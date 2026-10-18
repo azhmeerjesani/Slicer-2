@@ -1548,12 +1548,19 @@ smoke_test() {
   dmg=${dmg:-"${OUT_DIR}/${DMG_PREFIX}-<version>-macos-${HOST_ARCH}.dmg"}
   info "disk image: ${dmg}"
 
-  # Runs the real start-up (main window, modules, Python) from the read-only
-  # disk image with temporary settings, so the user's Slicer.ini (shared with
-  # official Slicer installations) is not touched.
+  # Runs the real start-up (main window, Studio shell, modules, Python, saving
+  # and reloading a scene and a NIfTI file) from the read-only disk image with
+  # temporary settings, so the user's Slicer.ini (shared with official Slicer
+  # installations) is not touched. The check is shared with the Linux package
+  # build (Utilities/Scripts/SlicerStudioSmokeCheck.py); the inline fallback
+  # only covers a copy of this script used outside the source tree.
+  local shared_check="${SOURCE_DIR}/Utilities/Scripts/SlicerStudioSmokeCheck.py"
   local code
-  code=$(
-    cat <<'PY'
+  if [ -f "${shared_check}" ]; then
+    code=$(cat "${shared_check}")
+  else
+    code=$(
+      cat <<'PY'
 import qt
 import slicer
 mainWindow = slicer.util.mainWindow()
@@ -1566,7 +1573,8 @@ if mainWindow is None or modules:
     raise RuntimeError("start-up test failed: main window %s, missing modules %s" % (mainWindow, modules))
 print("SLICER_STUDIO_SMOKE_OK")
 PY
-  )
+    )
+  fi
   local python_code="import sys, numpy, ssl; print('PythonSlicer', sys.version.split()[0])"
   local log="${LOG_DIR}/smoke-${HOST_ARCH}.log"
   # Multi-line code cannot be given with --python-code (the command line
@@ -1613,6 +1621,12 @@ PY
   fi
   if ! grep -q "SLICER_STUDIO_SMOKE_OK" "${log}"; then
     status=1
+  fi
+  # Errors in start-up callbacks (for example while the Studio shell is
+  # applied) are printed but do not stop the application.
+  if grep -q "^Traceback (most recent call last)" "${log}"; then
+    status=1
+    echo "    a Python error was reported during start-up"
   fi
   grep "SLICER_STUDIO_SMOKE " "${log}" | sed 's/^/    /'
 

@@ -200,20 +200,16 @@ jobs:
           mkdir -p "$RUNNER_TEMP/smoke"
           tar -xzf "$PACKAGE" -C "$RUNNER_TEMP/smoke"
           launcher=$(find "$RUNNER_TEMP/smoke" -mindepth 2 -maxdepth 2 -name Slicer -type f | head -n 1)
-          cat >"$RUNNER_TEMP/smoke.py" <<'EOF'
-          import qt
-          import slicer
-          mainWindow = slicer.util.mainWindow()
-          missing = [name for name in ("volumes", "segmenteditor", "markups", "data") if not hasattr(slicer.modules, name)]
-          print("SLICER_STUDIO_SMOKE version=%s qt=%s mainWindow=%s studio=%s" % (
-              slicer.app.applicationVersion, qt.qVersion(), mainWindow is not None, hasattr(slicer.modules, "studio")))
-          if mainWindow is None or missing:
-              raise RuntimeError("start-up test failed: main window %s, missing modules %s" % (mainWindow, missing))
-          print("SLICER_STUDIO_SMOKE_OK")
-          EOF
+          # Shared with the macOS disk image build: start-up, Studio shell, scene and NIfTI round trip.
           xvfb-run -a -s "-screen 0 1920x1080x24" timeout 600 "$launcher" --no-splash --disable-settings \
-            --ignore-slicerrc --exit-after-startup --python-script "$RUNNER_TEMP/smoke.py" 2>&1 | tee "$LOG_DIR/smoke.log"
+            --ignore-slicerrc --exit-after-startup --python-script Utilities/Scripts/SlicerStudioSmokeCheck.py 2>&1 \
+            | tee "$LOG_DIR/smoke.log"
           grep -q SLICER_STUDIO_SMOKE_OK "$LOG_DIR/smoke.log"
+          # Errors in start-up callbacks are printed but do not stop the application.
+          if grep -q "^Traceback (most recent call last)" "$LOG_DIR/smoke.log"; then
+            echo "::error::a Python error was reported during start-up (see smoke.log)"
+            exit 1
+          fi
 
       - name: Upload logs
         if: ${{ failure() || cancelled() }}
