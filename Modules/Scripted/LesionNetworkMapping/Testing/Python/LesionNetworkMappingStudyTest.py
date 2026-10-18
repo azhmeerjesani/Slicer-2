@@ -129,6 +129,14 @@ class StudyTest(unittest.TestCase):
             f.write("participant_id\nsub-01\nsub-01\n")
         with self.assertRaisesRegex(ValueError, "Duplicate"):
             Study.open(folder)
+        # Values beyond the header would be lost on the next save: an error naming the line; empty extra fields are fine
+        with open(os.path.join(folder, study.PARTICIPANTS_TSV), "w", encoding="utf-8") as f:
+            f.write("participant_id\tgroup\nsub-01\tcase\t\t\n\nsub-02\tcontrol\t5\n")
+        with self.assertRaisesRegex(ValueError, "line 4: 3 fields but only 2 columns"):
+            Study.open(folder)
+        with open(os.path.join(folder, study.PARTICIPANTS_TSV), "w", encoding="utf-8") as f:
+            f.write("participant_id\tgroup\nsub-01\tcase\t\t\n")
+        self.assertEqual(Study.open(folder).subject("sub-01")["group"], "case")
         with open(os.path.join(folder, study.STUDY_JSON), "w", encoding="utf-8") as f:
             json.dump({"format": "slicer-studio-study", "version": 2}, f)
         with self.assertRaisesRegex(ValueError, "newer"):
@@ -175,6 +183,7 @@ class StudyTest(unittest.TestCase):
             f.truncate(400)
         report = created.add_files([self.path("bids"), self.path("other")])
         self.assertEqual(report["added"], ["sub-01", "sub-02", "sub-patient03"])
+        self.assertEqual(report["warnings"], [])
         self.assertEqual(report["pairs"]["sub-01"], {"scan": self.path("bids/sub-01/anat/sub-01_T1w.nii.gz"), "lesion": self.path("bids/sub-01/anat/sub-01_label-lesion_roi.nii.gz")})
         self.assertEqual(report["pairs"]["sub-02"]["lesion"], None)
         self.assertEqual(report["pairs"]["sub-02"]["scan"], self.path("bids/sub-02/ses-1/anat/sub-02_ses-1_T1w.nii.gz"))
@@ -200,6 +209,18 @@ class StudyTest(unittest.TestCase):
         report = created.add_files(self._image("later2/sub-02_lesion.nii.gz"))
         self.assertEqual(report["updated"], [])
         self.assertIn("already has a lesion", report["skipped"][0]["reason"])
+        # Files whose sform and qform disagree are added with a warning (Slicer may show them elsewhere)
+        disagreeing = self._image("later3/sub-08_T1w.nii")
+        record = nifti.read_raw_header(disagreeing)
+        srow = record["srow_x"].copy()
+        srow[3] += 3.0
+        record["srow_x"] = srow
+        with open(disagreeing, "r+b") as f:
+            f.write(record.tobytes())
+        report = created.add_files(disagreeing)
+        self.assertEqual(report["added"], ["sub-08"])
+        self.assertEqual([item["path"] for item in report["warnings"]], [disagreeing])
+        self.assertIn("sform and qform disagree by up to 3 mm", report["warnings"][0]["message"])
         # A custom id rule
         custom = Study.create(self.path("custom"), rules={"id": r"P(\d+)"})
         self._image("custom_data/scan_P7.nii.gz")

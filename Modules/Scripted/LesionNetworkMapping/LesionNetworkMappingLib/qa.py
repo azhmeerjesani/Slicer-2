@@ -131,6 +131,8 @@ def relocated_lesions(weights, bundle_or_grid, mask_indices=None, brain_mask=Non
     centroid onto brain-mask voxels drawn in random order (without repetition, never the zero
     shift); a shift is accepted when at least ``min_inside`` of the lesion's weight lands on
     connectome voxels inside the brain mask. Weight landing outside the connectome mask is dropped.
+    Positions are not otherwise constrained, so a relocated lesion may overlap the original one
+    (rare on a whole-brain mask: about 1% of the relocations of a 250-voxel lesion on a 2 mm grid).
 
     :param weights: (V,) lesion weights over the connectome mask voxels (``engine.prepare_lesion``).
     :param bundle_or_grid: a :class:`ConnectomeBundle`, or a :class:`Grid` or 3D shape together
@@ -300,14 +302,23 @@ def _ordinal(value):
 
 
 def read_degree_metadata(bundle_path):
-    """Contents of ``derived/degree.json`` of a bundle, or None (missing, unreadable or without degree.npy)."""
+    """Contents of ``derived/degree.json`` of a bundle, or None (missing, unreadable, or not describing
+    the current ``derived/degree.npy``: its ``degree_sha256`` must match the file).
+    """
+    from .export import file_sha256
+
     derived = os.path.join(os.fspath(bundle_path), "derived")
     path = os.path.join(derived, DEGREE_JSON)
-    if not (os.path.isfile(path) and os.path.isfile(os.path.join(derived, "degree.npy"))):
+    degree_path = os.path.join(derived, "degree.npy")
+    if not (os.path.isfile(path) and os.path.isfile(degree_path)):
         return None
     try:
         with open(path, encoding="utf-8") as f:
-            return json.load(f)
+            metadata = json.load(f)
+        # A degree map recomputed after degree.json was written (or a job stopped between the two files)
+        if not isinstance(metadata, dict) or metadata.get("degree_sha256") != file_sha256(degree_path):
+            return None
+        return metadata
     except (OSError, ValueError):
         return None
 
@@ -341,9 +352,13 @@ def _degree_command(args):
         eta = elapsed / done * (total - done) if done else 0.0
         _emit({"event": "progress", "done": done, "total": total, "elapsed": round(elapsed, 3), "eta": round(eta, 3)})
 
+    json_path = os.path.join(bundle.path, "derived", DEGREE_JSON)
+    if os.path.exists(json_path):
+        os.remove(json_path)  # never leave metadata of an older degree map next to a new one
     start = time.perf_counter()
     degree = compute_degree(bundle, n_seeds=n_seeds, subjects=ids, measure=args.measure, seed=args.seed, chunk=args.chunk, store=True, progress=on_progress)
     elapsed = time.perf_counter() - start
+    degree_path = os.path.join(bundle.path, "derived", "degree.npy")
     metadata = {
         "K": n_seeds,
         "subjects": len(ids),
@@ -353,13 +368,13 @@ def _degree_command(args):
         "manifest_sha256": file_sha256(os.path.join(bundle.path, "connectome.json")),
         "created": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
         "elapsed": round(elapsed, 3),
+        "degree_sha256": file_sha256(degree_path),
     }
-    json_path = os.path.join(bundle.path, "derived", DEGREE_JSON)
     tmp_path = f"{json_path}.{os.getpid()}.tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
     os.replace(tmp_path, json_path)
-    _emit({"event": "done", "path": os.path.join(bundle.path, "derived", "degree.npy"), "json": json_path, "elapsed": round(elapsed, 3), "min": float(degree.min()), "max": float(degree.max()), **metadata})
+    _emit({"event": "done", "path": degree_path, "json": json_path, "elapsed": round(elapsed, 3), "min": float(degree.min()), "max": float(degree.max()), **metadata})
 
 
 def main(argv=None):

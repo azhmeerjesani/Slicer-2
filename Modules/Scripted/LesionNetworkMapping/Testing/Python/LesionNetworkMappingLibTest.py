@@ -6,6 +6,8 @@ Run without Slicer's GUI:
     PythonSlicer -m unittest Testing/Python/LesionNetworkMappingLibTest.py -v
 """
 
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -43,6 +45,24 @@ def _oblique_affine():
     affine[:3, :3] = rotation @ np.diag([1.5, 2.0, 2.5])
     affine[:3, 3] = [-10.25, 20.5, 3.0]
     return affine.astype(np.float32).astype(np.float64)
+
+
+def _set_sform(path, sform, sform_code=None):
+    """Overwrite the sform (and optionally its code) of an uncompressed NIfTI file; the qform is unchanged."""
+    record = nifti.read_raw_header(path)
+    for row, name in enumerate(("srow_x", "srow_y", "srow_z")):
+        record[name] = np.asarray(sform, dtype=np.float64)[row]
+    if sform_code is not None:
+        record["sform_code"] = sform_code
+    with open(path, "r+b") as f:
+        f.write(record.tobytes())
+
+
+def _translation(i, j, k):
+    """Voxel shift matrix: ``affine @ _translation(...)`` moves a grid by (i, j, k) voxels."""
+    matrix = np.eye(4)
+    matrix[:3, 3] = (i, j, k)
+    return matrix
 
 
 def _pearson_rows(seed, data):
@@ -930,6 +950,21 @@ class CommandLineTest(_TempDirTestCase):
         self.assertEqual([event["event"] for event in events], ["error"])
         self.assertIn("--threads", events[0]["message"])
 
+    def test_engine_warns_when_sform_and_qform_disagree(self):
+        meta = connectome.make_synthetic(self.path("synthetic.lnmc"), n_subjects=2, name="Synthetic")
+        lesion_path = _sphere_lesion(self.path("sub-01_run-2_space-MNI152NLin6Asym_desc-lesion_mask.nii"), meta["blobs"]["A"]["center_world"])
+        header = nifti.read_nifti_header(lesion_path)
+        _set_sform(lesion_path, header["qform"] @ _translation(0, 2, 0))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = engine.main(["--bundle", meta["path"], "--lesion", lesion_path, "--out", self.path("out")])
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual((code, events[-1]["event"]), (0, "done"))
+        self.assertEqual(next(event for event in events if event["event"] == "start")["lesions"], ["sub-01_run-2"])
+        warnings = [event for event in events if event["event"] == "warning"]
+        self.assertEqual([event["lesion"] for event in warnings], ["sub-01_run-2"])
+        self.assertIn("sform and qform", warnings[0]["message"])
+
     def test_benchmark_runs(self):
         result = engine.benchmark(V=5000, T=40, L=3, n_subjects=2)
         self.assertGreater(result["per_subject_best_s"], 0.0)
@@ -1001,9 +1036,79 @@ class WriteLikeTest(_TempDirTestCase):
             nifti.write_like(self.path("outside.nii.gz"), lesion, shifted, reference_path)
         with self.assertRaisesRegex(ValueError, "fit"):
             nifti.write_like(self.path("range.nii.gz"), lesion * 300.0, RADIOLOGICAL_AFFINE, reference_path)
+        # Fractions are never truncated silently into an integer type (a probabilistic lesion would become all zeros)
+        for label, values in (("fraction", lesion * 0.5), ("nan", np.where(lesion > 0, np.nan, 0.0))):
+            with self.subTest(label), self.assertRaisesRegex(ValueError, "Non-integer"):
+                nifti.write_like(self.path(f"{label}.nii.gz"), values, RADIOLOGICAL_AFFINE, reference_path)
+        nifti.write_like(self.path("whole.nii.gz"), lesion.astype(np.float32), RADIOLOGICAL_AFFINE, reference_path)
+        np.testing.assert_array_equal(nifti.read_nifti(self.path("whole.nii.gz"))[0], lesion.transpose(2, 1, 0))
+        nifti.write_like(self.path("probabilistic.nii.gz"), lesion * 0.25, RADIOLOGICAL_AFFINE, reference_path, dtype=np.float32)
+        np.testing.assert_array_equal(nifti.read_nifti(self.path("probabilistic.nii.gz"))[0], lesion.transpose(2, 1, 0) * np.float32(0.25))
         # Zeros falling outside the reference are fine
         nifti.write_like(self.path("zeros.nii.gz"), np.zeros_like(lesion), shifted, reference_path)
         self.assertFalse(os.path.exists(self.path("bad.nii.gz")))
+        self.assertFalse(os.path.exists(self.path("fraction.nii.gz")))
+
+    def test_sform_and_qform_that_disagree(self):
+        # Readers choose differently when both are set (Slicer/ITK usually the qform, FSL and nibabel the
+        # sform), so the array grid must identify the reference voxels through every transform.
+        lesion = np.zeros((7, 6, 5), np.uint8)  # [i, j, k]
+        lesion[2, 3, 4] = 1
+        for label, qform in (("ras", RAS_AFFINE), ("radiological", RADIOLOGICAL_AFFINE)):
+            for case, sform, distance in (("whole voxels", qform @ _translation(3, 0, 0), 6.0), ("half voxel", qform @ _translation(0, 0.5, 0), 1.0)):
+                reference_path = self._reference(f"{label}_{case}.nii", qform)
+                _set_sform(reference_path, sform)
+                header = nifti.read_nifti_header(reference_path)
+                self.assertAlmostEqual(nifti.xform_disagreement(header), distance, places=5)
+                for source, ijk_to_ras in (("qform", qform), ("sform", sform), ("qform crop", qform @ _translation(1, 2, 3))):
+                    with self.subTest(reference=label, case=case, array_grid=source):
+                        path = self.path("lesion.nii")
+                        array = lesion[1:, 2:, 3:] if source == "qform crop" else lesion
+                        if case == "whole voxels":
+                            # The grid matches both transforms: placing it through either could be wrong
+                            with self.assertRaisesRegex(ValueError, "sform and qform"):
+                                nifti.write_like(path, array.transpose(2, 1, 0), ijk_to_ras, reference_path)
+                            self.assertFalse(os.path.exists(path))
+                        else:
+                            # Only one transform matches the grid: the voxels are unambiguous
+                            nifti.write_like(path, array.transpose(2, 1, 0), ijk_to_ras, reference_path)
+                            np.testing.assert_array_equal(nifti.read_nifti(path)[0], lesion)
+                            self._assert_same_geometry_bytes(reference_path, path)
+                            os.remove(path)
+        # Only one transform set, or both equal: nothing to disagree about
+        self.assertEqual(nifti.xform_disagreement(nifti.read_nifti_header(self._reference("q.nii", RAS_AFFINE, sform_code=0))), 0.0)
+        self.assertLess(nifti.xform_disagreement(nifti.read_nifti_header(self._reference("o.nii", _oblique_affine()))), 1e-4)
+
+    def test_sform_and_qform_that_disagree_with_simpleitk(self):
+        try:
+            import SimpleITK as sitk
+        except ImportError:
+            self.skipTest("SimpleITK is not available")
+
+        def itk_ijk_to_ras(image):
+            matrix = np.eye(4)
+            matrix[:3, :3] = np.array(image.GetDirection()).reshape(3, 3) * np.array(image.GetSpacing())
+            matrix[:3, 3] = image.GetOrigin()
+            return np.diag([-1.0, -1.0, 1.0, 1.0]) @ matrix  # LPS to RAS, as Slicer does
+
+        lesion = np.zeros((5, 6, 7), np.uint8)  # [k, j, i] as ITK and Slicer arrays
+        lesion[4, 3, 2] = 1
+        for sform_code, shift, itk_uses in ((4, 3, "qform"), (1, 3, "sform"), (4, 0.5, "qform"), (1, 0.5, "sform")):
+            with self.subTest(sform_code=sform_code, shift=shift):
+                reference_path = self._reference("itk_ref.nii", RAS_AFFINE)
+                sform = RAS_AFFINE @ _translation(shift, 0, 0)
+                _set_sform(reference_path, sform, sform_code)
+                ijk_to_ras = itk_ijk_to_ras(sitk.ReadImage(reference_path))
+                np.testing.assert_allclose(ijk_to_ras, RAS_AFFINE if itk_uses == "qform" else sform, atol=1e-5)
+                path = self.path("itk_lesion.nii")
+                if shift == 3:
+                    with self.assertRaisesRegex(ValueError, "sform and qform"):
+                        nifti.write_like(path, lesion, ijk_to_ras, reference_path)
+                    continue
+                nifti.write_like(path, lesion, ijk_to_ras, reference_path)
+                image = sitk.ReadImage(path)
+                np.testing.assert_allclose(itk_ijk_to_ras(image), ijk_to_ras, atol=1e-5)
+                np.testing.assert_array_equal(sitk.GetArrayFromImage(image), lesion)
 
     def test_consistent_with_simpleitk(self):
         try:
@@ -1299,6 +1404,9 @@ class ExportTest(_TempDirTestCase):
         self.assertEqual(engine._lesion_name("/x/sub-07_space-MNI152NLin2009cAsym_desc-lesion_mask.nii.gz"), "sub-07")
         self.assertEqual(engine._lesion_name("sub-07_ses-2_label-lesion_roi.nii"), "sub-07_ses-2")
         self.assertEqual(engine._lesion_name("patient01_lesion.nii.gz"), "patient01_lesion")
+        self.assertEqual(engine._lesion_name("sub-07_ses-2_acq-flair_run-2_space-MNI152NLin6Asym_res-2_desc-lesion_mask.nii.gz"), "sub-07_ses-2_acq-flair_run-2")
+        self.assertEqual(engine._lesion_name("sub-07_run-1_lesion.nii.gz"), "sub-07_run-1")
+        self.assertEqual(engine._lesion_name("sub-07_T1w_lesion.nii"), "sub-07")
         peaks = stats.peak_table(np.array([0.0, 5.0, -7.0]), geometry.Grid((3, 1, 1), RAS_AFFINE), top_k=2, min_distance_mm=0.5)
         export.write_peaks_tsv(self.path("peaks.tsv"), peaks, ["Precuneus"])
         with open(self.path("peaks.tsv"), encoding="utf-8") as f:
@@ -1494,6 +1602,10 @@ class QACommandLineTest(_TempDirTestCase):
         result, events, _ = self._run("engine", "--bundle", meta["path"], "--lesion", lesion_path, "--out", out_dir, "--threshold-rule", '{"kind": "fdr"}')
         self.assertEqual((result.returncode, [e["event"] for e in events]), (2, ["error"]))
         self.assertIn("--threshold-rule", events[0]["message"])
+        # degree.json is ignored once it no longer describes derived/degree.npy (e.g. a degree map recomputed directly)
+        self.assertEqual(qa.read_degree_metadata(meta["path"])["degree_sha256"], export.file_sha256(os.path.join(meta["path"], "derived", "degree.npy")))
+        connectome.compute_degree(bundle, n_seeds=100, subjects=2, seed=2, store=True)
+        self.assertIsNone(qa.read_degree_metadata(meta["path"]))
 
 
 if __name__ == "__main__":

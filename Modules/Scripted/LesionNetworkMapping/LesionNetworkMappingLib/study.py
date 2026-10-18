@@ -130,18 +130,24 @@ def detect_file_space(path):
 
 
 def read_tsv(path):
-    """Read a TSV table: (column names, list of row dicts). Empty values become "n/a"."""
+    """Read a TSV table: (column names, list of row dicts). Empty values become "n/a".
+
+    :raises ValueError: for duplicate or empty column names, or a row with more non-empty values
+      than there are columns (they would be lost on the next save); extra empty fields are ignored.
+    """
     with open(path, encoding="utf-8-sig", newline="") as f:
-        lines = [line.rstrip("\r") for line in f.read().split("\n")]
-    lines = [line for line in lines if line.strip()]
+        lines = [(number, line.rstrip("\r")) for number, line in enumerate(f.read().split("\n"), start=1)]
+    lines = [(number, line) for number, line in lines if line.strip()]
     if not lines:
         return [], []
-    columns = [name.strip() for name in lines[0].split("\t")]
+    columns = [name.strip() for name in lines[0][1].split("\t")]
     if len(set(columns)) != len(columns) or not all(columns):
         raise ValueError(f"{path}: duplicate or empty column names")
     rows = []
-    for line in lines[1:]:
+    for number, line in lines[1:]:
         values = [value.strip() for value in line.split("\t")]
+        if any(values[len(columns):]):
+            raise ValueError(f"{path}, line {number}: {len(values)} fields but only {len(columns)} columns; add a column name for the extra values or remove them")
         values += [NA] * (len(columns) - len(values))
         rows.append({column: value or NA for column, value in zip(columns, values[: len(columns)], strict=True)})
     return columns, rows
@@ -497,15 +503,17 @@ class Study:
           contains "lesion".
         :param id_regex: regular expression of subject ids (default: the study's rule, "sub-[A-Za-z0-9]+").
           Files without a match use the first word of their name ("patient01_T1.nii.gz": "patient01").
-        :return: {"added": [ids], "updated": [ids], "skipped": [{"path", "reason"}], "pairs": {id: {"scan", "lesion"}}}.
+        :return: {"added": [ids], "updated": [ids], "skipped": [{"path", "reason"}], "pairs": {id: {"scan", "lesion"}},
+          "warnings": [{"path", "message"}]} (files that are added but lie at different places in
+          different programs because their sform and qform disagree).
         """
         from .geometry import detect_space
-        from .nifti import read_nifti_header
+        from .nifti import XFORM_WARNING_MM, read_nifti_header, xform_disagreement
 
         rules = self.rules
         lesion_re = re.compile(lesion_rule or rules["lesion"], re.IGNORECASE)
         id_re = re.compile(id_regex or rules["id"])
-        report = {"added": [], "updated": [], "skipped": [], "pairs": {}}
+        report = {"added": [], "updated": [], "skipped": [], "pairs": {}, "warnings": []}
         candidates = {}
         for path in self._expand(paths):
             stem = _nifti_stem(path)
@@ -530,6 +538,12 @@ class Study:
                 continue
             kind = "lesion" if is_lesion else "scan"
             candidates.setdefault(sid, {"scan": [], "lesion": []})[kind].append((path, header))
+            disagreement = xform_disagreement(header)
+            if disagreement > XFORM_WARNING_MM:
+                report["warnings"].append({
+                    "path": path,
+                    "message": f"The sform and qform disagree by up to {disagreement:.2g} mm: Slicer may show this image at another place than FSL and the network mapping, which use the sform.",
+                })
 
         for sid, kinds in candidates.items():
             chosen = {}

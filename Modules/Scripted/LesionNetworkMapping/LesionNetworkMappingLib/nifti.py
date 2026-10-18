@@ -88,6 +88,10 @@ XFORM_ALIGNED = 2
 XFORM_TALAIRACH = 3
 XFORM_MNI = 4
 
+# Files whose sform and qform disagree by more than this (mm, see xform_disagreement) are reported:
+# the engine and FSL use the sform, while Slicer (ITK) usually displays such a file with the qform.
+XFORM_WARNING_MM = 0.1
+
 
 def _is_gzip(path):
     return os.fspath(path).lower().endswith(".gz")

@@ -58,7 +58,7 @@ import numpy as np
 
 from .connectome import ConnectomeBundle, _is_cancelled
 from .geometry import from_masked_vector, resample_to_grid, to_masked_vector
-from .nifti import read_nifti, read_nifti_header, write_nifti, xform_disagreement
+from .nifti import XFORM_WARNING_MM, read_nifti, read_nifti_header, write_nifti, xform_disagreement
 
 RMAX = 0.999999  # r is clipped to +/-RMAX before the Fisher transform
 DEFAULT_CHUNK = 8192
@@ -68,9 +68,6 @@ NULL_DESC = "RelocatedT"  # "desc" label of the optional 4D null T maps
 # Null maps only feed spatial correlations: by default they are computed on a random sample of this
 # many voxels, which bounds their memory and GEMM cost for large connectomes and many lesions.
 NULL_MAX_VOXELS = 30_000
-# A lesion file whose sform and qform disagree by more than this (mm) gets a warning event: the maps
-# use the sform, as FSL and nibabel do, while Slicer (ITK) usually displays such a file with the qform.
-XFORM_WARNING_MM = 0.1
 
 
 class NetworkMaps:

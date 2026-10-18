@@ -1201,4 +1201,8 @@ if __name__ == "__main__":
     if inSlicer():
         runInSlicer(arguments)
     else:
-        sys.exit(runSystemPython(arguments))
+        try:
+            sys.exit(runSystemPython(arguments))
+        except (OSError, ValueError) as error:  # for example a missing or invalid JSON file
+            print(f"error: {error}", file=sys.stderr)
+            sys.exit(2)
