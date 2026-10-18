@@ -64,6 +64,13 @@ def _settingsBool(key, default):
     return slicer.util.settingsValue(key, default, converter=slicer.util.toBool)
 
 
+def associatedWidgets(action):
+    """Widgets that ``action`` was added to (Qt 5 has associatedWidgets(), Qt 6 only associatedObjects())."""
+    if hasattr(action, "associatedWidgets"):
+        return list(action.associatedWidgets())
+    return [obj for obj in action.associatedObjects() if isinstance(obj, qt.QWidget)]
+
+
 def onStartupCompleted(startTime=None):
     """Apply Studio after the application started (connected by the Studio module).
 
@@ -760,7 +767,7 @@ class Shell:
             if widget is None or depth > 8:
                 return False
             if widget.inherits("QMenu"):
-                owners = widget.menuAction().associatedWidgets()
+                owners = associatedWidgets(widget.menuAction())
                 if owners:
                     return all(isChrome(owner, depth + 1) for owner in owners)
             ancestor = widget
@@ -776,7 +783,7 @@ class Shell:
                 continue
             if action.shortcutContext not in (qt.Qt.WindowShortcut, qt.Qt.ApplicationShortcut):
                 continue
-            owners = action.associatedWidgets()
+            owners = associatedWidgets(action)
             if not owners or mainWindow in owners:
                 continue
             if all(isChrome(owner) for owner in owners):

@@ -256,6 +256,8 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
 
     def test_2_apply_classic_round_trip(self):
         """Classic restores the exact window state, the logo title bar and the menubar (SPEC 2.7)."""
+        from StudioLib import shell
+
         mainWindow = self.mainWindow
         dock = mainWindow.findChild("QDockWidget", "PanelDockWidget")
         titleBar = dock.titleBarWidget()
@@ -263,11 +265,9 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         closeSceneAction = mainWindow.findChild("QAction", "FileCloseSceneAction")
         addDataAction = mainWindow.findChild("QAction", "FileAddDataAction")
         addDataShortcuts = [portableKey(key) for key in addDataAction.shortcuts()]
-        self.assertNotIn(mainWindow, closeSceneAction.associatedWidgets())
+        self.assertNotIn(mainWindow, shell.associatedWidgets(closeSceneAction))
 
         studioShell = self._applyStudio()
-        from StudioLib import shell
-
         self.assertIs(shell.instance(), studioShell)
         self.assertIsNotNone(studioShell.applyDurationMs)
         topBar = mainWindow.findChild("QToolBar", "StudioTopBar")
@@ -284,7 +284,7 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(dock.titleBarWidget().objectName, "StudioPanelHeader")
         # The module panel starts below the 40 px panel header (QDockWidget uses its size hint)
         self.assertGreaterEqual(dock.widget().mapTo(dock, qt.QPoint(0, 0)).y(), 40)
-        self.assertIn(mainWindow, closeSceneAction.associatedWidgets())
+        self.assertIn(mainWindow, shell.associatedWidgets(closeSceneAction))
         self.assertEqual(list(addDataAction.shortcuts()), [])
         self.assertEqual(studioShell.currentWorkspace(), "library")
         # Library empty state (nothing loaded): the inspector is hidden (SPEC 2.5, StudioLib/library.py)
@@ -295,7 +295,7 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         panelToggle = dock.toggleViewAction()
         self.assertEqual(portableKey(panelToggle.shortcut), "Ctrl+5")
         self.assertTrue(panelToggle.enabled)
-        self.assertIn(mainWindow, panelToggle.associatedWidgets())
+        self.assertIn(mainWindow, shell.associatedWidgets(panelToggle))
         panelToggle.trigger()
         self._pump()
         self.assertTrue(dock.isHidden())
@@ -311,7 +311,7 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertFalse(titleBar.isHidden())
         self.assertFalse(mainWindow.menuBar().isHidden())
         self.assertIsNone(mainWindow.findChild("QToolBar", "StudioTopBar"))
-        self.assertNotIn(mainWindow, closeSceneAction.associatedWidgets())
+        self.assertNotIn(mainWindow, shell.associatedWidgets(closeSceneAction))
         self.assertEqual([portableKey(key) for key in addDataAction.shortcuts()], addDataShortcuts)
         self.assertEqual(mainWindow.dockWidgetArea(dock), qt.Qt.LeftDockWidgetArea)
 
