@@ -13,9 +13,9 @@ browser on your own computer; no package has been published yet.
 > **Early development, no release yet.** Wave 1 of 4 and the packaging work are implemented: the Studio
 > interface, the Library page, drawing and slicing fixes and speed-ups, the lesion network mapping
 > library and command line, file compatibility checks and the packaging scripts. Planned next: the
-> streamlined Draw panel and the Map workspace (wave 2), then the study workflow (wave 3). The first
-> packaging workflow run is in progress; no disk image, Linux package or web image has been published
-> yet. See [Status and roadmap](#status-and-roadmap).
+> streamlined Draw panel and the Map workspace (wave 2), then the study workflow (wave 3). Packages are
+> built on your own computer (see [Install](#install)); no disk image, Linux package or web image has
+> been published yet. See [Status and roadmap](#status-and-roadmap).
 
 > [!WARNING]
 > **Research use only.** Slicer Studio, like 3D Slicer, is not a medical device. Lesion network maps must
@@ -214,46 +214,21 @@ builds this way is planned (wave 4).
 
 ## Install
 
-Slicer Studio is not on download.slicer.org. You get it from this repository's GitHub Actions workflow
-once its first run has finished (no package has been published yet), or you build it yourself. The full
-guide is [Install Slicer Studio](Docs/user_guide/install_studio.md).
+Slicer Studio is not on download.slicer.org, and no package has been published yet: you build it yourself,
+on your own computer. The full guide is [Install Slicer Studio](Docs/user_guide/install_studio.md).
 
 | Form | Runs on | How to get it |
 |---|---|---|
-| macOS disk image | macOS 14 (Sonoma) or newer, Apple Silicon or Intel | GitHub Actions, or a build script on your Mac |
+| macOS disk image | macOS 14 (Sonoma) or newer, Apple Silicon or Intel | A build script on your Mac |
 | Web browser on localhost | Any computer with Docker (macOS, Windows, Linux); on Linux also without Docker | Python launcher plus a Docker image |
-| Linux package | Ubuntu 24.04, x86-64 | GitHub Actions, or `make package` |
+| Linux package | Ubuntu 24.04, x86-64 | `make package` |
 | Build from source | Linux (tested on Ubuntu 24.04); macOS through the disk image script | Slicer build instructions |
 
 There is no Windows package; on Windows, use the web version.
 
 ### macOS disk image
 
-**From GitHub Actions**, without building on your Mac. Until Slicer Studio is merged into `main`,
-*Run workflow* is not offered: use the request file or a `studio-build-*` tag (below).
-
-1. On the repository's GitHub page, open **Actions > Slicer Studio packages > Run workflow**, choose
-   the packages and start the run. Options: `macos` (Apple Silicon disk image, on by default),
-   `macos_intel`, `qt` (`official`: runs on macOS 14 and newer, the default; `homebrew`: runs on
-   macOS 15 and newer), `linux` (on by default), `docker` (the web image) and `ref` (what to build).
-2. When the run has finished, download `SlicerStudio-<version>-macos-arm64.dmg` from the run's
-   **Artifacts**. Artifacts are kept for 30 days.
-
-*Run workflow* is only offered for workflows on the default branch. To build from another branch,
-change [`.github/studio-packages-request.txt`](.github/studio-packages-request.txt) on that branch (for
-example, increase the number after `request:`) and push, or push a tag whose name starts with
-`studio-build-`:
-
-```console
-git tag studio-build-1
-git push origin studio-build-1
-```
-
-Both build the Apple Silicon disk image (official Qt) and the Linux package. A first build takes
-several hours. If a job stops at the runner time limit, run the workflow again: the saved compiler
-cache lets it continue.
-
-**On your Mac**, from the top of the source tree (macOS 14 or newer, Xcode Command Line Tools,
+**Build it on your Mac**, from the top of the source tree (macOS 14 or newer, Xcode Command Line Tools,
 Homebrew, about 40 GB of free disk space, several hours):
 
 ```console
@@ -283,8 +258,10 @@ softwareupdate --install-rosetta --agree-to-license
 ```
 
 > [!NOTE]
-> The macOS packages are the first Qt 6 builds of this fork, and they have not been tested on a Mac
-> yet. Slicer Studio has so far been run on Linux with Qt 5.15.
+> The macOS packages are the first Qt 6 builds of this fork. A disk image built on 2026-10-18 passed the
+> start-up test on macOS 15 with Apple Silicon (Qt 6.11.2) and the bundle self-containment check; other
+> macOS versions and Intel Macs have not been tested. Slicer Studio has so far been run on Linux with
+> Qt 5.15.
 
 ### In a web browser (localhost)
 
@@ -301,14 +278,7 @@ python3 slicer_studio_web.py        # start Slicer Studio and open the browser
 python3 slicer_studio_web.py stop
 ```
 
-The package is the Linux package of this fork (see [Linux package](#linux-package)). Instead of building
-the image, you can use the one the workflow pushes with its `docker` option (a new image is private:
-run `docker login ghcr.io` first, or make it public). Like the other commands here, run it in
-`Utilities/SlicerStudioWeb`:
-
-```console
-python3 slicer_studio_web.py run --image ghcr.io/<owner>/slicer-studio-web:latest
-```
+The package is the Linux package of this fork (see [Linux package](#linux-package)).
 
 On Linux, the launcher can also run a local Slicer installation or build tree without Docker:
 
@@ -326,8 +296,9 @@ Windows. Details and troubleshooting:
 
 ### Linux package
 
-The workflow's `linux` option builds `Slicer-<version>-linux-amd64.tar.gz` on Ubuntu 24.04 with the
-system Qt 5.15 and the system OpenSSL. It runs on Ubuntu 24.04.
+The Linux package, `Slicer-<version>-linux-amd64.tar.gz`, is built on Ubuntu 24.04 with the system Qt 5.15
+and the system OpenSSL (see [Build from source](#build-from-source); `make package` in the `Slicer-build`
+folder writes it). It runs on Ubuntu 24.04.
 
 1. Install the runtime libraries (Qt 5 and a few others) listed in
    [the install guide](Docs/user_guide/install_studio.md#linux).
@@ -338,7 +309,7 @@ system Qt 5.15 and the system OpenSSL. It runs on Ubuntu 24.04.
 
 Follow the [3D Slicer build instructions](Docs/developer_guide/build_instructions/index.md)
 ([online](https://slicer.readthedocs.io/en/latest/developer_guide/build_instructions/index.html)). On
-Ubuntu 24.04 with the system Qt 5, which is how this fork is developed and how the workflow builds it:
+Ubuntu 24.04 with the system Qt 5, which is how this fork is developed and how the Linux package is built:
 
 ```console
 sudo apt update && sudo apt install git git-lfs build-essential cmake libssl-dev libxt-dev \
@@ -574,7 +545,7 @@ released yet.
 | Part | Contents | State |
 |---|---|---|
 | Wave 1: foundation | Benchmark, screenshot and test tools; dark theme and Appearance settings; Studio interface (top bar, workspaces, Studio layouts, Classic switch); Library page with direct loading and the bundled MNI template; Segment Editor effect fixes and speed-ups; faster masked painting; faster slice updates; LNM thresholds, QA, study model and export; file compatibility | Implemented, under review |
-| Packaging | Web browser launcher and Docker image; macOS disk image script; GitHub Actions workflow (disk image, Linux package, web image) | Implemented; first CI run in progress; macOS builds not yet tested on a Mac |
+| Packaging | Web browser launcher and Docker image; macOS disk image script; Linux package (`make package`); a GitHub Actions workflow, disabled and kept as a reference for the build steps | Implemented; packages are built locally; a macOS disk image passed the start-up test on macOS 15 (Apple Silicon), other Macs not yet tested |
 | Wave 2: the streamlined editor | Draw panel (lesion card, tool tiles, letter keys, brush presets, *Done* / *Map network* button); Map workspace v1 (seed, connectome, compute with progressive maps, thresholds, QA, export, disclaimer); Inter font; flat view bars; more style work; Segment Editor improvements (segment created automatically, masking summary, brush limits); Threshold and Fill between slices fixes | Planned (next) |
 | Wave 3: navigation, study loop | Slice navigation keys and mouse; menu-bar-free shortcuts and focus mode in C++; NIfTI loading fixes; brush size display and `[` `]` keys; command palette, shortcut overlay, in-view readout; studies (subject list, *Done → next*, QC flags, autosave journal); cohort statistics, connectome manager and Map integration | Planned |
 | Wave 4: performance and docs | Faster Draw and Scissors apply, cheaper undo; Library grid with thumbnails; faster startup (lazy Python wrappers, linker option); user guide pages | Planned |
@@ -605,7 +576,7 @@ Known limitations today:
 | [Utilities/SlicerStudioWeb](Utilities/SlicerStudioWeb) | Web browser launcher and Docker image |
 | [Utilities/Scripts/SlicerStudioMacOS](Utilities/Scripts/SlicerStudioMacOS) | macOS disk image build script |
 | [Utilities/Scripts](Utilities/Scripts) | `StudioTestRunner.py`, `StudioBench.py`, `StudioScreens.py`, `SlicerFileCompatibilityCheck.py` |
-| [.github/workflows/studio-packages.yml](.github/workflows/studio-packages.yml) | Packaging workflow |
+| [.github/workflows/studio-packages.yml](.github/workflows/studio-packages.yml) | Packaging workflow; disabled, kept as a reference for the build steps |
 | [Docs/user_guide/install_studio.md](Docs/user_guide/install_studio.md) | Install guide |
 
 ### Tests

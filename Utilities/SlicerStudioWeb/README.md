@@ -88,9 +88,6 @@ Press `Ctrl+C` in the terminal to stop everything. See [Local mode](#local-mode-
 The Docker image is built from the Linux package of Slicer Studio, a file named
 like `Slicer-5.13.0-2026-10-18-linux-amd64.tar.gz`. Get it in one of these ways:
 
-- **From the continuous integration builds**: the "Studio packages" workflow
-  (`.github/workflows/studio-packages.yml`) builds the Linux package; download it
-  from the artifacts (or release assets) of a successful run.
 - **From a Linux build tree**: in `Slicer-build`, run `make package` (or
   `cmake --build . --target package`); the package is written to that folder.
   The script can do this for you:
@@ -102,14 +99,6 @@ like `Slicer-5.13.0-2026-10-18-linux-amd64.tar.gz`. Get it in one of these ways:
   Add `--reuse-package` to use the newest package already in the build tree.
 - **From a web address**: `--package-url URL` downloads the package (into the cache
   folder, once) before building; add `--package-sha256 HASH` to check it.
-
-If the "Studio packages" workflow also published the web image (to the GitHub
-Container Registry), you do not need the package: give the image to `run`, which
-downloads it the first time (run `docker login ghcr.io` first if it is private):
-
-```
-python3 slicer_studio_web.py run --image ghcr.io/<owner>/slicer-studio-web:latest
-```
 
 The package must be the Linux amd64 (x86-64) package of this fork. It is built with
 the Qt 5 of Ubuntu 24.04, which is why the image is based on Ubuntu 24.04.
@@ -180,7 +169,7 @@ the Qt 5 of Ubuntu 24.04, which is why the image is based on Ubuntu 24.04.
   seconds, so the browser tab keeps working. "Restart Slicer" works as on the
   desktop. Use `stop` to stop everything.
 - **Extensions**: the Extensions Manager needs a package built with the system
-  OpenSSL 3 (packages from the GitHub workflow are). An image built from an older
+  OpenSSL 3 (`Slicer_USE_SYSTEM_OpenSSL=ON`). An image built from an older
   package that bundles OpenSSL 1.1 cannot download the extension catalog
   ("Failed to download extension metadata from server"); rebuild the image from
   a newer package. Downloads made by Python, such as Sample Data, work in both.

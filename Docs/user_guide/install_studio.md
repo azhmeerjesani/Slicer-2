@@ -7,8 +7,8 @@ tree. It comes in three forms:
 - a Linux package, as a `.tar.gz` file;
 - a web version that runs on your computer and opens in a web browser.
 
-None of these is on download.slicer.org. You get them from this repository's
-GitHub Actions workflow, or you build them yourself.
+None of these is on download.slicer.org. You build them yourself, on your own
+computer.
 
 Slicer Studio works side by side with official 3D Slicer:
 
@@ -16,41 +16,25 @@ Slicer Studio works side by side with official 3D Slicer:
   and 5.13, and files saved by official 3D Slicer open in Slicer Studio.
 - Both applications can be installed at the same time.
 
-## Get the packages from GitHub
+## Build the packages
 
-The **Slicer Studio packages** workflow (`.github/workflows/studio-packages.yml`)
-builds the packages on GitHub's servers. To get them:
+Each form is built on your own computer:
 
-1. On the repository's GitHub page, open **Actions** and select
-   **Slicer Studio packages**.
-2. Click **Run workflow**, choose the packages, and start the run. Each package
-   has its own option:
-   - **macos**: the Apple Silicon disk image (on by default).
-   - **macos_intel**: an Intel disk image.
-   - **linux**: the Linux tarball (on by default).
-   - **docker**: the web image.
-3. When the run has finished, download the packages from the **Artifacts**
-   section of the run page. The disk image is the
-   `SlicerStudio-<version>-macos-<arch>.dmg` file itself. The Linux package is
-   `Slicer-<version>-linux-amd64.tar.gz`.
+- **macOS disk image:** run `Utilities/Scripts/SlicerStudioMacOS/build_dmg.sh`
+  on your Mac (see [macOS](#macos)).
+- **Linux package:** run `make package` in the `Slicer-build` folder of a Linux
+  build (see [Linux](#linux)).
+- **Web version:** build a Docker image from the Linux package (see
+  [In a web browser](#in-a-web-browser)).
 
-**Run workflow** is only offered for workflows that are on the repository's
-default branch. To build packages from another branch, either push a change to
-`.github/studio-packages-request.txt` on that branch, or push a tag whose name
-starts with `studio-build-` (for example `git tag studio-build-1` then
-`git push origin studio-build-1`): this builds the Apple Silicon disk image and
-the Linux tarball.
-
-A build takes several hours. If a run stops at the time limit of GitHub's
-runners, run the workflow again: the compiler cache saved by the first run
-lets the next run finish quickly. Artifacts are kept for 30 days.
+A first build takes several hours.
 
 ## macOS
 
-### Get the disk image
+### Build the disk image
 
-Download it from the workflow run (see above), or build it on your Mac. To build
-it, run this command from the top of the source tree:
+Build the disk image on your Mac. Run this command from the top of the source
+tree:
 
 ```console
 Utilities/Scripts/SlicerStudioMacOS/build_dmg.sh
@@ -69,7 +53,6 @@ Which Macs a disk image runs on depends on how it was built:
 
 | Disk image | Runs on |
 |---|---|
-| From the workflow (default settings) | macOS 14 (Sonoma) or newer, on Apple Silicon. The Intel disk image runs on Intel Macs with macOS 14 or newer. |
 | Built on your Mac with the default settings (Homebrew's Qt) | Your Mac, and Macs with the same or a newer macOS |
 | Built on your Mac with `--qt=official` | macOS 14 or newer, on the same kind of processor as your Mac |
 
@@ -167,29 +150,18 @@ on macOS (including Apple Silicon), Windows and Linux. You need Docker Desktop
 
 The launcher is `Utilities/SlicerStudioWeb/slicer_studio_web.py`. It uses only
 the Python standard library. `Utilities/SlicerStudioWeb/README.md` covers the
-details and troubleshooting. There are two ways to get the image:
+details and troubleshooting.
 
-- **Build it from the Linux package.** Build the image once, then start it:
+You build the image yourself, from the Linux package (see [Linux](#linux)).
+Build the image once, then start it:
 
-  ```console
-  python3 Utilities/SlicerStudioWeb/slicer_studio_web.py build --package Slicer-<version>-linux-amd64.tar.gz
-  python3 Utilities/SlicerStudioWeb/slicer_studio_web.py
-  ```
+```console
+python3 Utilities/SlicerStudioWeb/slicer_studio_web.py build --package Slicer-<version>-linux-amd64.tar.gz
+python3 Utilities/SlicerStudioWeb/slicer_studio_web.py
+```
 
-  The second command starts Slicer Studio and opens the browser. Stop it with
-  `python3 Utilities/SlicerStudioWeb/slicer_studio_web.py stop`.
-
-- **Pull the image built by the workflow.** When the workflow is run with the
-  **docker** option, it pushes the image to
-  `ghcr.io/<owner>/slicer-studio-web`. Pull the image and start it:
-
-  ```console
-  docker pull ghcr.io/<owner>/slicer-studio-web:latest
-  python3 Utilities/SlicerStudioWeb/slicer_studio_web.py run --image ghcr.io/<owner>/slicer-studio-web:latest
-  ```
-
-  A newly pushed image is private. To pull it, either log in first with
-  `docker login ghcr.io`, or make it public in the package settings on GitHub.
+The second command starts Slicer Studio and opens the browser. Stop it with
+`python3 Utilities/SlicerStudioWeb/slicer_studio_web.py stop`.
 
 On Linux, the launcher can also run without Docker, on a local Slicer
 installation or build tree (`slicer_studio_web.py local`).

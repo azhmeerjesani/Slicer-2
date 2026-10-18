@@ -1,5 +1,10 @@
 name: Slicer Studio packages
 
+# DISABLED: this workflow is disabled on the repository and must not be run or
+# re-enabled. GitHub is used only as the git remote of this fork (see
+# CLAUDE.md); packages are built locally (Docs/user_guide/install_studio.md).
+# The file is kept as a reference for the build steps.
+#
 # Builds installable Slicer Studio packages on demand (Actions tab > "Slicer
 # Studio packages" > "Run workflow"): a macOS disk image (.dmg), a Linux
 # tarball and, optionally, the web (browser) Docker image. The packages are

@@ -1,4 +1,0 @@
-# Pushing a change to this file builds the Slicer Studio packages (macOS disk
-# image and Linux tarball) with .github/workflows/studio-packages.yml.
-# See Docs/user_guide/install_studio.md.
-request: 2

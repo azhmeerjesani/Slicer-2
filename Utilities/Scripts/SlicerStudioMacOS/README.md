@@ -7,9 +7,9 @@ to an official 3D Slicer without replacing it.
 
 The script runs on the Mac. It checks the machine, installs the build tools with
 Homebrew, gets Qt, builds the Slicer superbuild in Release mode, packages it
-with CPack and makes the final disk image. To get a disk image without building
-on your Mac, run the GitHub Actions workflow instead (see
-[Building in GitHub Actions](#building-in-github-actions)).
+with CPack and makes the final disk image. Disk images are built on a Mac with
+this script. The CI workflow file in the repository is only a reference (see
+[The CI workflow file](#the-ci-workflow-file)).
 
 ## Quick start
 
@@ -47,7 +47,7 @@ Everything the script creates goes into `~/SlicerStudio`:
 | `--qt=` | Qt | The disk image runs on | Notes |
 |---|---|---|---|
 | `homebrew` (default) | Homebrew's current Qt 6 | the build Mac, and Macs with the same or a newer macOS | Fastest to set up. Homebrew only provides Qt for Apple Silicon Macs with macOS 15 or newer. On other Macs, `brew install qt` compiles Qt for hours (the script warns): use `official` there. |
-| `official[=6.11.2]` | official Qt binaries, downloaded with [aqtinstall](https://github.com/miurahr/aqtinstall) | macOS 14 and newer (the minimum of this source tree; Qt 6.11 itself supports macOS 13) | Use this for a disk image you share. It is also used by GitHub Actions. It downloads roughly 1 to 2 GB. |
+| `official[=6.11.2]` | official Qt binaries, downloaded with [aqtinstall](https://github.com/miurahr/aqtinstall) | macOS 14 and newer (the minimum of this source tree; Qt 6.11 itself supports macOS 13) | Use this for a disk image you share. It downloads roughly 1 to 2 GB. |
 | `source[=6.11.2]` | Qt built from source by `Utilities/Scripts/Build-qt6.sh` | macOS 14 and newer | Takes hours and needs the full Xcode (Metal toolchain). Build-qt6.sh assumes Homebrew in `/opt/homebrew`. |
 | `/path/to/Qt` | an existing Qt 6.8+ or Qt 5.15 installation (its prefix, or its `lib/cmake/Qt6` or `lib/cmake/Qt5` folder) | depends on that Qt | For example, a Qt from the Qt online installer: `--qt=~/Qt/6.11.2/macos`. |
 
@@ -210,8 +210,7 @@ Some things stay shared on purpose:
 Open the disk image and drag **Slicer Studio** to **Applications**.
 
 The application is signed ad hoc but not notarized by Apple. When it is
-downloaded, for example from GitHub, macOS blocks it the first time. Do one of
-the following:
+downloaded, macOS blocks it the first time. Do one of the following:
 
 - Open it once, then go to **System Settings > Privacy & Security** and click
   **Open Anyway**. On macOS 14, you can instead right-click the application
@@ -233,26 +232,14 @@ softwareupdate --install-rosetta --agree-to-license
 The first start after installing can take a minute or two, while macOS checks
 the application's libraries. Slicer shows a progress window during that time.
 
-## Building in GitHub Actions
+## The CI workflow file
 
-`.github/workflows/studio-packages.yml` builds the packages on GitHub's runners.
-To start it, go to **Actions > Slicer Studio packages > Run workflow** (only
-available when the workflow is on the default branch), or push a tag named
-`studio-build-*` (default choices, from any branch). The workflow produces:
-
-- **macOS disk image** (default on). Built with this script on `macos-15`
-  (Apple Silicon) with `--qt=official`, so it runs on macOS 14 and newer.
-  `--qt=homebrew` is available as an option. An Intel disk image
-  (`macos-15-intel`, always official Qt) can be turned on.
-- **Linux tarball** (default on). Built on Ubuntu 24.04 with the system Qt 5.15.
-- **Web image** (optional). The Docker image of
-  [Utilities/SlicerStudioWeb](../../SlicerStudioWeb/README.md), pushed to
-  `ghcr.io/<owner>/slicer-studio-web`.
-
-When the run finishes, download the disk image from the run's **Artifacts**. It
-is attached as the `.dmg` file itself. A first build can reach the runners' time
-limit. The compiler cache is saved even then, so running the workflow again
-finishes the build.
+`.github/workflows/studio-packages.yml` is a GitHub Actions workflow that runs
+the build steps of the packages on a clean machine, using this script for the
+disk image. It is disabled and stays disabled: GitHub is only used as the git
+remote, and no package is built or published there. The file is kept as a
+reference for the build steps. Build disk images on a Mac with this script (see
+[Quick start](#quick-start)).
 
 ## Troubleshooting
 
