@@ -21,10 +21,13 @@ LesionNetworkMappingLib is available (in the writer or in the source tree), and 
 A generated checker script then runs headless in B, loads both saved scenes and the NIfTI outputs, and
 records what it sees. This script compares that with what A recorded before saving:
 
-- same node classes and counts, identical voxel data, geometry, segments, markup coordinates,
-  table contents and color table entries (including alpha), parameter node content and view settings;
+- same node classes and counts (every singleton node saved in the scene exists after loading it),
+  identical voxel data, geometry, segments, markup coordinates, table contents and color table
+  entries (including alpha), parameter node content and view settings;
 - working views: a fork scene saved with layout 7001 shows slice views in official Slicer (portable
-  fallback to the Conventional layout) and the fork restores layout 7001;
+  fallback to the Conventional layout) and the fork restores layout 7001; no widget of the application
+  covers the slice views (a canvas that the fork's Studio interface shows over the views, such as its
+  Library, is reported and hidden for the checks);
 - no new errors or warnings in the application log, compared with B loading the scene B wrote itself;
 - the NIfTI outputs load with identical geometry and voxel values.
 
@@ -376,18 +379,38 @@ def _sceneNodeIds():
 
 
 def _addedNodeClassCounts(baselineIds, savedOnly):
+    """Count the nodes added since ``baselineIds`` was recorded, by class.
+
+    Singleton nodes are not counted: they are merged into the existing node of the same singleton tag
+    on load, and whether they exist before depends on the application state (modules used before) and
+    on the scenes loaded before. Every singleton node saved in a scene must exist after loading it
+    (see ``savedSingletons`` and ``_sceneSingletons``).
+    """
     import slicer
 
     scene = slicer.mrmlScene
     counts = {}
     for index in range(scene.GetNumberOfNodes()):
         node = scene.GetNthNode(index)
-        if not node or node.GetID() in baselineIds:
+        if not node or node.GetID() in baselineIds or node.GetSingletonTag():
             continue
         if savedOnly and not node.GetSaveWithScene():
             continue
         counts[node.GetClassName()] = counts.get(node.GetClassName(), 0) + 1
     return counts
+
+
+def _sceneSingletons():
+    """Return the sorted "<XML tag>/<singleton tag>" keys of the singleton nodes of the scene."""
+    import slicer
+
+    scene = slicer.mrmlScene
+    keys = set()
+    for index in range(scene.GetNumberOfNodes()):
+        node = scene.GetNthNode(index)
+        if node and node.GetSingletonTag():
+            keys.add(f"{node.GetNodeTagName()}/{node.GetSingletonTag()}")
+    return sorted(keys)
 
 
 def _collectState():
@@ -568,9 +591,13 @@ def _viewsState():
         viewport = None
     ancestor = viewport if viewport is not None else slicer.util.mainWindow()
     sliceViews = {}
+    covered = {}
     for name in layoutManager.sliceViewNames():
         widget = layoutManager.sliceWidget(name)
         sliceViews[name] = bool(widget.isVisibleTo(ancestor)) and widget.width > 1 and widget.height > 1
+        coveringWidget = _coveringWidget(widget.sliceView()) if sliceViews[name] else None
+        if coveringWidget:
+            covered[name] = coveringWidget
     threeDViews = 0
     for index in range(layoutManager.threeDViewCount):
         widget = layoutManager.threeDWidget(index)
@@ -605,10 +632,48 @@ def _viewsState():
         "viewArrangement": layoutNode.GetViewArrangement(),
         "descriptionLength": len(layoutNode.GetCurrentLayoutDescription() or ""),
         "sliceViews": sliceViews,
+        # Shown slice views that another widget of the application covers (name of that widget)
+        "covered": covered,
         "threeDViewsShown": threeDViews,
         "viewportVisible": bool(viewport.isVisible()) if viewport is not None else None,
         "render": render,
     }
+
+
+def _coveringWidget(view):
+    """Return the name of the widget shown over the center of ``view``, or None if the view is not covered.
+
+    A widget that is shown over the views (for example a full-size canvas of the application user
+    interface) does not change whether the views are visible for Qt, but the user does not see them.
+    """
+    import qt
+
+    center = view.mapToGlobal(qt.QPoint(view.width // 2, view.height // 2))
+    top = qt.QApplication.widgetAt(center)
+    if top is None or top == view or view.isAncestorOf(top):
+        # None: nothing of the application at this position (the view is not covered by it)
+        return None
+    return top.objectName or top.className()
+
+
+def _revealViews():
+    """Hide the canvas that the application shows over the view area, if any. Return its name, or None.
+
+    The Slicer Studio interface of the fork shows its Library workspace as a canvas over the view area.
+    Hiding it does not change the layout, the views or the scene.
+    """
+    try:
+        from StudioLib import shell as studioShell
+    except ImportError:
+        return None  # not a fork, or a fork without Studio
+    studio = studioShell.instance()
+    canvas = studio.canvas() if studio is not None else None
+    if canvas is None or not canvas.isVisible():
+        return None
+    name = canvas.objectName or canvas.className()
+    studio.setCanvas(None)
+    _processEvents()
+    return name
 
 
 def _screenshot(path):
@@ -647,6 +712,8 @@ def _runWriter(config):
     _processEvents()
     capture.start()
     result = {"isFork": config["isFork"]}
+    # Show the views (for the screenshot); it does not change what is saved
+    result["startupCanvas"] = _revealViews()
 
     layoutId = CONVENTIONAL_LAYOUT
     if config["isFork"]:
@@ -799,8 +866,15 @@ def _loadAndInspect(path, shotPath, capture):
         record["loadException"] = traceback.format_exc()
     _processEvents(5)
     record["classCounts"] = _addedNodeClassCounts(baselineIds, savedOnly=False)
+    record["singletons"] = _sceneSingletons()
     record["state"] = _collectState()
     record["views"] = _viewsState()
+    if record["views"]["covered"]:
+        # Something was shown over the views when the scene was loaded: record it, then check the views
+        canvas = _revealViews()
+        if canvas:
+            record["coveredAfterLoad"] = {"views": record["views"]["covered"], "hidden": canvas}
+            record["views"] = _viewsState()
     _screenshot(shotPath)
     record["screenshot"] = shotPath
     record["messages"] = capture.stop()
@@ -837,6 +911,9 @@ def _runChecker(config):
     slicer.util.mainWindow().resize(1400, 900)
     capture = _LogCapture()
     result = {"isFork": config["isFork"], "baseline": None, "writers": {}}
+    # The checks are about the files: show the views if the application started with a canvas over them.
+    # A canvas that is shown again by loading a scene is reported for that scene (coveredAfterLoad).
+    result["startupCanvas"] = _revealViews()
     if config.get("baseline"):
         # Messages that this Slicer emits when it loads the scene it wrote itself
         result["baseline"] = _loadAndInspect(config["baseline"], os.path.join(config["shotsDir"], f"baseline_{config['name']}.png"), capture)
@@ -979,6 +1056,9 @@ def compareViews(expectedLayoutId, views):
             problems.append(f"slice views {missing} are not shown (shown: {shown})")
     elif not shown and not views.get("threeDViewsShown"):
         problems.append("no view is shown")
+    covered = views.get("covered") or {}
+    if covered:
+        problems.append(f"slice views {sorted(covered)} are covered by {sorted(set(covered.values()))}")
     render = views.get("render", {})
     if render.get("status") == "ok" and (render.get("distinctColors", 0) < 16 or render.get("std", 0.0) < 1.0):
         problems.append(f"the Red slice view does not render the scene ({render})")
@@ -1023,6 +1103,28 @@ def compareClassCounts(expected, actual):
         if expected.get(className, 0) != actual.get(className, 0):
             problems.append(f"{className}: {expected.get(className, 0)} saved, {actual.get(className, 0)} loaded")
     return problems
+
+
+def savedSingletons(scenePath):
+    """Return the sorted "<XML tag>/<singleton tag>" keys of the singleton nodes saved in a scene file or bundle."""
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    if scenePath.lower().endswith(".mrb"):
+        with zipfile.ZipFile(scenePath) as bundle:
+            # The scene file of the bundle (the shortest path, other .mrml files would be in subdirectories)
+            sceneFiles = sorted((name for name in bundle.namelist() if name.lower().endswith(".mrml")), key=len)
+            if not sceneFiles:
+                raise ValueError(f"no scene file in {scenePath}")
+            root = ET.fromstring(bundle.read(sceneFiles[0]))
+    else:
+        root = ET.parse(scenePath).getroot()
+    return sorted({f"{element.tag}/{element.get('singletonTag')}" for element in root if element.get("singletonTag")})
+
+
+def compareSingletons(saved, loaded):
+    """Every singleton node saved in the scene must exist after loading it (it may have existed before)."""
+    return [f"{key.replace('/', ' singletonTag=', 1)}: saved, missing after loading" for key in sorted(set(saved) - set(loaded))]
 
 
 def compareLnm(writerOutputs, checked):
@@ -1243,6 +1345,12 @@ def _evaluatePair(writerName, checkerName, writer, checker, isFork):
         if not record.get("loaded"):
             problems.append("loading the scene failed" + (": " + record["loadException"].strip().splitlines()[-1] if record.get("loadException") else ""))
         problems += [f"node count: {p}" for p in compareClassCounts(writer["classCounts"], record["classCounts"])]
+        try:
+            saved = savedSingletons(writer["files"][sceneFormat])
+        except Exception as exc:
+            problems.append(f"singleton nodes: cannot read the saved scene: {exc}")
+        else:
+            problems += [f"singleton node {p}" for p in compareSingletons(saved, record.get("singletons", []))]
         problems += compareStates(writer["state"], record["state"])
         problems += [f"views: {p}" for p in compareViews(expectedLayoutId, record["views"])]
         messageProblems, ignored = compareMessages(record["messages"], baselineMessages, writerName == checkerName)
@@ -1255,6 +1363,8 @@ def _evaluatePair(writerName, checkerName, writer, checker, isFork):
             "render": record["views"].get("render"),
             "screenshot": record.get("screenshot"),
             "ignoredMessages": [m["text"].strip()[:200] for m in ignored],
+            # Informational: a canvas of the application was shown over the views after loading (hidden for the checks)
+            "coveredAfterLoad": record.get("coveredAfterLoad"),
         }
     lnm = writer.get("lnm", {})
     if lnm.get("status") == "ok":
@@ -1268,6 +1378,8 @@ def _formatReport(report):
     lines = ["Slicer file compatibility check", "=" * 31, ""]
     for name, info in report["slicers"].items():
         lines.append(f"{name:<20} {info.get('version') or '?':<22} {'fork' if info['isFork'] else 'official'}  {info['path']}")
+        if info.get("startupCanvas"):
+            lines.append(f"{'':<20} (started with {info['startupCanvas']} over the views; hidden for the checks)")
     lines += ["", "Writers:"]
     for name, writer in report["writers"].items():
         status = "PASS" if not writer["problems"] else "FAIL"
@@ -1308,6 +1420,9 @@ def _formatReport(report):
                 extra += f", render {render.get('status')}" + (f" ({render.get('distinctColors')} colors)" if render.get("status") == "ok" else "")
             lines.append(f"    {key:<4} {status}{extra}")
             lines += [f"         - {p}" for p in part["problems"]]
+            if part.get("coveredAfterLoad"):
+                covered = part["coveredAfterLoad"]
+                lines.append(f"         (after loading, {covered['hidden']} covered slice views {','.join(sorted(covered['views']))}; hidden for the checks)")
             if part.get("ignoredMessages"):
                 lines.append(f"         (ignored environment messages: {len(part['ignoredMessages'])})")
     if report.get("formatDifferences"):
@@ -1375,7 +1490,14 @@ def main(argv=None):
     report = {"slicers": {}, "writers": {}, "pairs": {}, "formatDifferences": {}}
     for name in involved:
         info = writers[name].get("info", {})
-        report["slicers"][name] = {"path": slicers[name], "isFork": isFork[name], "version": info.get("version"), "revision": info.get("revision")}
+        report["slicers"][name] = {
+            "path": slicers[name],
+            "isFork": isFork[name],
+            "version": info.get("version"),
+            "revision": info.get("revision"),
+            # Informational: canvas shown over the views at startup, hidden for the checks
+            "startupCanvas": writers[name].get("startupCanvas") or checkers.get(name, {}).get("startupCanvas"),
+        }
         report["writers"][name] = {
             "problems": _evaluateWriter(name, writers[name]),
             "layout": writers[name].get("layout"),

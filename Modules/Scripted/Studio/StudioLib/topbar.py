@@ -126,6 +126,11 @@ class TopBar:
         self.redoButton = _toolButton("StudioRedoButton", "redo-2", _("Redo"))
         self.redoButton.connect("clicked()", self._onRedo)
         layout.addWidget(self.redoButton)
+        for button in (self.undoButton, self.redoButton):
+            # Visible in Draw only: keep their space so that the switcher does not move between workspaces
+            sizePolicy = button.sizePolicy
+            sizePolicy.setRetainSizeWhenHidden(True)
+            button.setSizePolicy(sizePolicy)
         self.undoRedoTimer = qt.QTimer(self.toolBar)
         self.undoRedoTimer.setInterval(UNDO_REDO_POLL_INTERVAL_MS)
         self.undoRedoTimer.connect("timeout()", self.updateUndoRedo)

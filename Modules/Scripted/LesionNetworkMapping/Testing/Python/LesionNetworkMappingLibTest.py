@@ -950,6 +950,31 @@ class CommandLineTest(_TempDirTestCase):
         self.assertEqual([event["event"] for event in events], ["error"])
         self.assertIn("--threads", events[0]["message"])
 
+    def test_engine_usage_errors(self):
+        def run(*args):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+                try:
+                    code = engine.main(list(args))
+                except SystemExit as exc:
+                    code = exc.code
+            return code, [json.loads(line)["event"] for line in output.getvalue().splitlines()]
+
+        required = ["--bundle", self.path("missing.lnmc"), "--lesion", self.path("missing.nii.gz"), "--out", self.path("out")]
+        for extra in (
+            ["--threshold-rule", '{"kind": "custom_t", "value": null}'],
+            ["--threshold-rule", '{"kind": "fwe_bonferroni", "alpha": null}'],
+            ["--threshold-rule", "abc"],
+            ["--null-voxels", "-1"],
+            ["--null-relocations", "-1"],
+            ["--desc-suffix", "Preview-1"],
+        ):
+            with self.subTest(arguments=extra):
+                self.assertEqual(run(*required, *extra), (2, ["error"]))
+        # No abbreviated options (run.json records the arguments, reproduce.sh rewrites paths by full option names)
+        self.assertEqual(run("--bund", self.path("missing.lnmc"), *required[2:]), (2, ["error"]))
+        self.assertFalse(os.path.exists(self.path("out")))
+
     def test_engine_warns_when_sform_and_qform_disagree(self):
         meta = connectome.make_synthetic(self.path("synthetic.lnmc"), n_subjects=2, name="Synthetic")
         lesion_path = _sphere_lesion(self.path("sub-01_run-2_space-MNI152NLin6Asym_desc-lesion_mask.nii"), meta["blobs"]["A"]["center_world"])
@@ -1227,11 +1252,30 @@ class ThresholdsTest(unittest.TestCase):
             self.assertEqual(json.loads(json.dumps(resolved.to_dict()))["rule"], normalized)
         self.assertEqual(thresholds.rule_from_json(""), thresholds.DEFAULT_RULE)
         self.assertEqual(thresholds.normalize_rule({"kind": "t_convention"}), {"kind": "t_convention", "value": 7.0, "reference_n": 1000})
-        for bad in ({"kind": "fdr"}, {"kind": "fwe_bonferroni", "alpha": 2}, {"kind": "custom_t", "value": -1}, {"kind": "t_convention", "reference_n": 1}, [1, 2], "{"):
+        self.assertEqual(thresholds.normalize_rule('{"kind": "custom_t", "value": "4.5", "reference_n": 500.0}'), {"kind": "custom_t", "value": 4.5, "reference_n": 500})
+        bad_rules = [{"kind": "fdr"}, {"kind": "fwe_bonferroni", "alpha": 2}, {"kind": "custom_t", "value": -1}, {"kind": "t_convention", "reference_n": 1}, [1, 2], "{"]
+        # Null, non-numeric and boolean parameters are ValueErrors too (callers catch ValueError only)
+        bad_rules += [
+            {"kind": "custom_t", "value": None},
+            {"kind": "fwe_bonferroni", "alpha": None},
+            {"kind": "t_convention", "reference_n": [1]},
+            {"kind": "custom_t", "value": 5, "reference_n": "x"},
+            {"kind": "custom_t", "value": 5, "reference_n": 500.5},
+            {"kind": "custom_t", "value": True},
+            {"kind": "fz_abs", "value": {"a": 1}},
+            {"kind": "t_convention", "override": "no"},
+        ]
+        for bad in bad_rules:
             with self.subTest(rule=bad), self.assertRaises(ValueError):
                 thresholds.normalize_rule(bad)
         with self.assertRaises(ValueError):
             thresholds.resolve(None, 100, 0)
+        valid = thresholds.resolve(None, 640, 50_000).to_dict()
+        for key, value in (("n", None), ("v", "many"), ("rule", None), ("statistic", "Z"), ("df", 1.5), ("allowed", "yes")):
+            with self.subTest(field=key, value=value), self.assertRaises(ValueError):
+                thresholds.Resolved.from_dict({**valid, key: value})
+        with self.assertRaises(ValueError):
+            thresholds.Resolved.from_dict({key: value for key, value in valid.items() if key not in ("n", "v", "rule")})
 
 
 class QATest(_TempDirTestCase):
@@ -1407,6 +1451,11 @@ class ExportTest(_TempDirTestCase):
         self.assertEqual(engine._lesion_name("sub-07_ses-2_acq-flair_run-2_space-MNI152NLin6Asym_res-2_desc-lesion_mask.nii.gz"), "sub-07_ses-2_acq-flair_run-2")
         self.assertEqual(engine._lesion_name("sub-07_run-1_lesion.nii.gz"), "sub-07_run-1")
         self.assertEqual(engine._lesion_name("sub-07_T1w_lesion.nii"), "sub-07")
+        # Several lesions with the same name: the subject label stays valid
+        self.assertEqual(engine._unique_name("sub-07", ["sub-07"]), "sub-07_lesion-2")
+        self.assertEqual(engine._unique_name("sub-07_ses-2", ["sub-07_ses-2", "sub-07_ses-2_lesion-2"]), "sub-07_ses-2_lesion-3")
+        self.assertEqual(engine._unique_name("patient01_lesion", ["patient01_lesion"]), "patient01_lesion-2")
+        self.assertEqual(engine._unique_name("sub-08", ["sub-07"]), "sub-08")
         peaks = stats.peak_table(np.array([0.0, 5.0, -7.0]), geometry.Grid((3, 1, 1), RAS_AFFINE), top_k=2, min_distance_mm=0.5)
         export.write_peaks_tsv(self.path("peaks.tsv"), peaks, ["Precuneus"])
         with open(self.path("peaks.tsv"), encoding="utf-8") as f:
@@ -1481,6 +1530,7 @@ class ExportTest(_TempDirTestCase):
             methods = f.read()
         for text in (export.DISCLAIMER, "doi:10.1093/brain/awv228", "doi:10.1056/NEJMra1706158", "doi:10.1038/s41593-025-02196-7", "N = 3 subjects (preview", "relocated to 4 random positions"):
             self.assertIn(text, methods)
+        self.assertIn("maps of its relocated lesions is reported", methods)
         # reproduce.sh recomputes the same maps
         script = os.path.join(out, "reproduce.sh")
         self.assertTrue(os.stat(script).st_mode & 0o111)
@@ -1510,6 +1560,11 @@ class ExportTest(_TempDirTestCase):
         self.assertEqual((sidecar["N"], sidecar["df"], sidecar["subset"]["partial"], sidecar["subject_ids_sha256"]), (2, 1, True, None))
         self.assertEqual(sidecar["threshold"]["resolved"]["banner"], "This threshold was defined for N\u22481000; this map has N=2 (partial). Use FWE or effect size.")
         self.assertIsNotNone(sidecar["qa"]["degree_r"])  # computed from the T map file
+        self.assertIsNone(sidecar["qa"]["null"])  # the null QA of a stopped run is not available...
+        with open(files["methods"], encoding="utf-8") as f:
+            methods = f.read()
+        self.assertNotIn("is reported", methods)  # ... and methods.md says so
+        self.assertIn("not available for this run", methods)
         with open(files["reproduce"], encoding="utf-8") as f:
             self.assertIn("stopped after 2 subjects", f.read())
 

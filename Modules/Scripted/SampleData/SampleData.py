@@ -1090,6 +1090,8 @@ class SampleDataLogic:
                     loadedNode = self.loadNode(filePath, nodeName, loadFileType, source.loadFileProperties.copy())
                     if loadedNode:
                         # Success
+                        if source.loadFileProperties.get("labelmap") and self.categoryForSource(source) == self.neuroCategoryName:
+                            SampleDataLogic.convertLabelmapToIntegerScalarType(loadedNode)
                         resultNodes.append(loadedNode)
                         break
                 else:
@@ -1129,6 +1131,29 @@ class SampleDataLogic:
                 if a_source == source:
                     return category
         return None
+
+    @staticmethod
+    def convertLabelmapToIntegerScalarType(labelmapNode):
+        """Convert the voxels of a labelmap volume node read as floating point to the smallest integer type that holds them.
+
+        For example, the TemplateFlow MNI152NLin2009cAsym 2 mm brain mask stores 0/255 values with a 1/255 scaling
+        (NIfTI scl_slope) that the reader applies. Labels that are not integer values are left unchanged.
+        Returns True if the voxels were converted.
+        """
+        import numpy as np
+
+        imageData = labelmapNode.GetImageData() if labelmapNode.IsA("vtkMRMLLabelMapVolumeNode") else None
+        if not imageData or imageData.GetScalarType() not in (vtk.VTK_FLOAT, vtk.VTK_DOUBLE):
+            return False
+        voxels = slicer.util.arrayFromVolume(labelmapNode)
+        labels = np.rint(voxels)
+        if not np.allclose(voxels, labels, rtol=0.0, atol=1e-3):
+            return False
+        for scalarType in (np.uint8, np.int16, np.int32):
+            if labels.min() >= np.iinfo(scalarType).min and labels.max() <= np.iinfo(scalarType).max:
+                slicer.util.updateVolumeFromArray(labelmapNode, labels.astype(scalarType))
+                return True
+        return False
 
     def downloadFromURL(self, uris=None, fileNames=None, nodeNames=None, checksums=None, loadFiles=None,
                         customDownloader=None, loadFileTypes=None, loadFileProperties={}, forceDownload=False):
@@ -1712,5 +1737,9 @@ class SampleDataTest(ScriptedLoadableModuleTest):
             node = logic.downloadSample(sampleName)
             self.assertEqual(node.GetClassName(), className)
             self.assertEqual(node.GetImageData().GetDimensions(), (97, 115, 97))
+            if node.IsA("vtkMRMLLabelMapVolumeNode"):
+                # The file stores 0/255 with a 1/255 scaling (NIfTI scl_slope): labels are converted to integers
+                self.assertEqual(node.GetImageData().GetScalarTypeAsString(), "unsigned char")
+                self.assertEqual(node.GetImageData().GetScalarRange(), (0.0, 1.0))
             (algo, digest) = extractAlgoAndDigest(source.checksums[0])
             self.assertEqual(computeChecksum(algo, cachedFilePath), digest)

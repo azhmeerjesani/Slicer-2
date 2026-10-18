@@ -162,9 +162,7 @@ class SegmentEditorMarginEffect(AbstractScriptedSegmentEditorEffect):
         slicer.app.processEvents()
 
     def processMargin(self):
-        # Get modifier labelmap and parameters
-        modifierLabelmap = self.scriptedEffect.defaultModifierLabelmap()
-
+        # Get parameters
         marginSizeMM = self.scriptedEffect.doubleParameter("MarginSizeMm")
 
         # The segment can only change within the margin size around its current extent, and the selected segment
@@ -206,6 +204,11 @@ class SegmentEditorMarginEffect(AbstractScriptedSegmentEditorEffect):
         margin.SetOuterMarginMM(abs(marginSizeMM))
         margin.Update()
 
+        # The result covers the processed (cropped) region and it replaces the segment ("Set" modification mode),
+        # therefore it is stored in a new labelmap instead of defaultModifierLabelmap(), which would allocate and clear
+        # a labelmap as large as the reference geometry.
+        modifierLabelmap = slicer.vtkOrientedImageData()
+        modifierLabelmap.CopyDirections(selectedSegmentLabelmap)
         if marginSizeMM >= 0:
             modifierLabelmap.ShallowCopy(margin.GetOutput())
         else:

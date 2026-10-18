@@ -33,6 +33,7 @@
 
 // STD includes
 #include <algorithm>
+#include <set>
 
 vtkStandardNewMacro(vtkSegmentationModifier);
 
@@ -42,6 +43,99 @@ namespace
 bool IsExtentNonEmpty(const int extent[6])
 {
   return extent[0] <= extent[1] && extent[2] <= extent[3] && extent[4] <= extent[5];
+}
+
+//-----------------------------------------------------------------------------
+template <class LabelmapScalarType, class ModifierScalarType>
+bool GetLabelValuesErasedByModifierGeneric2(vtkImageData* labelmap, vtkImageData* modifier, int extent[6], std::set<double>& labelValues)
+{
+  LabelmapScalarType* labelmapPtr = static_cast<LabelmapScalarType*>(labelmap->GetScalarPointerForExtent(extent));
+  ModifierScalarType* modifierPtr = static_cast<ModifierScalarType*>(modifier->GetScalarPointerForExtent(extent));
+  if (!labelmapPtr || !modifierPtr)
+  {
+    return false;
+  }
+  vtkIdType labelmapIncX = 0;
+  vtkIdType labelmapIncY = 0;
+  vtkIdType labelmapIncZ = 0;
+  vtkIdType modifierIncX = 0;
+  vtkIdType modifierIncY = 0;
+  vtkIdType modifierIncZ = 0;
+  labelmap->GetContinuousIncrements(extent, labelmapIncX, labelmapIncY, labelmapIncZ);
+  modifier->GetContinuousIncrements(extent, modifierIncX, modifierIncY, modifierIncZ);
+  // Neighboring voxels usually have the same label, therefore the last inserted label is not inserted again
+  bool lastLabelValueValid = false;
+  LabelmapScalarType lastLabelValue = 0;
+  for (int z = extent[4]; z <= extent[5]; ++z)
+  {
+    for (int y = extent[2]; y <= extent[3]; ++y)
+    {
+      for (int x = extent[0]; x <= extent[1]; ++x)
+      {
+        // The minimum operation sets the voxel to 0 where the modifier is not positive
+        if (*modifierPtr <= 0 && *labelmapPtr > 0 && !(lastLabelValueValid && *labelmapPtr == lastLabelValue))
+        {
+          lastLabelValue = *labelmapPtr;
+          lastLabelValueValid = true;
+          labelValues.insert(static_cast<double>(lastLabelValue));
+        }
+        ++labelmapPtr;
+        ++modifierPtr;
+      }
+      labelmapPtr += labelmapIncY;
+      modifierPtr += modifierIncY;
+    }
+    labelmapPtr += labelmapIncZ;
+    modifierPtr += modifierIncZ;
+  }
+  return true;
+}
+
+//-----------------------------------------------------------------------------
+template <class LabelmapScalarType>
+bool GetLabelValuesErasedByModifierGeneric(vtkImageData* labelmap, vtkImageData* modifier, int extent[6], std::set<double>& labelValues)
+{
+  bool success = false;
+  switch (modifier->GetScalarType())
+  {
+    vtkTemplateMacro(success = (GetLabelValuesErasedByModifierGeneric2<LabelmapScalarType, VTK_TT>(labelmap, modifier, extent, labelValues)));
+    default: break;
+  }
+  return success;
+}
+
+//-----------------------------------------------------------------------------
+/// Get the label values of the voxels within the extent that are erased by a minimum operation of all segments
+/// with the modifier (positive label values where the modifier is not positive).
+/// Returns false if it cannot be determined (for example, the labelmap and the modifier have different geometry).
+bool GetLabelValuesErasedByModifier(vtkOrientedImageData* labelmap, vtkOrientedImageData* modifier, const int extent[6], std::set<double>& labelValues)
+{
+  labelValues.clear();
+  if (!labelmap->GetPointData()->GetScalars() || !modifier->GetPointData()->GetScalars()              //
+      || labelmap->GetNumberOfScalarComponents() != 1 || modifier->GetNumberOfScalarComponents() != 1 //
+      || !vtkOrientedImageDataResample::DoGeometriesMatch(labelmap, modifier))
+  {
+    return false;
+  }
+  int checkedExtent[6] = { 0, -1, 0, -1, 0, -1 };
+  const int* labelmapExtent = labelmap->GetExtent();
+  const int* modifierExtent = modifier->GetExtent();
+  for (int i = 0; i < 6; i += 2)
+  {
+    checkedExtent[i] = std::max({ extent[i], labelmapExtent[i], modifierExtent[i] });
+    checkedExtent[i + 1] = std::min({ extent[i + 1], labelmapExtent[i + 1], modifierExtent[i + 1] });
+  }
+  if (!IsExtentNonEmpty(checkedExtent))
+  {
+    return true;
+  }
+  bool success = false;
+  switch (labelmap->GetScalarType())
+  {
+    vtkTemplateMacro(success = GetLabelValuesErasedByModifierGeneric<VTK_TT>(labelmap, modifier, checkedExtent, labelValues));
+    default: break;
+  }
+  return success;
 }
 } // namespace
 
@@ -410,7 +504,10 @@ bool vtkSegmentationModifier::AppendLabelmapToSegment(vtkOrientedImageData* labe
     }
 
     vtkSmartPointer<vtkOrientedImageData> modifierLabelmap = labelmap;
+    // Segments in the same layer whose voxels are overwritten or erased by the merge
     std::vector<std::string> sharedSegmentIDsInMask;
+    // If true then this segment is included in sharedSegmentIDsInMask if its voxels are changed by the merge
+    bool sharedSegmentIDsInMaskIncludesSegment = false;
     if (operation == vtkOrientedImageDataResample::OPERATION_MINIMUM)
     {
       int updateExtent[6] = { 0, -1, 0, -1, 0, -1 };
@@ -427,6 +524,34 @@ bool vtkSegmentationModifier::AppendLabelmapToSegment(vtkOrientedImageData* labe
         modifierLabelmap = vtkSmartPointer<vtkOrientedImageData>::New();
         modifierLabelmap->ShallowCopy(threshold->GetOutput());
         modifierLabelmap->CopyDirections(labelmap);
+
+        if (minimumOfAllSegments && modifiedSegmentIDs)
+        {
+          // Voxels of all segments in the layer are erased where the modifier is not positive.
+          // Get the segments in the layer (including this segment) that will be erased (must be determined before the merge).
+          std::vector<std::string> layerSegmentIDs;
+          segmentation->GetSegmentIDsSharingBinaryLabelmapRepresentation(segmentID, layerSegmentIDs, true);
+          if (layerSegmentIDs.size() > 1)
+          {
+            std::set<double> erasedLabelValues;
+            if (GetLabelValuesErasedByModifier(segmentLabelmap, labelmap, updateExtent, erasedLabelValues))
+            {
+              for (const std::string& layerSegmentID : layerSegmentIDs)
+              {
+                if (erasedLabelValues.count(segmentation->GetSegment(layerSegmentID)->GetLabelValue()) > 0)
+                {
+                  sharedSegmentIDsInMask.push_back(layerSegmentID);
+                }
+              }
+            }
+            else
+            {
+              // The erased segments cannot be determined (for example, the labelmap will be resampled), report all segments in the layer
+              sharedSegmentIDsInMask = layerSegmentIDs;
+            }
+            sharedSegmentIDsInMaskIncludesSegment = true;
+          }
+        }
       }
     }
     else
@@ -490,7 +615,11 @@ bool vtkSegmentationModifier::AppendLabelmapToSegment(vtkOrientedImageData* labe
     if (modifiedSegmentIDs && (segmentLabelmapModified || segmentCleared || segmentResampled))
     {
       modifiedSegmentIDs->insert(modifiedSegmentIDs->end(), sharedSegmentIDsInMask.begin(), sharedSegmentIDsInMask.end());
-      modifiedSegmentIDs->push_back(segmentID);
+      bool segmentFoundInMask = std::find(sharedSegmentIDsInMask.begin(), sharedSegmentIDsInMask.end(), segmentID) != sharedSegmentIDsInMask.end();
+      if (!segmentFoundInMask && (!sharedSegmentIDsInMaskIncludesSegment || segmentResampled))
+      {
+        modifiedSegmentIDs->push_back(segmentID);
+      }
     }
   }
   return true;

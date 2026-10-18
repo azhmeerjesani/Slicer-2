@@ -343,10 +343,17 @@ class Shell:
         self._installedWorkspaceShortcuts = []
         self._addedActions = []
         self._watchedToolBars = []
+        #: [toolBar, visible in Classic] of the toolbars that the classic window state does not restore
+        #: (added after Studio was applied, or without objectName)
+        self._unsavedToolBars = []
+        self._classicToolBarNames = set()
+        self._toolBarScanTimer = None
         self._plugins = []
         self._connections = []
         self._focusModeHidden = None
         self._panelWidthTimer = None
+        #: Minimum inspector width of each workspace module, as last measured while it was shown
+        self._workspaceMinimumWidths = {}
         self._eventFilter = None
         if _shell is None:
             _shell = self
@@ -468,6 +475,9 @@ class Shell:
         self._installedWorkspaceShortcuts = []
         self._shortcuts = []
         self._tabShortcut = None
+        if self._toolBarScanTimer is not None:
+            self._toolBarScanTimer.stop()
+            self._toolBarScanTimer = None
         for toolBar, slot in self._watchedToolBars:
             try:
                 toolBar.disconnect("visibilityChanged(bool)", slot)
@@ -506,6 +516,14 @@ class Shell:
         dock.setFeatures(self._classicDockFeatures)
 
         mainWindow.restoreState(self._classicState)
+        for toolBar, visible in self._unsavedToolBars:
+            try:
+                if visible and toolBar.isHidden() and toolBar.objectName not in self._classicToolBarNames:
+                    toolBar.show()
+            except Exception:
+                # Deleted by its owner
+                pass
+        self._unsavedToolBars = []
         mainWindow.menuBar().setVisible(self._classicVisibility["menuBar"])
         if mainWindow.statusBar() is not None:
             mainWindow.statusBar().setVisible(self._classicVisibility["statusBar"])
@@ -550,8 +568,15 @@ class Shell:
         dataProbe = self._dataProbe()
 
         # 1. Remember the classic state
+        if self._dockAreasFollowSizeHints():
+            # Applied at startup, before the first layout of the window: saveState() would store the
+            # pre-layout width of the module panel. Store the width that the first layout gives it.
+            width = min(max(dock.sizeHint.width(), dock.minimumSizeHint.width(), dock.minimumWidth), dock.maximumWidth)
+            mainWindow.resizeDocks([dock], [width], qt.Qt.Horizontal)
         self._classicState = mainWindow.saveState()
         settings.setValue("Studio/ClassicWindowState", self._classicState)
+        self._classicToolBarNames = {toolBar.objectName for toolBar in self._mainWindowToolBars() if toolBar.objectName}
+        self._unsavedToolBars = []
         self._classicTitleBar = dock.titleBarWidget()
         self._classicDockFeatures = dock.features
         sequences = getattr(slicer.modules, "sequences", None)
@@ -567,13 +592,19 @@ class Shell:
 
         # 2. Hide the classic chrome (nothing is deleted)
         self._active = True
+        self._workspaceMinimumWidths = {}
         self._eventFilter = _ShellEventFilter(self)
         self.workspaces = workspaces.WorkspaceController(self)
         mainWindow.menuBar().hide()
         if mainWindow.statusBar() is not None:
             mainWindow.statusBar().hide()
-        for toolBar in mainWindow.findChildren("QToolBar"):
+        for toolBar in self._mainWindowToolBars():
             self._hideToolBar(toolBar)
+        # Toolbars added later (extensions) are hidden too: see _onEvent()
+        self._toolBarScanTimer = qt.QTimer()
+        self._toolBarScanTimer.setSingleShot(True)
+        self._toolBarScanTimer.setInterval(0)
+        self._toolBarScanTimer.connect("timeout()", self._hideNewToolBars)
         if sequences is not None:
             sequences.autoShowToolBar = False
         if dataProbe is not None:
@@ -598,7 +629,9 @@ class Shell:
         # 4. Inspector on the right with the Studio panel header and a footer slot
         if dock.floating:
             dock.setFloating(False)
-        dock.setFeatures(qt.QDockWidget.NoDockWidgetFeatures)
+        # Not movable or floatable. Closable keeps its toggle view action (Ctrl+5, View > Module Panel)
+        # enabled; the panel header has no title bar close button.
+        dock.setFeatures(qt.QDockWidget.DockWidgetClosable)
         mainWindow.addDockWidget(qt.Qt.RightDockWidgetArea, dock)
         dock.show()
         self.panelHeader = PanelHeader(self)
@@ -643,6 +676,36 @@ class Shell:
             startWorkspace = "library"
         self.switchTo(startWorkspace)
 
+    def _dockAreasFollowSizeHints(self):
+        """True while the main window is shown for the first time (not laid out yet) and Slicer did
+        not restore a saved window state: the first layout then sizes the module panel from its size
+        hint, but saveState() still holds its pre-layout width.
+        """
+        mainWindow = self.mainWindow
+        dock = self._panelDock()
+        if mainWindow.testAttribute(qt.Qt.WA_Mapped) or dock.floating or dock.isHidden():
+            return False
+        settings = qt.QSettings()
+        if not slicer.util.toBool(settings.value("MainWindow/RestoreGeometry", False)):
+            return True
+        savedState = settings.value("MainWindow/windowState")
+        return savedState.isEmpty() if hasattr(savedState, "isEmpty") else not savedState
+
+    def _mainWindowToolBars(self):
+        """Toolbars of the main window (in its toolbar areas, floating or not)."""
+        mainWindow = self.mainWindow
+        return [toolBar for toolBar in mainWindow.findChildren("QToolBar")
+                if toolBar.parentWidget() == mainWindow and mainWindow.toolBarArea(toolBar) != qt.Qt.NoToolBarArea]
+
+    def _hideNewToolBars(self):
+        """Hide the toolbars added to the main window since Studio was applied (extensions)."""
+        if not self._active:
+            return
+        watched = [toolBar for toolBar, slot in self._watchedToolBars]
+        for toolBar in self._mainWindowToolBars():
+            if toolBar not in watched:
+                self._hideToolBar(toolBar)
+
     def _hideToolBar(self, toolBar):
         if self.topBar is not None and toolBar == self.topBar.toolBar:
             return
@@ -652,6 +715,11 @@ class Shell:
             slot = lambda visible, toolBar=toolBar: self._onToolBarVisibilityChanged(toolBar, visible)
             toolBar.connect("visibilityChanged(bool)", slot)
             self._watchedToolBars.append((toolBar, slot))
+            if toolBar.objectName not in self._classicToolBarNames:
+                # restoreState() does not restore it: remember if it is shown, or about to be shown by
+                # the main window layout (hidden but not explicitly)
+                visible = not (toolBar.isHidden() and toolBar.testAttribute(qt.Qt.WA_WState_ExplicitShowHide))
+                self._unsavedToolBars.append([toolBar, visible])
         if toolBar.objectName not in self._allowedToolBars():
             toolBar.hide()
 
@@ -663,7 +731,13 @@ class Shell:
         return list(allowed or [])
 
     def _onToolBarVisibilityChanged(self, toolBar, visible):
-        if not visible or not self._active or toolBar.objectName in self._allowedToolBars():
+        if not visible or not self._active:
+            return
+        for entry in self._unsavedToolBars:
+            if entry[0] == toolBar:
+                # Its extension showed it: show it in Classic too
+                entry[1] = True
+        if toolBar.objectName in self._allowedToolBars():
             return
         # An extension toolbar showed itself (for example the sequence browser): hide it again
         qt.QTimer.singleShot(0, lambda: toolBar.hide() if self._active and toolBar.objectName not in self._allowedToolBars() else None)
@@ -816,7 +890,8 @@ class Shell:
         self.panelHeader.setTitle(ws.title)
         for keySequence, callback, description in self._workspaceShortcuts.get(ws.key, []):
             self._installedWorkspaceShortcuts.append(self._createShortcut(keySequence, callback, description))
-        self.setInspectorVisible(True)
+        if not self.focusMode():
+            self.setInspectorVisible(True)
         self._schedulePanelWidthUpdate(shrink=shrinkPanel)
 
     def _onWorkspaceLeft(self, ws):
@@ -833,7 +908,8 @@ class Shell:
         self.topBar.setCurrentWorkspace(None)
         last = workspaces.workspace(self.workspaces.last or "library")
         self.panelHeader.setTitle(title, transient=True, closeToolTip=_("Close and return to {workspace}").format(workspace=last.title))
-        self.setInspectorVisible(True)
+        if not self.focusMode():
+            self.setInspectorVisible(True)
 
     def _onModuleAdded(self, moduleName):
         if moduleName == "SegmentEditor":
@@ -959,15 +1035,24 @@ class Shell:
     def _updatePanelWidth(self, shrink=False):
         """Size the inspector to the stored width, or wider if the module needs it.
 
-        The inspector shrinks back to the stored width only when a workspace is entered through
-        the shell, so programmatic module switches do not resize the views back and forth.
+        The workspaces share one width: the stored width, or the largest minimum width of the
+        workspace modules (as last measured while each one was shown), so that switching between
+        workspaces does not resize (and render again) the views. A transient module may make the
+        inspector wider; with ``shrink`` (entering a workspace, setting the width) it gets back
+        to the width of the workspaces.
         """
         if not self._active:
             return
         dock = self._panelDock()
         if dock.isHidden():
             return
-        target = max(self.panelWidth, dock.minimumSizeHint.width())
+        minimumWidth = dock.minimumSizeHint.width()
+        current = self.currentWorkspace()
+        if current is not None:
+            if self.currentModuleName() == workspaces.workspace(current).moduleName:
+                self._workspaceMinimumWidths[current] = minimumWidth
+            minimumWidth = max([minimumWidth, *self._workspaceMinimumWidths.values()])
+        target = max(self.panelWidth, minimumWidth)
         if dock.width < target or (shrink and dock.width != target):
             self.mainWindow.resizeDocks([dock], [target], qt.Qt.Horizontal)
 
@@ -985,9 +1070,13 @@ class Shell:
     def _persistDraggedPanelWidth(self):
         if not self._active:
             return
-        width = min(max(self._panelDock().width, MIN_PANEL_WIDTH), MAX_PANEL_WIDTH)
+        dock = self._panelDock()
+        width = min(max(dock.width, MIN_PANEL_WIDTH), MAX_PANEL_WIDTH)
         if width != self.panelWidth:
             qt.QSettings().setValue("Studio/PanelWidth", width)
+        if width != dock.width:
+            # Dragged out of the 300-480 px range: snap back into it (but not narrower than the module needs)
+            self._updatePanelWidth(shrink=True)
 
     def setInspectorVisible(self, visible):
         """Show or hide the inspector (the module panel dock widget)."""
@@ -996,9 +1085,8 @@ class Shell:
         dock = self._panelDock()
         if dock.isHidden() == (not visible):
             return
+        # When shown, the width is updated on its Show event
         dock.setVisible(visible)
-        if visible:
-            self._schedulePanelWidthUpdate(shrink=True)
 
     def isInspectorVisible(self):
         return self._active and not self._panelDock().isHidden()
@@ -1112,7 +1200,9 @@ class Shell:
 
     def focusMode(self):
         if hasattr(self.mainWindow, "focusMode"):
-            return self.mainWindow.focusMode()
+            # Slot or property of the main window (W3-03)
+            focusMode = self.mainWindow.focusMode
+            return bool(focusMode() if callable(focusMode) else focusMode)
         return self._focusModeHidden is not None
 
     def setFocusMode(self, enabled):
@@ -1171,11 +1261,16 @@ class Shell:
                 # In a small window the views keep their minimum width and the inspector gets narrower
                 # than the stored width: give it back when the window grows
                 self._schedulePanelWidthUpdate(shrink=False)
-        elif eventType == qt.QEvent.ChildAdded and obj == self.mainWindow:
-            child = event.child()
-            if child is not None and child.inherits("QToolBar"):
-                # Toolbars added later (extensions) are hidden like the others, once they are set up
-                qt.QTimer.singleShot(0, lambda: self._hideToolBar(child) if self._active else None)
+        elif eventType in (qt.QEvent.ChildAdded, qt.QEvent.ChildPolished, qt.QEvent.LayoutRequest) and obj == self.mainWindow:
+            # Toolbars added later (extensions) are hidden like the others. A toolbar constructed with
+            # the main window as parent is a child before it is a QToolBar, and it may be put in a
+            # toolbar area (which requests a layout) only later: look for new toolbars when the event
+            # loop runs again.
+            if self._toolBarScanTimer is not None:
+                self._toolBarScanTimer.start()
+        elif eventType == qt.QEvent.Show and obj == self._panelDock():
+            # Shown again (Tab, Ctrl+5, focus mode): back to the width of the workspaces
+            self._schedulePanelWidthUpdate(shrink=True)
 
     def _removeEventFilters(self):
         if self._eventFilter is None:

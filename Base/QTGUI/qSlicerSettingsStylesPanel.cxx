@@ -27,6 +27,7 @@
 
 // QtGUI includes
 #include "qSlicerApplication.h"
+#include "qSlicerCommandOptions.h"
 #include "qSlicerRelativePathMapper.h"
 #include "qSlicerSettingsStylesPanel.h"
 #include "qSlicerStyle.h"
@@ -56,6 +57,14 @@ public:
   void updateAccentColorWidgets();
   /// The theme only applies to the "Slicer" style, other styles have their own palette.
   void updateThemeWidgets();
+  /// Default accent color of the current palette (the accent color used when none is set).
+  QColor defaultAccentColor() const;
+
+  /// Return true if the application palette is dark.
+  static bool isDarkPalette();
+  /// Return true if the theme and the accent color are not applied: the historical light
+  /// appearance is kept when testing is enabled or the application runs without main window.
+  static bool isClassicAppearance();
 
   static bool isQtStyle(const QString& styleName);
   static QStringList qtStyles();
@@ -183,28 +192,72 @@ void qSlicerSettingsStylesPanelPrivate::updateAccentColorWidgets()
   if (isDefault)
   {
     // Show the default accent color of the current palette
-    qSlicerApplication* app = qSlicerApplication::application();
-    bool dark = app && app->palette().color(QPalette::Window).lightness() < 128;
-    accentColor = qSlicerStyle::tokenColor("accent", dark);
+    accentColor = this->defaultAccentColor();
   }
   bool wasUpdating = this->UpdatingAccentColorWidgets;
   this->UpdatingAccentColorWidgets = true;
   this->AccentColorPickerButton->setColor(accentColor);
   this->AccentColorPickerButton->setColorName(isDefault ? qSlicerSettingsStylesPanel::tr("Default") : QString());
   this->UpdatingAccentColorWidgets = wasUpdating;
-  this->AccentColorResetButton->setEnabled(!isDefault);
+  bool classicAppearance = Self::isClassicAppearance();
+  this->AccentColorPickerButton->setEnabled(!classicAppearance);
+  this->AccentColorResetButton->setEnabled(!isDefault && !classicAppearance);
+  this->AccentColorPickerButton->setToolTip(
+    classicAppearance ? qSlicerSettingsStylesPanel::tr("The accent color is not applied when testing is enabled or the application runs without main window.")
+                      : qSlicerSettingsStylesPanel::tr("Color of selected items, links and highlighted controls."));
+}
+
+// --------------------------------------------------------------------------
+QColor qSlicerSettingsStylesPanelPrivate::defaultAccentColor() const
+{
+  // tokenColor() returns the accent color override if one is set, so clear it temporarily.
+  QColor accentColor = qSlicerStyle::accentColor();
+  qSlicerStyle::setAccentColor(QColor());
+  QColor defaultColor = qSlicerStyle::tokenColor("accent", Self::isDarkPalette());
+  qSlicerStyle::setAccentColor(accentColor);
+  return defaultColor;
+}
+
+// --------------------------------------------------------------------------
+bool qSlicerSettingsStylesPanelPrivate::isDarkPalette()
+{
+  qSlicerApplication* app = qSlicerApplication::application();
+  return app && app->palette().color(QPalette::Window).lightness() < 128;
+}
+
+// --------------------------------------------------------------------------
+bool qSlicerSettingsStylesPanelPrivate::isClassicAppearance()
+{
+  if (qSlicerCoreApplication::testAttribute(qSlicerCoreApplication::AA_EnableTesting))
+  {
+    return true;
+  }
+  qSlicerApplication* app = qSlicerApplication::application();
+  qSlicerCommandOptions* options = app ? app->commandOptions() : nullptr;
+  return options && options->noMainWindow();
 }
 
 // --------------------------------------------------------------------------
 void qSlicerSettingsStylesPanelPrivate::updateThemeWidgets()
 {
   Q_Q(qSlicerSettingsStylesPanel);
-  bool themeApplies = (q->currentStyle().compare("Slicer", Qt::CaseInsensitive) == 0);
-  this->ThemeComboBox->setEnabled(themeApplies);
-  this->ThemeComboBox->setToolTip(themeApplies ? qSlicerSettingsStylesPanel::tr("Color theme of the application.")
-                                               : qSlicerSettingsStylesPanel::tr("The colors are set by the '%1' style (see Advanced section). "
-                                                                                "Select the 'Slicer' style to choose the theme here.")
-                                                   .arg(q->currentStyle()));
+  bool slicerStyle = (q->currentStyle().compare("Slicer", Qt::CaseInsensitive) == 0);
+  bool classicAppearance = Self::isClassicAppearance();
+  this->ThemeComboBox->setEnabled(slicerStyle && !classicAppearance);
+  if (!slicerStyle)
+  {
+    this->ThemeComboBox->setToolTip(qSlicerSettingsStylesPanel::tr("The colors are set by the '%1' style (see Advanced section). "
+                                                                   "Select the 'Slicer' style to choose the theme here.")
+                                      .arg(q->currentStyle()));
+  }
+  else if (classicAppearance)
+  {
+    this->ThemeComboBox->setToolTip(qSlicerSettingsStylesPanel::tr("The light theme is always used when testing is enabled or the application runs without main window."));
+  }
+  else
+  {
+    this->ThemeComboBox->setToolTip(qSlicerSettingsStylesPanel::tr("Color theme of the application."));
+  }
 }
 
 namespace
@@ -461,7 +514,9 @@ void qSlicerSettingsStylesPanel::onAccentColorPicked(const QColor& color)
   {
     return;
   }
-  this->setAccentColor(color.name());
+  // Picking the default accent color of the current theme restores the default accent color,
+  // so that each theme keeps its own default.
+  this->setAccentColor(color == d->defaultAccentColor() ? QString() : color.name());
 }
 
 // --------------------------------------------------------------------------

@@ -175,8 +175,6 @@ class SegmentEditorHollowEffect(AbstractScriptedSegmentEditorEffect):
         slicer.app.processEvents()
 
     def processHollowing(self):
-        # Get modifier labelmap and parameters
-        modifierLabelmap = self.scriptedEffect.defaultModifierLabelmap()
         # The shell is within the shell thickness around the current segment extent, and the selected segment
         # is replaced (the "Set" modification mode clears it everywhere), therefore it is enough to process this region.
         # Voxel coordinates computed in the distance map filter are single-precision, therefore the results may slightly
@@ -214,9 +212,12 @@ class SegmentEditorHollowEffect(AbstractScriptedSegmentEditorEffect):
             margin.SetOuterMarginMM(0.0)
             margin.SetInnerMarginMM(-shellThicknessMM + voxelDiameter)
 
-        modifierLabelmap.DeepCopy(margin.GetOutput())
-
         margin.Update()
+        # The result covers the processed (cropped) region and it replaces the segment ("Set" modification mode),
+        # therefore it is stored in a new labelmap instead of defaultModifierLabelmap(), which would allocate and clear
+        # a labelmap as large as the reference geometry.
+        modifierLabelmap = slicer.vtkOrientedImageData()
+        modifierLabelmap.CopyDirections(selectedSegmentLabelmap)
         modifierLabelmap.ShallowCopy(margin.GetOutput())
 
         # Apply changes

@@ -571,6 +571,7 @@ void vtkMRMLSliceLogic::OnMRMLNodeModified(vtkMRMLNode* node)
     // event of this logic. The layers find nothing left to update when they process
     // the slice node event themselves.
     bool wasModifying = this->StartModify();
+    int pendingModifiedEventCount = this->GetPendingModifiedEventCount();
 
     /// set slice extents in the layes
     this->SetSliceExtentsToSliceNode();
@@ -601,6 +602,16 @@ void vtkMRMLSliceLogic::OnMRMLNodeModified(vtkMRMLNode* node)
         layer->UpdateImageDisplay();
         layer->UpdateGlyphs();
       }
+    }
+
+    // A layer only notifies (and so makes this logic update the slice model and notify) when its output may
+    // have changed: never if it shows no volume, nor if the slice node change does not affect its reslice
+    // (for example slab thickness or layout color). This logic still has to update the slice model and tell
+    // its observers (slice intersections in other views, slice controller...) that the slice node changed.
+    // This does not re-execute any reslice.
+    if (this->GetPendingModifiedEventCount() == pendingModifiedEventCount)
+    {
+      this->ProcessMRMLLogicsEvents();
     }
 
     this->EndModify(wasModifying);

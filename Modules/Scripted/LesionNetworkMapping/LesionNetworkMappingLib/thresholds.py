@@ -73,17 +73,56 @@ class Resolved:
 
     @classmethod
     def from_dict(cls, data):
-        """Inverse of :meth:`to_dict` (a missing threshold value becomes NaN)."""
+        """Inverse of :meth:`to_dict` (a missing threshold value becomes NaN).
+
+        :raises ValueError: missing or invalid fields.
+        """
+        if not isinstance(data, dict):
+            raise ValueError(f"A resolved threshold must be a JSON object, got {type(data).__name__}")
+        missing = [field for field in ("statistic", "df", "allowed", "n", "v", "rule") if data.get(field) is None]
+        if missing:
+            raise ValueError(f"Resolved threshold without {', '.join(missing)}")
+        if data["statistic"] not in ("T", "Fz"):
+            raise ValueError(f"Unknown threshold statistic {data['statistic']!r}")
         values = {field: data.get(field) for field in cls.__dataclass_fields__}
-        values["value"] = float("nan") if values["value"] is None else float(values["value"])
-        values["df"], values["n"], values["v"] = int(values["df"]), int(values["n"]), int(values["v"])
-        values["allowed"] = bool(values["allowed"])
+        values["value"] = float("nan") if values["value"] is None else _number(values, "value")
+        for key in ("p_unc", "p_fwe"):
+            values[key] = None if values[key] is None else _number(values, key)
+        values["df"], values["n"], values["v"] = (_number(values, key, integer=True) for key in ("df", "n", "v"))
+        values["allowed"] = _flag(values, "allowed")
+        values["banner"] = None if values["banner"] is None else str(values["banner"])
         values["rule"] = normalize_rule(values["rule"])
         return cls(**values)
 
     @classmethod
     def from_json(cls, text):
         return cls.from_dict(json.loads(text))
+
+
+def _number(values, key, integer=False):
+    """``values[key]`` as a float (or an int), raising ValueError for anything else (None, booleans, lists, ...)."""
+    raw = values[key]
+    try:
+        if isinstance(raw, bool):
+            raise TypeError
+        number = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{key} must be a number, got {raw!r}") from None
+    if integer:
+        if not number.is_integer():
+            raise ValueError(f"{key} must be a whole number, got {raw!r}")
+        return int(number)
+    return number
+
+
+def _flag(values, key):
+    """``values[key]`` as a boolean: true/false or 1/0 (None counts as false)."""
+    raw = values[key]
+    if raw is None or isinstance(raw, bool):
+        return bool(raw)
+    if isinstance(raw, int) and raw in (0, 1):
+        return bool(raw)
+    raise ValueError(f"{key} must be true or false, got {raw!r}")
 
 
 def normalize_rule(rule=None):
@@ -104,19 +143,19 @@ def normalize_rule(rule=None):
     out = {"kind": kind, **RULE_DEFAULTS[kind]}
     out.update({key: value for key, value in rule.items() if key != "kind"})
     if kind == "fwe_bonferroni":
-        out["alpha"] = float(out["alpha"])
+        out["alpha"] = _number(out, "alpha")
         if not 0.0 < out["alpha"] < 1.0:
             raise ValueError(f"alpha must be between 0 and 1, got {out['alpha']}")
     else:
-        out["value"] = float(out["value"])
+        out["value"] = _number(out, "value")
         if not (math.isfinite(out["value"]) and out["value"] > 0.0):
             raise ValueError(f"The threshold value must be positive, got {out['value']}")
     if out.get("reference_n") is not None:
-        out["reference_n"] = int(out["reference_n"])
+        out["reference_n"] = _number(out, "reference_n", integer=True)
         if out["reference_n"] < 2:
             raise ValueError(f"reference_n must be at least 2, got {out['reference_n']}")
     if "override" in out:
-        out["override"] = bool(out["override"])
+        out["override"] = _flag(out, "override")
     return out
 
 

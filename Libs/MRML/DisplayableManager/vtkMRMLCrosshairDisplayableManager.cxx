@@ -100,7 +100,10 @@ public:
   // Observe the slice logics of the other slice views, to render this view when the slice intersections
   // it shows move. The slice intersection representation updates itself, but does not request a render.
   void UpdateIntersectingSliceLogicObservations();
+  // Remove the observations of the slice logics and of their collection
   void RemoveIntersectingSliceLogicObservations();
+  // Remove the observations of the slice logics only
+  void RemoveSliceLogicModifiedObservations();
   static void IntersectingSliceLogicModifiedCallback(vtkObject* caller, unsigned long eid, void* clientData, void* callData);
   static void SliceLogicsModifiedCallback(vtkObject* caller, unsigned long eid, void* clientData, void* callData);
   // Return true if the slice intersections (or thick slab) of the slice of this logic are displayed in slice views
@@ -283,19 +286,17 @@ void vtkMRMLCrosshairDisplayableManager::vtkInternal::UpdateIntersectingSliceLog
     this->ObservedSliceLogicsTag = sliceLogics ? sliceLogics->AddObserver(vtkCommand::ModifiedEvent, this->SliceLogicsModifiedCommand) : 0;
   }
 
-  // Observe all the slice logics but the one of this view (this view is rendered when its own slice changes)
+  // Observe all the slice logics, including the one of this view: it is ignored when it is modified (this view
+  // is rendered when its own slice changes), but observing it keeps the observations independent of the slice
+  // node of this view, which may change.
   std::vector<vtkMRMLSliceLogic*> intersectingSliceLogics;
   if (sliceLogics)
   {
-    vtkMRMLSliceNode* sliceNode = this->GetSliceNode();
     vtkCollectionSimpleIterator it;
     vtkMRMLSliceLogic* sliceLogic = nullptr;
     for (sliceLogics->InitTraversal(it); (sliceLogic = vtkMRMLSliceLogic::SafeDownCast(sliceLogics->GetNextItemAsObject(it)));)
     {
-      if (sliceNode == nullptr || sliceLogic->GetSliceNode() != sliceNode)
-      {
-        intersectingSliceLogics.push_back(sliceLogic);
-      }
+      intersectingSliceLogics.push_back(sliceLogic);
     }
   }
   bool unchanged = (intersectingSliceLogics.size() == this->IntersectingSliceLogicTags.size());
@@ -307,7 +308,8 @@ void vtkMRMLCrosshairDisplayableManager::vtkInternal::UpdateIntersectingSliceLog
   {
     return;
   }
-  this->RemoveIntersectingSliceLogicObservations();
+  // Keep observing the collection, to observe the slice logics of the slice views created later
+  this->RemoveSliceLogicModifiedObservations();
   for (vtkMRMLSliceLogic* sliceLogic : intersectingSliceLogics)
   {
     unsigned long tag = sliceLogic->AddObserver(vtkCommand::ModifiedEvent, this->IntersectingSliceLogicModifiedCommand);
@@ -316,7 +318,7 @@ void vtkMRMLCrosshairDisplayableManager::vtkInternal::UpdateIntersectingSliceLog
 }
 
 //---------------------------------------------------------------------------
-void vtkMRMLCrosshairDisplayableManager::vtkInternal::RemoveIntersectingSliceLogicObservations()
+void vtkMRMLCrosshairDisplayableManager::vtkInternal::RemoveSliceLogicModifiedObservations()
 {
   for (std::pair<vtkWeakPointer<vtkMRMLSliceLogic>, unsigned long>& sliceLogicTag : this->IntersectingSliceLogicTags)
   {
@@ -326,6 +328,12 @@ void vtkMRMLCrosshairDisplayableManager::vtkInternal::RemoveIntersectingSliceLog
     }
   }
   this->IntersectingSliceLogicTags.clear();
+}
+
+//---------------------------------------------------------------------------
+void vtkMRMLCrosshairDisplayableManager::vtkInternal::RemoveIntersectingSliceLogicObservations()
+{
+  this->RemoveSliceLogicModifiedObservations();
   if (this->ObservedSliceLogics)
   {
     this->ObservedSliceLogics->RemoveObserver(this->ObservedSliceLogicsTag);
@@ -341,7 +349,13 @@ void vtkMRMLCrosshairDisplayableManager::vtkInternal::IntersectingSliceLogicModi
                                                                                              void* vtkNotUsed(callData))
 {
   vtkMRMLCrosshairDisplayableManager* self = vtkMRMLCrosshairDisplayableManager::SafeDownCast(static_cast<vtkObject*>(clientData));
-  if (self && vtkInternal::AreIntersectionsDisplayed(vtkMRMLSliceLogic::SafeDownCast(caller)))
+  vtkMRMLSliceLogic* sliceLogic = vtkMRMLSliceLogic::SafeDownCast(caller);
+  // The slice logic of this view is ignored (this view is rendered when its own slice changes)
+  if (!self || !sliceLogic || sliceLogic->GetSliceNode() == self->Internal->GetSliceNode())
+  {
+    return;
+  }
+  if (vtkInternal::AreIntersectionsDisplayed(sliceLogic))
   {
     self->RequestRender();
   }

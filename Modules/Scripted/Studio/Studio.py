@@ -79,9 +79,11 @@ class StudioWidget(ScriptedLoadableModuleWidget):
         contentsLayout.setContentsMargins(12, 12, 12, 12)
         contentsLayout.setSpacing(8)
         panel = self._createLibraryPanel()
-        if panel is not None:
+        panelWidget = panel if isinstance(panel, qt.QWidget) else getattr(panel, "widget", None)
+        if panelWidget is not None:
+            # The panel object is kept (it may be a Python object that owns its widget)
             self.libraryPanel = panel
-            contentsLayout.addWidget(panel)
+            contentsLayout.addWidget(panelWidget)
         else:
             contentsLayout.addWidget(self._createPlaceholder())
         self.layout.addWidget(contents)
@@ -89,15 +91,16 @@ class StudioWidget(ScriptedLoadableModuleWidget):
 
     @staticmethod
     def _createLibraryPanel():
-        """The Library page (StudioLib.library.LibraryPanel), if this build has it."""
+        """The Library page (StudioLib.library.LibraryPanel: a QWidget, or an object with a ``widget``),
+        if this build has it.
+        """
         library = StudioWidget._importStudioModule("StudioLib.library")
         if library is None:
             return None
         panelClass = getattr(library, "LibraryPanel", None)
         if panelClass is None:
             return None
-        panel = panelClass()
-        return panel if isinstance(panel, qt.QWidget) else getattr(panel, "widget", None)
+        return panelClass()
 
     def _createPlaceholder(self):
         from StudioLib import ui

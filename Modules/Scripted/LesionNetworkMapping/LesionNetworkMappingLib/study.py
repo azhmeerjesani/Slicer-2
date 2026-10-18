@@ -63,10 +63,33 @@ ALLOWED_VALUES = {
 }
 DEFAULT_RULES = {"lesion": "lesion|mask|seg|label|roi", "id": "sub-[A-Za-z0-9]+"}
 NIFTI_EXTENSIONS = (".nii.gz", ".nii")
-# Never lesions, even though they match the default lesion rule: brain masks and anatomical segmentations
-_ANATOMICAL = re.compile(r"brain[_-]?mask|desc-brain|dseg|probseg|aseg|aparc|wmparc", re.IGNORECASE)
-# Words that do not identify a subject in non-BIDS file names (e.g. "patient01_T1.nii.gz")
-_SCAN_WORDS = {"t1", "t1w", "t2", "t2w", "flair", "mprage", "anat", "scan", "image", "img", "brain", "mni", "dwi", "bold"}
+# Word boundaries in file names (case-sensitive): "_", "-", ".", "+" or spaces, letters next to digits,
+# and CamelCase ("LesionSmooth", "MNILesion")
+_WORD_START = r"(?-i:^|(?<=[-_.+\s])|(?<=[0-9])(?=[A-Za-z])|(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z]))"
+_WORD_END = r"(?-i:(?=[-_.+\s0-9]|$)|(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z]))"
+
+
+def whole_word_rule(pattern):
+    """Compile a rule (a regular expression, case-insensitive) that matches whole words of file names.
+
+    Words are separated by "_", "-", ".", "+", spaces, digits or CamelCase; a match may be a plural or
+    two matches written together. With "lesion|mask": "sub-01_desc-lesion_mask", "LesionSmooth",
+    "T1lesion", "lesions" and "lesionmask" match; "sub-01_T1w_masked" and "defacemask" do not.
+    """
+    flags = re.match(r"\(\?[aiLmsux]+\)", pattern)  # global flags must stay at the start of the expression
+    head, body = (flags.group(0), pattern[flags.end() :]) if flags else ("", pattern)
+    return re.compile(rf"{head}{_WORD_START}(?i:(?:{body}){{1,2}}s?){_WORD_END}")
+
+
+# Never lesions or scans unless their name contains "lesion": brain and deface masks, anatomical segmentations
+_ANATOMICAL = whole_word_rule(r"brain[-_]?mask|defacemask|dseg|probseg|aseg|aparc|wmparc")
+# Words of non-BIDS file names that describe the image, not the subject ("patient01_T1w_2mm.nii.gz")
+_SCAN_WORD = re.compile(
+    r"t1|t1w|t1c|t1ce|t1gd|t2|t2w|t2star|flair|mprage|mp2rage|swi|adc|dwi|dti|bold|ct|anat|scan|image|img|brain"
+    r"|mni|mni152\w*|\d+mm|(?:ses|acq|ce|rec|run|echo|part|space|res|den|label|desc)-\w+",
+    re.IGNORECASE,
+)
+_SUBJECT_WORDS = ("sub", "subj", "subject")
 _PARTICIPANT = re.compile(r"^sub-[A-Za-z0-9]+$")
 
 
@@ -285,8 +308,8 @@ class Study:
 
     @property
     def subjects(self):
-        """The rows (dicts of TSV text), in table order."""
-        return list(self._rows)
+        """Copies of the rows (dicts of TSV text), in table order; change cells with :meth:`set`."""
+        return [dict(row) for row in self._rows]
 
     @property
     def subject_ids(self):
@@ -320,7 +343,7 @@ class Study:
 
     def lesion_relpath(self, sid, space=None):
         """Table path of a subject's lesion file: lesions/<sid>_space-<space>_desc-lesion_mask.nii.gz."""
-        row = self.subject(sid)
+        row = self._row(sid)
         space = space or (None if is_missing(row.get("space")) else row["space"]) or self.space or "native"
         if not re.fullmatch(r"[A-Za-z0-9]+", space):
             raise ValueError(f"Invalid space label {space!r}")
@@ -345,16 +368,19 @@ class Study:
         self._index[sid] = full
         return full
 
-    def subject(self, sid):
-        """The row of a subject (KeyError if unknown)."""
+    def _row(self, sid):
         try:
             return self._index[sid]
         except KeyError:
             raise KeyError(f"Unknown subject {sid!r} in study {self.name!r}") from None
 
+    def subject(self, sid):
+        """A copy of the row of a subject (KeyError if unknown); change cells with :meth:`set`."""
+        return dict(self._row(sid))
+
     def value(self, sid, column, cast=str):
         """A cell converted with ``cast`` (None when missing, "n/a" or not convertible)."""
-        text = self.subject(sid).get(column, NA)
+        text = self._row(sid).get(column, NA)
         if is_missing(text):
             return None
         try:
@@ -363,31 +389,31 @@ class Study:
             return None
 
     def add_subject(self, sid, values=None, **fields):
-        """Add a subject (its id is normalized with :func:`participant_label`) and return its row."""
+        """Add a subject (its id is normalized with :func:`participant_label`) and return a copy of its row."""
         sid = participant_label(sid)
         if sid in self._index:
             raise ValueError(f"Subject {sid} is already in the study")
-        row = self._insert({"participant_id": sid})
+        self._insert({"participant_id": sid})
         try:
-            self.set(sid, values, **fields)
+            return self.set(sid, values, **fields)
         except Exception:
             self.remove_subject(sid)
             raise
-        return row
 
     def remove_subject(self, sid):
         """Remove a subject's row (its files are kept)."""
-        row = self.subject(sid)
-        self._rows.remove(row)
+        row = self._row(sid)
+        self._rows = [other for other in self._rows if other is not row]
         del self._index[sid]
 
     def set(self, sid, values=None, **fields):
         """Set cells of a subject's row; unknown columns are added at the end of the table.
 
         :param values: optional {column: value} (for column names that are not Python identifiers).
+        :return: a copy of the row.
         :raises ValueError: invalid group, include, status or qc values (nothing is changed then).
         """
-        row = self.subject(sid)
+        row = self._row(sid)
         updates = {**(values or {}), **fields}
         if "participant_id" in updates and updates["participant_id"] != sid:
             raise ValueError("participant_id cannot be changed")
@@ -400,7 +426,7 @@ class Study:
                 for other in self._rows:
                     other.setdefault(column, NA)
             row[column] = text
-        return row
+        return dict(row)
 
     def next_subject(self, after=None, status="untraced", include_only=True):
         """Next subject in table order after ``after`` (wrapping around) with the given status (None: any).
@@ -497,12 +523,16 @@ class Study:
         :param paths: NIfTI files and/or folders (searched recursively; hidden folders and the
           study's own derivatives and .studio folders are skipped). BIDS layouts work: the subject
           id is searched in the file name, then in the parent folders (sub-01/anat/...).
-        :param lesion_rule: regular expression (case-insensitive) that marks lesion files by name;
-          default: the study's rule ("lesion|mask|seg|label|roi"). Brain masks and anatomical
-          segmentations (brain_mask, dseg, aseg, ...) are never taken as lesions unless their name
-          contains "lesion".
+        :param lesion_rule: regular expression (case-insensitive) that marks lesion files by name, matched
+          as whole words (see :func:`whole_word_rule`: "sub-01_desc-lesion_mask" and "LesionSmooth" are
+          lesions, "sub-01_T1w_masked" and "Segura_01_T1" are scans); default: the study's rule
+          ("lesion|mask|seg|label|roi"). Brain masks, deface masks and anatomical segmentations
+          (brain_mask, defacemask, dseg, aseg, ...) are skipped unless their name contains "lesion".
         :param id_regex: regular expression of subject ids (default: the study's rule, "sub-[A-Za-z0-9]+").
-          Files without a match use the first word of their name ("patient01_T1.nii.gz": "patient01").
+          Files without a match use the start of their name: the words before the first modality or
+          lesion word (T1, FLAIR, lesion, ...) up to the first word with a digit ("patient_01_T1.nii.gz":
+          "patient01"; "sub_01_lesion.nii.gz": "01"; "Patient 7 T1.nii": "Patient7"), or the first
+          word when there is no digit ("smith_T1.nii": "smith").
         :return: {"added": [ids], "updated": [ids], "skipped": [{"path", "reason"}], "pairs": {id: {"scan", "lesion"}},
           "warnings": [{"path", "message"}]} (files that are added but lie at different places in
           different programs because their sform and qform disagree).
@@ -511,7 +541,7 @@ class Study:
         from .nifti import XFORM_WARNING_MM, read_nifti_header, xform_disagreement
 
         rules = self.rules
-        lesion_re = re.compile(lesion_rule or rules["lesion"], re.IGNORECASE)
+        lesion_re = whole_word_rule(lesion_rule or rules["lesion"])
         id_re = re.compile(id_regex or rules["id"])
         report = {"added": [], "updated": [], "skipped": [], "pairs": {}, "warnings": []}
         candidates = {}
@@ -527,10 +557,10 @@ class Study:
             if len(header["shape"]) > 3:
                 report["skipped"].append({"path": path, "reason": f"not a 3D image (shape {list(header['shape'])})"})
                 continue
-            is_lesion = bool(lesion_re.search(stem))
-            if is_lesion and _ANATOMICAL.search(stem) and "lesion" not in stem.lower():
-                report["skipped"].append({"path": path, "reason": "brain mask or anatomical segmentation"})
+            if _ANATOMICAL.search(stem) and "lesion" not in stem.lower():
+                report["skipped"].append({"path": path, "reason": "brain mask, deface mask or anatomical segmentation"})
                 continue
+            is_lesion = bool(lesion_re.search(stem))
             try:
                 sid = participant_label(self._subject_id(path, stem, id_re, lesion_re))
             except ValueError:
@@ -545,15 +575,20 @@ class Study:
                     "message": f"The sform and qform disagree by up to {disagreement:.2g} mm: Slicer may show this image at another place than FSL and the network mapping, which use the sform.",
                 })
 
+        def file_space(item):
+            return detect_space(item[1]["shape"][:3], item[1]["affine"])
+
         for sid, kinds in candidates.items():
-            chosen = {}
-            for kind, preferred in (("scan", re.compile(r"t1", re.IGNORECASE)), ("lesion", re.compile(r"lesion", re.IGNORECASE))):
-                files = sorted(kinds[kind], key=lambda item: (not preferred.search(os.path.basename(item[0])), item[0]))
-                chosen[kind] = files[0] if files else None
+            # The lesion first: the scan should be in its space (BIDS derivatives may hold native and template T1w files)
+            lesions = sorted(kinds["lesion"], key=lambda item: ("lesion" not in os.path.basename(item[0]).lower(), item[0]))
+            chosen = {"lesion": lesions[0] if lesions else None}
+            lesion_space = file_space(chosen["lesion"]) if chosen["lesion"] else None
+            scans = sorted(kinds["scan"], key=lambda item: (lesion_space is not None and file_space(item) != lesion_space, "t1" not in os.path.basename(item[0]).lower(), item[0]))
+            chosen["scan"] = scans[0] if scans else None
+            for kind, files in (("scan", scans), ("lesion", lesions)):
                 for path, _ in files[1:]:
                     report["skipped"].append({"path": path, "reason": f"another {kind} was chosen for {sid}"})
-            space_source = chosen["scan"] or chosen["lesion"]
-            space = detect_space(space_source[1]["shape"][:3], space_source[1]["affine"])
+            space = lesion_space or file_space(chosen["scan"])
             values = {"scan": self.relpath(chosen["scan"][0]) if chosen["scan"] else None, "lesion": self.relpath(chosen["lesion"][0]) if chosen["lesion"] else None}
             report["pairs"][sid] = {kind: chosen[kind][0] if chosen[kind] else None for kind in ("scan", "lesion")}
             if sid not in self._index:
@@ -601,7 +636,27 @@ class Study:
             if "id" in id_re.groupindex:
                 return match.group("id")
             return match.group(1) if id_re.groups else match.group(0)
-        words = [word for word in re.split(r"[_.\s]+", stem) if word and word.lower() not in _SCAN_WORDS and not lesion_re.fullmatch(word)]
+        # The first run of words that are not modality or lesion words ("T1_patient_01_lesion_v2": patient, 01)
+        def named(word):
+            return _SCAN_WORD.fullmatch(word) or lesion_re.fullmatch(word)
+
+        tokens = []
+        for word in re.split(r"[_.\s]+", stem):
+            parts = word.split("-")
+            # "-" separates a modality or lesion word ("patient01-lesion"), not BIDS entities or names ("smith-jones")
+            tokens += parts if not named(word) and any(named(part) for part in parts) else [word]
+        words = []
+        for word in tokens:
+            if word and named(word):
+                if words:
+                    break
+            elif word:
+                words.append(word)
         if not words:
             raise ValueError(f"No subject id in {path}")
+        if len(words) > 1 and words[0].lower() in _SUBJECT_WORDS:
+            words = words[1:]  # "sub_01_T1": 01
+        for index, word in enumerate(words):
+            if any(char.isdigit() for char in word):
+                return "".join(words[: index + 1])  # "patient_01_T1": patient01
         return words[0]

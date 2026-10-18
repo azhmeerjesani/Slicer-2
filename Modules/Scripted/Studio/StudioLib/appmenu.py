@@ -36,11 +36,19 @@ def stylesPanel():
 
 def currentTheme():
     panel = stylesPanel()
-    if panel is None or not hasattr(panel, "theme"):
+    if panel is None:
         return None
     if panel.currentStyle in _FIXED_PALETTE_STYLES:
         return "Dark" if panel.currentStyle == "Dark Slicer" else "Light"
-    return panel.theme
+    return panel.theme if hasattr(panel, "theme") else None
+
+
+def availableThemes():
+    """Themes that ``setTheme()`` can apply: without the theme setting, the Dark and Light styles."""
+    panel = stylesPanel()
+    if panel is None:
+        return ()
+    return tuple(theme for theme, iconName in _THEMES) if hasattr(panel, "theme") else ("Dark", "Light")
 
 
 def setTheme(theme):
@@ -88,10 +96,13 @@ class AppMenu:
         self.menu.connect("aboutToShow()", self._update)
 
         self.workspaceActions = {}
+        # Exclusive (drawn as radio items); none is checked while a transient module is shown
+        self.workspaceGroup = qt.QActionGroup(self.menu)
         for index, ws in enumerate(workspaces.WORKSPACES):
             action = self.menu.addAction(_menuText(ws.title, f"Ctrl+Alt+{index + 1}"))
             action.setObjectName(f"Studio{ws.title}WorkspaceAction")
             action.setCheckable(True)
+            self.workspaceGroup.addAction(action)
             action.setEnabled(workspaces.isAvailable(ws))
             action.connect("triggered()", lambda key=ws.key: self.shell.switchTo(key))
             self.workspaceActions[ws.key] = action
@@ -172,8 +183,9 @@ class AppMenu:
         for key, action in self.workspaceActions.items():
             action.setChecked(key == current)
         theme = currentTheme()
+        themes = availableThemes()
         for name, action in self.themeActions.items():
-            action.setEnabled(theme is not None)
+            action.setEnabled(name in themes)
             action.setChecked(name == theme)
         density = currentDensity()
         for name, action in self.densityActions.items():

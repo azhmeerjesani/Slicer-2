@@ -13,6 +13,12 @@ is noisy, so compare medians of 3 or more runs), or evaluates an existing JSON::
   python3 Utilities/Scripts/StudioBench.py --merge run1.json run2.json run3.json --out F.json
   python3 Utilities/Scripts/StudioBench.py --input F.json [--check] [--compare prev.json]
 
+Startup reports the phases of ``--report-startup-timing``. Their total, ``startup_total_ms``, is
+startup to interactive Library: the first show of the main window emits ``startupCompleted``, whose
+slots (the Studio apply among them) run synchronously within the "Showing the main window" phase.
+When Studio is applied, ``startup_studio_apply_ms`` reports the duration of the apply, which is part
+of that total.
+
 The JSON holds ``{"metrics": {...}, "errors": {...}, "details": {...}, "meta": {...}}``. Every metric
 is a number for which lower is better, or null when its measurement failed (the reason is then in
 "errors"). Metrics that do not apply to the running build (for example Studio metrics before the
@@ -59,10 +65,16 @@ DEFAULT_MRHEAD_PATH = "/tmp/claude-0/understand/data/MRHead.nrrd"
 # A dict value {"relative": r} means "at most r above the value of the --compare JSON".
 # Not numeric, therefore not listed: "LNM GUI: frame rate unaffected during compute (subprocess)".
 BUDGETS = {
-    "startup_total_ms": 2700,  # Startup to interactive Library (Studio on): waves 1-3; 2000 after W4-03
-    "studio_apply_ms": 150,  # Studio apply in startupCompleted
+    # Startup to interactive Library (Studio on): waves 1-3; 2000 after W4-03. The --report-startup-timing total
+    # includes the Studio apply: the "Showing the main window" phase ends after the startupCompleted slots return.
+    "startup_total_ms": 2700,
+    # Studio apply in startupCompleted: shell.applyDurationMs, read in-Slicer and in each --startup run
+    "studio_apply_ms": 150,
+    "startup_studio_apply_ms": 150,
     "workspace_switch_ms": 50,  # Workspace switch (warm, no layout change)
-    "module_switch_warm_ms": {"relative": 0.10},  # Warm module switch: at most +10% of baseline
+    # Warm module switch: at most +10% of baseline. It varies more than 10% between runs on a loaded VM: evaluate
+    # medians of 3 or more runs (--merge) on both sides; evaluate() warns otherwise.
+    "module_switch_warm_ms": {"relative": 0.10},
     "hover_ms": 1.0,  # Hover (Qt side), Studio, per event
     "scroll_step_ms": 5.0,  # Wheel step (event loop)
     "noop_modified_ms": 3.0,  # No-op sliceNode.Modified
@@ -91,6 +103,17 @@ GROUPS = (
     ("effect_gui", ("effect_gui_refresh_ms",), "measureEffectGuiRefresh"),
     ("lnm", ("lnm_synthetic_s",), "measureLesionNetworkMapping"),
 )
+
+# Run by --startup through --python-script: Slicer runs it once the event loop processes the command line, so
+# after startupCompleted and the Studio apply (both run within the "Showing the main window" phase).
+STARTUP_PROBE_SCRIPT = """
+try:
+    from StudioLib import shell
+    studio = shell.instance()
+except ImportError:
+    studio = None
+print("StudioBench startup probe: studio_apply_ms=%s" % getattr(studio, "applyDurationMs", None), flush=True)
+"""
 
 STARTUP_PHASES = {
     "Before the process entry point, loading the application's own libraries": "startup_pre_entry_ms",
@@ -191,8 +214,31 @@ def lostMeasurements(result, previousMetrics):
     return sorted(name for name in skipped if name not in metrics and previousMetrics.get(name) is not None)
 
 
+def loadCompareResult(args):
+    """The --compare JSON, or None without --compare. Raises OSError or ValueError if it cannot be read."""
+    if not args.compare:
+        return None
+    with open(args.compare) as f:
+        return json.load(f)
+
+
+def relativeBudgetWarnings(result, previousResult):
+    """Warnings for relative budgets evaluated on single runs, which the VM noise makes unreliable."""
+    names = [name for name, budget in BUDGETS.items() if isinstance(budget, dict) and result.get("metrics", {}).get(name) is not None]
+    if not names or previousResult is None:
+        return []
+    single = [label for label, data in (("this result", result), ("the --compare JSON", previousResult))
+              if data.get("meta", {}).get("mode") != "merge"]
+    if not single:
+        return []
+    return [(f"Warning: {', '.join(names)} relative budget evaluated on a single run ({' and '.join(single)}); "
+             "use --merge of 3 or more runs on both sides")]
+
+
 def evaluate(result, args):
     """Print the metrics and the evaluation (failed measurements, --check, --compare). Returns the exit code."""
+    previousResult = loadCompareResult(args)
+    previousMetrics = previousResult.get("metrics", {}) if previousResult is not None else None
     metrics = result.get("metrics", {})
     errors = result.get("errors", {})
     print("Metrics:")
@@ -203,10 +249,6 @@ def evaluate(result, args):
     for name in sorted(set(errors) - set(metrics)):  # errors that are not about a metric, for example a failed startup run
         errorLines = str(errors[name]).strip().splitlines()
         print(f"  {name:40s} {'error':>12s}  {errorLines[-1] if errorLines else ''}")
-    previousMetrics = None
-    if args.compare:
-        with open(args.compare) as f:
-            previousMetrics = json.load(f).get("metrics", {})
     # Null means FAIL: a measurement that broke must not pass the gate silently
     summary = []
     failed = measurementFailures(result)
@@ -216,6 +258,8 @@ def evaluate(result, args):
         failures, lines = checkBudgets(metrics, previousMetrics)
         print("Budgets (SPEC 8.2):")
         print("\n".join(lines) if lines else "  no measured metric has a budget")
+        for line in relativeBudgetWarnings(result, previousResult):
+            print(line)
         if failures:
             summary.append("Over budget: " + ", ".join(failures))
     if previousMetrics is not None:
@@ -293,7 +337,8 @@ def listMeasurements():
     print("Measurement groups (in-Slicer mode):")
     for group, metrics, _method in GROUPS:
         print(f"  {group}: {', '.join(metrics)}")
-    print("Startup mode: startup_total_ms, startup_wall_ms, " + ", ".join(STARTUP_PHASES.values()))
+    print("Startup mode: startup_total_ms (startup to interactive Library, including the Studio apply), startup_wall_ms, "
+          "startup_studio_apply_ms (only when Studio is applied), " + ", ".join(STARTUP_PHASES.values()))
     print("Budgets (SPEC 8.2):")
     for name, budget in BUDGETS.items():
         print(f"  {name}: {budget}")
@@ -1091,6 +1136,11 @@ def runInSlicer(argv):
             exitCode = 0
             return
         groups, selectedMetrics = resolveSelection(args.only)
+        try:
+            loadCompareResult(args)  # before measuring, which takes minutes
+        except (OSError, ValueError) as error:
+            print(f"error: --compare: {error}", file=sys.stderr)
+            return
         meta = baseMeta([SCRIPT_PATH] + list(argv))
         bench = InSlicerBench(args)
         startTime = time.perf_counter()
@@ -1151,8 +1201,25 @@ def parseStartupReport(text):
     return phases
 
 
+def parseStartupProbe(text):
+    """Return {metric: ms} from the output of STARTUP_PROBE_SCRIPT (empty when Studio was not applied)."""
+    match = re.search(r"^StudioBench startup probe: studio_apply_ms=(\d+(?:\.\d+)?)$", text, re.MULTILINE)
+    return {"startup_studio_apply_ms": float(match.group(1))} if match else {}
+
+
 def runStartup(args):
-    command = [args.slicer, "--no-splash", "--report-startup-timing", "--exit-after-startup"] + args.slicer_args.split()
+    probeDirectory = tempfile.mkdtemp(prefix="StudioBench-")
+    try:
+        probePath = os.path.join(probeDirectory, "StudioBenchStartupProbe.py")
+        with open(probePath, "w") as f:
+            f.write(STARTUP_PROBE_SCRIPT)
+        return runStartupWithProbe(args, probePath)
+    finally:
+        shutil.rmtree(probeDirectory, ignore_errors=True)
+
+
+def runStartupWithProbe(args, probePath):
+    command = [args.slicer, "--no-splash", "--report-startup-timing", "--exit-after-startup", "--python-script", probePath] + args.slicer_args.split()
     if not args.no_xvfb:
         command = ["xvfb-run", "-a", "-s", "-screen 0 1920x1080x24"] + command
     environment = dict(os.environ)
@@ -1173,6 +1240,7 @@ def runStartup(args):
             f.write(output)
         phases = parseStartupReport(output)
         phases["startup_wall_ms"] = wall
+        phases.update(parseStartupProbe(output))
         if process.returncode != 0 or "startup_total_ms" not in phases:
             errors[f"run{run + 1}"] = f"exit code {process.returncode}, no timing report found; see {logPath}"
         runs.append(phases)
@@ -1232,6 +1300,7 @@ def runSystemPython(argv):
     if args.list:
         listMeasurements()
         return 0
+    loadCompareResult(args)  # before measuring; raises OSError or ValueError (exit code 2)
     if args.input:
         with open(args.input) as f:
             result = json.load(f)

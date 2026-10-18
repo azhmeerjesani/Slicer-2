@@ -66,6 +66,8 @@ class StudioLayoutPortabilityTest(unittest.TestCase):
     def _standaloneLayout(self):
         """Return a new scene and its layout logic and layout node, independent of the application."""
         scene = slicer.vtkMRMLScene()
+        # The slice nodes of the layouts use the orientation presets (as in vtkMRMLApplicationLogic)
+        slicer.vtkMRMLSliceNode.AddDefaultSliceOrientationPresets(scene)
         layoutLogic = slicer.vtkMRMLLayoutLogic()
         layoutLogic.SetMRMLScene(scene)
         return scene, layoutLogic, layoutLogic.GetLayoutNode()

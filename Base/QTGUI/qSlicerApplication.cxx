@@ -541,7 +541,8 @@ void qSlicerApplicationPrivate::initStyle()
   // Slicer installations sharing the same settings file ignore. The default theme can be set
   // in the default settings file (Appearance/ForkDefaultTheme).
   // The density is read only at startup, as changing it requires to lay out all widgets again.
-  // Without main window (batch processing, tests), the historical compact metrics are kept.
+  // Without main window (batch processing, tests), the historical compact metrics are kept
+  // (qSlicerStyle also keeps the light palette and the default accent color in that case).
   QSettings* settings = q->userSettings();
   if (settings)
   {

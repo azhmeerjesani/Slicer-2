@@ -46,7 +46,7 @@ public:
     /// Slightly larger layout spacing and margins.
     Comfortable
   };
-  Q_ENUM(Density);
+  Q_ENUM(Density)
 
   /// Color theme followed by the standard palette of the "Slicer" style.
   /// The "Dark Slicer" and "Light Slicer" styles always use their own palette.
@@ -58,7 +58,7 @@ public:
     DarkTheme,
     LightTheme
   };
-  Q_ENUM(Theme);
+  Q_ENUM(Theme)
 
   /// Constructors
   qSlicerStyle();
@@ -69,17 +69,24 @@ public:
   int pixelMetric(PixelMetric metric, const QStyleOption* option = nullptr, const QWidget* widget = nullptr) const override;
 
   /// Return the dark or light palette depending on theme().
-  /// When testing is enabled, the light palette is always returned.
+  /// When testing is enabled or the application runs without main window,
+  /// the light palette is always returned (historical appearance).
   QPalette standardPalette() const override;
   QPalette standardLightPalette() const;
   QPalette standardDarkPalette() const;
   int styleHint(StyleHint hint, const QStyleOption* opt, const QWidget* widget, QStyleHintReturn* returnData) const override;
 
+  /// Draw check box and radio button indicators with a visible frame and an accent fill
+  /// on dark palettes. Other primitives (and all primitives on light palettes) are drawn
+  /// by the base style.
+  void drawPrimitive(PrimitiveElement element, const QStyleOption* option, QPainter* painter, const QWidget* widget = nullptr) const override;
+
   /// Return the color of a named style token of the dark or light theme.
   /// Supported names: canvas, card, control-hover, control-pressed, hairline, border,
   /// text2, text3, accent, accent-hover, accent-pressed, accent-fg, accent-subtle,
   /// success, warning, danger, view-bar and lesion.
-  /// Accent tokens follow accentColor() if it is set (except when testing is enabled).
+  /// Accent tokens follow accentColor() if it is set (except when testing is enabled or the
+  /// application runs without main window).
   /// An invalid color is returned for unknown names.
   static QColor tokenColor(const QString& name, bool dark);
 
@@ -95,6 +102,7 @@ public:
   /// \sa density()
   static void setDensity(Density density);
   /// Return the density in effect. Always Compact when testing is enabled.
+  /// qSlicerApplication also sets Compact when the application runs without main window.
   static Density density();
 
   /// Set the theme followed by standardPalette(). Call QApplication::setPalette()
@@ -105,7 +113,7 @@ public:
 
   /// Set the accent color of the palettes (Highlight, Link) and of the accent tokens.
   /// An invalid color restores the default accent color of each theme.
-  /// The accent color is ignored when testing is enabled.
+  /// The accent color is ignored when testing is enabled or the application runs without main window.
   /// Call QApplication::setPalette() with the new standard palette to apply it.
   /// \sa accentColor()
   static void setAccentColor(const QColor& color);

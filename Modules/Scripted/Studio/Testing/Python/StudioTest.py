@@ -287,6 +287,17 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertIn(mainWindow, closeSceneAction.associatedWidgets())
         self.assertEqual(list(addDataAction.shortcuts()), [])
         self.assertEqual(studioShell.currentWorkspace(), "library")
+        # Ctrl+5 (View > Module Panel) keeps toggling the inspector
+        panelToggle = dock.toggleViewAction()
+        self.assertEqual(portableKey(panelToggle.shortcut), "Ctrl+5")
+        self.assertTrue(panelToggle.enabled)
+        self.assertIn(mainWindow, panelToggle.associatedWidgets())
+        panelToggle.trigger()
+        self._pump()
+        self.assertTrue(dock.isHidden())
+        panelToggle.trigger()
+        self._pump()
+        self.assertFalse(dock.isHidden())
 
         studioShell.classic(persist=False)
         self._pump()
@@ -325,11 +336,15 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertEqual(self.layoutManager.layout, layouts.FOCUS_LAYOUT_ID)
             self.assertFalse(studioShell.isRenderPausedByCanvas())
             self.assertTrue(studioShell.topBar.undoButton.isVisibleTo(studioShell.topBar.toolBar))
+            dock = self.mainWindow.findChild("QDockWidget", "PanelDockWidget")
+            drawPanelWidth = dock.width
             studioShell.switchTo("library")
             self._pump()
             self.assertEqual(studioShell.currentModuleName(), "Studio")
             self.assertEqual(studioShell.currentWorkspace(), "library")
             self.assertTrue(studioShell.isRenderPausedByCanvas())
+            # The inspector keeps its width between workspaces (the views are not resized)
+            self.assertEqual(dock.width, drawPanelWidth)
             self.assertLessEqual(len(layoutChanges), 1)
             # Already on the remembered layout: no layout change
             studioShell.switchTo("draw")
@@ -346,6 +361,8 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self._pump()
             self.assertEqual(studioShell.currentWorkspace(), "draw")
             self.assertEqual(studioShell.currentModuleName(), "SegmentEditor")
+            # Leaving a transient module shrinks the inspector back to the stored width (or what Draw needs)
+            self.assertEqual(dock.width, max(studioShell.panelWidth, dock.minimumSizeHint.width()))
 
             # Selecting a workspace module by other means checks its tab
             slicer.util.selectModule("Studio")
@@ -508,3 +525,32 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(len(group.buttons()), 2)
         with self.assertRaises(ValueError):
             ui.setRole(qt.QWidget(), "no-such-role")
+
+    def test_9_late_toolbars(self):
+        """Toolbars that extensions add when Studio is shown are hidden, and shown again in Classic (SPEC 2.3)."""
+        mainWindow = self.mainWindow
+        studioShell = self._applyStudio()
+        added = mainWindow.addToolBar("Studio test toolbar")
+        added.setObjectName("StudioTestAddedToolBar")
+        constructed = qt.QToolBar("Studio test toolbar 2", mainWindow)
+        constructed.setObjectName("StudioTestConstructedToolBar")
+        mainWindow.addToolBar(constructed)
+        hiddenByOwner = qt.QToolBar("Studio test toolbar 3", mainWindow)
+        hiddenByOwner.setObjectName("StudioTestHiddenToolBar")
+        hiddenByOwner.hide()
+        mainWindow.addToolBar(hiddenByOwner)
+        toolBars = (added, constructed, hiddenByOwner)
+        try:
+            self._pump()
+            for toolBar in toolBars:
+                self.assertTrue(toolBar.isHidden(), toolBar.objectName)
+            studioShell.classic(persist=False)
+            self._pump()
+            self.assertTrue(added.isVisible())
+            self.assertTrue(constructed.isVisible())
+            self.assertTrue(hiddenByOwner.isHidden())
+        finally:
+            for toolBar in toolBars:
+                mainWindow.removeToolBar(toolBar)
+                toolBar.deleteLater()
+            self._pump()

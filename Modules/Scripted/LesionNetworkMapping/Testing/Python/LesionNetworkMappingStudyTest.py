@@ -188,7 +188,7 @@ class StudyTest(unittest.TestCase):
         self.assertEqual(report["pairs"]["sub-02"]["lesion"], None)
         self.assertEqual(report["pairs"]["sub-02"]["scan"], self.path("bids/sub-02/ses-1/anat/sub-02_ses-1_T1w.nii.gz"))
         skipped = {os.path.basename(item["path"]): item["reason"] for item in report["skipped"]}
-        self.assertEqual(skipped["sub-02_ses-1_desc-brain_mask.nii.gz"], "brain mask or anatomical segmentation")
+        self.assertEqual(skipped["sub-02_ses-1_desc-brain_mask.nii.gz"], "brain mask, deface mask or anatomical segmentation")
         self.assertIn("another scan", skipped["sub-02_ses-1_FLAIR.nii.gz"])
         self.assertIn("not a 3D image", skipped["func_bold.nii.gz"])
         self.assertNotIn("sub-09_T1w.nii.gz", skipped)
@@ -225,6 +225,87 @@ class StudyTest(unittest.TestCase):
         custom = Study.create(self.path("custom"), rules={"id": r"P(\d+)"})
         self._image("custom_data/scan_P7.nii.gz")
         self.assertEqual(custom.add_files(self.path("custom_data"))["added"], ["sub-7"])
+
+    def test_add_files_non_bids_names(self):
+        created = Study.create(self.path("study"))
+        # Ids with separators must not collapse into one subject ("patient_01" and "patient_02" are two subjects)
+        names = {
+            "sub-01": ("sub_01_T1.nii.gz", "sub_01_lesion.nii.gz"),
+            "sub-02": ("sub_02_T1.nii.gz", "sub_02_lesion.nii.gz"),
+            "sub-patient01": ("patient_01_T1.nii.gz", "patient_01_lesion.nii.gz"),
+            "sub-patient02": ("patient_02_T1w.nii.gz", "patient_02_lesion_v2.nii.gz"),
+            "sub-Patient7": ("Patient 7 T1.nii", "Patient 7 lesion.nii"),
+            "sub-case12": ("T1_case_12_2mm.nii.gz", "case_12_FLAIR_lesion.nii.gz"),
+            "sub-smith": ("smith_T1.nii", "smith_lesion.nii"),
+        }
+        for scan, lesion in names.values():
+            self._image(f"raw/{scan}")
+            self._image(f"raw/{lesion}")
+        report = created.add_files(self.path("raw"))
+        self.assertEqual(report["skipped"], [])
+        self.assertEqual(sorted(report["added"]), sorted(names))
+        for sid, (scan, lesion) in names.items():
+            self.assertEqual(report["pairs"][sid], {"scan": self.path("raw", scan), "lesion": self.path("raw", lesion)}, sid)
+
+        # BIDS derivatives with a native and a template T1w: the scan in the lesion's space is chosen
+        self._image("derivatives/sub-03/anat/sub-03_T1w.nii.gz")
+        mni_scan = self._image("derivatives/sub-03/anat/sub-03_space-MNI152NLin2009cAsym_T1w.nii.gz", shape=(97, 115, 97), affine=MNI2009C_2MM)
+        self._image("derivatives/sub-03/anat/sub-03_space-MNI152NLin2009cAsym_desc-lesion_mask.nii.gz", shape=(97, 115, 97), affine=MNI2009C_2MM)
+        report = created.add_files(self.path("derivatives"))
+        self.assertEqual(report["pairs"]["sub-03"]["scan"], mni_scan)
+        self.assertEqual(created.subject("sub-03")["space"], "MNI152NLin2009cAsym")
+        # Rows are copies: cells change only through set() (validated)
+        row = created.subject("sub-03")
+        row["group"] = "patient"
+        created.subjects[0]["status"] = "bad"
+        self.assertEqual((created.subject("sub-03")["group"], created.subjects[0]["status"]), ("n/a", "traced"))
+
+    def test_lesion_rule_matches_whole_words(self):
+        created = Study.create(self.path("study"))
+        lesions = {
+            "sub-031768": "031768_LesionSmooth_stx.nii.gz",  # ATLAS v1.2
+            "sub-r001s001": "sub-r001s001_ses-1_space-MNIEx2009aSym_label-L_desc-T1lesion_mask.nii.gz",  # ATLAS R2.0
+            "sub-patient01": "patient01-lesion.nii.gz",
+            "sub-P01": "P01_lesion1.nii.gz",
+            "sub-P02": "P02_ROI.nii.gz",
+            "sub-P03": "P03_LesionMask.nii.gz",
+            "sub-P04": "P04_lesions.nii.gz",
+            "sub-BraTS2021": "BraTS2021_00000_seg.nii.gz",
+        }
+        # Names that contain a lesion word inside another word are scans: skull-stripped images, surnames
+        scans = {"sub-05": "sub-05_T1w_masked.nii.gz", "sub-Segura01": "Segura_01_T1.nii.gz", "sub-SEGURA02": "SEGURA_02_T1.nii.gz", "sub-patient01": "patient01-T1.nii.gz"}
+        for name in [*lesions.values(), *scans.values()]:
+            self._image(f"data/{name}")
+        self._image("data/sub-06/anat/sub-06_T1w.nii.gz")
+        self._image("data/sub-06/anat/sub-06_mod-T1w_defacemask.nii.gz")  # BIDS raw data
+        self._image("data/sub-06/anat/sub-06_wmparc.nii.gz")
+        report = created.add_files(self.path("data"))
+        for sid, name in lesions.items():
+            self.assertEqual(report["pairs"][sid]["lesion"], self.path("data", name), sid)
+        for sid, name in scans.items():
+            self.assertEqual(report["pairs"][sid]["scan"], self.path("data", name), sid)
+        self.assertEqual({sid: created.subject(sid)["status"] for sid in ("sub-05", "sub-06", "sub-Segura01", "sub-SEGURA02")}, dict.fromkeys(("sub-05", "sub-06", "sub-Segura01", "sub-SEGURA02"), "untraced"))
+        self.assertEqual(report["pairs"]["sub-06"], {"scan": self.path("data/sub-06/anat/sub-06_T1w.nii.gz"), "lesion": None})
+        skipped = {os.path.basename(item["path"]): item["reason"] for item in report["skipped"]}
+        self.assertEqual(skipped, dict.fromkeys(("sub-06_mod-T1w_defacemask.nii.gz", "sub-06_wmparc.nii.gz"), "brain mask, deface mask or anatomical segmentation"))
+        self.assertEqual(sorted(created.lesion_paths()), sorted(self.path("data", name) for name in lesions.values()))
+        offered = [created.next_subject()]  # the Draw loop offers the scans for tracing
+        while len(offered) < 10 and created.next_subject(offered[-1]) not in offered:
+            offered.append(created.next_subject(offered[-1]))
+        self.assertEqual(sorted(offered), ["sub-05", "sub-06", "sub-SEGURA02", "sub-Segura01"])
+
+        # Hyphens separate lesion and modality words from the subject id, not names
+        self.assertEqual(created.subject("sub-patient01")["scan"], "../data/patient01-T1.nii.gz")
+        self._image("names/smith-jones_T1.nii.gz")
+        self._image("names/smith-brown_T1.nii.gz")
+        self.assertEqual(created.add_files(self.path("names"))["added"], ["sub-smithbrown", "sub-smithjones"])
+        # Custom rules are whole words too, and may start with global flags
+        custom = Study.create(self.path("custom"), rules={"lesion": "(?i)les"})
+        self._image("custom_data/P07_les.nii.gz")
+        self._image("custom_data/P07_lesion.nii.gz")
+        self.assertEqual(custom.add_files(self.path("custom_data"))["pairs"]["sub-P07"], {"scan": self.path("custom_data", "P07_lesion.nii.gz"), "lesion": self.path("custom_data", "P07_les.nii.gz")})
+        self.assertTrue(study.whole_word_rule("lesion").search("Lesion_mask"))
+        self.assertFalse(study.whole_word_rule("(?i)mask").search("MASKED"))
 
     def test_lesion_paths_next_subject_and_names(self):
         created = Study.create(self.path("loop"), space="MNI152NLin2009cAsym")

@@ -517,6 +517,7 @@ def _emit(event):
 
 _BIDS_NAME = re.compile(r"^sub-[A-Za-z0-9]+(?:_[A-Za-z0-9-]+)+$")
 _BIDS_ENTITY = re.compile(r"^([A-Za-z0-9]+)-[A-Za-z0-9]+$")
+_BIDS_LABEL = re.compile(r"^sub-[A-Za-z0-9]+(?:_[A-Za-z0-9]+-[A-Za-z0-9]+)*$")  # a lesion output name made of entities only
 # Entities of a lesion file name that describe the lesion image itself (its grid, label and
 # description), not the source acquisition; outputs are on the connectome grid with their own desc.
 _LESION_IMAGE_ENTITIES = ("space", "res", "den", "label", "desc")
@@ -536,6 +537,17 @@ def _lesion_name(path):
         return name
     entities = (_BIDS_ENTITY.match(part) for part in name.split("_"))
     return "_".join(entity.group(0) for entity in entities if entity and entity.group(1) not in _LESION_IMAGE_ENTITIES)
+
+
+def _unique_name(name, used):
+    """``name``, or ``name`` with a counter when it is in ``used``: "lesion-2" or, for BIDS-style
+    names, an extra entity that keeps the subject label valid ("sub-01_lesion-2", not "sub-01-2").
+    """
+    pattern = "{}_lesion-{}" if _BIDS_LABEL.match(name) else "{}-{}"
+    unique, counter = name, 2
+    while unique in used:
+        unique, counter = pattern.format(name, counter), counter + 1
+    return unique
 
 
 def connectome_label(bundle_name):
@@ -607,7 +619,8 @@ class _ArgumentParser(argparse.ArgumentParser):
 
 def main(argv=None):
     """Command-line entry point; returns the process exit code."""
-    parser = _ArgumentParser(prog="python -m LesionNetworkMappingLib.engine", description="Compute lesion network maps from a connectome bundle.")
+    # No abbreviated options: run.json records the arguments as given, and reproduce.sh rewrites them by their full names
+    parser = _ArgumentParser(prog="python -m LesionNetworkMappingLib.engine", description="Compute lesion network maps from a connectome bundle.", allow_abbrev=False)
     parser.add_argument("--bundle", required=True, help="connectome bundle directory (.lnmc)")
     parser.add_argument("--lesion", required=True, action="append", help="lesion NIfTI file (any grid; repeat for several lesions)")
     parser.add_argument("--out", required=True, help="output directory")
@@ -633,6 +646,8 @@ def main(argv=None):
         parser.error("--desc-suffix must contain only letters and digits")
     if args.null_relocations < 0:
         parser.error("--null-relocations must be at least 0")
+    if args.null_voxels < 0:
+        parser.error("--null-voxels must be at least 0")
     rule = None
     if args.threshold_rule is not None:
         from .thresholds import normalize_rule
@@ -656,10 +671,7 @@ def main(argv=None):
         names, weights, qc = [], [], []
         for path in args.lesion:
             lesion_weights_vector, lesion_qc_values = prepare_lesion(path, bundle, supersample=args.supersample, binarize=not args.probabilistic)
-            name = _lesion_name(path)
-            base, suffix = name, 2
-            while name in names:
-                name, suffix = f"{base}-{suffix}", suffix + 1
+            name = _unique_name(_lesion_name(path), names)
             names.append(name)
             weights.append(lesion_weights_vector)
             qc.append({"lesion": name, **lesion_qc_values})

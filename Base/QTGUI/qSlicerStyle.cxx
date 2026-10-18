@@ -25,12 +25,16 @@
 #include <QDebug>
 #include <QEvent>
 #include <QGroupBox>
+#include <QPainter>
+#include <QPainterPath>
 #include <QScrollBar>
 #include <QSettings>
 #include <QStyleOptionGroupBox>
+#include <QtMath>
 
 // Slicer includes
-#include "qSlicerCoreApplication.h"
+#include "qSlicerApplication.h"
+#include "qSlicerCommandOptions.h"
 
 // qMRML includes
 #include "qSlicerStyle.h"
@@ -81,14 +85,45 @@ bool isTestingEnabled()
 }
 
 //------------------------------------------------------------------------------
+/// Return true if the historical appearance must be kept (light palette, default accent color):
+/// when testing is enabled or when the application runs without main window.
+bool useClassicAppearance()
+{
+  if (isTestingEnabled())
+  {
+    return true;
+  }
+  qSlicerApplication* app = qSlicerApplication::application();
+  qSlicerCommandOptions* options = app ? app->commandOptions() : nullptr;
+  return options && options->noMainWindow();
+}
+
+//------------------------------------------------------------------------------
 /// Accent color override in effect (invalid if the default accent colors must be used)
 QColor effectiveAccentColor()
 {
-  if (!StyleAccentColor.isValid() || isTestingEnabled())
+  if (!StyleAccentColor.isValid() || useClassicAppearance())
   {
     return QColor();
   }
   return StyleAccentColor;
+}
+
+//------------------------------------------------------------------------------
+/// Relative luminance of a color, as defined by WCAG 2
+qreal relativeLuminance(const QColor& color)
+{
+  auto channel = [](qreal value) { return value <= 0.03928 ? value / 12.92 : qPow((value + 0.055) / 1.055, 2.4); };
+  return 0.2126 * channel(color.redF()) + 0.7152 * channel(color.greenF()) + 0.0722 * channel(color.blueF());
+}
+
+//------------------------------------------------------------------------------
+/// Contrast ratio between two colors, as defined by WCAG 2 (from 1 to 21)
+qreal contrastRatio(const QColor& color1, const QColor& color2)
+{
+  const qreal luminance1 = relativeLuminance(color1);
+  const qreal luminance2 = relativeLuminance(color2);
+  return (qMax(luminance1, luminance2) + 0.05) / (qMin(luminance1, luminance2) + 0.05);
 }
 
 //------------------------------------------------------------------------------
@@ -98,6 +133,21 @@ QColor shiftLightness(const QColor& color, qreal delta)
   QColor hsl = color.toHsl();
   qreal lightness = qBound<qreal>(0., hsl.lightnessF() + delta, 1.);
   return QColor::fromHslF(hsl.hslHueF(), hsl.hslSaturationF(), lightness, hsl.alphaF()).toRgb();
+}
+
+//------------------------------------------------------------------------------
+/// Return \a color made lighter (on a dark background) or darker (on a light background)
+/// until its contrast ratio with \a background is at least \a minimumContrast.
+QColor readableColor(const QColor& color, const QColor& background, qreal minimumContrast)
+{
+  const qreal delta = background.lightness() < 128 ? 0.02 : -0.02;
+  QColor readable = color;
+  // At most 50 steps: lightness reaches 0 or 1, which gives the maximum contrast
+  for (int step = 0; step < 50 && contrastRatio(readable, background) < minimumContrast; ++step)
+  {
+    readable = shiftLightness(readable, delta);
+  }
+  return readable;
 }
 
 //------------------------------------------------------------------------------
@@ -127,10 +177,11 @@ QColor derivedAccentToken(const QString& name, const QColor& accent, bool dark)
   }
   if (name == QLatin1String("accent-fg"))
   {
-    // Keep the foreground accent readable on the window color
+    // Lighter accent on dark windows, and readable (WCAG AA contrast for text) on the window color
     QColor hsl = accent.toHsl();
     qreal lightness = dark ? qMax<qreal>(hsl.lightnessF(), 0.70) : qMin<qreal>(hsl.lightnessF(), 0.53);
-    return QColor::fromHslF(hsl.hslHueF(), hsl.hslSaturationF(), lightness).toRgb();
+    QColor foreground = QColor::fromHslF(hsl.hslHueF(), hsl.hslSaturationF(), lightness).toRgb();
+    return readableColor(foreground, QColor(dark ? "#1c1c1f" : "#f4f4f6"), 4.5);
   }
   if (name == QLatin1String("accent-subtle"))
   {
@@ -148,15 +199,108 @@ void applyAccentColor(QPalette& palette, bool dark)
   {
     return;
   }
-  // Dark text on light accent colors
-  const qreal luminance = 0.299 * accent.redF() + 0.587 * accent.greenF() + 0.114 * accent.blueF();
-  const QColor highlightedText = luminance > 0.6 ? QColor("#1c1c1f") : QColor(Qt::white);
+  // White or dark text, whichever is more readable on the accent color
+  const QColor lightText(Qt::white);
+  const QColor darkText("#1c1c1f");
+  const QColor highlightedText = contrastRatio(accent, lightText) >= contrastRatio(accent, darkText) ? lightText : darkText;
   for (QPalette::ColorGroup group : { QPalette::Active, QPalette::Inactive })
   {
     palette.setColor(group, QPalette::Highlight, accent);
     palette.setColor(group, QPalette::HighlightedText, highlightedText);
   }
   palette.setColor(QPalette::Link, qSlicerStyle::tokenColor("accent-fg", dark));
+}
+
+//------------------------------------------------------------------------------
+/// Draw a check box (or item view check) or radio button indicator for dark palettes.
+/// The base style (Fusion) draws the indicator frame in a color derived from the window
+/// color, which is almost invisible on dark palettes. Here the frame uses the "text3" token,
+/// and checked indicators are filled with the highlight (accent) color.
+void drawDarkIndicator(QStyle::PrimitiveElement element, const QStyleOption* option, QPainter* painter)
+{
+  const QStyle::State state = option->state;
+  const bool enabled = state & QStyle::State_Enabled;
+  const bool radio = (element == QStyle::PE_IndicatorRadioButton);
+  const bool partial = !radio && (state & QStyle::State_NoChange);
+  const bool checked = partial || (state & QStyle::State_On);
+  const bool hover = enabled && (state & QStyle::State_MouseOver);
+  const bool sunken = enabled && (state & QStyle::State_Sunken);
+  const bool focus = (state & QStyle::State_HasFocus) && (state & QStyle::State_KeyboardFocusChange);
+  const QPalette::ColorGroup group = !enabled ? QPalette::Disabled : (state & QStyle::State_Active) ? QPalette::Active : QPalette::Inactive;
+
+  QColor fillColor;
+  QColor frameColor;
+  if (checked)
+  {
+    fillColor = option->palette.color(group, QPalette::Highlight);
+    if (hover)
+    {
+      fillColor = fillColor.lighter(112);
+    }
+    else if (sunken)
+    {
+      fillColor = fillColor.darker(112);
+    }
+    // Keep the indicator distinct from the highlighted background of selected items
+    frameColor = (state & QStyle::State_Selected) ? option->palette.color(group, QPalette::HighlightedText) : fillColor;
+  }
+  else
+  {
+    fillColor = sunken ? qSlicerStyle::tokenColor("control-pressed", true) : option->palette.color(group, QPalette::Base);
+    frameColor = !enabled ? qSlicerStyle::tokenColor("border", true) : hover ? qSlicerStyle::tokenColor("text2", true) : qSlicerStyle::tokenColor("text3", true);
+  }
+  if (focus)
+  {
+    frameColor = qSlicerStyle::tokenColor("accent-fg", true);
+  }
+  const QColor markColor = option->palette.color(group, QPalette::HighlightedText);
+
+  // Square indicator centered in the option rectangle, with the frame on pixel centers
+  const qreal side = qMin(option->rect.width(), option->rect.height());
+  QRectF frameRect(0., 0., side - 1., side - 1.);
+  frameRect.moveCenter(QRectF(option->rect).center());
+
+  painter->save();
+  painter->setRenderHint(QPainter::Antialiasing, true);
+  painter->setPen(QPen(frameColor, 1.));
+  painter->setBrush(fillColor);
+  if (radio)
+  {
+    painter->drawEllipse(frameRect);
+    if (checked)
+    {
+      const qreal dotRadius = frameRect.width() / 5.;
+      painter->setPen(Qt::NoPen);
+      painter->setBrush(markColor);
+      painter->drawEllipse(frameRect.center(), dotRadius, dotRadius);
+    }
+  }
+  else
+  {
+    painter->drawRoundedRect(frameRect, 3., 3.);
+    if (checked)
+    {
+      const qreal penWidth = qBound<qreal>(1.5, side * 0.14, 2.5);
+      painter->setPen(QPen(markColor, penWidth, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+      painter->setBrush(Qt::NoBrush);
+      const qreal x = frameRect.left();
+      const qreal y = frameRect.top();
+      const qreal w = frameRect.width();
+      if (partial)
+      {
+        painter->drawLine(QPointF(x + w * 0.27, y + w * 0.5), QPointF(x + w * 0.73, y + w * 0.5));
+      }
+      else
+      {
+        QPainterPath checkMark;
+        checkMark.moveTo(x + w * 0.24, y + w * 0.52);
+        checkMark.lineTo(x + w * 0.43, y + w * 0.70);
+        checkMark.lineTo(x + w * 0.77, y + w * 0.31);
+        painter->drawPath(checkMark);
+      }
+    }
+  }
+  painter->restore();
 }
 } // namespace
 
@@ -253,8 +397,8 @@ int qSlicerStyle::pixelMetric(PixelMetric metric, const QStyleOption* option, co
 QPalette qSlicerStyle::standardPalette() const
 {
   bool dark = false;
-  // The light palette is always used for testing.
-  if (!isTestingEnabled())
+  // The light palette is always used for testing and without main window (historical appearance).
+  if (!useClassicAppearance())
   {
     switch (qSlicerStyle::theme())
     {
@@ -386,6 +530,25 @@ int qSlicerStyle::styleHint(StyleHint hint, const QStyleOption* opt, const QWidg
     default: res = this->Superclass::styleHint(hint, opt, widget, returnData);
   }
   return res;
+}
+
+//------------------------------------------------------------------------------
+void qSlicerStyle::drawPrimitive(PrimitiveElement element, const QStyleOption* option, QPainter* painter, const QWidget* widget) const
+{
+  switch (element)
+  {
+    case QStyle::PE_IndicatorCheckBox:
+    case QStyle::PE_IndicatorRadioButton:
+      // Item view checks and menu check boxes are drawn by the base style as PE_IndicatorCheckBox.
+      if (option && painter && option->palette.color(QPalette::Window).lightness() < 128)
+      {
+        drawDarkIndicator(element, option, painter);
+        return;
+      }
+      break;
+    default: break;
+  }
+  this->Superclass::drawPrimitive(element, option, painter, widget);
 }
 
 //------------------------------------------------------------------------------

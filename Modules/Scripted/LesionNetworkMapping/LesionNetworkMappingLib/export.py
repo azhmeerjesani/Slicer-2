@@ -474,8 +474,12 @@ def methods_text(info, n, subset, threshold, lesions, run_meta=None):
         qa_text += (
             f", and each lesion was rigidly relocated to {null['k']} random positions inside the brain mask "
             f"(integer voxel shifts on the connectome grid, ≥ {int(100 * null.get('min_inside', 0.95))}% of the lesion weight inside, overlap with the original lesion allowed, seed {null.get('seed', 0)}) "
-            "and mapped in the same pass; the similarity between each map and the maps of its relocated lesions is reported"
+            "and mapped in the same pass"
         )
+        if any((lesion.get("qa") or {}).get("null") for lesion in lesions):
+            qa_text += "; the similarity between each map and the maps of its relocated lesions is reported"
+        else:
+            qa_text += "; the similarity to the relocated-lesion maps is not available for this run (it is computed when a run completes)"
     qa_text += "."
     paragraph = (
         f"Lesion network maps were computed with the lesion network mapping library of 3D Slicer ({LIBRARY_NAME} {LIBRARY_VERSION}). "

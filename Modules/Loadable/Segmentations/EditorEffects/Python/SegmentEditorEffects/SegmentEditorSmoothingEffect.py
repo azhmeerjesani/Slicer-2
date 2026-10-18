@@ -279,7 +279,15 @@ If segments overlap, segment higher in the segments table will have priority. <b
     def smoothSelectedSegment(self, maskImage=None, maskExtent=None):
         try:
             # Get modifier labelmap
-            modifierLabelmap = self.scriptedEffect.defaultModifierLabelmap()
+            referenceGeometryImage = self.scriptedEffect.referenceGeometryImage()
+            if maskImage is None and maskExtent is None and referenceGeometryImage is not None:
+                # The whole segment is smoothed in a cropped region (see selectedSegmentLabelmapForSmoothing) and the result
+                # replaces the segment, therefore the result is stored in a new labelmap (with the reference geometry) instead of
+                # defaultModifierLabelmap(), which would allocate and clear a labelmap as large as the reference geometry.
+                modifierLabelmap = slicer.vtkOrientedImageData()
+                modifierLabelmap.ShallowCopy(referenceGeometryImage)
+            else:
+                modifierLabelmap = self.scriptedEffect.defaultModifierLabelmap()
 
             smoothingMethod = self.scriptedEffect.parameter("SmoothingMethod")
 
