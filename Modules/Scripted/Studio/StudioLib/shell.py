@@ -128,9 +128,9 @@ def fitWindowToScreen(mainWindow, fraction=FIRST_RUN_WINDOW_FRACTION):
     restored = slicer.util.toBool(settings.value("MainWindow/RestoreGeometry", False)) and settings.contains("MainWindow/geometry")
     if restored or mainWindow.isMaximized() or mainWindow.isFullScreen():
         return False
-    screen = mainWindow.screen() if hasattr(mainWindow, "screen") else None
+    screen = mainWindow.screen() if callable(getattr(mainWindow, "screen", None)) else None
     if screen is None:
-        screen = qt.QGuiApplication.primaryScreen()
+        screen = slicer.app.primaryScreen()
     if screen is None:
         return False
     available = screen.availableGeometry
@@ -1572,7 +1572,7 @@ class Shell:
         elif self._escapeHandled:
             self._escapeHandled = False
             return True
-        if int(event.modifiers()) & ~int(qt.Qt.KeypadModifier):
+        if event.modifiers() not in (qt.Qt.NoModifier, qt.Qt.KeypadModifier):
             return False
         if slicer.app.activePopupWidget() is not None or slicer.app.activeModalWidget() is not None:
             return False

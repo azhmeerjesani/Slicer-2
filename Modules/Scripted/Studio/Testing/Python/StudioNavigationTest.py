@@ -231,6 +231,13 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertTrue(press.isAccepted())
             self.assertEqual(interactionNode.GetCurrentInteractionMode(), slicer.vtkMRMLInteractionNode.ViewTransform)
 
+        # Esc with a modifier is left alone
+        studioShell.setFocusMode(True)
+        shiftEscape = qt.QKeyEvent(qt.QEvent.KeyPress, qt.Qt.Key_Escape, qt.Qt.ShiftModifier)
+        qt.QApplication.sendEvent(sliceView, shiftEscape)
+        self.assertTrue(studioShell.focusMode())
+        studioShell.setFocusMode(False)
+
         # A maximized view, the focus mode and an active Segment Editor tool: one state per Esc, innermost
         # first, and the tool is deselected only when nothing else is left. (The Segment Editor itself
         # leaves the place mode when a tool is active.)
@@ -473,7 +480,7 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertFalse(resized)
             return
         self.assertTrue(resized)
-        screen = mainWindow.screen() if hasattr(mainWindow, "screen") else qt.QGuiApplication.primaryScreen()
+        screen = mainWindow.screen() if callable(getattr(mainWindow, "screen", None)) else slicer.app.primaryScreen()
         available = screen.availableGeometry() if callable(screen.availableGeometry) else screen.availableGeometry
         self.assertGreaterEqual(mainWindow.width, int(available.width() * 0.85))
         self.assertGreaterEqual(mainWindow.height, int(available.height() * 0.85))
