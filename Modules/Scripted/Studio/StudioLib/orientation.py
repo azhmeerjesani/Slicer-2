@@ -80,7 +80,8 @@ def directionLetters(direction):
     if length < 1e-9:
         return ""
     unit = [component / length for component in direction]
-    order = sorted(range(3), key=lambda axis: -abs(unit[axis]))
+    # Largest component first; equal components (within rounding) in R, A, S order
+    order = sorted(range(3), key=lambda axis: -round(abs(unit[axis]), 6))
     letters = ""
     for rank, axis in enumerate(order):
         component = unit[axis]

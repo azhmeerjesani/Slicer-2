@@ -9,7 +9,8 @@ make it a place that keeps its state and has a visible way out:
   ``enter()`` restores the effect (and the segment, if the segmentation is still the same).
 - Something is armed on arrival: on the first entry, the Paint effect is activated as soon as a segmentation
   with a selected segment and a source volume exist (for example, right after a scan is opened).
-  A tool deselected with Esc stays deselected: nothing is re-armed until the user picks a tool again.
+  A tool deselected with Esc stays deselected on that lesion: nothing is re-armed until the user picks a tool
+  again, or another lesion is edited (a new case is a new landing, so Paint is armed on it).
   A tool that the Segment Editor deactivated by itself (another segmentation was selected, the scene was
   closed) is armed again on the new segmentation.
 - "Save lesion…": a primary button in the inspector footer (also ``Ctrl+Shift+S`` and ``Ctrl+Enter``, the
@@ -108,7 +109,8 @@ class DrawState:
     """What ``leave()`` records and ``enter()`` restores.
 
     ``effect`` is the name of the active effect, None if the user deselected it, ``_UNSET`` before the first
-    entry. The node and segment IDs identify what was edited.
+    entry. The node and segment IDs identify what was edited. The segmentation node is also kept as a weak
+    reference: node IDs are reused after the scene is closed, so the ID alone does not tell a new case apart.
     """
 
     def __init__(self):
@@ -116,9 +118,22 @@ class DrawState:
         self.segmentationNodeId = None
         self.segmentId = None
         self.sourceVolumeNodeId = None
+        self._segmentationNodeRef = vtk.vtkWeakReference()
 
     def isRecorded(self):
         return self.effect is not _UNSET
+
+    def segmentationNode(self):
+        """The recorded segmentation node, None if there is none or it was deleted."""
+        return self._segmentationNodeRef.Get()
+
+    def setSegmentationNode(self, segmentationNode):
+        self._segmentationNodeRef.Set(segmentationNode)
+        self.segmentationNodeId = segmentationNode.GetID() if segmentationNode is not None else None
+
+    def isDeselectedOn(self, segmentationNode):
+        """True if the user deselected the tool (Esc) while editing ``segmentationNode``."""
+        return self.effect is None and segmentationNode is not None and self.segmentationNode() is segmentationNode
 
     def __repr__(self):
         effect = "<unset>" if self.effect is _UNSET else self.effect
@@ -133,10 +148,14 @@ class _Snapshot:
         self.segmentId = editor.currentSegmentID() or None
         self.sourceVolumeNodeId = editor.sourceVolumeNodeID() or None
         self.canEdit = _canEdit(editor)
+        # Node IDs are reused after the scene is closed: the node itself tells a new case apart
+        self._segmentationNodeRef = vtk.vtkWeakReference()
+        self._segmentationNodeRef.Set(editor.segmentationNode())
 
     def sameTarget(self, other):
-        return (self.segmentationNodeId, self.segmentId, self.sourceVolumeNodeId) == (
-            other.segmentationNodeId, other.segmentId, other.sourceVolumeNodeId)
+        return (self._segmentationNodeRef.Get() is other._segmentationNodeRef.Get()
+                and (self.segmentationNodeId, self.segmentId, self.sourceVolumeNodeId) == (
+                    other.segmentationNodeId, other.segmentId, other.sourceVolumeNodeId))
 
 
 class _DrawSession(VTKObservationMixin):
@@ -193,8 +212,11 @@ class _DrawSession(VTKObservationMixin):
         self._snapshot = None
         self.pendingEffect = None
         self._removeShortcuts()
-        if shell is not None and self.footer is not None and shell.inspectorFooter() == self.footer.widget:
-            shell.setInspectorFooter(None)
+        if self.footer is not None:
+            if shell is not None and shell.inspectorFooter() == self.footer.widget:
+                shell.setInspectorFooter(None)
+            self.footer.dispose()
+            self.footer = None
         self.active = False
 
     def _record(self, editor):
@@ -211,7 +233,11 @@ class _DrawSession(VTKObservationMixin):
                 state.effect = effect
         # Else the module was left first (transient module): its exit() deactivated the effect, and the state
         # holds the effect that was active before (see _evaluate()).
-        state.segmentationNodeId = editor.segmentationNodeID() or None
+        segmentationNode = editor.segmentationNode()
+        if state.effect is None and segmentationNode is not None and not state.isDeselectedOn(segmentationNode):
+            # Deselected on another lesion than the one now edited: the next entry is a new landing
+            state.effect = _UNSET
+        state.setSegmentationNode(segmentationNode)
         state.segmentId = editor.currentSegmentID() or None
         state.sourceVolumeNodeId = editor.sourceVolumeNodeID() or None
 
@@ -220,7 +246,7 @@ class _DrawSession(VTKObservationMixin):
         state = self.state
         scene = slicer.mrmlScene
         segmentationNode = editor.segmentationNode()
-        if (state.segmentId and segmentationNode is not None and segmentationNode.GetID() == state.segmentationNodeId
+        if (state.segmentId and segmentationNode is not None and state.segmentationNode() is segmentationNode
                 and segmentationNode.GetSegmentation().GetSegment(state.segmentId) is not None
                 and editor.currentSegmentID() != state.segmentId):
             editor.setCurrentSegmentID(state.segmentId)
@@ -228,6 +254,9 @@ class _DrawSession(VTKObservationMixin):
             sourceVolumeNode = scene.GetNodeByID(state.sourceVolumeNodeId)
             if sourceVolumeNode is not None and sourceVolumeNode.IsA("vtkMRMLScalarVolumeNode"):
                 editor.setSourceVolumeNode(sourceVolumeNode)
+        if state.effect is None and segmentationNode is not None and not state.isDeselectedOn(segmentationNode):
+            # Deselected with Esc on another lesion (another case was opened meanwhile): a new landing
+            state.effect = _UNSET
         self.pendingEffect = DEFAULT_EFFECT if not state.isRecorded() else state.effect
 
     #
@@ -265,12 +294,19 @@ class _DrawSession(VTKObservationMixin):
                 self.pendingEffect = None
             elif snapshot.effect is None and previous.effect is not None:
                 if snapshot.sameTarget(previous) and snapshot.canEdit:
-                    # Deselected with Esc, Space or the effect button: do not fight it
+                    # Deselected with Esc, Space or the effect button: do not fight it (on this lesion)
                     self.state.effect = None
+                    self.state.setSegmentationNode(editor.segmentationNode())
                     self.pendingEffect = None
                 else:
                     # Deactivated by the editor (another segmentation or segment, scene closed): arm it again
                     self.pendingEffect = previous.effect
+        segmentationNode = editor.segmentationNode()
+        if (snapshot.effect is None and self.state.effect is None and segmentationNode is not None
+                and not self.state.isDeselectedOn(segmentationNode)):
+            # Deselected with Esc on another lesion, and now a new case or lesion is edited: a new landing
+            self.state.effect = _UNSET
+            self.pendingEffect = DEFAULT_EFFECT
         self._tryArm(editor)
         self._updateFooter(editor)
 
@@ -295,6 +331,7 @@ class _DrawSession(VTKObservationMixin):
 
     def _installFooter(self, shell):
         if self.footer is None:
+            # Created on every entry and disposed by leave(): nothing is kept across Classic
             self.footer = _SaveFooter(lambda: saveLesionDialog(self.shell))
         shell.setInspectorFooter(self.footer.widget)
         if not shell.primaryActionLabel():
@@ -347,7 +384,14 @@ def _keyIsFree(mainWindow, keySequence):
     return True
 
 
+#: Widgets that take typed text: Ctrl+Y there must not change the lesion (the user is typing, e.g. a segment name)
+_TEXT_INPUT_CLASSES = ("QLineEdit", "QAbstractSpinBox", "QTextEdit", "QPlainTextEdit", "ctkConsole")
+
+
 def _redo():
+    focusWidget = slicer.app.focusWidget()
+    if focusWidget is not None and any(focusWidget.inherits(className) for className in _TEXT_INPUT_CLASSES):
+        return
     editor = segmentEditor()
     if editor is not None and _isModuleEntered():
         editor.redo()
@@ -376,6 +420,19 @@ class _SaveFooter:
     def setEnabled(self, enabled):
         if self.saveButton.enabled != enabled:
             self.saveButton.setEnabled(enabled)
+
+    def dispose(self):
+        """Unbind the stylesheet and delete the widget (it holds the callback, and so the Draw session)."""
+        ui.bindStyleSheet(self.widget, None)
+        try:
+            self.saveButton.disconnect("clicked()")
+        except Exception:
+            pass
+        self.widget.hide()
+        self.widget.setParent(None)
+        self.widget.deleteLater()
+        self.widget = None
+        self.saveButton = None
 
 
 #: Draw sessions of the shells (one shell per main window)
@@ -546,7 +603,9 @@ def saveLesion(path, segmentationNode, referenceVolumeNode=None, segmentIds=None
     :param referenceVolumeNode: the file has the grid of this volume (the scan or the template), else the
       reference geometry of the segmentation.
     :param segmentIds: segments to write (default: all). Segments get the values 1, 2... in this order, so a
-      single lesion segment is a 0/1 mask (uint8 up to 255 segments).
+      single lesion segment is a 0/1 mask (uint8 up to 255 segments). A label map holds one value per voxel:
+      where segments overlap, the voxel gets the value of the later segment, so an earlier segment can have
+      fewer voxels in the file than in the editor (``saveLesionDialog()`` says so when it saves several segments).
     Raise ``RuntimeError`` on failure. No node is left in the scene.
     """
     if segmentationNode is None:
@@ -610,5 +669,11 @@ def saveLesionDialog(shell=None, path=None):
     if folder != slicer.util.settingsValue(LAST_SAVE_FOLDER_KEY, ""):
         qt.QSettings().setValue(LAST_SAVE_FOLDER_KEY, folder)
     if shell is not None and shell.isActive():
-        shell.toast(_("Saved lesion to {name}").format(name=os.path.basename(path)), 3000)
+        segmentCount = segmentationNode.GetSegmentation().GetNumberOfSegments()
+        if segmentCount > 1:
+            message = _("Saved {count} segments to {name} (values 1 to {count}; where they overlap, the later one wins)").format(
+                count=segmentCount, name=os.path.basename(path))
+        else:
+            message = _("Saved lesion to {name}").format(name=os.path.basename(path))
+        shell.toast(message, 4000 if segmentCount > 1 else 3000)
     return path

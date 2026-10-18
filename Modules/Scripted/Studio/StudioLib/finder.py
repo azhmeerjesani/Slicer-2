@@ -109,7 +109,7 @@ _GROUP_CORE = 0
 _GROUP_OTHER = 1
 _GROUP_DEMOTED = 2
 
-_DEMOTED_CATEGORIES = ("Registration", "Legacy", "Developer Tools", "Testing", "Utilities", "Converters")
+_DEMOTED_CATEGORIES = ("Registration", "Legacy", "Developer Tools", "Testing")
 _DEMOTED_TITLE_PATTERN = re.compile(r"(?i)\(BRAINS\)|\bregistration\b|\bplugin\b")
 
 _WORD_PATTERN = re.compile(r"[A-Za-z0-9]+")
@@ -266,6 +266,10 @@ class _FinderRanking:
         self.ranked = []
         self.classicWindowTitle = dialog.windowTitle
         self.classicHideAll = bool(_property(self.filterModel, "hideAllWhenShowModulesIsEmpty"))
+        # setShowModules() sets a regular expression, which also sets the case sensitivity of the filter
+        self.classicCaseSensitivity = _property(self.filterModel, "filterCaseSensitivity")
+        self.classicSortColumn = self.filterModel.sortColumn()
+        self.classicSortOrder = self.filterModel.sortOrder()
         self.connections = []
         # Connected after the dialog's own slots, so the ranking runs after the dialog's filter
         self._connect(self.searchBox, "textChanged(QString)", self._onFilterChanged)
@@ -340,9 +344,10 @@ class _FinderRanking:
         self.filterModel.hideAllWhenShowModulesIsEmpty = self.classicHideAll
         self.filterModel.setShowModules([])
         self.dialog.setSearchInAllText(self._fullTextSearch())
+        self.filterModel.filterCaseSensitivity = self.classicCaseSensitivity
         text = self.searchBox.text
         self.filterModel.setFilterFixedString(text() if callable(text) else text)
-        self.filterModel.sort(-1)
+        self.filterModel.sort(self.classicSortColumn, self.classicSortOrder)
 
     def dispose(self):
         for sender, signal, slot in reversed(self.connections):

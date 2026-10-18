@@ -684,6 +684,35 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self._pump()
         self.assertEqual(self._effect(editor), "Paint")
 
+        # Esc is remembered for the lesion it was pressed on: a new case is a new landing, Paint is armed on it
+        from StudioLib import importer
+
+        editor.setActiveEffect(None)
+        self._pump()
+        self.assertIsNone(draw.drawState(studioShell).effect)
+        importer.loadFiles([self._scanFile("sub-08_T1w.nii.gz")], studioShell)
+        self._pump(8)
+        self.assertEqual(editor.sourceVolumeNode().GetName(), "sub-08_T1w")
+        self.assertEqual(self._effect(editor), "Paint")
+
+        # The same after the scene is closed (node IDs are reused) ...
+        editor.setActiveEffect(None)
+        self._pump()
+        slicer.mrmlScene.Clear(0)
+        importer.loadFiles([self._scanFile("sub-09_T1w.nii.gz")], studioShell)
+        self._pump(8)
+        self.assertEqual(self._effect(editor), "Paint")
+
+        # ... and when the new case is opened while Draw is not shown
+        editor.setActiveEffect(None)
+        self._pump()
+        studioShell.switchTo("library")
+        self._pump()
+        importer.loadFiles([self._scanFile("sub-10_T1w.nii.gz")], studioShell)
+        self._pump(8)
+        self.assertEqual(studioShell.currentWorkspace(), "draw")
+        self.assertEqual(self._effect(editor), "Paint")
+
     def test_11_save_lesion(self):
         """Save lesion writes a NIfTI mask on the scan grid, readable by Slicer, with no node left behind (NFT-01, CRT-05)."""
         import os
@@ -754,10 +783,26 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             else:
                 settings.setValue(draw.LAST_SAVE_FOLDER_KEY, previousFolder)
 
+        # Several segments: values 1, 2... (the later segment wins where they overlap), and the toast says so
+        segmentationNode.GetSegmentation().AddEmptySegment("", "Second lesion")
+        written = draw.saveLesionDialog(studioShell, path=os.path.join(os.path.dirname(path), "lesions", "two.nii.gz"))
+        self.assertIsNotNone(written)
+        self.assertIn("2 segments", studioShell._toast.text())
+
+        # The footer is deleted when Draw is left, and created again on the next entry
+        from StudioLib import ui
+
+        footerWidget = draw.session(studioShell).footer.widget
         studioShell.switchTo("library")
         self._pump()
-        self.assertFalse(saveButton.isVisible())
+        slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+        self.assertIsNone(self.mainWindow.findChild("QPushButton", "StudioSaveLesionButton"))
+        self.assertIsNone(draw.session(studioShell).footer)
+        self.assertFalse([entry for entry in ui._boundStyleSheets if entry[0] is footerWidget])
         self.assertNotIn("Ctrl+Shift+S", [portableKey(shortcut.key) for shortcut in studioShell.shortcuts()])
+        studioShell.switchTo("draw")
+        self._pump()
+        self.assertIsNotNone(self.mainWindow.findChild("QPushButton", "StudioSaveLesionButton"))
 
     def test_12_recent_already_open(self):
         """A Recent row or an Open… of a file that is already loaded does not load a duplicate in Studio (NAV-05)."""
@@ -817,6 +862,19 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         count = lambda: int(slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, sourceVolumeNode).sum())
         editor.undo()
         self.assertEqual(count(), 0)
+        # Not while the user types in a text field (Ctrl+Y must not change the lesion then)
+        lineEdit = qt.QLineEdit(self.mainWindow)
+        lineEdit.show()
+        self.mainWindow.activateWindow()
+        lineEdit.setFocus()
+        self._pump()
+        if slicer.app.focusWidget() == lineEdit:
+            draw._redo()
+            self.assertEqual(count(), 0)
+        lineEdit.hide()
+        lineEdit.setParent(None)
+        lineEdit.deleteLater()
+        self._pump()
         draw._redo()
         self.assertEqual(count(), voxels)
 
