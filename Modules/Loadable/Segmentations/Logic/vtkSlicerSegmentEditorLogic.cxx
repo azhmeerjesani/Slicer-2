@@ -46,6 +46,7 @@ Copyright (c) Laboratory for Percutaneous Surgery (PerkLab)
 #include <vtkSegment.h>
 #include <vtkSegmentation.h>
 #include <vtkSegmentationHistory.h>
+#include <vtkSegmentationModifier.h>
 
 // VTK includes
 #include <vtkAlgorithmOutput.h>
@@ -216,6 +217,69 @@ bool IsLabelToEraseUnderModifier(vtkOrientedImageData* labelmap, vtkOrientedImag
     default: break;
   }
   return found;
+}
+
+//----------------------------------------------------------------------------
+template <class ScalarType>
+bool HasPositiveVoxelGeneric(vtkImageData* image, const int extent[6])
+{
+  for (int z = extent[4]; z <= extent[5]; ++z)
+  {
+    for (int y = extent[2]; y <= extent[3]; ++y)
+    {
+      ScalarType* voxelPtr = static_cast<ScalarType*>(image->GetScalarPointer(extent[0], y, z));
+      for (int x = extent[0]; x <= extent[1]; ++x, ++voxelPtr)
+      {
+        if (*voxelPtr > 0)
+        {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+//----------------------------------------------------------------------------
+/// Shrink the labelmap of a segment to its effective extent (extent of the non-zero voxels), if it is not already.
+/// The voxels do not change, therefore other representations of the segments are kept.
+/// Checking a labelmap that is already shrunk is fast: it has non-zero voxels on all faces of its extent.
+void ShrinkLabelmapToEffectiveExtent(vtkSegmentation* segmentation, const std::string& segmentID, vtkOrientedImageData* labelmap)
+{
+  int* extent = labelmap->GetExtent();
+  if (!IsExtentNonEmpty(extent) || !labelmap->GetPointData()->GetScalars() || labelmap->GetNumberOfScalarComponents() != 1)
+  {
+    return;
+  }
+  bool shrunk = true;
+  for (int face = 0; face < 6 && shrunk; ++face)
+  {
+    int faceExtent[6] = { extent[0], extent[1], extent[2], extent[3], extent[4], extent[5] };
+    faceExtent[face - face % 2] = extent[face];
+    faceExtent[face - face % 2 + 1] = extent[face];
+    switch (labelmap->GetScalarType())
+    {
+      vtkTemplateMacro(shrunk = HasPositiveVoxelGeneric<VTK_TT>(labelmap, faceExtent));
+      default: break;
+    }
+  }
+  if (shrunk)
+  {
+    return;
+  }
+  // vtkSegmentationModifier shrinks the labelmap after the modification, without invalidating other representations.
+  // A minimum operation with a modifier voxel that is outside the labelmap does not change any voxel.
+  vtkNew<vtkOrientedImageData> outsideModifier;
+  outsideModifier->SetExtent(extent[1] + 1, extent[1] + 1, extent[2], extent[2], extent[4], extent[4]);
+  outsideModifier->SetSpacing(labelmap->GetSpacing());
+  outsideModifier->SetOrigin(labelmap->GetOrigin());
+  outsideModifier->CopyDirections(labelmap);
+  outsideModifier->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+  vtkOrientedImageDataResample::FillImage(outsideModifier, VTK_UNSIGNED_CHAR_MAX);
+  std::vector<std::string> sharedSegmentIDs;
+  segmentation->GetSegmentIDsSharingBinaryLabelmapRepresentation(segmentID, sharedSegmentIDs, true);
+  vtkSegmentationModifier::ModifyBinaryLabelmap(
+    outsideModifier, segmentation, segmentID, vtkSegmentationModifier::MODE_MERGE_MIN, nullptr, /*minimumOfAllSegments=*/true, false, sharedSegmentIDs);
 }
 } // namespace
 
@@ -2300,6 +2364,10 @@ void vtkSlicerSegmentEditorLogic::ModifySegmentByLabelmap(vtkMRMLSegmentationNod
         }
         if (!IsLabelToEraseUnderModifier(currentLabelmap, modifierLabelmap, inverterExtent, protectedLabelValues))
         {
+          // Erasing would have shrunk the labelmap to its effective extent. Do it here, too (only changes
+          // labelmaps that are not shrunk yet, such as ones loaded from file), as large labelmap extents
+          // make display, undo and masking slower.
+          ShrinkLabelmapToEffectiveExtent(segmentationNode->GetSegmentation(), eraseSegmentID, currentLabelmap);
           continue;
         }
       }

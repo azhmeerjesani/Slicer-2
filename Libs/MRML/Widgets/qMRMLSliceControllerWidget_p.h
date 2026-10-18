@@ -32,6 +32,9 @@
 // We mean it.
 //
 
+// Qt includes
+#include <QIcon>
+
 // CTK includes
 #include <ctkPimpl.h>
 #include <ctkVTKObject.h>
@@ -106,6 +109,15 @@ public:
   /// the "Reformat" string if sliceToRAS is different one of the preset.
   static void updateSliceOrientationSelector(vtkMRMLSliceNode* sliceNode, QComboBox* sliceOrientationSelector);
 
+  /// Update the spin boxes of the popup menus that show slice node properties (field of view,
+  /// slice model). They are only updated while the popup is visible, and when it is shown.
+  void updatePopupWidgetsFromMRMLSliceNode();
+
+  /// Update the range, step and value of the slice offset slider from the slice logic.
+  void updateSliceOffsetSliderFromSliceLogic();
+
+  bool eventFilter(QObject* object, QEvent* event) override;
+
 public slots:
   /// Update widget state when the scene is modified
   void updateFromMRMLScene();
@@ -173,6 +185,15 @@ public:
   ctkDynamicSpacer* SliderSpacer;
   /// Slicer offset resolution without applying display scaling.
   double SliceOffsetResolution{ 1.0 };
+  /// Slice offset range last set with setSliceOffsetRange() (valid if SliceOffsetRangeSet is true).
+  /// The slider range is only set again when it changes.
+  double SliceOffsetRange[2]{ 0.0, 0.0 };
+  bool SliceOffsetRangeSet{ false };
+  /// True while an update of the slice offset slider from the slice logic is queued: the slice logic can be
+  /// modified several times per slice change, the slider is only updated once.
+  bool SliceOffsetSliderUpdatePending{ false };
+  /// True if the popup widgets need an update when the popup is shown
+  bool PopupWidgetsUpdatePending{ false };
   double LastLabelMapOpacity;
   double LastForegroundOpacity;
   double LastBackgroundOpacity;
@@ -200,6 +221,9 @@ public:
   QSpinBox* SliceModelDimensionYSpinBox;
 
   QSize ViewSize;
+
+  QIcon AutomaticSliceSpacingIcon;
+  QIcon ManualSliceSpacingIcon;
 
   ctkSignalMapper* OrientationMarkerTypesMapper;
   ctkSignalMapper* OrientationMarkerSizesMapper;

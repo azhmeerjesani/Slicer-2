@@ -19,6 +19,7 @@ class SegmentEditorIslandsEffect(AbstractScriptedSegmentEditorEffect):
         scriptedEffect.title = _("Islands")
         AbstractScriptedSegmentEditorEffect.__init__(self, scriptedEffect)
         self.widgetToOperationNameMap = {}
+        self.showWarningPopups = False
 
     def clone(self):
         import qSlicerSegmentationsEditorEffectsPythonQt as effects
@@ -94,11 +95,22 @@ about each operation, hover the mouse over the option and wait for the tooltip t
         self.minimumSizeSpinBox.setMaximum(vtk.VTK_INT_MAX)
         self.minimumSizeSpinBox.setValue(1000)
         self.minimumSizeSpinBox.suffix = _(" voxels")
-        self.minimumSizeLabel = self.scriptedEffect.addLabeledOptionsWidget(_("Minimum size:"), self.minimumSizeSpinBox)
+        self.minimumSizeVolumeLabel = qt.QLabel()
+        self.minimumSizeVolumeLabel.setToolTip(_("Minimum size in physical units. Computed from the segment's spacing and the specified minimum size."))
+        minimumSizeLayout = qt.QHBoxLayout()
+        minimumSizeLayout.addWidget(self.minimumSizeSpinBox)
+        minimumSizeLayout.addWidget(self.minimumSizeVolumeLabel)
+        self.minimumSizeLabel = self.scriptedEffect.addLabeledOptionsWidget(_("Minimum size:"), minimumSizeLayout)
 
         self.applyButton = qt.QPushButton(_("Apply"))
         self.applyButton.objectName = self.__class__.__name__ + "Apply"
         self.scriptedEffect.addOptionsWidget(self.applyButton)
+
+        self.statusLabel = qt.QLabel()
+        self.statusLabel.objectName = self.__class__.__name__ + "Status"
+        self.statusLabel.wordWrap = True
+        self.statusLabel.hide()
+        self.scriptedEffect.addOptionsWidget(self.statusLabel)
 
         for operationRadioButton in self.operationRadioButtons:
             operationRadioButton.connect(
@@ -107,12 +119,25 @@ about each operation, hover the mouse over the option and wait for the tooltip t
 
         self.minimumSizeSpinBox.connect("valueChanged(int)", self.updateMRMLFromGUI)
 
-        self.applyButton.connect("clicked()", self.onApply)
+        self.applyButton.connect("clicked()", self.onApplyButtonClicked)
 
     def onOperationSelectionChanged(self, operationName, toggle):
         if not toggle:
             return
+        self.setStatusText("")
         self.scriptedEffect.setParameter("Operation", operationName)
+
+    def setStatusText(self, text):
+        self.statusLabel.text = text
+        self.statusLabel.setVisible(bool(text))
+
+    def onApplyButtonClicked(self):
+        # Popups are only shown when the operation is started from the GUI (not from scripts)
+        self.showWarningPopups = True
+        try:
+            self.onApply()
+        finally:
+            self.showWarningPopups = False
 
     def currentOperationRequiresSegmentSelection(self):
         operationName = self.scriptedEffect.parameter("Operation")
@@ -122,10 +147,13 @@ about each operation, hover the mouse over the option and wait for the tooltip t
         # Make sure the user wants to do the operation, even if the segment is not visible
         if not self.scriptedEffect.confirmCurrentSegmentVisible():
             return
+        self.setStatusText("")
         operationName = self.scriptedEffect.parameter("Operation")
         minimumSize = self.scriptedEffect.integerParameter("MinimumSize")
         if operationName == KEEP_LARGEST_ISLAND:
-            self.splitSegments(minimumSize=minimumSize, maxNumberOfSegments=1)
+            # The largest island is kept regardless of its size (minimum size is not used),
+            # so that a small segment is not removed entirely
+            self.splitSegments(minimumSize=0, maxNumberOfSegments=1)
         elif operationName == REMOVE_SMALL_ISLANDS:
             self.splitSegments(minimumSize=minimumSize, split=False)
         elif operationName == SPLIT_ISLANDS_TO_SEGMENTS:
@@ -138,11 +166,30 @@ about each operation, hover the mouse over the option and wait for the tooltip t
         """
         # This can be a long operation - indicate it to the user
         qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
+        try:
+            emptiedSegmentName = self._splitSegments(minimumSize, maxNumberOfSegments, split)
+        finally:
+            qt.QApplication.restoreOverrideCursor()
 
+        if emptiedSegmentName is not None:
+            # Do not let the segment disappear silently
+            message = _("All islands of segment '{segmentName}' were smaller than the minimum size ({minimumSize} voxels), "
+                        "therefore the segment is now empty. Click Undo to restore it.").format(
+                segmentName=emptiedSegmentName, minimumSize=minimumSize)
+            self.setStatusText(message)
+            if self.showWarningPopups and not slicer.app.testingEnabled():
+                slicer.util.warningDisplay(message, windowTitle=_("Islands"))
+            else:
+                logging.warning(message)
+
+    def _splitSegments(self, minimumSize, maxNumberOfSegments, split):
+        """Implementation of splitSegments. Returns the segment name if all its islands were removed, None otherwise."""
         self.scriptedEffect.saveStateForUndo()
 
-        # Get modifier labelmap
-        selectedSegmentLabelmap = self.scriptedEffect.selectedSegmentLabelmap()
+        # Get modifier labelmap.
+        # Islands are within the segment's extent and the selected segment is replaced (the "Set" modification mode
+        # clears it everywhere), therefore it is enough to process the segment's extent.
+        selectedSegmentLabelmap = self.croppedSelectedSegmentLabelmap(1)
 
         castIn = vtk.vtkImageCast()
         castIn.SetInputData(selectedSegmentLabelmap)
@@ -254,7 +301,7 @@ about each operation, hover the mouse over the option and wait for the tooltip t
             self.scriptedEffect.modifySegmentByLabelmap(segmentationNode, selectedSegmentID, modifierImage,
                                                         slicer.qSlicerSegmentEditorAbstractEffect.ModificationModeSet)
 
-        qt.QApplication.restoreOverrideCursor()
+        return selectedSegmentName if (numberOfIslands == 0 and islandOrigCount > 0) else None
 
     def processInteractionEvents(self, callerInteractor, eventId, viewWidget):
         import vtkSegmentationCorePython as vtkSegmentationCore
@@ -411,13 +458,26 @@ about each operation, hover the mouse over the option and wait for the tooltip t
         # qSlicerSegmentEditorAbstractEffect should be improved so that it triggers a cursor update
         # self.scriptedEffect.showEffectCursorInSliceView = segmentSelectionRequired
 
-        showMinimumSizeOption = operationName in [KEEP_LARGEST_ISLAND, REMOVE_SMALL_ISLANDS, SPLIT_ISLANDS_TO_SEGMENTS]
+        # Keep largest island keeps the largest island regardless of its size
+        showMinimumSizeOption = operationName in [REMOVE_SMALL_ISLANDS, SPLIT_ISLANDS_TO_SEGMENTS]
         self.minimumSizeSpinBox.setEnabled(showMinimumSizeOption)
         self.minimumSizeLabel.setEnabled(showMinimumSizeOption)
+        self.minimumSizeVolumeLabel.setEnabled(showMinimumSizeOption)
 
+        minimumSize = self.scriptedEffect.integerParameter("MinimumSize")
         self.minimumSizeSpinBox.blockSignals(True)
-        self.minimumSizeSpinBox.value = self.scriptedEffect.integerParameter("MinimumSize")
+        self.minimumSizeSpinBox.value = minimumSize
         self.minimumSizeSpinBox.blockSignals(False)
+
+        spacing = self.segmentSpacing()
+        minimumSizeMm3 = minimumSize * spacing[0] * spacing[1] * spacing[2]
+        if minimumSizeMm3 >= 100:
+            minimumSizeMm3Text = f"{minimumSizeMm3:.0f}"
+        elif minimumSizeMm3 >= 1:
+            minimumSizeMm3Text = f"{minimumSizeMm3:.1f}"
+        else:
+            minimumSizeMm3Text = f"{minimumSizeMm3:.3g}"
+        self.minimumSizeVolumeLabel.text = _("= {volume} mm³").format(volume=minimumSizeMm3Text)
 
     def updateMRMLFromGUI(self):
         # Operation is managed separately

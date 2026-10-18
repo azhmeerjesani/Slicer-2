@@ -28,6 +28,7 @@
 #include <vtkMRMLDisplayNode.h>
 #include <vtkMRMLInteractionNode.h>
 #include <vtkMRMLScene.h>
+#include <vtkMRMLSliceDisplayNode.h>
 #include <vtkMRMLSliceIntersectionWidget.h>
 #include <vtkMRMLSliceLogic.h>
 #include <vtkMRMLSliceNode.h>
@@ -36,6 +37,7 @@
 #include <vtkActor2D.h>
 #include <vtkCallbackCommand.h>
 #include <vtkCellArray.h>
+#include <vtkCollection.h>
 #include <vtkMatrix4x4.h>
 #include <vtkNew.h>
 #include <vtkObjectFactory.h>
@@ -55,6 +57,9 @@
 // STD includes
 #include <algorithm>
 #include <cassert>
+#include <cstring>
+#include <utility>
+#include <vector>
 
 //---------------------------------------------------------------------------
 vtkStandardNewMacro(vtkMRMLCrosshairDisplayableManager);
@@ -92,6 +97,15 @@ public:
   // Has crosshair property changed?
   bool HasCrosshairPropertyChanged();
 
+  // Observe the slice logics of the other slice views, to render this view when the slice intersections
+  // it shows move. The slice intersection representation updates itself, but does not request a render.
+  void UpdateIntersectingSliceLogicObservations();
+  void RemoveIntersectingSliceLogicObservations();
+  static void IntersectingSliceLogicModifiedCallback(vtkObject* caller, unsigned long eid, void* clientData, void* callData);
+  static void SliceLogicsModifiedCallback(vtkObject* caller, unsigned long eid, void* clientData, void* callData);
+  // Return true if the slice intersections (or thick slab) of the slice of this logic are displayed in slice views
+  static bool AreIntersectionsDisplayed(vtkMRMLSliceLogic* sliceLogic);
+
   vtkMRMLCrosshairDisplayableManager* External;
   int PickState;
   int ActionState;
@@ -104,6 +118,12 @@ public:
   float CrosshairColor[3];
 
   vtkSmartPointer<vtkMRMLSliceIntersectionWidget> SliceIntersectionWidget;
+
+  vtkWeakPointer<vtkCollection> ObservedSliceLogics;
+  unsigned long ObservedSliceLogicsTag{ 0 };
+  std::vector<std::pair<vtkWeakPointer<vtkMRMLSliceLogic>, unsigned long>> IntersectingSliceLogicTags;
+  vtkNew<vtkCallbackCommand> IntersectingSliceLogicModifiedCommand;
+  vtkNew<vtkCallbackCommand> SliceLogicsModifiedCommand;
 };
 
 //---------------------------------------------------------------------------
@@ -124,11 +144,16 @@ vtkMRMLCrosshairDisplayableManager::vtkInternal::vtkInternal(vtkMRMLCrosshairDis
   this->CrosshairColor[1] = 0.8f;
   this->CrosshairColor[2] = 0.1f;
   this->SliceIntersectionWidget = vtkSmartPointer<vtkMRMLSliceIntersectionWidget>::New();
+  this->IntersectingSliceLogicModifiedCommand->SetClientData(external);
+  this->IntersectingSliceLogicModifiedCommand->SetCallback(vtkInternal::IntersectingSliceLogicModifiedCallback);
+  this->SliceLogicsModifiedCommand->SetClientData(external);
+  this->SliceLogicsModifiedCommand->SetCallback(vtkInternal::SliceLogicsModifiedCallback);
 }
 
 //---------------------------------------------------------------------------
 vtkMRMLCrosshairDisplayableManager::vtkInternal::~vtkInternal()
 {
+  this->RemoveIntersectingSliceLogicObservations();
   this->SetCrosshairNode(nullptr);
 
   if (this->SliceIntersectionWidget)
@@ -222,8 +247,11 @@ void vtkMRMLCrosshairDisplayableManager::vtkInternal::UpdateIntersectingSliceNod
   if (this->External->GetMRMLScene() == nullptr)
   {
     this->SliceIntersectionWidget->SetSliceNode(nullptr);
+    this->RemoveIntersectingSliceLogicObservations();
     return;
   }
+
+  this->UpdateIntersectingSliceLogicObservations();
 
   vtkMRMLApplicationLogic* mrmlAppLogic = this->External->GetMRMLApplicationLogic();
 
@@ -238,6 +266,110 @@ void vtkMRMLCrosshairDisplayableManager::vtkInternal::UpdateIntersectingSliceNod
   {
     this->SliceIntersectionWidget->SetSliceNode(this->GetSliceNode());
   }
+}
+
+//---------------------------------------------------------------------------
+void vtkMRMLCrosshairDisplayableManager::vtkInternal::UpdateIntersectingSliceLogicObservations()
+{
+  vtkMRMLApplicationLogic* mrmlAppLogic = this->External->GetMRMLApplicationLogic();
+  vtkCollection* sliceLogics = mrmlAppLogic ? mrmlAppLogic->GetSliceLogics() : nullptr;
+  if (sliceLogics != this->ObservedSliceLogics)
+  {
+    if (this->ObservedSliceLogics)
+    {
+      this->ObservedSliceLogics->RemoveObserver(this->ObservedSliceLogicsTag);
+    }
+    this->ObservedSliceLogics = sliceLogics;
+    this->ObservedSliceLogicsTag = sliceLogics ? sliceLogics->AddObserver(vtkCommand::ModifiedEvent, this->SliceLogicsModifiedCommand) : 0;
+  }
+
+  // Observe all the slice logics but the one of this view (this view is rendered when its own slice changes)
+  std::vector<vtkMRMLSliceLogic*> intersectingSliceLogics;
+  if (sliceLogics)
+  {
+    vtkMRMLSliceNode* sliceNode = this->GetSliceNode();
+    vtkCollectionSimpleIterator it;
+    vtkMRMLSliceLogic* sliceLogic = nullptr;
+    for (sliceLogics->InitTraversal(it); (sliceLogic = vtkMRMLSliceLogic::SafeDownCast(sliceLogics->GetNextItemAsObject(it)));)
+    {
+      if (sliceNode == nullptr || sliceLogic->GetSliceNode() != sliceNode)
+      {
+        intersectingSliceLogics.push_back(sliceLogic);
+      }
+    }
+  }
+  bool unchanged = (intersectingSliceLogics.size() == this->IntersectingSliceLogicTags.size());
+  for (size_t index = 0; unchanged && index < intersectingSliceLogics.size(); ++index)
+  {
+    unchanged = (intersectingSliceLogics[index] == this->IntersectingSliceLogicTags[index].first.GetPointer());
+  }
+  if (unchanged)
+  {
+    return;
+  }
+  this->RemoveIntersectingSliceLogicObservations();
+  for (vtkMRMLSliceLogic* sliceLogic : intersectingSliceLogics)
+  {
+    unsigned long tag = sliceLogic->AddObserver(vtkCommand::ModifiedEvent, this->IntersectingSliceLogicModifiedCommand);
+    this->IntersectingSliceLogicTags.emplace_back(sliceLogic, tag);
+  }
+}
+
+//---------------------------------------------------------------------------
+void vtkMRMLCrosshairDisplayableManager::vtkInternal::RemoveIntersectingSliceLogicObservations()
+{
+  for (std::pair<vtkWeakPointer<vtkMRMLSliceLogic>, unsigned long>& sliceLogicTag : this->IntersectingSliceLogicTags)
+  {
+    if (sliceLogicTag.first)
+    {
+      sliceLogicTag.first->RemoveObserver(sliceLogicTag.second);
+    }
+  }
+  this->IntersectingSliceLogicTags.clear();
+  if (this->ObservedSliceLogics)
+  {
+    this->ObservedSliceLogics->RemoveObserver(this->ObservedSliceLogicsTag);
+    this->ObservedSliceLogics = nullptr;
+  }
+  this->ObservedSliceLogicsTag = 0;
+}
+
+//---------------------------------------------------------------------------
+void vtkMRMLCrosshairDisplayableManager::vtkInternal::IntersectingSliceLogicModifiedCallback(vtkObject* caller,
+                                                                                             unsigned long vtkNotUsed(eid),
+                                                                                             void* clientData,
+                                                                                             void* vtkNotUsed(callData))
+{
+  vtkMRMLCrosshairDisplayableManager* self = vtkMRMLCrosshairDisplayableManager::SafeDownCast(static_cast<vtkObject*>(clientData));
+  if (self && vtkInternal::AreIntersectionsDisplayed(vtkMRMLSliceLogic::SafeDownCast(caller)))
+  {
+    self->RequestRender();
+  }
+}
+
+//---------------------------------------------------------------------------
+void vtkMRMLCrosshairDisplayableManager::vtkInternal::SliceLogicsModifiedCallback(vtkObject* vtkNotUsed(caller),
+                                                                                  unsigned long vtkNotUsed(eid),
+                                                                                  void* clientData,
+                                                                                  void* vtkNotUsed(callData))
+{
+  vtkMRMLCrosshairDisplayableManager* self = vtkMRMLCrosshairDisplayableManager::SafeDownCast(static_cast<vtkObject*>(clientData));
+  if (self)
+  {
+    self->Internal->UpdateIntersectingSliceLogicObservations();
+  }
+}
+
+//---------------------------------------------------------------------------
+bool vtkMRMLCrosshairDisplayableManager::vtkInternal::AreIntersectionsDisplayed(vtkMRMLSliceLogic* sliceLogic)
+{
+  vtkMRMLSliceDisplayNode* displayNode = sliceLogic ? sliceLogic->GetSliceDisplayNode() : nullptr;
+  if (!displayNode)
+  {
+    return false;
+  }
+  return displayNode->GetIntersectingSlicesVisibility() || displayNode->GetIntersectingThickSlabVisibility() //
+         || displayNode->GetIntersectingSlicesInteractive() || displayNode->GetIntersectingThickSlabInteractive();
 }
 
 //---------------------------------------------------------------------------
@@ -256,6 +388,14 @@ vtkMRMLCrosshairNode* vtkMRMLCrosshairDisplayableManager::FindCrosshairNode(vtkM
   if (scene == nullptr)
   {
     return nullptr;
+  }
+
+  // The crosshair name is its singleton tag, so the "default" crosshair node normally has
+  // this ID: look it up directly, as this is called at every mouse move.
+  vtkMRMLCrosshairNode* defaultCrosshairNode = vtkMRMLCrosshairNode::SafeDownCast(scene->GetNodeByID("vtkMRMLCrosshairNodedefault"));
+  if (defaultCrosshairNode && defaultCrosshairNode->GetCrosshairName() && strcmp(defaultCrosshairNode->GetCrosshairName(), "default") == 0)
+  {
+    return defaultCrosshairNode;
   }
 
   vtkMRMLNode* node;
@@ -449,6 +589,7 @@ void vtkMRMLCrosshairDisplayableManager::UpdateFromMRMLScene()
 void vtkMRMLCrosshairDisplayableManager::UnobserveMRMLScene()
 {
   this->Internal->SliceIntersectionWidget->SetSliceNode(nullptr);
+  this->Internal->RemoveIntersectingSliceLogicObservations();
   this->Internal->SetCrosshairNode(nullptr);
 }
 
@@ -479,8 +620,12 @@ void vtkMRMLCrosshairDisplayableManager::OnMRMLNodeModified(vtkMRMLNode* vtkNotU
     lastRas[2] = ras[2];
   }
 
-  // Request a render
-  this->RequestRender();
+  // Request a render, unless the crosshair is not displayed and was not rebuilt
+  // (the crosshair node is modified at every mouse move, and is observed in every view)
+  if (builtCrosshair || this->Internal->CrosshairMode != vtkMRMLCrosshairNode::NoCrosshair)
+  {
+    this->RequestRender();
+  }
 }
 
 //---------------------------------------------------------------------------
@@ -516,6 +661,14 @@ void vtkMRMLCrosshairDisplayableManager::OnMRMLSliceNodeModifiedEvent()
     }
 
     this->OnMRMLNodeModified(this->Internal->CrosshairNode);
+
+    // The slice node of this view changed: keep requesting a render even if the crosshair is not displayed,
+    // as other content of this view may depend on the slice node (for example, the slice intersections are
+    // updated in all views by modifying all slice nodes in vtkMRMLApplicationLogic::SetIntersectingSlicesEnabled).
+    if (this->Internal->CrosshairMode == vtkMRMLCrosshairNode::NoCrosshair)
+    {
+      this->RequestRender();
+    }
   }
 }
 

@@ -23,10 +23,17 @@ budget is evaluated against the ``--compare`` JSON). ``--compare`` prints the me
 by more than ``--tolerance`` (15%) versus a previous JSON and exits 1 if there are any. Differences
 smaller than ``--min-delta-ms`` are treated as noise.
 
+Null means FAIL for the gate: a metric that is null, or that has an entry in "errors" (a failed
+startup run, or a run of a ``--merge`` input), is a failed measurement and makes every mode exit 1,
+with or without ``--check`` / ``--compare``. So does a metric that the ``--compare`` JSON has a value
+for but that this run skipped. Metrics that are merely absent (not selected with ``--only``) are not
+failures.
+
 ``--only`` takes metric names or measurement group names (see ``--list``). A group always measures
 all of its metrics, but only the requested metrics are written.
 
-Exit codes: 0 success, 1 budget exceeded or regression found, 2 usage or internal error.
+Exit codes: 0 success, 1 failed measurement, budget exceeded or regression found, 2 usage or
+internal error.
 """
 
 import argparse
@@ -72,7 +79,8 @@ BUDGETS = {
 
 # Measurement groups: (group name, metrics it produces, InSlicerBench method).
 GROUPS = (
-    ("module_switch", ("module_switch_cold_ms", "module_switch_warm_ms", "segment_editor_first_open_ms"), "measureModuleSwitch"),
+    ("module_switch", ("module_switch_cold_ms", "module_switch_warm_ms", "module_switch_warm_select_only_ms",
+                       "segment_editor_first_open_ms"), "measureModuleSwitch"),
     ("studio", ("studio_apply_ms", "workspace_switch_ms"), "measureStudio"),
     ("layout", ("layout_switch_ms",), "measureLayoutSwitch"),
     ("slices", ("hover_ms", "scroll_step_ms", "noop_modified_ms", "slice_logic_modified_per_step",
@@ -109,7 +117,10 @@ def minimumDelta(name, minDeltaMs):
 
 
 def checkBudgets(metrics, previousMetrics=None):
-    """Return (failures, lines) for the metrics that have a budget."""
+    """Return (failures, lines) for the metrics that have a budget.
+
+    Null metrics are not evaluated here: they are failed measurements (see measurementFailures).
+    """
     failures = []
     lines = []
     for name, budget in BUDGETS.items():
@@ -119,7 +130,8 @@ def checkBudgets(metrics, previousMetrics=None):
         if isinstance(budget, dict):
             previous = (previousMetrics or {}).get(name)
             if previous is None:
-                lines.append(f"  {name:40s} {value:12.3f}  relative budget +{budget['relative']:.0%}: not checked (needs --compare)")
+                reason = "needs --compare" if previousMetrics is None else "no value in the --compare JSON"
+                lines.append(f"  {name:40s} {value:12.3f}  relative budget +{budget['relative']:.0%}: not checked ({reason})")
                 continue
             limit = previous * (1.0 + budget["relative"])
             budgetText = f"<= {limit:.3f} (+{budget['relative']:.0%} of {previous:.3f})"
@@ -134,13 +146,20 @@ def checkBudgets(metrics, previousMetrics=None):
 
 
 def compareMetrics(metrics, previousMetrics, tolerance, minDeltaMs):
-    """Return (regressions, lines): metrics that increased by more than tolerance versus previousMetrics."""
+    """Return (regressions, lines): metrics that increased by more than tolerance versus previousMetrics.
+
+    Metrics that are null now but had a value before are listed, but not returned: they are failed
+    measurements (see measurementFailures).
+    """
     regressions = []
     lines = []
     for name in sorted(metrics):
         value = metrics[name]
         previous = previousMetrics.get(name)
-        if value is None or previous is None:
+        if previous is None:
+            continue
+        if value is None:
+            lines.append(f"  {name:40s} {previous:12.3f} ->         null            MEASUREMENT FAILED")
             continue
         delta = value - previous
         ratio = (delta / previous) if previous else (float("inf") if delta > 0 else 0.0)
@@ -151,8 +170,29 @@ def compareMetrics(metrics, previousMetrics, tolerance, minDeltaMs):
     return regressions, lines
 
 
+def measurementFailures(result):
+    """Names of the failed measurements of a result: its null metrics and every key of its "errors".
+
+    Error keys can also name something other than a metric (for example "run2" of --startup).
+    Metrics that are absent or skipped are not failures.
+    """
+    names = {name for name, value in result.get("metrics", {}).items() if value is None}
+    names.update(result.get("errors", {}))
+    return sorted(names)
+
+
+def lostMeasurements(result, previousMetrics):
+    """Metrics that have a value in previousMetrics but that this result skipped instead of measuring.
+
+    For example the Studio metrics after a change that makes StudioLib.shell.instance() return None.
+    """
+    metrics = result.get("metrics", {})
+    skipped = result.get("details", {}).get("skipped", {})
+    return sorted(name for name in skipped if name not in metrics and previousMetrics.get(name) is not None)
+
+
 def evaluate(result, args):
-    """Print the metrics and the --check / --compare evaluation. Returns the exit code."""
+    """Print the metrics and the evaluation (failed measurements, --check, --compare). Returns the exit code."""
     metrics = result.get("metrics", {})
     errors = result.get("errors", {})
     print("Metrics:")
@@ -160,26 +200,38 @@ def evaluate(result, args):
         value = metrics[name]
         errorLines = str(errors.get(name, "")).strip().splitlines()
         print(f"  {name:40s} {'        null' if value is None else f'{value:12.3f}'}  {errorLines[-1] if errorLines else ''}")
+    for name in sorted(set(errors) - set(metrics)):  # errors that are not about a metric, for example a failed startup run
+        errorLines = str(errors[name]).strip().splitlines()
+        print(f"  {name:40s} {'error':>12s}  {errorLines[-1] if errorLines else ''}")
     previousMetrics = None
     if args.compare:
         with open(args.compare) as f:
             previousMetrics = json.load(f).get("metrics", {})
-    exitCode = 0
+    # Null means FAIL: a measurement that broke must not pass the gate silently
+    summary = []
+    failed = measurementFailures(result)
+    if failed:
+        summary.append("Measurement failed: " + ", ".join(failed))
     if args.check:
         failures, lines = checkBudgets(metrics, previousMetrics)
         print("Budgets (SPEC 8.2):")
         print("\n".join(lines) if lines else "  no measured metric has a budget")
         if failures:
-            print("Over budget: " + ", ".join(failures))
-            exitCode = 1
+            summary.append("Over budget: " + ", ".join(failures))
     if previousMetrics is not None:
         regressions, lines = compareMetrics(metrics, previousMetrics, args.tolerance, args.min_delta_ms)
+        lost = lostMeasurements(result, previousMetrics)
+        skipped = result.get("details", {}).get("skipped", {})
+        lines += [f"  {name:40s} {previousMetrics[name]:12.3f} ->      skipped  MEASUREMENT FAILED ({skipped[name]})" for name in lost]
         print(f"Comparison with {args.compare} (tolerance {args.tolerance:.0%}, noise floor {args.min_delta_ms} ms):")
         print("\n".join(lines) if lines else "  no common metric")
+        if lost:
+            summary.append("Measurement failed (measured in the --compare JSON, skipped now): " + ", ".join(lost))
         if regressions:
-            print("Regressions: " + ", ".join(regressions))
-            exitCode = 1
-    return exitCode
+            summary.append("Regressions: " + ", ".join(regressions))
+    for line in summary:
+        print(line)
+    return 1 if summary else 0
 
 
 def gitRevision():
@@ -502,9 +554,11 @@ class InSlicerBench:
                 self.pump(2)
                 warm[name].append(self.elapsedMs(startTime))
         self.record("module_switch_warm_ms", statistics.median([value for values in warm.values() for value in values]))
+        # selectModule alone, without the event processing (panel layout, view resize and render) that follows it.
+        # This is what the SPEC 8.1 warm baseline (4-6 ms) measured; it is much less noisy than module_switch_warm_ms.
+        self.record("module_switch_warm_select_only_ms", statistics.median(selectOnly))
         self.details["module_switch_cold_ms_by_module"] = {name: round(value, 2) for name, value in cold.items()}
         self.details["module_switch_warm_ms_by_module"] = {name: round(statistics.median(values), 2) for name, values in warm.items()}
-        # selectModule alone, without the event processing (panel layout, view resize and render) that follows it
         self.details["module_switch_warm_select_only_ms"] = round(statistics.median(selectOnly), 2)
 
     def measureStudio(self):
@@ -1044,6 +1098,7 @@ def runInSlicer(argv):
         if selectedMetrics is not None:
             bench.metrics = {name: value for name, value in bench.metrics.items() if name in selectedMetrics}
             bench.errors = {name: value for name, value in bench.errors.items() if name in selectedMetrics}
+            bench.details["skipped"] = {name: value for name, value in bench.details["skipped"].items() if name in selectedMetrics}
         meta.update({
             "mode": "in-slicer",
             "build": {
@@ -1136,7 +1191,11 @@ def runStartup(args):
 
 
 def mergeResults(paths):
-    """Per-metric median of several result files (null only when no run produced a value)."""
+    """Per-metric median of several result files (null only when no run produced a value).
+
+    A metric that failed in any run keeps an entry in "errors" even when other runs produced a value,
+    so that a measurement that fails intermittently still fails the gate.
+    """
     results = []
     for path in paths:
         with open(path) as f:
@@ -1146,9 +1205,18 @@ def mergeResults(paths):
     for name in sorted({name for result in results for name in result.get("metrics", {})}):
         values = [result["metrics"][name] for result in results if result.get("metrics", {}).get(name) is not None]
         metrics[name] = round(statistics.median(values), 3) if values else None
-        if not values:
-            errors[name] = "\n".join(str(result.get("errors", {}).get(name, "not measured")) for result in results)[-3000:]
+        failedRuns = [(path, result) for path, result in zip(paths, results, strict=True)
+                      if name in result.get("errors", {}) or (name in result.get("metrics", {}) and result["metrics"][name] is None)]
+        if failedRuns:
+            errors[name] = (f"failed in {len(failedRuns)} of {len(results)} runs\n" + "\n".join(
+                f"{os.path.basename(path)}: {result.get('errors', {}).get(name, 'null')}" for path, result in failedRuns))[-3000:]
+    for path, result in zip(paths, results, strict=True):
+        for name, message in result.get("errors", {}).items():
+            if name not in metrics:  # errors that are not about a metric, for example a failed startup run
+                errors[f"{os.path.basename(path)}:{name}"] = message
     details = dict(results[0].get("details", {}))
+    details["skipped"] = {name: reason for result in results for name, reason in result.get("details", {}).get("skipped", {}).items()
+                          if name not in metrics}
     details["merged_from"] = [os.path.abspath(path) for path in paths]
     details["merged_metrics"] = [result.get("metrics", {}) for result in results]
     meta = baseMeta(sys.argv)

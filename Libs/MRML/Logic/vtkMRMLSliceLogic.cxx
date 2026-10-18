@@ -61,6 +61,17 @@ const int vtkMRMLSliceLogic::SLICE_INDEX_OUT_OF_VOLUME = -2;
 const int vtkMRMLSliceLogic::SLICE_INDEX_NO_VOLUME = -3;
 const std::string vtkMRMLSliceLogic::SLICE_MODEL_NODE_NAME_SUFFIX = std::string("Volume Slice");
 
+namespace
+{
+//----------------------------------------------------------------------------
+// Return true if the slice model (the slice plane, textured with the slice image) may be shown in a view.
+bool IsSliceModelShown(vtkMRMLSliceNode* sliceNode, vtkMRMLModelNode* sliceModelNode)
+{
+  vtkMRMLDisplayNode* sliceModelDisplayNode = sliceModelNode ? sliceModelNode->GetDisplayNode() : nullptr;
+  return (sliceNode && sliceNode->GetSliceVisible()) || (sliceModelDisplayNode && sliceModelDisplayNode->GetVisibility());
+}
+} // namespace
+
 //----------------------------------------------------------------------------
 struct SliceLayerInfo
 {
@@ -552,12 +563,18 @@ void vtkMRMLSliceLogic::OnMRMLNodeModified(vtkMRMLNode* node)
     return;
   }
 
-  /// set slice extents in the layes
-  this->SetSliceExtentsToSliceNode();
-
   // Update from SliceNode
   if (node == this->SliceNode)
   {
+    // Each layer observes the slice node too, but the layers are updated here, so that
+    // all the layer changes caused by a slice node change result in a single Modified
+    // event of this logic. The layers find nothing left to update when they process
+    // the slice node event themselves.
+    bool wasModifying = this->StartModify();
+
+    /// set slice extents in the layes
+    this->SetSliceExtentsToSliceNode();
+
     // assert (sliceNode == this->SliceNode); not an assert because the node
     // might have change in CreateSliceModel() or UpdateSliceNode()
     vtkMRMLDisplayNode* sliceDisplayNode = this->SliceModelNode ? this->SliceModelNode->GetModelDisplayNode() : nullptr;
@@ -573,8 +590,27 @@ void vtkMRMLSliceLogic::OnMRMLNodeModified(vtkMRMLNode* node)
     {
       vtkMRMLSliceLogic::UpdateReconstructionSlab(this, this->GetNthLayer(vtkMRMLSliceLogic::Layer_Last + additionalLayerIndex));
     }
+
+    // Indexed loop: a layer update may update the pipeline, which may add layers
+    for (size_t layerIndex = 0; layerIndex < this->Layers.size(); ++layerIndex)
+    {
+      vtkSmartPointer<vtkMRMLSliceLayerLogic> layer = this->Layers[layerIndex];
+      if (layer != nullptr && layer->GetSliceNode() == this->SliceNode)
+      {
+        layer->UpdateTransforms();
+        layer->UpdateImageDisplay();
+        layer->UpdateGlyphs();
+      }
+    }
+
+    this->EndModify(wasModifying);
+    return;
   }
-  else if (node == this->SliceCompositeNode)
+
+  /// set slice extents in the layes
+  this->SetSliceExtentsToSliceNode();
+
+  if (node == this->SliceCompositeNode)
   {
     this->UpdatePipeline();
     this->InvokeEvent(CompositeModifiedEvent);
@@ -679,6 +715,7 @@ void vtkMRMLSliceLogic::ProcessMRMLLogicsEvents()
     inPoint[2] = this->SliceNode->GetActiveSlice();
 
     vtkPlaneSource* plane = vtkPlaneSource::SafeDownCast(this->SliceModelNode->GetPolyDataConnection()->GetProducer());
+    vtkMTimeType planeMTime = plane->GetMTime();
 
     int wasModified = this->SliceModelNode->StartModify();
 
@@ -695,11 +732,17 @@ void vtkMRMLSliceLogic::ProcessMRMLLogicsEvents()
     plane->SetPoint2(outPoint3);
 
     this->SliceModelNode->EndModify(wasModified);
+    bool planeGeometryChanged = (plane->GetMTime() != planeMTime);
 
     this->UpdatePipeline();
+    // The slice image (the texture of the slice model) may have changed, which the views showing the
+    // slice model need to know. If the slice model is hidden, only a change of its geometry matters.
     /// \tbd Ideally it should not be fired if the output polydata is not
     /// modified.
-    plane->Modified();
+    if (planeGeometryChanged || IsSliceModelShown(this->SliceNode, this->SliceModelNode))
+    {
+      plane->Modified();
+    }
   }
 
   // This is called when a slice layer is modified, so pass it on
@@ -1359,7 +1402,8 @@ void vtkMRMLSliceLogic::UpdatePipeline()
     // Mark the pipeline as modified if any updates were performed
     if (modified)
     {
-      if (this->SliceModelNode && this->SliceModelNode->GetPolyData())
+      // The slice model shows the new slice image as texture (only matters if it is shown)
+      if (this->SliceModelNode && IsSliceModelShown(this->SliceNode, this->SliceModelNode) && this->SliceModelNode->GetPolyData())
       {
         this->SliceModelNode->GetPolyData()->Modified();
       }

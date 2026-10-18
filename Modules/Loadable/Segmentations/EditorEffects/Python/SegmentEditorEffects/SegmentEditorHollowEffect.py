@@ -93,10 +93,7 @@ class SegmentEditorHollowEffect(AbstractScriptedSegmentEditorEffect):
         self.scriptedEffect.setParameterDefault("ShellThicknessMm", 3.0)
 
     def getShellThicknessPixel(self):
-        selectedSegmentLabelmapSpacing = [1.0, 1.0, 1.0]
-        selectedSegmentLabelmap = self.scriptedEffect.selectedSegmentLabelmap()
-        if selectedSegmentLabelmap:
-            selectedSegmentLabelmapSpacing = selectedSegmentLabelmap.GetSpacing()
+        selectedSegmentLabelmapSpacing = self.segmentSpacing()
 
         shellThicknessMM = abs(self.scriptedEffect.doubleParameter("ShellThicknessMm"))
         shellThicknessPixel = [math.floor(shellThicknessMM / selectedSegmentLabelmapSpacing[componentIndex]) for componentIndex in range(3)]
@@ -105,7 +102,7 @@ class SegmentEditorHollowEffect(AbstractScriptedSegmentEditorEffect):
     def updateGUIFromMRML(self):
         shellThicknessMM = self.scriptedEffect.doubleParameter("ShellThicknessMm")
         wasBlocked = self.shellThicknessMMSpinBox.blockSignals(True)
-        self.setWidgetMinMaxStepFromImageSpacing(self.shellThicknessMMSpinBox, self.scriptedEffect.selectedSegmentLabelmap())
+        self.setWidgetMinMaxStepFromImageSpacing(self.shellThicknessMMSpinBox, self.scriptedEffect.referenceGeometryImage())
         self.shellThicknessMMSpinBox.value = abs(shellThicknessMM)
         self.shellThicknessMMSpinBox.blockSignals(wasBlocked)
 
@@ -121,10 +118,12 @@ class SegmentEditorHollowEffect(AbstractScriptedSegmentEditorEffect):
         self.outsideSurfaceOptionRadioButton.setChecked(self.scriptedEffect.parameter("ShellMode") == OUTSIDE_SURFACE)
         self.outsideSurfaceOptionRadioButton.blockSignals(wasBlocked)
 
-        selectedSegmentLabelmapSpacing = [1.0, 1.0, 1.0]
-        selectedSegmentLabelmap = self.scriptedEffect.selectedSegmentLabelmap()
-        if selectedSegmentLabelmap:
-            selectedSegmentLabelmapSpacing = selectedSegmentLabelmap.GetSpacing()
+        # Check if there is a selected segment without computing its labelmap (that would be slow for large images)
+        parameterSetNode = self.scriptedEffect.parameterSetNode()
+        segmentationNode = parameterSetNode.GetSegmentationNode() if parameterSetNode else None
+        selectedSegmentID = parameterSetNode.GetSelectedSegmentID() if parameterSetNode else None
+        if (segmentationNode and selectedSegmentID and segmentationNode.GetSegmentation().GetSegment(selectedSegmentID)
+                and self.scriptedEffect.referenceGeometryImage()):
             shellThicknessPixel = self.getShellThicknessPixel()
             if shellThicknessPixel[0] < 1 or shellThicknessPixel[1] < 1 or shellThicknessPixel[2] < 1:
                 self.shellThicknessLabel.text = _("Not feasible at current resolution.")
@@ -136,7 +135,7 @@ class SegmentEditorHollowEffect(AbstractScriptedSegmentEditorEffect):
         else:
             self.shellThicknessLabel.text = _("Empty segment")
 
-        self.setWidgetMinMaxStepFromImageSpacing(self.shellThicknessMMSpinBox, self.scriptedEffect.selectedSegmentLabelmap())
+        self.setWidgetMinMaxStepFromImageSpacing(self.shellThicknessMMSpinBox, self.scriptedEffect.referenceGeometryImage())
 
         applyToAllVisibleSegments = qt.Qt.Unchecked if self.scriptedEffect.integerParameter("ApplyToAllVisibleSegments") == 0 else qt.Qt.Checked
         wasBlocked = self.applyToAllVisibleSegmentsCheckBox.blockSignals(True)
@@ -162,10 +161,7 @@ class SegmentEditorHollowEffect(AbstractScriptedSegmentEditorEffect):
             self.scriptedEffect.setParameter("ShellMode", OUTSIDE_SURFACE)
 
     def getShellThicknessMM(self):
-        selectedSegmentLabelmapSpacing = [1.0, 1.0, 1.0]
-        selectedSegmentLabelmap = self.scriptedEffect.selectedSegmentLabelmap()
-        if selectedSegmentLabelmap:
-            selectedSegmentLabelmapSpacing = selectedSegmentLabelmap.GetSpacing()
+        selectedSegmentLabelmapSpacing = self.segmentSpacing()
 
         shellThicknessPixel = self.getShellThicknessPixel()
         shellThicknessMM = [abs((shellThicknessPixel[i]) * selectedSegmentLabelmapSpacing[i]) for i in range(3)]
@@ -181,7 +177,12 @@ class SegmentEditorHollowEffect(AbstractScriptedSegmentEditorEffect):
     def processHollowing(self):
         # Get modifier labelmap and parameters
         modifierLabelmap = self.scriptedEffect.defaultModifierLabelmap()
-        selectedSegmentLabelmap = self.scriptedEffect.selectedSegmentLabelmap()
+        # The shell is within the shell thickness around the current segment extent, and the selected segment
+        # is replaced (the "Set" modification mode clears it everywhere), therefore it is enough to process this region.
+        # Voxel coordinates computed in the distance map filter are single-precision, therefore the results may slightly
+        # depend on the voxel position relative to the start of the image, which the cropping takes into account.
+        marginVoxels = math.ceil(abs(self.scriptedEffect.doubleParameter("ShellThicknessMm")) / min(self.segmentSpacing())) + 2
+        selectedSegmentLabelmap = self.croppedSelectedSegmentLabelmap(marginVoxels, singlePrecisionCoordinates=True)
         # We need to know exactly the value of the segment voxels, apply threshold to make force the selected label value
         labelValue = 1
         backgroundValue = 0

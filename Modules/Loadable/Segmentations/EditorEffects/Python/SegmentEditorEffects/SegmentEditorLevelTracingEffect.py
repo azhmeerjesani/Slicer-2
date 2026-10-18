@@ -47,10 +47,43 @@ class SegmentEditorLevelTracingEffect(AbstractScriptedSegmentEditorLabelEffect):
         </ul><p>""")
 
     def setupOptionsFrame(self):
+        self.operationAddRadioButton = qt.QRadioButton(_("Add"))
+        self.operationAddRadioButton.objectName = self.__class__.__name__ + "OperationAdd"
+        self.operationAddRadioButton.setToolTip(_("Add the previewed region to the selected segment."))
+        self.operationSubtractRadioButton = qt.QRadioButton(_("Subtract"))
+        self.operationSubtractRadioButton.objectName = self.__class__.__name__ + "OperationSubtract"
+        self.operationSubtractRadioButton.setToolTip(_("Remove the previewed region from the selected segment."))
+        self.operationButtonGroup = qt.QButtonGroup()
+        self.operationButtonGroup.addButton(self.operationAddRadioButton)
+        self.operationButtonGroup.addButton(self.operationSubtractRadioButton)
+        self.operationAddRadioButton.setChecked(True)
+        operationLayout = qt.QHBoxLayout()
+        operationLayout.addWidget(self.operationAddRadioButton)
+        operationLayout.addWidget(self.operationSubtractRadioButton)
+        operationLayout.addStretch(1)
+        self.scriptedEffect.addLabeledOptionsWidget(_("Operation:"), operationLayout)
+        self.operationSubtractRadioButton.connect("toggled(bool)", self.updateMRMLFromGUI)
+
         self.sliceRotatedErrorLabel = qt.QLabel()
         # This widget displays an error message if the slice view is not aligned
         # with the segmentation's axes.
         self.scriptedEffect.addOptionsWidget(self.sliceRotatedErrorLabel)
+
+    def setMRMLDefaults(self):
+        self.scriptedEffect.setParameterDefault("Operation", OUTLINE_OPERATION_ADD)
+
+    def updateGUIFromMRML(self):
+        subtract = isOutlineSubtracted(self.scriptedEffect)
+        wasBlocked = self.operationSubtractRadioButton.blockSignals(True)
+        self.operationSubtractRadioButton.setChecked(subtract)
+        self.operationSubtractRadioButton.blockSignals(wasBlocked)
+        wasBlocked = self.operationAddRadioButton.blockSignals(True)
+        self.operationAddRadioButton.setChecked(not subtract)
+        self.operationAddRadioButton.blockSignals(wasBlocked)
+
+    def updateMRMLFromGUI(self):
+        self.scriptedEffect.setParameter("Operation",
+                                         OUTLINE_OPERATION_SUBTRACT if self.operationSubtractRadioButton.checked else OUTLINE_OPERATION_ADD)
 
     def activate(self):
         self.sliceRotatedErrorLabel.text = ""
@@ -86,6 +119,10 @@ class SegmentEditorLevelTracingEffect(AbstractScriptedSegmentEditorLabelEffect):
                 pipeline.sliceWidget.sliceView().scheduleRender()
                 return abortEvent
 
+            if pipeline.polyData.GetLines() is None or pipeline.polyData.GetLines().GetNumberOfCells() == 0:
+                # No region is previewed, nothing to do (no undo state is saved)
+                return abortEvent
+
             self.scriptedEffect.saveStateForUndo()
 
             # Get modifier labelmap
@@ -94,7 +131,11 @@ class SegmentEditorLevelTracingEffect(AbstractScriptedSegmentEditorLabelEffect):
             # Apply poly data on modifier labelmap
             pipeline.appendPolyMask(modifierLabelmap)
             # TODO: it would be nice to reduce extent
-            self.scriptedEffect.modifySelectedSegmentByLabelmap(modifierLabelmap, slicer.qSlicerSegmentEditorAbstractEffect.ModificationModeAdd)
+            if isOutlineSubtracted(self.scriptedEffect):
+                modificationMode = slicer.qSlicerSegmentEditorAbstractEffect.ModificationModeRemove
+            else:
+                modificationMode = slicer.qSlicerSegmentEditorAbstractEffect.ModificationModeAdd
+            self.scriptedEffect.modifySelectedSegmentByLabelmap(modifierLabelmap, modificationMode)
 
         elif eventId == vtk.vtkCommand.MouseMoveEvent:
             if pipeline.actionState == "":
@@ -168,9 +209,6 @@ class LevelTracingPipeline:
 
         self.mapper = vtk.vtkPolyDataMapper2D()
         self.actor = vtk.vtkActor2D()
-        actorProperty = self.actor.GetProperty()
-        actorProperty.SetColor(107 / 255.0, 190 / 255.0, 99 / 255.0)
-        actorProperty.SetLineWidth(1)
         self.mapper.SetInputData(self.polyData)
         self.actor.SetMapper(self.mapper)
         actorProperty = self.actor.GetProperty()
@@ -249,3 +287,13 @@ class LevelTracingPipeline:
         # Apply poly data on modifier labelmap
         segmentationNode = self.effect.scriptedEffect.parameterSetNode().GetSegmentationNode()
         self.effect.scriptedEffect.appendPolyMask(modifierLabelmap, self.polyData, self.sliceWidget, segmentationNode)
+
+
+def isOutlineSubtracted(scriptedEffect):
+    """Return True if the "Operation" parameter of the effect is set to subtract the region (default: add)"""
+    # Parameters may be missing (for example, in scenes saved by Slicer versions that did not have them)
+    return scriptedEffect.parameterDefined("Operation") and scriptedEffect.parameter("Operation") == OUTLINE_OPERATION_SUBTRACT
+
+
+OUTLINE_OPERATION_ADD = "Add"
+OUTLINE_OPERATION_SUBTRACT = "Subtract"

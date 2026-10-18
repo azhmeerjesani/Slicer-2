@@ -29,6 +29,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QTimer>
 #include <QWidgetAction>
 
 // CTK includes
@@ -124,6 +125,11 @@ void qMRMLSliceControllerWidgetPrivate::setupPopupUi()
 
   this->Superclass::setupPopupUi();
   this->Ui_qMRMLSliceControllerWidget::setupUi(this->PopupWidget);
+  // The popup widgets are refreshed when the popup is shown (see updateWidgetFromMRMLSliceNode)
+  this->PopupWidget->installEventFilter(this);
+
+  this->AutomaticSliceSpacingIcon = QIcon(":/Icons/SlicerAutomaticSliceSpacing.png");
+  this->ManualSliceSpacingIcon = QIcon(":/Icons/SlicerManualSliceSpacing.png");
 
   this->SegmentationOpacitySlider->spinBox()->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Minimum);
   this->LabelMapOpacitySlider->spinBox()->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Minimum);
@@ -688,15 +694,11 @@ void qMRMLSliceControllerWidgetPrivate::updateSliceOrientationSelector(vtkMRMLSl
   vtkNew<vtkStringArray> orientationNames;
   sliceNode->GetSliceOrientationPresetNames(orientationNames.GetPointer());
 
-  bool wasBlocked = sliceOrientationSelector->blockSignals(true);
-
-  // Clear list
-  sliceOrientationSelector->clear();
-
-  // Add all available presets
+  // All available presets
+  QStringList orientations;
   for (int idx = 0; idx < orientationNames->GetNumberOfValues(); ++idx)
   {
-    sliceOrientationSelector->addItem(QString::fromStdString(orientationNames->GetValue(idx)));
+    orientations << QString::fromStdString(orientationNames->GetValue(idx));
   }
 
   QString currentOrientation = QString::fromStdString(sliceNode->GetOrientation());
@@ -704,7 +706,24 @@ void qMRMLSliceControllerWidgetPrivate::updateSliceOrientationSelector(vtkMRMLSl
   // Add "Reformat" only if current orientation is "Reformat"
   if (currentOrientation == "Reformat")
   {
-    sliceOrientationSelector->addItem(currentOrientation);
+    orientations << currentOrientation;
+  }
+
+  bool wasBlocked = sliceOrientationSelector->blockSignals(true);
+
+  // Only rebuild the list if it changed (this is called at every slice node change)
+  bool orientationsChanged = (sliceOrientationSelector->count() != orientations.count());
+  for (int idx = 0; !orientationsChanged && idx < orientations.count(); ++idx)
+  {
+    orientationsChanged = (sliceOrientationSelector->itemText(idx) != orientations[idx]);
+  }
+  if (orientationsChanged)
+  {
+    sliceOrientationSelector->clear();
+    for (const QString& orientation : orientations)
+    {
+      sliceOrientationSelector->addItem(orientation);
+    }
   }
 
   // Update orientation selector state
@@ -728,11 +747,15 @@ void qMRMLSliceControllerWidgetPrivate::updateWidgetFromMRMLSliceNode()
     return;
   }
 
+  // This is called at every slice node change (scrolling, panning, zooming...): the widgets are only
+  // updated if what they show changed, as updating the visible bar makes it lay out and repaint again.
+
   double* layoutColorVtk = sliceNode->GetLayoutColor();
   QColor layoutColor = QColor::fromRgbF(layoutColorVtk[0], layoutColorVtk[1], layoutColorVtk[2]);
-  this->setColor(layoutColor);
-
-  bool wasBlocked;
+  if (layoutColor != this->color())
+  {
+    this->setColor(layoutColor);
+  }
 
   // Update abbreviated slice view name
   this->ViewLabel->setText(sliceNode->GetLayoutLabel());
@@ -744,8 +767,16 @@ void qMRMLSliceControllerWidgetPrivate::updateWidgetFromMRMLSliceNode()
   double planeNormal[3] = { sliceToRas->GetElement(0, 2), sliceToRas->GetElement(1, 2), sliceToRas->GetElement(2, 2) };
   std::string positiveAxisLabel = sliceNode->GetDirectionLabel(planeNormal, true);
   std::string negativeAxisLabel = sliceNode->GetDirectionLabel(planeNormal, false);
-  this->SliceOffsetSlider->setToolTip(QString("%1 <-----> %2").arg(QString::fromStdString(negativeAxisLabel)).arg(QString::fromStdString(positiveAxisLabel)));
-  this->SliceOffsetSlider->setPrefix(QString("%1: ").arg(QString::fromStdString(positiveAxisLabel)));
+  QString sliceOffsetToolTip = QString("%1 <-----> %2").arg(QString::fromStdString(negativeAxisLabel)).arg(QString::fromStdString(positiveAxisLabel));
+  if (this->SliceOffsetSlider->toolTip() != sliceOffsetToolTip)
+  {
+    this->SliceOffsetSlider->setToolTip(sliceOffsetToolTip);
+  }
+  QString sliceOffsetPrefix = QString("%1: ").arg(QString::fromStdString(positiveAxisLabel));
+  if (this->SliceOffsetSlider->prefix() != sliceOffsetPrefix)
+  {
+    this->SliceOffsetSlider->setPrefix(sliceOffsetPrefix);
+  }
 
   // Update slice visibility toggle
   this->actionShow_in_3D->setChecked(sliceNode->GetSliceVisible());
@@ -775,19 +806,16 @@ void qMRMLSliceControllerWidgetPrivate::updateWidgetFromMRMLSliceNode()
   this->SlabReconstructionTypesActions->setEnabled(sliceNode->GetSlabReconstructionEnabled());
 
   // Slice spacing mode
-  this->SliceSpacingButton->setIcon(sliceNode->GetSliceSpacingMode() == vtkMRMLSliceNode::AutomaticSliceSpacingMode ? QIcon(":/Icons/SlicerAutomaticSliceSpacing.png")
-                                                                                                                    : QIcon(":/Icons/SlicerManualSliceSpacing.png"));
+  const QIcon& sliceSpacingIcon = sliceNode->GetSliceSpacingMode() == vtkMRMLSliceNode::AutomaticSliceSpacingMode ? this->AutomaticSliceSpacingIcon : this->ManualSliceSpacingIcon;
+  if (this->SliceSpacingButton->icon().cacheKey() != sliceSpacingIcon.cacheKey())
+  {
+    this->SliceSpacingButton->setIcon(sliceSpacingIcon);
+  }
   this->actionSliceSpacingModeAutomatic->setChecked(sliceNode->GetSliceSpacingMode() == vtkMRMLSliceNode::AutomaticSliceSpacingMode);
   // Prescribed slice spacing
   double spacing[3] = { 0.0, 0.0, 0.0 };
   sliceNode->GetPrescribedSliceSpacing(spacing);
   this->SliceSpacingSpinBox->setValue(spacing[2]);
-  // Field of view
-  double fov[3] = { 0.0, 0.0, 0.0 };
-  sliceNode->GetFieldOfView(fov);
-  wasBlocked = this->SliceFOVSpinBox->blockSignals(true);
-  this->SliceFOVSpinBox->setValue(fov[0] < fov[1] ? fov[0] : fov[1]);
-  this->SliceFOVSpinBox->blockSignals(wasBlocked);
 
   this->actionSliceModelModeVolumes->setChecked(sliceNode->GetSliceResolutionMode() == vtkMRMLSliceNode::SliceResolutionMatchVolumes);
   this->actionSliceModelMode2D->setChecked(sliceNode->GetSliceResolutionMode() == vtkMRMLSliceNode::SliceResolutionMatch2DView);
@@ -796,37 +824,16 @@ void qMRMLSliceControllerWidgetPrivate::updateWidgetFromMRMLSliceNode()
   // this->actionSliceModelModeCustom->setChecked(sliceNode->GetSliceResolutionMode() ==
   //                                               vtkMRMLSliceNode::SliceResolutionCustom);
 
-  double UVWExtents[] = { 256, 256, 256 };
-  double UVWOrigin[] = { 0, 0, 0 };
-  int UVWDimensions[] = { 256, 256, 256 };
-
-  sliceNode->GetUVWExtents(UVWExtents);
-  sliceNode->GetUVWOrigin(UVWOrigin);
-  sliceNode->GetUVWDimensions(UVWDimensions);
-
-  wasBlocked = this->SliceModelFOVXSpinBox->blockSignals(true);
-  this->SliceModelFOVXSpinBox->setValue(UVWExtents[0]);
-  this->SliceModelFOVXSpinBox->blockSignals(wasBlocked);
-
-  wasBlocked = this->SliceModelFOVYSpinBox->blockSignals(true);
-  this->SliceModelFOVYSpinBox->setValue(UVWExtents[1]);
-  this->SliceModelFOVYSpinBox->blockSignals(wasBlocked);
-
-  wasBlocked = this->SliceModelDimensionXSpinBox->blockSignals(true);
-  this->SliceModelDimensionXSpinBox->setValue(UVWDimensions[0]);
-  this->SliceModelDimensionXSpinBox->blockSignals(wasBlocked);
-
-  wasBlocked = this->SliceModelDimensionYSpinBox->blockSignals(true);
-  this->SliceModelDimensionYSpinBox->setValue(UVWDimensions[1]);
-  this->SliceModelDimensionYSpinBox->blockSignals(wasBlocked);
-
-  wasBlocked = this->SliceModelOriginXSpinBox->blockSignals(true);
-  this->SliceModelOriginXSpinBox->setValue(UVWOrigin[0]);
-  this->SliceModelOriginXSpinBox->blockSignals(wasBlocked);
-
-  wasBlocked = this->SliceModelOriginYSpinBox->blockSignals(true);
-  this->SliceModelOriginYSpinBox->setValue(UVWOrigin[1]);
-  this->SliceModelOriginYSpinBox->blockSignals(wasBlocked);
+  // The field of view and slice model spin boxes (their signals are blocked while they are updated)
+  // only need to be up to date while the popup is shown.
+  if (this->PopupWidget->isVisible())
+  {
+    this->updatePopupWidgetsFromMRMLSliceNode();
+  }
+  else
+  {
+    this->PopupWidgetsUpdatePending = true;
+  }
 
   this->actionSliceEdgeVisibility3D->setChecked(sliceNode->GetSliceEdgeVisibility3D());
 
@@ -862,6 +869,70 @@ void qMRMLSliceControllerWidgetPrivate::updateWidgetFromMRMLSliceNode()
   {
     action->setChecked(true);
   }
+}
+
+// --------------------------------------------------------------------------
+void qMRMLSliceControllerWidgetPrivate::updatePopupWidgetsFromMRMLSliceNode()
+{
+  Q_Q(qMRMLSliceControllerWidget);
+
+  this->PopupWidgetsUpdatePending = false;
+  vtkMRMLSliceNode* sliceNode = q->mrmlSliceNode();
+  if (!sliceNode)
+  {
+    return;
+  }
+
+  bool wasBlocked;
+
+  // Field of view
+  double fov[3] = { 0.0, 0.0, 0.0 };
+  sliceNode->GetFieldOfView(fov);
+  wasBlocked = this->SliceFOVSpinBox->blockSignals(true);
+  this->SliceFOVSpinBox->setValue(fov[0] < fov[1] ? fov[0] : fov[1]);
+  this->SliceFOVSpinBox->blockSignals(wasBlocked);
+
+  double UVWExtents[] = { 256, 256, 256 };
+  double UVWOrigin[] = { 0, 0, 0 };
+  int UVWDimensions[] = { 256, 256, 256 };
+
+  sliceNode->GetUVWExtents(UVWExtents);
+  sliceNode->GetUVWOrigin(UVWOrigin);
+  sliceNode->GetUVWDimensions(UVWDimensions);
+
+  wasBlocked = this->SliceModelFOVXSpinBox->blockSignals(true);
+  this->SliceModelFOVXSpinBox->setValue(UVWExtents[0]);
+  this->SliceModelFOVXSpinBox->blockSignals(wasBlocked);
+
+  wasBlocked = this->SliceModelFOVYSpinBox->blockSignals(true);
+  this->SliceModelFOVYSpinBox->setValue(UVWExtents[1]);
+  this->SliceModelFOVYSpinBox->blockSignals(wasBlocked);
+
+  wasBlocked = this->SliceModelDimensionXSpinBox->blockSignals(true);
+  this->SliceModelDimensionXSpinBox->setValue(UVWDimensions[0]);
+  this->SliceModelDimensionXSpinBox->blockSignals(wasBlocked);
+
+  wasBlocked = this->SliceModelDimensionYSpinBox->blockSignals(true);
+  this->SliceModelDimensionYSpinBox->setValue(UVWDimensions[1]);
+  this->SliceModelDimensionYSpinBox->blockSignals(wasBlocked);
+
+  wasBlocked = this->SliceModelOriginXSpinBox->blockSignals(true);
+  this->SliceModelOriginXSpinBox->setValue(UVWOrigin[0]);
+  this->SliceModelOriginXSpinBox->blockSignals(wasBlocked);
+
+  wasBlocked = this->SliceModelOriginYSpinBox->blockSignals(true);
+  this->SliceModelOriginYSpinBox->setValue(UVWOrigin[1]);
+  this->SliceModelOriginYSpinBox->blockSignals(wasBlocked);
+}
+
+// --------------------------------------------------------------------------
+bool qMRMLSliceControllerWidgetPrivate::eventFilter(QObject* object, QEvent* event)
+{
+  if (object == this->PopupWidget && event->type() == QEvent::Show && this->PopupWidgetsUpdatePending)
+  {
+    this->updatePopupWidgetsFromMRMLSliceNode();
+  }
+  return this->Superclass::eventFilter(object, event);
 }
 
 // --------------------------------------------------------------------------
@@ -946,6 +1017,9 @@ void qMRMLSliceControllerWidgetPrivate::updateWidgetFromMRMLSliceCompositeNode()
 void qMRMLSliceControllerWidgetPrivate::updateWidgetFromUnitNode()
 {
   Q_Q(qMRMLSliceControllerWidget);
+  // The unit precision may have changed the slider range (rounded to the displayed decimals):
+  // set the range again at the next update from the slice logic.
+  this->SliceOffsetRangeSet = false;
   q->setSliceOffsetResolution(q->sliceOffsetResolution());
   if (this->SelectionNode && q->mrmlScene())
   {
@@ -1141,13 +1215,42 @@ void qMRMLSliceControllerWidgetPrivate::onSliceLogicModifiedEvent()
     return;
   }
 
-  bool wasBlocking = this->SliceOffsetSlider->blockSignals(true);
-  q->setSliceOffsetRange(offsetRange[0], offsetRange[1]);
-  q->setSliceOffsetResolution(offsetResolution);
-  this->SliceOffsetSlider->setValue(this->SliceLogic->GetSliceOffset());
-  this->SliceOffsetSlider->blockSignals(wasBlocking);
+  // The slice logic may be modified several times for one change (for example by linked views):
+  // update the slider once, when the event loop runs.
+  if (!this->SliceOffsetSliderUpdatePending)
+  {
+    this->SliceOffsetSliderUpdatePending = true;
+    QTimer::singleShot(0, this, [this]() { this->updateSliceOffsetSliderFromSliceLogic(); });
+  }
 
   emit q->renderRequested();
+}
+
+// --------------------------------------------------------------------------
+void qMRMLSliceControllerWidgetPrivate::updateSliceOffsetSliderFromSliceLogic()
+{
+  Q_Q(qMRMLSliceControllerWidget);
+  this->SliceOffsetSliderUpdatePending = false;
+
+  double offsetRange[2] = { -1.0, 1.0 };
+  double offsetResolution = 1.0;
+  if (!this->SliceLogic || !this->SliceLogic->GetSliceOffsetRangeResolution(offsetRange, offsetResolution))
+  {
+    return;
+  }
+
+  bool wasBlocking = this->SliceOffsetSlider->blockSignals(true);
+  // Setting the range makes the slider compute the width of its spin box again: only set it if it changed
+  if (!this->SliceOffsetRangeSet || offsetRange[0] != this->SliceOffsetRange[0] || offsetRange[1] != this->SliceOffsetRange[1])
+  {
+    q->setSliceOffsetRange(offsetRange[0], offsetRange[1]);
+  }
+  this->SliceOffsetSlider->setValue(this->SliceLogic->GetSliceOffset());
+  // The step is cheap to set, and it is set at every update, after the value, on purpose: the slider maps
+  // values to handle positions depending on the value it had when the step was last set
+  // (see ctkDoubleSlider::setSingleStep), and the slice logic used to be modified several times per change.
+  q->setSliceOffsetResolution(offsetResolution);
+  this->SliceOffsetSlider->blockSignals(wasBlocking);
 }
 
 //---------------------------------------------------------------------------
@@ -1724,6 +1827,9 @@ void qMRMLSliceControllerWidget::setImageDataConnection(vtkAlgorithmOutput* newI
 void qMRMLSliceControllerWidget::setSliceOffsetRange(double min, double max)
 {
   Q_D(qMRMLSliceControllerWidget);
+  d->SliceOffsetRange[0] = min;
+  d->SliceOffsetRange[1] = max;
+  d->SliceOffsetRangeSet = true;
   d->SliceOffsetSlider->setRange(min, max);
 }
 

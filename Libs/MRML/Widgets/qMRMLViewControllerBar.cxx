@@ -162,6 +162,11 @@ bool qMRMLViewControllerBarPrivate::eventFilter(QObject* object, QEvent* event)
 void qMRMLViewControllerBarPrivate::setColor(QColor barColor)
 {
   // Q_Q(qMRMLViewControllerBar);
+  if (barColor.isValid() && barColor == this->BarColor)
+  {
+    // Setting the palette makes the whole bar lay out and repaint again
+    return;
+  }
   this->BarColor = barColor;
 
   QPalette palette = this->BarWidget->palette();
@@ -346,15 +351,16 @@ void qMRMLViewControllerBar::updateWidgetFromMRMLView()
   d->MaximizeViewButton->setVisible(canBeMaximized && d->ShowMaximizeViewButton);
   if (canBeMaximized && d->ShowMaximizeViewButton)
   {
-    if (isMaximized)
+    // This is called at every change of the view node: only update the button when its state changes
+    QString toolTip = isMaximized ? tr("Restore view layout") : tr("Maximize view");
+    const QIcon& icon = isMaximized ? d->ViewRestoreIcon : d->ViewMaximizeIcon;
+    if (d->MaximizeViewButton->toolTip() != toolTip)
     {
-      d->MaximizeViewButton->setToolTip(tr("Restore view layout"));
-      d->MaximizeViewButton->setIcon(d->ViewRestoreIcon);
+      d->MaximizeViewButton->setToolTip(toolTip);
     }
-    else
+    if (d->MaximizeViewButton->icon().cacheKey() != icon.cacheKey())
     {
-      d->MaximizeViewButton->setToolTip(tr("Maximize view"));
-      d->MaximizeViewButton->setIcon(d->ViewMaximizeIcon);
+      d->MaximizeViewButton->setIcon(icon);
     }
   }
 }

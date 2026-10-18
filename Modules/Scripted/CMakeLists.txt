@@ -8,6 +8,7 @@ set(modules
   SegmentEditor
   SegmentStatistics
   SelfTests
+  Studio
   VectorToScalarVolume
   WebServer
   )

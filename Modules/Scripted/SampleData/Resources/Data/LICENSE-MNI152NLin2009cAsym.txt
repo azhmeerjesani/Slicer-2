@@ -7,6 +7,12 @@ Files:
 Obtained from TemplateFlow (https://www.templateflow.org, tpl-MNI152NLin2009cAsym),
 unmodified.
 
+The thumbnails ../Icons/MNI152NLin2009cAsym.png and ../Icons/MNI152NLin6Asym.png are
+axial slices rendered from tpl-MNI152NLin2009cAsym_res-02_desc-brain_T1w.nii.gz and
+tpl-MNI152NLin2009cAsym_res-02_T1w.nii.gz respectively. No FSL MNI152NLin6Asym data is
+distributed with this module: the MNI152NLin6Asym templates are downloaded on request
+(FSL licence terms apply).
+
 Copyright (C) 1993-2009 Louis Collins, McConnell Brain Imaging Centre, Montreal
 Neurological Institute, McGill University. Permission to use, copy, modify, and
 distribute this software and its documentation for any purpose and without fee is

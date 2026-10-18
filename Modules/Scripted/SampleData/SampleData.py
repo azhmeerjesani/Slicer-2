@@ -841,6 +841,7 @@ class SampleDataLogic:
             templateId = fileName.split("_")[0]  # for example "tpl-MNI152NLin6Asym"
             return f"https://templateflow.s3.amazonaws.com/{templateId}/{fileName}"
 
+        # Both thumbnails are rendered from MNI152NLin2009cAsym data: no FSL-licensed data is distributed with the module
         nlin2009cAsymThumbnail = os.path.join(iconPath, "MNI152NLin2009cAsym.png")
         nlin6AsymThumbnail = os.path.join(iconPath, "MNI152NLin6Asym.png")
         labelmap = {"labelmap": True}

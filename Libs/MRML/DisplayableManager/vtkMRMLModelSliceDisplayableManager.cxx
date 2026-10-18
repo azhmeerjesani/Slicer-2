@@ -136,6 +136,10 @@ public:
   bool UseDisplayNode(vtkMRMLDisplayNode* displayNode);
   bool UseDisplayableNode(vtkMRMLDisplayableNode* displayNode);
   void ClearDisplayableNodes();
+  /// Return true if a display node of the displayable node is shown in this view
+  bool HasVisiblePipeline(vtkMRMLDisplayableNode* node);
+  /// Return true if any display node is shown in this view
+  bool HasVisiblePipeline();
 
   vtkInternal(vtkMRMLModelSliceDisplayableManager* external);
   ~vtkInternal();
@@ -737,7 +741,56 @@ bool vtkMRMLModelSliceDisplayableManager::vtkInternal::UseDisplayableNode(vtkMRM
   std::string cmpstr = std::string(this->SliceNode->GetLayoutName()) + " Volume Slice";
   show = show && (cmpstr.compare(node->GetName()));
 
+  // Ignore the slice model nodes of the other slice views too: they are never shown in slice views
+  // (see IsVisible()), and observing them made every slice change re-render all the other slice views.
+  if (show && vtkMRMLSliceLogic::IsSliceModelNode(node) && node->GetNumberOfDisplayNodes() > 0)
+  {
+    bool onlySliceModelDisplayNodes = true;
+    for (int displayNodeIndex = 0; displayNodeIndex < node->GetNumberOfDisplayNodes(); ++displayNodeIndex)
+    {
+      vtkMRMLDisplayNode* displayNode = node->GetNthDisplayNode(displayNodeIndex);
+      if (displayNode && !vtkMRMLSliceLogic::IsSliceModelDisplayNode(displayNode))
+      {
+        onlySliceModelDisplayNodes = false;
+        break;
+      }
+    }
+    show = !onlySliceModelDisplayNodes;
+  }
+
   return show;
+}
+
+//---------------------------------------------------------------------------
+bool vtkMRMLModelSliceDisplayableManager::vtkInternal::HasVisiblePipeline(vtkMRMLDisplayableNode* node)
+{
+  ModelToDisplayCacheType::iterator displayableIt = this->ModelToDisplayNodes.find(node);
+  if (displayableIt == this->ModelToDisplayNodes.end())
+  {
+    return false;
+  }
+  for (vtkMRMLDisplayNode* displayNode : displayableIt->second)
+  {
+    PipelinesCacheType::iterator pipelineIt = this->DisplayPipelines.find(displayNode);
+    if (pipelineIt != this->DisplayPipelines.end() && pipelineIt->second->Actor->GetVisibility())
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
+//---------------------------------------------------------------------------
+bool vtkMRMLModelSliceDisplayableManager::vtkInternal::HasVisiblePipeline()
+{
+  for (PipelinesCacheType::value_type& displayPipeline : this->DisplayPipelines)
+  {
+    if (displayPipeline.second->Actor->GetVisibility())
+    {
+      return true;
+    }
+  }
+  return false;
 }
 
 //---------------------------------------------------------------------------
@@ -876,6 +929,8 @@ void vtkMRMLModelSliceDisplayableManager::ProcessMRMLNodesEvents(vtkObject* call
 
   vtkMRMLDisplayableNode* displayableNode = vtkMRMLDisplayableNode::SafeDownCast(caller);
 
+  // Renders are only requested if the view shows (or showed, before the update) something of the node:
+  // most changes of nodes that are not shown in this view do not change what this view shows.
   if (displayableNode)
   {
     vtkMRMLNode* callDataNode = reinterpret_cast<vtkMRMLDisplayNode*>(callData);
@@ -883,20 +938,33 @@ void vtkMRMLModelSliceDisplayableManager::ProcessMRMLNodesEvents(vtkObject* call
 
     if (displayNode && (event == vtkMRMLDisplayableNode::DisplayModifiedEvent))
     {
+      vtkMRMLDisplayableNode* updatedNode = displayNode->GetDisplayableNode() ? displayNode->GetDisplayableNode() : displayableNode;
+      bool wasVisible = this->Internal->HasVisiblePipeline(updatedNode);
       this->Internal->UpdateDisplayNode(displayNode);
-      this->RequestRender();
+      if (wasVisible || this->Internal->HasVisiblePipeline(updatedNode))
+      {
+        this->RequestRender();
+      }
     }
     else if ((event == vtkMRMLDisplayableNode::TransformModifiedEvent) //
              || (event == vtkMRMLModelNode::PolyDataModifiedEvent))
     {
+      bool wasVisible = this->Internal->HasVisiblePipeline(displayableNode);
       this->Internal->UpdateDisplayableTransforms(displayableNode);
-      this->RequestRender();
+      if (wasVisible || this->Internal->HasVisiblePipeline(displayableNode))
+      {
+        this->RequestRender();
+      }
     }
   }
   else if (vtkMRMLSliceNode::SafeDownCast(caller))
   {
+    bool wasVisible = this->Internal->HasVisiblePipeline();
     this->Internal->UpdateSliceNode();
-    this->RequestRender();
+    if (wasVisible || this->Internal->HasVisiblePipeline())
+    {
+      this->RequestRender();
+    }
   }
   else
   {
