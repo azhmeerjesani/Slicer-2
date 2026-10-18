@@ -36,6 +36,15 @@
 
 vtkStandardNewMacro(vtkSegmentationModifier);
 
+namespace
+{
+//-----------------------------------------------------------------------------
+bool IsExtentNonEmpty(const int extent[6])
+{
+  return extent[0] <= extent[1] && extent[2] <= extent[3] && extent[4] <= extent[5];
+}
+} // namespace
+
 //-----------------------------------------------------------------------------
 vtkSegmentationModifier::vtkSegmentationModifier() = default;
 
@@ -312,6 +321,7 @@ bool vtkSegmentationModifier::AppendLabelmapToSegment(vtkOrientedImageData* labe
   // Ensure that the value for the segment can be contained in the labelmap.
   vtkOrientedImageDataResample::CastImageForValue(segmentLabelmap, labelValue);
 
+  bool segmentCleared = false;
   if (mergeMode == MODE_REPLACE)
   {
     std::vector<std::string> sharedSegmentIDs;
@@ -322,6 +332,7 @@ bool vtkSegmentationModifier::AppendLabelmapToSegment(vtkOrientedImageData* labe
       // Clear the representation and use mask mode.
       mergeMode = MODE_MERGE_MASK;
       segmentation->ClearSegment(segmentID);
+      segmentCleared = true;
     }
     else
     {
@@ -369,11 +380,41 @@ bool vtkSegmentationModifier::AppendLabelmapToSegment(vtkOrientedImageData* labe
       default: operation = vtkOrientedImageDataResample::OPERATION_MINIMUM;
     }
 
+    // Extent of the merge operation
+    const int* mergeExtent = extent;
+    int minimumOperationExtent[6] = { 0, -1, 0, -1, 0, -1 };
+    if (operation == vtkOrientedImageDataResample::OPERATION_MINIMUM && vtkOrientedImageDataResample::DoGeometriesMatch(segmentLabelmap, labelmap)
+        && IsExtentNonEmpty(labelmap->GetExtent()) && (!extent || IsExtentNonEmpty(extent)))
+    {
+      // The minimum operation can only decrease voxel values that are inside the segment labelmap,
+      // therefore the operation is restricted to the segment labelmap extent. This avoids padding the
+      // segment labelmap to the modifier extent (reallocating it and then shrinking it back).
+      const int* modifierExtent = labelmap->GetExtent();
+      for (int axis = 0; axis < 3; axis++)
+      {
+        minimumOperationExtent[axis * 2] = std::max(segmentLabelmapExtent[axis * 2], modifierExtent[axis * 2]);
+        minimumOperationExtent[axis * 2 + 1] = std::min(segmentLabelmapExtent[axis * 2 + 1], modifierExtent[axis * 2 + 1]);
+        if (extent)
+        {
+          minimumOperationExtent[axis * 2] = std::max(minimumOperationExtent[axis * 2], extent[axis * 2]);
+          minimumOperationExtent[axis * 2 + 1] = std::min(minimumOperationExtent[axis * 2 + 1], extent[axis * 2 + 1]);
+        }
+      }
+      if (!IsExtentNonEmpty(minimumOperationExtent))
+      {
+        // The modifier does not overlap with the segment labelmap, so the segment cannot change
+        segmentLabelmapModified = false;
+        return true;
+      }
+      mergeExtent = minimumOperationExtent;
+    }
+
     vtkSmartPointer<vtkOrientedImageData> modifierLabelmap = labelmap;
+    std::vector<std::string> sharedSegmentIDsInMask;
     if (operation == vtkOrientedImageDataResample::OPERATION_MINIMUM)
     {
       int updateExtent[6] = { 0, -1, 0, -1, 0, -1 };
-      vtkSegmentationModifier::GetExtentIntersection(labelmap->GetExtent(), extent, updateExtent);
+      vtkSegmentationModifier::GetExtentIntersection(labelmap->GetExtent(), mergeExtent, updateExtent);
       if (vtkSegmentationModifier::IsExtentValid(updateExtent))
       {
         vtkNew<vtkImageThreshold> threshold;
@@ -392,12 +433,9 @@ bool vtkSegmentationModifier::AppendLabelmapToSegment(vtkOrientedImageData* labe
     {
       if (modifiedSegmentIDs)
       {
-        vtkSegmentationModifier::GetSharedSegmentIDsInMask(segmentation, segmentID, labelmap, extent, *modifiedSegmentIDs);
+        // Segments in the same layer that will be overwritten (must be determined before the merge)
+        vtkSegmentationModifier::GetSharedSegmentIDsInMask(segmentation, segmentID, labelmap, extent, sharedSegmentIDsInMask);
       }
-    }
-    if (modifiedSegmentIDs)
-    {
-      modifiedSegmentIDs->push_back(segmentID);
     }
 
     vtkSmartPointer<vtkOrientedImageData> resampledSegmentLabelmap;
@@ -422,7 +460,7 @@ bool vtkSegmentationModifier::AppendLabelmapToSegment(vtkOrientedImageData* labe
       thresholdSegment->SetOutValue(0);
       thresholdSegment->SetOutputScalarTypeToUnsignedChar();
       int updateExtent[6] = { 0, -1, 0, -1, 0, -1 };
-      vtkSegmentationModifier::GetExtentIntersection(resampledSegmentLabelmap->GetExtent(), extent, updateExtent);
+      vtkSegmentationModifier::GetExtentIntersection(resampledSegmentLabelmap->GetExtent(), mergeExtent, updateExtent);
       if (vtkSegmentationModifier::IsExtentValid(updateExtent))
       {
         vtkNew<vtkImageThreshold> thresholdSegment;
@@ -440,10 +478,19 @@ bool vtkSegmentationModifier::AppendLabelmapToSegment(vtkOrientedImageData* labe
       }
     }
 
-    if (!vtkOrientedImageDataResample::MergeImage(resampledSegmentLabelmap, modifierLabelmap, segmentLabelmap, operation, extent, 0, labelValue, &segmentLabelmapModified))
+    if (!vtkOrientedImageDataResample::MergeImage(resampledSegmentLabelmap, modifierLabelmap, segmentLabelmap, operation, mergeExtent, 0, labelValue, &segmentLabelmapModified))
     {
       vtkErrorWithObjectMacro(segmentation, "vtkSegmentationModifier::SetBinaryLabelmapToSegment: Failed to merge labelmap (max)");
       return false;
+    }
+
+    // Only report the segments as modified if the labelmap has changed (cleared, resampled or merged),
+    // because other representations of modified segments are re-converted, which may take a long time.
+    bool segmentResampled = (resampledSegmentLabelmap.GetPointer() != segmentLabelmap);
+    if (modifiedSegmentIDs && (segmentLabelmapModified || segmentCleared || segmentResampled))
+    {
+      modifiedSegmentIDs->insert(modifiedSegmentIDs->end(), sharedSegmentIDsInMask.begin(), sharedSegmentIDsInMask.end());
+      modifiedSegmentIDs->push_back(segmentID);
     }
   }
   return true;

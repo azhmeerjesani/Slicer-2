@@ -66,6 +66,17 @@ def _pearson(a, b):
     return float((a @ b) / denominator) if denominator > 0 else float("nan")
 
 
+def _ranks(values):
+    """Ranks (1..n) with ties sharing their average rank, as scipy.stats.rankdata (which is slow to import)."""
+    order = np.argsort(values, kind="stable")
+    ordered = values[order]
+    starts = np.flatnonzero(np.r_[True, ordered[1:] != ordered[:-1]])
+    ends = np.r_[starts[1:], len(values)]
+    ranks = np.empty(len(values), dtype=np.float64)
+    ranks[order] = np.repeat((starts + ends + 1) / 2.0, ends - starts)
+    return ranks
+
+
 def degree_similarity(map_vec, degree_vec):
     """Spatial similarity between a map and the connectome degree map over their finite voxels.
 
@@ -73,8 +84,6 @@ def degree_similarity(map_vec, degree_vec):
     :param degree_vec: (V,) degree map (``ConnectomeBundle.degree``).
     :return: (pearson r, spearman rho); NaN when undefined (fewer than 3 voxels or a constant map).
     """
-    from scipy import stats as scipy_stats
-
     a = np.asarray(map_vec, dtype=np.float64).ravel()
     b = np.asarray(degree_vec, dtype=np.float64).ravel()
     if a.shape != b.shape:
@@ -83,7 +92,7 @@ def degree_similarity(map_vec, degree_vec):
     if np.count_nonzero(valid) < 3:
         return float("nan"), float("nan")
     a, b = a[valid], b[valid]
-    return _pearson(a, b), _pearson(scipy_stats.rankdata(a), scipy_stats.rankdata(b))
+    return _pearson(a, b), _pearson(_ranks(a), _ranks(b))
 
 
 def chip_level(r):
@@ -114,7 +123,7 @@ def _grid_and_indices(bundle_or_grid, mask_indices):
     return tuple(int(n) for n in shape[:3]), np.asarray(indices, dtype=np.int64)
 
 
-def relocated_lesions(weights, bundle_or_grid, mask_indices=None, brain_mask=None, k=DEFAULT_RELOCATIONS, seed=0, min_inside=MIN_INSIDE, max_attempts=None, return_shifts=False):
+def relocated_lesions(weights, bundle_or_grid, mask_indices=None, brain_mask=None, k=DEFAULT_RELOCATIONS, seed=0, min_inside=MIN_INSIDE, max_attempts=None, return_shifts=False, sparse=False):
     """Rigid translations of a lesion's occupancy to random places in the brain (relocated-lesion null).
 
     Each relocated lesion is the lesion's weight pattern moved by an integer voxel shift on the
@@ -132,6 +141,9 @@ def relocated_lesions(weights, bundle_or_grid, mask_indices=None, brain_mask=Non
     :param seed: seed of ``np.random.default_rng``; the result is deterministic for a seed.
     :param max_attempts: maximum number of candidate shifts tested (default ``max(1000, 200 * k)``).
     :param return_shifts: also return the (k, 3) integer voxel shifts.
+    :param sparse: return a list of (voxel positions, float32 weights) pairs, one per relocated
+      lesion, instead of the dense matrix (much smaller for large connectomes; accepted by
+      ``engine.compute_network_maps(null_weights=...)``).
     :return: (k', V) float32 relocated weights with k' <= k (fewer when not enough valid shifts
       were found within ``max_attempts``), and the shifts when ``return_shifts`` is True.
     """
@@ -143,7 +155,7 @@ def relocated_lesions(weights, bundle_or_grid, mask_indices=None, brain_mask=Non
     in_brain = np.ones(n_voxels, dtype=bool) if brain_mask is None else np.asarray(brain_mask, dtype=bool).ravel()
     if in_brain.size != n_voxels:
         raise ValueError(f"The brain mask has {in_brain.size} values, the mask has {n_voxels} voxels")
-    empty = np.zeros((0, n_voxels), dtype=np.float32)
+    empty = [] if sparse else np.zeros((0, n_voxels), dtype=np.float32)
     lesion = np.flatnonzero(weights > 0)
     total = float(weights[lesion].sum(dtype=np.float64))
     if lesion.size == 0 or total <= 0 or k <= 0:
@@ -163,10 +175,14 @@ def relocated_lesions(weights, bundle_or_grid, mask_indices=None, brain_mask=Non
     max_attempts = max(1000, 200 * int(k)) if max_attempts is None else int(max_attempts)
     candidates = rng.permutation(len(brain_ijk))[:max_attempts]
     shape_array = np.array(shape, dtype=np.int64)
-    batch = max(1, 2_000_000 // lesion.size)
+    max_batch = max(1, 2_000_000 // lesion.size)  # bounds the (batch, lesion voxels, 3) arrays
+    batch = min(max_batch, max(64, 4 * int(k)))  # most shifts are usually valid: start small
     accepted, shifts = [], []
-    for start in range(0, len(candidates), batch):
+    start = 0
+    while start < len(candidates) and len(accepted) < k:
         shift = brain_ijk[candidates[start:start + batch]] - centroid  # (b, 3)
+        start += batch
+        batch = min(max_batch, 2 * batch)
         shift = shift[np.any(shift != 0, axis=1)]
         moved = lesion_ijk[np.newaxis] + shift[:, np.newaxis]  # (b, m, 3)
         inside = np.all((moved >= 0) & (moved < shape_array), axis=2)
@@ -174,17 +190,20 @@ def relocated_lesions(weights, bundle_or_grid, mask_indices=None, brain_mask=Non
         target = np.where(inside, position[flat], -1)  # (b, m) mask positions, -1 if lost
         landed = target >= 0
         in_brain_mass = (np.where(landed, in_brain[np.maximum(target, 0)], False) * values).sum(axis=1)
-        for row in np.flatnonzero(in_brain_mass >= min_inside * total * (1.0 - 1e-12)):
+        for row in np.flatnonzero(in_brain_mass >= min_inside * total * (1.0 - 1e-12))[: k - len(accepted)]:
             accepted.append(target[row])
             shifts.append(shift[row])
-            if len(accepted) == k:
-                break
-        if len(accepted) == k:
-            break
-    out = np.zeros((len(accepted), n_voxels), dtype=np.float32)
-    for row, target in enumerate(accepted):
+    columns = []
+    for target in accepted:
         landed = target >= 0
-        out[row, target[landed]] = weights[lesion[landed]]
+        order = np.argsort(target[landed])
+        columns.append((target[landed][order], weights[lesion[landed]][order]))
+    if sparse:
+        out = columns
+    else:
+        out = np.zeros((len(columns), n_voxels), dtype=np.float32)
+        for row, (positions, column_weights) in enumerate(columns):
+            out[row, positions] = column_weights
     if return_shifts:
         return out, np.array(shifts, dtype=np.int64).reshape(-1, 3)
     return out
@@ -225,7 +244,8 @@ def null_summary(map_vec, null_maps):
         return np.divide(x, norm, out=np.full_like(x, np.nan), where=norm > 0)
 
     z_observed = standardize(observed)
-    r = standardize(nulls) @ z_observed
+    z_nulls = standardize(nulls)
+    r = z_nulls @ z_observed
     finite = r[np.isfinite(r)]
     if finite.size:
         result["r_median"] = float(np.median(finite))
@@ -235,7 +255,7 @@ def null_summary(map_vec, null_maps):
     result["r_mean_map"] = r_mean if np.isfinite(r_mean) else None
     if k >= 2 and result["r_mean_map"] is not None:
         # Leave-one-out: similarity of each null map to the mean of the others
-        loo = np.einsum("ij,ij->i", standardize(nulls), standardize((total[np.newaxis] - nulls) / (k - 1)))
+        loo = np.einsum("ij,ij->i", z_nulls, standardize(total[np.newaxis] - nulls))
         loo = loo[np.isfinite(loo)]
         if loo.size:
             result["percentile"] = float(100.0 * np.count_nonzero(loo <= r_mean) / loo.size)

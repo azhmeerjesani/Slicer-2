@@ -1252,10 +1252,19 @@ class QATest(_TempDirTestCase):
         np.testing.assert_array_equal(with_nulls.t, plain.t)  # the lesion's own maps do not change
         np.testing.assert_array_equal(with_nulls.null_voxels, voxels)
         reference = engine.compute_network_maps(self.bundle, nulls)
-        np.testing.assert_allclose(with_nulls.null_t, reference.t[:, voxels], rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(with_nulls.null_t, reference.t[:, voxels], rtol=1e-4, atol=1e-4)  # float32 accumulation
         everywhere = engine.compute_network_maps(self.bundle, weights, null_weights=nulls)
         self.assertIsNone(everywhere.null_voxels)
-        np.testing.assert_allclose(everywhere.null_t, reference.t, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(everywhere.null_t, reference.t, rtol=1e-4, atol=1e-4)
+        # Sparse relocated lesions (as the CLI uses them) give the same null maps
+        sparse = qa.relocated_lesions(weights, self.bundle, k=6, seed=1, sparse=True)
+        self.assertEqual(len(sparse), 6)
+        for row, (positions, values) in zip(nulls, sparse, strict=True):
+            np.testing.assert_array_equal(np.flatnonzero(row), positions)
+            np.testing.assert_array_equal(row[positions], values)
+        from_sparse = engine.compute_network_maps(self.bundle, weights, null_weights=sparse, null_voxels=voxels)
+        np.testing.assert_allclose(from_sparse.null_t, with_nulls.null_t, rtol=1e-5, atol=1e-5)
+        np.testing.assert_array_equal(from_sparse.t, plain.t)
         with self.assertRaises(ValueError):
             engine.compute_network_maps(self.bundle, weights, null_weights=nulls, null_voxels=voxels[::-1])
 
@@ -1482,6 +1491,9 @@ class QACommandLineTest(_TempDirTestCase):
         # Invalid suffixes are rejected like other invalid arguments
         result, events, _ = self._run("engine", "--bundle", meta["path"], "--lesion", lesion_path, "--out", out_dir, "--desc-suffix", "Preview_N3")
         self.assertEqual((result.returncode, [e["event"] for e in events]), (2, ["error"]))
+        result, events, _ = self._run("engine", "--bundle", meta["path"], "--lesion", lesion_path, "--out", out_dir, "--threshold-rule", '{"kind": "fdr"}')
+        self.assertEqual((result.returncode, [e["event"] for e in events]), (2, ["error"]))
+        self.assertIn("--threshold-rule", events[0]["message"])
 
 
 if __name__ == "__main__":

@@ -445,6 +445,24 @@ GEOMETRY_FIELDS = (
 )
 
 
+def xform_disagreement(header):
+    """Largest distance (mm) between the positions that the sform and the qform give to a voxel.
+
+    Readers differ when both are set and disagree: ITK (and so Slicer) uses the qform unless the
+    two are nearly identical or the sform is labelled scanner-based, while FSL, nibabel and this
+    module use the sform. The same file then lies at different places in different programs.
+
+    :param header: header dictionary (see :func:`read_nifti_header`).
+    :return: the distance over the corner voxels of the image (the maximum over the whole grid),
+      or 0.0 unless both sform_code and qform_code are set.
+    """
+    if header["sform_code"] <= 0 or header["qform_code"] <= 0:
+        return 0.0
+    corners = np.array([[i, j, k, 1.0] for i in (0, header["shape"][0] - 1) for j in (0, header["shape"][1] - 1) for k in (0, header["shape"][2] - 1)])
+    difference = corners @ (header["sform"] - header["qform"]).T
+    return float(np.linalg.norm(difference[:, :3], axis=1).max())
+
+
 def read_raw_header(path):
     """Return the 348-byte header of a NIfTI-1 file as a numpy record in the file's byte order."""
     _check_extension(path)
@@ -467,10 +485,13 @@ def write_like(path, array_kji, ijk_to_ras, reference_path, dtype=np.uint8, desc
       segment's extent); voxels outside it are written as 0.
     :param ijk_to_ras: 4x4 IJK to RAS matrix of the array (e.g. ``volumeNode.GetIJKToRASMatrix``).
     :param reference_path: NIfTI file defining the output grid (the scan or template the lesion was drawn on).
-    :param dtype: on-disk data type; values must fit in it.
+    :param dtype: on-disk data type; values must fit in it (and be whole numbers for integer types).
     :raises ValueError: if the array grid is not the reference grid up to axis permutations, flips
       and integer voxel shifts (``inv(ref_affine) @ ijk_to_ras`` must be a signed permutation with
-      integer offsets within 1e-3), or if non-zero voxels fall outside the reference grid.
+      integer offsets within 1e-3), if the reference's sform and qform disagree and the array grid
+      matches both (it is then unknown through which one the array was placed, see
+      :func:`xform_disagreement`), if values do not fit in ``dtype``, or if non-zero voxels fall
+      outside the reference grid.
     :return: ``path``.
     """
     from .geometry import signed_permutation
@@ -481,15 +502,30 @@ def write_like(path, array_kji, ijk_to_ras, reference_path, dtype=np.uint8, desc
     array = np.asarray(array_kji)
     if array.ndim != 3:
         raise ValueError(f"write_like expects a 3D [k, j, i] array, got shape {array.shape}")
-    mapping = signed_permutation(np.asarray(ijk_to_ras, dtype=np.float64), reference["affine"], tolerance=1e-3)
-    if mapping is None:
+    # The array was placed through whichever transform its reader chose (ITK/Slicer usually the
+    # qform, FSL and nibabel the sform), so it must map to the same reference voxels through every
+    # transform that is set. When they disagree, only an array grid matching a single one is unambiguous.
+    ijk_to_ras = np.asarray(ijk_to_ras, dtype=np.float64)
+    transforms = [reference[name] for name in ("sform", "qform") if reference[f"{name}_code"] > 0] or [reference["affine"]]
+    mappings = {signed_permutation(ijk_to_ras, transform, tolerance=1e-3) for transform in transforms} - {None}
+    if not mappings:
         raise ValueError(
             f"The image grid does not match the voxel grid of {reference_path} (it must only differ by axis order, flips and whole-voxel shifts); resample it to the reference first",
         )
+    if len(mappings) > 1:
+        raise ValueError(
+            f"The sform and qform of {reference_path} disagree by up to {xform_disagreement(reference):.3g} mm and the image grid matches both, "
+            "so the lesion cannot be placed unambiguously (Slicer/ITK usually use the qform, FSL and nibabel the sform). "
+            "Make the reference's sform and qform agree (e.g. copy the qform to the sform), load it again and redraw or re-save the lesion",
+        )
+    (mapping,) = mappings
     dtype = np.dtype(dtype)
     if dtype.newbyteorder("=") not in _DATATYPE_CODES:
         raise ValueError(f"Unsupported data type for NIfTI-1: {dtype}")
     if array.size and np.issubdtype(dtype, np.integer) and not np.issubdtype(array.dtype, np.bool_):
+        if not np.issubdtype(array.dtype, np.integer) and not np.array_equal(array, np.round(array)):
+            # astype would truncate silently (e.g. a probabilistic lesion stored as uint8 becomes all zeros)
+            raise ValueError(f"Non-integer values cannot be stored as {dtype.name}; binarize the array first or pass a floating point dtype (e.g. np.float32)")
         info = np.iinfo(dtype)
         if array.min() < info.min or array.max() > info.max:
             raise ValueError(f"Values {array.min()}..{array.max()} do not fit in {dtype.name}")

@@ -3,12 +3,14 @@ r"""Slicer Studio benchmark harness: the before/after performance gate of every 
 
 In-Slicer mode measures interactive costs and writes a JSON file::
 
-  xvfb-run -a -s "-screen 0 1920x1080x24" ./Slicer --no-splash --python-script Utilities/Scripts/StudioBench.py -- \\
+  xvfb-run -a -s "-screen 0 1920x1080x24" ./Slicer --no-splash --python-script Utilities/Scripts/StudioBench.py -- \
     --out F.json [--only m1,m2] [--check] [--compare prev.json] [--mrhead PATH]
 
-System-Python mode measures startup through child processes, or evaluates an existing JSON::
+System-Python mode measures startup through child processes, merges runs (per-metric median; the VM
+is noisy, so compare medians of 3 or more runs), or evaluates an existing JSON::
 
   python3 Utilities/Scripts/StudioBench.py --startup --slicer /opt/S-r/Slicer-build/Slicer --runs 3 --out F.json [--home DIR]
+  python3 Utilities/Scripts/StudioBench.py --merge run1.json run2.json run3.json --out F.json
   python3 Utilities/Scripts/StudioBench.py --input F.json [--check] [--compare prev.json]
 
 The JSON holds ``{"metrics": {...}, "errors": {...}, "details": {...}, "meta": {...}}``. Every metric
@@ -224,6 +226,7 @@ def parseArguments(argv, inSlicer):
     parser.add_argument("--mrhead", default=DEFAULT_MRHEAD_PATH, help="MRHead volume file; SampleData MRHead is used if it does not exist")
     if not inSlicer:
         parser.add_argument("--input", help="evaluate an existing JSON (--check / --compare) without measuring")
+        parser.add_argument("--merge", nargs="+", metavar="JSON", help="write the per-metric median of several result files to --out")
         parser.add_argument("--startup", action="store_true", help="measure startup with --report-startup-timing --exit-after-startup")
         parser.add_argument("--slicer", default="/opt/S-r/Slicer-build/Slicer", help="Slicer launcher for --startup")
         parser.add_argument("--runs", type=int, default=3, help="startup runs; the median of each phase is reported (default: 3)")
@@ -1132,6 +1135,27 @@ def runStartup(args):
     return {"metrics": metrics, "errors": errors, "details": {"runs": runs}, "meta": meta}
 
 
+def mergeResults(paths):
+    """Per-metric median of several result files (null only when no run produced a value)."""
+    results = []
+    for path in paths:
+        with open(path) as f:
+            results.append(json.load(f))
+    metrics = {}
+    errors = {}
+    for name in sorted({name for result in results for name in result.get("metrics", {})}):
+        values = [result["metrics"][name] for result in results if result.get("metrics", {}).get(name) is not None]
+        metrics[name] = round(statistics.median(values), 3) if values else None
+        if not values:
+            errors[name] = "\n".join(str(result.get("errors", {}).get(name, "not measured")) for result in results)[-3000:]
+    details = dict(results[0].get("details", {}))
+    details["merged_from"] = [os.path.abspath(path) for path in paths]
+    details["merged_metrics"] = [result.get("metrics", {}) for result in results]
+    meta = baseMeta(sys.argv)
+    meta.update({"mode": "merge", "inputs": [result.get("meta", {}) for result in results]})
+    return {"metrics": metrics, "errors": errors, "details": details, "meta": meta}
+
+
 def runSystemPython(argv):
     try:
         args = parseArguments(argv, inSlicer=False)
@@ -1143,6 +1167,12 @@ def runSystemPython(argv):
     if args.input:
         with open(args.input) as f:
             result = json.load(f)
+    elif args.merge:
+        if not args.out:
+            print("--out is required with --merge", file=sys.stderr)
+            return 2
+        result = mergeResults(args.merge)
+        writeResult(args.out, result)
     elif args.startup:
         if not args.out:
             print("--out is required with --startup", file=sys.stderr)
@@ -1150,7 +1180,7 @@ def runSystemPython(argv):
         result = runStartup(args)
         writeResult(args.out, result)
     else:
-        print("Outside Slicer use --startup or --input; to measure the application run this script with "
+        print("Outside Slicer use --startup, --merge or --input; to measure the application run this script with "
               "'Slicer --python-script StudioBench.py -- --out F.json'.", file=sys.stderr)
         return 2
     return evaluate(result, args)

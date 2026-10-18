@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check that files saved by one Slicer installation load correctly in another one.
+r"""Check that files saved by one Slicer installation load correctly in another one.
 
 For every ordered pair (writer A, checker B) of the given Slicer installations, a generated
 writer script runs headless in A and builds a small test scene:
@@ -114,8 +114,7 @@ STUDIO_LAYOUTS = {
     7003: f'<layout type="horizontal" split="true"><item>{_SLICE_RED}</item><item>{_SLICE_GREEN}</item><item>{_SLICE_YELLOW}</item></layout>',
 }
 
-# Node classes whose instances the test scene contains; the counts of nodes of these classes (and of
-# every other class that the writer saved) must be the same after loading.
+# A writer saves the scene as a scene file with data files in a directory ("dir") and as a bundle ("mrb")
 SCENE_FORMATS = ("dir", "mrb")
 
 # Messages that the application emits asynchronously for reasons unrelated to the loaded files
@@ -159,9 +158,11 @@ def runInSlicer(configPath):
     except Exception:
         result["exception"] = traceback.format_exc()
         print(result["exception"], file=sys.stderr)
-    with open(config["resultPath"], "w", encoding="utf-8") as f:
-        json.dump(result, f, indent=1, sort_keys=True)
-    slicer.app.exit(0)
+    try:
+        with open(config["resultPath"], "w", encoding="utf-8") as f:
+            json.dump(result, f, indent=1, sort_keys=True, default=str)
+    finally:
+        slicer.app.exit(0)
 
 
 def _processEvents(times=3):
@@ -582,6 +583,8 @@ def _viewsState():
     elif redWidget is not None and sliceViews.get("Red"):
         sliceView = redWidget.sliceView()
         sliceView.forceRender()
+        # Render even if the application paused rendering, to check what the view would show
+        sliceView.renderWindow().Render()
         windowToImage = vtk.vtkWindowToImageFilter()
         windowToImage.SetInput(sliceView.renderWindow())
         windowToImage.SetInputBufferTypeToRGB()
@@ -690,7 +693,13 @@ def _runWriter(config):
     _screenshot(shot)
     result["screenshot"] = shot
 
-    result["lnm"] = _writeLnmOutputs(config) if config["isFork"] else {"status": "skipped", "reason": "official writer (LNM is a fork module)"}
+    if config["isFork"]:
+        try:
+            result["lnm"] = _writeLnmOutputs(config)
+        except Exception:
+            result["lnm"] = {"status": "error", "stderr": traceback.format_exc()}
+    else:
+        result["lnm"] = {"status": "skipped", "reason": "official writer (LNM is a fork module)"}
     result["messages"] = capture.stop()
     return result
 
@@ -741,7 +750,7 @@ def _writeLnmOutputs(config):
     environment = dict(os.environ)
     environment["PYTHONPATH"] = os.pathsep.join([libDir] + ([environment["PYTHONPATH"]] if environment.get("PYTHONPATH") else []))
     command = [sys.executable, "-m", "LesionNetworkMappingLib.engine", "--bundle", bundle["path"], "--lesion", lesionPath, "--out", outputDir, "--threads", "1"]
-    process = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=600)
+    process = subprocess.run(command, check=False, env=environment, capture_output=True, text=True, timeout=600)
     events = []
     for line in process.stdout.splitlines():
         try:
@@ -754,7 +763,7 @@ def _writeLnmOutputs(config):
 
     outputs = []
     for path in done[0]["outputs"]:
-        data, affine, header = nifti.read_nifti(path)
+        data, affine, _ = nifti.read_nifti(path)
         node = slicer.util.loadVolume(path)
         matrix = vtk.vtkMatrix4x4()
         node.GetIJKToRASMatrix(matrix)
@@ -858,7 +867,7 @@ def _close(a, b, tolerance):
 
 
 def _closeLists(a, b, tolerance):
-    return a is not None and b is not None and len(a) == len(b) and all(_close(x, y, tolerance) for x, y in zip(a, b))
+    return a is not None and b is not None and len(a) == len(b) and all(_close(x, y, tolerance) for x, y in zip(a, b, strict=True))
 
 
 def _compareVolume(label, expected, actual, problems):
@@ -897,7 +906,7 @@ def compareStates(expected, actual):
         if colorTable["numberOfColors"] != expectedColorTable["numberOfColors"]:
             problems.append(f"colorTable: number of colors differs ({expectedColorTable['numberOfColors']} != {colorTable['numberOfColors']})")
         else:
-            bad = [e[0] for e, a in zip(expectedColorTable["entries"], colorTable["entries"]) if e[1] != a[1] or not _closeLists(e[2:], a[2:], COLOR_TOLERANCE)]
+            bad = [e[0] for e, a in zip(expectedColorTable["entries"], colorTable["entries"], strict=True) if e[1] != a[1] or not _closeLists(e[2:], a[2:], COLOR_TOLERANCE)]
             if bad:
                 problems.append(f"colorTable: {len(bad)} entries differ (first: {expectedColorTable['entries'][bad[0]]} != {colorTable['entries'][bad[0]]})")
 
@@ -912,7 +921,7 @@ def compareStates(expected, actual):
         expectedSegments, segments = expectedSegmentation["segments"], segmentation["segments"]
         if [s["id"] for s in expectedSegments] != [s["id"] for s in segments]:
             problems.append(f"segmentation: segment IDs differ ({[s['id'] for s in expectedSegments]} != {[s['id'] for s in segments]})")
-        for expectedSegment, segment in zip(expectedSegments, segments):
+        for expectedSegment, segment in zip(expectedSegments, segments, strict=False):
             for key in ("name", "voxels", "md5"):
                 if expectedSegment[key] != segment[key]:
                     problems.append(f"segment {expectedSegment['id']}: {key} differs ({expectedSegment[key]} != {segment[key]})")
@@ -927,7 +936,7 @@ def compareStates(expected, actual):
     elif "error" not in pointList:
         if len(pointList["points"]) != len(expectedPointList["points"]):
             problems.append(f"pointList: number of points differs ({len(expectedPointList['points'])} != {len(pointList['points'])})")
-        for index, (expectedPoint, point) in enumerate(zip(expectedPointList["points"], pointList["points"])):
+        for index, (expectedPoint, point) in enumerate(zip(expectedPointList["points"], pointList["points"], strict=False)):
             for key in ("label", "description", "selected", "locked"):
                 if expectedPoint[key] != point[key]:
                     problems.append(f"point {index}: {key} differs ({expectedPoint[key]} != {point[key]})")
@@ -1159,7 +1168,7 @@ def _runSlicer(slicerPath, role, name, config, args):
     start = time.time()
     with open(os.path.join(runDir, "slicer.log"), "w", encoding="utf-8") as log:
         try:
-            process = subprocess.run(command, env=environment, stdout=log, stderr=subprocess.STDOUT, timeout=args.timeout)
+            process = subprocess.run(command, check=False, env=environment, stdout=log, stderr=subprocess.STDOUT, timeout=args.timeout)
             returncode = process.returncode
         except subprocess.TimeoutExpired:
             returncode = "timeout"
@@ -1171,7 +1180,9 @@ def _runSlicer(slicerPath, role, name, config, args):
     result["seconds"] = round(time.time() - start, 1)
     result["log"] = os.path.join(runDir, "slicer.log")
     if not os.path.exists(config["resultPath"]):
-        result["exception"] = f"Slicer did not write a result (exit code {returncode}); see {result['log']}"
+        with open(result["log"], encoding="utf-8", errors="replace") as log:
+            lastLines = [line.strip() for line in log.read().splitlines() if line.strip()][-1:]
+        result["exception"] = f"Slicer did not write a result (exit code {returncode}), see {result['log']}\n{' '.join(lastLines)[:300]}"
     return result
 
 
@@ -1256,7 +1267,7 @@ def _evaluatePair(writerName, checkerName, writer, checker, isFork):
 def _formatReport(report):
     lines = ["Slicer file compatibility check", "=" * 31, ""]
     for name, info in report["slicers"].items():
-        lines.append(f"{name:<20} {info.get('version', '?'):<22} {'fork' if info['isFork'] else 'official'}  {info['path']}")
+        lines.append(f"{name:<20} {info.get('version') or '?':<22} {'fork' if info['isFork'] else 'official'}  {info['path']}")
     lines += ["", "Writers:"]
     for name, writer in report["writers"].items():
         status = "PASS" if not writer["problems"] else "FAIL"

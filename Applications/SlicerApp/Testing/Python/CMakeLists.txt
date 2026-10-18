@@ -254,6 +254,13 @@ slicer_add_python_unittest(
   SLICER_ARGS --disable-modules --ignore-slicerrc
   )
 
+# Slicer Studio layouts (user layout IDs 7001-7099) are registered by vtkMRMLLayoutLogic and saved in
+# scenes with a fallback layout that other Slicer versions can display.
+slicer_add_python_unittest(
+  SCRIPT StudioLayoutPortabilityTest.py
+  SLICER_ARGS --disable-cli-modules --disable-scripted-loadable-modules --ignore-slicerrc
+  )
+
 if(VTK_DEBUG_LEAKS AND Slicer_HAS_CONSOLE_IO_SUPPORT)
   set(testname MRMLCreateNodeByClassWithoutSetReferenceCount)
   slicer_add_python_test(

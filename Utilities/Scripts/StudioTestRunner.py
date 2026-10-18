@@ -14,7 +14,8 @@ Usage::
 - ``selftest``: ``slicer.util.selectModule(MODULE)`` then ``slicer.selfTests[MODULE]()``, with ``--testing``.
 - ``generic``: the generic module test, configured from ``Base/QTCore/Testing/Python/qSlicerModuleGenericTest.py.in``
   into ``--generic-dir``, run with ``--testing --no-main-window`` (as ctest does for WITH_GENERIC_TESTS modules).
-- ``pyunit``: ``PythonSlicer -m unittest TESTFILE`` in DIR (pure Python tests, no application).
+- ``pyunit``: ``PythonSlicer -m unittest TESTFILE`` in DIR (pure Python tests, no application). DIR may
+  also be a module name, meaning the module's source directory.
 
 Every child runs under ``xvfb-run`` (unless ``--no-xvfb``). The exit code is the child's, or the first
 non-zero one when several tests run.
@@ -39,14 +40,15 @@ def splitNames(values):
     return [name for name in re.split(r"[\s,{}]+", " ".join(values)) if name]
 
 
-def resolveTestDirectory(directory):
+def resolveDirectory(directory, subdirectory=""):
+    """A directory, or for a module name its source directory (joined with subdirectory)."""
     if os.path.isdir(directory):
         return os.path.abspath(directory)
     for moduleType in ("Scripted", "Loadable", "CLI"):
-        candidate = os.path.join(SOURCE_DIR, "Modules", moduleType, directory, "Testing", "Python")
+        candidate = os.path.join(SOURCE_DIR, "Modules", moduleType, directory, subdirectory)
         if os.path.isdir(candidate):
-            return candidate
-    raise ValueError(f"'{directory}' is neither a directory nor a module with a Testing/Python directory")
+            return os.path.normpath(candidate)
+    raise ValueError(f"'{directory}' is neither a directory nor a module with a {subdirectory or 'source'} directory")
 
 
 def pythonSlicerPath(args):
@@ -83,7 +85,7 @@ def slicerCommand(args, pythonCode, extraArguments=()):
 
 
 def runUnitTests(args):
-    directory = resolveTestDirectory(args.directory)
+    directory = resolveDirectory(args.directory, os.path.join("Testing", "Python"))
     exitCode = 0
     for name in splitNames(args.names):
         code = f"import slicer.testing; slicer.testing.runUnitTest([{directory!r}], {name!r}); slicer.app.exit(0)"
@@ -111,7 +113,7 @@ def runGenericTest(args):
 
 
 def runPythonUnitTest(args):
-    directory = resolveTestDirectory(args.directory)
+    directory = resolveDirectory(args.directory)
     command = [pythonSlicerPath(args), "-m", "unittest", "-v", *splitNames(args.testfiles)]
     return run(command, args, f"pyunit {' '.join(args.testfiles)}", cwd=directory)
 
@@ -138,7 +140,7 @@ def main(argv):
     genericParser.add_argument("module")
     genericParser.set_defaults(function=runGenericTest)
     pyunitParser = subparsers.add_parser("pyunit", help="PythonSlicer -m unittest in a directory")
-    pyunitParser.add_argument("directory", help="working directory, or a module name")
+    pyunitParser.add_argument("directory", help="working directory, or a module name (its source directory)")
     pyunitParser.add_argument("testfiles", nargs="+", help="test file(s), relative to the directory")
     pyunitParser.set_defaults(function=runPythonUnitTest)
     args = parser.parse_args(argv)

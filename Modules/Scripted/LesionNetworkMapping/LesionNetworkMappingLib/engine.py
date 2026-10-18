@@ -12,10 +12,16 @@ runs of the per-run Pearson r. All lesions are columns of S: one GEMM per voxel 
 A run in which the seed (or a voxel) has zero variance contributes r = 0 to that mean.
 The time series are stored as float16 and upcast to float32 chunk by chunk (float16 GEMM is very slow).
 
-Command line (prints one JSON object per line: progress, snapshot, warning, done or error events)::
+Command line (prints one JSON object per line: start, progress, snapshot, warning, done or error events)::
 
     python -m LesionNetworkMappingLib.engine --bundle B.lnmc --lesion lesion1.nii.gz [--lesion ...]
         --out DIR [--subjects N [--random] [--seed S]] [--threads K] [--snapshot-every K]
+        [--null-relocations K [--null-seed S] [--brain-mask MASK] [--null-voxels N] [--write-null]]
+        [--desc-suffix PreviewN100] [--threshold-rule JSON] [--run-json run.json]
+
+After the maps, the specificity QA (see qa.py) runs: degree similarity when the bundle has a degree
+map, and the relocated-lesion null when --null-relocations is given (the relocated lesions are extra
+seed columns of the same pass). It is reported in the "done" event ("qa") and in <out>/qa.json.
 """
 
 import os
@@ -52,7 +58,7 @@ import numpy as np
 
 from .connectome import ConnectomeBundle, _is_cancelled
 from .geometry import from_masked_vector, resample_to_grid, to_masked_vector
-from .nifti import read_nifti, write_nifti
+from .nifti import read_nifti, read_nifti_header, write_nifti, xform_disagreement
 
 RMAX = 0.999999  # r is clipped to +/-RMAX before the Fisher transform
 DEFAULT_CHUNK = 8192
@@ -62,6 +68,9 @@ NULL_DESC = "RelocatedT"  # "desc" label of the optional 4D null T maps
 # Null maps only feed spatial correlations: by default they are computed on a random sample of this
 # many voxels, which bounds their memory and GEMM cost for large connectomes and many lesions.
 NULL_MAX_VOXELS = 30_000
+# A lesion file whose sform and qform disagree by more than this (mm) gets a warning event: the maps
+# use the sform, as FSL and nibabel do, while Slicer (ITK) usually displays such a file with the qform.
+XFORM_WARNING_MM = 0.1
 
 
 class NetworkMaps:
@@ -204,14 +213,51 @@ class _Seeds:
             for run in range(len(runs)):
                 segment = slice(bounds[run], bounds[run + 1])
                 raw[:, segment] += (self.weights[:, u0:u0 + chunk] * norms[run, rows]) @ x[:, segment]
-        seeds = np.zeros((bounds[-1], self.n_lesions), dtype=np.float64)
-        for run in range(len(runs)):
-            segment = slice(bounds[run], bounds[run + 1])
-            s = raw[:, segment] - raw[:, segment].mean(axis=1, keepdims=True)  # (L, T_r)
-            norm = np.linalg.norm(s, axis=1)
-            valid = norm > 0
-            seeds[segment, valid] = (s[valid] / norm[valid, np.newaxis]).T / len(runs)
-        return seeds.astype(np.float32)
+        return _normalized_seeds(raw, runs)
+
+
+class _SparseSeeds:
+    """Seeds given as sparse columns (voxel positions, weights), e.g. many small relocated lesions.
+
+    Same interface as :class:`_Seeds`; each seed time course only reads its own voxels.
+    """
+
+    def __init__(self, columns, n_voxels, min_weight=MIN_WEIGHT):
+        self.n_voxels = int(n_voxels)
+        self.columns = []
+        for positions, values in columns:
+            positions = np.asarray(positions, dtype=np.int64)
+            values = np.asarray(values, dtype=np.float32)
+            if positions.shape != values.shape or (positions.size and (positions.min() < 0 or positions.max() >= self.n_voxels)):
+                raise ValueError("Each sparse seed needs matching voxel positions (within the connectome mask) and weights")
+            keep = values > min_weight
+            self.columns.append((positions[keep], values[keep]))
+        self.n_lesions = len(self.columns)
+
+    def matrix(self, data, norms, runs, chunk=DEFAULT_CHUNK):
+        """Return S (T_total, K) float32 such that ``data @ S`` is the mean over runs of Pearson r."""
+        bounds = np.cumsum((0, *runs))
+        raw = np.zeros((self.n_lesions, bounds[-1]), dtype=np.float64)
+        for column, (positions, values) in enumerate(self.columns):
+            if positions.size:
+                x = data[positions].astype(np.float32, copy=False)  # (m, T_total)
+                for run in range(len(runs)):
+                    segment = slice(bounds[run], bounds[run + 1])
+                    raw[column, segment] = (values * norms[run, positions]) @ x[:, segment]
+        return _normalized_seeds(raw, runs)
+
+
+def _normalized_seeds(raw, runs):
+    """Demean and unit-normalize raw seed time courses (L, T_total) within each run; return (T_total, L) / nRuns."""
+    bounds = np.cumsum((0, *runs))
+    seeds = np.zeros((bounds[-1], raw.shape[0]), dtype=np.float64)
+    for run in range(len(runs)):
+        segment = slice(bounds[run], bounds[run + 1])
+        s = raw[:, segment] - raw[:, segment].mean(axis=1, keepdims=True)  # (L, T_r)
+        norm = np.linalg.norm(s, axis=1)
+        valid = norm > 0
+        seeds[segment, valid] = (s[valid] / norm[valid, np.newaxis]).T / len(runs)
+    return seeds.astype(np.float32)
 
 
 def iter_correlation_chunks(data, seeds, chunk=DEFAULT_CHUNK):
@@ -259,21 +305,25 @@ class _Accumulator:
 
     Memory: three (V, L) float64 arrays, i.e. 24 * V * L bytes (about 5.5 MB per lesion at
     230k voxels), plus 12 * V * L bytes for the float32 maps returned by :meth:`maps`.
+
+    Null seeds use ``dtype=np.float32`` and ``keep_r=False`` (only :meth:`t_map` is needed for their
+    spatial correlations), which halves the memory and the per-subject cost.
     """
 
-    def __init__(self, n_voxels, n_lesions, chunk):
+    def __init__(self, n_voxels, n_lesions, chunk, dtype=np.float64, keep_r=True):
         self.n = 0
-        self.sum_r = np.zeros((n_voxels, n_lesions))
-        self.mean_z = np.zeros((n_voxels, n_lesions))
-        self.m2 = np.zeros((n_voxels, n_lesions))
+        self.dtype = np.dtype(dtype)
+        self.sum_r = np.zeros((n_voxels, n_lesions), self.dtype) if keep_r else None
+        self.mean_z = np.zeros((n_voxels, n_lesions), self.dtype)
+        self.m2 = np.zeros((n_voxels, n_lesions), self.dtype)
         size = min(chunk, n_voxels) * n_lesions
         self._z = np.empty(size, dtype=np.float32)
-        self._delta = np.empty(size)
-        self._tmp = np.empty(size)
+        self._delta = np.empty(size, self.dtype)
+        self._tmp = np.empty(size, self.dtype)
 
     def add_subject(self, data, seed_matrix, chunk):
         self.n += 1
-        inv_n = 1.0 / self.n
+        inv_n = self.dtype.type(1.0 / self.n)
         n_lesions = seed_matrix.shape[1]
         for v0, v1, r in iter_correlation_chunks(data, seed_matrix, chunk):
             size = (v1 - v0) * n_lesions
@@ -281,7 +331,8 @@ class _Accumulator:
             delta = self._delta[:size].reshape(r.shape)
             tmp = self._tmp[:size].reshape(r.shape)
             np.arctanh(r, out=z)
-            self.sum_r[v0:v1] += r
+            if self.sum_r is not None:
+                self.sum_r[v0:v1] += r
             mean = self.mean_z[v0:v1]
             np.subtract(z, mean, out=delta)
             np.multiply(delta, inv_n, out=tmp)
@@ -302,6 +353,14 @@ class _Accumulator:
             np.divide(self.mean_z, standard_error, out=t, where=standard_error > 0)
         as_rows = lambda a: np.ascontiguousarray(a.T, dtype=np.float32)
         return NetworkMaps(as_rows(avg_r), as_rows(self.mean_z), as_rows(t), subject_ids, cancelled, elapsed)
+
+    def t_map(self):
+        """Current T maps only, (L, V) float32 (0 with fewer than 2 subjects or zero variance)."""
+        t = np.zeros_like(self.mean_z)
+        if self.n >= 2:
+            standard_error = np.sqrt(self.m2 / self.dtype.type((self.n - 1) * self.n))
+            np.divide(self.mean_z, standard_error, out=t, where=standard_error > 0)
+        return np.ascontiguousarray(t.T, dtype=np.float32)
 
 
 def resolve_subjects(bundle, subjects=None, random_subset=False, seed=0):
@@ -338,9 +397,10 @@ def compute_network_maps(
     :param cancel: optional threading.Event or callable returning True to stop; checked between
       subjects. The maps of the subjects processed so far are returned with ``cancelled=True``.
     :param snapshot_every: if > 0, call ``snapshot(maps)`` every this many subjects (not after the last).
-    :param null_weights: optional (K, V) weights of null seeds (e.g. relocated lesions, see
-      ``qa.relocated_lesions``), mapped in the same pass as extra seed columns. Only their T maps
-      are kept (``NetworkMaps.null_t``); snapshots do not include them.
+    :param null_weights: optional null seeds (e.g. relocated lesions, see ``qa.relocated_lesions``)
+      mapped in the same pass as extra seed columns: a (K, V) weight matrix, or a list of K sparse
+      (voxel positions, weights) pairs. Only their T maps are kept (``NetworkMaps.null_t``);
+      snapshots do not include them.
     :param null_voxels: optional sorted indices into the V voxels at which the null maps are
       computed (see :func:`null_voxel_sample`); default: all voxels.
     :return: :class:`NetworkMaps`; ``cancelled`` is also True if the iteration stopped early because
@@ -357,15 +417,18 @@ def compute_network_maps(
     ids = resolve_subjects(bundle, subjects, random_subset, seed)
     accumulator = _Accumulator(bundle.n_voxels, seeds.n_lesions, chunk)
     nulls = null_rows = null_accumulator = None
-    if null_weights is not None and np.size(null_weights):
+    if isinstance(null_weights, (list, tuple)) and null_weights:
+        nulls = _SparseSeeds(null_weights, bundle.n_voxels, min_weight)
+    elif null_weights is not None and not isinstance(null_weights, (list, tuple)) and np.size(null_weights):
         nulls = _Seeds(null_weights, min_weight)
+    if nulls is not None:
         if nulls.n_voxels != bundle.n_voxels:
             raise ValueError(f"Null weights have {nulls.n_voxels} voxels, the connectome has {bundle.n_voxels}")
         if null_voxels is not None:
             null_rows = np.asarray(null_voxels, dtype=np.int64)
             if null_rows.ndim != 1 or (null_rows.size and (null_rows.min() < 0 or null_rows.max() >= bundle.n_voxels or np.any(np.diff(null_rows) <= 0))):
                 raise ValueError("null_voxels must be sorted, unique indices of connectome voxels")
-        null_accumulator = _Accumulator(bundle.n_voxels if null_rows is None else null_rows.size, nulls.n_lesions, chunk)
+        null_accumulator = _Accumulator(bundle.n_voxels if null_rows is None else null_rows.size, nulls.n_lesions, chunk, dtype=np.float32, keep_r=False)
     processed = []
     cancelled = False
     start = time.perf_counter()
@@ -391,7 +454,7 @@ def compute_network_maps(
     cancelled = cancelled or len(processed) < len(ids)
     maps = accumulator.maps(processed, cancelled, time.perf_counter() - start)
     if nulls is not None:
-        maps.null_t = null_accumulator.maps(processed).t
+        maps.null_t = null_accumulator.t_map()
         maps.null_voxels = null_rows
     return maps
 
@@ -455,20 +518,27 @@ def _emit(event):
     print(json.dumps(event), flush=True)
 
 
-_BIDS_SUBJECT = re.compile(r"^(sub-[A-Za-z0-9]+(?:_ses-[A-Za-z0-9]+)?)_[A-Za-z0-9_-]+$")
+_BIDS_NAME = re.compile(r"^sub-[A-Za-z0-9]+(?:_[A-Za-z0-9-]+)+$")
+_BIDS_ENTITY = re.compile(r"^([A-Za-z0-9]+)-[A-Za-z0-9]+$")
+# Entities of a lesion file name that describe the lesion image itself (its grid, label and
+# description), not the source acquisition; outputs are on the connectome grid with their own desc.
+_LESION_IMAGE_ENTITIES = ("space", "res", "den", "label", "desc")
 
 
 def _lesion_name(path):
-    """Output name of a lesion file: its name without extension, or only its subject (and session)
-    entities for BIDS-style names (sub-01_space-X_desc-lesion_mask.nii.gz gives "sub-01").
+    """Output name of a lesion file: its name without extension or, for BIDS-style names, its
+    key-value entities except the lesion-image entities space, res, den, label and desc
+    (sub-01_ses-2_run-1_space-X_desc-lesion_mask.nii.gz gives "sub-01_ses-2_run-1").
     """
     name = os.path.basename(os.fspath(path))
     for ext in (".nii.gz", ".nii"):
         if name.lower().endswith(ext):
             name = name[: -len(ext)]
             break
-    match = _BIDS_SUBJECT.match(name)
-    return match.group(1) if match else name
+    if not _BIDS_NAME.match(name):
+        return name
+    entities = (_BIDS_ENTITY.match(part) for part in name.split("_"))
+    return "_".join(entity.group(0) for entity in entities if entity and entity.group(1) not in _LESION_IMAGE_ENTITIES)
 
 
 def connectome_label(bundle_name):
@@ -556,7 +626,7 @@ def main(argv=None):
     parser.add_argument("--null-seed", type=int, default=0, help="random seed of the lesion relocations")
     parser.add_argument("--null-voxels", type=int, default=NULL_MAX_VOXELS, help=f"compute the null maps on a random sample of this many voxels (0: all voxels; default: {NULL_MAX_VOXELS})")
     parser.add_argument("--brain-mask", default=None, help="brain mask NIfTI (any grid) that relocated lesions must stay in (default: the connectome mask)")
-    parser.add_argument("--write-null", action="store_true", help="also write the null T maps (4D, one volume per relocation; computed on all voxels)")
+    parser.add_argument("--write-null", action="store_true", help="also write the null T maps (4D, one volume per relocation; computed on all voxels; Slicer 5.13+ loads them as a sequence)")
     parser.add_argument("--desc-suffix", default="", help="appended to the output desc labels, e.g. PreviewN100 for a preview run (letters and digits)")
     parser.add_argument("--threshold-rule", default=None, help="threshold rule JSON, recorded in the run JSON (maps are written unthresholded)")
     parser.add_argument("--run-json", default=None, help="write the run configuration and provenance (arguments, subjects hash, seeds, versions, times) to this file")
@@ -566,16 +636,19 @@ def main(argv=None):
         parser.error("--desc-suffix must contain only letters and digits")
     if args.null_relocations < 0:
         parser.error("--null-relocations must be at least 0")
+    rule = None
+    if args.threshold_rule is not None:
+        from .thresholds import normalize_rule
+
+        try:
+            rule = normalize_rule(args.threshold_rule)
+        except ValueError as exc:
+            parser.error(f"--threshold-rule: {exc}")
     run = None
     try:
         from . import qa as qa_lib
         from .export import file_sha256, now_iso, run_record, subjects_sha256, write_json_atomic
 
-        rule = None
-        if args.threshold_rule is not None:
-            from .thresholds import normalize_rule
-
-            rule = normalize_rule(args.threshold_rule)
         started = time.perf_counter()
         bundle = ConnectomeBundle.open(args.bundle)
         os.makedirs(args.out, exist_ok=True)
@@ -595,16 +668,23 @@ def main(argv=None):
             qc.append({"lesion": name, **lesion_qc_values})
             if lesion_qc_values["voxels_in_mask"] == 0:
                 _emit({"event": "warning", "lesion": name, "message": "The lesion does not overlap the connectome mask; its maps are all zero."})
+            disagreement = xform_disagreement(read_nifti_header(path))
+            if disagreement > XFORM_WARNING_MM:
+                _emit({
+                    "event": "warning",
+                    "lesion": name,
+                    "message": f"The sform and qform of the lesion file disagree by up to {disagreement:.2g} mm; the maps use the sform (as FSL does), while Slicer may display the file with the qform. Check that the lesion lies where it was drawn.",
+                })
 
         # Relocated-lesion null: K rigid translations of each lesion, extra seed columns of the same pass
-        null_weights, null_counts, null_voxels = [], [0] * len(names), None
+        null_columns, null_counts, null_voxels = [], [0] * len(names), None
         brain_mask = None
         if args.null_relocations > 0:
             brain_mask = _brain_mask_vector(args.brain_mask, bundle) if args.brain_mask else None
             for index, (name, lesion_weights_vector) in enumerate(zip(names, weights, strict=True)):
-                relocated = qa_lib.relocated_lesions(lesion_weights_vector, bundle, brain_mask=brain_mask, k=args.null_relocations, seed=args.null_seed)
+                relocated = qa_lib.relocated_lesions(lesion_weights_vector, bundle, brain_mask=brain_mask, k=args.null_relocations, seed=args.null_seed, sparse=True)
                 null_counts[index] = len(relocated)
-                null_weights.append(relocated)
+                null_columns.extend(relocated)
                 if len(relocated) < args.null_relocations and qc[index]["voxels_in_mask"] > 0:
                     _emit({"event": "warning", "lesion": name, "message": f"Only {len(relocated)} of {args.null_relocations} relocated lesions fit inside the brain mask."})
             if not args.write_null:
@@ -639,7 +719,6 @@ def main(argv=None):
                 write_json_atomic(args.run_json, run)
             _emit({"event": "snapshot", "n": partial.n, "outputs": outputs})
 
-        all_null_weights = np.concatenate(null_weights) if sum(null_counts) else None
         maps = compute_network_maps(
             bundle,
             np.stack(weights),
@@ -648,11 +727,11 @@ def main(argv=None):
             progress=on_progress,
             snapshot_every=args.snapshot_every,
             snapshot=on_snapshot,
-            null_weights=all_null_weights,
+            null_weights=null_columns or None,
             null_voxels=null_voxels,
         )
         outputs = write_maps(maps, names, bundle, args.out, args.desc_suffix)
-        null_outputs = write_null_maps(maps, names, null_counts, bundle, args.out, args.desc_suffix) if args.write_null and all_null_weights is not None else []
+        null_outputs = write_null_maps(maps, names, null_counts, bundle, args.out, args.desc_suffix) if args.write_null and null_columns else []
 
         # QA: degree similarity (when the bundle has a degree map) and the relocated-lesion null summary
         try:
