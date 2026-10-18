@@ -5,6 +5,8 @@ index, so grids with any orientation (including radiological, left-handed grids)
 Volumes are indexed [i, j, k] in file order (see nifti.py).
 """
 
+from typing import NamedTuple
+
 import numpy as np
 
 from .nifti import read_nifti_header
@@ -72,6 +74,94 @@ def affine_from_spm_mat(mat):
     shift = np.eye(4)
     shift[:3, 3] = 1.0
     return np.asarray(mat, dtype=np.float64) @ shift
+
+
+class SignedPermutation(NamedTuple):
+    """Voxel index mapping ``dst[axes[a]] = signs[a] * src[a] + offsets[axes[a]]`` (all integers)."""
+
+    axes: tuple
+    signs: tuple
+    offsets: tuple
+
+
+def signed_permutation(src_affine, dst_affine, tolerance=1e-3):
+    """Express the source voxel grid in destination voxel indices, if this is exact.
+
+    ``M = inv(dst_affine) @ src_affine`` maps source voxel indices to destination voxel indices.
+    When its linear part is a signed permutation matrix (same voxel size, axes only swapped or
+    flipped) and its offsets are integers, both grids share their voxel centers.
+
+    :param tolerance: maximum deviation of every matrix entry and offset from an integer.
+    :return: :class:`SignedPermutation`, or None if the grids do not share voxel centers.
+    """
+    matrix = np.linalg.inv(np.asarray(dst_affine, dtype=np.float64)) @ np.asarray(src_affine, dtype=np.float64)
+    rounded = np.round(matrix)
+    if np.abs(matrix - rounded).max() > tolerance or np.any(rounded[3] != [0, 0, 0, 1]):
+        return None
+    linear = rounded[:3, :3]
+    if not np.array_equal(np.abs(linear).sum(axis=0), [1, 1, 1]) or not np.array_equal(np.abs(linear).sum(axis=1), [1, 1, 1]):
+        return None
+    axes = tuple(int(a) for a in np.argmax(np.abs(linear), axis=0))
+    signs = tuple(int(linear[axes[a], a]) for a in range(3))
+    return SignedPermutation(axes, signs, tuple(int(v) for v in rounded[:3, 3]))
+
+
+# Standard template grids (TemplateFlow): template id, resolution label, shape and the world (RAS)
+# coordinates of the voxel center with the smallest x, y and z. Radiological (FSL) and RAS+ storage
+# of the same grid have the same voxel centers and are both recognized.
+KNOWN_GRIDS = (
+    ("MNI152NLin6Asym", 1, (182, 218, 182), 1.0, (-91.0, -126.0, -72.0)),
+    ("MNI152NLin6Asym", 2, (91, 109, 91), 2.0, (-90.0, -126.0, -72.0)),
+    ("MNI152NLin2009cAsym", 1, (193, 229, 193), 1.0, (-96.0, -132.0, -78.0)),
+    ("MNI152NLin2009cAsym", 2, (97, 115, 97), 2.0, (-96.5, -132.5, -78.5)),
+)
+NATIVE_SPACE = "native"
+
+
+def detect_grid(shape, affine, origin_tolerance=1.0, spacing_tolerance=1e-3):
+    """Identify a standard template grid (see :data:`KNOWN_GRIDS`).
+
+    The voxel axes must be aligned with the RAS axes (any order and directions), the voxel size and
+    the number of voxels along each world axis must match, and the lowest voxel center must be
+    within ``origin_tolerance`` mm of the template's.
+
+    :return: (space, resolution), e.g. ("MNI152NLin2009cAsym", 2), or ("native", None).
+    """
+    shape = tuple(int(n) for n in tuple(shape)[:3])
+    affine = np.asarray(affine, dtype=np.float64)
+    if len(shape) != 3 or affine.shape != (4, 4):
+        return NATIVE_SPACE, None
+    linear = affine[:3, :3]
+    world_axes = np.argmax(np.abs(linear), axis=0)  # world axis of each voxel axis
+    if len(set(world_axes.tolist())) != 3:
+        return NATIVE_SPACE, None
+    steps = linear[world_axes, np.arange(3)]
+    off_axis = linear.copy()
+    off_axis[world_axes, np.arange(3)] = 0.0
+    if np.abs(off_axis).max() > spacing_tolerance * np.abs(steps).max():
+        return NATIVE_SPACE, None
+    world_shape = np.zeros(3, dtype=np.int64)
+    world_spacing = np.zeros(3)
+    lowest = affine[:3, 3].copy()
+    for axis in range(3):
+        world_axis = world_axes[axis]
+        world_shape[world_axis] = shape[axis]
+        world_spacing[world_axis] = abs(steps[axis])
+        if steps[axis] < 0:
+            lowest[world_axis] += steps[axis] * (shape[axis] - 1)
+    for space, resolution, grid_shape, spacing, origin in KNOWN_GRIDS:
+        if (
+            tuple(world_shape) == grid_shape
+            and np.all(np.abs(world_spacing - spacing) <= spacing_tolerance * spacing)
+            and np.all(np.abs(lowest - origin) <= origin_tolerance)
+        ):
+            return space, resolution
+    return NATIVE_SPACE, None
+
+
+def detect_space(shape, affine, origin_tolerance=1.0):
+    """Template space of a grid: "MNI152NLin6Asym", "MNI152NLin2009cAsym" or "native" (see :func:`detect_grid`)."""
+    return detect_grid(shape, affine, origin_tolerance)[0]
 
 
 def resample_to_grid(src_data, src_affine, dst_grid, mode="fraction", supersample=2, max_points=4_000_000):

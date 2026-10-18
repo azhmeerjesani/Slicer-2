@@ -29,6 +29,7 @@
 #include "qSlicerApplication.h"
 #include "qSlicerRelativePathMapper.h"
 #include "qSlicerSettingsStylesPanel.h"
+#include "qSlicerStyle.h"
 #include "ui_qSlicerSettingsStylesPanel.h"
 
 // --------------------------------------------------------------------------
@@ -49,10 +50,20 @@ public:
   int styleIndex(const QString& styleName) const;
   void populateStyles();
 
+  /// Apply the standard palette of the current application style, if it changed.
+  void applyStylePalette();
+  /// Show the current accent color in the accent color widgets.
+  void updateAccentColorWidgets();
+  /// The theme only applies to the "Slicer" style, other styles have their own palette.
+  void updateThemeWidgets();
+
   static bool isQtStyle(const QString& styleName);
   static QStringList qtStyles();
 
   QStringList AdditionalPaths;
+  /// Accent color name, empty for the default accent color
+  QString AccentColor;
+  bool UpdatingAccentColorWidgets{ false };
 };
 
 // --------------------------------------------------------------------------
@@ -98,10 +109,36 @@ void qSlicerSettingsStylesPanelPrivate::init()
                       ctkSettingsPanel::OptionRequireRestart);
 
   // Style setting
+  // Connect before setting the default style, so that the palette of the style is
+  // applied whenever the style is set.
   this->populateStyles();
-  q->setCurrentStyle("Slicer");
   QObject::connect(this->StyleComboBox, &QComboBox::currentTextChanged, q, &qSlicerSettingsStylesPanel::onStyleChanged);
+  q->setCurrentStyle("Slicer");
   q->registerProperty("Styles/Style", q, "currentStyle", SIGNAL(currentStyleChanged(QString)), qSlicerSettingsStylesPanel::tr("Current style"));
+
+  // Theme, accent color and density settings.
+  // These are stored in Appearance/* keys and not in Styles/Style, so that other Slicer
+  // installations sharing the same settings file are not affected.
+  // The theme and the accent color are already applied at startup by qSlicerApplication.
+  this->ThemeComboBox->addItem(qSlicerSettingsStylesPanel::tr("System"), qSlicerStyle::themeToString(qSlicerStyle::SystemTheme));
+  this->ThemeComboBox->addItem(qSlicerSettingsStylesPanel::tr("Dark"), qSlicerStyle::themeToString(qSlicerStyle::DarkTheme));
+  this->ThemeComboBox->addItem(qSlicerSettingsStylesPanel::tr("Light"), qSlicerStyle::themeToString(qSlicerStyle::LightTheme));
+  q->setTheme(qSlicerSettingsStylesPanel::defaultTheme());
+  QObject::connect(this->ThemeComboBox, SIGNAL(currentIndexChanged(int)), q, SLOT(onThemeChanged(int)));
+  q->registerProperty("Appearance/Theme", q, "theme", SIGNAL(themeChanged(QString)), qSlicerSettingsStylesPanel::tr("Theme"));
+
+  this->updateAccentColorWidgets();
+  QObject::connect(this->AccentColorPickerButton, SIGNAL(colorChanged(QColor)), q, SLOT(onAccentColorPicked(QColor)));
+  QObject::connect(this->AccentColorResetButton, SIGNAL(clicked()), q, SLOT(onAccentColorReset()));
+  q->registerProperty("Appearance/Accent", q, "accentColor", SIGNAL(accentColorChanged(QString)), qSlicerSettingsStylesPanel::tr("Accent color"));
+
+  this->DensityComboBox->addItem(qSlicerSettingsStylesPanel::tr("Comfortable"), qSlicerStyle::densityToString(qSlicerStyle::Comfortable));
+  this->DensityComboBox->addItem(qSlicerSettingsStylesPanel::tr("Compact"), qSlicerStyle::densityToString(qSlicerStyle::Compact));
+  q->setDensity(qSlicerStyle::densityToString(qSlicerStyle::Comfortable));
+  QObject::connect(this->DensityComboBox, SIGNAL(currentIndexChanged(int)), q, SLOT(onDensityChanged(int)));
+  q->registerProperty("Appearance/Density", q, "density", SIGNAL(densityChanged(QString)), qSlicerSettingsStylesPanel::tr("Density"), ctkSettingsPanel::OptionRequireRestart);
+
+  this->updateThemeWidgets();
 
   // Connect AdditionalStylePaths buttons
   QObject::connect(this->AddAdditionalStylePathButton, SIGNAL(clicked()), q, SLOT(onAddStyleAdditionalPathClicked()));
@@ -119,6 +156,55 @@ int qSlicerSettingsStylesPanelPrivate::styleIndex(const QString& styleName) cons
     styleIndex = this->StyleComboBox->findText("Slicer", Qt::MatchFixedString);
   }
   return styleIndex;
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsStylesPanelPrivate::applyStylePalette()
+{
+  qSlicerApplication* app = qSlicerApplication::application();
+  if (!app || !app->style())
+  {
+    return;
+  }
+  QPalette palette = app->style()->standardPalette();
+  // Setting the application palette updates all widgets, skip it if nothing changed.
+  if (palette != app->palette())
+  {
+    app->setPalette(palette);
+  }
+  this->updateAccentColorWidgets();
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsStylesPanelPrivate::updateAccentColorWidgets()
+{
+  QColor accentColor(this->AccentColor);
+  bool isDefault = !accentColor.isValid();
+  if (isDefault)
+  {
+    // Show the default accent color of the current palette
+    qSlicerApplication* app = qSlicerApplication::application();
+    bool dark = app && app->palette().color(QPalette::Window).lightness() < 128;
+    accentColor = qSlicerStyle::tokenColor("accent", dark);
+  }
+  bool wasUpdating = this->UpdatingAccentColorWidgets;
+  this->UpdatingAccentColorWidgets = true;
+  this->AccentColorPickerButton->setColor(accentColor);
+  this->AccentColorPickerButton->setColorName(isDefault ? qSlicerSettingsStylesPanel::tr("Default") : QString());
+  this->UpdatingAccentColorWidgets = wasUpdating;
+  this->AccentColorResetButton->setEnabled(!isDefault);
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsStylesPanelPrivate::updateThemeWidgets()
+{
+  Q_Q(qSlicerSettingsStylesPanel);
+  bool themeApplies = (q->currentStyle().compare("Slicer", Qt::CaseInsensitive) == 0);
+  this->ThemeComboBox->setEnabled(themeApplies);
+  this->ThemeComboBox->setToolTip(themeApplies ? qSlicerSettingsStylesPanel::tr("Color theme of the application.")
+                                               : qSlicerSettingsStylesPanel::tr("The colors are set by the '%1' style (see Advanced section). "
+                                                                                "Select the 'Slicer' style to choose the theme here.")
+                                                   .arg(q->currentStyle()));
 }
 
 namespace
@@ -284,6 +370,7 @@ void qSlicerSettingsStylesPanel::setCurrentStyle(const QString& newStyleName)
 // --------------------------------------------------------------------------
 void qSlicerSettingsStylesPanel::onStyleChanged(const QString& newStyleName)
 {
+  Q_D(qSlicerSettingsStylesPanel);
   qSlicerApplication* app = qSlicerApplication::application();
   app->removeEventFilter(app->style());
 
@@ -300,7 +387,110 @@ void qSlicerSettingsStylesPanel::onStyleChanged(const QString& newStyleName)
   app->installEventFilter(app->style());
   app->setPalette(newStyle->standardPalette());
 
+  d->updateThemeWidgets();
+  d->updateAccentColorWidgets();
+
   emit this->currentStyleChanged(newStyleName);
+}
+
+// --------------------------------------------------------------------------
+QString qSlicerSettingsStylesPanel::defaultTheme()
+{
+  QString theme;
+  qSlicerCoreApplication* coreApp = qSlicerCoreApplication::application();
+  if (coreApp && coreApp->defaultSettings())
+  {
+    theme = coreApp->defaultSettings()->value("Appearance/ForkDefaultTheme").toString();
+  }
+  return qSlicerStyle::themeToString(qSlicerStyle::themeFromString(theme, qSlicerStyle::DarkTheme));
+}
+
+// --------------------------------------------------------------------------
+QString qSlicerSettingsStylesPanel::theme() const
+{
+  Q_D(const qSlicerSettingsStylesPanel);
+  return d->ThemeComboBox->currentData().toString();
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsStylesPanel::setTheme(const QString& theme)
+{
+  Q_D(qSlicerSettingsStylesPanel);
+  QString themeName = qSlicerStyle::themeToString(qSlicerStyle::themeFromString(theme, qSlicerStyle::themeFromString(qSlicerSettingsStylesPanel::defaultTheme())));
+  d->ThemeComboBox->setCurrentIndex(d->ThemeComboBox->findData(themeName));
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsStylesPanel::onThemeChanged(int index)
+{
+  Q_D(qSlicerSettingsStylesPanel);
+  QString themeName = d->ThemeComboBox->itemData(index).toString();
+  qSlicerStyle::setTheme(qSlicerStyle::themeFromString(themeName));
+  d->applyStylePalette();
+  emit this->themeChanged(themeName);
+}
+
+// --------------------------------------------------------------------------
+QString qSlicerSettingsStylesPanel::accentColor() const
+{
+  Q_D(const qSlicerSettingsStylesPanel);
+  return d->AccentColor;
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsStylesPanel::setAccentColor(const QString& colorName)
+{
+  Q_D(qSlicerSettingsStylesPanel);
+  QColor color(colorName);
+  QString newColorName = color.isValid() ? color.name() : QString();
+  if (newColorName == d->AccentColor)
+  {
+    return;
+  }
+  d->AccentColor = newColorName;
+  qSlicerStyle::setAccentColor(color);
+  d->applyStylePalette();
+  emit this->accentColorChanged(newColorName);
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsStylesPanel::onAccentColorPicked(const QColor& color)
+{
+  Q_D(qSlicerSettingsStylesPanel);
+  if (d->UpdatingAccentColorWidgets)
+  {
+    return;
+  }
+  this->setAccentColor(color.name());
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsStylesPanel::onAccentColorReset()
+{
+  this->setAccentColor(QString());
+}
+
+// --------------------------------------------------------------------------
+QString qSlicerSettingsStylesPanel::density() const
+{
+  Q_D(const qSlicerSettingsStylesPanel);
+  return d->DensityComboBox->currentData().toString();
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsStylesPanel::setDensity(const QString& density)
+{
+  Q_D(qSlicerSettingsStylesPanel);
+  QString densityName = qSlicerStyle::densityToString(qSlicerStyle::densityFromString(density));
+  d->DensityComboBox->setCurrentIndex(d->DensityComboBox->findData(densityName));
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsStylesPanel::onDensityChanged(int index)
+{
+  Q_D(qSlicerSettingsStylesPanel);
+  // The density is applied by qSlicerApplication at startup (the setting requires a restart).
+  emit this->densityChanged(d->DensityComboBox->itemData(index).toString());
 }
 
 // --------------------------------------------------------------------------

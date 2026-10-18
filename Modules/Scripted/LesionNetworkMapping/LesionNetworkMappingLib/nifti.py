@@ -402,7 +402,10 @@ def write_nifti(
     header["magic"] = b"n+1\0"
 
     disk_dtype = native.newbyteorder(byteorder) if native.itemsize > 1 else native
-    payload = data.astype(disk_dtype, copy=False).tobytes(order="F")
+    _write_image(path, header, data.astype(disk_dtype, copy=False).tobytes(order="F"), compresslevel)
+
+
+def _write_image(path, header, payload, compresslevel):
     # Write to a temporary file then rename, so readers never see a partially written image.
     tmp_path = f"{os.fspath(path)}.{os.getpid()}.tmp"
     try:
@@ -422,3 +425,119 @@ def _write_payload(f, header, payload):
     f.write(header.tobytes())
     f.write(b"\0\0\0\0")  # no extensions
     f.write(payload)
+
+
+# Header fields that define the voxel grid; write_like copies them unchanged from the reference image.
+GEOMETRY_FIELDS = (
+    "pixdim",
+    "xyzt_units",
+    "qform_code",
+    "sform_code",
+    "quatern_b",
+    "quatern_c",
+    "quatern_d",
+    "qoffset_x",
+    "qoffset_y",
+    "qoffset_z",
+    "srow_x",
+    "srow_y",
+    "srow_z",
+)
+
+
+def read_raw_header(path):
+    """Return the 348-byte header of a NIfTI-1 file as a numpy record in the file's byte order."""
+    _check_extension(path)
+    with _open(path, "rb") as f:
+        raw = f.read(HEADER_SIZE)
+    byteorder = _parse_header(raw, path)["byteorder"]
+    return np.frombuffer(raw[:HEADER_SIZE], dtype=_HEADER_DTYPE.newbyteorder(byteorder))[0].copy()
+
+
+def write_like(path, array_kji, ijk_to_ras, reference_path, dtype=np.uint8, descrip="", compresslevel=1):
+    """Write a Slicer array on the voxel grid and with the exact geometry header of a reference image.
+
+    This is how lesions drawn in Slicer are saved: the result has the reference's voxel order,
+    sform, qform, pixdim, codes and byte order, so it overlays the reference exactly in any NIfTI
+    reader (also for radiological, qfac = -1 references, which Slicer's own writer stores with a
+    flipped k axis).
+
+    :param array_kji: 3D array indexed [k, j, i] as returned by ``slicer.util.arrayFromVolume`` or
+      ``arrayFromSegmentBinaryLabelmap``. It may cover only part of the reference grid (e.g. a
+      segment's extent); voxels outside it are written as 0.
+    :param ijk_to_ras: 4x4 IJK to RAS matrix of the array (e.g. ``volumeNode.GetIJKToRASMatrix``).
+    :param reference_path: NIfTI file defining the output grid (the scan or template the lesion was drawn on).
+    :param dtype: on-disk data type; values must fit in it.
+    :raises ValueError: if the array grid is not the reference grid up to axis permutations, flips
+      and integer voxel shifts (``inv(ref_affine) @ ijk_to_ras`` must be a signed permutation with
+      integer offsets within 1e-3), or if non-zero voxels fall outside the reference grid.
+    :return: ``path``.
+    """
+    from .geometry import signed_permutation
+
+    _check_extension(path)
+    record = read_raw_header(reference_path)
+    reference = _parse_header(record.tobytes(), reference_path)
+    array = np.asarray(array_kji)
+    if array.ndim != 3:
+        raise ValueError(f"write_like expects a 3D [k, j, i] array, got shape {array.shape}")
+    mapping = signed_permutation(np.asarray(ijk_to_ras, dtype=np.float64), reference["affine"], tolerance=1e-3)
+    if mapping is None:
+        raise ValueError(
+            f"The image grid does not match the voxel grid of {reference_path} (it must only differ by axis order, flips and whole-voxel shifts); resample it to the reference first",
+        )
+    dtype = np.dtype(dtype)
+    if dtype.newbyteorder("=") not in _DATATYPE_CODES:
+        raise ValueError(f"Unsupported data type for NIfTI-1: {dtype}")
+    if array.size and np.issubdtype(dtype, np.integer) and not np.issubdtype(array.dtype, np.bool_):
+        info = np.iinfo(dtype)
+        if array.min() < info.min or array.max() > info.max:
+            raise ValueError(f"Values {array.min()}..{array.max()} do not fit in {dtype.name}")
+
+    # Move the source axes (i, j, k) to the reference axes, flip reversed axes, then paste the block
+    block = np.transpose(array, (2, 1, 0))  # [i, j, k]
+    order = np.argsort(mapping.axes)  # source axis of each reference axis
+    block = np.transpose(block, order)
+    out_shape = reference["shape"][:3]
+    source_slices, target_slices = [], []
+    for axis in range(3):
+        source_axis = order[axis]
+        size = block.shape[axis]
+        first = mapping.offsets[axis]
+        if mapping.signs[source_axis] < 0:
+            block = np.flip(block, axis)
+            first -= size - 1
+        lo, hi = max(first, 0), min(first + size, out_shape[axis])
+        source_slices.append(slice(lo - first, max(hi - first, lo - first)))
+        target_slices.append(slice(lo, max(hi, lo)))
+    out = np.zeros(out_shape, dtype=dtype)
+    kept = block[tuple(source_slices)]
+    if np.count_nonzero(kept) != np.count_nonzero(block):
+        raise ValueError(f"Non-zero voxels lie outside the grid of {reference_path}")
+    out[tuple(target_slices)] = kept
+
+    header = record.copy()
+    native = dtype.newbyteorder("=")
+    dim = [1] * 8
+    dim[0] = 3
+    dim[1:4] = out_shape
+    header["dim"] = dim
+    header["datatype"] = _DATATYPE_CODES[native]
+    header["bitpix"] = native.itemsize * 8
+    header["vox_offset"] = HEADER_SIZE + 4
+    header["scl_slope"] = 1.0
+    header["scl_inter"] = 0.0
+    header["cal_min"] = header["cal_max"] = 0.0
+    header["glmin"] = header["glmax"] = 0
+    header["intent_code"] = 0
+    header["intent_p1"] = header["intent_p2"] = header["intent_p3"] = 0.0
+    header["intent_name"] = b""
+    header["descrip"] = descrip.encode("latin-1")[:80]
+    header["aux_file"] = b""
+    header["slice_start"] = header["slice_end"] = 0
+    header["slice_code"] = 0
+    header["slice_duration"] = header["toffset"] = 0.0
+    header["magic"] = b"n+1\0"
+    disk_dtype = native.newbyteorder(reference["byteorder"]) if native.itemsize > 1 else native
+    _write_image(path, header, out.astype(disk_dtype, copy=False).tobytes(order="F"), compresslevel)
+    return path

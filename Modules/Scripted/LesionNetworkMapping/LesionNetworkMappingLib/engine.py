@@ -58,6 +58,10 @@ RMAX = 0.999999  # r is clipped to +/-RMAX before the Fisher transform
 DEFAULT_CHUNK = 8192
 MIN_WEIGHT = 1e-4  # lesion weights at or below this value are ignored (as in Lead-DBS)
 OUTPUT_KEYS = (("AvgR", "AvgR"), ("AvgFz", "AvgRFz"), ("T", "T"))  # result key, Lead-DBS "desc" label
+NULL_DESC = "RelocatedT"  # "desc" label of the optional 4D null T maps
+# Null maps only feed spatial correlations: by default they are computed on a random sample of this
+# many voxels, which bounds their memory and GEMM cost for large connectomes and many lesions.
+NULL_MAX_VOXELS = 30_000
 
 
 class NetworkMaps:
@@ -66,15 +70,21 @@ class NetworkMaps:
     ``maps[i]`` is a dict of masked vectors ``{"AvgR", "AvgFz", "T", "N"}`` for lesion i; the arrays
     ``avg_r``, ``avg_fz`` and ``t`` have shape (L, V). ``n`` is the number of subjects included and
     ``cancelled`` tells whether the computation stopped early.
+
+    When null seeds were mapped in the same pass (``compute_network_maps(null_weights=...)``),
+    ``null_t`` holds their T maps, shape (K, V'), over the voxels ``null_voxels`` (indices into the
+    V mask voxels; None means all V voxels). Otherwise both are None.
     """
 
-    def __init__(self, avg_r, avg_fz, t, subject_ids, cancelled=False, elapsed=0.0):
+    def __init__(self, avg_r, avg_fz, t, subject_ids, cancelled=False, elapsed=0.0, null_t=None, null_voxels=None):
         self.avg_r = avg_r
         self.avg_fz = avg_fz
         self.t = t
         self.subject_ids = list(subject_ids)
         self.cancelled = cancelled
         self.elapsed = elapsed
+        self.null_t = null_t
+        self.null_voxels = null_voxels
 
     @property
     def n(self):
@@ -314,6 +324,8 @@ def compute_network_maps(
     snapshot=None,
     prefetch=True,
     min_weight=MIN_WEIGHT,
+    null_weights=None,
+    null_voxels=None,
 ):
     """Compute group network maps for a batch of lesions in one streaming pass over the subjects.
 
@@ -326,11 +338,17 @@ def compute_network_maps(
     :param cancel: optional threading.Event or callable returning True to stop; checked between
       subjects. The maps of the subjects processed so far are returned with ``cancelled=True``.
     :param snapshot_every: if > 0, call ``snapshot(maps)`` every this many subjects (not after the last).
+    :param null_weights: optional (K, V) weights of null seeds (e.g. relocated lesions, see
+      ``qa.relocated_lesions``), mapped in the same pass as extra seed columns. Only their T maps
+      are kept (``NetworkMaps.null_t``); snapshots do not include them.
+    :param null_voxels: optional sorted indices into the V voxels at which the null maps are
+      computed (see :func:`null_voxel_sample`); default: all voxels.
     :return: :class:`NetworkMaps`; ``cancelled`` is also True if the iteration stopped early because
       the bundle was closed. T is 0 where Fz has zero variance over the subjects.
 
     Memory grows with the number of lesions: about 36 * V * L bytes (8 MB per lesion, 830 MB for
     100 lesions at 230k voxels), so split large cohorts into batches of at most ~100 lesions.
+    Null seeds cost 36 * V' * K bytes over their V' voxels.
     """
     chunk = max(1, int(chunk))
     seeds = _Seeds(weights, min_weight)
@@ -338,6 +356,16 @@ def compute_network_maps(
         raise ValueError(f"Lesion weights have {seeds.n_voxels} voxels, the connectome has {bundle.n_voxels}")
     ids = resolve_subjects(bundle, subjects, random_subset, seed)
     accumulator = _Accumulator(bundle.n_voxels, seeds.n_lesions, chunk)
+    nulls = null_rows = null_accumulator = None
+    if null_weights is not None and np.size(null_weights):
+        nulls = _Seeds(null_weights, min_weight)
+        if nulls.n_voxels != bundle.n_voxels:
+            raise ValueError(f"Null weights have {nulls.n_voxels} voxels, the connectome has {bundle.n_voxels}")
+        if null_voxels is not None:
+            null_rows = np.asarray(null_voxels, dtype=np.int64)
+            if null_rows.ndim != 1 or (null_rows.size and (null_rows.min() < 0 or null_rows.max() >= bundle.n_voxels or np.any(np.diff(null_rows) <= 0))):
+                raise ValueError("null_voxels must be sorted, unique indices of connectome voxels")
+        null_accumulator = _Accumulator(bundle.n_voxels if null_rows is None else null_rows.size, nulls.n_lesions, chunk)
     processed = []
     cancelled = False
     start = time.perf_counter()
@@ -348,6 +376,9 @@ def compute_network_maps(
                 cancelled = True
                 break
             accumulator.add_subject(subject.data, seeds.matrix(subject.data, subject.norms, subject.runs, chunk), chunk)
+            if nulls is not None:
+                null_data = subject.data if null_rows is None else subject.data[null_rows]
+                null_accumulator.add_subject(null_data, nulls.matrix(subject.data, subject.norms, subject.runs, chunk), chunk)
             processed.append(subject.id)
             elapsed = time.perf_counter() - start
             if progress:
@@ -358,7 +389,20 @@ def compute_network_maps(
         iterator.close()
     # The bundle may have been closed (from another thread) while iterating: never report partial maps as complete
     cancelled = cancelled or len(processed) < len(ids)
-    return accumulator.maps(processed, cancelled, time.perf_counter() - start)
+    maps = accumulator.maps(processed, cancelled, time.perf_counter() - start)
+    if nulls is not None:
+        maps.null_t = null_accumulator.maps(processed).t
+        maps.null_voxels = null_rows
+    return maps
+
+
+def null_voxel_sample(n_voxels, max_voxels=NULL_MAX_VOXELS, seed=0):
+    """Sorted random sample of at most ``max_voxels`` voxel indices (all voxels when n_voxels <= max_voxels
+    or max_voxels <= 0), for computing null maps where only their spatial correlations are needed.
+    """
+    if max_voxels is None or max_voxels <= 0 or n_voxels <= max_voxels:
+        return None
+    return np.sort(np.random.default_rng(seed).choice(n_voxels, size=int(max_voxels), replace=False))
 
 
 def benchmark(V=230_000, T=240, L=10, n_subjects=3, lesion_voxels=300, n_runs=2, chunk=DEFAULT_CHUNK, seed=0):
@@ -411,29 +455,78 @@ def _emit(event):
     print(json.dumps(event), flush=True)
 
 
+_BIDS_SUBJECT = re.compile(r"^(sub-[A-Za-z0-9]+(?:_ses-[A-Za-z0-9]+)?)_[A-Za-z0-9_-]+$")
+
+
 def _lesion_name(path):
+    """Output name of a lesion file: its name without extension, or only its subject (and session)
+    entities for BIDS-style names (sub-01_space-X_desc-lesion_mask.nii.gz gives "sub-01").
+    """
     name = os.path.basename(os.fspath(path))
     for ext in (".nii.gz", ".nii"):
         if name.lower().endswith(ext):
-            return name[: -len(ext)]
-    return name
+            name = name[: -len(ext)]
+            break
+    match = _BIDS_SUBJECT.match(name)
+    return match.group(1) if match else name
 
 
-def output_paths(out_dir, lesion_name, bundle_name):
-    """Output file names (Lead-DBS style) for one lesion: {result key: path}."""
-    label = re.sub(r"[^A-Za-z0-9]", "", bundle_name) or "connectome"
-    return {key: os.path.join(out_dir, f"{lesion_name}_conn-{label}_desc-{desc}_funcmap.nii.gz") for key, desc in OUTPUT_KEYS}
+def connectome_label(bundle_name):
+    """BIDS-style label of a connectome (letters and digits of its name), used in "conn-<label>"."""
+    return re.sub(r"[^A-Za-z0-9]", "", bundle_name) or "connectome"
 
 
-def write_maps(maps, lesion_names, bundle, out_dir):
+def output_paths(out_dir, lesion_name, bundle_name, desc_suffix=""):
+    """Output file names (Lead-DBS style) for one lesion: {result key: path}.
+
+    :param desc_suffix: appended to the "desc" label, e.g. "PreviewN100" for a preview (subset) run.
+    """
+    label = connectome_label(bundle_name)
+    return {key: os.path.join(out_dir, f"{lesion_name}_conn-{label}_desc-{desc}{desc_suffix}_funcmap.nii.gz") for key, desc in OUTPUT_KEYS}
+
+
+def null_output_path(out_dir, lesion_name, bundle_name, desc_suffix=""):
+    """File name of the optional 4D T maps of a lesion's relocated-lesion null (one volume per relocation)."""
+    return os.path.join(out_dir, f"{lesion_name}_conn-{connectome_label(bundle_name)}_desc-{NULL_DESC}{desc_suffix}_funcmap.nii.gz")
+
+
+def write_maps(maps, lesion_names, bundle, out_dir, desc_suffix=""):
     """Write AvgR, AvgRFz and T NIfTI maps (exact bundle affine) for every lesion; return the paths."""
     written = []
+    note = f" {desc_suffix}" if desc_suffix else ""
     for index, lesion_name in enumerate(lesion_names):
-        for key, path in output_paths(out_dir, lesion_name, bundle.name).items():
+        for key, path in output_paths(out_dir, lesion_name, bundle.name, desc_suffix).items():
             intent = {"intent_code": 3, "intent_params": (max(maps.n - 1, 0), 0.0, 0.0)} if key == "T" else {}
-            write_nifti(path, maps.volume(index, key, bundle), bundle.affine, descrip=f"LNM {key} N={maps.n}", **intent)
+            write_nifti(path, maps.volume(index, key, bundle), bundle.affine, descrip=f"LNM {key} N={maps.n}{note}", **intent)
             written.append(path)
     return written
+
+
+def write_null_maps(maps, lesion_names, null_counts, bundle, out_dir, desc_suffix=""):
+    """Write the null T maps of each lesion as one 4D NIfTI (needs null maps on all voxels); return the paths."""
+    if maps.null_t is None or maps.null_voxels is not None:
+        raise ValueError("Null maps on all connectome voxels are needed to write them")
+    written = []
+    start = 0
+    for lesion_name, count in zip(lesion_names, null_counts, strict=True):
+        if count:
+            volumes = unmask(maps.null_t[start:start + count], bundle)  # (k, ni, nj, nk)
+            path = null_output_path(out_dir, lesion_name, bundle.name, desc_suffix)
+            write_nifti(path, np.moveaxis(volumes, 0, -1), bundle.affine, descrip=f"LNM relocated-lesion T N={maps.n}", intent_code=3, intent_params=(max(maps.n - 1, 0), 0.0, 0.0))
+            written.append(path)
+        start += count
+    return written
+
+
+def _brain_mask_vector(path, bundle):
+    """Boolean vector over the bundle voxels: voxels at least half covered by a brain mask image (any grid)."""
+    data, affine, _ = read_nifti(path)
+    data = np.asarray(data).reshape(data.shape[:3]) != 0
+    coverage = resample_to_grid(data.astype(np.float64), affine, bundle.grid, mode="fraction")
+    vector = to_masked_vector(coverage, bundle.mask_indices) >= 0.5
+    if not vector.any():
+        raise ValueError(f"The brain mask {path} does not overlap the connectome mask")
+    return vector
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -459,10 +552,37 @@ def main(argv=None):
     parser.add_argument("--supersample", type=int, default=2, help="minimum sub-samples per axis when resampling lesions on oblique grids")
     parser.add_argument("--probabilistic", action="store_true", help="use lesion image values as weights instead of binarizing")
     parser.add_argument("--snapshot-every", type=int, default=0, help="write partial maps every K subjects")
-    args = parser.parse_args(argv)
+    parser.add_argument("--null-relocations", type=int, default=0, help="specificity QA: map K rigid relocations of each lesion in the same pass (default: 0, off)")
+    parser.add_argument("--null-seed", type=int, default=0, help="random seed of the lesion relocations")
+    parser.add_argument("--null-voxels", type=int, default=NULL_MAX_VOXELS, help=f"compute the null maps on a random sample of this many voxels (0: all voxels; default: {NULL_MAX_VOXELS})")
+    parser.add_argument("--brain-mask", default=None, help="brain mask NIfTI (any grid) that relocated lesions must stay in (default: the connectome mask)")
+    parser.add_argument("--write-null", action="store_true", help="also write the null T maps (4D, one volume per relocation; computed on all voxels)")
+    parser.add_argument("--desc-suffix", default="", help="appended to the output desc labels, e.g. PreviewN100 for a preview run (letters and digits)")
+    parser.add_argument("--threshold-rule", default=None, help="threshold rule JSON, recorded in the run JSON (maps are written unthresholded)")
+    parser.add_argument("--run-json", default=None, help="write the run configuration and provenance (arguments, subjects hash, seeds, versions, times) to this file")
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(raw_argv)
+    if not re.fullmatch(r"[A-Za-z0-9]*", args.desc_suffix):
+        parser.error("--desc-suffix must contain only letters and digits")
+    if args.null_relocations < 0:
+        parser.error("--null-relocations must be at least 0")
+    run = None
     try:
+        from . import qa as qa_lib
+        from .export import file_sha256, now_iso, run_record, subjects_sha256, write_json_atomic
+
+        rule = None
+        if args.threshold_rule is not None:
+            from .thresholds import normalize_rule
+
+            rule = normalize_rule(args.threshold_rule)
+        started = time.perf_counter()
         bundle = ConnectomeBundle.open(args.bundle)
         os.makedirs(args.out, exist_ok=True)
+        ids = resolve_subjects(bundle, args.subjects, args.random, args.seed)
+        if args.run_json:
+            run = run_record(raw_argv, bundle, ids, args, rule)
+            write_json_atomic(args.run_json, run)
         names, weights, qc = [], [], []
         for path in args.lesion:
             lesion_weights_vector, lesion_qc_values = prepare_lesion(path, bundle, supersample=args.supersample, binarize=not args.probabilistic)
@@ -475,22 +595,118 @@ def main(argv=None):
             qc.append({"lesion": name, **lesion_qc_values})
             if lesion_qc_values["voxels_in_mask"] == 0:
                 _emit({"event": "warning", "lesion": name, "message": "The lesion does not overlap the connectome mask; its maps are all zero."})
-        ids = resolve_subjects(bundle, args.subjects, args.random, args.seed)
-        _emit({"event": "start", "bundle": bundle.name, "lesions": names, "subjects": len(ids), "threads": args.threads, "qc": qc})
+
+        # Relocated-lesion null: K rigid translations of each lesion, extra seed columns of the same pass
+        null_weights, null_counts, null_voxels = [], [0] * len(names), None
+        brain_mask = None
+        if args.null_relocations > 0:
+            brain_mask = _brain_mask_vector(args.brain_mask, bundle) if args.brain_mask else None
+            for index, (name, lesion_weights_vector) in enumerate(zip(names, weights, strict=True)):
+                relocated = qa_lib.relocated_lesions(lesion_weights_vector, bundle, brain_mask=brain_mask, k=args.null_relocations, seed=args.null_seed)
+                null_counts[index] = len(relocated)
+                null_weights.append(relocated)
+                if len(relocated) < args.null_relocations and qc[index]["voxels_in_mask"] > 0:
+                    _emit({"event": "warning", "lesion": name, "message": f"Only {len(relocated)} of {args.null_relocations} relocated lesions fit inside the brain mask."})
+            if not args.write_null:
+                null_voxels = null_voxel_sample(bundle.n_voxels, args.null_voxels, seed=args.null_seed)
+        null_settings = {
+            "k": args.null_relocations,
+            "seed": args.null_seed,
+            "min_inside": qa_lib.MIN_INSIDE,
+            "counts": dict(zip(names, null_counts, strict=True)),
+            "voxels": bundle.n_voxels if null_voxels is None else len(null_voxels),
+            "brain_mask": os.path.abspath(args.brain_mask) if args.brain_mask else None,
+        }
+        if run is not None:
+            # Recorded before the computation so that a stopped run still documents its inputs
+            run["lesions"] = [
+                {"name": name, "file": os.path.abspath(path), "sha256": file_sha256(path), **{key: value for key, value in values.items() if key != "lesion"}}
+                for name, path, values in zip(names, args.lesion, qc, strict=True)
+            ]
+            run["maps"] = {name: {key: os.path.abspath(p) for key, p in output_paths(args.out, name, bundle.name, args.desc_suffix).items()} for name in names}
+            run["null"] = null_settings
+            write_json_atomic(args.run_json, run)
+        _emit({"event": "start", "bundle": bundle.name, "lesions": names, "subjects": len(ids), "threads": args.threads, "qc": qc, "null_relocations": null_counts})
 
         def on_progress(done, total, elapsed):
             eta = elapsed / done * (total - done) if done else 0.0
             _emit({"event": "progress", "done": done, "total": total, "elapsed": round(elapsed, 3), "eta": round(eta, 3)})
 
         def on_snapshot(partial):
-            _emit({"event": "snapshot", "n": partial.n, "outputs": write_maps(partial, names, bundle, args.out)})
+            outputs = write_maps(partial, names, bundle, args.out, args.desc_suffix)
+            if run is not None:
+                run["snapshot_n"] = partial.n
+                write_json_atomic(args.run_json, run)
+            _emit({"event": "snapshot", "n": partial.n, "outputs": outputs})
 
-        maps = compute_network_maps(bundle, np.stack(weights), subjects=ids, chunk=args.chunk, progress=on_progress, snapshot_every=args.snapshot_every, snapshot=on_snapshot)
-        outputs = write_maps(maps, names, bundle, args.out)
-        _emit({"event": "done", "outputs": outputs, "n": maps.n, "elapsed": round(maps.elapsed, 3), "qc": qc})
+        all_null_weights = np.concatenate(null_weights) if sum(null_counts) else None
+        maps = compute_network_maps(
+            bundle,
+            np.stack(weights),
+            subjects=ids,
+            chunk=args.chunk,
+            progress=on_progress,
+            snapshot_every=args.snapshot_every,
+            snapshot=on_snapshot,
+            null_weights=all_null_weights,
+            null_voxels=null_voxels,
+        )
+        outputs = write_maps(maps, names, bundle, args.out, args.desc_suffix)
+        null_outputs = write_null_maps(maps, names, null_counts, bundle, args.out, args.desc_suffix) if args.write_null and all_null_weights is not None else []
+
+        # QA: degree similarity (when the bundle has a degree map) and the relocated-lesion null summary
+        try:
+            degree = bundle.degree
+        except (OSError, ValueError) as exc:
+            degree = None
+            _emit({"event": "warning", "message": f"The connectome degree map cannot be read ({exc}); degree similarity is not computed."})
+        qa_values = {}
+        start = 0
+        for index, name in enumerate(names):
+            count = null_counts[index]
+            lesion_nulls = maps.null_t[start:start + count] if count else None
+            qa_values[name] = qa_lib.lesion_qa(maps.t[index], degree, lesion_nulls, maps.null_voxels)
+            start += count
+        qa_path = os.path.join(args.out, "qa.json")
+        degree_info = qa_lib.read_degree_metadata(bundle.path) if degree is not None else None
+        write_json_atomic(qa_path, {
+            "format": "slicer-lnm-qa",
+            "version": 1,
+            "bundle": bundle.name,
+            "n": maps.n,
+            "statistic": "T",
+            "degree": {"available": degree is not None, **(degree_info or {})},
+            "null": null_settings,
+            "lesions": qa_values,
+        })
+        done = {"event": "done", "outputs": outputs, "n": maps.n, "elapsed": round(maps.elapsed, 3), "qc": qc, "qa": qa_values, "qa_json": qa_path}
+        if null_outputs:
+            done["null_outputs"] = null_outputs
+        if run is not None:
+            run.update({
+                "status": "done",
+                "n": maps.n,
+                "cancelled": maps.cancelled,
+                "subject_ids_sha256": subjects_sha256(maps.subject_ids),
+                "null_outputs": [os.path.abspath(p) for p in null_outputs],
+                "qa_json": os.path.abspath(qa_path),
+                "end": now_iso(),
+                "elapsed": round(time.perf_counter() - started, 3),
+                "engine_elapsed": round(maps.elapsed, 3),
+            })
+            write_json_atomic(args.run_json, run)
+            done["run_json"] = os.path.abspath(args.run_json)
+        _emit(done)
         return 0
     except Exception as exc:
-        _emit({"event": "error", "message": f"{type(exc).__name__}: {exc}"})
+        message = f"{type(exc).__name__}: {exc}"
+        if run is not None:
+            try:
+                run.update({"status": "error", "error": message, "end": now_iso()})
+                write_json_atomic(args.run_json, run)
+            except Exception:
+                pass
+        _emit({"event": "error", "message": message})
         return 1
 
 

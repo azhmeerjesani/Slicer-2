@@ -1,0 +1,27 @@
+ICBM 2009c Nonlinear Asymmetric template (MNI152NLin2009cAsym)
+
+Files:
+  tpl-MNI152NLin2009cAsym_res-02_desc-brain_T1w.nii.gz
+  tpl-MNI152NLin2009cAsym_res-02_desc-brain_mask.nii.gz
+
+Obtained from TemplateFlow (https://www.templateflow.org, tpl-MNI152NLin2009cAsym),
+unmodified.
+
+Copyright (C) 1993-2009 Louis Collins, McConnell Brain Imaging Centre, Montreal
+Neurological Institute, McGill University. Permission to use, copy, modify, and
+distribute this software and its documentation for any purpose and without fee is
+hereby granted, provided that the above copyright notice appear in all copies. The
+authors and McGill University make no representations about the suitability of this
+software for any purpose. It is provided "as is" without express or implied
+warranty. The authors are not responsible for any data loss, equipment damage,
+property loss, or injury to subjects or patients resulting from the use or misuse
+of this software package.
+
+Please cite:
+  Fonov VS, Evans AC, Botteron K, Almli CR, McKinstry RC, Collins DL. Unbiased
+  average age-appropriate atlases for pediatric studies. NeuroImage 54(1):313-327,
+  2011. doi:10.1016/j.neuroimage.2010.07.033
+
+  Ciric R, Thompson WH, Lorenz R, Goncalves M, MacNicol EE, Markiewicz CJ, et al.
+  TemplateFlow: FAIR-sharing of multi-scale, multi-species brain models. Nature
+  Methods 19:1568-1571, 2022. doi:10.1038/s41592-022-01681-2

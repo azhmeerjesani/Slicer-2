@@ -23,6 +23,7 @@
 #include <QDebug>
 #include <QDesktopServices>
 #include <QFile>
+#include <QFontDatabase>
 #include <QLabel>
 #include <QtGlobal>
 #include <QMainWindow>
@@ -103,6 +104,7 @@
 #include "qSlicerSettingsViewsPanel.h"
 #include "qSlicerSettingsDeveloperPanel.h"
 #include "qSlicerSettingsUserInformationPanel.h"
+#include "qSlicerStyle.h"
 
 // qMRMLWidget includes
 #include "qMRMLEventBrokerConnection.h"
@@ -368,6 +370,10 @@ void qSlicerApplicationPrivate::init()
   this->ErrorLogModel->setMsgHandlerEnabled(ctkErrorLogFDMessageHandler::HandlerName, true);
 #endif
 
+  // Initialize the style (palette, fonts) before widgets such as the Python console
+  // read colors from the application palette.
+  this->initStyle();
+
 #ifdef Slicer_USE_PYTHONQT
   if (!qSlicerCoreApplication::testAttribute(qSlicerCoreApplication::AA_DisablePython))
   {
@@ -396,8 +402,6 @@ void qSlicerApplicationPrivate::init()
     }
   }
 #endif
-
-  this->initStyle();
 
   QIcon icon;
   icon.addFile(":/Icons/Medium/DesktopIcon.png");
@@ -516,9 +520,45 @@ Q_GLOBAL_STATIC_WITH_ARGS(QFactoryLoader, loaderV2,
 //-----------------------------------------------------------------------------
 void qSlicerApplicationPrivate::initStyle()
 {
+  Q_Q(qSlicerApplication);
+
   // Force showing the icons in the menus even if the native OS style
   // discourages it
   QCoreApplication::setAttribute(Qt::AA_DontShowIconsInMenus, false);
+
+  // Register the bundled user interface fonts
+  for (const QString& fontFile : { QStringLiteral(":/Fonts/Inter-Regular.ttf"), //
+                                   QStringLiteral(":/Fonts/Inter-Medium.ttf"),
+                                   QStringLiteral(":/Fonts/Inter-SemiBold.ttf") })
+  {
+    if (QFile::exists(fontFile))
+    {
+      QFontDatabase::addApplicationFont(fontFile);
+    }
+  }
+
+  // Appearance settings used by the Slicer styles. Only Appearance/* keys are read, which other
+  // Slicer installations sharing the same settings file ignore. The default theme can be set
+  // in the default settings file (Appearance/ForkDefaultTheme).
+  // The density is read only at startup, as changing it requires to lay out all widgets again.
+  // Without main window (batch processing, tests), the historical compact metrics are kept.
+  QSettings* settings = q->userSettings();
+  if (settings)
+  {
+    qSlicerStyle::Theme defaultTheme = qSlicerStyle::themeFromString(qSlicerSettingsStylesPanel::defaultTheme());
+    qSlicerStyle::setTheme(qSlicerStyle::themeFromString(settings->value("Appearance/Theme").toString(), defaultTheme));
+    qSlicerStyle::Density density = qSlicerStyle::densityFromString(settings->value("Appearance/Density").toString(), qSlicerStyle::Comfortable);
+    if (q->commandOptions() && q->commandOptions()->noMainWindow())
+    {
+      density = qSlicerStyle::Compact;
+    }
+    qSlicerStyle::setDensity(density);
+    qSlicerStyle::setAccentColor(QColor(settings->value("Appearance/Accent").toString()));
+  }
+
+  // Apply the palette of the current style. The settings panel only applies a palette
+  // when the style is changed, which does not happen when the default style is used.
+  q->setPalette(q->style()->standardPalette());
 }
 
 //-----------------------------------------------------------------------------

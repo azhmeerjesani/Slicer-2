@@ -142,7 +142,8 @@ void qSlicerExtensionsServerWidgetPrivate::setFailurePage(const QStringList& err
 void qSlicerExtensionsServerWidgetPrivate::updateTheme()
 {
   Q_Q(qSlicerExtensionsServerWidget);
-  this->setDarkThemeEnabled(q->style()->objectName().compare("Dark Slicer", Qt::CaseInsensitive) == 0);
+  // Detect dark theme from the palette (not from the style name), as the "Slicer" style can also be dark
+  this->setDarkThemeEnabled(q->palette().color(QPalette::Window).lightness() < 128);
 }
 
 // --------------------------------------------------------------------------
@@ -406,7 +407,8 @@ void qSlicerExtensionsServerWidget::changeEvent(QEvent* e)
   Q_D(qSlicerExtensionsServerWidget);
   switch (e->type())
   {
-    case QEvent::StyleChange: d->updateTheme(); break;
+    case QEvent::StyleChange:
+    case QEvent::PaletteChange: d->updateTheme(); break;
     default: break;
   }
   this->Superclass::changeEvent(e);

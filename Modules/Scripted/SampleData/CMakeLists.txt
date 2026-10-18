@@ -26,6 +26,11 @@ set(MODULE_PYTHON_RESOURCES
   Resources/Icons/PreDentalSurgery.png
   Resources/Icons/CTBrain.png
   Resources/Icons/TinyPatient.png
+  Resources/Icons/MNI152NLin2009cAsym.png
+  Resources/Icons/MNI152NLin6Asym.png
+  Resources/Data/tpl-MNI152NLin2009cAsym_res-02_desc-brain_T1w.nii.gz
+  Resources/Data/tpl-MNI152NLin2009cAsym_res-02_desc-brain_mask.nii.gz
+  Resources/Data/LICENSE-MNI152NLin2009cAsym.txt
   )
 
 #-----------------------------------------------------------------------------

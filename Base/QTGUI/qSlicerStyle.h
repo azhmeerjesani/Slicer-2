@@ -21,6 +21,9 @@
 #ifndef __qSlicerStyle_h
 #define __qSlicerStyle_h
 
+// Qt includes
+#include <QColor>
+
 // CTK includes
 #include <ctkProxyStyle.h>
 
@@ -34,6 +37,29 @@ public:
   /// Superclass typedef
   typedef ctkProxyStyle Superclass;
 
+  /// Spacing of the user interface elements.
+  /// \sa setDensity(), density()
+  enum Density
+  {
+    /// Historical Slicer layout spacing and margins.
+    Compact = 0,
+    /// Slightly larger layout spacing and margins.
+    Comfortable
+  };
+  Q_ENUM(Density);
+
+  /// Color theme followed by the standard palette of the "Slicer" style.
+  /// The "Dark Slicer" and "Light Slicer" styles always use their own palette.
+  /// \sa setTheme(), theme(), standardPalette()
+  enum Theme
+  {
+    /// Follow the operating system setting (Windows only, light otherwise).
+    SystemTheme = 0,
+    DarkTheme,
+    LightTheme
+  };
+  Q_ENUM(Theme);
+
   /// Constructors
   qSlicerStyle();
   ~qSlicerStyle() override;
@@ -42,10 +68,58 @@ public:
 
   int pixelMetric(PixelMetric metric, const QStyleOption* option = nullptr, const QWidget* widget = nullptr) const override;
 
+  /// Return the dark or light palette depending on theme().
+  /// When testing is enabled, the light palette is always returned.
   QPalette standardPalette() const override;
   QPalette standardLightPalette() const;
   QPalette standardDarkPalette() const;
   int styleHint(StyleHint hint, const QStyleOption* opt, const QWidget* widget, QStyleHintReturn* returnData) const override;
+
+  /// Return the color of a named style token of the dark or light theme.
+  /// Supported names: canvas, card, control-hover, control-pressed, hairline, border,
+  /// text2, text3, accent, accent-hover, accent-pressed, accent-fg, accent-subtle,
+  /// success, warning, danger, view-bar and lesion.
+  /// Accent tokens follow accentColor() if it is set (except when testing is enabled).
+  /// An invalid color is returned for unknown names.
+  static QColor tokenColor(const QString& name, bool dark);
+
+  /// Return the color of a named style token for the current application palette.
+  /// \sa tokenColor(), isDarkPalette()
+  Q_INVOKABLE QColor token(const QString& name) const;
+
+  /// Return true if the current application palette is dark (window color lightness < 128).
+  Q_INVOKABLE bool isDarkPalette() const;
+
+  /// Set the density used by all Slicer styles. It is read by pixelMetric(), therefore
+  /// widgets that are already laid out are not updated.
+  /// \sa density()
+  static void setDensity(Density density);
+  /// Return the density in effect. Always Compact when testing is enabled.
+  static Density density();
+
+  /// Set the theme followed by standardPalette(). Call QApplication::setPalette()
+  /// with the new standard palette to apply it.
+  /// \sa theme()
+  static void setTheme(Theme theme);
+  static Theme theme();
+
+  /// Set the accent color of the palettes (Highlight, Link) and of the accent tokens.
+  /// An invalid color restores the default accent color of each theme.
+  /// The accent color is ignored when testing is enabled.
+  /// Call QApplication::setPalette() with the new standard palette to apply it.
+  /// \sa accentColor()
+  static void setAccentColor(const QColor& color);
+  static QColor accentColor();
+
+  /// Convert between a theme and its settings value: "System", "Dark" or "Light" (case insensitive).
+  /// \a defaultTheme is returned for unknown names.
+  static QString themeToString(Theme theme);
+  static Theme themeFromString(const QString& name, Theme defaultTheme = DarkTheme);
+
+  /// Convert between a density and its settings value: "Compact" or "Comfortable" (case insensitive).
+  /// \a defaultDensity is returned for unknown names.
+  static QString densityToString(Density density);
+  static Density densityFromString(const QString& name, Density defaultDensity = Comfortable);
 
   /// Behavior of widgets can be tweaked if an event filter is installed on a
   /// widget or application.

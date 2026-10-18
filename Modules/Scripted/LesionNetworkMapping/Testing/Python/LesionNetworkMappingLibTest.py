@@ -24,7 +24,7 @@ import numpy as np
 from scipy import io as sio
 from scipy import stats as scipy_stats
 
-from LesionNetworkMappingLib import connectome, engine, geometry, nifti, stats
+from LesionNetworkMappingLib import connectome, engine, export, geometry, nifti, qa, stats, thresholds
 
 # float16 stores the unit-norm time series with unit roundoff u = 2**-11. By Cauchy-Schwarz the error
 # of r = x . s is at most ~u from the voxel row plus ~2u from the seed, i.e. |dr| <= 3u ~ 1.5e-3.
@@ -934,6 +934,554 @@ class CommandLineTest(_TempDirTestCase):
         result = engine.benchmark(V=5000, T=40, L=3, n_subjects=2)
         self.assertGreater(result["per_subject_best_s"], 0.0)
         self.assertEqual((result["V"], result["T"], result["L"]), (5000, 40, 3))
+
+
+class WriteLikeTest(_TempDirTestCase):
+    """nifti.write_like: Slicer arrays written on the exact voxel grid and header of a reference image."""
+
+    def _reference(self, name, affine, shape=(7, 6, 5), **kwargs):
+        path = self.path(name)
+        nifti.write_nifti(path, np.zeros(shape, np.int16), affine, **kwargs)
+        return path
+
+    def _assert_same_geometry_bytes(self, reference_path, path):
+        reference, written = nifti.read_raw_header(reference_path), nifti.read_raw_header(path)
+        for field in nifti.GEOMETRY_FIELDS:
+            self.assertEqual(reference[field].tobytes(), written[field].tobytes(), field)
+        self.assertEqual(reference.dtype.byteorder, written.dtype.byteorder)
+
+    def test_round_trips_on_ras_and_radiological_references(self):
+        rng = np.random.default_rng(10)
+        shape = (7, 6, 5)
+        lesion = (rng.random(shape) > 0.7).astype(np.uint8)  # [i, j, k] in reference file order
+        for label, affine, extra in (
+            ("ras", RAS_AFFINE, {}),
+            ("radiological", RADIOLOGICAL_AFFINE, {}),
+            ("radiological_big_endian_codes", RADIOLOGICAL_AFFINE, {"byteorder": ">", "sform_code": 2, "qform_code": 1, "xyzt_units": 2}),
+        ):
+            reference_path = self._reference(f"{label}_ref.nii.gz", affine, **extra)
+            ref_affine = nifti.read_nifti_header(reference_path)["affine"]
+            ni, nj, _ = shape
+            cases = {
+                # The array loaded from the reference itself (Slicer keeps the file voxel order)
+                "identity": (lesion, ref_affine),
+                # The same voxels on a grid whose i axis runs the other way
+                "flipped_i": (lesion[::-1], ref_affine @ np.array([[-1.0, 0, 0, ni - 1], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])),
+                # Axes stored in another order (k, i, j) with j flipped
+                "permuted": (np.transpose(lesion[:, ::-1, :], (2, 0, 1)), ref_affine @ np.array([[0, 1.0, 0, 0], [0, 0, -1, nj - 1], [1, 0, 0, 0], [0, 0, 0, 1]])),
+            }
+            # A cropped extent (e.g. a segment's own geometry) offset by whole voxels
+            cropped = np.zeros(shape, np.uint8)
+            cropped[2:6, 1:4, 1:5] = lesion[2:6, 1:4, 1:5]
+            cases["cropped"] = (lesion[2:6, 1:4, 1:5], ref_affine @ np.array([[1.0, 0, 0, 2], [0, 1, 0, 1], [0, 0, 1, 1], [0, 0, 0, 1]]))
+            for case, (array_ijk, ijk_to_ras) in cases.items():
+                with self.subTest(reference=label, case=case):
+                    path = self.path(f"{label}_{case}.nii.gz")
+                    self.assertEqual(nifti.write_like(path, np.transpose(array_ijk, (2, 1, 0)), ijk_to_ras, reference_path), path)
+                    data, read_affine, header = nifti.read_nifti(path)
+                    self.assertEqual(data.dtype, np.uint8)
+                    np.testing.assert_array_equal(data, cropped if case == "cropped" else lesion)
+                    np.testing.assert_array_equal(read_affine, ref_affine)
+                    self._assert_same_geometry_bytes(reference_path, path)
+                    self.assertEqual(header["qfac"], nifti.read_nifti_header(reference_path)["qfac"])
+
+    def test_rejects_other_grids_and_lost_voxels(self):
+        reference_path = self._reference("ref.nii", RADIOLOGICAL_AFFINE)
+        lesion = np.zeros((5, 6, 7), np.uint8)  # [k, j, i]
+        lesion[2, 3, 4] = 1
+        half_voxel = RADIOLOGICAL_AFFINE.copy()
+        half_voxel[:3, 3] += [1.0, 0.0, 0.0]
+        finer = RADIOLOGICAL_AFFINE.copy()
+        finer[:3, :3] /= 2.0
+        for label, affine in (("half voxel shift", half_voxel), ("other spacing", finer), ("oblique", _oblique_affine())):
+            with self.subTest(label), self.assertRaisesRegex(ValueError, "voxel grid"):
+                nifti.write_like(self.path("bad.nii.gz"), lesion, affine, reference_path)
+        shifted = RADIOLOGICAL_AFFINE @ np.array([[1.0, 0, 0, 3], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])
+        with self.assertRaisesRegex(ValueError, "outside"):
+            nifti.write_like(self.path("outside.nii.gz"), lesion, shifted, reference_path)
+        with self.assertRaisesRegex(ValueError, "fit"):
+            nifti.write_like(self.path("range.nii.gz"), lesion * 300.0, RADIOLOGICAL_AFFINE, reference_path)
+        # Zeros falling outside the reference are fine
+        nifti.write_like(self.path("zeros.nii.gz"), np.zeros_like(lesion), shifted, reference_path)
+        self.assertFalse(os.path.exists(self.path("bad.nii.gz")))
+
+    def test_consistent_with_simpleitk(self):
+        try:
+            import SimpleITK as sitk
+        except ImportError:
+            self.skipTest("SimpleITK is not available")
+        lesion = np.zeros((7, 6, 5), np.uint8)
+        lesion[1:3, 2:5, 3] = 1
+        for affine in (RAS_AFFINE, RADIOLOGICAL_AFFINE):
+            reference_path = self._reference("itk_ref.nii.gz", affine)
+            path = self.path("itk_lesion.nii.gz")
+            nifti.write_like(path, lesion.transpose(2, 1, 0), affine, reference_path)
+            reference, image = sitk.ReadImage(reference_path), sitk.ReadImage(path)
+            self.assertEqual(reference.GetOrigin(), image.GetOrigin())
+            self.assertEqual(reference.GetDirection(), image.GetDirection())
+            self.assertEqual(reference.GetSpacing(), image.GetSpacing())
+            np.testing.assert_array_equal(sitk.GetArrayFromImage(image), lesion.transpose(2, 1, 0))
+
+
+class SpaceDetectionTest(unittest.TestCase):
+    def test_known_template_grids(self):
+        nlin6 = np.array([[-2.0, 0, 0, 90], [0, 2, 0, -126], [0, 0, 2, -72], [0, 0, 0, 1]])  # FSL radiological storage
+        nlin6_ras = np.array([[2.0, 0, 0, -90], [0, 2, 0, -126], [0, 0, 2, -72], [0, 0, 0, 1]])
+        nlin6_1mm = np.array([[-1.0, 0, 0, 90], [0, 1, 0, -126], [0, 0, 1, -72], [0, 0, 0, 1]])
+        c2009_2mm = np.array([[2.0, 0, 0, -96.5], [0, 2, 0, -132.5], [0, 0, 2, -78.5], [0, 0, 0, 1]])
+        c2009_1mm = np.array([[1.0, 0, 0, -96], [0, 1, 0, -132], [0, 0, 1, -78], [0, 0, 0, 1]])
+        cases = [
+            ((91, 109, 91), nlin6, ("MNI152NLin6Asym", 2)),
+            ((91, 109, 91), nlin6_ras, ("MNI152NLin6Asym", 2)),
+            ((182, 218, 182), nlin6_1mm, ("MNI152NLin6Asym", 1)),
+            ((97, 115, 97), c2009_2mm, ("MNI152NLin2009cAsym", 2)),
+            ((193, 229, 193), c2009_1mm, ("MNI152NLin2009cAsym", 1)),
+            ((97, 115, 97), c2009_2mm @ np.diag([1.0, 1.0, 1.0, 1.0]) + np.array([[0, 0, 0, 0.9], [0, 0, 0, -0.5], [0, 0, 0, 0], [0, 0, 0, 0]]), ("MNI152NLin2009cAsym", 2)),
+            ((97, 115, 97), c2009_2mm + np.array([[0, 0, 0, 1.5], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]]), ("native", None)),
+            ((97, 115, 96), c2009_2mm, ("native", None)),
+            ((91, 109, 91), np.diag([1.5, 1.5, 1.5, 1.0]), ("native", None)),
+            ((91, 109, 91), _oblique_affine(), ("native", None)),
+        ]
+        # Axes stored in another order (k, i, j): same voxel centers, same space
+        permutation = np.array([[0, 1.0, 0, 0], [0, 0, 1, 0], [1, 0, 0, 0], [0, 0, 0, 1]])
+        cases.append(((91, 91, 109), nlin6 @ permutation, ("MNI152NLin6Asym", 2)))
+        for shape, affine, expected in cases:
+            with self.subTest(shape=shape, affine=affine.tolist()):
+                self.assertEqual(geometry.detect_grid(shape, affine), expected)
+                self.assertEqual(geometry.detect_space(shape, affine), expected[0])
+
+    def test_signed_permutation(self):
+        flip = RADIOLOGICAL_AFFINE @ np.array([[-1.0, 0, 0, 30], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])
+        mapping = geometry.signed_permutation(flip, RADIOLOGICAL_AFFINE)
+        self.assertEqual(mapping, geometry.SignedPermutation((0, 1, 2), (-1, 1, 1), (30, 0, 0)))
+        permuted = RAS_AFFINE @ np.array([[0, 0, 1.0, 0], [1, 0, 0, -2], [0, 1, 0, 5], [0, 0, 0, 1]])
+        self.assertEqual(geometry.signed_permutation(permuted, RAS_AFFINE), geometry.SignedPermutation((1, 2, 0), (1, 1, 1), (0, -2, 5)))
+        self.assertIsNone(geometry.signed_permutation(_oblique_affine(), RAS_AFFINE))
+        self.assertIsNone(geometry.signed_permutation(RAS_AFFINE @ np.diag([0.5, 1, 1, 1]), RAS_AFFINE))
+        shifted = RAS_AFFINE.copy()
+        shifted[0, 3] += 0.01  # 0.005 voxel: beyond the 1e-3 tolerance
+        self.assertIsNone(geometry.signed_permutation(shifted, RAS_AFFINE))
+        shifted[0, 3] = RAS_AFFINE[0, 3] + 0.001  # float32 rounding noise
+        self.assertIsNotNone(geometry.signed_permutation(shifted, RAS_AFFINE))
+
+
+class ThresholdsTest(unittest.TestCase):
+    def test_fwe_bonferroni(self):
+        for n_voxels, expected in ((228_483, 5.22), (292_019, 5.27)):
+            resolved = thresholds.resolve(None, 1000, n_voxels)
+            self.assertEqual((resolved.statistic, resolved.df, resolved.banner, resolved.allowed), ("T", 999, None, True))
+            self.assertAlmostEqual(resolved.value, expected, delta=0.01)
+            self.assertAlmostEqual(resolved.p_unc, 0.05 / n_voxels)
+            self.assertEqual(resolved.p_fwe, 0.05)
+            self.assertAlmostEqual(stats.t_to_p(resolved.value, 999), 0.05 / n_voxels, delta=1e-12)
+        self.assertEqual(thresholds.describe(thresholds.resolve({"kind": "fwe_bonferroni"}, 1000, 292_019)), "⇒ |T| ≥ 5.27 at N=1000 (df=999), V=292,019 · p_unc ≤ 1.7e-7")
+        # Re-resolved from N: a smaller N gives a higher threshold
+        self.assertGreater(thresholds.resolve(None, 100, 292_019).value, 5.27)
+        self.assertAlmostEqual(thresholds.resolve({"kind": "fwe_bonferroni", "alpha": 0.01}, 1000, 292_019).p_fwe, 0.01)
+
+    def test_t_convention_needs_n_close_to_1000(self):
+        rule = {"kind": "t_convention", "value": 7, "reference_n": 1000}
+        resolved = thresholds.resolve(rule, 312, 292_019, note="partial")
+        self.assertFalse(resolved.allowed)
+        self.assertEqual(resolved.banner, "This threshold was defined for N≈1000; this map has N=312 (partial). Use FWE or effect size.")
+        self.assertEqual(thresholds.resolve(rule, 312, 292_019).banner, "This threshold was defined for N≈1000; this map has N=312. Use FWE or effect size.")
+        self.assertEqual(resolved.value, 7.0)
+        self.assertAlmostEqual(resolved.p_unc, float(stats.t_to_p(7.0, 311)))
+        # "Keep T=7" is an explicit, recorded choice
+        kept = thresholds.resolve({**rule, "override": True}, 312, 292_019)
+        self.assertTrue(kept.allowed)
+        self.assertIsNotNone(kept.banner)
+        self.assertTrue(kept.rule["override"])
+        # Within 10% of the reference N: no banner; above it: a banner but allowed
+        for n, banner, allowed in ((1000, False, True), (900, False, True), (1100, False, True), (899, True, False), (1101, True, True)):
+            with self.subTest(n=n):
+                resolved = thresholds.resolve(rule, n, 292_019)
+                self.assertEqual((resolved.banner is not None, resolved.allowed), (banner, allowed))
+        self.assertAlmostEqual(thresholds.resolve(rule, 1000, 292_019).p_unc, 4.7e-12, delta=0.1e-12)
+
+    def test_effect_size_and_custom_rules(self):
+        fz = thresholds.resolve({"kind": "fz_abs", "value": 0.05}, 312, 292_019)
+        self.assertEqual((fz.statistic, fz.value, fz.p_unc, fz.p_fwe, fz.banner, fz.allowed), ("Fz", 0.05, None, None, None, True))
+        self.assertEqual(thresholds.describe(fz), "⇒ |Fz| ≥ 0.05 at N=312, V=292,019 · effect size (no p-value)")
+        custom = thresholds.resolve({"kind": "custom_t", "value": 4.25, "reference_n": 98}, 98, 1000)
+        self.assertEqual((custom.value, custom.banner, custom.allowed), (4.25, None, True))
+        self.assertAlmostEqual(custom.p_unc, 4.9e-5, delta=0.1e-5)
+        self.assertAlmostEqual(custom.p_fwe, custom.p_unc * 1000)
+        self.assertIn("N≈98; this map has N=200", thresholds.resolve({"kind": "custom_t", "value": 4.25, "reference_n": 98}, 200, 1000).banner)
+        self.assertIsNone(thresholds.resolve({"kind": "custom_t", "value": 4.25}, 200, 1000).banner)
+        too_few = thresholds.resolve(None, 1, 1000)
+        self.assertFalse(too_few.allowed)
+        self.assertIsNone(too_few.to_dict()["value"])
+
+    def test_json_round_trip_and_validation(self):
+        for rule in (None, {"kind": "t_convention"}, {"kind": "fz_abs", "value": 0.1}, {"kind": "custom_t", "value": 6, "reference_n": 500, "override": 1}):
+            normalized = thresholds.normalize_rule(rule)
+            self.assertEqual(thresholds.rule_from_json(thresholds.rule_to_json(rule)), normalized)
+            resolved = thresholds.resolve(normalized, 640, 50_000)
+            self.assertEqual(thresholds.Resolved.from_json(resolved.to_json()), resolved)
+            self.assertEqual(json.loads(json.dumps(resolved.to_dict()))["rule"], normalized)
+        self.assertEqual(thresholds.rule_from_json(""), thresholds.DEFAULT_RULE)
+        self.assertEqual(thresholds.normalize_rule({"kind": "t_convention"}), {"kind": "t_convention", "value": 7.0, "reference_n": 1000})
+        for bad in ({"kind": "fdr"}, {"kind": "fwe_bonferroni", "alpha": 2}, {"kind": "custom_t", "value": -1}, {"kind": "t_convention", "reference_n": 1}, [1, 2], "{"):
+            with self.subTest(rule=bad), self.assertRaises(ValueError):
+                thresholds.normalize_rule(bad)
+        with self.assertRaises(ValueError):
+            thresholds.resolve(None, 100, 0)
+
+
+class QATest(_TempDirTestCase):
+    def setUp(self):
+        super().setUp()
+        self.meta = connectome.make_synthetic(self.path("qa.lnmc"), n_subjects=4, seed=2)
+        self.bundle = connectome.ConnectomeBundle.open(self.meta["path"])
+        self.rng = np.random.default_rng(12)
+
+    def _blob_weights(self, name="A"):
+        weights = self.meta["blobs"][name]["mask"].astype(np.float32)
+        weights[weights > 0] *= self.rng.uniform(0.2, 1.0, int(weights.sum())).astype(np.float32)  # fractional occupancy
+        return weights
+
+    def test_degree_similarity(self):
+        degree = connectome.compute_degree(self.bundle, n_seeds=300, seed=1)
+        r, rho = qa.degree_similarity(degree, degree)
+        self.assertAlmostEqual(r, 1.0, places=6)
+        self.assertAlmostEqual(rho, 1.0, places=6)
+        r, rho = qa.degree_similarity(-2.0 * degree, degree)
+        self.assertAlmostEqual(r, -1.0, places=6)
+        self.assertAlmostEqual(rho, -1.0, places=6)
+        noisy = degree + self.rng.standard_normal(degree.size).astype(np.float32) * degree.std()
+        noisy[:5] = np.nan
+        valid = np.isfinite(noisy)
+        self.assertAlmostEqual(qa.degree_similarity(noisy, degree)[0], np.corrcoef(noisy[valid], degree[valid])[0, 1], places=6)
+        self.assertAlmostEqual(qa.degree_similarity(noisy, degree)[1], scipy_stats.spearmanr(noisy[valid], degree[valid]).statistic, places=6)
+        self.assertTrue(all(np.isnan(qa.degree_similarity(np.ones(10), np.arange(10.0)))))
+        # The planted network (A, A2, B) has the highest degree: a lesion in A gives a map whose
+        # strongest values (A2, B) lie on hubs, so |T| tracks degree and T is positively correlated
+        maps = engine.compute_network_maps(self.bundle, self.meta["blobs"]["A"]["mask"].astype(np.float32))
+        r_signed, rho_signed = qa.degree_similarity(maps.t[0], degree)
+        r_abs, _ = qa.degree_similarity(np.abs(maps.t[0]), degree)
+        self.assertGreater(r_signed, 0.0)
+        self.assertGreater(rho_signed, 0.0)
+        self.assertGreater(r_abs, 0.5)
+        self.assertGreater(r_abs, r_signed)
+        values = qa.lesion_qa(maps.t[0], degree)
+        self.assertEqual((values["degree_r"], values["degree_rho"]), (r_signed, rho_signed))
+        self.assertIsNone(values["null"])
+
+    def test_chip_levels(self):
+        self.assertEqual(qa.chip_level(0.29), ("neutral", "low"))
+        self.assertEqual(qa.chip_level(0.3), ("amber", "moderate"))
+        self.assertEqual(qa.chip_level(-0.45), ("amber", "moderate"))
+        self.assertEqual(qa.chip_level(0.6)[0], "red")
+        self.assertIn("connectome hubs", qa.chip_level(0.9)[1])
+        self.assertEqual(qa.chip_level(float("nan")), ("neutral", "n/a"))
+        self.assertEqual((qa.null_level(0.74), qa.null_level(0.75), qa.null_level(None)), ("neutral", "amber", "neutral"))
+
+    def test_relocated_lesions_are_rigid_shifts_inside_the_mask(self):
+        bundle = self.bundle
+        weights = self._blob_weights("B")
+        total = weights.sum(dtype=np.float64)
+        # Brain mask: the half of the connectome mask with i >= 8 (the lesion must move into it)
+        ijk = np.stack(np.unravel_index(bundle.mask_indices, bundle.shape), axis=1)
+        brain = ijk[:, 0] >= 8
+        nulls, shifts = qa.relocated_lesions(weights, bundle, brain_mask=brain, k=25, seed=3, return_shifts=True)
+        self.assertEqual(nulls.shape, (25, bundle.n_voxels))
+        self.assertEqual(nulls.dtype, np.float32)
+        self.assertEqual(shifts.shape, (25, 3))
+        self.assertEqual(len({tuple(s) for s in shifts}), 25)
+        self.assertFalse(np.any(np.all(shifts == 0, axis=1)))
+        lesion_volume = engine.unmask(weights, bundle)
+        for null, shift in zip(nulls, shifts, strict=True):
+            self.assertGreaterEqual(null[brain].sum(dtype=np.float64), 0.95 * total - 1e-6)
+            # Exactly the lesion's weights moved by the shift (parts leaving the connectome mask dropped)
+            expected = np.zeros(bundle.shape, np.float32)
+            src = np.argwhere(lesion_volume > 0)
+            dst = src + shift
+            keep = np.all((dst >= 0) & (dst < bundle.shape), axis=1)
+            expected[tuple(dst[keep].T)] = lesion_volume[tuple(src[keep].T)]
+            np.testing.assert_array_equal(engine.unmask(null, bundle), np.where(bundle.mask, expected, 0))
+        # Deterministic for a seed, different for another seed; the bundle or (grid shape, mask indices) work alike
+        again = qa.relocated_lesions(weights, bundle.grid, mask_indices=bundle.mask_indices, brain_mask=brain, k=25, seed=3)
+        np.testing.assert_array_equal(again, nulls)
+        self.assertFalse(np.array_equal(qa.relocated_lesions(weights, bundle, brain_mask=brain, k=25, seed=4), nulls))
+        # A lesion that cannot fit inside the brain mask gives fewer (here no) relocations
+        everywhere = np.ones(bundle.n_voxels, np.float32)
+        self.assertEqual(qa.relocated_lesions(everywhere, bundle, k=5, max_attempts=50).shape, (0, bundle.n_voxels))
+        self.assertEqual(qa.relocated_lesions(np.zeros(bundle.n_voxels, np.float32), bundle, k=5).shape, (0, bundle.n_voxels))
+        with self.assertRaises(ValueError):
+            qa.relocated_lesions(weights[:-1], bundle)
+
+    def test_null_summary(self):
+        n_voxels, k = 500, 30
+        common = self.rng.standard_normal(n_voxels)
+        nulls = common + 0.7 * self.rng.standard_normal((k, n_voxels))
+        observed = common + 0.3 * self.rng.standard_normal(n_voxels)
+        summary = qa.null_summary(observed, nulls)
+        r = np.array([np.corrcoef(observed, null)[0, 1] for null in nulls])
+        self.assertEqual(summary["k"], k)
+        self.assertAlmostEqual(summary["r_median"], np.median(r), places=10)
+        self.assertAlmostEqual(summary["r_p05"], np.percentile(r, 5), places=10)
+        self.assertAlmostEqual(summary["r_p95"], np.percentile(r, 95), places=10)
+        self.assertAlmostEqual(summary["r_mean_map"], np.corrcoef(observed, nulls.mean(axis=0))[0, 1], places=10)
+        loo = np.array([np.corrcoef(nulls[j], np.delete(nulls, j, axis=0).mean(axis=0))[0, 1] for j in range(k)])
+        self.assertAlmostEqual(summary["percentile"], 100.0 * np.mean(loo <= summary["r_mean_map"]), places=10)
+        self.assertEqual(summary["percentile"], 100.0)  # less noisy than any relocated map
+        self.assertGreaterEqual(summary["r_mean_map"], qa.NULL_AMBER)
+        self.assertIn("(median of 30; 5\u201395%:", qa.describe_null(summary))
+        self.assertIn("100th percentile", qa.describe_null(summary))
+        distinct = qa.null_summary(self.rng.standard_normal(n_voxels), nulls)
+        self.assertLess(abs(distinct["r_mean_map"]), 0.3)
+        self.assertLess(distinct["percentile"], 50.0)
+        empty = qa.null_summary(observed, np.zeros((0, n_voxels)))
+        self.assertEqual(empty["k"], 0)
+        self.assertIsNone(empty["r_median"])
+        # The null maps may cover a voxel subset
+        voxels = np.arange(0, n_voxels, 3)
+        values = qa.lesion_qa(observed, None, nulls[:, voxels], voxels)
+        self.assertAlmostEqual(values["null"]["r_mean_map"], np.corrcoef(observed[voxels], nulls[:, voxels].mean(axis=0))[0, 1], places=10)
+        self.assertEqual(values["null_level"], "amber")
+
+    def test_null_columns_in_the_same_pass(self):
+        weights = self._blob_weights("A")
+        nulls = qa.relocated_lesions(weights, self.bundle, k=6, seed=1)
+        plain = engine.compute_network_maps(self.bundle, weights)
+        voxels = engine.null_voxel_sample(self.bundle.n_voxels, 1000, seed=2)
+        self.assertEqual(len(voxels), 1000)
+        self.assertIsNone(engine.null_voxel_sample(self.bundle.n_voxels, 0))
+        with_nulls = engine.compute_network_maps(self.bundle, weights, null_weights=nulls, null_voxels=voxels)
+        np.testing.assert_array_equal(with_nulls.t, plain.t)  # the lesion's own maps do not change
+        np.testing.assert_array_equal(with_nulls.null_voxels, voxels)
+        reference = engine.compute_network_maps(self.bundle, nulls)
+        np.testing.assert_allclose(with_nulls.null_t, reference.t[:, voxels], rtol=1e-5, atol=1e-5)
+        everywhere = engine.compute_network_maps(self.bundle, weights, null_weights=nulls)
+        self.assertIsNone(everywhere.null_voxels)
+        np.testing.assert_allclose(everywhere.null_t, reference.t, rtol=1e-5, atol=1e-5)
+        with self.assertRaises(ValueError):
+            engine.compute_network_maps(self.bundle, weights, null_weights=nulls, null_voxels=voxels[::-1])
+
+
+def _sphere_lesion(path, center_world, radius=3.0):
+    """A sphere drawn on a 1 mm radiological grid (as Slicer users often have), saved as NIfTI."""
+    lesion_affine = np.diag([-1.0, 1.0, 1.0, 1.0])
+    lesion_affine[:3, 3] = [25.0, -25.0, -25.0]
+    grid = geometry.Grid((51, 51, 51), lesion_affine)
+    world = grid.voxel_to_world(np.indices(grid.shape).reshape(3, -1).T)
+    lesion = (np.linalg.norm(world - np.asarray(center_world), axis=1) <= radius).reshape(grid.shape)
+    nifti.write_nifti(path, lesion.astype(np.uint8), lesion_affine)
+    return path
+
+
+class ExportTest(_TempDirTestCase):
+    SIDECAR_KEYS = {"format", "version", "Description", "software", "connectome", "lesion", "N", "df", "subject_ids_sha256", "subset", "threshold", "qa", "maps", "timestamp", "disclaimer"}
+
+    def test_names(self):
+        self.assertEqual(export.DISCLAIMER, "Research use only — not for clinical decisions. Lesion network mapping specificity is debated (van den Heuvel et al., 2026, Nat Neurosci, doi:10.1038/s41593-025-02196-7).")
+        self.assertEqual(
+            os.path.basename(export.map_paths("out", "sub-01", "GSP 1000 (MF)", preview_n=100)["T"]),
+            "sub-01_conn-GSP1000MF_desc-TPreviewN100_funcmap.nii.gz",
+        )
+        self.assertEqual(os.path.basename(export.map_paths("out", "sub-01", "GSP1000")["AvgFz"]), "sub-01_conn-GSP1000_desc-AvgRFz_funcmap.nii.gz")
+        self.assertEqual(os.path.basename(export.sidecar_path("out", "sub-01", "GSP1000")), "sub-01_conn-GSP1000_lnm.json")
+        self.assertEqual(os.path.basename(export.sidecar_path("out", "sub-01", "GSP1000", 100)), "sub-01_conn-GSP1000_desc-PreviewN100_lnm.json")
+        self.assertEqual(export.derivatives_dir("study", "GSP1000", 312), os.path.join("study", "derivatives", "lnm", "conn-GSP1000_n-312"))
+        self.assertEqual(os.path.basename(export.group_map_path("out", "GSP1000", "sens90")), "group_conn-GSP1000_desc-sens90_map.nii.gz")
+        with self.assertRaises(ValueError):
+            export.group_map_path("out", "GSP1000", "sens-90")
+        self.assertEqual(engine._lesion_name("/x/sub-07_space-MNI152NLin2009cAsym_desc-lesion_mask.nii.gz"), "sub-07")
+        self.assertEqual(engine._lesion_name("sub-07_ses-2_label-lesion_roi.nii"), "sub-07_ses-2")
+        self.assertEqual(engine._lesion_name("patient01_lesion.nii.gz"), "patient01_lesion")
+        peaks = stats.peak_table(np.array([0.0, 5.0, -7.0]), geometry.Grid((3, 1, 1), RAS_AFFINE), top_k=2, min_distance_mm=0.5)
+        export.write_peaks_tsv(self.path("peaks.tsv"), peaks, ["Precuneus"])
+        with open(self.path("peaks.tsv"), encoding="utf-8") as f:
+            self.assertEqual(f.read(), "x\ty\tz\tvalue\tlabel\n-86.0\t-126.0\t-72.0\t-7\tPrecuneus\n-88.0\t-126.0\t-72.0\t5\tn/a\n")
+
+    def test_write_run_from_memory(self):
+        meta = connectome.make_synthetic(self.path("export.lnmc"), n_subjects=3, name="Synthetic Export")
+        bundle = connectome.ConnectomeBundle.open(meta["path"])
+        weights = np.stack([meta["blobs"]["A"]["mask"], meta["blobs"]["B"]["mask"]]).astype(np.float32)
+        maps = engine.compute_network_maps(bundle, weights, subjects=2)
+        qa_values = {name: qa.lesion_qa(maps.t[i], None) for i, name in enumerate(("sub-01", "sub-02"))}
+        out = self.path("derivatives")
+        files = export.write_run(out, maps, ["sub-01", "sub-02"], bundle, rule={"kind": "t_convention"}, qa=qa_values, run_meta=None, preview_n=2, software={"slicer": "5.13.0"})
+        names = sorted(os.listdir(out))
+        self.assertIn("sub-01_conn-SyntheticExport_desc-TPreviewN2_funcmap.nii.gz", names)
+        self.assertIn("sub-02_conn-SyntheticExport_desc-AvgRPreviewN2_funcmap.nii.gz", names)
+        self.assertIn("sub-02_conn-SyntheticExport_desc-PreviewN2_lnm.json", names)
+        self.assertEqual(len(files["maps"]), 6)
+        for name in ("provenance.json", "methods.md", "reproduce.sh"):
+            self.assertIn(name, names)
+        with open(files["sidecars"][0], encoding="utf-8") as f:
+            sidecar = json.load(f)
+        self.assertEqual(set(sidecar), self.SIDECAR_KEYS)
+        self.assertEqual((sidecar["N"], sidecar["df"]), (2, 1))
+        self.assertEqual(sidecar["subset"]["preview"], True)
+        self.assertEqual(sidecar["threshold"]["rule"]["kind"], "t_convention")
+        self.assertFalse(sidecar["threshold"]["resolved"]["allowed"])
+        self.assertIn("(preview)", sidecar["threshold"]["resolved"]["banner"])
+        self.assertEqual(sidecar["software"]["slicer"], "5.13.0")
+        self.assertEqual(sidecar["subject_ids_sha256"], export.subjects_sha256(bundle.subject_ids[:2]))
+        self.assertEqual(sidecar["connectome"]["manifest_sha256"], export.file_sha256(os.path.join(meta["path"], "connectome.json")))
+        self.assertEqual(sidecar["disclaimer"], export.DISCLAIMER)
+        t_map, affine, header = nifti.read_nifti(os.path.join(out, sidecar["maps"]["T"]))
+        np.testing.assert_array_equal(affine, bundle.affine)
+        self.assertEqual((header["intent_code"], header["intent_params"][0]), (3, 1.0))
+        np.testing.assert_array_equal(t_map[bundle.mask], maps.t[0])
+
+    def test_export_cli_run_and_reproduce(self):
+        meta = connectome.make_synthetic(self.path("run.lnmc"), n_subjects=4, name="Synthetic")
+        lesion_path = _sphere_lesion(self.path("sub-01_space-MNI152NLin2009cAsym_desc-lesion_mask.nii.gz"), meta["blobs"]["A"]["center_world"])
+        run_dir = self.path("run")
+        env = dict(os.environ, PYTHONPATH=MODULE_DIR + os.pathsep + os.environ.get("PYTHONPATH", ""))
+        args = ["--bundle", os.path.relpath(meta["path"], self.tmp), "--lesion", lesion_path, "--out", run_dir, "--subjects", "3", "--random", "--seed", "5"]
+        args += ["--desc-suffix", "PreviewN3", "--null-relocations", "4", "--run-json", os.path.join(run_dir, "run.json"), "--threads", "1"]
+        result = subprocess.run([sys.executable, "-m", "LesionNetworkMappingLib.engine", *args], check=False, capture_output=True, text=True, env=env, cwd=self.tmp, timeout=300)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        out = self.path("derivatives", "lnm", "conn-Synthetic_n-3")
+        files = export.export_run(run_dir, out, rule={"kind": "fwe_bonferroni", "alpha": 0.05})
+        sidecar_name = "sub-01_conn-Synthetic_desc-PreviewN3_lnm.json"
+        self.assertEqual([os.path.basename(p) for p in files["sidecars"]], [sidecar_name])
+        for source, target in zip(sorted(glob_maps(run_dir)), sorted(files["maps"]), strict=True):
+            self.assertEqual(os.path.basename(source), os.path.basename(target))
+            with open(source, "rb") as a, open(target, "rb") as b:
+                self.assertEqual(a.read(), b.read())
+        with open(os.path.join(out, sidecar_name), encoding="utf-8") as f:
+            sidecar = json.load(f)
+        self.assertEqual(set(sidecar), self.SIDECAR_KEYS)
+        self.assertEqual(sidecar["N"], 3)
+        self.assertEqual(sidecar["subset"], {"preview": True, "partial": False, "n_requested": 3, "random": True, "seed": 5})
+        self.assertEqual(sidecar["lesion"]["sha256"], export.file_sha256(lesion_path))
+        self.assertGreater(sidecar["lesion"]["voxels_on_connectome_grid"], 0)
+        self.assertEqual(set(sidecar["qa"]), {"degree_r", "degree_rho", "degree_level", "null", "null_level"})
+        self.assertEqual(sidecar["qa"]["null"]["k"], 4)
+        self.assertEqual(sidecar["threshold"]["derived"], thresholds.describe(thresholds.resolve(None, 3, 3752)))
+        with open(os.path.join(out, "provenance.json"), encoding="utf-8") as f:
+            provenance = json.load(f)
+        self.assertEqual(provenance["disclaimer"], export.DISCLAIMER)
+        self.assertEqual(provenance["run"]["status"], "done")
+        self.assertEqual(provenance["null"]["k"], 4)
+        self.assertEqual(provenance["lesions"][0]["sidecar"], sidecar_name)
+        with open(os.path.join(out, "methods.md"), encoding="utf-8") as f:
+            methods = f.read()
+        for text in (export.DISCLAIMER, "doi:10.1093/brain/awv228", "doi:10.1056/NEJMra1706158", "doi:10.1038/s41593-025-02196-7", "N = 3 subjects (preview", "relocated to 4 random positions"):
+            self.assertIn(text, methods)
+        # reproduce.sh recomputes the same maps
+        script = os.path.join(out, "reproduce.sh")
+        self.assertTrue(os.stat(script).st_mode & 0o111)
+        reproduced = self.path("reproduced")
+        result = subprocess.run(["sh", script], check=False, capture_output=True, text=True, env=dict(env, PYTHONSLICER=sys.executable, OUT=reproduced), cwd=self.path(), timeout=300)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for path in glob_maps(run_dir):
+            original = nifti.read_nifti(path)[0]
+            np.testing.assert_array_equal(nifti.read_nifti(os.path.join(reproduced, os.path.basename(path)))[0], original)
+        with self.assertRaises(FileNotFoundError):
+            export.export_run(self.path("missing"), out)
+
+        # A stopped run (terminated after a snapshot) exports its latest snapshot as a partial run
+        run_json = os.path.join(run_dir, "run.json")
+        with open(run_json, encoding="utf-8") as f:
+            run = json.load(f)
+        run.update({"status": "running", "snapshot_n": 2, "end": None})
+        for key in ("n", "cancelled", "qa_json"):
+            run.pop(key)
+        export.write_json_atomic(run_json, run)
+        with self.assertRaisesRegex(ValueError, "did not finish"):
+            export.export_run(run_dir, self.path("stopped"))
+        connectome.compute_degree(connectome.ConnectomeBundle.open(meta["path"]), n_seeds=50)
+        files = export.export_run(run_dir, self.path("stopped"), rule={"kind": "t_convention"}, partial=True)
+        with open(files["sidecars"][0], encoding="utf-8") as f:
+            sidecar = json.load(f)
+        self.assertEqual((sidecar["N"], sidecar["df"], sidecar["subset"]["partial"], sidecar["subject_ids_sha256"]), (2, 1, True, None))
+        self.assertEqual(sidecar["threshold"]["resolved"]["banner"], "This threshold was defined for N\u22481000; this map has N=2 (partial). Use FWE or effect size.")
+        self.assertIsNotNone(sidecar["qa"]["degree_r"])  # computed from the T map file
+        with open(files["reproduce"], encoding="utf-8") as f:
+            self.assertIn("stopped after 2 subjects", f.read())
+
+
+def glob_maps(folder):
+    return [os.path.join(folder, name) for name in os.listdir(folder) if name.endswith("_funcmap.nii.gz")]
+
+
+class QACommandLineTest(_TempDirTestCase):
+    def _run(self, module, *args):
+        env = dict(os.environ, PYTHONPATH=MODULE_DIR + os.pathsep + os.environ.get("PYTHONPATH", ""))
+        start = time.perf_counter()
+        result = subprocess.run([sys.executable, "-m", f"LesionNetworkMappingLib.{module}", *args], check=False, capture_output=True, text=True, env=env, cwd=self.tmp, timeout=300)
+        events = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+        return result, events, time.perf_counter() - start
+
+    def test_degree_job_and_null_relocations(self):
+        meta = connectome.make_synthetic(self.path("synthetic.lnmc"), n_subjects=5, name="Synthetic Test")
+        bundle = connectome.ConnectomeBundle.open(meta["path"])
+        lesion_path = _sphere_lesion(self.path("patient01_lesion.nii.gz"), meta["blobs"]["A"]["center_world"])
+
+        result, events, _ = self._run("qa", "degree", "--bundle", meta["path"], "--seeds", "200", "--subjects", "3", "--seed", "1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([e["event"] for e in events], ["start", "progress", "progress", "progress", "done"])
+        np.testing.assert_array_equal(bundle.degree, connectome.compute_degree(bundle, n_seeds=200, subjects=3, seed=1, store=False))
+        with open(os.path.join(meta["path"], "derived", "degree.json"), encoding="utf-8") as f:
+            degree_json = json.load(f)
+        self.assertEqual({key: degree_json[key] for key in ("K", "subjects", "seed", "measure")}, {"K": 200, "subjects": 3, "seed": 1, "measure": "abs_fz"})
+        self.assertEqual(qa.read_degree_metadata(meta["path"])["K"], 200)
+        result, events, _ = self._run("qa", "degree", "--bundle", self.path("missing.lnmc"))
+        self.assertEqual((result.returncode, events[-1]["event"]), (1, "error"))
+        result, events, _ = self._run("qa", "degree")
+        self.assertEqual((result.returncode, events[-1]["event"]), (2, "error"))
+
+        out_dir = self.path("out")
+        run_json = self.path("run.json")
+        args = ["--bundle", meta["path"], "--lesion", lesion_path, "--out", out_dir, "--threads", "1", "--null-relocations", "10", "--run-json", run_json, "--snapshot-every", "2"]
+        result, events, seconds = self._run("engine", *args, "--threshold-rule", '{"kind": "t_convention"}')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLessEqual(seconds, 10.0)
+        kinds = [event["event"] for event in events]
+        self.assertEqual((kinds[0], kinds[-1]), ("start", "done"))
+        self.assertEqual(events[0]["null_relocations"], [10])
+        done = events[-1]
+        self.assertEqual(set(done["qa"]), {"patient01_lesion"})
+        values = done["qa"]["patient01_lesion"]
+        self.assertGreater(values["degree_r"], 0.0)
+        self.assertEqual(set(values["null"]), {"r_mean_map", "r_median", "r_p05", "r_p95", "percentile", "k"})
+        self.assertEqual(values["null"]["k"], 10)
+        with open(done["qa_json"], encoding="utf-8") as f:
+            qa_json = json.load(f)
+        self.assertEqual(qa_json["lesions"], done["qa"])
+        self.assertEqual((qa_json["n"], qa_json["null"]["k"], qa_json["degree"]["K"]), (5, 10, 200))
+        with open(run_json, encoding="utf-8") as f:
+            run = json.load(f)
+        self.assertEqual(run["status"], "done")
+        self.assertEqual(run["subject_ids_sha256"], export.subjects_sha256(bundle.subject_ids))
+        self.assertEqual(run["bundle"]["manifest_sha256"], export.file_sha256(os.path.join(meta["path"], "connectome.json")))
+        self.assertEqual(run["threshold_rule"], thresholds.normalize_rule({"kind": "t_convention"}))
+        self.assertEqual(set(run["versions"]) >= {"python", "numpy", "scipy"}, True)
+        self.assertEqual(run["argv"][-2:], ["--threshold-rule", '{"kind": "t_convention"}'])
+        self.assertTrue(run["start"] <= run["end"])
+        # The lesion's maps are those of a run without nulls; null maps are not written by default
+        t_map = nifti.read_nifti(done["outputs"][2])[0]
+        weights, _ = engine.prepare_lesion(lesion_path, bundle)
+        np.testing.assert_allclose(t_map[bundle.mask], engine.compute_network_maps(bundle, weights).t[0], rtol=1e-5, atol=1e-5)
+        self.assertEqual(sorted(os.listdir(out_dir)), sorted([*map(os.path.basename, done["outputs"]), "qa.json"]))
+
+        # Preview naming, a brain mask on another grid and the 4D null maps
+        brain_affine = np.diag([1.0, 1.0, 1.0, 1.0])
+        brain_affine[:3, 3] = -30.0
+        brain = np.zeros((61, 61, 61), np.uint8)
+        brain[:, 25:, :] = 1  # y >= -5 mm
+        nifti.write_nifti(self.path("brain.nii.gz"), brain, brain_affine)
+        preview_dir = self.path("preview")
+        args = ["--bundle", meta["path"], "--lesion", lesion_path, "--out", preview_dir, "--subjects", "3", "--desc-suffix", "PreviewN3", "--null-relocations", "3", "--brain-mask", self.path("brain.nii.gz"), "--write-null"]
+        result, events, _ = self._run("engine", *args)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        done = events[-1]
+        self.assertEqual([os.path.basename(p) for p in done["outputs"]], [f"patient01_lesion_conn-SyntheticTest_desc-{d}PreviewN3_funcmap.nii.gz" for d in ("AvgR", "AvgRFz", "T")])
+        self.assertEqual([os.path.basename(p) for p in done["null_outputs"]], ["patient01_lesion_conn-SyntheticTest_desc-RelocatedTPreviewN3_funcmap.nii.gz"])
+        null_maps, affine, header = nifti.read_nifti(done["null_outputs"][0])
+        self.assertEqual(null_maps.shape, (*bundle.shape, 3))
+        np.testing.assert_array_equal(affine, bundle.affine)
+        self.assertEqual(header["intent_code"], 3)
+        self.assertEqual(done["qa"]["patient01_lesion"]["null"]["k"], 3)
+        # Invalid suffixes are rejected like other invalid arguments
+        result, events, _ = self._run("engine", "--bundle", meta["path"], "--lesion", lesion_path, "--out", out_dir, "--desc-suffix", "Preview_N3")
+        self.assertEqual((result.returncode, [e["event"] for e in events]), (2, ["error"]))
 
 
 if __name__ == "__main__":

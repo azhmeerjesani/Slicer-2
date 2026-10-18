@@ -58,10 +58,14 @@ set(APP_SRCS
   Main.cxx
   )
 
+# Fork defaults merged into the user settings for missing keys (see qSlicerCoreApplication::defaultSettings()).
+# The file is copied to "<build>/${Slicer_SHARE_DIR}/SlicerDefaultSettings.ini" and installed into
+# ${Slicer_INSTALL_SHARE_DIR}, which is where qSlicerCoreApplication::slicerDefaultSettingsFilePath() looks.
 slicerMacroBuildApplication(
   NAME ${PROJECT_NAME}
   APPLICATION_NAME ${${PROJECT_NAME}_APPLICATION_NAME}
   APPLICATION_DISPLAY_NAME ${${PROJECT_NAME}_APPLICATION_DISPLAY_NAME}
+  DEFAULT_SETTINGS_FILE Resources/SlicerDefaultSettings.ini
   LAUNCHER_SPLASHSCREEN_FILE ${SlicerApp_LAUNCHER_SPLASHSCREEN_FILE}
   APPLE_ICON_FILE ${SlicerApp_APPLE_ICON_FILE}
   WIN_ICON_FILE ${SlicerApp_WIN_ICON_FILE}
