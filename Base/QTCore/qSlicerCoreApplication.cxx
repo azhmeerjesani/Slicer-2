@@ -373,18 +373,24 @@ void qSlicerCoreApplicationPrivate::mergeDefaultSettings()
   // This must be called after the arguments are parsed: user settings are instantiated
   // on first use and they must not be instantiated before it is known whether settings are
   // disabled (for example, in testing mode temporary settings must be used).
-  if (q->defaultSettings())
+  // Default settings are retrieved before user settings are instantiated because instantiating
+  // temporary user settings changes the application name, which is used in the default settings file path.
+  QSettings* defaultSettings = q->defaultSettings();
+  if (!defaultSettings)
   {
-    for (const QString& key : q->defaultSettings()->allKeys())
+    return;
+  }
+  QSettings* userSettings = q->userSettings();
+  QSettings* revisionUserSettings = q->revisionUserSettings();
+  for (const QString& key : defaultSettings->allKeys())
+  {
+    if (!userSettings->contains(key))
     {
-      if (!q->userSettings()->contains(key))
-      {
-        q->userSettings()->setValue(key, q->defaultSettings()->value(key));
-      }
-      if (!q->revisionUserSettings()->contains(key))
-      {
-        q->revisionUserSettings()->setValue(key, q->defaultSettings()->value(key));
-      }
+      userSettings->setValue(key, defaultSettings->value(key));
+    }
+    if (!revisionUserSettings->contains(key))
+    {
+      revisionUserSettings->setValue(key, defaultSettings->value(key));
     }
   }
 }
@@ -1448,17 +1454,19 @@ void qSlicerCoreApplication::handleCommandLineArguments()
 QSettings* qSlicerCoreApplication::defaultSettings() const
 {
   Q_D(const qSlicerCoreApplication);
+  if (d->DefaultSettings)
+  {
+    // The default settings file path depends on the application name, which changes when temporary
+    // user settings are instantiated, therefore the path is not checked again once settings are created.
+    return d->DefaultSettings;
+  }
   if (!QFile(this->slicerDefaultSettingsFilePath()).exists())
   {
     return nullptr;
   }
   qSlicerCoreApplication* mutable_self = const_cast<qSlicerCoreApplication*>(this);
   qSlicerCoreApplicationPrivate* mutable_d = const_cast<qSlicerCoreApplicationPrivate*>(d);
-  // If required, instantiate Settings
-  if (!mutable_d->DefaultSettings)
-  {
-    mutable_d->DefaultSettings = new QSettings(this->slicerDefaultSettingsFilePath(), QSettings::IniFormat, mutable_self);
-  }
+  mutable_d->DefaultSettings = new QSettings(this->slicerDefaultSettingsFilePath(), QSettings::IniFormat, mutable_self);
   return mutable_d->DefaultSettings;
 }
 
