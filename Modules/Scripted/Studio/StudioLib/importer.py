@@ -3,13 +3,18 @@
 Unambiguous files load directly, without the Add Data dialog:
 
 - a name that looks like a lesion (``isLesionName()``: lesion, mask, seg, label or roi as a whole word)
-  is loaded as a segmentation, whose first segment becomes "Lesion" (#F2545B);
+  is loaded as a segmentation, whose first segment becomes "Lesion" (#F2545B). An empty mask gets an
+  empty "Lesion" segment to draw into. In a multi-label mask, only the first label becomes "Lesion": the
+  other labels keep the names given by the reader ("Segment_2"...). ``.seg.nrrd`` and ``.seg.vtm`` files
+  with several segments keep their names and colors;
 - other NIfTI, NRRD and MetaImage files are loaded as scalar volumes and shown in all slice views;
 - ``.mrb`` and ``.mrml`` files are loaded as scenes.
 
 Anything else (other file types, several folders, Shift+drop) opens the classic Add Data dialog with the
 dropped paths. A DICOM folder goes to the DICOM module; a folder with several NIfTI files is offered as
-a card in the Library. In Studio, loading a scan switches to Draw.
+a card in the Library. In Studio, loading a scan switches to Draw, on the lesion loaded with it or on a new
+"Lesions (<scan name>)" segmentation bound to that scan (never on the segmentation of another scan, even if
+it has the same geometry, as scans normalized to MNI space do).
 
 This module is an optional plug-in of the Studio shell: ``install(shell)`` handles the files dropped on
 the main window while Studio is shown, ``uninstall(shell)`` restores the classic drop handling.
@@ -25,6 +30,7 @@ import qt
 import slicer
 import vtk
 from slicer.i18n import tr as _
+from slicer.util import VTKObservationMixin
 
 #: Whole-word lesion names (SPEC 3.1): "sub-01_lesion.nii.gz", "mask.nrrd", "brain.seg.nrrd"...
 LESION_NAME_PATTERN = re.compile(r"(?i)(^|[_\-.])(lesion|mask|seg|label|roi)([_\-.]|$)")
@@ -156,9 +162,12 @@ def _applyLesionNaming(segmentationNode, path):
     """Name the first segment "Lesion" with the lesion color.
 
     Files that store segment names and colors (``.seg.nrrd``...) keep them unless they hold a single segment.
+    An empty mask (no segment) gets an empty "Lesion" segment, so that Draw has a segment to draw into.
     """
     segmentation = segmentationNode.GetSegmentation()
     if segmentation.GetNumberOfSegments() == 0:
+        segmentId = segmentation.AddEmptySegment("", LESION_SEGMENT_NAME, LESION_COLOR)
+        styleLesionSegment(segmentationNode, segmentId)
         return
     if _extension(path) in SEGMENTATION_FILE_EXTENSIONS and segmentation.GetNumberOfSegments() > 1:
         return
@@ -180,6 +189,9 @@ def loadLesion(path):
         logging.info(f"Studio: {path} is not readable as a segmentation, loading it as a labelmap volume")
         labelmapNode = slicer.util.loadLabelVolume(path, {"singleFile": True, "show": False})
         segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", labelmapNode.GetName())
+        # The geometry of the mask is kept even if it is empty (no node reference: the labelmap is removed below)
+        segmentationNode.GetSegmentation().SetConversionParameter(
+            slicer.vtkSegmentationConverter.GetReferenceImageGeometryParameterName(), _volumeGeometry(labelmapNode))
         if not slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(labelmapNode, segmentationNode):
             slicer.mrmlScene.RemoveNode(segmentationNode)
             slicer.mrmlScene.RemoveNode(labelmapNode)
@@ -202,6 +214,16 @@ def _volumeGeometry(volumeNode):
 def _referenceGeometryMatches(segmentationNode, volumeNode):
     parameterName = slicer.vtkSegmentationConverter.GetReferenceImageGeometryParameterName()
     return segmentationNode.GetSegmentation().GetConversionParameter(parameterName) == _volumeGeometry(volumeNode)
+
+
+def _isBoundTo(segmentationNode, volumeNode):
+    """True if the reference geometry of the segmentation is ``volumeNode`` itself (node reference and geometry).
+
+    The node reference is set by ``SetReferenceImageGeometryParameterFromVolumeNode()``. A geometry match alone
+    is not enough: scans of different subjects normalized to MNI space share their geometry.
+    """
+    role = slicer.vtkMRMLSegmentationNode.GetReferenceImageGeometryReferenceRole()
+    return segmentationNode.GetNodeReferenceID(role) == volumeNode.GetID() and _referenceGeometryMatches(segmentationNode, volumeNode)
 
 
 def isSegmentationEmpty(segmentationNode):
@@ -236,15 +258,24 @@ def createLesionSegmentation(volumeNode, name=LESION_SEGMENTATION_NAME):
     return segmentationNode
 
 
-def _lesionSegmentationFor(volumeNode):
-    """An existing "Lesions" segmentation on the geometry of ``volumeNode``, else a new one."""
+def scanLesionSegmentationName(volumeNode):
+    """Name of the segmentation created for the lesion of a loaded scan: "Lesions (<scan name>)"."""
+    return f"{LESION_SEGMENTATION_NAME} ({volumeNode.GetName()})"
+
+
+def _lesionSegmentationFor(volumeNode, name):
+    """The segmentation ``name`` bound to ``volumeNode`` (see ``_isBoundTo()``) if it is in the scene, else a new one.
+
+    The segmentation of another volume is never reused, even if it has the same geometry: it may hold the lesion
+    of another subject.
+    """
     for segmentationNode in slicer.util.getNodesByClass("vtkMRMLSegmentationNode"):
-        if segmentationNode.GetName() == LESION_SEGMENTATION_NAME and _referenceGeometryMatches(segmentationNode, volumeNode):
+        if segmentationNode.GetName() == name and _isBoundTo(segmentationNode, volumeNode):
             if segmentationNode.GetSegmentation().GetNumberOfSegments() == 0:
                 segmentId = segmentationNode.GetSegmentation().AddEmptySegment("", LESION_SEGMENT_NAME, LESION_COLOR)
                 styleLesionSegment(segmentationNode, segmentId)
             return segmentationNode
-    return createLesionSegmentation(volumeNode)
+    return createLesionSegmentation(volumeNode, name)
 
 
 def segmentEditorWidget():
@@ -355,10 +386,11 @@ def _afterLoad(result, shell):
     sourceVolume = scans[0] if scans else _backgroundVolume()
     lesions = result.segmentations
     if sourceVolume is not None and (scans or lesions):
-        # Draw edits the loaded lesion, else a "Lesions" segmentation on the geometry of the scan (never the
-        # segmentation of a previous scan or template, which may have another geometry)
+        # Draw edits the loaded lesion, else a segmentation bound to the scan (never the segmentation of a previous
+        # scan or of the template, which may hold another subject's lesion)
         if segmentEditorWidget() is not None:
-            selectInSegmentEditor(lesions[0] if lesions else _lesionSegmentationFor(sourceVolume), sourceVolume)
+            lesion = lesions[0] if lesions else _lesionSegmentationFor(sourceVolume, scanLesionSegmentationName(sourceVolume))
+            selectInSegmentEditor(lesion, sourceVolume)
         shell.switchTo("draw")
     loaded = result.nodes()
     if loaded:
@@ -536,10 +568,12 @@ def openFolderDialog(shell=None):
 #
 
 _templateBanner = None
-#: Nodes created by the last "Start on MNI template": {"volume": node ID, "segmentation": node ID}
+#: Nodes of the last "Start on MNI template": {"volume": node ID, "segmentation": node ID}. Forgotten when the
+#: scene is closed (node IDs start again from 1 then) and always checked by ``_templateNodes()``.
 _templateNodeIds = {}
 #: SampleData sources of the templates, by sample name
 _templateSources = {}
+_templateWatcher = None
 
 
 def templateSource(sampleName):
@@ -554,6 +588,11 @@ def templateSource(sampleName):
         if source is not None:
             _templateSources[sampleName] = source
     return source
+
+
+def _templateNodeName(sampleName):
+    source = templateSource(sampleName)
+    return source.nodeNames[0] if source is not None else None
 
 
 def cachedTemplatePath(sampleName=TEMPLATE_SAMPLE_1MM):
@@ -571,8 +610,11 @@ def cachedTemplatePath(sampleName=TEMPLATE_SAMPLE_1MM):
     return None
 
 
-def _templateVolume(sampleName, path=None):
-    """The template volume already in the scene, else load it (from ``path``, else from SampleData)."""
+def _templateVolume(sampleName, path=None, show=True):
+    """The template volume already in the scene, else load it (from ``path``, else from SampleData).
+
+    With ``show=False``, a volume loaded from ``path`` does not replace the background of the slice views.
+    """
     source = templateSource(sampleName)
     if source is None:
         raise RuntimeError(_("The SampleData module is not available"))
@@ -581,13 +623,45 @@ def _templateVolume(sampleName, path=None):
         if node.GetName() == nodeName and not node.IsA("vtkMRMLLabelMapVolumeNode"):
             return node
     if path is not None:
-        return slicer.util.loadVolume(path, {"name": nodeName, "singleFile": True})
+        return slicer.util.loadVolume(path, {"name": nodeName, "singleFile": True, "show": show})
     import SampleData
 
     volumeNode = SampleData.SampleDataLogic().downloadSample(sampleName)
     if volumeNode is None:
         raise RuntimeError(_("Failed to load {sampleName}").format(sampleName=sampleName))
     return volumeNode
+
+
+def _trackTemplate(volumeNode, segmentationNode):
+    _templateNodeIds["volume"] = volumeNode.GetID()
+    _templateNodeIds["segmentation"] = segmentationNode.GetID() if segmentationNode is not None else None
+    _watchTemplate()
+
+
+def _templateNodes():
+    """The template volume and the "Lesions" segmentation of the last "Start on MNI template", if they are still
+    in the scene; ``(None, None)`` otherwise (the segmentation alone is None if it was removed or re-bound).
+
+    The volume must still be a template volume and the segmentation must still be bound to it: a node ID alone
+    does not identify a node once the scene was closed.
+    """
+    scene = slicer.mrmlScene
+    volumeId = _templateNodeIds.get("volume")
+    volumeNode = scene.GetNodeByID(volumeId) if volumeId else None
+    templateNames = (_templateNodeName(TEMPLATE_SAMPLE_2MM), _templateNodeName(TEMPLATE_SAMPLE_1MM))
+    if volumeNode is None or not _isScan(volumeNode) or volumeNode.GetName() not in templateNames:
+        return None, None
+    segmentationId = _templateNodeIds.get("segmentation")
+    segmentationNode = scene.GetNodeByID(segmentationId) if segmentationId else None
+    if segmentationNode is not None and (not segmentationNode.IsA("vtkMRMLSegmentationNode") or not _isBoundTo(segmentationNode, volumeNode)):
+        segmentationNode = None
+    return volumeNode, segmentationNode
+
+
+def _isTemplateShown(volumeNode):
+    """True if ``volumeNode`` is the background volume of the slice views."""
+    background = _backgroundVolume()
+    return volumeNode is not None and background is not None and background.GetID() == volumeNode.GetID()
 
 
 def startOnTemplate(res=2, shell=None):
@@ -606,9 +680,8 @@ def startOnTemplate(res=2, shell=None):
         else:
             volumeNode = _templateVolume(TEMPLATE_SAMPLE_2MM)
         slicer.util.setSliceViewerLayers(background=volumeNode, fit=True)
-        segmentationNode = _lesionSegmentationFor(volumeNode)
-        _templateNodeIds["volume"] = volumeNode.GetID()
-        _templateNodeIds["segmentation"] = segmentationNode.GetID()
+        segmentationNode = _lesionSegmentationFor(volumeNode, LESION_SEGMENTATION_NAME)
+        _trackTemplate(volumeNode, segmentationNode)
         selectInSegmentEditor(segmentationNode, volumeNode)
         if shell is not None:
             shell.switchTo("draw")
@@ -618,11 +691,17 @@ def startOnTemplate(res=2, shell=None):
         banner = showTemplateDownloadBanner()
         if banner is not None and res == 1 and banner.state == "offer":
             banner.startDownload()
+    else:
+        # A banner whose download completed while it was hidden: the 1 mm template is used now
+        _closeTemplateBanner()
     return volumeNode, segmentationNode
 
 
 def showTemplateDownloadBanner(url=None):
-    """Show the card that offers the 1 mm template download (``url`` replaces the TemplateFlow URL, for tests)."""
+    """Show the card that offers the 1 mm template download (``url`` replaces the TemplateFlow URL, for tests).
+
+    A banner hidden while the template was not shown is shown again, with its download state.
+    """
     global _templateBanner
     from . import downloads
 
@@ -630,8 +709,11 @@ def showTemplateDownloadBanner(url=None):
     source = templateSource(TEMPLATE_SAMPLE_1MM)
     if mainWindow is None or source is None:
         return None
-    if _templateBanner is not None and _templateBanner.isVisible():
-        return _templateBanner
+    if _templateBanner is not None and _templateBanner.isAlive():
+        if url is None or url == _templateBanner.download.url:
+            _templateBanner.show()
+            return _templateBanner
+        _closeTemplateBanner()
     checksum = source.checksums[0] if source.checksums else None
     _templateBanner = downloads.DownloadBanner(
         mainWindow.centralWidget(),
@@ -643,6 +725,7 @@ def showTemplateDownloadBanner(url=None):
         actionText=_("Switch to 1 mm"),
         onAction=switchTemplateTo1mm)
     _templateBanner.show()
+    _watchTemplate()
     return _templateBanner
 
 
@@ -651,19 +734,96 @@ def templateBanner():
     return _templateBanner if _templateBanner is not None and _templateBanner.isVisible() else None
 
 
+def _closeTemplateBanner():
+    global _templateBanner
+    if _templateBanner is not None:
+        _templateBanner.close()
+        _templateBanner = None
+
+
+def _updateTemplateBanner():
+    """Show the 1 mm banner only while the 2 mm template is the background of the slice views.
+
+    Once the template is no longer in the scene (for example, the scene was closed), the banner closes; a running
+    download goes on with the banner hidden, so that the next "Start on MNI template" uses the 1 mm file.
+    """
+    global _templateBanner
+    banner = _templateBanner
+    if banner is None:
+        return
+    if not banner.isAlive():
+        _templateBanner = None
+        return
+    volumeNode = _templateNodes()[0]
+    is1mm = volumeNode is not None and volumeNode.GetName() == _templateNodeName(TEMPLATE_SAMPLE_1MM)
+    if (volumeNode is None or is1mm) and not banner.download.isRunning():
+        _closeTemplateBanner()
+        return
+    banner.setVisible(_isTemplateShown(volumeNode) and not is1mm)
+
+
+class _TemplateWatcher(VTKObservationMixin):
+    """Forgets the template nodes when the scene is closed, and updates the 1 mm banner when the scene or the
+    background volume of the slice views changes.
+    """
+
+    def __init__(self):
+        VTKObservationMixin.__init__(self)
+        self.timer = qt.QTimer()
+        self.timer.setSingleShot(True)
+        self.timer.setInterval(0)
+        self.timer.connect("timeout()", _updateTemplateBanner)
+        scene = slicer.mrmlScene
+        self.addObserver(scene, scene.EndCloseEvent, self._onSceneClosed)
+        self.addObserver(scene, scene.NodeAddedEvent, self._onNodeAdded)
+        self.addObserver(scene, scene.NodeRemovedEvent, self._onChanged)
+        for compositeNode in slicer.util.getNodesByClass("vtkMRMLSliceCompositeNode"):
+            self._observeCompositeNode(compositeNode)
+        slicer.app.connect("aboutToQuit()", self.dispose)
+
+    def _observeCompositeNode(self, compositeNode):
+        if not self.hasObserver(compositeNode, vtk.vtkCommand.ModifiedEvent, self._onChanged):
+            self.addObserver(compositeNode, vtk.vtkCommand.ModifiedEvent, self._onChanged)
+
+    def _onSceneClosed(self, caller, event):
+        _templateNodeIds.clear()
+        self._onChanged(caller, event)
+
+    @vtk.calldata_type(vtk.VTK_OBJECT)
+    def _onNodeAdded(self, caller, event, node):
+        if node is not None and node.IsA("vtkMRMLSliceCompositeNode"):
+            self._observeCompositeNode(node)
+
+    def _onChanged(self, caller, event):
+        if _templateBanner is not None:
+            self.timer.start()
+
+    def dispose(self):
+        slicer.app.disconnect("aboutToQuit()", self.dispose)
+        self.timer.stop()
+        self.removeObservers()
+
+
+def _watchTemplate():
+    global _templateWatcher
+    if _templateWatcher is None:
+        _templateWatcher = _TemplateWatcher()
+
+
 def switchTemplateTo1mm(path, shell=None):
     """Use the downloaded 1 mm template instead of the 2 mm one, if no lesion was drawn yet.
 
-    The background volume of the slice views and the source volume of the Segment Editor are replaced, and
-    the "Lesions" segmentation is bound to the 1 mm geometry. A lesion already drawn keeps the 2 mm grid.
-    Return True if the template was switched.
+    Only the nodes of the last "Start on MNI template" are changed, if they are still in the scene: the "Lesions"
+    segmentation is bound to the 1 mm geometry, and the 1 mm volume replaces the 2 mm one as background of the
+    slice views and as source volume of the Segment Editor (where the 2 mm template was shown or edited).
+    A lesion already drawn keeps the 2 mm grid. Return True if the template was switched.
     """
     shell = _currentShell(shell)
-    segmentationId = _templateNodeIds.get("segmentation")
-    segmentationNode = slicer.mrmlScene.GetNodeByID(segmentationId) if segmentationId else None
-    if segmentationNode is not None and segmentationNode.GetName() != LESION_SEGMENTATION_NAME:
-        # The scene was closed since: the ID belongs to another segmentation
-        segmentationNode = None
+    volumeNode, segmentationNode = _templateNodes()
+    if volumeNode is None or volumeNode.GetName() == _templateNodeName(TEMPLATE_SAMPLE_1MM):
+        # The template is not in the scene anymore (the next "Start on MNI template" uses the 1 mm file),
+        # or it is the 1 mm one already
+        return False
     if segmentationNode is not None and not isSegmentationEmpty(segmentationNode):
         message = _("The lesion is already drawn on the 2 mm template: it stays on the 2 mm grid.")
         if shell is not None:
@@ -671,15 +831,23 @@ def switchTemplateTo1mm(path, shell=None):
         else:
             slicer.util.infoDisplay(message)
         return False
+    widget = getattr(slicer.modules, "SegmentEditorWidget", None)
+    editor = widget.editor if widget is not None else None
+    editedSegmentation = editor.segmentationNode() if editor is not None else None
+    editsTemplate = segmentationNode is not None and editedSegmentation is not None and editedSegmentation.GetID() == segmentationNode.GetID()
+    shown = _isTemplateShown(volumeNode)
     with slicer.util.WaitCursor():
-        volumeNode = _templateVolume(TEMPLATE_SAMPLE_1MM, path)
-        slicer.util.setSliceViewerLayers(background=volumeNode, fit=True)
-        _templateNodeIds["volume"] = volumeNode.GetID()
+        # The 1 mm volume is not shown when the user's own scan is the background
+        volume1mm = _templateVolume(TEMPLATE_SAMPLE_1MM, path, show=shown)
+        if shown:
+            slicer.util.setSliceViewerLayers(background=volume1mm, fit=True)
         if segmentationNode is not None:
-            segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(volumeNode)
-            widget = getattr(slicer.modules, "SegmentEditorWidget", None)
-            if widget is not None and widget.editor is not None and widget.editor.segmentationNode() == segmentationNode:
-                widget.editor.setSourceVolumeNode(volumeNode)
+            segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(volume1mm)
+        _trackTemplate(volume1mm, segmentationNode)
+        if editsTemplate:
+            editor.setSourceVolumeNode(volume1mm)
+    # The background is unchanged if the template was not shown, so the watcher is not notified: close the banner now
+    _updateTemplateBanner()
     if shell is not None:
         shell.toast(_("Switched to the 1 mm template"))
     return True

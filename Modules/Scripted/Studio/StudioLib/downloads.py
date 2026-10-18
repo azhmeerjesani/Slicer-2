@@ -287,6 +287,7 @@ class DownloadBanner(qt.QObject):
         self.download.failed.connect(self._onFailed)
         self.state = None
         self._disposeOnQuit = False
+        self._disposed = False
 
         self.widget = qt.QFrame(parentWidget)
         self.widget.setObjectName("StudioDownloadBanner")
@@ -305,6 +306,7 @@ class DownloadBanner(qt.QObject):
         headerRow.addWidget(self.iconLabel, 0, qt.Qt.AlignTop)
         self.textLabel = qt.QLabel()
         self.textLabel.setObjectName("StudioDownloadBannerText")
+        self.textLabel.setTextFormat(qt.Qt.PlainText)
         self.textLabel.setWordWrap(True)
         headerRow.addWidget(self.textLabel, 1)
         self.closeButton = qt.QToolButton()
@@ -326,6 +328,8 @@ class DownloadBanner(qt.QObject):
         layout.addWidget(self.progressBar)
         self.detailLabel = qt.QLabel()
         self.detailLabel.setObjectName("StudioDownloadBannerDetail")
+        # Error messages may hold URLs and paths
+        self.detailLabel.setTextFormat(qt.Qt.PlainText)
         self._setPixelSize(self.detailLabel, 12)
         layout.addWidget(self.detailLabel)
         ui.bindStyleSheet(self.textLabel, lambda: f"QLabel#StudioDownloadBannerText {{ color: {ui.token('text').name()}; }}")
@@ -370,13 +374,31 @@ class DownloadBanner(qt.QObject):
         self.iconLabel.setPixmap(ui.pixmap(iconName, 18, color))
         self.closeButton.setIcon(ui.icon("x", 14))
 
+    def isAlive(self):
+        """False once the card was closed or disposed."""
+        return not self._disposed and _isAlive(self.widget)
+
     def isVisible(self):
-        return _isAlive(self.widget) and self.widget.isVisible()
+        return self.isAlive() and self.widget.isVisible()
 
     def show(self):
+        """Show the card above the other children of its parent widget."""
+        if not self.isAlive():
+            return
         self.updatePosition()
         self.widget.show()
         self.widget.raise_()
+
+    def setVisible(self, visible):
+        """Show or hide the card without changing its stacking order (a canvas raised over it stays above).
+
+        The download goes on while the card is hidden.
+        """
+        if not self.isAlive() or self.widget.isVisible() == bool(visible):
+            return
+        if visible:
+            self.updatePosition()
+        self.widget.setVisible(bool(visible))
 
     def close(self):
         """Close the card. A running download is canceled."""
@@ -385,6 +407,7 @@ class DownloadBanner(qt.QObject):
         self.dispose()
 
     def dispose(self):
+        self._disposed = True
         if self._disposeOnQuit:
             slicer.app.disconnect("aboutToQuit()", self.dispose)
             self._disposeOnQuit = False

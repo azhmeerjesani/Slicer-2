@@ -287,6 +287,10 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertIn(mainWindow, closeSceneAction.associatedWidgets())
         self.assertEqual(list(addDataAction.shortcuts()), [])
         self.assertEqual(studioShell.currentWorkspace(), "library")
+        # Library empty state (nothing loaded): the inspector is hidden (SPEC 2.5, StudioLib/library.py)
+        self.assertTrue(dock.isHidden())
+        studioShell.setInspectorVisible(True)
+        self._pump()
         # Ctrl+5 (View > Module Panel) keeps toggling the inspector
         panelToggle = dock.toggleViewAction()
         self.assertEqual(portableKey(panelToggle.shortcut), "Ctrl+5")
@@ -313,6 +317,10 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
 
         # Back to Studio and Classic again
         studioShell.studio()
+        self._pump()
+        # The saved state holds a cached minimum size of the module panel, which restoreState() ignores: it is only
+        # byte-identical if the inspector was laid out while shown (it is hidden in the Library empty state)
+        studioShell.setInspectorVisible(True)
         self._pump()
         self.assertIsNotNone(mainWindow.findChild("QToolBar", "StudioTopBar"))
         studioShell.classic(persist=False)

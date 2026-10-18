@@ -211,16 +211,16 @@ def recentEntries(limit=RECENT_ROW_COUNT):
     """The most recently loaded files that still exist, most recent first.
 
     They come from the "RecentlyLoadedMenu" actions of the main window (property ``fileParameters``),
-    or from the settings that the main window writes when there is no main window.
+    or from the settings that the main window writes when there is no main window. Files are examined
+    (``os.stat``) only until ``limit`` existing files are found.
     """
-    entries = []
+    candidates = []  # [(properties, action)], most recent first
     menu = recentlyLoadedMenu()
     if menu is not None:
         for action in menu.actions():
             properties = action.property("fileParameters")
-            if not properties:
-                continue
-            entries.append(RecentEntry(properties, action))
+            if properties:
+                candidates.append((properties, action))
     else:
         settings = qt.QSettings()
         count = settings.beginReadArray("RecentlyLoadedFiles/RecentFiles")
@@ -231,11 +231,20 @@ def recentEntries(limit=RECENT_ROW_COUNT):
                 continue
             properties = dict(properties)
             properties["fileName"] = slicer.app.toSlicerHomeAbsolutePath(str(properties.get("fileName", "")))
-            entries.append(RecentEntry(properties))
+            candidates.append((properties, None))
         settings.endArray()
         # Stored oldest first
-        entries.reverse()
-    return [entry for entry in entries if entry.path and entry.exists()][:limit]
+        candidates.reverse()
+    entries = []
+    for properties, action in candidates:
+        if len(entries) >= limit:
+            break
+        if not str(properties.get("fileName", "")):
+            continue
+        entry = RecentEntry(properties, action)
+        if entry.exists():
+            entries.append(entry)
+    return entries
 
 
 class _RecentMenuWatcher(qt.QObject):
@@ -329,6 +338,9 @@ class RecentList(qt.QObject):
         folderLabel = qt.QLabel()
         folderLabel.setObjectName("StudioRecentFolder")
         _setFont(folderLabel, 12)
+        # File names are never rich text (a name may start with "<")
+        for label in (nameLabel, folderLabel):
+            label.setTextFormat(qt.Qt.PlainText)
         folderLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
         timeLabel = qt.QLabel()
         timeLabel.setObjectName("StudioRecentTime")
@@ -470,6 +482,7 @@ class FolderCard:
 
         self.folderLabel = qt.QLabel()
         self.folderLabel.setObjectName("StudioFolderCardFolder")
+        self.folderLabel.setTextFormat(qt.Qt.PlainText)
         _setFont(self.folderLabel, 12)
         self.folderLabel.setToolTip(folder)
         self.folderLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
