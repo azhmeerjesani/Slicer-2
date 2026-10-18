@@ -6,10 +6,11 @@ name: Slicer Studio packages
 # attached to the workflow run as artifacts. See
 # Docs/user_guide/install_studio.md.
 #
-# Pushing a tag named "studio-build-*" also runs the workflow, with the default
-# choices (Apple Silicon disk image with the official Qt, and Linux tarball). This
-# allows building packages from any branch, as "Run workflow" is only available
-# for workflows that are on the default branch.
+# Pushing a tag named "studio-build-*", or pushing a change to
+# .github/studio-packages-request.txt on any branch, also runs the workflow, with
+# the default choices (Apple Silicon disk image with the official Qt, and Linux
+# tarball). This allows building packages from any branch, as "Run workflow" is
+# only available for workflows that are on the default branch.
 #
 # A first build takes several hours. When a build step reaches its time limit,
 # the compiler cache is still saved, so running the workflow again continues
@@ -17,8 +18,14 @@ name: Slicer Studio packages
 
 on:
   push:
+    # Branch pushes run the workflow only when they change the request file (paths
+    # filters are not evaluated for tag pushes).
+    branches:
+      - "**"
     tags:
       - "studio-build-*"
+    paths:
+      - ".github/studio-packages-request.txt"
   workflow_dispatch:
     inputs:
       ref:

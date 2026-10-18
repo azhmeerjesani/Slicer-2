@@ -35,10 +35,11 @@ builds the packages on GitHub's servers. To get them:
    `Slicer-<version>-linux-amd64.tar.gz`.
 
 **Run workflow** is only offered for workflows that are on the repository's
-default branch. To build packages from another branch, push a tag whose name
+default branch. To build packages from another branch, either push a change to
+`.github/studio-packages-request.txt` on that branch, or push a tag whose name
 starts with `studio-build-` (for example `git tag studio-build-1` then
 `git push origin studio-build-1`): this builds the Apple Silicon disk image and
-the Linux tarball from the tagged commit.
+the Linux tarball.
 
 A build takes several hours. If a run stops at the time limit of GitHub's
 runners, run the workflow again: the compiler cache saved by the first run
