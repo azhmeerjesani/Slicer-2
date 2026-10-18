@@ -201,11 +201,16 @@ class WorkspaceController:
         return value
 
     def switchTo(self, key):
-        """Show a workspace: its module in the inspector and its remembered layout."""
+        """Show a workspace: its module in the inspector and its remembered layout.
+
+        Asking again for the current workspace (its tab or its shortcut) brings it back into view:
+        the inspector that the user hid is shown again and the focus mode is left.
+        """
         ws = workspace(key)
         if ws is None:
             raise ValueError(f"Unknown Studio workspace: {key}")
         if ws.key == self.current and self.transientModule is None:
+            self.shell._onCurrentWorkspaceReselected(ws)
             return
         if not isAvailable(ws):
             self.shell.toast(_("{workspace} is not available in this build").format(workspace=ws.title))

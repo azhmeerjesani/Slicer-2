@@ -39,8 +39,9 @@ Its three workspaces follow the path of a lesion network mapping study:
 <b>Library</b> (open data and choose a subject), <b>Draw</b> (trace the lesion) and <b>Map</b>
 (compute and read a network map).</p>
 <p>Keyboard: Ctrl+Alt+1/2/3 switch workspaces, Ctrl+K searches tools and actions,
-Alt+1..4 change the view layout, Tab (in a view) shows or hides the inspector,
-F11 toggles the focus mode and Ctrl+Alt+0 switches to the Classic interface and back
+Alt+1..4 change the view layout, Ctrl+\\ shows or hides the inspector,
+F11 toggles the focus mode, Esc backs out of the place and window/level modes, a maximized view
+and the focus mode, and Ctrl+Alt+0 switches to the Classic interface and back
 (also View &gt; Studio interface).</p>
 <p>The Classic interface is never removed. Studio is not used when testing,
 without main window, with the SLICER_CLASSIC_UI=1 environment variable,

@@ -1,7 +1,8 @@
 """App menu (≡) of the Slicer Studio top bar (SPEC 2.4).
 
 It reuses the File, Edit, View and Help menus of the main window, and offers the workspaces,
-Appearance (theme and density), common dialogs and the switch to the Classic interface.
+the inspector and focus mode toggles, Appearance (theme and density), common dialogs and the switch
+to the Classic interface.
 
 Appearance settings are changed through the Appearance settings panel, so they are stored in
 the fork's own keys (``Appearance/Theme``, ``Appearance/Density``) and never in keys that other
@@ -113,6 +114,17 @@ class AppMenu:
         allTools.connect("triggered()", self.shell.openPalette)
         self.menu.addSeparator()
 
+        # Ways back to a hidden inspector and out of the focus mode, with their keys
+        self.inspectorAction = self.menu.addAction(_menuText(_("Show inspector"), shell.inspectorShortcutText()))
+        self.inspectorAction.setObjectName("StudioInspectorAction")
+        self.inspectorAction.setCheckable(True)
+        self.inspectorAction.connect("triggered()", self.shell.toggleInspector)
+        self.focusModeAction = self.menu.addAction(_menuText(_("Focus mode"), "F11"))
+        self.focusModeAction.setObjectName("StudioFocusModeAction")
+        self.focusModeAction.setCheckable(True)
+        self.focusModeAction.connect("triggered()", self.shell.toggleFocusMode)
+        self.menu.addSeparator()
+
         # Existing main window menus (shared, not copied)
         for name in ("FileMenu", "EditMenu", "ViewMenu", "HelpMenu"):
             existingMenu = mainWindow.findChild("QMenu", name)
@@ -184,6 +196,8 @@ class AppMenu:
         current = self.shell.currentWorkspace()
         for key, action in self.workspaceActions.items():
             action.setChecked(key == current)
+        self.inspectorAction.setChecked(self.shell.isInspectorVisible())
+        self.focusModeAction.setChecked(self.shell.focusMode())
         theme = currentTheme()
         themes = availableThemes()
         for name, action in self.themeActions.items():

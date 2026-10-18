@@ -213,6 +213,10 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         if self.layoutManager is not None and self.initialLayout is not None and self.layoutManager.layout != self.initialLayout:
             self.layoutManager.setLayout(self.initialLayout)
         slicer.app.processEvents()
+        # Delete what the shell disposed with deleteLater() (processEvents() does not, below the main event loop):
+        # a top bar left alive keeps the File, Edit, View and Help menus in its app menu, and the next shell would
+        # then not attach their shortcuts to the main window
+        slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
 
     def runTest(self):
         for name in sorted(name for name in dir(self) if name.startswith("test_")):
@@ -574,3 +578,251 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                 toolBar.deleteLater()
             container.deleteLater()
             self._pump()
+
+    #
+    # Draw (StudioLib/draw.py) and the importer
+    #
+
+    def _scanFile(self, name="sub-07_T1w.nii.gz"):
+        """Write a small synthetic scan to a temporary NIfTI file and return its path."""
+        import tempfile
+
+        import numpy as np
+
+        directory = tempfile.mkdtemp(prefix="StudioTest", dir=slicer.app.temporaryPath)
+        path = f"{directory}/{name}"
+        node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "StudioTestScan")
+        z, y, x = np.mgrid[0:24, 0:28, 0:20]
+        slicer.util.updateVolumeFromArray(node, (100 * np.exp(-((x - 10) ** 2 + (y - 14) ** 2 + (z - 12) ** 2) / 50.0)).astype(np.int16))
+        node.SetSpacing(2.0, 2.0, 2.5)
+        node.SetOrigin(-20.0, -28.0, -30.0)
+        self.assertTrue(slicer.util.saveNode(node, path))
+        slicer.mrmlScene.RemoveNode(node)
+        return path
+
+    def _openScanInDraw(self, studioShell):
+        """Open a scan with the importer (it switches to Draw) and return (path, editor)."""
+        from StudioLib import importer
+
+        path = self._scanFile()
+        result = importer.loadFiles([path], studioShell)
+        self._pump(8)
+        self.assertEqual(len(result.volumes), 1)
+        self.assertEqual(studioShell.currentWorkspace(), "draw")
+        return path, slicer.modules.SegmentEditorWidget.editor
+
+    @staticmethod
+    def _effect(editor):
+        return editor.activeEffect().name if editor.activeEffect() is not None else None
+
+    @staticmethod
+    def _paintCube(editor, size=4):
+        segmentationNode, segmentId, sourceVolumeNode = editor.segmentationNode(), editor.currentSegmentID(), editor.sourceVolumeNode()
+        array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, sourceVolumeNode)
+        array[8:8 + size, 10:10 + size, 6:6 + size] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, sourceVolumeNode)
+        return int(slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, sourceVolumeNode).sum())
+
+    def test_10_draw_round_trips(self):
+        """Draw arms Paint on arrival and keeps the tool and segment across round trips; Esc is respected (NAV-02, NFT-03)."""
+        from StudioLib import draw
+
+        studioShell = self._applyStudio()
+        _path, editor = self._openScanInDraw(studioShell)
+        # First entry with a lesion segment and a source volume: Paint is armed
+        self.assertEqual(self._effect(editor), "Paint")
+        segmentationId, segmentId = editor.segmentationNodeID(), editor.currentSegmentID()
+        self.assertTrue(segmentId)
+
+        editor.setActiveEffectByName("Erase")
+        self._pump()
+        studioShell.switchTo("library")
+        self._pump()
+        self.assertIsNone(editor.activeEffect())
+        self.assertEqual(draw.drawState(studioShell).effect, "Erase")
+        studioShell.switchTo("draw")
+        self._pump()
+        self.assertEqual(self._effect(editor), "Erase")
+        self.assertEqual((editor.segmentationNodeID(), editor.currentSegmentID()), (segmentationId, segmentId))
+
+        # A transient module: the Segment Editor is left (its exit() drops the effect) before the Draw hook runs
+        slicer.util.selectModule("Volumes")
+        self._pump()
+        self.assertIsNone(studioShell.currentWorkspace())
+        studioShell.closeTransientModule()
+        self._pump()
+        self.assertEqual(studioShell.currentWorkspace(), "draw")
+        self.assertEqual(self._effect(editor), "Erase")
+        self.assertEqual((editor.segmentationNodeID(), editor.currentSegmentID()), (segmentationId, segmentId))
+
+        # Classic round trip
+        studioShell.classic(persist=False)
+        self._pump()
+        self.assertIsNone(self.mainWindow.findChild("QPushButton", "StudioSaveLesionButton"))
+        studioShell.studio()
+        self._pump()
+        studioShell.switchTo("draw")
+        self._pump()
+        self.assertEqual(self._effect(editor), "Erase")
+
+        # Esc (the Segment Editor's deactivate shortcut) inside Draw: the tool stays deselected
+        editor.setActiveEffect(None)
+        self._pump()
+        studioShell.switchTo("library")
+        self._pump()
+        studioShell.switchTo("draw")
+        self._pump()
+        self.assertIsNone(editor.activeEffect())
+
+        # A tool that the editor dropped by itself (another segmentation) is armed again on the new one
+        editor.setActiveEffectByName("Paint")
+        self._pump()
+        otherSegmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Other")
+        otherSegmentation.SetReferenceImageGeometryParameterFromVolumeNode(editor.sourceVolumeNode())
+        editor.setSegmentationNode(otherSegmentation)
+        editor.setCurrentSegmentID(otherSegmentation.GetSegmentation().AddEmptySegment("", "Other lesion"))
+        self._pump()
+        self.assertEqual(self._effect(editor), "Paint")
+
+    def test_11_save_lesion(self):
+        """Save lesion writes a NIfTI mask on the scan grid, readable by Slicer, with no node left behind (NFT-01, CRT-05)."""
+        import os
+
+        import numpy as np
+
+        from StudioLib import draw
+
+        studioShell = self._applyStudio()
+        path, editor = self._openScanInDraw(studioShell)
+        # The footer and the primary action belong to Draw
+        saveButton = self.mainWindow.findChild("QPushButton", "StudioSaveLesionButton")
+        self.assertIsNotNone(saveButton)
+        self.assertTrue(saveButton.isVisible())
+        self.assertTrue(saveButton.enabled)
+        self.assertEqual(studioShell.primaryActionLabel(), "Save lesion…")
+        self.assertIn("Ctrl+Shift+S", [portableKey(shortcut.key) for shortcut in studioShell.shortcuts()])
+
+        voxels = self._paintCube(editor)
+        self.assertEqual(voxels, 64)
+        segmentationNode, sourceVolumeNode = editor.segmentationNode(), editor.sourceVolumeNode()
+        self.assertEqual(draw.defaultLesionFileName(segmentationNode, sourceVolumeNode), "sub-07_lesion.nii.gz")
+        sourceVolumeNode.SetName("patient_T1")
+        segmentationNode.SetName("Lesions (patient_T1)")
+        sourceVolumeNode.GetStorageNode().SetFileName(path.replace("sub-07_T1w", "patient_T1"))
+        self.assertEqual(draw.defaultLesionFileName(segmentationNode, sourceVolumeNode), "patient_T1_lesion.nii.gz")
+        sourceVolumeNode.GetStorageNode().SetFileName(path)
+
+        settings = qt.QSettings()
+        previousFolder = settings.value(draw.LAST_SAVE_FOLDER_KEY)
+        settings.remove(draw.LAST_SAVE_FOLDER_KEY)
+        try:
+            # The scan is in a temporary folder: the dialog proposes the home folder (or Documents), never the application folder
+            directory = draw.defaultSaveDirectory(sourceVolumeNode)
+            self.assertFalse(draw._isInside(directory, slicer.app.slicerHome))
+            self.assertIn(directory, (qt.QDir.homePath(), os.path.join(qt.QDir.homePath(), "Documents")))
+
+            nodeCount = slicer.mrmlScene.GetNumberOfNodes()
+            outputPath = os.path.join(os.path.dirname(path), "lesions", "sub-07_lesion")
+            written = draw.saveLesionDialog(studioShell, path=outputPath)
+            self.assertEqual(written, outputPath + ".nii.gz")
+            self.assertTrue(os.path.isfile(written))
+            self.assertEqual(os.listdir(os.path.dirname(written)), ["sub-07_lesion.nii.gz"])
+            self.assertEqual(slicer.mrmlScene.GetNumberOfNodes(), nodeCount)
+            self.assertEqual(slicer.util.settingsValue(draw.LAST_SAVE_FOLDER_KEY, ""), os.path.dirname(written))
+            self.assertEqual(draw.defaultSaveDirectory(sourceVolumeNode), os.path.dirname(written))
+            self.assertEqual(studioShell._toast.text(), "Saved lesion to sub-07_lesion.nii.gz")
+
+            labelmapNode = slicer.util.loadLabelVolume(written, {"show": False})
+            try:
+                array = slicer.util.arrayFromVolume(labelmapNode)
+                self.assertEqual(int(np.count_nonzero(array)), voxels)
+                self.assertEqual(sorted(np.unique(array).tolist()), [0, 1])
+                self.assertEqual(labelmapNode.GetImageData().GetDimensions(), sourceVolumeNode.GetImageData().GetDimensions())
+                for actual, expected in ((labelmapNode.GetSpacing(), sourceVolumeNode.GetSpacing()), (labelmapNode.GetOrigin(), sourceVolumeNode.GetOrigin())):
+                    self.assertTrue(np.allclose(actual, expected), (actual, expected))
+            finally:
+                slicer.mrmlScene.RemoveNode(labelmapNode)
+            with open(written, "rb") as f:
+                import gzip
+
+                header = gzip.decompress(f.read())[:352]
+            # NIfTI datatype 2: unsigned char
+            self.assertEqual(int.from_bytes(header[70:72], "little"), 2)
+        finally:
+            if previousFolder is None:
+                settings.remove(draw.LAST_SAVE_FOLDER_KEY)
+            else:
+                settings.setValue(draw.LAST_SAVE_FOLDER_KEY, previousFolder)
+
+        studioShell.switchTo("library")
+        self._pump()
+        self.assertFalse(saveButton.isVisible())
+        self.assertNotIn("Ctrl+Shift+S", [portableKey(shortcut.key) for shortcut in studioShell.shortcuts()])
+
+    def test_12_recent_already_open(self):
+        """A Recent row or an Open… of a file that is already loaded does not load a duplicate in Studio (NAV-05)."""
+        from StudioLib import importer
+
+        studioShell = self._applyStudio()
+        path, editor = self._openScanInDraw(studioShell)
+        voxels = self._paintCube(editor)
+        segmentationNode = editor.segmentationNode()
+        counts = lambda: (len(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")), len(slicer.util.getNodesByClass("vtkMRMLSegmentationNode")))
+        before = counts()
+        studioShell.switchTo("library")
+        self._pump()
+
+        result = importer.loadRecentFile({"fileName": path, "fileType": "VolumeFile"}, None, studioShell)
+        self._pump()
+        self.assertEqual(counts(), before)
+        self.assertEqual([node.GetName() for node in result.alreadyOpen], ["sub-07_T1w"])
+        self.assertEqual(studioShell.currentWorkspace(), "draw")
+        self.assertEqual(editor.segmentationNode().GetID(), segmentationNode.GetID())
+        self.assertEqual(int(slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, editor.currentSegmentID(), editor.sourceVolumeNode()).sum()), voxels)
+        self.assertEqual(studioShell._toast.text(), "sub-07_T1w is already open")
+
+        result = importer.loadFiles([path.replace("/", "//")], studioShell)
+        self._pump()
+        self.assertEqual(counts(), before)
+        self.assertEqual(len(result.alreadyOpen), 1)
+
+        # Classic keeps the official behavior: the file is loaded again
+        studioShell.classic(persist=False)
+        self._pump()
+        result = importer.loadFiles([path])
+        self._pump()
+        self.assertEqual(len(result.volumes), 1)
+        self.assertEqual(counts()[0], before[0] + 1)
+
+    def test_13_draw_redo_shortcut(self):
+        """Ctrl+Y redoes in Draw without an ambiguous key, and is removed outside Draw (NFT-07)."""
+        from StudioLib import draw
+
+        studioShell = self._applyStudio()
+        _path, editor = self._openScanInDraw(studioShell)
+        shortcut = self.mainWindow.findChild("QShortcut", "StudioDrawRedoShortcut")
+        if qt.QKeySequence(qt.QKeySequence.Redo).toString(qt.QKeySequence.PortableText) == "Ctrl+Y":
+            # The Segment Editor binds Ctrl+Y itself (Windows): no second shortcut
+            self.assertIsNone(shortcut)
+            return
+        self.assertIsNotNone(shortcut)
+        self.assertEqual(portableKey(shortcut.key), "Ctrl+Y")
+        owners = [other for other in self.mainWindow.findChildren("QShortcut") if other.enabled and portableKey(other.key) == "Ctrl+Y"]
+        owners += [action for action in self.mainWindow.actions() if action.enabled and "Ctrl+Y" in [portableKey(key) for key in action.shortcuts()]]
+        self.assertEqual(len(owners), 1)
+
+        editor.saveStateForUndo()
+        voxels = self._paintCube(editor)
+        segmentationNode, segmentId, sourceVolumeNode = editor.segmentationNode(), editor.currentSegmentID(), editor.sourceVolumeNode()
+        count = lambda: int(slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, sourceVolumeNode).sum())
+        editor.undo()
+        self.assertEqual(count(), 0)
+        draw._redo()
+        self.assertEqual(count(), voxels)
+
+        studioShell.switchTo("library")
+        self._pump()
+        self.assertIsNone(self.mainWindow.findChild("QShortcut", "StudioDrawRedoShortcut"))
+        studioShell.classic(persist=False)
+        self._pump()
+        self.assertIsNone(self.mainWindow.findChild("QShortcut", "StudioDrawRedoShortcut"))

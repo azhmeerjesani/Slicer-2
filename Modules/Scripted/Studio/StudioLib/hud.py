@@ -1,4 +1,6 @@
-"""Heads-up display of Slicer Studio: short toast messages over the view area (SPEC 2.4)."""
+"""Heads-up display of Slicer Studio over the view area (SPEC 2.4): short toast messages and the
+floating "Exit focus mode" pill.
+"""
 
 import qt
 
@@ -7,6 +9,8 @@ from . import ui
 TOAST_HEIGHT = 32
 TOAST_BOTTOM_MARGIN = 28
 FADE_DURATION_MS = 250
+PILL_HEIGHT = 28
+PILL_MARGIN = 12
 
 
 class Toast:
@@ -76,3 +80,66 @@ class Toast:
         ui.bindStyleSheet(self.label, None)
         self.label.hide()
         self.label.deleteLater()
+
+
+class CornerPill:
+    """A small pill button floating in the top-right corner of a widget (the main window central widget).
+
+    It is drawn at low emphasis (translucent tooltip colors) and becomes opaque when hovered. Studio uses
+    it as the on-screen exit of the focus mode, where the top bar and the inspector are hidden.
+    """
+
+    def __init__(self, parentWidget, objectName, text, iconName, callback, toolTip=None):
+        self.parentWidget = parentWidget
+        self.iconName = iconName
+        self.button = qt.QToolButton(parentWidget)
+        self.button.setObjectName(objectName)
+        self.button.setText(text)
+        self.button.setToolTip(toolTip or text)
+        self.button.setToolButtonStyle(qt.Qt.ToolButtonTextBesideIcon)
+        self.button.setFocusPolicy(qt.Qt.NoFocus)
+        self.button.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
+        self.button.setIconSize(qt.QSize(14, 14))
+        self.button.setFixedHeight(PILL_HEIGHT)
+        self.button.connect("clicked()", callback)
+        self.button.hide()
+        ui.bindStyleSheet(self.button, self._styleSheet)
+        self.refreshIcon()
+        ui.addPaletteListener(self.refreshIcon)
+
+    def _styleSheet(self):
+        objectName = self.button.objectName
+        background = ui.token("tooltip")
+        text = ui.token("tooltip-text")
+        return (
+            f"QToolButton#{objectName} {{ background-color: {ui._rgba(background, 0.55)}; color: {ui._rgba(text, 0.8)};"
+            f" border: 1px solid {ui._rgba(text, 0.12)}; border-radius: {PILL_HEIGHT // 2}px; padding: 0px 12px 0px 10px; font-size: 12px; }}"
+            f"QToolButton#{objectName}:hover {{ background-color: {ui._rgba(background, 0.92)}; color: {text.name()}; }}")
+
+    def refreshIcon(self):
+        self.button.setIcon(qt.QIcon(ui.pixmap(self.iconName, 14, "tooltip-text")))
+
+    def show(self):
+        self.button.adjustSize()
+        self.updatePosition()
+        self.button.show()
+        self.button.raise_()
+
+    def hide(self):
+        self.button.hide()
+
+    def isVisible(self):
+        return self.button.isVisible()
+
+    def raise_(self):
+        if self.button.isVisible():
+            self.button.raise_()
+
+    def updatePosition(self):
+        self.button.move(self.parentWidget.width - self.button.width - PILL_MARGIN, PILL_MARGIN)
+
+    def dispose(self):
+        ui.removePaletteListener(self.refreshIcon)
+        ui.bindStyleSheet(self.button, None)
+        self.button.hide()
+        self.button.deleteLater()

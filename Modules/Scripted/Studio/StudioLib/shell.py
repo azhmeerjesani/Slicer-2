@@ -1,4 +1,4 @@
-"""Shell of Slicer Studio, the streamlined default user interface (SPEC 2).
+r"""Shell of Slicer Studio, the streamlined default user interface (SPEC 2).
 
 On a normal launch, ``onStartupCompleted()`` applies Studio to the main window: one 44 px top bar
 replaces the menubar, the toolbars and the status bar, and the module panel becomes a 340 px
@@ -12,8 +12,15 @@ must handle None.
 
 Public API (SPEC 2.10): ``instance()``, ``Shell.switchTo()``, ``currentWorkspace()``, ``toast()``,
 ``setBreadcrumb()``, ``setStatusChip()``, ``setInspectorFooter()``, ``setCanvas()``,
-``setInspectorVisible()``, ``setPrimaryAction()``, ``addWorkspaceShortcut()``, ``studySession``,
-``classic()``, ``studio()`` and ``panelWidth``.
+``setInspectorVisible()``, ``toggleInspector()``, ``setFocusMode()``, ``handleEscape()``,
+``setPrimaryAction()``, ``addWorkspaceShortcut()``, ``studySession``, ``classic()``, ``studio()``
+and ``panelWidth``.
+
+Navigation ("where am I, how do I get back"): the tab or the shortcut of the current workspace shows
+the inspector again and leaves the focus mode; ``Ctrl+\`` shows or hides the inspector (Tab and
+Shift+Tab keep moving the keyboard focus); the focus mode shows an "Exit focus mode" pill; Esc backs
+out of one navigation state at a time (see ``Shell.handleEscape()``); Classic -> Studio returns to the
+workspace of the current module.
 
 Settings are stored under ``Studio/*`` only. The shell does not change values of keys that other
 Slicer installations read (SPEC 9.7 rule 5), except that after the application window is closed it
@@ -43,6 +50,18 @@ MAX_PANEL_WIDTH = 480
 PANEL_HEADER_HEIGHT = 40
 PANEL_HEADER_BUTTON_SIZE = 26
 
+#: Shows or hides the inspector. Not Tab: Tab and Shift+Tab move the keyboard focus, also out of the views.
+INSPECTOR_SHORTCUT = "Ctrl+\\"
+FOCUS_MODE_SHORTCUTS = ("F11", "Ctrl+6")
+
+#: Explicit minimum width of the module panel in Studio. The minimum size hint of the module panel is the
+#: width of the module widget, so a wide tool (for example the Paint options) would widen the inspector and
+#: move the views under the cursor: the inspector keeps its width and wide contents scroll instead.
+_MODULE_PANEL_MINIMUM_WIDTH = 240
+
+#: Part of the available screen area given to the main window when Slicer did not restore its geometry
+FIRST_RUN_WINDOW_FRACTION = 0.9
+
 #: Main window actions that keep their classic behavior in Studio: they are not attached to the
 #: main window (Ctrl+Z/Y are owned by the Segment Editor, Ctrl+6 by the focus mode, Ctrl+O by Studio)
 _KEEP_UNATTACHED_ACTIONS = ("EditUndoAction", "EditRedoAction", "WindowMaximizeViewAction", "FileAddDataAction")
@@ -51,6 +70,8 @@ _PORTABLE_LAYOUT = slicer.vtkMRMLLayoutNode.SlicerLayoutConventionalView
 
 _shell = None
 _closeGuard = None
+#: The "Panel hidden" hint is shown once per application session
+_panelHiddenHintShown = False
 
 
 def instance():
@@ -92,7 +113,34 @@ def onStartupCompleted(startTime=None):
     shell.installClassicSwitch()
     if str(slicer.util.settingsValue("Studio/Mode", "studio")).lower() == "classic":
         return
+    fitWindowToScreen(mainWindow)
     shell.apply(startTime=startTime)
+
+
+def fitWindowToScreen(mainWindow, fraction=FIRST_RUN_WINDOW_FRACTION):
+    """Give the main window most of the screen when Slicer did not restore a saved geometry.
+
+    Without a saved geometry (first run, or ``MainWindow/RestoreGeometry`` off) the window opens at the
+    835x570 px size of its form, too small for the inspector and the views. The settings are only read.
+    Return True if the window was resized.
+    """
+    settings = slicer.app.userSettings()
+    restored = slicer.util.toBool(settings.value("MainWindow/RestoreGeometry", False)) and settings.contains("MainWindow/geometry")
+    if restored or mainWindow.isMaximized() or mainWindow.isFullScreen():
+        return False
+    screen = mainWindow.screen() if hasattr(mainWindow, "screen") else None
+    if screen is None:
+        screen = qt.QGuiApplication.primaryScreen()
+    if screen is None:
+        return False
+    available = screen.availableGeometry()
+    width = int(available.width() * fraction)
+    height = int(available.height() * fraction)
+    if mainWindow.width >= width and mainWindow.height >= height:
+        return False
+    mainWindow.resize(width, height)
+    mainWindow.move(available.x() + (available.width() - width) // 2, available.y() + (available.height() - height) // 2)
+    return True
 
 
 #
@@ -302,7 +350,8 @@ class _ShellEventFilter(qt.QObject):
 
     def eventFilter(self, obj, event):
         try:
-            self.shell._onEvent(obj, event)
+            # Only the Esc key of the Esc stack is consumed (True)
+            return bool(self.shell._onEvent(obj, event))
         except Exception:
             logging.error(f"Studio event handler failed:\n{traceback.format_exc()}")
         return False
@@ -345,7 +394,6 @@ class Shell:
         self._primaryAction = None
         self._primaryActionLabel = ""
         self._shortcuts = []
-        self._tabShortcut = None
         self._workspaceShortcuts = {}
         self._installedWorkspaceShortcuts = []
         self._addedActions = []
@@ -358,9 +406,22 @@ class Shell:
         self._plugins = []
         self._connections = []
         self._focusModeHidden = None
+        self._focusModePill = None
         self._panelWidthTimer = None
-        #: Minimum inspector width of each workspace module, as last measured while it was shown
-        self._workspaceMinimumWidths = {}
+        self._panelUpdateTimer = None
+        self._pendingPanelShrink = False
+        #: True while the inspector is hidden by the user (shortcut, Ctrl+5, menu), not by a workspace page
+        self._inspectorHiddenByUser = False
+        #: (toggle view action, slot) of the toolbars that Studio hides
+        self._toolBarToggleConnections = []
+        #: Toolbars without objectName that the user showed in this session (not persisted)
+        self._sessionAllowedToolBars = []
+        #: Classic minimum width of the module panel and policy of its horizontal scroll bar
+        self._classicModulePanelState = None
+        #: ctkFittedTextBrowser widgets given an explicit minimum width in Studio
+        self._fittedTextBrowsers = []
+        #: True from an Esc shortcut override that the Esc stack handled to the matching key press
+        self._escapeHandled = False
         self._eventFilter = None
         if _shell is None:
             _shell = self
@@ -452,9 +513,13 @@ class Shell:
             self.studio()
 
     def studio(self):
-        """Switch to the Studio interface and remember the choice."""
+        """Switch to the Studio interface and remember the choice.
+
+        Coming from Classic in the middle of a session, Studio returns to the workspace of the current
+        module (Draw for the Segment Editor), else to the last workspace (``Studio/LastWorkspace``).
+        """
         qt.QSettings().setValue("Studio/Mode", "studio")
-        self.apply()
+        self.apply(midSession=True)
 
     def classic(self, persist=True):
         """Restore the Classic interface exactly as it was (SPEC 2.7) and remember the choice."""
@@ -477,20 +542,31 @@ class Shell:
         self._active = False
         self._disconnectAll()
         self._removeEventFilters()
+        self._escapeHandled = False
+        self._inspectorHiddenByUser = False
         for shortcut in self._installedWorkspaceShortcuts + self._shortcuts:
             self._deleteShortcut(shortcut)
         self._installedWorkspaceShortcuts = []
         self._shortcuts = []
-        self._tabShortcut = None
-        if self._toolBarScanTimer is not None:
-            self._toolBarScanTimer.stop()
-            self._toolBarScanTimer = None
+        for timer in (self._toolBarScanTimer, self._panelUpdateTimer, self._panelWidthTimer):
+            if timer is not None:
+                timer.stop()
+        self._toolBarScanTimer = None
+        self._panelUpdateTimer = None
+        self._pendingPanelShrink = False
         for toolBar, slot in self._watchedToolBars:
             try:
                 toolBar.disconnect("visibilityChanged(bool)", slot)
             except Exception:
                 pass
         self._watchedToolBars = []
+        for action, slot in self._toolBarToggleConnections:
+            try:
+                action.disconnect("triggered(bool)", slot)
+            except Exception:
+                pass
+        self._toolBarToggleConnections = []
+        self._sessionAllowedToolBars = []
         for action in self._addedActions:
             mainWindow.removeAction(action)
         self._addedActions = []
@@ -504,6 +580,9 @@ class Shell:
         if self._toast is not None:
             self._toast.dispose()
             self._toast = None
+        if self._focusModePill is not None:
+            self._focusModePill.dispose()
+            self._focusModePill = None
         if self.hoverTracker is not None:
             self.hoverTracker.dispose()
             self.hoverTracker = None
@@ -521,6 +600,7 @@ class Shell:
             self.panelHeader.dispose()
             self.panelHeader = None
         dock.setFeatures(self._classicDockFeatures)
+        self._setModulePanelConstrained(False)
 
         mainWindow.restoreState(self._classicState)
         for toolBar, visible in self._unsavedToolBars:
@@ -549,14 +629,18 @@ class Shell:
     # Apply
     #
 
-    def apply(self, startTime=None):
-        """Show the Studio interface (SPEC 2.3)."""
+    def apply(self, startTime=None, midSession=False):
+        """Show the Studio interface (SPEC 2.3).
+
+        At startup Studio shows ``Studio/StartWorkspace``. With ``midSession`` (from Classic, see
+        ``studio()``) it shows the workspace of the current module, else the last workspace.
+        """
         if self._active:
             return
         if startTime is None:
             startTime = time.perf_counter()
         try:
-            self._apply()
+            self._apply(midSession=midSession)
         except Exception:
             logging.error(f"Studio could not be applied, restoring the Classic interface:\n{traceback.format_exc()}")
             if self._active:
@@ -570,7 +654,7 @@ class Shell:
         self.applyDurationMs = (time.perf_counter() - startTime) * 1000.0
         logging.debug(f"Studio applied in {self.applyDurationMs:.1f} ms")
 
-    def _apply(self):
+    def _apply(self, midSession=False):
         mainWindow = self.mainWindow
         settings = qt.QSettings()
         dock = self._panelDock()
@@ -602,7 +686,6 @@ class Shell:
 
         # 2. Hide the classic chrome (nothing is deleted)
         self._active = True
-        self._workspaceMinimumWidths = {}
         self._eventFilter = _ShellEventFilter(self)
         self.workspaces = workspaces.WorkspaceController(self)
         mainWindow.menuBar().hide()
@@ -630,11 +713,10 @@ class Shell:
         self._addShortcut("Ctrl+Return", self.triggerPrimaryAction, _("Primary action of the inspector"))
         self._addShortcut("Ctrl+Enter", self.triggerPrimaryAction, _("Primary action of the inspector"))
         if not hasattr(mainWindow, "setFocusMode"):
-            self._addShortcut("F11", self.toggleFocusMode, _("Focus mode"))
-            self._addShortcut("Ctrl+6", self.toggleFocusMode, _("Focus mode"))
-        self._tabShortcut = self._addShortcut("Tab", self.toggleInspector, _("Show or hide the inspector"),
-                                              parent=mainWindow.centralWidget(), context=qt.Qt.WidgetWithChildrenShortcut)
-        self._tabShortcut.setEnabled(False)
+            for keySequence in FOCUS_MODE_SHORTCUTS:
+                self._addShortcut(keySequence, self.toggleFocusMode, _("Focus mode"))
+        # Not Tab: Tab and Shift+Tab move the keyboard focus (out of the views too)
+        self._addShortcut(INSPECTOR_SHORTCUT, self.toggleInspector, _("Show or hide the inspector"))
 
         # 4. Inspector on the right with the Studio panel header and a footer slot
         if dock.floating:
@@ -647,6 +729,7 @@ class Shell:
         self.panelHeader = PanelHeader(self)
         dock.setTitleBarWidget(self.panelHeader.widget)
         self._insertFooterSlot()
+        self._setModulePanelConstrained(True)
         mainWindow.resizeDocks([dock], [self.panelWidth], qt.Qt.Horizontal)
 
         # 5. Top bar
@@ -656,6 +739,8 @@ class Shell:
         self.topBar.toolBar.show()
         self._addTopBarShortcuts()
         self._toast = hud.Toast(mainWindow.centralWidget())
+        self._focusModePill = hud.CornerPill(mainWindow.centralWidget(), "StudioExitFocusModeButton", _("Exit focus mode"), "minimize-2",
+                                             lambda: self.setFocusMode(False), _("Exit focus mode (F11 or Esc)"))
 
         # 6. Layouts (registered in C++ by the fork, only added here on builds that lack them)
         layouts.register()
@@ -665,7 +750,7 @@ class Shell:
         layoutManager = slicer.app.layoutManager()
         if layoutManager is not None:
             self._connect(layoutManager, "layoutChanged(int)", self.workspaces.onLayoutChanged)
-        self._connect(slicer.app, "focusChanged(QWidget*,QWidget*)", self._onFocusChanged)
+        self._connect(dock.toggleViewAction(), "triggered(bool)", self._onPanelToggleTriggered)
         mainWindow.installEventFilter(self._eventFilter)
         mainWindow.centralWidget().installEventFilter(self._eventFilter)
         dock.installEventFilter(self._eventFilter)
@@ -679,12 +764,25 @@ class Shell:
         qt.QTimer.singleShot(600, lambda: self._prewarm("LesionNetworkMapping"))
 
         # 8. Start workspace
+        self.switchTo(self._midSessionWorkspace() if midSession else self._startWorkspace())
+
+    @staticmethod
+    def _availableWorkspaceKey(keyOrTitle):
+        ws = workspaces.workspace(keyOrTitle)
+        return ws.key if ws is not None and workspaces.isAvailable(ws) else None
+
+    def _startWorkspace(self):
+        """Workspace shown when Studio is applied at startup (``Studio/StartWorkspace``, "Last" allowed)."""
         startWorkspace = slicer.util.settingsValue("Studio/StartWorkspace", "Library")
         if str(startWorkspace).lower() == "last":
             startWorkspace = slicer.util.settingsValue("Studio/LastWorkspace", "Library")
-        if workspaces.workspace(startWorkspace) is None or not workspaces.isAvailable(workspaces.workspace(startWorkspace)):
-            startWorkspace = "library"
-        self.switchTo(startWorkspace)
+        return self._availableWorkspaceKey(startWorkspace) or "library"
+
+    def _midSessionWorkspace(self):
+        """Workspace shown when the user comes back from Classic: the one of the current module, else the last one."""
+        ws = workspaces.workspaceForModule(self.currentModuleName())
+        key = self._availableWorkspaceKey(ws.key) if ws is not None else None
+        return key or self._availableWorkspaceKey(slicer.util.settingsValue("Studio/LastWorkspace", "Library")) or "library"
 
     def _dockAreasFollowSizeHints(self):
         """True while the main window is shown for the first time (not laid out yet) and Slicer did
@@ -728,20 +826,32 @@ class Shell:
             slot = lambda visible, toolBar=toolBar: self._onToolBarVisibilityChanged(toolBar, visible)
             toolBar.connect("visibilityChanged(bool)", slot)
             self._watchedToolBars.append((toolBar, slot))
+            # View > Toolbars: triggered() is only emitted for the user (or trigger()), not when the toolbar
+            # shows itself or is shown by code
+            toggleViewAction = toolBar.toggleViewAction()
+            toggleSlot = lambda checked, toolBar=toolBar: self._onToolBarToggledByUser(toolBar, checked)
+            toggleViewAction.connect("triggered(bool)", toggleSlot)
+            self._toolBarToggleConnections.append((toggleViewAction, toggleSlot))
             if toolBar.objectName not in self._classicToolBarNames:
                 # restoreState() does not restore it: remember if it is shown, or about to be shown by
                 # the main window layout (hidden but not explicitly)
                 visible = not (toolBar.isHidden() and toolBar.testAttribute(qt.Qt.WA_WState_ExplicitShowHide))
                 self._unsavedToolBars.append([toolBar, visible])
-        if toolBar.objectName not in self._allowedToolBars():
+        if not self._isToolBarAllowed(toolBar):
             toolBar.hide()
 
     @staticmethod
     def _allowedToolBars():
+        """Object names of the toolbars shown in Studio (``Studio/AllowedToolbars``)."""
         allowed = slicer.util.settingsValue("Studio/AllowedToolbars", [])
         if isinstance(allowed, str):
             allowed = [allowed] if allowed else []
-        return list(allowed or [])
+        return [str(name) for name in (allowed or [])]
+
+    def _isToolBarAllowed(self, toolBar):
+        if toolBar.objectName:
+            return toolBar.objectName in self._allowedToolBars()
+        return toolBar in self._sessionAllowedToolBars
 
     def _onToolBarVisibilityChanged(self, toolBar, visible):
         if not visible or not self._active:
@@ -750,10 +860,34 @@ class Shell:
             if entry[0] == toolBar:
                 # Its extension showed it: show it in Classic too
                 entry[1] = True
-        if toolBar.objectName in self._allowedToolBars():
+        if self._isToolBarAllowed(toolBar):
             return
-        # An extension toolbar showed itself (for example the sequence browser): hide it again
-        qt.QTimer.singleShot(0, lambda: toolBar.hide() if self._active and toolBar.objectName not in self._allowedToolBars() else None)
+        # An extension toolbar showed itself (for example the sequence browser): hide it again, unless the
+        # user showed it from View > Toolbars (handled by _onToolBarToggledByUser() before the timer fires)
+        qt.QTimer.singleShot(0, lambda: toolBar.hide() if self._active and not self._isToolBarAllowed(toolBar) else None)
+
+    def _onToolBarToggledByUser(self, toolBar, checked):
+        """The user showed or hid a toolbar from View > Toolbars: remember it in ``Studio/AllowedToolbars``."""
+        if not self._active:
+            return
+        name = toolBar.objectName
+        if name:
+            allowed = self._allowedToolBars()
+            if checked and name not in allowed:
+                allowed.append(name)
+            elif not checked and name in allowed:
+                allowed.remove(name)
+            else:
+                return
+            settings = qt.QSettings()
+            if allowed:
+                settings.setValue("Studio/AllowedToolbars", allowed)
+            else:
+                settings.remove("Studio/AllowedToolbars")
+        elif checked and toolBar not in self._sessionAllowedToolBars:
+            self._sessionAllowedToolBars.append(toolBar)
+        elif not checked and toolBar in self._sessionAllowedToolBars:
+            self._sessionAllowedToolBars.remove(toolBar)
 
     def _chromeShortcutActions(self):
         """Actions with a shortcut that only belong to the menubar, the status bar or hidden toolbars."""
@@ -906,6 +1040,17 @@ class Shell:
         self._showInspectorForModule()
         self._schedulePanelWidthUpdate(shrink=shrinkPanel)
 
+    def _onCurrentWorkspaceReselected(self, ws):
+        """The tab or the shortcut of the current workspace was used: bring the workspace back into view.
+
+        The focus mode is left and an inspector that the user hid is shown again. An inspector that the
+        workspace page hid itself (the Library empty state) stays hidden.
+        """
+        if self.focusMode():
+            self.setFocusMode(False)
+        if self._inspectorHiddenByUser and not self.isInspectorVisible():
+            self.setInspectorVisible(True)
+
     def _onWorkspaceLeft(self, ws):
         for shortcut in self._installedWorkspaceShortcuts:
             self._deleteShortcut(shortcut)
@@ -932,7 +1077,8 @@ class Shell:
     def _onModuleAdded(self, moduleName):
         if moduleName == "SegmentEditor":
             self._setSegmentEditorPresentation("studio")
-        # The module widget may need a wider panel than the stored width
+        self._fitTextBrowsers()
+        # A transient module may need a wider panel than the stored width
         self._schedulePanelWidthUpdate(shrink=False)
 
     def _prewarm(self, moduleName):
@@ -1024,7 +1170,8 @@ class Shell:
         if cheatsheet is not None and hasattr(cheatsheet, "toggle"):
             cheatsheet.toggle(self)
             return
-        self.toast(_("Ctrl+K search · Ctrl+Alt+1/2/3 workspaces · Alt+1..4 layouts · Ctrl+Alt+0 Classic"), 4000)
+        self.toast(_("Ctrl+K search · Ctrl+Alt+1/2/3 workspaces · Alt+1..4 layouts · {inspector} panel · F11 focus mode · Ctrl+Alt+0 Classic").format(
+            inspector=self.inspectorShortcutText()), 5000)
 
     #
     # Inspector
@@ -1047,32 +1194,97 @@ class Shell:
         self.panelWidth = DEFAULT_PANEL_WIDTH
 
     def _schedulePanelWidthUpdate(self, shrink):
-        # Queued: the module widget is laid out first
-        qt.QTimer.singleShot(0, lambda: self._updatePanelWidth(shrink))
+        """Update the inspector width when the event loop runs again (the module widget is laid out
+        first). Several requests are coalesced into one update; ``shrink`` is kept if any asked for it.
+        """
+        self._pendingPanelShrink = self._pendingPanelShrink or shrink
+        if self._panelUpdateTimer is None:
+            self._panelUpdateTimer = qt.QTimer()
+            self._panelUpdateTimer.setSingleShot(True)
+            self._panelUpdateTimer.setInterval(0)
+            self._panelUpdateTimer.connect("timeout()", self._onPanelUpdateTimeout)
+        self._panelUpdateTimer.start()
+
+    def _onPanelUpdateTimeout(self):
+        shrink = self._pendingPanelShrink
+        self._pendingPanelShrink = False
+        self._updatePanelWidth(shrink)
 
     def _updatePanelWidth(self, shrink=False):
-        """Size the inspector to the stored width, or wider if the module needs it.
+        """Size the inspector to the stored width (SPEC 2.5).
 
-        The workspaces share one width: the stored width, or the largest minimum width of the
-        workspace modules (as last measured while each one was shown), so that switching between
-        workspaces does not resize (and render again) the views. A transient module may make the
-        inspector wider; with ``shrink`` (entering a workspace, setting the width) it gets back
-        to the width of the workspaces.
+        In the workspaces the inspector keeps the stored width whatever tool is shown: the module panel
+        has an explicit minimum width and wider contents scroll horizontally (``_setModulePanelConstrained()``),
+        so that the views do not move under the cursor. A transient module may make the inspector as
+        wide as its widget needs; with ``shrink`` (entering a workspace, setting the width, showing the
+        inspector again) it gets back to the stored width.
         """
         if not self._active:
             return
         dock = self._panelDock()
         if dock.isHidden():
             return
-        minimumWidth = dock.minimumSizeHint.width()
-        current = self.currentWorkspace()
-        if current is not None:
-            if self.currentModuleName() == workspaces.workspace(current).moduleName:
-                self._workspaceMinimumWidths[current] = minimumWidth
-            minimumWidth = max([minimumWidth, *self._workspaceMinimumWidths.values()])
-        target = max(self.panelWidth, minimumWidth)
+        target = self.panelWidth
+        if self.currentWorkspace() is None:
+            modulePanel = self._modulePanel()
+            # The minimum size hint of the module panel is the width of the module widget (qSlicerModulePanel)
+            chrome = max(0, dock.width - modulePanel.width)
+            target = max(target, modulePanel.minimumSizeHint.width() + chrome)
         if dock.width < target or (shrink and dock.width != target):
             self.mainWindow.resizeDocks([dock], [target], qt.Qt.Horizontal)
+
+    def _setModulePanelConstrained(self, constrained):
+        """Keep the inspector width independent of the width of the module widget (Studio), or restore Classic.
+
+        The module panel reports the width of the module widget as its minimum size hint, which sets the
+        minimum width of the dock widget: selecting a tool with wide options (Paint: 425 -> 550 px) widened
+        the inspector and shrank the views. In Studio the module panel gets an explicit minimum width and
+        its scroll area a horizontal scroll bar when needed.
+        """
+        modulePanel = self._modulePanel()
+        if modulePanel is None:
+            return
+        scrollArea = modulePanel.findChild("QScrollArea", "ScrollArea")
+        if constrained:
+            if self._classicModulePanelState is None:
+                self._classicModulePanelState = (modulePanel.minimumWidth, scrollArea.horizontalScrollBarPolicy if scrollArea is not None else None)
+            modulePanel.setMinimumWidth(_MODULE_PANEL_MINIMUM_WIDTH)
+            if scrollArea is not None:
+                scrollArea.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAsNeeded)
+            self._fitTextBrowsers()
+            return
+        self._unfitTextBrowsers()
+        if self._classicModulePanelState is not None:
+            minimumWidth, policy = self._classicModulePanelState
+            modulePanel.setMinimumWidth(minimumWidth)
+            if scrollArea is not None and policy is not None:
+                scrollArea.setHorizontalScrollBarPolicy(policy)
+            self._classicModulePanelState = None
+
+    def _fitTextBrowsers(self):
+        """Give the fitted text browsers of the module panel (the Segment Editor effect help) an explicit
+        minimum width. Their minimum size hint is their current width, so that they never let the panel
+        get narrower once it was wide.
+        """
+        if not self._active:
+            return
+        modulePanel = self._modulePanel()
+        if modulePanel is None:
+            return
+        for browser in modulePanel.findChildren("ctkFittedTextBrowser"):
+            if browser.minimumWidth == 0 and browser not in self._fittedTextBrowsers:
+                browser.setMinimumWidth(1)
+                self._fittedTextBrowsers.append(browser)
+
+    def _unfitTextBrowsers(self):
+        for browser in self._fittedTextBrowsers:
+            try:
+                if browser.minimumWidth == 1:
+                    browser.setMinimumWidth(0)
+            except Exception:
+                # Deleted with its module widget
+                pass
+        self._fittedTextBrowsers = []
 
     def _onDockResized(self):
         # Persist the width when the user drags the separator between the views and the inspector
@@ -1100,6 +1312,8 @@ class Shell:
         """Show or hide the inspector (the module panel dock widget)."""
         if not self._active:
             return
+        if visible:
+            self._inspectorHiddenByUser = False
         dock = self._panelDock()
         if dock.isHidden() == (not visible):
             return
@@ -1110,7 +1324,37 @@ class Shell:
         return self._active and not self._panelDock().isHidden()
 
     def toggleInspector(self):
-        self.setInspectorVisible(not self.isInspectorVisible())
+        r"""Show or hide the inspector (``Ctrl+\``, the app menu). Hiding it shows how to get it back."""
+        if not self._active:
+            return
+        if self.focusMode():
+            # The inspector is hidden by the focus mode: leave it
+            self.setFocusMode(False)
+            self.setInspectorVisible(True)
+            return
+        visible = not self.isInspectorVisible()
+        self.setInspectorVisible(visible)
+        if not visible:
+            self._onInspectorHiddenByUser()
+
+    def _onPanelToggleTriggered(self, checked):
+        # View > Module Panel (Ctrl+5) toggles the dock widget directly
+        if checked:
+            self._inspectorHiddenByUser = False
+        else:
+            self._onInspectorHiddenByUser()
+
+    def _onInspectorHiddenByUser(self):
+        global _panelHiddenHintShown
+        self._inspectorHiddenByUser = True
+        if not _panelHiddenHintShown:
+            _panelHiddenHintShown = True
+            self.toast(_("Panel hidden · {key} to show").format(key=self.inspectorShortcutText()), 3000)
+
+    @staticmethod
+    def inspectorShortcutText():
+        r"""The key that shows or hides the inspector, as displayed on this platform (for example "Ctrl+\")."""
+        return qt.QKeySequence(INSPECTOR_SHORTCUT).toString(qt.QKeySequence.NativeText)
 
     def setInspectorFooter(self, widget=None):
         """Show ``widget`` in the sticky footer below the module panel (None: no footer)."""
@@ -1163,6 +1407,8 @@ class Shell:
             widget.raise_()
             if self._toast is not None and self._toast.isVisible():
                 self._toast.label.raise_()
+            if self._focusModePill is not None:
+                self._focusModePill.raise_()
             if not self._renderPausedByCanvas and layoutManager is not None:
                 layoutManager.setRenderPaused(True)
                 self._renderPausedByCanvas = True
@@ -1224,24 +1470,39 @@ class Shell:
         return self._focusModeHidden is not None
 
     def setFocusMode(self, enabled):
-        """Hide (or show again) the inspector and the top bar."""
+        """Hide (or show again) the inspector and the top bar.
+
+        In the focus mode a low-emphasis "Exit focus mode" pill stays in the top-right corner of the
+        views, and entering it says how to leave it (F11 or Esc).
+        """
+        wasFocusMode = self.focusMode()
         if hasattr(self.mainWindow, "setFocusMode"):
             if self._active or not enabled:
                 self.mainWindow.setFocusMode(enabled)
-            return
-        if enabled == (self._focusModeHidden is not None):
-            return
-        if enabled:
-            if not self._active:
-                return
-            widgets = [self._panelDock(), self.topBar.toolBar]
-            self._focusModeHidden = [widget for widget in widgets if not widget.isHidden()]
-            for widget in self._focusModeHidden:
-                widget.hide()
-        else:
-            for widget in self._focusModeHidden:
-                widget.show()
-            self._focusModeHidden = None
+        elif enabled != (self._focusModeHidden is not None):
+            if enabled:
+                if not self._active:
+                    return
+                widgets = [self._panelDock(), self.topBar.toolBar]
+                self._focusModeHidden = [widget for widget in widgets if not widget.isHidden()]
+                for widget in self._focusModeHidden:
+                    widget.hide()
+            else:
+                for widget in self._focusModeHidden:
+                    widget.show()
+                self._focusModeHidden = None
+        self._updateFocusModeIndicators(wasFocusMode)
+
+    def _updateFocusModeIndicators(self, wasFocusMode):
+        focusMode = self._active and self.focusMode()
+        if self._focusModePill is not None:
+            if focusMode:
+                self._focusModePill.show()
+            else:
+                self._focusModePill.hide()
+        if focusMode and not wasFocusMode:
+            self.toast(_("Focus mode · {keys} or Esc to exit").format(
+                keys=qt.QKeySequence(FOCUS_MODE_SHORTCUTS[0]).toString(qt.QKeySequence.NativeText)), 2500)
 
     def toggleFocusMode(self):
         self.setFocusMode(not self.focusMode())
@@ -1250,29 +1511,87 @@ class Shell:
     # Events
     #
 
-    def _onFocusChanged(self, old, now):
-        if self._tabShortcut is None:
-            return
-        # Tab toggles the inspector only while a view has the keyboard focus
-        isView = False
-        widget = now
-        for level in range(3):
-            if widget is None:
-                break
-            if widget.inherits("ctkVTKAbstractView"):
-                isView = True
-                break
-            widget = widget.parentWidget()
-        self._tabShortcut.setEnabled(isView)
+    #: Widgets that keep Esc for themselves (text input, consoles): the Esc stack does not apply
+    _ESCAPE_EXEMPT_FOCUS_CLASSES = ("QLineEdit", "QAbstractSpinBox", "QTextEdit", "QPlainTextEdit", "ctkConsole")
+
+    def handleEscape(self):
+        """Back out of the innermost navigation state, as Esc does in Studio. Return True if a state was left.
+
+        The Esc stack, handled in this order (one state per key press):
+
+        1. Place mode or Adjust window/level mode of the mouse -> the default mode (view transform);
+        2. a maximized view (double-click on a view, or the view bar button) -> the layout is restored;
+        3. the focus mode (F11) -> left.
+
+        If none applies, the key is not consumed and goes on to its other handlers: the Segment Editor's
+        Esc then deselects the active tool, and the views cancel their current interaction. Popups and
+        dialogs close themselves, and text fields and consoles keep their own Esc (see ``_onEscapeKey()``).
+        A transient module is left with the close button of the inspector header, not with Esc.
+        """
+        if not self._active:
+            return False
+        modes = (slicer.vtkMRMLInteractionNode.Place, slicer.vtkMRMLInteractionNode.AdjustWindowLevel)
+        handled = False
+        for interactionNode in slicer.util.getNodesByClass("vtkMRMLInteractionNode"):
+            if interactionNode.GetCurrentInteractionMode() in modes:
+                interactionNode.SwitchToViewTransformMode()
+                handled = True
+        if handled:
+            return True
+        layoutManager = slicer.app.layoutManager()
+        layoutNode = layoutManager.layoutLogic().GetLayoutNode() if layoutManager is not None else None
+        if layoutNode is not None and layoutNode.GetNumberOfMaximizedViewNodes() > 0:
+            viewNode = layoutNode.GetMaximizedViewNode(layoutNode.GetNumberOfMaximizedViewNodes() - 1)
+            layoutManager.removeMaximizedViewNode(viewNode)
+            return True
+        if self.focusMode():
+            self.setFocusMode(False)
+            return True
+        return False
+
+    def _onEscapeKey(self, event):
+        """Esc reached the main window (the focus widget did not use it). Return True to consume it.
+
+        The Esc stack runs when Qt asks whether a shortcut may take the key (ShortcutOverride): accepting
+        it there keeps the window-wide Esc shortcut of the Segment Editor from firing for the same press.
+        The key press that follows is then consumed. Key presses without a shortcut override (sent
+        directly to a widget) run the stack too.
+        """
+        eventType = event.type()
+        if eventType == qt.QEvent.ShortcutOverride:
+            self._escapeHandled = False
+        elif self._escapeHandled:
+            self._escapeHandled = False
+            return True
+        if int(event.modifiers()) & ~int(qt.Qt.KeypadModifier):
+            return False
+        if slicer.app.activePopupWidget() is not None or slicer.app.activeModalWidget() is not None:
+            return False
+        focusWidget = slicer.app.focusWidget()
+        if focusWidget is not None and any(focusWidget.inherits(className) for className in self._ESCAPE_EXEMPT_FOCUS_CLASSES):
+            return False
+        if not self.handleEscape():
+            return False
+        if eventType == qt.QEvent.ShortcutOverride:
+            event.accept()
+            self._escapeHandled = True
+        return True
 
     def _onEvent(self, obj, event):
+        """Event filter of the main window, its central widget and the inspector. Return True to consume the event."""
         eventType = event.type()
+        if eventType in (qt.QEvent.ShortcutOverride, qt.QEvent.KeyPress):
+            if obj == self.mainWindow and event.key() == qt.Qt.Key_Escape:
+                return self._onEscapeKey(event)
+            return False
         if eventType == qt.QEvent.Resize:
             if obj == self.mainWindow.centralWidget():
                 if self._canvas is not None:
                     self._canvas.setGeometry(obj.rect)
                 if self._toast is not None:
                     self._toast.updatePosition()
+                if self._focusModePill is not None:
+                    self._focusModePill.updatePosition()
             elif obj == self._panelDock():
                 self._onDockResized()
             elif obj == self.mainWindow:
@@ -1287,8 +1606,9 @@ class Shell:
             if self._toolBarScanTimer is not None:
                 self._toolBarScanTimer.start()
         elif eventType == qt.QEvent.Show and obj == self._panelDock():
-            # Shown again (Tab, Ctrl+5, focus mode): back to the width of the workspaces
+            # Shown again (Ctrl+\, Ctrl+5, focus mode): back to the width of the workspaces
             self._schedulePanelWidthUpdate(shrink=True)
+        return False
 
     def _removeEventFilters(self):
         if self._eventFilter is None:

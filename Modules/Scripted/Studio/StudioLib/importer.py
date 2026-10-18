@@ -10,6 +10,10 @@ Unambiguous files load directly, without the Add Data dialog:
 - other NIfTI, NRRD and MetaImage files are loaded as scalar volumes and shown in all slice views;
 - ``.mrb`` and ``.mrml`` files are loaded as scenes.
 
+In Studio, a scan or lesion file that is already loaded (same real path as the file of a node in the scene) is
+not loaded a second time: it becomes current again, with the toast "<name> is already open". Classic keeps the
+official behavior (the file is loaded again).
+
 Anything else (other file types, several folders, Shift+drop) opens the classic Add Data dialog with the
 dropped paths. A DICOM folder goes to the DICOM module; a folder with several NIfTI files is offered as
 a card in the Library. In Studio, loading a scan switches to Draw, on the lesion loaded with it or on a new
@@ -121,7 +125,10 @@ def isDicomFile(path):
 
 
 class LoadResult:
-    """Nodes and files of a load. ``addDataPaths`` were handed to the Add Data dialog instead."""
+    """Nodes and files of a load. ``addDataPaths`` were handed to the Add Data dialog instead.
+
+    ``alreadyOpen`` are nodes of files that were already loaded (Studio only): they were not loaded again.
+    """
 
     def __init__(self):
         self.volumes = []
@@ -129,6 +136,7 @@ class LoadResult:
         self.scenes = []
         self.addDataPaths = []
         self.errors = []
+        self.alreadyOpen = []
 
     def nodes(self):
         return self.volumes + self.segmentations
@@ -136,7 +144,8 @@ class LoadResult:
     def __repr__(self):
         return (f"LoadResult(volumes={[node.GetName() for node in self.volumes]}, "
                 f"segmentations={[node.GetName() for node in self.segmentations]}, scenes={self.scenes}, "
-                f"addDataPaths={self.addDataPaths}, errors={self.errors})")
+                f"addDataPaths={self.addDataPaths}, errors={self.errors}, "
+                f"alreadyOpen={[node.GetName() for node in self.alreadyOpen]})")
 
 
 #
@@ -317,6 +326,30 @@ def _isScan(node):
     return node.IsA("vtkMRMLScalarVolumeNode") and not node.IsA("vtkMRMLLabelMapVolumeNode")
 
 
+def _normalizedPath(path):
+    return os.path.normcase(os.path.realpath(os.path.abspath(str(path))))
+
+
+def openNodeForFile(path):
+    """The scan or segmentation of the scene that was loaded from ``path`` (same real path), or None.
+
+    Only nodes shown to the user are considered: scans (not label maps) and segmentations whose storage node
+    reads that file.
+    """
+    if not path:
+        return None
+    target = _normalizedPath(path)
+    for className in ("vtkMRMLScalarVolumeNode", "vtkMRMLSegmentationNode"):
+        for node in slicer.util.getNodesByClass(className):
+            if node.GetHideFromEditors() or (className == "vtkMRMLScalarVolumeNode" and not _isScan(node)):
+                continue
+            storageNode = node.GetStorageNode()
+            fileName = storageNode.GetFileName() if storageNode is not None else None
+            if fileName and _normalizedPath(fileName) == target:
+                return node
+    return None
+
+
 #
 # Loading
 #
@@ -357,6 +390,11 @@ def loadFiles(paths, shell=None):
             for path, kind in zip(paths, kinds, strict=True):
                 if kind != wantedKind:
                     continue
+                openNode = openNodeForFile(path) if shell is not None and kind != "scene" else None
+                if openNode is not None:
+                    # In Studio, a file is not loaded twice: its node becomes current again
+                    result.alreadyOpen.append(openNode)
+                    continue
                 try:
                     if kind == "scene":
                         slicer.util.loadScene(path, {})
@@ -376,21 +414,57 @@ def loadFiles(paths, shell=None):
     return result
 
 
+def _editedNodes():
+    """``(segmentationNode, sourceVolumeNode)`` of the Segment Editor, Nones if its widget was not created."""
+    widget = getattr(slicer.modules, "SegmentEditorWidget", None)
+    editor = widget.editor if widget is not None else None
+    if editor is None:
+        return None, None
+    return editor.segmentationNode(), editor.sourceVolumeNode()
+
+
+def _sameNode(node, other):
+    return node is not None and other is not None and node.GetID() == other.GetID()
+
+
 def _afterLoad(result, shell):
-    """Show what was loaded: scans in the slice views; in Studio, the lesion in Draw and a toast."""
+    """Show what was loaded: scans in the slice views; in Studio, the lesion in Draw and a toast.
+
+    Nodes of files that were already open (``result.alreadyOpen``) become current again: the scan is shown,
+    and Draw keeps editing its lesion if it already does.
+    """
     scans = [node for node in result.volumes if _isScan(node)]
+    openScans = [node for node in result.alreadyOpen if _isScan(node)]
+    openLesions = [node for node in result.alreadyOpen if node.IsA("vtkMRMLSegmentationNode")]
     if scans:
         slicer.util.setSliceViewerLayers(background=scans[0], fit=True)
+    elif openScans and not _sameNode(_backgroundVolume(), openScans[0]):
+        slicer.util.setSliceViewerLayers(background=openScans[0], fit=True)
     if shell is None:
         return
-    sourceVolume = scans[0] if scans else _backgroundVolume()
-    lesions = result.segmentations
-    if sourceVolume is not None and (scans or lesions):
+    editedSegmentation, editedSource = _editedNodes()
+    lesions = result.segmentations or openLesions
+    if scans:
+        sourceVolume = scans[0]
+    elif openScans:
+        sourceVolume = openScans[0]
+    elif lesions and _sameNode(lesions[0], editedSegmentation) and editedSource is not None:
+        sourceVolume = editedSource
+    else:
+        sourceVolume = _backgroundVolume()
+    if sourceVolume is not None and (scans or lesions or openScans):
         # Draw edits the loaded lesion, else a segmentation bound to the scan (never the segmentation of a previous
         # scan or of the template, which may hold another subject's lesion)
         if segmentEditorWidget() is not None:
-            lesion = lesions[0] if lesions else _lesionSegmentationFor(sourceVolume, scanLesionSegmentationName(sourceVolume))
-            selectInSegmentEditor(lesion, sourceVolume)
+            if lesions:
+                lesion = lesions[0]
+            elif not scans and editedSegmentation is not None and _sameNode(editedSource, sourceVolume):
+                # The scan was already open and Draw edits its lesion: keep it (and the selected segment)
+                lesion = editedSegmentation
+            else:
+                lesion = _lesionSegmentationFor(sourceVolume, scanLesionSegmentationName(sourceVolume))
+            if not (_sameNode(lesion, editedSegmentation) and _sameNode(sourceVolume, editedSource)):
+                selectInSegmentEditor(lesion, sourceVolume)
         shell.switchTo("draw")
     loaded = result.nodes()
     if loaded:
@@ -399,6 +473,8 @@ def _afterLoad(result, shell):
             shell.toast(_("Loaded {name}").format(name=name))
         else:
             shell.toast(_("Loaded {name} and {count} more").format(name=name, count=len(loaded) - 1))
+    elif result.alreadyOpen:
+        shell.toast(_("{name} is already open").format(name=result.alreadyOpen[0].GetName()))
     elif result.scenes:
         shell.toast(_("Loaded {name}").format(name=os.path.basename(result.scenes[0])))
 
@@ -407,11 +483,18 @@ def loadRecentFile(properties, action=None, shell=None):
     """Load an entry of the recently loaded files (``fileParameters`` of a "RecentlyLoadedMenu" action).
 
     The file is loaded with its recorded properties (by triggering ``action`` if given). In Studio, a
-    loaded scan is shown in Draw, as for ``loadFiles()``. A scene keeps its own views.
+    loaded scan is shown in Draw, as for ``loadFiles()``, and a scan or lesion that is already open is not
+    loaded again (it becomes current). A scene keeps its own views.
     """
     shell = _currentShell(shell)
     fileName = str((properties or {}).get("fileName", ""))
     isScene = (properties or {}).get("fileType") == "SceneFile" or _extension(fileName) in SCENE_EXTENSIONS
+    openNode = openNodeForFile(fileName) if shell is not None and not isScene else None
+    if openNode is not None:
+        result = LoadResult()
+        result.alreadyOpen.append(openNode)
+        _afterLoad(result, shell)
+        return result
     scene = slicer.mrmlScene
     nodeIdsBefore = {scene.GetNthNode(index).GetID() for index in range(scene.GetNumberOfNodes())}
     if action is not None:
