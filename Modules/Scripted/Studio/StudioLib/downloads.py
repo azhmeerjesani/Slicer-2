@@ -12,6 +12,7 @@ with a Cancel button, and offers an action once the file is ready (for example "
 import hashlib
 import logging
 import os
+import traceback
 
 import qt
 import slicer
@@ -93,8 +94,6 @@ class Signal:
             try:
                 callback(*args)
             except Exception:
-                import traceback
-
                 logging.error(f"Studio download callback failed:\n{traceback.format_exc()}")
 
 
@@ -106,7 +105,7 @@ class Download:
     - ``progress(bytesReceived, bytesTotal)``: ``bytesTotal`` is -1 while the size is unknown;
     - ``finished(path)``: the file is complete, its checksum matched and it is at ``dest``;
     - ``failed(message)``: the download failed, the checksum did not match or ``cancel()`` was called
-      (then ``state`` is "canceled"). Nothing is left at ``dest``.
+      (then ``state`` is "canceled"). The partial file is removed and ``dest`` is not written.
 
     ``state`` is one of "idle", "running", "done", "failed" and "canceled".
     """
@@ -287,13 +286,13 @@ class DownloadBanner(qt.QObject):
         self.download.finished.connect(self._onFinished)
         self.download.failed.connect(self._onFailed)
         self.state = None
+        self._disposeOnQuit = False
 
         self.widget = qt.QFrame(parentWidget)
         self.widget.setObjectName("StudioDownloadBanner")
         self.widget.setFixedWidth(BANNER_WIDTH)
+        # The card frame is drawn by the card role (a stylesheet bound to the card itself would replace it)
         ui.setRole(self.widget, "card")
-        # The card frame is drawn by the card role: only the text colors are set here
-        ui.bindStyleSheet(self.widget, self._styleSheet)
         layout = qt.QVBoxLayout(self.widget)
         layout.setContentsMargins(12, 10, 8, 12)
         layout.setSpacing(8)
@@ -329,6 +328,8 @@ class DownloadBanner(qt.QObject):
         self.detailLabel.setObjectName("StudioDownloadBannerDetail")
         self._setPixelSize(self.detailLabel, 12)
         layout.addWidget(self.detailLabel)
+        ui.bindStyleSheet(self.textLabel, lambda: f"QLabel#StudioDownloadBannerText {{ color: {ui.token('text').name()}; }}")
+        ui.bindStyleSheet(self.detailLabel, lambda: f"QLabel#StudioDownloadBannerDetail {{ color: {ui.token('text2').name()}; }}")
 
         buttonRow = qt.QHBoxLayout()
         buttonRow.setContentsMargins(26, 0, 4, 0)
@@ -350,6 +351,9 @@ class DownloadBanner(qt.QObject):
         ui.addPaletteListener(self._refreshIcons)
         self._refreshIcons()
         parentWidget.installEventFilter(self)
+        # Python event filters must not run while the interpreter is finalized (after the application quits)
+        slicer.app.connect("aboutToQuit()", self.dispose)
+        self._disposeOnQuit = True
         self._setState("offer")
 
     @staticmethod
@@ -357,11 +361,6 @@ class DownloadBanner(qt.QObject):
         font = qt.QFont(widget.font)
         font.setPixelSize(pixelSize)
         widget.setFont(font)
-
-    @staticmethod
-    def _styleSheet():
-        return (f"QLabel#StudioDownloadBannerText {{ color: {ui.token('text').name()}; }}"
-                f"QLabel#StudioDownloadBannerDetail {{ color: {ui.token('text2').name()}; }}")
 
     def _refreshIcons(self):
         if not _isAlive(self.widget):
@@ -386,6 +385,9 @@ class DownloadBanner(qt.QObject):
         self.dispose()
 
     def dispose(self):
+        if self._disposeOnQuit:
+            slicer.app.disconnect("aboutToQuit()", self.dispose)
+            self._disposeOnQuit = False
         ui.removePaletteListener(self._refreshIcons)
         self.download.progress.disconnect()
         self.download.finished.disconnect()
@@ -395,7 +397,8 @@ class DownloadBanner(qt.QObject):
         if _isAlive(self.parentWidget):
             self.parentWidget.removeEventFilter(self)
         if _isAlive(self.widget):
-            ui.bindStyleSheet(self.widget, None)
+            for widget in (self.widget, self.textLabel, self.detailLabel):
+                ui.bindStyleSheet(widget, None)
             self.widget.hide()
             self.widget.deleteLater()
 

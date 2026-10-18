@@ -151,11 +151,17 @@ the Qt 5 of Ubuntu 24.04, which is why the image is based on Ubuntu 24.04.
 - Everything else inside the container is temporary: it is lost when the
   container is removed (`stop` removes it).
 - Slicer settings (and extensions) are kept between runs in the Docker volume
-  `slicer-studio-web-home`. To start over with default settings, run
+  `slicer-studio-web-home` (on Linux, when your user id is not 1000:
+  `slicer-studio-web-home-<your user id>`, because settings files can only be
+  changed by the user who wrote them). To start over with default settings, run
   `docker volume rm slicer-studio-web-home` while Slicer Studio is stopped. Use
-  `--home-volume ""` to not keep settings at all.
+  `--home-volume ""` to not keep settings at all, or `--home-volume NAME` to
+  choose the volume.
 - On Linux, the container runs with your user and group ids when they are not
-  1000, so files written to the data folder belong to you.
+  1000, so files written to the data folder belong to you. Run the script as your
+  user, not with `sudo`: under `sudo`, the script uses the ids, the home folder
+  and the settings volume of the user who ran `sudo`; as `root` itself, Slicer
+  would run as root in the container too.
 
 ## Using Slicer in the browser
 
@@ -171,8 +177,13 @@ the Qt 5 of Ubuntu 24.04, which is why the image is based on Ubuntu 24.04.
 - **Window size**: the Slicer screen follows the size of the browser window. Slicer
   Studio stays usable down to about 1366x768.
 - **Quitting**: if you quit Slicer (File > Exit), it starts again after a few
-  seconds, so the browser tab keeps working. "Restart Slicer" (for example after
-  installing an extension) works as on the desktop. Use `stop` to stop everything.
+  seconds, so the browser tab keeps working. "Restart Slicer" works as on the
+  desktop. Use `stop` to stop everything.
+- **Extensions**: in the current Linux builds of this fork, Qt cannot make HTTPS
+  connections (Ubuntu's Qt 5 needs OpenSSL 3, the build bundles OpenSSL 1.1), so
+  the Extensions Manager cannot download its catalog ("Failed to download
+  extension metadata from server"). Downloads made by Python, such as Sample
+  Data, work.
 - **Display quality**: the picture is sent with the best quality noVNC offers (JPEG
   quality 100, no chroma subsampling, lossless for flat areas). It is close to, but
   not exactly, pixel-identical to a local display. Like all Slicer builds, this is
@@ -195,13 +206,21 @@ the Qt 5 of Ubuntu 24.04, which is why the image is based on Ubuntu 24.04.
   there.
 - Whoever can open the page controls Slicer, including its Python console, and can
   read and change the files of the data folder. Only the data folder of your
-  computer is shared with the container, which runs as an unprivileged user.
+  computer is shared with the container, which runs as an unprivileged user (on
+  Linux, with your user id; see [Your files](#your-files)).
+- The password is given to the container as the environment variable
+  `VNC_PASSWORD`: it does not appear in process lists, but anyone who may use
+  Docker on this computer can read it (`docker inspect`). Using Docker requires
+  administrator rights anyway.
+- In local mode, the virtual display only accepts programs that have its key (an
+  X authority cookie in a private temporary folder), so other users of the
+  computer cannot reach Slicer through the display instead of the browser.
 
 ## Troubleshooting
 
 | Problem | What to do |
 |---|---|
-| "Docker is not installed" / "Docker is not running" | Install Docker Desktop (or Docker Engine) and start it; wait until it reports that it is running. On Linux, "permission denied" means your user is not in the `docker` group. |
+| "Docker is not installed" / "Docker is not running" | Install Docker Desktop (or Docker Engine) and start it; wait until it reports that it is running. On Linux, "permission denied" means your user is not in the `docker` group: add it (`sudo usermod -aG docker $USER`), then log in again. |
 | "Port 8080 is already in use" | Another program (or another Slicer Studio) uses the port: `--port 8081`. |
 | "The Docker image ... does not exist yet" | Build it first: `build --package FILE` (see above). |
 | Docker Hub "toomanyrequests" (rate limit) while building | The script retries with `mirror.gcr.io/library/ubuntu:24.04` automatically. You can also choose the base image with `--base-image`. |
@@ -210,8 +229,8 @@ the Qt 5 of Ubuntu 24.04, which is why the image is based on Ubuntu 24.04.
 | Very slow on a Mac with Apple Silicon | Turn on Rosetta in Docker Desktop (see the quick start) and give Docker more CPUs and memory. |
 | Cannot save into the data folder (Linux) | The folder must be writable by your user; with rootless Docker or user namespaces, files may need `chmod`. |
 | Keys do not reach Slicer | Click into the Slicer picture first. Browser shortcuts cannot be overridden; see [Using Slicer in the browser](#using-slicer-in-the-browser). |
-| Start over with default settings | `stop`, then `docker volume rm slicer-studio-web-home`, then `run`. |
-| Remove everything | `stop`, then `docker image rm slicer-studio-web:latest` and `docker volume rm slicer-studio-web-home`. |
+| Start over with default settings | `stop`, then `docker volume rm slicer-studio-web-home` (on Linux with a user id other than 1000: `slicer-studio-web-home-<id>`), then `run`. |
+| Remove everything | `stop`, then `docker image rm slicer-studio-web:latest` and `docker volume rm slicer-studio-web-home` (see the line above). |
 
 ## Local mode (Linux without Docker)
 

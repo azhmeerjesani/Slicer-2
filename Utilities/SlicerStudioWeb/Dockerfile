@@ -154,6 +154,15 @@ RUN --mount=type=bind,target=/mnt/context \
 COPY docker/entrypoint.sh /usr/local/bin/slicer-studio-web-entrypoint
 COPY docker/openbox-rc.xml /etc/slicer-studio-web/openbox-rc.xml
 COPY docker/index.html /usr/share/novnc/index.html
+# A checkout with Windows line endings (Git for Windows converts to CRLF by
+# default) would give a script that cannot run: convert it to LF.
+# On Linux, Slicer keeps its revision-specific settings and extensions in
+# <installation>/slicer.org, which the user cannot write here: keep them in the
+# settings folder of the user instead (kept between runs with the home volume).
+RUN set -eux; \
+  sed -i 's/\r$//' /usr/local/bin/slicer-studio-web-entrypoint; \
+  chmod 0755 /usr/local/bin/slicer-studio-web-entrypoint; \
+  if [ ! -e /opt/slicer/slicer.org ]; then ln -s /home/slicer/.config/slicer.org /opt/slicer/slicer.org; fi
 
 ENV LANG=C.UTF-8 \
     HOME=/home/slicer \

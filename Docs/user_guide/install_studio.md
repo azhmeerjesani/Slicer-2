@@ -49,10 +49,10 @@ it, run this command from the top of the source tree:
 Utilities/Scripts/SlicerStudioMacOS/build_dmg.sh
 ```
 
-Building needs macOS 13 or newer, the Xcode Command Line Tools, Homebrew, about
-40 GB of free disk space and several hours. The disk image is written to
-`~/SlicerStudio/dist/`. If the build is interrupted, run the same command again
-to continue.
+Building needs macOS 14 (Sonoma) or newer, the Xcode Command Line Tools,
+Homebrew, about 40 GB of free disk space and several hours. The disk image is
+written to `~/SlicerStudio/dist/`. If the build is interrupted, run the same
+command again to continue.
 
 `Utilities/Scripts/SlicerStudioMacOS/README.md` explains the options, for
 example how to choose the Qt version. It also explains how to make a disk image
@@ -62,8 +62,13 @@ Which Macs a disk image runs on depends on how it was built:
 
 | Disk image | Runs on |
 |---|---|
-| From the workflow (default settings) | macOS 13 or newer, on Apple Silicon. The Intel disk image runs on Intel Macs. |
+| From the workflow (default settings) | macOS 14 (Sonoma) or newer, on Apple Silicon. The Intel disk image runs on Intel Macs with macOS 14 or newer. |
 | Built on your Mac with the default settings (Homebrew's Qt) | Your Mac, and Macs with the same or a newer macOS |
+| Built on your Mac with `--qt=official` | macOS 14 or newer, on the same kind of processor as your Mac |
+
+On an Apple Silicon Mac with macOS 14, or on an Intel Mac, build with
+`--qt=official`: Homebrew only has a ready-made Qt for Apple Silicon with
+macOS 15 or newer, and compiles Qt for hours elsewhere.
 
 ### Install
 
@@ -78,8 +83,8 @@ open a downloaded copy, macOS blocks it. To allow it, do one of the following:
 
 - Try to open the application, then go to **System Settings** >
   **Privacy & Security**. Click **Open Anyway** next to the message about
-  Slicer Studio, and confirm with **Open**. On macOS 14 and older, you can
-  instead right-click the application and choose **Open**.
+  Slicer Studio, and confirm with **Open**. On macOS 14, you can instead
+  right-click the application and choose **Open**.
 - Or, in Terminal, run:
 
   ```console

@@ -27,7 +27,7 @@ on:
         type: boolean
         default: false
       qt:
-        description: "Qt for the Apple Silicon build: official (runs on macOS 13 and newer) or homebrew (runs on macOS 15 and newer)"
+        description: "Qt for the Apple Silicon build: official (runs on macOS 14 and newer) or homebrew (runs on macOS 15 and newer)"
         type: choice
         options:
           - official

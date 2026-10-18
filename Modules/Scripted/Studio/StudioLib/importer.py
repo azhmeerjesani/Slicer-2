@@ -375,9 +375,11 @@ def loadRecentFile(properties, action=None, shell=None):
     """Load an entry of the recently loaded files (``fileParameters`` of a "RecentlyLoadedMenu" action).
 
     The file is loaded with its recorded properties (by triggering ``action`` if given). In Studio, a
-    loaded scan is shown in Draw, as for ``loadFiles()``.
+    loaded scan is shown in Draw, as for ``loadFiles()``. A scene keeps its own views.
     """
     shell = _currentShell(shell)
+    fileName = str((properties or {}).get("fileName", ""))
+    isScene = (properties or {}).get("fileType") == "SceneFile" or _extension(fileName) in SCENE_EXTENSIONS
     scene = slicer.mrmlScene
     nodeIdsBefore = {scene.GetNthNode(index).GetID() for index in range(scene.GetNumberOfNodes())}
     if action is not None:
@@ -389,6 +391,10 @@ def loadRecentFile(properties, action=None, shell=None):
             if not slicer.app.coreIOManager().loadNodes(fileType, properties):
                 slicer.util.errorDisplay(_("Failed to load {path}").format(path=properties.get("fileName", "")))
     result = LoadResult()
+    if isScene:
+        result.scenes.append(fileName)
+        _afterLoad(result, shell)
+        return result
     for index in range(scene.GetNumberOfNodes()):
         node = scene.GetNthNode(index)
         if node.GetID() in nodeIdsBefore or node.GetHideFromEditors():
@@ -396,7 +402,6 @@ def loadRecentFile(properties, action=None, shell=None):
         if node.IsA("vtkMRMLScalarVolumeNode"):
             result.volumes.append(node)
         elif node.IsA("vtkMRMLSegmentationNode"):
-            fileName = (properties or {}).get("fileName", "")
             if fileName and isLesionName(fileName):
                 _applyLesionNaming(node, fileName)
             result.segmentations.append(node)
@@ -429,11 +434,12 @@ def scanFolder(path):
     Subfolders are examined (``FOLDER_SCAN_MAX_DEPTH`` levels, ``FOLDER_SCAN_MAX_FILES`` files at most);
     only the header of up to ``FOLDER_SCAN_MAX_DICOM_PROBES`` files is read.
     """
+    path = os.path.abspath(path)
     niftiFiles = []
     isDicom = False
     examined = 0
     probes = 0
-    rootDepth = os.path.abspath(path).rstrip(os.sep).count(os.sep)
+    rootDepth = path.rstrip(os.sep).count(os.sep)
     for directory, subdirectories, fileNames in os.walk(path):
         subdirectories[:] = sorted(name for name in subdirectories if not name.startswith("."))
         if directory.rstrip(os.sep).count(os.sep) - rootDepth >= FOLDER_SCAN_MAX_DEPTH:
@@ -454,11 +460,18 @@ def scanFolder(path):
 
 
 def importDicomFolder(path):
-    """Import a DICOM folder into the DICOM database and show the DICOM browser."""
+    """Import a DICOM folder into the DICOM database and show the DICOM browser.
+
+    Without the DICOM module, the Add Data dialog opens with the folder.
+    """
+    if not hasattr(slicer.modules, "dicom"):
+        openAddDataDialog([path])
+        return False
     slicer.util.selectModule("DICOM")
     from DICOMLib import DICOMUtils
 
-    if slicer.dicomDatabase is None or not slicer.dicomDatabase.isOpen:
+    database = getattr(slicer, "dicomDatabase", None)
+    if database is None or not database.isOpen:
         slicer.util.errorDisplay(_("The DICOM database is not set up. Choose a database folder in the DICOM module, then import the folder again."))
         return False
     with slicer.util.WaitCursor():
@@ -525,8 +538,7 @@ def openFolderDialog(shell=None):
 _templateBanner = None
 #: Nodes created by the last "Start on MNI template": {"volume": node ID, "segmentation": node ID}
 _templateNodeIds = {}
-
-
+#: SampleData sources of the templates, by sample name
 _templateSources = {}
 
 
@@ -572,7 +584,10 @@ def _templateVolume(sampleName, path=None):
         return slicer.util.loadVolume(path, {"name": nodeName, "singleFile": True})
     import SampleData
 
-    return SampleData.SampleDataLogic().downloadSample(sampleName)
+    volumeNode = SampleData.SampleDataLogic().downloadSample(sampleName)
+    if volumeNode is None:
+        raise RuntimeError(_("Failed to load {sampleName}").format(sampleName=sampleName))
+    return volumeNode
 
 
 def startOnTemplate(res=2, shell=None):
@@ -597,7 +612,7 @@ def startOnTemplate(res=2, shell=None):
         selectInSegmentEditor(segmentationNode, volumeNode)
         if shell is not None:
             shell.switchTo("draw")
-        elif hasattr(slicer.modules, "segmenteditor"):
+        elif hasattr(slicer.modules, "segmenteditor") and slicer.util.mainWindow() is not None:
             slicer.util.selectModule("SegmentEditor")
     if cached1mm is None:
         banner = showTemplateDownloadBanner()
@@ -644,7 +659,11 @@ def switchTemplateTo1mm(path, shell=None):
     Return True if the template was switched.
     """
     shell = _currentShell(shell)
-    segmentationNode = slicer.mrmlScene.GetNodeByID(_templateNodeIds.get("segmentation", ""))
+    segmentationId = _templateNodeIds.get("segmentation")
+    segmentationNode = slicer.mrmlScene.GetNodeByID(segmentationId) if segmentationId else None
+    if segmentationNode is not None and segmentationNode.GetName() != LESION_SEGMENTATION_NAME:
+        # The scene was closed since: the ID belongs to another segmentation
+        segmentationNode = None
     if segmentationNode is not None and not isSegmentationEmpty(segmentationNode):
         message = _("The lesion is already drawn on the 2 mm template: it stays on the 2 mm grid.")
         if shell is not None:
@@ -738,14 +757,19 @@ def _setDropHighlight(active):
 
 
 _dropHandler = None
+_uninstallOnQuit = False
 
 
 def install(shell):
     """Handle the files dropped on the main window while Studio is shown."""
-    global _dropHandler
+    global _dropHandler, _uninstallOnQuit
     uninstall(shell)
     _dropHandler = _DropHandler(shell)
     shell.mainWindow.installEventFilter(_dropHandler)
+    if not _uninstallOnQuit:
+        # Python event filters must not run while the interpreter is finalized (after the application quits)
+        slicer.app.connect("aboutToQuit()", lambda: uninstall(None))
+        _uninstallOnQuit = True
 
 
 def uninstall(shell):

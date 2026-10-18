@@ -41,18 +41,26 @@ APP_NAME="Slicer Studio"
 APP_BUNDLE_ID="org.slicer.slicerstudio"
 DMG_PREFIX="SlicerStudio"
 
-# Qt version used by --qt=official and --qt=source. Qt 6.11 supports macOS 13
-# and newer, and is the version Utilities/Scripts/Build-qt6.sh builds by default.
+# Qt version used by --qt=official and --qt=source: the version
+# Utilities/Scripts/Build-qt6.sh builds by default.
 DEFAULT_QT_VERSION="6.11.2"
 AQTINSTALL_VERSION="3.3.0"
 # Qt add-on modules Slicer needs on top of the essentials (qtbase, qtdeclarative,
 # qtsvg, qttools, qttranslations) that aqtinstall always installs.
 OFFICIAL_QT_MODULES="qt5compat qtimageformats qtmultimedia qtpositioning qtscxml qtshadertools qtwebchannel qtwebengine"
 
-MIN_MACOS_MAJOR=13
-DEFAULT_MACOS_MIN="13.0"
+# Oldest macOS a build can target. The source tree enforces its own minimum
+# (required_deployment_target in CMake/SlicerInitializeOSXVariables.cmake),
+# which is read from there; this value is used when it cannot be read.
+DEFAULT_MACOS_MIN="14.0"
 MIN_FREE_DISK_GB=40
 MIN_CMAKE_VERSION="3.28"
+# CMake used when no CMake 3 (3.28 or newer) is installed: official universal
+# binaries from Kitware, checked against their published SHA-256. This source
+# tree validates CMake policies up to 3.28 and the macOS build instructions use
+# 3.31, while Homebrew (and GitHub's runners) provide CMake 4.
+PINNED_CMAKE_VERSION="3.31.10"
+PINNED_CMAKE_SHA256="be9f3faeeaf7921cc2d77cea711dd5e6f72c63af2810cacd9205b3ce8d1593c9"
 FINGERPRINT_NAME=".slicer-studio-build.conf"
 
 #-----------------------------------------------------------------------------
@@ -90,8 +98,10 @@ HOST_OS=""
 HOST_ARCH=""
 HOST_MACOS_VERSION=""
 FAKED_PLATFORM=0
+MACOS_FLOOR=${DEFAULT_MACOS_MIN}
 BREW=""
 BREW_PREFIX=""
+CMAKE_BIN="cmake"
 QT_MODE=""
 QT_REQUESTED_VERSION=""
 QT_CMAKE_VAR=""
@@ -107,6 +117,7 @@ PACKAGE_VERIFIED="not run"
 C_COMPILER=""
 CXX_COMPILER=""
 MOUNTED_DIRS=""
+ATTACHED_MOUNT=""
 BG_PID=""
 IN_GROUP=0
 USE_COLOR=0
@@ -121,13 +132,14 @@ usage() {
 Usage: ${SCRIPT_NAME} [options]
 
 Build "${APP_NAME}.app" from this checkout and package it as
-${DMG_PREFIX}-<version>-macos-<arch>.dmg (run on macOS 13 or newer).
+${DMG_PREFIX}-<version>-macos-<arch>.dmg (run on macOS ${DEFAULT_MACOS_MIN} or newer).
 
 Qt:
-  --qt=homebrew          Homebrew's Qt 6 (default). Fastest; the DMG runs on
-                         this Mac and on Macs with the same or a newer macOS.
+  --qt=homebrew          Homebrew's Qt 6 (default). Fastest on Apple Silicon
+                         with macOS 15 or newer; the DMG runs on this Mac and
+                         on Macs with the same or a newer macOS.
   --qt=official[=VER]    Official Qt binaries (default ${DEFAULT_QT_VERSION}) downloaded with
-                         aqtinstall. Redistributable DMG for macOS 13 and newer.
+                         aqtinstall. Redistributable DMG for macOS ${DEFAULT_MACOS_MIN} and newer.
   --qt=source[=VER]      Build Qt (default ${DEFAULT_QT_VERSION}) from source with
                          Utilities/Scripts/Build-qt6.sh. Redistributable, but
                          takes hours and needs the full Xcode.
@@ -146,14 +158,16 @@ Locations:
 Build:
   --jobs N               Parallel build jobs (default: CPU count, capped at one
                          job per 2 GB of memory).
-  --macos-min VERSION    Minimum macOS version of the build (default ${DEFAULT_MACOS_MIN}; raised
+  --macos-min VERSION    Minimum macOS version of the build (default and lowest
+                         allowed: the source tree's minimum, ${DEFAULT_MACOS_MIN}; raised
                          automatically to the minimum of the Qt libraries).
   --cmake-arg ARG        Extra argument for the superbuild configuration, for
                          example --cmake-arg=-DSlicer_USE_SimpleITK:BOOL=OFF
                          (repeatable).
   --clean                Delete the build directory and start from scratch.
   --reconfigure          Run the CMake configuration again on an existing build.
-  --skip-deps            Do not install anything with Homebrew or download Qt.
+  --skip-deps            Do not install anything with Homebrew or download Qt
+                         or CMake.
   --skip-build           Package only (the build must be complete).
   --no-package           Build only; stop before packaging.
 
@@ -457,24 +471,29 @@ add_preflight_problem() {
 #-----------------------------------------------------------------------------
 
 parse_args() {
-  local option value
+  local option value inline_value
   while [ $# -gt 0 ]; do
     option=$1
     value=""
+    inline_value=0
     case "${option}" in
       --*=*)
         value=${option#*=}
         option=${option%%=*}
+        inline_value=1
         ;;
     esac
     case "${option}" in
       --qt | --source | --work-dir | --build-dir | --out-dir | --jobs | --macos-min | --cmake-arg | --sign-identity | --dmg-format | --dmg)
-        if [ -z "${value}" ]; then
+        if [ "${inline_value}" = 0 ]; then
           if [ $# -lt 2 ]; then
             die "${EXIT_USAGE}" "${option} requires a value (see --help)"
           fi
           value=$2
           shift
+        fi
+        if [ -z "${value}" ]; then
+          die "${EXIT_USAGE}" "${option} requires a value (see --help)"
         fi
         ;;
     esac
@@ -512,12 +531,17 @@ parse_args() {
 
   if [ -n "${JOBS}" ]; then
     case "${JOBS}" in
-      *[!0-9]* | 0*) die "${EXIT_USAGE}" "--jobs expects a positive number, got '${JOBS}'" ;;
+      *[!0-9]* | ??????*) die "${EXIT_USAGE}" "--jobs expects a positive number, got '${JOBS}'" ;;
     esac
+    # Base 10, so that a leading zero is not read as an octal number.
+    JOBS=$((10#${JOBS}))
+    if [ "${JOBS}" -lt 1 ]; then
+      die "${EXIT_USAGE}" "--jobs expects a positive number, got '${JOBS}'"
+    fi
   fi
   if [ -n "${MACOS_MIN}" ]; then
     case "${MACOS_MIN}" in
-      *[!0-9.]* | .* | *. | *..*) die "${EXIT_USAGE}" "--macos-min expects a version such as 13.0, got '${MACOS_MIN}'" ;;
+      *[!0-9.]* | .* | *. | *..*) die "${EXIT_USAGE}" "--macos-min expects a version such as ${DEFAULT_MACOS_MIN}, got '${MACOS_MIN}'" ;;
     esac
   fi
   if [ "${SKIP_BUILD}" = 1 ] && [ "${NO_PACKAGE}" = 1 ]; then
@@ -618,7 +642,7 @@ find_brew() {
     if [ -n "${candidate}" ] && [ -x "${candidate}" ]; then
       BREW=${candidate}
       BREW_PREFIX=$("${BREW}" --prefix 2>/dev/null)
-      # Make Homebrew's tools (cmake, ccache, git-lfs) visible to the build.
+      # Make Homebrew's tools (ccache, git-lfs) visible to the build.
       case ":${PATH}:" in
         *":${BREW_PREFIX}/bin:"*) ;;
         *) PATH="${BREW_PREFIX}/bin:${PATH}" ;;
@@ -639,6 +663,21 @@ resolve_locations() {
   OUT_DIR=${OUT_DIR:-${WORK_DIR}/dist}
   SLICER_BUILD_DIR="${BUILD_DIR}/Slicer-build"
   LOG_DIR="${WORK_DIR}/logs"
+}
+
+source_minimum_macos() {
+  # Lowest CMAKE_OSX_DEPLOYMENT_TARGET accepted by the source tree.
+  sed -n 's/^ *set(required_deployment_target "\([0-9.]*\)").*/\1/p' \
+    "${SOURCE_DIR}/CMake/SlicerInitializeOSXVariables.cmake" 2>/dev/null | head -n 1
+}
+
+resolve_minimum_macos() {
+  local minimum
+  minimum=$(source_minimum_macos)
+  MACOS_FLOOR=${minimum:-${DEFAULT_MACOS_MIN}}
+  if [ -n "${MACOS_MIN}" ] && ! version_ge "${MACOS_MIN}" "${MACOS_FLOOR}"; then
+    die "${EXIT_USAGE}" "--macos-min ${MACOS_MIN} is too old: this source tree builds for macOS ${MACOS_FLOOR} and newer (CMake/SlicerInitializeOSXVariables.cmake)"
+  fi
 }
 
 preflight() {
@@ -673,10 +712,10 @@ preflight() {
     warn "the build path is ${#BUILD_DIR} characters long; paths over ~40 characters can break macOS linking (use a short --build-dir such as ~/S)"
   fi
 
-  # macOS version
+  # macOS version: programs built for the target macOS run during the build.
   if [ -n "${HOST_MACOS_VERSION}" ]; then
-    if ! version_ge "${HOST_MACOS_VERSION}" "${MIN_MACOS_MAJOR}"; then
-      add_preflight_problem "macOS ${MIN_MACOS_MAJOR} or newer is required (found ${HOST_MACOS_VERSION})"
+    if ! version_ge "${HOST_MACOS_VERSION}" "${MACOS_FLOOR}"; then
+      add_preflight_problem "macOS ${MACOS_FLOOR} or newer is required (found ${HOST_MACOS_VERSION})"
     fi
   else
     add_preflight_problem "could not determine the macOS version (sw_vers)"
@@ -753,7 +792,7 @@ preflight() {
 brew_install() {
   # brew_install <formula>[:<command>]...
   # Install the given formulae when missing. A formula is not needed when its
-  # command is already available (for example a CMake installed otherwise).
+  # command is already available (for example a ccache installed otherwise).
   # Installed formulae are never upgraded: upgrading Qt underneath an existing
   # build breaks it.
   local missing=() item formula command
@@ -778,37 +817,116 @@ brew_install() {
     "${BREW}" install "${missing[@]}"
 }
 
+homebrew_qt_installed() {
+  [ "${FAKED_PLATFORM}" = 0 ] && "${BREW}" list --versions qt >/dev/null 2>&1
+}
+
 install_dependencies() {
-  section "Build tools (Homebrew)"
+  section "Build tools"
   if [ "${SKIP_DEPS}" = 1 ]; then
     info "skipped (--skip-deps)"
   else
-    local formulae=(cmake:cmake git-lfs:git-lfs ccache:ccache)
+    local formulae=(git-lfs:git-lfs ccache:ccache)
     if [ "${QT_MODE}" = "homebrew" ]; then
       formulae+=(qt)
-      if [ "${HOST_ARCH}" = "x86_64" ] && ! "${BREW}" list --versions qt >/dev/null 2>&1; then
-        warn "Homebrew has no Qt bottles for Intel Macs, so 'brew install qt' compiles Qt from source (hours); --qt=official is much faster"
+      # Homebrew only has prebuilt Qt ("bottles") for Apple Silicon with
+      # macOS 15 or newer; elsewhere it compiles Qt.
+      if ! homebrew_qt_installed; then
+        if [ "${HOST_ARCH}" = "x86_64" ]; then
+          warn "Homebrew has no Qt bottles for Intel Macs, so 'brew install qt' compiles Qt from source (hours); --qt=official is much faster"
+        elif ! version_ge "${HOST_MACOS_VERSION}" "15"; then
+          warn "Homebrew has Qt bottles only for macOS 15 and newer, so on macOS ${HOST_MACOS_VERSION} 'brew install qt' compiles Qt from source (hours); --qt=official is much faster"
+        fi
       fi
     fi
     brew_install "${formulae[@]}" || die "${EXIT_DEPS}" "brew install failed"
     run git lfs install --skip-repo || warn "git lfs install failed"
   fi
+  setup_cmake
+}
 
+cmake_version_of() {
+  "$1" --version 2>/dev/null | sed -n 's/^cmake version \([0-9.]*\).*/\1/p' | head -n 1
+}
+
+install_pinned_cmake() {
+  # install_pinned_cmake <tools dir>
+  local tools=$1
+  local name="cmake-${PINNED_CMAKE_VERSION}-macos-universal"
+  local archive="${tools}/${name}.tar.gz"
+  run mkdir -p "${tools}" || return 1
+  run curl --fail --location --silent --show-error --retry 3 --output "${archive}" \
+    "https://github.com/Kitware/CMake/releases/download/v${PINNED_CMAKE_VERSION}/${name}.tar.gz" || return 1
+  if [ "${DRY_RUN}" = 1 ]; then
+    info "would check that the SHA-256 of ${archive} is ${PINNED_CMAKE_SHA256}"
+  else
+    local checksum
+    checksum=$(shasum -a 256 "${archive}" | awk '{ print $1 }')
+    if [ "${checksum}" != "${PINNED_CMAKE_SHA256}" ]; then
+      rm -f "${archive}"
+      echo "    unexpected SHA-256 ${checksum} for ${archive}" >&2
+      return 1
+    fi
+  fi
+  # Extract next to the final location first, so that an interrupted
+  # extraction never leaves an incomplete CMake behind.
+  local partial="${tools}/${name}.partial"
+  run rm -rf "${partial}" "${tools}/${name}" || return 1
+  run mkdir -p "${partial}" || return 1
+  run tar -xzf "${archive}" -C "${partial}" || return 1
+  run mv "${partial}/${name}" "${tools}/${name}" || return 1
+  run rm -rf "${partial}" "${archive}"
+}
+
+setup_cmake() {
+  # Select the CMake that configures the superbuild, in this order: the pinned
+  # CMake downloaded by an earlier run (so a resumed build keeps its CMake), a
+  # CMake 3 found on PATH, or else download the pinned CMake.
+  local tools="${WORK_DIR}/tools"
+  local pinned="${tools}/cmake-${PINNED_CMAKE_VERSION}-macos-universal/CMake.app/Contents/bin/cmake"
   if [ "${FAKED_PLATFORM}" = 1 ]; then
+    info "would use a CMake ${MIN_CMAKE_VERSION} to 3.x found on PATH; without one (Homebrew's CMake is 4.x):"
+    install_pinned_cmake "${tools}"
+    CMAKE_BIN=${pinned}
     return 0
   fi
-  command -v cmake >/dev/null 2>&1 || die "${EXIT_DEPS}" "cmake not found (install it with: brew install cmake)"
-  local cmake_version
-  cmake_version=$(cmake --version | sed -n 's/^cmake version \([0-9.]*\).*/\1/p')
-  info "cmake ${cmake_version} ($(command -v cmake))"
-  if ! version_ge "${cmake_version}" "${MIN_CMAKE_VERSION}"; then
-    die "${EXIT_DEPS}" "CMake ${MIN_CMAKE_VERSION} or newer is required (found ${cmake_version})"
+  local found="" version=""
+  if [ -x "${pinned}" ]; then
+    found=${pinned}
+  else
+    found=$(command -v cmake 2>/dev/null || true)
   fi
-  if version_ge "${cmake_version}" "4.0"; then
+  if [ -n "${found}" ]; then
+    version=$(cmake_version_of "${found}")
+  fi
+  if [ "${SKIP_DEPS}" = 0 ] && { [ -z "${version}" ] || ! version_ge "${version}" "${MIN_CMAKE_VERSION}" || version_ge "${version}" "4.0"; }; then
+    info "found ${found:-no cmake}${version:+ (version ${version})}; using CMake ${PINNED_CMAKE_VERSION} instead"
+    install_pinned_cmake "${tools}" || die "${EXIT_DEPS}" "downloading CMake ${PINNED_CMAKE_VERSION} failed"
+    CMAKE_BIN=${pinned}
+    if [ "${DRY_RUN}" = 1 ]; then
+      return 0
+    fi
+    found=${pinned}
+    version=$(cmake_version_of "${found}")
+  fi
+  if [ -z "${version}" ]; then
+    die "${EXIT_DEPS}" "no working cmake found (run without --skip-deps to download CMake ${PINNED_CMAKE_VERSION})"
+  fi
+  CMAKE_BIN=${found}
+  if [ "${CMAKE_BIN}" = "${pinned}" ]; then
+    # Also for build steps that run "cmake" by name.
+    PATH="$(dirname "${pinned}"):${PATH}"
+    export PATH
+  fi
+  info "cmake ${version} (${CMAKE_BIN})"
+  if ! version_ge "${version}" "${MIN_CMAKE_VERSION}"; then
+    die "${EXIT_DEPS}" "CMake ${MIN_CMAKE_VERSION} or newer is required (found ${version})"
+  fi
+  if version_ge "${version}" "4.0"; then
     # CMake 4 rejects projects declaring compatibility with CMake < 3.5; the
     # environment variable reaches every external project of the superbuild.
     export CMAKE_POLICY_VERSION_MINIMUM="${CMAKE_POLICY_VERSION_MINIMUM:-3.5}"
-    info "CMAKE_POLICY_VERSION_MINIMUM=${CMAKE_POLICY_VERSION_MINIMUM} (CMake 4 and older external projects)"
+    warn "CMake ${version} is not tested with this source tree (run without --skip-deps to use CMake ${PINNED_CMAKE_VERSION}); setting CMAKE_POLICY_VERSION_MINIMUM=${CMAKE_POLICY_VERSION_MINIMUM}"
   fi
 }
 
@@ -909,10 +1027,11 @@ install_official_qt() {
 resolve_qt() {
   section "Qt (${QT_MODE})"
   local expected=""
+  MACOS_MIN=${MACOS_MIN:-${MACOS_FLOOR}}
   case "${QT_MODE}" in
     homebrew)
       info "Homebrew's Qt is built for the macOS version it was bottled for: the DMG will run on this Mac"
-      info "and on Macs with the same or a newer macOS. Use --qt=official for a DMG for macOS ${DEFAULT_MACOS_MIN} and newer."
+      info "and on Macs with the same or a newer macOS. Use --qt=official for a DMG for macOS ${MACOS_FLOOR} and newer."
       local candidate
       for candidate in "${BREW_PREFIX}/lib/cmake/Qt6" "${BREW_PREFIX}/opt/qtbase/lib/cmake/Qt6" "${BREW_PREFIX}/opt/qt/lib/cmake/Qt6"; do
         if set_qt_cmake_dir "${candidate}"; then
@@ -950,7 +1069,7 @@ resolve_qt() {
         (
           cd "${qt_source_root}" 2>/dev/null || [ "${DRY_RUN}" = 1 ] || exit 1
           run_logged "${LOG_DIR}/qt-source.log" \
-            bash "${SOURCE_DIR}/Utilities/Scripts/Build-qt6.sh" "${QT_REQUESTED_VERSION}" "${HOST_ARCH}" "${MACOS_MIN:-${DEFAULT_MACOS_MIN}}"
+            bash "${SOURCE_DIR}/Utilities/Scripts/Build-qt6.sh" "${QT_REQUESTED_VERSION}" "${HOST_ARCH}" "${MACOS_MIN}"
         ) || die "${EXIT_DEPS}" "building Qt from source failed (see ${LOG_DIR}/qt-source.log)"
         set_qt_cmake_dir "${install_dir}" || true
       fi
@@ -989,13 +1108,25 @@ resolve_qt() {
   esac
 
   # The application cannot run on an older macOS than its Qt libraries.
-  MACOS_MIN=${MACOS_MIN:-${DEFAULT_MACOS_MIN}}
   QT_MINOS=$(qt_minimum_macos 2>/dev/null || true)
   if [ -n "${QT_MINOS}" ]; then
     info "Qt libraries require macOS ${QT_MINOS} or newer"
     if ! version_ge "${MACOS_MIN}" "${QT_MINOS}"; then
       info "raising the minimum macOS version of the build from ${MACOS_MIN} to ${QT_MINOS}"
       MACOS_MIN=${QT_MINOS}
+    fi
+  fi
+  info "minimum macOS of the build (CMAKE_OSX_DEPLOYMENT_TARGET): ${MACOS_MIN}"
+  # macOS does not load programs built for a newer macOS, and the build runs
+  # the programs it builds. (A macOS older than the source tree's minimum is
+  # already reported by the preflight checks.)
+  if [ -n "${HOST_MACOS_VERSION}" ] && version_ge "${HOST_MACOS_VERSION}" "${MACOS_FLOOR}" &&
+    ! version_ge "${HOST_MACOS_VERSION}" "${MACOS_MIN}"; then
+    local problem="this Mac runs macOS ${HOST_MACOS_VERSION}, older than the minimum macOS of the build (${MACOS_MIN}): use a lower --macos-min or a Qt built for this macOS"
+    if [ "${DRY_RUN}" = 1 ]; then
+      warn "a real run would stop here: ${problem}"
+    else
+      die "${EXIT_PREFLIGHT}" "${problem}"
     fi
   fi
 }
@@ -1010,7 +1141,8 @@ write_fingerprint() {
     "source=${SOURCE_DIR}" \
     "arch=${HOST_ARCH}" \
     "qt_dir=${QT_CMAKE_DIR}" \
-    "qt_version=${QT_VERSION_FOUND}"
+    "qt_version=${QT_VERSION_FOUND}" \
+    "macos_min=${MACOS_MIN}"
 }
 
 clean_build_dir() {
@@ -1086,7 +1218,7 @@ configure_superbuild() {
         printf '%s\n' "${existing}" | sed 's/^/      /' >&2
         echo "    requested:" >&2
         printf '%s\n' "${wanted}" | sed 's/^/      /' >&2
-        die "${EXIT_CONFIGURE}" "${BUILD_DIR} was configured with a different source, architecture or Qt; re-run with --clean (or use another --build-dir)"
+        die "${EXIT_CONFIGURE}" "${BUILD_DIR} was configured with a different source, architecture, Qt or minimum macOS; re-run with --clean (or use another --build-dir)"
       fi
     fi
     if [ "${RECONFIGURE}" = 0 ]; then
@@ -1129,7 +1261,7 @@ configure_superbuild() {
   else
     write_fingerprint >"${fingerprint_file}"
   fi
-  run_logged "${LOG_DIR}/configure.log" cmake "${args[@]}" ||
+  run_logged "${LOG_DIR}/configure.log" "${CMAKE_BIN}" "${args[@]}" ||
     die "${EXIT_CONFIGURE}" "CMake configuration failed (see ${LOG_DIR}/configure.log)"
 }
 
@@ -1181,15 +1313,19 @@ build_superbuild() {
 #-----------------------------------------------------------------------------
 
 attach_dmg() {
-  # attach_dmg <dmg> : prints the mount point
+  # attach_dmg <dmg>: mounts the image read-only and sets ATTACHED_MOUNT.
+  # Do not call it in a subshell such as $(...): the mount point must reach
+  # MOUNTED_DIRS of this shell, so that cleanup() detaches it on an error or
+  # an interruption.
   local dmg=$1 mount_point
+  ATTACHED_MOUNT=""
   mount_point=$(mktemp -d "${TMPDIR:-/tmp}/slicer-studio-mount.XXXXXX") || return 1
   if ! hdiutil attach -nobrowse -readonly -noautoopen -noverify -mountpoint "${mount_point}" "${dmg}" </dev/null >/dev/null; then
     rmdir "${mount_point}" 2>/dev/null
     return 1
   fi
   MOUNTED_DIRS="${MOUNTED_DIRS} ${mount_point}"
-  printf '%s' "${mount_point}"
+  ATTACHED_MOUNT=${mount_point}
 }
 
 detach_dmg() {
@@ -1267,7 +1403,8 @@ make_studio_dmg() {
     print_cmd hdiutil detach "<mount point>"
   else
     local mount_point source_app
-    mount_point=$(attach_dmg "${CPACK_DMG}") || die "${EXIT_PACKAGE}" "could not mount ${CPACK_DMG}"
+    attach_dmg "${CPACK_DMG}" || die "${EXIT_PACKAGE}" "could not mount ${CPACK_DMG}"
+    mount_point=${ATTACHED_MOUNT}
     source_app=$(find "${mount_point}" -maxdepth 1 -name '*.app' -type d -print | head -n 1)
     if [ -z "${source_app}" ]; then
       detach_dmg "${mount_point}"
@@ -1450,7 +1587,8 @@ PY
   : >"${log}"
   printf '%s\n' "${code}" >"${check_script}"
   local mount_point app status=0
-  mount_point=$(attach_dmg "${dmg}") || die "${EXIT_SMOKE}" "could not mount ${dmg}"
+  attach_dmg "${dmg}" || die "${EXIT_SMOKE}" "could not mount ${dmg}"
+  mount_point=${ATTACHED_MOUNT}
   app="${mount_point}/${APP_NAME}.app"
   if [ ! -d "${app}" ]; then
     detach_dmg "${mount_point}"
@@ -1539,6 +1677,7 @@ main() {
     return 0
   fi
 
+  resolve_minimum_macos
   preflight
   if [ "${SKIP_BUILD}" = 0 ]; then
     install_dependencies

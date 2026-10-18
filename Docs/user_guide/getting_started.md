@@ -51,9 +51,9 @@ Once downloaded, follow the instructions below to complete installation:
 ### Mac
 
 - Open the install package (.dmg file).
-- Drag the Slicer application (Slicer.app) to your Applications folder (or other location of your choice).
+- Drag the Slicer application ("3D Slicer <version>.app", or "Slicer.app" in older releases) to your Applications folder (or other location of your choice).
   - This step is necessary because content of a .dmg file is opened as a read-only volume, and you cannot install extensions or Python packages into a read-only volume.
-- Delete the Slicer.app folder to uninstall.
+- Delete the application folder to uninstall.
 
 #### Installing Preview Releases
 

@@ -22,6 +22,8 @@ readonly WEB_PORT=8080
 readonly NOVNC_DIR="${NOVNC_DIR:-/usr/share/novnc}"
 readonly SLICER_EXECUTABLE="${SLICER_EXECUTABLE:-/opt/slicer/Slicer}"
 readonly OPENBOX_CONFIG="/etc/slicer-studio-web/openbox-rc.xml"
+# Process names (pgrep/pkill patterns) of the Slicer launcher and application.
+readonly SLICER_PROCESS_NAMES="Slicer|SlicerApp-real"
 
 export DISPLAY=":${DISPLAY_NUMBER}"
 
@@ -31,15 +33,26 @@ log() {
 
 # The container may run with an arbitrary --user id (the launcher does this on
 # Linux to match the owner of the data folder): make sure HOME is writable.
+user_id="$(id -u)"
 if [ ! -w "${HOME:-/nonexistent}" ]; then
-  export HOME="/tmp/home-$(id -u)"
+  HOME="/tmp/home-${user_id}"
+  export HOME
 fi
 mkdir -p "${HOME}"
-export USER="${USER:-$(id -un 2>/dev/null || echo slicer)}"
-export LOGNAME="${USER}"
-export XDG_RUNTIME_DIR="/tmp/runtime-$(id -u)"
+# Such an id has no name in /etc/passwd ("id -un" prints the number and fails):
+# use the name of the image user, which Slicer uses for its temporary folder.
+if [ -z "${USER:-}" ] && ! USER="$(id -un 2> /dev/null)"; then
+  USER=slicer
+fi
+LOGNAME="${USER}"
+XDG_RUNTIME_DIR="/tmp/runtime-${user_id}"
+export USER LOGNAME XDG_RUNTIME_DIR
 mkdir -p "${XDG_RUNTIME_DIR}"
 chmod 700 "${XDG_RUNTIME_DIR}"
+
+# Folder of the revision-specific settings and extensions of Slicer
+# (/opt/slicer/slicer.org links to it, see the Dockerfile).
+mkdir -p /home/slicer/.config/slicer.org 2> /dev/null || true
 
 # Slicer's default scene folder is ~/Documents: point it to the data volume.
 if [ ! -e "${HOME}/Documents" ] && [ -d /data ]; then
@@ -69,7 +82,7 @@ stop_all() {
     kill -TERM "${slicer_pid}" 2> /dev/null || true
   fi
   # Also stop instances that Slicer started itself (for example after "Restart").
-  pkill -TERM -u "$(id -u)" -x SlicerApp-real 2> /dev/null || true
+  pkill -TERM -u "${user_id}" -x "${SLICER_PROCESS_NAMES}" 2> /dev/null || true
   for pid in "${pids[@]}"; do
     kill -TERM "${pid}" 2> /dev/null || true
   done
@@ -140,11 +153,11 @@ while true; do
     stop_all 1
   fi
   slicer_pid=""
-  # "Restart Slicer" starts a new instance and quits the current one: wait for
-  # that instance instead of starting another one.
-  if pgrep -u "$(id -u)" -x SlicerApp-real > /dev/null; then
+  # "Restart Slicer" starts a new instance (launcher, then application) and quits
+  # the current one: wait for that instance instead of starting another one.
+  if pgrep -u "${user_id}" -x "${SLICER_PROCESS_NAMES}" > /dev/null; then
     log "Slicer restarted itself; waiting for the new instance to exit."
-    while pgrep -u "$(id -u)" -x SlicerApp-real > /dev/null; do
+    while pgrep -u "${user_id}" -x "${SLICER_PROCESS_NAMES}" > /dev/null; do
       sleep 1 &
       wait $! || true
     done

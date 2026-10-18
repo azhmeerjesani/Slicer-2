@@ -15,7 +15,7 @@ on your Mac, run the GitHub Actions workflow instead (see
 
 You need:
 
-- macOS 13 (Ventura) or newer, on Apple Silicon (arm64) or Intel (x86_64);
+- macOS 14 (Sonoma) or newer, on Apple Silicon (arm64) or Intel (x86_64);
 - the Xcode Command Line Tools (`xcode-select --install`);
 - [Homebrew](https://brew.sh);
 - about 40 GB of free disk space, and several hours for the first build.
@@ -39,22 +39,28 @@ Everything the script creates goes into `~/SlicerStudio`:
 | `~/SlicerStudio/dist` | final disk image and its `.sha256` checksum file (`--out-dir`) |
 | `~/SlicerStudio/logs` | `configure.log`, `build.log`, `package.log`, `packageverify.log`, `smoke-<arch>.log` |
 | `~/SlicerStudio/Qt-official`, `Qt-source` | Qt used by `--qt=official` or `--qt=source` |
+| `~/SlicerStudio/tools` | CMake 3.31 (when no CMake 3 is installed) and the aqtinstall environment |
 | `~/SlicerStudio/ccache-bin` | compiler wrappers that use [ccache](https://ccache.dev) |
 
 ## Choosing Qt
 
 | `--qt=` | Qt | The disk image runs on | Notes |
 |---|---|---|---|
-| `homebrew` (default) | Homebrew's current Qt 6 | the build Mac, and Macs with the same or a newer macOS | Fastest to set up. Homebrew only provides Qt for Apple Silicon Macs with macOS 15 or newer. On other Macs, `brew install qt` compiles Qt for hours. |
-| `official[=6.11.2]` | official Qt binaries, downloaded with [aqtinstall](https://github.com/miurahr/aqtinstall) | macOS 13 and newer (the minimum of Qt 6.11) | Use this for a disk image you share. It is also used by GitHub Actions. It downloads roughly 1 to 2 GB. |
-| `source[=6.11.2]` | Qt built from source by `Utilities/Scripts/Build-qt6.sh` | macOS 13 and newer | Takes hours and needs the full Xcode (Metal toolchain). Build-qt6.sh assumes Homebrew in `/opt/homebrew`. |
+| `homebrew` (default) | Homebrew's current Qt 6 | the build Mac, and Macs with the same or a newer macOS | Fastest to set up. Homebrew only provides Qt for Apple Silicon Macs with macOS 15 or newer. On other Macs, `brew install qt` compiles Qt for hours (the script warns): use `official` there. |
+| `official[=6.11.2]` | official Qt binaries, downloaded with [aqtinstall](https://github.com/miurahr/aqtinstall) | macOS 14 and newer (the minimum of this source tree; Qt 6.11 itself supports macOS 13) | Use this for a disk image you share. It is also used by GitHub Actions. It downloads roughly 1 to 2 GB. |
+| `source[=6.11.2]` | Qt built from source by `Utilities/Scripts/Build-qt6.sh` | macOS 14 and newer | Takes hours and needs the full Xcode (Metal toolchain). Build-qt6.sh assumes Homebrew in `/opt/homebrew`. |
 | `/path/to/Qt` | an existing Qt 6.8+ or Qt 5.15 installation (its prefix, or its `lib/cmake/Qt6` or `lib/cmake/Qt5` folder) | depends on that Qt | For example, a Qt from the Qt online installer: `--qt=~/Qt/6.11.2/macos`. |
 
-The script reads the minimum macOS version of the Qt libraries. When that
-version is newer than `--macos-min` (default 13.0), the script raises the
-deployment target to match. It also records the result in the application
-(`LSMinimumSystemVersion`), so Finder explains why the application cannot start
-on an older macOS.
+The oldest macOS a build can target is set by the source tree:
+`required_deployment_target` in `CMake/SlicerInitializeOSXVariables.cmake`,
+currently 14.0. The script reads it from there and uses it as the deployment
+target (`CMAKE_OSX_DEPLOYMENT_TARGET`). A lower `--macos-min` is refused.
+
+The script also reads the minimum macOS version of the Qt libraries. When that
+version is newer, the script raises the deployment target to match. It records
+the result in the application (`LSMinimumSystemVersion`), so Finder explains why
+the application cannot start on an older macOS. The build runs the programs it
+builds, so the build Mac itself must run at least that macOS version.
 
 ### Packaging with Homebrew's Qt
 
@@ -91,7 +97,7 @@ Run `build_dmg.sh --help` for the complete list. Common combinations:
 | Command | Effect |
 |---|---|
 | `build_dmg.sh` | Build (or continue the build) and package. |
-| `build_dmg.sh --qt=official` | Make a disk image for macOS 13 and newer. |
+| `build_dmg.sh --qt=official` | Make a disk image for macOS 14 and newer. |
 | `build_dmg.sh --skip-deps --skip-build` | Package an existing build again. |
 | `build_dmg.sh --no-package` | Build only. |
 | `build_dmg.sh --clean` | Delete the build directory and start again. The compiler cache keeps a rebuild short. |
@@ -117,7 +123,7 @@ Exit codes:
 ## What the script does
 
 1. **Preflight.** The script checks:
-   - the macOS version and the architecture;
+   - the macOS version (14 or newer) and the architecture;
    - the Xcode Command Line Tools and Homebrew;
    - Rosetta 2, on Apple Silicon only;
    - free disk space;
@@ -126,10 +132,17 @@ Exit codes:
    Rosetta 2 is needed because the CTK application launcher, used by the build
    tree and by the bundled `PythonSlicer`, is only released as an x86_64
    binary.
-2. **Tools.** `brew install` of cmake, git-lfs, ccache and, with
-   `--qt=homebrew`, qt. Only missing packages are installed. With CMake 4, the
-   script sets `CMAKE_POLICY_VERSION_MINIMUM=3.5` so that older external projects
-   still configure.
+2. **Tools.** `brew install` of git-lfs, ccache and, with `--qt=homebrew`, qt.
+   Only missing packages are installed.
+
+   The superbuild is configured with CMake 3: this source tree validates CMake
+   policies up to 3.28, and the macOS build instructions use 3.31. A CMake
+   3.28 to 3.x found on `PATH` is used. Otherwise, for example when only
+   Homebrew's CMake 4 is installed, the script downloads the official CMake
+   3.31.10 binaries from Kitware into `~/SlicerStudio/tools`, after checking
+   their SHA-256 checksum. With `--skip-deps` and only CMake 4, the script uses
+   it with `CMAKE_POLICY_VERSION_MINIMUM=3.5`, so that older external projects
+   still configure, and warns that this is untested.
 3. **Qt.** The script finds or installs Qt, as described in
    [Choosing Qt](#choosing-qt).
 4. **Configure.** The superbuild is configured with these options:
@@ -143,9 +156,9 @@ Exit codes:
    compiler path on to every external project (VTK, ITK, CTK, Python and the
    rest), so all of them are cached.
 
-   The script records the source, architecture and Qt of the build directory.
-   Reusing that build directory with a different source, architecture or Qt is
-   refused.
+   The script records the source, architecture, Qt and minimum macOS of the
+   build directory. Reusing that build directory with a different source,
+   architecture, Qt or minimum macOS is refused.
 5. **Build.** `make -C <build-dir> -j<jobs>`.
 6. **Package.** `make package` in `Slicer-build` (CPack DragNDrop), then
    `make packageverify`.
@@ -201,8 +214,8 @@ downloaded, for example from GitHub, macOS blocks it the first time. Do one of
 the following:
 
 - Open it once, then go to **System Settings > Privacy & Security** and click
-  **Open Anyway**. On macOS 14 and older, right-click the application and
-  choose **Open**.
+  **Open Anyway**. On macOS 14, you can instead right-click the application
+  and choose **Open**.
 - Or, in Terminal, run:
 
   ```console
@@ -227,7 +240,7 @@ To start it, go to **Actions > Slicer Studio packages > Run workflow**. The
 workflow produces:
 
 - **macOS disk image** (default on). Built with this script on `macos-15`
-  (Apple Silicon) with `--qt=official`, so it runs on macOS 13 and newer.
+  (Apple Silicon) with `--qt=official`, so it runs on macOS 14 and newer.
   `--qt=homebrew` is available as an option. An Intel disk image
   (`macos-15-intel`, always official Qt) can be turned on.
 - **Linux tarball** (default on). Built on Ubuntu 24.04 with the system Qt 5.15.
@@ -249,9 +262,12 @@ finishes the build.
 - **The build stopped**: `~/SlicerStudio/logs/build.log` contains the error.
   Fix the cause and run the script again. With parallel jobs, the first error
   can be far above the end of the log, so search the log for `error:`.
-- **`configured with a different source, architecture or Qt`**: Homebrew
-  upgraded Qt, or a different `--qt` was given. Run again with `--clean`. The
-  compiler cache keeps the rebuild short.
+- **`configured with a different source, architecture, Qt or minimum macOS`**:
+  Homebrew upgraded Qt, or a different `--qt` or `--macos-min` was given. Run
+  again with `--clean`. The compiler cache keeps the rebuild short.
+- **`older than the minimum macOS of the build`**: the Qt libraries (or
+  `--macos-min`) require a newer macOS than the build Mac runs. Use a lower
+  `--macos-min`, or a Qt built for this macOS, such as `--qt=official`.
 - **`bundle check: FAILED`**: some library in the bundle still loads from
   outside of it. `~/SlicerStudio/logs/packageverify.log` lists those libraries.
   The disk image probably works on the build Mac only. Try `--qt=official`.
@@ -260,5 +276,5 @@ finishes the build.
 - **Running the script without a Mac**: `--dry-run` prints the full plan on any
   system. On Linux, fake the platform with
   `SLICER_STUDIO_FAKE_UNAME=Darwin/arm64 build_dmg.sh --dry-run`. A third field
-  sets the macOS version, as in `Darwin/x86_64/13.7`. The variable is ignored
+  sets the macOS version, as in `Darwin/x86_64/14.7`. The variable is refused
   without `--dry-run`.

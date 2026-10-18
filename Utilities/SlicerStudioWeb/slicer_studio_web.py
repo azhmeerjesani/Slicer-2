@@ -32,9 +32,11 @@ import http.client
 import importlib.util
 import ipaddress
 import os
+import re
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -57,8 +59,11 @@ DEFAULT_CONTAINER = "slicer-studio-web"
 DEFAULT_PORT = 8080
 DEFAULT_LISTEN = "127.0.0.1"
 DEFAULT_GEOMETRY = "1600x1000"
-DEFAULT_DATA_DIR = Path.home() / "SlicerStudioData"
+DEFAULT_DATA_DIR_NAME = "SlicerStudioData"
+DEFAULT_HOME_VOLUME = "slicer-studio-web-home"
 CONTAINER_WEB_PORT = 8080
+# User and group ids of the "slicer" user of the image.
+IMAGE_USER_IDS = (1000, 1000)
 # Used when Docker Hub refuses to serve the default base image (rate limit).
 MIRROR_BASE_IMAGE = "mirror.gcr.io/library/ubuntu:24.04"
 
@@ -72,7 +77,8 @@ SYSTEM_NOVNC_DIRS = ("/usr/share/novnc", "/usr/share/webapps/novnc", "/usr/local
 
 PROXY_VARIABLES = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy")
 LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "::1")
-SLICER_PROCESS_NAME = "SlicerApp-real"
+# Process names of the Slicer launcher and application.
+SLICER_PROCESS_NAMES = ("Slicer", "SlicerApp-real")
 
 DOCKER_INSTALL_HINT = "Install Docker Desktop (macOS, Windows: https://www.docker.com/products/docker-desktop/) or Docker Engine (Linux: https://docs.docker.com/engine/install/)."
 
@@ -112,7 +118,7 @@ def docker_executable():
 
 def docker(*args, check=True, timeout=None, env=None):
     """Run a docker command and return the completed process (output captured)."""
-    result = subprocess.run([docker_executable(), *args], capture_output=True, text=True, timeout=timeout, env=env, check=False)
+    result = subprocess.run([docker_executable(), *args], capture_output=True, encoding="utf-8", errors="replace", timeout=timeout, env=env, check=False)
     if check and result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
         raise LauncherError(f"'docker {args[0]}' failed: {detail}")
@@ -128,7 +134,7 @@ def ensure_docker_running():
     if result.returncode != 0 or not result.stdout.strip():
         detail = (result.stderr or result.stdout).strip().splitlines()
         if "permission denied" in result.stderr.lower():
-            hint = "Your user may not use Docker: add it to the 'docker' group (then log in again) or run this script with sudo."
+            hint = "Your user may not use Docker: add it to the 'docker' group, then log in again."
         else:
             hint = "Start Docker Desktop (or the Docker service) and try again."
         message = f"Docker is not running or cannot be reached.\n  {hint}"
@@ -184,8 +190,10 @@ def container_url(name):
 
 
 def container_logs_tail(name, lines=30):
-    result = docker("logs", "--tail", str(lines), name, check=False)
-    return (result.stdout + result.stderr).strip()
+    """Return the last lines of the container output (its stdout and stderr in order)."""
+    result = subprocess.run([docker_executable(), "logs", "--tail", str(lines), name], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            encoding="utf-8", errors="replace", check=False)
+    return result.stdout.strip()
 
 
 def mount_option(kind, source, target):
@@ -194,6 +202,40 @@ def mount_option(kind, source, target):
     if "," in source_field or '"' in source_field:
         source_field = '"' + source_field.replace('"', '""') + '"'
     return f"type={kind},{source_field},target={target}"
+
+
+def host_user_ids():
+    """Return (uid, gid) of the user of this script on Linux (under sudo: of the user who ran sudo), else None.
+
+    Docker Desktop on macOS and Windows maps file ownership by itself.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    sudo_uid, sudo_gid = os.environ.get("SUDO_UID", ""), os.environ.get("SUDO_GID", "")
+    if os.getuid() == 0 and sudo_uid.isdigit() and sudo_gid.isdigit():
+        return int(sudo_uid), int(sudo_gid)
+    return os.getuid(), os.getgid()
+
+
+def default_data_dir():
+    """Return ~/SlicerStudioData of the user of this script (under sudo: of the user who ran sudo)."""
+    sudo_user = os.environ.get("SUDO_USER")
+    if sys.platform.startswith("linux") and os.getuid() == 0 and sudo_user:
+        home = os.path.expanduser(f"~{sudo_user}")
+        if not home.startswith("~"):
+            return Path(home) / DEFAULT_DATA_DIR_NAME
+    return Path.home() / DEFAULT_DATA_DIR_NAME
+
+
+def default_home_volume(user_ids):
+    """Return the name of the volume that keeps the Slicer settings of this user.
+
+    Settings files can only be changed by the user id that wrote them: on Linux,
+    users other than the image user get their own volume.
+    """
+    if user_ids is None or user_ids[0] == IMAGE_USER_IDS[0]:
+        return DEFAULT_HOME_VOLUME
+    return f"{DEFAULT_HOME_VOLUME}-{user_ids[0]}"
 
 
 def run_streaming(command, env=None):
@@ -340,6 +382,16 @@ def link_or_copy(source, destination):
         shutil.copy2(source, destination)
 
 
+def docker_desktop_host_url(parts):
+    """Return the URL (urlsplit result) with its host replaced by the address of this computer in Docker Desktop."""
+    user_info, at, _ = parts.netloc.rpartition("@")
+    try:
+        port = f":{parts.port}" if parts.port else ""
+    except ValueError:  # invalid port: leave the URL to the build tools
+        return parts.geturl()
+    return urllib.parse.urlunsplit(parts._replace(netloc=f"{user_info}{at}host.docker.internal{port}"))
+
+
 def proxy_build_arguments():
     """Pass the proxy settings of this environment to the image build.
 
@@ -353,12 +405,12 @@ def proxy_build_arguments():
         if not value:
             continue
         if name.lower() != "no_proxy":
-            host = urllib.parse.urlsplit(value if "://" in value else f"http://{value}").hostname
-            if host in LOOPBACK_HOSTS:
+            parts = urllib.parse.urlsplit(value if "://" in value else f"http://{value}")
+            if parts.hostname in LOOPBACK_HOSTS:
                 if sys.platform.startswith("linux"):
                     use_host_network = True
                 else:
-                    value = value.replace(host, "host.docker.internal", 1)
+                    value = docker_desktop_host_url(parts)
         arguments += ["--build-arg", f"{name}={value}"]
     if use_host_network:
         arguments += ["--network", "host"]
@@ -423,8 +475,6 @@ def browser_url(host, port):
 
 def check_listen_address(listen):
     """Validate the --listen address; return True when it is reachable from other computers."""
-    if listen == "localhost":
-        return False
     try:
         address = ipaddress.ip_address(listen)
     except ValueError:
@@ -435,7 +485,7 @@ def check_listen_address(listen):
 
 
 def check_port_free(listen, port):
-    bind_host = "127.0.0.1" if listen == "localhost" else listen
+    in_use = False
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         if os.name != "nt":
             # Like the servers: ignore connections of a previous run that are still closing
@@ -443,9 +493,19 @@ def check_port_free(listen, port):
             # allow binding a port in use.
             probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            probe.bind((bind_host, port))
+            probe.bind((listen, port))
         except OSError:
-            raise LauncherError(f"Port {port} is already in use. Close the program that uses it, or choose another port, for example: --port {port + 1}")
+            in_use = True
+    if not in_use:
+        # On macOS the bind above also succeeds when another program listens on all
+        # addresses of the port: check that nothing answers there either.
+        try:
+            with socket.create_connection(("127.0.0.1" if listen == "0.0.0.0" else listen, port), timeout=1):
+                in_use = True
+        except OSError:
+            pass
+    if in_use:
+        raise LauncherError(f"Port {port} is already in use. Close the program that uses it, or choose another port, for example: --port {port + 1}")
 
 
 def free_local_port():
@@ -537,13 +597,23 @@ def command_run(args):
         remote_access_warning(args.listen, args.port)
     check_port_free(args.listen, args.port)
 
-    data_dir = Path(args.data).expanduser().resolve()
-    data_dir.mkdir(parents=True, exist_ok=True)
+    user_ids = host_user_ids()
+    data_dir = (Path(args.data).expanduser() if args.data else default_data_dir()).resolve()
+    # Under sudo, the folders created here belong to the user who ran sudo.
+    owner_ids = user_ids if user_ids and os.getuid() == 0 else None
+    created = [path for path in (data_dir, *data_dir.parents) if not path.exists()] if owner_ids else []
+    try:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        for path in created:
+            os.chown(path, *owner_ids)
+    except OSError as error:
+        raise LauncherError(f"The data folder {data_dir} cannot be created: {error}")
+    home_volume = default_home_volume(user_ids) if args.home_volume is None else args.home_volume
     command = ["run", "--detach", "--name", args.name]
     command += ["--publish", f"{args.listen}:{args.port}:{CONTAINER_WEB_PORT}"]
     command += ["--mount", mount_option("bind", data_dir, "/data")]
-    if args.home_volume:
-        command += ["--mount", mount_option("volume", args.home_volume, "/home/slicer")]
+    if home_volume:
+        command += ["--mount", mount_option("volume", home_volume, "/home/slicer")]
     command += ["--shm-size", "2g"]
     if args.geometry:
         command += ["--env", f"GEOMETRY={args.geometry}"]
@@ -554,11 +624,12 @@ def command_run(args):
         command += ["--env", "VNC_PASSWORD"]  # the value comes from the environment, not the command line
     if emulated:
         command += ["--platform", "linux/amd64"]
-    if sys.platform.startswith("linux") and hasattr(os, "getuid") and os.getuid() != 1000:
-        # The image user has uid 1000: run with the ids of this user instead, so
-        # that Slicer can write to the data folder and the files belong to this user.
-        # (Docker Desktop on macOS and Windows maps file ownership by itself.)
-        command += ["--user", f"{os.getuid()}:{os.getgid()}"]
+    if user_ids and user_ids != IMAGE_USER_IDS:
+        # Run with the ids of this user instead of those of the image user, so that
+        # Slicer can write to the data folder and the files belong to this user.
+        command += ["--user", f"{user_ids[0]}:{user_ids[1]}"]
+        if user_ids[0] == 0:
+            warn("This script runs as root, so Slicer runs as root in the container too. Run it as your user (a member of the 'docker' group) instead.")
     command.append(args.image)
     command += args.slicer_args
 
@@ -611,7 +682,7 @@ def command_status(args):
     try:
         architecture = ensure_docker_running()
     except LauncherError as error:
-        info(f"Docker: {error}")
+        info(str(error))
         return 1
     info(f"Docker: running ({architecture})" + (" - the amd64 image runs with emulation" if needs_amd64_emulation(architecture) else ""))
     result = docker("image", "inspect", "--format", "{{.Size}}|{{.Created}}", args.image, check=False)
@@ -752,6 +823,7 @@ class LocalSession:
         self.display = free_display_number()
         self.vnc_port = free_local_port()
         self.runtime_dir = Path(tempfile.mkdtemp(prefix="slicer-studio-web-"))
+        self.xauthority = self.runtime_dir / "Xauthority"
         self.services = []
         self.slicer_process = None
 
@@ -775,9 +847,21 @@ class LocalSession:
                 message += f"\n{name} stopped (status {process.returncode}). Last output:\n  " + "\n  ".join(log_lines[-15:])
         return LauncherError(message)
 
+    def write_xauthority(self):
+        """Write an X authority file with a new cookie: only the processes started here can use the display."""
+
+        def field(data):
+            return struct.pack(">H", len(data)) + data
+
+        # One entry: any address (family 0xFFFF), the display number, a random MIT-MAGIC-COOKIE-1.
+        entry = struct.pack(">H", 0xFFFF) + field(b"") + field(str(self.display).encode()) + field(b"MIT-MAGIC-COOKIE-1") + field(os.urandom(16))
+        self.xauthority.write_bytes(entry)
+        self.xauthority.chmod(0o600)
+
     def display_env(self):
         env = dict(os.environ)
         env["DISPLAY"] = f":{self.display}"
+        env["XAUTHORITY"] = str(self.xauthority)
         env.pop("VNC_PASSWORD", None)
         env.pop("WAYLAND_DISPLAY", None)  # show Qt applications on the virtual display, not on the desktop
         env["QT_QPA_PLATFORM"] = "xcb"
@@ -797,6 +881,7 @@ class LocalSession:
     def start_display(self):
         geometry = self.args.geometry or DEFAULT_GEOMETRY
         socket_path = Path(f"/tmp/.X11-unix/X{self.display}")
+        self.write_xauthority()
         xvnc = shutil.which("Xvnc")
         if xvnc:
             security = ["-SecurityTypes", "None"]
@@ -809,7 +894,7 @@ class LocalSession:
                 password_file.write_bytes(encoded)
                 password_file.chmod(0o600)
                 security = ["-SecurityTypes", "VncAuth", "-PasswordFile", str(password_file)]
-            command = [xvnc, f":{self.display}", "-geometry", geometry, "-depth", "24", "-desktop", "Slicer Studio",
+            command = [xvnc, f":{self.display}", "-auth", str(self.xauthority), "-geometry", geometry, "-depth", "24", "-desktop", "Slicer Studio",
                        "-rfbport", str(self.vnc_port), "-localhost", "-nolisten", "tcp", "-AlwaysShared", *security]
             server = self.start_service(command, "Xvnc")
             x11vnc = None
@@ -821,14 +906,15 @@ class LocalSession:
                     "  sudo apt install tigervnc-standalone-server tigervnc-tools   (Debian, Ubuntu)\n"
                     "  sudo dnf install tigervnc-server                            (Fedora)\n"
                     "or install Xvfb and x11vnc.")
-            server = self.start_service([xvfb, f":{self.display}", "-screen", "0", f"{geometry}x24", "-nolisten", "tcp"], "Xvfb")
+            server = self.start_service([xvfb, f":{self.display}", "-auth", str(self.xauthority), "-screen", "0", f"{geometry}x24", "-nolisten", "tcp"], "Xvfb")
         deadline = time.monotonic() + 30
         while not socket_path.exists():
             if server.poll() is not None or time.monotonic() > deadline:
                 raise self.service_failure(f"The virtual display :{self.display} did not start.")
             time.sleep(0.1)
         if x11vnc:  # VNC server of the Xvfb display (no resizing from the browser)
-            command = [x11vnc, "-display", f":{self.display}", "-rfbport", str(self.vnc_port), "-localhost", "-forever", "-shared", "-quiet", "-desktop", "Slicer Studio"]
+            command = [x11vnc, "-display", f":{self.display}", "-auth", str(self.xauthority), "-rfbport", str(self.vnc_port), "-localhost", "-forever", "-shared", "-quiet",
+                       "-desktop", "Slicer Studio"]
             if self.password:
                 password_file = self.runtime_dir / "x11vnc-password"
                 password_file.write_text(self.password + "\n")
@@ -864,7 +950,7 @@ class LocalSession:
             if not proc.name.isdigit():
                 continue
             try:
-                if (proc / "comm").read_text().strip() != SLICER_PROCESS_NAME[:15]:
+                if (proc / "comm").read_text().strip() not in SLICER_PROCESS_NAMES:
                     continue
                 environment = (proc / "environ").read_bytes().split(b"\0")
             except OSError:
@@ -971,11 +1057,19 @@ def add_package_options(parser):
     group.add_argument("--no-cache", action="store_true", help="build the image without the Docker build cache")
 
 
+def geometry_value(text):
+    """Return a screen size given as WIDTHxHEIGHT (argparse type)."""
+    match = re.fullmatch(r"\s*(\d+)\s*[xX]\s*(\d+)\s*", text)
+    if not match or int(match.group(1)) == 0 or int(match.group(2)) == 0:
+        raise argparse.ArgumentTypeError(f"'{text}' is not a screen size such as {DEFAULT_GEOMETRY}")
+    return f"{int(match.group(1))}x{int(match.group(2))}"
+
+
 def add_server_options(parser):
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"browser port on this computer (default {DEFAULT_PORT})")
     parser.add_argument("--listen", default=DEFAULT_LISTEN, metavar="ADDRESS",
                         help=f"network address to listen on (default {DEFAULT_LISTEN}: this computer only; 0.0.0.0 allows other computers and needs a password)")
-    parser.add_argument("--geometry", metavar="WxH", help=f"initial screen size (default {DEFAULT_GEOMETRY}; the browser window size is used once connected)")
+    parser.add_argument("--geometry", metavar="WxH", type=geometry_value, help=f"initial screen size (default {DEFAULT_GEOMETRY}; the browser window size is used once connected)")
     parser.add_argument("--ask-password", action="store_true", help="ask for a password to require in the browser (or set VNC_PASSWORD)")
     parser.add_argument("--no-browser", action="store_true", help="do not open the web browser")
     parser.add_argument("slicer_args", nargs="*", metavar="-- SLICER_ARGS", help="arguments passed to Slicer, after '--'")
@@ -998,9 +1092,9 @@ def build_parser():
 
     run = commands.add_parser("run", parents=[docker_options], help="start Slicer Studio in Docker and open the browser (default)")
     add_server_options(run)
-    run.add_argument("--data", default=str(DEFAULT_DATA_DIR), metavar="DIR", help=f"folder shared with Slicer as its Documents folder and /data (default {DEFAULT_DATA_DIR})")
-    run.add_argument("--home-volume", default="slicer-studio-web-home", metavar="NAME",
-                     help="Docker volume that keeps Slicer settings between runs (default slicer-studio-web-home; empty: do not keep them)")
+    run.add_argument("--data", metavar="DIR", help=f"folder shared with Slicer as its Documents folder and /data (default ~/{DEFAULT_DATA_DIR_NAME})")
+    run.add_argument("--home-volume", metavar="NAME",
+                     help=f"Docker volume that keeps Slicer settings between runs (default {DEFAULT_HOME_VOLUME}; on Linux, {DEFAULT_HOME_VOLUME}-UID for user ids other than 1000; empty: do not keep them)")
     run.add_argument("--recreate", action="store_true", help="replace a running container")
     run.add_argument("--timeout", type=int, metavar="SECONDS", help="how long to wait for the server (default 180, 600 with emulation)")
     add_package_options(run)
@@ -1037,6 +1131,8 @@ def main(argv=None):
         index = argv.index("--")
         argv, slicer_args = argv[:index], argv[index + 1:]
     args = build_parser().parse_args(argv)
+    if getattr(args, "listen", None) == "localhost":
+        args.listen = DEFAULT_LISTEN  # Docker needs an IP address
     if hasattr(args, "slicer_args"):
         args.slicer_args = list(args.slicer_args) + slicer_args
     try:

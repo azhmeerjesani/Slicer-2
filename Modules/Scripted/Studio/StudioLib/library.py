@@ -51,6 +51,32 @@ def _isAlive(qobject):
     return True
 
 
+_eventFilters = []  # [(watched object, filter object)]
+_eventFiltersRemovedOnQuit = False
+
+
+def _installEventFilter(watched, eventFilter):
+    """Install a Python event filter, removed when the application quits.
+
+    Python event filters must not run while the Python interpreter is finalized: the widgets owned by Python
+    objects are deleted then, and their destruction sends events (ChildRemoved) to the filters.
+    """
+    global _eventFiltersRemovedOnQuit
+    _eventFilters[:] = [(obj, filterObject) for obj, filterObject in _eventFilters if _isAlive(obj) and _isAlive(filterObject)]
+    watched.installEventFilter(eventFilter)
+    _eventFilters.append((watched, eventFilter))
+    if not _eventFiltersRemovedOnQuit:
+        slicer.app.connect("aboutToQuit()", _removeEventFilters)
+        _eventFiltersRemovedOnQuit = True
+
+
+def _removeEventFilters():
+    for watched, eventFilter in _eventFilters:
+        if _isAlive(watched) and _isAlive(eventFilter):
+            watched.removeEventFilter(eventFilter)
+    _eventFilters.clear()
+
+
 def _setFont(widget, pixelSize, weight=None, letterSpacing=None):
     font = qt.QFont(widget.font)
     font.setPixelSize(pixelSize)
@@ -223,7 +249,7 @@ class _RecentMenuWatcher(qt.QObject):
         self.timer.setSingleShot(True)
         self.timer.setInterval(0)
         self.timer.connect("timeout()", self._notify)
-        menu.installEventFilter(self)
+        _installEventFilter(menu, self)
 
     def eventFilter(self, obj, event):
         if event.type() in (qt.QEvent.ActionAdded, qt.QEvent.ActionRemoved, qt.QEvent.ActionChanged):
@@ -266,55 +292,59 @@ class RecentList(qt.QObject):
 
     def __init__(self, rowCount=RECENT_ROW_COUNT):
         qt.QObject.__init__(self)
+        self.rowCount = rowCount
         self.entries = []
+        #: (button, name label, folder label, time label) of the rows created so far (created when needed)
         self.rows = []
         self._dirty = True
         self.widget = qt.QFrame()
         self.widget.setObjectName("StudioRecentList")
-        layout = qt.QVBoxLayout(self.widget)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        for index in range(rowCount):
-            row = qt.QPushButton()
-            row.setObjectName("StudioRecentRow")
-            row.setFixedHeight(RECENT_ROW_HEIGHT)
-            row.setFocusPolicy(qt.Qt.StrongFocus)
-            # Enter and Return click the focused row (outside dialogs, only auto default buttons do)
-            row.setAutoDefault(True)
-            row.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
-            rowLayout = qt.QHBoxLayout(row)
-            rowLayout.setContentsMargins(10, 0, 10, 0)
-            rowLayout.setSpacing(10)
-            nameLabel = qt.QLabel()
-            nameLabel.setObjectName("StudioRecentName")
-            _setFont(nameLabel, 13)
-            folderLabel = qt.QLabel()
-            folderLabel.setObjectName("StudioRecentFolder")
-            _setFont(folderLabel, 12)
-            folderLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
-            timeLabel = qt.QLabel()
-            timeLabel.setObjectName("StudioRecentTime")
-            _setFont(timeLabel, 12)
-            timeLabel.setAlignment(qt.Qt.AlignRight | qt.Qt.AlignVCenter)
-            for label in (nameLabel, folderLabel, timeLabel):
-                label.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
-            rowLayout.addWidget(nameLabel)
-            rowLayout.addWidget(folderLabel, 1)
-            rowLayout.addWidget(timeLabel)
-            row.connect("clicked()", lambda index=index: self.activate(index))
-            row.installEventFilter(self)
-            folderLabel.installEventFilter(self)
-            row.hide()
-            layout.addWidget(row)
-            self.rows.append((row, nameLabel, folderLabel, timeLabel))
+        self.rowsLayout = qt.QVBoxLayout(self.widget)
+        self.rowsLayout.setContentsMargins(0, 0, 0, 0)
+        self.rowsLayout.setSpacing(0)
         self.emptyLabel = qt.QLabel(_("Files you open appear here."))
         self.emptyLabel.setObjectName("StudioRecentEmpty")
         _setFont(self.emptyLabel, 12)
         self.emptyLabel.setContentsMargins(10, 8, 10, 8)
-        layout.addWidget(self.emptyLabel)
+        self.rowsLayout.addWidget(self.emptyLabel)
         ui.bindStyleSheet(self.widget, self._styleSheet)
-        self.widget.installEventFilter(self)
+        _installEventFilter(self.widget, self)
         _watchRecentMenu(self._onRecentFilesChanged)
+
+    def _createRow(self):
+        index = len(self.rows)
+        row = qt.QPushButton()
+        row.setObjectName("StudioRecentRow")
+        row.setFixedHeight(RECENT_ROW_HEIGHT)
+        row.setFocusPolicy(qt.Qt.StrongFocus)
+        # Enter and Return click the focused row (outside dialogs, only auto default buttons do)
+        row.setAutoDefault(True)
+        row.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
+        rowLayout = qt.QHBoxLayout(row)
+        rowLayout.setContentsMargins(10, 0, 10, 0)
+        rowLayout.setSpacing(10)
+        nameLabel = qt.QLabel()
+        nameLabel.setObjectName("StudioRecentName")
+        _setFont(nameLabel, 13)
+        folderLabel = qt.QLabel()
+        folderLabel.setObjectName("StudioRecentFolder")
+        _setFont(folderLabel, 12)
+        folderLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+        timeLabel = qt.QLabel()
+        timeLabel.setObjectName("StudioRecentTime")
+        _setFont(timeLabel, 12)
+        timeLabel.setAlignment(qt.Qt.AlignRight | qt.Qt.AlignVCenter)
+        for label in (nameLabel, folderLabel, timeLabel):
+            label.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
+        rowLayout.addWidget(nameLabel)
+        rowLayout.addWidget(folderLabel, 1)
+        rowLayout.addWidget(timeLabel)
+        row.connect("clicked()", lambda index=index: self.activate(index))
+        _installEventFilter(row, self)
+        _installEventFilter(folderLabel, self)
+        # Rows are above the empty state label
+        self.rowsLayout.insertWidget(index, row)
+        self.rows.append((row, nameLabel, folderLabel, timeLabel))
 
     @staticmethod
     def _styleSheet():
@@ -336,7 +366,9 @@ class RecentList(qt.QObject):
     def refresh(self):
         """Read the recently loaded files again."""
         self._dirty = False
-        self.entries = recentEntries(len(self.rows))
+        self.entries = recentEntries(self.rowCount)
+        while len(self.rows) < len(self.entries):
+            self._createRow()
         now = time.time()
         for index, (row, nameLabel, folderLabel, timeLabel) in enumerate(self.rows):
             if index >= len(self.entries):
@@ -566,7 +598,7 @@ class LibraryCanvas(qt.QObject):
         self.dropZone.setProperty("dragActive", False)
         self.dropZone.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
         self.dropZone.setToolTip(_("Drop files here, or click to open files"))
-        self.dropZone.installEventFilter(self)
+        _installEventFilter(self.dropZone, self)
         dropZoneLayout = qt.QVBoxLayout(self.dropZone)
         dropZoneLayout.setContentsMargins(24, 24, 24, 24)
         dropZoneLayout.setSpacing(10)
@@ -749,15 +781,33 @@ class LibraryCanvas(qt.QObject):
 _panels = []
 
 
-class LibraryPanel:
+class LibraryPanel(qt.QObject):
     """Content of the Studio module panel: Open buttons and the recently loaded files.
 
-    It works in Studio (inspector), in Classic and without main window.
+    It works in Studio (inspector), in Classic and without main window. The content is built when the panel
+    is shown for the first time, except while Studio enters the Library empty state, which hides the inspector
+    (at startup on a fresh profile, for example).
     """
 
     def __init__(self):
+        qt.QObject.__init__(self)
         self.widget = qt.QWidget()
         self.widget.setObjectName("StudioLibraryPanel")
+        self.openButton = None
+        self.openFolderButton = None
+        self.templateButton = None
+        self.folderCardSlot = None
+        self.recentList = None
+        _installEventFilter(self.widget, self)
+        _panels.append(self)
+
+    def isBuilt(self):
+        return self.recentList is not None
+
+    def build(self):
+        """Create the content (done when the panel is shown for the first time)."""
+        if self.isBuilt():
+            return
         layout = qt.QVBoxLayout(self.widget)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
@@ -785,8 +835,13 @@ class LibraryPanel:
 
         ui.addPaletteListener(self._refreshIcons)
         self._refreshIcons()
-        _panels.append(self)
+        # Built: the Show events are not needed anymore
+        self.widget.removeEventFilter(self)
 
+    def eventFilter(self, obj, event):
+        if event.type() == qt.QEvent.Show and obj == self.widget and not self.isBuilt() and not _inspectorHiddenOnEnter():
+            self.build()
+        return False
 
     def _refreshIcons(self):
         if not _isAlive(self.widget):
@@ -796,6 +851,7 @@ class LibraryPanel:
             button.setIcon(ui.icon(iconName, 16))
 
     def showFolderCard(self, folder, files):
+        self.build()
         return self.folderCardSlot.show(folder, files)
 
 
@@ -803,7 +859,8 @@ def _livePanel():
     for panel in list(_panels):
         if not _isAlive(panel.widget):
             _panels.remove(panel)
-            panel.recentList.dispose()
+            if panel.recentList is not None:
+                panel.recentList.dispose()
             continue
         return panel
     return None
@@ -839,6 +896,13 @@ def isEmptyState(shell=None):
     if shell is not None and getattr(shell, "studySession", None) is not None:
         return False
     return not hasData()
+
+
+def _inspectorHiddenOnEnter():
+    """True while Studio switches to the Library empty state: ``enter()`` is about to hide the inspector."""
+    shell = _shell()
+    workspaces = getattr(shell, "workspaces", None) if shell is not None else None
+    return workspaces is not None and workspaces.isSwitching() and isEmptyState(shell)
 
 
 class _SceneWatcher(VTKObservationMixin):
