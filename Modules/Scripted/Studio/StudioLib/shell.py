@@ -89,7 +89,9 @@ def associatedWidgets(action):
     """Widgets that ``action`` was added to (Qt 5 has associatedWidgets(), Qt 6 only associatedObjects())."""
     if hasattr(action, "associatedWidgets"):
         return list(action.associatedWidgets())
-    return [obj for obj in action.associatedObjects() if isinstance(obj, qt.QWidget)]
+    # Not isinstance(obj, qt.QWidget): PythonQt wrappers do not inherit from the wrappers of their C++ base classes,
+    # so that is False for a QMenu, a QToolBar or the main window, and the list would always be empty
+    return [obj for obj in action.associatedObjects() if obj.isWidgetType()]
 
 
 def onStartupCompleted(startTime=None):
@@ -130,7 +132,7 @@ def fitWindowToScreen(mainWindow, fraction=FIRST_RUN_WINDOW_FRACTION):
         return False
     screen = mainWindow.screen() if callable(getattr(mainWindow, "screen", None)) else None
     if screen is None:
-        screen = slicer.app.primaryScreen()
+        screen = slicer.app.primaryScreen  # a property in PythonQt, not a method
     if screen is None:
         return False
     available = screen.availableGeometry
@@ -602,7 +604,7 @@ class Shell:
         if self.panelHeader is not None:
             self.panelHeader.dispose()
             self.panelHeader = None
-        dock.setFeatures(self._classicDockFeatures)
+        dock.setProperty("features", self._classicDockFeatures)
         self._setModulePanelConstrained(False)
 
         mainWindow.restoreState(self._classicState)
@@ -675,7 +677,8 @@ class Shell:
         self._classicToolBarNames = {toolBar.objectName for toolBar in self._mainWindowToolBars() if toolBar.objectName}
         self._unsavedToolBars = []
         self._classicTitleBar = dock.titleBarWidget()
-        self._classicDockFeatures = dock.features
+        # Through the property() / setProperty() pair: with Qt 6, dock.features is an opaque object that setFeatures() rejects
+        self._classicDockFeatures = dock.property("features")
         sequences = getattr(slicer.modules, "sequences", None)
         self._classicVisibility = {
             "menuBar": not mainWindow.menuBar().isHidden(),

@@ -43,6 +43,17 @@ if hasStudio:
     studioShell = shell.instance()
     check(studioShell is not None, "the Studio shell is not active")
     check(mainWindow.findChild("QWidget", "StudioTopBar") is not None, "the Studio top bar is missing")
+    # The shortcuts of the hidden menus keep working: their actions are attached to the main window (this needs
+    # QAction.associatedObjects() with Qt 6)
+    closeSceneAction = mainWindow.findChild("QAction", "FileCloseSceneAction")
+    check(closeSceneAction is not None and mainWindow in shell.associatedWidgets(closeSceneAction),
+          "the shortcuts of the hidden menus are not attached to the main window")
+    # Classic and back: the Classic interface is the way out of a Studio problem
+    studioShell.classic(persist=False)
+    check(not studioShell.isActive() and not mainWindow.menuBar().isHidden(), "could not switch to the Classic interface")
+    slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)  # the top bar of the Studio interface
+    studioShell.studio()
+    check(studioShell.isActive(), "could not switch back to the Studio interface")
 
 # A small volume with a "lesion", traced into a segmentation.
 volumeArray = np.zeros((48, 64, 64), dtype=np.int16)

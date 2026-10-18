@@ -42,6 +42,11 @@ def _importer():
     return importer
 
 
+def _eventPosition(event):
+    """Position of a mouse event in its widget: ``position()`` in Qt 6 (``pos()`` is deprecated there), ``pos()`` in Qt 5."""
+    return event.position().toPoint() if hasattr(event, "position") else event.pos()
+
+
 def _isAlive(qobject):
     """False if the C++ object was deleted."""
     try:
@@ -737,7 +742,7 @@ class LibraryCanvas(qt.QObject):
         if obj == self.dropZone and event.type() in (qt.QEvent.MouseButtonPress, qt.QEvent.MouseButtonRelease):
             if event.button() != qt.Qt.LeftButton:
                 return False
-            if event.type() == qt.QEvent.MouseButtonRelease and self.dropZone.rect.contains(event.pos()):
+            if event.type() == qt.QEvent.MouseButtonRelease and self.dropZone.rect.contains(_eventPosition(event)):
                 openFiles()
             return True
         return False

@@ -480,7 +480,7 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertFalse(resized)
             return
         self.assertTrue(resized)
-        screen = mainWindow.screen() if callable(getattr(mainWindow, "screen", None)) else slicer.app.primaryScreen()
+        screen = mainWindow.screen() if callable(getattr(mainWindow, "screen", None)) else slicer.app.primaryScreen
         available = screen.availableGeometry() if callable(screen.availableGeometry) else screen.availableGeometry
         self.assertGreaterEqual(mainWindow.width, int(available.width() * 0.85))
         self.assertGreaterEqual(mainWindow.height, int(available.height() * 0.85))

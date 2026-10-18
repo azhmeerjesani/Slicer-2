@@ -104,7 +104,12 @@ class AbstractScriptedSegmentEditorEffect:
         if not imageData:
             return
         import math
-        spinbox.unitAwareProperties = spinbox.unitAwareProperties & ~(slicer.qMRMLSpinBox.MinimumValue | slicer.qMRMLSpinBox.MaximumValue | slicer.qMRMLSpinBox.Precision)
+        try:
+            spinbox.unitAwareProperties = spinbox.unitAwareProperties & ~(slicer.qMRMLSpinBox.MinimumValue | slicer.qMRMLSpinBox.MaximumValue | slicer.qMRMLSpinBox.Precision)
+        except TypeError:
+            # Qt 6: the flags property is an opaque object that supports no operator. A spin box has Prefix, Suffix,
+            # Precision, MinimumValue and MaximumValue on by default (qMRMLSpinBox.cxx): switch off the last three
+            spinbox.unitAwareProperties = slicer.qMRMLSpinBox.Prefix | slicer.qMRMLSpinBox.Suffix
         stepSize = 10 ** (math.floor(math.log10(min(imageData.GetSpacing()) / 10.0)))
         spinbox.minimum = stepSize
         spinbox.maximum = 10 ** (math.ceil(math.log10(max(imageData.GetSpacing()) * 100.0)))
