@@ -180,7 +180,9 @@ class TopBar:
         self.searchIcon = qt.QLabel()
         self.searchIcon.setObjectName("StudioSearchIcon")
         pillLayout.addWidget(self.searchIcon)
-        self.searchPlaceholder = qt.QLabel(_("Search tools and actions"))
+        # The pill opens the module finder (ranked by StudioLib/finder.py): say "Search modules" until the
+        # command palette (StudioLib/palette.py, W3-06) also finds tools and actions
+        self.searchPlaceholder = qt.QLabel(_("Search modules"))
         self.searchPlaceholder.setObjectName("StudioSearchPlaceholder")
         pillLayout.addWidget(self.searchPlaceholder, 1)
         searchKey = ui.kbd(_("Ctrl K"))
