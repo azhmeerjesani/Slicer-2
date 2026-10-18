@@ -658,9 +658,14 @@ def saveLesionDialog(shell=None, path=None):
         path = qt.QFileDialog.getSaveFileName(slicer.util.mainWindow(), _("Save lesion"), defaultPath, NIFTI_FILTER)
         if not path:
             return None
+    # The file keeps the grid of the lesion (for example 91x109x91 for a mask on the FSL MNI152 2 mm grid, as
+    # connectomes expect), not the grid of the scan or template it is drawn on. The scan's grid is only used for
+    # a segmentation without a reference geometry.
+    referenceGeometry = segmentationNode.GetSegmentation().GetConversionParameter(
+        slicer.vtkSegmentationConverter.GetReferenceImageGeometryParameterName())
     try:
         with slicer.util.WaitCursor():
-            path = saveLesion(path, segmentationNode, sourceVolumeNode)
+            path = saveLesion(path, segmentationNode, None if referenceGeometry else sourceVolumeNode)
     except Exception as e:
         logging.error(f"Studio: cannot save the lesion:\n{traceback.format_exc()}")
         slicer.util.errorDisplay(_("The lesion could not be saved."), detailedText=str(e))
