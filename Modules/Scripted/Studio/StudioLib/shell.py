@@ -133,7 +133,10 @@ def fitWindowToScreen(mainWindow, fraction=FIRST_RUN_WINDOW_FRACTION):
         screen = qt.QGuiApplication.primaryScreen()
     if screen is None:
         return False
-    available = screen.availableGeometry()
+    available = screen.availableGeometry
+    if callable(available):
+        # A method when the property is not wrapped as an attribute
+        available = available()
     width = int(available.width() * fraction)
     height = int(available.height() * fraction)
     if mainWindow.width >= width and mainWindow.height >= height:
@@ -1244,19 +1247,25 @@ class Shell:
         modulePanel = self._modulePanel()
         if modulePanel is None:
             return
+        # The dock widget contents (module panel, footer, Data Probe) report the module widget width as
+        # their minimum size too (their size policy does not shrink below the size hint)
+        contents = self._panelDock().widget()
         scrollArea = modulePanel.findChild("QScrollArea", "ScrollArea")
         if constrained:
             if self._classicModulePanelState is None:
-                self._classicModulePanelState = (modulePanel.minimumWidth, scrollArea.horizontalScrollBarPolicy if scrollArea is not None else None)
+                self._classicModulePanelState = (modulePanel.minimumWidth, contents.minimumWidth,
+                                                 scrollArea.horizontalScrollBarPolicy if scrollArea is not None else None)
             modulePanel.setMinimumWidth(_MODULE_PANEL_MINIMUM_WIDTH)
+            contents.setMinimumWidth(_MODULE_PANEL_MINIMUM_WIDTH)
             if scrollArea is not None:
                 scrollArea.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAsNeeded)
             self._fitTextBrowsers()
             return
         self._unfitTextBrowsers()
         if self._classicModulePanelState is not None:
-            minimumWidth, policy = self._classicModulePanelState
-            modulePanel.setMinimumWidth(minimumWidth)
+            modulePanelMinimumWidth, contentsMinimumWidth, policy = self._classicModulePanelState
+            modulePanel.setMinimumWidth(modulePanelMinimumWidth)
+            contents.setMinimumWidth(contentsMinimumWidth)
             if scrollArea is not None and policy is not None:
                 scrollArea.setHorizontalScrollBarPolicy(policy)
             self._classicModulePanelState = None

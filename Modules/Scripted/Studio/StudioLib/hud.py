@@ -11,6 +11,8 @@ TOAST_BOTTOM_MARGIN = 28
 FADE_DURATION_MS = 250
 PILL_HEIGHT = 28
 PILL_MARGIN = 12
+#: Below the controller bar of the slice views (about 30 px), so that its controls stay reachable
+PILL_TOP_MARGIN = 40
 
 
 class Toast:
@@ -136,10 +138,11 @@ class CornerPill:
             self.button.raise_()
 
     def updatePosition(self):
-        self.button.move(self.parentWidget.width - self.button.width - PILL_MARGIN, PILL_MARGIN)
+        self.button.move(self.parentWidget.width - self.button.width - PILL_MARGIN, PILL_TOP_MARGIN)
 
     def dispose(self):
         ui.removePaletteListener(self.refreshIcon)
         ui.bindStyleSheet(self.button, None)
         self.button.hide()
+        self.button.setObjectName("")
         self.button.deleteLater()
