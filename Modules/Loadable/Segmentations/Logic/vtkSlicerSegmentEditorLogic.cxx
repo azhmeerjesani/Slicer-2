@@ -139,7 +139,11 @@ bool UpdateImageThreshold(vtkImageThreshold* threshold, vtkOrientedImageData* in
 
 //----------------------------------------------------------------------------
 template <class LabelmapScalarType, class ModifierScalarType>
-bool IsLabelToEraseUnderModifierGeneric2(vtkImageData* labelmap, vtkImageData* modifier, int extent[6], const std::vector<double>& protectedLabelValues)
+bool IsLabelToEraseUnderModifierGeneric2(vtkImageData* labelmap,
+                                         vtkImageData* modifier,
+                                         int extent[6],
+                                         const std::vector<double>& protectedLabelValues,
+                                         bool& protectedLabelInExtent)
 {
   LabelmapScalarType* labelmapPtr = static_cast<LabelmapScalarType*>(labelmap->GetScalarPointerForExtent(extent));
   ModifierScalarType* modifierPtr = static_cast<ModifierScalarType*>(modifier->GetScalarPointerForExtent(extent));
@@ -162,11 +166,21 @@ bool IsLabelToEraseUnderModifierGeneric2(vtkImageData* labelmap, vtkImageData* m
     {
       for (int x = extent[0]; x <= extent[1]; ++x)
       {
-        // Voxels where the modifier is positive are erased (see the inverter in ModifySegmentByLabelmap)
-        if (*modifierPtr > 0 && *labelmapPtr != 0
-            && std::find(protectedLabelValues.begin(), protectedLabelValues.end(), static_cast<double>(*labelmapPtr)) == protectedLabelValues.end())
+        // Voxels where the modifier is positive are erased (see the inverter in ModifySegmentByLabelmap).
+        // Outside the modifier, labels are only looked up until the first protected label is found.
+        if (*labelmapPtr != 0 && (*modifierPtr > 0 || !protectedLabelInExtent))
         {
-          return true;
+          if (std::find(protectedLabelValues.begin(), protectedLabelValues.end(), static_cast<double>(*labelmapPtr)) == protectedLabelValues.end())
+          {
+            if (*modifierPtr > 0)
+            {
+              return true;
+            }
+          }
+          else
+          {
+            protectedLabelInExtent = true;
+          }
         }
         ++labelmapPtr;
         ++modifierPtr;
@@ -182,12 +196,16 @@ bool IsLabelToEraseUnderModifierGeneric2(vtkImageData* labelmap, vtkImageData* m
 
 //----------------------------------------------------------------------------
 template <class LabelmapScalarType>
-bool IsLabelToEraseUnderModifierGeneric(vtkImageData* labelmap, vtkImageData* modifier, int extent[6], const std::vector<double>& protectedLabelValues)
+bool IsLabelToEraseUnderModifierGeneric(vtkImageData* labelmap,
+                                        vtkImageData* modifier,
+                                        int extent[6],
+                                        const std::vector<double>& protectedLabelValues,
+                                        bool& protectedLabelInExtent)
 {
   bool found = true;
   switch (modifier->GetScalarType())
   {
-    vtkTemplateMacro(found = (IsLabelToEraseUnderModifierGeneric2<LabelmapScalarType, VTK_TT>(labelmap, modifier, extent, protectedLabelValues)));
+    vtkTemplateMacro(found = (IsLabelToEraseUnderModifierGeneric2<LabelmapScalarType, VTK_TT>(labelmap, modifier, extent, protectedLabelValues, protectedLabelInExtent)));
     default: break;
   }
   return found;
@@ -196,9 +214,16 @@ bool IsLabelToEraseUnderModifierGeneric(vtkImageData* labelmap, vtkImageData* mo
 //----------------------------------------------------------------------------
 /// Returns true if the labelmap contains a non-zero label that is not in protectedLabelValues
 /// in a voxel within the extent where the modifier is positive (that is, where the modifier would erase it).
+/// If false is returned then protectedLabelInExtent tells if any voxel of the labelmap within the extent
+/// (under the modifier or not) has a label value in protectedLabelValues.
 /// The labelmap and the modifier must have the same geometry.
-bool IsLabelToEraseUnderModifier(vtkOrientedImageData* labelmap, vtkOrientedImageData* modifier, const int extent[6], const std::vector<double>& protectedLabelValues)
+bool IsLabelToEraseUnderModifier(vtkOrientedImageData* labelmap,
+                                 vtkOrientedImageData* modifier,
+                                 const int extent[6],
+                                 const std::vector<double>& protectedLabelValues,
+                                 bool& protectedLabelInExtent)
 {
+  protectedLabelInExtent = false;
   if (!labelmap->GetPointData()->GetScalars() || !modifier->GetPointData()->GetScalars() //
       || labelmap->GetNumberOfScalarComponents() != 1 || modifier->GetNumberOfScalarComponents() != 1)
   {
@@ -213,7 +238,7 @@ bool IsLabelToEraseUnderModifier(vtkOrientedImageData* labelmap, vtkOrientedImag
   bool found = true;
   switch (labelmap->GetScalarType())
   {
-    vtkTemplateMacro(found = IsLabelToEraseUnderModifierGeneric<VTK_TT>(labelmap, modifier, checkedExtent, protectedLabelValues));
+    vtkTemplateMacro(found = IsLabelToEraseUnderModifierGeneric<VTK_TT>(labelmap, modifier, checkedExtent, protectedLabelValues, protectedLabelInExtent));
     default: break;
   }
   return found;
@@ -2355,6 +2380,10 @@ void vtkSlicerSegmentEditorLogic::ModifySegmentByLabelmap(vtkMRMLSegmentationNod
       // Skip the layer if the modifier does not overlap with any segment that would be erased in it.
       // This avoids reallocating the labelmap and re-converting other representations (such as the closed surface)
       // of segments that are not changed.
+      // The layer is not skipped if a segment that must not be overwritten (dontOverwriteIDs) is in the modified region
+      // (inverterExtent), because then the merge below moves eraseSegmentID to a separate layer even if no voxel is erased
+      // (see vtkSegmentationModifier::SeparateModifiedSegmentFromSharedLabelmap). The layers determine the result of
+      // later modifications, so they must stay the same as without skipping.
       if (currentLabelmap && vtkOrientedImageDataResample::DoGeometriesMatch(currentLabelmap, modifierLabelmap))
       {
         std::vector<double> protectedLabelValues;
@@ -2362,7 +2391,8 @@ void vtkSlicerSegmentEditorLogic::ModifySegmentByLabelmap(vtkMRMLSegmentationNod
         {
           protectedLabelValues.push_back(segmentationNode->GetSegmentation()->GetSegment(dontOverwriteID)->GetLabelValue());
         }
-        if (!IsLabelToEraseUnderModifier(currentLabelmap, modifierLabelmap, inverterExtent, protectedLabelValues))
+        bool protectedLabelInExtent = false;
+        if (!IsLabelToEraseUnderModifier(currentLabelmap, modifierLabelmap, inverterExtent, protectedLabelValues, protectedLabelInExtent) && !protectedLabelInExtent)
         {
           // Erasing would have shrunk the labelmap to its effective extent. Do it here, too (only changes
           // labelmaps that are not shrunk yet, such as ones loaded from file), as large labelmap extents

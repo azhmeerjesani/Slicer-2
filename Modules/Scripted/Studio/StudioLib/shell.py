@@ -518,7 +518,10 @@ class Shell:
         mainWindow.restoreState(self._classicState)
         for toolBar, visible in self._unsavedToolBars:
             try:
-                if visible and toolBar.isHidden() and toolBar.objectName not in self._classicToolBarNames:
+                # Skip toolbars that their owner removed from the main window (removeToolBar() hides them in
+                # Classic) or reparented: showing them would draw a stray widget over the main window
+                if (visible and toolBar.isHidden() and self._isMainWindowToolBar(toolBar)
+                        and toolBar.objectName not in self._classicToolBarNames):
                     toolBar.show()
             except Exception:
                 # Deleted by its owner
@@ -691,11 +694,14 @@ class Shell:
         savedState = settings.value("MainWindow/windowState")
         return savedState.isEmpty() if hasattr(savedState, "isEmpty") else not savedState
 
+    def _isMainWindowToolBar(self, toolBar):
+        """True if the toolbar is in a toolbar area of the main window (floating or not)."""
+        mainWindow = self.mainWindow
+        return toolBar.parentWidget() == mainWindow and mainWindow.toolBarArea(toolBar) != qt.Qt.NoToolBarArea
+
     def _mainWindowToolBars(self):
         """Toolbars of the main window (in its toolbar areas, floating or not)."""
-        mainWindow = self.mainWindow
-        return [toolBar for toolBar in mainWindow.findChildren("QToolBar")
-                if toolBar.parentWidget() == mainWindow and mainWindow.toolBarArea(toolBar) != qt.Qt.NoToolBarArea]
+        return [toolBar for toolBar in self.mainWindow.findChildren("QToolBar") if self._isMainWindowToolBar(toolBar)]
 
     def _hideNewToolBars(self):
         """Hide the toolbars added to the main window since Studio was applied (extensions)."""

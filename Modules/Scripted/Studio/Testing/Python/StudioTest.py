@@ -539,18 +539,30 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         hiddenByOwner.setObjectName("StudioTestHiddenToolBar")
         hiddenByOwner.hide()
         mainWindow.addToolBar(hiddenByOwner)
-        toolBars = (added, constructed, hiddenByOwner)
+        removedByOwner = mainWindow.addToolBar("Studio test toolbar 4")
+        removedByOwner.setObjectName("StudioTestRemovedToolBar")
+        reparentedByOwner = mainWindow.addToolBar("Studio test toolbar 5")
+        reparentedByOwner.setObjectName("StudioTestReparentedToolBar")
+        container = qt.QWidget()
+        toolBars = (added, constructed, hiddenByOwner, removedByOwner, reparentedByOwner)
         try:
             self._pump()
             for toolBar in toolBars:
                 self.assertTrue(toolBar.isHidden(), toolBar.objectName)
+            # Owners take their toolbars out of the main window while Studio is shown
+            mainWindow.removeToolBar(removedByOwner)
+            reparentedByOwner.setParent(container)
             studioShell.classic(persist=False)
             self._pump()
             self.assertTrue(added.isVisible())
             self.assertTrue(constructed.isVisible())
             self.assertTrue(hiddenByOwner.isHidden())
+            # Not shown again outside the toolbar areas
+            self.assertTrue(removedByOwner.isHidden())
+            self.assertTrue(reparentedByOwner.isHidden())
         finally:
             for toolBar in toolBars:
                 mainWindow.removeToolBar(toolBar)
                 toolBar.deleteLater()
+            container.deleteLater()
             self._pump()

@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Slicer Studio</title>
+<noscript>
+<meta http-equiv="refresh" content="0; url=vnc.html?autoconnect=1&amp;resize=remote&amp;reconnect=1&amp;quality=9">
+</noscript>
+<script>
+  // Open the noVNC client: connect at once, resize the remote screen to the
+  // browser window, reconnect after interruptions and use the best image
+  // quality (localhost has plenty of bandwidth). Parameters given in the
+  // address of this page are kept and take precedence.
+  var params = new URLSearchParams(window.location.search);
+  var defaults = { autoconnect: "1", resize: "remote", reconnect: "1", quality: "9" };
+  for (var name in defaults) {
+    if (!params.has(name)) {
+      params.set(name, defaults[name]);
+    }
+  }
+  window.location.replace("vnc.html?" + params.toString() + window.location.hash);
+</script>
+</head>
+<body>
+<p><a href="vnc.html?autoconnect=1&amp;resize=remote&amp;reconnect=1&amp;quality=9">Open Slicer Studio</a></p>
+</body>
+</html>

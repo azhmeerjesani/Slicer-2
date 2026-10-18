@@ -25,6 +25,10 @@ GPU: Graphics must support minimum OpenGL 3.2. Integrated graphics card is suffi
 
 ## Installing 3D Slicer
 
+:::{note}
+**Slicer Studio**, the redesigned edition of 3D Slicer built from this source tree, is not available on download.slicer.org. To install it as a macOS disk image or a Linux package, or to run it in a web browser, see [Install Slicer Studio](install_studio.md). It can be installed next to the official 3D Slicer described below.
+:::
+
 To download Slicer, click [here](https://download.slicer.org/).
 
 ![](https://github.com/Slicer/Slicer/releases/download/docs-resources/getting_started_download.png)
