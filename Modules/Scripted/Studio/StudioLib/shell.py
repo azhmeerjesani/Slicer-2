@@ -52,12 +52,20 @@ PANEL_HEADER_BUTTON_SIZE = 26
 
 #: Shows or hides the inspector. Not Tab: Tab and Shift+Tab move the keyboard focus, also out of the views.
 INSPECTOR_SHORTCUT = "Ctrl+\\"
+#: Second key of the inspector, for keyboard layouts where Ctrl+\ cannot be typed (German, French: AltGr)
+INSPECTOR_ALTERNATE_SHORTCUT = "F6"
 FOCUS_MODE_SHORTCUTS = ("F11", "Ctrl+6")
 
 #: Explicit minimum width of the module panel in Studio. The minimum size hint of the module panel is the
 #: width of the module widget, so a wide tool (for example the Paint options) would widen the inspector and
 #: move the views under the cursor: the inspector keeps its width and wide contents scroll instead.
 _MODULE_PANEL_MINIMUM_WIDTH = 240
+#: Widest inspector that a workspace module may ask for (its layout minimum). Wider contents scroll.
+MAX_WORKSPACE_PANEL_WIDTH = 600
+#: Widest layout minimum seen so far for each workspace module, kept across sessions so that the inspector
+#: does not widen again when a tool is chosen: "Studio/WorkspacePanelWidths/<module name>" holds
+#: "<width>@<layout signature>" (see ``Shell._layoutSignature()``)
+_WORKSPACE_PANEL_WIDTHS_GROUP = "Studio/WorkspacePanelWidths"
 
 #: Part of the available screen area given to the main window when Slicer did not restore its geometry
 FIRST_RUN_WINDOW_FRACTION = 0.9
@@ -415,6 +423,10 @@ class Shell:
         self._panelWidthTimer = None
         self._panelUpdateTimer = None
         self._pendingPanelShrink = False
+        #: Widest inspector width needed by each workspace module ({module name: px}), see _workspacePanelWidth()
+        self._workspacePanelWidths = {}
+        #: Contents of the module panel scroll area, watched for layout changes (a tool was chosen)
+        self._watchedPanelContents = None
         #: True while the inspector is hidden by the user (shortcut, Ctrl+5, menu), not by a workspace page
         self._inspectorHiddenByUser = False
         #: (toggle view action, slot) of the toolbars that Studio hides
@@ -723,6 +735,7 @@ class Shell:
                 self._addShortcut(keySequence, self.toggleFocusMode, _("Focus mode"))
         # Not Tab: Tab and Shift+Tab move the keyboard focus (out of the views too)
         self._addShortcut(INSPECTOR_SHORTCUT, self.toggleInspector, _("Show or hide the inspector"))
+        self._addShortcut(INSPECTOR_ALTERNATE_SHORTCUT, self.toggleInspector, _("Show or hide the inspector"))
 
         # 4. Inspector on the right with the Studio panel header and a footer slot
         if dock.floating:
@@ -736,7 +749,11 @@ class Shell:
         dock.setTitleBarWidget(self.panelHeader.widget)
         self._insertFooterSlot()
         self._setModulePanelConstrained(True)
-        mainWindow.resizeDocks([dock], [self.panelWidth], qt.Qt.Horizontal)
+        # The widths that the workspace modules needed in earlier sessions: the first workspace has the width
+        # of all workspaces at once
+        for ws in workspaces.WORKSPACES:
+            self._workspacePanelWidth(ws.moduleName, 0)
+        mainWindow.resizeDocks([dock], [max([self.panelWidth, *self._workspacePanelWidths.values()])], qt.Qt.Horizontal)
 
         # 5. Top bar
         self.hoverTracker = layouts.HoveredSliceViewTracker()
@@ -961,7 +978,8 @@ class Shell:
     def _addTopBarShortcuts(self):
         for index, ws in enumerate(workspaces.WORKSPACES):
             self._addShortcut(f"Ctrl+Alt+{index + 1}", lambda key=ws.key: self.switchTo(key), _("{workspace} workspace").format(workspace=ws.title))
-        self._addShortcut("Ctrl+K", self.openPalette, _("Search tools and actions"))
+        # "Search modules" until the command palette (StudioLib/palette.py, W3-06) also finds tools and actions
+        self._addShortcut("Ctrl+K", self.openPalette, _("Search modules"))
         self._addShortcut("Ctrl+/", self.toggleCheatSheet, _("Keyboard shortcuts"))
         for key, title, shortcut, iconName, layoutId in layouts.PICKER_ENTRIES:
             self._addShortcut(shortcut, lambda key=key: self.setLayoutFromPicker(key), _("{layout} layout").format(layout=title))
@@ -1177,7 +1195,7 @@ class Shell:
             cheatsheet.toggle(self)
             return
         self.toast(_("Ctrl+K search · Ctrl+Alt+1/2/3 workspaces · Alt+1..4 layouts · {inspector} panel · F11 focus mode · Ctrl+Alt+0 Classic").format(
-            inspector=self.inspectorShortcutText()), 5000)
+            inspector=self.inspectorShortcutText(alternate=True)), 5000)
 
     #
     # Inspector
@@ -1217,27 +1235,97 @@ class Shell:
         self._updatePanelWidth(shrink)
 
     def _updatePanelWidth(self, shrink=False):
-        """Size the inspector to the stored width (SPEC 2.5).
+        """Size the inspector to the stored width, or to the width that its module needs (SPEC 2.5).
 
-        In the workspaces the inspector keeps the stored width whatever tool is shown: the module panel
-        has an explicit minimum width and wider contents scroll horizontally (``_setModulePanelConstrained()``),
-        so that the views do not move under the cursor. A transient module may make the inspector as
-        wide as its widget needs; with ``shrink`` (entering a workspace, setting the width, showing the
-        inspector again) it gets back to the stored width.
+        The module panel has an explicit minimum width and wider contents scroll horizontally
+        (``_setModulePanelConstrained()``): the inspector width does not follow every change of the
+        module widget. Instead:
+
+        - The workspaces share one width: the stored width, or the widest layout minimum that a workspace
+          module needed so far (``_workspacePanelWidth()``, kept across sessions), and never narrower. Once
+          every tool was used, choosing a tool or a workspace does not move the views under the cursor,
+          and the options are not clipped. The user cannot drag the inspector narrower than that either.
+        - A transient module may make the inspector as wide as its widget needs.
+
+        With ``shrink`` (entering a workspace, setting the width, showing the inspector again) the
+        inspector gets back to that width; otherwise it only widens.
         """
         if not self._active:
             return
         dock = self._panelDock()
         if dock.isHidden():
             return
+        contents = dock.widget()
         target = self.panelWidth
+        needed = self._modulePanelNeededWidth()
+        contentsMinimumWidth = _MODULE_PANEL_MINIMUM_WIDTH
         if self.currentWorkspace() is None:
-            modulePanel = self._modulePanel()
-            # The minimum size hint of the module panel is the width of the module widget (qSlicerModulePanel)
-            chrome = max(0, dock.width - modulePanel.width)
-            target = max(target, modulePanel.minimumSizeHint.width() + chrome)
+            target = max(target, needed)
+        else:
+            self._workspacePanelWidth(self.currentModuleName(), min(needed, MAX_WORKSPACE_PANEL_WIDTH))
+            # The workspaces share one width, so that switching between them does not resize (and render
+            # again) the views
+            held = max(self._workspacePanelWidths.values(), default=0)
+            target = max(target, held)
+            # The dock widget is as wide as its contents plus its margins
+            contentsMinimumWidth = max(contentsMinimumWidth, held - max(0, dock.width - contents.width))
+        if contents.minimumWidth != contentsMinimumWidth:
+            contents.setMinimumWidth(contentsMinimumWidth)
         if dock.width < target or (shrink and dock.width != target):
             self.mainWindow.resizeDocks([dock], [target], qt.Qt.Horizontal)
+
+    def _modulePanelNeededWidth(self):
+        """Width of the inspector at which the module widget is not clipped (its layout minimum).
+
+        Room for the vertical scroll bar is always kept, so that a module widget getting taller than the
+        inspector does not widen it.
+        """
+        dock = self._panelDock()
+        modulePanel = self._modulePanel()
+        scrollArea = modulePanel.findChild("QScrollArea", "ScrollArea") if modulePanel is not None else None
+        if scrollArea is None or scrollArea.widget() is None:
+            # The minimum size hint of the module panel is the width of the module widget (qSlicerModulePanel)
+            return modulePanel.minimumSizeHint.width() + max(0, dock.width - modulePanel.width) if modulePanel is not None else 0
+        chrome = max(0, dock.width - scrollArea.width) + 2 * scrollArea.frameWidth + scrollArea.verticalScrollBar().sizeHint.width()
+        return scrollArea.widget().minimumSizeHint.width() + chrome
+
+    def _workspacePanelWidth(self, moduleName, needed):
+        """Widest inspector width that the workspace module ``moduleName`` needed so far, at least ``needed``.
+
+        Kept in ``Studio/WorkspacePanelWidths/<module name>`` with a signature of what the layout depends on
+        (``_layoutSignature()``): another Slicer build or application font measures again.
+        """
+        if not moduleName:
+            return needed
+        held = self._workspacePanelWidths.get(moduleName)
+        key = f"{_WORKSPACE_PANEL_WIDTHS_GROUP}/{moduleName}"
+        if held is None:
+            held = 0
+            stored = str(qt.QSettings().value(key, "") or "")
+            width, _separator, signature = stored.partition("@")
+            if signature == self._layoutSignature():
+                try:
+                    held = min(max(int(width), 0), MAX_WORKSPACE_PANEL_WIDTH)
+                except ValueError:
+                    held = 0
+        if needed > held:
+            held = needed
+            qt.QSettings().setValue(key, f"{held}@{self._layoutSignature()}")
+        self._workspacePanelWidths[moduleName] = held
+        return held
+
+    @staticmethod
+    def _layoutSignature():
+        """What the layout minimum of a module widget depends on: the Slicer build and the application font."""
+        font = slicer.app.font()
+        return f"{slicer.app.applicationVersion}-{slicer.app.revision}-{font.family()}-{font.pointSizeF()}-{font.pixelSize()}"
+
+    def resetWorkspacePanelWidths(self):
+        """Forget the widths needed by the workspace modules (they are measured again as tools are used)."""
+        self._workspacePanelWidths = {}
+        qt.QSettings().remove(_WORKSPACE_PANEL_WIDTHS_GROUP)
+        if self._active:
+            self._updatePanelWidth(shrink=True)
 
     def _setModulePanelConstrained(self, constrained):
         """Keep the inspector width independent of the width of the module widget (Studio), or restore Classic.
@@ -1262,6 +1350,10 @@ class Shell:
             contents.setMinimumWidth(_MODULE_PANEL_MINIMUM_WIDTH)
             if scrollArea is not None:
                 scrollArea.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAsNeeded)
+                # A tool chosen in the module widget changes its layout minimum: see _updatePanelWidth()
+                if self._eventFilter is not None and scrollArea.widget() is not None and self._watchedPanelContents is None:
+                    self._watchedPanelContents = scrollArea.widget()
+                    self._watchedPanelContents.installEventFilter(self._eventFilter)
             self._fitTextBrowsers()
             return
         self._unfitTextBrowsers()
@@ -1317,7 +1409,8 @@ class Shell:
         if width != self.panelWidth:
             qt.QSettings().setValue("Studio/PanelWidth", width)
         if width != dock.width:
-            # Dragged out of the 300-480 px range: snap back into it (but not narrower than the module needs)
+            # Dragged out of the 300-480 px range: snap back into it (but not narrower than a workspace
+            # module needs, see _updatePanelWidth())
             self._updatePanelWidth(shrink=True)
 
     def setInspectorVisible(self, visible):
@@ -1361,12 +1454,19 @@ class Shell:
         self._inspectorHiddenByUser = True
         if not _panelHiddenHintShown:
             _panelHiddenHintShown = True
-            self.toast(_("Panel hidden · {key} to show").format(key=self.inspectorShortcutText()), 3000)
+            self.toast(_("Panel hidden · {key} to show").format(key=self.inspectorShortcutText(alternate=True)), 3000)
 
     @staticmethod
-    def inspectorShortcutText():
-        r"""The key that shows or hides the inspector, as displayed on this platform (for example "Ctrl+\")."""
-        return qt.QKeySequence(INSPECTOR_SHORTCUT).toString(qt.QKeySequence.NativeText)
+    def inspectorShortcutText(alternate=False):
+        r"""The key that shows or hides the inspector, as displayed on this platform (for example "Ctrl+\").
+
+        With ``alternate``, both keys ("Ctrl+\ or F6"): not every keyboard layout can type Ctrl+\.
+        """
+        text = qt.QKeySequence(INSPECTOR_SHORTCUT).toString(qt.QKeySequence.NativeText)
+        if not alternate:
+            return text
+        return _("{key} or {alternateKey}").format(
+            key=text, alternateKey=qt.QKeySequence(INSPECTOR_ALTERNATE_SHORTCUT).toString(qt.QKeySequence.NativeText))
 
     def setInspectorFooter(self, widget=None):
         """Show ``widget`` in the sticky footer below the module panel (None: no footer)."""
@@ -1561,6 +1661,16 @@ class Shell:
             return True
         return False
 
+    @staticmethod
+    def _hasKeyModifiers(event):
+        """True if Shift, Ctrl, Alt or Meta is held (the keypad modifier does not count)."""
+        mask = qt.Qt.ShiftModifier | qt.Qt.ControlModifier | qt.Qt.AltModifier | qt.Qt.MetaModifier
+        try:
+            # Explicit integers: a QFlags value may not compare equal to an enum value (Qt 6)
+            return bool(int(event.modifiers()) & int(mask))
+        except (TypeError, ValueError):
+            return bool(event.modifiers() & mask)
+
     def _onEscapeKey(self, event):
         """Esc reached the main window (the focus widget did not use it). Return True to consume it.
 
@@ -1575,7 +1685,7 @@ class Shell:
         elif self._escapeHandled:
             self._escapeHandled = False
             return True
-        if event.modifiers() not in (qt.Qt.NoModifier, qt.Qt.KeypadModifier):
+        if self._hasKeyModifiers(event):
             return False
         if slicer.app.activePopupWidget() is not None or slicer.app.activeModalWidget() is not None:
             return False
@@ -1617,6 +1727,9 @@ class Shell:
             # loop runs again.
             if self._toolBarScanTimer is not None:
                 self._toolBarScanTimer.start()
+        elif eventType == qt.QEvent.LayoutRequest and obj == self._watchedPanelContents:
+            # The module widget changed (a tool was chosen): the inspector may need to widen once
+            self._schedulePanelWidthUpdate(shrink=False)
         elif eventType == qt.QEvent.Show and obj == self._panelDock():
             # Shown again (Ctrl+\, Ctrl+5, focus mode): back to the width of the workspaces
             self._schedulePanelWidthUpdate(shrink=True)
@@ -1627,6 +1740,13 @@ class Shell:
             return
         for obj in (self.mainWindow, self.mainWindow.centralWidget(), self._panelDock()):
             obj.removeEventFilter(self._eventFilter)
+        if self._watchedPanelContents is not None:
+            try:
+                self._watchedPanelContents.removeEventFilter(self._eventFilter)
+            except Exception:
+                # Deleted with the module panel
+                pass
+            self._watchedPanelContents = None
         self._eventFilter = None
 
     #

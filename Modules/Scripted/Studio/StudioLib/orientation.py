@@ -26,9 +26,14 @@ single-shot timer then compares the direction part of SliceToRAS with the last o
 the views whose letters changed (``scheduleRender()``). Nothing runs on hover. Views added or removed
 by layout changes are followed through ``layoutManager.layoutChanged``.
 
-This module is an optional plug-in of the Studio shell: ``install(shell)`` shows the letters (unless
-the ``Studio/OrientationLetters`` setting is false), ``uninstall(shell)`` removes every actor and
-observer, so that Classic shows nothing new.
+The slice view ruler (View controller > ruler) is drawn at the bottom centre of the view, where the
+bottom letter is: while a ruler is shown, the bottom letter is raised above its ticks (the ruler type is
+part of the key compared by the timer, the ruler geometry is a fraction of the view height so the
+position follows resizes without any update).
+
+This module is an optional plug-in of the Studio shell: ``install(shell)`` shows the letters while the
+shell is active (unless the ``Studio/OrientationLetters`` setting is false), ``uninstall(shell)``
+removes every actor and observer, so that Classic shows nothing new.
 """
 
 import logging
@@ -66,6 +71,11 @@ EDGES = (
     ("top", (0.5, 1.0), (0, -EDGE_MARGIN), "center", "top"),
     ("bottom", (0.5, 0.0), (0, EDGE_MARGIN), "center", "bottom"),
 )
+#: Geometry of the slice view ruler (vtkMRMLRulerDisplayableManager), as fractions of the view height:
+#: distance of the ruler line from the bottom edge and length of its major ticks per ruler type
+#: (thin: base, thick: 2x base). The ruler text is to the right of the ruler, not above its centre.
+_RULER_LINE_MARGIN = 0.015
+_RULER_TICK_LENGTHS = {1: 0.015, 2: 0.03}  # vtkMRMLAbstractViewNode.RulerTypeThin, RulerTypeThick
 
 _controller = None
 
@@ -96,6 +106,22 @@ def directionLetters(direction):
 def _directionKey(sliceToRAS):
     """The two in-plane screen directions of a SliceToRAS matrix (columns 0 and 1), rounded."""
     return tuple(round(sliceToRAS.GetElement(row, column), 6) for column in (0, 1) for row in range(3))
+
+
+def bottomReference(rulerType):
+    """Reference point (normalized viewport coordinates) of the bottom letter for a ruler type.
+
+    Without a ruler the letter is at the bottom edge; with a ruler it is above the ruler's major ticks.
+    """
+    tickLength = _RULER_TICK_LENGTHS.get(rulerType)
+    if tickLength is None:
+        return (0.5, 0.0)
+    return (0.5, _RULER_LINE_MARGIN + tickLength)
+
+
+def _rulerType(sliceNode):
+    """The ruler type of a slice node (0: none)."""
+    return sliceNode.GetRulerType() if hasattr(sliceNode, "GetRulerType") else 0
 
 
 def edgeLetters(sliceToRAS):
@@ -133,6 +159,7 @@ class _ViewLetters:
         self.sliceNode = sliceWidget.mrmlSliceNode()
         self.renderer = self._findRenderer()
         self.directionKey = None
+        self.rulerType = 0
         self.letters = ("", "", "", "")
         self.actors = []
         for edgeName, reference, offset, horizontal, vertical in EDGES:
@@ -189,19 +216,31 @@ class _ViewLetters:
         return (_isAlive(self.sliceView) and sliceWidget is not None and sliceWidget.sliceView() == self.sliceView
                 and sliceWidget.mrmlSliceNode() == self.sliceNode)
 
+    def _updateBottomPosition(self):
+        """Raise the bottom letter above the ruler when the ruler type changed. Return True if it moved."""
+        rulerType = _rulerType(self.sliceNode)
+        if rulerType == self.rulerType:
+            return False
+        self.rulerType = rulerType
+        reference = bottomReference(rulerType)
+        self.actors[3].GetPositionCoordinate().GetReferenceCoordinate().SetValue(reference[0], reference[1])
+        return True
+
     def update(self):
-        """Update the letters if the in-plane directions changed. Return True if a render was requested."""
+        """Update the letters if the in-plane directions or the ruler changed. Return True if a render was requested."""
+        changed = self._updateBottomPosition()
         sliceToRAS = self.sliceNode.GetSliceToRAS()
         key = _directionKey(sliceToRAS)
-        if key == self.directionKey:
+        if key != self.directionKey:
+            self.directionKey = key
+            letters = edgeLetters(sliceToRAS)
+            if letters != self.letters:
+                self.letters = letters
+                for actor, text in zip(self.actors, letters, strict=True):
+                    actor.SetInput(text)
+                changed = True
+        if not changed:
             return False
-        self.directionKey = key
-        letters = edgeLetters(sliceToRAS)
-        if letters == self.letters:
-            return False
-        self.letters = letters
-        for actor, text in zip(self.actors, letters, strict=True):
-            actor.SetInput(text)
         if _isAlive(self.sliceView):
             self.sliceView.scheduleRender()
         return True
@@ -297,10 +336,18 @@ def isEnabled():
     return slicer.util.settingsValue(SETTINGS_KEY, True, converter=slicer.util.toBool)
 
 
+def _isShellActive(shell):
+    """True if the Studio shell is shown (letters are never shown in Classic or without a shell)."""
+    return shell is not None and hasattr(shell, "isActive") and shell.isActive()
+
+
 def setEnabled(shell, enabled):
-    """Store the ``Studio/OrientationLetters`` setting and show or hide the letters in Studio."""
+    """Store the ``Studio/OrientationLetters`` setting and show or hide the letters in Studio.
+
+    In Classic only the setting is stored: the letters appear the next time Studio is shown.
+    """
     qt.QSettings().setValue(SETTINGS_KEY, bool(enabled))
-    if enabled and shell is not None:
+    if enabled and _isShellActive(shell):
         install(shell)
     else:
         uninstall(shell)
@@ -329,10 +376,13 @@ def update():
 
 
 def install(shell):
-    """Show the orientation letters in every slice view (if the ``Studio/OrientationLetters`` setting is on)."""
+    """Show the orientation letters in every slice view while the Studio shell is active.
+
+    Nothing is shown in Classic, without a shell or if the ``Studio/OrientationLetters`` setting is off.
+    """
     global _controller
     uninstall(shell)
-    if not isEnabled():
+    if not _isShellActive(shell) or not isEnabled():
         return
     layoutManager = slicer.app.layoutManager()
     if layoutManager is None:

@@ -11,8 +11,9 @@ In Studio, this plug-in ranks the matches like a person expects (``rankModules()
 2. synonym ("fiducial", "point", "landmark" -> Markups; "window level", "contrast" -> Volumes;
    "paint", "brush", "draw", "lesion" -> Segment Editor; see ``SYNONYMS``);
 3. title or name prefix ("vol" -> Volumes, Volume Rendering...);
-4. prefix of a synonym, for queries of 3 characters or more ("fid" -> Markups, after "Fiducial Registration");
-5. word starts: every word of the query starts a word of the title, in order ("seg ed", "stat");
+4. word starts: every word of the query starts a word of the title, in order ("seg ed", "stat");
+5. prefix of a synonym, for queries of 3 characters or more ("fid" -> Markups, after "Fiducial Registration";
+   after the title word starts, so "fil" lists the Filter modules before Data from "files");
 6. substring of the title or name;
 7. with "Search in full text" checked, the help, acknowledgment and contributors text.
 
@@ -96,8 +97,8 @@ SYNONYMS = {
 RANK_EXACT = 0
 RANK_SYNONYM = 1
 RANK_PREFIX = 2
-RANK_SYNONYM_PREFIX = 3
-RANK_WORD_START = 4
+RANK_WORD_START = 3
+RANK_SYNONYM_PREFIX = 4
 RANK_SUBSTRING = 5
 RANK_FULL_TEXT = 6
 
@@ -113,6 +114,7 @@ _DEMOTED_CATEGORIES = ("Registration", "Legacy", "Developer Tools", "Testing")
 _DEMOTED_TITLE_PATTERN = re.compile(r"(?i)\(BRAINS\)|\bregistration\b|\bplugin\b")
 
 _WORD_PATTERN = re.compile(r"[A-Za-z0-9]+")
+_QUERY_SEPARATOR_PATTERN = re.compile(r"[\s_-]+")
 _CAMEL_CASE_PATTERN = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+")
 
 _FILTER_ROLE_MODULE_NAME = qt.Qt.UserRole
@@ -126,7 +128,11 @@ def _normalized(text):
 
 
 def _compact(text):
-    return re.sub(r"[^a-z0-9]", "", text.lower())
+    """Text without spaces, '-' and '_' ("segment-editor" -> "segmenteditor").
+
+    Other punctuation is kept, so that it still has to match ("c++" does not become "c").
+    """
+    return _QUERY_SEPARATOR_PATTERN.sub("", text.lower())
 
 
 class ModuleEntry:
@@ -188,7 +194,8 @@ def moduleRank(entry, query, synonymRanks=None, fullText=False):
         ranks.append(synonymRank)
     if entry.titleLower.startswith(query) or entry.nameLower.startswith(compactQuery or query):
         ranks.append(RANK_PREFIX)
-    queryWords = _WORD_PATTERN.findall(query)
+    # Query words are separated by spaces, '-' or '_' only: other punctuation must match ("c++" is not "c")
+    queryWords = [word for word in _QUERY_SEPARATOR_PATTERN.split(query) if word]
     if queryWords and (_wordsStartInOrder(queryWords, entry.titleWords) or _wordsStartInOrder(queryWords, entry.nameWords)):
         ranks.append(RANK_WORD_START)
     if query in entry.titleLower or (compactQuery and compactQuery in entry.nameLower):

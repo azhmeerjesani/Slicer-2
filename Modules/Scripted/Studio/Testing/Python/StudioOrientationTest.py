@@ -207,6 +207,34 @@ class StudioOrientationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertIn(name, controller.views)
             self.assertTrue(all(orientation.viewLetters(name)), name)
 
+    def test_4_ruler(self):
+        """The bottom letter moves above the slice view ruler while it is shown, and back without it."""
+        from StudioLib import orientation
+
+        studioShell = self._applyStudio()
+        self._ensureLetters(studioShell)
+        self._setFourUp()
+        orientation.update()
+        redNode = self.layoutManager.sliceWidget("Red").mrmlSliceNode()
+        view = orientation.instance().views["Red"]
+        bottomReference = view.actors[3].GetPositionCoordinate().GetReferenceCoordinate()
+        self.assertEqual(tuple(bottomReference.GetValue())[:2], (0.5, 0.0))
+        try:
+            for rulerType in (redNode.RulerTypeThin, redNode.RulerTypeThick):
+                redNode.SetRulerType(rulerType)
+                self._pump()
+                expected = orientation.bottomReference(rulerType)
+                self.assertGreater(expected[1], 0.0)
+                self.assertAlmostEqual(bottomReference.GetValue()[1], expected[1])
+            self.assertGreater(orientation.bottomReference(redNode.RulerTypeThick)[1], orientation.bottomReference(redNode.RulerTypeThin)[1])
+            # The other edges and the letters do not move
+            self.assertEqual(orientation.viewLetters("Red"), ("R", "L", "A", "P"))
+            self.assertEqual(tuple(view.actors[0].GetPositionCoordinate().GetReferenceCoordinate().GetValue())[:2], (0.0, 0.5))
+        finally:
+            redNode.SetRulerType(redNode.RulerTypeNone)
+            self._pump()
+        self.assertEqual(tuple(bottomReference.GetValue())[:2], (0.5, 0.0))
+
     def test_5_uninstall_removes_everything(self):
         """Classic shows no letters: every actor, observer and connection is removed."""
         from StudioLib import orientation
@@ -238,12 +266,40 @@ class StudioOrientationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self._pump()
         self.assertIsNone(orientation.viewLetters("Red"))
 
+        # In Classic, setEnabled() only stores the setting, and install() shows nothing (a future
+        # settings toggle reachable from Classic must not add letters there)
+        settings = qt.QSettings()
+        hadSetting = settings.contains(orientation.SETTINGS_KEY)
+        previousSetting = settings.value(orientation.SETTINGS_KEY)
+        try:
+            self.assertFalse(studioShell.isActive())
+            orientation.setEnabled(studioShell, True)
+            self.assertTrue(orientation.isEnabled())
+            self.assertIsNone(orientation.instance())
+            orientation.install(studioShell)
+            self.assertIsNone(orientation.instance())
+            orientation.install(None)
+            self.assertIsNone(orientation.instance())
+            for name in self.layoutManager.sliceViewNames():
+                renderers = self.layoutManager.sliceWidget(name).sliceView().renderWindow().GetRenderers()
+                for index in range(renderers.GetNumberOfItems()):
+                    props = renderers.GetItemAsObject(index).GetViewProps()
+                    for propIndex in range(props.GetNumberOfItems()):
+                        prop = props.GetItemAsObject(propIndex)
+                        objectName = prop.GetObjectName() if hasattr(prop, "GetObjectName") else ""
+                        self.assertFalse(str(objectName).startswith("StudioOrientationLetter"), name)
+        finally:
+            if hadSetting:
+                settings.setValue(orientation.SETTINGS_KEY, previousSetting)
+            else:
+                settings.remove(orientation.SETTINGS_KEY)
+
     #
     # Module finder ranking
     #
 
     def test_6_ranking_function(self):
-        """rankModules(): exact > synonym > prefix > word start > substring; core modules first."""
+        """rankModules(): exact > synonym > prefix > word start > synonym prefix > substring; core modules first."""
         from StudioLib import finder
 
         def entry(name, title, group=finder._GROUP_OTHER):
@@ -263,6 +319,9 @@ class StudioOrientationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             entry("Segmentations", "Segmentations"),
             entry("SegmentStatistics", "Segment Statistics"),
             entry("FiducialRegistration", "Fiducial Registration", demoted),
+            entry("Data", "Data"),
+            entry("SimpleFilters", "Simple Filters"),
+            entry("BRAINSIntensityNormalize", "Intensity Normalize"),
         ]
         self.assertEqual(finder.rankModules("vol", entries)[:2], ["Volumes", "VolumeRendering"])
         self.assertEqual(finder.rankModules("volumes", entries)[0], "Volumes")
@@ -276,6 +335,13 @@ class StudioOrientationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(finder.rankModules("window level", entries), ["Volumes"])
         self.assertEqual(finder.rankModules("", entries), [])
         self.assertEqual(finder.rankModules("xyzzy", entries), [])
+        # Title word starts before synonym prefixes: "fil" lists Simple Filters before Data ("files")
+        self.assertEqual(finder.rankModules("fil", entries), ["SimpleFilters", "Data"])
+        # Spaces, '-' and '_' are ignored, other punctuation must match
+        self.assertEqual(finder.rankModules("segment-editor", entries)[0], "SegmentEditor")
+        self.assertEqual(finder.rankModules("segment_editor", entries)[0], "SegmentEditor")
+        self.assertEqual(finder.rankModules("c++", entries), [])
+        self.assertEqual(finder.rankModules("(brains)", entries), ["BRAINSTransformConvert"])
 
     def test_7_finder_in_studio(self):
         """The search pill's finder selects the best match (Enter opens it); Classic restores the classic finder."""

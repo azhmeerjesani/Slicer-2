@@ -173,7 +173,7 @@ class TopBar:
         pill.setFixedSize(SEARCH_PILL_WIDTH, 30)
         pill.setFocusPolicy(qt.Qt.NoFocus)
         pill.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
-        pill.setToolTip(_("Search modules, tools and actions (Ctrl+K)"))
+        pill.setToolTip(_("Search modules (Ctrl+K)"))
         pillLayout = qt.QHBoxLayout(pill)
         pillLayout.setContentsMargins(10, 0, 8, 0)
         pillLayout.setSpacing(6)

@@ -115,6 +115,8 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         keys = [portableKey(shortcut.key) for shortcut in studioShell.shortcuts()]
         self.assertNotIn("Tab", keys)
         self.assertIn(portableKey(shell.INSPECTOR_SHORTCUT), keys)
+        # A second key for keyboard layouts that cannot type Ctrl+\
+        self.assertIn(portableKey(shell.INSPECTOR_ALTERNATE_SHORTCUT), keys)
         try:
             import StudioTest
 
@@ -133,6 +135,7 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertTrue(dock.isHidden())
         self.assertTrue(studioShell._toast.isVisible())
         self.assertIn(studioShell.inspectorShortcutText(), studioShell._toast.text())
+        self.assertIn(studioShell.inspectorShortcutText(alternate=True), studioShell._toast.text())
         # Clicking the tab of the current workspace shows it again
         studioShell.topBar.workspaceButtons["draw"].click()
         self._pump()
@@ -236,7 +239,10 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         shiftEscape = qt.QKeyEvent(qt.QEvent.KeyPress, qt.Qt.Key_Escape, qt.Qt.ShiftModifier)
         qt.QApplication.sendEvent(sliceView, shiftEscape)
         self.assertTrue(studioShell.focusMode())
-        studioShell.setFocusMode(False)
+        # The keypad modifier is not a modifier (an Esc key sent through the keypad)
+        keypadEscape = qt.QKeyEvent(qt.QEvent.KeyPress, qt.Qt.Key_Escape, qt.Qt.KeypadModifier)
+        qt.QApplication.sendEvent(sliceView, keypadEscape)
+        self.assertFalse(studioShell.focusMode())
 
         # A maximized view, the focus mode and an active Segment Editor tool: one state per Esc, innermost
         # first, and the tool is deselected only when nothing else is left. (The Segment Editor itself
@@ -414,53 +420,108 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                 settings.setValue("Studio/AllowedToolbars", savedAllowed)
 
     def test_6_stable_panel_width(self):
-        """Selecting Segment Editor tools does not change the inspector width (NFT-06)."""
+        """Selecting Segment Editor tools neither moves the views nor clips the options (NFT-06)."""
+        from StudioLib import shell
+
         mainWindow = self.mainWindow
         mainWindow.resize(1600, 1000)
         self._pump()
+        settings = qt.QSettings()
+        widthsKey = f"{shell._WORKSPACE_PANEL_WIDTHS_GROUP}/SegmentEditor"
+        savedWidths = settings.value(widthsKey)
+        settings.remove(widthsKey)
         modulePanel = mainWindow.findChild("QWidget", "ModulePanel")
         scrollArea = modulePanel.findChild("QScrollArea", "ScrollArea")
+        dock = self._dock()
         classicPolicy = scrollArea.horizontalScrollBarPolicy
         classicMinimumWidth = modulePanel.minimumWidth
-        studioShell = self._applyStudio()
-        volume, segmentation = self._loadScanAndSegmentation()
-        studioShell.switchTo("draw")
-        self._pump(10)
-        editor = slicer.modules.SegmentEditorWidget.editor
-        editor.setSegmentationNode(segmentation)
-        editor.setSourceVolumeNode(volume)
-        self._pump(10)
-        dock = self._dock()
-        # Draw lands on the stored width (Studio/PanelWidth, 340 px by default)
-        self.assertLessEqual(abs(dock.width - studioShell.panelWidth), 2)
-        reference = dock.width
-        for size in ((1600, 1000), (1366, 768)):
-            mainWindow.resize(*size)
+        classicContentsMinimumWidth = dock.widget().minimumWidth
+        effectNames = ("Paint", "Draw", "Erase", "Threshold", "Islands", "")
+
+        def assertNotClipped(message):
+            contents = scrollArea.widget()
+            self.assertGreaterEqual(contents.width, contents.layout().minimumSize().width() - 1, message)
+            self.assertFalse(scrollArea.horizontalScrollBar().isVisible(), message)
+
+        try:
+            studioShell = self._applyStudio()
+            volume, segmentation = self._loadScanAndSegmentation()
+            studioShell.switchTo("draw")
             self._pump(10)
-            for effectName in ("Paint", "Draw", "Erase", "Threshold", "Islands", ""):
+            editor = slicer.modules.SegmentEditorWidget.editor
+            editor.setSegmentationNode(segmentation)
+            editor.setSourceVolumeNode(volume)
+            self._pump(10)
+            # Draw lands on the stored width (Studio/PanelWidth), or wider if the Segment Editor needs it
+            self.assertGreaterEqual(dock.width, studioShell.panelWidth - 2)
+            assertNotClipped("landing")
+
+            # First use of each tool: the inspector may widen (once) so that nothing is clipped, never shrinks
+            previous = dock.width
+            for effectName in effectNames:
                 editor.setActiveEffectByName(effectName)
                 self._pump(10)
-                self.assertLessEqual(abs(dock.width - reference), 2, f"{effectName} at {size}")
-                # Wide options scroll rather than being clipped
-                contents = scrollArea.widget()
-                self.assertGreaterEqual(contents.width, contents.layout().minimumSize().width() - 1, effectName)
-                if contents.width > scrollArea.viewport().width:
-                    self.assertTrue(scrollArea.horizontalScrollBar().isVisible(), effectName)
-        mainWindow.resize(1600, 1000)
-        self._pump()
-        # A transient module may widen the inspector; the workspace gets the stored width back
-        slicer.util.selectModule("Data")
-        self._pump(10)
-        studioShell.closeTransientModule()
-        self._pump(10)
-        self.assertLessEqual(abs(dock.width - reference), 2)
+                self.assertGreaterEqual(dock.width, previous - 2, effectName)
+                assertNotClipped(f"first use of {effectName!r}")
+                previous = dock.width
+            reference = dock.width
+            # The width that the Segment Editor needs is remembered (Studio/*)
+            self.assertTrue(str(settings.value(widthsKey, "")).startswith(f"{reference}@"), settings.value(widthsKey))
 
-        studioShell.classic(persist=False)
-        self._pump()
-        self.assertEqual(scrollArea.horizontalScrollBarPolicy, classicPolicy)
-        self.assertEqual(modulePanel.minimumWidth, classicMinimumWidth)
-        for browser in modulePanel.findChildren("ctkFittedTextBrowser"):
-            self.assertNotEqual(browser.minimumWidth, 1, browser.objectName)
+            # Then choosing a tool does not change the width, also at 1366x768
+            for size in ((1600, 1000), (1366, 768)):
+                mainWindow.resize(*size)
+                self._pump(10)
+                for effectName in effectNames:
+                    editor.setActiveEffectByName(effectName)
+                    self._pump(10)
+                    self.assertLessEqual(abs(dock.width - reference), 2, f"{effectName} at {size}")
+                    assertNotClipped(f"{effectName!r} at {size}")
+            mainWindow.resize(1600, 1000)
+            self._pump()
+            # The workspaces share the width: switching does not resize the views
+            studioShell.switchTo("library")
+            self._pump(10)
+            if not dock.isHidden():
+                self.assertLessEqual(abs(dock.width - reference), 2)
+            studioShell.switchTo("draw")
+            self._pump(10)
+            self.assertLessEqual(abs(dock.width - reference), 2)
+            # The user cannot drag the inspector narrower than the tools need
+            self.assertGreaterEqual(dock.minimumSizeHint.width(), reference - 2)
+            # A transient module may widen the inspector; the workspace gets its width back
+            slicer.util.selectModule("Data")
+            self._pump(10)
+            studioShell.closeTransientModule()
+            self._pump(10)
+            self.assertLessEqual(abs(dock.width - reference), 2)
+
+            studioShell.classic(persist=False)
+            self._pump()
+            self.assertEqual(scrollArea.horizontalScrollBarPolicy, classicPolicy)
+            self.assertEqual(modulePanel.minimumWidth, classicMinimumWidth)
+            self.assertEqual(dock.widget().minimumWidth, classicContentsMinimumWidth)
+            for browser in modulePanel.findChildren("ctkFittedTextBrowser"):
+                self.assertNotEqual(browser.minimumWidth, 1, browser.objectName)
+
+            # The next session lands on the remembered width at once, whatever tool is armed
+            editor.setActiveEffectByName("")
+            studioShell.studio()
+            self._pump(10)
+            self.assertEqual(studioShell.currentWorkspace(), "draw")
+            self.assertLessEqual(abs(dock.width - reference), 2)
+            studioShell.classic(persist=False)
+            self._pump()
+
+            # A width measured with another build or font is measured again
+            settings.setValue(widthsKey, f"{shell.MAX_WORKSPACE_PANEL_WIDTH}@another build")
+            otherShell = shell.Shell(force=True)
+            self.assertEqual(otherShell._workspacePanelWidth("SegmentEditor", 350), 350)
+        finally:
+            if savedWidths is None:
+                settings.remove(widthsKey)
+            else:
+                settings.setValue(widthsKey, savedWidths)
 
     def test_7_first_run_window_size(self):
         """Without a restored geometry the window gets about 90% of the screen (novice step 2)."""

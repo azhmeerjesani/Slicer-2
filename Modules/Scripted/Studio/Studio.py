@@ -39,7 +39,7 @@ Its three workspaces follow the path of a lesion network mapping study:
 <b>Library</b> (open data and choose a subject), <b>Draw</b> (trace the lesion) and <b>Map</b>
 (compute and read a network map).</p>
 <p>Keyboard: Ctrl+Alt+1/2/3 switch workspaces, Ctrl+K searches tools and actions,
-Alt+1..4 change the view layout, Ctrl+\\ shows or hides the inspector,
+Alt+1..4 change the view layout, Ctrl+\\ (or F6) shows or hides the inspector,
 F11 toggles the focus mode, Esc backs out of the place and window/level modes, a maximized view
 and the focus mode, and Ctrl+Alt+0 switches to the Classic interface and back
 (also View &gt; Studio interface).</p>
