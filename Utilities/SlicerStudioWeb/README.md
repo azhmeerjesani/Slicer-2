@@ -179,11 +179,11 @@ the Qt 5 of Ubuntu 24.04, which is why the image is based on Ubuntu 24.04.
 - **Quitting**: if you quit Slicer (File > Exit), it starts again after a few
   seconds, so the browser tab keeps working. "Restart Slicer" works as on the
   desktop. Use `stop` to stop everything.
-- **Extensions**: in the current Linux builds of this fork, Qt cannot make HTTPS
-  connections (Ubuntu's Qt 5 needs OpenSSL 3, the build bundles OpenSSL 1.1), so
-  the Extensions Manager cannot download its catalog ("Failed to download
-  extension metadata from server"). Downloads made by Python, such as Sample
-  Data, work.
+- **Extensions**: the Extensions Manager needs a package built with the system
+  OpenSSL 3 (packages from the GitHub workflow are). An image built from an older
+  package that bundles OpenSSL 1.1 cannot download the extension catalog
+  ("Failed to download extension metadata from server"); rebuild the image from
+  a newer package. Downloads made by Python, such as Sample Data, work in both.
 - **Display quality**: the picture is sent with the best quality noVNC offers (JPEG
   quality 100, no chroma subsampling, lossless for flat areas). It is close to, but
   not exactly, pixel-identical to a local display. Like all Slicer builds, this is

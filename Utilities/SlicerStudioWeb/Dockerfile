@@ -72,6 +72,7 @@ RUN set -eux; \
     libqt5xml5t64 \
     libqt5xmlpatterns5 \
     libsm6 \
+    libssl3t64 \
     libuuid1 \
     libx11-6 \
     libx11-xcb1 \

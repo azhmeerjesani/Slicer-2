@@ -141,7 +141,7 @@ the system. It runs on Ubuntu 24.04.
      libqt5xml5t64 libqt5xmlpatterns5 libqt5x11extras5 libqt5multimedia5 libqt5multimediawidgets5 \
      libqt5qml5 libqt5quick5 libqt5quickwidgets5 libqt5webchannel5 libqt5webengine5 \
      libqt5webenginecore5 libqt5webenginewidgets5 libqt5test5t64 \
-     libglu1-mesa libxt6t64 libnss3 libasound2t64 libpulse-mainloop-glib0
+     libglu1-mesa libxt6t64 libnss3 libasound2t64 libpulse-mainloop-glib0 libssl3t64
    ```
 
 2. Extract the package anywhere:
