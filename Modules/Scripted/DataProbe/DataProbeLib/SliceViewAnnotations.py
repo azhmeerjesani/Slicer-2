@@ -115,10 +115,33 @@ class SliceAnnotations(VTKObservationMixin):
         # See https://github.com/Slicer/Slicer/issues/7092
         self.allowForcingTopRightVisibility = True
 
-        self.create()
+        # Slice logic is modified several times when the slice view is changed (e.g., for each slice offset change),
+        # but the annotations do not depend on the slice position. Therefore the annotations of a view are
+        # updated only once, when the application processes events next time.
+        self.sliceLogicsToUpdate = []
+        self.updateViewAnnotationsTimer = qt.QTimer()
+        self.updateViewAnnotationsTimer.setSingleShot(True)
+        self.updateViewAnnotationsTimer.setInterval(0)
+        self.updateViewAnnotationsTimer.connect("timeout()", self.updatePendingViewAnnotations)
+
+        # The settings window is created when it is first accessed (see `window` property),
+        # because loading the widget from the .ui file is slow and it is not needed at application startup.
+        self._window = None
 
         if self.sliceViewAnnotationsEnabled:
             self.updateSliceViewFromGUI()
+
+    @property
+    def window(self):
+        """Settings widget. It is created when first accessed."""
+        if self._window is None:
+            self.create()
+        return self._window
+
+    @window.setter
+    def window(self, window):
+        # Allows create() to be overridden in a subclass that sets self.window
+        self._window = window
 
     def create(self):
         # Instantiate and connect widgets ...
@@ -126,8 +149,8 @@ class SliceAnnotations(VTKObservationMixin):
         path = os.path.join(os.path.dirname(__file__), "Resources", "UI", "settings.ui")
         qfile = qt.QFile(path)
         qfile.open(qt.QFile.ReadOnly)
-        self.window = loader.load(qfile)
-        window = self.window
+        self._window = loader.load(qfile)
+        window = self._window
 
         find = slicer.util.findChildren
         self.cornerTextParametersCollapsibleButton = find(window, "cornerTextParametersCollapsibleButton")[0]
@@ -259,29 +282,27 @@ class SliceAnnotations(VTKObservationMixin):
         def _defaultValue(key):
             return SliceAnnotations.DEFAULTS[key]
 
-        self.sliceViewAnnotationsCheckBox.checked = _defaultValue("enabled")
         self.sliceViewAnnotationsEnabled = _defaultValue("enabled")
-        self.updateEnabledButtons()
-
-        radioButtons = [self.level1RadioButton, self.level2RadioButton, self.level3RadioButton]
-        radioButtons[_defaultValue("displayLevel")].checked = True
         self.annotationsDisplayAmount = _defaultValue("displayLevel")
-
-        self.topLeftCheckBox.checked = _defaultValue("topLeft")
         self.topLeft = _defaultValue("topLeft")
-
-        self.topRightCheckBox.checked = _defaultValue("topRight")
         self.topRight = _defaultValue("topRight")
-
-        self.bottomLeftCheckBox.checked = _defaultValue("bottomLeft")
         self.bottomLeft = _defaultValue("bottomLeft")
-
-        self.fontSizeSpinBox.value = _defaultValue("fontSize")
-        self.timesFontRadioButton.checked = _defaultValue("fontFamily") == "Times"
+        self.fontSize = _defaultValue("fontSize")
         self.fontFamily = _defaultValue("fontFamily")
-
         self.backgroundDICOMAnnotationsPersistence = _defaultValue("bgDICOMAnnotationsPersistence")
-        self.backgroundPersistenceCheckBox.checked = _defaultValue("bgDICOMAnnotationsPersistence")
+
+        # Update the settings widgets (if the settings window has been created already)
+        if self._window is not None:
+            self.sliceViewAnnotationsCheckBox.checked = self.sliceViewAnnotationsEnabled
+            self.updateEnabledButtons()
+            radioButtons = [self.level1RadioButton, self.level2RadioButton, self.level3RadioButton]
+            radioButtons[self.annotationsDisplayAmount].checked = True
+            self.topLeftCheckBox.checked = self.topLeft
+            self.topRightCheckBox.checked = self.topRight
+            self.bottomLeftCheckBox.checked = self.bottomLeft
+            self.fontSizeSpinBox.value = self.fontSize
+            self.timesFontRadioButton.checked = self.fontFamily == "Times"
+            self.backgroundPersistenceCheckBox.checked = self.backgroundDICOMAnnotationsPersistence
 
         settings = qt.QSettings()
         settings.setValue("DataProbe/sliceViewAnnotations.enabled", self.sliceViewAnnotationsEnabled)
@@ -303,6 +324,9 @@ class SliceAnnotations(VTKObservationMixin):
         self.updateSliceViewFromGUI()
 
     def updateEnabledButtons(self):
+        if self._window is None:
+            # settings window has not been created yet
+            return
         enabled = self.sliceViewAnnotationsEnabled
 
         self.cornerTextParametersCollapsibleButton.enabled = enabled
@@ -357,10 +381,31 @@ class SliceAnnotations(VTKObservationMixin):
         self.sliceWidgets[sliceViewName] = sliceWidget
 
     def updateViewAnnotations(self, caller, event):
+        """Request update of the annotations of the slice view of the caller slice logic.
+
+        The update is performed when the application processes events next time (in updatePendingViewAnnotations),
+        so that multiple modifications of the slice logic result in a single update.
+        """
         if not self.sliceViewAnnotationsEnabled:
             # when self.sliceViewAnnotationsEnabled is set to false
             # then annotation and scalar bar gets hidden, therefore
             # we have nothing to do here
+            return
+
+        if caller not in self.sliceLogicsToUpdate:
+            self.sliceLogicsToUpdate.append(caller)
+        if not self.updateViewAnnotationsTimer.isActive():
+            self.updateViewAnnotationsTimer.start()
+
+    def updatePendingViewAnnotations(self):
+        """Update annotations of all slice views that have been modified since the last update.
+
+        It is called automatically when the application processes events, but it can also be called directly
+        to update the annotations immediately (e.g., before capturing a slice view without processing events).
+        """
+        sliceLogics = self.sliceLogicsToUpdate
+        self.sliceLogicsToUpdate = []
+        if not sliceLogics or not self.sliceViewAnnotationsEnabled:
             return
 
         layoutManager = self.layoutManager
@@ -373,7 +418,8 @@ class SliceAnnotations(VTKObservationMixin):
                 self.addSliceViewObserver(sliceViewName)
                 self.createActors(sliceViewName)
                 self.updateSliceViewFromGUI()
-        self.makeAnnotationText(caller)
+        for sliceLogic in sliceLogics:
+            self.makeAnnotationText(sliceLogic)
 
     def updateCornerAnnotation(self, sliceLogic):
         sliceNode = sliceLogic.GetBackgroundLayer().GetSliceNode()
@@ -488,7 +534,8 @@ class SliceAnnotations(VTKObservationMixin):
             # See https://github.com/Slicer/Slicer/issues/7092
             if sliceNode.GetSlabReconstructionEnabled() and self.allowForcingTopRightVisibility:
                 self.topRight = 1
-                self.topRightCheckBox.checked = True
+                if self._window is not None:
+                    self.topRightCheckBox.checked = True
 
                 # Disable automatic enforcement to allow user-controlled visibility toggling.
                 self.allowForcingTopRightVisibility = False
@@ -644,6 +691,7 @@ class SliceAnnotations(VTKObservationMixin):
         viewWidth = self.sliceViews[sliceViewName].width
         self.maximumTextLength = int((viewWidth - 40) / self.fontSize)
 
+        renderRequired = False
         for i, cornerText in enumerate(self.cornerTexts):
             keys = sorted(cornerText.keys())
             cornerAnnotation = ""
@@ -663,11 +711,18 @@ class SliceAnnotations(VTKObservationMixin):
                         if cornerText[key]["category"] == "A":
                             cornerAnnotation = cornerAnnotation + text + "\n"
             sliceCornerAnnotation = self.sliceViews[sliceViewName].cornerAnnotation()
-            sliceCornerAnnotation.SetText(i, cornerAnnotation)
+            if sliceCornerAnnotation.GetText(i) != cornerAnnotation:
+                sliceCornerAnnotation.SetText(i, cornerAnnotation)
+                renderRequired = True
             textProperty = sliceCornerAnnotation.GetTextProperty()
-            textProperty.SetShadow(1)
+            if not textProperty.GetShadow():
+                textProperty.SetShadow(1)
+                renderRequired = True
 
-        self.sliceViews[sliceViewName].scheduleRender()
+        # Annotations are updated whenever the slice view changes (e.g., for each slice offset change)
+        # but they rarely change, so only request rendering if they have changed.
+        if renderRequired:
+            self.sliceViews[sliceViewName].scheduleRender()
 
     def resetTexts(self):
         for i, cornerText in enumerate(self.cornerTexts):
