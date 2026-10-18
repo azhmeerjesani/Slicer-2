@@ -6,11 +6,19 @@ name: Slicer Studio packages
 # attached to the workflow run as artifacts. See
 # Docs/user_guide/install_studio.md.
 #
+# Pushing a tag named "studio-build-*" also runs the workflow, with the default
+# choices (Apple Silicon disk image with the official Qt, and Linux tarball). This
+# allows building packages from any branch, as "Run workflow" is only available
+# for workflows that are on the default branch.
+#
 # A first build takes several hours. When a build step reaches its time limit,
 # the compiler cache is still saved, so running the workflow again continues
 # from where it stopped.
 
 on:
+  push:
+    tags:
+      - "studio-build-*"
   workflow_dispatch:
     inputs:
       ref:
@@ -56,7 +64,7 @@ defaults:
 jobs:
   linux:
     name: Linux tarball
-    if: ${{ inputs.linux }}
+    if: ${{ github.event_name == 'push' || inputs.linux }}
     runs-on: ubuntu-24.04
     timeout-minutes: 355
     outputs:
@@ -211,7 +219,7 @@ jobs:
 
   macos:
     name: macOS disk image (${{ matrix.arch }})
-    if: ${{ inputs.macos || inputs.macos_intel }}
+    if: ${{ github.event_name == 'push' || inputs.macos || inputs.macos_intel }}
     # macos-15 is the free Apple Silicon runner; macos-15-intel the Intel one.
     runs-on: ${{ matrix.arch == 'arm64' && 'macos-15' || 'macos-15-intel' }}
     timeout-minutes: 355
@@ -220,12 +228,12 @@ jobs:
       matrix:
         arch: [arm64, x86_64]
         exclude:
-          - arch: ${{ !inputs.macos && 'arm64' || 'none' }}
-          - arch: ${{ !inputs.macos_intel && 'x86_64' || 'none' }}
+          - arch: ${{ github.event_name != 'push' && !inputs.macos && 'arm64' || 'none' }}
+          - arch: ${{ (github.event_name == 'push' || !inputs.macos_intel) && 'x86_64' || 'none' }}
     env:
       ARCH: ${{ matrix.arch }}
       # Homebrew has no Qt bottles for Intel Macs: always use the official Qt there.
-      QT_MODE: ${{ matrix.arch == 'x86_64' && 'official' || inputs.qt }}
+      QT_MODE: ${{ matrix.arch == 'x86_64' && 'official' || inputs.qt || 'official' }}
       CCACHE_MAXSIZE: 4G
       CCACHE_COMPILERCHECK: content
       HOMEBREW_NO_INSTALL_CLEANUP: "1"

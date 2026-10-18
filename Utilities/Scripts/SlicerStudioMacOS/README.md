@@ -236,8 +236,9 @@ the application's libraries. Slicer shows a progress window during that time.
 ## Building in GitHub Actions
 
 `.github/workflows/studio-packages.yml` builds the packages on GitHub's runners.
-To start it, go to **Actions > Slicer Studio packages > Run workflow**. The
-workflow produces:
+To start it, go to **Actions > Slicer Studio packages > Run workflow** (only
+available when the workflow is on the default branch), or push a tag named
+`studio-build-*` (default choices, from any branch). The workflow produces:
 
 - **macOS disk image** (default on). Built with this script on `macos-15`
   (Apple Silicon) with `--qt=official`, so it runs on macOS 14 and newer.

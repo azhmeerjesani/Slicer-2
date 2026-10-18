@@ -34,6 +34,12 @@ builds the packages on GitHub's servers. To get them:
    `SlicerStudio-<version>-macos-<arch>.dmg` file itself. The Linux package is
    `Slicer-<version>-linux-amd64.tar.gz`.
 
+**Run workflow** is only offered for workflows that are on the repository's
+default branch. To build packages from another branch, push a tag whose name
+starts with `studio-build-` (for example `git tag studio-build-1` then
+`git push origin studio-build-1`): this builds the Apple Silicon disk image and
+the Linux tarball from the tagged commit.
+
 A build takes several hours. If a run stops at the time limit of GitHub's
 runners, run the workflow again: the compiler cache saved by the first run
 lets the next run finish quickly. Artifacts are kept for 30 days.
