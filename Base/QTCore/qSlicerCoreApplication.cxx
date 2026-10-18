@@ -362,8 +362,17 @@ void qSlicerCoreApplicationPrivate::initializeEnvironmentFromLauncher()
   // Add 'SLICER_SHARE_DIR' to the environment so that Tcl scripts can reference
   // their dependencies.
   q->setEnvironmentVariable("SLICER_SHARE_DIR", Slicer_SHARE_DIR);
+}
+
+//-----------------------------------------------------------------------------
+void qSlicerCoreApplicationPrivate::mergeDefaultSettings()
+{
+  Q_Q(qSlicerCoreApplication);
 
   // Load default settings if any.
+  // This must be called after the arguments are parsed: user settings are instantiated
+  // on first use and they must not be instantiated before it is known whether settings are
+  // disabled (for example, in testing mode temporary settings must be used).
   if (q->defaultSettings())
   {
     for (const QString& key : q->defaultSettings()->allKeys())
@@ -394,6 +403,8 @@ void qSlicerCoreApplicationPrivate::init()
   // This guarantees that any options affecting later initialization
   // operate with a complete environment.
   this->parseArguments();
+
+  this->mergeDefaultSettings();
 
   // Create the application Logic object,
   this->AppLogic = vtkSmartPointer<vtkSlicerApplicationLogic>::New();

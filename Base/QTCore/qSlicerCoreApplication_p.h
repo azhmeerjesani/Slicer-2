@@ -130,6 +130,10 @@ public:
   /// Parse arguments
   void parseArguments();
 
+  /// Copy values from default settings to user settings for keys that are not set yet.
+  /// Must be called after parseArguments() because settings may be disabled by arguments.
+  void mergeDefaultSettings();
+
   /// \brief Returns list of translation files contained in given \a dir for the input \a settingsLanguage
   ///
   /// If \a settingsLanguage is empty returns an empty list (application default language)
