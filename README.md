@@ -3,17 +3,19 @@
 Slicer Studio is an edition of [3D Slicer](https://www.slicer.org) for one kind of work: drawing brain
 lesions slice by slice and computing lesion network maps (LNM). It opens on a simple Library page and
 puts the Segment Editor next to a large axial view in a Draw workspace; a Map workspace that computes a
-lesion's network from a normative connectome is in progress. The layout borrows from photo editors
+lesion's network from a normative connectome is planned (wave 2). The layout borrows from photo editors
 such as Lightroom: a library to choose what to work on, a focused editing space and a quiet dark
 interface. Underneath it is 3D Slicer 5.13, so its files open in official 3D Slicer and the other way
-round. It installs as a macOS disk image or a Linux package, or runs in a web browser on your own
-computer.
+round. Its packaging scripts build a macOS disk image, a Linux package and a version that runs in a web
+browser on your own computer; no package has been published yet.
 
 > [!NOTE]
-> **Early development, no release yet.** Wave 1 of 4 is implemented: the Studio interface, the Library
-> page, drawing and slicing fixes and speed-ups, the lesion network mapping library and command line,
-> file compatibility checks and the packaging scripts. The streamlined Draw panel, the Map workspace and
-> the study workflow are in progress. See [Status and roadmap](#status-and-roadmap).
+> **Early development, no release yet.** Wave 1 of 4 and the packaging work are implemented: the Studio
+> interface, the Library page, drawing and slicing fixes and speed-ups, the lesion network mapping
+> library and command line, file compatibility checks and the packaging scripts. Planned next: the
+> streamlined Draw panel and the Map workspace (wave 2), then the study workflow (wave 3). The first
+> packaging workflow run is in progress; no disk image, Linux package or web image has been published
+> yet. See [Status and roadmap](#status-and-roadmap).
 
 > [!WARNING]
 > **Research use only.** Slicer Studio, like 3D Slicer, is not a medical device. Lesion network maps must
@@ -32,7 +34,7 @@ This repository is a fork of [3D Slicer](https://www.slicer.org)
 ([Slicer/Slicer on GitHub](https://github.com/Slicer/Slicer)). It branched from upstream `main` at
 commit `bccfb40` (2026-10-16, version 5.13). Slicer Studio is not an official 3D Slicer release, is not
 on download.slicer.org and is not supported by the 3D Slicer developers: please report problems with
-Slicer Studio in this repository, not on the Slicer forum.
+Slicer Studio to the maintainer of this fork (GitHub Issues are not enabled yet), not on the Slicer forum.
 
 What stays the same:
 
@@ -56,19 +58,19 @@ On a normal launch Slicer Studio shows its own interface, Studio, instead of the
   (workspaces, the File, Edit, View and Help menus, Appearance, Settings, Python console, Error log and
   Classic interface), the name of the current data, the **Library | Draw | Map** switcher, Undo and Redo
   (in Draw), a layout picker, a search box and an error badge.
-- **One inspector.** The module panel is a 340 px panel on the right. A workspace is a module shown in
-  it. Any other module, opened from the search box or by a script, appears there too, with a close
-  button that returns to the workspace.
+- **One inspector.** The module panel is a panel on the right, 340 px wide by default (300–480 px;
+  423 px in Draw for now). A workspace is a module shown in it. Any other module, opened from the
+  search box or by a script, appears there too, with a close button that returns to the workspace.
 - **Dark by default.** A graphite dark theme, a light theme and System, an accent color and a
   Comfortable or Compact density, in *Application Settings > Appearance* (theme and density also in
-  `≡ > Appearance`). Check boxes and radio buttons are redrawn for contrast in the dark theme. Icons
-  are [Lucide](https://lucide.dev) SVGs.
+  `≡ > Appearance`; a density change takes effect after a restart). Check boxes and radio buttons are
+  redrawn for contrast in the dark theme. Icons are [Lucide](https://lucide.dev) SVGs.
 
 | Workspace | What you do there | State |
 |---|---|---|
 | **Library** | Open scans, lesion masks, scenes or DICOM folders, or start on the MNI template. A drop zone, *Open…*, *Open folder…*, *Start on MNI template* and the most recent files are shown over the views. | Available |
-| **Draw** | Trace the lesion with the Segment Editor. The views use the *Studio Focus* layout: a large axial view, with the coronal and sagittal views stacked on its right. | Available with the classic Segment Editor panel; the streamlined panel is in progress |
-| **Map** | Compute and read the lesion's network map. | In progress: the tab is shown but disabled |
+| **Draw** | Trace the lesion with the Segment Editor. The views use the *Studio Focus* layout: a large axial view, with the coronal and sagittal views stacked on its right. | Available with the classic Segment Editor panel; the streamlined panel is planned (wave 2) |
+| **Map** | Compute and read the lesion's network map. | Planned (wave 2): the tab is shown but disabled |
 
 Keyboard (on macOS, `Ctrl` is `Cmd` and `Alt` is `Option`):
 
@@ -81,7 +83,7 @@ Keyboard (on macOS, `Ctrl` is `Cmd` and `Alt` is `Option`):
 | `Alt+1` / `2` / `3` / `4` | Focus / Single / Four-up / Row layout |
 | `Tab` (in a view) | Show or hide the inspector |
 | `Ctrl+6` or `F11` | Focus mode: hide the inspector and the top bar |
-| `Ctrl+/` | Shortcut summary |
+| `Ctrl+/` | Brief reminder of the main shortcuts (a full shortcut overlay is planned, wave 3) |
 
 Slicer's own shortcuts, such as `Ctrl+S` (save), `Ctrl+2` (settings) or `Ctrl+3` (Python console), keep
 working with the menu bar hidden.
@@ -115,19 +117,21 @@ These changes are in the Segment Editor itself, so they also apply in the Classi
 ### Slicing and navigation
 
 - **Studio layouts.** *Studio Focus* (large axial view, coronal over sagittal on the right),
-  *Studio Focus + 3D* and *Studio Row* (three equal views). They also exist in the Classic interface and
-  are saved so that official Slicer can open the scene. The layout picker (`Alt+1` to `Alt+4`) also
-  offers a single view and Four-up. Each workspace remembers its layout, and switching workspaces
-  changes the layout only when it differs.
+  *Studio Focus + 3D* and *Studio Row* (three equal views). They are registered in every mode, so a scene
+  saved with one of them reopens with it in Studio and Classic, and official Slicer can open it. The
+  Classic layout menu does not list them yet, and *Studio Focus + 3D* is only available from Python
+  (`slicer.app.layoutManager().setLayout(7002)`). The layout picker (`Alt+1` to `Alt+4`) offers Focus, a
+  single view, Four-up and Row; *More layouts…* opens Slicer's layout menu. Each workspace remembers its
+  layout, and switching workspaces changes the layout only when it differs.
 - **Fewer updates per slice step.** A scroll step causes one slice-logic update instead of three. Other
   views are re-rendered only when they show something that moved (slice intersections, slabs, handles).
   A slice node change that changes nothing no longer reslices the volume. The slice controller bar
   updates only what changed. The rendered views are pixel-identical to before (416 captures compared).
 - **Data Probe and slice annotation updates** are coalesced and skipped while hidden;
   `slicer.i18n.tr()` caches the source file of its caller.
-- **Planned** (wave 3): PageUp/PageDown by 10 slices, Home/End, stepping that stops at the first and
-  last slice, symmetric zoom, focus that follows the mouse, left-drag window/level, and flat view bars
-  that show the slice index.
+- **Planned:** flat view bars that show the slice index (wave 2); PageUp/PageDown by 10 slices,
+  Home/End, stepping that stops at the first and last slice, symmetric zoom, focus that follows the mouse
+  and left-drag window/level (wave 3).
 
 ### Lesion network mapping library
 
@@ -135,14 +139,14 @@ These changes are in the Segment Editor itself, so they also apply in the Classi
   against a normative functional connectome in one streaming pass, with N-aware threshold rules,
   specificity QA (connectome degree similarity, relocated-lesion null), a plain-file study model and an
   export package with provenance. It has 67 unit tests on synthetic data, without network access.
-- The Map workspace (the Slicer module around the library) is in progress. Until then, use the command
-  line: see [Lesion network mapping](#lesion-network-mapping).
+- The Map workspace (the Slicer module around the library) is planned (wave 2). Until then, use the
+  command line: see [Lesion network mapping](#lesion-network-mapping).
 
 ### Performance
 
 Measured with [`Utilities/Scripts/StudioBench.py`](Utilities/Scripts/StudioBench.py) and the work
 package verification scripts, on a Linux (Ubuntu 24.04) Release build: a shared 4-core virtual machine,
-Xvfb with software OpenGL (Mesa llvmpipe), 1920x1080 window. Absolute times vary 1.5 to 3 times with the
+Xvfb with software OpenGL (Mesa llvmpipe), 1920x1080 window. Absolute times vary up to 4 times with the
 load of the machine, so only compare the two values in the same row.
 
 | Operation | Before | After | Comparison basis |
@@ -150,7 +154,7 @@ load of the machine, so only compare the two values in the same row.
 | Paint stroke release, 256³ volume, 7 segments, 3D surfaces shown | 773–853 ms | 217 ms | official 5.13 nightly vs Slicer Studio, same session (official: 3 runs; Studio: median of 3) |
 | 3D surfaces rebuilt per stroke, same scene | 7 | 1 | same |
 | Paint stroke with intensity masking, MNI 1 mm grid | 68–90 ms | 20 ms | same |
-| Median smoothing (3 mm) of a small lesion (20-voxel sphere) in a 256³ volume | 452 ms | 125 ms | same build before and after the change, median of 5 runs; identical voxels |
+| Median smoothing (3 mm) of a small lesion (sphere of radius 10 voxels, about 4,100 voxels, plus a one-voxel island) in a 256³ volume, 1 mm voxels | 452 ms | 125 ms | same build tree before and after the change, median of 5 runs; identical voxels |
 | Islands, keep largest, same lesion | 468 ms | 123 ms | same |
 | Margin, grow 2 mm, same lesion | 364 ms | 120 ms | same |
 | Refresh of the Margin options, 384x384x256 volume | 26.7 ms | 0.2 ms | same build before and after, median |
@@ -158,31 +162,37 @@ load of the machine, so only compare the two values in the same row.
 | `sliceNode.Modified()` that changes nothing | 18.5 ms | 3.5 ms | 3 interleaved before/after pairs, heavily loaded machine |
 | Slice-logic updates per scroll step / renders of the other views (slice intersections off) | 3 / 2 | 1 / 0 | same |
 | Warm module switch | 102 ms (Classic) | 21 ms (Studio) | same build, Classic vs Studio interface, interleaved runs |
-| 300 mouse moves over a slice view, Data Probe open | 1361 ms | 21 ms | original vs new Data Probe code, same process, interleaved |
+| 300 crosshair moves over a slice view, events processed after each, Data Probe open (loop wall time) | 1361 ms | 21 ms | original vs new Data Probe code, same process, interleaved |
+| Same, paced at 125 Hz (main-thread CPU) | 1185 ms | 529 ms | same |
 
 Not faster yet:
 
 - **Startup.** Studio 3.1 s, Classic 3.0 s (same build, median of 5 alternating runs): the Studio
   interface adds about 0.1 s. Startup work is planned for wave 4.
-- **Undo with 3D surfaces.** Not faster than official 5.13 (Studio 174–255 ms, official 191–224 ms
+- **Undo with 3D surfaces.** Not faster than official 5.13 (Studio 174–292 ms, official 191–249 ms
   across sessions). Planned for wave 4.
 - **Brush hover with 3D surfaces.** Unchanged. Planned for wave 3.
 
-A Linux build made on Ubuntu 24.04 starts in 2.5–3.3 s, against 6.1–6.4 s for the official Linux
-nightly package on the same machine. This comes from Ubuntu's linker default (`--as-needed`, which drops
-unused library dependencies), not from Slicer Studio code. An option to link packaged builds this way is
-planned (wave 4).
+A build made on Ubuntu 24.04 (before the Studio changes) started in 2.5–3.3 s, against 6.1–6.4 s for
+the official Linux nightly package on the same idle machine. This comes from Ubuntu's linker default
+(`--as-needed`, which drops unused library dependencies) and from building without the Qt Designer
+plugins (`Slicer_BUILD_QT_DESIGNER_PLUGINS=OFF`, about 0.6 s less first-load work), not from Slicer
+Studio code. Measured again with the Studio changes (fresh settings, machine under some load), the
+build started in 3.3–3.9 s and the official 5.13 nightly in 8.0–8.8 s. An option to link packaged
+builds this way is planned (wave 4).
 
 ### File compatibility with official 3D Slicer
 
 - **Both directions.** Scenes and data saved by Slicer Studio open in official 3D Slicer 5.12 and 5.13,
   and files saved by those versions open in Slicer Studio. The compatibility check (below) passes for
-  all 9 ordered writer/reader pairs of Slicer Studio, official 5.12.4 and official 5.13 nightly, for scene
-  folders, `.mrb` bundles and LNM outputs, in normal and `--testing` mode.
-- **No new formats.** No new node classes, storage node classes or file formats, no changes to MRML
-  defaults or to what existing writers produce. Module state is kept in standard scripted module
-  parameter nodes. Extra information is only stored as node attributes or XML attributes that official
-  Slicer ignores.
+  all 9 ordered writer/reader pairs of Slicer Studio, official 5.12.4 and the official 5.13 nightly of
+  2026-10-16, for scene folders and `.mrb` bundles, in normal and `--testing` mode; the LNM outputs
+  written by Slicer Studio load in all three.
+- **No new formats.** No new node classes, storage node classes or file formats, and no changes to MRML
+  defaults. Existing writers produce the same output, except that a layout node with a Studio layout
+  also writes a `studioViewArrangement` XML attribute (see *Portable layouts*). Module state is kept in
+  standard scripted module parameter nodes. Extra information is only stored as node attributes or XML
+  attributes that official Slicer ignores.
 - **Portable layouts.** The Studio layouts (ids 7001–7003, range 7001–7099 reserved) are registered in
   C++ in every mode. A scene saved with one of them stores `currentViewArrangement="2"` (the Conventional
   layout, which official Slicer knows) plus `studioViewArrangement="7001"`. Official Slicer ignores the
@@ -204,8 +214,9 @@ planned (wave 4).
 
 ## Install
 
-Slicer Studio is not on download.slicer.org. You get it from this repository's GitHub Actions workflow,
-or you build it yourself. The full guide is [Install Slicer Studio](Docs/user_guide/install_studio.md).
+Slicer Studio is not on download.slicer.org. You get it from this repository's GitHub Actions workflow
+once its first run has finished (no package has been published yet), or you build it yourself. The full
+guide is [Install Slicer Studio](Docs/user_guide/install_studio.md).
 
 | Form | Runs on | How to get it |
 |---|---|---|
@@ -218,7 +229,8 @@ There is no Windows package; on Windows, use the web version.
 
 ### macOS disk image
 
-**From GitHub Actions**, without building on your Mac:
+**From GitHub Actions**, without building on your Mac. Until Slicer Studio is merged into `main`,
+*Run workflow* is not offered: use the request file or a `studio-build-*` tag (below).
 
 1. On the repository's GitHub page, open **Actions > Slicer Studio packages > Run workflow**, choose
    the packages and start the run. Options: `macos` (Apple Silicon disk image, on by default),
@@ -245,8 +257,10 @@ cache lets it continue.
 Homebrew, about 40 GB of free disk space, several hours):
 
 ```console
-Utilities/Scripts/SlicerStudioMacOS/build_dmg.sh               # Homebrew Qt: runs on this Mac and newer macOS
-Utilities/Scripts/SlicerStudioMacOS/build_dmg.sh --qt=official  # runs on any Mac with macOS 14 or newer
+# Homebrew Qt: runs on this Mac and newer macOS
+Utilities/Scripts/SlicerStudioMacOS/build_dmg.sh
+# Official Qt: runs on macOS 14 or newer, on Macs with the same processor (Apple Silicon or Intel)
+Utilities/Scripts/SlicerStudioMacOS/build_dmg.sh --qt=official
 ```
 
 The disk image is written to `~/SlicerStudio/dist/`. If the build stops, run the same command again to
@@ -303,18 +317,19 @@ sudo apt install tigervnc-standalone-server tigervnc-tools websockify novnc open
 python3 slicer_studio_web.py local --slicer ~/Slicer-SuperBuild-Release/Slicer-build/Slicer
 ```
 
-Good to know: `~/SlicerStudioData` is shared with Slicer as its `Documents` folder (`--data` to choose
-another one); the server listens on `127.0.0.1` only (`--ask-password` adds a password); shortcuts use
-`Ctrl`, also on a Mac; rendering uses the CPU, so large volume renderings are slow. The web version has
-been tested with Docker on Linux, not yet with Docker Desktop on macOS or Windows. Details and
-troubleshooting: [Utilities/SlicerStudioWeb/README.md](Utilities/SlicerStudioWeb/README.md).
+Good to know: with Docker, `~/SlicerStudioData` is shared with Slicer as its `Documents` folder
+(`run --data` to choose another one); the server listens on `127.0.0.1` only (`--ask-password` adds a
+password); shortcuts use `Ctrl`, also on a Mac; rendering uses the CPU, so large volume renderings are
+slow. The web version has been tested with Docker on Linux, not yet with Docker Desktop on macOS or
+Windows. Details and troubleshooting:
+[Utilities/SlicerStudioWeb/README.md](Utilities/SlicerStudioWeb/README.md).
 
 ### Linux package
 
 The workflow's `linux` option builds `Slicer-<version>-linux-amd64.tar.gz` on Ubuntu 24.04 with the
 system Qt 5.15 and the system OpenSSL. It runs on Ubuntu 24.04.
 
-1. Install the Qt 5 runtime libraries listed in
+1. Install the runtime libraries (Qt 5 and a few others) listed in
    [the install guide](Docs/user_guide/install_studio.md#linux).
 2. Extract the package anywhere: `tar -xzf Slicer-<version>-linux-amd64.tar.gz`
 3. Run `Slicer` in the extracted folder. To uninstall, remove the folder.
@@ -327,13 +342,17 @@ Ubuntu 24.04 with the system Qt 5, which is how this fork is developed and how t
 
 ```console
 sudo apt update && sudo apt install git git-lfs build-essential cmake libssl-dev libxt-dev \
-  libqt5x11extras5-dev qtmultimedia5-dev libqt5svg5-dev qtwebengine5-dev \
+  libgl-dev libglu1-mesa-dev libqt5x11extras5-dev qtmultimedia5-dev libqt5svg5-dev qtwebengine5-dev \
   libqt5xmlpatterns5-dev qttools5-dev qtbase5-private-dev
-git clone https://github.com/azhmeerjesani/Slicer-2.git Slicer  # --branch NAME for another branch
+# Slicer Studio is not on main yet
+git clone --branch claude/hopeful-hawking-kibs73 https://github.com/azhmeerjesani/Slicer-2.git Slicer
 cmake -S Slicer -B Slicer-SuperBuild-Release \
   -DCMAKE_BUILD_TYPE:STRING=Release \
   -DSlicer_USE_SYSTEM_OpenSSL:BOOL=ON \
-  -DBUILD_TESTING:BOOL=OFF
+  -DBUILD_TESTING:BOOL=OFF \
+  -DSlicer_BUILD_DOCUMENTATION:BOOL=OFF \
+  -DSlicer_USE_VTK_DEBUG_LEAKS:BOOL=OFF \
+  -DSlicer_BUILD_QT_DESIGNER_PLUGINS:BOOL=OFF
 cmake --build Slicer-SuperBuild-Release --parallel "$(nproc)"
 Slicer-SuperBuild-Release/Slicer-build/Slicer
 ```
@@ -358,21 +377,23 @@ Slicer-SuperBuild-Release/Slicer-build/Slicer
      the scan's grid.
      Scenes (`.mrb`, `.mrml`) open as scenes. `Shift`+drop opens the classic *Add Data* dialog instead.
    - *Open folder…*: a DICOM folder goes to the DICOM module; a folder with several NIfTI files offers
-     *Load all* (up to 20 files); any other folder opens *Add Data*.
+     *Load all* (disabled above 20 files: open one subject's files with *Open…*); any other folder opens
+     *Add Data*.
    - *Start on MNI template* loads the MNI152NLin2009cAsym 2 mm brain that comes with Slicer Studio
      (no network needed) and creates a "Lesions" segmentation on its grid. A banner offers the 1 mm
      template: a 13.7 MB download from TemplateFlow with progress, Cancel and a checksum check.
    - *Recent* lists the most recent files; `Enter` reopens the first one.
 3. **Trace the lesion in Draw.** After a scan, a lesion or the template is loaded, Draw opens by itself
-   with the "Lesion" segment selected in the Segment Editor. Use the usual effects: Paint, Draw (with *Add* / *Subtract* and the lasso),
-   Level tracing, Erase, Islands, Smoothing, Margin. `Ctrl+Z` and `Ctrl+Y` undo and redo. *In progress:*
-   the streamlined Draw panel (a lesion card with its volume, labeled tool tiles with letter keys, brush
-   size presets, a *Done → next* button and autosave).
+   with the "Lesion" segment selected in the Segment Editor. Use the usual effects: Paint, Draw (with
+   *Add* / *Subtract* and the lasso), Level tracing, Erase, Islands, Smoothing, Margin. `Ctrl+Z` and
+   `Ctrl+Y` undo and redo. *Planned:* the streamlined Draw panel (wave 2: a lesion card with its volume,
+   labeled tool tiles with letter keys, brush size presets) and the study loop (wave 3: *Done → next*,
+   autosave).
 4. **Save.** `Ctrl+S` saves the scene as a folder or a `.mrb` file, which also opens in official
    3D Slicer. To save the lesion as a NIfTI mask, open the Segmentations module (`Ctrl+K`, type
    "Segmentations") and use *Export to files* with the NIfTI format.
-5. **Map the network.** *In progress:* the Map workspace is not available yet. You can already compute
-   a map from the command line with the exported lesion, see
+5. **Map the network.** *Planned (wave 2):* the Map workspace is not available yet. You can already
+   compute a map from the command line with the exported lesion, see
    [Lesion network mapping](#lesion-network-mapping). The lesion must be in the connectome's MNI space.
    Note that the template that comes with Slicer Studio (MNI152NLin2009cAsym) and the FSL MNI152 template
    used by GSP1000 (MNI152NLin6Asym) differ by a few millimeters. Normalizing native-space scans to MNI
@@ -398,10 +419,15 @@ pointing to `Modules/Scripted/LesionNetworkMapping` and the `PythonSlicer` of an
 | Linux package | `bin/PythonSlicer` in the extracted folder |
 | macOS | `/Applications/Slicer Studio.app/Contents/bin/PythonSlicer` |
 
-The commands below assume:
+In the commands below, `PythonSlicer` stands for the path in the table above, with `PYTHONPATH` set:
 
 ```console
-export PYTHONPATH=/path/to/Slicer-2/Modules/Scripted/LesionNetworkMapping
+export PYTHONPATH=/path/to/Slicer/Modules/Scripted/LesionNetworkMapping
+```
+
+To check the setup:
+
+```console
 PythonSlicer -m LesionNetworkMappingLib.engine --help
 ```
 
@@ -416,6 +442,7 @@ MyConnectome.lnmc/
   subjects/<id>.f16.npy    time series, voxel-major float16, each run demeaned and unit-norm
   subjects/<id>.norms.npy  norms of the runs (float32)
   derived/degree.npy       optional connectome degree map, for QA
+  derived/degree.json      how the degree map was computed (written with it by qa degree)
 ```
 
 Converters (Python API; tested on synthetic data):
@@ -423,9 +450,10 @@ Converters (Python API; tested on synthetic data):
 ```python
 from LesionNetworkMappingLib import connectome
 
-# Preprocessed 4D NIfTI time series on one mask grid, one file per run;
-# the regular expression groups the runs of each subject
-connectome.from_nifti_timeseries("/data/rest/*.nii.gz", "/data/rest/mask.nii.gz", "/data/MyConnectome.lnmc",
+# Preprocessed 4D NIfTI time series on one mask grid, one file per run (the pattern must
+# match only the time series); the regular expression groups the runs of each subject
+connectome.from_nifti_timeseries("/data/rest/sub-*_bold.nii.gz", "/data/mask.nii.gz",
+                                 "/data/MyConnectome.lnmc",
                                  runs_grouping=r"(?P<subject>sub-[A-Za-z0-9]+)",
                                  citation="...", data_use_terms="...")
 
@@ -463,9 +491,11 @@ PythonSlicer -m LesionNetworkMappingLib.engine \
 | `--threads K` | BLAS threads (default 2). |
 
 The engine prints one JSON object per line (`start`, `progress`, `snapshot`, `warning`, `done`, `error`)
-and writes, for each lesion, `<lesion>_conn-<connectome>_desc-{AvgR,AvgRFz,T}_funcmap.nii.gz` (Lead-DBS
-names; float32 in the connectome's exact header; the T map carries its degrees of freedom) and
-`qa.json`. `--help` lists every option.
+and writes, for each lesion, `<name>_conn-<connectome>_desc-{AvgR,AvgRFz,T}_funcmap.nii.gz` (Lead-DBS
+names; float32 on the connectome's grid, same shape and affine; the T map carries its degrees of freedom
+in the NIfTI intent), and one `qa.json` for the run. `<name>` is the lesion file name without extension
+or, for BIDS-style names, its entities without the suffix and without `space`, `res`, `den`, `label`
+and `desc` (`sub-01_lesion.nii.gz` gives `sub-01`). `--help` lists every option.
 
 To export a run with one JSON sidecar per lesion (N, degrees of freedom, threshold rule and its resolved
 value, lesion checksum, QA, disclaimer), `provenance.json`, a generated `methods.md` and a
@@ -490,9 +520,9 @@ they are used, so a value that depends on N is never silently reused for another
 | Rule | Resolves to |
 |---|---|
 | `fwe_bonferroni` (default, alpha 0.05) | Bonferroni-corrected T: \|T\| ≥ 5.27 at N = 1000, V = 292,019 |
-| `t_convention` | T = 7, defined for N ≈ 1000; refused below N = 900 unless overridden, with a warning when N differs by more than 10% |
+| `t_convention` | T = 7, defined for N ≈ 1000; not applied below N = 900 unless overridden, with a warning when N differs by more than 10% |
 | `fz_abs` | An effect size on the mean Fisher z |
-| `custom_t` | A T value with its reference N, with the same warning |
+| `custom_t` | A T value, with an optional reference N and then the same warning |
 
 QA, following the critique by van den Heuvel et al. (2026):
 
@@ -544,8 +574,8 @@ released yet.
 | Part | Contents | State |
 |---|---|---|
 | Wave 1: foundation | Benchmark, screenshot and test tools; dark theme and Appearance settings; Studio interface (top bar, workspaces, Studio layouts, Classic switch); Library page with direct loading and the bundled MNI template; Segment Editor effect fixes and speed-ups; faster masked painting; faster slice updates; LNM thresholds, QA, study model and export; file compatibility | Implemented, under review |
-| Packaging | Web browser launcher and Docker image; macOS disk image script; GitHub Actions workflow (disk image, Linux package, web image) | Implemented; macOS builds not yet tested on a Mac |
-| Wave 2: the streamlined editor | Draw panel (lesion card, tool tiles, letter keys, brush presets, *Done* / *Map network* button); Map workspace v1 (seed, connectome, compute with progressive maps, thresholds, QA, export, disclaimer); Inter font; flat view bars; more style work; Segment Editor improvements (segment created automatically, masking summary, brush limits); Threshold and Fill between slices fixes | In progress |
+| Packaging | Web browser launcher and Docker image; macOS disk image script; GitHub Actions workflow (disk image, Linux package, web image) | Implemented; first CI run in progress; macOS builds not yet tested on a Mac |
+| Wave 2: the streamlined editor | Draw panel (lesion card, tool tiles, letter keys, brush presets, *Done* / *Map network* button); Map workspace v1 (seed, connectome, compute with progressive maps, thresholds, QA, export, disclaimer); Inter font; flat view bars; more style work; Segment Editor improvements (segment created automatically, masking summary, brush limits); Threshold and Fill between slices fixes | Planned (next) |
 | Wave 3: navigation, study loop | Slice navigation keys and mouse; menu-bar-free shortcuts and focus mode in C++; NIfTI loading fixes; brush size display and `[` `]` keys; command palette, shortcut overlay, in-view readout; studies (subject list, *Done → next*, QC flags, autosave journal); cohort statistics, connectome manager and Map integration | Planned |
 | Wave 4: performance and docs | Faster Draw and Scissors apply, cheaper undo; Library grid with thumbnails; faster startup (lazy Python wrappers, linker option); user guide pages | Planned |
 | Automation | Autosave of lesions, smart fill, MNI normalization of native-space scans, cohort pipeline with a report | Planned |
@@ -553,11 +583,13 @@ released yet.
 Known limitations today:
 
 - The Map workspace is disabled; lesion network mapping runs from the command line.
-- Draw shows the classic Segment Editor panel, so the inspector is wider than 340 px in Draw.
+- Draw shows the classic Segment Editor panel, so the inspector is 423 px wide in Draw, and stays that
+  wide in the Library after Draw has been opened.
 - `Ctrl+K` opens Slicer's module finder, not a command palette.
 - The *System* theme follows the operating system on Windows only; on macOS and Linux it is light.
 - The fork's default settings file (`Applications/SlicerApp/Resources/SlicerDefaultSettings.ini`) is
-  not installed yet; every key in it equals the built-in default, so nothing changes for users.
+  not installed yet; its keys equal the built-in defaults or are not read yet (the Inter font keys,
+  wave 2), so nothing changes for users.
 
 ## Development
 
@@ -585,7 +617,7 @@ Known limitations today:
 SLICER=~/Slicer-SuperBuild-Release/Slicer-build/Slicer
 python3 Utilities/Scripts/StudioTestRunner.py --slicer "$SLICER" unittest Studio StudioTest
 python3 Utilities/Scripts/StudioTestRunner.py --slicer "$SLICER" unittest Applications/SlicerApp/Testing/Python StudioLayoutPortabilityTest
-python3 Utilities/Scripts/StudioTestRunner.py --slicer "$SLICER" generic Studio
+python3 Utilities/Scripts/StudioTestRunner.py --slicer "$SLICER" --generic-dir "$(mktemp -d)" generic Studio
 ```
 
 `unittest DIR NAME` accepts a module name as `DIR`; `selftest MODULE` runs a module's self-test. Upstream
@@ -607,9 +639,9 @@ panels and LNM, and checks them against budgets:
 ```console
 cd ~/Slicer-SuperBuild-Release/Slicer-build
 xvfb-run -a -s "-screen 0 1920x1080x24" ./Slicer --no-splash \
-  --python-script /path/to/Slicer-2/Utilities/Scripts/StudioBench.py -- --out after.json --check --compare before.json
-python3 /path/to/Slicer-2/Utilities/Scripts/StudioBench.py --startup --slicer ./Slicer --runs 3 --out startup.json
-python3 /path/to/Slicer-2/Utilities/Scripts/StudioBench.py --merge run1.json run2.json run3.json --out merged.json
+  --python-script /path/to/Slicer/Utilities/Scripts/StudioBench.py -- --out after.json --check --compare before.json
+python3 /path/to/Slicer/Utilities/Scripts/StudioBench.py --startup --slicer ./Slicer --runs 3 --out startup.json
+python3 /path/to/Slicer/Utilities/Scripts/StudioBench.py --merge run1.json run2.json run3.json --out merged.json
 ```
 
 `--only` selects metrics or groups (`--list` shows them). A metric that fails to measure counts as a
@@ -623,7 +655,7 @@ the Studio workspaces and a widget gallery, in several window sizes and both the
 
 ```console
 HOME=$(mktemp -d) xvfb-run -a -s "-screen 0 1920x1080x24" ./Slicer --no-splash \
-  --python-script /path/to/Slicer-2/Utilities/Scripts/StudioScreens.py -- --out shots --sizes 1920x1080,1366x768
+  --python-script /path/to/Slicer/Utilities/Scripts/StudioScreens.py -- --out shots --sizes 1920x1080,1366x768
 ```
 
 ### Compatibility check
@@ -692,11 +724,11 @@ Added by this fork:
 
 | Component | Where | License | Notes |
 |---|---|---|---|
-| [Lucide](https://lucide.dev) icons 0.468.0 | [Modules/Scripted/Studio/Resources/Icons/Lucide](Modules/Scripted/Studio/Resources/Icons/Lucide) | ISC; portions MIT (Feather) | [LICENSE](Modules/Scripted/Studio/Resources/Icons/Lucide/LICENSE) next to the icons |
+| [Lucide](https://lucide.dev) icons 0.468.0 | [Modules/Scripted/Studio/Resources/Icons/Lucide](Modules/Scripted/Studio/Resources/Icons/Lucide) | ISC; portions MIT (Feather) | 58 icons from lucide-static 0.468.0, stroke width changed from 2 to 1.75; the module icon `Resources/Icons/Studio.svg` is Lucide's *library* icon, recolored. [LICENSE](Modules/Scripted/Studio/Resources/Icons/Lucide/LICENSE) next to the icons |
 | [Inter](https://rsms.me/inter/) font | Not bundled yet (planned, wave 2) | SIL Open Font License 1.1 | No font file is included yet; the application font is unchanged |
 | MNI152NLin2009cAsym 2 mm brain T1w and brain mask, from [TemplateFlow](https://www.templateflow.org), unmodified | [Modules/Scripted/SampleData/Resources/Data](Modules/Scripted/SampleData/Resources/Data) | MNI / McGill permissive license | [LICENSE-MNI152NLin2009cAsym.txt](Modules/Scripted/SampleData/Resources/Data/LICENSE-MNI152NLin2009cAsym.txt); cite Fonov et al., NeuroImage 2011 and TemplateFlow (Ciric et al., Nature Methods 2022). The two thumbnails are rendered from this template. |
 | TemplateFlow downloads on request: MNI152NLin2009cAsym 1 mm T1w and mask; MNI152NLin6Asym 1 mm and 2 mm T1w, 2 mm mask; Schaefer2018 400 parcels; Harvard-Oxford th25 | Downloaded to the Slicer cache when you ask, SHA-256 checked | Their own terms; MNI152NLin6Asym and Harvard-Oxford: FSL license (non-commercial) | Never bundled |
-| noVNC, websockify, TigerVNC, Openbox | Only in the web Docker image ([Dockerfile](Utilities/SlicerStudioWeb/Dockerfile)), installed from Ubuntu 24.04 packages | noVNC: MPL-2.0; websockify: LGPL-3.0; TigerVNC: GPL-2.0; Openbox: GPL-2.0 | Local mode uses the system packages, or downloads noVNC 1.6.0 from GitHub (checksum verified) |
+| noVNC, websockify, TigerVNC, Openbox | Only in the web Docker image ([Dockerfile](Utilities/SlicerStudioWeb/Dockerfile)), installed from Ubuntu 24.04 packages | noVNC: MPL-2.0 (some bundled files under other permissive licenses); websockify: LGPL-3.0; TigerVNC: GPL-2.0; Openbox: GPL-2.0 | The image uses Ubuntu's noVNC 1.3.0. Local mode uses the system packages, or downloads noVNC 1.6.0 from GitHub (checksum verified). The image also contains Ubuntu 24.04 runtime packages (Qt 5: LGPL-3.0; Mesa and tini: MIT; others); their licenses are under `/usr/share/doc/*/copyright` in the image and their sources are the Ubuntu 24.04 source packages. |
 | GSP1000 connectome | Not included | GSP Open Access Data Use Terms | Obtain it from Harvard Dataverse |
 
 ## Based on 3D Slicer
