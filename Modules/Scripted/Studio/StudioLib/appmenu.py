@@ -5,7 +5,9 @@ Appearance (theme and density), common dialogs and the switch to the Classic int
 
 Appearance settings are changed through the Appearance settings panel, so they are stored in
 the fork's own keys (``Appearance/Theme``, ``Appearance/Density``) and never in keys that other
-Slicer installations read (SPEC 9.7 rule 5).
+Slicer installations read (SPEC 9.7 rule 5). Only on builds without the theme setting (the Studio
+module run by another Slicer), Dark and Light select the "Dark Slicer" and "Light Slicer" styles,
+like the style combo box of the panel does.
 """
 
 import qt

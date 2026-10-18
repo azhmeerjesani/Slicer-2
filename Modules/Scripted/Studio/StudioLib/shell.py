@@ -890,8 +890,7 @@ class Shell:
         self.panelHeader.setTitle(ws.title)
         for keySequence, callback, description in self._workspaceShortcuts.get(ws.key, []):
             self._installedWorkspaceShortcuts.append(self._createShortcut(keySequence, callback, description))
-        if not self.focusMode():
-            self.setInspectorVisible(True)
+        self._showInspectorForModule()
         self._schedulePanelWidthUpdate(shrink=shrinkPanel)
 
     def _onWorkspaceLeft(self, ws):
@@ -908,8 +907,14 @@ class Shell:
         self.topBar.setCurrentWorkspace(None)
         last = workspaces.workspace(self.workspaces.last or "library")
         self.panelHeader.setTitle(title, transient=True, closeToolTip=_("Close and return to {workspace}").format(workspace=last.title))
-        if not self.focusMode():
-            self.setInspectorVisible(True)
+        self._showInspectorForModule()
+
+    def _showInspectorForModule(self):
+        # Selecting a module shows the module panel (qSlicerMainWindow): in focus mode, leave the
+        # focus mode rather than showing the inspector without the top bar
+        if self.focusMode():
+            self.setFocusMode(False)
+        self.setInspectorVisible(True)
 
     def _onModuleAdded(self, moduleName):
         if moduleName == "SegmentEditor":
