@@ -49,6 +49,11 @@ MIN_PANEL_WIDTH = 300
 MAX_PANEL_WIDTH = 480
 PANEL_HEADER_HEIGHT = 40
 PANEL_HEADER_BUTTON_SIZE = 26
+#: Help popover of the panel header: a card under the header, as wide as the inspector
+HELP_POPOVER_PADDING = 12
+HELP_POPOVER_MIN_WIDTH = 240
+HELP_POPOVER_MIN_HEIGHT = 200
+HELP_POPOVER_MAX_HEIGHT = 420
 
 #: Shows or hides the inspector. Not Tab: Tab and Shift+Tab move the keyboard focus, also out of the views.
 INSPECTOR_SHORTCUT = "Ctrl+\\"
@@ -322,26 +327,50 @@ class PanelHeader:
         self.dataProbeAction.setChecked(dataProbe is not None and not dataProbe.isHidden())
         self.dataProbeAction.blockSignals(False)
 
-    def showHelp(self):
+    def helpPopover(self):
+        """Create the help popover of the current module, or return None if no module is shown.
+
+        It is a menu that holds a text browser, to be shown under the header (``helpPopoverPosition()``) over the
+        whole inspector width. It is a card with a border and padding, so that it reads as a surface of its own
+        rather than as text over the inspector.
+        """
         moduleName = self.shell.currentModuleName()
         module = slicer.app.moduleManager().module(moduleName) if moduleName and workspaces.moduleExists(moduleName) else None
         if module is None:
-            return
-        html = f"<h3>{module.title}</h3>{module.helpText}"
+            return None
+        html = f'<h3 style="margin-top: 0px;">{module.title}</h3>{module.helpText}'
         if module.acknowledgementText:
             html += f"<h4>{_('Acknowledgment')}</h4>{module.acknowledgementText}"
         menu = qt.QMenu(self.helpButton)
         menu.setObjectName("StudioHelpPopover")
+        card = ui.token("card").name()
+        menu.setStyleSheet(
+            f"QMenu#StudioHelpPopover {{ background-color: {card}; border: 1px solid {ui.token('border').name()}; padding: 0px; }}"
+            f"QTextBrowser#StudioHelpBrowser {{ background-color: {card}; border: none; }}")
         browser = qt.QTextBrowser()
         browser.setObjectName("StudioHelpBrowser")
         browser.setOpenExternalLinks(True)
         browser.setFrameShape(qt.QFrame.NoFrame)
         browser.setHtml(html)
-        browser.setFixedSize(380, 360)
+        browser.document.setDocumentMargin(HELP_POPOVER_PADDING)
+        # As wide as the inspector (inside the 1 px border), as high as the inspector allows
+        dock = self.widget.parentWidget()
+        available = (dock.height if dock is not None else HELP_POPOVER_MAX_HEIGHT) - self.widget.height - HELP_POPOVER_PADDING
+        browser.setFixedSize(max(self.widget.width - 2, HELP_POPOVER_MIN_WIDTH), max(HELP_POPOVER_MIN_HEIGHT, min(HELP_POPOVER_MAX_HEIGHT, available)))
         action = qt.QWidgetAction(menu)
         action.setDefaultWidget(browser)
         menu.addAction(action)
-        menu.exec_(self.helpButton.mapToGlobal(qt.QPoint(self.helpButton.width - 380, self.helpButton.height)))
+        return menu
+
+    def helpPopoverPosition(self):
+        """Global position of the help popover: the bottom left corner of the header."""
+        return self.widget.mapToGlobal(qt.QPoint(0, self.widget.height))
+
+    def showHelp(self):
+        menu = self.helpPopover()
+        if menu is None:
+            return
+        menu.exec_(self.helpPopoverPosition())
         menu.deleteLater()
 
     def dispose(self):
@@ -1045,11 +1074,11 @@ class Shell:
     # Workspaces
     #
 
-    def switchTo(self, key):
-        """Show the workspace ``key`` ("library", "draw" or "map")."""
+    def switchTo(self, key, keepLayout=False):
+        """Show the workspace ``key`` ("library", "draw" or "map"), in its remembered layout unless ``keepLayout``."""
         if not self._active:
             return
-        self.workspaces.switchTo(key)
+        self.workspaces.switchTo(key, keepLayout=keepLayout)
 
     def closeTransientModule(self):
         """Return from a transient module to the last workspace."""

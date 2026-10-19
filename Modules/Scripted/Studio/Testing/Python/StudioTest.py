@@ -884,3 +884,214 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         studioShell.classic(persist=False)
         self._pump()
         self.assertIsNone(self.mainWindow.findChild("QShortcut", "StudioDrawRedoShortcut"))
+
+    #
+    # Files of other installations (SPEC 9.7) and first entries into Draw
+    #
+
+    #: Terminology of a "Neoplasm" segment, as official Slicer writes it
+    NEOPLASM_TERMINOLOGY = (
+        "Segmentation category and type - 3D Slicer General Anatomy list~SCT^49755003^Morphologically Altered Structure"
+        "~SCT^108369006^Neoplasm~^^~Anatomic codes - DICOM master list~^^~^^")
+
+    @staticmethod
+    def _segmentStates(segmentationNode):
+        """[(name, color, terminology)] of the segments of a segmentation."""
+        import vtk
+
+        segmentation = segmentationNode.GetSegmentation()
+        states = []
+        for index in range(segmentation.GetNumberOfSegments()):
+            segment = segmentation.GetSegment(segmentation.GetNthSegmentID(index))
+            terminology = vtk.mutable("")
+            segment.GetTag(slicer.vtkSegment.GetTerminologyEntryTagName(), terminology)
+            states.append((segment.GetName(), [round(component, 3) for component in segment.GetColor()], str(terminology)))
+        return states
+
+    @staticmethod
+    def _errorLogErrors():
+        """Descriptions of the Error, Critical and Fatal entries of the error log."""
+        model = slicer.app.errorLogModel()
+        levelColumn, descriptionColumn = 2, 4  # ctkErrorLogAbstractModel::LogLevelColumn, DescriptionColumn
+        return [str(model.index(row, descriptionColumn).data()) for row in range(model.rowCount())
+                if model.index(row, levelColumn).data() in ("Error", "Critical", "Fatal")]
+
+    def _coveredByLibrary(self, widget):
+        """True if a widget of the Library page is shown over the center of ``widget``."""
+        covering = slicer.app.widgetAt(widget.mapToGlobal(qt.QPoint(widget.width // 2, widget.height // 2)))
+        while covering is not None:
+            if covering.objectName.startswith("StudioLibrary"):
+                return True
+            covering = covering.parentWidget()
+        return False
+
+    def test_14_segmentation_files_kept(self):
+        """Segments read from files that store them keep their name, color and terminology; a label map mask gets "Lesion" (F1)."""
+        import os
+
+        import numpy as np
+
+        from StudioLib import importer
+
+        scanPath = self._scanFile()
+        directory = os.path.dirname(scanPath)
+        scan = slicer.util.loadVolume(scanPath, {"show": False})
+        mask = np.zeros(slicer.util.arrayFromVolume(scan).shape, np.uint8)
+        mask[10:14, 12:16, 8:12] = 1
+
+        # One "Tumor" segment with terminology (what official Slicer writes), as .seg.nrrd and as .nrrd
+        segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "OneTumor")
+        segmentationNode.CreateDefaultDisplayNodes()
+        segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(scan)
+        segmentId = segmentationNode.GetSegmentation().AddEmptySegment("Tumor", "Tumor", [0.1, 0.6, 0.2])
+        segmentationNode.GetSegmentation().GetSegment(segmentId).SetTag(slicer.vtkSegment.GetTerminologyEntryTagName(), self.NEOPLASM_TERMINOLOGY)
+        slicer.util.updateSegmentBinaryLabelmapFromArray(mask, segmentationNode, segmentId, scan)
+        expected = [("Tumor", [0.1, 0.6, 0.2], self.NEOPLASM_TERMINOLOGY)]
+        self.assertEqual(self._segmentStates(segmentationNode), expected)
+        segmentationFiles = [os.path.join(directory, "OneTumor.seg.nrrd"), os.path.join(directory, "sub-07_lesion.nrrd")]
+        for path in segmentationFiles:
+            self.assertTrue(slicer.util.saveNode(segmentationNode, path), path)
+        # A plain label map mask
+        labelmapNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "mask")
+        slicer.util.updateVolumeFromArray(labelmapNode, mask)
+        labelmapNode.CopyOrientation(scan)
+        maskPath = os.path.join(directory, "sub-07_mask.nii.gz")
+        self.assertTrue(slicer.util.saveNode(labelmapNode, maskPath))
+        slicer.mrmlScene.Clear(0)
+
+        for path in segmentationFiles:
+            self.assertTrue(importer.storesSegments(path), path)
+        self.assertFalse(importer.storesSegments(maskPath))
+        self.assertFalse(importer.storesSegments(scanPath))
+
+        studioShell = self._applyStudio()
+        for path in segmentationFiles:
+            slicer.mrmlScene.Clear(0)
+            result = importer.loadFiles([path], studioShell)
+            self._pump()
+            self.assertEqual(len(result.segmentations), 1, path)
+            self.assertEqual(self._segmentStates(result.segmentations[0]), expected, path)
+            # The recent files path (Add Data, Recent) keeps them too
+            slicer.mrmlScene.Clear(0)
+            result = importer.loadRecentFile({"fileName": path, "fileType": "SegmentationFile"}, None, studioShell)
+            self._pump()
+            self.assertEqual(len(result.segmentations), 1, path)
+            self.assertEqual(self._segmentStates(result.segmentations[0]), expected, path)
+
+        slicer.mrmlScene.Clear(0)
+        result = importer.loadFiles([maskPath], studioShell)
+        self._pump()
+        self.assertEqual(len(result.segmentations), 1)
+        name, color, _terminology = self._segmentStates(result.segmentations[0])[0]
+        self.assertEqual((name, color), (importer.LESION_SEGMENT_NAME, [round(component, 3) for component in importer.LESION_COLOR]))
+
+    def test_15_scene_opened_in_library(self):
+        """A scene or a segmentation opened in Library is shown in Draw, a scene in its own layout (F2)."""
+        import os
+
+        from StudioLib import importer
+
+        scanPath = self._scanFile()
+        directory = os.path.dirname(scanPath)
+        scan = slicer.util.loadVolume(scanPath)
+        segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Tumor")
+        segmentationNode.CreateDefaultDisplayNodes()
+        segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(scan)
+        segmentationNode.GetSegmentation().AddEmptySegment("Tumor", "Tumor", [0.1, 0.6, 0.2])
+        conventional = slicer.vtkMRMLLayoutNode.SlicerLayoutConventionalView
+        self.layoutManager.setLayout(conventional)
+        self._pump()
+        scenePath = os.path.join(directory, "conventional.mrb")
+        self.assertTrue(slicer.util.saveScene(scenePath))
+        segmentationPath = os.path.join(directory, "tumor.seg.nrrd")
+        self.assertTrue(slicer.util.saveNode(segmentationNode, segmentationPath))
+        slicer.mrmlScene.Clear(0)
+
+        studioShell = self._applyStudio()
+        # Closing a scene in Draw records the layout of Draw (Studio/Draw/Layout): restored at the end
+        settings = qt.QSettings()
+        previousDrawLayout = settings.value("Studio/Draw/Layout")
+        try:
+            for path, layout in ((scenePath, conventional), (segmentationPath, None)):
+                slicer.mrmlScene.Clear(0)
+                studioShell.switchTo("library")
+                self._pump()
+                # Library keeps the current layout: another one than the layout of the scene
+                self.layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
+                self._pump()
+                self.assertIsNotNone(studioShell.canvas())
+                importer.loadFiles([path], studioShell)
+                self._pump(8)
+                self.assertEqual(studioShell.currentWorkspace(), "draw", path)
+                self.assertIsNone(studioShell.canvas(), path)
+                self.assertFalse(studioShell.isRenderPausedByCanvas(), path)
+                if layout is not None:
+                    # The scene keeps its layout (not the remembered Draw layout)
+                    self.assertEqual(self.layoutManager.layout, layout)
+                for viewName in self.layoutManager.sliceViewNames():
+                    sliceWidget = self.layoutManager.sliceWidget(viewName)
+                    if sliceWidget.isVisible():
+                        self.assertFalse(self._coveredByLibrary(sliceWidget), f"{path}: {viewName}")
+                self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLSegmentationNode")), 1, path)
+        finally:
+            if previousDrawLayout is None:
+                settings.remove("Studio/Draw/Layout")
+            else:
+                settings.setValue("Studio/Draw/Layout", previousDrawLayout)
+
+    def test_16_draw_entry_logs_no_error(self):
+        """Start on MNI template and Library -> Draw, with the mouse pointer where a slice view appears, log no error (UX-B1)."""
+        from StudioLib import importer
+
+        studioShell = self._applyStudio()
+        studioShell.switchTo("library")
+        self._pump()
+        # The pointer over the view area: a slice view appears under it when the Library page is hidden
+        centralWidget = self.mainWindow.centralWidget()
+        qt.QCursor.setPos(centralWidget.mapToGlobal(qt.QPoint(centralWidget.width // 3, centralWidget.height // 2)))
+        self._pump()
+        errorCount = len(self._errorLogErrors())
+        try:
+            importer.startOnTemplate(shell=studioShell)
+            self._pump(10)
+            editor = slicer.modules.SegmentEditorWidget.editor
+            self.assertEqual(studioShell.currentWorkspace(), "draw")
+            self.assertEqual(self._effect(editor), "Paint")
+            self.assertEqual(self._errorLogErrors()[errorCount:], [])
+
+            studioShell.switchTo("library")
+            self._pump()
+            studioShell.switchTo("draw")
+            self._pump(10)
+            self.assertEqual(self._effect(editor), "Paint")
+            self.assertEqual(self._errorLogErrors()[errorCount:], [])
+        finally:
+            importer._closeTemplateBanner()
+
+    def test_17_help_popover(self):
+        """The help popover is a card with a border and padding under the panel header, as wide as the inspector (UX-B3)."""
+        from StudioLib import shell, ui
+
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        self._pump()
+        header = studioShell.panelHeader
+        menu = header.helpPopover()
+        self.assertIsNotNone(menu)
+        try:
+            browser = menu.findChild("QTextBrowser", "StudioHelpBrowser")
+            self.assertIsNotNone(browser)
+            self.assertEqual(browser.document.documentMargin, shell.HELP_POPOVER_PADDING)
+            self.assertIn(f"border: 1px solid {ui.token('border').name()}", menu.styleSheet)
+            self.assertIn(f"background-color: {ui.token('card').name()}", menu.styleSheet)
+            menu.popup(header.helpPopoverPosition())
+            self._pump()
+            self.assertTrue(menu.isVisible())
+            self.assertEqual(menu.width, max(header.widget.width, shell.HELP_POPOVER_MIN_WIDTH + 2))
+            # The card is drawn: the browser shows the card color
+            image = browser.viewport().grab().toImage()
+            self.assertEqual(qt.QColor.fromRgba(image.pixel(2, image.height() - 3)).name(), ui.token("card").name())
+        finally:
+            menu.close()
+            menu.deleteLater()
+            self._pump()

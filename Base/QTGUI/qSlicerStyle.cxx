@@ -27,9 +27,12 @@
 #include <QGroupBox>
 #include <QPainter>
 #include <QPainterPath>
+#include <qdrawutil.h>
 #include <QScrollBar>
 #include <QSettings>
+#include <QStyleOptionComboBox>
 #include <QStyleOptionGroupBox>
+#include <QStyleOptionSpinBox>
 #include <QtMath>
 
 // Slicer includes
@@ -212,6 +215,40 @@ void applyAccentColor(QPalette& palette, bool dark)
 }
 
 //------------------------------------------------------------------------------
+/// Return true if the option is drawn with a dark palette (window color lightness < 128)
+bool hasDarkPalette(const QStyleOption* option)
+{
+  return option && option->palette.color(QPalette::Window).lightness() < 128;
+}
+
+//------------------------------------------------------------------------------
+/// Draw the frame of an input field (line edit, spin box, editable combo box) of a dark palette:
+/// a 1 px "border" token line ("accent-fg" when focused, "hairline" when disabled).
+/// The base style (Fusion) frames fields with a color darker than the window color and fills
+/// them with the base color, which is almost the window color: fields have no visible boundary.
+/// \a rect is the rectangle framed by the base style, the frame has the same geometry to cover it.
+void drawDarkFieldFrame(const QRect& rect, QStyle::State state, QPainter* painter)
+{
+  QColor frameColor = qSlicerStyle::tokenColor("border", true);
+  if (!(state & QStyle::State_Enabled))
+  {
+    frameColor = qSlicerStyle::tokenColor("hairline", true);
+  }
+  else if (state & QStyle::State_HasFocus)
+  {
+    frameColor = qSlicerStyle::tokenColor("accent-fg", true);
+  }
+  painter->save();
+  painter->setRenderHint(QPainter::Antialiasing, true);
+  // Line on pixel centers, like the base style
+  painter->translate(0.5, 0.5);
+  painter->setPen(frameColor);
+  painter->setBrush(Qt::NoBrush);
+  painter->drawRoundedRect(QRectF(rect.adjusted(0, 0, -1, -1)), 2., 2.);
+  painter->restore();
+}
+
+//------------------------------------------------------------------------------
 /// Draw a check box (or item view check) or radio button indicator for dark palettes.
 /// The base style (Fusion) draws the indicator frame in a color derived from the window
 /// color, which is almost invisible on dark palettes. Here the frame uses the "text3" token,
@@ -299,6 +336,28 @@ void drawDarkIndicator(QStyle::PrimitiveElement element, const QStyleOption* opt
         painter->drawPath(checkMark);
       }
     }
+  }
+  painter->restore();
+}
+
+//------------------------------------------------------------------------------
+/// Draw the surface (PE_PanelMenu) or the frame (PE_FrameMenu) of a menu of a dark palette: a card with
+/// a 1 px border. The base style fills dark menus with a color close to the window color and frames them
+/// with a darker line, so a menu over a panel does not stand out from the panel.
+void drawDarkMenuSurface(QStyle::PrimitiveElement element, const QStyleOption* option, QPainter* painter)
+{
+  const QColor borderColor = qSlicerStyle::tokenColor("border", true);
+  painter->save();
+  if (element == QStyle::PE_PanelMenu)
+  {
+    const QBrush background(qSlicerStyle::tokenColor("card", true));
+    qDrawPlainRect(painter, option->rect, borderColor, 1, &background);
+  }
+  else
+  {
+    painter->setPen(borderColor);
+    painter->setBrush(Qt::NoBrush);
+    painter->drawRect(option->rect.adjusted(0, 0, -1, -1));
   }
   painter->restore();
 }
@@ -540,15 +599,67 @@ void qSlicerStyle::drawPrimitive(PrimitiveElement element, const QStyleOption* o
     case QStyle::PE_IndicatorCheckBox:
     case QStyle::PE_IndicatorRadioButton:
       // Item view checks and menu check boxes are drawn by the base style as PE_IndicatorCheckBox.
-      if (option && painter && option->palette.color(QPalette::Window).lightness() < 128)
+      if (painter && hasDarkPalette(option))
       {
         drawDarkIndicator(element, option, painter);
+        return;
+      }
+      break;
+    case QStyle::PE_PanelMenu:
+    case QStyle::PE_FrameMenu:
+      if (painter && hasDarkPalette(option))
+      {
+        drawDarkMenuSurface(element, option, painter);
+        return;
+      }
+      break;
+    case QStyle::PE_FrameLineEdit:
+      // Line edits (PE_PanelLineEdit fills them with the base color) and editable combo boxes
+      if (painter && hasDarkPalette(option))
+      {
+        drawDarkFieldFrame(option->rect, option->state, painter);
         return;
       }
       break;
     default: break;
   }
   this->Superclass::drawPrimitive(element, option, painter, widget);
+}
+
+//------------------------------------------------------------------------------
+void qSlicerStyle::drawComplexControl(ComplexControl control, const QStyleOptionComplex* option, QPainter* painter, const QWidget* widget) const
+{
+  this->Superclass::drawComplexControl(control, option, painter, widget);
+  if (!painter || !hasDarkPalette(option))
+  {
+    return;
+  }
+  // The base style (Fusion) draws the frame of spin boxes itself, and draws the arrow button of
+  // editable combo boxes over their PE_FrameLineEdit frame: draw the frame of dark fields over them.
+  switch (control)
+  {
+    case QStyle::CC_SpinBox:
+      if (const QStyleOptionSpinBox* spinBox = qstyleoption_cast<const QStyleOptionSpinBox*>(option))
+      {
+        if (spinBox->frame)
+        {
+          // The base style leaves one pixel above and below the frame
+          drawDarkFieldFrame(spinBox->rect.adjusted(0, 1, 0, -1), spinBox->state, painter);
+        }
+      }
+      break;
+    case QStyle::CC_ComboBox:
+      if (const QStyleOptionComboBox* comboBox = qstyleoption_cast<const QStyleOptionComboBox*>(option))
+      {
+        // Non-editable combo boxes are drawn as buttons
+        if (comboBox->editable && comboBox->frame)
+        {
+          drawDarkFieldFrame(comboBox->rect, comboBox->state, painter);
+        }
+      }
+      break;
+    default: break;
+  }
 }
 
 //------------------------------------------------------------------------------

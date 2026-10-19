@@ -8,7 +8,8 @@ make it a place that keeps its state and has a visible way out:
   the brush. ``leave()`` records the active effect, the segmentation, the segment and the source volume, and
   ``enter()`` restores the effect (and the segment, if the segmentation is still the same).
 - Something is armed on arrival: on the first entry, the Paint effect is activated as soon as a segmentation
-  with a selected segment and a source volume exist (for example, right after a scan is opened).
+  with a selected segment and a source volume exist (for example, right after a scan is opened). The effect is
+  armed on the event loop iteration after the entry, once the views shown by the switch are in place.
   A tool deselected with Esc stays deselected on that lesion: nothing is re-armed until the user picks a tool
   again, or another lesion is edited (a new case is a new landing, so Paint is armed on it).
   A tool that the Segment Editor deactivated by itself (another segmentation was selected, the scene was
@@ -198,7 +199,11 @@ class _DrawSession(VTKObservationMixin):
         self._restore(editor)
         self._observe(editor)
         self._snapshot = _Snapshot(editor)
-        self._tryArm(editor)
+        # The effect is armed on the next event loop iteration (_evaluate()), after the views that the switch shows
+        # (Library page hidden, Draw layout) got their Enter events. Armed now, Paint would get the Enter event of
+        # the view under the mouse pointer and draw its brush before the brush has a shape (VTK error
+        # "vtkTransformPolyDataFilter has 0 connections"), until the first mouse move.
+        self._timer.start()
         self._updateFooter(editor)
 
     def leave(self):

@@ -76,10 +76,16 @@ public:
   QPalette standardDarkPalette() const;
   int styleHint(StyleHint hint, const QStyleOption* opt, const QWidget* widget, QStyleHintReturn* returnData) const override;
 
-  /// Draw check box and radio button indicators with a visible frame and an accent fill
-  /// on dark palettes. Other primitives (and all primitives on light palettes) are drawn
+  /// Draw check box and radio button indicators with a visible frame and an accent fill,
+  /// menus as cards with a border and line edit frames (PE_FrameLineEdit) with the "border"
+  /// token on dark palettes. Other primitives (and all primitives on light palettes) are drawn
   /// by the base style.
   void drawPrimitive(PrimitiveElement element, const QStyleOption* option, QPainter* painter, const QWidget* widget = nullptr) const override;
+
+  /// Draw complex controls with the base style. On dark palettes, the frames of spin boxes
+  /// and editable combo boxes are then drawn like line edit frames, so that input fields
+  /// have a visible boundary.
+  void drawComplexControl(ComplexControl control, const QStyleOptionComplex* option, QPainter* painter, const QWidget* widget = nullptr) const override;
 
   /// Return the color of a named style token of the dark or light theme.
   /// Supported names: canvas, card, control-hover, control-pressed, hairline, border,

@@ -200,9 +200,10 @@ class WorkspaceController:
             return ws.defaultLayout
         return value
 
-    def switchTo(self, key):
+    def switchTo(self, key, keepLayout=False):
         """Show a workspace: its module in the inspector and its remembered layout.
 
+        With ``keepLayout``, the current layout is kept (for example the layout of a scene that was just opened).
         Asking again for the current workspace (its tab or its shortcut) brings it back into view:
         the inspector that the user hid is shown again and the focus mode is left.
         """
@@ -225,7 +226,7 @@ class WorkspaceController:
                 self.shell.setCanvas(None)
             if self.shell.currentModuleName() != ws.moduleName:
                 slicer.util.selectModule(ws.moduleName)
-            layoutId = self.rememberedLayout(ws)
+            layoutId = self.rememberedLayout(ws) if not keepLayout else None
             layoutManager = slicer.app.layoutManager()
             if layoutId is not None and layoutManager is not None and layoutManager.layout != layoutId:
                 layoutManager.setLayout(layoutId)

@@ -3,12 +3,15 @@
 Unambiguous files load directly, without the Add Data dialog:
 
 - a name that looks like a lesion (``isLesionName()``: lesion, mask, seg, label or roi as a whole word)
-  is loaded as a segmentation, whose first segment becomes "Lesion" (#F2545B). An empty mask gets an
-  empty "Lesion" segment to draw into. In a multi-label mask, only the first label becomes "Lesion": the
-  other labels keep the names given by the reader ("Segment_2"...). ``.seg.nrrd`` and ``.seg.vtm`` files
-  with several segments keep their names and colors;
+  is loaded as a segmentation. In a label map image (a NIfTI, NRRD or MetaImage mask), the first segment
+  becomes "Lesion" (#F2545B); the other labels keep the names given by the reader ("Segment_2"...). An empty
+  mask gets an empty "Lesion" segment to draw into. Files that store segments (``.seg.nrrd``, ``.seg.nhdr``,
+  ``.seg.vtm``, or a NRRD file with segment fields, as Slicer writes them) are never changed: their segments
+  keep their names, colors and terminology, whatever their number (SPEC 9.7: a file saved again after it was
+  opened in Studio has the same content);
 - other NIfTI, NRRD and MetaImage files are loaded as scalar volumes and shown in all slice views;
-- ``.mrb`` and ``.mrml`` files are loaded as scenes.
+- ``.mrb`` and ``.mrml`` files are loaded as scenes. They keep their own layout and views; a scene opened in
+  Library is shown in Draw (the Library page covers the views).
 
 In Studio, a scan or lesion file that is already loaded (same real path as the file of a node in the scene) is
 not loaded a second time: it becomes current again, with the toast "<name> is already open". Classic keeps the
@@ -45,6 +48,10 @@ NIFTI_EXTENSIONS = (".nii", ".nii.gz")
 SCENE_EXTENSIONS = (".mrb", ".mrml")
 #: Segmentation files that store segment names and colors: they are kept as they are
 SEGMENTATION_FILE_EXTENSIONS = (".seg.nrrd", ".seg.nhdr", ".seg.vtm")
+#: Field of a segment in the header of a NRRD file written by Slicer ("Segment0_Name:=Tumor")
+SEGMENT_FIELD_PATTERN = re.compile(rb"^Segment\d+_(ID|Name|Color|Tags|LabelValue):=", re.MULTILINE)
+#: At most this many bytes of a NRRD file are read to find segment fields
+NRRD_HEADER_MAX_BYTES = 1 << 20
 
 LESION_SEGMENT_NAME = "Lesion"
 LESION_SEGMENTATION_NAME = "Lesions"
@@ -167,18 +174,42 @@ def styleLesionSegment(segmentationNode, segmentId):
         displayNode.SetSliceIntersectionThickness(LESION_SLICE_INTERSECTION_THICKNESS)
 
 
-def _applyLesionNaming(segmentationNode, path):
-    """Name the first segment "Lesion" with the lesion color.
+def storesSegments(path):
+    """True if the file stores segments with their names, colors and terminology.
 
-    Files that store segment names and colors (``.seg.nrrd``...) keep them unless they hold a single segment.
-    An empty mask (no segment) gets an empty "Lesion" segment, so that Draw has a segment to draw into.
+    These are the segmentation files (``.seg.nrrd``, ``.seg.nhdr``, ``.seg.vtm``, ``.vtm``) and the NRRD files
+    whose header has segment fields (a segmentation that Slicer saved as ``.nrrd``). A label map image (NIfTI,
+    MetaImage, NRRD without segment fields) does not: its segments are named by the reader ("Segment_1"...).
     """
+    extension = _extension(path)
+    if extension in SEGMENTATION_FILE_EXTENSIONS or extension == ".vtm":
+        return True
+    if extension not in (".nrrd", ".nhdr"):
+        return False
+    try:
+        with open(path, "rb") as f:
+            header = f.read(NRRD_HEADER_MAX_BYTES)
+    except OSError:
+        return False
+    # The header ends at the first empty line (the data follows it in a .nrrd file)
+    header = re.split(rb"\r?\n\r?\n", header, maxsplit=1)[0]
+    return SEGMENT_FIELD_PATTERN.search(header) is not None
+
+
+def _applyLesionNaming(segmentationNode, path):
+    """Name the first segment of a label map image "Lesion", with the lesion color.
+
+    Files that store segments (``storesSegments()``) are never changed, whatever their number of segments:
+    their names, colors and terminology were chosen by whoever saved them, and a scene saved after the file was
+    opened must keep them (SPEC 9.7). An empty mask (no segment) gets an empty "Lesion" segment, so that Draw has
+    a segment to draw into.
+    """
+    if storesSegments(path):
+        return
     segmentation = segmentationNode.GetSegmentation()
     if segmentation.GetNumberOfSegments() == 0:
         segmentId = segmentation.AddEmptySegment("", LESION_SEGMENT_NAME, LESION_COLOR)
         styleLesionSegment(segmentationNode, segmentId)
-        return
-    if _extension(path) in SEGMENTATION_FILE_EXTENSIONS and segmentation.GetNumberOfSegments() > 1:
         return
     segmentId = segmentation.GetNthSegmentID(0)
     segmentation.GetSegment(segmentId).SetName(LESION_SEGMENT_NAME)
@@ -186,7 +217,7 @@ def _applyLesionNaming(segmentationNode, path):
 
 
 def loadLesion(path):
-    """Load a lesion file as a segmentation whose first segment is "Lesion".
+    """Load a lesion file as a segmentation (see ``_applyLesionNaming()`` for the "Lesion" segment).
 
     Image files that the segmentation reader cannot read are loaded as a labelmap volume and converted.
     """
@@ -431,7 +462,8 @@ def _afterLoad(result, shell):
     """Show what was loaded: scans in the slice views; in Studio, the lesion in Draw and a toast.
 
     Nodes of files that were already open (``result.alreadyOpen``) become current again: the scan is shown,
-    and Draw keeps editing its lesion if it already does.
+    and Draw keeps editing its lesion if it already does. A scene opened in Library is shown in Draw with its own
+    layout and views (the Library page covers the views).
     """
     scans = [node for node in result.volumes if _isScan(node)]
     openScans = [node for node in result.alreadyOpen if _isScan(node)]
@@ -466,6 +498,14 @@ def _afterLoad(result, shell):
             if not (_sameNode(lesion, editedSegmentation) and _sameNode(sourceVolume, editedSource)):
                 selectInSegmentEditor(lesion, sourceVolume)
         shell.switchTo("draw")
+    elif lesions:
+        # A segmentation without a scan to draw on: Draw shows it (the Library page would cover the views)
+        if segmentEditorWidget() is not None and not _sameNode(lesions[0], editedSegmentation):
+            selectInSegmentEditor(lesions[0], None)
+        shell.switchTo("draw")
+    elif result.scenes and shell.currentWorkspace() == "library":
+        # The Library page covers the views: Draw shows the scene, in the scene's own layout
+        shell.switchTo("draw", keepLayout=True)
     loaded = result.nodes()
     if loaded:
         name = loaded[0].GetName()
