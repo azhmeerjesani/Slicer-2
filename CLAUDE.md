@@ -28,9 +28,9 @@ The user pays for any usage beyond their plans, so even an accidental use costs 
 
 ## Agent concurrency
 
-- Run at most one agent at any time, day and night: one standalone agent, or one workflow whose agents
-  run strictly one after another (no `parallel()` or concurrent `pipeline()` stages). Wait for it to
-  finish before starting the next.
+- Run at most two agents at any time, day and night: up to two standalone agents, or up to two workflows
+  whose agents run strictly one after another (no `parallel()` or concurrent `pipeline()` stages), on work
+  whose files do not overlap.
 - Use the cheapest model that does the job well: Haiku for mechanical edits, Sonnet for routine
   implementation, docs, tests and walkthroughs, Opus for design, C++, numerics, file compatibility
   and adversarial review.
