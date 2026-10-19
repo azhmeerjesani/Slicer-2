@@ -12,6 +12,16 @@
   `Utilities/Scripts/SlicerStudioMacOS/build_dmg.sh`, and the Linux package with `make package` in
   the build tree (see `Docs/user_guide/install_studio.md`).
 
+## Agent concurrency (user's time zone: US Eastern)
+
+- From 11 pm to 6 am: any number of agents and workflows may run at once.
+- From 6 am to 11 pm: at most 2 agents running at any time (one workflow, which runs at most 2 agents,
+  or up to 2 standalone agents). Wind night work down before 6 am; do not stop work mid-agent if it
+  can be avoided, start nothing new that would exceed the limit.
+- Use the cheapest model that does the job well: Haiku for mechanical edits, Sonnet for routine
+  implementation, docs, tests and walkthroughs, Opus for design, C++, numerics, file compatibility
+  and adversarial review.
+
 ## Standing rules
 
 - Files saved by Slicer Studio must open in official 3D Slicer, and files saved by official 3D Slicer
