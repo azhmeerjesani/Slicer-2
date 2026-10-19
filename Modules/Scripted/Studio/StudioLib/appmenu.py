@@ -1,6 +1,7 @@
 """App menu (≡) of the Slicer Studio top bar (SPEC 2.4).
 
-It reuses the File, Edit, View and Help menus of the main window, and offers the workspaces,
+It reuses the File, Edit, View and Help menus of the main window (plug-ins add Studio items to Help with
+``addHelpActions()``, removed when Studio is left), and offers the workspaces,
 Search, the inspector and "Hide panels" toggles, Appearance (theme and density), common dialogs and
 the switch to the Classic interface. While Studio is shown, View also has "Recent messages…" (the
 last toast messages). The menu opens with F10 (and Alt, Alt+F/E/V/H on Windows and Linux, see the shell).
@@ -154,6 +155,10 @@ class AppMenu:
         if self._viewMenu is not None and hasattr(self.shell, "showRecentMessages"):
             self._recentMessagesSeparator = self._viewMenu.addSeparator()
             self._viewMenu.addAction(self.recentMessagesAction)
+        # ≡ > Help items of the plug-ins (addHelpActions()), above the items of 3D Slicer
+        self._helpMenu = mainWindow.findChild("QMenu", "HelpMenu")
+        self._helpActions = []
+        self._helpSeparator = None
 
         self.appearanceMenu = self.menu.addMenu(_("Appearance"))
         self.appearanceMenu.setObjectName("StudioAppearanceMenu")
@@ -195,6 +200,42 @@ class AppMenu:
 
         self.refreshIcons()
         ui.addPaletteListener(self.refreshIcons)
+
+    def addHelpActions(self, actions):
+        """Show ``actions`` (QActions of a plug-in, for example the guided tours) at the top of ≡ > Help while Studio is shown.
+
+        The Help menu is the one of the main window, shared with Classic: the actions are removed by
+        ``removeHelpActions()`` and when Studio is left (``dispose()``).
+        """
+        if self._helpMenu is None:
+            return
+        if self._helpSeparator is None:
+            existing = self._helpMenu.actions()
+            self._helpSeparator = qt.QAction(self._helpMenu)
+            self._helpSeparator.setSeparator(True)
+            self._helpSeparator.setObjectName("StudioHelpSeparator")
+            if existing:
+                self._helpMenu.insertAction(existing[0], self._helpSeparator)
+            else:
+                self._helpMenu.addAction(self._helpSeparator)
+        for action in actions:
+            if action in self._helpActions:
+                continue
+            self._helpMenu.insertAction(self._helpSeparator, action)
+            self._helpActions.append(action)
+
+    def removeHelpActions(self, actions):
+        """Remove plug-in actions added by ``addHelpActions()`` from ≡ > Help."""
+        if self._helpMenu is None:
+            return
+        for action in list(actions):
+            if action in self._helpActions:
+                self._helpMenu.removeAction(action)
+                self._helpActions.remove(action)
+        if not self._helpActions and self._helpSeparator is not None:
+            self._helpMenu.removeAction(self._helpSeparator)
+            self._helpSeparator.deleteLater()
+            self._helpSeparator = None
 
     def _pythonConsoleAction(self):
         console = self.shell.mainWindow.findChild("QDockWidget", "PythonConsoleDockWidget")
@@ -242,6 +283,7 @@ class AppMenu:
 
     def dispose(self):
         ui.removePaletteListener(self.refreshIcons)
+        self.removeHelpActions(self._helpActions)
         if self._viewMenu is not None:
             self._viewMenu.removeAction(self.recentMessagesAction)
             if self._recentMessagesSeparator is not None:

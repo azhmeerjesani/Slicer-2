@@ -46,6 +46,7 @@ import os
 import sys
 import time
 import traceback
+from html import escape as _escapeHtml
 
 import qt
 import slicer
@@ -56,7 +57,7 @@ from . import hud, layouts, topbar, ui, workspaces
 #: Plug-ins installed when Studio is applied (``install(shell)``) and removed in Classic
 #: (``uninstall(shell)``). Missing modules are skipped.
 OPTIONAL_PLUGINS = ["StudioLib.importer", "StudioLib.probe", "StudioLib.journal", "StudioLib.study_ui", "StudioLib.orientation", "StudioLib.finder",
-                    "StudioLib.modes", "StudioLib.a11y", "StudioLib.firstrun"]
+                    "StudioLib.modes", "StudioLib.a11y", "StudioLib.firstrun", "StudioLib.tour"]
 
 DEFAULT_PANEL_WIDTH = 340
 MIN_PANEL_WIDTH = 300
@@ -112,6 +113,8 @@ STICKY_TOAST_MINIMUM_MS = 4000
 RECENT_MESSAGES_COUNT = 20
 #: Link of the hook help popover that shows the module documentation instead
 _MODULE_HELP_LINK = "studio-help:module"
+#: Prefix of the links that plug-ins add to the help popover (``Shell.addHelpLink()``)
+_HELP_LINK_PREFIX = "studio-help:link:"
 
 #: Explicit minimum width of the module panel in Studio. The minimum size hint of the module panel is the
 #: width of the module widget, so a wide tool (for example the Paint options) would widen the inspector and
@@ -472,8 +475,9 @@ class PanelHeader:
         layout.addWidget(self.moreButton)
         #: Actions added by the hook ``moreMenuActions(shell)`` (rebuilt each time the menu is shown)
         self._hookActions = []
-        #: Text browser of the help popover while it exists
+        #: Text browser of the help popover while it exists, and the popover while it is shown
         self._helpBrowser = None
+        self._helpMenu = None
 
         ui.bindStyleSheet(self.widget, lambda: (
             f"QFrame#StudioPanelHeader {{ background-color: {ui.token('window').name()}; border: none; border-bottom: 1px solid {ui.token('hairline').name()}; }}"
@@ -578,8 +582,15 @@ class PanelHeader:
             text = f'<h3 style="margin-top: 0px;">{title}</h3>{body}' if title else str(body)
             if moduleHtml is not None:
                 text += f'<p><a href="{_MODULE_HELP_LINK}">{_("Module documentation")}</a></p>'
+            return self._withPluginLinks(text)
+        return self._withPluginLinks(moduleHtml)
+
+    def _withPluginLinks(self, text):
+        """``text`` followed by the enabled links of the plug-ins (``Shell.addHelpLink()``), or None if both are empty."""
+        links = [f'<a href="{_HELP_LINK_PREFIX}{key}">{_escapeHtml(linkText)}</a>' for key, linkText in self.shell.helpLinks()]
+        if not links:
             return text
-        return moduleHtml
+        return (text or "") + f'<p>{" · ".join(links)}</p>'
 
     def helpPopover(self):
         """Create the help popover of the current tool or module, or return None if there is no help.
@@ -620,6 +631,14 @@ class PanelHeader:
         browser = self._helpBrowser
         if browser is None:
             return
+        if url.toString().startswith(_HELP_LINK_PREFIX):
+            callback = self.shell.helpLinkCallback(url.toString()[len(_HELP_LINK_PREFIX):])
+            if self._helpMenu is not None:
+                self._helpMenu.close()
+            if callback is not None:
+                # After the popover is closed
+                qt.QTimer.singleShot(0, callback)
+            return
         if url.toString() == _MODULE_HELP_LINK:
             moduleHtml = self._moduleHelpHtml()
             if moduleHtml is not None:
@@ -638,7 +657,9 @@ class PanelHeader:
         menu = self.helpPopover()
         if menu is None:
             return
+        self._helpMenu = menu
         _execMenu(menu, self.helpPopoverPosition())
+        self._helpMenu = None
         self._helpBrowser = None
         menu.deleteLater()
 
@@ -650,6 +671,7 @@ class PanelHeader:
         ui.removePaletteListener(self.refreshIcons)
         ui.bindStyleSheet(self.widget, None)
         self._helpBrowser = None
+        self._helpMenu = None
         self._hookActions = []
         self.widget.hide()
         # Until Qt deletes it, the header must not be found by its object names
@@ -1020,6 +1042,8 @@ class Shell:
         self._eventFilter = None
         #: Studio overlays that Esc closes (rung 0.5): [(widget, close function)], the top-most last
         self._escapeOverlays = []
+        #: Links of the plug-ins at the end of the help popover: [(key, text, callback, isEnabled or None)]
+        self._helpLinks = []
         self._stickyToast = None
         self._inspectorHandle = None
         #: Inspector notice slot (above the module panel) and its notice: [widget, key, workspace key]
@@ -2850,6 +2874,37 @@ class Shell:
     #
     # Events
     #
+
+    def addHelpLink(self, key, text, callback, isEnabled=None):
+        """Add a link at the end of the help popover of the panel header (for example "Tour this workspace").
+
+        ``callback()`` runs after the popover is closed; the link is shown only while ``isEnabled()`` (if given)
+        returns True. A link with the same ``key`` is replaced.
+        """
+        self.removeHelpLink(key)
+        self._helpLinks.append((key, text, callback, isEnabled))
+
+    def removeHelpLink(self, key):
+        self._helpLinks = [link for link in self._helpLinks if link[0] != key]
+
+    def helpLinks(self):
+        """The enabled links of the help popover: [(key, text)]."""
+        links = []
+        for key, text, callback, isEnabled in self._helpLinks:
+            try:
+                enabled = isEnabled is None or bool(isEnabled())
+            except Exception:
+                logging.error(f"Studio: help link {key} failed:\n{traceback.format_exc()}")
+                enabled = False
+            if enabled:
+                links.append((key, text))
+        return links
+
+    def helpLinkCallback(self, key):
+        for linkKey, text, callback, isEnabled in self._helpLinks:
+            if linkKey == key:
+                return callback
+        return None
 
     def registerEscapeOverlay(self, widget, closeFn):
         """Register a Studio overlay that is not a Qt popup (the shortcut list, a popover) that Esc closes (rung 0.5).

@@ -15,6 +15,7 @@ Slicer Studio works side by side with official 3D Slicer:
 - Scenes and data files saved by Slicer Studio open in official 3D Slicer 5.12
   and 5.13, and files saved by official 3D Slicer open in Slicer Studio.
 - Both applications can be installed at the same time.
+- Coming from 3D Slicer? [Coming from 3D Slicer](studio_coming_from_slicer.md) shows where everything went.
 
 ## Build the packages
 
