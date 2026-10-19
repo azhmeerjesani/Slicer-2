@@ -43,9 +43,29 @@
 #include "vtkTransform.h"
 #include "vtkWidgetEvent.h"
 
+#include <algorithm>
 #include <deque>
+#include <set>
 
 vtkStandardNewMacro(vtkMRMLSliceIntersectionWidget);
+
+namespace
+{
+// Application-wide navigation options (see SetPageStepSlices, SetClampSliceStepping, SetSymmetricZoom).
+// They default to the behavior of earlier versions.
+int PageStepSlices = 0;
+bool ClampSliceStepping = false;
+bool SymmetricZoom = false;
+
+/// Live widgets, so that a change of an application-wide option that affects the event mapping
+/// is applied to existing widgets. Widgets add themselves in the constructor and remove themselves
+/// in the destructor; all access is from the main thread.
+std::set<vtkMRMLSliceIntersectionWidget*>& LiveSliceIntersectionWidgets()
+{
+  static std::set<vtkMRMLSliceIntersectionWidget*> widgets;
+  return widgets;
+}
+} // namespace
 
 //----------------------------------------------------------------------------------
 vtkMRMLSliceIntersectionWidget::vtkMRMLSliceIntersectionWidget()
@@ -126,11 +146,14 @@ vtkMRMLSliceIntersectionWidget::vtkMRMLSliceIntersectionWidget()
 
   this->ActionsEnabled = ActionAll;
   this->UpdateInteractionEventMapping();
+
+  LiveSliceIntersectionWidgets().insert(this);
 }
 
 //----------------------------------------------------------------------------------
 vtkMRMLSliceIntersectionWidget::~vtkMRMLSliceIntersectionWidget()
 {
+  LiveSliceIntersectionWidgets().erase(this);
   this->SetSliceNode(nullptr);
   this->SetMRMLApplicationLogic(nullptr);
 }
@@ -182,6 +205,13 @@ void vtkMRMLSliceIntersectionWidget::UpdateInteractionEventMapping()
     this->SetKeyboardEventTranslation(WidgetStateIdle, vtkEvent::NoModifier, 0, 0, "b", WidgetEventDecrementSlice);
     this->SetEventTranslation(WidgetStateIdle, vtkCommand::MouseWheelForwardEvent, vtkEvent::NoModifier, WidgetEventIncrementSlice);
     this->SetEventTranslation(WidgetStateIdle, vtkCommand::MouseWheelBackwardEvent, vtkEvent::NoModifier, WidgetEventDecrementSlice);
+    if (PageStepSlices > 0)
+    {
+      this->SetKeyboardEventTranslation(WidgetStateIdle, vtkEvent::NoModifier, 0, 0, "Prior", WidgetEventIncrementSlicePage);
+      this->SetKeyboardEventTranslation(WidgetStateIdle, vtkEvent::NoModifier, 0, 0, "Next", WidgetEventDecrementSlicePage);
+      this->SetKeyboardEventTranslation(WidgetStateIdle, vtkEvent::NoModifier, 0, 0, "Home", WidgetEventFirstSlice);
+      this->SetKeyboardEventTranslation(WidgetStateIdle, vtkEvent::NoModifier, 0, 0, "End", WidgetEventLastSlice);
+    }
     // Scroll through slices by click-and-drag (only handled when the Scroll mouse mode is active, see CanProcessInteractionEvent)
     this->SetEventTranslationClickAndDrag(WidgetStateIdle, vtkCommand::LeftButtonPressEvent, vtkEvent::NoModifier, WidgetStateScroll, WidgetEventScrollStart, WidgetEventScrollEnd);
   }
@@ -568,6 +598,10 @@ bool vtkMRMLSliceIntersectionWidget::ProcessInteractionEvent(vtkMRMLInteractionE
     break;
     case WidgetEventIncrementSlice: this->IncrementSlice(); break;
     case WidgetEventDecrementSlice: this->DecrementSlice(); break;
+    case WidgetEventIncrementSlicePage: this->MoveSlice(std::max(PageStepSlices, 1) * this->GetSliceSpacing()); break;
+    case WidgetEventDecrementSlicePage: this->MoveSlice(-std::max(PageStepSlices, 1) * this->GetSliceSpacing()); break;
+    case WidgetEventFirstSlice: this->MoveSliceToBoundary(false); break;
+    case WidgetEventLastSlice: this->MoveSliceToBoundary(true); break;
     case WidgetEventToggleSliceVisibility:
       this->SliceLogic->GetMRMLScene()->SaveStateForUndo();
       this->GetSliceNode()->SetSliceVisible(!this->GetSliceNode()->GetSliceVisible());
@@ -588,8 +622,8 @@ bool vtkMRMLSliceIntersectionWidget::ProcessInteractionEvent(vtkMRMLInteractionE
     break;
     case WidgetEventZoomInSlice: this->ScaleZoom(1.2, eventData); break;
     case WidgetEventZoomOutSlice:
-      this->ScaleZoom(0.8, eventData);
-      break;
+      // The symmetric factor makes zooming in and out by the same number of steps restore the field of view
+      this->ScaleZoom(SymmetricZoom ? 1.0 / 1.2 : 0.8, eventData);
       break;
     case WidgetEventShowPreviousBackgroundVolume:
       this->SliceLogic->GetMRMLScene()->SaveStateForUndo();
@@ -1311,12 +1345,123 @@ void vtkMRMLSliceIntersectionWidget::MoveSlice(double delta)
 
   double sliceBounds[6] = { 0, -1, 0, -1, 0, -1 };
   this->SliceLogic->GetSliceBounds(sliceBounds);
-  if (newOffset >= sliceBounds[4] && newOffset <= sliceBounds[5])
+  if (newOffset < sliceBounds[4] || newOffset > sliceBounds[5])
   {
-    this->SliceLogic->StartSliceNodeInteraction(vtkMRMLSliceNode::SliceToRASFlag);
-    this->SliceLogic->SetSliceOffset(newOffset);
-    this->SliceLogic->EndSliceNodeInteraction();
+    // The step would leave the volumes
+    double range[2] = { 0.0, 0.0 };
+    if (!ClampSliceStepping || !this->GetSliceSteppingRange(range))
+    {
+      return;
+    }
+    // Stop at the first/last slice, but never move against the requested direction
+    // (for example, when the slice is already beyond the last slice of the lowest volume layer)
+    newOffset = std::min(std::max(newOffset, range[0]), range[1]);
+    if ((delta > 0 && newOffset <= offset) || (delta < 0 && newOffset >= offset) || delta == 0)
+    {
+      return;
+    }
   }
+  this->SliceLogic->StartSliceNodeInteraction(vtkMRMLSliceNode::SliceToRASFlag);
+  this->SliceLogic->SetSliceOffset(newOffset);
+  this->SliceLogic->EndSliceNodeInteraction();
+}
+
+//----------------------------------------------------------------------------
+bool vtkMRMLSliceIntersectionWidget::GetSliceSteppingRange(double range[2])
+{
+  vtkMRMLSliceCompositeNode* sliceCompositeNode = this->SliceLogic->GetSliceCompositeNode();
+  if (!sliceCompositeNode)
+  {
+    return false;
+  }
+  bool volumeShown = false;
+  for (int layer = 0; layer < vtkMRMLSliceLogic::Layer_Last + sliceCompositeNode->GetNumberOfAdditionalLayers(); ++layer)
+  {
+    if (this->SliceLogic->GetNthLayerVolumeNode(layer))
+    {
+      volumeShown = true;
+      break;
+    }
+  }
+  if (!volumeShown)
+  {
+    return false;
+  }
+  // Bounds of the voxel centers, so that the first/last slice is displayed at the center of the voxels
+  double sliceBounds[6] = { 0, -1, 0, -1, 0, -1 };
+  this->SliceLogic->GetLowestVolumeSliceBounds(sliceBounds, true);
+  range[0] = std::min(sliceBounds[4], sliceBounds[5]);
+  range[1] = std::max(sliceBounds[4], sliceBounds[5]);
+  return true;
+}
+
+//----------------------------------------------------------------------------
+void vtkMRMLSliceIntersectionWidget::MoveSliceToBoundary(bool last)
+{
+  double range[2] = { 0.0, 0.0 };
+  if (!this->GetSliceSteppingRange(range))
+  {
+    return;
+  }
+  double newOffset = last ? range[1] : range[0];
+  if (newOffset == this->SliceLogic->GetSliceOffset())
+  {
+    return;
+  }
+  this->SliceLogic->StartSliceNodeInteraction(vtkMRMLSliceNode::SliceToRASFlag);
+  this->SliceLogic->SetSliceOffset(newOffset);
+  this->SliceLogic->EndSliceNodeInteraction();
+}
+
+//----------------------------------------------------------------------------
+void vtkMRMLSliceIntersectionWidget::SetPageStepSlices(int numberOfSlices)
+{
+  numberOfSlices = std::max(numberOfSlices, 0);
+  if (numberOfSlices == PageStepSlices)
+  {
+    return;
+  }
+  bool mappingChanged = ((numberOfSlices > 0) != (PageStepSlices > 0));
+  PageStepSlices = numberOfSlices;
+  if (mappingChanged)
+  {
+    // Copy the set: it must not change while the mappings are updated
+    std::set<vtkMRMLSliceIntersectionWidget*> widgets = LiveSliceIntersectionWidgets();
+    for (vtkMRMLSliceIntersectionWidget* widget : widgets)
+    {
+      widget->UpdateInteractionEventMapping();
+    }
+  }
+}
+
+//----------------------------------------------------------------------------
+int vtkMRMLSliceIntersectionWidget::GetPageStepSlices()
+{
+  return PageStepSlices;
+}
+
+//----------------------------------------------------------------------------
+void vtkMRMLSliceIntersectionWidget::SetClampSliceStepping(bool clamp)
+{
+  ClampSliceStepping = clamp;
+}
+
+//----------------------------------------------------------------------------
+bool vtkMRMLSliceIntersectionWidget::GetClampSliceStepping()
+{
+  return ClampSliceStepping;
+}
+
+//----------------------------------------------------------------------------
+void vtkMRMLSliceIntersectionWidget::SetSymmetricZoom(bool symmetric)
+{
+  SymmetricZoom = symmetric;
+}
+
+//----------------------------------------------------------------------------
+bool vtkMRMLSliceIntersectionWidget::GetSymmetricZoom()
+{
+  return SymmetricZoom;
 }
 
 //----------------------------------------------------------------------------

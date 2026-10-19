@@ -157,6 +157,12 @@ public:
     // WidgetStateOnTranslateIntersectingThickSlabHandle/WidgetStateTranslateIntersectingThickSlabHandle
     WidgetEventTranslateIntersectingThickSlabHandleStart,
     WidgetEventTranslateIntersectingThickSlabHandleEnd,
+
+    // Fast slice browsing (only mapped if PageStepSlices > 0, see SetPageStepSlices)
+    WidgetEventIncrementSlicePage, ///< move the slice forward by PageStepSlices slices (PageUp)
+    WidgetEventDecrementSlicePage, ///< move the slice backward by PageStepSlices slices (PageDown)
+    WidgetEventFirstSlice,         ///< move the slice to the first slice of the lowest volume layer (Home)
+    WidgetEventLastSlice,          ///< move the slice to the last slice of the lowest volume layer (End)
   };
 
   /// Action State values and management
@@ -206,6 +212,32 @@ public:
   bool GetActionEnabled(int actionsMask);
 
   void UpdateInteractionEventMapping();
+
+  /// @{
+  /// Number of slices that PageUp/PageDown (keysyms "Prior"/"Next") move the slice by, in all slice views.
+  /// If it is greater than 0 then Home/End also move to the first/last slice of the lowest volume layer.
+  /// Default is 0: these keys are not mapped (the behavior of earlier versions).
+  /// The mapping of existing widgets is updated when the value changes, which resets event translations
+  /// that were customized after the widget was created (see UpdateInteractionEventMapping()).
+  static void SetPageStepSlices(int numberOfSlices);
+  static int GetPageStepSlices();
+  /// @}
+
+  /// @{
+  /// If enabled then stepping slices past the end of the lowest volume layer moves the slice to the
+  /// first or last slice, instead of ignoring the step. Applies to all slice views.
+  /// Default is false (the behavior of earlier versions).
+  static void SetClampSliceStepping(bool clamp);
+  static bool GetClampSliceStepping();
+  /// @}
+
+  /// @{
+  /// If enabled then Ctrl+mouse wheel zooms by factors of 1.2 and 1/1.2, so that zooming in and out by
+  /// the same number of steps restores the field of view. Applies to all slice views.
+  /// Default is false: factors are 1.2 and 0.8 (the behavior of earlier versions).
+  static void SetSymmetricZoom(bool symmetric);
+  static bool GetSymmetricZoom();
+  /// @}
 
   // Allows the widget to request a cursor shape
   int GetMouseCursor() override;
@@ -318,6 +350,11 @@ protected:
   void IncrementSlice();
   void DecrementSlice();
   void MoveSlice(double delta);
+  /// Move the slice to the first (lowest offset) or last (highest offset) slice of the lowest volume layer.
+  void MoveSliceToBoundary(bool last);
+  /// Get the offsets of the first and last voxel centers of the lowest volume layer along the slice normal.
+  /// Returns false if no volume is shown in the slice view.
+  bool GetSliceSteppingRange(double range[2]);
 
   // Scroll (browse slices by click-and-drag)
   double ScrollStartSliceOffset;

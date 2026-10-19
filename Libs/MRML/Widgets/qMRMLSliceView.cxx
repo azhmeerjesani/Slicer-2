@@ -19,6 +19,7 @@
 ==============================================================================*/
 
 // Qt includes
+#include <QApplication>
 #include <QDebug>
 #include <QDropEvent>
 #include <QShowEvent>
@@ -441,6 +442,40 @@ void qMRMLSliceView::showEvent(QShowEvent* event)
 {
   this->Superclass::showEvent(event);
   this->scheduleRender();
+}
+
+//------------------------------------------------------------------------------
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+void qMRMLSliceView::enterEvent(QEnterEvent* event)
+#else
+void qMRMLSliceView::enterEvent(QEvent* event)
+#endif
+{
+  this->Superclass::enterEvent(event);
+  // Focus follows mouse is enabled by the application (for example, the Slicer Studio interface)
+  // with a dynamic property, so that it is off by default and can be set from Python.
+  if (!qApp || !qApp->property("SlicerFocusFollowsMouse").toBool())
+  {
+    return;
+  }
+  QWidget* vtkWidget = this->VTKWidget();
+  if (!vtkWidget || vtkWidget->hasFocus() || !this->isActiveWindow())
+  {
+    return;
+  }
+  if (QApplication::activePopupWidget() || QApplication::activeModalWidget())
+  {
+    return;
+  }
+  QWidget* focusWidget = QApplication::focusWidget();
+  if (focusWidget
+      && (focusWidget->inherits("QLineEdit") || focusWidget->inherits("QAbstractSpinBox") || focusWidget->inherits("QTextEdit") || focusWidget->inherits("QPlainTextEdit")
+          || focusWidget->inherits("ctkConsole")))
+  {
+    // Do not interrupt text input
+    return;
+  }
+  vtkWidget->setFocus(Qt::MouseFocusReason);
 }
 
 //---------------------------------------------------------------------------
