@@ -1,12 +1,9 @@
 name: CI (Lint)
 
+# Slicer Studio: manual runs only. GitHub is used only as the git remote (see CLAUDE.md), so no workflow
+# runs on pushes, pull requests, tags or a schedule.
 on:
-  # Triggers the workflow on push or pull request events
-  push:
-    branches: [main]
-  pull_request:
-    branches:
-      - "*"
+  workflow_dispatch:
 
 permissions:
   contents: read

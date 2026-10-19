@@ -2,15 +2,30 @@
 
 ## GitHub: version control only
 
-- Use GitHub only as the git remote: `git push`, `git pull`, `git fetch`.
-- Never use GitHub Actions. Do not trigger, re-run or re-enable a workflow, and do not push a change
-  that starts one, such as `.github/studio-packages-request.txt` or a `studio-build-*` tag. Both
-  workflows (`codespell`, `Slicer Studio packages`) are disabled on the repository; keep them that way.
-- Do not use any other GitHub feature: no API calls (`api.github.com`, `gh`, GitHub MCP tools),
-  pull requests, issues, releases, packages or artifacts.
+- Use GitHub only as the git remote: `git push`, `git pull`, `git fetch`. Push only the working branch;
+  do not push tags.
+- Never use GitHub Actions. Every workflow file runs only from a manual "Run workflow"
+  (`workflow_dispatch`): do not add a push, pull request, tag or schedule trigger, do not add a workflow
+  file, and do not trigger, re-run or re-enable a workflow. The two workflows that ran (`codespell`,
+  `Slicer Studio packages`) are also disabled on the repository; keep them that way.
+- Do not use any other GitHub feature: no API calls (`api.github.com`, `gh`, GitHub MCP tools), pull
+  requests, issues, releases, packages (`ghcr.io`), Git LFS, Codespaces or artifacts.
 - Build packages locally instead. The macOS disk image is built on the user's Mac with
   `Utilities/Scripts/SlicerStudioMacOS/build_dmg.sh`, and the Linux package with `make package` in
   the build tree (see `Docs/user_guide/install_studio.md`).
+
+## Nothing that costs money
+
+The user pays for any usage beyond their plans, so even an accidental use costs them money.
+
+- Do not use paid or metered services: cloud command-line tools (`gcloud`, `gsutil`, `bq`, `aws`),
+  container registries, or connectors and MCP tools for other services (Adobe, Dropbox, Google Drive,
+  Gmail, Google Calendar, Claude Docs, Slack and others), unless the user asks for that service.
+- Do not create cloud sessions, routines (scheduled triggers) or webhooks, except the two routines that
+  switch between the night and day agent limits below, unless the user asks.
+- Download only from free public sources (Python packages, upstream Slicer data, template sites),
+  never from the user's own GitHub releases, packages or artifacts.
+- When a Claude usage limit is reached, stop and report; do not work around it.
 
 ## Agent concurrency (user's time zone: US Eastern)
 

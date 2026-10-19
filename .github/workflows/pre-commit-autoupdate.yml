@@ -1,10 +1,8 @@
 name: Pre-commit auto-update
 
+# Slicer Studio: manual runs only. GitHub is used only as the git remote (see CLAUDE.md), so no workflow
+# runs on pushes, pull requests, tags or a schedule.
 on:
-  # on the first day of every month at midnight UTC
-  schedule:
-    - cron: "0 0 1 * *"
-  # on demand
   workflow_dispatch:
 
 permissions:

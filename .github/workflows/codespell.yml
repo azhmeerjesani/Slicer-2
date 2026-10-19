@@ -2,7 +2,10 @@
 # https://github.com/codespell-project/actions-codespell
 # https://github.com/codespell-project/codespell
 name: codespell
-on: [push, pull_request]
+# Slicer Studio: manual runs only. GitHub is used only as the git remote (see CLAUDE.md), so no workflow
+# runs on pushes, pull requests, tags or a schedule.
+on:
+  workflow_dispatch:
 
 permissions:
   contents: read

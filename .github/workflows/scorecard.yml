@@ -1,14 +1,8 @@
 name: Scorecard analysis workflow
+# Slicer Studio: manual runs only. GitHub is used only as the git remote (see CLAUDE.md), so no workflow
+# runs on pushes, pull requests, tags or a schedule.
 on:
-  # Only the default branch is supported.
-  branch_protection_rule:
-  schedule:
-    # Weekly on Saturdays.
-    - cron: "30 1 * * 6"
-  # on demand
   workflow_dispatch:
-  push:
-    branches: [main]
 
 # Declare default permissions as read only.
 permissions: read-all
