@@ -565,6 +565,8 @@ class StudioTourTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self._pump()
             helpMenu.aboutToShow()
             self.assertTrue(action("StudioTourWorkspaceAction").isEnabled())
+            # Named after the workspace
+            self.assertEqual(action("StudioTourWorkspaceAction").text, {"library": "Tour Library…", "draw": "Tour Draw…"}[workspace])
             action("StudioTourWorkspaceAction").trigger()
             self._pump()
             self.assertEqual(tour.activeTour(), workspace)
@@ -668,3 +670,128 @@ class StudioTourTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(whereMap.searchField.text, "save")
         self.assertEqual(studioShell.currentWorkspace(), "library")
         whereMap.close()
+
+    def test_12_workspace_tour_from_a_module(self):
+        """'Tour this workspace' from a module opened from Search: Esc and Skip tour bring the module back."""
+        from StudioLib import tour
+
+        studioShell = self._applyStudio()
+        self._resize(1366, 768)
+        studioShell.switchTo("library")
+        self._pump()
+        slicer.util.selectModule("Volumes")
+        self._pump()
+        before = self._viewState(studioShell)
+        self.assertEqual(before["transient"], "Volumes")
+        self.assertEqual(before["origin"], "library")
+        self.assertEqual(studioShell.panelHeader.closeButton.text, "Library")
+
+        # ≡ > Help > Tour Library…, then Esc through the shell's Esc ladder
+        helpMenu = self.mainWindow.findChild("QMenu", "HelpMenu")
+        helpMenu.aboutToShow()
+        workspaceAction = self.mainWindow.findChild("QAction", "StudioTourWorkspaceAction")
+        self.assertTrue(workspaceAction.isEnabled())
+        self.assertEqual(workspaceAction.text, "Tour Library…")
+        workspaceAction.trigger()
+        self._pump()
+        player = tour.activePlayer()
+        self.assertEqual(tour.activeTour(), "library")
+        self.assertEqual(studioShell.currentWorkspace(), "library")
+        self.mainWindow.setFocus()
+        self.assertTrue(studioShell.handleEscape())
+        self._pump()
+        self.assertFalse(player.active)
+        self.assertEqual(self._viewState(studioShell), before)
+        self.assertEqual(studioShell.panelHeader.closeButton.text, "Library")
+
+        # The help popover link, then Skip tour
+        header = studioShell.panelHeader
+        self.assertIn("Tour this workspace", header.helpHtml())
+        header._helpBrowser = qt.QTextBrowser()
+        try:
+            header._onHelpLinkClicked(qt.QUrl("studio-help:link:tour-workspace"))
+            self._wait(50)
+        finally:
+            header._helpBrowser = None
+        player = tour.activePlayer()
+        self.assertEqual(tour.activeTour(), "library")
+        player.next()
+        player.card().skipButton.click()
+        self._pump()
+        self.assertFalse(player.active)
+        self.assertEqual(self._viewState(studioShell), before)
+        self.assertEqual(studioShell.panelHeader.closeButton.text, "Library")
+
+    def test_13_settings_changed_during_a_tour_are_kept(self):
+        """A setting the user changes during a tour (a shortcut still works) is kept; what the tour changed is put back."""
+        from StudioLib import tour
+
+        studioShell = self._applyStudio()
+        self._resize(1366, 768)
+        studioShell.switchTo("library")
+        self._pump()
+        settings = qt.QSettings()
+        keys = ("Studio/LastOpenDirectory", "Studio/Autosave/Directory", "Studio/TourTestNewKey")
+        saved = {key: settings.value(key) for key in keys if settings.contains(key)}
+        try:
+            settings.setValue("Studio/LastOpenDirectory", "/before")
+            settings.remove("Studio/TourTestNewKey")
+            viewKeys = ("Studio/LastWorkspace", "Studio/Draw/Layout", "Studio/Library/Layout")
+            viewBefore = {key: str(settings.value(key)) for key in viewKeys}
+            for leave in ("escape", "done"):
+                settings.setValue("Studio/Autosave/Directory", "")
+                self.assertTrue(tour.startTour("studio"))
+                player = tour.activePlayer()
+                while player.active and studioShell.currentWorkspace() != "draw":
+                    player.next()
+                self.assertTrue(player.active)
+                # Written meanwhile by Studio itself, as Ctrl+O and the Autosave settings panel write them
+                settings.setValue("Studio/LastOpenDirectory", f"/during-{leave}")
+                settings.setValue("Studio/Autosave/Directory", f"/autosave-{leave}")
+                settings.setValue("Studio/TourTestNewKey", leave)
+                if leave == "escape":
+                    self._sendKey(player.card().nextButton, qt.Qt.Key_Escape)
+                else:
+                    while player.active:
+                        player.next()
+                    self.assertTrue(player.completed)
+                self._pump()
+                self.assertFalse(player.active)
+                self.assertEqual(settings.value("Studio/LastOpenDirectory"), f"/during-{leave}", leave)
+                self.assertEqual(settings.value("Studio/Autosave/Directory"), f"/autosave-{leave}", leave)
+                self.assertEqual(settings.value("Studio/TourTestNewKey"), leave, leave)
+                # The workspace and the layouts that the tour showed are put back
+                self.assertEqual(studioShell.currentWorkspace(), "library", leave)
+                self.assertEqual({key: str(settings.value(key)) for key in viewKeys}, viewBefore, leave)
+        finally:
+            for key in keys:
+                if key in saved:
+                    settings.setValue(key, saved[key])
+                else:
+                    settings.remove(key)
+
+    def test_14_drops_on_the_tour_are_ignored(self):
+        """Files dragged over the dimmed area or the card are taken by the tour (the main window would load them)."""
+        from StudioLib import tour
+
+        self._applyStudio()
+        self._resize(1366, 768)
+        self.assertTrue(tour.startTour("studio"))
+        player = tour.activePlayer()
+        try:
+            mimeData = qt.QMimeData()
+            mimeData.setUrls([qt.QUrl.fromLocalFile("/tmp/does-not-exist.nrrd")])
+            for widget in (player.overlay(), player.card().frame):
+                self.assertTrue(widget.acceptDrops)
+                try:
+                    event = qt.QDragEnterEvent(qt.QPoint(5, 5), qt.Qt.CopyAction, mimeData, qt.Qt.LeftButton, qt.Qt.NoModifier)
+                except (TypeError, ValueError):
+                    # This PythonQt cannot make the event (QFlags arguments)
+                    continue
+                event.ignore()
+                qt.QApplication.sendEvent(widget, event)
+                self.assertTrue(event.isAccepted(), widget.objectName)
+                self.assertEqual(event.dropAction(), qt.Qt.IgnoreAction, widget.objectName)
+        finally:
+            tour.stopTour()
+            self._pump()

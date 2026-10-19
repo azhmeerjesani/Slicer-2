@@ -115,8 +115,9 @@ Library page does the same.
 The tours are in the menu (≡ > Help):
 
 - **Take a tour…**: Slicer Studio in two minutes.
-- **Tour this workspace…**: the Library or Draw workspace (also the
-  *Tour this workspace* link of the inspector's ? button).
+- **Tour Library…** or **Tour Draw…** (named after the workspace you are in):
+  that workspace (also the *Tour this workspace* link of the inspector's ?
+  button). Leaving the tour brings back the workspace or module you were in.
 - **Coming from 3D Slicer…**: what stays the same and what moved, ending with
   the *Where did it go?* list.
 - **Where did it go? (3D Slicer → Studio)**: the searchable list above.

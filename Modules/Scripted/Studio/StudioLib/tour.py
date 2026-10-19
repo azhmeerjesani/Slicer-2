@@ -27,6 +27,7 @@ offer is never scheduled under ``--testing``), and nothing starts while a modal 
 ``Studio/Tour/Offered`` and ``Studio/Tour/Completed`` (completed tours as "<id>@<content version>").
 """
 
+import contextlib
 import logging
 import time
 import traceback
@@ -39,8 +40,12 @@ from . import ui
 
 OFFERED_KEY = "Studio/Tour/Offered"
 COMPLETED_KEY = "Studio/Tour/Completed"
-#: Settings group of the tours: never restored by a tour (every other Studio/* key is)
+#: Settings group of the tours: never restored by a tour
 _TOUR_GROUP = "Studio/Tour/"
+#: Studio settings of the views that a tour shows and puts back (the last workspace; each workspace's layout is
+#: added from workspaces.WORKSPACES). With the keys that the tour's own changes wrote, they are the only settings
+#: that a tour restores: a setting the user changes during a tour is kept.
+_VIEW_KEYS = ("Studio/LastWorkspace",)
 
 #: Spotlight: padding around the control, corner radius and accent ring width
 SPOTLIGHT_PADDING = 6
@@ -103,6 +108,19 @@ def _isAlive(widget):
     except ValueError:
         return False
     return True
+
+
+def _refuseDrop(event):
+    """Take a drag or drop event without dropping anything (it does not reach the main window, which loads files)."""
+    event.setDropAction(qt.Qt.IgnoreAction)
+    event.accept()
+
+
+def _sameValue(first, second):
+    try:
+        return bool(first == second)
+    except Exception:
+        return False
 
 
 def _settingsBool(key, default=False):
@@ -233,8 +251,11 @@ def _stepMayShow(step, shell):
 
 
 class _ViewState:
-    """The user's workspace, module, layout, inspector, hidden panels, keyboard focus, the Studio settings and the
-    scene nodes, captured when a tour starts and restored when it ends.
+    """The user's workspace, module, layout, inspector, hidden panels, keyboard focus and scene nodes, captured when a
+    tour starts and restored when it ends.
+
+    Settings: only the Studio/* keys that the tour's own changes wrote (see ``tracking()``) and the view keys
+    (``_viewKeys()``) are put back. Anything the user sets meanwhile (a shortcut still works during a tour) is kept.
     """
 
     def __init__(self, shell):
@@ -250,6 +271,8 @@ class _ViewState:
         focusWidget = slicer.app.focusWidget()
         self.focusWidget = focusWidget if focusWidget is not None and focusWidget.window() == shell.mainWindow else None
         self.settings = self._studioSettings()
+        #: Studio/* keys written by what the tour itself did (switching workspaces, showing the inspector, restoring)
+        self.touchedKeys = set()
         self.nodeIds = {node.GetID() for node in self._nodes()}
         self.sceneModified = slicer.mrmlScene.GetModifiedSinceRead()
 
@@ -267,17 +290,37 @@ class _ViewState:
         settings = qt.QSettings()
         return {key: settings.value(key) for key in settings.allKeys() if key.startswith("Studio/") and not key.startswith(_TOUR_GROUP)}
 
+    @staticmethod
+    def _viewKeys():
+        from . import workspaces
+
+        return set(_VIEW_KEYS) | {ws.layoutSettingsKey for ws in workspaces.WORKSPACES}
+
+    @contextlib.contextmanager
+    def tracking(self):
+        """Record the Studio/* keys written inside this block: they are put back when the tour ends."""
+        before = self._studioSettings()
+        try:
+            yield
+        finally:
+            after = self._studioSettings()
+            for key in set(before) | set(after):
+                if key not in before or key not in after or not _sameValue(before[key], after[key]):
+                    self.touchedKeys.add(key)
+
     def prepareTour(self):
         """Leave the hidden panels (the top bar must be visible to show it)."""
         if self.focusMode:
-            self.shell.setFocusMode(False)
+            with self.tracking():
+                self.shell.setFocusMode(False)
 
     def restore(self, views=True):
         """Put everything back. ``views=False`` (the shell goes Classic) restores only the scene and the settings."""
         shell = self.shell
         if views and shell.isActive():
             try:
-                self._restoreViews()
+                with self.tracking():
+                    self._restoreViews()
             except Exception:
                 logging.error(f"Studio tour: cannot restore the workspace:\n{traceback.format_exc()}")
         try:
@@ -286,7 +329,8 @@ class _ViewState:
             logging.error(f"Studio tour: cannot restore the scene:\n{traceback.format_exc()}")
         if views and shell.isActive():
             try:
-                self._restoreInspector()
+                with self.tracking():
+                    self._restoreInspector()
             except Exception:
                 logging.error(f"Studio tour: cannot restore the inspector:\n{traceback.format_exc()}")
         self._restoreSettings()
@@ -331,18 +375,17 @@ class _ViewState:
             slicer.mrmlScene.RemoveNode(node)
 
     def _restoreSettings(self):
+        """Put back the keys that the tour wrote and the view keys; leave every other setting as it is now."""
         settings = qt.QSettings()
         current = self._studioSettings()
-        for key in current:
+        for key in (self.touchedKeys | self._viewKeys()):
+            if key.startswith(_TOUR_GROUP):
+                continue
             if key not in self.settings:
-                settings.remove(key)
-        for key, value in self.settings.items():
-            try:
-                changed = key not in current or current[key] != value
-            except Exception:
-                changed = True
-            if changed:
-                settings.setValue(key, value)
+                if key in current:
+                    settings.remove(key)
+            elif key not in current or not _sameValue(current[key], self.settings[key]):
+                settings.setValue(key, self.settings[key])
 
 
 #
@@ -362,6 +405,7 @@ class _Overlay(qt.QWidget):
         self.setObjectName("StudioTourOverlay")
         self.setAttribute(qt.Qt.WA_NoSystemBackground)
         self.setFocusPolicy(qt.Qt.NoFocus)
+        self.setAcceptDrops(True)
         self.spot = None
         self.passThrough = False
 
@@ -418,6 +462,17 @@ class _Overlay(qt.QWidget):
     def wheelEvent(self, event):
         event.accept()
 
+    # Files dropped on the dimmed area are not loaded during a tour (the drop is taken here and ignored)
+
+    def dragEnterEvent(self, event):
+        _refuseDrop(event)
+
+    def dragMoveEvent(self, event):
+        _refuseDrop(event)
+
+    def dropEvent(self, event):
+        _refuseDrop(event)
+
 
 class _Dots(qt.QWidget):
     """Progress dots: one per step, the current one wider and in the accent color."""
@@ -462,6 +517,7 @@ class _CardFrame(qt.QWidget):
     def __init__(self, parent):
         qt.QWidget.__init__(self, parent)
         self.setObjectName("StudioTourCard")
+        self.setAcceptDrops(True)
         self.pointerSide = None
         self.pointerOffset = 0
         self.box = qt.QRect()
@@ -502,6 +558,17 @@ class _CardFrame(qt.QWidget):
             path.lineTo(x, y)
         path.closeSubpath()
         return path
+
+    # Files dropped on the card are not loaded either (they would reach the main window)
+
+    def dragEnterEvent(self, event):
+        _refuseDrop(event)
+
+    def dragMoveEvent(self, event):
+        _refuseDrop(event)
+
+    def dropEvent(self, event):
+        _refuseDrop(event)
 
 
 class _CardKeys(qt.QObject):
@@ -1009,6 +1076,14 @@ class TourPlayer:
             except Exception:
                 logging.error(f"Studio tour: condition of step {step.id} failed:\n{traceback.format_exc()}")
                 return False
+        if self._state is None:
+            return self._prepareViews(step)
+        # The settings that showing the workspace and the inspector writes are put back when the tour ends
+        with self._state.tracking():
+            return self._prepareViews(step)
+
+    def _prepareViews(self, step):
+        shell = self.shell
         if step.workspace is not None:
             from . import workspaces
 
@@ -1026,7 +1101,11 @@ class TourPlayer:
         if step.inspector and not shell.isInspectorVisible():
             shell.setInspectorVisible(True)
         # Show events and layouts of what was just shown
-        slicer.app.processEvents(qt.QEventLoop.ExcludeUserInputEvents)
+        try:
+            slicer.app.processEvents(qt.QEventLoop.ExcludeUserInputEvents)
+        except TypeError:
+            # PythonQt without the enum-to-QFlags conversion (Qt 6)
+            slicer.app.processEvents()
         return True
 
     def currentStep(self):
@@ -1095,7 +1174,13 @@ class TourPlayer:
                 return
         if self.target is None or not _isAlive(self.target) or not _isShown(self.target, self.shell.mainWindow):
             # The control went away (a key switched the workspace): show the step again, or the next one
-            target = resolveTarget(step.target, self.shell) if step is not None and self._prepare(step) else None
+            self._busy = True
+            try:
+                target = resolveTarget(step.target, self.shell) if step is not None and self._prepare(step) else None
+            finally:
+                self._busy = False
+            if not self.active:
+                return
             if target is None:
                 if not self._goTo(self.index + 1, 1):
                     self._finish(completed=True)
@@ -1605,8 +1690,7 @@ class TourPlugin:
         for action in self.actions:
             if action.objectName == "StudioTourWorkspaceAction":
                 action.setEnabled(self.hasWorkspaceTour())
-                ws = self._workspaceTour()
-                action.setText(_("Tour {workspace}…").format(workspace=ws.title) if ws is not None else _("Tour this workspace…"))
+                action.setText(self.workspaceTourText())
             if action.property("studioIcon"):
                 action.setIcon(ui.icon(action.property("studioIcon"), 16))
 
@@ -1621,6 +1705,14 @@ class TourPlugin:
 
     def hasWorkspaceTour(self):
         return self._workspaceTour() is not None
+
+    def workspaceTourText(self):
+        """Text of the ≡ > Help item: "Tour Library…" (the workspace's title), or "Tour this workspace…"."""
+        from . import workspaces
+
+        tour = self._workspaceTour()
+        ws = workspaces.workspace(tour.workspace) if tour is not None else None
+        return _("Tour {workspace}…").format(workspace=ws.title) if ws is not None else _("Tour this workspace…")
 
     def availableTours(self):
         return [tour for tour in _tours().TOURS if tour.isAvailable(self.shell)]
@@ -1647,8 +1739,8 @@ class TourPlugin:
         tour = self._workspaceTour()
         if tour is None:
             return self.startTour("studio")
-        if self.shell.transientOrigin() is not None and self.shell.currentWorkspace() is None:
-            self.shell.switchTo(tour.workspace)
+        # Every step of a workspace tour shows its workspace itself, after the tour recorded the view (a module opened
+        # from Search comes back when the tour ends)
         return self.startTour(tour.id)
 
     def _afterFromSlicer(self, player):
@@ -1729,7 +1821,9 @@ class TourPlugin:
         if self.player is not None and self.player.active:
             return True
         notice = self.shell.inspectorNotice()
-        if notice is not None and _isAlive(notice) and notice.isVisible():
+        if notice is not None and _isAlive(notice) and (notice.isVisible() or self.shell.currentWorkspace() != "library"):
+            # Outside Library the offer is an inspector notice, which would replace this one (also one registered
+            # for another workspace, which is hidden now)
             return True
         for widget in slicer.app.topLevelWidgets():
             if widget.objectName in ("StudioRecoveryDialog",) and widget.isVisible():
@@ -1755,6 +1849,10 @@ class TourPlugin:
         if canvas is not None and _isAlive(canvas):
             self.offerCard = _OfferCard(self, canvas)
         else:
+            notice = self.shell.inspectorNotice()
+            if notice is not None and _isAlive(notice):
+                # The slot holds one notice: never replace another one
+                return False
             self.offerNotice = ui.noticeLine(_("New to Slicer Studio? Take a 2-minute tour."), [
                 (_("Take the tour"), self._onOfferTake), (_("What moved"), self._onOfferMoved), (_("Not now"), self._onOfferNotNow)])
             self.offerNotice.setObjectName("StudioTourOfferNotice")
