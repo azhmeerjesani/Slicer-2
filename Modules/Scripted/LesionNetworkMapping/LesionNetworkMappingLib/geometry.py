@@ -5,6 +5,8 @@ index, so grids with any orientation (including radiological, left-handed grids)
 Volumes are indexed [i, j, k] in file order (see nifti.py).
 """
 
+import os
+import re
 from typing import NamedTuple
 
 import numpy as np
@@ -106,40 +108,123 @@ def signed_permutation(src_affine, dst_affine, tolerance=1e-3):
     return SignedPermutation(axes, signs, tuple(int(v) for v in rounded[:3, 3]))
 
 
-# Standard template grids (TemplateFlow): template id, resolution label, shape and the world (RAS)
-# coordinates of the voxel center with the smallest x, y and z. Radiological (FSL) and RAS+ storage
-# of the same grid have the same voxel centers and are both recognized.
-KNOWN_GRIDS = (
-    ("MNI152NLin6Asym", 1, (182, 218, 182), 1.0, (-91.0, -126.0, -72.0)),
-    ("MNI152NLin6Asym", 2, (91, 109, 91), 2.0, (-90.0, -126.0, -72.0)),
-    ("MNI152NLin2009cAsym", 1, (193, 229, 193), 1.0, (-96.0, -132.0, -78.0)),
-    ("MNI152NLin2009cAsym", 2, (97, 115, 97), 2.0, (-96.5, -132.5, -78.5)),
+# Template grids and spaces
+#
+# A grid (shape, voxel size and position) does not name a space: TemplateFlow resamples
+# MNI152NLin2009cAsym, MNI152NLin2009aSym and MNI152NLin2009cSym onto the same 1 mm and 2 mm grids,
+# and the SPM/ICBM 1 mm box also holds Colin27 images. GRID_REGISTRY therefore lists, for each
+# grid, the candidate spaces (the first is the default) and whether the grid is ambiguous, so a
+# study can ask once instead of silently choosing.
+
+
+class GridSpec(NamedTuple):
+    """A standard voxel grid.
+
+    :ivar grid_id: registry key, e.g. "TF2009-1mm".
+    :ivar shape: number of voxels along the world x, y and z axes.
+    :ivar spacing: voxel size (mm), the same along every axis.
+    :ivar lowest_center: RAS world coordinates (mm) of the voxel center with the smallest x, y and z.
+    :ivar candidates: spaces stored on this grid; the first is the default.
+    :ivar family: space family of the grid (see :func:`space_family`).
+    :ivar ambiguous: True when the grid alone does not tell the candidates apart.
+    :ivar x_flipped: True when the reference files store x from right to left (LAS, FSL's
+      radiological layout); the grid is recognized in any storage order.
+    """
+
+    grid_id: str
+    shape: tuple
+    spacing: float
+    lowest_center: tuple
+    candidates: tuple
+    family: str
+    ambiguous: bool = False
+    x_flipped: bool = False
+
+    @property
+    def space(self):
+        """Default space of the grid (the first candidate)."""
+        return self.candidates[0]
+
+    @property
+    def resolution(self):
+        """Voxel size as an int when it is a whole number of mm (the TemplateFlow ``res`` label), else a float."""
+        return int(self.spacing) if float(self.spacing).is_integer() else float(self.spacing)
+
+    @property
+    def affine(self):
+        """4x4 voxel-to-RAS matrix of the grid as its reference files store it (LAS when ``x_flipped``)."""
+        affine = np.diag([self.spacing, self.spacing, self.spacing, 1.0])
+        affine[:3, 3] = self.lowest_center
+        if self.x_flipped:
+            affine[0, 0] = -self.spacing
+            affine[0, 3] = self.lowest_center[0] + self.spacing * (self.shape[0] - 1)
+        return affine
+
+    @property
+    def grid(self):
+        """The :class:`Grid` of :attr:`affine`."""
+        return Grid(self.shape, self.affine)
+
+
+_TF2009_CANDIDATES = ("MNI152NLin2009cAsym", "MNI152NLin2009aSym", "MNI152NLin2009cSym")
+
+GRID_REGISTRY = (
+    # FSL's MNI152 (MNI152_T1_1mm/2mm and TemplateFlow tpl-MNI152NLin6Asym res-01 are stored LAS; TemplateFlow's res-02 is RAS)
+    GridSpec("NLin6-1mm", (182, 218, 182), 1.0, (-91.0, -126.0, -72.0), ("MNI152NLin6Asym",), "fsl6", x_flipped=True),
+    GridSpec("NLin6-2mm", (91, 109, 91), 2.0, (-90.0, -126.0, -72.0), ("MNI152NLin6Asym",), "fsl6", x_flipped=True),
+    # TemplateFlow's resampled MNI ICBM 2009 grids, shared by the 2009c and 2009a templates
+    GridSpec("TF2009-1mm", (193, 229, 193), 1.0, (-96.0, -132.0, -78.0), _TF2009_CANDIDATES, "2009", ambiguous=True),
+    GridSpec("TF2009-2mm", (97, 115, 97), 2.0, (-96.5, -132.5, -78.5), _TF2009_CANDIDATES, "2009", ambiguous=True),
+    # The original McGill 2009a grid (ATLAS v2.0 lesions; header verified on NeuroVault collection 11940)
+    GridSpec("McGill2009a-1mm", (197, 233, 189), 1.0, (-98.0, -134.0, -72.0), ("MNI152NLin2009aSym",), "2009"),
+    # SPM's default bounding box [-90 -126 -72; 90 90 108] at 1 mm (the published value: no header was available offline)
+    GridSpec("SPM-1mm", (181, 217, 181), 1.0, (-90.0, -126.0, -72.0), ("MNI152Lin", "MNIColin27"), "spm", ambiguous=True, x_flipped=True),
 )
+GRID_BY_ID = {spec.grid_id: spec for spec in GRID_REGISTRY}
+
+# Spaces of the connectome grids that detect_grid and detect_space report (the other registry
+# grids are reported as "native" by them, as before; use detect_grid_candidates to recognize them)
+CONNECTOME_SPACES = ("MNI152NLin6Asym", "MNI152NLin2009cAsym")
+
+# (space, resolution, shape, spacing, lowest voxel center) of the grids detect_grid recognizes
+KNOWN_GRIDS = tuple((spec.space, spec.resolution, spec.shape, spec.spacing, spec.lowest_center) for spec in GRID_REGISTRY if spec.space in CONNECTOME_SPACES)
 NATIVE_SPACE = "native"
 
 
-def detect_grid(shape, affine, origin_tolerance=1.0, spacing_tolerance=1e-3):
-    """Identify a standard template grid (see :data:`KNOWN_GRIDS`).
+class GridMatch(NamedTuple):
+    """Result of :func:`detect_grid_candidates`: the registry grid and the spaces it may hold (the first is the default)."""
 
-    The voxel axes must be aligned with the RAS axes (any order and directions), the voxel size and
-    the number of voxels along each world axis must match, and the lowest voxel center must be
-    within ``origin_tolerance`` mm of the template's.
+    grid_id: str
+    candidates: tuple
+    family: str
+    resolution: object
+    ambiguous: bool
 
-    :return: (space, resolution), e.g. ("MNI152NLin2009cAsym", 2), or ("native", None).
+    @property
+    def space(self):
+        """Default space (the first candidate)."""
+        return self.candidates[0]
+
+
+def _world_box(shape, affine, spacing_tolerance):
+    """Shape, voxel size and lowest voxel center of a grid along the world x, y and z axes.
+
+    :return: (world_shape tuple, world_spacing array, lowest array), or None when the voxel axes
+      are not aligned with the world axes.
     """
     shape = tuple(int(n) for n in tuple(shape)[:3])
     affine = np.asarray(affine, dtype=np.float64)
     if len(shape) != 3 or affine.shape != (4, 4):
-        return NATIVE_SPACE, None
+        return None
     linear = affine[:3, :3]
     world_axes = np.argmax(np.abs(linear), axis=0)  # world axis of each voxel axis
     if len(set(world_axes.tolist())) != 3:
-        return NATIVE_SPACE, None
+        return None
     steps = linear[world_axes, np.arange(3)]
     off_axis = linear.copy()
     off_axis[world_axes, np.arange(3)] = 0.0
     if np.abs(off_axis).max() > spacing_tolerance * np.abs(steps).max():
-        return NATIVE_SPACE, None
+        return None
     world_shape = np.zeros(3, dtype=np.int64)
     world_spacing = np.zeros(3)
     lowest = affine[:3, 3].copy()
@@ -149,19 +234,155 @@ def detect_grid(shape, affine, origin_tolerance=1.0, spacing_tolerance=1e-3):
         world_spacing[world_axis] = abs(steps[axis])
         if steps[axis] < 0:
             lowest[world_axis] += steps[axis] * (shape[axis] - 1)
+    return tuple(int(n) for n in world_shape), world_spacing, lowest
+
+
+def _box_matches(box, shape, spacing, lowest_center, origin_tolerance, spacing_tolerance):
+    world_shape, world_spacing, lowest = box
+    return (
+        world_shape == tuple(shape)
+        and bool(np.all(np.abs(world_spacing - spacing) <= spacing_tolerance * spacing))
+        and bool(np.all(np.abs(lowest - np.asarray(lowest_center)) <= origin_tolerance))
+    )
+
+
+def detect_grid(shape, affine, origin_tolerance=1.0, spacing_tolerance=1e-3):
+    """Identify a connectome template grid (see :data:`KNOWN_GRIDS`).
+
+    The voxel axes must be aligned with the RAS axes (any order and directions), the voxel size and
+    the number of voxels along each world axis must match, and the lowest voxel center must be
+    within ``origin_tolerance`` mm of the template's. Ambiguous grids report their default space
+    (193x229x193 is "MNI152NLin2009cAsym"); :func:`detect_grid_candidates` lists the alternatives
+    and recognizes more grids.
+
+    :return: (space, resolution), e.g. ("MNI152NLin2009cAsym", 2), or ("native", None).
+    """
+    box = _world_box(shape, affine, spacing_tolerance)
+    if box is None:
+        return NATIVE_SPACE, None
     for space, resolution, grid_shape, spacing, origin in KNOWN_GRIDS:
-        if (
-            tuple(world_shape) == grid_shape
-            and np.all(np.abs(world_spacing - spacing) <= spacing_tolerance * spacing)
-            and np.all(np.abs(lowest - origin) <= origin_tolerance)
-        ):
+        if _box_matches(box, grid_shape, spacing, origin, origin_tolerance, spacing_tolerance):
             return space, resolution
     return NATIVE_SPACE, None
 
 
-def detect_space(shape, affine, origin_tolerance=1.0):
-    """Template space of a grid: "MNI152NLin6Asym", "MNI152NLin2009cAsym" or "native" (see :func:`detect_grid`)."""
+def detect_grid_candidates(shape, affine, origin_tolerance=1.0, spacing_tolerance=1e-3):
+    """Identify any registry grid (see :data:`GRID_REGISTRY`) and the spaces it may hold.
+
+    Same matching rules as :func:`detect_grid` (any axis order and directions, e.g. radiological
+    storage). Header-only and numpy-only.
+
+    :return: :class:`GridMatch` (candidates, the first being the default; ``ambiguous`` when the
+      grid alone does not identify the space, so the user should be asked once), or None.
+    """
+    box = _world_box(shape, affine, spacing_tolerance)
+    if box is None:
+        return None
+    for spec in GRID_REGISTRY:
+        if _box_matches(box, spec.shape, spec.spacing, spec.lowest_center, origin_tolerance, spacing_tolerance):
+            return GridMatch(spec.grid_id, spec.candidates, spec.family, spec.resolution, spec.ambiguous)
+    return None
+
+
+def _shape_and_affine(source):
+    """(shape, affine) of a NIfTI path, a :class:`Grid`, a (shape, affine) pair, a mapping or object
+    with ``shape`` and ``affine``, a Slicer volume node or a vtkOrientedImageData.
+    """
+    if isinstance(source, (str, os.PathLike)):
+        header = read_nifti_header(source)
+        return header["shape"][:3], header["affine"]
+    if isinstance(source, dict):
+        return source["shape"], source["affine"]
+    if isinstance(source, (tuple, list)) and len(source) == 2:
+        return source
+    if hasattr(source, "shape") and hasattr(source, "affine"):
+        return source.shape, source.affine
+    if hasattr(source, "GetIJKToRASMatrix") and hasattr(source, "GetImageData"):  # vtkMRMLVolumeNode
+        import vtk
+
+        matrix = vtk.vtkMatrix4x4()
+        source.GetIJKToRASMatrix(matrix)
+        image = source.GetImageData()
+        if image is None:
+            raise ValueError("The volume has no image data")
+        return image.GetDimensions(), _vtk_matrix_to_array(matrix)
+    if hasattr(source, "GetImageToWorldMatrix") and hasattr(source, "GetDimensions"):  # vtkOrientedImageData
+        import vtk
+
+        matrix = vtk.vtkMatrix4x4()
+        source.GetImageToWorldMatrix(matrix)
+        extent = source.GetExtent()
+        shift = np.eye(4)
+        shift[:3, 3] = extent[0::2]  # voxel (0, 0, 0) of the array is the first voxel of the extent
+        return source.GetDimensions(), _vtk_matrix_to_array(matrix) @ shift
+    raise TypeError(f"Cannot read a voxel grid from {type(source).__name__}")
+
+
+def _vtk_matrix_to_array(matrix):
+    return np.array([[matrix.GetElement(row, column) for column in range(4)] for row in range(4)])
+
+
+def detect_space(shape, affine=None, origin_tolerance=1.0):
+    """Template space of a grid.
+
+    Two forms:
+
+    - ``detect_space(shape, affine)``: "MNI152NLin6Asym", "MNI152NLin2009cAsym" or "native"
+      (see :func:`detect_grid`; unchanged).
+    - ``detect_space(path_or_geometry)``: (space, resolution) of any registry grid, ambiguous grids
+      giving their default space, or None when the grid is not a standard one (native space).
+      The argument is a NIfTI path (only the header is read), a :class:`Grid`, a (shape, affine)
+      pair, a mapping or object with ``shape`` and ``affine``, a Slicer volume node or a
+      vtkOrientedImageData (e.g. a segmentation's reference geometry).
+    """
+    if affine is None:
+        shape, affine = _shape_and_affine(shape)
+        match = detect_grid_candidates(shape, affine, origin_tolerance)
+        return None if match is None else (match.space, match.resolution)
     return detect_grid(shape, affine, origin_tolerance)[0]
+
+
+# Space families: templates of one family share their coordinate convention closely enough that
+# images are compared without a warp; across families (e.g. 2009c and NLin6, which differ by a few
+# millimetres in subcortical structures) a template-family transform is needed.
+_FAMILY_PATTERNS = (
+    ("fsl6", re.compile(r"^(mni152nlin6(asym|sym)?|fsl(mni152)?|mni152fsl)$")),
+    ("2009b", re.compile(r"^mni152nlin2009b(asym|sym)$")),
+    ("2009", re.compile(r"^(mni152nlin2009[ac](asym|sym)|mni2009[ac](asym|sym)?|icbm2009[ac](asym|sym)?)$")),
+    ("spm", re.compile(r"^(mni152lin|spm|spmmni|icbm152lin|avg152)$")),
+    ("colin", re.compile(r"^(mnicolin27|colin27|colin|ch2)$")),
+    ("pediatric", re.compile(r"^(mnipediatric(asym|sym)?|nihpd.*|mniinfant|uncinfant.*)$")),
+    ("native", re.compile(r"^(native|scanner|orig|individual|acpc|t1w|t2w|flair|pd|pdw|t2starw|ct|dwi|bold|anat)$")),
+)
+SPACE_FAMILIES = ("fsl6", "2009", "2009b", "spm", "colin", "pediatric", "native", "unknown")
+
+
+def space_family(space):
+    """Family of a space label: "fsl6", "2009", "2009b", "spm", "colin", "pediatric", "native" or "unknown".
+
+    Labels are matched without case and without a "tpl-" or "space-" prefix, e.g.
+    "MNI152NLin6Asym" -> "fsl6", "MNI152NLin2009aSym" -> "2009", "MNIColin27" -> "colin",
+    "T1w" or "native" -> "native" (subject spaces), anything else (including None) -> "unknown".
+    """
+    if not space:
+        return "unknown"
+    label = str(space).strip().lower()
+    for prefix in ("tpl-", "space-"):
+        if label.startswith(prefix):
+            label = label[len(prefix):]
+    label = label.replace("_", "").replace(" ", "")
+    for family, pattern in _FAMILY_PATTERNS:
+        if pattern.match(label):
+            return family
+    return "unknown"
+
+
+def same_family(a, b):
+    """True when two space labels belong to the same template family (images are comparable without
+    a template-family transform). Native (subject) and unknown spaces never share a family.
+    """
+    family = space_family(a)
+    return family not in ("native", "unknown") and family == space_family(b)
 
 
 def resample_to_grid(src_data, src_affine, dst_grid, mode="fraction", supersample=2, max_points=4_000_000):
