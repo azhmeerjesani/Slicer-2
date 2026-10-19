@@ -80,7 +80,9 @@ class StudioWidget(ScriptedLoadableModuleWidget):
         contentsLayout.setContentsMargins(12, 12, 12, 12)
         contentsLayout.setSpacing(8)
         panel = self._createLibraryPanel()
-        panelWidget = panel if isinstance(panel, qt.QWidget) else getattr(panel, "widget", None)
+        # isWidgetType(), not isinstance(panel, qt.QWidget): PythonQt wrappers of subclasses differ in Qt 5 and Qt 6
+        isWidget = callable(getattr(panel, "isWidgetType", None)) and panel.isWidgetType()
+        panelWidget = panel if isWidget else getattr(panel, "widget", None)
         if panelWidget is not None:
             # The panel object is kept (it may be a Python object that owns its widget)
             self.libraryPanel = panel
