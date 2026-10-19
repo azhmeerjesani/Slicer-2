@@ -21,18 +21,16 @@ The user pays for any usage beyond their plans, so even an accidental use costs 
 - Do not use paid or metered services: cloud command-line tools (`gcloud`, `gsutil`, `bq`, `aws`),
   container registries, or connectors and MCP tools for other services (Adobe, Dropbox, Google Drive,
   Gmail, Google Calendar, Claude Docs, Slack and others), unless the user asks for that service.
-- Do not create cloud sessions, routines (scheduled triggers) or webhooks, except the two routines that
-  switch between the night and day agent limits below, unless the user asks.
+- Do not create cloud sessions, routines (scheduled triggers) or webhooks unless the user asks.
 - Download only from free public sources (Python packages, upstream Slicer data, template sites),
   never from the user's own GitHub releases, packages or artifacts.
 - When a Claude usage limit is reached, stop and report; do not work around it.
 
-## Agent concurrency (user's time zone: US Eastern)
+## Agent concurrency
 
-- From 11 pm to 6 am: any number of agents and workflows may run at once.
-- From 6 am to 11 pm: at most 2 agents running at any time (one workflow, which runs at most 2 agents,
-  or up to 2 standalone agents). Wind night work down before 6 am; do not stop work mid-agent if it
-  can be avoided, start nothing new that would exceed the limit.
+- Run at most one agent at any time, day and night: one standalone agent, or one workflow whose agents
+  run strictly one after another (no `parallel()` or concurrent `pipeline()` stages). Wait for it to
+  finish before starting the next.
 - Use the cheapest model that does the job well: Haiku for mechanical edits, Sonnet for routine
   implementation, docs, tests and walkthroughs, Opus for design, C++, numerics, file compatibility
   and adversarial review.
