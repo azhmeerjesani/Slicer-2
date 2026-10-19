@@ -178,6 +178,8 @@ public:
 
   void setupVisibilityButton(const QModelIndex& proxyIndex);
   void setupColorButton(const QModelIndex& proxyIndex);
+  /// Remove the padding of the tool buttons shown in item rows
+  static void setCompactButtonStyle(QToolButton* button);
   void setupAllButtons();
   /// Request a setupAllButtons() call. Multiple requests are coalesced into a single deferred call.
   void scheduleSetupAllButtons();
@@ -300,6 +302,21 @@ void qMRMLSubjectHierarchyTreeViewPrivate::init()
 }
 
 //--------------------------------------------------------------------------
+void qMRMLSubjectHierarchyTreeViewPrivate::setCompactButtonStyle(QToolButton* button)
+{
+  // Tool button without padding around its icon. The Slicer styles paint the "compact" role,
+  // which is cheaper than a stylesheet per row; other styles get the equivalent stylesheet.
+  if (button->style()->property("supportsSlicerRole").toBool())
+  {
+    button->setProperty("slicerRole", "compact");
+  }
+  else
+  {
+    button->setStyleSheet("QToolButton { padding: 0px; }");
+  }
+}
+
+//--------------------------------------------------------------------------
 void qMRMLSubjectHierarchyTreeViewPrivate::setupVisibilityButton(const QModelIndex& proxyIndex)
 {
   Q_Q(qMRMLSubjectHierarchyTreeView);
@@ -318,7 +335,7 @@ void qMRMLSubjectHierarchyTreeViewPrivate::setupVisibilityButton(const QModelInd
   button->setFocusPolicy(Qt::NoFocus);
   int iconSize = button->style()->pixelMetric(QStyle::PM_SmallIconSize);
   button->setIconSize(QSize(iconSize, iconSize));
-  button->setStyleSheet("QToolButton { padding: 0px; }");
+  qMRMLSubjectHierarchyTreeViewPrivate::setCompactButtonStyle(button);
   button->setIcon(proxyIndex.data(qMRMLSubjectHierarchyModel::VisibilityIconRole).value<QIcon>());
   button->setProperty("itemID", QVariant::fromValue(itemID));
 
@@ -369,7 +386,7 @@ void qMRMLSubjectHierarchyTreeViewPrivate::setupColorButton(const QModelIndex& p
   button->setFocusPolicy(Qt::NoFocus);
   int iconSize = button->style()->pixelMetric(QStyle::PM_SmallIconSize);
   button->setIconSize(QSize(iconSize, iconSize));
-  button->setStyleSheet("QToolButton { padding: 0px; }");
+  qMRMLSubjectHierarchyTreeViewPrivate::setCompactButtonStyle(button);
   button->setIcon(this->colorIcon(color));
 
   button->setProperty("itemID", QVariant::fromValue(itemID));
