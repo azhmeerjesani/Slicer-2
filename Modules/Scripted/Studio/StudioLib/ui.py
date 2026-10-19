@@ -6,7 +6,11 @@ other modules may use:
 - ``token(name)``, ``isDark()``: colors of the graphite themes (dark and light);
 - ``icon(name, size=18, role="normal")``: a Lucide icon tinted for every widget state;
 - ``setRole(widget, role)``: the ``slicerRole`` widget property;
-- builders ``card()``, ``chip()``, ``kbd()``, ``primaryButton()``, ``segmented()``.
+- builders ``card()``, ``chip()``, ``kbd()``, ``primaryButton()``, ``segmented()``, ``noticeLine()``
+  and ``wrapRow()``;
+- ``tooltip(name, key, description)``: the "Name · key · description" tooltip format;
+- ``contrastRatio()``, ``primaryScreen()``, ``fontPx()`` and ``installButtonKeys()`` (keyboard
+  activation of focused buttons).
 
 Colors come from ``qSlicerStyle.token()`` when the application style provides it. A fallback
 table with the same values is used otherwise (for example with a Qt built-in style).
@@ -16,10 +20,12 @@ a small stylesheet that only matches the widget's role is set on the Studio widg
 there is no application-wide stylesheet.
 """
 
+import html
 import os
 
 import qt
 import slicer
+from slicer.i18n import tr as _
 
 #: Directory of the vendored Lucide icons (ISC license, see LICENSE in that directory)
 ICON_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Resources", "Icons", "Lucide")
@@ -37,8 +43,10 @@ _DARK_TOKENS = {
     "control-pressed": "#26262a",
     "hairline": "#2e2e34",
     "border": "#3a3a41",
+    "control-border": "#71717a",
     "text2": "#a1a1aa",
-    "text3": "#71717a",
+    "text3": "#94949c",
+    "text-disabled": "#71717a",
     "accent": "#3568d4",
     "accent-hover": "#3f74e3",
     "accent-pressed": "#2c5bbf",
@@ -58,11 +66,13 @@ _LIGHT_TOKENS = {
     "control-pressed": "#e4e4e9",
     "hairline": "#e1e1e6",
     "border": "#cacad1",
+    "control-border": "#7a7a84",
     "text2": "#5c5c66",
-    "text3": "#8e8e98",
+    "text3": "#63636c",
+    "text-disabled": "#8e8e98",
     "accent": "#2f6fde",
     # accent-hover and accent-pressed are derived from accent (lightness +/- 8%)
-    "accent-fg": "#2f6fde",
+    "accent-fg": "#2158bd",
     "accent-subtle": "#e3ecfc",
     "success": "#1a7f37",
     "warning": "#9a6700",
@@ -99,8 +109,8 @@ def token(name):
     """Return the ``qt.QColor`` of a style token for the current application palette.
 
     Style tokens are listed in SPEC 4.2 and 4.3 (``canvas``, ``card``, ``hairline``, ``border``,
-    ``text2``, ``text3``, ``accent``, ``accent-fg``, ``accent-subtle``, ``success``, ``warning``,
-    ``danger``, ``view-bar``...). Palette roles are also available as ``window``, ``text``,
+    ``control-border``, ``text2``, ``text3``, ``text-disabled``, ``accent``, ``accent-fg``,
+    ``accent-subtle``, ``success``, ``warning``, ``danger``, ``view-bar``...). Palette roles are also available as ``window``, ``text``,
     ``base``, ``button``, ``highlight``, ``tooltip`` and ``tooltip-text``.
     """
     role = _PALETTE_TOKENS.get(name)
@@ -237,12 +247,12 @@ _iconCachePaletteKey = None
 
 # Icon tint per role: (normal, active/hover, checked, disabled)
 _ICON_TINTS = {
-    "normal": ("text2", "text", "accent-fg", "text3"),
-    "strong": ("text", "text", "accent-fg", "text3"),
-    "accent": ("accent-fg", "accent-fg", "accent-fg", "text3"),
-    "onAccent": ("#ffffff", "#ffffff", "#ffffff", "text3"),
-    "danger": ("danger", "danger", "danger", "text3"),
-    "warning": ("warning", "warning", "warning", "text3"),
+    "normal": ("text2", "text", "accent-fg", "text-disabled"),
+    "strong": ("text", "text", "accent-fg", "text-disabled"),
+    "accent": ("accent-fg", "accent-fg", "accent-fg", "text-disabled"),
+    "onAccent": ("#ffffff", "#ffffff", "#ffffff", "text-disabled"),
+    "danger": ("danger", "danger", "danger", "text-disabled"),
+    "warning": ("warning", "warning", "warning", "text-disabled"),
 }
 
 
@@ -293,7 +303,7 @@ def icon(name, size=18, role="normal"):
     """Return a ``qt.QIcon`` of the Lucide icon ``name`` (file name without extension).
 
     The icon is tinted for each state: normal = text2, active (hover) = text, checked = accent-fg,
-    disabled = text3. ``role`` selects another tint set: "strong" (text), "accent", "onAccent"
+    disabled = text-disabled. ``role`` selects another tint set: "strong" (text), "accent", "onAccent"
     (white, for icons on an accent fill), "danger" or "warning".
     Pixmaps are rendered at 1x and at the device pixel ratio. Icons are cached per palette.
     """
@@ -347,7 +357,7 @@ def supportsRoles():
 def _roleStyleSheet(role):
     """Scoped fallback stylesheet of a role. Selectors only match widgets that have the role."""
     t = {name: token(name).name() for name in (
-        "window", "text", "button", "card", "hairline", "border", "text2", "text3", "control-hover", "control-pressed",
+        "window", "text", "button", "card", "hairline", "border", "control-border", "text2", "text3", "text-disabled", "control-hover", "control-pressed",
         "accent", "accent-hover", "accent-pressed", "accent-fg", "accent-subtle", "success", "warning", "danger", "view-bar")}
     if role == "card":
         return (
@@ -359,20 +369,20 @@ def _roleStyleSheet(role):
             f'*[slicerRole="primary"] {{ background-color: {t["accent"]}; color: #ffffff; border: none; border-radius: 6px; padding: 0px 14px; min-height: 32px; font-weight: 600; }}'
             f'*[slicerRole="primary"]:hover {{ background-color: {t["accent-hover"]}; }}'
             f'*[slicerRole="primary"]:pressed {{ background-color: {t["accent-pressed"]}; }}'
-            f'*[slicerRole="primary"]:disabled {{ background-color: {t["border"]}; color: {t["text3"]}; }}')
+            f'*[slicerRole="primary"]:disabled {{ background-color: {t["border"]}; color: {t["text-disabled"]}; }}')
     if role == "secondary":
         return (
-            f'*[slicerRole="secondary"] {{ background-color: {t["button"]}; color: {t["text"]}; border: 1px solid {t["border"]}; border-radius: 6px; padding: 0px 12px; min-height: 28px; }}'
+            f'*[slicerRole="secondary"] {{ background-color: {t["button"]}; color: {t["text"]}; border: 1px solid {t["control-border"]}; border-radius: 6px; padding: 0px 12px; min-height: 28px; }}'
             f'*[slicerRole="secondary"]:hover {{ background-color: {t["control-hover"]}; }}'
             f'*[slicerRole="secondary"]:pressed {{ background-color: {t["control-pressed"]}; }}'
-            f'*[slicerRole="secondary"]:disabled {{ color: {t["text3"]}; }}')
+            f'*[slicerRole="secondary"]:disabled {{ color: {t["text-disabled"]}; }}')
     if role == "ghost":
         return (
             f'*[slicerRole="ghost"] {{ background-color: transparent; color: {t["text2"]}; border: 1px solid transparent; border-radius: 6px; padding: 3px; }}'
             f'*[slicerRole="ghost"]:hover {{ background-color: {t["control-hover"]}; color: {t["text"]}; }}'
             f'*[slicerRole="ghost"]:pressed {{ background-color: {t["control-pressed"]}; }}'
             f'*[slicerRole="ghost"]:checked {{ background-color: {t["accent-subtle"]}; border-color: {t["accent-fg"]}; color: {t["text"]}; }}'
-            f'*[slicerRole="ghost"]:disabled {{ color: {t["text3"]}; }}'
+            f'*[slicerRole="ghost"]:disabled {{ color: {t["text-disabled"]}; }}'
             f'QToolButton[slicerRole="ghost"]::menu-indicator {{ image: none; width: 0px; }}')
     if role == "segmented":
         return (
@@ -380,7 +390,7 @@ def _roleStyleSheet(role):
             f'QFrame[slicerRole="segmented"] QToolButton {{ background-color: transparent; color: {t["text2"]}; border: none; border-radius: 6px; padding: 3px 12px; font-size: 13px; }}'
             f'QFrame[slicerRole="segmented"] QToolButton:hover {{ background-color: {t["control-hover"]}; color: {t["text"]}; }}'
             f'QFrame[slicerRole="segmented"] QToolButton:checked {{ background-color: {t["accent-subtle"]}; color: {t["text"]}; }}'
-            f'QFrame[slicerRole="segmented"] QToolButton:disabled {{ color: {t["text3"]}; }}')
+            f'QFrame[slicerRole="segmented"] QToolButton:disabled {{ color: {t["text-disabled"]}; }}')
     if role == "chip":
         neutral = (t["control-hover"], t["text2"])
         levels = {
@@ -522,3 +532,258 @@ def segmented(labels):
         layout.addWidget(button)
     setRole(frame, "segmented")
     return frame, group
+
+
+#
+# Tooltips, contrast, screens and font sizes
+#
+
+
+def keyText(key):
+    r"""``key`` ("Ctrl+K", "Esc") as displayed on this platform (``QKeySequence.NativeText``: "⌘K" on macOS).
+
+    A text that is not exactly one key sequence ("Ctrl+\ or Ctrl+5", "Shift+wheel") is returned as given.
+    """
+    if not key:
+        return ""
+    key = str(key)
+    if " " in key.strip():
+        return key
+    sequence = qt.QKeySequence(key)
+    if sequence.count() != 1 or sequence.toString(qt.QKeySequence.PortableText).lower() != key.lower():
+        return key
+    return sequence.toString(qt.QKeySequence.NativeText) or key
+
+
+def tooltip(name, key=None, description=None):
+    """Return the Studio tooltip "Name · key · description" (USABILITY 10): the key as displayed on this platform.
+
+    The parts are escaped: a key such as "Ctrl+<" is not read as markup.
+    """
+    text = " · ".join(part for part in (str(name), keyText(key), str(description) if description else "") if part)
+    escaped = html.escape(text, quote=False)
+    # Plain text unless escaping was needed (rich text tooltips are word-wrapped)
+    return escaped if escaped == text else f"<qt>{escaped}</qt>"
+
+
+def _relativeLuminance(color):
+    color = qt.QColor(color)
+
+    def channel(value):
+        value = value / 255.0
+        return value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+
+    return 0.2126 * channel(color.red()) + 0.7152 * channel(color.green()) + 0.0722 * channel(color.blue())
+
+
+def contrastRatio(color1, color2):
+    """WCAG 2.x contrast ratio (1 to 21) of two colors (``qt.QColor`` or "#rrggbb")."""
+    luminances = sorted((_relativeLuminance(color1), _relativeLuminance(color2)), reverse=True)
+    return (luminances[0] + 0.05) / (luminances[1] + 0.05)
+
+
+def _validScreen(screen):
+    if screen is None:
+        return None
+    try:
+        screen.geometry
+    except ValueError:
+        # A wrapper without a live QScreen
+        return None
+    return screen
+
+
+def primaryScreen():
+    """The primary screen, or None.
+
+    In this PythonQt build ``slicer.app.primaryScreen`` is None and ``QGuiApplication.primaryScreen`` is a
+    property of the class that does not hold a live screen (it is a method elsewhere): the first screen of
+    ``QGuiApplication.screens()`` (the primary screen, by definition) is used then.
+    """
+    screen = getattr(qt.QGuiApplication, "primaryScreen", None)
+    screen = _validScreen(screen() if callable(screen) else screen)
+    if screen is None:
+        screens = qt.QGuiApplication.screens()
+        screen = _validScreen(screens[0]) if screens else None
+    return screen
+
+
+def screenOf(widget):
+    """The screen that shows ``widget``, else the primary screen."""
+    screen = _validScreen(widget.screen()) if widget is not None and callable(getattr(widget, "screen", None)) else None
+    return screen if screen is not None else primaryScreen()
+
+
+#: Pixel size of the body text that the Studio pixel sizes are designed for (SPEC 4.5)
+DESIGN_BODY_PX = 13.0
+
+
+def applicationFontPx():
+    """Pixel size of the application font (a point size is converted at 96 dpi)."""
+    font = qt.QApplication.font()
+    pixelSize = qt.QFontInfo(font).pixelSize()
+    if pixelSize > 0:
+        return pixelSize
+    return max(1.0, font.pointSizeF() * 96.0 / 72.0)
+
+
+def fontPx(basePx):
+    """Pixel size ``basePx`` (designed for a 13 px body) scaled with the application font (USABILITY 9.4)."""
+    return max(1, round(basePx * applicationFontPx() / DESIGN_BODY_PX))
+
+
+#
+# Keyboard activation of buttons
+#
+
+_ACTIVATION_KEYS = (qt.Qt.Key_Space, qt.Qt.Key_Return, qt.Qt.Key_Enter)
+_buttonKeys = None
+
+
+def hasKeyModifiers(event):
+    """True if Shift, Ctrl, Alt or Meta is held during the key event (the keypad modifier does not count)."""
+    mask = qt.Qt.ShiftModifier | qt.Qt.ControlModifier | qt.Qt.AltModifier | qt.Qt.MetaModifier
+    try:
+        # Explicit integers: a QFlags value may not compare equal to an enum value (Qt 6)
+        return bool(int(event.modifiers()) & int(mask))
+    except (TypeError, ValueError):
+        return bool(event.modifiers() & mask)
+
+
+class _ButtonKeys(qt.QObject):
+    """Space, Return and Enter press a focused button.
+
+    The shortcut override is accepted, so that window-wide shortcuts on these keys (the Space shortcut
+    of the Segment Editor) do not take them from a focused button, and the key press clicks the button
+    (a QToolButton does not react to Return by itself).
+    """
+
+    def eventFilter(self, obj, event):
+        eventType = event.type()
+        if eventType not in (qt.QEvent.ShortcutOverride, qt.QEvent.KeyPress, qt.QEvent.KeyRelease):
+            return False
+        if event.key() not in _ACTIVATION_KEYS or hasKeyModifiers(event) or not obj.hasFocus() or not obj.isEnabled():
+            return False
+        if eventType == qt.QEvent.ShortcutOverride:
+            event.accept()
+            return True
+        if eventType == qt.QEvent.KeyPress and not event.isAutoRepeat():
+            obj.click()
+        # Also the key release: the one of Space would click the button a second time
+        return True
+
+
+def installButtonKeys(button):
+    """Let Space, Return and Enter press ``button`` (a QAbstractButton) when it has the keyboard focus.
+
+    One shared event filter serves every button. Return ``button``.
+    """
+    global _buttonKeys
+    if _buttonKeys is None:
+        _buttonKeys = _ButtonKeys()
+    button.installEventFilter(_buttonKeys)
+    return button
+
+
+#
+# Height-for-width rows and notice lines
+#
+
+#: Width below which a ``wrapRow()`` (and a ``noticeLine()``) stacks its widgets
+WRAP_ROW_WIDTH = 300
+NOTICE_LINE_HEIGHT = 32
+_wrapFilter = None
+
+
+class _WrapFilter(qt.QObject):
+    """Switches the box layout of a widget between a row and a column when the widget is resized
+    (the threshold is the ``studioWrapWidth`` property of the widget).
+    """
+
+    def eventFilter(self, obj, event):
+        if event.type() == qt.QEvent.Resize:
+            layout = obj.layout()
+            if layout is not None and hasattr(layout, "setDirection"):
+                threshold = obj.property("studioWrapWidth") or WRAP_ROW_WIDTH
+                direction = qt.QBoxLayout.TopToBottom if obj.width < threshold else qt.QBoxLayout.LeftToRight
+                if layout.direction() != direction:
+                    layout.setDirection(direction)
+        return False
+
+
+def _installWrap(widget, width):
+    global _wrapFilter
+    if _wrapFilter is None:
+        _wrapFilter = _WrapFilter()
+    widget.setProperty("studioWrapWidth", int(width))
+    policy = qt.QSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+    policy.setHeightForWidth(True)
+    widget.setSizePolicy(policy)
+    widget.installEventFilter(_wrapFilter)
+
+
+def wrapRow(widgets, width=WRAP_ROW_WIDTH, spacing=6):
+    """Return a widget that lays ``widgets`` out in a row, stacked when it is narrower than ``width`` px.
+
+    Its horizontal size policy is Ignored: a row never makes its container (the inspector) wider.
+    """
+    row = qt.QWidget()
+    row.setObjectName("StudioWrapRow")
+    layout = qt.QBoxLayout(qt.QBoxLayout.LeftToRight, row)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(spacing)
+    for widget in widgets:
+        layout.addWidget(widget)
+    _installWrap(row, width)
+    return row
+
+
+def noticeLine(text, actions=()):
+    """Return a notice for the inspector notice slot (``shell.setInspectorNotice()``): one 32 px line with a
+    word-wrapped text and buttons, for example ``noticeLine(text, noticeActions(notNow=close, details=show))``.
+
+    ``actions`` are ``(text, callback)`` pairs. The text is the ``StudioNoticeText`` label and the buttons are
+    named ``StudioNoticeButton``. The buttons go under the text when the inspector is narrow (below
+    ``WRAP_ROW_WIDTH``), and the notice has an Ignored horizontal size policy: it never widens the inspector.
+    """
+    frame = qt.QFrame()
+    frame.setObjectName("StudioNoticeLine")
+    frame.setMinimumHeight(NOTICE_LINE_HEIGHT)
+    layout = qt.QBoxLayout(qt.QBoxLayout.LeftToRight, frame)
+    layout.setContentsMargins(12, 4, 8, 4)
+    layout.setSpacing(6)
+    label = qt.QLabel(text)
+    label.setObjectName("StudioNoticeText")
+    label.setWordWrap(True)
+    layout.addWidget(label, 1)
+    if actions:
+        buttonRow = qt.QHBoxLayout()
+        buttonRow.setSpacing(2)
+        buttonRow.addStretch(1)
+        for buttonText, callback in actions:
+            button = qt.QToolButton()
+            button.setObjectName("StudioNoticeButton")
+            button.setText(buttonText)
+            button.setAutoRaise(True)
+            button.setFocusPolicy(qt.Qt.TabFocus)
+            button.setToolButtonStyle(qt.Qt.ToolButtonTextOnly)
+            button.connect("clicked()", callback)
+            setRole(button, "ghost")
+            installButtonKeys(button)
+            buttonRow.addWidget(button)
+        layout.addLayout(buttonRow)
+    _installWrap(frame, WRAP_ROW_WIDTH)
+    bindStyleSheet(frame, lambda: (
+        f"QFrame#StudioNoticeLine {{ background-color: {token('accent-subtle').name()}; border: none; border-bottom: 1px solid {token('hairline').name()}; }}"
+        f"QLabel#StudioNoticeText {{ color: {token('text').name()}; background: transparent; }}"))
+    return frame
+
+
+def noticeActions(notNow=None, details=None):
+    """The usual actions of an offer notice: "Not now" and "Details" (an action is left out when its callback is None)."""
+    actions = []
+    if notNow is not None:
+        actions.append((_("Not now"), notNow))
+    if details is not None:
+        actions.append((_("Details"), details))
+    return actions

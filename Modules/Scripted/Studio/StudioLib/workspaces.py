@@ -2,11 +2,19 @@
 
 A workspace is a module shown in the inspector (the module panel), plus a remembered view layout
 and an optional hooks module. Hooks modules (``StudioLib.library``, ``StudioLib.draw``,
-``StudioLib.mappage``) are imported lazily; they may define ``enter(shell)`` and ``leave(shell)``.
+``StudioLib.mappage``) are imported lazily (``hooks(ws)``); they may define:
+
+- ``enter(shell)`` and ``leave(shell)``;
+- ``helpHtml(shell)``: ``(title, html)`` for the "?" popover of the panel header (the current tool), or None
+  for the module help;
+- ``moreMenuActions(shell)``: ``[(text, callback, checked or None)]``, extra items of the header "⋯" menu;
+- ``focusFirst(shell)``: give the keyboard focus to the first control of the workspace after it is entered.
+
 A missing hooks module means "no hooks", so later pages plug in without editing the shell.
 
 Any other module selected in the inspector is "transient": no workspace tab is checked and the
-panel header shows the module title with a close button that returns to the last workspace.
+panel header shows "← <workspace>", a button that returns to the workspace the module was opened from
+(Esc does too, see ``Shell.handleEscape()``). The keyboard focus starts on the module panel itself.
 """
 
 import importlib
@@ -29,15 +37,17 @@ class Workspace:
     :param iconName: Lucide icon name.
     :param hooksModule: Python module that defines the optional ``enter(shell)``/``leave(shell)`` hooks.
     :param defaultLayout: view layout of the workspace, None to keep the current layout (Library).
+    :param caption: what the workspace is, shown after the title in the panel header ("Draw · Segment Editor").
     """
 
-    def __init__(self, key, title, moduleName, iconName, hooksModule=None, defaultLayout=None):
+    def __init__(self, key, title, moduleName, iconName, hooksModule=None, defaultLayout=None, caption=None):
         self.key = key
         self.title = title
         self.moduleName = moduleName
         self.iconName = iconName
         self.hooksModule = hooksModule
         self.defaultLayout = defaultLayout
+        self.caption = caption
 
     @property
     def layoutSettingsKey(self):
@@ -48,9 +58,11 @@ class Workspace:
 
 
 WORKSPACES = (
-    Workspace("library", "Library", "Studio", "library", hooksModule="StudioLib.library"),
-    Workspace("draw", "Draw", "SegmentEditor", "brush", hooksModule="StudioLib.draw", defaultLayout=layouts.FOCUS_LAYOUT_ID),
-    Workspace("map", "Map", "LesionNetworkMapping", "waypoints", hooksModule="StudioLib.mappage", defaultLayout=layouts.FOCUS_LAYOUT_ID),
+    Workspace("library", "Library", "Studio", "library", hooksModule="StudioLib.library", caption=_("Open data")),
+    Workspace("draw", "Draw", "SegmentEditor", "brush", hooksModule="StudioLib.draw", defaultLayout=layouts.FOCUS_LAYOUT_ID,
+              caption=_("Segment Editor")),
+    Workspace("map", "Map", "LesionNetworkMapping", "waypoints", hooksModule="StudioLib.mappage", defaultLayout=layouts.FOCUS_LAYOUT_ID,
+              caption=_("Lesion network mapping")),
 )
 
 
@@ -105,15 +117,29 @@ def hooks(ws):
     return module
 
 
-def _callHook(ws, name, shell):
-    module = hooks(ws)
+def hookFunction(ws, name):
+    """The function ``name`` of the hooks module of ``ws``, or None."""
+    module = hooks(ws) if ws is not None else None
     function = getattr(module, name, None) if module is not None else None
+    return function if callable(function) else None
+
+
+def callHook(ws, name, shell, default=None):
+    """Call the hook ``name(shell)`` of ``ws`` and return its result (``default`` if there is no such hook or it failed)."""
+    function = hookFunction(ws, name)
     if function is None:
-        return False
+        return default
     try:
-        function(shell)
+        return function(shell)
     except Exception:
         logging.error(f"Studio: {ws.hooksModule}.{name}() failed:\n{traceback.format_exc()}")
+    return default
+
+
+def _callHook(ws, name, shell):
+    if hookFunction(ws, name) is None:
+        return False
+    callHook(ws, name, shell)
     return True
 
 
@@ -241,6 +267,14 @@ class WorkspaceController:
         self.transientModule = None
         self.shell._onWorkspaceEntered(ws, shrinkPanel=shrinkPanel)
         _callHook(ws, "enter", self.shell)
+        if hookFunction(ws, "focusFirst") is not None:
+            # After the module widget and the canvas are laid out
+            qt.QTimer.singleShot(0, lambda key=ws.key: self._focusFirst(key))
+
+    def _focusFirst(self, key):
+        if self.current != key or not self.shell.isActive():
+            return
+        callHook(workspace(key), "focusFirst", self.shell)
 
     def _leave(self):
         if self.current is None:

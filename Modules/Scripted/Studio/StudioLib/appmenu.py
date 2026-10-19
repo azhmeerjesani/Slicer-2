@@ -1,8 +1,9 @@
 """App menu (≡) of the Slicer Studio top bar (SPEC 2.4).
 
 It reuses the File, Edit, View and Help menus of the main window, and offers the workspaces,
-the inspector and focus mode toggles, Appearance (theme and density), common dialogs and the switch
-to the Classic interface.
+Search, the inspector and "Hide panels" toggles, Appearance (theme and density), common dialogs and
+the switch to the Classic interface. While Studio is shown, View also has "Recent messages…" (the
+last toast messages). The menu opens with F10 (and Alt, Alt+F/E/V/H on Windows and Linux, see the shell).
 
 Appearance settings are changed through the Appearance settings panel, so they are stored in
 the fork's own keys (``Appearance/Theme``, ``Appearance/Density``) and never in keys that other
@@ -21,6 +22,16 @@ _THEMES = (("Dark", "moon"), ("Light", "sun"), ("System", "monitor"))
 _DENSITIES = ("Comfortable", "Compact")
 # Built-in styles whose palette does not follow the theme setting
 _FIXED_PALETTE_STYLES = ("Dark Slicer", "Light Slicer")
+
+
+def _keyText(key):
+    return ui.keyText(key)
+
+
+def _focusModeKeyText():
+    from . import shell
+
+    return shell.focusModeKeyText()
 
 
 def _menuText(text, shortcut=None):
@@ -109,17 +120,20 @@ class AppMenu:
             action.setEnabled(workspaces.isAvailable(ws))
             action.connect("triggered()", lambda key=ws.key: self.shell.switchTo(key))
             self.workspaceActions[ws.key] = action
-        allTools = self.menu.addAction(_menuText(_("All tools…"), "Ctrl+K"))
-        allTools.setObjectName("StudioAllToolsAction")
-        allTools.connect("triggered()", self.shell.openPalette)
+        # One search, one name (USABILITY 4): the object name of the former "All tools…" item is kept
+        search = self.menu.addAction(_menuText(_("Search…"), _keyText("Ctrl+K")))
+        search.setObjectName("StudioAllToolsAction")
+        search.setProperty("studioIcon", "search")
+        search.connect("triggered()", self.shell.openPalette)
+        self.searchAction = search
         self.menu.addSeparator()
 
-        # Ways back to a hidden inspector and out of the focus mode, with their keys
+        # Ways back to a hidden inspector and to hidden panels, with their keys
         self.inspectorAction = self.menu.addAction(_menuText(_("Show inspector"), shell.inspectorShortcutText()))
         self.inspectorAction.setObjectName("StudioInspectorAction")
         self.inspectorAction.setCheckable(True)
         self.inspectorAction.connect("triggered()", self.shell.toggleInspector)
-        self.focusModeAction = self.menu.addAction(_menuText(_("Focus mode"), "F11"))
+        self.focusModeAction = self.menu.addAction(_menuText(_("Hide panels"), _focusModeKeyText()))
         self.focusModeAction.setObjectName("StudioFocusModeAction")
         self.focusModeAction.setCheckable(True)
         self.focusModeAction.connect("triggered()", self.shell.toggleFocusMode)
@@ -131,6 +145,15 @@ class AppMenu:
             if existingMenu is not None:
                 self.menu.addMenu(existingMenu)
         self.menu.addSeparator()
+        # View > Recent messages… (removed from the shared View menu in Classic, see dispose())
+        self._viewMenu = mainWindow.findChild("QMenu", "ViewMenu")
+        self.recentMessagesAction = qt.QAction(_("Recent messages…"), mainWindow)
+        self.recentMessagesAction.setObjectName("StudioRecentMessagesAction")
+        self.recentMessagesAction.connect("triggered()", self.shell.showRecentMessages)
+        self._recentMessagesSeparator = None
+        if self._viewMenu is not None and hasattr(self.shell, "showRecentMessages"):
+            self._recentMessagesSeparator = self._viewMenu.addSeparator()
+            self._viewMenu.addAction(self.recentMessagesAction)
 
         self.appearanceMenu = self.menu.addMenu(_("Appearance"))
         self.appearanceMenu.setObjectName("StudioAppearanceMenu")
@@ -219,3 +242,10 @@ class AppMenu:
 
     def dispose(self):
         ui.removePaletteListener(self.refreshIcons)
+        if self._viewMenu is not None:
+            self._viewMenu.removeAction(self.recentMessagesAction)
+            if self._recentMessagesSeparator is not None:
+                self._viewMenu.removeAction(self._recentMessagesSeparator)
+        self._recentMessagesSeparator = None
+        self.recentMessagesAction.setObjectName("")
+        self.recentMessagesAction.deleteLater()

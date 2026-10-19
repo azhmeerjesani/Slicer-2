@@ -14,6 +14,7 @@ from .SegmentEditorMarginEffect import *
 from .SegmentEditorMaskVolumeEffect import *
 from .SegmentEditorSmoothingEffect import *
 from .SegmentEditorThresholdEffect import *
+from .SegmentEditorSmartFillEffect import *
 
 from SegmentEditorEffects import *
 
@@ -33,6 +34,7 @@ editorEffectNames = [
     "SegmentEditorMaskVolumeEffect",
     "SegmentEditorSmoothingEffect",
     "SegmentEditorThresholdEffect",
+    "SegmentEditorSmartFillEffect",
 ]
 
 

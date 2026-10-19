@@ -10,17 +10,28 @@ Studio never runs under ``--testing`` or ``--no-main-window``, nor with ``SLICER
 ``Studio/Enabled=false``. ``instance()`` returns None in these cases and in Classic: every consumer
 must handle None.
 
-Public API (SPEC 2.10): ``instance()``, ``Shell.switchTo()``, ``currentWorkspace()``, ``toast()``,
-``setBreadcrumb()``, ``setStatusChip()``, ``setInspectorFooter()``, ``setCanvas()``,
-``setInspectorVisible()``, ``toggleInspector()``, ``setFocusMode()``, ``handleEscape()``,
-``setPrimaryAction()``, ``addWorkspaceShortcut()``, ``studySession``, ``classic()``, ``studio()``
-and ``panelWidth``.
+Public API (SPEC 2.10): ``instance()``, ``willApplyAtStartup()``, ``Shell.switchTo()``,
+``currentWorkspace()``, ``toast()``, ``recentMessages()``, ``setBreadcrumb()``, ``setStatusChip()``,
+``setInspectorFooter()``, ``setInspectorNotice()``, ``clearInspectorNotice()``, ``setCanvas()``,
+``setInspectorVisible()``, ``toggleInspector()``, ``setFocusMode()`` (named "Hide panels" in the UI),
+``handleEscape()``, ``registerEscapeOverlay()``, ``unregisterEscapeOverlay()``, ``openPalette()``,
+``setPrimaryAction()``, ``addWorkspaceShortcut()``, ``studySession``, ``classic()``, ``studio()`` and
+``panelWidth``.
 
-Navigation ("where am I, how do I get back"): the tab or the shortcut of the current workspace shows
-the inspector again and leaves the focus mode; ``Ctrl+\`` shows or hides the inspector (Tab and
-Shift+Tab keep moving the keyboard focus); the focus mode shows an "Exit focus mode" pill; Esc backs
-out of one navigation state at a time (see ``Shell.handleEscape()``); Classic -> Studio returns to the
-workspace of the current module.
+Navigation ("where am I, how do I get back", USABILITY 2-3): the tab or the shortcut of the current
+workspace shows the inspector again and the hidden panels; ``Ctrl+\`` or ``Ctrl+5`` shows or hides the
+inspector (Tab and Shift+Tab keep moving the keyboard focus) and a hidden inspector has an edge handle;
+hidden panels show a "Show panels" pill; a transient module has a labelled "← <workspace>" back button;
+Esc backs out of one state at a time (``ESCAPE_LADDER``, ``Shell.handleEscape()``); Classic -> Studio
+returns to the workspace of the current module.
+
+Keyboard (USABILITY 9): F10 opens the ≡ menu (also Alt, and Alt+F/E/V/H for its submenus, on Windows and
+Linux); F6 and Shift+F6 move the focus between the top bar, the inspector and the views (or the Library
+canvas); Space and Enter press a focused button of the top bar and of the panel header.
+
+Studio also turns on the Studio-only navigation behaviours of the views while it is shown (left-drag
+window/level, PageUp/PageDown by ``Studio/PageStepSlices``, clamped slice stepping, symmetric zoom and
+focus follows the mouse) and turns them off in Classic.
 
 Settings are stored under ``Studio/*`` only. The shell does not change values of keys that other
 Slicer installations read (SPEC 9.7 rule 5), except that after the application window is closed it
@@ -28,9 +39,11 @@ replaces what Slicer saved there while Studio was shown by the Classic equivalen
 window state in ``MainWindow/windowState`` and a portable layout in ``MainWindow/layout``.
 """
 
+import collections
 import importlib
 import logging
 import os
+import sys
 import time
 import traceback
 
@@ -42,7 +55,8 @@ from . import hud, layouts, topbar, ui, workspaces
 
 #: Plug-ins installed when Studio is applied (``install(shell)``) and removed in Classic
 #: (``uninstall(shell)``). Missing modules are skipped.
-OPTIONAL_PLUGINS = ["StudioLib.importer", "StudioLib.probe", "StudioLib.journal", "StudioLib.study_ui", "StudioLib.orientation", "StudioLib.finder"]
+OPTIONAL_PLUGINS = ["StudioLib.importer", "StudioLib.probe", "StudioLib.journal", "StudioLib.study_ui", "StudioLib.orientation", "StudioLib.finder",
+                    "StudioLib.modes", "StudioLib.a11y", "StudioLib.firstrun"]
 
 DEFAULT_PANEL_WIDTH = 340
 MIN_PANEL_WIDTH = 300
@@ -57,9 +71,47 @@ HELP_POPOVER_MAX_HEIGHT = 420
 
 #: Shows or hides the inspector. Not Tab: Tab and Shift+Tab move the keyboard focus, also out of the views.
 INSPECTOR_SHORTCUT = "Ctrl+\\"
-#: Second key of the inspector, for keyboard layouts where Ctrl+\ cannot be typed (German, French: AltGr)
-INSPECTOR_ALTERNATE_SHORTCUT = "F6"
+#: Second key of the inspector, for keyboard layouts where Ctrl+\ needs AltGr (German, French, Spanish, Nordic):
+#: the classic View > Module Panel key (the shortcut of the dock widget's toggle view action, not a Studio shortcut)
+INSPECTOR_ALTERNATE_SHORTCUT = "Ctrl+5"
+#: "Hide panels" (formerly "focus mode"): F11, which macOS reserves (Show Desktop), and Ctrl+6 (⌘6)
 FOCUS_MODE_SHORTCUTS = ("F11", "Ctrl+6")
+#: Cycle the keyboard focus between the regions of the window: top bar, inspector, views (or the Library canvas)
+FOCUS_REGION_SHORTCUTS = ("F6", "Shift+F6")
+#: Opens the ≡ menu on every platform
+APP_MENU_SHORTCUT = "F10"
+#: Windows and Linux only (on macOS Option+letter types characters): open ≡ and one of its submenus. Not Alt+V:
+#: the slice views use V with any modifier (SPEC 9.6); Alt and then V opens ≡ > View (its mnemonic) instead.
+APP_SUBMENU_SHORTCUTS = (("Alt+F", "FileMenu"), ("Alt+E", "EditMenu"), ("Alt+H", "HelpMenu"))
+
+#: The Esc ladder (USABILITY 3), one rung per key press, as (state, what Esc does), for the shortcut list.
+#: Before these, Qt popups and dialogs close themselves and text fields with unsent edits, consoles and open
+#: item editors keep their Esc. Library is outside the ladder: it is a workspace, not a state (its visible
+#: back is "Continue in Draw" on the Current work card).
+ESCAPE_LADDER = [
+    (_("Popover, search or shortcut list"), _("close it")),
+    (_("Place / window-level mode"), _("back to navigation")),
+    (_("Maximized or single view"), _("restore the layout")),
+    (_("Hidden panels"), _("show them")),
+    (_("Active Draw tool"), _("deselect")),
+    (_("Module from Search"), _("back to the workspace")),
+]
+
+#: Studio-only navigation behaviours of the views (SPEC 6.2, USABILITY 9.1): (settings key, default)
+LEFT_DRAG_WINDOW_LEVEL_KEY = ("Studio/LeftDragWindowLevel", True)
+PAGE_STEP_SLICES_KEY = ("Studio/PageStepSlices", 10)
+FOCUS_FOLLOWS_MOUSE_KEY = ("Studio/FocusFollowsMouse", True)
+#: Application property read by qMRMLSliceView::enterEvent (W3-02a)
+FOCUS_FOLLOWS_MOUSE_PROPERTY = "SlicerFocusFollowsMouse"
+
+#: Edge handle of a hidden inspector (USABILITY 6.3, "Panel handle" slot)
+INSPECTOR_HANDLE_SIZE = (20, 56)
+#: A consequence toast stays until the next input, but at least this long
+STICKY_TOAST_MINIMUM_MS = 4000
+#: Number of toast messages kept for "Recent messages"
+RECENT_MESSAGES_COUNT = 20
+#: Link of the hook help popover that shows the module documentation instead
+_MODULE_HELP_LINK = "studio-help:module"
 
 #: Explicit minimum width of the module panel in Studio. The minimum size hint of the module panel is the
 #: width of the module widget, so a wide tool (for example the Paint options) would widen the inspector and
@@ -76,15 +128,15 @@ _WORKSPACE_PANEL_WIDTHS_GROUP = "Studio/WorkspacePanelWidths"
 FIRST_RUN_WINDOW_FRACTION = 0.9
 
 #: Main window actions that keep their classic behavior in Studio: they are not attached to the
-#: main window (Ctrl+Z/Y are owned by the Segment Editor, Ctrl+6 by the focus mode, Ctrl+O by Studio)
-_KEEP_UNATTACHED_ACTIONS = ("EditUndoAction", "EditRedoAction", "WindowMaximizeViewAction", "FileAddDataAction")
+#: main window (Ctrl+Z/Y are owned by the Segment Editor, Ctrl+6 by "Hide panels", Ctrl+O, Ctrl+F and Ctrl+H
+#: by Studio)
+_KEEP_UNATTACHED_ACTIONS = ("EditUndoAction", "EditRedoAction", "WindowMaximizeViewAction", "FileAddDataAction",
+                            "ViewFindModuleAction", "ModuleHomeAction")
 
 _PORTABLE_LAYOUT = slicer.vtkMRMLLayoutNode.SlicerLayoutConventionalView
 
 _shell = None
 _closeGuard = None
-#: The "Panel hidden" hint is shown once per application session
-_panelHiddenHintShown = False
 
 
 def instance():
@@ -96,6 +148,112 @@ def instance():
 
 def _settingsBool(key, default):
     return slicer.util.settingsValue(key, default, converter=slicer.util.toBool)
+
+
+def _settingsInt(key, default):
+    try:
+        return int(slicer.util.settingsValue(key, default, converter=int))
+    except (TypeError, ValueError):
+        return default
+
+
+def willApplyAtStartup():
+    """True if ``onStartupCompleted()`` will apply Studio: not testing, a main window, ``SLICER_CLASSIC_UI`` is
+    not "1", ``Studio/Enabled`` and ``Studio/Mode`` is not "classic". Nothing is changed.
+    """
+    if slicer.app.testingEnabled() or slicer.app.commandOptions().noMainWindow:
+        return False
+    if slicer.util.mainWindow() is None:
+        return False
+    if os.environ.get("SLICER_CLASSIC_UI") == "1":
+        return False
+    if not _settingsBool("Studio/Enabled", True):
+        return False
+    return str(slicer.util.settingsValue("Studio/Mode", "studio")).lower() != "classic"
+
+
+def isMacOS():
+    return sys.platform == "darwin"
+
+
+def focusModeKeyText():
+    """The key of "Hide panels" as displayed on this platform: ⌘6 on macOS (F11 is Show Desktop there), else F11."""
+    key = FOCUS_MODE_SHORTCUTS[1] if isMacOS() else FOCUS_MODE_SHORTCUTS[0]
+    return qt.QKeySequence(key).toString(qt.QKeySequence.NativeText)
+
+
+def _execMenu(menu, point):
+    """Show ``menu`` at ``point`` and wait until it is closed (QMenu.exec in Qt 6, exec_ in Qt 5)."""
+    run = getattr(menu, "exec", None) or menu.exec_
+    return run(point)
+
+
+def _ancestors(widget):
+    """``widget`` and its parent widgets."""
+    while widget is not None:
+        yield widget
+        widget = widget.parentWidget()
+
+
+def _isEditingItemView(view):
+    """True if an item editor of ``view`` (a QAbstractItemView) is open."""
+    state = getattr(view, "state", None)
+    if callable(state):
+        try:
+            return state() == qt.QAbstractItemView.EditingState
+        except Exception:
+            pass
+    return False
+
+
+def _keepsEscape(focusWidget):
+    """True if the focus widget uses Esc itself, so that the Esc ladder does not run (USABILITY 3, rung 0).
+
+    Consoles, editable multi-line text fields, open item editors and line edits with unsent edits keep Esc.
+    A line edit of a spin box or of a combo box counts as its parent: spin boxes and closed combo boxes do
+    not keep Esc (see ``_leavesFieldOnEscape()``).
+    """
+    if focusWidget is None:
+        return False
+    for ancestor in _ancestors(focusWidget):
+        if ancestor.inherits("ctkConsole"):
+            return True
+        if ancestor.inherits("QAbstractItemView"):
+            # The focus widget is the view itself, or an editor in its viewport
+            if ancestor == focusWidget:
+                return _isEditingItemView(ancestor)
+            return _isEditingItemView(ancestor) or any(focusWidget.inherits(name) for name in ("QLineEdit", "QAbstractSpinBox", "QComboBox", "QTextEdit"))
+    if focusWidget.inherits("QTextEdit") or focusWidget.inherits("QPlainTextEdit"):
+        return not focusWidget.readOnly
+    if focusWidget.inherits("QLineEdit"):
+        parent = focusWidget.parentWidget()
+        if parent is not None and (parent.inherits("QAbstractSpinBox") or parent.inherits("QComboBox")):
+            return False
+        return bool(focusWidget.isModified()) and bool(focusWidget.text)
+    return False
+
+
+def _isTextInput(widget):
+    """True if ``widget`` takes typed text: an editable line edit, text field, spin box or combo box."""
+    if widget is None:
+        return False
+    if widget.inherits("QLineEdit") or widget.inherits("QTextEdit") or widget.inherits("QPlainTextEdit"):
+        return not widget.readOnly
+    if widget.inherits("QAbstractSpinBox"):
+        return not widget.readOnly
+    if widget.inherits("QComboBox"):
+        return bool(widget.editable)
+    return False
+
+
+def _leavesFieldOnEscape(focusWidget):
+    """True for a spin box or a closed combo box (or their line edit): Esc moves the focus out of it and runs the ladder."""
+    if focusWidget is None:
+        return False
+    widget = focusWidget
+    if widget.inherits("QLineEdit") and widget.parentWidget() is not None:
+        widget = widget.parentWidget()
+    return widget.inherits("QAbstractSpinBox") or widget.inherits("QComboBox")
 
 
 def associatedWidgets(action):
@@ -143,9 +301,7 @@ def fitWindowToScreen(mainWindow, fraction=FIRST_RUN_WINDOW_FRACTION):
     restored = slicer.util.toBool(settings.value("MainWindow/RestoreGeometry", False)) and settings.contains("MainWindow/geometry")
     if restored or mainWindow.isMaximized() or mainWindow.isFullScreen():
         return False
-    screen = mainWindow.screen() if callable(getattr(mainWindow, "screen", None)) else None
-    if screen is None:
-        screen = slicer.app.primaryScreen  # a property in PythonQt, not a method
+    screen = ui.screenOf(mainWindow)
     if screen is None:
         return False
     available = screen.availableGeometry
@@ -243,7 +399,14 @@ def installCloseGuard(mainWindow):
 
 
 class PanelHeader:
-    """The 40 px header of the inspector, which replaces the module panel title bar (SPEC 2.5)."""
+    """The 40 px header of the inspector, which replaces the module panel title bar (SPEC 2.5).
+
+    In a workspace it shows the workspace title and its caption ("Draw · Segment Editor"). For a transient
+    module it shows a labelled back button "← Draw" (objectName ``StudioPanelCloseButton``) and the module
+    title. "?" shows the help of the current tool (the workspace hook ``helpHtml(shell)``) or of the module,
+    and "⋯" the hook items (``moreMenuActions(shell)``) and the panel actions. The buttons take the keyboard
+    focus with Tab; Space and Enter press them.
+    """
 
     def __init__(self, shell):
         self.shell = shell
@@ -251,22 +414,44 @@ class PanelHeader:
         self.widget.setObjectName("StudioPanelHeader")
         self.widget.setFixedHeight(PANEL_HEADER_HEIGHT)
         layout = qt.QHBoxLayout(self.widget)
+        self._layout = layout
         # QDockWidget reserves the size hint height of a title bar widget (not its fixed height):
         # the 26 px buttons and these margins make the size hint 40 px
-        verticalMargin = (PANEL_HEADER_HEIGHT - PANEL_HEADER_BUTTON_SIZE) // 2
-        layout.setContentsMargins(12, verticalMargin, 6, verticalMargin)
+        self._verticalMargin = (PANEL_HEADER_HEIGHT - PANEL_HEADER_BUTTON_SIZE) // 2
+        layout.setContentsMargins(12, self._verticalMargin, 6, self._verticalMargin)
         layout.setSpacing(2)
 
+        # Back to the workspace that the transient module was opened from (the former close button)
+        self.closeButton = self._button("StudioPanelCloseButton", "arrow-left", _("Back"))
+        self.closeButton.setToolButtonStyle(qt.Qt.ToolButtonTextBesideIcon)
+        # Labelled: as wide as its text
+        self.closeButton.setMaximumSize(16777215, 16777215)
+        self.closeButton.setFixedHeight(PANEL_HEADER_BUTTON_SIZE)
+        self.closeButton.setMinimumWidth(PANEL_HEADER_BUTTON_SIZE)
+        ui._font(self.closeButton, 13)
+        self.closeButton.connect("clicked()", self.shell.closeTransientModule)
+        self.closeButton.hide()
+        layout.addWidget(self.closeButton)
+        layout.addSpacing(4)
+
+        # Kept for compatibility, no longer shown (the back button says where the module was opened from)
         self.prefixLabel = qt.QLabel(_("Module ·"))
         self.prefixLabel.setObjectName("StudioPanelHeaderPrefix")
         ui._font(self.prefixLabel, 13)
         self.prefixLabel.hide()
         layout.addWidget(self.prefixLabel)
-        layout.addSpacing(2)
         self.titleLabel = qt.QLabel()
         self.titleLabel.setObjectName("StudioPanelHeaderTitle")
         ui._font(self.titleLabel, 15, qt.QFont.DemiBold)
-        layout.addWidget(self.titleLabel, 1)
+        layout.addWidget(self.titleLabel)
+        self.captionLabel = qt.QLabel()
+        self.captionLabel.setObjectName("StudioPanelHeaderCaption")
+        ui._font(self.captionLabel, 13)
+        # Never wider than the room left: the header must not widen the inspector
+        self.captionLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+        self.captionLabel.hide()
+        layout.addSpacing(6)
+        layout.addWidget(self.captionLabel, 1)
 
         self.helpButton = self._button("StudioPanelHelpButton", "circle-help", _("Help and acknowledgment"))
         self.helpButton.connect("clicked()", self.showHelp)
@@ -285,15 +470,15 @@ class PanelHeader:
         self.moreMenu.connect("aboutToShow()", self._updateMoreMenu)
         self.moreButton.setMenu(self.moreMenu)
         layout.addWidget(self.moreButton)
-
-        self.closeButton = self._button("StudioPanelCloseButton", "x", _("Close"))
-        self.closeButton.connect("clicked()", self.shell.closeTransientModule)
-        self.closeButton.hide()
-        layout.addWidget(self.closeButton)
+        #: Actions added by the hook ``moreMenuActions(shell)`` (rebuilt each time the menu is shown)
+        self._hookActions = []
+        #: Text browser of the help popover while it exists
+        self._helpBrowser = None
 
         ui.bindStyleSheet(self.widget, lambda: (
             f"QFrame#StudioPanelHeader {{ background-color: {ui.token('window').name()}; border: none; border-bottom: 1px solid {ui.token('hairline').name()}; }}"
-            f"QLabel#StudioPanelHeaderPrefix {{ color: {ui.token('text2').name()}; }}"))
+            f"QLabel#StudioPanelHeaderPrefix {{ color: {ui.token('text2').name()}; }}"
+            f"QLabel#StudioPanelHeaderCaption {{ color: {ui.token('text2').name()}; }}"))
         self.refreshIcons()
         ui.addPaletteListener(self.refreshIcons)
 
@@ -303,37 +488,73 @@ class PanelHeader:
         button.setObjectName(objectName)
         button.setToolTip(toolTip)
         button.setAutoRaise(True)
-        button.setFocusPolicy(qt.Qt.NoFocus)
+        # Reachable with Tab (not by a click: the focus stays where the user works)
+        button.setFocusPolicy(qt.Qt.TabFocus)
         button.setIconSize(qt.QSize(16, 16))
         button.setFixedSize(PANEL_HEADER_BUTTON_SIZE, PANEL_HEADER_BUTTON_SIZE)
         button.setProperty("studioIcon", iconName)
         ui.setRole(button, "ghost")
+        ui.installButtonKeys(button)
         return button
 
     def refreshIcons(self):
         for button in (self.helpButton, self.moreButton, self.closeButton):
             button.setIcon(ui.icon(button.property("studioIcon"), 16))
 
-    def setTitle(self, title, transient=False, closeToolTip=None):
+    def setTitle(self, title, transient=False, closeToolTip=None, backText=None, caption=None):
+        """Show a workspace title (with its ``caption``), or with ``transient`` a module title after the back button.
+
+        ``backText`` is the label of the back button (the workspace the module was opened from) and
+        ``closeToolTip`` its tooltip.
+        """
         self.titleLabel.setText(title)
-        self.prefixLabel.setVisible(transient)
+        # The "Module ·" prefix is replaced by the labelled back button
+        self.prefixLabel.setVisible(False)
+        self.closeButton.setText(backText or "")
         self.closeButton.setVisible(transient)
         if closeToolTip:
             self.closeButton.setToolTip(closeToolTip)
+        captionText = f"· {caption}" if caption and not transient else ""
+        self.captionLabel.setText(captionText)
+        self.captionLabel.setVisible(bool(captionText))
+        self._layout.setContentsMargins(6 if transient else 12, self._verticalMargin, 6, self._verticalMargin)
+
+    def _currentHooksWorkspace(self):
+        return workspaces.workspace(self.shell.currentWorkspace())
 
     def _updateMoreMenu(self):
         dataProbe = self.shell.mainWindow.findChild("QWidget", "DataProbeCollapsibleWidget")
         self.dataProbeAction.blockSignals(True)
         self.dataProbeAction.setChecked(dataProbe is not None and not dataProbe.isHidden())
         self.dataProbeAction.blockSignals(False)
+        # Items of the workspace hooks, above the panel items
+        for action in self._hookActions:
+            self.moreMenu.removeAction(action)
+            action.deleteLater()
+        self._hookActions = []
+        items = workspaces.callHook(self._currentHooksWorkspace(), "moreMenuActions", self.shell) or []
+        for item in items:
+            try:
+                text, callback, checked = (tuple(item) + (None, None))[:3]
+            except TypeError:
+                continue
+            action = qt.QAction(text, self.moreMenu)
+            action.setObjectName("StudioPanelHookAction")
+            if checked is not None:
+                action.setCheckable(True)
+                action.setChecked(bool(checked))
+            if callback is not None:
+                action.connect("triggered()", callback)
+            self.moreMenu.insertAction(self.dataProbeAction, action)
+            self._hookActions.append(action)
+        if self._hookActions:
+            separator = qt.QAction(self.moreMenu)
+            separator.setSeparator(True)
+            self.moreMenu.insertAction(self.dataProbeAction, separator)
+            self._hookActions.append(separator)
 
-    def helpPopover(self):
-        """Create the help popover of the current module, or return None if no module is shown.
-
-        It is a menu that holds a text browser, to be shown under the header (``helpPopoverPosition()``) over the
-        whole inspector width. It is a card with a border and padding, so that it reads as a surface of its own
-        rather than as text over the inspector.
-        """
+    def _moduleHelpHtml(self):
+        """Help and acknowledgment of the module shown in the inspector, or None."""
         moduleName = self.shell.currentModuleName()
         module = slicer.app.moduleManager().module(moduleName) if moduleName and workspaces.moduleExists(moduleName) else None
         if module is None:
@@ -341,6 +562,35 @@ class PanelHeader:
         html = f'<h3 style="margin-top: 0px;">{module.title}</h3>{module.helpText}'
         if module.acknowledgementText:
             html += f"<h4>{_('Acknowledgment')}</h4>{module.acknowledgementText}"
+        return html
+
+    def helpHtml(self):
+        """HTML of the help popover: the help of the current tool (workspace hook ``helpHtml(shell)``, followed by
+        a "Module documentation" link), else the module help. None if there is nothing to show.
+        """
+        moduleHtml = self._moduleHelpHtml()
+        hookHelp = workspaces.callHook(self._currentHooksWorkspace(), "helpHtml", self.shell)
+        if hookHelp:
+            try:
+                title, body = hookHelp
+            except (TypeError, ValueError):
+                title, body = None, str(hookHelp)
+            text = f'<h3 style="margin-top: 0px;">{title}</h3>{body}' if title else str(body)
+            if moduleHtml is not None:
+                text += f'<p><a href="{_MODULE_HELP_LINK}">{_("Module documentation")}</a></p>'
+            return text
+        return moduleHtml
+
+    def helpPopover(self):
+        """Create the help popover of the current tool or module, or return None if there is no help.
+
+        It is a menu that holds a text browser, to be shown under the header (``helpPopoverPosition()``) over the
+        whole inspector width. It is a card with a border and padding, so that it reads as a surface of its own
+        rather than as text over the inspector.
+        """
+        html = self.helpHtml()
+        if html is None:
+            return None
         menu = qt.QMenu(self.helpButton)
         menu.setObjectName("StudioHelpPopover")
         card = ui.token("card").name()
@@ -349,7 +599,11 @@ class PanelHeader:
             f"QTextBrowser#StudioHelpBrowser {{ background-color: {card}; border: none; }}")
         browser = qt.QTextBrowser()
         browser.setObjectName("StudioHelpBrowser")
-        browser.setOpenExternalLinks(True)
+        # Links are handled here: the "Module documentation" link shows the module help in the same popover
+        browser.setOpenLinks(False)
+        # A bound method, not a lambda that holds the browser: the browser would keep itself alive from Python
+        self._helpBrowser = browser
+        browser.connect("anchorClicked(QUrl)", self._onHelpLinkClicked)
         browser.setFrameShape(qt.QFrame.NoFrame)
         browser.setHtml(html)
         browser.document.setDocumentMargin(HELP_POPOVER_PADDING)
@@ -362,6 +616,20 @@ class PanelHeader:
         menu.addAction(action)
         return menu
 
+    def _onHelpLinkClicked(self, url):
+        browser = self._helpBrowser
+        if browser is None:
+            return
+        if url.toString() == _MODULE_HELP_LINK:
+            moduleHtml = self._moduleHelpHtml()
+            if moduleHtml is not None:
+                browser.setHtml(moduleHtml)
+            return
+        if url.toString().startswith("#"):
+            browser.scrollToAnchor(url.fragment())
+            return
+        qt.QDesktopServices.openUrl(url)
+
     def helpPopoverPosition(self):
         """Global position of the help popover: the bottom left corner of the header."""
         return self.widget.mapToGlobal(qt.QPoint(0, self.widget.height))
@@ -370,14 +638,295 @@ class PanelHeader:
         menu = self.helpPopover()
         if menu is None:
             return
-        menu.exec_(self.helpPopoverPosition())
+        _execMenu(menu, self.helpPopoverPosition())
+        self._helpBrowser = None
         menu.deleteLater()
+
+    def focusTarget(self):
+        """The control of the header that the F6 focus regions start from (the back button), or None."""
+        return self.closeButton if self.closeButton.isVisible() else None
 
     def dispose(self):
         ui.removePaletteListener(self.refreshIcons)
         ui.bindStyleSheet(self.widget, None)
+        self._helpBrowser = None
+        self._hookActions = []
         self.widget.hide()
+        # Until Qt deletes it, the header must not be found by its object names
+        for widget in (self.widget, self.closeButton, self.helpButton, self.moreButton):
+            widget.setObjectName("")
         self.widget.deleteLater()
+
+
+#
+# Overlays: consequence toast and inspector edge handle
+#
+
+
+class StickyToast:
+    """The toast of consequences of automatic actions (USABILITY 6.3): it stays until the next input in the
+    application (a mouse button or a key, at least ``STICKY_TOAST_MINIMUM_MS``) and may carry one action button
+    (Undo, Show, Details). With a timeout it is a confirmation that carries an action.
+
+    It is drawn like the plain toast (``hud.Toast``) at the same place, and replaces it.
+    """
+
+    def __init__(self, parentWidget):
+        self.parentWidget = parentWidget
+        self.frame = qt.QFrame(parentWidget)
+        self.frame.setObjectName("StudioStickyToast")
+        self.frame.setFixedHeight(hud.TOAST_HEIGHT)
+        layout = qt.QHBoxLayout(self.frame)
+        layout.setContentsMargins(16, 0, 6, 0)
+        layout.setSpacing(8)
+        self.label = qt.QLabel()
+        self.label.setObjectName("StudioStickyToastText")
+        layout.addWidget(self.label)
+        self.actionButton = qt.QToolButton()
+        self.actionButton.setObjectName("StudioStickyToastAction")
+        self.actionButton.setAutoRaise(True)
+        self.actionButton.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
+        self.actionButton.setFocusPolicy(qt.Qt.TabFocus)
+        self.actionButton.connect("clicked()", self._onAction)
+        ui.installButtonKeys(self.actionButton)
+        self.actionButton.hide()
+        layout.addWidget(self.actionButton)
+        self.frame.hide()
+        ui.bindStyleSheet(self.frame, self._styleSheet)
+        self._action = None
+        self._sticky = False
+        self._inputFilter = _StickyToastInputFilter(self)
+        self._filterInstalled = False
+        self.minimumTimer = qt.QTimer(self.frame)
+        self.minimumTimer.setSingleShot(True)
+        self.minimumTimer.connect("timeout()", self._onMinimumElapsed)
+        self.hideTimer = qt.QTimer(self.frame)
+        self.hideTimer.setSingleShot(True)
+        self.hideTimer.connect("timeout()", self.hide)
+        # The application event filter must be gone before Python is finalized
+        slicer.app.connect("aboutToQuit()", self.hide)
+
+    @staticmethod
+    def _styleSheet():
+        tooltip = ui.token("tooltip")
+        text = ui.token("tooltip-text")
+        return (
+            f"QFrame#StudioStickyToast {{ background-color: {ui._rgba(tooltip, 0.95)}; border: 1px solid {ui._rgba(text, 0.12)};"
+            f" border-radius: {hud.TOAST_HEIGHT // 2}px; }}"
+            f"QLabel#StudioStickyToastText {{ color: {text.name()}; background: transparent; font-size: 13px; }}"
+            f"QToolButton#StudioStickyToastAction {{ color: {text.name()}; background: transparent; border: none; border-radius: 10px;"
+            f" padding: 2px 8px; font-size: 13px; font-weight: 600; text-decoration: underline; }}"
+            f"QToolButton#StudioStickyToastAction:hover {{ background-color: {ui._rgba(text, 0.12)}; }}")
+
+    def show(self, text, sticky=True, ms=None, action=None, actionText=None):
+        self._action = action
+        self._sticky = sticky
+        self.label.setText(text)
+        hasAction = action is not None
+        self.actionButton.setText(actionText or _("Show"))
+        self.actionButton.setVisible(hasAction)
+        # Read by screen readers (QAccessible is not wrapped in every build: the name and staying until the
+        # next input are what remains then)
+        self.label.setAccessibleName(text)
+        self.label.setAccessibleDescription(self.actionButton.text if hasAction else "")
+        self.frame.setAccessibleName(text)
+        self._removeInputFilter()
+        self.hideTimer.stop()
+        self.minimumTimer.stop()
+        self.updatePosition()
+        self.frame.show()
+        self.frame.raise_()
+        if sticky:
+            self.minimumTimer.start(STICKY_TOAST_MINIMUM_MS)
+        else:
+            self.hideTimer.start(max(0, int(ms or 1600)))
+        self._announce()
+
+    def _announce(self):
+        accessible = getattr(qt, "QAccessible", None)
+        event = getattr(qt, "QAccessibleEvent", None)
+        if accessible is None or event is None or not hasattr(accessible, "updateAccessibility"):
+            return
+        try:
+            accessible.updateAccessibility(event(self.label, accessible.Alert))
+        except Exception:
+            pass
+
+    def _onMinimumElapsed(self):
+        if self.frame.isVisible() and self._sticky and not self._filterInstalled:
+            slicer.app.installEventFilter(self._inputFilter)
+            self._filterInstalled = True
+
+    def _removeInputFilter(self):
+        if self._filterInstalled:
+            slicer.app.removeEventFilter(self._inputFilter)
+            self._filterInstalled = False
+
+    def onInput(self, obj):
+        """An input event reached ``obj`` after the minimum time: close the toast, unless it is the action button."""
+        try:
+            if obj is not None and obj.isWidgetType() and (obj == self.frame or self.frame.isAncestorOf(obj)):
+                return
+        except Exception:
+            pass
+        self.hide()
+
+    def _onAction(self):
+        action = self._action
+        self.hide()
+        if action is not None:
+            try:
+                action()
+            except Exception:
+                logging.error(f"Studio toast action failed:\n{traceback.format_exc()}")
+
+    def hide(self):
+        self._removeInputFilter()
+        self.minimumTimer.stop()
+        self.hideTimer.stop()
+        self.frame.hide()
+
+    def updatePosition(self):
+        self.frame.adjustSize()
+        width = min(self.frame.sizeHint.width(), max(120, self.parentWidget.width - 48))
+        self.frame.resize(width, hud.TOAST_HEIGHT)
+        self.frame.move((self.parentWidget.width - width) // 2, self.parentWidget.height - hud.TOAST_HEIGHT - hud.TOAST_BOTTOM_MARGIN)
+
+    def isVisible(self):
+        return self.frame.isVisible()
+
+    def isSticky(self):
+        return self._sticky
+
+    def text(self):
+        return self.label.text
+
+    def raise_(self):
+        if self.frame.isVisible():
+            self.frame.raise_()
+
+    def dispose(self):
+        self.hide()
+        slicer.app.disconnect("aboutToQuit()", self.hide)
+        ui.bindStyleSheet(self.frame, None)
+        self.frame.setObjectName("")
+        self.frame.deleteLater()
+
+
+class _StickyToastInputFilter(qt.QObject):
+    """Application event filter, installed only while a consequence toast waits for the next input."""
+
+    _INPUT_EVENTS = (qt.QEvent.MouseButtonPress, qt.QEvent.MouseButtonDblClick, qt.QEvent.KeyPress, qt.QEvent.ShortcutOverride,
+                     qt.QEvent.Wheel, qt.QEvent.TouchBegin)
+
+    def __init__(self, toast):
+        qt.QObject.__init__(self)
+        self.toast = toast
+
+    def eventFilter(self, obj, event):
+        if event.type() in self._INPUT_EVENTS:
+            try:
+                if event.type() in (qt.QEvent.KeyPress, qt.QEvent.ShortcutOverride) and event.key() in (
+                        qt.Qt.Key_Shift, qt.Qt.Key_Control, qt.Qt.Key_Alt, qt.Qt.Key_Meta, qt.Qt.Key_AltGr):
+                    # A modifier alone is not an input yet
+                    return False
+                self.toast.onInput(obj)
+            except Exception:
+                logging.error(f"Studio toast input filter failed:\n{traceback.format_exc()}")
+        return False
+
+
+class InspectorHandle:
+    """The edge handle (a chevron) at the right edge of the views while the inspector is hidden (USABILITY 6.3)."""
+
+    def __init__(self, shell, parentWidget):
+        self.parentWidget = parentWidget
+        width, height = INSPECTOR_HANDLE_SIZE
+        self.button = qt.QToolButton(parentWidget)
+        self.button.setObjectName("StudioInspectorHandle")
+        self.button.setFixedSize(width, height)
+        self.button.setIconSize(qt.QSize(14, 14))
+        self.button.setFocusPolicy(qt.Qt.TabFocus)
+        self.button.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
+        self.button.setToolTip(ui.tooltip(_("Show inspector"), _("{key} or {alternateKey}").format(
+            key=ui.keyText(INSPECTOR_SHORTCUT), alternateKey=ui.keyText(INSPECTOR_ALTERNATE_SHORTCUT)), _("or click the current tab")))
+        self.button.setAccessibleName(_("Show inspector"))
+        self.button.connect("clicked()", lambda: shell.setInspectorVisible(True))
+        ui.installButtonKeys(self.button)
+        self.button.hide()
+        ui.bindStyleSheet(self.button, self._styleSheet)
+        self.refreshIcon()
+        ui.addPaletteListener(self.refreshIcon)
+
+    def _styleSheet(self):
+        background = ui.token("tooltip")
+        text = ui.token("tooltip-text")
+        radius = INSPECTOR_HANDLE_SIZE[0] // 2
+        return (
+            f"QToolButton#StudioInspectorHandle {{ background-color: {ui._rgba(background, 0.7)}; border: 1px solid {ui._rgba(text, 0.16)};"
+            f" border-right: none; border-top-left-radius: {radius}px; border-bottom-left-radius: {radius}px; padding: 0px; }}"
+            f"QToolButton#StudioInspectorHandle:hover {{ background-color: {ui._rgba(background, 0.95)}; }}"
+            f"QToolButton#StudioInspectorHandle:focus {{ border: 2px solid {ui.token('accent-fg').name()}; border-right: none; }}")
+
+    def refreshIcon(self):
+        self.button.setIcon(qt.QIcon(ui.pixmap("chevron-left", 14, "tooltip-text")))
+
+    def setVisible(self, visible):
+        if visible:
+            self._place()
+            self.button.show()
+            self.button.raise_()
+        else:
+            self.button.hide()
+
+    def isVisible(self):
+        return self.button.isVisible()
+
+    def updatePosition(self):
+        if self.button.isVisible():
+            self._place()
+
+    def _viewBarBands(self):
+        """The vertical bands [(top, bottom)] of the view bars that reach the right edge, in parent coordinates."""
+        layoutManager = slicer.app.layoutManager()
+        viewport = layoutManager.viewport() if layoutManager is not None else None
+        if viewport is None:
+            return []
+        bands = []
+        right = self.parentWidget.width - INSPECTOR_HANDLE_SIZE[0]
+        for bar in viewport.findChildren("qMRMLViewControllerBar"):
+            try:
+                if not bar.isVisible():
+                    continue
+                topLeft = bar.mapTo(self.parentWidget, qt.QPoint(0, 0))
+                if topLeft.x() + bar.width > right:
+                    bands.append((topLeft.y(), topLeft.y() + bar.height))
+            except Exception:
+                # Deleted with its view
+                pass
+        return bands
+
+    def _place(self):
+        """At the right edge, vertically centred, but not over the view bar of a view on the right (its offset text)."""
+        width, height = INSPECTOR_HANDLE_SIZE
+        parentHeight = self.parentWidget.height
+        top = max(0, (parentHeight - height) // 2)
+        for bandTop, bandBottom in sorted(self._viewBarBands()):
+            if top < bandBottom and top + height > bandTop:
+                below = bandBottom + 4
+                top = below if below + height <= parentHeight else max(0, bandTop - height - 4)
+        self.button.move(self.parentWidget.width - width, top)
+
+    def raise_(self):
+        if self.button.isVisible():
+            self.button.raise_()
+
+    def dispose(self):
+        ui.removePaletteListener(self.refreshIcon)
+        ui.bindStyleSheet(self.button, None)
+        self.button.hide()
+        self.button.setObjectName("")
+        self.button.deleteLater()
 
 
 #
@@ -469,6 +1018,38 @@ class Shell:
         #: True from an Esc shortcut override that the Esc stack handled to the matching key press
         self._escapeHandled = False
         self._eventFilter = None
+        #: Studio overlays that Esc closes (rung 0.5): [(widget, close function)], the top-most last
+        self._escapeOverlays = []
+        self._stickyToast = None
+        self._inspectorHandle = None
+        #: Inspector notice slot (above the module panel) and its notice: [widget, key, workspace key]
+        self._noticeSlot = None
+        self._notice = None
+        #: Last toast messages: (time.time(), text, level)
+        self._recentMessages = collections.deque(maxlen=RECENT_MESSAGES_COUNT)
+        #: Workspace that the current chain of transient modules was opened from (label of the back button)
+        self._transientOrigin = None
+        self._classicFileAddDataShortcuts = []
+        #: Shortcuts of the main window actions that Studio retargets ({objectName: [QKeySequence]})
+        self._classicActionShortcuts = {}
+        #: (text, tooltip) of the main window actions that Studio renames ({objectName: (text, tooltip)})
+        self._classicActionTexts = {}
+        self._classicStatusBarActionEnabled = None
+        #: Menu items given a mnemonic in Studio: [(action, classic text, Studio text)]
+        self._mnemonicActions = []
+        #: Scene root directory before Studio replaced it (the Ctrl+S folder), and the one Studio set
+        self._classicSceneRoot = None
+        self._studioSceneRoot = None
+        self._sceneCloseObservation = None
+        #: Focus policies of the view widgets covered by the canvas ({id(widget): (widget, policy)})
+        self._coveredFocusPolicies = {}
+        #: Widgets of the view area whose focus policy accepts Tab, visible or not, found by the last full scan
+        #: (None: scan again, after a layout change or a Classic period)
+        self._viewTabStops = None
+        #: A bare Alt press waits for its release (it opens the ≡ menu on Windows and Linux)
+        self._altPending = False
+        self._altSeenHeld = False
+        self._altTimer = None
         if _shell is None:
             _shell = self
 
@@ -491,10 +1072,25 @@ class Shell:
         return self.mainWindow.moduleSelector().selectedModule
 
     def _modulePanel(self):
-        return self.mainWindow.findChild("QWidget", "ModulePanel")
+        return self._cachedChild("QWidget", "ModulePanel")
 
     def _panelDock(self):
-        return self.mainWindow.findChild("QDockWidget", "PanelDockWidget")
+        return self._cachedChild("QDockWidget", "PanelDockWidget")
+
+    def _cachedChild(self, className, objectName):
+        """A child of the main window that lives as long as it (found once: findChild() walks thousands of widgets)."""
+        cache = self.__dict__.setdefault("_childCache", {})
+        widget = cache.get(objectName)
+        if widget is not None:
+            try:
+                if widget.objectName == objectName:
+                    return widget
+            except Exception:
+                # Deleted
+                pass
+        widget = self.mainWindow.findChild(className, objectName)
+        cache[objectName] = widget
+        return widget
 
     def _dataProbe(self):
         return self.mainWindow.findChild("QWidget", "DataProbeCollapsibleWidget")
@@ -522,7 +1118,7 @@ class Shell:
         """Add the checkable "Studio interface" action (Ctrl+Alt+0) to the View menu and the main window."""
         if self._classicSwitchAction is not None:
             return
-        action = qt.QAction(_("Studio interface"), self.mainWindow)
+        action = qt.QAction(self._classicSwitchText(), self.mainWindow)
         action.setObjectName("StudioInterfaceAction")
         action.setCheckable(True)
         action.setChecked(self._active)
@@ -545,9 +1141,14 @@ class Shell:
         else:
             self.classic()
 
+    def _classicSwitchText(self):
+        # In Classic the item says what it does; in Studio it is the checked state of the interface
+        return _("Studio interface") if self._active else _("Switch to Studio interface")
+
     def _updateClassicSwitchAction(self):
         if self._classicSwitchAction is not None:
             self._classicSwitchAction.setChecked(self._active)
+            self._classicSwitchAction.setText(self._classicSwitchText())
 
     def _classicStateIfActive(self):
         return self._classicState if self._active else None
@@ -579,10 +1180,14 @@ class Shell:
     def _restoreClassic(self):
         """Undo apply(). Also used to recover from a failed apply(), so each part may be missing."""
         mainWindow = self.mainWindow
+        self._applyNavigationBehaviours(False)
         if self.workspaces is not None:
             self.workspaces.leaveCurrent()
         self.setCanvas(None)
         self.setFocusMode(False)
+        self._restoreCoveredFocusPolicies()
+        # The layout may change in Classic, where _onLayoutChanged is not connected
+        self._viewTabStops = None
         self._uninstallPlugins()
         self._setSegmentEditorPresentation("classic")
         self._active = False
@@ -590,6 +1195,13 @@ class Shell:
         self._removeEventFilters()
         self._escapeHandled = False
         self._inspectorHiddenByUser = False
+        self._escapeOverlays = []
+        self._transientOrigin = None
+        self._cancelAltKey()
+        if self._sceneCloseObservation is not None:
+            slicer.mrmlScene.RemoveObserver(self._sceneCloseObservation)
+            self._sceneCloseObservation = None
+        self._restoreSceneRootDirectory()
         for shortcut in self._installedWorkspaceShortcuts + self._shortcuts:
             self._deleteShortcut(shortcut)
         self._installedWorkspaceShortcuts = []
@@ -619,6 +1231,22 @@ class Shell:
         fileAddDataAction = self._fileAddDataAction()
         if fileAddDataAction is not None:
             fileAddDataAction.setShortcuts(self._classicFileAddDataShortcuts)
+        for objectName, shortcuts in self._classicActionShortcuts.items():
+            action = mainWindow.findChild("QAction", objectName)
+            if action is not None:
+                action.setShortcuts(shortcuts)
+        self._classicActionShortcuts = {}
+        for objectName, (text, toolTip) in self._classicActionTexts.items():
+            action = mainWindow.findChild("QAction", objectName)
+            if action is not None:
+                action.setText(text)
+                action.setToolTip(toolTip)
+        self._classicActionTexts = {}
+        statusBarAction = mainWindow.findChild("QAction", "ShowStatusBarAction")
+        if statusBarAction is not None and self._classicStatusBarActionEnabled is not None:
+            statusBarAction.setEnabled(self._classicStatusBarActionEnabled)
+        self._classicStatusBarActionEnabled = None
+        self._removeMenuMnemonics()
 
         if self.topBar is not None:
             self.topBar.dispose()
@@ -626,6 +1254,12 @@ class Shell:
         if self._toast is not None:
             self._toast.dispose()
             self._toast = None
+        if self._stickyToast is not None:
+            self._stickyToast.dispose()
+            self._stickyToast = None
+        if self._inspectorHandle is not None:
+            self._inspectorHandle.dispose()
+            self._inspectorHandle = None
         if self._focusModePill is not None:
             self._focusModePill.dispose()
             self._focusModePill = None
@@ -638,6 +1272,7 @@ class Shell:
 
         dock = self._panelDock()
         self._removeFooterSlot()
+        self._removeNoticeSlot()
         if dock.titleBarWidget() != self._classicTitleBar:
             dock.setTitleBarWidget(self._classicTitleBar)
             if self._classicTitleBar is not None:
@@ -730,6 +1365,17 @@ class Shell:
         }
         fileAddDataAction = self._fileAddDataAction()
         self._classicFileAddDataShortcuts = list(fileAddDataAction.shortcuts()) if fileAddDataAction is not None else []
+        # Ctrl+F (module finder) and Ctrl+H (home module) are retargeted; Ctrl+H is left alone on macOS (⌘H hides the application)
+        retargeted = ["ViewFindModuleAction"] if isMacOS() else ["ViewFindModuleAction", "ModuleHomeAction"]
+        self._classicActionShortcuts = {}
+        for objectName in retargeted:
+            action = mainWindow.findChild("QAction", objectName)
+            if action is not None:
+                self._classicActionShortcuts[objectName] = list(action.shortcuts())
+        maximizeViewAction = mainWindow.findChild("QAction", "WindowMaximizeViewAction")
+        self._classicActionTexts = {"WindowMaximizeViewAction": (maximizeViewAction.text, maximizeViewAction.toolTip)} if maximizeViewAction is not None else {}
+        statusBarAction = mainWindow.findChild("QAction", "ShowStatusBarAction")
+        self._classicStatusBarActionEnabled = statusBarAction.enabled if statusBarAction is not None else None
 
         # 2. Hide the classic chrome (nothing is deleted)
         self._active = True
@@ -759,12 +1405,28 @@ class Shell:
         self._addShortcut("Ctrl+O", self.openFiles, _("Open files"))
         self._addShortcut("Ctrl+Return", self.triggerPrimaryAction, _("Primary action of the inspector"))
         self._addShortcut("Ctrl+Enter", self.triggerPrimaryAction, _("Primary action of the inspector"))
+        # The classic Ctrl+F and Ctrl+H actions lose their keys (two shortcuts on one key would be ambiguous)
+        for objectName in self._classicActionShortcuts:
+            mainWindow.findChild("QAction", objectName).setShortcuts([])
+        self._addShortcut("Ctrl+F", lambda: self.openPalette("modules"), _("Search modules"))
+        if "ModuleHomeAction" in self._classicActionShortcuts:
+            self._addShortcut("Ctrl+H", lambda: self.switchTo("library"), _("Library workspace"))
         if not hasattr(mainWindow, "setFocusMode"):
             for keySequence in FOCUS_MODE_SHORTCUTS:
-                self._addShortcut(keySequence, self.toggleFocusMode, _("Focus mode"))
-        # Not Tab: Tab and Shift+Tab move the keyboard focus (out of the views too)
+                self._addShortcut(keySequence, self.toggleFocusMode, _("Hide panels"))
+        # Not Tab: Tab and Shift+Tab move the keyboard focus (out of the views too). The second key of the
+        # inspector, Ctrl+5, is the shortcut of the dock widget's toggle view action (View > Module Panel).
         self._addShortcut(INSPECTOR_SHORTCUT, self.toggleInspector, _("Show or hide the inspector"))
-        self._addShortcut(INSPECTOR_ALTERNATE_SHORTCUT, self.toggleInspector, _("Show or hide the inspector"))
+        self._mnemonicActions = []
+        self._addMenuMnemonics()
+        for menuName in {menuName for menuName, moduleName, word in self._STUDIO_MNEMONICS}:
+            menu = mainWindow.findChild("QMenu", menuName)
+            if menu is not None:
+                self._connect(menu, "aboutToShow()", self._addMenuMnemonics)
+        # Help > Keyboard Shortcuts Reference and View: Ctrl+6 is "Hide panels" in Studio (restored in Classic)
+        if maximizeViewAction is not None:
+            maximizeViewAction.setText(_("Hide panels"))
+            maximizeViewAction.setToolTip(ui.tooltip(_("Hide panels"), focusModeKeyText(), _("Hide the inspector and the top bar")))
 
         # 4. Inspector on the right with the Studio panel header and a footer slot
         if dock.floating:
@@ -777,6 +1439,7 @@ class Shell:
         self.panelHeader = PanelHeader(self)
         dock.setTitleBarWidget(self.panelHeader.widget)
         self._insertFooterSlot()
+        self._insertNoticeSlot()
         self._setModulePanelConstrained(True)
         # The widths that the workspace modules needed in earlier sessions: the first workspace has the width
         # of all workspaces at once
@@ -789,10 +1452,13 @@ class Shell:
         self.topBar = topbar.TopBar(self)
         mainWindow.addToolBar(qt.Qt.TopToolBarArea, self.topBar.toolBar)
         self.topBar.toolBar.show()
+        self._makeTopBarFocusable()
         self._addTopBarShortcuts()
         self._toast = hud.Toast(mainWindow.centralWidget())
-        self._focusModePill = hud.CornerPill(mainWindow.centralWidget(), "StudioExitFocusModeButton", _("Exit focus mode"), "minimize-2",
-                                             lambda: self.setFocusMode(False), _("Exit focus mode (F11 or Esc)"))
+        self._stickyToast = StickyToast(mainWindow.centralWidget())
+        self._focusModePill = hud.CornerPill(mainWindow.centralWidget(), "StudioExitFocusModeButton", _("Show panels"), "minimize-2",
+                                             lambda: self.setFocusMode(False), ui.tooltip(_("Show panels"), focusModeKeyText(), _("or Esc")))
+        self._inspectorHandle = InspectorHandle(self, mainWindow.centralWidget())
 
         # 6. Layouts (registered in C++ by the fork, only added here on builds that lack them)
         layouts.register()
@@ -802,13 +1468,26 @@ class Shell:
         layoutManager = slicer.app.layoutManager()
         if layoutManager is not None:
             self._connect(layoutManager, "layoutChanged(int)", self.workspaces.onLayoutChanged)
+            self._connect(layoutManager, "layoutChanged(int)", self._onLayoutChanged)
         self._connect(dock.toggleViewAction(), "triggered(bool)", self._onPanelToggleTriggered)
+        errorLogDock = mainWindow.errorLogDockWidget() if hasattr(mainWindow, "errorLogDockWidget") else None
+        if errorLogDock is not None:
+            self._connect(errorLogDock, "visibilityChanged(bool)", self._onErrorLogVisibilityChanged)
+        viewMenu = mainWindow.findChild("QMenu", "ViewMenu")
+        if viewMenu is not None:
+            self._connect(viewMenu, "aboutToShow()", self._onViewMenuAboutToShow)
+        settingsDialog = slicer.app.settingsDialog()
+        if settingsDialog is not None:
+            # The navigation settings (Studio/*) may have changed
+            self._connect(settingsDialog, "finished(int)", self._onSettingsDialogFinished)
         mainWindow.installEventFilter(self._eventFilter)
         mainWindow.centralWidget().installEventFilter(self._eventFilter)
         dock.installEventFilter(self._eventFilter)
 
-        # 7. Draw presentation of the Segment Editor, if it exists already
+        # 7. Draw presentation of the Segment Editor, if it exists already. The folder of the Save dialog (Ctrl+S).
         self._setSegmentEditorPresentation("studio")
+        self._fixSceneRootDirectory()
+        self._sceneCloseObservation = slicer.mrmlScene.AddObserver(slicer.vtkMRMLScene.EndCloseEvent, self._onSceneEndClose)
         self._installPlugins()
 
         # Build the heavy workspace pages when the application is idle
@@ -817,6 +1496,9 @@ class Shell:
 
         # 8. Start workspace
         self.switchTo(self._midSessionWorkspace() if midSession else self._startWorkspace())
+
+        # 9. Navigation behaviours of the views that only Studio uses
+        self._applyNavigationBehaviours(True)
 
     @staticmethod
     def _availableWorkspaceKey(keyOrTitle):
@@ -1004,14 +1686,60 @@ class Shell:
         self._footerSlot.deleteLater()
         self._footerSlot = None
 
+    def _insertNoticeSlot(self):
+        """The inspector notice slot, directly above the module panel (USABILITY 6.4)."""
+        contents = self._panelDock().widget()
+        layout = contents.layout()
+        self._noticeSlot = qt.QWidget()
+        self._noticeSlot.setObjectName("StudioInspectorNotice")
+        # Ignored: a notice never sets the minimum width of the inspector (notices are height-for-width)
+        policy = qt.QSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Maximum)
+        policy.setHeightForWidth(True)
+        self._noticeSlot.setSizePolicy(policy)
+        noticeLayout = qt.QVBoxLayout(self._noticeSlot)
+        noticeLayout.setContentsMargins(0, 0, 0, 0)
+        noticeLayout.setSpacing(0)
+        self._noticeSlot.hide()
+        layout.insertWidget(layout.indexOf(self._modulePanel()), self._noticeSlot)
+
+    def _removeNoticeSlot(self):
+        if self._noticeSlot is None:
+            return
+        self.setInspectorNotice(None)
+        layout = self._panelDock().widget().layout()
+        layout.removeWidget(self._noticeSlot)
+        self._noticeSlot.hide()
+        self._noticeSlot.setObjectName("")
+        self._noticeSlot.deleteLater()
+        self._noticeSlot = None
+
+    def _makeTopBarFocusable(self):
+        """The buttons of the top bar take the keyboard focus with Tab (not by a click), and Space and Enter press them."""
+        topBar = self.topBar
+        buttons = [getattr(topBar, name, None) for name in ("menuButton", "breadcrumbButton", "undoButton", "redoButton", "layoutButton", "errorBadge")]
+        buttons += list(getattr(topBar, "workspaceButtons", {}).values())
+        for button in buttons:
+            if button is None:
+                continue
+            if button.focusPolicy == qt.Qt.NoFocus:
+                button.setFocusPolicy(qt.Qt.TabFocus)
+            ui.installButtonKeys(button)
+
     def _addTopBarShortcuts(self):
         for index, ws in enumerate(workspaces.WORKSPACES):
             self._addShortcut(f"Ctrl+Alt+{index + 1}", lambda key=ws.key: self.switchTo(key), _("{workspace} workspace").format(workspace=ws.title))
-        # "Search modules" until the command palette (StudioLib/palette.py, W3-06) also finds tools and actions
-        self._addShortcut("Ctrl+K", self.openPalette, _("Search modules"))
+        self._addShortcut("Ctrl+K", self.openPalette, _("Search"))
         self._addShortcut("Ctrl+/", self.toggleCheatSheet, _("Keyboard shortcuts"))
         for key, title, shortcut, iconName, layoutId in layouts.PICKER_ENTRIES:
             self._addShortcut(shortcut, lambda key=key: self.setLayoutFromPicker(key), _("{layout} layout").format(layout=title))
+        # Keyboard access to the menus and to the regions of the window (USABILITY 9.1)
+        self._addShortcut(APP_MENU_SHORTCUT, self.showAppMenu, _("Menu"))
+        if not isMacOS():
+            # On macOS the native menu bar stays reachable (Ctrl+F2) and Option+letter types characters
+            for keySequence, menuName in APP_SUBMENU_SHORTCUTS:
+                self._addShortcut(keySequence, lambda menuName=menuName: self.showAppMenu(menuName), _("Menu: {menu}").format(menu=menuName[:-4]))
+        self._addShortcut(FOCUS_REGION_SHORTCUTS[0], lambda: self.cycleFocusRegion(1), _("Next region (top bar, inspector, views)"))
+        self._addShortcut(FOCUS_REGION_SHORTCUTS[1], lambda: self.cycleFocusRegion(-1), _("Previous region"))
 
     #
     # Shortcuts
@@ -1081,17 +1809,28 @@ class Shell:
         self.workspaces.switchTo(key, keepLayout=keepLayout)
 
     def closeTransientModule(self):
-        """Return from a transient module to the last workspace."""
-        if self._active:
+        """Return from a transient module to the workspace it was opened from (the "← Draw" button, Esc)."""
+        if not self._active:
+            return
+        origin = self._transientOrigin
+        if origin is not None and self._availableWorkspaceKey(origin) is not None:
+            self.switchTo(origin)
+        else:
             self.workspaces.returnToLastWorkspace()
 
+    def transientOrigin(self):
+        """Key of the workspace that the shown transient module was opened from, None in a workspace."""
+        return self._transientOrigin if self._active and self.currentWorkspace() is None else None
+
     def _onWorkspaceEntered(self, ws, shrinkPanel):
+        self._transientOrigin = None
         self.topBar.setCurrentWorkspace(ws.key)
-        self.panelHeader.setTitle(ws.title)
+        self.panelHeader.setTitle(ws.title, caption=getattr(ws, "caption", None))
         for keySequence, callback, description in self._workspaceShortcuts.get(ws.key, []):
             self._installedWorkspaceShortcuts.append(self._createShortcut(keySequence, callback, description))
         self._showInspectorForModule()
         self._schedulePanelWidthUpdate(shrink=shrinkPanel)
+        self._updateInspectorNotice()
 
     def _onCurrentWorkspaceReselected(self, ws):
         """The tab or the shortcut of the current workspace was used: bring the workspace back into view.
@@ -1111,14 +1850,30 @@ class Shell:
         self._primaryAction = None
         self._primaryActionLabel = ""
         self.setInspectorFooter(None)
+        # A notice of the workspace stays registered and comes back with it
+        self._updateInspectorNotice(leaving=ws.key)
 
     def _onTransientModuleEntered(self, moduleName):
         module = slicer.app.moduleManager().module(moduleName) if workspaces.moduleExists(moduleName) else None
         title = module.title if module is not None else moduleName
         self.topBar.setCurrentWorkspace(None)
-        last = workspaces.workspace(self.workspaces.last or "library")
-        self.panelHeader.setTitle(title, transient=True, closeToolTip=_("Close and return to {workspace}").format(workspace=last.title))
+        # The origin is recorded once per chain: Draw -> Volumes -> Data still goes back to Draw
+        if self._transientOrigin is None:
+            self._transientOrigin = self.workspaces.last or "library"
+        origin = workspaces.workspace(self._transientOrigin) or workspaces.workspace("library")
+        self.panelHeader.setTitle(title, transient=True, backText=origin.title, closeToolTip=ui.tooltip(
+            _("Back to {workspace}").format(workspace=origin.title), "Esc", _("Close {module} and return").format(module=title)))
         self._showInspectorForModule()
+        self._updateInspectorNotice()
+        # The keyboard focus starts on the module panel itself (neutral for Tab and Esc), not on its first input
+        qt.QTimer.singleShot(0, lambda moduleName=moduleName: self._focusTransientModule(moduleName))
+
+    def _focusTransientModule(self, moduleName):
+        if not self._active or self.workspaces is None or self.workspaces.transientModule != moduleName:
+            return
+        modulePanel = self._modulePanel()
+        if modulePanel is not None and modulePanel.isVisible():
+            modulePanel.setFocus(qt.Qt.OtherFocusReason)
 
     def _showInspectorForModule(self):
         # Selecting a module shows the module panel (qSlicerMainWindow): in focus mode, leave the
@@ -1209,11 +1964,17 @@ class Shell:
         else:
             slicer.util.openAddDataDialog()
 
-    def openPalette(self):
-        """Command palette (Ctrl+K), or the module finder if the palette is not available."""
+    def openPalette(self, category=None):
+        """Search (Ctrl+K; Ctrl+F filtered to the modules with ``category="modules"``): the command palette, or the
+        module finder if the palette is not available.
+        """
         palette = self._importOptional("StudioLib.palette")
         if palette is not None and hasattr(palette, "open"):
-            palette.open(self)
+            try:
+                palette.open(self, category=category)
+            except TypeError:
+                # A palette without categories
+                palette.open(self)
             return
         self.mainWindow.moduleSelector().showModuleFinder()
 
@@ -1223,8 +1984,219 @@ class Shell:
         if cheatsheet is not None and hasattr(cheatsheet, "toggle"):
             cheatsheet.toggle(self)
             return
-        self.toast(_("Ctrl+K search · Ctrl+Alt+1/2/3 workspaces · Alt+1..4 layouts · {inspector} panel · F11 focus mode · Ctrl+Alt+0 Classic").format(
-            inspector=self.inspectorShortcutText(alternate=True)), 5000)
+        self.toast(_("Ctrl+K search · Ctrl+Alt+1 Library, 2 Draw, 3 Map · Alt+1..4 layouts · {inspector} inspector · {panels} hide panels · "
+                     "F10 menu · F6 regions · Ctrl+Alt+0 Classic").format(
+            inspector=self.inspectorShortcutText(alternate=True), panels=focusModeKeyText()), 6000)
+
+    #
+    # Keyboard access: menus and focus regions
+    #
+
+    def showAppMenu(self, subMenuName=None):
+        """Open the ≡ menu (F10), and with ``subMenuName`` ("FileMenu", "EditMenu", "ViewMenu", "HelpMenu") that submenu."""
+        if not self._active or self.topBar is None:
+            return
+        if slicer.app.activePopupWidget() is not None or slicer.app.activeModalWidget() is not None:
+            return
+        menu = self.topBar.appMenu.menu
+        button = self.topBar.menuButton
+        if button.isVisible():
+            point = button.mapToGlobal(qt.QPoint(0, button.height))
+        else:
+            # Hidden panels: the top-left corner of the views
+            point = self.mainWindow.centralWidget().mapToGlobal(qt.QPoint(8, 8))
+        menu.popup(point)
+        if subMenuName:
+            qt.QTimer.singleShot(0, lambda: self._openAppSubMenu(subMenuName))
+
+    def _openAppSubMenu(self, subMenuName):
+        menu = self.topBar.appMenu.menu if self.topBar is not None else None
+        subMenu = self.mainWindow.findChild("QMenu", subMenuName)
+        if menu is None or subMenu is None or not menu.isVisible():
+            return
+        subMenuAction = subMenu.menuAction()
+        if subMenuAction not in menu.actions():
+            return
+        menu.setActiveAction(subMenuAction)
+        if not subMenu.isVisible():
+            geometry = menu.actionGeometry(subMenuAction)
+            subMenu.popup(menu.mapToGlobal(geometry.topRight()))
+
+    def _onAltKey(self, event):
+        """A bare Alt press and release opens the ≡ menu on Windows and Linux (like a menu bar)."""
+        eventType = event.type()
+        key = event.key()
+        if eventType in (qt.QEvent.ShortcutOverride, qt.QEvent.KeyPress):
+            if key != qt.Qt.Key_Alt:
+                self._cancelAltKey()
+                return
+            if eventType == qt.QEvent.KeyPress and self._altPending:
+                return
+            if isMacOS() or event.isAutoRepeat() or not self._altKeyMayOpenMenu() or self._otherModifiersHeld(event):
+                self._cancelAltKey()
+                return
+            self._altPending = True
+            self._altSeenHeld = False
+            if self._altTimer is None:
+                # Key releases do not always reach the main window (a view takes them): poll the modifier state
+                self._altTimer = qt.QTimer()
+                self._altTimer.setInterval(30)
+                self._altTimer.connect("timeout()", self._pollAltKey)
+            self._altStart = time.perf_counter()
+            self._altTimer.start()
+        elif eventType == qt.QEvent.KeyRelease and key == qt.Qt.Key_Alt:
+            self._onAltReleased()
+
+    @staticmethod
+    def _otherModifiersHeld(event):
+        """True if a modifier other than Alt is held with the Alt press (Ctrl+Alt, AltGr on Windows, Shift+Alt)."""
+        others = qt.Qt.ControlModifier, qt.Qt.ShiftModifier, qt.Qt.MetaModifier
+        try:
+            modifiers = int(event.modifiers())
+            return any(modifiers & int(modifier) for modifier in others)
+        except (TypeError, ValueError):
+            return any(event.modifiers() & modifier for modifier in others)
+
+    def _altKeyMayOpenMenu(self):
+        if slicer.app.activePopupWidget() is not None or slicer.app.activeModalWidget() is not None:
+            return False
+        return not _isTextInput(slicer.app.focusWidget())
+
+    def _pollAltKey(self):
+        if not self._altPending or not self._active:
+            self._cancelAltKey()
+            return
+        try:
+            mousePressed = int(qt.QApplication.mouseButtons()) != 0
+        except (TypeError, ValueError):
+            mousePressed = qt.QApplication.mouseButtons() != qt.Qt.NoButton
+        if mousePressed or time.perf_counter() - self._altStart > 5.0:
+            self._cancelAltKey()
+            return
+        try:
+            held = bool(int(qt.QGuiApplication.queryKeyboardModifiers()) & int(qt.Qt.AltModifier))
+        except (TypeError, ValueError):
+            held = bool(qt.QGuiApplication.queryKeyboardModifiers() & qt.Qt.AltModifier)
+        if held:
+            self._altSeenHeld = True
+        elif self._altSeenHeld:
+            # Released (only trusted once the platform reported it held: synthetic events do not change it)
+            self._onAltReleased()
+
+    def _onAltReleased(self):
+        pending = self._altPending
+        self._cancelAltKey()
+        active = self.mainWindow.isActiveWindow
+        if callable(active):
+            # A method when the property is not wrapped as an attribute
+            active = active()
+        if pending and self._active and active and self._altKeyMayOpenMenu():
+            qt.QTimer.singleShot(0, self.showAppMenu)
+
+    def _cancelAltKey(self):
+        self._altPending = False
+        self._altSeenHeld = False
+        if self._altTimer is not None:
+            self._altTimer.stop()
+
+    def _focusRegions(self):
+        """The keyboard focus regions in F6 order: [(name, container widget, function that focuses it)]."""
+        regions = []
+        if self.topBar is not None and self.topBar.toolBar.isVisible():
+            regions.append(("topBar", self.topBar.toolBar, lambda: self.topBar.menuButton.setFocus(qt.Qt.ShortcutFocusReason)))
+        dock = self._panelDock()
+        if dock is not None and dock.isVisible():
+            regions.append(("inspector", dock, self._focusInspector))
+        canvas = self._canvas
+        if canvas is not None and self._isAlive(canvas) and canvas.isVisible():
+            regions.append(("canvas", canvas, self._focusCanvas))
+        else:
+            layoutManager = slicer.app.layoutManager()
+            viewport = layoutManager.viewport() if layoutManager is not None else None
+            if viewport is not None and viewport.isVisible():
+                regions.append(("view", viewport, self._focusView))
+        return regions
+
+    def focusRegion(self):
+        """Name of the region that has the keyboard focus ("topBar", "inspector", "view", "canvas"), or None."""
+        focusWidget = slicer.app.focusWidget()
+        if focusWidget is None:
+            return None
+        for name, container, focus in self._focusRegions():
+            if container == focusWidget or container.isAncestorOf(focusWidget):
+                return name
+        return None
+
+    def cycleFocusRegion(self, step=1):
+        """Move the keyboard focus to the next (``step=1``, F6) or previous (-1, Shift+F6) region of the window."""
+        if not self._active:
+            return
+        regions = self._focusRegions()
+        if not regions:
+            return
+        current = self.focusRegion()
+        names = [name for name, container, focus in regions]
+        index = (names.index(current) + step) % len(regions) if current in names else (0 if step > 0 else len(regions) - 1)
+        regions[index][2]()
+
+    def _focusInspector(self):
+        target = self.panelHeader.focusTarget() if self.panelHeader is not None else None
+        modulePanel = self._modulePanel()
+        if target is None and modulePanel is not None:
+            target = self._firstTabStop(modulePanel)
+        if target is None:
+            target = modulePanel
+        if target is not None:
+            target.setFocus(qt.Qt.ShortcutFocusReason)
+
+    @staticmethod
+    def _firstTabStop(container, maximumSteps=2000):
+        """The first visible and enabled widget of ``container`` that Tab can reach, or None."""
+        widget = container.nextInFocusChain()
+        for _step in range(maximumSteps):
+            if widget is None or widget == container:
+                return None
+            try:
+                tabFocus = bool(int(widget.focusPolicy) & int(qt.Qt.TabFocus))
+            except (TypeError, ValueError):
+                tabFocus = widget.focusPolicy in (qt.Qt.TabFocus, qt.Qt.StrongFocus, qt.Qt.WheelFocus)
+            if tabFocus and widget.isVisible() and widget.isEnabled() and container.isAncestorOf(widget):
+                return widget
+            widget = widget.nextInFocusChain()
+        return None
+
+    def _focusCanvas(self):
+        canvas = self._canvas
+        library = self._importOptional("StudioLib.library") if self.currentWorkspace() == "library" else None
+        page = library.canvas() if library is not None and hasattr(library, "canvas") else None
+        if page is not None and getattr(page, "widget", None) == canvas and hasattr(page, "focusFirst"):
+            page.focusFirst()
+            return
+        target = self._firstTabStop(canvas)
+        (target or canvas).setFocus(qt.Qt.ShortcutFocusReason)
+
+    def _focusView(self):
+        layoutManager = slicer.app.layoutManager()
+        if layoutManager is None:
+            return
+        names = list(layoutManager.sliceViewNames())
+        name = self.hoverTracker.lastSliceViewName if self.hoverTracker is not None else None
+        if name not in names:
+            name = "Red" if "Red" in names else (names[0] if names else None)
+        sliceWidget = layoutManager.sliceWidget(name) if name else None
+        if sliceWidget is None:
+            return
+        sliceView = sliceWidget.sliceView()
+        vtkWidget = sliceView.VTKWidget() if hasattr(sliceView, "VTKWidget") else None
+        (vtkWidget or sliceView).setFocus(qt.Qt.ShortcutFocusReason)
+
+    @staticmethod
+    def _isAlive(widget):
+        try:
+            widget.objectName
+        except Exception:
+            return False
+        return True
 
     #
     # Inspector
@@ -1450,9 +2422,11 @@ class Shell:
             self._inspectorHiddenByUser = False
         dock = self._panelDock()
         if dock.isHidden() == (not visible):
+            self._updateInspectorHandle()
             return
         # When shown, the width is updated on its Show event
         dock.setVisible(visible)
+        self._updateInspectorHandle()
 
     def isInspectorVisible(self):
         return self._active and not self._panelDock().isHidden()
@@ -1472,24 +2446,56 @@ class Shell:
             self._onInspectorHiddenByUser()
 
     def _onPanelToggleTriggered(self, checked):
-        # View > Module Panel (Ctrl+5) toggles the dock widget directly
+        # View > Module Panel (Ctrl+5, the second inspector key) toggles the dock widget directly
         if checked:
             self._inspectorHiddenByUser = False
+            if self.focusMode():
+                # The top bar comes back with the inspector
+                self.setFocusMode(False)
         else:
             self._onInspectorHiddenByUser()
+        self._updateInspectorHandle()
 
     def _onInspectorHiddenByUser(self):
-        global _panelHiddenHintShown
+        """The user hid the inspector (a key or the menu): say how to get it back, each time (a consequence toast)."""
         self._inspectorHiddenByUser = True
-        if not _panelHiddenHintShown:
-            _panelHiddenHintShown = True
-            self.toast(_("Panel hidden · {key} to show").format(key=self.inspectorShortcutText(alternate=True)), 3000)
+        self._updateInspectorHandle()
+        ws = workspaces.workspace(self.currentWorkspace() or self._transientOrigin)
+        if ws is not None:
+            text = _("Inspector hidden · click the {workspace} tab or the {handle} handle to show it").format(workspace=ws.title, handle="\u2039")
+        else:
+            text = _("Inspector hidden · click the {handle} handle to show it").format(handle="\u2039")
+        self.toast(text, level="consequence", action=lambda: self.setInspectorVisible(True), actionText=_("Show"),
+                   toolTip=ui.tooltip(_("Show inspector"), self.inspectorShortcutText(alternate=True)))
+
+    def _inspectorHandleWanted(self):
+        """The edge handle is shown while the inspector is hidden over visible views: not over the Library canvas
+        (Library shows the inspector itself when it has something to show) and not with hidden panels (their pill).
+        """
+        if not self._active or self._inspectorHandle is None:
+            return False
+        if self._canvas is not None or self.focusMode():
+            return False
+        dock = self._panelDock()
+        return dock is not None and dock.isHidden()
+
+    def _updateInspectorHandle(self):
+        if self._inspectorHandle is not None:
+            self._inspectorHandle.setVisible(self._inspectorHandleWanted())
+
+    def _updateInspectorHandlePosition(self):
+        if self._inspectorHandle is not None:
+            self._inspectorHandle.updatePosition()
+
+    def inspectorHandle(self):
+        """The edge handle button of the hidden inspector (``StudioInspectorHandle``), or None."""
+        return self._inspectorHandle.button if self._inspectorHandle is not None else None
 
     @staticmethod
     def inspectorShortcutText(alternate=False):
         r"""The key that shows or hides the inspector, as displayed on this platform (for example "Ctrl+\").
 
-        With ``alternate``, both keys ("Ctrl+\ or F6"): not every keyboard layout can type Ctrl+\.
+        With ``alternate``, both keys ("Ctrl+\ or Ctrl+5"): not every keyboard layout can type Ctrl+\.
         """
         text = qt.QKeySequence(INSPECTOR_SHORTCUT).toString(qt.QKeySequence.NativeText)
         if not alternate:
@@ -1520,6 +2526,67 @@ class Shell:
     def inspectorFooter(self):
         return self._footerWidget
 
+    def setInspectorNotice(self, widget=None, key=None, workspace=None):
+        """Show ``widget`` in the inspector notice slot, between the panel header and the module (USABILITY 6.4).
+
+        Offers and notices (downloads, recovery, questions) go here, never over a view. The slot holds one
+        notice: a new one replaces the current one, whose widget is hidden and given back to its owner (it is
+        not deleted). With ``workspace`` (for example "draw") the notice is shown only while that workspace is
+        current, and stays registered when it is left. ``widget=None`` removes the notice. Notices must be
+        height-for-width (word-wrapped labels; ``ui.noticeLine()``, ``ui.wrapRow()``): the slot never widens
+        the inspector.
+        """
+        if self._noticeSlot is None:
+            return
+        layout = self._noticeSlot.layout()
+        previous = self._notice[0] if self._notice is not None else None
+        if previous is not None and previous != widget:
+            try:
+                layout.removeWidget(previous)
+                previous.hide()
+                previous.setParent(None)
+            except Exception:
+                # Deleted by its owner
+                pass
+        if widget is None:
+            self._notice = None
+        else:
+            wsKey = workspaces.workspace(workspace).key if workspace and workspaces.workspace(workspace) is not None else workspace
+            self._notice = [widget, key, wsKey]
+            if previous != widget:
+                layout.addWidget(widget)
+        self._updateInspectorNotice()
+
+    def inspectorNotice(self):
+        """The widget of the current inspector notice (also while its workspace is not current), or None."""
+        return self._notice[0] if self._notice is not None else None
+
+    def inspectorNoticeKey(self):
+        return self._notice[1] if self._notice is not None else None
+
+    def clearInspectorNotice(self, key):
+        """Remove the inspector notice if it was set with ``key``. Return True if it was removed."""
+        if self._notice is None or self._notice[1] != key:
+            return False
+        self.setInspectorNotice(None)
+        return True
+
+    def _updateInspectorNotice(self, leaving=None):
+        if self._noticeSlot is None:
+            return
+        visible = False
+        if self._notice is not None:
+            widget, _key, wsKey = self._notice
+            current = self.currentWorkspace()
+            visible = wsKey is None or (wsKey == current and wsKey != leaving)
+            try:
+                widget.setVisible(visible)
+            except Exception:
+                # Deleted by its owner
+                self._notice = None
+                visible = False
+        self._noticeSlot.setVisible(visible)
+
     def setDataProbeVisible(self, visible):
         dataProbe = self._dataProbe()
         if dataProbe is not None:
@@ -1548,15 +2615,22 @@ class Shell:
             widget.raise_()
             if self._toast is not None and self._toast.isVisible():
                 self._toast.label.raise_()
+            if self._stickyToast is not None:
+                self._stickyToast.raise_()
             if self._focusModePill is not None:
                 self._focusModePill.raise_()
             if not self._renderPausedByCanvas and layoutManager is not None:
                 layoutManager.setRenderPaused(True)
                 self._renderPausedByCanvas = True
-        elif self._renderPausedByCanvas:
-            if layoutManager is not None:
-                layoutManager.setRenderPaused(False)
-            self._renderPausedByCanvas = False
+            # No Tab stop under the canvas (the views are covered, not disabled: that costs 27-55 ms)
+            self._coverFocusPolicies()
+        else:
+            if self._renderPausedByCanvas:
+                if layoutManager is not None:
+                    layoutManager.setRenderPaused(False)
+                self._renderPausedByCanvas = False
+            self._restoreCoveredFocusPolicies()
+        self._updateInspectorHandle()
 
     def canvas(self):
         return self._canvas
@@ -1564,14 +2638,136 @@ class Shell:
     def isRenderPausedByCanvas(self):
         return self._renderPausedByCanvas
 
+    @staticmethod
+    def _acceptsTab(widget):
+        try:
+            return bool(int(widget.focusPolicy) & int(qt.Qt.TabFocus))
+        except (TypeError, ValueError):
+            return widget.focusPolicy in (qt.Qt.TabFocus, qt.Qt.StrongFocus, qt.Qt.WheelFocus)
+
+    def _coverFocusPolicies(self):
+        """Take the widgets of the view area (views, view bars) out of the Tab chain while the canvas covers them.
+
+        Their focus policies are stored and restored exactly by ``_restoreCoveredFocusPolicies()``. The view area
+        has hundreds of widgets (about 600 with a 4-up layout): the ones whose policy accepts Tab are found once per
+        layout (``_viewTabStops``, about 4 ms), and each call only covers those that are visible now (about 0.3 ms).
+        Hidden widgets are not Tab stops. Visibility is checked on every call, so that a widget shown since the scan
+        is covered too, and a call made while the main window is hidden (nothing visible) is made again when it is
+        shown (``_onEvent``).
+        """
+        layoutManager = slicer.app.layoutManager()
+        viewport = layoutManager.viewport() if layoutManager is not None else None
+        if viewport is None:
+            return
+        covered = self._coveredFocusPolicies
+        if self._viewTabStops is None:
+            self._viewTabStops = [widget for widget in viewport.findChildren("QWidget")
+                                  if id(widget) in covered or self._acceptsTab(widget)]
+        for widget in self._viewTabStops:
+            try:
+                if id(widget) in covered or not widget.isVisible() or not self._acceptsTab(widget):
+                    continue
+                covered[id(widget)] = (widget, widget.focusPolicy)
+                widget.setFocusPolicy(qt.Qt.NoFocus)
+            except Exception:
+                # Deleted with its view
+                pass
+
+    def _restoreCoveredFocusPolicies(self):
+        covered = self._coveredFocusPolicies
+        self._coveredFocusPolicies = {}
+        for widget, policy in covered.values():
+            try:
+                if widget.focusPolicy == qt.Qt.NoFocus:
+                    widget.setFocusPolicy(policy)
+            except Exception:
+                # Deleted with its view (layout change)
+                pass
+
+    def _onLayoutChanged(self, layoutId=None):
+        # The views of the new layout are found again
+        self._viewTabStops = None
+        if self._inspectorHandle is not None and self._inspectorHandle.isVisible():
+            # Keep the handle off the view bars of the new layout (placed once the views have their geometry)
+            qt.QTimer.singleShot(0, self._updateInspectorHandlePosition)
+        if self._canvas is not None:
+            # View widgets created by the layout change are covered too
+            self._coverFocusPolicies()
+
     #
     # Top bar
     #
 
-    def toast(self, text, ms=1600):
-        """Show a short message near the bottom of the view area."""
-        if self._toast is not None:
-            self._toast.show(text, ms)
+    def toast(self, text, ms=1600, action=None, actionText=None, sticky=False, level="info", toolTip=None):
+        """Show a message near the bottom of the view area (USABILITY 6.3) and list it in ``recentMessages()``.
+
+        A confirmation ("Saved sub-01_lesion.nii.gz") fades out after ``ms`` milliseconds. A consequence of an
+        automatic action that the user must know about (``level="consequence"`` or ``sticky=True``: a new lesion
+        was created and the previous one hidden, the inspector was hidden...) stays until the next input (at
+        least ``STICKY_TOAST_MINIMUM_MS``). Both may carry one ``action`` button labelled ``actionText``
+        ("Undo", "Show", "Details"). A new message replaces the current one.
+        """
+        sticky = bool(sticky) or level == "consequence"
+        self._recentMessages.append((time.time(), str(text), level if not sticky or level != "info" else "consequence"))
+        if self._toast is None or self._stickyToast is None:
+            return
+        if sticky or action is not None:
+            self._hidePlainToast()
+            self._stickyToast.show(text, sticky=sticky, ms=ms, action=action, actionText=actionText)
+            self._stickyToast.frame.setToolTip(toolTip or "")
+            return
+        self._stickyToast.hide()
+        self._toast.show(text, ms)
+        self._toast.label.setAccessibleName(str(text))
+
+    def _hidePlainToast(self):
+        toast = self._toast
+        if toast is None:
+            return
+        for name in ("hideTimer", "fadeAnimation"):
+            member = getattr(toast, name, None)
+            if member is not None:
+                member.stop()
+        toast.label.hide()
+
+    def toastText(self):
+        """Text of the visible toast (plain or consequence), "" if none is shown."""
+        if self._stickyToast is not None and self._stickyToast.isVisible():
+            return self._stickyToast.text()
+        if self._toast is not None and self._toast.isVisible():
+            return self._toast.text()
+        return ""
+
+    def recentMessages(self):
+        """The last toast messages, oldest first: [(time.time(), text, level)] (≡ > View > Recent messages)."""
+        return list(self._recentMessages)
+
+    def showRecentMessages(self):
+        """Show the recent messages in a small read-only list popover (Esc or a click outside closes it)."""
+        if not self._active:
+            return
+        menu = qt.QMenu(self.mainWindow)
+        menu.setObjectName("StudioRecentMessagesPopover")
+        listWidget = qt.QListWidget()
+        listWidget.setObjectName("StudioRecentMessagesList")
+        listWidget.setSelectionMode(qt.QAbstractItemView.NoSelection)
+        listWidget.setFocusPolicy(qt.Qt.NoFocus)
+        listWidget.setFrameShape(qt.QFrame.NoFrame)
+        messages = self.recentMessages()
+        for timestamp, text, level in reversed(messages):
+            item = qt.QListWidgetItem(f"{time.strftime('%H:%M:%S', time.localtime(timestamp))}  {text}")
+            listWidget.addItem(item)
+        if not messages:
+            listWidget.addItem(_("No messages yet"))
+        listWidget.setMinimumWidth(360)
+        listWidget.setFixedHeight(min(320, max(40, listWidget.sizeHintForRow(0) * max(1, len(messages)) + 8)))
+        action = qt.QWidgetAction(menu)
+        action.setDefaultWidget(listWidget)
+        menu.addAction(action)
+        button = self.topBar.menuButton if self.topBar is not None else None
+        anchor = button if button is not None and button.isVisible() else self.mainWindow.centralWidget()
+        _execMenu(menu, anchor.mapToGlobal(qt.QPoint(0, anchor.height if anchor == button else 8)))
+        menu.deleteLater()
 
     def setBreadcrumb(self, primary, secondary=None, onClick=None):
         """Set the top bar breadcrumb ("study / subject"). ``primary=None`` shows the first volume name."""
@@ -1611,10 +2807,10 @@ class Shell:
         return self._focusModeHidden is not None
 
     def setFocusMode(self, enabled):
-        """Hide (or show again) the inspector and the top bar.
+        """Hide (or show again) the inspector and the top bar: "Hide panels" (F11 or ⌘6), formerly "focus mode".
 
-        In the focus mode a low-emphasis "Exit focus mode" pill stays in the top-right corner of the
-        views, and entering it says how to leave it (F11 or Esc).
+        With hidden panels a low-emphasis "Show panels" pill stays in the top-right corner of the
+        views, and hiding them says how to show them again (the key or Esc).
         """
         wasFocusMode = self.focusMode()
         if hasattr(self.mainWindow, "setFocusMode"):
@@ -1641,9 +2837,12 @@ class Shell:
                 self._focusModePill.show()
             else:
                 self._focusModePill.hide()
+        self._updateInspectorHandle()
+        text = _("Panels hidden · {key} or Esc to show them").format(key=focusModeKeyText())
         if focusMode and not wasFocusMode:
-            self.toast(_("Focus mode · {keys} or Esc to exit").format(
-                keys=qt.QKeySequence(FOCUS_MODE_SHORTCUTS[0]).toString(qt.QKeySequence.NativeText)), 2500)
+            self.toast(text, level="consequence", action=lambda: self.setFocusMode(False), actionText=_("Show panels"))
+        elif wasFocusMode and not focusMode and self._stickyToast is not None and self._stickyToast.isVisible() and self._stickyToast.text() == text:
+            self._stickyToast.hide()
 
     def toggleFocusMode(self):
         self.setFocusMode(not self.focusMode())
@@ -1652,25 +2851,56 @@ class Shell:
     # Events
     #
 
-    #: Widgets that keep Esc for themselves (text input, consoles): the Esc stack does not apply
-    _ESCAPE_EXEMPT_FOCUS_CLASSES = ("QLineEdit", "QAbstractSpinBox", "QTextEdit", "QPlainTextEdit", "ctkConsole")
+    def registerEscapeOverlay(self, widget, closeFn):
+        """Register a Studio overlay that is not a Qt popup (the shortcut list, a popover) that Esc closes (rung 0.5).
+
+        The overlays form a stack: Esc calls ``closeFn()`` of the top-most visible one (the last registered).
+        Hidden overlays stay registered until ``unregisterEscapeOverlay(widget)``.
+        """
+        self.unregisterEscapeOverlay(widget)
+        self._escapeOverlays.append((widget, closeFn))
+
+    def unregisterEscapeOverlay(self, widget):
+        self._escapeOverlays = [(overlay, closeFn) for overlay, closeFn in self._escapeOverlays if overlay != widget]
+
+    def _closeTopEscapeOverlay(self):
+        for overlay, closeFn in reversed(list(self._escapeOverlays)):
+            try:
+                visible = overlay.isVisible()
+            except Exception:
+                # Deleted by its owner
+                self.unregisterEscapeOverlay(overlay)
+                continue
+            if not visible:
+                continue
+            try:
+                closeFn()
+            except Exception:
+                logging.error(f"Studio: closing an overlay with Esc failed:\n{traceback.format_exc()}")
+            return True
+        return False
 
     def handleEscape(self):
-        """Back out of the innermost navigation state, as Esc does in Studio. Return True if a state was left.
+        """Back out of the innermost state, as Esc does in Studio. Return True if a state was left.
 
-        The Esc stack, handled in this order (one state per key press):
+        The Esc ladder (USABILITY 3, ``ESCAPE_LADDER``), one rung per key press:
 
+        0.5. a registered Studio overlay (``registerEscapeOverlay()``) -> closed;
         1. Place mode or Adjust window/level mode of the mouse -> the default mode (view transform);
-        2. a maximized view (double-click on a view, or the view bar button) -> the layout is restored;
-        3. the focus mode (F11) -> left.
+        2. a maximized view (double-click on a view, the view bar button, the Single layout) -> the layout is restored;
+        3. hidden panels (F11 / ⌘6) -> shown;
+        4. an active Segment Editor tool (Draw) -> not handled here: the key is not consumed, so that the Segment
+           Editor's own Esc deselects the tool;
+        5. a transient module -> back to the workspace it was opened from (``closeTransientModule()``).
 
-        If none applies, the key is not consumed and goes on to its other handlers: the Segment Editor's
-        Esc then deselects the active tool, and the views cancel their current interaction. Popups and
-        dialogs close themselves, and text fields and consoles keep their own Esc (see ``_onEscapeKey()``).
-        A transient module is left with the close button of the inspector header, not with Esc.
+        Before the ladder (rung 0), popups and dialogs close themselves, and consoles, editable text fields,
+        line edits with unsent edits and open item editors keep their own Esc (see ``_onEscapeKey()``). Esc never
+        stops a computation and never leaves a workspace: Library is outside the ladder.
         """
         if not self._active:
             return False
+        if self._closeTopEscapeOverlay():
+            return True
         modes = (slicer.vtkMRMLInteractionNode.Place, slicer.vtkMRMLInteractionNode.AdjustWindowLevel)
         handled = False
         for interactionNode in slicer.util.getNodesByClass("vtkMRMLInteractionNode"):
@@ -1688,25 +2918,27 @@ class Shell:
         if self.focusMode():
             self.setFocusMode(False)
             return True
+        # Rung 4 (the active Draw tool) belongs to the Segment Editor's Esc shortcut
+        if self.workspaces is not None and self.workspaces.transientModule and self.currentWorkspace() is None:
+            self.closeTransientModule()
+            return True
         return False
 
     @staticmethod
     def _hasKeyModifiers(event):
         """True if Shift, Ctrl, Alt or Meta is held (the keypad modifier does not count)."""
-        mask = qt.Qt.ShiftModifier | qt.Qt.ControlModifier | qt.Qt.AltModifier | qt.Qt.MetaModifier
-        try:
-            # Explicit integers: a QFlags value may not compare equal to an enum value (Qt 6)
-            return bool(int(event.modifiers()) & int(mask))
-        except (TypeError, ValueError):
-            return bool(event.modifiers() & mask)
+        return ui.hasKeyModifiers(event)
 
     def _onEscapeKey(self, event):
         """Esc reached the main window (the focus widget did not use it). Return True to consume it.
 
-        The Esc stack runs when Qt asks whether a shortcut may take the key (ShortcutOverride): accepting
+        The Esc ladder runs when Qt asks whether a shortcut may take the key (ShortcutOverride): accepting
         it there keeps the window-wide Esc shortcut of the Segment Editor from firing for the same press.
         The key press that follows is then consumed. Key presses without a shortcut override (sent
-        directly to a widget) run the stack too.
+        directly to a widget) run the ladder too.
+
+        A spin box or a closed combo box does not keep Esc: the focus moves to the module panel and the ladder
+        runs in the same press, so that Esc leaves a transient module after the brush size was touched.
         """
         eventType = event.type()
         if eventType == qt.QEvent.ShortcutOverride:
@@ -1719,8 +2951,14 @@ class Shell:
         if slicer.app.activePopupWidget() is not None or slicer.app.activeModalWidget() is not None:
             return False
         focusWidget = slicer.app.focusWidget()
-        if focusWidget is not None and any(focusWidget.inherits(className) for className in self._ESCAPE_EXEMPT_FOCUS_CLASSES):
+        if _keepsEscape(focusWidget):
             return False
+        if _leavesFieldOnEscape(focusWidget):
+            modulePanel = self._modulePanel()
+            if modulePanel is not None and modulePanel.isVisible():
+                modulePanel.setFocus(qt.Qt.OtherFocusReason)
+            else:
+                focusWidget.clearFocus()
         if not self.handleEscape():
             return False
         if eventType == qt.QEvent.ShortcutOverride:
@@ -1731,9 +2969,19 @@ class Shell:
     def _onEvent(self, obj, event):
         """Event filter of the main window, its central widget and the inspector. Return True to consume the event."""
         eventType = event.type()
-        if eventType in (qt.QEvent.ShortcutOverride, qt.QEvent.KeyPress):
-            if obj == self.mainWindow and event.key() == qt.Qt.Key_Escape:
+        if eventType in (qt.QEvent.ShortcutOverride, qt.QEvent.KeyPress, qt.QEvent.KeyRelease):
+            if obj != self.mainWindow:
+                return False
+            key = event.key()
+            if eventType != qt.QEvent.KeyRelease and key == qt.Qt.Key_Escape:
+                self._cancelAltKey()
                 return self._onEscapeKey(event)
+            if self._altPending or key == qt.Qt.Key_Alt:
+                self._onAltKey(event)
+            return False
+        if eventType in (qt.QEvent.MouseButtonPress, qt.QEvent.Wheel):
+            # Alt+click and Alt+wheel are not a bare Alt press
+            self._cancelAltKey()
             return False
         if eventType == qt.QEvent.Resize:
             if obj == self.mainWindow.centralWidget():
@@ -1741,8 +2989,12 @@ class Shell:
                     self._canvas.setGeometry(obj.rect)
                 if self._toast is not None:
                     self._toast.updatePosition()
+                if self._stickyToast is not None and self._stickyToast.isVisible():
+                    self._stickyToast.updatePosition()
                 if self._focusModePill is not None:
                     self._focusModePill.updatePosition()
+                if self._inspectorHandle is not None:
+                    self._inspectorHandle.updatePosition()
             elif obj == self._panelDock():
                 self._onDockResized()
             elif obj == self.mainWindow:
@@ -1759,9 +3011,16 @@ class Shell:
         elif eventType == qt.QEvent.LayoutRequest and obj == self._watchedPanelContents:
             # The module widget changed (a tool was chosen): the inspector may need to widen once
             self._schedulePanelWidthUpdate(shrink=False)
+        elif eventType == qt.QEvent.Show and obj == self.mainWindow:
+            if self._canvas is not None:
+                # The canvas was set while the main window was hidden (no view widget was visible): cover now
+                self._coverFocusPolicies()
         elif eventType == qt.QEvent.Show and obj == self._panelDock():
-            # Shown again (Ctrl+\, Ctrl+5, focus mode): back to the width of the workspaces
+            # Shown again (Ctrl+\, Ctrl+5, hidden panels): back to the width of the workspaces
             self._schedulePanelWidthUpdate(shrink=True)
+            self._updateInspectorHandle()
+        elif eventType == qt.QEvent.Hide and obj == self._panelDock():
+            self._updateInspectorHandle()
         return False
 
     def _removeEventFilters(self):
@@ -1777,6 +3036,169 @@ class Shell:
                 pass
             self._watchedPanelContents = None
         self._eventFilter = None
+
+    #
+    # Studio-only behaviours of the views, the save folder and the classic menus
+    #
+
+    @staticmethod
+    def navigationBehaviours():
+        """The Studio-only navigation behaviours from the settings: {leftDragWindowLevel, pageStepSlices, focusFollowsMouse}."""
+        return {
+            "leftDragWindowLevel": _settingsBool(*LEFT_DRAG_WINDOW_LEVEL_KEY),
+            "pageStepSlices": max(0, _settingsInt(*PAGE_STEP_SLICES_KEY)),
+            "focusFollowsMouse": _settingsBool(*FOCUS_FOLLOWS_MOUSE_KEY),
+        }
+
+    def _applyNavigationBehaviours(self, enabled):
+        """Turn on the navigation behaviours of the views that Studio uses (USABILITY 9.1, SPEC 6.2), or (``enabled``
+        False) restore the classic ones: left-drag window/level, PageUp/PageDown by ``Studio/PageStepSlices`` slices,
+        clamped slice stepping, symmetric zoom and focus follows the mouse. They are application-wide statics of the
+        view widgets and an application property (W3-02a): no setting that official Slicer reads is written. Builds without them
+        are skipped.
+        """
+        behaviours = self.navigationBehaviours() if enabled else {"leftDragWindowLevel": False, "pageStepSlices": 0, "focusFollowsMouse": False}
+        windowLevelWidget = getattr(slicer, "vtkMRMLWindowLevelWidget", None)
+        if windowLevelWidget is not None and hasattr(windowLevelWidget, "SetLeftDragWindowLevel"):
+            windowLevelWidget.SetLeftDragWindowLevel(behaviours["leftDragWindowLevel"])
+        sliceIntersectionWidget = getattr(slicer, "vtkMRMLSliceIntersectionWidget", None)
+        if sliceIntersectionWidget is not None:
+            if hasattr(sliceIntersectionWidget, "SetPageStepSlices"):
+                sliceIntersectionWidget.SetPageStepSlices(behaviours["pageStepSlices"])
+            if hasattr(sliceIntersectionWidget, "SetClampSliceStepping"):
+                sliceIntersectionWidget.SetClampSliceStepping(bool(enabled))
+            if hasattr(sliceIntersectionWidget, "SetSymmetricZoom"):
+                sliceIntersectionWidget.SetSymmetricZoom(bool(enabled))
+        slicer.app.setProperty(FOCUS_FOLLOWS_MOUSE_PROPERTY, bool(behaviours["focusFollowsMouse"]))
+
+    def _onSettingsDialogFinished(self, result=None):
+        if self._active:
+            self._applyNavigationBehaviours(True)
+
+    @staticmethod
+    def _isApplicationDirectory(path):
+        """True if ``path`` is (in) a folder that never holds the user's files: the application, temporary or cache folders."""
+        try:
+            from . import draw
+
+            directories = draw._applicationDirectories()
+            return any(draw._isInside(path, directory) for directory in directories)
+        except Exception:
+            pass
+        real = os.path.normcase(os.path.realpath(path))
+        return any(real == os.path.normcase(os.path.realpath(directory)) for directory in (slicer.app.slicerHome, slicer.app.applicationDirPath()) if directory)
+
+    def _sceneRootTarget(self):
+        """The folder of the Save dialog when the scene root is not usable: the last save folder, else the home folder."""
+        try:
+            from . import draw
+
+            lastFolder = str(slicer.util.settingsValue(draw.LAST_SAVE_FOLDER_KEY, "") or "")
+        except Exception:
+            lastFolder = str(slicer.util.settingsValue("Studio/LastSaveFolder", "") or "")
+        if lastFolder and os.path.isdir(lastFolder):
+            return lastFolder
+        return qt.QDir.homePath()
+
+    def _fixSceneRootDirectory(self):
+        """The Save dialog (Ctrl+S) opens in the scene root directory: never let it be a missing folder (Qt then uses
+        the current folder, the application folder) or an application folder (USABILITY 8, rule 6). No setting is written.
+        """
+        root = slicer.mrmlScene.GetRootDirectory()
+        if root and os.path.isdir(root) and not self._isApplicationDirectory(root):
+            return
+        target = self._sceneRootTarget()
+        if os.path.normcase(os.path.realpath(target)) == os.path.normcase(os.path.realpath(root or "")):
+            return
+        if self._studioSceneRoot is None:
+            self._classicSceneRoot = root
+        slicer.mrmlScene.SetRootDirectory(target)
+        self._studioSceneRoot = slicer.mrmlScene.GetRootDirectory()
+
+    def _restoreSceneRootDirectory(self):
+        """Classic: put the scene root directory back if it is still the one Studio set."""
+        if self._studioSceneRoot is not None and slicer.mrmlScene.GetRootDirectory() == self._studioSceneRoot:
+            slicer.mrmlScene.SetRootDirectory(self._classicSceneRoot or "")
+        self._studioSceneRoot = None
+        self._classicSceneRoot = None
+
+    def _onSceneEndClose(self, caller=None, event=None):
+        if self._active:
+            self._fixSceneRootDirectory()
+
+    def _onErrorLogVisibilityChanged(self, visible):
+        """The error log opens at the bottom in Studio (tabbed with the Python console when that is there).
+
+        Classic gets its own place back with the classic window state.
+        """
+        if visible and self._active:
+            qt.QTimer.singleShot(0, self._dockErrorLogAtBottom)
+
+    def _dockErrorLogAtBottom(self):
+        mainWindow = self.mainWindow
+        dock = mainWindow.errorLogDockWidget()
+        if not self._active or dock is None or dock.isHidden():
+            return
+        if not dock.floating and mainWindow.dockWidgetArea(dock) == qt.Qt.BottomDockWidgetArea:
+            return
+        mainWindow.addDockWidget(qt.Qt.BottomDockWidgetArea, dock)
+        python = mainWindow.findChild("QDockWidget", "PythonConsoleDockWidget")
+        if python is not None and not python.isHidden() and not python.floating and mainWindow.dockWidgetArea(python) == qt.Qt.BottomDockWidgetArea:
+            mainWindow.tabifyDockWidget(python, dock)
+        dock.show()
+        dock.raise_()
+
+    #: Items of the shared menus that get a keyboard mnemonic in Studio, so that the ≡ menu is usable from the keyboard
+    #: (F10, F, D: File > Add DICOM Data): (menu object name, module whose action it is, word that takes the mnemonic)
+    _STUDIO_MNEMONICS = (("FileMenu", "dicom", "DICOM"),)
+
+    def _addMenuMnemonics(self):
+        """Give menu items without a mnemonic one in Studio (restored in Classic) when its letter is free in the menu.
+
+        Also run when the menu is about to show: modules add their items when the application has started.
+        """
+        if not self._active:
+            return
+        for menuName, moduleName, word in self._STUDIO_MNEMONICS:
+            menu = self.mainWindow.findChild("QMenu", menuName)
+            module = getattr(slicer.modules, moduleName, None)
+            action = module.action() if module is not None and hasattr(module, "action") else None
+            if menu is None or action is None or action not in menu.actions():
+                continue
+            if any(action == handled for handled, text, studioText in self._mnemonicActions):
+                continue
+            text = action.text
+            if "&" in text or word not in text:
+                continue
+            taken = {str(qt.QKeySequence.mnemonic(other.text).toString(qt.QKeySequence.PortableText)) for other in menu.actions() if other != action}
+            if f"Alt+{word[0].upper()}" in taken:
+                continue
+            studioText = text.replace(word, "&" + word, 1)
+            action.setText(studioText)
+            self._mnemonicActions.append((action, text, studioText))
+
+    def _removeMenuMnemonics(self):
+        for action, text, studioText in self._mnemonicActions:
+            try:
+                if action.text == studioText:
+                    action.setText(text)
+            except Exception:
+                # Deleted with its module
+                pass
+        self._mnemonicActions = []
+
+    def _onViewMenuAboutToShow(self):
+        """View menu in Studio: no status bar to show, and Module Panel says whether the inspector is shown."""
+        if not self._active:
+            return
+        statusBarAction = self.mainWindow.findChild("QAction", "ShowStatusBarAction")
+        if statusBarAction is not None:
+            statusBarAction.setEnabled(False)
+        dock = self._panelDock()
+        toggle = dock.toggleViewAction()
+        toggle.blockSignals(True)
+        toggle.setChecked(not dock.isHidden())
+        toggle.blockSignals(False)
 
     #
     # Cleanup

@@ -16,6 +16,8 @@ set(SegmentEditorEffects_PYTHON_SCRIPTS
   SegmentEditorMaskVolumeEffect
   SegmentEditorSmoothingEffect
   SegmentEditorThresholdEffect
+  SegmentEditorSmartFillEffect
+  SmartFillAlgorithm
   )
 
 set(SegmentEditorEffects_PYTHON_RESOURCES
@@ -30,6 +32,7 @@ set(SegmentEditorEffects_PYTHON_RESOURCES
   Resources/Icons/MaskVolume.png
   Resources/Icons/Smoothing.png
   Resources/Icons/Threshold.png
+  Resources/Icons/SmartFill.png
   )
 
 ctkMacroCompilePythonScript(
