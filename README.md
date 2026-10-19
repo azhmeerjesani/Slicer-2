@@ -10,12 +10,15 @@ round. Its packaging scripts build a macOS disk image, a Linux package and a ver
 browser on your own computer; no package has been published yet.
 
 > [!NOTE]
-> **Early development, no release yet.** Wave 1 of 4 and the packaging work are implemented: the Studio
+> **Early development, no release yet.** Wave 1 of 5 and the packaging work are implemented: the Studio
 > interface, the Library page, drawing and slicing fixes and speed-ups, the lesion network mapping
-> library and command line, file compatibility checks and the packaging scripts. Planned next: the
-> streamlined Draw panel and the Map workspace (wave 2), then the study workflow (wave 3). Packages are
-> built on your own computer (see [Install](#install)); no disk image, Linux package or web image has
-> been published yet. See [Status and roadmap](#status-and-roadmap).
+> library and command line, file compatibility checks and the packaging scripts. A first round of
+> navigation fixes is also in (Draw keeps its tool when you leave and come back, *Save lesion*, a way out
+> of focus mode, orientation letters on the views, a ranked module search) and the Qt 6 start-up problems
+> found so far are fixed. Planned next: the streamlined Draw panel, the Map workspace, autosave and Smart
+> fill (wave 2), then the study workflow (wave 3). Packages are built on your own computer (see
+> [Install](#install)); no disk image, Linux package or web image has been published yet. See
+> [Status and roadmap](#status-and-roadmap).
 
 > [!WARNING]
 > **Research use only.** Slicer Studio, like 3D Slicer, is not a medical device. Lesion network maps must
@@ -58,9 +61,12 @@ On a normal launch Slicer Studio shows its own interface, Studio, instead of the
   (workspaces, the File, Edit, View and Help menus, Appearance, Settings, Python console, Error log and
   Classic interface), the name of the current data, the **Library | Draw | Map** switcher, Undo and Redo
   (in Draw), a layout picker, a search box and an error badge.
-- **One inspector.** The module panel is a panel on the right, 340 px wide by default (300–480 px;
-  423 px in Draw for now). A workspace is a module shown in it. Any other module, opened from the
-  search box or by a script, appears there too, with a close button that returns to the workspace.
+- **One inspector.** The module panel is a panel on the right, 340 px wide by default (300–480 px). A
+  workspace is a module shown in it. The workspaces share one width: if a tool of the Segment Editor
+  needs more than that (up to 600 px), the inspector takes that width once, remembers it, and keeps it
+  when you choose another tool, so the views do not move under the cursor. Wider contents scroll
+  sideways. Any other module, opened from the search box or by a script, appears in the inspector too,
+  with a close button that returns to the workspace.
 - **Dark by default.** A graphite dark theme, a light theme and System, an accent color and a
   Comfortable or Compact density, in *Application Settings > Appearance* (theme and density also in
   `≡ > Appearance`; a density change takes effect after a restart). Check boxes and radio buttons are
@@ -69,7 +75,7 @@ On a normal launch Slicer Studio shows its own interface, Studio, instead of the
 | Workspace | What you do there | State |
 |---|---|---|
 | **Library** | Open scans, lesion masks, scenes or DICOM folders, or start on the MNI template. A drop zone, *Open…*, *Open folder…*, *Start on MNI template* and the most recent files are shown over the views. | Available |
-| **Draw** | Trace the lesion with the Segment Editor. The views use the *Studio Focus* layout: a large axial view, with the coronal and sagittal views stacked on its right. | Available with the classic Segment Editor panel; the streamlined panel is planned (wave 2) |
+| **Draw** | Trace the lesion with the Segment Editor. The views use the *Studio Focus* layout: a large axial view, with the coronal and sagittal views stacked on its right. A *Save lesion…* button at the bottom of the inspector writes the lesion as a NIfTI mask. | Available with the classic Segment Editor panel; the streamlined panel is planned (wave 2) |
 | **Map** | Compute and read the lesion's network map. | Planned (wave 2): the tab is shown but disabled |
 
 Keyboard (on macOS, `Ctrl` is `Cmd` and `Alt` is `Option`):
@@ -79,14 +85,35 @@ Keyboard (on macOS, `Ctrl` is `Cmd` and `Alt` is `Option`):
 | `Ctrl+Alt+1` / `2` / `3` | Library / Draw / Map |
 | `Ctrl+Alt+0` | Switch between Studio and Classic |
 | `Ctrl+O` | Open files, loaded directly (Classic keeps *Add Data*) |
-| `Ctrl+K` | Search modules (Slicer's module finder; a command palette is planned) |
+| `Ctrl+K` | Search modules (Slicer's module finder, with ranked results; a command palette is planned) |
 | `Alt+1` / `2` / `3` / `4` | Focus / Single / Four-up / Row layout |
-| `Tab` (in a view) | Show or hide the inspector |
+| `Ctrl+\` or `F6` | Show or hide the inspector (`Tab` no longer does this, so it keeps its normal job) |
 | `Ctrl+6` or `F11` | Focus mode: hide the inspector and the top bar |
-| `Ctrl+/` | Brief reminder of the main shortcuts (a full shortcut overlay is planned, wave 3) |
+| `Esc` | Backs out of one state per press: Place or window/level mode, then a maximized view, then focus mode; otherwise it is left to the Segment Editor (deselects the tool) |
+| `Ctrl+Z` / `Ctrl+Y` | Undo / redo the lesion (in Draw; `Ctrl+Shift+Z` also redoes) |
+| `Ctrl+Shift+S` or `Ctrl+Enter` | Save lesion… (in Draw) |
+| `Ctrl+/` | Brief reminder of the main shortcuts (a full shortcut overlay is planned, wave 2) |
 
 Slicer's own shortcuts, such as `Ctrl+S` (save), `Ctrl+2` (settings) or `Ctrl+3` (Python console), keep
 working with the menu bar hidden.
+
+Navigation details:
+
+- **Focus mode** shows a toast ("Focus mode · F11 or Esc to exit") and a translucent *Exit focus mode*
+  button at the top right of the window.
+- **Clicking the current tab** (or pressing its `Ctrl+Alt+1` / `2` / `3` again) shows an inspector you
+  hid and leaves focus mode. Hiding the inspector shows a one-time reminder of the key.
+- **Draw remembers its tool.** Going from Draw to the Library or to another module and back keeps the
+  selected segment and the armed tool (Paint on the first visit). Pressing `Esc` to deselect the tool
+  is respected.
+- **Files that are already open** are not loaded a second time from *Recent*, *Open…* or a drop in
+  Studio: the existing scan or lesion becomes current and a message says so. Classic still loads the
+  file again, as official Slicer does.
+- **Back to Studio from Classic** returns to the workspace of the module you were in (else the last
+  workspace, else the Library).
+- **View > Toolbars** is honoured: a toolbar you switch on stays on and is remembered under
+  `Studio/AllowedToolbars`.
+- **First start** with no stored window geometry opens a window of 90% of the screen, centered.
 
 The Classic interface is also used, whatever the last choice, with `--testing`, with
 `--no-main-window`, when the environment variable `SLICER_CLASSIC_UI=1` is set, or when the setting
@@ -129,9 +156,18 @@ These changes are in the Segment Editor itself, so they also apply in the Classi
   updates only what changed. The rendered views are pixel-identical to before (416 captures compared).
 - **Data Probe and slice annotation updates** are coalesced and skipped while hidden;
   `slicer.i18n.tr()` caches the source file of its caller.
+- **Orientation letters.** Every slice view shows a letter at each edge (for example R and L, A and P),
+  computed from the view's own orientation, so they stay right when you rotate or flip a view. Within
+  25 degrees of an anatomical axis one letter is shown; otherwise the letters of the axes involved are
+  combined (for example `RA`). The default display is radiological. `Studio/OrientationLetters`
+  (default true) turns them off.
+- **Module search.** The search box, `Ctrl+K` and `Ctrl+F` open Slicer's module finder, now titled
+  *Search modules*, with ranked results: exact title, synonym, prefix, word starts, then substring. Core
+  modules come first, and `Enter` opens the top result. "fiducial" finds Markups, "paint" or "lesion"
+  Segment Editor, "window level" Volumes. Classic keeps the finder's own behavior.
 - **Planned:** flat view bars that show the slice index (wave 2); PageUp/PageDown by 10 slices,
   Home/End, stepping that stops at the first and last slice, symmetric zoom, focus that follows the mouse
-  and left-drag window/level (wave 3).
+  and left-drag window/level (core in wave 2, settings in wave 3).
 
 ### Lesion network mapping library
 
@@ -358,11 +394,15 @@ Slicer-SuperBuild-Release/Slicer-build/Slicer
    with the "Lesion" segment selected in the Segment Editor. Use the usual effects: Paint, Draw (with
    *Add* / *Subtract* and the lasso), Level tracing, Erase, Islands, Smoothing, Margin. `Ctrl+Z` and
    `Ctrl+Y` undo and redo. *Planned:* the streamlined Draw panel (wave 2: a lesion card with its volume,
-   labeled tool tiles with letter keys, brush size presets) and the study loop (wave 3: *Done → next*,
-   autosave).
-4. **Save.** `Ctrl+S` saves the scene as a folder or a `.mrb` file, which also opens in official
-   3D Slicer. To save the lesion as a NIfTI mask, open the Segmentations module (`Ctrl+K`, type
-   "Segmentations") and use *Export to files* with the NIfTI format.
+   labeled tool tiles with letter keys, brush size presets) and autosave and Smart fill (wave 2), and the study loop
+   (wave 3: *Done → next*).
+4. **Save.** *Save lesion…* (bottom of the inspector in Draw, `Ctrl+Shift+S` or `Ctrl+Enter`) writes the
+   lesion as a NIfTI mask (`.nii.gz`, 0/1 values, `uint8`) on the lesion's own grid: a lesion mask that
+   you opened on the FSL MNI152 2 mm grid is saved on that grid, not on the grid of the template you drew
+   over. It suggests `sub-XX_lesion.nii.gz` when the scan name has a BIDS subject, and remembers the
+   folder. `Ctrl+S` saves the whole scene as a folder or a `.mrb` file, which also opens in official
+   3D Slicer. For other export options, open the Segmentations module (`Ctrl+K`, type "Segmentations")
+   and use *Export to files*.
 5. **Map the network.** *Planned (wave 2):* the Map workspace is not available yet. You can already
    compute a map from the command line with the exported lesion, see
    [Lesion network mapping](#lesion-network-mapping). The lesion must be in the connectome's MNI space.
@@ -538,29 +578,60 @@ Every sidecar, `provenance.json` and `methods.md` carries this text:
 
 ## Status and roadmap
 
-The work is organized in four waves of work packages, plus packaging. "Implemented" means written and
-verified with this repository's tests, benchmarks, screenshots and compatibility check; nothing is
-released yet.
+The work is organized in five waves of work packages (identifiers such as W1-03 or A-01), plus
+packaging. "Done" means written and verified with this repository's tests, benchmarks, screenshots and
+compatibility check; nothing is released yet. Everything under *Planned* is not available in the
+application today.
 
-| Part | Contents | State |
+### Done
+
+| What | Work packages | Where it is checked |
 |---|---|---|
-| Wave 1: foundation | Benchmark, screenshot and test tools; dark theme and Appearance settings; Studio interface (top bar, workspaces, Studio layouts, Classic switch); Library page with direct loading and the bundled MNI template; Segment Editor effect fixes and speed-ups; faster masked painting; faster slice updates; LNM thresholds, QA, study model and export; file compatibility | Implemented, under review |
-| Packaging | Web browser launcher and Docker image; macOS disk image script; Linux package (`make package`); a GitHub Actions workflow, disabled and kept as a reference for the build steps | Implemented; packages are built locally; a macOS disk image passed the start-up test on macOS 15 (Apple Silicon), other Macs not yet tested |
-| Wave 2: the streamlined editor | Draw panel (lesion card, tool tiles, letter keys, brush presets, *Done* / *Map network* button); Map workspace v1 (seed, connectome, compute with progressive maps, thresholds, QA, export, disclaimer); Inter font; flat view bars; more style work; Segment Editor improvements (segment created automatically, masking summary, brush limits); Threshold and Fill between slices fixes | Planned (next) |
-| Wave 3: navigation, study loop | Slice navigation keys and mouse; menu-bar-free shortcuts and focus mode in C++; NIfTI loading fixes; brush size display and `[` `]` keys; command palette, shortcut overlay, in-view readout; studies (subject list, *Done → next*, QC flags, autosave journal); cohort statistics, connectome manager and Map integration | Planned |
-| Wave 4: performance and docs | Faster Draw and Scissors apply, cheaper undo; Library grid with thumbnails; faster startup (lazy Python wrappers, linker option); user guide pages | Planned |
-| Automation | Autosave of lesions, smart fill, MNI normalization of native-space scans, cohort pipeline with a report | Planned |
+| Benchmark, screenshot and test tools; fork defaults; bundled MNI templates | W1-01 | `StudioBench.py`, `StudioScreens.py`, `StudioTestRunner.py` |
+| Dark theme, accent color, density and the Appearance settings | W1-02 | `StudioTest` |
+| Studio interface: top bar, workspaces, Studio layouts, Classic switch, inspector header | W1-03 | `StudioTest` |
+| Draw and Level tracing *Add* / *Subtract*, lasso, Islands keep-largest, Margin and Smoothing on the region around the segment | W1-04 | Segment Editor tests, `StudioBench.py` |
+| Faster masked painting and per-stroke 3D surface rebuild | W1-05 | `StudioBench.py` |
+| Faster slice updates | W1-06 | `StudioBench.py`, pixel comparison of rendered views |
+| `LesionNetworkMappingLib`: thresholds, QA, study model, lesion writer, export with provenance | W1-07 | LNM unit tests |
+| Library page, direct loading, Recent, bundled MNI template | W1-08 | `StudioTest` |
+| Portable layouts and the cross-version file round trip | W1-09 | `SlicerFileCompatibilityCheck.py`, `StudioLayoutPortabilityTest` |
+| Web browser launcher with a Docker image | P-01 | built and run locally |
+| macOS disk image script and install guide | P-02 | built locally; start-up test on macOS 15 |
+| Draw keeps its tool and segment through Library and module round trips; Paint armed on entry; `Ctrl+Y`; *Save lesion…* (`Ctrl+Shift+S`, `Ctrl+Enter`) on the lesion's own grid; files that are already open are not loaded twice | Navigation quick wins | `StudioTest` |
+| `Esc` steps back one state at a time; focus mode exit button; tab re-click shows the inspector; `Ctrl+\` / `F6` for the inspector; Classic back to Studio returns to the workspace; View > Toolbars honoured; first-run window size; stable inspector width with a remembered width per workspace | Navigation quick wins | `StudioNavigationTest` |
+| Orientation letters on slice views; ranked module search with synonyms | Navigation quick wins | `StudioOrientationTest` |
+| Qt 6 fixes: Studio start-up, flag and widget handling in Studio and the Segment Editor, Library panel detection, macOS bundle checks | Qt 6 fixes | start-up tests of the packages |
+| Segment names, colors and terminology kept when a `.seg.nrrd` is opened; a scene or segmentation opened from the Library is shown in Draw | Wave 1 integration fixes | `StudioTest` |
+
+### Roadmap
+
+Planned items are listed by wave, with the identifiers of the work packages. Titles are shortened and the
+plan may change.
+
+| Wave | Planned contents | State |
+|---|---|---|
+| Wave 1: foundation | W1-01 to W1-09 (see *Done*) | Done, under review |
+| Packaging | P-01, P-02 (see *Done*); P-03: web container environment and LNM smoke checks for packages | P-01, P-02 done; P-03 planned (wave 4) |
+| Wave 2: streamlined editor, navigation, autosave, Smart fill, Map v1, LNM foundations | W2-01 flat controls; W2-02 Inter font and theme-aware view defaults; W2-03 flat view bars with the slice index; W2-04 Segment Editor widget UX (key tooltips, masking summary, compact rows); W2-05 streamlined Draw (lesion card, labelled tool tiles, brush defaults, letter keys, lesion navigation keys); W2-06 Map v1 (seed, connectome, compute, result with threshold rules, QA, export, disclaimer); W2-07 Threshold and Fill between slices fixes; W3-02a slice navigation core (PageUp/PageDown, Home/End, clamped stepping, symmetric zoom, focus follows mouse, left-drag window/level); W3-06 command palette, shortcut overlay, in-view readout; U-01, U-02 and U-04 to U-07 usability work (Esc ladder with overlay, back button, mode pill, top bar tooltips, Library current work, import routes that never hijack the views) and the regression gate; A-01 autosave and crash recovery; A-02 Smart fill; L-01 to L-11 LNM foundations (study schema v2, job protocol, connectome provenance, threshold rules v2, space registry, design builder, GLM permutation engine, cohort map orchestration, reference maps, QA v2, Map plug-in framework); A-05 README update | Planned (next) |
+| Wave 3: study loop, normalization, cohort statistics | W3-01 thin sliders and scroll bars; W3-03 main-window hooks and shell speed; W3-04 NIfTI loading fixes; W3-05 brush size display and paint speed; W3-07 Library study loop (subject list, switching); W3-08 cohort statistics UI, connectome manager, Map integration; W3-02b navigation settings UI; U-03 accessibility and first-run/close flow; A-01b autosave status and recovery card in Studio; A-03, A-03b, A-03c one-click normalization to MNI for a lesion and for a study; L-12 to L-22 research numerics and the cohort Contrast and Symptom tabs; A-05b README update | Planned |
+| Wave 4: cohort pipeline, report, performance, user guide | A-04, A-04b, A-04c *Run everything* cohort pipeline and the HTML cohort report; W4-01 faster Draw and Scissors apply and cheaper undo; W4-02 Library grid with thumbnails; W4-03 lazy Python wrappers; W4-04 linker option `--as-needed` for packaged builds; W4-05 user guide; L-23 to L-34 figures, nulls, validation, robustness, Draw intake and Map QA surfaces, connectome converters, Lead-DBS interoperability; P-03; A-06 README update | Planned |
+| Wave 5: LNM research features | L-35 to L-54 connectome fetcher, Validate, Robust and Nulls cards, analysis recipes, control-lesion sets, review workflow, blind double tracing, case series, share-safe study export, headless twin, pipeline calibration, coordinate seeds, VLSM, literature sources, reference maps, tutorial cohorts, LNM documentation; A-07 README update | Planned |
+
+Connectomes are never bundled or downloaded automatically; templates are downloaded only when you ask.
 
 Known limitations today:
 
 - The Map workspace is disabled; lesion network mapping runs from the command line.
-- Draw shows the classic Segment Editor panel, so the inspector is 423 px wide in Draw, and stays that
-  wide in the Library after Draw has been opened.
+- Draw shows the classic Segment Editor panel. Its inspector width is chosen from what the tools need
+  (up to 600 px, remembered), so it can be wider than the 340 px default after you have used the tools.
 - `Ctrl+K` opens Slicer's module finder, not a command palette.
 - The *System* theme follows the operating system on Windows only; on macOS and Linux it is light.
 - The fork's default settings file (`Applications/SlicerApp/Resources/SlicerDefaultSettings.ini`) is
   not installed yet; its keys equal the built-in defaults or are not read yet (the Inter font keys,
   wave 2), so nothing changes for users.
+- Slicer Studio has been run on Linux with Qt 5.15. The macOS packages (Qt 6) passed the start-up test
+  on macOS 15 with Apple Silicon only.
 
 ## Development
 
@@ -568,7 +639,7 @@ Known limitations today:
 
 | Path | Contents |
 |---|---|
-| [Modules/Scripted/Studio](Modules/Scripted/Studio) | Studio interface: shell, top bar, workspaces, layouts, Library page, importer, downloads; `StudioTest` |
+| [Modules/Scripted/Studio](Modules/Scripted/Studio) | Studio interface: shell, top bar, workspaces, layouts, Library page, importer, downloads, Draw hooks, orientation letters, module finder; `StudioTest`, `StudioNavigationTest`, `StudioOrientationTest` |
 | [Modules/Scripted/LesionNetworkMapping](Modules/Scripted/LesionNetworkMapping) | `LesionNetworkMappingLib` and its unit tests (the module itself is planned) |
 | [Modules/Scripted/SampleData](Modules/Scripted/SampleData) | "MNI152 (neuro)" category: bundled 2 mm template, TemplateFlow downloads |
 | [Base/QTGUI/qSlicerStyle.cxx](Base/QTGUI/qSlicerStyle.cxx) | Palettes, color tokens, density, accent color |
@@ -576,7 +647,6 @@ Known limitations today:
 | [Utilities/SlicerStudioWeb](Utilities/SlicerStudioWeb) | Web browser launcher and Docker image |
 | [Utilities/Scripts/SlicerStudioMacOS](Utilities/Scripts/SlicerStudioMacOS) | macOS disk image build script |
 | [Utilities/Scripts](Utilities/Scripts) | `StudioTestRunner.py`, `StudioBench.py`, `StudioScreens.py`, `SlicerFileCompatibilityCheck.py` |
-| [.github/workflows/studio-packages.yml](.github/workflows/studio-packages.yml) | Packaging workflow; disabled, kept as a reference for the build steps |
 | [Docs/user_guide/install_studio.md](Docs/user_guide/install_studio.md) | Install guide |
 
 ### Tests
