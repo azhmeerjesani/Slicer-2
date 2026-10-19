@@ -19,6 +19,16 @@ def _onStartupCompleted():
     from StudioLib import shell
 
     shell.onStartupCompleted(startTime)
+    # Scene autosave and crash recovery, in Classic and in Studio (after the Studio apply time measurement)
+    try:
+        from StudioLib import autosave
+
+        autosave.onStartupCompleted()
+    except Exception:
+        import logging
+        import traceback
+
+        logging.error("Autosave could not be started:\n" + traceback.format_exc())
 
 
 class Studio(ScriptedLoadableModule):
@@ -46,6 +56,14 @@ and the focus mode, and Ctrl+Alt+0 switches to the Classic interface and back
 <p>The Classic interface is never removed. Studio is not used when testing,
 without main window, with the SLICER_CLASSIC_UI=1 environment variable,
 or when the Studio/Enabled setting is false.</p>
+<p>Autosave and recovery (Classic and Studio): while you work, the scene is autosaved every few minutes
+to a private folder of your user account (the StudioAutosave folder in the application data folder,
+for example ~/.local/share/slicer.org/Slicer/StudioAutosave on Linux and
+~/Library/Application Support/slicer.org/Slicer/StudioAutosave on macOS), never to your own folders.
+Autosave is not Save: use File &gt; Save to keep your work. If Slicer closes unexpectedly, or you close
+without saving, the work can be recovered at the next start or with File &gt; Recover Autosaved Work.
+The location, the frequency and how long autosaves are kept are set in the Autosave panel of the
+application settings.</p>
 """)
         self.parent.acknowledgementText = _("""
 <p>Icons: <a href="https://lucide.dev">Lucide</a> 0.468.0, ISC License,

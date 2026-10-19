@@ -14,7 +14,10 @@ writer script runs headless in A and builds a small test scene:
 - the current layout: 7001 "Studio Focus" for a fork writer, Conventional for an official writer
 
 The scene is saved twice: as a scene file with its data files in a directory, and as a ``.mrb``
-bundle. A fork writer also runs the lesion network mapping command-line interface
+bundle. With ``--autosave``, a fork writer first writes the scene with the Slicer Studio scene autosave
+(``StudioLib.autosave_io.writeSnapshot``, before the regular saves, so that every node is written by the autosave)
+into ``autosave/``; checkers load that ``Scene.mrml`` as a third scene, with the same checks. A fork writer also
+runs the lesion network mapping command-line interface
 (``python -m LesionNetworkMappingLib.engine``) on a small synthetic connectome, when
 LesionNetworkMappingLib is available (in the writer or in the source tree), and saves its NIfTI outputs.
 
@@ -32,13 +35,16 @@ records what it sees. This script compares that with what A recorded before savi
 - the NIfTI outputs load with identical geometry and voxel values.
 
 Each Slicer process runs with fresh, isolated settings (a temporary HOME), so the user's settings are
-neither used nor modified. A report is written as JSON (``report.json``) and as text (``report.txt``)
+neither used nor modified. Official installations run under ``LANG=LC_ALL=C.UTF-8`` (official 5.12.4 fails on
+non-ASCII paths under the POSIX locale). One more writer case saves into a folder whose name has non-ASCII
+characters and spaces ("Étude with spaces"): the first fork writer (or the first writer) writes it again there, and
+every checker loads it. A report is written as JSON (``report.json``) and as text (``report.txt``)
 into the output directory, with screenshots in ``shots/``. The exit code is non-zero if any check fails.
 
 Usage::
 
   SlicerFileCompatibilityCheck.py --slicer NAME=PATH [--slicer NAME=PATH ...] --out DIR
-      [--pairs all|cross|WRITER:CHECKER[,WRITER:CHECKER...]] [--fork NAME ...] [--testing]
+      [--pairs all|cross|WRITER:CHECKER[,WRITER:CHECKER...]] [--fork NAME ...] [--testing] [--autosave]
       [--timeout SECONDS] [--no-xvfb] [--lnm-lib-dir DIR]
 
   --slicer NAME=PATH  a Slicer launcher to test (repeatable). NAMEs starting with "fork" are treated as
@@ -48,6 +54,7 @@ Usage::
                       "cross": only pairs of different installations; or an explicit list
   --fork NAME         name of a fork installation (repeatable)
   --testing           start Slicer with --testing (by default the normal user interface is used)
+  --autosave          also check the scene autosave of fork writers (skipped when StudioLib is missing)
   --timeout SECONDS   time limit for each Slicer process (default: 900)
   --no-xvfb           do not wrap the Slicer processes in xvfb-run
   --lnm-lib-dir DIR   directory that contains the LesionNetworkMappingLib package, used when a fork
@@ -117,8 +124,11 @@ STUDIO_LAYOUTS = {
     7003: f'<layout type="horizontal" split="true"><item>{_SLICE_RED}</item><item>{_SLICE_GREEN}</item><item>{_SLICE_YELLOW}</item></layout>',
 }
 
-# A writer saves the scene as a scene file with data files in a directory ("dir") and as a bundle ("mrb")
-SCENE_FORMATS = ("dir", "mrb")
+# A writer saves the scene as a scene file with data files in a directory ("dir") and as a bundle ("mrb");
+# with --autosave, a fork writer also writes the Slicer Studio scene autosave ("autosave")
+SCENE_FORMATS = ("dir", "mrb", "autosave")
+# Folder name of the writer case with non-ASCII characters and spaces in the path
+UNICODE_FOLDER_NAME = "\u00c9tude with spaces"
 
 # Messages that the application emits asynchronously for reasons unrelated to the loaded files
 # (no network access in the test environment, software rendering). They are reported but ignored.
@@ -730,6 +740,9 @@ def _runWriter(config):
     result["layout"] = _setLayout(layoutId)
     result["state"] = _collectState()
     result["views"] = _viewsState()
+    if config.get("autosave"):
+        # Before the regular saves: every node is new, so the autosave writes all the data itself
+        result["autosave"] = _writeAutosave(config) if config["isFork"] else {"status": "skipped", "reason": "official writer (autosave is a fork feature)"}
 
     # Scene file with its data files in a directory (what the Save data dialog does)
     sceneDir = os.path.join(outDir, "scene")
@@ -754,13 +767,17 @@ def _runWriter(config):
     saved[f"{SCENE_NAME}.mrb"] = bool(slicer.util.saveScene(mrbFile))
     result["saved"] = saved
     result["files"] = {"dir": sceneFile, "mrb": mrbFile}
+    if result.get("autosave", {}).get("status") == "ok":
+        result["files"]["autosave"] = result["autosave"]["scene"]
     result["classCounts"] = _addedNodeClassCounts(baselineIds, savedOnly=True)
 
     shot = os.path.join(config["shotsDir"], f"writer_{config['name']}.png")
     _screenshot(shot)
     result["screenshot"] = shot
 
-    if config["isFork"]:
+    if config.get("skipLnm"):
+        result["lnm"] = {"status": "skipped", "reason": "not repeated for this writer case"}
+    elif config["isFork"]:
         try:
             result["lnm"] = _writeLnmOutputs(config)
         except Exception:
@@ -769,6 +786,33 @@ def _runWriter(config):
         result["lnm"] = {"status": "skipped", "reason": "official writer (LNM is a fork module)"}
     result["messages"] = capture.stop()
     return result
+
+
+def _writeAutosave(config):
+    """Write the scene with the Slicer Studio autosave (StudioLib.autosave_io) into <outDir>/autosave."""
+    import importlib
+
+    import slicer
+
+    try:
+        autosaveIo = importlib.import_module("StudioLib.autosave_io")
+    except ImportError:
+        return {"status": "skipped", "reason": "StudioLib is not available in this Slicer"}
+    slotDir = os.path.join(config["outDir"], "autosave")
+    shutil.rmtree(slotDir, ignore_errors=True)
+    start = time.perf_counter()
+    try:
+        plan = autosaveIo.writeSnapshot(slicer.mrmlScene, slotDir, {"autosaveRoot": slotDir})
+    except Exception:
+        return {"status": "error", "stderr": traceback.format_exc()}
+    return {
+        "status": "ok",
+        "scene": os.path.join(slotDir, autosaveIo.SCENE_FILE),
+        "seconds": round(time.perf_counter() - start, 3),
+        "kinds": {entry.get("name"): entry.get("kind") for entry in plan.entries.values()},
+        # The autosave must leave the scene "modified since read" (D-A4)
+        "sceneModifiedAfter": bool(slicer.mrmlScene.GetModifiedSinceRead()),
+    }
 
 
 def _importLnm(config):
@@ -1266,6 +1310,9 @@ def _runSlicer(slicerPath, role, name, config, args):
         command = ["xvfb-run", "-a", "-s", "-screen 0 1920x1080x24", *command]
     # Isolated settings: never use or modify the settings that the user's installations share
     environment = dict(os.environ, HOME=home, XDG_CONFIG_HOME=os.path.join(home, ".config"), XDG_CACHE_HOME=os.path.join(home, ".cache"), XDG_DATA_HOME=os.path.join(home, ".local", "share"))
+    if not config.get("isFork"):
+        # Official 5.12.4 fails on non-ASCII paths under the POSIX locale; it loads them correctly under C.UTF-8 (A-04 E9)
+        environment.update(LANG="C.UTF-8", LC_ALL="C.UTF-8")
     print(f"[{time.strftime('%H:%M:%S')}] {role} {name}: {slicerPath}", flush=True)
     start = time.time()
     with open(os.path.join(runDir, "slicer.log"), "w", encoding="utf-8") as log:
@@ -1318,6 +1365,11 @@ def _evaluateWriter(name, writer):
             problems.append(f"could not set layout {STUDIO_FOCUS_LAYOUT} (layout is {writer.get('layout')})")
         if writer.get("lnm", {}).get("status") == "error":
             problems.append(f"LNM command line failed: {writer['lnm'].get('stderr', '').strip()[-300:]}")
+        autosave = writer.get("autosave", {})
+        if autosave.get("status") == "error":
+            problems.append(f"autosave failed: {autosave.get('stderr', '').strip()[-300:]}")
+        elif autosave.get("status") == "ok" and not autosave.get("sceneModifiedAfter"):
+            problems.append("the autosave marked the scene as saved (vtkMRMLScene::Commit string mode)")
     errors = [m for m in writer.get("messages", []) if m["level"] in ERROR_LEVELS and not _isNoise(m)]
     for message in errors:
         problems.append(f"{message['level']} while writing: {message['text'].strip()[:300]}")
@@ -1338,6 +1390,12 @@ def _evaluatePair(writerName, checkerName, writer, checker, isFork):
     expectedLayoutId = expectedLayout(writer["layout"], isFork[checkerName])
     for sceneFormat in SCENE_FORMATS:
         record = records.get(sceneFormat)
+        if sceneFormat == "autosave":
+            if "autosave" not in writer:
+                continue  # --autosave was not given
+            if writer["autosave"].get("status") != "ok":
+                evaluation[sceneFormat] = {"problems": [], "skipped": writer["autosave"].get("reason") or writer["autosave"].get("status")}
+                continue
         if record is None:
             evaluation[sceneFormat] = {"problems": ["not checked"]}
             continue
@@ -1385,13 +1443,20 @@ def _formatReport(report):
         status = "PASS" if not writer["problems"] else "FAIL"
         lnm = writer.get("lnm", {})
         lnmText = f"LNM outputs: {lnm.get('status')}" + (f" ({lnm.get('library') or lnm.get('reason')})" if lnm.get("library") or lnm.get("reason") else "")
+        if "autosave" in writer:
+            autosave = writer["autosave"]
+            lnmText += f"; autosave: {autosave.get('status')}" + (f" ({autosave.get('reason')})" if autosave.get("reason") else f" ({autosave.get('seconds')} s)")
         lines.append(f"  {name:<20} {status}  layout {writer.get('layout')}; {lnmText}")
+        if writer.get("outDir") and UNICODE_FOLDER_NAME in writer["outDir"]:
+            lines.append(f"      (saved in {writer['outDir']})")
         lines += [f"      - {p}" for p in writer["problems"]]
 
     names = list(report["slicers"])
-    width = max(len(n) for n in names) + 2
-    lines += ["", "Matrix (rows: writer, columns: checker; formats dir/mrb/lnm):", " " * width + "".join(f"{n:<{width + 4}}" for n in names)]
-    for writerName in names:
+    writerNames = list(report["writers"])
+    width = max(len(n) for n in names + writerNames) + 2
+    formats = "dir/mrb/autosave/lnm" if any("autosave" in writer for writer in report["writers"].values()) else "dir/mrb/lnm"
+    lines += ["", f"Matrix (rows: writer, columns: checker; formats {formats}):", " " * width + "".join(f"{n:<{width + 4}}" for n in names)]
+    for writerName in writerNames:
         row = f"{writerName:<{width}}"
         for checkerName in names:
             pair = report["pairs"].get(f"{writerName}:{checkerName}")
@@ -1441,6 +1506,7 @@ def main(argv=None):
     parser.add_argument("--pairs", default="all", help="'all' (default), 'cross' or WRITER:CHECKER[,WRITER:CHECKER...]")
     parser.add_argument("--fork", action="append", default=None, metavar="NAME", help="name of a fork installation (default: names starting with 'fork')")
     parser.add_argument("--testing", action="store_true", help="start Slicer with --testing")
+    parser.add_argument("--autosave", action="store_true", help="also check the scene autosave of fork writers (Slicer Studio)")
     parser.add_argument("--timeout", type=int, default=900, help="time limit for each Slicer process in seconds")
     parser.add_argument("--no-xvfb", action="store_true", help="do not run Slicer in xvfb-run")
     parser.add_argument("--lnm-lib-dir", default=os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "Modules", "Scripted", "LesionNetworkMapping")))
@@ -1469,9 +1535,23 @@ def main(argv=None):
     for name in involved:
         outDir = os.path.join(args.out, "write", name)
         os.makedirs(outDir)
-        writers[name] = _runSlicer(slicers[name], "writer", name, {"outDir": outDir, "isFork": isFork[name], "lnmLibDir": args.lnm_lib_dir}, args)
+        writers[name] = _runSlicer(slicers[name], "writer", name, {"outDir": outDir, "isFork": isFork[name], "lnmLibDir": args.lnm_lib_dir, "autosave": args.autosave}, args)
         with open(os.path.join(outDir, "manifest.json"), "w", encoding="utf-8") as f:
             json.dump(writers[name], f, indent=1, sort_keys=True)
+
+    # One more writer case: a folder name with non-ASCII characters and spaces, loaded by every checker
+    unicodeBase = next((name for name in involved if isFork[name]), involved[0] if involved else None)
+    if unicodeBase is not None:
+        unicodeName = f"{unicodeBase}-unicode-path"
+        outDir = os.path.join(args.out, "write", unicodeName, UNICODE_FOLDER_NAME)
+        os.makedirs(outDir)
+        config = {"outDir": outDir, "isFork": isFork[unicodeBase], "lnmLibDir": args.lnm_lib_dir, "autosave": args.autosave, "skipLnm": True}
+        writers[unicodeName] = _runSlicer(slicers[unicodeBase], "writer", unicodeName, config, args)
+        with open(os.path.join(args.out, "write", unicodeName, "manifest.json"), "w", encoding="utf-8") as f:
+            json.dump(writers[unicodeName], f, indent=1, sort_keys=True)
+        slicers[unicodeName] = slicers[unicodeBase]
+        isFork[unicodeName] = isFork[unicodeBase]
+        pairs += [(unicodeName, checker) for checker in involved]
 
     # Checkers: one process per checker installation loads the files of all its writers
     checkers = {}
@@ -1498,12 +1578,16 @@ def main(argv=None):
             # Informational: canvas shown over the views at startup, hidden for the checks
             "startupCanvas": writers[name].get("startupCanvas") or checkers.get(name, {}).get("startupCanvas"),
         }
+    for name, writer in writers.items():
         report["writers"][name] = {
-            "problems": _evaluateWriter(name, writers[name]),
-            "layout": writers[name].get("layout"),
-            "lnm": {key: writers[name].get("lnm", {}).get(key) for key in ("status", "library", "reason")},
-            "seconds": writers[name].get("seconds"),
+            "problems": _evaluateWriter(name, writer),
+            "layout": writer.get("layout"),
+            "lnm": {key: writer.get("lnm", {}).get(key) for key in ("status", "library", "reason")},
+            "seconds": writer.get("seconds"),
+            "outDir": os.path.dirname(writer.get("files", {}).get("dir") or "") or None,
         }
+        if "autosave" in writer:
+            report["writers"][name]["autosave"] = {key: writer["autosave"].get(key) for key in ("status", "reason", "seconds", "kinds")}
     for writerName, checkerName in pairs:
         checker = checkers.get(checkerName, {"exception": "checker was not run"})
         report["pairs"][f"{writerName}:{checkerName}"] = _evaluatePair(writerName, checkerName, writers[writerName], checker, isFork)
