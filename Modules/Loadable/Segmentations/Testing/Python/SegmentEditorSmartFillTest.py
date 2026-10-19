@@ -5,6 +5,7 @@ Run with: Slicer --testing --python-code "import slicer.testing; slicer.testing.
 """
 
 import os
+import sys
 import time
 import unittest
 
@@ -268,6 +269,58 @@ class SegmentEditorSmartFillTest(unittest.TestCase):
         self.assertFalse(self.effect.hasPendingPreview())
         self.assertEqual(np.count_nonzero(self.segmentArray()), 0)
 
+    def test_progressive_tolerance_update(self):
+        """A tolerance update shows the flood at once, then the finalized region; it is never applied or kept unfinished."""
+        self.createScene(lesions=(((64, 64, 44), 12, 160.0), ((64, 64, 92), 8, 160.0)))
+        effectModule = sys.modules[type(self.effect).__module__]  # the package attribute is the class, not the module
+        self.effect.previewAtIjk((44, 64, 64))
+        tolerance = self.effect.lastResult["tolerance"]
+        self.effect.setTolerance(1.15, relative=True)
+        self.effect.finishTaskSynchronously()
+        self.assertFalse(self.effect.lastResult["provisional"])
+        final = self.previewArray() == 1
+        self.assertGreater(np.count_nonzero(final), 0)
+        self.assertFalse(final[:, :, 72:].any())
+        self.effect.discardPendingPreview()
+
+        budgetSeconds, provisionalMs = effectModule.STEP_BUDGET_SECONDS, effectModule.PROVISIONAL_FINALIZE_MS
+        effectModule.STEP_BUDGET_SECONDS = 0.0  # one step per timer callback, so that each state can be observed
+        effectModule.PROVISIONAL_FINALIZE_MS = 0.0  # show the flood first whatever the finalization time
+        try:
+            # repeated steps add up while an update is running
+            self.effect.previewAtIjk((44, 64, 64))
+            self.effect.setTolerance(1.15, relative=True)
+            self.effect.setTolerance(1.15, relative=True)
+            self.effect.finishTaskSynchronously()
+            self.assertAlmostEqual(self.effect.lastResult["tolerance"], tolerance * 1.15 * 1.15, delta=1e-6 * tolerance)
+            self.effect.discardPendingPreview()
+
+            for action in ("extend", "apply"):
+                self.effect.previewAtIjk((44, 64, 64))
+                self.effect.setTolerance(1.15, relative=True)  # first step: the flood
+                self.effect.onTaskTimer()  # next step: the flood is shown before the leak guard, closing and hole filling
+                self.assertTrue(self.effect.isComputing())
+                self.assertTrue(self.effect.lastResult["provisional"])
+                self.assertTrue(self.effect.hasPendingPreview())
+                if action == "extend":
+                    self.effect.previewAtIjk((92, 64, 64), "extend")
+                    self.assertFalse(self.effect.lastResult["provisional"])
+                    extended = self.previewArray() == 1
+                    self.assertTrue(np.array_equal(extended[:, :, :72], final[:, :, :72]), "the finalized region is kept")
+                    self.assertTrue(extended[:, :, 72:].any())
+                    self.effect.discardPendingPreview()
+                else:
+                    self.assertTrue(self.effect.applyPendingPreview())
+                    self.assertFalse(self.effect.isComputing())
+                    self.assertTrue(np.array_equal(self.segmentArray(), final), "Apply applies the finalized region")
+        finally:
+            effectModule.STEP_BUDGET_SECONDS, effectModule.PROVISIONAL_FINALIZE_MS = budgetSeconds, provisionalMs
+
+        # without a pending preview and with the automatic tolerance, +/- do not change the stored tolerance
+        percent = self.effect.parameterValue("TolerancePercent")
+        self.effect.setTolerance(1.15, relative=True)
+        self.assertEqual(self.effect.parameterValue("TolerancePercent"), percent)
+
     def test_shift_drag_pans_without_preview(self):
         if not self.hasViews():
             self.skipTest("needs slice views")
@@ -298,9 +351,15 @@ class SegmentEditorSmartFillTest(unittest.TestCase):
         self.effect = self.editor.activeEffect().self()
         self.click((64, 64, 64))
         self.assertGreater(renderer.GetActors2D().GetNumberOfItems(), baseline)
-        # start a computation and deactivate while it runs
-        xy = self.xyOf(red, (64, 64, 64))
-        slicer.util.clickAndDrag(red, start=xy, end=xy, steps=1)
+        # start a computation and deactivate while it runs (one step per timer callback: it is still running)
+        effectModule = sys.modules[type(self.effect).__module__]
+        budgetSeconds = effectModule.STEP_BUDGET_SECONDS
+        effectModule.STEP_BUDGET_SECONDS = 0.0
+        try:
+            xy = self.xyOf(red, (64, 64, 64))
+            slicer.util.clickAndDrag(red, start=xy, end=xy, steps=1)
+        finally:
+            effectModule.STEP_BUDGET_SECONDS = budgetSeconds
         self.assertTrue(self.effect.isComputing())
         effect = self.effect
         startTime = time.perf_counter()

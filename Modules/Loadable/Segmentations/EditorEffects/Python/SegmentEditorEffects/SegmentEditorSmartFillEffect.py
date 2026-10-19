@@ -55,6 +55,7 @@ CLICK_MAX_MOVE_PIXELS = 4.0  # logical pixels; a Shift/Ctrl press-release that m
 CLICK_MAX_SECONDS = 0.6
 WHEEL_MIN_INTERVAL_SECONDS = 0.040  # at most one tolerance step per 40 ms (trackpads send many wheel events)
 STEP_BUDGET_SECONDS = 0.040  # compute time per timer callback
+PROVISIONAL_FINALIZE_MS = 15.0  # a tolerance update shows its flood first if finalizing the region took longer than this
 BUSY_DELAY_MS = 150  # show "Computing..." only for computations that take longer
 MASK_POLL_INTERVAL_MS = 50
 
@@ -103,6 +104,19 @@ def _nativeControlKeyName():
     text = qt.QKeySequence("Ctrl+A").toString(qt.QKeySequence.NativeText)
     text = text[:-1] if text.endswith("A") else text
     return text[:-1] if text.endswith("+") else text
+
+
+def _timedSteps(generator, timing):
+    """Generator: run the steps of generator, adding their compute time (not the time between them) to timing[0]."""
+    while True:
+        start = time.perf_counter()
+        try:
+            next(generator)
+        except StopIteration as stop:
+            timing[0] += 1000.0 * (time.perf_counter() - start)
+            return stop.value
+        timing[0] += 1000.0 * (time.perf_counter() - start)
+        yield
 
 
 def _devicePixelRatio(widget):
@@ -306,7 +320,8 @@ class SegmentEditorSmartFillEffect(AbstractScriptedSegmentEditorEffect):
 
         self.applyOnClickCheckBox = qt.QCheckBox(_("Apply on click"))
         self.applyOnClickCheckBox.objectName = "SmartFillApplyOnClickCheckBox"
-        self.applyOnClickCheckBox.setToolTip(_("Apply each click immediately instead of showing a preview to apply with Enter."))
+        self.applyOnClickCheckBox.setToolTip(_("Apply each click immediately instead of showing a preview to apply with Enter."
+                                               " Shift+click and {ctrl}+click still show a preview.").format(ctrl=_nativeControlKeyName()))
         self.scriptedEffect.addOptionsWidget(self.applyOnClickCheckBox)
 
         self.applyButton = qt.QPushButton(_("Apply"))
@@ -515,15 +530,22 @@ class SegmentEditorSmartFillEffect(AbstractScriptedSegmentEditorEffect):
         """Change the tolerance of the last region of the preview and recompute it.
 
         :param value: tolerance in percent of the click's intensity scale, or a factor when relative is True.
-        Without a pending preview, it changes the TolerancePercent parameter (used when Auto is off).
+        Without a pending preview, it changes the TolerancePercent parameter when Auto is off; when Auto is on,
+        a relative change only shows a hint (the automatic tolerance would ignore it).
         """
         low, high = TOLERANCE_PERCENT_RANGE
         if not self.parts or self.lastPart is None:
+            if relative and self.parameterValue("AutoTolerance"):
+                self.setMessage(_("The tolerance is automatic: click inside a lesion first, then adjust it"))
+                return
             percent = self.parameterValue("TolerancePercent") * value if relative else value
             self.setParameters({"TolerancePercent": float(min(max(percent, low), high))})
             return
         scale = self.lastPart["scale"]
-        percent = self.lastPart["tolerancePercent"] * value if relative else value
+        currentPercent = self.lastPart["tolerancePercent"]
+        if self.task is not None and self.task.get("tolerance") is not None and scale > 0:
+            currentPercent = 100.0 * self.task["tolerance"] / scale  # repeated steps add up while an update runs
+        percent = currentPercent * value if relative else value
         percent = min(max(percent, low), high)
         self.startRetolerance(percent * scale / 100.0)
 
@@ -759,8 +781,12 @@ class SegmentEditorSmartFillEffect(AbstractScriptedSegmentEditorEffect):
     # Computation
     #
 
-    def sourceContext(self):
-        """Source array view, spacing, display window, intensity range and allowed mask (or a message)."""
+    def sourceContext(self, waitForBrainMask=True):
+        """Source array view, spacing, display window, intensity range and allowed mask (or a message).
+
+        :param waitForBrainMask: wait for a brain mask that is still being read (scripts); otherwise (clicks) return a
+          message instead of blocking the GUI thread.
+        """
         modules = _lazyModules()
         numpy, numpy_support = modules["numpy"], modules["numpy_support"]
         sourceImage = self.scriptedEffect.sourceVolumeImageData()
@@ -783,6 +809,8 @@ class SegmentEditorSmartFillEffect(AbstractScriptedSegmentEditorEffect):
             intensityRange = tuple(parameterSetNode.GetSourceVolumeIntensityMaskRange())
         allowed = None
         if self.parameterValue("StayInsideBrain") and self.brainMask is not None:
+            if self.brainMask["state"] == "loading" and not waitForBrainMask:
+                return None, _("The brain mask is still loading: click again in a moment")
             self.waitForBrainMask()
             if self.brainMask is not None and self.brainMask.get("array") is not None and self.brainMask["array"].shape == dims:
                 allowed = self.brainMask["array"]
@@ -791,18 +819,21 @@ class SegmentEditorSmartFillEffect(AbstractScriptedSegmentEditorEffect):
 
     def startClick(self, ijk, operation, tolerancePercent, sliceAxis, synchronous):
         """Start (or run synchronously) the computation of one click."""
+        context, error = self.sourceContext(waitForBrainMask=synchronous)
+        seed = None
+        if context is not None:
+            extent = context["extent"]
+            seed = (int(ijk[2]) - extent[4], int(ijk[1]) - extent[2], int(ijk[0]) - extent[0])
+            if not all(0 <= s < n for s, n in zip(seed, context["array"].shape, strict=True)):
+                error = _("Click inside the image")
+            elif context["allowed"] is not None and not context["allowed"][seed]:
+                error = _("Outside the brain mask")
+        if error or operation != "new":
+            # the preview is kept (or extended): a tolerance update that shows its unfinished region must end first
+            self.settleProvisionalTask()
         self.cancelTask()
-        context, error = self.sourceContext()
-        if context is None:
+        if error:
             self.setMessage(error, warning=True)
-            return
-        extent = context["extent"]
-        seed = (int(ijk[2]) - extent[4], int(ijk[1]) - extent[2], int(ijk[0]) - extent[0])
-        if not all(0 <= s < n for s, n in zip(seed, context["array"].shape, strict=True)):
-            self.setMessage(_("Click inside the image"), warning=True)
-            return
-        if context["allowed"] is not None and not context["allowed"][seed]:
-            self.setMessage(_("Outside the brain mask"), warning=True)
             return
         self.clickSerial += 1
         generator = self.iterClick(context, seed, operation, tolerancePercent, sliceAxis, self.clickSerial)
@@ -839,14 +870,15 @@ class SegmentEditorSmartFillEffect(AbstractScriptedSegmentEditorEffect):
             region, _count = grower.region(tolerance)
             yield
             info = {"limitReached": grower.limitReached(region), "noEdge": False, "mayContinue": False}
-        finalizeStart = time.perf_counter()
-        region = yield from algorithm.iterFinalize(grower, region, self.parameterValue("LeakGuardMm"), self.parameterValue("FillHoles"))
-        finalizeMs = 1000.0 * (time.perf_counter() - finalizeStart)
+        finalizeTiming = [0.0]
+        region = yield from _timedSteps(
+            algorithm.iterFinalize(grower, region, self.parameterValue("LeakGuardMm"), self.parameterValue("FillHoles")), finalizeTiming)
+        finalizeMs = finalizeTiming[0]
         extending = bool(auto and info.get("mayContinue") and firstRadiusMm < maxRadiusMm)
         limitReached = bool(info.get("limitReached") or (info.get("mayContinue") and not extending))
         part = {"serial": serial, "sign": sign, "operation": operation, "grower": grower, "region": region,
                 "tolerance": tolerance, "auto": auto, "limitReached": limitReached, "noEdge": bool(info.get("noEdge")),
-                "escalated": False, "extending": extending, "mode": mode}
+                "escalated": False, "extending": extending, "mode": mode, "finalizeMs": finalizeMs}
         pass1Ms = 1000.0 * (time.perf_counter() - startTime)
         yield  # the display update is a step of its own
         self.setLastPart(part, replaceLast=False, timings={"pass1": pass1Ms, "pass2": None, "finalize": finalizeMs})
@@ -861,35 +893,65 @@ class SegmentEditorSmartFillEffect(AbstractScriptedSegmentEditorEffect):
         pass2Start = time.perf_counter()
         grower2 = yield from algorithm.RegionGrower.iterCreate(*arguments, maxRadiusMm=maxRadiusMm, **options)
         tolerance2, region2, info2 = yield from grower2.iterAutoTolerance(minFraction=info.get("fraction"))
-        finalizeStart = time.perf_counter()
-        region2 = yield from algorithm.iterFinalize(grower2, region2, self.parameterValue("LeakGuardMm"), self.parameterValue("FillHoles"))
-        finalizeMs = 1000.0 * (time.perf_counter() - finalizeStart)
-        part2 = dict(part, grower=grower2, region=region2, tolerance=tolerance2, escalated=True, extending=False,
+        finalizeTiming = [0.0]
+        region2 = yield from _timedSteps(
+            algorithm.iterFinalize(grower2, region2, self.parameterValue("LeakGuardMm"), self.parameterValue("FillHoles")), finalizeTiming)
+        finalizeMs = finalizeTiming[0]
+        part2 = dict(part, grower=grower2, region=region2, tolerance=tolerance2, escalated=True, extending=False, finalizeMs=finalizeMs,
                      limitReached=bool(info2.get("limitReached") or info2.get("mayContinue")), noEdge=bool(info2.get("noEdge")))
         yield  # the display update is a step of its own
         self.setLastPart(part2, replaceLast=True, timings={"pass2": 1000.0 * (time.perf_counter() - pass2Start), "finalize": finalizeMs})
         logging.debug(f"Smart fill extended to {grower2.effectiveRadiusMm:.0f} mm: tolerance {tolerance2:.4g}, {int(region2.sum())} voxels")
 
     def iterRetolerance(self, tolerance):
+        """Generator: recompute the last part at a new tolerance, progressively.
+
+        When finalizing the region (leak guard, closing and hole filling) took more than PROVISIONAL_FINALIZE_MS
+        last time, the flood at the new tolerance is shown at once (provisional) and rendered before the region is
+        finalized and shown again. A newer tolerance request cancels the finalization; anything else that keeps the
+        preview (Apply, an extend or remove click) first finishes it, so that a provisional region is never applied
+        or kept.
+        """
         algorithm = _lazyModules()["algorithm"]
         self.task["phase"] = "tolerance"
+        self.task["tolerance"] = tolerance
         startTime = time.perf_counter()
         part = self.lastPart
         grower = part["grower"]
         region, _count = grower.region(tolerance)
         limitReached = grower.limitReached(region)
+        newPart = dict(part, region=region, tolerance=tolerance, auto=False, limitReached=limitReached, noEdge=False,
+                       extending=False, provisional=False)
+        leakGuardMm, fillHoles = self.parameterValue("LeakGuardMm"), self.parameterValue("FillHoles")
         yield
-        region = yield from algorithm.iterFinalize(grower, region, self.parameterValue("LeakGuardMm"), self.parameterValue("FillHoles"))
-        newPart = dict(part, region=region, tolerance=tolerance, auto=False, limitReached=limitReached, noEdge=False, extending=False)
-        yield  # the display update is a step of its own
-        self.setLastPart(newPart, replaceLast=True, timings={"tolerance": 1000.0 * (time.perf_counter() - startTime)})
+        if leakGuardMm > 0 or fillHoles:
+            if part.get("finalizeMs", 0.0) > PROVISIONAL_FINALIZE_MS:
+                self.task["provisional"] = True
+                self.setLastPart(dict(newPart, provisional=True), replaceLast=True,
+                                 timings={"toleranceFirst": 1000.0 * (time.perf_counter() - startTime)})
+                self.task["pause"] = True  # back to the event loop, so that the provisional region is rendered now
+                yield
+            finalizeTiming = [0.0]
+            newPart["region"] = yield from _timedSteps(algorithm.iterFinalize(grower, region, leakGuardMm, fillHoles), finalizeTiming)
+            newPart["finalizeMs"] = finalizeTiming[0]
+            yield  # the display update is a step of its own
+        timings = {"tolerance": 1000.0 * (time.perf_counter() - startTime)}
+        if not self.task.get("provisional"):
+            timings["toleranceFirst"] = timings["tolerance"]
+        self.task["provisional"] = False
+        self.setLastPart(newPart, replaceLast=True, timings=timings)
 
     def setLastPart(self, part, replaceLast, timings):
         """Store a computed region as the last part of the preview and update the display."""
         displayStart = time.perf_counter()
         part["scale"] = part["grower"].scale
         part["tolerancePercent"] = 100.0 * part["tolerance"] / part["scale"] if part["scale"] > 0 else 0.0
-        entry = (part["sign"], tuple(int(x) for x in part["grower"].offsetKji), part["region"])
+        offset, region = tuple(int(x) for x in part["grower"].offsetKji), part["region"]
+        if region.any():
+            slices = _lazyModules()["algorithm"].boundingBoxSlices(region, pad=0)
+            offset = tuple(o + s.start for o, s in zip(offset, slices, strict=True))
+            region = region[slices]
+        entry = (part["sign"], offset, region)
         if replaceLast and self.parts:
             self.parts[-1] = entry
         elif part["operation"] == "new":
@@ -917,6 +979,7 @@ class SegmentEditorSmartFillEffect(AbstractScriptedSegmentEditorEffect):
             "escalated": part["escalated"],
             "extending": part["extending"],
             "mode": part["mode"],
+            "provisional": bool(part.get("provisional")),
             "timingsMs": timingsMs,
         }
         self.message = ""
@@ -943,6 +1006,11 @@ class SegmentEditorSmartFillEffect(AbstractScriptedSegmentEditorEffect):
         if self.task is task:
             task["busy"] = True
             self.updateStatus()
+
+    def settleProvisionalTask(self):
+        """Finish a tolerance update whose unfinished region is shown, so that it is never kept in the preview."""
+        if self.task is not None and self.task.get("provisional"):
+            self.finishTaskSynchronously()
 
     def cancelTask(self):
         if self.task is not None:
@@ -985,6 +1053,8 @@ class SegmentEditorSmartFillEffect(AbstractScriptedSegmentEditorEffect):
                 task["maxStep"] = max(task["maxStep"], now - stepStart)
                 if self.task is not task:
                     return True  # cancelled from inside the step
+                if task.pop("pause", False) and budgetSeconds is not None:
+                    return False  # the step asked to return to the event loop (to render)
                 # run another step only if a step as long as the longest one so far still fits in the budget
                 if budgetSeconds is not None and (now - startTime) + task["maxStep"] > budgetSeconds:
                     return False

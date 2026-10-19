@@ -263,6 +263,21 @@ class SmartFillAlgorithmTest(unittest.TestCase):
                 self.assertTrue(np.array_equal(sfa.morph(sub, radiusKji, 0, 1), fullFilter(sub, radiusKji, 0, 1)))
                 self.assertTrue(np.array_equal(sfa.dilate(sub, radiusKji), fullFilter(sub, radiusKji)))
 
+        # row-decomposed kernels (and the per-offset fallback) on random masks, including 2D kernels and several slabs
+        noiseMask = np.random.default_rng(1).random((40, 37, 35)) > 0.7
+        for radiusKji in ((1, 1, 1), (2, 2, 0), (0, 2, 2), (2, 0, 2), (1, 2, 3), (3, 3, 3), (0, 0, 1)):
+            key = tuple(radiusKji)
+            for useRows in (True, False):
+                rows = sfa.kernelRows(key)
+                if not useRows:
+                    sfa._kernelRowsCache[key] = None
+                try:
+                    self.assertTrue(np.array_equal(sfa.morph(noiseMask, radiusKji, 1, 0), fullFilter(noiseMask, radiusKji, 1, 0)))
+                    self.assertTrue(np.array_equal(sfa.morph(noiseMask, radiusKji, 0, 1), fullFilter(noiseMask, radiusKji, 0, 1)))
+                    self.assertTrue(np.array_equal(sfa.dilate(noiseMask, radiusKji), fullFilter(noiseMask, radiusKji)))
+                finally:
+                    sfa._kernelRowsCache[key] = rows
+
         # largest generator step for an escalated r=45 lesion on 256^3
         fraction = ball(shape, (128, 128, 128), 45)
         image = 100 * (1 - fraction) + 160 * fraction + self.noise(4, shape)
@@ -284,6 +299,14 @@ class SmartFillAlgorithmTest(unittest.TestCase):
         self.assertLessEqual(max(steps), 60.0)
         score = dice(place(shape, result[0], result[1]), fraction > 0.5)
         self.assertGreaterEqual(score, 0.95)
+
+        # noise realizations where a below-noise tolerance percolates through the lesion to the first-pass radius
+        # limit (only noise-level edges before it): the radius must still be extended
+        for seed in (5, 10):
+            image = 100 * (1 - fraction) + 160 * fraction + np.random.default_rng(seed).normal(0, 4, shape).astype(np.float32)
+            offset, region, info = sfa.smartFill(image, (128, 128, 143), (1, 1, 1), 200.0)
+            self.assertTrue(info.get("escalated"), f"seed {seed}")
+            self.assertGreaterEqual(dice(place(shape, offset, region), fraction > 0.5), 0.95, f"seed {seed}")
 
     def test_m_stepped_percentiles(self):
         """The intensity scale of large boxes uses stepped percentiles: identical to numpy.percentile."""

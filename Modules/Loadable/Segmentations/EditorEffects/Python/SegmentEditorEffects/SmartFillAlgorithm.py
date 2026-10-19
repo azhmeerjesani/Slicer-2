@@ -175,10 +175,12 @@ def ellipsoidOffsets(radiusKji):
 
 def boundingBoxSlices(mask, pad=1):
     """Slices of the bounding box of the True voxels of a non-empty mask, padded and clamped to the array."""
+    # two passes over the mask (projections along k and onto the j-i plane) instead of one per axis
+    projectionJi = mask.any(axis=0)
+    projections = (mask.any(axis=(1, 2)), projectionJi.any(axis=1), projectionJi.any(axis=0))
     slices = []
-    for axis in range(3):
-        otherAxes = tuple(a for a in range(3) if a != axis)
-        nonZero = numpy.flatnonzero(mask.any(axis=otherAxes))
+    for axis, projection in enumerate(projections):
+        nonZero = numpy.flatnonzero(projection)
         slices.append(slice(max(0, int(nonZero[0]) - pad), min(mask.shape[axis], int(nonZero[-1]) + 1 + pad)))
     return tuple(slices)
 
@@ -370,7 +372,8 @@ class RegionGrower:
 
         info: scale, mu, sigma, candidates [(tolerance, count, contrast)], limitReached (no valid candidate),
         fraction (of the chosen tolerance), contrastGain, noEdge (only noise-level edges), mayContinue (the
-        contrast was still rising when the sweep reached the radius limit: the lesion may continue).
+        contrast was still rising, or no real edge was found, when the sweep reached the radius limit: the lesion may
+        continue).
         """
         candidates = []  # dicts without regions, sorted by fraction at the end
         best = None  # the candidate with the best contrast so far, with its region
@@ -428,8 +431,12 @@ class RegionGrower:
         info["fraction"] = float(chosen["fraction"])
         info["contrastGain"] = gain
         info["noEdge"] = bool(gain < MIN_EDGE_GAIN and bestContrast < NOISE_EDGE_SIGMAS * max(self.sigma, 1e-12))
-        info["mayContinue"] = bool(firstHit is not None and good[-1]["contrast"] >= bestContrast
-                                   and (gain < MIN_EDGE_GAIN or self.reachMm(region) >= CONTINUE_REACH * self.effectiveRadiusMm))
+        # The lesion may continue beyond the radius limit if the contrast was still rising when the sweep reached it,
+        # or if no real edge was found before it (in a lesion larger than the radius limit, a tolerance below the
+        # noise can percolate through the lesion to the limit: then only noise-level candidates remain).
+        info["mayContinue"] = bool(firstHit is not None and (info["noEdge"] or (
+            good[-1]["contrast"] >= bestContrast
+            and (gain < MIN_EDGE_GAIN or self.reachMm(region) >= CONTINUE_REACH * self.effectiveRadiusMm))))
         return chosen["tolerance"], region, info
 
 
@@ -458,28 +465,70 @@ def kernelOffsets(radiusKji):
     return _kernelOffsetsCache[key]
 
 
+_kernelRowsCache = {}
+
+
+def kernelRows(radiusKji):
+    """The kernel of kernelOffsets() as rows along i: a list of (dk, dj, halfWidth), each row being di = -w..w.
+
+    Returns None if a row of the kernel is not such a centred run (then the morphology uses the offsets directly).
+    """
+    key = tuple(int(r) for r in radiusKji)
+    if key not in _kernelRowsCache:
+        rows = {}
+        for dk, dj, di in kernelOffsets(key).tolist():
+            rows.setdefault((dk, dj), set()).add(di)
+        runs = []
+        for (dk, dj), values in sorted(rows.items()):
+            halfWidth = max(values)
+            if values != set(range(-halfWidth, halfWidth + 1)):
+                runs = None
+                break
+            runs.append((dk, dj, halfWidth))
+        _kernelRowsCache[key] = runs
+    return _kernelRowsCache[key]
+
+
 def _iterSpread(mask, radiusKji, foreground):
     """Generator: dilation (foreground=True) or erosion (False) of a bool mask, SLAB_PLANES planes of k per step.
 
     Same result as vtkImageDilateErode3D with the same kernel size: voxels outside the array are ignored.
-    Implemented with numpy (OR / AND of the shifted mask over the kernel offsets): 3-4 times faster than VTK.
+    Implemented with numpy (OR / AND of the shifted mask over the kernel): the kernel is split into rows along i,
+    the mask is first spread along i once per row half-width, then the rows are combined (one operation per row
+    instead of one per kernel voxel: 179 -> 37 + 6 for a 7x7x7 kernel). Results are identical to the VTK filter.
     """
     radius = tuple(int(r) for r in radiusKji)
-    offsets = kernelOffsets(radius)
+    rows = kernelRows(radius)
+    if rows is None:
+        rows = [(dk, dj, None, di) for dk, dj, di in kernelOffsets(radius).tolist()]
+    else:
+        rows = [(dk, dj, halfWidth, 0) for dk, dj, halfWidth in rows]
+    combine = numpy.bitwise_or if foreground else numpy.bitwise_and
     # outside voxels are ignored: they never erode (padded with True) and never dilate (padded with False)
     padded = numpy.pad(mask, [(r, r) for r in radius], constant_values=not foreground)
     output = numpy.empty_like(mask)
     nk, nj, ni = mask.shape
+    ri = radius[2]
+    halfWidths = sorted({row[2] for row in rows if row[2] is not None})
     for k0 in range(0, nk, SLAB_PLANES):
         k1 = min(nk, k0 + SLAB_PLANES)
+        window = padded[k0:k1 + 2 * radius[0]]  # the planes that the slab's kernel reaches
+        # spread along i by each half-width needed (incrementally: w from w - 1 with the two new columns)
+        spreadByWidth = {}
+        spread = window[:, :, ri:ri + ni]
+        for width in range(1, (halfWidths[-1] if halfWidths else 0) + 1):
+            spread = combine(spread, window[:, :, ri - width:ri - width + ni])
+            combine(spread, window[:, :, ri + width:ri + width + ni], out=spread)
+            spreadByWidth[width] = spread
+        spreadByWidth[0] = window[:, :, ri:ri + ni]
         slab = output[k0:k1]
         slab[...] = not foreground
-        for dk, dj, di in offsets:
-            shifted = padded[radius[0] + dk + k0:radius[0] + dk + k1, radius[1] + dj:radius[1] + dj + nj, radius[2] + di:radius[2] + di + ni]
-            if foreground:
-                slab |= shifted
+        for dk, dj, halfWidth, di in rows:
+            if halfWidth is None:
+                source = window[:, :, ri + di:ri + di + ni]
             else:
-                slab &= shifted
+                source = spreadByWidth[halfWidth]
+            combine(slab, source[radius[0] + dk:radius[0] + dk + k1 - k0, radius[1] + dj:radius[1] + dj + nj], out=slab)
         yield
     return output
 
