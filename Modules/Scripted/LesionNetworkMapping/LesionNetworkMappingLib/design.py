@@ -24,6 +24,11 @@ the identity first. Two subjects whose design rows are identical are interchange
 unique permutations (:func:`unique_count`) counts distinct arrangements of design rows, as PALM does
 (Winkler 2014). Enumeration is exhaustive when that number is at most the requested number of permutations.
 
+Orientation: an index array P permutes the data rows (Y* = Y[P], as glm.py applies it), which is the
+same test as keeping Y and relabelling the design as X[P⁻¹] (P⁻¹ = ``np.argsort(P)``). An exhaustive
+enumeration therefore yields arrays whose relabellings ``labels[np.argsort(P)]`` are all distinct (not
+``labels[P]``, which would repeat designs: for 5 + 5 subjects the 252 arrays would give only 6).
+
 :func:`matrix_checks` (rank, intercept, estimability, one-sample) is shared with the PALM export
 validation (``palm.validate_palm_export``) and preflight checks, so imported designs pass the same checks.
 """
@@ -1199,6 +1204,9 @@ def _arrangement_index(codes, arrangement):
 def permutations(n, blocks=None, mode="free", n_perm=DEFAULT_N_PERM, seed=0, labels=None):
     """Yield permutation index arrays P (data rows Y[P]); the first is always the identity.
 
+    Each P tests the design relabelled as X[P⁻¹]; an exhaustive enumeration yields every distinct
+    relabelling ``labels[np.argsort(P)]`` exactly once (see the module docstring).
+
     :param blocks: per-row block codes (needed by "within" and "whole").
     :param mode: "free" (rng.permutation), "within" (permute inside each block, never across) or
       "whole" (permute equal-size blocks as units).
@@ -1234,7 +1242,12 @@ def permutations(n, blocks=None, mode="free", n_perm=DEFAULT_N_PERM, seed=0, lab
 
 
 def _exhaustive(n, blocks, mode, codes):
-    """Every unique permutation once, the identity first."""
+    """Every unique permutation once, the identity first, as data-row index arrays (Y[P]).
+
+    Each arrangement A of the row codes (the design relabelled) is reached by an index array Q with
+    codes[Q] == A; the data-row array that tests that relabelling is its inverse P = argsort(Q), so
+    that labels[argsort(P)] == A (Y[P] against X is the same test as Y against X[P⁻¹]).
+    """
     if mode == "whole":
         groups, patterns = _whole_patterns(blocks, codes, n)
         for arrangement in _multiset_permutations(patterns.tolist()):
@@ -1242,7 +1255,7 @@ def _exhaustive(n, blocks, mode, codes):
             out = np.empty(n, dtype=np.intp)
             for (_, rows), source in zip(groups, sources, strict=True):
                 out[rows] = groups[source][1]
-            yield out
+            yield np.argsort(out).astype(np.intp)
         return
     groups = _block_rows(blocks if mode == "within" else None, n)
     per_block = [[rows[_arrangement_index(codes[rows], arrangement)] for arrangement in _multiset_permutations(codes[rows].tolist())] for _, rows in groups]
@@ -1250,7 +1263,7 @@ def _exhaustive(n, blocks, mode, codes):
         out = np.arange(n, dtype=np.intp)
         for (_, rows), arranged in zip(groups, combination, strict=True):
             out[rows] = arranged
-        yield out
+        yield np.argsort(out).astype(np.intp)
 
 
 def sign_flips(n, n_perm=DEFAULT_N_PERM, seed=0, blocks=None, mode="free"):

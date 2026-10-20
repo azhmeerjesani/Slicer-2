@@ -35,6 +35,12 @@ def _codes(check_list, level=None):
     return [check.code for check in check_list if level is None or check.level == level]
 
 
+def _designs(permutations, labels):
+    """Distinct designs tested by data-row index arrays P (Y[P] against X is Y against X[P⁻¹])."""
+    labels = np.asarray(labels)
+    return {tuple(labels[np.argsort(permutation)].tolist()) for permutation in permutations}
+
+
 class _StudyTestCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="lnm-design-test-")
@@ -384,7 +390,10 @@ class CrossedTest(_StudyTestCase):
         self.assertEqual(designlib.unique_count(12, blocks, labels, mode="whole"), 6)
         enumerated = list(designlib.permutations(12, blocks, "whole", 5000, 0, labels))
         self.assertEqual(len(enumerated), 6)
-        self.assertEqual(len({tuple(np.array(labels)[p].tolist()) for p in enumerated}), 6)
+        self.assertEqual(len(_designs(enumerated, labels)), 6)
+        for permutation in enumerated:
+            for row in permutation.reshape(4, 3):
+                self.assertEqual(len(set(blocks[row].tolist())), 1)
         with self.assertRaises(ValueError):
             designlib.unique_count(5, [1, 1, 2, 2, 2], None, mode="whole")
 
@@ -407,15 +416,14 @@ class PermutationTest(_StudyTestCase):
         permutations = list(designlib.permutations(8, None, "free", 5000, 0, labels))
         self.assertEqual(len(permutations), 70)
         np.testing.assert_array_equal(permutations[0], np.arange(8))
-        arrangements = {tuple(np.array(labels)[p].tolist()) for p in permutations}
-        self.assertEqual(len(arrangements), 70)
+        self.assertEqual(len(_designs(permutations, labels)), 70)
         # Within blocks: C(4, 2) * C(4, 2)
         blocks = np.array([1, 1, 1, 1, 2, 2, 2, 2])
         labels = ["a", "a", "b", "b"] * 2
         self.assertEqual(designlib.unique_count(8, blocks, labels), 36)
         within = list(designlib.permutations(8, blocks, "within", 5000, 0, labels))
         self.assertEqual(len(within), 36)
-        self.assertEqual(len({tuple(np.array(labels)[p].tolist()) for p in within}), 36)
+        self.assertEqual(len(_designs(within, labels)), 36)
         for permutation in within:
             np.testing.assert_array_equal(blocks[permutation], blocks)
 
@@ -459,6 +467,67 @@ class PermutationTest(_StudyTestCase):
         self.assertEqual(sixteen.unique_perms, 12870)
         self.assertFalse(sixteen.exhaustive)
         self.assertEqual(sixteen.n_perm, 5000)
+
+
+class ExhaustiveOrientationTest(_StudyTestCase):
+    """Exhaustive permutations are data-row arrays (Y[P]) whose relabellings X[P⁻¹] are all distinct."""
+
+    def five_and_five(self):
+        rows = [(f"sub-{level[:2]}{index}", {"group": level, "volume_ml": 10.0}) for level in ("case", "control") for index in range(5)]
+        return designlib.build_design(self.make_study(rows, "fivefive"), DesignSpec(covariates=[], volume_off_reason="orientation test"))
+
+    def test_all_designs_distinct(self):
+        labels = ["case"] * 5 + ["control"] * 5
+        permutations = list(designlib.permutations(10, None, "free", 5000, 0, labels))
+        self.assertEqual(len(permutations), math.comb(10, 5))
+        np.testing.assert_array_equal(permutations[0], np.arange(10))
+        self.assertEqual(len(_designs(permutations, labels)), 252)
+        # Within blocks (C(5, 2)² = 100) and whole blocks (6 blocks with patterns 3 + 2 + 1: 60)
+        blocks = np.repeat([1, 2], 5)
+        within_labels = ["a", "a", "b", "b", "b"] * 2
+        within = list(designlib.permutations(10, blocks, "within", 5000, 0, within_labels))
+        self.assertEqual(len(within), 100)
+        self.assertEqual(len(_designs(within, within_labels)), 100)
+        blocks = np.repeat([1, 2, 3, 4, 5, 6], 2)
+        whole_labels = ["a", "b"] * 3 + ["b", "a"] * 2 + ["b", "b"]
+        whole = list(designlib.permutations(12, blocks, "whole", 5000, 0, whole_labels))
+        self.assertEqual(len(whole), designlib.unique_count(12, blocks, whole_labels, mode="whole"))
+        self.assertEqual(len(_designs(whole, whole_labels)), 60)
+
+    def test_exhaustive_p_matches_brute_force(self):
+        from LesionNetworkMappingLib import glm
+
+        design = self.five_and_five()
+        self.assertTrue(design.exhaustive)
+        self.assertEqual(design.unique_perms, 252)
+        Y = self.rng.standard_normal((design.n, 12))
+        Y[: design.n // 2, :4] += 1.5  # a few voxels with an effect, so small p values are exercised
+        # Brute force: every assignment of 5 of the 10 subjects to the first level, data unchanged
+        brute = []
+        for chosen in itertools.combinations(range(design.n), 5):
+            relabelled = design.X.copy()
+            relabelled[:, 1] = 0.0
+            relabelled[list(chosen), 1] = 1.0
+            brute.append(glm.fit(Y, relabelled, design.C).stat)
+        brute = np.abs(np.array(brute))
+        # The design's enumeration applied as data rows Y[P] against the unchanged design
+        enumerated = np.abs(np.array([glm.fit(Y[permutation], design.X, design.C).stat for permutation in designlib.design_shufflings(design)]))
+        self.assertEqual(enumerated.shape, brute.shape)
+        np.testing.assert_allclose(np.sort(enumerated, axis=0), np.sort(brute, axis=0), rtol=1e-10, atol=1e-12)
+        observed = np.abs(glm.fit(Y, design.X, design.C).stat)
+        tolerance = 1e-9 * observed + 1e-12
+        exact = np.sum(brute >= observed - tolerance, axis=0) / 252.0
+        from_design = np.sum(enumerated >= observed - tolerance, axis=0) / 252.0
+        np.testing.assert_array_equal(from_design, exact)
+        self.assertLess(exact.min(), 0.05)
+        # glm.shufflings yields the same arrays, and its exhaustive p is the brute-force p
+        iterator, count, exhaustive = glm.shufflings(design)
+        listed = list(iterator)
+        self.assertEqual((count, exhaustive), (252, True))
+        self.assertTrue(all(np.array_equal(a, b) for a, b in zip(listed, designlib.design_shufflings(design), strict=True)))
+        result = glm.run(design, Y, dtype=np.float64)
+        self.assertTrue(result.exhaustive)
+        np.testing.assert_allclose(result.p_unc, exact, rtol=0, atol=1e-12)
 
 
 class ChecksTest(_StudyTestCase):

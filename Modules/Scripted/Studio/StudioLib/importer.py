@@ -2009,14 +2009,51 @@ def _isTemplateShown(volumeNode):
     return volumeNode is not None and background is not None and background.GetID() == volumeNode.GetID()
 
 
+def _isSavedAndUnchanged(segmentationNode):
+    """True if the lesion has voxels and is saved to a file with no change since (Draw's "Saved" state)."""
+    draw = _drawModule()
+    lesionSaveState = getattr(draw, "lesionSaveState", None) if draw is not None else None
+    if segmentationNode is None or lesionSaveState is None:
+        return False
+    try:
+        state = lesionSaveState(segmentationNode)[0]
+    except Exception:
+        logging.error(f"Studio: the lesion save state failed:\n{traceback.format_exc()}")
+        return False
+    return state == "saved" and not isSegmentationEmpty(segmentationNode)
+
+
+def _templateLesionFor(volumeNode, shell=None):
+    """The lesion to draw on the template ``volumeNode`` for "Start on MNI template".
+
+    The lesion edited in Draw is kept if it is bound to the template (a "Lesion 2" too), else the template's "Lesions"
+    segmentation (created if needed). A lesion that is saved and unchanged belongs to a finished case: a new lesion
+    is started instead (``newLesionSegmentation()``: the saved one keeps its file and is hidden, Undo in the toast),
+    so that the Save call to action, which re-saves silently to the file of the session's first save, can never
+    overwrite the previous case. A lesion with unsaved changes (or never saved) is reused as it is: its strokes are
+    never hidden and it is never re-targeted to another file.
+    """
+    edited, _source = _editedNodes()
+    if edited is not None and edited.IsA("vtkMRMLSegmentationNode") and _isBoundTo(edited, volumeNode):
+        segmentationNode = edited
+    else:
+        segmentationNode = _lesionSegmentationFor(volumeNode, LESION_SEGMENTATION_NAME)
+    if not _isSavedAndUnchanged(segmentationNode):
+        return segmentationNode
+    # Edit the saved lesion first, so that the new lesion hides it and its Undo edits it again
+    selectInSegmentEditor(segmentationNode, volumeNode)
+    newSegmentationNode = newLesionSegmentation(volumeNode, shell=shell)
+    return newSegmentationNode if newSegmentationNode is not None else segmentationNode
+
 def startOnTemplate(res=2, shell=None, volumeNode=None):
     """Load the MNI152NLin2009cAsym template and open Draw on a "Lesions" segmentation of its geometry.
 
     The 2 mm brain is bundled, so this works offline. The 1 mm T1w is used instead when it was downloaded
     before. Otherwise the 1 mm template is offered in the inspector notice slot after the first stroke on the 2 mm
-    template (``res=1`` offers it now and starts the download). The template volume and its "Lesions" segmentation are
-    reused if they are in the scene. ``volumeNode``: a template volume that is already loaded (from the Sample Data
-    module) is used. Return ``(volumeNode, segmentationNode)``.
+    template (``res=1`` offers it now and starts the download). The template volume and its lesion are reused if they
+    are in the scene, except a lesion that is saved and unchanged: the next case then starts on a new lesion, so that
+    Save never re-saves it silently to the previous case's file (``_templateLesionFor()``). ``volumeNode``: a template
+    volume that is already loaded (from the Sample Data module) is used. Return ``(volumeNode, segmentationNode)``.
     """
     shell = _currentShell(shell)
     cached1mm = cachedTemplatePath(TEMPLATE_SAMPLE_1MM)
@@ -2032,7 +2069,7 @@ def startOnTemplate(res=2, shell=None, volumeNode=None):
         else:
             volumeNode = _templateVolume(TEMPLATE_SAMPLE_2MM)
         setViewLayers(background=volumeNode, fit=True)
-        segmentationNode = _lesionSegmentationFor(volumeNode, LESION_SEGMENTATION_NAME)
+        segmentationNode = _templateLesionFor(volumeNode, shell)
         _trackTemplate(volumeNode, segmentationNode)
         selectInSegmentEditor(segmentationNode, volumeNode)
         if shell is not None:
