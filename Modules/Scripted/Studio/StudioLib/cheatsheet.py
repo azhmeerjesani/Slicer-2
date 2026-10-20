@@ -29,8 +29,9 @@ from slicer.i18n import tr as _
 from . import ui
 
 #: Width of the columns and of the keys column of each row (keys that do not fit go on another line)
-COLUMN_MIN_WIDTH = 280
-KEYS_COLUMN_WIDTH = 156
+COLUMN_MIN_WIDTH = 330
+COLUMN_SPACING = 32
+KEYS_COLUMN_WIDTH = 150
 KEY_SPACING = 3
 #: Opacity of the overlay background (the views stay faintly visible)
 BACKGROUND_ALPHA = 0.94
@@ -320,8 +321,19 @@ def sections(shell):
     ]
 
 
-#: Columns of the overlay: sections per column
+#: Columns of the overlay: sections per column, for 3, 2 and 1 columns (narrow windows)
 COLUMNS = ((SECTION_DRAW,), (SECTION_VIEWS, SECTION_LIBRARY), (SECTION_APP, SECTION_ESCAPE, SECTION_PLATFORM))
+_COLUMN_LAYOUTS = {
+    3: COLUMNS,
+    2: ((SECTION_DRAW, SECTION_LIBRARY), (SECTION_VIEWS, SECTION_APP, SECTION_ESCAPE, SECTION_PLATFORM)),
+    1: ((SECTION_DRAW, SECTION_VIEWS, SECTION_LIBRARY, SECTION_APP, SECTION_ESCAPE, SECTION_PLATFORM),),
+}
+
+
+def columnCount(width):
+    """Columns that fit in an overlay ``width`` px wide (3 at most)."""
+    available = width - 2 * MARGIN
+    return max(1, min(3, (available + COLUMN_SPACING) // (COLUMN_MIN_WIDTH + COLUMN_SPACING)))
 
 
 class _Background(qt.QWidget):
@@ -385,6 +397,7 @@ class CheatSheet:
         self.sectionWidgets = {}
         self.content = []
         self._previousFocus = None
+        self.columnCount = 0
         outer = qt.QVBoxLayout(self.widget)
         outer.setContentsMargins(MARGIN, MARGIN - 8, MARGIN, MARGIN - 8)
         outer.setSpacing(12)
@@ -464,11 +477,12 @@ class CheatSheet:
         body.setObjectName("StudioCheatSheetBody")
         columns = qt.QHBoxLayout(body)
         columns.setContentsMargins(0, 0, 0, 0)
-        columns.setSpacing(32)
+        columns.setSpacing(COLUMN_SPACING)
         self.rowWidgets = []
         self.sectionWidgets = {}
         bySection = {section: (title, rows) for section, title, rows in self.content}
-        for sectionNames in COLUMNS:
+        self.columnCount = columnCount(self._overlayWidth())
+        for sectionNames in _COLUMN_LAYOUTS[self.columnCount]:
             column = qt.QVBoxLayout()
             column.setSpacing(4)
             for section in sectionNames:
@@ -489,7 +503,6 @@ class CheatSheet:
                 self.sectionWidgets[section] = (label, sectionRows)
             column.addStretch(1)
             container = qt.QWidget()
-            container.setMinimumWidth(COLUMN_MIN_WIDTH)
             container.setLayout(column)
             columns.addWidget(container, 1)
         old = self.scrollArea.takeWidget()
@@ -517,8 +530,8 @@ class CheatSheet:
         lineWidth = 0
         for key in keys:
             text = _native(key)
-            # Text, padding (2 x 5 px) and border (2 x 1 px)
-            width = _advance(metrics, text) + 12
+            # Text, padding (2 x 5 px), border (2 x 1 px) and the rounding of the style sheet font
+            width = _advance(metrics, text) + 18
             if line is None or (lineWidth > 0 and lineWidth + KEY_SPACING + width > KEYS_COLUMN_WIDTH):
                 line = qt.QHBoxLayout()
                 line.setContentsMargins(0, 0, 0, 0)
@@ -528,23 +541,34 @@ class CheatSheet:
             chip = qt.QLabel(text)
             chip.setObjectName("StudioCheatSheetKey")
             chip.setTextFormat(qt.Qt.PlainText)
+            chip.setSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Fixed)
             line.addWidget(chip)
             lineWidth += width + KEY_SPACING
         for index in range(keysLayout.count()):
             keysLayout.itemAt(index).layout().addStretch(1)
         keysBox.setFixedWidth(KEYS_COLUMN_WIDTH)
-        layout.addWidget(keysBox)
+        keysBox.setSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Maximum)
+        layout.addWidget(keysBox, 0, qt.Qt.AlignTop)
         label = qt.QLabel(description)
         label.setObjectName("StudioCheatSheetDescription")
         label.setTextFormat(qt.Qt.PlainText)
         label.setWordWrap(True)
-        layout.addWidget(label, 1)
+        layout.addWidget(label, 1, qt.Qt.AlignTop)
         row.setToolTip(ui.tooltip(description, " / ".join(_native(key) for key in keys) if len(keys) > 1 else (keys[0] if keys else None)))
         return row
+
+    def _overlayWidth(self):
+        centralWidget = self.mainWindow.centralWidget()
+        return centralWidget.width if centralWidget is not None else self.mainWindow.width
 
     def updateGeometry(self):
         if not _isAlive(self.widget):
             return
+        if self.widget.isVisible() and self.content and columnCount(self._overlayWidth()) != self.columnCount:
+            # The window became narrower or wider: lay the sections out in another number of columns
+            text = self.field.text
+            self._build()
+            self._applyFilter(text)
         centralWidget = self.mainWindow.centralWidget()
         if centralWidget is None:
             self.widget.setGeometry(self.mainWindow.rect)
