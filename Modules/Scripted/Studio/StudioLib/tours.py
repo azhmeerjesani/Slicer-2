@@ -345,9 +345,30 @@ _DRAW_STEPS = (
 )
 
 _MAP_STEPS = (
-    Step("map", "StudioMapWorkspaceButton", _("Map"), _("Lesion network mapping: from traced lesions to network maps, with quality checks."),
-         inSlicer=_("Not part of official 3D Slicer."), placement="below"),
-    Step("panel", "PanelDockWidget", _("The Map inspector"), _("Choose the lesions and the connectome, then Map network. Results open in the views."),
+    Step("map", "StudioMapWorkspaceButton", _("Map"),
+         _("Lesion network mapping: the brain network connected to a lesion, computed from a normative connectome, with quality checks."),
+         rows=("lesion-network-mapping",), keys=((("Ctrl+Alt+3",), _("Map")),), placement="below"),
+    Step("seed", "LNMSeedCard", _("Seed: the lesion"),
+         _("The segmentation and the segment that hold the lesion (by default the segment named Lesion). The lesion is used on its own grid."),
+         inSlicer=_("Not part of official 3D Slicer. The lesion is a segment, as in the Segment Editor module."),
+         workspace="map", inspector=True, placement="left"),
+    Step("connectome", "LNMConnectomeCard", _("Connectome"),
+         _("A connectome is a folder on this computer (a .lnmc bundle): add one with Add connectome… or Manage…, or try Map with the demo, "
+           "a small synthetic connectome (not real data). Nothing is downloaded unless you ask, and its data use terms must be accepted first."),
+         rows=("connectome",), workspace="map", inspector=True, placement="left"),
+    Step("compute", "LNMComputeButton", _("Map network"),
+         _("Computes the network map of the lesion with the chosen connectome, in the background. Specificity QA maps relocated copies of "
+           "the lesion in the same pass, to compare with what any lesion of this shape gives."),
+         rows=("lesion-network-mapping",), keys=((("Ctrl+Enter",), _("the blue button")),), workspace="map", inspector=True, placement="left"),
+    Step("result", "LNMResultCard", _("Result: statistic, rule and threshold"),
+         _("The map opens in the views. Its threshold is a rule (FWE, the |T| ≥ 7 convention, an Fz effect size, a custom T or the top x%), "
+           "worked out again from the number of subjects, so a T threshold is never silently reused on another N. "
+           "The statistic, the sign (±, +, −) and the opacity change only what is shown."),  # noqa: RUF001
+         inSlicer=_("Not part of official 3D Slicer. The map is an ordinary volume: the Volumes and Data modules work on it as usual."),
+         workspace="map", inspector=True, placement="left"),
+    Step("disclaimer", "LNMDisclaimer", _("Research use only"),
+         _("Network maps are for research, not for clinical decisions, and the specificity of lesion network mapping is debated. "
+           "This line is always shown while Map is open, and the exported files carry it too."),
          inSlicer=_("Not part of official 3D Slicer."), workspace="map", inspector=True, placement="left"),
 )
 
@@ -357,7 +378,8 @@ TOURS = (
          finishText=_("Open the map")),
     Tour("library", _("Library tour"), _("Opening data, the MNI template, Recent and sample data."), _LIBRARY_STEPS, workspace="library"),
     Tour("draw", _("Draw tour"), _("Your lesion, the tools, the brush, Display, Undo and Save lesion."), _DRAW_STEPS, workspace="draw"),
-    Tour("map", _("Map tour"), _("Lesion network mapping."), _MAP_STEPS, workspace="map", available=_mapAvailable),
+    Tour("map", _("Map tour"), _("Lesion network mapping: the lesion, the connectome, Map network, the result and its threshold."), _MAP_STEPS,
+         workspace="map", available=_mapAvailable),
 )
 
 

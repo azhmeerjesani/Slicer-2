@@ -2026,18 +2026,19 @@ def _isSavedAndUnchanged(segmentationNode):
 def _templateLesionFor(volumeNode, shell=None):
     """The lesion to draw on the template ``volumeNode`` for "Start on MNI template".
 
-    The lesion edited in Draw is kept if it is bound to the template (a "Lesion 2" too), else the template's "Lesions"
-    segmentation (created if needed). A lesion that is saved and unchanged belongs to a finished case: a new lesion
-    is started instead (``newLesionSegmentation()``: the saved one keeps its file and is hidden, Undo in the toast),
-    so that the Save call to action, which re-saves silently to the file of the session's first save, can never
-    overwrite the previous case. A lesion with unsaved changes (or never saved) is reused as it is: its strokes are
-    never hidden and it is never re-targeted to another file.
+    The lesion of the last "Start on MNI template" is kept while it is bound to the template (a "Lesion 2" that it
+    started too), else the template's "Lesions" segmentation (created if needed). A lesion that is saved and unchanged
+    belongs to a finished case: a new lesion is started instead (``newLesionSegmentation()``: the saved one keeps its
+    file and is hidden, Undo in the toast), so that the Save call to action, which re-saves silently to the file of
+    the session's first save, can never overwrite the previous case. A lesion with unsaved changes (or never saved)
+    is reused as it is: its strokes are never hidden and it is never re-targeted to another file.
     """
-    edited, _source = _editedNodes()
-    if edited is not None and edited.IsA("vtkMRMLSegmentationNode") and _isBoundTo(edited, volumeNode):
-        segmentationNode = edited
-    else:
+    trackedVolume, segmentationNode = _templateNodes()
+    if segmentationNode is None or not _sameNode(trackedVolume, volumeNode):
         segmentationNode = _lesionSegmentationFor(volumeNode, LESION_SEGMENTATION_NAME)
+    elif segmentationNode.GetSegmentation().GetNumberOfSegments() == 0:
+        segmentId = segmentationNode.GetSegmentation().AddEmptySegment("", LESION_SEGMENT_NAME, LESION_COLOR)
+        styleLesionSegment(segmentationNode, segmentId)
     if not _isSavedAndUnchanged(segmentationNode):
         return segmentationNode
     # Edit the saved lesion first, so that the new lesion hides it and its Undo edits it again

@@ -30,6 +30,10 @@ and says how the same thing is done in 3D Slicer.
 - **Segment Editor.** Draw is the Segment Editor module with the same effects
   and keys: 1 to 0 pick an effect, Esc deselects it, Space pauses it, Ctrl+Z
   undoes.
+- **Lesion network mapping.** Map is not part of official 3D Slicer. The maps
+  it writes are standard NIfTI files (with JSON sidecars) that official
+  3D Slicer opens; a connectome is a folder on your computer, never
+  downloaded unless you ask.
 - **Settings.** Slicer Studio shares its settings file (`Slicer.ini`) with your
   other 3D Slicer installations. It stores its own choices only under `Studio/`
   and `Appearance/`, and does not change the settings of official 3D Slicer.
@@ -78,6 +82,8 @@ Windows and Linux; on macOS, Ctrl is ⌘.
 | Crosshair Selection toolbar | Shift + move the mouse in a view jumps the crosshair, as in 3D Slicer; the layout button's View section shows or hides it (also slice intersections and linked views), and the toolbar is in ≡ > View > Toolbars |
 | Slice view controller bars | Above each view. In the flat bars the sliders button opens the layers, opacity and interpolation on click, the orientation button (Axial ▾) has Reformat… and Reset, and the position shows the slice number; the classic bars keep the pin |
 | Data Probe (bottom of the module panel) | The probe at the bottom right of the view under the mouse: position (MNI or scanner), value and lesion; ⋯ in the inspector header > Show Data Probe shows the classic panel |
+| Lesion network mapping (not part of official 3D Slicer) | Map (Ctrl+Alt+3): choose the lesion and a connectome, then Map network (Ctrl+Enter); the map opens in the views with its threshold rule, quality checks and export |
+| Connectome (not part of official 3D Slicer) | Map > Connectome: add a connectome folder on this computer (a .lnmc bundle) or try the synthetic demo; nothing is downloaded unless you ask, and the data use terms are accepted first |
 <!-- END where-did-it-go -->
 
 ## Keyboard differences
@@ -97,7 +103,7 @@ its own controls while the Studio interface is shown:
 | F10 | (not used) | Open the menu (≡) |
 | F6, Shift+F6 | (not used) | Move the keyboard focus between the top bar, the inspector and the views |
 | Ctrl+Shift+S | (not used) | Save lesion (Draw) |
-| Ctrl+Enter | (not used) | The blue button of the inspector (Save lesion in Draw) |
+| Ctrl+Enter | (not used) | The blue button of the inspector (Save lesion in Draw, Map network in Map) |
 | Ctrl+/ | (not used) | Keyboard shortcuts |
 | Esc | Deselects the Segment Editor effect | One step back: closes a popover, leaves Place or window/level mode, restores a maximized view, shows hidden panels, deselects the Draw tool, returns from a module opened with Search |
 | Ctrl+Alt+0 | (not used) | Switch to the Classic interface and back |
@@ -116,8 +122,8 @@ Library page does the same.
 The tours are in the menu (≡ > Help):
 
 - **Take a tour…**: Slicer Studio in two minutes.
-- **Tour Library…** or **Tour Draw…** (named after the workspace you are in):
-  that workspace (also the *Tour this workspace* link of the inspector's ?
+- **Tour Library…**, **Tour Draw…** or **Tour Map…** (named after the workspace
+  you are in): that workspace (also the *Tour this workspace* link of the inspector's ?
   button). Leaving the tour brings back the workspace or module you were in.
 - **Coming from 3D Slicer…**: what stays the same and what moved, ending with
   the *Where did it go?* list.

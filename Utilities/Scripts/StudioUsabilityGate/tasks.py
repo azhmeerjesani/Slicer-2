@@ -211,6 +211,30 @@ def toolButton(g, effectName):
     return g.widget(effectName, "QToolButton")
 
 
+def revealToolButton(g, effectName):
+    """The button of an effect; in the Draw tiles (W2-05) the effects beyond the five tiles are under "More tools ▾"
+    (1 action to open it). None if absent.
+    """
+    button = toolButton(g, effectName)
+    more = g.widget("SegmentEditorMoreToolsButton", "QAbstractButton")
+    if button is None and more is not None and str(more.text).startswith("More tools"):
+        yield from g.click(more, "Click More tools")
+        yield 300
+        button = toolButton(g, effectName)
+    return button
+
+
+def revealMaskingOptions(g):
+    """Expand the masking section of the Segment Editor when it is collapsed (the Draw presentation shows it collapsed
+    with a summary title such as "Paint everywhere · overwrite other segments", W2-04/W2-05; 1 action).
+    """
+    checkBox = g.widget("SourceVolumeIntensityMaskCheckBox", "QCheckBox")
+    masking = g.widget("MaskingGroupBox")
+    if checkBox is None and masking is not None and bool(masking.property("collapsed")):
+        yield from g.click(masking, "Expand the masking options", localPoint=(24, 10))
+        yield 300
+
+
 def isInsideWidget(inner, outer):
     return inner is not None and outer is not None and isAncestorOrSelf(outer, inner)
 
@@ -621,6 +645,12 @@ def planned(g, key, root=None):
     return None
 
 
+def menuHasItem(menu, text):
+    """True if an open menu has an item whose text starts with ``text`` (lookup, not a user action)."""
+    wanted = text.lower()
+    return any(not action.isSeparator() and str(action.text).replace("&", "").split("\t")[0].strip().lower().startswith(wanted) for action in menu.actions())
+
+
 def appMenuButton(g):
     return g.widget("StudioAppMenuButton", "QToolButton")
 
@@ -666,6 +696,36 @@ def hoverKeyMapped(g, name, keysym):
     logic.SetSliceOffset(before)
     g.pump(40)
     return moved
+
+
+def layoutMenu(g):
+    """The menu of the top bar's layout button (the layout popover, U-06), or None."""
+    button = g.widget("StudioLayoutButton", "QToolButton")
+    return button.menu() if button is not None else None
+
+
+def hasLayoutMenuItem(g, text):
+    """True if the layout popover has an item whose text starts with ``text`` (feature detection, not a user action)."""
+    menu = layoutMenu(g)
+    if menu is None:
+        return False
+    wanted = text.lower()
+    return any(not action.isSeparator() and str(action.text).replace("&", "").strip().lower().startswith(wanted) for action in menu.actions())
+
+
+def layoutMenuItem(g, text, description=""):
+    """Open the layout popover with the layout button and click its item ``text`` (2 actions)."""
+    yield from g.click(g.widget("StudioLayoutButton", "QToolButton"), "Open the layout popover")
+    yield from g.until(lambda: qt.QApplication.activePopupWidget() is not None, 2000)
+    menu = qt.QApplication.activePopupWidget()
+    if menu is None:
+        return g.refuse("menu", description or text, "the layout popover did not open", text)
+    return (yield from g.clickMenuItem(menu, text, description or f"Choose {text}"))
+
+
+def redSliceLinked():
+    composite = slicer.app.layoutManager().sliceWidget("Red").mrmlSliceCompositeNode()
+    return bool(composite.GetLinkedControl()) if composite is not None else None
 
 
 def edgeLetterCheck(g, name="Red"):
@@ -756,12 +816,24 @@ def nav(g):
     window = g.mainWindow
     right, bottom = window.x + window.width, window.y + window.height
     g.check("window-fits-screen", right <= screenWidth and bottom <= screenHeight, f"the main window is {window.width}x{window.height} at ({window.x}, {window.y}) on a {screenWidth}x{screenHeight} screen after the layouts")
-    # Link the views: the toggle of the view bar (hover popup in Classic bars)
+    # Link the views: the View section of the layout popover (U-06), else a link toggle, the flat bar's link button (W2-03)
+    # or the hover popup of the Classic bars
     linkToggle = planned(g, "linkToggle")
-    if linkToggle is not None:
+    barLink = sliceBarWidget(g, "Red", "BarLinkButton", "QToolButton")
+    if hasLayoutMenuItem(g, "Link views"):
+        yield from layoutMenuItem(g, "Link views", "Choose Link views")
+        g.note("linkedFromLayoutMenu", redSliceLinked())
+        yield from g.wheel(g.sliceView("Red"), -3, "Zoom out while linked", modifiers=("ctrl",))
+        yield from layoutMenuItem(g, "Link views", "Choose Link views again (unlink)")
+        g.note("unlinkedFromLayoutMenu", not redSliceLinked())
+    elif linkToggle is not None:
         yield from g.click(linkToggle, "Link the views")
         yield from g.wheel(g.sliceView("Red"), -3, "Zoom out while linked", modifiers=("ctrl",))
         yield from g.click(linkToggle, "Unlink the views")
+    elif barLink is not None and barLink.isVisible():
+        yield from g.click(barLink, "Link the views (link button of the Red bar)")
+        yield from g.wheel(g.sliceView("Red"), -3, "Zoom out while linked", modifiers=("ctrl",))
+        yield from g.click(sliceBarWidget(g, "Red", "BarLinkButton", "QToolButton"), "Unlink the views")
     else:
         pins = sorted(g.widgets("PinButton", "QToolButton"), key=lambda w: (w.mapToGlobal(qt.QPoint(0, 0)).y(), w.mapToGlobal(qt.QPoint(0, 0)).x()))
         pin = pins[0] if pins else None
@@ -773,9 +845,11 @@ def nav(g):
         yield from g.hover(pin, "Hover the pin again")
         yield from g.until(lambda: g.widget("SliceLinkButton", "QToolButton") is not None, 2500)
         yield from g.click(g.widget("SliceLinkButton", "QToolButton"), "Unlink the views")
-    # Crosshair: its toggle, or the Crosshair Selection toolbar from View > Toolbars
+    # Crosshair: the View section of the layout popover (U-06), its toggle, or the Crosshair Selection toolbar from View > Toolbars
     crosshair = planned(g, "crosshairToggle")
-    if crosshair is not None:
+    if hasLayoutMenuItem(g, "Crosshair"):
+        yield from layoutMenuItem(g, "Crosshair", "Choose Crosshair")
+    elif crosshair is not None:
         yield from g.click(crosshair, "Show the crosshair")
     else:
         yield from appMenu(g, ["View", "Toolbars", "Crosshair Selection"], "Show the Crosshair toolbar")
@@ -809,6 +883,7 @@ def nav(g):
     if g.effectName() != "Paint":
         yield from g.click(paint, "Pick the Paint tool")
         yield 300
+    yield from revealMaskingOptions(g)
     yield from g.click(g.widget("SourceVolumeIntensityMaskCheckBox", "QCheckBox"), "Tick 'Editable intensity range'", localPoint=(7, 7))
     yield 300
     rangeWidget = g.widget("SourceVolumeIntensityMaskRangeWidget")
@@ -827,7 +902,8 @@ def nav(g):
     words = [w for w in g.dock().findChildren("QLabel") if w.isVisible() and re.search(r"\b(Left|Right|Both hemispheres)\b", str(w.text))]
     g.check("no-hemisphere-word-scanner", not words, "hemisphere word in the inspector for a scanner-space lesion: " + "; ".join(str(w.text)[:40] for w in words[:3]))
     # Smooth the lesion
-    yield from g.click(toolButton(g, "Smoothing"), "Pick the Smoothing tool")
+    smoothing = yield from revealToolButton(g, "Smoothing")
+    yield from g.click(smoothing, "Pick the Smoothing tool")
     yield 400
     apply = g.buttonWithText("Apply")
     yield from g.click(apply, "Apply the smoothing")
@@ -1195,7 +1271,9 @@ def findToolsBody(g, warm=False):
             yield from clickMenuBarItem(g, "View", "Open the View menu")
             popup = qt.QApplication.activePopupWidget()
             if popup is not None:
-                yield from g.clickMenuItem(popup, "Studio interface", "Choose View > Studio interface")
+                # In Classic the View menu item reads "Switch to Studio interface" (shell.py), "Studio interface" before
+                label = "Switch to Studio interface" if menuHasItem(popup, "Switch to Studio interface") else "Studio interface"
+                yield from g.clickMenuItem(popup, label, f"Choose View > {label}")
             yield 1500
         g.check("classic-studio-draw", g.currentWorkspace() == "draw", f"workspace after Classic -> Studio: {g.currentWorkspace()}")
     end("T10")
@@ -1327,6 +1405,11 @@ def classic(g):
     yield 1500
     yield from g.key("Ctrl+/", "Press Ctrl+/ for the keyboard shortcuts")
     yield 400
+    if planned(g, "cheatSheet") is not None:
+        # The cheat sheet is an overlay (W3-06), not a popup: Esc closes it (Esc ladder rung 0.5)
+        g.shot("tour-cheat-sheet")
+        yield from g.key("Esc", "Esc closes the keyboard shortcuts")
+        yield 300
     g.closePopups()
     g.metric("tour", g.actions - tourStart)
     # ---------------- persona A: the productive core (the offline template is the sample) ----------------
@@ -1407,14 +1490,42 @@ def chooseFromCombo(g, combo, text, description=""):
 
 
 def sliceBarWidget(g, sliceName, objectName, className="QWidget"):
-    """A widget of the view bar (controller) of a slice view, or None."""
+    """A widget of the view bar (controller) of a slice view, the visible one first, or None."""
     controller = g.sliceWidget(sliceName).sliceController()
     if controller is None:
         return None
-    for candidate in controller.findChildren(className):
-        if candidate.objectName == objectName:
-            return candidate
-    return None
+    found = [candidate for candidate in controller.findChildren(className) if candidate.objectName == objectName]
+    visible = [candidate for candidate in found if candidate.isVisible()]
+    return (visible or found or [None])[0]
+
+
+def isFlatBar(g, sliceName):
+    controller = g.sliceWidget(sliceName).sliceController()
+    return bool(controller is not None and getattr(controller, "flatStyle", False))
+
+
+def showBarOptions(g, sliceName):
+    """Show the layers of a view bar: a click on the options button of the flat bar (W2-03), else hover the Classic pin."""
+    if isFlatBar(g, sliceName):
+        options = sliceBarWidget(g, sliceName, "OptionsButton", "QToolButton")
+        if not (options.isVisible() and sliceBarWidget(g, sliceName, "BackgroundComboBox") is not None and sliceBarWidget(g, sliceName, "BackgroundComboBox").isVisible()):
+            yield from g.click(options, f"Open the options of the {sliceName} bar")
+    else:
+        yield from g.hover(sliceBarWidget(g, sliceName, "PinButton", "QToolButton"), f"Hover the pin of the {sliceName} bar")
+
+
+def setBarOrientation(g, sliceName, orientation):
+    """Set a view's orientation: the orientation button of the flat bar (a menu), else the Classic combo of the pin popup."""
+    if isFlatBar(g, sliceName):
+        yield from g.click(sliceBarWidget(g, sliceName, "OrientationButton", "QToolButton"), f"Open the orientation menu of the {sliceName} bar")
+        yield from g.until(lambda: qt.QApplication.activePopupWidget() is not None, 2000)
+        menu = qt.QApplication.activePopupWidget()
+        if menu is None:
+            return g.refuse("menu", f"Set the {sliceName} view to {orientation}", "the orientation menu did not open", orientation)
+        return (yield from g.clickMenuItem(menu, orientation, f"Set the {sliceName} view to {orientation.lower()}"))
+    yield from showBarOptions(g, sliceName)
+    yield from g.until(lambda: sliceBarWidget(g, sliceName, "SliceOrientationSelector") is not None and sliceBarWidget(g, sliceName, "SliceOrientationSelector").isVisible(), 2500)
+    return (yield from chooseFromCombo(g, sliceBarWidget(g, sliceName, "SliceOrientationSelector"), orientation, f"Set the {sliceName} view to {orientation.lower()}"))
 
 
 def sliceBackgroundName(sliceName):
@@ -1461,18 +1572,13 @@ def arrangeFigureViews(g, path):
     for name in ("Red", "Green"):
         if sliceBackgroundName(name) == template:
             continue
-        pin = sliceBarWidget(g, name, "PinButton", "QToolButton")
-        yield from g.hover(pin, f"Hover the pin of the {name} bar")
+        yield from showBarOptions(g, name)
         yield from g.until(lambda name=name: sliceBarWidget(g, name, "BackgroundComboBox") is not None and sliceBarWidget(g, name, "BackgroundComboBox").isVisible(), 2500)
         yield from chooseFromCombo(g, sliceBarWidget(g, name, "BackgroundComboBox"), template, f"Show the template in the {name} view")
         yield from g.click(sliceBarWidget(g, name, "FitToWindowToolButton", "QToolButton"), f"Fit the template to the {name} view")
         yield 300
     # Yellow: axial, fitted
-    pin = sliceBarWidget(g, "Yellow", "PinButton", "QToolButton")
-    yield from g.hover(pin, "Hover the pin of the Yellow bar")
-    yield from g.until(lambda: sliceBarWidget(g, "Yellow", "SliceOrientationSelector") is not None and sliceBarWidget(g, "Yellow", "SliceOrientationSelector").isVisible(), 2500)
-    selector = sliceBarWidget(g, "Yellow", "SliceOrientationSelector")
-    yield from chooseFromCombo(g, selector, "Axial", "Set the Yellow view to axial")
+    yield from setBarOrientation(g, "Yellow", "Axial")
     fit = sliceBarWidget(g, "Yellow", "FitToWindowToolButton", "QToolButton")
     yield from g.click(fit, "Fit the figure to the Yellow view")
     yield 400
@@ -1869,7 +1975,9 @@ def lnm(g):
     yield from g.click(g.widget("StudioFolderCardLoadAllButton", "QPushButton"), "Click 'Load all'")
     yield from g.until(lambda: len(slicer.util.getNodesByClass("vtkMRMLSegmentationNode")) >= 6, 20000, what="the six lesions")
     yield 800
-    review = planned(g, "loadedSet")
+    # The loaded set (U-07): its Library card is not shown while Draw reviews the set, so the feature is detected through
+    # the importer (not a user action)
+    review = loadedSetOf(g)
     g.note("loadedSet", review is not None)
     if g.currentWorkspace() != "draw":
         yield from g.click(g.widget("StudioDrawWorkspaceButton", "QToolButton"), "Review in Draw (the Draw tab)")
@@ -1913,7 +2021,16 @@ def lnm(g):
     shown = tmapNode is not None and any(
         sliceBackgroundName(name) == tmapNode.GetName() or sliceForegroundName(name) == tmapNode.GetName() for name in ("Red", "Green", "Yellow"))
     g.note("tmapShown", shown)
-    typed = yield from searchAndOpen(g, "Volumes", "vol")
+    # The statistical map notice (U-07) shows the map as an overlay with a threshold field: type the threshold there.
+    # Without it, the colour table and the threshold are set in the Volumes module.
+    statmapThreshold = g.widget("StudioStatMapThresholdSpinBox", "QDoubleSpinBox")
+    if statmapThreshold is not None:
+        edit = next((child for child in statmapThreshold.findChildren("QLineEdit") if child.isVisible()), None)
+        yield from g.type(edit, str(g.fixtures["tmap"]["threshold"]), "Type the threshold in the map notice", selectAll=True, enter=True)
+        yield 500
+        g.note("tmapThreshold", {"notice": float(statmapThreshold.value), "wanted": g.fixtures["tmap"]["threshold"]})
+        g.shot("tmap-threshold")
+    typed = (yield from searchAndOpen(g, "Volumes", "vol")) if statmapThreshold is None else None
     if typed is not None:
         yield from waitTransient(g, "Volumes")
         tree = g.widget("ActiveVolumeNodeSelector", "qMRMLSubjectHierarchyTreeView")
@@ -1933,6 +2050,16 @@ def lnm(g):
     g.metric("A", g.actions - start)
     yield from lnmStudyPath(g)
     g.shot("end")
+
+
+def loadedSetOf(g):
+    """The loaded set of lesion masks (``importer.loadedSet()``, U-07), else a visible loaded-set widget, else None."""
+    try:
+        from StudioLib import importer
+    except ImportError:
+        importer = None
+    loadedSet = importer.loadedSet() if importer is not None and hasattr(importer, "loadedSet") else None
+    return loadedSet if loadedSet is not None else planned(g, "loadedSet")
 
 
 #: The buttons of the study path (B), found by their text: create the study, map every lesion, group statistics, export
@@ -1960,7 +2087,8 @@ def lnmStudyPath(g):
     yield from g.click(g.widget("StudioLibraryWorkspaceButton", "QToolButton"), "Click Library")
     yield 600
     yield from openFolderThroughDialog(g, g.fixtures["cohort"]["folder"])
-    yield from g.until(lambda: g.widget("StudioFolderCardCreateStudyButton", "QPushButton") is not None, 5000, what="folder card")
+    # The folder card; its "Create study…" button exists only when the study UI is part of the build (W3-07)
+    yield from g.until(lambda: g.widget("StudioFolderCardLoadAllButton", "QPushButton") is not None, 5000, what="folder card")
     start = g.actions
     button = g.widget("StudioFolderCardCreateStudyButton", "QPushButton")
     if button is None or not button.isEnabled():
@@ -2021,6 +2149,10 @@ def reopen(g):
     scrollSign(g, "Red")
     yield from wheelToOffset(g, "Red", blob[2], "Wheel to the blob")
     points = [sliceViewPoint(g, "Red", (blob[0] + dx, blob[1] + dy, sliceOffset(g))) for dx, dy in ((-5, -5), (5, -5), (5, 5), (-5, 5), (-5, -3))]
+    if g.effectName() != "Paint":
+        # A dropped patient scan lands unarmed (D-U2): a drag adjusts window/level until Brush is picked
+        yield from g.click(toolButton(g, "Paint"), "Pick Brush")
+        yield 300
     yield from g.drag(g.sliceView("Red"), points, "Paint a stroke over the blob")
     _segmentation, _source = lesionNodes(g)
     savedPath = yield from saveLesionTo(g, "sub-01_lesion.nii.gz")
@@ -2307,6 +2439,12 @@ def escMatrix(g):
     yield from g.key("Esc", "Esc leaves the window/level mode", settle=400)
     record("windowLevel", interactionMode() == viewTransformMode(), f"mode after Esc: {interactionMode()}")
     # --- a maximized view (double-click) ---
+    # While a drawing tool is armed a double-click belongs to the tool (it closes an Outline, two Brush clicks) and does
+    # not maximize (draw.py DOUBLE_CLICK_GUARDED_EFFECTS, W2-05): the tool is deselected first (setup), as a user would
+    g.note("toolBeforeMaximize", g.effectName())
+    if g.effectName() is not None:
+        g.segmentEditor().setActiveEffect(None)
+        yield 300
     yield from g.click(g.sliceView("Red"), "Double-click the axial view", double=True)
     yield 400
     wasMaximized = stateSnapshot(g)["maximized"]

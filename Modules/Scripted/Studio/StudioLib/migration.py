@@ -37,7 +37,7 @@ class Row:
     :param key: the key in Studio, or None.
     :param target: the Studio control that "Show me" points at: an objectName or "Parent/Child", a tuple of them (the
         first one shown), or None.
-    :param workspace: the workspace that shows ``target`` ("library", "draw"), None for the top bar.
+    :param workspace: the workspace that shows ``target`` ("library", "draw", "map"), None for the top bar.
     :param note: one more sentence, or None.
     :param same: True if nothing changed (the place is the same in both).
     :param planned: the work package that adds ``target`` when it is not built yet, else None.
@@ -236,6 +236,18 @@ ROWS = (
         _("The probe at the bottom right of the view under the mouse: position (MNI or scanner), value and lesion; "
           "⋯ in the inspector header > Show Data Probe shows the classic panel"),
         target="StudioPanelMoreButton", workspace="draw", keywords="data probe pixel value coordinates ras intensity mni probe", category="panel"),
+    # Not in official 3D Slicer
+    Row("lesion-network-mapping", _("Lesion network mapping (not part of official 3D Slicer)"),
+        _("Map ({key:Ctrl+Alt+3}): choose the lesion and a connectome, then Map network ({key:Ctrl+Enter}); the map opens in the views with "
+          "its threshold rule, quality checks and export"),
+        key="Ctrl+Alt+3", target="StudioMapWorkspaceButton", keywords="lnm lesion network mapping map network connectivity seed specificity",
+        note=_("Official 3D Slicer has no lesion network mapping; the maps that Map writes are standard NIfTI files that official 3D Slicer opens."),
+        category="module"),
+    Row("connectome", _("Connectome (not part of official 3D Slicer)"),
+        _("Map > Connectome: add a connectome folder on this computer (a .lnmc bundle) or try the synthetic demo; nothing is downloaded "
+          "unless you ask, and the data use terms are accepted first"),
+        target="LNMConnectomeCard", workspace="map", keywords="connectome gsp1000 normative functional connectivity bundle lnmc demo terms",
+        category="panel"),
 )
 
 

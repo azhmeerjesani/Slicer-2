@@ -268,6 +268,13 @@ class StudioTourTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                 if step.tryIt:
                     self.assertIsNotNone(step.done, f"{tour.id}/{step.id}")
         self.assertGreaterEqual(len(tours.tour("studio").steps), 9)
+        mapTargets = {step.target for step in tours.tour("map").steps}
+        for objectName in ("LNMSeedCard", "LNMConnectomeCard", "LNMComputeButton", "LNMResultCard", "LNMDisclaimer"):
+            self.assertIn(objectName, mapTargets)
+        self.assertIn("not part of official 3D Slicer", migration.row("lesion-network-mapping").official)
+        self.assertIn("not part of official 3D Slicer", migration.row("connectome").official)
+        self.assertEqual(migration.lookup("lesion network mapping")[0].id, "lesion-network-mapping")
+        self.assertEqual(migration.lookup("connectome")[0].id, "connectome")
         rowIds = [row.id for row in migration.ROWS]
         self.assertEqual(len(rowIds), len(set(rowIds)))
         for rowId in REQUIRED_ROWS:
@@ -312,13 +319,14 @@ class StudioTourTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
 
     def test_04_map_targets(self):
         """Every row of the map points at a control of this build ("Show me" spotlights it) or is marked as planned."""
-        from StudioLib import migration, tour
+        from StudioLib import migration, tour, tours
 
         studioShell = self._applyStudio()
         self._resize(1366, 768)
         before = self._nodeIds()
+        mapAvailable = tours.tour("map").isAvailable(studioShell)
         for row in migration.ROWS:
-            if row.planned:
+            if row.planned or (row.workspace == "map" and not mapAvailable):
                 continue
             self.assertTrue(row.target, row.id)
             self.assertTrue(tour.showMe(row.id), f"{row.id}: Show me found no control for {row.target}")
@@ -357,6 +365,9 @@ class StudioTourTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                     if tourId == "studio":
                         allSteps = [step.id for step in tours.tour("studio").steps]
                         self.assertEqual(set(allSteps) - set(shown), expectedSkips, f"{label}: steps skipped")
+                    if tourId == "map":
+                        # Every Map step points at a control that is shown and not covered (_checkStep): none is skipped
+                        self.assertEqual(shown, [step.id for step in tours.tour("map").steps], f"{label}: steps skipped")
                     self.assertEqual(self._viewState(studioShell), stateBefore, label)
                     self.assertEqual(self._nodeIds(), nodesBefore, label)
                     self.assertEqual(slicer.mrmlScene.GetModifiedSinceRead(), modifiedBefore, label)

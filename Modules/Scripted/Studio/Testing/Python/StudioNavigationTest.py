@@ -934,10 +934,24 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         studioShell.switchTo("draw")
         self._pump()
         header = studioShell.panelHeader
-        moduleHelp = header.helpHtml()
+        # Draw's own hook (W2-05): the help of the current tool, then a link to the module documentation
+        drawHelp = header.helpHtml()
+        self.assertIn(shell._MODULE_HELP_LINK, drawHelp)
+        self.assertIn("Module documentation", drawHelp)
+        triggered = []
+
+        class NoHelpHooks:
+            pass
+
+        # Without a help hook the popover shows the module help
+        originalHooks = workspaces.hooks
+        workspaces.hooks = lambda ws: NoHelpHooks if ws is not None and ws.key == "draw" else originalHooks(ws)
+        try:
+            moduleHelp = header.helpHtml()
+        finally:
+            workspaces.hooks = originalHooks
         self.assertIn("Segment Editor", moduleHelp)
         self.assertNotIn(shell._MODULE_HELP_LINK, moduleHelp)
-        triggered = []
 
         class FakeHooks:
             @staticmethod
@@ -976,8 +990,10 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         finally:
             workspaces.hooks = originalHooks
         header.moreMenu.aboutToShow()
-        self.assertNotIn("Show all controls", [action.text for action in header.moreMenu.actions()])
-        self.assertEqual(header.helpHtml(), moduleHelp)
+        texts = [action.text for action in header.moreMenu.actions()]
+        self.assertNotIn("Plain item", texts)
+        self.assertEqual(texts.count("Show all controls"), 1)  # Draw's own item (W2-05)
+        self.assertEqual(header.helpHtml(), drawHelp)
         # The header buttons are reachable with Tab
         for button in (header.helpButton, header.moreButton, header.closeButton):
             self.assertEqual(button.focusPolicy, qt.Qt.TabFocus)

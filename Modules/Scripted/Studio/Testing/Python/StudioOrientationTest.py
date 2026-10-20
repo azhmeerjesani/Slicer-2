@@ -659,7 +659,9 @@ class StudioOrientationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertNotEqual(dialog.windowTitle, classicTitle)
         topBar = self.mainWindow.findChild("QToolBar", "StudioTopBar")
         placeholder = topBar.findChild("QLabel", "StudioSearchPlaceholder")
-        self.assertEqual(placeholder.text, "Search modules")
+        # One search, one name (U-06): "Search" opens the command palette; "Search modules" only without it
+        hasPalette = studioShell._importOptional("StudioLib.palette") is not None
+        self.assertEqual(placeholder.text, "Search" if hasPalette else "Search modules")
 
         expected = {
             "vol": "Volumes",
