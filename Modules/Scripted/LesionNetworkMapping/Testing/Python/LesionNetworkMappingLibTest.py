@@ -1433,7 +1433,11 @@ class ExportTest(_TempDirTestCase):
     SIDECAR_KEYS = {"format", "version", "Description", "software", "connectome", "lesion", "N", "df", "subject_ids_sha256", "subset", "threshold", "qa", "maps", "timestamp", "disclaimer"}
 
     def test_names(self):
-        self.assertEqual(export.DISCLAIMER, "Research use only — not for clinical decisions. Lesion network mapping specificity is debated (van den Heuvel et al., 2026, Nat Neurosci, doi:10.1038/s41593-025-02196-7).")
+        self.assertEqual(
+            export.DISCLAIMER,
+            "Research use only — not for clinical decisions. Lesion network mapping specificity is debated (van den Heuvel et al., 2026, Nat Neurosci, doi:10.1038/s41593-025-02196-7; "
+            "Siddiqi et al., 2026, bioRxiv, doi:10.64898/2026.02.24.707529; Zalesky & Cash, 2026, Nat Neurosci, doi:10.1038/s41593-026-02259-3).",
+        )
         self.assertEqual(
             os.path.basename(export.map_paths("out", "sub-01", "GSP 1000 (MF)", preview_n=100)["T"]),
             "sub-01_conn-GSP1000MF_desc-TPreviewN100_funcmap.nii.gz",

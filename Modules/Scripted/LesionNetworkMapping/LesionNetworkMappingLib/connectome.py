@@ -8,6 +8,7 @@ Bundle layout::
                              demeaned and scaled to unit L2 norm; zero-variance voxels are all zeros.
     subjects/<id>.norms.npy  (nRuns, V) float32 L2 norms of the demeaned run segments
     derived/degree.npy       optional (V,) float32 connectome degree map (see compute_degree)
+    derived/degree_fz.npy    optional (V,) float32 signed mean Fz degree map (compute_degree measure "fz")
 
 connectome.json::
 
@@ -15,16 +16,40 @@ connectome.json::
      "shape": [ni, nj, nk], "affine": 4x4 voxel-to-RAS, "nVoxels": V,
      "subjects": [{"id": ..., "runs": [nTR, ...]}, ...], "dtype": "float16"}
 
+Optional provenance keys (camelCase; all may be missing, and readers that do not know them ignore
+them, so the format stays "lnmc" version 1; see :data:`PROVENANCE_KEYS` and :func:`set_metadata`)::
+
+    "source": {"doi", "version", "url", "name", "tag", "citation",
+               "files": [{"name", "md5" | "sha1" | "sha256", "size"}, ...]}
+    "kind": "timeseries" (default) | "group_pca" | "tractogram"
+    "mask": {"source": text, "sha256": mask_content_sha256(mask)}   (the voxels, not a file's bytes)
+    "subjectsSha256": sha256 of the subject ids, each followed by a newline, in bundle order
+    "licence": "GSP-DUT-2014" | an SPDX licence id | "unknown"
+    "termsSha256": sha256 of the data use terms text that was accepted
+    "acknowledgement": wording the data use terms require in publications
+    "preprocessing": {"gsr": true | false | "unknown", "nuisance", "bandpass", "smoothingMm", "pipelineUrl"}
+    "population": {"n", "ageRange", "sexRatio", "scanners"}
+    "trS": repetition time in seconds
+    "subsets": {name: [subject ids]}   named subject subsets (for example the Lead-DBS
+               "First 100 Subjects"); subsets defined by the user are named "user:<name>"
+    "participants": relative path of a participants.tsv describing the subjects
+
+``ConnectomeWriter`` fills in "subjectsSha256" and "mask.sha256" when it finalizes a bundle.
+
 The V voxels are the non-zero voxels of the mask in C order of the [i, j, k] array
 (``geometry.mask_indices``). With this layout the Pearson correlation of every voxel with a unit-norm
 seed is a single matrix product (see engine.py). A "float32" dtype (``<id>.f32.npy``) is also accepted.
 """
 
+import copy
 import glob
+import hashlib
 import json
+import math
 import os
 import queue
 import re
+import shutil
 import threading
 import time
 from typing import NamedTuple
@@ -39,8 +64,21 @@ FORMAT_NAME = "lnmc"
 FORMAT_VERSION = 1
 MANIFEST_NAME = "connectome.json"
 PARTIAL_MANIFEST_NAME = "connectome.partial.json"
+# connectome.partial.json only: the writer's provenance, kept so that a resumed conversion still writes it
+_PENDING_PROVENANCE_KEY = "pendingProvenance"
 SUBJECT_DTYPES = {"float16": ("f16", np.dtype(np.float16)), "float32": ("f32", np.dtype(np.float32))}
 _SUBJECT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# Keys that define the data of a bundle: set_metadata() never changes them
+REQUIRED_KEYS = ("format", "version", "name", "shape", "affine", "nVoxels", "subjects", "dtype")
+# Optional provenance keys (format "lnmc" version 1.1); older readers ignore them
+PROVENANCE_KEYS = ("source", "kind", "mask", "subjectsSha256", "licence", "termsSha256", "acknowledgement", "preprocessing", "population", "trS", "subsets", "participants")
+# Other optional keys that set_metadata() may change
+DESCRIPTIVE_KEYS = ("description", "citation", "dataUseTerms", "space")
+KINDS = ("timeseries", "group_pca", "tractogram")
+GSR_VALUES = (True, False, "unknown")
+USER_SUBSET_PREFIX = "user:"
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_DOI_PATTERN = re.compile(r"\b(10\.\d{4,9}/[^\s\"<>]+)", re.IGNORECASE)
 
 
 class UnsupportedFormatError(ValueError):
@@ -75,6 +113,124 @@ def _write_json_atomic(path, obj):
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2)
     os.replace(tmp_path, path)
+
+
+def subjects_sha256(subject_ids):
+    """Hex sha256 of a subject list: the UTF-8 ids, each followed by a newline, in the given order."""
+    return hashlib.sha256("".join(f"{subject_id}\n" for subject_id in subject_ids).encode("utf-8")).hexdigest()
+
+
+def mask_content_sha256(mask):
+    """Hex sha256 of a 3D mask's voxels: its shape and its non-zero voxels as C-order packed bits.
+
+    The hash depends only on which voxels are in the mask, not on how mask.nii.gz is encoded or compressed.
+    """
+    mask = np.asarray(mask)
+    mask = mask.reshape(mask.shape[:3]) != 0
+    digest = hashlib.sha256("lnmc-mask {} {} {}\n".format(*mask.shape).encode("ascii"))
+    digest.update(np.packbits(mask.reshape(-1)).tobytes())
+    return digest.hexdigest()
+
+
+def _is_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _check_type(key, value, types, what):
+    if not isinstance(value, types):
+        raise ValueError(f"connectome.json {key!r} must be {what}, got {value!r}")
+
+
+def _validate_subsets(subsets, subject_ids):
+    """Check a "subsets" value ({name: [ids]}) against the bundle's subject ids; return it as a new dict."""
+    _check_type("subsets", subsets, dict, "an object {name: [subject ids]}")
+    known = set(subject_ids)
+    out = {}
+    for name, ids in subsets.items():
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"connectome.json subset names must be non-empty text, got {name!r}")
+        if not isinstance(ids, list) or not ids or not all(isinstance(i, str) for i in ids):
+            raise ValueError(f"Subset {name!r} must be a non-empty list of subject ids")
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"Subset {name!r} lists a subject more than once")
+        unknown = [i for i in ids if i not in known]
+        if unknown:
+            raise ValueError(f"Subset {name!r} has {len(unknown)} subject id(s) that are not in the bundle: {', '.join(unknown[:10])}{' ...' if len(unknown) > 10 else ''}")
+        out[name] = list(ids)
+    return out
+
+
+def _validate_provenance_value(key, value, subject_ids):
+    """Check one optional key of connectome.json (see the module docstring); return a copy of the value."""
+    if key in ("description", "citation", "dataUseTerms", "acknowledgement", "licence", "space"):
+        _check_type(key, value, str, "text")
+    elif key == "kind":
+        if value not in KINDS:
+            raise ValueError(f"connectome.json 'kind' must be one of {', '.join(KINDS)}, got {value!r}")
+    elif key in ("termsSha256", "subjectsSha256"):
+        if not isinstance(value, str) or not _SHA256_PATTERN.match(value):
+            raise ValueError(f"connectome.json {key!r} must be a lowercase hex sha256, got {value!r}")
+    elif key == "trS":
+        if not _is_number(value) or value <= 0:
+            raise ValueError(f"connectome.json 'trS' must be a positive number of seconds, got {value!r}")
+    elif key == "participants":
+        _check_type(key, value, str, "a relative path")
+        parts = value.replace("\\", "/").split("/")
+        if not value or os.path.isabs(value) or value.startswith(("/", "\\")) or ".." in parts:
+            raise ValueError(f"connectome.json 'participants' must be a path inside the bundle, got {value!r}")
+    elif key == "subsets":
+        return _validate_subsets(value, subject_ids)
+    elif key == "source":
+        _check_type(key, value, dict, "an object")
+        files = value.get("files", [])
+        if not isinstance(files, list) or not all(isinstance(f, dict) and isinstance(f.get("name"), str) for f in files):
+            raise ValueError("connectome.json 'source.files' must be a list of objects with a 'name'")
+    elif key == "mask":
+        _check_type(key, value, dict, "an object")
+        if value.get("sha256") is not None and not _SHA256_PATTERN.match(str(value["sha256"])):
+            raise ValueError(f"connectome.json 'mask.sha256' must be a lowercase hex sha256, got {value['sha256']!r}")
+    elif key == "preprocessing":
+        _check_type(key, value, dict, "an object")
+        if "gsr" in value and value["gsr"] not in GSR_VALUES:
+            raise ValueError(f"connectome.json 'preprocessing.gsr' must be true, false or \"unknown\", got {value['gsr']!r}")
+        if value.get("smoothingMm") is not None and (not _is_number(value["smoothingMm"]) or value["smoothingMm"] < 0):
+            raise ValueError(f"connectome.json 'preprocessing.smoothingMm' must be a number of mm, got {value['smoothingMm']!r}")
+    elif key == "population":
+        _check_type(key, value, dict, "an object")
+        if value.get("n") is not None and (not isinstance(value["n"], int) or isinstance(value["n"], bool) or value["n"] < 0):
+            raise ValueError(f"connectome.json 'population.n' must be a number of subjects, got {value['n']!r}")
+    else:
+        raise ValueError(f"Unknown connectome.json key {key!r}")
+    try:
+        json.dumps(value, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"connectome.json {key!r} is not plain JSON: {exc}") from None
+    return copy.deepcopy(value)
+
+
+def _apply_metadata(metadata, keys):
+    """Return a copy of ``metadata`` with optional ``keys`` set (None removes a key), all validated.
+
+    Required keys (:data:`REQUIRED_KEYS`) and unknown keys are refused. "subjectsSha256" and
+    "mask.sha256", which describe the data, may only be set to their actual values.
+    """
+    refused = [key for key in keys if key in REQUIRED_KEYS]
+    if refused:
+        raise ValueError(f"Required connectome.json keys cannot be changed: {', '.join(refused)}")
+    unknown = [key for key in keys if key not in PROVENANCE_KEYS and key not in DESCRIPTIVE_KEYS]
+    if unknown:
+        raise ValueError(f"Unknown connectome.json keys: {', '.join(unknown)} (optional keys: {', '.join(PROVENANCE_KEYS + DESCRIPTIVE_KEYS)})")
+    subject_ids = [entry["id"] for entry in metadata["subjects"]]
+    out = copy.deepcopy(metadata)
+    for key, value in keys.items():
+        if value is None:
+            out.pop(key, None)
+            continue
+        value = _validate_provenance_value(key, value, subject_ids)
+        if key == "subjectsSha256" and value != subjects_sha256(subject_ids):
+            raise ValueError("connectome.json 'subjectsSha256' does not match the bundle's subject list")
+        out[key] = value
+    return out
 
 
 def _save_npy_atomic(path, array):
@@ -122,6 +278,7 @@ class ConnectomeBundle:
         self._subjects = {entry["id"]: entry for entry in self.metadata["subjects"]}
         self._mask = None
         self._mask_indices = None
+        self._mask_sha256 = None
         self._prefetchers = set()
         self._lock = threading.Lock()
 
@@ -131,6 +288,8 @@ class ConnectomeBundle:
         return cls(path)
 
     def _validate_metadata(self):
+        # Optional provenance keys are checked where they are used (provenance, subsets, mask_sha256),
+        # so that an odd optional key never prevents opening a bundle.
         meta = self.metadata
         if meta.get("format") != FORMAT_NAME:
             raise ValueError(f"Unknown connectome format {meta.get('format')!r} in {self.path}")
@@ -231,6 +390,121 @@ class ConnectomeBundle:
             return None
         return _read_npy(path, (self.n_voxels,), np.dtype(np.float32))
 
+    # Provenance (optional connectome.json keys)
+
+    @property
+    def kind(self):
+        """Bundle kind: "timeseries" (the default; the only kind the engine computes maps from)."""
+        return self.metadata.get("kind") or "timeseries"
+
+    @property
+    def provenance(self):
+        """The optional provenance keys of connectome.json (a new dict) with defaults for missing ones.
+
+        Keys: source, kind, mask, subjectsSha256, licence ("unknown"), termsSha256, acknowledgement,
+        preprocessing (gsr "unknown"), population, trS, subsets and participants (see the module docstring).
+        Values are returned as stored; :attr:`subsets` and :attr:`mask_sha256` validate theirs.
+        """
+        meta = self.metadata
+
+        def section(key, defaults):
+            value = meta.get(key)
+            return {**defaults, **(copy.deepcopy(value) if isinstance(value, dict) else {})}
+
+        return {
+            "source": section("source", {"doi": None, "version": None, "url": None, "files": []}),
+            "kind": self.kind,
+            "mask": section("mask", {"source": None, "sha256": None}),
+            "subjectsSha256": meta.get("subjectsSha256"),
+            "licence": meta.get("licence") or "unknown",
+            "termsSha256": meta.get("termsSha256"),
+            "acknowledgement": meta.get("acknowledgement") or "",
+            "preprocessing": section("preprocessing", {"gsr": "unknown", "nuisance": None, "bandpass": None, "smoothingMm": None, "pipelineUrl": None}),
+            "population": section("population", {"n": None, "ageRange": None, "sexRatio": None, "scanners": None}),
+            "trS": meta.get("trS"),
+            "subsets": copy.deepcopy(meta.get("subsets")) if isinstance(meta.get("subsets"), dict) else {},
+            "participants": meta.get("participants"),
+        }
+
+    @property
+    def subsets(self):
+        """Named subject subsets {name: [subject ids]} (empty when there are none).
+
+        Raises ValueError when a subset is malformed or lists ids that are not in the bundle.
+        """
+        subsets = self.metadata.get("subsets")
+        return {} if subsets is None else _validate_subsets(subsets, self.subject_ids)
+
+    @property
+    def mask_sha256(self):
+        """sha256 of the mask voxels (:func:`mask_content_sha256`), computed once.
+
+        Raises ValueError when connectome.json declares a different "mask.sha256".
+        """
+        if self._mask_sha256 is None:
+            computed = mask_content_sha256(self.mask)
+            declared = (self.metadata.get("mask") or {}).get("sha256") if isinstance(self.metadata.get("mask"), dict) else None
+            if declared and declared != computed:
+                raise ValueError(f"mask.nii.gz does not match the mask sha256 recorded in connectome.json ({self.path})")
+            self._mask_sha256 = computed
+        return self._mask_sha256
+
+    def resolve_subject_list(self, spec):
+        """Resolve a subject list specification; return a :class:`SubjectList`.
+
+        :param spec: a subset name (see :attr:`subsets`); the path of a text file of subject ids (one per
+          line, or separated by commas, tabs or spaces; "#" starts a comment; a first line
+          "participant_id", "subject" or "id" is a header, and a header with several columns makes the file a
+          table of which only the first column is read); a comma-separated text of ids; or a list of ids.
+        The ids are returned in bundle order, without duplicates. Unknown ids raise ValueError, which lists them.
+        """
+        name = path = None
+        if isinstance(spec, (str, os.PathLike)):
+            text = os.fspath(spec)
+            subsets = self.subsets
+            if text not in subsets and text.strip() in subsets:
+                text = text.strip()  # " First 100 Subjects " names the subset "First 100 Subjects"
+            if text in subsets:
+                source, name, ids = "subset", text, subsets[text]
+            elif os.path.isfile(text):
+                source, path = "file", os.path.abspath(text)
+                ids = _read_subject_list_file(text)
+            else:
+                source, ids = "ids", [token.strip() for token in text.split(",") if token.strip()]
+                if len(ids) == 1 and ids[0] not in self._subjects:
+                    named = f" (named subsets: {', '.join(repr(n) for n in subsets)})" if subsets else " (it has no named subsets)"
+                    raise ValueError(f"{text!r} is not a subset name, a file or a subject id of the connectome {self.name!r}{named}")
+        else:
+            source, ids = "ids", [str(i) for i in spec]
+        if not ids:
+            raise ValueError("The subject list is empty")
+        unknown = [i for i in dict.fromkeys(ids) if i not in self._subjects]
+        if unknown:
+            raise ValueError(f"{len(unknown)} subject id(s) of the list are not in the connectome {self.name!r}: {', '.join(unknown[:20])}{' ...' if len(unknown) > 20 else ''}")
+        wanted = set(ids)
+        ordered = [subject_id for subject_id in self.subject_ids if subject_id in wanted]
+        return SubjectList(ordered, name, source, path, subjects_sha256(ordered))
+
+    def subject_list(self, spec):
+        """Subject ids of a subset name, a file of ids or a list of ids, in bundle order (see :meth:`resolve_subject_list`)."""
+        return self.resolve_subject_list(spec).ids
+
+    def participants_rows(self):
+        """Rows of the bundle's participants.tsv as dicts (column name to text); [] when there is none."""
+        relative = self.metadata.get("participants")
+        if not isinstance(relative, str) or not relative:
+            return []
+        path = os.path.normpath(os.path.join(self.path, relative))
+        if not path.startswith(self.path + os.sep) or not os.path.isfile(path):
+            return []
+        with open(path, encoding="utf-8-sig", newline="") as f:
+            lines = [line.rstrip("\r\n") for line in f]
+        lines = [line for line in lines if line.strip()]
+        if not lines:
+            return []
+        header = lines[0].split("\t")
+        return [dict(zip(header, (line.split("\t") + [""] * len(header))[: len(header)], strict=True)) for line in lines[1:]]
+
     # Subjects
 
     def _entry(self, subject_id):
@@ -321,6 +595,43 @@ class ConnectomeBundle:
 
     def __repr__(self):
         return f"ConnectomeBundle({self.name!r}, subjects={self.n_subjects}, voxels={self.n_voxels})"
+
+
+class SubjectList(NamedTuple):
+    """A resolved subject list (see :meth:`ConnectomeBundle.resolve_subject_list`)."""
+
+    ids: list  # subject ids in bundle order
+    name: str  # subset name, or None
+    source: str  # "subset", "file" or "ids"
+    path: str  # absolute path of the file of ids, or None
+    sha256: str  # subjects_sha256(ids)
+
+
+_SUBJECT_LIST_HEADERS = {"participant_id", "subject", "subject_id", "id", "ids"}
+
+
+def _read_subject_list_file(path):
+    """Subject ids of a text file: ids separated by commas, tabs, spaces or new lines; in a table (a TSV,
+    or a CSV or TSV whose header row has several columns, such as participants.tsv) only the first column.
+    """
+    ids = []
+    first = True
+    table = False
+    with open(path, encoding="utf-8-sig") as f:
+        for line in f:
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            fields = [field for field in re.split(r"[,\s]+", line) if field]
+            if first and fields[0].lower() in _SUBJECT_LIST_HEADERS:
+                first = False
+                table = len(fields) > 1
+                continue
+            first = False
+            if table or "\t" in line:
+                fields = fields[:1]  # only the first column holds ids
+            ids.extend(fields)
+    return ids
 
 
 class _Failure:
@@ -424,9 +735,15 @@ class ConnectomeWriter:
     bundle at the same path are deleted first.
     """
 
-    def __init__(self, path, mask, affine, name=None, description="", citation="", data_use_terms="", dtype="float16", overwrite=False, resume=False):
+    def __init__(self, path, mask, affine, name=None, description="", citation="", data_use_terms="", dtype="float16", overwrite=False, resume=False, provenance=None):
+        """:param provenance: optional dict of provenance keys (see the module docstring and
+        :func:`set_metadata`), validated and added to connectome.json by :meth:`finalize`.
+        """
         if dtype not in SUBJECT_DTYPES:
             raise ValueError(f"dtype must be one of {sorted(SUBJECT_DTYPES)}")
+        self.provenance = dict(provenance or {})
+        # Fail early on bad keys; the values that depend on the subjects are checked by finalize()
+        _apply_metadata({"subjects": []}, {key: value for key, value in self.provenance.items() if key not in ("subsets", "subjectsSha256")})
         self.path = os.path.abspath(os.fspath(path))
         manifest = os.path.join(self.path, MANIFEST_NAME)
         if os.path.exists(manifest) and not (overwrite or resume):
@@ -470,6 +787,11 @@ class ConnectomeWriter:
             same_grid = previous.get("shape") == self.metadata["shape"] and np.allclose(previous.get("affine", np.zeros((4, 4))), self.affine, atol=1e-4, rtol=0)
             if not same_grid or previous.get("nVoxels") != self.n_voxels or previous.get("dtype") != self.metadata["dtype"] or not self._same_mask_on_disk():
                 raise ValueError(f"Cannot resume: the existing bundle at {self.path} has a different grid, mask or dtype")
+            # Keep the provenance of the interrupted conversion; keys given to this writer take precedence
+            saved = previous.get(_PENDING_PROVENANCE_KEY) if name == PARTIAL_MANIFEST_NAME else previous
+            if isinstance(saved, dict):
+                saved = {key: value for key, value in saved.items() if key in PROVENANCE_KEYS and key != "subjectsSha256"}
+                self.provenance = {**saved, **self.provenance}
             for entry in previous.get("subjects", []):
                 if all(os.path.isfile(p) for p in self._subject_files(entry["id"])):
                     self.metadata["subjects"].append(entry)
@@ -484,9 +806,9 @@ class ConnectomeWriter:
 
     def _remove_previous(self):
         """Delete a previous bundle's manifests (first, so that an interrupted overwrite never leaves
-        a manifest describing new data), its subject files and derived/degree.npy.
+        a manifest describing new data), its subject files and derived degree maps.
         """
-        stale = [os.path.join(self.path, "derived", "degree.npy")]
+        stale = [os.path.join(self.path, "derived", name) for name in ("degree.npy", "degree_fz.npy")]
         for name in (MANIFEST_NAME, PARTIAL_MANIFEST_NAME):
             path = os.path.join(self.path, name)
             if not os.path.isfile(path):
@@ -542,12 +864,21 @@ class ConnectomeWriter:
         _save_npy_atomic(data_path, data)
         _save_npy_atomic(norms_path, norms)
         self.metadata["subjects"].append({"id": subject_id, "runs": lengths})
-        _write_json_atomic(os.path.join(self.path, PARTIAL_MANIFEST_NAME), self.metadata)
+        partial = {**self.metadata, _PENDING_PROVENANCE_KEY: self.provenance} if self.provenance else self.metadata
+        _write_json_atomic(os.path.join(self.path, PARTIAL_MANIFEST_NAME), partial)
 
     def finalize(self):
-        """Write connectome.json and return the bundle path."""
+        """Write connectome.json (with the provenance keys, "subjectsSha256" and "mask.sha256") and return the bundle path."""
         if not self.metadata["subjects"]:
             raise ValueError("Cannot finalize a connectome bundle without subjects")
+        provenance = dict(self.provenance)
+        mask_info = dict(provenance.get("mask") or {})
+        computed = mask_content_sha256(self.mask)
+        if mask_info.get("sha256") not in (None, computed):
+            raise ValueError("The provenance 'mask.sha256' does not match the bundle mask")
+        provenance["mask"] = {**mask_info, "sha256": computed}
+        provenance["subjectsSha256"] = subjects_sha256(entry["id"] for entry in self.metadata["subjects"])
+        self.metadata = _apply_metadata(self.metadata, provenance)
         _write_json_atomic(os.path.join(self.path, MANIFEST_NAME), self.metadata)
         partial = os.path.join(self.path, PARTIAL_MANIFEST_NAME)
         if os.path.exists(partial):
@@ -560,6 +891,35 @@ class ConnectomeWriter:
     def __exit__(self, exc_type, exc, tb):
         if exc_type is None:
             self.finalize()
+
+
+def set_metadata(bundle_path, **keys):
+    """Set optional connectome.json keys of a bundle in place (atomically); a value of None removes the key.
+
+    Only the provenance keys (:data:`PROVENANCE_KEYS`) and the descriptive keys (:data:`DESCRIPTIVE_KEYS`)
+    can be set; the keys that define the data (:data:`REQUIRED_KEYS`) are refused. Values are validated
+    (for example "subsets" may only list subjects of the bundle). Note that any change changes the
+    manifest sha256 that runs and terms acceptances refer to.
+
+    Example: ``set_metadata(path, licence="GSP-DUT-2014", preprocessing={"gsr": True}, subsets={"user:young": ids})``
+
+    :return: the new metadata dict.
+    """
+    path = os.path.join(os.path.abspath(os.fspath(bundle_path)), MANIFEST_NAME)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Not a connectome bundle (missing {MANIFEST_NAME}): {bundle_path}")
+    bundle = ConnectomeBundle(os.path.dirname(path))  # the bundle must be valid
+    metadata = bundle.metadata
+    if isinstance(keys.get("mask"), dict):
+        computed = mask_content_sha256(bundle.mask)
+        if keys["mask"].get("sha256") not in (None, computed):
+            raise ValueError("'mask.sha256' does not match the bundle mask")
+        keys["mask"] = {**keys["mask"], "sha256": computed}
+    if "subjectsSha256" not in keys:
+        keys["subjectsSha256"] = subjects_sha256(bundle.subject_ids)
+    metadata = _apply_metadata(metadata, keys)
+    _write_json_atomic(path, metadata)
+    return metadata
 
 
 def normalize_run(run, out=None, block=8192):
@@ -617,6 +977,8 @@ def from_nifti_timeseries(
     overwrite=False,
     progress=None,
     cancel=None,
+    participants=None,
+    provenance=None,
 ):
     """Build a bundle from preprocessed 4D NIfTI time series (one file per run).
 
@@ -628,6 +990,9 @@ def from_nifti_timeseries(
     :param progress: optional callback(done_subjects, total_subjects, elapsed_s).
     :param cancel: optional threading.Event or callable; when set the conversion stops and None is
       returned (call again with resume=True to continue).
+    :param participants: optional participants.tsv describing the subjects; it is copied into the
+      bundle as participants.tsv (with its participants.json data dictionary, when there is one).
+    :param provenance: optional provenance keys for connectome.json (see :func:`set_metadata`).
     :return: bundle path.
     """
     files = sorted(glob.glob(os.fspath(files_or_glob))) if isinstance(files_or_glob, (str, os.PathLike)) else [os.fspath(f) for f in files_or_glob]
@@ -665,7 +1030,26 @@ def from_nifti_timeseries(
         if not Grid(header["shape"][:3], header["affine"]).matches(mask_grid, atol=1e-3):
             raise ValueError(f"{path} is not on the mask grid (shape {header['shape'][:3]} vs {mask_grid.shape}, or different affine); resample it first")
 
-    writer = ConnectomeWriter(out_dir, mask, mask_affine, name=name or _default_name(out_dir), description=description, citation=citation, data_use_terms=data_use_terms, dtype=dtype, overwrite=overwrite, resume=resume)
+    provenance = dict(provenance or {})
+    if participants is not None:
+        if not os.path.isfile(participants):
+            raise FileNotFoundError(f"participants file not found: {participants}")
+        provenance["participants"] = "participants.tsv"
+    writer = ConnectomeWriter(
+        out_dir,
+        mask,
+        mask_affine,
+        name=name or _default_name(out_dir),
+        description=description,
+        citation=citation,
+        data_use_terms=data_use_terms,
+        dtype=dtype,
+        overwrite=overwrite,
+        resume=resume,
+        provenance=provenance,
+    )
+    if participants is not None:
+        _copy_participants(participants, writer.path)
     start = time.perf_counter()
     for done, (subject, paths) in enumerate(groups.items(), 1):
         if _is_cancelled(cancel):
@@ -676,6 +1060,16 @@ def from_nifti_timeseries(
         if progress:
             progress(done, len(groups), time.perf_counter() - start)
     return writer.finalize()
+
+
+def _copy_participants(source, bundle_path):
+    """Copy a participants.tsv (and its participants.json sidecar, if any) into a bundle folder."""
+    for source_path, name in ((source, "participants.tsv"), (os.path.splitext(source)[0] + ".json", "participants.json")):
+        target = os.path.join(bundle_path, name)
+        if os.path.isfile(source_path) and not (os.path.exists(target) and os.path.samefile(source_path, target)):
+            tmp_path = f"{target}.{os.getpid()}.tmp"
+            shutil.copyfile(source_path, tmp_path)
+            os.replace(tmp_path, target)
 
 
 def _loadmat(path, **kwargs):
@@ -708,7 +1102,56 @@ def _leaddbs_subject_entries(sub_ids):
     return [[str(v) for v in _as_list(item)] for item in items]
 
 
-def from_leaddbs(dataset_dir, out_dir, name=None, description="", citation="", data_use_terms="", dtype="float16", max_subjects=None, resume=False, overwrite=False, progress=None, cancel=None):
+def _leaddbs_subsets(info, subject_ids, n_listed):
+    """Named subsets of dataset_info.json ("subsets": [{"name", "subs": 1-based indices}]) as {name: [ids]}.
+
+    "subs" may be a scalar (a single subject). Subsets that refer to subjects that were not converted
+    (``max_subjects``) are left out; malformed entries are ignored.
+    """
+    entries = info.get("subsets") or []
+    if isinstance(entries, dict):
+        entries = [entries]  # a single subset (MATLAB jsonencode of a 1x1 struct)
+    out = {}
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict) or not isinstance(entry.get("name"), str) or not entry["name"].strip():
+            continue
+        try:
+            values = [float(i) for i in _as_list(entry.get("subs"))]
+        except (TypeError, ValueError):
+            continue
+        if not all(value.is_integer() for value in values):
+            continue
+        indices = [int(value) for value in values]
+        if not indices or min(indices) < 1 or max(indices) > n_listed or len(set(indices)) != len(indices):
+            continue
+        if max(indices) <= len(subject_ids):
+            out[entry["name"].strip()] = [subject_ids[i - 1] for i in indices]
+    return out
+
+
+def _leaddbs_source(info):
+    """The "source" provenance of a Lead-DBS dataset: name, tag and citation of dataset_info.json, and the DOI in the citation."""
+    source = {key: info[key] for key in ("name", "tag", "citation") if info.get(key)}
+    citation = info.get("citation")
+    texts = [citation] if isinstance(citation, str) else [v for v in citation.values() if isinstance(v, str)] if isinstance(citation, dict) else []
+    for text in texts:
+        match = _DOI_PATTERN.search(text)
+        if match:
+            source["doi"] = match.group(1).rstrip(".,;)")
+            break
+    return source
+
+
+def _leaddbs_citation_text(info):
+    citation = info.get("citation")
+    if isinstance(citation, str):
+        return citation
+    if isinstance(citation, dict):
+        return citation.get("long") or citation.get("short") or ""
+    return ""
+
+
+def from_leaddbs(dataset_dir, out_dir, name=None, description="", citation="", data_use_terms="", dtype="float16", max_subjects=None, resume=False, overwrite=False, progress=None, cancel=None, provenance=None):
     """Convert a Lead-DBS fMRI connectome folder (dataset_volsurf.mat, dataset_info.json, vol/*.mat).
 
     ``vol.outidx`` holds 1-based MATLAB (Fortran-order) voxel indices into ``vol.space`` (an SPM
@@ -716,7 +1159,13 @@ def from_leaddbs(dataset_dir, out_dir, name=None, description="", citation="", d
     per run, each containing ``gmtc`` (T x V in format 1.1, V x T in format 1.0). Voxels are reordered
     to the bundle's C order. Only MATLAB v5/v7 files are supported (v7.3 raises UnsupportedFormatError).
 
+    The named subsets of dataset_info.json (for example "First 100 Subjects", given as 1-based indices
+    into vol.subIDs) become "subsets" of connectome.json, and its name, tag, citation and DOI are
+    recorded as "source". Without ``citation`` the dataset's citation text is used.
+
     :param max_subjects: optional limit on the number of converted subjects.
+    :param provenance: optional provenance keys for connectome.json (see :func:`set_metadata`);
+      its "source" keys are added to the ones read from dataset_info.json.
     :return: bundle path, or None if cancelled.
     """
     dataset_dir = os.fspath(dataset_dir)
@@ -743,6 +1192,7 @@ def from_leaddbs(dataset_dir, out_dir, name=None, description="", citation="", d
     n_voxels = len(outidx)
 
     entries = _leaddbs_subject_entries(vol["subIDs"])
+    n_listed = len(entries)
     if max_subjects is not None:
         entries = entries[: int(max_subjects)]
     subject_ids = []
@@ -752,7 +1202,26 @@ def from_leaddbs(dataset_dir, out_dir, name=None, description="", citation="", d
         subject_ids.append(sanitize_subject_id(entry[0]))
         if subject_ids.count(subject_ids[-1]) > 1:
             raise ValueError(f"vol.subIDs has duplicate subject id {entry[0]!r} (as {subject_ids[-1]!r})")
-    writer = ConnectomeWriter(out_dir, mask.reshape(shape), affine, name=name or _default_name(out_dir), description=description, citation=citation, data_use_terms=data_use_terms, dtype=dtype, overwrite=overwrite, resume=resume)
+    provenance = dict(provenance or {})
+    source = {**_leaddbs_source(info), **(provenance.get("source") or {})}
+    if source:
+        provenance["source"] = source
+    subsets = {**_leaddbs_subsets(info, subject_ids, n_listed), **(provenance.get("subsets") or {})}
+    if subsets:
+        provenance["subsets"] = subsets
+    writer = ConnectomeWriter(
+        out_dir,
+        mask.reshape(shape),
+        affine,
+        name=name or _default_name(out_dir),
+        description=description,
+        citation=citation or _leaddbs_citation_text(info),
+        data_use_terms=data_use_terms,
+        dtype=dtype,
+        overwrite=overwrite,
+        resume=resume,
+        provenance=provenance,
+    )
     format_version = float(info.get("formatversion", 1.0))
     start = time.perf_counter()
     for done, (subject, entry) in enumerate(zip(subject_ids, entries, strict=True), 1):
@@ -824,18 +1293,21 @@ def make_synthetic(out_dir, shape=(20, 24, 20), n_subjects=6, runs=(30, 30), see
 
 
 def compute_degree(bundle, n_seeds=1000, subjects=None, measure="abs_fz", seed=0, chunk=8192, store=True, progress=None, cancel=None):
-    """Connectome degree map for confound QA: mean |Fisher z| (or mean r) of each voxel with a
-    random sample of seed voxels, averaged over subjects. Self-correlations are excluded.
+    """Connectome degree map for confound QA: the mean |Fisher z| ("hubness"), mean signed Fisher z
+    or mean r of each voxel with a random sample of seed voxels, averaged over subjects.
+    Self-correlations are excluded.
 
     :param subjects: None (all), an int (first n) or a list of ids.
-    :param measure: "abs_fz" (mean |Fz|) or "r" (mean r).
-    :param store: save the result as derived/degree.npy in the bundle.
+    :param measure: "abs_fz" (mean |Fz|, hubness), "fz" (signed mean Fz) or "r" (mean r).
+    :param store: save the result in the bundle's derived folder: degree.npy (the map used by the QA,
+      see :attr:`ConnectomeBundle.degree`) for "abs_fz" and "r", degree_fz.npy for the signed "fz"
+      (so that it never replaces the hubness reference).
     :return: (V,) float32 degree map, or None if cancelled.
     """
     from .engine import RMAX, iter_correlation_chunks
 
-    if measure not in ("abs_fz", "r"):
-        raise ValueError("measure must be 'abs_fz' or 'r'")
+    if measure not in ("abs_fz", "fz", "r"):
+        raise ValueError("measure must be 'abs_fz', 'fz' or 'r'")
     if isinstance(subjects, int):
         ids = bundle.select_subjects(subjects)
     else:
@@ -856,7 +1328,12 @@ def compute_degree(bundle, n_seeds=1000, subjects=None, measure="abs_fz", seed=0
         # Rows are unit norm per run, so a single voxel's seed is its own row divided by nRuns.
         seed_matrix = np.ascontiguousarray(subject.data[seeds].astype(np.float32).T / len(subject.runs))
         for v0, v1, r in iter_correlation_chunks(subject.data, seed_matrix, chunk):
-            values = np.abs(np.arctanh(np.clip(r, -RMAX, RMAX))) if measure == "abs_fz" else r.astype(np.float64)
+            if measure == "r":
+                values = r.astype(np.float64)
+            else:
+                values = np.arctanh(np.clip(r, -RMAX, RMAX))
+                if measure == "abs_fz":
+                    np.abs(values, out=values)
             rows = np.flatnonzero(is_seed[v0:v1])
             values[rows, seed_column[v0 + rows]] = 0.0
             total[v0:v1] += values.sum(axis=1)
@@ -866,5 +1343,5 @@ def compute_degree(bundle, n_seeds=1000, subjects=None, measure="abs_fz", seed=0
     degree = (total / np.maximum(counts, 1) / max(done, 1)).astype(np.float32)
     if store:
         os.makedirs(os.path.join(bundle.path, "derived"), exist_ok=True)
-        _save_npy_atomic(os.path.join(bundle.path, "derived", "degree.npy"), degree)
+        _save_npy_atomic(os.path.join(bundle.path, "derived", "degree_fz.npy" if measure == "fz" else "degree.npy"), degree)
     return degree

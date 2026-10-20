@@ -15,9 +15,15 @@ The time series are stored as float16 and upcast to float32 chunk by chunk (floa
 Command line (prints one JSON object per line: start, progress, snapshot, warning, done or error events)::
 
     python -m LesionNetworkMappingLib.engine --bundle B.lnmc --lesion lesion1.nii.gz [--lesion ...]
-        --out DIR [--subjects N [--random] [--seed S]] [--threads K] [--snapshot-every K]
+        --out DIR [--subjects N [--random] [--seed S] | --subject-list SPEC] [--threads K] [--snapshot-every K]
         [--null-relocations K [--null-seed S] [--brain-mask MASK] [--null-voxels N] [--write-null]]
         [--desc-suffix PreviewN100] [--threshold-rule JSON] [--run-json run.json]
+
+--subject-list takes a named subset of the bundle (e.g. "First 100 Subjects"), a text file of subject
+ids or a comma-separated list of ids; a named subset labels the outputs "Subset<Name>" unless
+--desc-suffix is given. The "start" event carries the process id ("pid"). Run as a module, the
+engine stops (exit code 3, "cancelled" event) on SIGTERM/SIGINT or when the process that started it
+is gone (the PythonSlicer launcher does not pass SIGTERM on), see jobs.run_job.
 
 After the maps, the specificity QA (see qa.py) runs: degree similarity when the bundle has a degree
 map, and the relocated-lesion null when --null-relocations is given (the relocated lesions are extra
@@ -56,6 +62,7 @@ import time
 
 import numpy as np
 
+from . import jobs
 from .connectome import ConnectomeBundle, _is_cancelled
 from .geometry import from_masked_vector, resample_to_grid, to_masked_vector
 from .nifti import XFORM_WARNING_MM, read_nifti, read_nifti_header, write_nifti, xform_disagreement
@@ -555,6 +562,11 @@ def connectome_label(bundle_name):
     return re.sub(r"[^A-Za-z0-9]", "", bundle_name) or "connectome"
 
 
+def subset_suffix(subset_name):
+    """The "desc" suffix of a run on a named subject subset: "Subset" + the letters and digits of its name."""
+    return "Subset" + re.sub(r"[^A-Za-z0-9]", "", subset_name)
+
+
 def output_paths(out_dir, lesion_name, bundle_name, desc_suffix=""):
     """Output file names (Lead-DBS style) for one lesion: {result key: path}.
 
@@ -627,6 +639,7 @@ def main(argv=None):
     parser.add_argument("--subjects", type=int, default=None, help="use only N subjects (default: all)")
     parser.add_argument("--random", action="store_true", help="choose the N subjects at random")
     parser.add_argument("--seed", type=int, default=0, help="random seed for --random")
+    parser.add_argument("--subject-list", default=None, metavar="SPEC", help="use these subjects: a named subset of the bundle, a text file of subject ids or a comma-separated list of ids")
     parser.add_argument("--threads", type=int, default=2, help="BLAS threads (default: 2)")
     parser.add_argument("--chunk", type=int, default=DEFAULT_CHUNK, help="voxels per matrix product")
     parser.add_argument("--supersample", type=int, default=2, help="minimum sub-samples per axis when resampling lesions on oblique grids")
@@ -648,6 +661,8 @@ def main(argv=None):
         parser.error("--null-relocations must be at least 0")
     if args.null_voxels < 0:
         parser.error("--null-voxels must be at least 0")
+    if args.subject_list is not None and (args.subjects is not None or args.random):
+        parser.error("--subject-list cannot be combined with --subjects or --random")
     rule = None
     if args.threshold_rule is not None:
         from .thresholds import normalize_rule
@@ -662,14 +677,26 @@ def main(argv=None):
         from .export import file_sha256, now_iso, run_record, subjects_sha256, write_json_atomic
 
         started = time.perf_counter()
+        # Set by SIGTERM/SIGINT or the orphan watchdog when run as a module (jobs.run_job)
+        cancel = jobs.CancelToken(signals=False)
         bundle = ConnectomeBundle.open(args.bundle)
+        if bundle.kind != "timeseries":
+            raise ValueError(f"The connectome {bundle.name!r} is a {bundle.kind!r} bundle; network maps need a time series connectome")
+        subject_list = None
+        if args.subject_list is not None:
+            subject_list = bundle.resolve_subject_list(args.subject_list)
+            ids = subject_list.ids
+            if subject_list.name and not args.desc_suffix:
+                args.desc_suffix = subset_suffix(subject_list.name)
+        else:
+            ids = resolve_subjects(bundle, args.subjects, args.random, args.seed)
         os.makedirs(args.out, exist_ok=True)
-        ids = resolve_subjects(bundle, args.subjects, args.random, args.seed)
         if args.run_json:
-            run = run_record(raw_argv, bundle, ids, args, rule)
+            run = run_record(raw_argv, bundle, ids, args, rule, subject_list)
             write_json_atomic(args.run_json, run)
         names, weights, qc = [], [], []
         for path in args.lesion:
+            cancel.raise_if_cancelled(done=0)
             lesion_weights_vector, lesion_qc_values = prepare_lesion(path, bundle, supersample=args.supersample, binarize=not args.probabilistic)
             name = _unique_name(_lesion_name(path), names)
             names.append(name)
@@ -715,7 +742,7 @@ def main(argv=None):
             run["maps"] = {name: {key: os.path.abspath(p) for key, p in output_paths(args.out, name, bundle.name, args.desc_suffix).items()} for name in names}
             run["null"] = null_settings
             write_json_atomic(args.run_json, run)
-        _emit({"event": "start", "bundle": bundle.name, "lesions": names, "subjects": len(ids), "threads": args.threads, "qc": qc, "null_relocations": null_counts})
+        _emit({"event": "start", "bundle": bundle.name, "lesions": names, "subjects": len(ids), "threads": args.threads, "qc": qc, "null_relocations": null_counts, "pid": os.getpid()})
 
         def on_progress(done, total, elapsed):
             eta = elapsed / done * (total - done) if done else 0.0
@@ -738,7 +765,14 @@ def main(argv=None):
             snapshot=on_snapshot,
             null_weights=null_columns or None,
             null_voxels=null_voxels,
+            cancel=cancel,
         )
+        if maps.cancelled and cancel.cancelled():
+            # Stopped: the snapshots already written stay valid; run.json keeps status "running" (a partial run)
+            if run is not None:
+                run["stop_reason"] = cancel.reason
+                write_json_atomic(args.run_json, run)
+            raise jobs.Cancelled(done=maps.n, reason=cancel.reason)
         outputs = write_maps(maps, names, bundle, args.out, args.desc_suffix)
         null_outputs = write_null_maps(maps, names, null_counts, bundle, args.out, args.desc_suffix) if args.write_null and null_columns else []
 
@@ -786,6 +820,8 @@ def main(argv=None):
             done["run_json"] = os.path.abspath(args.run_json)
         _emit(done)
         return 0
+    except jobs.Cancelled:
+        raise
     except Exception as exc:
         message = f"{type(exc).__name__}: {exc}"
         if run is not None:
@@ -799,4 +835,5 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Orphan watchdog and SIGTERM/SIGINT as cancellation requests; "cancelled" event and exit code 3 when stopped
+    jobs.run_job(main, job="engine")
