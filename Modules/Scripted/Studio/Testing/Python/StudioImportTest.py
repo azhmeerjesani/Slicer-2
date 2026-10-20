@@ -1106,6 +1106,75 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         _volume, again = importer.startOnTemplate(shell=studioShell)
         self.assertEqual(again.GetID(), first.GetID())
 
+    def test_template_again_after_save_never_overwrites(self):
+        """Start on template after a saved, unchanged lesion starts a new lesion: Save never re-saves it silently to
+        the previous case's file. A lesion with unsaved changes is reused as it is (never hidden or re-targeted).
+        """
+        import hashlib
+
+        from StudioLib import draw, importer
+
+        def paint(segmentation, volume, box):
+            segmentId = segmentation.GetSegmentation().GetNthSegmentID(0)
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, segmentId, volume)
+            array[box] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentation, segmentId, volume)
+            self._pump()
+
+        def digest(path):
+            with open(path, "rb") as f:
+                return hashlib.sha256(f.read()).hexdigest()
+
+        studioShell = self._applyStudio()
+        volume, first = importer.startOnTemplate(shell=studioShell)
+        self._pump(6)
+        paint(first, volume, np.s_[40:44, 50:54, 40:44])
+        pathA = os.path.join(self.directory, "caseA_lesion.nii.gz")
+        self.assertEqual(draw.saveLesionDialog(studioShell, path=pathA), pathA)
+        self.assertEqual(draw.lesionSaveState(first)[0], "saved")
+        savedA = digest(pathA)
+        # Changed after the save: the same lesion is reused (its strokes stay visible, Save keeps its own file)
+        studioShell.switchTo("library")
+        self._pump()
+        paint(first, volume, np.s_[44:46, 50:54, 40:44])
+        self.assertEqual(draw.lesionSaveState(first)[0], "unsaved")
+        _volume, again = importer.startOnTemplate(shell=studioShell)
+        self._pump(4)
+        self.assertEqual(again.GetID(), first.GetID())
+        self.assertTrue(first.GetDisplayNode().GetVisibility2D())
+        self.assertEqual(draw.saveLesionNow(studioShell), pathA)
+        self.assertEqual(draw.lesionSaveState(first)[0], "saved")
+        savedA = digest(pathA)
+        # Saved and unchanged: the next case starts on a new lesion, the saved one is hidden and keeps its file
+        studioShell.switchTo("library")
+        self._pump()
+        volume2, second = importer.startOnTemplate(shell=studioShell)
+        self._pump(6)
+        self.assertEqual(volume2.GetID(), volume.GetID())
+        self.assertNotEqual(second.GetID(), first.GetID())
+        self.assertTrue(importer._isBoundTo(second, volume))
+        self.assertFalse(first.GetDisplayNode().GetVisibility2D())
+        self.assertEqual(self._editor().segmentationNode().GetID(), second.GetID())
+        self.assertEqual(studioShell.currentWorkspace(), "draw")
+        self.assertEqual(draw.lesionSaveState(second)[0], "never")
+        self.assertEqual(draw.lesionSaveState(first)[:2], ("saved", pathA))
+        # The Save call to action on the new lesion asks for a file (here: cancelled); case A is untouched
+        paint(second, volume2, np.s_[20:30, 20:30, 20:30])
+        dialogs = []
+        original = draw.saveLesionDialog
+        draw.saveLesionDialog = lambda shell=None, path=None: dialogs.append(path)
+        try:
+            self.assertIsNone(draw.saveLesionNow(studioShell))
+        finally:
+            draw.saveLesionDialog = original
+        self.assertEqual(dialogs, [None])
+        self.assertEqual(digest(pathA), savedA)
+        # A new lesion that is not saved yet is reused by the next Start on template (no "Lesion 3")
+        _volume, third = importer.startOnTemplate(shell=studioShell)
+        self._pump(4)
+        self.assertEqual(third.GetID(), second.GetID())
+        self.assertEqual(digest(pathA), savedA)
+
     #
     # Tables and Recent
     #
