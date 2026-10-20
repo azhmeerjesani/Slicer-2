@@ -1128,6 +1128,8 @@ const char* dualMonitorFourUpView = //
 const int studioFocusViewId = 7001;
 const int studioFocus3DViewId = 7002;
 const int studioRowViewId = 7003;
+// 7004 is reserved for the Trace layout (L-29)
+const int studioCompareViewId = 7005;
 
 const char* studioFocusView = //
   "<layout type=\"horizontal\" split=\"true\">"
@@ -1211,6 +1213,24 @@ const char* studioRowView = //
   "<item>"
   "<view class=\"vtkMRMLSliceNode\" singletontag=\"Yellow\">"
   "<property name=\"orientation\" action=\"default\">Sagittal</property>"
+  "<property name=\"viewlabel\" action=\"default\">Y</property>"
+  "<property name=\"viewcolor\" action=\"default\">#EDD54C</property>"
+  "</view>"
+  "</item>"
+  "</layout>";
+
+const char* studioCompareView = //
+  "<layout type=\"horizontal\" split=\"true\">"
+  "<item splitSize=\"550\">"
+  "<view class=\"vtkMRMLSliceNode\" singletontag=\"Red\">"
+  "<property name=\"orientation\" action=\"default\">Axial</property>"
+  "<property name=\"viewlabel\" action=\"default\">R</property>"
+  "<property name=\"viewcolor\" action=\"default\">#F34A33</property>"
+  "</view>"
+  "</item>"
+  "<item splitSize=\"450\">"
+  "<view class=\"vtkMRMLSliceNode\" singletontag=\"Yellow\">"
+  "<property name=\"orientation\" action=\"default\">Axial</property>"
   "<property name=\"viewlabel\" action=\"default\">Y</property>"
   "<property name=\"viewcolor\" action=\"default\">#EDD54C</property>"
   "</view>"
@@ -1616,6 +1636,8 @@ void vtkMRMLLayoutLogic::AddDefaultLayouts()
                                          studioFocus3DView);
   this->LayoutNode->AddLayoutDescription(studioRowViewId,
                                          studioRowView);
+  this->LayoutNode->AddLayoutDescription(studioCompareViewId,
+                                         studioCompareView);
   // clang-format on
 
   // add the CompareView modes which are defined programmatically

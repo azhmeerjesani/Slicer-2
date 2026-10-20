@@ -58,6 +58,8 @@ class ctkDynamicSpacer;
 class ctkSignalMapper;
 class ctkDoubleSpinBox;
 class ctkVTKSliceView;
+class QActionGroup;
+class QLabel;
 class QSpinBox;
 class qMRMLSliderWidget;
 class vtkMRMLSliceNode;
@@ -82,6 +84,21 @@ public:
 
   void init() override;
   void setColor(QColor color) override;
+  void updateFlatStyle() override;
+
+  /// Create the widgets of the flat bar (orientation button, slice readout, link button).
+  void setupFlatBar();
+  /// Update the readout "S 96.0 mm · 97/193", the orientation button and the view label tooltip
+  /// of the flat bar (no-op in the classic presentation).
+  void updateFlatBarFromMRMLSliceNode();
+  /// Update the flat bar when the event loop runs (with the offset slider): the slice node and the slice logic
+  /// are modified several times per slice change, and each separate repaint of the bar costs a window update.
+  void requestFlatBarUpdate();
+  /// Hide the less important flat bar widgets when the bar is narrow.
+  void updateFlatBarWidgetsVisibility();
+  /// Select the Reformat module (through the layout manager of the application), or show the
+  /// reformat widget when no module can be selected.
+  void openReformat();
 
   void setupLinkedOptionsMenu();
   void setupReformatOptionsMenu();
@@ -236,6 +253,25 @@ public:
   QActionGroup* SlabReconstructionTypesActions{ nullptr };
 
   bool ShowSliceOffsetSlider{ true };
+
+  // Flat bar (qMRMLViewControllerBar::flatStyle)
+  QToolButton* OrientationButton{ nullptr };
+  QMenu* OrientationMenu{ nullptr };
+  QActionGroup* OrientationActions{ nullptr };
+  QAction* ReformatAction{ nullptr };
+  QAction* ResetOrientationAction{ nullptr };
+  QLabel* SliceIndexLabel{ nullptr };
+  QToolButton* BarLinkButton{ nullptr };
+  QIcon FlatFitIcon;
+  QString ClassicViewLabelToolTip;
+  QIcon ClassicFitIcon;
+  QString ClassicFitToolTip;
+  QString ClassicSpinBoxStyleSheet;
+  bool ClassicSpinBoxVisible{ true };
+  bool ClassicMoreButtonChecked{ false };
+  bool ClassicMoreButtonHidden{ false };
+  bool ClassicStateRecorded{ false };
+  bool FlatBarUpdatePending{ false };
 };
 
 #endif

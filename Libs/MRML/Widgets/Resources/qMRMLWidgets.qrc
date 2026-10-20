@@ -166,5 +166,18 @@
         <file>Icons/ViewMaximize.png</file>
         <file>Icons/ViewRestore.png</file>
         <file>Icons/SlabReconstruction.png</file>
+        <file>Icons/Lucide/box.svg</file>
+        <file>Icons/Lucide/chevron-down.svg</file>
+        <file>Icons/Lucide/crosshair.svg</file>
+        <file>Icons/Lucide/eye.svg</file>
+        <file>Icons/Lucide/eye-off.svg</file>
+        <file>Icons/Lucide/link.svg</file>
+        <file>Icons/Lucide/maximize-2.svg</file>
+        <file>Icons/Lucide/minimize-2.svg</file>
+        <file>Icons/Lucide/pin.svg</file>
+        <file>Icons/Lucide/rotate-3d.svg</file>
+        <file>Icons/Lucide/scan.svg</file>
+        <file>Icons/Lucide/sliders-horizontal.svg</file>
+        <file>Icons/Lucide/unlink.svg</file>
     </qresource>
 </RCC>

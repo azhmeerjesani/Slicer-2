@@ -35,7 +35,8 @@ class Row:
     :param studio: where the same thing is in Studio, in plain words (may contain ``{key:...}``).
     :param officialKey: the key in official 3D Slicer, or None.
     :param key: the key in Studio, or None.
-    :param target: the Studio control that "Show me" points at: an objectName or "Parent/Child", or None.
+    :param target: the Studio control that "Show me" points at: an objectName or "Parent/Child", a tuple of them (the
+        first one shown), or None.
     :param workspace: the workspace that shows ``target`` ("library", "draw"), None for the top bar.
     :param note: one more sentence, or None.
     :param same: True if nothing changed (the place is the same in both).
@@ -149,8 +150,8 @@ ROWS = (
     Row("settings", _("Edit > Application Settings"), _("≡ > Settings… ({key:Ctrl+2})"), officialKey="Ctrl+2", key="Ctrl+2",
         target="StudioAppMenuButton", keywords="settings preferences options application settings",
         note=_("Settings are shared with your other 3D Slicer installations; Studio keeps its own choices under Studio/ and Appearance/.")),
-    Row("layout", _("View > Layout"), _("The layout button in the top bar: Focus, Single, Four-up, Row ({key:Alt+1} to {key:Alt+4}); More layouts… lists every "
-                                         "3D Slicer layout, and Search finds any layout by name"),
+    Row("layout", _("View > Layout"), _("The layout button in the top bar: Focus, Single (enlarges one view; Esc restores), Four-up, Row ({key:Alt+1} to "
+                                         "{key:Alt+4}) and Focus + 3D ({key:Alt+5}); More layouts… lists every 3D Slicer layout, and Search finds any layout by name"),
         key="Alt+1", target="StudioLayoutButton", keywords="layout conventional four-up four up one up red slice only views arrangement",
         note=_("The Layout Selection toolbar button of 3D Slicer offers the same layouts.")),
     Row("python-console", _("View > Python Console"), _("≡ > Python console ({key:Ctrl+3})"), officialKey="Ctrl+3", key="Ctrl+3",
@@ -185,8 +186,16 @@ ROWS = (
         key="Ctrl+Alt+2", target="StudioDrawWorkspaceButton", keywords="segment editor paint draw brush erase threshold lesion segmentation edit",
         category="module"),
     Row("segment-editor-tools", _("Segment Editor effects (Paint, Draw, Erase, Threshold...)"),
-        _("Draw: the same effects; {key:1} to {key:0} pick one, Esc deselects it and Space pauses it, as in 3D Slicer"),
-        target="EffectsGroupBox", workspace="draw", same=True, keywords="effects tools paint draw erase threshold islands smoothing scissors keys",
+        _("Draw: the same effects as labelled tools (Paint is Brush, Draw is Outline, Fill between slices is Fill gaps; More tools shows the "
+          "others); {key:P}, {key:D}, {key:M}, {key:E}, {key:L} or {key:1} to {key:0} pick one, Esc deselects it and Space pauses it"),
+        target=("EffectsGroupBox", "StudioDrawEmptyState"), workspace="draw",
+        keywords="effects tools paint brush draw outline erase threshold islands smoothing scissors keys more tools",
+        category="editor"),
+    Row("segment-editor-controls", _("Segment Editor: Segmentation and Source volume selectors, segments table, Add / Remove"),
+        _("Draw: the Lesion card names the lesion (⋯ > New lesion), the source chip ('on T1 ▾') picks the source volume; "
+          "⋯ of the panel > Show all controls shows the classic controls"),
+        target=("StudioLesionCard", "StudioDrawEmptyState"), workspace="draw",
+        keywords="segmentation selector source volume master volume segments table add segment remove segment show all controls",
         category="editor"),
     Row("export-segmentation", _("Segment Editor > Segmentations > Export to files..."),
         _("Draw > Save lesion ({key:Ctrl+Shift+S}): a NIfTI mask (.nii.gz) that official 3D Slicer, FSL and other tools read"),
@@ -197,25 +206,32 @@ ROWS = (
     Row("segment-editor-undo", _("Segment Editor Undo / Redo"), _("Undo and Redo in the top bar while you draw ({key:Ctrl+Z}, {key:Ctrl+Y})"),
         officialKey="Ctrl+Z / Ctrl+Shift+Z", key="Ctrl+Z", target="StudioUndoButton", workspace="draw", keywords="undo redo history", category="editor",
         note=_("Ctrl+Shift+Z, and Z and Y without Ctrl, still work as in 3D Slicer.")),
-    Row("segmentations-module", _("Segmentations module"), _("The Segmentations button in Draw, or Search > Segmentations"),
-        target="SwitchToSegmentationsButton", workspace="draw", keywords="segmentations module representations closed surface import export",
+    Row("segmentations-module", _("Segmentations module"),
+        _("Search > Segmentations ({key:Ctrl+K}); in Draw, ⋯ of the panel > Show all controls also shows its button"),
+        key="Ctrl+K", target="StudioSearchPill", keywords="segmentations module representations closed surface import export",
         category="module"),
     Row("markups", _("Markups toolbar / Place mode"),
         _("Search > Place point puts a point in a view; ≡ > View > Toolbars > Markups (it stays visible in Studio), or Search > Markups; "
-          "Esc leaves Place mode"),
-        target="StudioAppMenuButton", keywords="markups fiducial point landmark ruler line place mode", category="toolbar"),
+          "while you place, a pill at the top of the views says so, and its ✕ or Esc leaves Place mode"),
+        target="StudioAppMenuButton", keywords="markups fiducial point landmark ruler line place mode pill placing", category="toolbar"),
     Row("mouse-mode", _("Mouse Interaction toolbar (Window/level)"),
         _("Drag with the left mouse button in a view to adjust window/level when no tool is active, or Search > Window/level: Auto; "
-          "the toolbar is in ≡ > View > Toolbars > Mouse Interaction"),
-        target="qMRMLSliceWidgetRed/SliceView", workspace="draw", keywords="mouse mode window level adjust contrast interaction toolbar",
+          "the toolbar is in ≡ > View > Toolbars > Mouse Interaction. Adjust window/level from a view's menu shows a pill at the top of the views, "
+          "whose ✕ or Esc leaves it"),
+        target="qMRMLSliceWidgetRed/SliceView", workspace="draw", keywords="mouse mode window level adjust contrast interaction toolbar pill",
         category="toolbar"),
     Row("crosshair", _("Crosshair Selection toolbar"),
-        _("Shift + move the mouse in a view jumps the crosshair, as in 3D Slicer; Search > Show crosshair shows or hides it, and the toolbar "
-          "is in ≡ > View > Toolbars"),
-        target="qMRMLSliceWidgetRed/SliceView", workspace="draw", same=True, keywords="crosshair cursor jump slices", category="toolbar"),
-    Row("view-controllers", _("Slice view controller bars"), _("Above each view, as in 3D Slicer; the pin opens the full controls"),
-        target="qMRMLSliceWidgetRed/SliceController", workspace="draw", same=True,
-        keywords="slice controller bar pin link offset slider foreground background opacity view controllers", category="panel"),
+        _("Shift + move the mouse in a view jumps the crosshair, as in 3D Slicer; the layout button's View section shows or hides it (also "
+          "slice intersections and linked views), and the toolbar is in ≡ > View > Toolbars"),
+        target="StudioLayoutButton", workspace="draw", keywords="crosshair cursor jump slices intersections link views reset", category="toolbar"),
+    Row("view-controllers", _("Slice view controller bars"),
+        _("Above each view. In the flat bars the sliders button opens the layers, opacity and interpolation on click, the orientation "
+          "button (Axial ▾) has Reformat… and Reset, and the position shows the slice number; the classic bars keep the pin"),
+        target="qMRMLSliceWidgetRed/SliceController", workspace="draw",
+        note=_("The color swatch names the view (Red, Yellow, Green): it is not a direction. Right-click the link button for hot linking."),
+        keywords="slice controller bar pin link offset slider foreground background opacity view controllers options orientation "
+                 "reformat readout slice number index swatch flat maximize fit",
+        category="panel"),
     Row("data-probe", _("Data Probe (bottom of the module panel)"),
         _("The probe at the bottom right of the view under the mouse: position (MNI or scanner), value and lesion; "
           "⋯ in the inspector header > Show Data Probe shows the classic panel"),

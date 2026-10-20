@@ -54,7 +54,7 @@ Windows and Linux; on macOS, Ctrl is ⌘.
 | File > Save Data (Ctrl+S) | Ctrl+S, or ≡ > File > Save Data: saves the scene (.mrml, .mrb) as in 3D Slicer (same as 3D Slicer) |
 | File > Close Scene (Ctrl+W) | ≡ > File > Close Scene (Ctrl+W) (same as 3D Slicer) |
 | Edit > Application Settings (Ctrl+2) | ≡ > Settings… (Ctrl+2) |
-| View > Layout | The layout button in the top bar: Focus, Single, Four-up, Row (Alt+1 to Alt+4); More layouts… lists every 3D Slicer layout, and Search finds any layout by name |
+| View > Layout | The layout button in the top bar: Focus, Single (enlarges one view; Esc restores), Four-up, Row (Alt+1 to Alt+4) and Focus + 3D (Alt+5); More layouts… lists every 3D Slicer layout, and Search finds any layout by name |
 | View > Python Console (Ctrl+3) | ≡ > Python console (Ctrl+3) |
 | View > Extensions Manager (Ctrl+4) | ≡ > View > Extensions Manager (Ctrl+4) (same as 3D Slicer) |
 | View > Error Log (Ctrl+0) | ≡ > Error log (Ctrl+0); a red badge appears in the top bar when errors are logged |
@@ -68,14 +68,15 @@ Windows and Linux; on macOS, Ctrl is ⌘.
 | Data module | Search > Data (Ctrl+K) opens it in the inspector; Library shows what you open |
 | Volumes module | Search > Volumes (Ctrl+K); window/level: drag with the left mouse button in a view when no tool is active |
 | Segment Editor module | Draw (Ctrl+Alt+2): the Segment Editor in the inspector, with the same effects |
-| Segment Editor effects (Paint, Draw, Erase, Threshold...) | Draw: the same effects; 1 to 0 pick one, Esc deselects it and Space pauses it, as in 3D Slicer (same as 3D Slicer) |
+| Segment Editor effects (Paint, Draw, Erase, Threshold...) | Draw: the same effects as labelled tools (Paint is Brush, Draw is Outline, Fill between slices is Fill gaps; More tools shows the others); P, D, M, E, L or 1 to 0 pick one, Esc deselects it and Space pauses it |
+| Segment Editor: Segmentation and Source volume selectors, segments table, Add / Remove | Draw: the Lesion card names the lesion (⋯ > New lesion), the source chip ('on T1 ▾') picks the source volume; ⋯ of the panel > Show all controls shows the classic controls |
 | Segment Editor > Segmentations > Export to files... | Draw > Save lesion (Ctrl+Shift+S): a NIfTI mask (.nii.gz) that official 3D Slicer, FSL and other tools read |
 | Segment Editor Undo / Redo (Ctrl+Z / Ctrl+Shift+Z) | Undo and Redo in the top bar while you draw (Ctrl+Z, Ctrl+Y) |
-| Segmentations module | The Segmentations button in Draw, or Search > Segmentations |
-| Markups toolbar / Place mode | Search > Place point puts a point in a view; ≡ > View > Toolbars > Markups (it stays visible in Studio), or Search > Markups; Esc leaves Place mode |
-| Mouse Interaction toolbar (Window/level) | Drag with the left mouse button in a view to adjust window/level when no tool is active, or Search > Window/level: Auto; the toolbar is in ≡ > View > Toolbars > Mouse Interaction |
-| Crosshair Selection toolbar | Shift + move the mouse in a view jumps the crosshair, as in 3D Slicer; Search > Show crosshair shows or hides it, and the toolbar is in ≡ > View > Toolbars (same as 3D Slicer) |
-| Slice view controller bars | Above each view, as in 3D Slicer; the pin opens the full controls (same as 3D Slicer) |
+| Segmentations module | Search > Segmentations (Ctrl+K); in Draw, ⋯ of the panel > Show all controls also shows its button |
+| Markups toolbar / Place mode | Search > Place point puts a point in a view; ≡ > View > Toolbars > Markups (it stays visible in Studio), or Search > Markups; while you place, a pill at the top of the views says so, and its ✕ or Esc leaves Place mode |
+| Mouse Interaction toolbar (Window/level) | Drag with the left mouse button in a view to adjust window/level when no tool is active, or Search > Window/level: Auto; the toolbar is in ≡ > View > Toolbars > Mouse Interaction. Adjust window/level from a view's menu shows a pill at the top of the views, whose ✕ or Esc leaves it |
+| Crosshair Selection toolbar | Shift + move the mouse in a view jumps the crosshair, as in 3D Slicer; the layout button's View section shows or hides it (also slice intersections and linked views), and the toolbar is in ≡ > View > Toolbars |
+| Slice view controller bars | Above each view. In the flat bars the sliders button opens the layers, opacity and interpolation on click, the orientation button (Axial ▾) has Reformat… and Reset, and the position shows the slice number; the classic bars keep the pin |
 | Data Probe (bottom of the module panel) | The probe at the bottom right of the view under the mouse: position (MNI or scanner), value and lesion; ⋯ in the inspector header > Show Data Probe shows the classic panel |
 <!-- END where-did-it-go -->
 
