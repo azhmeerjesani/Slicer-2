@@ -311,10 +311,9 @@ bool qSlicerSettingsStylesPanelPrivate::userFontSetting(QFont& font) const
     return false;
   }
   // Same rules as qSlicerApplicationPrivate::forkFont()
-  bool savedFontIsDefault =
-    !savedFont.bold() && !savedFont.italic()
-    && ((savedFont.family() == QLatin1String("Sans Serif") && qFuzzyCompare(savedFont.pointSizeF(), 9.0))
-        || (savedFont.family() == this->PlatformFont.family() && qFuzzyCompare(savedFont.pointSizeF(), this->PlatformFont.pointSizeF())));
+  bool savedFontIsDefault = !savedFont.bold() && !savedFont.italic()
+                            && ((savedFont.family() == QLatin1String("Sans Serif") && qFuzzyCompare(savedFont.pointSizeF(), 9.0))
+                                || (savedFont.family() == this->PlatformFont.family() && qFuzzyCompare(savedFont.pointSizeF(), this->PlatformFont.pointSizeF())));
   if (savedFontIsDefault)
   {
     return false;

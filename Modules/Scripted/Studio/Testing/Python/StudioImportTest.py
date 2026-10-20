@@ -1228,14 +1228,17 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(os.path.normcase(os.path.abspath(statePath)), os.path.normcase(os.path.abspath(path)))
         # Paint: one more voxel
         segmentId = segmentationNode.GetSegmentation().GetNthSegmentID(0)
-        array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId)
+        referenceNode = slicer.util.loadLabelVolume(path, {"show": False})
+        array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, referenceNode)
         array[0, 0, 0] = 1
-        slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId)
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, referenceNode)
+        slicer.mrmlScene.RemoveNode(referenceNode)
         self._pump()
         self.assertEqual(draw.lesionSaveState(segmentationNode)[0], "unsaved")
         text, toolTip = draw.saveStateText(segmentationNode)
         self.assertTrue(text.startswith("Unsaved changes"), text)
         self.assertIn("sub-09_lesion.nii.gz", text)
+        self.assertEqual(os.path.basename(toolTip), "sub-09_lesion.nii.gz")
         # No record of a save in this session: Save asks for a file (here: cancelled) and the loaded file is untouched
         dialogs = []
         original = draw.saveLesionDialog
