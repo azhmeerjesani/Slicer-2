@@ -1631,6 +1631,10 @@ class _OfferWatcher(qt.QObject):
 
     def eventFilter(self, obj, event):
         if event.type() in (qt.QEvent.Resize, qt.QEvent.Show, qt.QEvent.LayoutRequest):
+            # The layout of the canvas is applied before its event filters run: place the card now, so that it is
+            # painted in the same frame as the canvas (a move after it costs one more repaint of the window), and
+            # again when the events queued by the change are processed (no repaint if it does not move then)
+            self.card.updatePosition()
             qt.QTimer.singleShot(0, self.card.updatePosition)
         return False
 

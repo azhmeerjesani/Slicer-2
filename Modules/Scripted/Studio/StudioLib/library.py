@@ -413,7 +413,11 @@ class RecentFolderEntry:
 
 
 def recentlyLoadedMenu():
-    mainWindow = slicer.util.mainWindow()
+    # The shell's main window when Studio is shown: slicer.util.mainWindow() looks it up among all top-level widgets
+    shell = _shell()
+    mainWindow = getattr(shell, "mainWindow", None) if shell is not None else None
+    if mainWindow is None:
+        mainWindow = slicer.util.mainWindow()
     return mainWindow.findChild("QMenu", "RecentlyLoadedMenu") if mainWindow is not None else None
 
 
@@ -617,7 +621,8 @@ class RecentList(qt.QObject):
         Without ``force`` (the page is shown again) nothing is read when the menu and the recorded times and folders did not change.
         """
         key = self._settingsKey()
-        if not force and not self._dirty and key == self._shownKey and self.rows:
+        # An empty list is not read again either (a new recent file changes the menu, which sets _dirty)
+        if not force and not self._dirty and key == self._shownKey:
             return
         self._shownKey = key
         self._dirty = False
@@ -2734,8 +2739,10 @@ def enter(shell):
     """Library becomes the current workspace: show the canvas (the views are paused) and focus Recent."""
     global _sceneWatcher
     libraryCanvas = canvas()
-    shell.setInspectorVisible(not isEmptyState(shell))
+    # The canvas covers the views first: the views that the inspector change resizes are paused (no render), and the
+    # edge handle of a hidden inspector is not shown for a moment
     shell.setCanvas(libraryCanvas.widget)
+    shell.setInspectorVisible(not isEmptyState(shell))
     libraryCanvas.refresh()
     libraryCanvas.focusFirst()
     if _sceneWatcher is not None:
@@ -2749,8 +2756,10 @@ def leave(shell):
     if _sceneWatcher is not None:
         _sceneWatcher.dispose()
         _sceneWatcher = None
-    shell.setCanvas(None)
+    # The inspector is shown while the canvas still covers the views: they are resized once, paused, and render
+    # when the canvas is hidden
     shell.setInspectorVisible(True)
+    shell.setCanvas(None)
 
 
 def setDropHighlight(active):

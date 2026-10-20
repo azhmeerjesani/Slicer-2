@@ -96,7 +96,7 @@ GROUPS = (
     ("studio", ("studio_apply_ms", "workspace_switch_ms"), "measureStudio"),
     ("layout", ("layout_switch_ms",), "measureLayoutSwitch"),
     ("slices", ("hover_ms", "scroll_step_ms", "noop_modified_ms", "slice_logic_modified_per_step",
-                "slice_logic_modified_per_step_fg", "render_counts_other_views"), "measureSlices"),
+                "slice_logic_modified_per_step_fg", "render_counts_other_views", "scroll_step_3d_ms"), "measureSlices"),
     ("paint_256", ("stroke_release_256_3d_ms", "surfaces_regenerated", "paint_hover_surfaces_ms", "undo_surfaces_ms"), "measurePaint256"),
     ("paint_mni", ("stroke_release_mni_ms", "stroke_release_mni_intensity_ms", "draw_apply_ms"), "measurePaintMNI"),
     ("segment_ops", ("smoothing_median3_ms", "islands_keep_largest_ms", "margin_2mm_ms"), "measureSegmentOperations"),
@@ -673,6 +673,13 @@ class InSlicerBench:
         redLogic = redWidget.sliceLogic()
         redView = redWidget.sliceView()
         offset0 = redLogic.GetSliceOffset()
+        # The metrics of this group are measured with the Red slice not shown in 3D (the default of a new scene, and the
+        # state of the baselines). Studio shows it in the first 3D view of a session (U-06): then the 3D view has to render
+        # the moving slice at every step, which scroll_step_3d_ms measures.
+        sliceVisible = redNode.GetSliceVisible()
+        self.details["red_slice_visible_in_3d_before"] = bool(sliceVisible)
+        redNode.SetSliceVisible(False)
+        self.pump(4)
         crosshair = slicer.mrmlScene.GetFirstNodeByClass("vtkMRMLCrosshairNode")
         centerX, centerY = redView.width // 2, redView.height // 2
         self.details["red_view_size"] = [redView.width, redView.height]
@@ -774,6 +781,33 @@ class InSlicerBench:
             self.record("render_counts_other_views", sum(counts.values()) / 20.0)
             self.details["render_counts_other_views_by_view"] = {name: count / 20.0 for name, count in counts.items()}
         self.attempt(["render_counts_other_views"], renderCountsOtherViews)
+
+        # Measured last: showing the slice in 3D and hiding it again would leave an official build (without the slice edge
+        # fix) rendering the 3D view at every slice change, which would inflate the metrics above.
+        def scrollShownIn3D():
+            def run():
+                startTime = time.perf_counter()
+                for i in range(100):
+                    redLogic.SetSliceOffset(offset0 - 50 + i)
+                    slicer.app.processEvents()
+                return self.elapsedMs(startTime) / 100
+            if layoutManager.threeDViewCount == 0:
+                self.skip("scroll_step_3d_ms", "the layout has no 3D view")
+                return
+            redNode.SetSliceVisible(True)
+            self.pump(4)
+            self.idleWait(100)
+            try:
+                run()
+                self.record("scroll_step_3d_ms", statistics.median([run() for _ in range(3)]))
+            finally:
+                redNode.SetSliceVisible(False)
+                redLogic.SetSliceOffset(offset0)
+                self.pump(4)
+                self.idleWait(100)
+        self.attempt(["scroll_step_3d_ms"], scrollShownIn3D)
+        redNode.SetSliceVisible(sliceVisible)
+        self.pump(2)
 
     def measurePaint256(self):
         import numpy as np

@@ -251,7 +251,7 @@ class WorkspaceController:
             elif ws.key != "library":
                 self.shell.setCanvas(None)
             if self.shell.currentModuleName() != ws.moduleName:
-                slicer.util.selectModule(ws.moduleName)
+                self._selectModule(ws.moduleName)
             layoutId = self.rememberedLayout(ws) if not keepLayout else None
             layoutManager = slicer.app.layoutManager()
             if layoutId is not None and layoutManager is not None and layoutManager.layout != layoutId:
@@ -260,6 +260,19 @@ class WorkspaceController:
         finally:
             self._switching = False
         self._persistLastWorkspace(ws)
+
+    def _selectModule(self, moduleName):
+        """Select the module of a workspace with the module selector of the shell's main window.
+
+        Same as ``slicer.util.selectModule()``, which looks the main window up among all top-level widgets (twice, about
+        2 ms each with the Studio menus and popovers).
+        """
+        mainWindow = getattr(self.shell, "mainWindow", None)
+        selector = mainWindow.moduleSelector() if mainWindow is not None and hasattr(mainWindow, "moduleSelector") else None
+        if selector is None:
+            slicer.util.selectModule(moduleName)
+            return
+        selector.selectModule(moduleName)
 
     def _enter(self, ws, shrinkPanel):
         self.current = ws.key
