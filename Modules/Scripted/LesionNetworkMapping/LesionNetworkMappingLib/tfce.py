@@ -15,10 +15,10 @@ structure built once (:class:`TfceGrid`), which is what the GLM permutation loop
 values come from the maximum TFCE of each permutation (glm.py). Each height labels only the box of
 the voxels still above it, which gives the same clusters as labelling the whole box.
 
-Cost on the reference host (4 cores): 0.7-0.9 s per one-sided map on the 91 x 109 x 91 box of a
-2 mm MNI mask (up to 100 ``scipy.ndimage.label`` calls on shrinking boxes), so 1.3-1.6 s per
+Cost on the reference host (4 cores): 0.7-0.95 s per one-sided map on the 91 x 109 x 91 box of a
+2 mm MNI mask (up to 100 ``scipy.ndimage.label`` calls on shrinking boxes), so 1.3-1.9 s per
 two-sided permutation (the addendum's 1.3 s per one-sided map labelled the whole box at every
-height); :func:`tfce_eta` scales the upper value by the size of the box.
+height); :func:`tfce_eta` scales the upper value (measured under shared load) by the size of the box.
 """
 
 import math
@@ -32,9 +32,9 @@ DEFAULT_E = 0.5
 DEFAULT_STEPS = 100
 DEFAULT_CONNECTIVITY = 26
 CONNECTIVITIES = {6: 1, 18: 2, 26: 3}
-#: Measured seconds per one-sided map per voxel of the bounding box (0.8 s on 91 x 109 x 91 with 3 BLAS
-#: threads, smooth maps; the upper end of /tmp/claude-0/verify/L-07 measurements)
-SECONDS_PER_BOX_VOXEL = 0.8 / (91 * 109 * 91)
+#: Measured seconds per one-sided map per voxel of the bounding box (0.95 s on 91 x 109 x 91 with 3 BLAS
+#: threads, smooth maps, under shared load; the upper end of the L-07 measurements and its review)
+SECONDS_PER_BOX_VOXEL = 0.95 / (91 * 109 * 91)
 REFERENCE_BOX = (91, 109, 91)
 
 
@@ -180,25 +180,32 @@ def tfce(vol, mask_bbox=None, H=DEFAULT_H, E=DEFAULT_E, steps=DEFAULT_STEPS, con
     return out.reshape(vol.shape)
 
 
-def tfce_eta(V, n_perm, two_sided=True, seconds_per_voxel=None):  # noqa: N803 (V: voxels, as in the spec)
+def tfce_eta(V, n_perm, two_sided=True, seconds_per_voxel=None, box_voxels=None):  # noqa: N803 (V: voxels, as in the spec)
     """Estimated seconds of TFCE for a permutation run.
 
-    :param V: the bounding box of the mask: a :class:`TfceGrid`, a 3D mask, a shape tuple, or a number
-      of box voxels.
+    The cost depends on the bounding box of the mask, not on the in-mask voxel count, so ``V`` must
+    describe the box; a bare voxel count is refused (it would usually be the in-mask count, which
+    underestimates about 4x on an MNI mask): pass ``box_voxels`` for an explicit box size.
+
+    :param V: the mask: a :class:`TfceGrid`, a 3D mask, or the box shape (a 3-tuple); None with ``box_voxels``.
     :param n_perm: number of maps enhanced (permutations, identity included).
     :param two_sided: two enhancements (positive and negative) per map.
     :param seconds_per_voxel: measured cost per box voxel and one-sided map (default: this host's
-      :data:`SECONDS_PER_BOX_VOXEL`, about 0.8 s for a 91 x 109 x 91 box); see :func:`measure_seconds_per_voxel`.
+      :data:`SECONDS_PER_BOX_VOXEL`, about 0.95 s for a 91 x 109 x 91 box); see :func:`measure_seconds_per_voxel`.
+    :param box_voxels: voxels of the bounding box, instead of ``V``.
     :return: seconds.
+    :raises TypeError: ``V`` is a bare number.
     """
-    if isinstance(V, TfceGrid):
+    if box_voxels is not None:
+        voxels = int(box_voxels)
+    elif isinstance(V, TfceGrid):
         voxels = V.box_voxels
     elif isinstance(V, (tuple, list)) and len(V) == 3 and all(isinstance(item, (int, np.integer)) for item in V):
         voxels = int(np.prod(V))
     elif isinstance(V, np.ndarray) and V.ndim == 3:
         voxels = int(np.prod(_box_size(bounding_box(V))))
     else:
-        voxels = int(V)
+        raise TypeError("tfce_eta needs the mask, its TfceGrid or the box shape (or box_voxels=); a voxel count is ambiguous")
     rate = SECONDS_PER_BOX_VOXEL if seconds_per_voxel is None else float(seconds_per_voxel)
     return float(voxels) * rate * (2 if two_sided else 1) * max(int(n_perm), 0)
 

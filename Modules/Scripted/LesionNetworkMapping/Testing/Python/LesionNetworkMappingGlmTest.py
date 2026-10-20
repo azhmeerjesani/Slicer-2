@@ -380,6 +380,38 @@ class DesignRunTest(_StudyTestCase):
         exact = np.sum(stats >= observed - 1e-9 * observed - 1e-12, axis=0) / 400.0
         np.testing.assert_allclose(result.p_unc, exact, rtol=0, atol=1e-12)
 
+    def test_float32_strong_effects_keep_exact_ties(self):
+        # The complementary relabelling of a balanced 5+5 design (and the all -1 sign flip) ties the
+        # observed |t| exactly. With a strong effect the float32 null SSE loses precision (kappa =
+        # ||Yr||² / SSE), and the tie must still count: float32 p equals float64 p
+        rows = [(f"sub-{level[:2]}{index}", {"group": level, "volume_ml": 10.0 + index}) for level in ("case", "control") for index in range(5)]
+        design = designlib.build_design(self.make_study(rows), DesignSpec(covariates=[], volume_off_reason="exhaustive test"))
+        self.assertTrue(design.exhaustive)
+        self.assertEqual(glm.run(design, self.rng.standard_normal((design.n, 3))).result.precision, "float64")  # auto: exhaustive
+        group = design.X[:, 1]
+        for effect, precision in ((6.0, "float32"), (10.0, "float32"), (1000.0, "float64")):
+            Y = 100.0 + effect * group[:, None] + self.rng.standard_normal((design.n, 200)) * self.rng.uniform(1.0, 2.0, 200)
+            r64 = glm.run(design, Y, dtype=np.float64)
+            r32 = glm.run(design, Y, dtype=np.float32)
+            self.assertEqual(r32.result.precision, precision, f"effect {effect}")
+            np.testing.assert_array_equal(r32.p_unc, r64.p_unc, f"effect {effect}")
+            np.testing.assert_array_equal(r32.p_fwe, r64.p_fwe, f"effect {effect}")
+            self.assertGreaterEqual(r32.p_unc.min(), 2 / 252)  # the complementary relabelling always ties
+        # Exhaustive sign flips (n = 10, a covariate), mean about 8 SD: |t| about 25, kappa below the float32 limit
+        n = 10
+        covariate = self.rng.uniform(5, 40, n)
+        X = np.column_stack([np.ones(n), covariate - covariate.mean()])
+        C = np.array([[1.0, 0.0]])
+        flips = [np.array(signs, dtype=np.float64) for signs in itertools.product([1.0, -1.0], repeat=n)]
+        for mean, precision in ((8.0, "float32"), (100.0, "float64")):
+            Y = mean + self.rng.standard_normal((n, 300))
+            r64 = glm.permutation_test(Y, X, C, flips, exchange="sign_flip", dtype=np.float64)
+            r32 = glm.permutation_test(Y, X, C, flips, exchange="sign_flip", dtype=np.float32)
+            self.assertEqual(r32.precision, precision, f"mean {mean}")
+            np.testing.assert_array_equal(r32.p_unc, r64.p_unc, f"mean {mean}")
+            np.testing.assert_array_equal(r32.p_fwe, r64.p_fwe, f"mean {mean}")
+            self.assertGreaterEqual(r32.p_unc.min(), 2 / 1024)  # the all -1 flip always ties
+
     def test_type_one_error_is_calibrated(self):
         # Null data with a nuisance (volume) effect: the FWE rate over 200 simulations is within the
         # binomial 95% interval of alpha = 0.05
@@ -475,8 +507,11 @@ class TfceTest(unittest.TestCase):
         self.assertAlmostEqual(grid.max_enhanced(vector), float(np.abs(tfce.tfce(full, mask)).max()))
         # The ETA scales with the box and the permutations; two-sided is twice one-sided
         reference = tfce.tfce_eta((91, 109, 91), 1, two_sided=False)
-        self.assertAlmostEqual(reference, 0.8, places=6)
-        self.assertAlmostEqual(tfce.tfce_eta((91, 109, 91), 1000), 1600.0, places=3)
+        self.assertAlmostEqual(reference, 0.95, places=6)
+        self.assertAlmostEqual(tfce.tfce_eta((91, 109, 91), 1000), 1900.0, places=3)
+        self.assertAlmostEqual(tfce.tfce_eta(None, 1000, box_voxels=91 * 109 * 91), 1900.0, places=3)
+        with self.assertRaises(TypeError):
+            tfce.tfce_eta(228483, 1000)  # an in-mask count is not a box
         self.assertAlmostEqual(tfce.tfce_eta(grid, 10, two_sided=False), 10 * 12 * 16 * 8 * tfce.SECONDS_PER_BOX_VOXEL)
         self.assertAlmostEqual(tfce.tfce_eta(mask, 10, two_sided=False), tfce.tfce_eta(grid, 10, two_sided=False))
         with self.assertRaises(ValueError):

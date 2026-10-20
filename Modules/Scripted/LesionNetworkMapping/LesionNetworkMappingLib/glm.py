@@ -37,8 +37,8 @@ cancelled, 75 locked)::
 
     python -m LesionNetworkMappingLib.glm --maps maps.tsv --participants participants.tsv
         --design design.json --mask mask.nii.gz --out DIR [--perm N] [--seed S] [--tfce] [--batch B]
-        [--threads K] [--cancel-file F] [--resume] [--conn-label L] [--desc D] [--precision float32|float64]
-        [--keep-maps] [--run-root DIR] [--parent-run ID]
+        [--threads K] [--cancel-file F] [--resume] [--conn-label L] [--desc D]
+        [--precision auto|float32|float64] [--keep-maps] [--run-root DIR] [--parent-run ID]
 
 ``maps.tsv`` comes from cohortmaps (participant_id plus the AvgFz and T map paths); the design's
 ``input`` chooses the column. Subjects of participants.tsv without a map are excluded (listwise,
@@ -54,7 +54,9 @@ reproduces the uninterrupted result. Outputs (exact mask header; export naming):
 
 P-value maps are plain p (not -log10), 1 outside the mask. The Aspin-Welch v statistic is written
 as the Tstat map (glm.json "stat": "v"). The run is registered (kind "glm") with the cohortmaps run
-of maps.tsv (its sibling cohortmaps.json) as parent.
+of maps.tsv (its sibling cohortmaps.json) as parent. The permutations run in float32, or in
+float64 for an exhaustive enumeration (``--precision auto``, the default), so that exhaustive p is
+exact.
 """
 
 import os
@@ -102,9 +104,16 @@ BATCH_BYTES = 128 * 1024**2
 MAX_BATCH = 64
 #: Voxels per chunk of the float64 preparation (observed statistics and Yr)
 CHUNK_VOXELS = 32768
-#: Relative tolerance of "null >= observed" (ties count; covers the rounding of the compute precision)
+#: Relative tolerance of "null >= observed" (ties count; covers the rounding of the compute precision).
+#: It is scaled per voxel by the conditioning kappa = ||Yr||² / SSE of the observed fit (see
+#: :attr:`Prepared.kappa`): the null SSE = ||Yr||² - ||u||² loses that factor of relative precision, so a
+#: relabelling that ties the observed statistic exactly (the complementary labelling of a balanced
+#: two-group design, the all -1 sign flip) still counts when the effect is strong.
 TIE_RTOL = {np.dtype(np.float32): 1e-5, np.dtype(np.float64): 1e-9}
 TIE_ATOL = {np.dtype(np.float32): 1e-6, np.dtype(np.float64): 1e-12}
+#: Largest kappa a float32 run accepts: beyond it (tie tolerance above 1%; |t| above about
+#: 30 sqrt(df)) the permutations are computed in float64 instead
+KAPPA_MAX_FLOAT32 = 1e3
 #: SSE is floored at this fraction of ||Yr||² (cancellation in SSE = ||Yr||² - ||u||²)
 SSE_RTOL = {np.dtype(np.float32): 1e-5, np.dtype(np.float64): 1e-12}
 #: A voxel whose residualized sum of squares is below this fraction of its raw sum of squares is
@@ -259,8 +268,13 @@ class FreedmanLane:
         self.Q = Q @ rotation
         self.basis_T = np.ascontiguousarray(self.Q.T.astype(self.dtype))
         self.groups = None
+        self.variance_groups = variance_groups
         if stat == "v":
             self._setup_variance_groups(variance_groups)
+
+    def with_dtype(self, dtype):
+        """The same engine with another compute precision."""
+        return FreedmanLane(self.X, self.C, self.stat, self.variance_groups, self.exchange, dtype)
 
     def _setup_variance_groups(self, variance_groups):
         if variance_groups is None:
@@ -334,6 +348,7 @@ class FreedmanLane:
         stat = np.empty(n_voxels)
         psi = np.empty(n_voxels) if self.r == 1 else None
         sse_out = np.empty(n_voxels)
+        kappa = np.empty(n_voxels)
         degenerate = np.zeros(n_voxels, dtype=bool)
         for start in range(0, n_voxels, chunk):
             part = slice(start, min(start + chunk, n_voxels))
@@ -352,6 +367,12 @@ class FreedmanLane:
                 extra = (self.v_mask @ (yr * yr), (self.Q * self.v_mask[:, None]).T @ yr)
             stat[part] = self._statistic(u, ss, floor, extra)
             sse_out[part] = np.maximum(ss - np.einsum("pv,pv->v", u, u), floor)
+            smallest = sse_out[part]
+            if self.stat == "v":  # the group SSEs are also differences of ||Yr||²-sized terms
+                residual = yr - self.Q @ u
+                sse1 = self.v_mask @ (residual * residual)
+                smallest = np.maximum(np.minimum(sse1, smallest - sse1), floor)
+            kappa[part] = np.maximum(ss / np.maximum(smallest, _TINY), 1.0)
             if psi is not None:
                 psi[part] = self.psi_scale * u[0]
             yy[part] = ss
@@ -359,9 +380,10 @@ class FreedmanLane:
             if Yr2 is not None:
                 Yr2[:, part] = yr * yr
         stat[degenerate] = 0.0
+        kappa[degenerate] = 1.0
         if psi is not None:
             psi[degenerate] = 0.0
-        return Prepared(Yr=Yr, Yr2=Yr2, yy=yy, stat=stat, psi=psi, sse=sse_out, degenerate=degenerate)
+        return Prepared(Yr=Yr, Yr2=Yr2, yy=yy, stat=stat, psi=psi, sse=sse_out, degenerate=degenerate, kappa=kappa)
 
     def null_statistics(self, prepared, shufflings, out=None):
         """Statistics of a batch of shufflings (B x V, compute precision).
@@ -405,7 +427,9 @@ class FreedmanLane:
 class Prepared:
     """Data prepared by :meth:`FreedmanLane.prepare`: Yr (n x V), Yr² (v only), ||Yr||², and the
     observed statistic, contrast estimate (one-row contrasts) and SSE (float64), plus the voxels that
-    are constant after removing the nuisance (statistic 0).
+    are constant after removing the nuisance (statistic 0), and ``kappa`` = ||Yr||² / SSE (>= 1; the
+    smaller group SSE for v), the factor by which the null SSE loses relative precision (it scales the
+    tie tolerance; None means 1).
     """
 
     Yr: np.ndarray
@@ -415,6 +439,7 @@ class Prepared:
     psi: np.ndarray | None
     sse: np.ndarray
     degenerate: np.ndarray
+    kappa: np.ndarray | None = None
 
     def __post_init__(self):
         dtype = self.Yr.dtype
@@ -481,7 +506,9 @@ class PermutationResult:
     - ``tfce`` and ``tfce_p_fwe`` (None without TFCE);
     - ``n_perm`` (shufflings used, identity included, = K + 1), ``min_p`` = 1 / (K + 1),
       ``fdr_floor_voxels`` = ceil(V * min_p / alpha);
-    - ``max_null``, ``tfce_max_null``, ``counts``; ``psi`` and ``sse`` of the observed fit; ``timings``.
+    - ``max_null``, ``tfce_max_null``, ``counts``; ``psi`` and ``sse`` of the observed fit; ``timings``;
+    - ``precision``: compute precision of the permutations ("float32" or "float64"; see
+      :data:`KAPPA_MAX_FLOAT32`).
     """
 
     stat: np.ndarray
@@ -504,6 +531,7 @@ class PermutationResult:
     tfce_max_null: np.ndarray | None = None
     timings: dict = dataclasses.field(default_factory=dict)
     fdr_alpha: float = FDR_ALPHA
+    precision: str = "float32"
 
     @property
     def n_voxels(self):
@@ -525,11 +553,16 @@ def _magnitude(values, two_sided):
     return np.abs(values) if two_sided else values
 
 
-def _threshold(observed, dtype, two_sided):
-    """The values a null statistic must reach to count as an exceedance (observed minus the tie tolerance)."""
+def _threshold(observed, dtype, two_sided, kappa=None):
+    """The values a null statistic must reach to count as an exceedance (observed minus the tie tolerance).
+
+    :param kappa: per-voxel conditioning of the null SSE (:attr:`Prepared.kappa`) that scales the
+      relative tolerance (default 1).
+    """
     magnitude = _magnitude(observed, two_sided)
     dtype = np.dtype(dtype)
-    return magnitude - (TIE_RTOL[dtype] * np.abs(magnitude) + TIE_ATOL[dtype])
+    rtol = TIE_RTOL[dtype] if kappa is None else TIE_RTOL[dtype] * np.maximum(np.asarray(kappa, dtype=np.float64), 1.0)
+    return magnitude - (rtol * np.abs(magnitude) + TIE_ATOL[dtype])
 
 
 def fdr_bh(p):
@@ -551,11 +584,14 @@ def fdr_floor_voxels(n_voxels, min_p, alpha=FDR_ALPHA):
     return math.ceil(n_voxels * min_p / alpha - 1e-9)
 
 
-def fwe_from_null(observed, max_null, dtype=np.float64, two_sided=True):
-    """FWE p = (1 + #{max_null >= observed}) / (K + 1) for every voxel (K = len(max_null))."""
+def fwe_from_null(observed, max_null, dtype=np.float64, two_sided=True, kappa=None):
+    """FWE p = (1 + #{max_null >= observed}) / (K + 1) for every voxel (K = len(max_null)).
+
+    :param kappa: per-voxel conditioning that scales the tie tolerance (see :func:`_threshold`).
+    """
     max_null = np.sort(np.asarray(max_null, dtype=np.float64))
     K = max_null.size
-    threshold = _threshold(np.asarray(observed, dtype=np.float64), dtype, two_sided)
+    threshold = _threshold(np.asarray(observed, dtype=np.float64), dtype, two_sided, kappa)
     exceed = K - np.searchsorted(max_null, threshold, side="left")
     return (1.0 + exceed) / (K + 1.0)
 
@@ -611,7 +647,9 @@ def permutation_test(
       the direction). F is always one-sided.
     :param n_total: number of shufflings expected (identity included), for progress only.
     :param batch: shufflings per GEMM (default :func:`default_batch`).
-    :param dtype: compute precision of the null statistics (float32 or float64).
+    :param dtype: compute precision of the null statistics (float32 or float64). A float32 run whose
+      data have a voxel with kappa above :data:`KAPPA_MAX_FLOAT32` (a very strong effect: the null SSE
+      cannot be resolved in float32) is computed in float64 instead (``result.precision``).
     :param tfce_grid: a ``tfce.TfceGrid`` of the mask (V in-mask voxels) to add TFCE and its FWE p.
     :param tfce_params: {"H", "E", "steps"} for TFCE (defaults: 2, 0.5, 100).
     :param cancel: ``jobs.CancelToken`` or any callable/Event; checked before each batch
@@ -626,10 +664,14 @@ def permutation_test(
     two_sided = tails == 2 and engine.stat != "F"
     if prepared is None:
         prepared = engine.prepare(Y)
+    if engine.dtype == np.float32 and prepared.kappa is not None and float(np.max(prepared.kappa, initial=1.0)) > KAPPA_MAX_FLOAT32:
+        engine = engine.with_dtype(np.float64)
+        prepared = engine.prepare(Y)
+        timings["promoted_to_float64"] = True
     timings["prepare_s"] = time.monotonic() - started
     observed = prepared.stat
     n_voxels = observed.size
-    threshold = _threshold(observed, engine.dtype, two_sided).astype(engine.dtype)
+    threshold = _threshold(observed, engine.dtype, two_sided, prepared.kappa).astype(engine.dtype)
     params = {"H": tfcelib.DEFAULT_H, "E": tfcelib.DEFAULT_E, "steps": tfcelib.DEFAULT_STEPS, **(tfce_params or {})}
     tfce_observed = None
     if tfce_grid is not None:
@@ -688,7 +730,7 @@ def permutation_test(
     min_p = 1.0 / n_perm
     p_unc = (1.0 + state.counts.astype(np.float64)) / n_perm
     max_null = np.asarray(state.max_null, dtype=np.float64)
-    p_fwe = fwe_from_null(observed, max_null, engine.dtype, two_sided)
+    p_fwe = fwe_from_null(observed, max_null, engine.dtype, two_sided, prepared.kappa)
     result = PermutationResult(
         stat=observed,
         kind=engine.stat,
@@ -707,6 +749,7 @@ def permutation_test(
         sse=prepared.sse,
         timings=timings,
         fdr_alpha=fdr_alpha,
+        precision=engine.dtype.name,
     )
     if tfce_grid is not None:
         tfce_null = np.asarray(state.tfce_max_null, dtype=np.float64)
@@ -765,6 +808,20 @@ def _distinct_relabellings(perms, row_labels):
     if distinct(perms):
         return inverses
     raise ValueError("The exhaustive permutations of the design are not distinct")
+
+
+def limitations(design):
+    """The design's limitations, plus the small-sample caveat of the v statistic (glm.json)."""
+    out = list(design.limitations)
+    if design.stat == "v" and design.variance_groups is not None:
+        _, sizes = np.unique(np.asarray(design.variance_groups).reshape(-1), return_counts=True)
+        if sizes.size == 2 and (sizes.min() < 20 or sizes.max() > 1.5 * sizes.min()):
+            out.append(
+                f"Aspin-Welch v with variance groups of {int(sizes.min())} and {int(sizes.max())} subjects: its permutation test is only "
+                "approximately exact when small or unbalanced groups have very different variances (in simulations of 8 vs 16 subjects "
+                "with a 4x SD ratio, 7.5% voxel-wise false positives at alpha 0.05, against 17% for t)",
+            )
+    return out
 
 
 def effect_kind(design):
@@ -849,7 +906,14 @@ class GlmResult:
         return getattr(self.result, name)
 
 
-def run(design, Y, n_perm=None, seed=None, mask=None, tfce=None, tfce_params=None, batch=None, dtype=np.float32, cancel=None, on_batch=None, state=None, fdr_alpha=FDR_ALPHA, allow_blocked=False, engine=None, prepared=None):
+def precision(exhaustive):
+    """Default compute precision: float64 for an exhaustive enumeration (exact p; at most n_perm
+    shufflings), float32 otherwise.
+    """
+    return np.dtype(np.float64 if exhaustive else np.float32)
+
+
+def run(design, Y, n_perm=None, seed=None, mask=None, tfce=None, tfce_params=None, batch=None, dtype=None, cancel=None, on_batch=None, state=None, fdr_alpha=FDR_ALPHA, allow_blocked=False, engine=None, prepared=None):
     """Permutation GLM of a design (design.py) on maps in design order.
 
     :param design: ``design.Design`` (rows in ``design.sids`` order).
@@ -857,6 +921,7 @@ def run(design, Y, n_perm=None, seed=None, mask=None, tfce=None, tfce_params=Non
     :param n_perm, seed: override the spec's (see :func:`shufflings`).
     :param mask: 3D mask of the V voxels (needed for TFCE).
     :param tfce: add TFCE (default: the spec's ``inference.tfce``).
+    :param dtype: compute precision of the permutations (default: :func:`precision` of the enumeration).
     :param allow_blocked: run although the design has blocking checks (tests only).
     :param engine, prepared: a :class:`FreedmanLane` of the design and its :meth:`FreedmanLane.prepare` result, to reuse.
     :return: :class:`GlmResult`.
@@ -868,6 +933,8 @@ def run(design, Y, n_perm=None, seed=None, mask=None, tfce=None, tfce_params=Non
     if Y_shape is None or len(Y_shape) != 2 or Y_shape[0] != design.n:
         raise ValueError(f"Expected {design.n} maps in design order, got shape {Y_shape}")
     iterator, count, exhaustive = shufflings(design, n_perm, seed)
+    if dtype is None:
+        dtype = engine.dtype if engine is not None else precision(exhaustive)
     use_tfce = bool(design.spec.inference.get("tfce")) if tfce is None else bool(tfce)
     grid = None
     if use_tfce:
@@ -1204,11 +1271,11 @@ def _parser():
     parser.add_argument("--out", required=True, help="output folder")
     parser.add_argument("--perm", type=jobs.positive_int, default=None, help="permutations, identity included (default: the design's n_perm)")
     parser.add_argument("--seed", type=int, default=None, help="permutation seed (default: the design's)")
-    parser.add_argument("--tfce", action="store_true", help="add TFCE (H=2, E=0.5, 100 steps, 26-connectivity); about 1.5 s per two-sided permutation on a 2 mm MNI mask")
+    parser.add_argument("--tfce", action="store_true", help="add TFCE (H=2, E=0.5, 100 steps, 26-connectivity); about 1.3-1.9 s per two-sided permutation on a 2 mm MNI mask")
     parser.add_argument("--batch", type=jobs.positive_int, default=None, help="permutations per GEMM (default: chosen from the memory of one batch)")
     parser.add_argument("--conn-label", default=None, help="connectome name of the output names (default: from cohortmaps.json next to maps.tsv)")
     parser.add_argument("--desc", default=None, help="contrast label of the output names (letters and digits; default: from the design)")
-    parser.add_argument("--precision", choices=("float32", "float64"), default="float32", help="precision of the permutations (default: float32)")
+    parser.add_argument("--precision", choices=("auto", "float32", "float64"), default="auto", help="precision of the permutations (default auto: float64 for an exhaustive enumeration, float32 otherwise)")
     parser.add_argument("--keep-maps", action="store_true", help="keep the n x V maps memmap after the run")
     jobs.add_common_arguments(parser)
     return parser
@@ -1297,7 +1364,7 @@ def _run_cli(args, argv):
         indices = mask_indices(mask)
         n_voxels = int(indices.size)
         mask_sha = file_sha256(args.mask)
-        dtype = np.dtype(args.precision)
+        dtype = precision(exhaustive) if args.precision == "auto" else np.dtype(args.precision)
         grid = tfcelib.TfceGrid(mask) if spec.inference.get("tfce") else None
         tfce_eta = tfcelib.tfce_eta(grid, count, two_sided) if grid is not None else None
         map_paths = [mapped[sid][0] for sid in design.sids]
@@ -1451,7 +1518,7 @@ def _run_cli(args, argv):
             "versions": versions(),
             "threads": args.threads,
             "batch": result.timings.get("batch"),
-            "precision": dtype.name,
+            "precision": result.precision,
             "inputs": {
                 "maps_tsv": maps_tsv,
                 "map_column": column,
@@ -1506,7 +1573,7 @@ def _run_cli(args, argv):
                 **(numbers.get("tfce_fwe") or {}),
             },
             "cluster_inference": None,
-            "limitations": list(design.limitations),
+            "limitations": limitations(design),
             "checks": [check.to_dict() for check in design.checks],
             "warnings": [check.message for check in design.warnings],
             "outputs": {key: os.path.basename(path) for key, path in paths.items()},
