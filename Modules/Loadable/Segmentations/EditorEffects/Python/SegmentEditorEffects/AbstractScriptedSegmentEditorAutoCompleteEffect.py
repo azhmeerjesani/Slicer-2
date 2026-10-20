@@ -490,7 +490,7 @@ class AbstractScriptedSegmentEditorAutoCompleteEffect(AbstractScriptedSegmentEdi
             masterImageExtent = masterImageData.GetExtent()
             labelsEffectiveExtent = self.mergedLabelmapGeometryImage.GetExtent()
             # Margin size is relative to combined seed region size, but minimum of 3 voxels
-            print(f"self.extentGrowthRatio = {self.extentGrowthRatio}")
+            logging.debug(f"{self.scriptedEffect.name} auto-complete: extentGrowthRatio = {self.extentGrowthRatio}")
             margin = [
                 int(max(3, self.extentGrowthRatio * (labelsEffectiveExtent[1] - labelsEffectiveExtent[0]))),
                 int(max(3, self.extentGrowthRatio * (labelsEffectiveExtent[3] - labelsEffectiveExtent[2]))),
@@ -502,9 +502,8 @@ class AbstractScriptedSegmentEditorAutoCompleteEffect(AbstractScriptedSegmentEdi
                 min(masterImageExtent[3], labelsEffectiveExtent[3] + margin[1]),
                 max(masterImageExtent[4], labelsEffectiveExtent[4] - margin[2]),
                 min(masterImageExtent[5], labelsEffectiveExtent[5] + margin[2])]
-            print("masterImageExtent = " + repr(masterImageExtent))
-            print("labelsEffectiveExtent = " + repr(labelsEffectiveExtent))
-            print("labelsExpandedExtent = " + repr(labelsExpandedExtent))
+            logging.debug(f"{self.scriptedEffect.name} auto-complete: masterImageExtent = {masterImageExtent!r},"
+                          f" labelsEffectiveExtent = {labelsEffectiveExtent!r}, labelsExpandedExtent = {labelsExpandedExtent!r}")
             self.mergedLabelmapGeometryImage.SetExtent(labelsExpandedExtent)
 
             # Create and setup preview node

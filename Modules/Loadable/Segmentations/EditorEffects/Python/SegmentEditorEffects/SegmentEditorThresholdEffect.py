@@ -39,6 +39,8 @@ class SegmentEditorThresholdEffect(AbstractScriptedSegmentEditorEffect):
         self.previewStep = 1
         self.previewSteps = 5
         self.timer.connect("timeout()", self.preview)
+        # Static preview: what the preview currently shows, so that timer ticks without a change render nothing
+        self._staticPreviewKey = None
 
         self.previewPipelines = {}
         self.histogramPipeline = None
@@ -94,23 +96,50 @@ class SegmentEditorThresholdEffect(AbstractScriptedSegmentEditorEffect):
     def helpText(self):
         return "<html>" + _("""Fill segment based on source volume intensity range<br>. Options:<p>
 <ul style="margin: 0">
-<li><b>Use for masking:</b> set the selected intensity range as <dfn>Editable intensity range</dfn> and switch to Paint effect.
+<li><b>Paint within this range:</b> set the selected intensity range as <dfn>Editable intensity range</dfn> and switch to Paint effect.
 <li><b>Apply:</b> set the previewed segmentation in the selected segment. Previous contents of the segment is overwritten.
+<li><b>Local histogram:</b> while this section is open, click-drag in a slice view to sample the intensities of a region
+and set the threshold range from them.
 </ul><p>""")
 
     def activate(self):
-        # Update intensity range
-        self.sourceVolumeNodeChanged()
+        # Update intensity range (deferred to activation, see sourceVolumeNodeChanged)
+        self.updateIntensityRangeFromSourceVolume()
 
         # Set up observers for background/foreground volume changes in visible slice widgets
         self.addSliceCompositeObservers()
 
-        # Start preview pulse
-        self.timer.start(200)
+        # Start preview pulse (or show a static preview)
+        self.updatePreviewMode()
+
+    def isStaticPreview(self):
+        """Return True if the preview is shown at constant opacity instead of pulsing (StaticPreview parameter)."""
+        return self.scriptedEffect.integerParameter("StaticPreview") != 0
+
+    def updatePreviewMode(self):
+        """Start the preview timer and refresh a static preview (active effect only).
+
+        The timer runs in both modes. With a static preview each tick only checks whether the previewed segmentation,
+        segment, color or range changed (for example another segment was selected) and renders the views only then,
+        instead of 5 times per second.
+        """
+        if not self.scriptedEffect.active():
+            return
+        if not self.timer.isActive():
+            self.timer.start(200)
+        self.updateStaticPreview()
+
+    def updateStaticPreview(self):
+        """Render the static preview once after a change (no-op while the preview pulses or the effect is inactive)."""
+        if self.scriptedEffect.active() and self.isStaticPreview():
+            # Force the update (e.g., the source volume layer changed, which is not part of the preview key)
+            self._staticPreviewKey = None
+            self.preview()
 
     def deactivate(self):
         # Stop preview pulse
         self.timer.stop()
+        self._staticPreviewKey = None
 
         # Remove observers
         self.removeSliceCompositeObservers()
@@ -151,6 +180,7 @@ class SegmentEditorThresholdEffect(AbstractScriptedSegmentEditorEffect):
             compositeNode = sliceWidget.sliceLogic().GetSliceCompositeNode()
             if compositeNode == caller:
                 self.updatePreviewDisplayPipelines()
+                self.updateStaticPreview()
                 break
 
     def setupOptionsFrame(self):
@@ -223,6 +253,12 @@ class SegmentEditorThresholdEffect(AbstractScriptedSegmentEditorEffect):
         self.scriptedEffect.addOptionsWidget(autoThresholdGroupBox)
 
         histogramFrame = qt.QVBoxLayout()
+
+        self.localHistogramHintLabel = qt.QLabel(_("Click-drag in a slice view to sample lesion intensities"))
+        self.localHistogramHintLabel.setWordWrap(True)
+        self.localHistogramHintLabel.setToolTip(_("While this section is open, a click-drag in a slice view samples the intensities"
+                                                  " of the region and sets the threshold range from them."))
+        histogramFrame.addWidget(self.localHistogramHintLabel)
 
         histogramBrushFrame = qt.QHBoxLayout()
         histogramFrame.addLayout(histogramBrushFrame)
@@ -379,15 +415,31 @@ class SegmentEditorThresholdEffect(AbstractScriptedSegmentEditorEffect):
         upperHistogramLayout.addWidget(self.histogramUpperThresholdMaximumButton)
         self.histogramUpperMethodButtonGroup.addButton(self.histogramUpperThresholdMaximumButton)
 
-        histogramGroupBox = ctk.ctkCollapsibleGroupBox()
-        histogramGroupBox.setTitle(_("Local histogram"))
-        histogramGroupBox.setLayout(histogramFrame)
-        histogramGroupBox.collapsed = True
-        self.scriptedEffect.addOptionsWidget(histogramGroupBox)
+        # Clicks in slice views sample the threshold range only while this section is expanded
+        self.localHistogramGroupBox = ctk.ctkCollapsibleGroupBox()
+        self.localHistogramGroupBox.objectName = self.__class__.__name__ + "LocalHistogram"
+        self.localHistogramGroupBox.setTitle(_("Local histogram"))
+        self.localHistogramGroupBox.setToolTip(_("Open to sample the threshold range by click-dragging in a slice view."))
+        self.localHistogramGroupBox.setLayout(histogramFrame)
+        self.localHistogramGroupBox.collapsed = True
+        self.scriptedEffect.addOptionsWidget(self.localHistogramGroupBox)
 
-        self.useForPaintButton = qt.QPushButton(_("Use for masking"))
-        self.useForPaintButton.setToolTip(_("Use specified intensity range for masking and switch to Paint effect."))
+        self.useForPaintButton = qt.QPushButton(_("Paint within this range"))
+        self.useForPaintButton.setToolTip(_("Limit painting to the specified intensity range (editable intensity range in Masking)"
+                                            " and switch to Paint effect."))
         self.scriptedEffect.addOptionsWidget(self.useForPaintButton)
+
+        self.keepActiveAfterApplyCheckBox = qt.QCheckBox(_("Keep Threshold active after Apply"))
+        self.keepActiveAfterApplyCheckBox.objectName = self.__class__.__name__ + "KeepActiveAfterApply"
+        self.keepActiveAfterApplyCheckBox.setToolTip(_("If checked, Threshold stays the active effect after Apply, so the range"
+                                                       " can be adjusted and applied again. Otherwise no effect is active after Apply."))
+        self.scriptedEffect.addOptionsWidget(self.keepActiveAfterApplyCheckBox)
+
+        self.staticPreviewCheckBox = qt.QCheckBox(_("Static preview"))
+        self.staticPreviewCheckBox.objectName = self.__class__.__name__ + "StaticPreview"
+        self.staticPreviewCheckBox.setToolTip(_("If checked, the preview is shown at constant opacity and views are rendered only"
+                                                " when it changes. Otherwise the preview pulses."))
+        self.scriptedEffect.addOptionsWidget(self.staticPreviewCheckBox)
 
         self.applyButton = qt.QPushButton(_("Apply"))
         self.applyButton.objectName = self.__class__.__name__ + "Apply"
@@ -395,6 +447,9 @@ class SegmentEditorThresholdEffect(AbstractScriptedSegmentEditorEffect):
         self.scriptedEffect.addOptionsWidget(self.applyButton)
 
         self.useForPaintButton.connect("clicked()", self.onUseForPaint)
+        self.localHistogramGroupBox.connect("toggled(bool)", self.onLocalHistogramToggled)
+        self.keepActiveAfterApplyCheckBox.connect("toggled(bool)", self.onOptionCheckBoxToggled)
+        self.staticPreviewCheckBox.connect("toggled(bool)", self.onOptionCheckBoxToggled)
         self.thresholdSlider.connect("valuesChanged(double,double)", self.onThresholdValuesChanged)
         self.autoThresholdMethodSelectorComboBox.connect("activated(int)", self.onSelectedAutoThresholdMethod)
         self.autoThresholdModeSelectorComboBox.connect("activated(int)", self.onSelectedAutoThresholdMethod)
@@ -404,6 +459,12 @@ class SegmentEditorThresholdEffect(AbstractScriptedSegmentEditorEffect):
         self.applyButton.connect("clicked()", self.onApply)
 
     def sourceVolumeNodeChanged(self):
+        # All registered effects are notified, active or not. Computing the scalar range of a newly loaded volume
+        # takes time, therefore it is only done here if the effect is active and is deferred to activate() otherwise.
+        if self.scriptedEffect.active():
+            self.updateIntensityRangeFromSourceVolume()
+
+    def updateIntensityRangeFromSourceVolume(self):
         # Set scalar range of source volume image data to threshold slider
         masterImageData = self.scriptedEffect.sourceVolumeImageData()
         if masterImageData:
@@ -412,8 +473,11 @@ class SegmentEditorThresholdEffect(AbstractScriptedSegmentEditorEffect):
             self.thresholdSlider.singleStep = (hi - lo) / 1000.
             if (self.scriptedEffect.doubleParameter("MinimumThreshold") == self.scriptedEffect.doubleParameter("MaximumThreshold")):
                 # has not been initialized yet
-                self.scriptedEffect.setParameter("MinimumThreshold", lo + (hi - lo) * 0.25)
-                self.scriptedEffect.setParameter("MaximumThreshold", hi)
+                with slicer.util.NodeModify(self.scriptedEffect.parameterSetNode()):
+                    self.scriptedEffect.setParameter("MinimumThreshold", lo + (hi - lo) * 0.25)
+                    self.scriptedEffect.setParameter("MaximumThreshold", hi)
+            # The slider values may have been clamped while the slider had the range of another volume
+            self.updateGUIFromMRML()
 
     def layoutChanged(self):
         self.addSliceCompositeObservers()
@@ -427,11 +491,13 @@ class SegmentEditorThresholdEffect(AbstractScriptedSegmentEditorEffect):
         self.scriptedEffect.setParameterDefault(HISTOGRAM_BRUSH_TYPE_PARAMETER_NAME, HISTOGRAM_BRUSH_TYPE_CIRCLE)
         self.scriptedEffect.setParameterDefault(HISTOGRAM_SET_LOWER_PARAMETER_NAME, HISTOGRAM_SET_LOWER)
         self.scriptedEffect.setParameterDefault(HISTOGRAM_SET_UPPER_PARAMETER_NAME, HISTOGRAM_SET_UPPER)
+        self.scriptedEffect.setParameterDefault("KeepActiveAfterApply", 0)
+        self.scriptedEffect.setParameterDefault("StaticPreview", 0)
 
     def updateGUIFromMRML(self):
         self.thresholdSlider.blockSignals(True)
-        self.thresholdSlider.setMinimumValue(self.scriptedEffect.doubleParameter("MinimumThreshold"))
-        self.thresholdSlider.setMaximumValue(self.scriptedEffect.doubleParameter("MaximumThreshold"))
+        # Set both values at once (setting one at a time may clamp it to the previous value of the other)
+        self.thresholdSlider.setValues(self.scriptedEffect.doubleParameter("MinimumThreshold"), self.scriptedEffect.doubleParameter("MaximumThreshold"))
         self.thresholdSlider.blockSignals(False)
 
         autoThresholdMethod = self.autoThresholdMethodSelectorComboBox.findData(self.scriptedEffect.parameter("AutoThresholdMethod"))
@@ -460,7 +526,19 @@ class SegmentEditorThresholdEffect(AbstractScriptedSegmentEditorEffect):
         self.histogramUpperThresholdUpperButton.checked = histogramSetModeUpper == HISTOGRAM_SET_UPPER
         self.histogramUpperThresholdMaximumButton.checked = histogramSetModeUpper == HISTOGRAM_SET_MAXIMUM
 
+        wasBlocked = self.keepActiveAfterApplyCheckBox.blockSignals(True)
+        self.keepActiveAfterApplyCheckBox.checked = self.scriptedEffect.integerParameter("KeepActiveAfterApply") != 0
+        self.keepActiveAfterApplyCheckBox.blockSignals(wasBlocked)
+        # The option is meaningless if a derived effect (e.g., LocalThreshold) hides the Apply button
+        self.keepActiveAfterApplyCheckBox.setVisible(not self.applyButton.isHidden())
+        wasBlocked = self.staticPreviewCheckBox.blockSignals(True)
+        self.staticPreviewCheckBox.checked = self.isStaticPreview()
+        self.staticPreviewCheckBox.blockSignals(wasBlocked)
+
         self.updateHistogramBackground()
+
+        # Effect parameters (such as the threshold range) may have changed
+        self.updatePreviewMode()
 
     def updateMRMLFromGUI(self):
         with slicer.util.NodeModify(self.scriptedEffect.parameterSetNode()):
@@ -474,6 +552,9 @@ class SegmentEditorThresholdEffect(AbstractScriptedSegmentEditorEffect):
             modeIndex = self.autoThresholdModeSelectorComboBox.currentIndex
             autoThresholdMode = self.autoThresholdModeSelectorComboBox.itemData(modeIndex)
             self.scriptedEffect.setParameter("AutoThresholdMode", autoThresholdMode)
+
+            self.scriptedEffect.setParameter("KeepActiveAfterApply", 1 if self.keepActiveAfterApplyCheckBox.checked else 0)
+            self.scriptedEffect.setParameter("StaticPreview", 1 if self.staticPreviewCheckBox.checked else 0)
 
             histogramParameterChanged = False
 
@@ -521,6 +602,18 @@ class SegmentEditorThresholdEffect(AbstractScriptedSegmentEditorEffect):
     #
     def onThresholdValuesChanged(self, min, max):
         self.scriptedEffect.updateMRMLFromGUI()
+
+    def onOptionCheckBoxToggled(self, checked):
+        self.scriptedEffect.updateMRMLFromGUI()
+
+    def onLocalHistogramToggled(self, expanded):
+        if not expanded:
+            # Clicks in the views no longer sample the range: remove the sampling region from the view
+            self.clearHistogramDisplay()
+
+    def isLocalHistogramSamplingEnabled(self):
+        """Clicks in slice views sample the threshold range only while the local histogram section is expanded."""
+        return not self.localHistogramGroupBox.collapsed
 
     def onUseForPaint(self):
         parameterSetNode = self.scriptedEffect.parameterSetNode()
@@ -607,8 +700,6 @@ class SegmentEditorThresholdEffect(AbstractScriptedSegmentEditorEffect):
             masterImageData = self.scriptedEffect.sourceVolumeImageData()
             # Get modifier labelmap
             modifierLabelmap = self.scriptedEffect.defaultModifierLabelmap()
-            originalImageToWorldMatrix = vtk.vtkMatrix4x4()
-            modifierLabelmap.GetImageToWorldMatrix(originalImageToWorldMatrix)
             # Get parameters
             min = self.scriptedEffect.doubleParameter("MinimumThreshold")
             max = self.scriptedEffect.doubleParameter("MaximumThreshold")
@@ -623,7 +714,7 @@ class SegmentEditorThresholdEffect(AbstractScriptedSegmentEditorEffect):
             thresh.SetOutValue(0)
             thresh.SetOutputScalarType(modifierLabelmap.GetScalarType())
             thresh.Update()
-            modifierLabelmap.DeepCopy(thresh.GetOutput())
+            modifierLabelmap.ShallowCopy(thresh.GetOutput())
         except IndexError:
             logging.error("apply: Failed to threshold source volume!")
             pass
@@ -631,8 +722,9 @@ class SegmentEditorThresholdEffect(AbstractScriptedSegmentEditorEffect):
         # Apply changes
         self.scriptedEffect.modifySelectedSegmentByLabelmap(modifierLabelmap, slicer.qSlicerSegmentEditorAbstractEffect.ModificationModeSet)
 
-        # De-select effect
-        self.scriptedEffect.selectEffect("")
+        # De-select effect, unless the user asked to keep it active to adjust the range and apply again
+        if self.scriptedEffect.integerParameter("KeepActiveAfterApply") == 0:
+            self.scriptedEffect.selectEffect("")
 
     def clearPreviewDisplayPipelines(self):
         for sliceWidget, pipeline in self.previewPipelines.items():
@@ -643,6 +735,7 @@ class SegmentEditorThresholdEffect(AbstractScriptedSegmentEditorEffect):
         self.previewPipelines = {}
         self.previewedSegmentationDisplayNode = None
         self.previewedSegmentID = None
+        self._staticPreviewKey = None
 
     def clearHistogramDisplay(self):
         if self.histogramPipeline is None:
@@ -728,7 +821,12 @@ class SegmentEditorThresholdEffect(AbstractScriptedSegmentEditorEffect):
         if not self.previewedSegmentationDisplayNode:
             return
 
-        opacity = 0.5 + self.previewState / (2.0 * self.previewSteps)
+        staticPreview = self.isStaticPreview()
+        if staticPreview:
+            # Constant opacity, in the middle of the pulse range
+            opacity = 0.75
+        else:
+            opacity = 0.5 + self.previewState / (2.0 * self.previewSteps)
         min = self.scriptedEffect.doubleParameter("MinimumThreshold")
         max = self.scriptedEffect.doubleParameter("MaximumThreshold")
 
@@ -736,6 +834,16 @@ class SegmentEditorThresholdEffect(AbstractScriptedSegmentEditorEffect):
         segmentID = self.scriptedEffect.parameterSetNode().GetSelectedSegmentID()
 
         r, g, b = self.previewedSegmentationDisplayNode.GetSegmentColor(segmentID)
+
+        if staticPreview:
+            # Render only if what the preview shows has changed since the last update
+            previewKey = (self.previewedSegmentationDisplayNode.GetID(), segmentID, min, max, r, g, b,
+                          tuple(sorted(sliceWidget.objectName for sliceWidget in self.previewPipelines)))
+            if previewKey == self._staticPreviewKey:
+                return
+            self._staticPreviewKey = previewKey
+        else:
+            self._staticPreviewKey = None
 
         # Set values to pipelines
         for sliceWidget in self.previewPipelines:
@@ -775,6 +883,11 @@ class SegmentEditorThresholdEffect(AbstractScriptedSegmentEditorEffect):
 
         # Only allow for slice views
         if viewWidget.className() != "qMRMLSliceWidget":
+            return abortEvent
+
+        # Clicks set the threshold range from the local histogram only while that section is expanded,
+        # so that a click in a view does not silently reset the range
+        if not self.isLocalHistogramSamplingEnabled():
             return abortEvent
 
         anyModifierKeyPressed = callerInteractor.GetShiftKey() or callerInteractor.GetControlKey() or callerInteractor.GetAltKey()
@@ -910,11 +1023,18 @@ class SegmentEditorThresholdEffect(AbstractScriptedSegmentEditorEffect):
 
         self.imageAccumulate.Update()
 
+        # Fill the histogram function with (bin position, count) pairs in one call
+        import numpy as np
+        from vtk.util import numpy_support
+
+        binCounts = numpy_support.vtk_to_numpy(self.imageAccumulate.GetOutput().GetPointData().GetScalars())
+        tableSize = len(binCounts)
+        histogramPoints = np.empty(2 * tableSize, dtype=np.float64)
+        histogramPoints[0::2] = binSpacing * np.arange(tableSize, dtype=np.float64) + scalarRange[0]
+        histogramPoints[1::2] = binCounts.reshape(-1)
         self.histogramFunction.RemoveAllPoints()
-        tableSize = self.imageAccumulate.GetOutput().GetPointData().GetScalars().GetNumberOfTuples()
-        for i in range(tableSize):
-            value = self.imageAccumulate.GetOutput().GetPointData().GetScalars().GetTuple1(i)
-            self.histogramFunction.AddPoint(binSpacing * i + scalarRange[0], value)
+        if tableSize > 0:
+            self.histogramFunction.FillFromDataPointer(tableSize, histogramPoints)
         self.histogramFunction.AdjustRange(scalarRange)
 
         lower = self.imageAccumulate.GetMin()[0]
@@ -966,11 +1086,18 @@ class SegmentEditorThresholdEffect(AbstractScriptedSegmentEditorEffect):
         elif histogramSetModeUpper == HISTOGRAM_SET_MAXIMUM:
             maximumThreshold = scalarRange[1]
 
-        self.scriptedEffect.setParameter("MinimumThreshold", minimumThreshold)
-        self.scriptedEffect.setParameter("MaximumThreshold", maximumThreshold)
+        # One parameter modified event for both values
+        with slicer.util.NodeModify(self.scriptedEffect.parameterSetNode()):
+            self.scriptedEffect.setParameter("MinimumThreshold", minimumThreshold)
+            self.scriptedEffect.setParameter("MaximumThreshold", maximumThreshold)
 
     def updateHistogramBackground(self):
         self.backgroundFunction.RemoveAllPoints()
+
+        if not self.scriptedEffect.active():
+            # Not displayed. Computing the scalar range of a newly loaded volume takes time,
+            # therefore it is done when the effect is activated (which updates the GUI).
+            return
 
         masterImageData = self.scriptedEffect.sourceVolumeImageData()
         if masterImageData is None:

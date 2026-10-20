@@ -105,6 +105,21 @@ class SegmentEditorGrowFromSeedsEffect(AbstractScriptedSegmentEditorAutoComplete
         if self.getPreviewNode():
             self.delayedAutoUpdateTimer.start()
 
+    def preview(self):
+        # The growth ratio must be set before the base class computes the extent of the merged labelmap
+        # (on the first preview and whenever the seeds grow close to the edge of that extent).
+        parameterSetNode = self.scriptedEffect.parameterSetNode()
+        if parameterSetNode and (parameterSetNode.GetSourceVolumeIntensityMask()
+                                 or parameterSetNode.GetMaskMode() != slicer.vtkMRMLSegmentationNode.EditAllowedEverywhere):
+            # Mask is used.
+            # Grow the extent more, as background segment does not surround region of interest.
+            self.extentGrowthRatio = 0.50
+        else:
+            # No masking is used.
+            # Background segment is expected to surround region of interest, so narrower margin is enough.
+            self.extentGrowthRatio = 0.20
+        AbstractScriptedSegmentEditorAutoCompleteEffect.preview(self)
+
     def computePreviewLabelmap(self, mergedImage, outputLabelmap):
         import vtkITK
 
@@ -112,20 +127,6 @@ class SegmentEditorGrowFromSeedsEffect(AbstractScriptedSegmentEditorAutoComplete
             self.growCutFilter = vtkITK.vtkITKGrowCut()
             self.growCutFilter.SetIntensityVolume(self.clippedMasterImageData)
             self.growCutFilter.SetMaskVolume(self.clippedMaskImageData)
-            maskExtent = self.clippedMaskImageData.GetExtent() if self.clippedMaskImageData else None
-            if (
-                maskExtent is not None
-                and maskExtent[0] <= maskExtent[1]
-                and maskExtent[2] <= maskExtent[3]
-                and maskExtent[4] <= maskExtent[5]
-            ):
-                # Mask is used.
-                # Grow the extent more, as background segment does not surround region of interest.
-                self.extentGrowthRatio = 0.50
-            else:
-                # No masking is used.
-                # Background segment is expected to surround region of interest, so narrower margin is enough.
-                self.extentGrowthRatio = 0.20
 
         if self.scriptedEffect.parameterDefined("SeedLocalityFactor"):
             seedLocalityFactor = self.scriptedEffect.doubleParameter("SeedLocalityFactor")
