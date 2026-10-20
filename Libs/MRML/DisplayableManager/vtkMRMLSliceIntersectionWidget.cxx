@@ -60,10 +60,12 @@ bool SymmetricZoom = false;
 /// Live widgets, so that a change of an application-wide option that affects the event mapping
 /// is applied to existing widgets. Widgets add themselves in the constructor and remove themselves
 /// in the destructor; all access is from the main thread.
+/// The set is intentionally never destroyed: widgets may be destroyed during static destruction
+/// (e.g., when held by other static objects), after a function-local static set would be gone.
 std::set<vtkMRMLSliceIntersectionWidget*>& LiveSliceIntersectionWidgets()
 {
-  static std::set<vtkMRMLSliceIntersectionWidget*> widgets;
-  return widgets;
+  static std::set<vtkMRMLSliceIntersectionWidget*>* widgets = new std::set<vtkMRMLSliceIntersectionWidget*>();
+  return *widgets;
 }
 } // namespace
 
@@ -553,6 +555,8 @@ bool vtkMRMLSliceIntersectionWidget::ProcessInteractionEvent(vtkMRMLInteractionE
       vtkMRMLSliceCompositeNode* sliceCompositeNode = this->SliceLogic->GetSliceCompositeNode();
       this->SliceLogic->GetMRMLScene()->SaveStateForUndo();
       this->LastForegroundOpacity = sliceCompositeNode->GetForegroundOpacity();
+      // Do not use the segmentation of a previous blend action
+      this->StartActionSegmentationDisplayNode = nullptr;
       this->LastLabelOpacity = this->GetLabelOpacity();
       this->StartActionSegmentationDisplayNode = this->GetVisibleSegmentationDisplayNode();
       processedEvent = this->ProcessStartMouseDrag(eventData);
@@ -561,7 +565,10 @@ bool vtkMRMLSliceIntersectionWidget::ProcessInteractionEvent(vtkMRMLInteractionE
       // (the slider in qMRMLSliceControllerWidget), there is no immediate need to change this.
     }
     break;
-    case WidgetEventBlendEnd: processedEvent = this->ProcessEndMouseDrag(eventData); break;
+    case WidgetEventBlendEnd:
+      processedEvent = this->ProcessEndMouseDrag(eventData);
+      this->StartActionSegmentationDisplayNode = nullptr;
+      break;
     case WidgetEventSetCrosshairPosition: this->ProcessSetCrosshair(eventData); break;
     case WidgetEventToggleLabelOpacity:
     {

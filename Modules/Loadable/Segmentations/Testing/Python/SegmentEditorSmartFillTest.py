@@ -39,15 +39,6 @@ class SegmentEditorSmartFillTest(unittest.TestCase):
     def tearDown(self):
         if self.editor is not None:
             self.editor.setActiveEffectByName("")
-            if self.hasViews():
-                # Ctrl+click (remove) is passed on to the view, where Ctrl+left-drag blends the layers. The blend action
-                # keeps a raw pointer to the segmentation display node (vtkMRMLSliceIntersectionWidget
-                # StartActionSegmentationDisplayNode), which dangles once the scene is cleared and crashes the next
-                # Ctrl+click. Toggling the label opacity twice ("g") resets that pointer before the scene is cleared.
-                interactor = self.interactor()
-                for _ in range(2):
-                    interactor.SetKeySym("g")
-                    interactor.InvokeEvent(vtk.vtkCommand.KeyPressEvent)
             self.editor.setMRMLScene(None)
             self.editor = None
         slicer.mrmlScene.Clear(0)
@@ -167,6 +158,30 @@ class SegmentEditorSmartFillTest(unittest.TestCase):
     #
     # Tests
     #
+
+    def test_blend_after_segmentation_deleted(self):
+        """Ctrl+left-drag (layer blend) in a slice view works after the segmentation of a previous blend was deleted.
+
+        Ctrl+click (remove) is passed on to the view, where Ctrl+left-drag blends the layers. The blend action used to
+        keep a raw pointer to the segmentation display node, which crashed the next Ctrl+left-drag once the node was deleted.
+        """
+        if not self.hasViews():
+            self.skipTest("needs slice views")
+        red = self.redWidget()
+        for _ in range(2):
+            self.createScene(shape=(32, 32, 32), lesions=(((16, 16, 16), 5, 160.0),))
+            self.editor.setActiveEffectByName("")
+            self.centerViewsOn((16, 16, 16))
+            displayNode = self.segmentationNode.GetDisplayNode()
+            opacity = displayNode.GetOpacity()
+            slicer.util.clickAndDrag(red, start=(100, 100), end=(60, 100), steps=2, modifiers=["Control"])
+            slicer.app.processEvents()
+            self.assertNotEqual(displayNode.GetOpacity(), opacity)
+            # Delete the segmentation (and the editor that shows it) before the next blend
+            self.editor.setMRMLScene(None)
+            self.editor = None
+            slicer.mrmlScene.RemoveNode(self.segmentationNode)
+            slicer.app.processEvents()
 
     def test_registration_and_order(self):
         self.createScene(shape=(32, 32, 32), lesions=(((16, 16, 16), 5, 160.0),))

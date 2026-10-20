@@ -574,7 +574,15 @@ void qSlicerSegmentEditorPaintEffectPrivate::scaleDiameter(double scaleFactor)
   }
   else
   {
-    q->setCommonParameter("BrushAbsoluteDiameter", q->doubleParameter("BrushAbsoluteDiameter") * scaleFactor);
+    // Stay within the limits of the slider (they follow the reference geometry)
+    double minimumDiameter = q->doubleParameter("BrushMinimumAbsoluteDiameter");
+    double maximumDiameter = q->doubleParameter("BrushMaximumAbsoluteDiameter");
+    double diameter = q->doubleParameter("BrushAbsoluteDiameter") * scaleFactor;
+    if (minimumDiameter > 0.0 && maximumDiameter > minimumDiameter)
+    {
+      diameter = qBound(minimumDiameter, diameter, maximumDiameter);
+    }
+    q->setCommonParameter("BrushAbsoluteDiameter", diameter);
   }
 }
 
@@ -1507,6 +1515,19 @@ void qSlicerSegmentEditorPaintEffect::updateGUIFromMRML()
   d->BrushDiameterIsAbsoluteButton->blockSignals(true);
   d->BrushDiameterIsAbsoluteButton->setChecked(!brushDiameterIsRelative);
   d->BrushDiameterIsAbsoluteButton->blockSignals(false);
+  // The segment editor widget sets the "studioPresentation" property in the Slicer Studio presentation,
+  // where the button names the current unit instead of being an "absolute" toggle.
+  if (this->property("studioPresentation").toBool())
+  {
+    d->BrushDiameterIsAbsoluteButton->setText(brushDiameterIsRelative ? tr("% of view") : tr("mm"));
+    d->BrushDiameterIsAbsoluteButton->setToolTip(brushDiameterIsRelative ? tr("The brush size is a percentage of the view height. Click to set it in millimeters.")
+                                                                         : tr("The brush size is in millimeters. Click to set it as a percentage of the view height."));
+  }
+  else
+  {
+    d->BrushDiameterIsAbsoluteButton->setText("absolute");
+    d->BrushDiameterIsAbsoluteButton->setToolTip(tr("Set the paint brush size as a percentage of screen height or physical size"));
+  }
 
   d->BrushDiameterSliderWidget->blockSignals(true);
   if (brushDiameterIsRelative)
@@ -1532,11 +1553,9 @@ void qSlicerSegmentEditorPaintEffect::updateGUIFromMRML()
     d->BrushDiameterSliderWidget->setQuantity("length");
     d->BrushDiameterSliderWidget->setSuffix(tr("mm"));
     d->BrushDiameterSliderWidget->setUnitAwareProperties(qMRMLSliderWidget::Prefix | qMRMLSliderWidget::Suffix);
-    int decimals = (int)(log10(d->BrushDiameterSliderWidget->minimum()));
-    if (decimals < 0)
-    {
-      d->BrushDiameterSliderWidget->setDecimals(-decimals * 2);
-    }
+    // Enough decimals for the minimum diameter (e.g., 4 for 0.01 mm, 2 for 0.5 mm)
+    int decimals = (int)floor(log10(d->BrushDiameterSliderWidget->minimum()));
+    d->BrushDiameterSliderWidget->setDecimals(decimals < 0 ? -decimals * 2 : 1);
   }
   d->BrushDiameterSliderWidget->blockSignals(false);
 
@@ -1608,10 +1627,21 @@ void qSlicerSegmentEditorPaintEffect::referenceGeometryChanged()
   double bounds[3] = { spacing[0] * dimensions[0], spacing[1] * dimensions[1], spacing[2] * dimensions[2] };
   double maximumBounds = qMax(bounds[0], qMax(bounds[1], bounds[2]));
   double maximumDiameter = 0.5 * maximumBounds;
+  if (minimumDiameter <= 0.0 || maximumDiameter <= minimumDiameter)
+  {
+    // Invalid or degenerate geometry
+    return;
+  }
 
-  this->setCommonParameter("BrushAbsoluteMinimumDiameter", minimumDiameter);
-  this->setCommonParameter("BrushAbsoluteMaximumDiameter", maximumDiameter);
-  this->setCommonParameter("BrushAbsoluteDiameter", qMin(50.0 * minimumDiameter, 0.5 * maximumDiameter));
+  this->setCommonParameter("BrushMinimumAbsoluteDiameter", minimumDiameter);
+  this->setCommonParameter("BrushMaximumAbsoluteDiameter", maximumDiameter);
+  // Keep the diameter that the user has chosen, only make sure that it is within the limits
+  double diameter = this->doubleParameter("BrushAbsoluteDiameter");
+  double clampedDiameter = qBound(minimumDiameter, diameter, maximumDiameter);
+  if (clampedDiameter != diameter)
+  {
+    this->setCommonParameter("BrushAbsoluteDiameter", clampedDiameter);
+  }
 
   this->updateGUIFromMRML();
 }

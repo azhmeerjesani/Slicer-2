@@ -67,6 +67,7 @@
 #include <vtkMRMLCameraWidget.h>
 #include <vtkMRMLCrosshairDisplayableManager.h>
 #include <vtkMRMLLabelMapVolumeNode.h>
+#include <vtkMRMLScalarVolumeDisplayNode.h>
 #include <vtkMRMLScene.h>
 #include <vtkMRMLSliceIntersectionWidget.h>
 #include <vtkMRMLSliceNode.h>
@@ -90,15 +91,22 @@
 // Qt includes
 #include <QButtonGroup>
 #include <QDebug>
+#include <QEvent>
+#include <QFontMetrics>
 #include <QGridLayout>
+#include <QGroupBox>
 #include <QInputDialog>
+#include <QKeySequence>
 #include <QMainWindow>
 #include <QMenu>
 #include <QMessageBox>
 #include <QPointer>
+#include <QRegularExpression>
 #include <QScrollArea>
 #include <QSettings>
 #include <QShortcut>
+#include <QStyle>
+#include <QStyleOption>
 #include <QTableView>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -107,6 +115,93 @@
 #include <ctkCollapsibleButton.h>
 
 static const char NULL_EFFECT_NAME[] = "NULL";
+
+/// Dynamic property set on the effects and on the segments table to tell them that
+/// the Slicer Studio presentation is used (\sa qMRMLSegmentEditorWidget::setStudioPresentation)
+static const char STUDIO_PRESENTATION_PROPERTY[] = "studioPresentation";
+
+namespace
+{
+//-----------------------------------------------------------------------------
+/// Layout manager of the application, nullptr if there is none or the application is being destroyed
+/// (qSlicerApplication::application() is nullptr while the application object is destroyed).
+qSlicerLayoutManager* applicationLayoutManager()
+{
+  qSlicerApplication* app = qSlicerApplication::application();
+  return app ? app->layoutManager() : nullptr;
+}
+
+//-----------------------------------------------------------------------------
+/// Format an intensity value with \a decimals decimals, without trailing zeros
+QString formatIntensity(double value, int decimals)
+{
+  QString text = QString::number(value, 'f', qMax(0, decimals));
+  if (text.contains('.'))
+  {
+    while (text.endsWith('0'))
+    {
+      text.chop(1);
+    }
+    if (text.endsWith('.'))
+    {
+      text.chop(1);
+    }
+  }
+  return text;
+}
+
+//-----------------------------------------------------------------------------
+/// Tooltip text that is displayed literally: plain text, unless escaping is needed
+/// (rich text tooltips are word-wrapped). Same as StudioLib ui.tooltip().
+QString literalToolTip(const QString& text)
+{
+  QString escaped = text.toHtmlEscaped();
+  return escaped == text ? text : QString("<qt>%1</qt>").arg(escaped);
+}
+
+//-----------------------------------------------------------------------------
+/// Width that QGroupBox::minimumSizeHint requires for displaying \a title in \a groupBox
+/// (the title, the check box of a checkable group box, and the frame).
+int groupBoxTitleMinimumWidth(QGroupBox* groupBox, const QString& title)
+{
+  QStyleOptionGroupBox option;
+  option.initFrom(groupBox);
+  option.text = title;
+  option.lineWidth = 1;
+  option.midLineWidth = 0;
+  option.textAlignment = groupBox->alignment();
+  option.features = groupBox->isFlat() ? QStyleOptionFrame::Flat : QStyleOptionFrame::None;
+  option.subControls = QStyle::SC_GroupBoxFrame | QStyle::SC_GroupBoxLabel;
+  QFontMetrics metrics(groupBox->font());
+  int baseWidth = metrics.horizontalAdvance(title) + metrics.horizontalAdvance(QLatin1Char(' '));
+  int baseHeight = metrics.height();
+  if (groupBox->isCheckable())
+  {
+    option.subControls |= QStyle::SC_GroupBoxCheckBox;
+    baseWidth += groupBox->style()->pixelMetric(QStyle::PM_IndicatorWidth, &option, groupBox);
+    baseWidth += groupBox->style()->pixelMetric(QStyle::PM_CheckBoxLabelSpacing, &option, groupBox);
+    baseHeight = qMax(baseHeight, groupBox->style()->pixelMetric(QStyle::PM_IndicatorHeight, &option, groupBox));
+  }
+  return groupBox->style()->sizeFromContents(QStyle::CT_GroupBox, &option, QSize(baseWidth, baseHeight), groupBox).width();
+}
+} // namespace
+
+//---------------------------------------------------------------------------
+/// Keeps the masking section title (a summary in the Studio presentation) fitted to the
+/// width of the section, see qMRMLSegmentEditorWidgetPrivate::updateMaskingTitle.
+class qMRMLSegmentEditorMaskingTitleFilter : public QObject
+{
+public:
+  qMRMLSegmentEditorMaskingTitleFilter(qMRMLSegmentEditorWidgetPrivate* editorPrivate, QObject* parent)
+    : QObject(parent)
+    , EditorPrivate(editorPrivate)
+  {
+  }
+  bool eventFilter(QObject* watched, QEvent* event) override;
+
+protected:
+  qMRMLSegmentEditorWidgetPrivate* EditorPrivate;
+};
 
 //---------------------------------------------------------------------------
 class vtkSegmentEditorEventCallbackCommand : public vtkCallbackCommand
@@ -153,6 +248,27 @@ public:
   /// Select first segment in table view
   void selectFirstSegment() const;
 
+  /// If autoCreateSegmentOnEffectActivation is enabled and the effect requires segments:
+  /// add a segment if the segmentation is empty, or select the first visible segment if
+  /// the effect works on the selected segment and none is selected.
+  void prepareSegmentForEffectActivation(qSlicerSegmentEditorAbstractEffect* effect);
+
+  /// Update the tooltips of the effect buttons (they depend on the effect order and the presentation)
+  void updateEffectButtonToolTips();
+
+  /// Keyboard shortcut that selects the effect shown at the given position in the effect layout
+  /// (position 0 is the "None" button). Empty if there is none.
+  QString effectShortcutText(int layoutIndex) const;
+
+  /// One-line summary of the masking settings, used as masking section title in the Studio presentation.
+  /// If \a maximumSegmentNameWidth is positive, the mask segment name is elided to that width (in pixels).
+  QString maskingSummary(int maximumSegmentNameWidth = 0) const;
+
+  /// Set the masking section title: "Masking" in the classic presentation, the masking summary
+  /// in the Studio presentation. The summary is elided to the width of the section (the full
+  /// summary is then in the tooltip) and does not change the minimum width of the editor.
+  void updateMaskingTitle();
+
   bool segmentationDisplayableInView(vtkMRMLAbstractViewNode* viewNode) const;
 
   QToolButton* toolButton(qSlicerSegmentEditorAbstractEffect* effect);
@@ -180,6 +296,21 @@ public:
 
   bool MaskingSectionVisible{ true };
   bool SpecifyGeometryButtonVisible{ true };
+
+  bool AutoCreateSegmentOnEffectActivation{ false };
+  bool EffectsAboveSegments{ false };
+  bool StudioPresentation{ false };
+
+  /// Title, tooltip and minimum width of the masking section in the classic presentation
+  QString DefaultMaskingTitle;
+  QString DefaultMaskingToolTip;
+  int DefaultMaskingMinimumWidth{ 0 };
+  /// Updates the masking title when the masking section is resized or its layout changes
+  qMRMLSegmentEditorMaskingTitleFilter* MaskingTitleFilter{ nullptr };
+
+  /// Size of the spacer below the effect buttons when effects are on the left of the segments table
+  QSize EffectsSpacerSize;
+  QSizePolicy EffectsSpacerSizePolicy;
 
   /// List of registered effect instances
   QList<qSlicerSegmentEditorAbstractEffect*> RegisteredEffects;
@@ -287,6 +418,10 @@ qMRMLSegmentEditorWidgetPrivate::~qMRMLSegmentEditorWidgetPrivate()
     delete effect;
   }
   this->RegisteredEffects.clear();
+
+  // The filter refers to this object, so it must not outlive it
+  delete this->MaskingTitleFilter;
+  this->MaskingTitleFilter = nullptr;
 }
 
 //-----------------------------------------------------------------------------
@@ -389,6 +524,13 @@ void qMRMLSegmentEditorWidgetPrivate::init()
   this->EffectHelpBrowser->setText("");
   this->MaskingGroupBox->hide();
 
+  this->DefaultMaskingTitle = this->MaskingGroupBox->title();
+  this->DefaultMaskingToolTip = this->MaskingGroupBox->toolTip();
+  this->DefaultMaskingMinimumWidth = this->MaskingGroupBox->minimumWidth();
+  this->MaskingTitleFilter = new qMRMLSegmentEditorMaskingTitleFilter(this, q);
+  this->EffectsSpacerSize = this->verticalSpacer_2->sizeHint();
+  this->EffectsSpacerSizePolicy = this->verticalSpacer_2->sizePolicy();
+
   q->updateSliceRotateWarningButtonVisibility();
 }
 
@@ -456,6 +598,242 @@ void qMRMLSegmentEditorWidgetPrivate::selectFirstSegment() const
 }
 
 //-----------------------------------------------------------------------------
+void qMRMLSegmentEditorWidgetPrivate::prepareSegmentForEffectActivation(qSlicerSegmentEditorAbstractEffect* effect)
+{
+  Q_Q(qMRMLSegmentEditorWidget);
+  if (!this->AutoCreateSegmentOnEffectActivation || !effect || !effect->requireSegments() || this->Locked || !this->ParameterSetNode)
+  {
+    return;
+  }
+  vtkMRMLSegmentationNode* segmentationNode = this->ParameterSetNode->GetSegmentationNode();
+  vtkSegmentation* segmentation = segmentationNode ? segmentationNode->GetSegmentation() : nullptr;
+  if (!segmentation)
+  {
+    return;
+  }
+  if (segmentation->GetNumberOfSegments() == 0)
+  {
+    if (this->Logic->CanAddSegments())
+    {
+      // Adding a segment selects it
+      q->onAddSegment();
+    }
+    return;
+  }
+  if (!effect->perSegment())
+  {
+    return;
+  }
+  const char* selectedSegmentID = this->ParameterSetNode->GetSelectedSegmentID();
+  if (selectedSegmentID && segmentation->GetSegment(selectedSegmentID))
+  {
+    return;
+  }
+  this->Logic->SelectFirstSegment(/* visibleOnly= */ true);
+  selectedSegmentID = this->ParameterSetNode->GetSelectedSegmentID();
+  if (!selectedSegmentID || !segmentation->GetSegment(selectedSegmentID))
+  {
+    // All segments are hidden
+    this->Logic->SelectFirstSegment(/* visibleOnly= */ false);
+  }
+}
+
+//-----------------------------------------------------------------------------
+QString qMRMLSegmentEditorWidgetPrivate::effectShortcutText(int layoutIndex) const
+{
+  if (this->KeyboardShortcuts.isEmpty())
+  {
+    // Keyboard shortcuts are not installed
+    return QString();
+  }
+  // See installKeyboardShortcuts: Escape, 1, 2, ..., 9, 0, Shift+1, ..., Shift+0
+  QKeySequence shortcut;
+  if (layoutIndex == 0)
+  {
+    shortcut = QKeySequence(Qt::Key_Escape);
+  }
+  else if (layoutIndex >= 1 && layoutIndex <= 10)
+  {
+    shortcut = QKeySequence(QString::number(layoutIndex % 10));
+  }
+  else if (layoutIndex >= 11 && layoutIndex <= 20)
+  {
+    shortcut = QKeySequence("Shift+" + QString::number((layoutIndex - 10) % 10));
+  }
+  return shortcut.toString(QKeySequence::NativeText);
+}
+
+//-----------------------------------------------------------------------------
+void qMRMLSegmentEditorWidgetPrivate::updateEffectButtonToolTips()
+{
+  const QString separator = QString(" ") + QChar(0x00B7) + QString(" ");
+  for (QAbstractButton* const effectButton : this->EffectButtonGroup.buttons())
+  {
+    qSlicerSegmentEditorAbstractEffect* effect = qobject_cast<qSlicerSegmentEditorAbstractEffect*>(effectButton->property("Effect").value<QObject*>());
+    if (!this->StudioPresentation)
+    {
+      // Classic presentation (same as when the button is created in updateEffectList)
+      effectButton->setToolTip(effect ? effect->title() : qMRMLSegmentEditorWidget::tr("No editing"));
+      effectButton->setAccessibleName(effectButton->toolTip());
+      continue;
+    }
+    // Studio presentation: "Name · key · one-line description" (same form as StudioLib ui.tooltip())
+    QString name = effect ? effect->title() : qMRMLSegmentEditorWidget::tr("None");
+    QString description;
+    if (effect)
+    {
+      // First sentence (or line) of the help text
+      QString helpText = effect->helpText();
+      QRegularExpression sentenceEnd("<br|<p|<ul|\\.(\\s|<|$)", QRegularExpression::CaseInsensitiveOption);
+      QRegularExpressionMatch match = sentenceEnd.match(helpText);
+      if (match.hasMatch())
+      {
+        helpText = helpText.left(match.capturedStart());
+      }
+      helpText.remove(QRegularExpression("<[^>]*>"));
+      description = helpText.simplified();
+    }
+    else
+    {
+      description = qMRMLSegmentEditorWidget::tr("No editing");
+    }
+    QStringList parts;
+    parts << name;
+    QString shortcut = this->effectShortcutText(this->EffectsGroupBox->layout()->indexOf(effectButton));
+    if (!shortcut.isEmpty())
+    {
+      parts << shortcut;
+    }
+    if (!description.isEmpty())
+    {
+      parts << description;
+    }
+    effectButton->setToolTip(literalToolTip(parts.join(separator)));
+    effectButton->setAccessibleName(name);
+  }
+}
+
+//-----------------------------------------------------------------------------
+QString qMRMLSegmentEditorWidgetPrivate::maskingSummary(int maximumSegmentNameWidth /*=0*/) const
+{
+  if (!this->ParameterSetNode)
+  {
+    return this->DefaultMaskingTitle;
+  }
+  QString maskText;
+  int maskMode = this->ParameterSetNode->GetMaskMode();
+  switch (maskMode)
+  {
+    case vtkMRMLSegmentationNode::EditAllowedEverywhere: maskText = qMRMLSegmentEditorWidget::tr("Paint everywhere"); break;
+    case vtkMRMLSegmentationNode::EditAllowedInsideAllSegments: maskText = qMRMLSegmentEditorWidget::tr("Only inside segments"); break;
+    case vtkMRMLSegmentationNode::EditAllowedInsideVisibleSegments: maskText = qMRMLSegmentEditorWidget::tr("Only inside visible segments"); break;
+    case vtkMRMLSegmentationNode::EditAllowedOutsideAllSegments: maskText = qMRMLSegmentEditorWidget::tr("Only outside segments"); break;
+    case vtkMRMLSegmentationNode::EditAllowedOutsideVisibleSegments: maskText = qMRMLSegmentEditorWidget::tr("Only outside visible segments"); break;
+    case vtkMRMLSegmentationNode::EditAllowedInsideSingleSegment:
+    {
+      QString segmentName = qSlicerUtils::safeQStringFromUtf8Ptr(this->ParameterSetNode->GetMaskSegmentID());
+      vtkMRMLSegmentationNode* segmentationNode = this->ParameterSetNode->GetSegmentationNode();
+      vtkSegment* segment = (segmentationNode && segmentationNode->GetSegmentation() && this->ParameterSetNode->GetMaskSegmentID())
+                              ? segmentationNode->GetSegmentation()->GetSegment(this->ParameterSetNode->GetMaskSegmentID())
+                              : nullptr;
+      if (segment)
+      {
+        segmentName = qSlicerUtils::safeQStringFromUtf8Ptr(segment->GetName());
+      }
+      if (maximumSegmentNameWidth > 0)
+      {
+        segmentName = QFontMetrics(this->MaskingGroupBox->font()).elidedText(segmentName, Qt::ElideMiddle, maximumSegmentNameWidth);
+      }
+      maskText = qMRMLSegmentEditorWidget::tr("Only inside %1").arg(segmentName);
+      break;
+    }
+    default: maskText = this->MaskModeComboBox->currentText(); break;
+  }
+
+  QString overwriteText;
+  int overwriteMode = this->ParameterSetNode->GetOverwriteMode();
+  switch (overwriteMode)
+  {
+    case vtkMRMLSegmentEditorNode::OverwriteVisibleSegments: overwriteText = qMRMLSegmentEditorWidget::tr("overwrite visible segments"); break;
+    case vtkMRMLSegmentEditorNode::OverwriteNone: overwriteText = qMRMLSegmentEditorWidget::tr("allow overlap"); break;
+    case vtkMRMLSegmentEditorNode::OverwriteAllSegments:
+    default: overwriteText = qMRMLSegmentEditorWidget::tr("overwrite other segments"); break;
+  }
+
+  bool intensityMask = this->ParameterSetNode->GetSourceVolumeIntensityMask();
+  QStringList parts;
+  parts << maskText;
+  // The default overwrite mode is only mentioned when nothing else restricts editing,
+  // e.g. "Paint everywhere · overwrite other segments", "Only inside Lesion · intensity 25–75".
+  if (overwriteMode != vtkMRMLSegmentEditorNode::OverwriteAllSegments //
+      || (maskMode == vtkMRMLSegmentationNode::EditAllowedEverywhere && !intensityMask))
+  {
+    parts << overwriteText;
+  }
+  if (intensityMask)
+  {
+    int decimals = this->SourceVolumeIntensityMaskRangeWidget->decimals();
+    double* range = this->ParameterSetNode->GetSourceVolumeIntensityMaskRange();
+    QString rangeText = formatIntensity(range[0], decimals) + QChar(0x2013) + formatIntensity(range[1], decimals);
+    parts << qMRMLSegmentEditorWidget::tr("intensity %1").arg(rangeText);
+  }
+  return parts.join(QString(" ") + QChar(0x00B7) + QString(" "));
+}
+
+//-----------------------------------------------------------------------------
+void qMRMLSegmentEditorWidgetPrivate::updateMaskingTitle()
+{
+  QGroupBox* groupBox = this->MaskingGroupBox;
+  if (!this->StudioPresentation)
+  {
+    groupBox->setTitle(this->DefaultMaskingTitle);
+    groupBox->setToolTip(this->DefaultMaskingToolTip);
+    groupBox->setMinimumWidth(this->DefaultMaskingMinimumWidth);
+    return;
+  }
+
+  // QGroupBox requires the full width of its title as minimum width, so a long summary (e.g., with a long
+  // segment name) would widen the whole editor. Instead, keep the minimum width of the classic
+  // presentation (that of the contents and the classic title) and elide the summary to the actual width.
+  int minimumWidth = qMax(groupBox->QWidget::minimumSizeHint().width(), groupBoxTitleMinimumWidth(groupBox, this->DefaultMaskingTitle));
+  minimumWidth = qMax(minimumWidth, this->DefaultMaskingMinimumWidth);
+  if (groupBox->minimumWidth() != minimumWidth)
+  {
+    groupBox->setMinimumWidth(minimumWidth);
+  }
+  // Before the section is laid out its width is not meaningful, the minimum width is used then
+  int availableWidth = qMax(groupBox->width(), minimumWidth) - groupBoxTitleMinimumWidth(groupBox, QString());
+
+  QFontMetrics metrics(groupBox->font());
+  QString summary = this->maskingSummary();
+  QString title = summary;
+  if (metrics.horizontalAdvance(title) > availableWidth)
+  {
+    // Shorten the segment name first, so that the rest of the summary remains readable
+    title = this->maskingSummary(qMax(availableWidth * 2 / 5, 8 * metrics.averageCharWidth()));
+  }
+  // Each '&' is displayed from "&&" (a single '&' would be a mnemonic), which the minimum width counts twice
+  int ampersandWidth = title.count(QLatin1Char('&')) * metrics.horizontalAdvance(QLatin1Char('&'));
+  title = metrics.elidedText(title, Qt::ElideRight, qMax(0, availableWidth - ampersandWidth));
+  title.replace(QLatin1Char('&'), QLatin1String("&&"));
+  if (groupBox->title() != title)
+  {
+    groupBox->setTitle(title);
+  }
+  groupBox->setToolTip(title == QString(summary).replace(QLatin1Char('&'), QLatin1String("&&")) ? QString() : literalToolTip(summary));
+}
+
+//-----------------------------------------------------------------------------
+bool qMRMLSegmentEditorMaskingTitleFilter::eventFilter(QObject* watched, QEvent* event)
+{
+  if (event->type() == QEvent::Resize || event->type() == QEvent::LayoutRequest || event->type() == QEvent::FontChange || event->type() == QEvent::StyleChange)
+  {
+    this->EditorPrivate->updateMaskingTitle();
+  }
+  return this->QObject::eventFilter(watched, event);
+}
+
+//-----------------------------------------------------------------------------
 bool qMRMLSegmentEditorWidgetPrivate::segmentationDisplayableInView(vtkMRMLAbstractViewNode* viewNode) const
 {
   return this->Logic->IsSegmentationDisplayableInView(viewNode);
@@ -510,6 +888,10 @@ void qMRMLSegmentEditorWidget::updateEffectList()
     // introducing a direct dependency of the effect on the widget.
     effect->setCallbackSlots(this, SLOT(setActiveEffectByName(QString)), SLOT(updateVolume(void*, bool&)), SLOT(saveStateForUndo()));
     effect->setSegmentEditorLogic(d->Logic);
+    if (d->StudioPresentation)
+    {
+      effect->setProperty(STUDIO_PRESENTATION_PROPERTY, true);
+    }
 
     // Set parameter set node (if it has been already set in the widget)
     if (d->ParameterSetNode)
@@ -629,6 +1011,12 @@ void qMRMLSegmentEditorWidget::updateEffectList()
       ++columnIndex;
     }
   }
+
+  if (d->StudioPresentation)
+  {
+    // Tooltips show the positional keyboard shortcuts, which depend on the effect order
+    d->updateEffectButtonToolTips();
+  }
 }
 
 //-----------------------------------------------------------------------------
@@ -656,6 +1044,16 @@ void qMRMLSegmentEditorWidget::updateWidgetFromMRML()
 
   this->updateWidgetFromSegmentationNode();
   this->updateWidgetFromSourceVolumeNode();
+  if (d->SegmentationNode)
+  {
+    // Let the effects know when the reference geometry changes (e.g., Paint adapts its brush size limits).
+    // The effects are notified only when the geometry differs from the last notified one.
+    std::string referenceImageGeometry = d->Logic->GetReferenceImageGeometryString();
+    if (!referenceImageGeometry.empty())
+    {
+      d->notifyEffectsOfReferenceGeometryChange(referenceImageGeometry);
+    }
+  }
   this->updateSliceRotateWarningButtonVisibility();
 
   d->EffectsGroupBox->setEnabled(d->SegmentationNode != nullptr);
@@ -772,9 +1170,16 @@ void qMRMLSegmentEditorWidget::updateMaskingSection()
   if (d->ParameterSetNode->GetSourceVolumeIntensityMask() //
       && d->ParameterSetNode->GetSourceVolumeIntensityMaskRange()[0] == d->ParameterSetNode->GetSourceVolumeIntensityMaskRange()[1])
   {
-    // threshold was uninitialized, set some default
+    // threshold was uninitialized, set some default: the middle half of the displayed window/level range
+    // (what the user sees), or of the scalar range if the window/level is not available
     double range[2] = { 0.0 };
-    if (d->SourceVolumeNode && d->SourceVolumeNode->GetImageData() && d->SourceVolumeNode->GetImageData()->GetPointData())
+    vtkMRMLScalarVolumeDisplayNode* sourceDisplayNode = d->SourceVolumeNode ? vtkMRMLScalarVolumeDisplayNode::SafeDownCast(d->SourceVolumeNode->GetDisplayNode()) : nullptr;
+    if (sourceDisplayNode && sourceDisplayNode->GetWindowLevelMax() > sourceDisplayNode->GetWindowLevelMin())
+    {
+      range[0] = sourceDisplayNode->GetWindowLevelMin();
+      range[1] = sourceDisplayNode->GetWindowLevelMax();
+    }
+    else if (d->SourceVolumeNode && d->SourceVolumeNode->GetImageData() && d->SourceVolumeNode->GetImageData()->GetPointData())
     {
       d->SourceVolumeNode->GetImageData()->GetScalarRange(range);
     }
@@ -791,6 +1196,11 @@ void qMRMLSegmentEditorWidget::updateMaskingSection()
   int overwriteModeIndex = d->OverwriteModeComboBox->findData(d->ParameterSetNode->GetOverwriteMode());
   d->OverwriteModeComboBox->setCurrentIndex(overwriteModeIndex);
   d->OverwriteModeComboBox->blockSignals(wasBlocked);
+
+  if (d->StudioPresentation)
+  {
+    d->updateMaskingTitle();
+  }
 }
 
 //-----------------------------------------------------------------------------
@@ -1048,6 +1458,8 @@ void qMRMLSegmentEditorWidget::updateEffectsSectionFromMRML()
     bool segmentAvailable = segmentationNode && (segmentationNode->GetSegmentation()->GetNumberOfSegments() > 0);
     QString selectedSegmentID(d->ParameterSetNode->GetSelectedSegmentID());
     bool segmentSelected = !selectedSegmentID.isEmpty();
+    // Effects that require segments create or select one when they are activated
+    bool segmentCanBePrepared = d->AutoCreateSegmentOnEffectActivation && d->Logic->CanAddSegments();
     QList<QAbstractButton*> effectButtons = d->EffectButtonGroup.buttons();
     for (QAbstractButton* const effectButton : effectButtons)
     {
@@ -1057,7 +1469,7 @@ void qMRMLSegmentEditorWidget::updateEffectsSectionFromMRML()
         // nullptr effect
         continue;
       }
-      effectButton->setEnabled(!effect->requireSegments() || (segmentAvailable && (segmentSelected || !effect->perSegment())));
+      effectButton->setEnabled(!effect->requireSegments() || segmentCanBePrepared || (segmentAvailable && (segmentSelected || !effect->perSegment())));
     }
   }
 
@@ -1165,16 +1577,17 @@ void qMRMLSegmentEditorWidget::setMRMLScene(vtkMRMLScene* newScene)
   }
 
   // Forward application logic to segment editor logic
-  d->Logic->SetMRMLApplicationLogic(qSlicerApplication::application()->applicationLogic());
+  qSlicerApplication* app = qSlicerApplication::application();
+  d->Logic->SetMRMLApplicationLogic(app ? app->applicationLogic() : nullptr);
   d->Logic->SetMRMLScene(newScene);
   d->Logic->SetVerbose(true);
 
   // Make connections that depend on the Slicer application
 
   // Observe layout manager (may not be available if running without main window)
-  if (qSlicerApplication::application()->layoutManager())
+  if (applicationLayoutManager())
   {
-    QObject::connect(qSlicerApplication::application()->layoutManager(), SIGNAL(layoutChanged(int)), this, SLOT(onLayoutChanged(int)));
+    QObject::connect(applicationLayoutManager(), SIGNAL(layoutChanged(int)), this, SLOT(onLayoutChanged(int)));
   }
 
   vtkMRMLInteractionNode* interactionNode = nullptr;
@@ -1260,6 +1673,8 @@ void qMRMLSegmentEditorWidget::setMRMLSegmentEditorNode(vtkMRMLSegmentEditorNode
   // Set parameter set node
   d->ParameterSetNode = newSegmentEditorNode;
   d->Logic->SetSegmentEditorNode(newSegmentEditorNode);
+  // Effects store geometry-dependent parameters (e.g., brush size limits) in the parameter set node
+  d->LastNotifiedReferenceImageGeometry.clear();
 
   if (!d->ParameterSetNode)
   {
@@ -1472,8 +1887,13 @@ void qMRMLSegmentEditorWidget::onSourceVolumeNodeChanged(vtkMRMLNode* node)
 void qMRMLSegmentEditorWidget::onEffectButtonClicked(QAbstractButton* button)
 {
   // Get effect that was just clicked
+  Q_D(qMRMLSegmentEditorWidget);
   qSlicerSegmentEditorAbstractEffect* clickedEffect = qobject_cast<qSlicerSegmentEditorAbstractEffect*>(button->property("Effect").value<QObject*>());
 
+  if (clickedEffect != d->ActiveEffect)
+  {
+    d->prepareSegmentForEffectActivation(clickedEffect);
+  }
   this->setActiveEffect(clickedEffect);
 }
 
@@ -1640,7 +2060,7 @@ void qMRMLSegmentEditorWidget::showSourceVolumeInSliceViewers(bool forceShowInBa
   {
     return;
   }
-  qSlicerLayoutManager* layoutManager = qSlicerApplication::application()->layoutManager();
+  qSlicerLayoutManager* layoutManager = applicationLayoutManager();
   if (!layoutManager)
   {
     // application is closing
@@ -1834,7 +2254,7 @@ void qMRMLSegmentEditorWidget::setupViewObservations()
   d->ObservedViewNodeIDs.clear();
 
   // Set up interactor observations
-  qSlicerLayoutManager* layoutManager = qSlicerApplication::application()->layoutManager();
+  qSlicerLayoutManager* layoutManager = applicationLayoutManager();
   if (!layoutManager)
   {
     // application is closing
@@ -2041,7 +2461,7 @@ void qMRMLSegmentEditorWidget::processEvents(vtkObject* caller, unsigned long ei
     return;
   }
 
-  vtkSlicerApplicationLogic* appLogic = qSlicerApplication::application()->applicationLogic();
+  vtkSlicerApplicationLogic* appLogic = qSlicerApplication::application() ? qSlicerApplication::application()->applicationLogic() : nullptr;
   if (!appLogic)
   {
     return;
@@ -2317,7 +2737,7 @@ void qMRMLSegmentEditorWidget::installKeyboardShortcuts(QWidget* parent /*=nullp
   Q_D(qMRMLSegmentEditorWidget);
   this->uninstallKeyboardShortcuts();
 
-  if (parent == nullptr)
+  if (parent == nullptr && qSlicerApplication::application())
   {
     parent = qSlicerApplication::application()->mainWindow();
   }
@@ -2391,6 +2811,12 @@ void qMRMLSegmentEditorWidget::installKeyboardShortcuts(QWidget* parent /*=nullp
   QShortcut* toggleSourceVolumeIntensityMaskShortcut = new QShortcut(QKeySequence(Qt::Key_I), parent);
   d->KeyboardShortcuts.push_back(toggleSourceVolumeIntensityMaskShortcut);
   QObject::connect(toggleSourceVolumeIntensityMaskShortcut, SIGNAL(activated()), this, SLOT(toggleSourceVolumeIntensityMaskEnabled()));
+
+  if (d->StudioPresentation)
+  {
+    // Tooltips show the keyboard shortcuts
+    d->updateEffectButtonToolTips();
+  }
 }
 
 //-----------------------------------------------------------------------------
@@ -2404,6 +2830,12 @@ void qMRMLSegmentEditorWidget::uninstallKeyboardShortcuts()
     delete shortcut;
   }
   d->KeyboardShortcuts.clear();
+
+  if (d->StudioPresentation)
+  {
+    // Tooltips show the keyboard shortcuts
+    d->updateEffectButtonToolTips();
+  }
 }
 
 //-----------------------------------------------------------------------------
@@ -2425,10 +2857,12 @@ void qMRMLSegmentEditorWidget::onSelectEffectShortcut()
       // effect is already active => deactivate it
       selectedEffect = nullptr;
     }
+    d->prepareSegmentForEffectActivation(selectedEffect);
     this->setActiveEffect(selectedEffect);
   }
   else
   {
+    d->prepareSegmentForEffectActivation(d->LastActiveEffect);
     this->setActiveEffect(d->LastActiveEffect);
   }
 }
@@ -2452,7 +2886,7 @@ void qMRMLSegmentEditorWidget::onSelectSegmentShortcut()
 void qMRMLSegmentEditorWidget::hideLabelLayer()
 {
   Q_D(qMRMLSegmentEditorWidget);
-  qSlicerLayoutManager* layoutManager = qSlicerApplication::application()->layoutManager();
+  qSlicerLayoutManager* layoutManager = applicationLayoutManager();
   if (!layoutManager)
   {
     // application is closing
@@ -2714,7 +3148,7 @@ void qMRMLSegmentEditorWidget::updateSliceRotateWarningButtonVisibility()
     return;
   }
 
-  qSlicerLayoutManager* layoutManager = qSlicerApplication::application()->layoutManager();
+  qSlicerLayoutManager* layoutManager = applicationLayoutManager();
   if (!layoutManager)
   {
     // application is closing
@@ -2777,7 +3211,7 @@ void qMRMLSegmentEditorWidget::rotateSliceViewsToSegmentation()
     return;
   }
 
-  qSlicerLayoutManager* layoutManager = qSlicerApplication::application()->layoutManager();
+  qSlicerLayoutManager* layoutManager = applicationLayoutManager();
   if (!layoutManager)
   {
     // application is closing
@@ -2938,6 +3372,114 @@ bool qMRMLSegmentEditorWidget::jumpToSelectedSegmentEnabled() const
   return d->SegmentsTableView->jumpToSelectedSegmentEnabled();
 }
 
+//-----------------------------------------------------------------------------
+bool qMRMLSegmentEditorWidget::autoCreateSegmentOnEffectActivation() const
+{
+  Q_D(const qMRMLSegmentEditorWidget);
+  return d->AutoCreateSegmentOnEffectActivation;
+}
+
+//-----------------------------------------------------------------------------
+void qMRMLSegmentEditorWidget::setAutoCreateSegmentOnEffectActivation(bool enable)
+{
+  Q_D(qMRMLSegmentEditorWidget);
+  if (d->AutoCreateSegmentOnEffectActivation == enable)
+  {
+    return;
+  }
+  d->AutoCreateSegmentOnEffectActivation = enable;
+  if (d->ParameterSetNode && this->mrmlScene())
+  {
+    // Update the enabled state of the effect buttons
+    this->updateEffectsSectionFromMRML();
+  }
+}
+
+//-----------------------------------------------------------------------------
+bool qMRMLSegmentEditorWidget::effectsAboveSegments() const
+{
+  Q_D(const qMRMLSegmentEditorWidget);
+  return d->EffectsAboveSegments;
+}
+
+//-----------------------------------------------------------------------------
+void qMRMLSegmentEditorWidget::setEffectsAboveSegments(bool above)
+{
+  Q_D(qMRMLSegmentEditorWidget);
+  if (d->EffectsAboveSegments == above)
+  {
+    return;
+  }
+  d->EffectsAboveSegments = above;
+  d->horizontalLayout->setDirection(above ? QBoxLayout::TopToBottom : QBoxLayout::LeftToRight);
+  // The spacer below the effect buttons would add a gap between the effects and the segments table
+  if (above)
+  {
+    d->verticalSpacer_2->changeSize(0, 0, QSizePolicy::Minimum, QSizePolicy::Fixed);
+  }
+  else
+  {
+    d->verticalSpacer_2->changeSize(
+      d->EffectsSpacerSize.width(), d->EffectsSpacerSize.height(), d->EffectsSpacerSizePolicy.horizontalPolicy(), d->EffectsSpacerSizePolicy.verticalPolicy());
+  }
+  d->horizontalLayout->invalidate();
+}
+
+//-----------------------------------------------------------------------------
+bool qMRMLSegmentEditorWidget::maskingSectionCollapsed() const
+{
+  Q_D(const qMRMLSegmentEditorWidget);
+  return d->MaskingGroupBox->collapsed();
+}
+
+//-----------------------------------------------------------------------------
+void qMRMLSegmentEditorWidget::setMaskingSectionCollapsed(bool collapsed)
+{
+  Q_D(qMRMLSegmentEditorWidget);
+  d->MaskingGroupBox->setCollapsed(collapsed);
+}
+
+//-----------------------------------------------------------------------------
+bool qMRMLSegmentEditorWidget::studioPresentation() const
+{
+  Q_D(const qMRMLSegmentEditorWidget);
+  return d->StudioPresentation;
+}
+
+//-----------------------------------------------------------------------------
+void qMRMLSegmentEditorWidget::setStudioPresentation(bool studio)
+{
+  Q_D(qMRMLSegmentEditorWidget);
+  if (d->StudioPresentation == studio)
+  {
+    return;
+  }
+  d->StudioPresentation = studio;
+
+  // Effects and the segments table adapt their own texts
+  for (qSlicerSegmentEditorAbstractEffect* const effect : d->RegisteredEffects)
+  {
+    effect->setProperty(STUDIO_PRESENTATION_PROPERTY, studio);
+  }
+  d->SegmentsTableView->setProperty(STUDIO_PRESENTATION_PROPERTY, studio);
+  QMetaObject::invokeMethod(d->SegmentsTableView, "onSegmentAddedOrRemoved");
+
+  d->updateEffectButtonToolTips();
+  if (studio)
+  {
+    d->MaskingGroupBox->installEventFilter(d->MaskingTitleFilter);
+  }
+  else
+  {
+    d->MaskingGroupBox->removeEventFilter(d->MaskingTitleFilter);
+  }
+  d->updateMaskingTitle();
+  if (d->ActiveEffect)
+  {
+    d->ActiveEffect->updateGUIFromMRML();
+  }
+}
+
 // --------------------------------------------------------------------------
 void qMRMLSegmentEditorWidget::setMaskingSectionVisible(bool visible)
 {
@@ -2986,19 +3528,25 @@ bool qMRMLSegmentEditorWidget::addRemoveSegmentButtonsVisible() const
 //---------------------------------------------------------------------------
 void qMRMLSegmentEditorWidget::pauseRender()
 {
-  qSlicerApplication::application()->pauseRender();
+  if (qSlicerApplication::application())
+  {
+    qSlicerApplication::application()->pauseRender();
+  }
 }
 
 //---------------------------------------------------------------------------
 void qMRMLSegmentEditorWidget::resumeRender()
 {
-  qSlicerApplication::application()->resumeRender();
+  if (qSlicerApplication::application())
+  {
+    qSlicerApplication::application()->resumeRender();
+  }
 }
 
 //-----------------------------------------------------------------------------
 void qMRMLSegmentEditorWidget::setEffectCursor(qSlicerSegmentEditorAbstractEffect* effect)
 {
-  qSlicerLayoutManager* layoutManager = qSlicerApplication::application()->layoutManager();
+  qSlicerLayoutManager* layoutManager = applicationLayoutManager();
   if (!layoutManager)
   {
     // application is closing

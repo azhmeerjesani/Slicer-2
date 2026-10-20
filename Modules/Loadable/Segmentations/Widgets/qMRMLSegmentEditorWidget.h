@@ -85,6 +85,10 @@ class Q_SLICER_MODULE_SEGMENTATIONS_WIDGETS_EXPORT qMRMLSegmentEditorWidget : pu
   Q_PROPERTY(QString defaultTerminologyEntrySettingsKey READ defaultTerminologyEntrySettingsKey WRITE setDefaultTerminologyEntrySettingsKey)
   Q_PROPERTY(QString defaultTerminologyEntry READ defaultTerminologyEntry WRITE setDefaultTerminologyEntry)
   Q_PROPERTY(bool jumpToSelectedSegmentEnabled READ jumpToSelectedSegmentEnabled WRITE setJumpToSelectedSegmentEnabled)
+  Q_PROPERTY(bool autoCreateSegmentOnEffectActivation READ autoCreateSegmentOnEffectActivation WRITE setAutoCreateSegmentOnEffectActivation)
+  Q_PROPERTY(bool effectsAboveSegments READ effectsAboveSegments WRITE setEffectsAboveSegments)
+  Q_PROPERTY(bool maskingSectionCollapsed READ maskingSectionCollapsed WRITE setMaskingSectionCollapsed)
+  Q_PROPERTY(bool studioPresentation READ studioPresentation WRITE setStudioPresentation)
 
 public:
   typedef qMRMLWidget Superclass;
@@ -277,6 +281,22 @@ public:
   /// Returns true if automatic jump to current segment is enabled.
   bool jumpToSelectedSegmentEnabled() const;
 
+  /// Returns true if picking an effect that requires segments creates or selects a segment.
+  /// \sa setAutoCreateSegmentOnEffectActivation
+  bool autoCreateSegmentOnEffectActivation() const;
+
+  /// Returns true if the effect buttons are shown above the segments table.
+  /// \sa setEffectsAboveSegments
+  bool effectsAboveSegments() const;
+
+  /// Returns true if the masking section is collapsed.
+  /// \sa setMaskingSectionCollapsed
+  bool maskingSectionCollapsed() const;
+
+  /// Returns true if the widget uses the Slicer Studio presentation of its texts.
+  /// \sa setStudioPresentation
+  bool studioPresentation() const;
+
   /// Set cursor for effect. If effect is nullptr then the cursor is reset to default.
   Q_INVOKABLE void setEffectCursor(qSlicerSegmentEditorAbstractEffect* effect);
 
@@ -453,6 +473,29 @@ public slots:
 
   /// Enables automatic jumping to current segment when selection is changed.
   void setJumpToSelectedSegmentEnabled(bool enable);
+
+  /// If enabled, then picking an effect that requires segments (by clicking its button or
+  /// pressing its keyboard shortcut) adds a segment when the segmentation is empty, and
+  /// selects the first visible segment when no segment is selected. These effects then
+  /// remain enabled while the segmentation is empty.
+  /// Disabled by default.
+  void setAutoCreateSegmentOnEffectActivation(bool enable);
+
+  /// If enabled, then the effect buttons are shown above the segments table instead of
+  /// on its left side. Disabled by default.
+  void setEffectsAboveSegments(bool above);
+
+  /// Collapse/expand the masking section. Expanded by default.
+  void setMaskingSectionCollapsed(bool collapsed);
+
+  /// If enabled, then the widget uses the Slicer Studio presentation of its texts:
+  /// effect button tooltips show the effect name, its keyboard shortcut and a one-line
+  /// description; the masking section title summarizes the masking settings (elided to the width
+  /// of the section, with the full summary in its tooltip); the segments
+  /// table shows a hint when the segmentation is empty; and effects can adapt their own texts
+  /// (the "studioPresentation" dynamic property is set on each effect and on the segments table).
+  /// Disabled by default, which keeps all texts unchanged.
+  void setStudioPresentation(bool studio);
 
 signals:
   /// Emitted if different segment is selected in the segment list.

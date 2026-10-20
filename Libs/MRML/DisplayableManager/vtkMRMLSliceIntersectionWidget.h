@@ -339,7 +339,9 @@ protected:
   // Blend
   double LastForegroundOpacity;
   double LastLabelOpacity;
-  vtkMRMLSegmentationDisplayNode* StartActionSegmentationDisplayNode;
+  /// Segmentation display node whose opacity is adjusted by the current blend action.
+  /// Weak pointer, as the node may be deleted between two blend actions.
+  vtkWeakPointer<vtkMRMLSegmentationDisplayNode> StartActionSegmentationDisplayNode;
 
   // Browse slice
   /// check for prescribed spacing, otherwise return best spacing amount
