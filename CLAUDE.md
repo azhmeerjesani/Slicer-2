@@ -33,7 +33,8 @@ The user pays for any usage beyond their plans, so even an accidental use costs 
   finish before starting the next.
 - Use the cheapest model that does the job well: Haiku for mechanical edits, Sonnet for routine
   implementation, docs, tests and walkthroughs, Opus for design, C++, numerics, file compatibility
-  and adversarial review.
+  and adversarial review. Use Fable when it is really needed: a second fix after a fix failed its
+  recheck, reviews of statistics or file-compatibility work, and crashes that Opus could not explain.
 
 ## Standing rules
 
