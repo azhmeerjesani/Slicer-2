@@ -50,6 +50,7 @@
 #include <vtkVectorText.h>
 
 // STD includes
+#include <cmath>
 
 //---------------------------------------------------------------------------
 vtkStandardNewMacro(vtkMRMLViewDisplayableManager);
@@ -577,17 +578,35 @@ void vtkMRMLViewDisplayableManager::vtkInternal::UpdateBackgroundColor()
                   backgroundColor[2] != backgroundColor2[2];
   this->External->GetRenderer()->SetGradientBackground(gradient);
 
-  // If new background color is White, switch axis color label to black
-  if (backgroundColor[0] == 1.0 && backgroundColor[1] == 1.0 && backgroundColor[2] == 1.0)
+  // Axis labels are black on light backgrounds (mean luminance of the background colors above 0.6)
+  // and white on dark backgrounds. The default vtkMRMLViewNode background keeps its white labels.
+  // The dark graphite background of Slicer's dark theme uses gray labels (#8A8F98) that are less prominent.
+  double* defaultBackgroundColor = vtkMRMLViewNode::defaultBackgroundColor();
+  double* defaultBackgroundColor2 = vtkMRMLViewNode::defaultBackgroundColor2();
+  const double darkThemeBackgroundColor[3] = { 0x2B / 255.0, 0x2E / 255.0, 0x34 / 255.0 };
+  const double darkThemeBackgroundColor2[3] = { 0x12 / 255.0, 0x13 / 255.0, 0x16 / 255.0 };
+  auto sameColor = [](const double color1[3], const double color2[3])
   {
-    double black[3] = { 0.0, 0.0, 0.0 };
-    this->SetAxisLabelColor(black);
-  }
-  else
+    const double tolerance = 0.5 / 255.0;
+    return std::abs(color1[0] - color2[0]) < tolerance && std::abs(color1[1] - color2[1]) < tolerance && std::abs(color1[2] - color2[2]) < tolerance;
+  };
+  auto luminance = [](const double color[3]) { return 0.299 * color[0] + 0.587 * color[1] + 0.114 * color[2]; };
+  double axisLabelColor[3] = { 1.0, 1.0, 1.0 }; // white
+  if (sameColor(backgroundColor, defaultBackgroundColor) && sameColor(backgroundColor2, defaultBackgroundColor2))
   {
-    double white[3] = { 1.0, 1.0, 1.0 };
-    this->SetAxisLabelColor(white);
+    // white
   }
+  else if (sameColor(backgroundColor, darkThemeBackgroundColor) && sameColor(backgroundColor2, darkThemeBackgroundColor2))
+  {
+    axisLabelColor[0] = 0x8A / 255.0;
+    axisLabelColor[1] = 0x8F / 255.0;
+    axisLabelColor[2] = 0x98 / 255.0;
+  }
+  else if ((luminance(backgroundColor) + luminance(backgroundColor2)) / 2.0 > 0.6)
+  {
+    axisLabelColor[0] = axisLabelColor[1] = axisLabelColor[2] = 0.0; // black
+  }
+  this->SetAxisLabelColor(axisLabelColor);
 
   this->External->RequestRender();
 }

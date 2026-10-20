@@ -411,6 +411,17 @@ void qMRMLThreeDView::setMRMLScene(vtkMRMLScene* newScene)
   {
     this->setMRMLViewNode(nullptr);
   }
+
+  // Until a view node is set, show the background of new views of the scene
+  // (the scene default view node may have another background than vtkMRMLViewNode).
+  vtkMRMLViewNode* defaultViewNode = newScene ? vtkMRMLViewNode::SafeDownCast(newScene->GetDefaultNodeByClass("vtkMRMLViewNode")) : nullptr;
+  if (!d->MRMLViewNode && defaultViewNode)
+  {
+    double* backgroundColor = defaultViewNode->GetBackgroundColor();
+    double* backgroundColor2 = defaultViewNode->GetBackgroundColor2();
+    this->setBackgroundColor(QColor::fromRgbF(backgroundColor[0], backgroundColor[1], backgroundColor[2]));
+    this->setBackgroundColor2(QColor::fromRgbF(backgroundColor2[0], backgroundColor2[1], backgroundColor2[2]));
+  }
 }
 
 //---------------------------------------------------------------------------

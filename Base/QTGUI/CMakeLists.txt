@@ -265,6 +265,31 @@ SlicerMacroBuildBaseQtLibrary(
   )
 
 #-----------------------------------------------------------------------------
+# User interface fonts
+#-----------------------------------------------------------------------------
+# The fonts are embedded in the library resources (":/Fonts/...") for the Qt user interface.
+# They are also copied to "<share>/Fonts", where the VTK text rendering (slice view annotations,
+# markups labels) can use them as font files (see Views/FontFile/SansSerif in qSlicerCoreApplication).
+set(_fonts
+  Inter-Regular.ttf
+  Inter-Medium.ttf
+  Inter-SemiBold.ttf
+  OFL.txt
+  )
+foreach(_font IN LISTS _fonts)
+  configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/Resources/Fonts/${_font}
+    ${CMAKE_BINARY_DIR}/${Slicer_SHARE_DIR}/Fonts/${_font}
+    COPYONLY
+    )
+  install(
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/Resources/Fonts/${_font}
+    DESTINATION ${Slicer_INSTALL_SHARE_DIR}/Fonts
+    COMPONENT Runtime
+    )
+endforeach()
+
+#-----------------------------------------------------------------------------
 # Slicer icon engine
 #-----------------------------------------------------------------------------
 

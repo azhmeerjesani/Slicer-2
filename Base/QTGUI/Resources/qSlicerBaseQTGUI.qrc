@@ -188,4 +188,9 @@
         <file alias="SlicerPointNumberLock.png">Icons/Small/SlicerPointNumberLock.png</file>
         <file alias="SlicerPointNumberUnlock.png">Icons/Small/SlicerPointNumberUnlock.png</file>
     </qresource>
+    <qresource prefix="/">
+        <file>Fonts/Inter-Regular.ttf</file>
+        <file>Fonts/Inter-Medium.ttf</file>
+        <file>Fonts/Inter-SemiBold.ttf</file>
+    </qresource>
 </RCC>

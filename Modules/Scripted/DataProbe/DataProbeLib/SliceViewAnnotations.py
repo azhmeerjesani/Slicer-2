@@ -19,8 +19,8 @@ class SliceAnnotations(VTKObservationMixin):
         "topLeft": 0,
         "topRight": 0,
         "bottomLeft": 1,
-        "fontFamily": "Times",
-        "fontSize": 14,
+        "fontFamily": "Arial",
+        "fontSize": 12,
         "bgDICOMAnnotationsPersistence": 0,
     }
 

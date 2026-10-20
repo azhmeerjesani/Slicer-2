@@ -243,6 +243,15 @@ public:
   /// Initialize application style
   void initStyle();
 
+  /// Set \a font to the font to use instead of the default application font and return true,
+  /// or return false if the default application font must be kept.
+  /// The font of the fork (Appearance/Font, or Appearance/ForkDefaultFontFamily and
+  /// Appearance/ForkDefaultFontPointSize) is used only if the application runs with a
+  /// main window and without testing, the font family is available, and the saved
+  /// application font ("font" key) is missing or is the default application font.
+  /// Must be called before the Appearance settings panel applies the saved font.
+  bool forkFont(QFont& font) const;
+
   QSettings* newSettings() override;
 
   QPointer<qSlicerLayoutManager> LayoutManager;
@@ -430,6 +439,11 @@ void qSlicerApplicationPrivate::init()
   q->setupFileLogging();
   q->logApplicationInformation();
 
+  // The font of the fork is decided before the Appearance settings panel applies
+  // the saved font and saves the default font if none is saved.
+  QFont forkFont;
+  bool useForkFont = this->forkFont(forkFont);
+
   //----------------------------------------------------------------------------
   // Settings Dialog
   //----------------------------------------------------------------------------
@@ -490,6 +504,14 @@ void qSlicerApplicationPrivate::init()
   this->SettingsDialog->addPanel(qSlicerApplication::tr("Developer"), developerPanel);
 
   QObject::connect(this->SettingsDialog, SIGNAL(restartRequested()), q, SLOT(restart()));
+
+  // Now that the Appearance settings panel has saved and applied the application font,
+  // the font of the fork is applied at runtime only: the "font" key is shared with other
+  // Slicer installations and it is not changed.
+  if (useForkFont)
+  {
+    QApplication::setFont(forkFont);
+  }
 
   //----------------------------------------------------------------------------
   // Test Utility
@@ -557,9 +579,99 @@ void qSlicerApplicationPrivate::initStyle()
     qSlicerStyle::setAccentColor(QColor(settings->value("Appearance/Accent").toString()));
   }
 
+  // Record the palette of the platform before it is replaced, so that the "System" theme can
+  // follow it on platforms that do not report a color scheme.
+  qSlicerStyle::setPlatformPalette(q->palette());
+
   // Apply the palette of the current style. The settings panel only applies a palette
   // when the style is changed, which does not happen when the default style is used.
   q->setPalette(q->style()->standardPalette());
+}
+
+//-----------------------------------------------------------------------------
+namespace
+{
+bool fontFromSettingsValue(const QVariant& value, QFont& font)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+  if (value.typeId() == QMetaType::QFont)
+#else
+  if (value.userType() == QMetaType::QFont)
+#endif
+  {
+    font = value.value<QFont>();
+    return !font.family().isEmpty();
+  }
+  QString fontString = value.toString();
+  return !fontString.isEmpty() && font.fromString(fontString) && !font.family().isEmpty();
+}
+} // namespace
+
+//-----------------------------------------------------------------------------
+bool qSlicerApplicationPrivate::forkFont(QFont& font) const
+{
+  Q_Q(const qSlicerApplication);
+  QSettings* settings = q->userSettings();
+  if (!settings || q->testAttribute(qSlicerCoreApplication::AA_EnableTesting) //
+      || (q->commandOptions() && q->commandOptions()->noMainWindow()))
+  {
+    return false;
+  }
+
+  // Keep the font chosen by the user. The saved font is the default application font
+  // (the font of the platform, "Sans Serif" 9 pt on Linux) if the user never changed it.
+  if (settings->contains("font"))
+  {
+    QFont savedFont;
+    if (!fontFromSettingsValue(settings->value("font"), savedFont))
+    {
+      return false;
+    }
+    const QFont defaultFont = QApplication::font();
+    bool savedFontIsDefault = !savedFont.bold() && !savedFont.italic()
+                              && ((savedFont.family() == QLatin1String("Sans Serif") && qFuzzyCompare(savedFont.pointSizeF(), 9.0))
+                                  || (savedFont.family() == defaultFont.family() && qFuzzyCompare(savedFont.pointSizeF(), defaultFont.pointSizeF())));
+    if (!savedFontIsDefault)
+    {
+      return false;
+    }
+  }
+
+  // Font of the fork: Appearance/Font if set, otherwise the default of the fork
+  QFont newFont;
+  if (!fontFromSettingsValue(settings->value("Appearance/Font"), newFont))
+  {
+    QSettings* defaultSettings = q->defaultSettings();
+    QString family = settings
+                       ->value("Appearance/ForkDefaultFontFamily", //
+                               defaultSettings ? defaultSettings->value("Appearance/ForkDefaultFontFamily") : QVariant())
+                       .toString();
+    double pointSize = settings
+                         ->value("Appearance/ForkDefaultFontPointSize", //
+                                 defaultSettings ? defaultSettings->value("Appearance/ForkDefaultFontPointSize") : QVariant())
+                         .toDouble();
+    if (family.isEmpty())
+    {
+      return false;
+    }
+    newFont = QApplication::font();
+    newFont.setFamily(family);
+    if (pointSize > 0.0)
+    {
+      newFont.setPointSizeF(pointSize);
+    }
+  }
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+  const QStringList fontFamilies = QFontDatabase::families();
+#else
+  const QStringList fontFamilies = QFontDatabase().families();
+#endif
+  if (!fontFamilies.contains(newFont.family()))
+  {
+    return false;
+  }
+  font = newFont;
+  return true;
 }
 
 //-----------------------------------------------------------------------------

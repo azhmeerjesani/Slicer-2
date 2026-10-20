@@ -613,6 +613,18 @@ void qSlicerCoreApplicationPrivate::init()
   QString viewsFontFileSansSerif = q->userSettings()->value("Views/FontFile/SansSerif").toString();
   QString viewsFontFileMonospaced = q->userSettings()->value("Views/FontFile/Monospaced").toString();
   QString viewsFontFileSerif = q->userSettings()->value("Views/FontFile/Serif").toString();
+  if (viewsFontFileSansSerif.isEmpty() && !q->testAttribute(qSlicerCoreApplication::AA_EnableTesting))
+  {
+    // Use the bundled user interface font for the sans-serif ("Arial") view text, such as slice view
+    // annotations and markups labels. Font files are looked up in the "<share>/Fonts" folder.
+    // The default is only used in memory and not written to the settings, which are shared with
+    // other Slicer installations.
+    const QString bundledFontFile = QStringLiteral("Inter-Medium.ttf");
+    if (QFile::exists(q->slicerHome() + "/" Slicer_SHARE_DIR "/Fonts/" + bundledFontFile))
+    {
+      viewsFontFileSansSerif = bundledFontFile;
+    }
+  }
   if (!viewsFontFileSansSerif.isEmpty())
   {
     this->AppLogic->SetFontFileName(VTK_ARIAL, viewsFontFileSansSerif.toStdString());
