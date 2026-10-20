@@ -535,6 +535,15 @@ def _forgetWindowLevels(*args):
     _savedWindowLevels.clear()
 
 
+def _forgetWindowLevelsObserver():
+    """Forget the saved window/levels and remove the scene observer (the palette is disposed)."""
+    global _savedWindowLevelsObserver
+    _savedWindowLevels.clear()
+    if _savedWindowLevelsObserver is not None:
+        slicer.mrmlScene.RemoveObserver(_savedWindowLevelsObserver)
+        _savedWindowLevelsObserver = None
+
+
 def _rememberWindowLevel(volumeNode, displayNode):
     global _savedWindowLevelsObserver
     if _savedWindowLevelsObserver is None:
@@ -618,7 +627,7 @@ def placePoint(shell=None):
         selectionNode.SetActivePlaceNodeClassName("vtkMRMLMarkupsFiducialNode")
     selectionNode.SetActivePlaceNodeID(pointList.GetID())
     interactionNode = applicationLogic.GetInteractionNode()
-    interactionNode.SetPlaceModePersistence(0)
+    # The place mode persistence is the user's choice (Markups toolbar): it is kept
     interactionNode.SetCurrentInteractionMode(interactionNode.Place)
     _toast(shell, _("Click in a view to place a point · Esc cancels"), 3000)
     return pointList
@@ -1809,6 +1818,7 @@ def runEntry(shell, entryId, deferred=False):
 def dispose():
     """Remove the popup (the shell goes Classic or quits)."""
     global _palette
+    _forgetWindowLevelsObserver()
     if _palette is not None:
         _palette.dispose()
         _palette = None

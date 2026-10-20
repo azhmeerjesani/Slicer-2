@@ -13,12 +13,20 @@ mouse shows one line at its bottom-right corner, for example:
 Coordinates never carry a minus sign. "MNI" is used when the background volume is on an MNI grid
 (``StudioLib.space.isMni``), otherwise "scanner".
 
+Over a view without a scan nothing is shown, or, over a lesion, the coordinates without a space name and the lesion.
+
 Cost: the plug-in observes the crosshair node's ``CursorPositionModifiedEvent`` and only starts a 33 ms single-shot
 timer (at most 30 updates per second). The update runs when the timer fires, skipped while a mouse button is held
-(so nothing runs while painting), writes one right-justified ``vtkTextActor`` in the renderer of the hovered view's
-corner annotation (12 px, #E8E8EC, with a shadow) and schedules a render of that view only. The text is hidden when
-the mouse leaves the view (the cursor position becomes invalid). Wheel steps under a still mouse refresh it through
-the hovered view's slice node.
+(so nothing runs while painting; the timer is restarted, so the text is refreshed once the button is released),
+writes one right-justified ``vtkTextActor`` in the renderer of the hovered view's corner annotation (12 px, #E8E8EC,
+with a shadow) and schedules a render of that view only. The text is hidden when the mouse leaves the view (the
+cursor position becomes invalid). Wheel steps under a still mouse refresh it through the hovered view's slice node.
+
+Placement: bottom-right, on the bottom row of the view when it fits there. The bottom row also holds the view's own
+texts: the corner annotations (layer names at the bottom left, ``B: <volume>``), the orientation letter at the bottom
+centre (``StudioLib.orientation``) and the ruler. When the line would run into one of them (narrow views, for example
+the side views of the Focus layout or Four-Up at 1366x768), it is raised above them (``probePlacement()``); a line
+wider than the view drops its last parts (value, then segment names) until it fits.
 
 Plug-in protocol: ``install(shell)`` / ``uninstall(shell)``; Classic shows no probe actor.
 """
@@ -44,6 +52,17 @@ TEXT_COLOR = (0.910, 0.910, 0.925)  # #E8E8EC
 SEPARATOR = " · "
 #: Segments checked per segmentation (a segmentation with more segments is checked up to this number)
 MAX_SEGMENTS = 64
+#: Horizontal and vertical space kept between the probe text and the other texts of the view, in pixels
+GAP = 6
+VERTICAL_GAP = 2
+#: Distance of the corner annotation texts from the view corner (vtkCornerAnnotation), in pixels
+CORNER_ANNOTATION_MARGIN = 5
+#: Font size of the corner annotations (SliceViewAnnotations), when the annotation does not fix one
+CORNER_ANNOTATION_FONT_SIZE = 14
+#: Geometry of the slice view ruler (vtkMRMLRulerDisplayableManager), as fractions of the view height:
+#: distance of the line from the bottom edge and length of the thick major ticks
+_RULER_LINE_MARGIN = 0.015
+_RULER_TICK_LENGTH = 0.03
 
 _controller = None
 
@@ -92,11 +111,11 @@ def formatNumber(value):
     return f"{value:.3g}"
 
 
-def formatCoordinates(ras, mni, decimals=1, hemisphere=True):
+def formatCoordinates(ras, mni, decimals=1, hemisphere=True, spaceName=True):
     """Coordinates as "Left 11.2 · P 17.8 · S 9.5 (MNI)" in MNI space, "L 11.2 · P 17.8 · S 9.5 (scanner)" otherwise; never a minus sign.
 
     In MNI space x is a hemisphere word ("Left", "Right"; "Midline" at 0); in scanner space it is a direction letter from
-    the image origin.
+    the image origin. ``spaceName=False`` leaves out the space ("(scanner)"), for a view without a scan.
     """
     x, y, z = (round(float(value), decimals) for value in ras[:3])
 
@@ -112,8 +131,11 @@ def formatCoordinates(ras, mni, decimals=1, hemisphere=True):
         xText = f"{'L' if x < 0 else 'R'} {magnitude(x)}"
     yText = f"{'P' if y < 0 else 'A'} {magnitude(y)}"
     zText = f"{'I' if z < 0 else 'S'} {magnitude(z)}"
+    coordinates = f"{xText}{SEPARATOR}{yText}{SEPARATOR}{zText}"
+    if not spaceName:
+        return coordinates
     space = "MNI" if mni else _("scanner")
-    return f"{xText}{SEPARATOR}{yText}{SEPARATOR}{zText} ({space})"
+    return f"{coordinates} ({space})"
 
 
 def _ijkOf(volumeNode, ras):
@@ -271,6 +293,11 @@ _spaceCache = _SpaceCache()
 
 def probeText(sliceWidget, ras, xyz=None, workspace=None):
     """The probe line of a slice view at a RAS position (see the module docstring), "" when there is nothing to show."""
+    return SEPARATOR.join(probeParts(sliceWidget, ras, xyz, workspace))
+
+
+def probeParts(sliceWidget, ras, xyz=None, workspace=None):
+    """The parts of the probe line, most important first (the coordinates are one part); [] when there is nothing to show."""
     sliceLogic = sliceWidget.sliceLogic()
     sliceNode = sliceWidget.mrmlSliceNode()
     background = sliceLogic.GetBackgroundLayer().GetVolumeNode() if sliceLogic is not None else None
@@ -287,12 +314,12 @@ def probeText(sliceWidget, ras, xyz=None, workspace=None):
     if isFigure:
         ijk, value = voxelValue(background, ras)
         if ijk is None:
-            return _("Figure")
+            return [_("Figure")]
         parts = [_("Figure"), _("pixel ({i}, {j})").format(i=ijk[0], j=ijk[1])]
         figureValue = _figureValue(background, value)
         if figureValue is not None:
             parts.append(f"{figureValue:.2f}" if not float(figureValue).is_integer() or figureValue <= 1 else formatNumber(figureValue))
-        return SEPARATOR.join(parts)
+        return parts
     statMap = None
     if foreground is not None and foreground.GetImageData() is not None:
         role = foreground.GetAttribute("Studio.Role")
@@ -308,16 +335,49 @@ def probeText(sliceWidget, ras, xyz=None, workspace=None):
         label = atlasLabelAt(ras) if mni else None
         if label:
             parts.append(label)
-        return SEPARATOR.join(parts)
-    parts.append(formatCoordinates(ras, isMni))
-    if background is not None:
+        return parts
+    segments = segmentsAt(ras, sliceNode)
+    hasScan = background is not None and background.GetImageData() is not None
+    if not hasScan and not segments:
+        # An empty view: nothing to probe
+        return []
+    # Without a scan these are world coordinates: neither MNI nor the scanner space of an image
+    parts.append(formatCoordinates(ras, isMni, spaceName=hasScan))
+    if hasScan:
         ijk, value = voxelValue(background, ras)
         if value is not None:
             parts.append(formatNumber(value))
-    segments = segmentsAt(ras, sliceNode)
     if segments:
         parts.append(", ".join(dict.fromkeys(segments)))
-    return SEPARATOR.join(parts)
+    return parts
+
+
+#
+# Placement
+#
+
+
+def probePlacement(viewWidth, textWidth, obstacles, margin=MARGIN):
+    """Height of the bottom of the probe text above the view bottom, in pixels.
+
+    The text is right-justified at ``margin`` from the right edge and ``margin`` from the bottom edge, unless it would
+    run into one of ``obstacles``: ``(left, right, top)`` boxes of the other texts at the bottom of the view (from the
+    bottom edge up to ``top``). It is then raised above the highest of the boxes it overlaps horizontally (with
+    ``GAP`` pixels of horizontal space).
+    """
+    right = viewWidth - margin
+    left = right - textWidth
+    bottom = margin
+    for obstacleLeft, obstacleRight, top in obstacles:
+        if obstacleLeft - GAP < right and obstacleRight + GAP > left:
+            bottom = max(bottom, top + VERTICAL_GAP)
+    return bottom
+
+
+def _orientation():
+    import sys
+
+    return sys.modules.get("StudioLib.orientation")
 
 
 #
@@ -354,7 +414,16 @@ class _ViewText:
         actor.SetInput("")
         actor.VisibilityOff()
         self.actor = actor
+        #: The probe line, and the part of it that is drawn (parts that do not fit the view width are left out)
         self.text = ""
+        self.shownText = ""
+        #: Height of the bottom of the text above the view bottom, in pixels
+        self.bottom = MARGIN
+        self._placementKey = None
+        # Measures the other texts of the view (never added to a renderer)
+        self._measureActor = vtk.vtkTextActor()
+        self._measureActor.SetTextScaleModeToNone()
+        self._measureCache = {}
         self.renderer.AddViewProp(actor)
 
     def _findRenderer(self):
@@ -369,13 +438,109 @@ class _ViewText:
     def isCurrent(self, sliceWidget):
         return _isAlive(self.sliceView) and sliceWidget is not None and sliceWidget.sliceView() == self.sliceView
 
-    def setText(self, text):
-        """Show ``text`` (hide for ""). Return True if a render was scheduled."""
-        if text == self.text:
+    def _textSize(self, actor):
+        bounds = [0.0, 0.0, 0.0, 0.0]
+        actor.GetBoundingBox(self.renderer, bounds)
+        return bounds[1] - bounds[0], bounds[3] - bounds[2]
+
+    def _measure(self, text, textProperty, fontSize, bold=False):
+        """``(width, height)`` in pixels of a text drawn with a copy of ``textProperty`` at ``fontSize``."""
+        key = (text, fontSize, bold, textProperty.GetFontFamily(), textProperty.GetFontFile() or "")
+        size = self._measureCache.get(key)
+        if size is None:
+            measureProperty = vtk.vtkTextProperty()
+            measureProperty.ShallowCopy(textProperty)
+            measureProperty.SetFontSize(fontSize)
+            measureProperty.SetBold(bold)
+            measureProperty.SetJustificationToLeft()
+            measureProperty.SetVerticalJustificationToBottom()
+            self._measureActor.SetTextProperty(measureProperty)
+            self._measureActor.SetInput(text)
+            size = self._textSize(self._measureActor)
+            if len(self._measureCache) > 32:
+                self._measureCache.clear()
+            self._measureCache[key] = size
+        return size
+
+    def _bottomTexts(self):
+        """What is drawn at the bottom of the view besides the probe: a key for the cache and a function giving the boxes."""
+        cornerAnnotation = self.sliceView.cornerAnnotation()
+        lowerLeft = lowerRight = ""
+        cornerFontSize = CORNER_ANNOTATION_FONT_SIZE
+        if cornerAnnotation is not None and cornerAnnotation.GetVisibility():
+            lowerLeft = cornerAnnotation.GetText(0) or ""
+            lowerRight = cornerAnnotation.GetText(1) or ""
+            minimum, maximum = cornerAnnotation.GetMinimumFontSize(), cornerAnnotation.GetMaximumFontSize()
+            cornerFontSize = maximum if minimum >= maximum else min(maximum, max(minimum, CORNER_ANNOTATION_FONT_SIZE))
+        sliceNode = self.sliceWidget.mrmlSliceNode() if _isAlive(self.sliceWidget) else None
+        rulerType = sliceNode.GetRulerType() if sliceNode is not None and hasattr(sliceNode, "GetRulerType") else 0
+        orientation = _orientation()
+        letters = orientation.viewLetters(sliceNode.GetLayoutName()) if orientation is not None and sliceNode is not None else None
+        bottomLetter = letters[3] if letters else ""
+        key = (lowerLeft, lowerRight, cornerFontSize, rulerType, bottomLetter)
+
+        def boxes(viewWidth, viewHeight, lineHeight):
+            result = []
+            if lowerLeft.strip():
+                width, height = self._measure(lowerLeft, cornerAnnotation.GetTextProperty(), cornerFontSize)
+                result.append((0, CORNER_ANNOTATION_MARGIN + width, CORNER_ANNOTATION_MARGIN + height))
+            if lowerRight.strip():
+                width, height = self._measure(lowerRight, cornerAnnotation.GetTextProperty(), cornerFontSize)
+                result.append((viewWidth - CORNER_ANNOTATION_MARGIN - width, viewWidth, CORNER_ANNOTATION_MARGIN + height))
+            if bottomLetter:
+                width, height = self._measure(bottomLetter, self.actor.GetTextProperty(), orientation.FONT_SIZE, bold=True)
+                letterBottom = orientation.bottomReference(rulerType)[1] * viewHeight + orientation.EDGE_MARGIN
+                result.append((viewWidth / 2.0 - width / 2.0, viewWidth / 2.0 + width / 2.0, letterBottom + height))
+            if rulerType:
+                # The ruler is centred and its length is not known here: its line, ticks and text are a full-width row
+                rulerTop = _RULER_LINE_MARGIN * viewHeight + max(_RULER_TICK_LENGTH * viewHeight, 1.2 * lineHeight)
+                result.append((0, viewWidth, rulerTop))
+            return result
+
+        return key, boxes
+
+    def _place(self, parts):
+        """Choose the shown text (the parts that fit the view width) and its height above the view bottom."""
+        viewWidth, viewHeight = self.renderer.GetSize()
+        texts = [SEPARATOR.join(parts[:count]) for count in range(len(parts), 0, -1)] or [""]
+        if viewWidth <= 0 or viewHeight <= 0 or not texts[0]:
+            self.actor.SetInput(texts[0])
+            return texts[0], MARGIN
+        key, boxes = self._bottomTexts()
+        placementKey = (tuple(parts), viewWidth, viewHeight, key)
+        if placementKey == self._placementKey:
+            return self.shownText, self.bottom
+        self._placementKey = placementKey
+        # The longest text that fits the view width (at least the first part)
+        for shown in texts:
+            self.actor.SetInput(shown)
+            width, height = self._textSize(self.actor)
+            if width <= viewWidth - 2 * MARGIN:
+                break
+        bottom = probePlacement(viewWidth, width, boxes(viewWidth, viewHeight, height))
+        return shown, bottom
+
+    def setText(self, text, parts=None):
+        """Show ``text`` (hide for ""), placed clear of the view's other texts. Return True if a render was scheduled.
+
+        ``parts`` are the parts of ``text`` (``probeParts()``), so that the last ones can be left out in a narrow view.
+        """
+        if parts is None:
+            parts = [text] if text else []
+        if text:
+            shown, bottom = self._place(parts)
+        else:
+            shown, bottom = "", self.bottom
+            self._placementKey = None
+        if text == self.text and shown == self.shownText and bottom == self.bottom:
             return False
         self.text = text
-        self.actor.SetInput(text or "")
-        self.actor.SetVisibility(bool(text))
+        self.shownText = shown
+        if bottom != self.bottom:
+            self.bottom = bottom
+            self.actor.GetPositionCoordinate().SetValue(-MARGIN, bottom)
+        self.actor.SetInput(shown or "")
+        self.actor.SetVisibility(bool(shown))
         if _isAlive(self.sliceView):
             self.sliceView.scheduleRender()
         return True
@@ -385,6 +550,7 @@ class _ViewText:
         if _isAlive(self.sliceView) and self.text:
             self.sliceView.scheduleRender()
         self.text = ""
+        self.shownText = ""
 
 
 class Probe:
@@ -437,6 +603,8 @@ class Probe:
             self.timer.start()
 
     def _onSceneClosed(self, caller, event):
+        # An update queued by the slice node changes of the close would show coordinates over an empty view
+        self.timer.stop()
         self._observeCrosshair()
         self.hide()
 
@@ -483,7 +651,9 @@ class Probe:
     def update(self):
         """Compute and show the probe text now. Return the text shown ("" when hidden, None when skipped)."""
         if _mouseButtonDown():
-            # A button is held (painting, dragging): nothing is computed
+            # A button is held (painting, dragging): nothing is computed. Check again later, so that the text is
+            # refreshed when the button is released (a painted voxel is named without moving the mouse)
+            self.timer.start()
             return None
         if self.crosshair is None:
             self._observeCrosshair()
@@ -505,10 +675,11 @@ class Probe:
         xyToRas = sliceNode.GetXYToRAS()
         ras = list(xyToRas.MultiplyPoint(xyz + [1.0]))[:3]
         workspace = self.shell.currentWorkspace() if self.shell is not None else None
-        text = probeText(view.sliceWidget, ras, xyz, workspace)
+        parts = probeParts(view.sliceWidget, ras, xyz, workspace)
+        text = SEPARATOR.join(parts)
         self.currentView = name
         self._watchSliceNode(sliceNode)
-        view.setText(text)
+        view.setText(text, parts)
         self.updateCount += 1
         self.lastUpdateMs = (time.perf_counter() - startTime) * 1000.0
         return text

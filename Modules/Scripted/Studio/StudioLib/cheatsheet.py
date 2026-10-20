@@ -133,6 +133,15 @@ def _addRow(rows, keys, description):
     rows.append([list(keys), description])
 
 
+def _mergedRows(*rowLists):
+    """One list of rows: a description listed by several sources (a live key and a static row) is shown once."""
+    rows = []
+    for rowList in rowLists:
+        for keys, description in rowList:
+            _addRow(rows, keys, description)
+    return rows
+
+
 def _studioShortcutRows(shell):
     """{section: rows} of the live Studio QShortcuts and of the registered workspace shortcuts."""
     result = {SECTION_DRAW: [], SECTION_VIEWS: [], SECTION_APP: [], SECTION_LIBRARY: []}
@@ -307,10 +316,10 @@ def sections(shell):
     """The content of the overlay: ``[(section, title, rows)]`` with rows ``[[keys], description]`` (portable keys)."""
     studioRows = _studioShortcutRows(shell)
     takenKeys = {key for rows in studioRows.values() for row in rows for key in row[0]}
-    draw = studioRows[SECTION_DRAW] + _effectRows() + _drawStaticRows()
-    views = studioRows[SECTION_VIEWS] + _viewRows()
-    app = studioRows[SECTION_APP] + _actionRows(shell, takenKeys)
-    library = studioRows[SECTION_LIBRARY] + _libraryRows()
+    draw = _mergedRows(studioRows[SECTION_DRAW], _effectRows(), _drawStaticRows())
+    views = _mergedRows(studioRows[SECTION_VIEWS], _viewRows())
+    app = _mergedRows(studioRows[SECTION_APP], _actionRows(shell, takenKeys))
+    library = _mergedRows(studioRows[SECTION_LIBRARY], _libraryRows())
     return [
         (SECTION_DRAW, _("Draw"), draw),
         (SECTION_VIEWS, _("Views"), views),
@@ -446,10 +455,9 @@ class CheatSheet:
 
         self._filter = _Filter(self)
         field.installEventFilter(self._filter)
-        self.mainWindow.installEventFilter(self._filter)
-        self._centralWidget = self.mainWindow.centralWidget()
-        if self._centralWidget is not None:
-            self._centralWidget.installEventFilter(self._filter)
+        # The window and the view area are only filtered while the overlay is shown (see _watchWindow)
+        self._centralWidget = None
+        self._watching = False
         field.connect("textChanged(QString)", self._applyFilter)
         self._styled = None
 
@@ -579,6 +587,23 @@ class CheatSheet:
     def isVisible(self):
         return _isAlive(self.widget) and self.widget.isVisible()
 
+    def _watchWindow(self, watch):
+        """Follow the size of the view area (resize and move events of the window) while the overlay is shown."""
+        if watch == self._watching:
+            return
+        self._watching = watch
+        if watch:
+            self._centralWidget = self.mainWindow.centralWidget() if _isAlive(self.mainWindow) else None
+        for obj in (self.mainWindow, self._centralWidget):
+            if not _isAlive(obj):
+                continue
+            if watch:
+                obj.installEventFilter(self._filter)
+            else:
+                obj.removeEventFilter(self._filter)
+        if not watch:
+            self._centralWidget = None
+
     def open(self):
         self._style()
         self._build()
@@ -586,6 +611,7 @@ class CheatSheet:
         self.field.clear()
         self.field.blockSignals(False)
         self._applyFilter("")
+        self._watchWindow(True)
         self.updateGeometry()
         self._previousFocus = slicer.app.focusWidget()
         self.widget.show()
@@ -597,6 +623,7 @@ class CheatSheet:
         if not _isAlive(self.widget):
             return
         self.shell.unregisterEscapeOverlay(self.widget)
+        self._watchWindow(False)
         if not self.widget.isVisible():
             return
         self.widget.hide()
@@ -628,11 +655,8 @@ class CheatSheet:
         if not _isAlive(self.widget):
             return
         self.close()
+        self._watchWindow(False)
         self.field.removeEventFilter(self._filter)
-        if _isAlive(self.mainWindow):
-            self.mainWindow.removeEventFilter(self._filter)
-        if _isAlive(self._centralWidget):
-            self._centralWidget.removeEventFilter(self._filter)
         self.widget.deleteLater()
         self.widget = None
 

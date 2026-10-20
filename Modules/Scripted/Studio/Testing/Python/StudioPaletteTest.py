@@ -531,6 +531,13 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertIn("Ctrl+5", platform)
         viewText = " ".join(description for keys, description in content[cheatsheet.SECTION_VIEWS])
         self.assertIn("Zoom", viewText)
+        # A key listed by a live shortcut and by the static tables (Ctrl+Y: Redo) is one row
+        for section, rows in content.items():
+            sectionDescriptions = [description for keys, description in rows]
+            duplicates = {description for description in sectionDescriptions if sectionDescriptions.count(description) > 1}
+            self.assertFalse(duplicates, f"{section}: listed twice: {duplicates}")
+        # The window is only filtered while the overlay is shown
+        self.assertTrue(sheet._watching)
         # Not a timed toast: still open later
         self._wait(1.0)
         self.assertTrue(cheatsheet.isVisible())
@@ -542,6 +549,7 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         # Esc in its field, then Esc through the shell's ladder, and Ctrl+/ toggles
         self._press(sheet.field, qt.Qt.Key_Escape)
         self.assertFalse(cheatsheet.isVisible())
+        self.assertFalse(sheet._watching)
         studioShell.toggleCheatSheet()
         self.assertTrue(cheatsheet.isVisible())
         self.assertTrue(studioShell.handleEscape())
@@ -570,6 +578,8 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         studioShell = self._applyStudio()
         live = probe.instance()
         self.assertIsNotNone(live)
+        # An empty view: nothing to probe (no "(scanner)" for world coordinates)
+        self.assertEqual(self._cursorAt("Red", (10.0, 20.0, 30.0)), "")
         volume, segmentation = importer.startOnTemplate(shell=studioShell)
         self._pump()
         self.layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUpRedSliceView)
@@ -663,6 +673,9 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertEqual(live.updateCount, countBefore)
         finally:
             probe._mouseButtonDown = original
+        # The button is released with the mouse still: the text is refreshed once (a painted voxel is named)
+        self._wait(0.15)
+        self.assertGreater(live.updateCount, countBefore)
 
     def test_11_formats(self):
         """Pure formatting: never a minus sign; hemisphere words only in MNI space."""
@@ -673,6 +686,7 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(probe.formatCoordinates((-11.2, -17.8, 9.5), False), "L 11.2 · P 17.8 · S 9.5 (scanner)")
         self.assertEqual(probe.formatCoordinates((0.01, 0, 0), True), "Midline 0.0 · A 0.0 · S 0.0 (MNI)")
         self.assertEqual(probe.formatCoordinates((-24.4, -8.2, 12.0), True, decimals=0), "Left 24 · P 8 · S 12 (MNI)")
+        self.assertEqual(probe.formatCoordinates((10, 20, 30), False, spaceName=False), "R 10.0 · A 20.0 · S 30.0")
         self.assertEqual(probe.formatNumber(412.0), "412")
         self.assertEqual(probe.formatNumber(8.3125), "8.31")
         self.assertEqual(probe.formatNumber(1234.56), "1234.6")
@@ -680,3 +694,59 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(probe.statLabel(node), "T")
         node.SetName("network_zmap")
         self.assertEqual(probe.statLabel(node), "Z")
+
+    def test_12_probe_placement(self):
+        """In a narrow view the probe line is raised above the view's bottom texts; in a wide view it stays on the bottom row."""
+        from StudioLib import importer, probe
+
+        # Pure placement: a 330 px view, a 200 px line, the bottom-centre letter and the lower-left layer name
+        # (left, right, top) of the letter at the view centre and of the layer name, as measured at 1366x768
+        def letter(viewWidth):
+            return (viewWidth / 2.0 - 4, viewWidth / 2.0 + 4, 19)
+
+        self.assertEqual(probe.probePlacement(975, 200, [letter(975), (0, 251, 32)]), probe.MARGIN)
+        self.assertEqual(probe.probePlacement(424, 200, [letter(424), (0, 191, 32)]), 19 + probe.VERTICAL_GAP)
+        self.assertEqual(probe.probePlacement(330, 200, [letter(330), (0, 145, 32)]), 32 + probe.VERTICAL_GAP)
+
+        # The Focus layout at 1366x768: the side views are about 330 px wide
+        geometry = self.mainWindow.geometry
+        maximized = self.mainWindow.isMaximized()
+        try:
+            self.mainWindow.showNormal()
+            self.mainWindow.resize(1366, 768)
+            studioShell = self._applyStudio()
+            importer.startOnTemplate(shell=studioShell)
+            self.layoutManager.setLayout(7001)
+            self._wait(0.3)
+            live = probe.instance()
+            widths = []
+            for viewName in ("Red", "Green"):
+                text = self._cursorAt(viewName, (-11.2, -17.8, 9.5))
+                self.assertTrue(text.startswith("Left 11.2"), text)
+                view = live.views[viewName]
+                viewWidth, viewHeight = view.renderer.GetSize()
+                widths.append(viewWidth)
+                relative = [0.0] * 4
+                view.actor.GetBoundingBox(view.renderer, relative)
+                # The bounding box is relative to the anchor: MARGIN from the right edge, view.bottom above the bottom edge
+                box = (viewWidth - probe.MARGIN + relative[0], viewWidth - probe.MARGIN + relative[1], view.bottom + relative[2])
+                obstacles = view._bottomTexts()[1](viewWidth, viewHeight, relative[3] - relative[2])
+                self.assertTrue(obstacles, f"{viewName}: the layer name and the orientation letter are found")
+                for left, right, top in obstacles:
+                    overlaps = left < box[1] and right > box[0] and top > box[2]
+                    self.assertFalse(overlaps, f"{viewName} ({viewWidth} px): {box} overlaps {(left, right, top)}")
+                self.assertGreaterEqual(box[0], 0, f"{viewName}: the line is inside the view")
+                if viewWidth > 600:
+                    self.assertEqual(view.bottom, probe.MARGIN, f"{viewName}: a wide view keeps the bottom row")
+                elif viewWidth < 360:
+                    self.assertGreater(view.bottom, probe.MARGIN, f"{viewName}: a narrow view raises the line")
+                    # Raised above the bottom-centre letter
+                    centre = [top for left, right, top in obstacles if left < viewWidth / 2.0 < right]
+                    self.assertTrue(centre, f"{viewName}: the orientation letter is found")
+                    self.assertGreater(box[2], max(centre))
+            self.assertLess(min(widths), 360, f"the Focus side views are narrow at 1366x768: {widths}")
+        finally:
+            if maximized:
+                self.mainWindow.showMaximized()
+            else:
+                self.mainWindow.setGeometry(geometry)
