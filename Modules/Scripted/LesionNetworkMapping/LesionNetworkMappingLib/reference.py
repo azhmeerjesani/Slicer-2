@@ -461,7 +461,8 @@ def _sigma_from_sums(acc_r, n_subjects, seed_column, chunk):
     sigma = np.zeros(n_voxels, dtype=np.float64)
     for v0 in range(0, n_voxels, chunk):
         v1 = min(n_voxels, v0 + chunk)
-        mean_r = acc_r[v0:v1].astype(np.float64) / n_subjects
+        mean_r = acc_r[v0:v1].astype(np.float64)
+        mean_r /= n_subjects  # in place: one (chunk, K) float64 temporary
         is_seed = seed_column[v0:v1] >= 0
         count = np.where(is_seed, n_seeds - 1, n_seeds).astype(np.float64)
         centre = mean_r.sum(axis=1) / count
@@ -497,11 +498,19 @@ _BASELINE_BYTES = 64 << 20  # Python, numpy and the library (34 MB measured) wit
 
 
 def _memory_bytes(n_voxels, n_seeds, max_times, itemsize, n_runs, m, chunk, buffers):
-    """Peak memory of the maps pass (the largest; PC passes need about buffers * subject + 4 * V * m * 8)."""
+    """Peak memory of the maps pass (the largest; PC passes need about buffers * subject + 4 * V * m * 8).
+
+    The peak is either during the subject loop (``buffers`` subject buffers and the chunk temporaries)
+    or right after it, while sigma_r is computed from the (V, K) sums: the last subject's buffer is
+    still allocated and each chunk needs a (chunk, K) float64 copy of the sums.
+    """
     chunk = min(chunk, n_voxels)
+    subject = n_voxels * max_times * itemsize
     accumulators = n_voxels * n_seeds * 4 + n_voxels * m * (8 + 4) + n_voxels * 8 * (6 + 2 * n_runs) + n_voxels * n_runs
-    temporaries = chunk * (max_times * 12 + n_seeds * 4 + 4 * 8) + max_times * (n_seeds + m) * 8
-    return int(_BASELINE_BYTES + accumulators + temporaries + buffers * n_voxels * max_times * itemsize)
+    scratch = chunk * (max_times * 12 + n_seeds * 4)
+    in_loop = scratch + chunk * 4 * 8 + max_times * (n_seeds + m) * 8 + buffers * subject
+    after_loop = scratch + chunk * n_seeds * 8 * 2 + subject  # sigma_r: the float64 chunk and the einsum product
+    return int(_BASELINE_BYTES + accumulators + max(in_loop, after_loop))
 
 
 def estimate(bundle, subjects=None, subject_list=None, n_seeds=DEFAULT_SEEDS, k=DEFAULT_PCS, power_iters=DEFAULT_POWER_ITERS, oversample=DEFAULT_OVERSAMPLE, ev1=False, chunk=DEFAULT_CHUNK, memory_budget=DEFAULT_MEMORY_BUDGET, measure=True):
