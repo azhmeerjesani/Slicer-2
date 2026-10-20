@@ -41,8 +41,10 @@ The user pays for any usage beyond their plans, so even an accidental use costs 
   must open in Slicer Studio.
 - Settings are shared with official installations (`Slicer.ini`): write fork-only keys under
   `Studio/*` or `Appearance/*`, and never rewrite official keys.
-- Never bundle or automatically download connectomes (for example GSP1000). Templates are downloaded
-  only when the user asks.
+- Never bundle or automatically download connectomes (for example GSP1000). The app may download one
+  only when the user asks for it ("Get a connectome…") and has accepted the provider's live terms text;
+  sources without stated terms are links only (approved by the user, decision D-L1). Templates are
+  downloaded only when the user asks.
 - Code must work with Qt 5.15 (Linux build) and Qt 6 (macOS disk image). PythonQt differs between
   them: use the helpers in `Modules/Scripted/Studio/StudioLib/shell.py` (for example
   `associatedWidgets()`), `obj.isWidgetType()` rather than `isinstance(obj, qt.QWidget)`, and
