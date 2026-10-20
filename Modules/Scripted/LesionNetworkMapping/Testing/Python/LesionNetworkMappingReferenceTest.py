@@ -252,10 +252,17 @@ class LoaderTest(_Base):
         self.assertIsNotNone(reference.load_reference(path, subjects_sha=all_sha))
         self.assertIsNone(reference.load_reference(path, subjects_sha=connectome.subjects_sha256(["sub-001"])))
 
-        # Optional metadata: still valid, except in strict mode
-        connectome.set_metadata(path, description="edited", preprocessing={"gsr": True})
+        # Descriptive metadata: still valid, except in strict mode
+        connectome.set_metadata(path, description="edited", subsets={"user:first": ["sub-001", "sub-002"]})
         self.assertIsNotNone(reference.load_reference(path))
         self.assertIsNone(reference.load_reference(path, strict=True))
+
+        # The preprocessing record (for example GSR) describes the data: stale
+        connectome.set_metadata(path, preprocessing={"gsr": True})
+        self.assertIsNone(reference.load_reference(path))
+        self.assertIn("preprocessing", reference.reference_status(path)[0]["reason"])
+        connectome.set_metadata(path, preprocessing=None)
+        self.assertIsNotNone(reference.load_reference(path))
 
         # A manifest change of the data (one subject fewer): stale
         manifest = os.path.join(path, "connectome.json")
@@ -293,6 +300,38 @@ class LoaderTest(_Base):
         self.assertEqual(reference.reference_status(path)[0]["status"], "corrupt")
         self.assertIsNotNone(reference.load_reference(path, verify=False))
 
+    def test_bundle_converted_again_with_other_data_is_stale(self):
+        # Same grid, mask, subjects, runs and dtype (identical connectome.json): only the time series differ
+        path = self.copy_bundle("reconverted.lnmc")
+        self.quiet_build(path, n_seeds=20, power_iters=1)
+        with open(os.path.join(path, "connectome.json"), encoding="utf-8") as f:
+            manifest = f.read()
+        _write_bundle(path, seed=99)
+        with open(os.path.join(path, "connectome.json"), encoding="utf-8") as f:
+            self.assertEqual(f.read(), manifest)
+        self.assertIsNone(reference.load_reference(path))
+        self.assertIsNone(reference.load_reference(path, strict=True))
+        status = reference.reference_status(path)[0]
+        self.assertEqual(status["status"], "stale")
+        self.assertIn("time series", status["reason"])
+        record = self.quiet_build(path, n_seeds=20, power_iters=1)
+        self.assertEqual(record["subjects"]["data_sha256"], reference.subjects_data_sha256(path, record["subjects"]["ids"]))
+        self.assertIsNotNone(reference.load_reference(path))
+
+    def test_malformed_reference_json_is_corrupt(self):
+        path = self.copy_bundle("malformed.lnmc")
+        self.quiet_build(path, n_seeds=20, power_iters=1)
+        json_path = os.path.join(path, "derived", "reference", reference.REFERENCE_JSON)
+        with open(json_path, encoding="utf-8") as f:
+            record = json.load(f)
+        broken = {**record["maps"], "mu_r": "mu_r.npy"}
+        for maps in (broken, {**record["maps"], "mu_r": {"file": "../../connectome.json"}}, {"pcs": record["maps"]["pcs"]}, []):
+            with self.subTest(maps=maps):
+                with open(json_path, "w", encoding="utf-8") as f:
+                    json.dump({**record, "maps": maps}, f)
+                self.assertEqual(reference.reference_status(path)[0]["status"], "corrupt")
+                self.assertIsNone(reference.load_reference(path))
+
     def test_subject_list_folders(self):
         path = self.copy_bundle("subsets.lnmc")
         record = self.quiet_build(path, subject_list="sub-001, sub-003,sub-002", n_seeds=20, power_iters=1)
@@ -315,7 +354,7 @@ class LoaderTest(_Base):
 class ResumeTest(_Base):
     def test_resume_after_stop_in_pc_stage_gives_identical_outputs(self):
         full = os.path.join(self.tmp, "full")
-        self.quiet_build(self.bundle, out_dir=full, n_seeds=40, ev1=True, register=False)
+        full_record = self.quiet_build(self.bundle, out_dir=full, n_seeds=40, ev1=True, register=False)
         stopped = os.path.join(self.tmp, "stopped")
         events = []
         n = self.bundle.n_subjects
@@ -327,10 +366,18 @@ class ResumeTest(_Base):
         state = jobs.ResumeState(os.path.join(stopped, reference.WORK_DIR, reference.RESUME_NAME))
         self.assertEqual(state.done, ["maps", "pc-step-1", "pc-step-2"])
         self.assertEqual(runs.latest(self.tmp, "reference")["status"], "cancelled")
+        # A hard kill after step 3 saved its basis but before it was marked done leaves its file behind:
+        # the resumed step 3 starts again from the basis of step 2
+        work = os.path.join(stopped, reference.WORK_DIR)
+        np.save(os.path.join(work, reference._q_name("pc", 3)), np.ones((self.bundle.n_voxels, 10)))
 
         events = []
-        self.quiet_build(self.bundle, out_dir=stopped, n_seeds=40, ev1=True, resume=True, events=events, run_root=self.tmp)
+        record = self.quiet_build(self.bundle, out_dir=stopped, n_seeds=40, ev1=True, resume=True, events=events, run_root=self.tmp)
         self.assertEqual(events[0][1]["resumed"], ["maps", "pc-step-1", "pc-step-2"])
+        # reference.json describes the whole build, including the convergence of the steps before the Stop
+        self.assertEqual(len(record["pca"]["convergence"]["history"]), 2 * reference.DEFAULT_POWER_ITERS + 2)
+        self.assertEqual(record["pca"]["convergence"], full_record["pca"]["convergence"])
+        self.assertEqual(record["ev1"], full_record["ev1"])
         self.assertFalse(any(fields.get("stage") == "maps" for event, fields in events if event == "progress"))
         self.assertEqual(runs.latest(self.tmp, "reference")["status"], "done")
         for name in ("mu_r.npy", "mu_z.npy", "sigma_r.npy", "hub_abs_z.npy", "pcs.npy", "eigvals.npy", "ev1.npy"):
@@ -363,6 +410,18 @@ class HubnessSourceTest(_Base):
         self.assertIn("hub_computed", [fields.get("code") for event, fields in events if event == "warning"])
         record = self.quiet_build(bundle, n_seeds=20, power_iters=1, hub="compute")
         self.assertEqual(record["hub"]["reason"], "requested")
+
+        # A degree map stored between a Stop and --resume changes the hubness source: the build starts again
+        out = os.path.join(self.tmp, "hub-resume")
+        os.remove(os.path.join(path, "derived", "degree.npy"))
+        events = []
+        with self.assertRaises(jobs.Cancelled):
+            self.quiet_build(bundle, out_dir=out, n_seeds=20, power_iters=1, register=False, cancel=lambda: ("stage", {"name": "pcs", "index": 2, "total": 3}) in events, events=events)
+        connectome.compute_degree(bundle, n_seeds=50, measure="abs_fz", store=True)
+        events = []
+        record = self.quiet_build(bundle, out_dir=out, n_seeds=20, power_iters=1, register=False, resume=True, events=events)
+        self.assertIn("resume_mismatch", [fields.get("code") for event, fields in events if event == "warning"])
+        self.assertEqual(record["hub"]["source"], "bundle derived/degree.npy")
 
 
 class ExternalMapTest(_Base):

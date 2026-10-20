@@ -249,6 +249,21 @@ def _load_npy(path):
     return np.load(path, allow_pickle=False)
 
 
+def _copy_atomic(source, target):
+    tmp_path = f"{target}.{os.getpid()}.tmp"
+    try:
+        shutil.copyfile(source, tmp_path)
+        os.replace(tmp_path, target)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
+def _q_name(kind, step):
+    """Work file of the orthonormal basis Q of the PCs ("pc") or EV1 ("ev") after PC step ``step`` (0: the maps pass)."""
+    return f"q_{kind}-{step}.npy"
+
+
 def _open_bundle(bundle):
     return bundle if isinstance(bundle, ConnectomeBundle) else ConnectomeBundle.open(bundle)
 
@@ -501,15 +516,15 @@ def _memory_bytes(n_voxels, n_seeds, max_times, itemsize, n_runs, m, chunk, buff
     """Peak memory of the maps pass (the largest; PC passes need about buffers * subject + 4 * V * m * 8).
 
     The peak is either during the subject loop (``buffers`` subject buffers and the chunk temporaries)
-    or right after it, while sigma_r is computed from the (V, K) sums: the last subject's buffer is
-    still allocated and each chunk needs a (chunk, K) float64 copy of the sums.
+    or right after it, while sigma_r is computed from the (V, K) sums (the subject buffers are
+    released; each chunk needs a (chunk, K) float64 copy of the sums).
     """
     chunk = min(chunk, n_voxels)
     subject = n_voxels * max_times * itemsize
     accumulators = n_voxels * n_seeds * 4 + n_voxels * m * (8 + 4) + n_voxels * 8 * (6 + 2 * n_runs) + n_voxels * n_runs
     scratch = chunk * (max_times * 12 + n_seeds * 4)
     in_loop = scratch + chunk * 4 * 8 + max_times * (n_seeds + m) * 8 + buffers * subject
-    after_loop = scratch + chunk * n_seeds * 8 * 2 + subject  # sigma_r: the float64 chunk and the einsum product
+    after_loop = scratch + chunk * n_seeds * 8
     return int(_BASELINE_BYTES + accumulators + max(in_loop, after_loop))
 
 
@@ -734,6 +749,8 @@ def build(
     data_sha = _data_sha256(bundle)
     mask_sha = bundle.mask_sha256
     manifest_sha = _manifest_sha256(bundle)
+    subjects_data_sha = subjects_data_sha256(bundle, ids)
+    provenance = _data_provenance(bundle)
     seeds = select_seeds(n_voxels, n_seeds, seed)
     seed_column = np.full(n_voxels, -1, dtype=np.int64)
     seed_column[seeds] = np.arange(n_seeds)
@@ -744,6 +761,9 @@ def build(
         "data_sha256": data_sha,
         "mask_sha256": mask_sha,
         "subjects_sha256": subjects_sha,
+        "subjects_data_sha256": subjects_data_sha,
+        "data_provenance": provenance,
+        "hub_source": hub_info.get("sha256") or "computed",  # a degree.npy created or changed before --resume restarts the build
         "K_seeds": n_seeds,
         "seed": int(seed),
         "k": k,
@@ -771,7 +791,10 @@ def build(
             for name in os.listdir(work):
                 if name != RESUME_NAME:
                     os.remove(os.path.join(work, name))
-        state.data = {"params": params, "elapsed": float(state.data.get("elapsed", 0.0)) if state.done else 0.0}
+        if state.done:  # keep the convergence history of the completed units
+            state.data = {"params": params, "elapsed": float(state.data.get("elapsed", 0.0)), "history": state.data.get("history")}
+        else:
+            state.data = {"params": params, "elapsed": 0.0}
         emit(
             "start",
             job="reference",
@@ -823,6 +846,7 @@ def build(
                 now = time.monotonic()  # wall time per subject, reading included
                 progress.step("maps", now - last, len(ids) - index - 1, len(ids) * n_steps, force=index == len(ids) - 1, first=index == 0)
                 last = now
+            subject = None  # release the last subject's buffer before sigma_r (see _memory_bytes)
             n = len(ids)
             counts = np.where(seed_column >= 0, n_seeds - 1, n_seeds).astype(np.float64)
             maps = {
@@ -839,22 +863,22 @@ def build(
             for key, vector in maps.items():
                 _save_npy(os.path.join(work, MAP_FILES[key]), vector)
             _save_npy(os.path.join(work, "mu_col.npy"), mu_col)
-            _save_npy(os.path.join(work, "q_pc.npy"), q_pc)
+            _save_npy(os.path.join(work, _q_name("pc", 0)), q_pc)
             history = {"pcs": [sv_pc[:k].tolist()], "ev1": []}
             if ev1:
                 q_ev, sv_ev = _orthonormalize(c_omega[:, m_pc:])
-                _save_npy(os.path.join(work, "q_ev.npy"), q_ev)
+                _save_npy(os.path.join(work, _q_name("ev", 0)), q_ev)
                 history["ev1"].append(sv_ev[:1].tolist())
             state.data["history"] = history
             state.data["elapsed"] = state.data.get("elapsed", 0.0) + (time.monotonic() - started)
             state.mark_done("maps")
         mu_r = _load_npy(os.path.join(work, MAP_FILES["mu_r"]))
         mu_col = _load_npy(os.path.join(work, "mu_col.npy"))
-        q_pc = _load_npy(os.path.join(work, "q_pc.npy"))
-        q_ev = _load_npy(os.path.join(work, "q_ev.npy")) if ev1 else None
         history = state.data.get("history") or {"pcs": [], "ev1": []}
 
-        # Stage 2: subspace iteration; odd steps apply C~^T, even steps C~, the last step gives B^T = C~^T Q
+        # Stage 2: subspace iteration; odd steps apply C~^T, even steps C~, the last step gives B^T = C~^T Q.
+        # Step s reads the Q of step s - 1 and writes its own files before it is marked done, so a step
+        # that is run again after a crash starts from the same Q (bit-identical results).
         emit("stage", name="pcs", index=2, total=len(STAGES))
         ones = np.ones(n_voxels)
         for step in range(1, n_steps + 1):
@@ -862,6 +886,8 @@ def build(
             if state.is_done(unit):
                 continue
             step_started = time.monotonic()
+            q_pc = _load_npy(os.path.join(work, _q_name("pc", step - 1)))
+            q_ev = _load_npy(os.path.join(work, _q_name("ev", step - 1))) if ev1 else None
             block = np.hstack([q_pc, q_ev]) if ev1 else q_pc
             block32 = block.astype(np.float32)
             product = np.zeros(block.shape, dtype=np.float64)
@@ -880,26 +906,30 @@ def build(
                 c_q = c_q - np.outer(ones, mu_col @ q_pc)
             if step < n_steps:
                 q_pc, sv = _orthonormalize(c_q)
+                _save_npy(os.path.join(work, _q_name("pc", step)), q_pc)
                 history["pcs"].append(sv[:k].tolist())
                 if ev1:
                     q_ev, sv_ev = _orthonormalize(product[:, m_pc:])
+                    _save_npy(os.path.join(work, _q_name("ev", step)), q_ev)
                     history["ev1"].append(sv_ev[:1].tolist())
             else:
                 bt_pc = c_q  # B^T = C~^T Q, (V, m)
                 _save_npy(os.path.join(work, "bt_pc.npy"), bt_pc)
                 if ev1:
                     _save_npy(os.path.join(work, "bt_ev.npy"), product[:, m_pc:])
-            _save_npy(os.path.join(work, "q_pc.npy"), q_pc)
-            if ev1:
-                _save_npy(os.path.join(work, "q_ev.npy"), q_ev)
             state.data["history"] = history
             state.data["elapsed"] = state.data.get("elapsed", 0.0) + (time.monotonic() - step_started)
             state.mark_done(unit)
+            if step < n_steps:  # the Q of step - 1 is no longer needed (the write stage needs the last Q)
+                for kind in ("pc", "ev"):
+                    stale = os.path.join(work, _q_name(kind, step - 1))
+                    if os.path.exists(stale):
+                        os.remove(stale)
 
         # Stage 3: small SVDs, orientation and the outputs
         emit("stage", name="write", index=3, total=len(STAGES))
         write_started = time.monotonic()
-        q_pc = _load_npy(os.path.join(work, "q_pc.npy"))
+        q_pc = _load_npy(os.path.join(work, _q_name("pc", n_steps - 1)))
         bt_pc = _load_npy(os.path.join(work, "bt_pc.npy"))
         u_b, singular, _ = np.linalg.svd(bt_pc.T, full_matrices=False)  # B = Q^T C~ (m, V)
         pcs = _orient((q_pc @ u_b[:, :k]).T, mu_r)
@@ -909,7 +939,7 @@ def build(
         outputs = {"pcs": pcs.astype(np.float32), "eigvals": eigvals.astype(np.float64)}
         ev1_info = None
         if ev1:
-            q_ev = _load_npy(os.path.join(work, "q_ev.npy"))
+            q_ev = _load_npy(os.path.join(work, _q_name("ev", n_steps - 1)))
             u_e, singular_ev, _ = np.linalg.svd(_load_npy(os.path.join(work, "bt_ev.npy")).T, full_matrices=False)
             vector = _orient((q_ev @ u_e[:, :1]).T, mu_r)[0]
             outputs["ev1"] = (vector / np.linalg.norm(vector)).astype(np.float32)
@@ -928,7 +958,8 @@ def build(
             "manifest_sha256": manifest_sha,
             "data_sha256": data_sha,
             "mask_sha256": mask_sha,
-            "subjects": {"n": len(ids), "sha256": subjects_sha, **list_info, "ids": list(ids)},
+            "data_provenance": provenance,
+            "subjects": {"n": len(ids), "sha256": subjects_sha, **list_info, "ids": list(ids), "data_sha256": subjects_data_sha, "data_rule": "sha256 over '<id>\\t<sha256 of subjects/<id>.norms.npy>\\n' per subject"},
             "K_seeds": n_seeds,
             "seed": int(seed),
             "k": k,
@@ -948,14 +979,15 @@ def build(
             "argv": list(argv or []),
             "software": {"library_version": jobs.library_version(), "numpy": np.__version__},
         }
-        # Publish: remove the old description first, so that reference.json never describes other files
+        # Publish: remove the old description first, so that reference.json never describes other files.
+        # The maps are copied (the work folder is removed at the end), so a resumed write stage can publish again.
         json_path = os.path.join(out_dir, REFERENCE_JSON)
         if os.path.exists(json_path):
             os.remove(json_path)
         for key, name in MAP_FILES.items():
             target = os.path.join(out_dir, name)
             if key in keys:
-                os.replace(os.path.join(work, name), target)
+                _copy_atomic(os.path.join(work, name), target)
                 shape = list(np.load(target, mmap_mode="r", allow_pickle=False).shape)
                 record["maps"][key] = {"file": name, "sha256": _file_sha256(target), "shape": shape, **MAP_DEFINITIONS[key]}
             elif os.path.exists(target):
@@ -1007,9 +1039,11 @@ def _candidates(bundle, path=None):
 def reference_status(bundle, subjects_sha=None, path=None, strict=False, verify=True):
     """Status of every reference folder of a bundle: a list of {path, status, reason, metadata}.
 
-    status is "ok", "missing", "stale" (connectome data, mask or, with ``strict``, the manifest
-    changed; or another definition), "other_subjects" (with ``subjects_sha``) or "corrupt"
-    (a file is missing, unreadable or does not match its sha256 with ``verify``).
+    status is "ok", "missing", "stale" (another definition, or the connectome changed: its
+    data-defining keys, kind or preprocessing record, mask, the time series of the reference's
+    subjects or, with ``strict``, any byte of connectome.json), "other_subjects" (with
+    ``subjects_sha``) or "corrupt" (reference.json is malformed, or with ``verify`` a file is missing
+    or does not match its sha256).
     """
     bundle = _open_bundle(bundle)
     statuses = []
@@ -1018,6 +1052,7 @@ def reference_status(bundle, subjects_sha=None, path=None, strict=False, verify=
     except (OSError, ValueError):
         mask_sha = None
     data_sha = _data_sha256(bundle)
+    provenance = _data_provenance(bundle)
     manifest_sha = _manifest_sha256(bundle) if strict else None
     for folder in _candidates(bundle, path):
         entry = {"path": folder, "status": "ok", "reason": None, "metadata": None}
@@ -1032,24 +1067,62 @@ def reference_status(bundle, subjects_sha=None, path=None, strict=False, verify=
         except (OSError, ValueError) as exc:
             entry.update(status="corrupt", reason=f"reference.json is unreadable: {exc}")
             continue
+        malformed = _malformed(metadata)
+        if malformed:
+            entry.update(status="corrupt", reason=f"reference.json is malformed: {malformed}")
+            continue
         entry["metadata"] = metadata
-        if not isinstance(metadata, dict) or metadata.get("definition") != DEFINITION:
-            entry.update(status="stale", reason=f"definition {metadata.get('definition') if isinstance(metadata, dict) else None!r} is not {DEFINITION!r}")
+        if metadata.get("definition") != DEFINITION:
+            entry.update(status="stale", reason=f"definition {metadata.get('definition')!r} is not {DEFINITION!r}")
         elif metadata.get("data_sha256") != data_sha:
             entry.update(status="stale", reason="the connectome data changed (connectome.json grid, subjects or dtype)")
+        elif metadata.get("data_provenance") != provenance:
+            entry.update(status="stale", reason="the connectome's kind or preprocessing record changed (connectome.json 'kind' or 'preprocessing')")
         elif mask_sha is None or metadata.get("mask_sha256") != mask_sha:
             entry.update(status="stale", reason="the connectome mask changed")
         elif strict and metadata.get("manifest_sha256") != manifest_sha:
             entry.update(status="stale", reason="connectome.json changed")
-        elif subjects_sha is not None and (metadata.get("subjects") or {}).get("sha256") != subjects_sha:
+        elif subjects_sha is not None and metadata["subjects"].get("sha256") != subjects_sha:
             entry.update(status="other_subjects", reason="built for another subject list")
+        elif _subjects_data_stale(bundle, metadata["subjects"]):
+            entry.update(status="stale", reason="the connectome time series changed (subjects/<id>.norms.npy)")
         elif verify:
-            for key, item in (metadata.get("maps") or {}).items():
-                file_path = os.path.join(folder, str(item.get("file", "")))
+            for item in metadata["maps"].values():
+                file_path = os.path.join(folder, item["file"])
                 if not os.path.isfile(file_path) or _file_sha256(file_path) != item.get("sha256"):
-                    entry.update(status="corrupt", reason=f"{item.get('file')} is missing or does not match its sha256")
+                    entry.update(status="corrupt", reason=f"{item['file']} is missing or does not match its sha256")
                     break
     return statuses
+
+
+def _malformed(metadata):
+    """Why a reference.json cannot be used (wrong types of the keys the loader reads), or None."""
+    if not isinstance(metadata, dict):
+        return "not a JSON object"
+    subjects = metadata.get("subjects")
+    if not isinstance(subjects, dict) or not isinstance(subjects.get("ids"), list) or not all(isinstance(i, str) for i in subjects["ids"]):
+        return "'subjects' must hold a list of subject ids"
+    maps = metadata.get("maps")
+    if not isinstance(maps, dict):
+        return "'maps' must be an object"
+    missing = [key for key in MAP_FILES if key != "ev1" and key not in maps]
+    if missing:
+        return f"'maps' lacks {', '.join(missing)}"
+    for key, item in maps.items():
+        if not isinstance(item, dict) or not isinstance(item.get("file"), str) or os.path.basename(item["file"]) != item["file"] or not item["file"]:
+            return f"maps[{key!r}] must name a file in the reference folder"
+    return None
+
+
+def _subjects_data_stale(bundle, subjects):
+    """True when the time series of the reference's subjects differ from those it was built from."""
+    expected = subjects.get("data_sha256")
+    if not isinstance(expected, str):
+        return True  # no fingerprint: the data cannot be checked
+    try:
+        return subjects_data_sha256(bundle, subjects["ids"]) != expected
+    except (OSError, KeyError):
+        return True  # a subject or its norms file is missing
 
 
 def load_reference(bundle, subjects_sha=None, path=None, strict=False, verify=True):
@@ -1066,17 +1139,17 @@ def load_reference(bundle, subjects_sha=None, path=None, strict=False, verify=Tr
     try:
         bundle = _open_bundle(bundle)
         valid = [entry for entry in reference_status(bundle, subjects_sha, path, strict, verify) if entry["status"] == "ok"]
-    except (OSError, ValueError):
+    except (OSError, ValueError, KeyError):
         return None
     if not valid:
         return None
     if path is None and subjects_sha is None and valid[0]["path"] != _candidates(bundle)[0]:
-        valid.sort(key=lambda entry: ((entry["metadata"].get("subjects") or {}).get("n") or 0, entry["metadata"].get("created") or ""), reverse=True)
+        valid.sort(key=lambda entry: (len(entry["metadata"]["subjects"]["ids"]), str(entry["metadata"].get("created") or "")), reverse=True)
     entry = valid[0]
     folder, metadata = entry["path"], entry["metadata"]
     try:
         files = {key: _load_npy(os.path.join(folder, item["file"])) for key, item in metadata["maps"].items()}
-    except (OSError, ValueError, KeyError):
+    except (OSError, ValueError):
         return None
     n_voxels = bundle.n_voxels
     pcs = files.get("pcs")
@@ -1235,11 +1308,14 @@ def _compare_main(argv):
         raise jobs.JobError(f"{type(exc).__name__}: {exc}", code="input") from None
     from .qa import degree_similarity
 
+    n_covered = int(np.count_nonzero(np.isfinite(external)))
+    if n_covered < 3:
+        jobs.emit("warning", code="no_overlap", message=f"The external map covers {n_covered} connectome voxels (non-zero, at least {args.min_coverage:g} of a voxel): check its space and orientation")
     comparisons = {}
     for key, vector in reference.maps.items():
         r, rho = degree_similarity(vector, external)
         comparisons[key] = {"r": r, "rho": rho}
-    jobs.emit("result", kind="comparison", external=os.path.abspath(args.external), reference=reference.path, reference_sha256=reference.sha256, n_voxels=int(np.count_nonzero(np.isfinite(external))), comparisons=comparisons)
+    jobs.emit("result", kind="comparison", external=os.path.abspath(args.external), reference=reference.path, reference_sha256=reference.sha256, n_voxels=n_covered, comparisons=comparisons)
     jobs.emit("done", outputs=[], elapsed=round(jobs.elapsed(), 3), run_id=None)
     return jobs.EXIT_OK
 
