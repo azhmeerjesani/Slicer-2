@@ -850,10 +850,33 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             slicer.app.processEvents()
             self._wait(draw.METRICS_DEBOUNCE_MS + 100)
             self.assertTrue(draw.extension().card.saveStateLabel.text.startswith("Unsaved changes"))
+            # Notes and source just typed in the card (the notes debounce pending, the source field still being
+            # edited) reach the sidecar of a save by shortcut
+            card = draw.extension().card
+            card.notesEdit.setPlainText("Typed just before Ctrl+Enter")
+            card.sourceReferenceEdit.selectAll()
+            card.sourceReferenceEdit.insert("10.1000/typed")
+            self.assertTrue(card.sourceReferenceEdit.isModified())
             studioShell.triggerPrimaryAction()
             self._pump()
             self.assertEqual(draw.lesionSaveState(segmentationNode)[:2], ("saved", written))
             self.assertEqual(sorted(os.listdir(os.path.dirname(written))), ["sub-07_lesion.json", "sub-07_lesion.nii.gz"])
+            with open(os.path.join(os.path.dirname(written), "sub-07_lesion.json"), encoding="utf-8") as f:
+                sidecar = json.load(f)
+            self.assertEqual(sidecar["Notes"], "Typed just before Ctrl+Enter")
+            self.assertEqual(sidecar["SourceReference"], "10.1000/typed")
+            self.assertFalse(card.sourceReferenceEdit.isModified())
+            # Notes typed just before another lesion is shown stay with the lesion they were typed for
+            otherNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Other lesion")
+            try:
+                card.notesEdit.setPlainText("For sub-07")
+                card.refresh({"lesionId": otherNode.GetID(), "notes": "", "sourceReference": ""})
+                self.assertEqual(segmentationNode.GetAttribute(draw.NOTES_ATTRIBUTE), "For sub-07")
+                self.assertIsNone(otherNode.GetAttribute(draw.NOTES_ATTRIBUTE))
+                self.assertEqual(card.notesEdit.toPlainText(), "")
+                card.refresh({"lesionId": segmentationNode.GetID(), "notes": "For sub-07", "sourceReference": "10.1000/typed"})
+            finally:
+                slicer.mrmlScene.RemoveNode(otherNode)
             # After the scene is saved and reopened: "Last saved as …" from the attributes
             draw._savedRecords.clear()
             self.assertEqual(draw.lesionSaveState(segmentationNode)[:2], ("previous", "sub-07_lesion.nii.gz"))
@@ -1260,7 +1283,9 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertTrue(editor.findChild("QWidget", "UndoRedoGroupBox").isVisibleTo(editor))
         self.assertFalse(editor.findChild("QWidget", "EffectHelpBrowser").isHidden())
         self.assertFalse(editor.findChild("QWidget", "SegmentsTableResizableFrame").isHidden())
-        self.assertEqual(list(editor.effectNameOrder()), [])
+        # The official tool order (and so the positional keys 1..0) comes back
+        self.assertEqual(list(editor.effectNameOrder())[:4], ["Threshold", "Paint", "Draw", "Erase"])
+        self.assertEqual(list(editor.effectNameOrder()), widget._classicEffectNameOrder)
         self.assertEqual(tableView.useTerminologySelectorSettingsKey, SegmentEditor.CLASSIC_TERMINOLOGY_SETTINGS_KEY)
         for button in widget._effectButtons():
             effect = widget._buttonEffect(button)
@@ -1480,6 +1505,25 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         interactor.InvokeEvent(vtk.vtkCommand.LeftButtonDoubleClickEvent)
         self._pump()
         self.assertEqual(layoutNode.GetNumberOfMaximizedViewNodes(), 0)
+        # Also after the view interactions are reconfigured while Paint is active (W3-02a setters)
+        crosshair = view.displayableManagerByClassName("vtkMRMLCrosshairDisplayableManager")
+        sliceIntersectionWidget = crosshair.GetSliceIntersectionWidget() if crosshair is not None else None
+        widgetClass = getattr(slicer, "vtkMRMLSliceIntersectionWidget", None)
+        if sliceIntersectionWidget is not None and hasattr(widgetClass, "SetPageStepSlices"):
+            actions = sliceIntersectionWidget.GetActionsEnabled()
+            pageStep = widgetClass.GetPageStepSlices()
+            try:
+                sliceIntersectionWidget.SetActionsEnabled(0)
+                sliceIntersectionWidget.SetActionsEnabled(actions)
+                widgetClass.SetPageStepSlices(pageStep + 3)
+                self._pump()
+                self.assertEqual(self._effect(editor), "Paint")
+                interactor.InvokeEvent(vtk.vtkCommand.LeftButtonDoubleClickEvent)
+                self._pump()
+                self.assertEqual(layoutNode.GetNumberOfMaximizedViewNodes(), 0)
+            finally:
+                widgetClass.SetPageStepSlices(pageStep)
+                sliceIntersectionWidget.SetActionsEnabled(actions)
         editor.setActiveEffect(None)
         self._pump()
         interactor.InvokeEvent(vtk.vtkCommand.LeftButtonDoubleClickEvent)
@@ -1657,6 +1701,131 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         compositeNode = self.layoutManager.sliceWidget("Red").mrmlSliceCompositeNode()
         self.assertFalse(compositeNode.GetForegroundVolumeID())
 
+    def test_31_draw_side_word_preset_and_set(self):
+        """'Left' only on an MNI grid, the Brain preset in one click, Alt+→ through a loaded set without new nodes (U6, U8, U16)."""
+        import os
+        import tempfile
+
+        import numpy as np
+
+        from StudioLib import draw, importer
+
+        def readout():
+            draw.session(studioShell).refreshPanel(computeMetrics=True)
+            return str(self.mainWindow.findChild("QLabel", "StudioLesionReadout").text)
+
+        def paintAt(editor, ras):
+            segmentationNode, segmentId, sourceVolumeNode = editor.segmentationNode(), editor.currentSegmentID(), editor.sourceVolumeNode()
+            rasToIjk = vtk_matrix()
+            sourceVolumeNode.GetRASToIJKMatrix(rasToIjk)
+            i, j, k = (round(value) for value in rasToIjk.MultiplyPoint((*ras, 1.0))[:3])
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, sourceVolumeNode)
+            array[k - 1:k + 2, j - 1:j + 2, i - 1:i + 2] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, sourceVolumeNode)
+
+        studioShell = self._applyStudio()
+        # On the MNI template a lesion at x < 0 is "Left"
+        editor = self._startOnTemplate(studioShell)
+        paintAt(editor, (-30.0, -10.0, 10.0))
+        self.assertTrue(readout().startswith("Left · "), readout())
+        # Display: the Brain preset changes window/level in one click
+        displayNode = editor.sourceVolumeNode().GetDisplayNode()
+        before = (displayNode.GetWindow(), displayNode.GetLevel())
+        draw.extension().displayCard.presetButtons["brain"].click()
+        self._pump()
+        self.assertNotEqual((displayNode.GetWindow(), displayNode.GetLevel()), before)
+        # On a scan in scanner space: no side word
+        slicer.mrmlScene.Clear(0)
+        _path, editor = self._openScanInDraw(studioShell)
+        source = editor.sourceVolumeNode()
+        bounds = [0.0] * 6
+        source.GetRASBounds(bounds)
+        paintAt(editor, (bounds[0] + 0.25 * (bounds[1] - bounds[0]), 0.5 * (bounds[2] + bounds[3]), 0.5 * (bounds[4] + bounds[5])))
+        text = readout()
+        self.assertTrue(text.split(" · ")[0].endswith("mL"), text)
+        # A loaded set of lesions on the NLin6Asym 2 mm grid: Alt+→ steps through it and adds no node
+        slicer.mrmlScene.Clear(0)
+        directory = tempfile.mkdtemp(prefix="StudioTestSet", dir=slicer.app.temporaryPath)
+        paths = []
+        for index in range(3):
+            maskNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "mask")
+            mask = np.zeros((91, 109, 91), np.uint8)
+            mask[40:43, 50:53, 20 + 5 * index:23 + 5 * index] = 1
+            slicer.util.updateVolumeFromArray(maskNode, mask)
+            maskNode.SetIJKToRASMatrix(vtk_matrix([[-2, 0, 0, 90], [0, 2, 0, -126], [0, 0, 2, -72], [0, 0, 0, 1]]))
+            paths.append(os.path.join(directory, f"sub-0{index + 1}_lesion.nii.gz"))
+            self.assertTrue(slicer.util.saveNode(maskNode, paths[-1]))
+            slicer.mrmlScene.RemoveNode(maskNode)
+        importer.loadFiles(paths, studioShell)
+        self._pump(10)
+        loadedSet = importer.loadedSet()
+        self.assertIsNotNone(loadedSet)
+        self.assertEqual(studioShell.currentWorkspace(), "draw")
+        # A lesion just loaded from its file (named and styled by the importer, voxels unchanged) is saved (U4)
+        state, savedPath, _savedTime = draw.lesionSaveState(loadedSet.current())
+        self.assertEqual(state, "saved")
+        self.assertIn(os.path.basename(savedPath), [os.path.basename(path) for path in paths])
+        nodeCount = slicer.mrmlScene.GetNumberOfNodes()
+        index = loadedSet.index
+        keys = {portableKey(shortcut.key): shortcut for shortcut in self.mainWindow.findChildren("QShortcut")
+                if shortcut.enabled and shortcut.property("studioShortcut")}
+        nextKey = keys.get(portableKey(draw.NEXT_SUBJECT_SHORTCUT))
+        if nextKey is not None:
+            nextKey.activated()
+        else:
+            draw.stepSubject(1, studioShell)
+        self._pump(6)
+        self.assertEqual(loadedSet.index, index + 1)
+        self.assertEqual(slicer.mrmlScene.GetNumberOfNodes(), nodeCount)
+        self.assertEqual(editor.segmentationNode().GetID(), loadedSet.current().GetID())
+        loadedSet.close()
+        self._pump()
+
+    def test_32_draw_lesion_segment_and_new_lesion(self):
+        """Looking at a scan in Draw adds no segment, the first tool adds "Lesion"; a saved lesion offers New lesion (UX-M9, U7)."""
+        import os
+        import tempfile
+
+        from StudioLib import draw
+
+        studioShell = self._applyStudio()
+        studioShell.switchTo("library")
+        self._pump()
+        volume = slicer.util.loadVolume(self._scanFile())
+        self._pump(4)
+        for node in slicer.util.getNodesByClass("vtkMRMLSegmentationNode"):
+            slicer.mrmlScene.RemoveNode(node)
+        studioShell.switchTo("library")
+        self._pump()
+        studioShell.switchTo("draw")
+        self._pump(6)
+        editor = slicer.modules.SegmentEditorWidget.editor
+        segmentationNode = editor.segmentationNode()
+        self.assertIsNotNone(segmentationNode)
+        self.assertEqual(editor.sourceVolumeNode().GetID(), volume.GetID())
+        self.assertEqual(segmentationNode.GetSegmentation().GetNumberOfSegments(), 0)
+        self.assertEqual([node.GetName() for node in slicer.util.getNodesByClass("vtkMRMLSegmentationNode")], [segmentationNode.GetName()])
+        # The Brush tile is suggested, and picking it adds the "Lesion" segment
+        self.assertIsNotNone(slicer.modules.SegmentEditorWidget.tileOutline("Paint"))
+        editor.findChild("QToolButton", "Paint").click()
+        self._pump(6)
+        self.assertEqual(self._effect(editor), "Paint")
+        segmentation = segmentationNode.GetSegmentation()
+        self.assertEqual(segmentation.GetNumberOfSegments(), 1)
+        self.assertEqual(segmentation.GetNthSegment(0).GetName(), "Lesion")
+        self.assertGreater(self._paintCube(editor), 0)
+        card = draw.lesionCard()
+        self.assertFalse(card.newLesionButton.isVisible())
+        directory = tempfile.mkdtemp(prefix="StudioTestNew", dir=slicer.app.temporaryPath)
+        self.assertTrue(draw.saveLesionDialog(studioShell, path=os.path.join(directory, "case-001_lesion.nii.gz")))
+        self._pump(4)
+        self.assertTrue(card.newLesionButton.isVisible())
+        saved = editor.segmentationNode()
+        card.newLesionButton.click()
+        self._pump(8)
+        self.assertIsNot(editor.segmentationNode(), saved)
+        self.assertEqual(self._effect(editor), "Paint")
+        self.assertFalse(card.newLesionButton.isVisible())
 
 def vtk_matrix(rows=None):
     """A vtkMatrix4x4 (identity, or the given rows)."""

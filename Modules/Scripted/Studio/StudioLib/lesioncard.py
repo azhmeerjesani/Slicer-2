@@ -10,7 +10,7 @@ Two parts:
 
     Row 1   [swatch] [name or lesion switcher ▾] [eye] [center] [follow] [⋯]
     Row 2   Left · 2.27 mL · 1 part · 0 gaps       (amber parts / gaps / outside with their links)
-    Row 3   Saved · sub-01_lesion.nii.gz · 2 min ago
+    Row 3   Saved · sub-01_lesion.nii.gz · 2 min ago       [New lesion] once the lesion is saved
     Row 4   space line (amber or neutral), when there is one
     Row 5   hint line (the suggested tool, the active tool), when there is one
     Row 6   [Fill gaps and specks] ...... [Notes ▸]   and the Notes fields when open
@@ -235,8 +235,8 @@ class LesionCard:
 
     ``renameLesion(name)``, ``chooseColor()``, ``setLesionVisible(bool)``, ``selectLesion(nodeId)``,
     ``setLesionVisibleById(nodeId, bool)``, ``centerOnLesion()``, ``setFollowStrokes(bool)``, ``keepLargest()``,
-    ``fillGaps()``, ``clipToBrain()``, ``fillGapsAndSpecks()``, ``setNotes(text)``, ``setSourceReference(text)`` and
-    ``menuActions()`` -> ``[(label, callback)]`` (None for a separator).
+    ``fillGaps()``, ``clipToBrain()``, ``fillGapsAndSpecks()``, ``newLesion()``, ``setNotes(text, lesionId)``,
+    ``setSourceReference(text, lesionId)`` (the lesion shown when the text was typed) and ``menuActions()`` -> ``[(label, callback)]`` (None for a separator).
     """
 
     def __init__(self, controller):
@@ -320,7 +320,32 @@ class LesionCard:
         self.saveStateLabel = self._label("StudioLesionSaveState", 12)
         self.spaceLabel = self._label("StudioLesionSpaceLine", 12)
         self.hintLabel = self._label("StudioLesionHint", 12)
-        for label in (self.readoutLabel, self.saveStateLabel, self.spaceLabel, self.hintLabel):
+        # Row 3: the save state, and "New lesion" once the lesion is saved (the next case starts on a new lesion and
+        # never overwrites the saved file)
+        self.saveRow = qt.QWidget()
+        self.saveRow.setObjectName("StudioLesionSaveRow")
+        self.saveRow.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+        saveRowLayout = qt.QHBoxLayout(self.saveRow)
+        saveRowLayout.setContentsMargins(0, 0, 0, 0)
+        saveRowLayout.setSpacing(4)
+        saveRowLayout.addWidget(self.saveStateLabel, 1)
+        self.newLesionButton = qt.QPushButton(_("New lesion"))
+        self.newLesionButton.setObjectName("StudioNewLesionButton")
+        self.newLesionButton.setFlat(True)
+        self.newLesionButton.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
+        self.newLesionButton.setToolTip(ui.tooltip(_("New lesion"), None, _("start the next lesion; the saved one keeps its file and is hidden")))
+        self.newLesionButton.setFocusPolicy(qt.Qt.TabFocus)
+        self.newLesionButton.connect("clicked()", self._onNewLesionClicked)
+        ui.setRole(self.newLesionButton, "ghost")
+        ui.installButtonKeys(self.newLesionButton)
+        _setPixelFont(self.newLesionButton, 12)
+        self.newLesionButton.hide()
+        saveRowLayout.addWidget(self.newLesionButton, 0, qt.Qt.AlignTop)
+        self.saveStateLabel.show()
+        self.saveRow.hide()
+        layout.addWidget(self.readoutLabel)
+        layout.addWidget(self.saveRow)
+        for label in (self.spaceLabel, self.hintLabel):
             layout.addWidget(label)
 
         # Row 6: one-click cleanup and the notes
@@ -369,7 +394,7 @@ class LesionCard:
         self.sourceReferenceEdit.setObjectName("StudioLesionSourceReferenceEdit")
         self.sourceReferenceEdit.setPlaceholderText(_("Source (DOI, figure)"))
         self.sourceReferenceEdit.setAccessibleName(_("Source (DOI, figure)"))
-        self.sourceReferenceEdit.connect("editingFinished()", lambda: self.controller.setSourceReference(str(self.sourceReferenceEdit.text)))
+        self.sourceReferenceEdit.connect("editingFinished()", self._commitSourceReference)
         notesLayout.addWidget(self.sourceReferenceEdit)
         self.notesFrame.hide()
         layout.addWidget(self.notesFrame)
@@ -381,7 +406,7 @@ class LesionCard:
         self._notesTimer = qt.QTimer()
         self._notesTimer.setSingleShot(True)
         self._notesTimer.setInterval(500)
-        self._notesTimer.connect("timeout()", lambda: self.controller.setNotes(str(self.notesEdit.toPlainText())))
+        self._notesTimer.connect("timeout()", self._commitNotes)
         ui.addPaletteListener(self._onPaletteChanged)
 
     def _label(self, objectName, basePx, links=False):
@@ -402,10 +427,14 @@ class LesionCard:
     #
 
     def refresh(self, state):
-        """Show ``state``: ``{name, color (r, g, b), visible, lesions [(id, name, visible)], readoutHtml, saveState
-        (text), saveStateToolTip, spaceLine (text or None), spaceLevel ("warn" or "neutral"), hint, notes,
+        """Show ``state``: ``{name, lesionId, color (r, g, b), visible, lesions [(id, name, visible)], readoutHtml, saveState
+        (text), saveStateToolTip, offerNewLesion, spaceLine (text or None), spaceLevel ("warn" or "neutral"), hint, notes,
         sourceReference, follow, enabled}``. Missing keys keep their current value.
         """
+        switched = "lesionId" in state and "lesionId" in self._state and state["lesionId"] != self._state["lesionId"]
+        if switched:
+            # Another lesion is shown: what was typed for the previous one goes to the previous one
+            self.commitEdits()
         self._state.update(state)
         state = self._state
         name = state.get("name") or ""
@@ -433,13 +462,19 @@ class LesionCard:
         self._setText(self.readoutLabel, state.get("readoutHtml"))
         self._setText(self.saveStateLabel, state.get("saveState"), "text3")
         self.saveStateLabel.setToolTip(state.get("saveStateToolTip") or "")
+        self.saveRow.setVisible(bool(state.get("saveState")))
+        self.newLesionButton.setVisible(bool(state.get("offerNewLesion")) and enabled)
         self._setText(self.spaceLabel, state.get("spaceLine"), "warning" if state.get("spaceLevel") == "warn" else "text2")
         self._setText(self.hintLabel, state.get("hint"), "text2")
-        if not self.notesEdit.hasFocus() and str(self.notesEdit.toPlainText()) != (state.get("notes") or ""):
+        # Text being typed (focused, or not yet committed) is not replaced by the lesion's value, unless another
+        # lesion is shown
+        notesTyped = self.notesEdit.hasFocus() or self._notesTimer.isActive()
+        if (switched or not notesTyped) and str(self.notesEdit.toPlainText()) != (state.get("notes") or ""):
             self.notesEdit.blockSignals(True)
             self.notesEdit.setPlainText(state.get("notes") or "")
             self.notesEdit.blockSignals(False)
-        if not self.sourceReferenceEdit.hasFocus() and str(self.sourceReferenceEdit.text) != (state.get("sourceReference") or ""):
+        sourceTyped = self.sourceReferenceEdit.hasFocus() or self.sourceReferenceEdit.isModified()
+        if (switched or not sourceTyped) and str(self.sourceReferenceEdit.text) != (state.get("sourceReference") or ""):
             self.sourceReferenceEdit.setText(state.get("sourceReference") or "")
 
     def _setText(self, label, text, colorToken=None):
@@ -543,6 +578,9 @@ class LesionCard:
     def _onCleanupClicked(self):
         self.controller.fillGapsAndSpecks()
 
+    def _onNewLesionClicked(self):
+        self.controller.newLesion()
+
     def _onEyeToggled(self, checked):
         self.eyeButton.setIcon(ui.icon("eye" if checked else "eye-off", 16))
         self.controller.setLesionVisible(bool(checked))
@@ -558,6 +596,26 @@ class LesionCard:
 
     def _onNotesChanged(self):
         self._notesTimer.start()
+
+    def _commitNotes(self):
+        self._notesTimer.stop()
+        self.controller.setNotes(str(self.notesEdit.toPlainText()), self._state.get("lesionId"))
+
+    def _commitSourceReference(self):
+        self.sourceReferenceEdit.setModified(False)
+        self.controller.setSourceReference(str(self.sourceReferenceEdit.text), self._state.get("lesionId"))
+
+    def commitEdits(self):
+        """Write the notes and the source reference that are still being typed to the lesion now (a save by keyboard
+        shortcut neither waits for the notes debounce nor finishes the editing of the source field).
+
+        Only edits the user made since the last commit are written: a field that only shows the lesion's own value is
+        left alone.
+        """
+        if self._notesTimer.isActive():
+            self._commitNotes()
+        if self.sourceReferenceEdit.isModified():
+            self._commitSourceReference()
 
     def _fillMenu(self):
         self.menu.clear()
@@ -617,8 +675,11 @@ class LesionCard:
             except Exception:
                 pass
         self.controller = _NullController()
+        # Deleted with its parent kept and its stylesheet bindings removed: a parentless widget that Python still holds
+        # (ui.bindStyleSheet) would be deleted at interpreter exit, after its Python event filters are gone
+        for target in (self.widget, *self.widget.findChildren("QWidget")):
+            ui.bindStyleSheet(target, None)
         self.widget.hide()
-        self.widget.setParent(None)
         self.widget.deleteLater()
 
 

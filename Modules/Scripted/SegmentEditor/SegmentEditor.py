@@ -163,6 +163,9 @@ class _TileEventFilter(qt.QObject):
         if eventType == qt.QEvent.Resize:
             self.widget._onTileGridResized(obj)
             return False
+        if eventType in (qt.QEvent.MouseButtonPress, qt.QEvent.MouseButtonRelease) and not obj.inherits("QAbstractButton"):
+            # The tile grid frame (gaps, margins, empty cells): only its resizes matter
+            return False
         if eventType == qt.QEvent.MouseButtonPress and event.button() == qt.Qt.LeftButton:
             if obj.checkable and obj.checked and self.widget._tileEffectIsActive(obj):
                 self.pressedTile = obj
@@ -202,6 +205,9 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._previousEffectName = None
         self._observedSegmentation = None
         self._columnTimer = None
+        self._bottomStretch = None
+        self._mainWindow = None
+        self._classicEffectNameOrder = []
 
     def setup(self):
         ScriptedLoadableModuleWidget.setup(self)
@@ -215,6 +221,8 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         import qSlicerSegmentationsModuleWidgetsPythonQt
 
         self.editor = qSlicerSegmentationsModuleWidgetsPythonQt.qMRMLSegmentEditorWidget()
+        # The classic (official) tool order, restored by the classic presentation
+        self._classicEffectNameOrder = list(self.editor.effectNameOrder())
         self.editor.setMaximumNumberOfUndoStates(UNDO_STATES)
         if not slicer.app.testingEnabled() and hasattr(self.editor, "autoCreateSegmentOnEffectActivation"):
             # The first effect creates the first segment (D24); never under --testing (SPEC 9.1)
@@ -247,6 +255,7 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.editor.updateEffectList()
         if self._appliedPresentation == "studio":
             self._applyStudioEffects()
+            self._stackCheckBoxRows(True)
 
     #
     # Presentation (Slicer Studio, SPEC 5.1)
@@ -346,9 +355,11 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._removeTileFilter()
         self._setModuleWidthPolicy(qt.QSizePolicy.Minimum)
         self._setProperties(classicProperties())
-        self.editor.setEffectNameOrder([])
+        self.editor.setEffectNameOrder(self._classicEffectNameOrder)
         self._setEffectParameters(CLASSIC_EFFECT_PARAMETERS)
         self.editor.setVisible(True)
+        self._setBottomStretch(False)
+        self._stackCheckBoxRows(False)
         for objectName in (*STUDIO_HIDDEN_WIDGETS, "SegmentsTableResizableFrame"):
             widget = self._child("QWidget", objectName)
             if widget is not None:
@@ -423,10 +434,50 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._installTileFilter()
         if self._installedExtension is not self._extension or not self._extensionWidgets:
             self._installExtensionWidgets()
+        self._setBottomStretch(True)
+        self._stackCheckBoxRows(True)
         self._observeSegmentation(self.editor.segmentationNode())
         self._updateSegmentsTableVisibility()
         self._applyStudioEffects()
         self._scheduleColumnUpdate()
+
+    def _setBottomStretch(self, stretch):
+        """Studio presentation: the cards and tool options keep their height and the free space goes below them (in the
+        classic presentation the segments table takes it; the studio presentation hides it with one segment).
+        """
+        if stretch and self._bottomStretch is None:
+            self._bottomStretch = qt.QSpacerItem(0, 0, qt.QSizePolicy.Minimum, qt.QSizePolicy.Expanding)
+            self.layout.addItem(self._bottomStretch)
+            self._setEditorVerticalPolicy(qt.QSizePolicy.Maximum)
+        elif not stretch and self._bottomStretch is not None:
+            self.layout.removeItem(self._bottomStretch)
+            self._bottomStretch = None
+            self._setEditorVerticalPolicy(self._classicEditorVerticalPolicy)
+
+    _classicEditorVerticalPolicy = None
+
+    def _setEditorVerticalPolicy(self, policy):
+        sizePolicy = self.editor.sizePolicy
+        if SegmentEditorWidget._classicEditorVerticalPolicy is None:
+            SegmentEditorWidget._classicEditorVerticalPolicy = sizePolicy.verticalPolicy()
+        if policy is not None and sizePolicy.verticalPolicy() != policy:
+            self.editor.setSizePolicy(sizePolicy.horizontalPolicy(), policy)
+
+    def _stackCheckBoxRows(self, stacked):
+        """Studio presentation: rows of check boxes in the tool options (Brush: Sphere brush, Edit in 3D views, Color smudge)
+        are stacked, so that the narrow inspector does not clip their labels; the classic presentation puts them back in rows.
+        """
+        optionsGroupBox = self._child("QGroupBox", "OptionsGroupBox")
+        if optionsGroupBox is None:
+            return
+        direction = qt.QBoxLayout.TopToBottom if stacked else qt.QBoxLayout.LeftToRight
+        for layout in optionsGroupBox.findChildren("QHBoxLayout"):
+            widgets = [layout.itemAt(index).widget() for index in range(layout.count())]
+            widgets = [widget for widget in widgets if widget is not None]
+            if len(widgets) < 2 or not all(widget.inherits("QCheckBox") for widget in widgets):
+                continue
+            if layout.direction() != direction:
+                layout.setDirection(direction)
 
     def _setModuleWidthPolicy(self, policy):
         """Horizontal size policy of the module widget. The module panel gives it Minimum (qSlicerModulePanel.cxx:163),
@@ -805,7 +856,10 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def _installPresentationShortcuts(self):
         self._removePresentationShortcuts()
-        mainWindow = slicer.util.mainWindow()
+        if self._mainWindow is None:
+            # Looked up once (slicer.util.mainWindow() walks the top-level widgets)
+            self._mainWindow = slicer.util.mainWindow()
+        mainWindow = self._mainWindow
         if mainWindow is None:
             return
         for key, target, description in STUDIO_MNEMONICS:
@@ -945,10 +999,11 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         studio = self._appliedPresentation == "studio"
         # If no segmentation node exists then create one so that the user does not have to create one manually
         if not self.editor.segmentationNodeID():
-            if studio and hasattr(self._extension, "ensureSegmentation"):
-                # The Draw workspace creates its lesion segmentation itself (never without a scan)
+            if studio:
+                # The Draw workspace creates its lesion segmentation itself (never without a scan), through its extension;
+                # without one yet, the studio presentation creates none (the extension does when it is installed)
                 self._callExtension(self._extension, "ensureSegmentation", self.editor)
-            elif not studio or self.hasScalarVolume():
+            else:
                 segmentationNode = slicer.mrmlScene.GetFirstNode(None, "vtkMRMLSegmentationNode")
                 if not segmentationNode:
                     segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode")
@@ -1029,5 +1084,7 @@ class SegmentEditorTest(ScriptedLoadableModuleTest):
         widget.setPresentation("classic")
         self.assertEqual({name: getattr(editor, name) for name in table}, table)
         self.assertTrue(editor.findChild("QWidget", "UndoRedoGroupBox").isVisibleTo(editor))
-        self.assertEqual(editor.effectNameOrder(), [])
+        # The official tool order (and so the positional keys 1..0) comes back
+        self.assertEqual(list(editor.effectNameOrder())[:4], ["Threshold", "Paint", "Draw", "Erase"])
+        self.assertEqual(list(editor.effectNameOrder()), widget._classicEffectNameOrder)
         self.delayDisplay("Test passed!")
