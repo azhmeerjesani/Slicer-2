@@ -10,10 +10,12 @@ restore the Classic interface. They cover:
 - the pill of the Place mode (single and persistent) naming the point list, with its Esc exit (the shell's Esc
   ladder) and its ✕;
 - the name of the Draw tool that resumes after the mode ("Brush resumes after");
-- the pill of the window/level mode, on one view (four-up);
+- the pill of the window/level mode, on one view (four-up), following layout changes;
 - the pill being hidden while a canvas covers the views (Library), and shown again afterwards;
 - Classic and uninstall(): no pill, no observer, no timer.
 """
+
+import time
 
 import qt
 
@@ -301,6 +303,39 @@ class StudioModesTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         modes.instance().refresh()
         self._pump()
         self.assertEqual(modes.instance().targetView, target)
+
+    def test_pill_follows_layout_change(self):
+        """A layout change during a mode (Alt+n, the layout menu) moves the pill to a view that is shown."""
+        from StudioLib import hud, modes
+
+        self._applyStudio()
+        layoutManager = slicer.app.layoutManager()
+        layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
+        self._pump(10)
+        centralWidget = self.mainWindow.centralWidget()
+        yellow = dict(hud.viewRects(centralWidget))["Yellow"]
+        qt.QCursor.setPos(centralWidget.mapToGlobal(yellow.center()))
+        self._pump()
+        self.interactionNode.SetCurrentInteractionMode(self.interactionNode.AdjustWindowLevel)
+        self._pump()
+        self.assertTrue(modes.pill().isVisible())
+
+        for layout in (slicer.vtkMRMLLayoutNode.SlicerLayoutOneUpRedSliceView, slicer.vtkMRMLLayoutNode.SlicerLayoutOneUp3DView,
+                       slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView):
+            layoutManager.setLayout(layout)
+            # The canvas check (every 250 ms) follows the views once their geometry is settled
+            deadline = time.monotonic() + 0.4
+            while time.monotonic() < deadline:
+                slicer.app.processEvents()
+                time.sleep(0.01)
+            controller = modes.instance()
+            pill = modes.pill()
+            pillRect = qt.QRect(pill.mapTo(centralWidget, qt.QPoint(0, 0)), pill.size)
+            views = dict(hud.viewRects(centralWidget))
+            self.assertIn(controller.targetView, views, f"layout {layout}")
+            self.assertEqual([name for name, rect in views.items() if rect.intersects(pillRect)], [controller.targetView], f"layout {layout}")
+            target = controller._targetViewRect()
+            self.assertLessEqual(abs(pillRect.center().x() - target.center().x()), 1, f"layout {layout}")
 
     #
     # Library canvas, Classic

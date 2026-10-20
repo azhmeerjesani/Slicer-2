@@ -154,12 +154,13 @@ void qSlicerSettingsStylesPanelPrivate::init()
   {
     this->PlatformFont = QApplication::font();
     q->registerProperty("Appearance/Font", q, "appearanceFont", SIGNAL(appearanceFontChanged(QString)), qSlicerSettingsStylesPanel::tr("Font"));
-    // Without a font chosen here, a font chosen in the "font" setting is applied as the classic panel does
-    // (qSlicerApplication applies Inter otherwise).
-    QFont userFont;
-    if (this->AppearanceFont.isEmpty() && this->userFontSetting(userFont) && userFont != QApplication::font())
+    // Without a usable font chosen here, the default font is applied: a font chosen in the "font" setting
+    // (as the classic panel does), else Inter. qSlicerApplication applies Inter at startup, but not when
+    // Appearance/Font names a font that is not installed (for example a settings file from another computer).
+    QFont defaultFont;
+    if (this->AppearanceFont.isEmpty() && this->defaultAppearanceFont(defaultFont) && defaultFont != QApplication::font())
     {
-      qSlicerApplication::application()->setFont(userFont);
+      qSlicerApplication::application()->setFont(defaultFont);
     }
     this->updateFontButton();
   }
@@ -750,7 +751,7 @@ void qSlicerSettingsStylesPanel::onFontChanged(const QFont& font)
 bool qSlicerSettingsStylesPanel::event(QEvent* event)
 {
   Q_D(qSlicerSettingsStylesPanel);
-  if (event->type() == QEvent::ApplicationFontChange || event->type() == QEvent::Show)
+  if (event->type() == QEvent::ApplicationFontChange || event->type() == QEvent::FontChange || event->type() == QEvent::Show)
   {
     d->updateFontButton();
   }

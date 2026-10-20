@@ -107,6 +107,12 @@ class StudioTopBarTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             patch(studioShell)
         studioShell.apply()
         self._pump()
+        # A window wide enough for the normal top bar (below 1100 px the shell makes it compact)
+        if self.mainWindow.width < shell.NARROW_WINDOW_WIDTH + 100:
+            self.mainWindow.showNormal()
+            self.mainWindow.resize(shell.NARROW_WINDOW_WIDTH + 300, max(self.mainWindow.height, 700))
+            self._wait(lambda: self.mainWindow.width >= shell.NARROW_WINDOW_WIDTH + 100, 2000)
+            self._pump()
         return studioShell
 
     def _patch(self, owner, name, value):

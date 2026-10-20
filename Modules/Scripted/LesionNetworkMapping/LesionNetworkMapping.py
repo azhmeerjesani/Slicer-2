@@ -78,6 +78,7 @@ def writeDemoConnectome(path, nSubjects=DEMO_SUBJECTS, shape=DEMO_SHAPE, runs=DE
 def _demoMain(argv):
     """``demo --out DIR [--subjects N] [--seed S]``: write the synthetic demo connectome with the job protocol."""
     import os
+    import shutil
     import time
 
     from LesionNetworkMappingLib import jobs
@@ -97,9 +98,29 @@ def _demoMain(argv):
         jobs.progress(done, total, started)
         cancel.raise_if_cancelled(done=done)
 
-    result = writeDemoConnectome(os.path.abspath(args.out), nSubjects=args.subjects, seed=args.seed, onSubject=onSubject)
-    jobs.emit("result", kind="connectome", path=result["path"])
-    jobs.emit("done", outputs=[result["path"]], elapsed=round(jobs.elapsed(), 3), run_id=None)
+    # Written beside the destination and swapped in at the end, so that a stopped or failed job leaves an
+    # existing demo as it was
+    out = os.path.abspath(args.out)
+    partial = out + ".partial"
+    shutil.rmtree(partial, ignore_errors=True)
+    try:
+        writeDemoConnectome(partial, nSubjects=args.subjects, seed=args.seed, onSubject=onSubject)
+        previous = out + ".previous"
+        shutil.rmtree(previous, ignore_errors=True)
+        if os.path.exists(out):
+            os.replace(out, previous)
+        try:
+            os.replace(partial, out)
+        except BaseException:
+            if os.path.exists(previous) and not os.path.exists(out):
+                os.replace(previous, out)
+            raise
+        shutil.rmtree(previous, ignore_errors=True)
+    except BaseException:
+        shutil.rmtree(partial, ignore_errors=True)
+        raise
+    jobs.emit("result", kind="connectome", path=out)
+    jobs.emit("done", outputs=[out], elapsed=round(jobs.elapsed(), 3), run_id=None)
 
 
 def _jobMain(argv):
@@ -440,7 +461,7 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
         self._bundleCache.pop(path, None)
         spec = jobrunner.JobSpec(
             "LesionNetworkMapping", ["demo", "--out", path, "--subjects", str(int(nSubjects))], title=_("Creating the demo"), heavy=False,
-            kind="demo", runRoot=os.path.dirname(path), onEvent=onEvent, onDone=onDone, name="demo")
+            kind="demo", runRoot=jobrunner.defaultRunRoot(), onEvent=onEvent, onDone=onDone, name="demo")
         return jobrunner.instance().submit(spec)
 
     @staticmethod

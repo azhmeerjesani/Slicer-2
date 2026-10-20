@@ -698,6 +698,7 @@ class StickyToast:
 
     def __init__(self, parentWidget):
         self.parentWidget = parentWidget
+        self.fullText = ""
         self.frame = qt.QFrame(parentWidget)
         self.frame.setObjectName("StudioStickyToast")
         self.frame.setFixedHeight(hud.TOAST_HEIGHT)
@@ -746,6 +747,7 @@ class StickyToast:
     def show(self, text, sticky=True, ms=None, action=None, actionText=None):
         self._action = action
         self._sticky = sticky
+        self.fullText = text
         self.label.setText(text)
         hasAction = action is not None
         self.actionButton.setText(actionText or _("Show"))
@@ -812,8 +814,12 @@ class StickyToast:
         self.frame.hide()
 
     def updatePosition(self):
+        # The whole text, shortened with an ellipsis when the toast is narrower (beside a figure)
+        self.label.setText(self.fullText)
         self.frame.adjustSize()
-        x, y, width = hud.toastGeometry(self.parentWidget, self.frame.sizeHint.width())
+        preferredWidth = self.frame.sizeHint.width()
+        x, y, width = hud.toastGeometry(self.parentWidget, preferredWidth)
+        self.label.setText(hud.elidedText(self.label, self.fullText, preferredWidth - width))
         self.frame.resize(width, hud.TOAST_HEIGHT)
         self.frame.move(x, y)
 
@@ -824,7 +830,8 @@ class StickyToast:
         return self._sticky
 
     def text(self):
-        return self.label.text
+        """The whole text (the label may show it shortened)."""
+        return self.fullText
 
     def raise_(self):
         if self.frame.isVisible():

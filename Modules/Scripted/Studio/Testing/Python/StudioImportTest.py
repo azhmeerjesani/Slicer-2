@@ -407,6 +407,51 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(self._background("Yellow").GetID(), second.GetID())
         self.assertEqual(self._background("Red").GetName(), "sub-09_T1w")
 
+    def test_toast_beside_figure_keeps_corner_text(self):
+        """In Compare, a long consequence toast is beside the figure, above the corner text of the drawing view
+        (its laterality cue, USABILITY P6), and its text is shortened with an ellipsis, never clipped.
+        """
+        from StudioLib import hud, importer
+
+        studioShell = self._applyStudio()
+        oldSize = self.mainWindow.size
+        try:
+            self.mainWindow.resize(1366, 768)
+            self._pump()
+            self._routeFigure(studioShell)
+            self._pump()
+            centralWidget = self.mainWindow.centralWidget()
+            views = dict(hud.viewRects(centralWidget))
+            red, figure = views["Red"], views[importer.FIGURE_VIEW_NAME]
+            text = "Smooth removed 12% of the lesion · this is a much longer consequence message than usual, to fill the toast"
+            studioShell.toast(text, level="consequence", action=lambda: None, actionText="Undo")
+            self._pump()
+            frame = studioShell._stickyToast.frame
+            toastRect = qt.QRect(frame.mapTo(centralWidget, qt.QPoint(0, 0)), frame.size)
+            # The bottom corner text of Red (two lines) and the figure are not covered
+            cornerBand = qt.QRect(red.left(), red.bottom() - 40, 150, 41)
+            self.assertFalse(toastRect.intersects(cornerBand), (toastRect, cornerBand))
+            self.assertFalse(toastRect.intersects(figure), (toastRect, figure))
+            # The whole text is kept (screen readers, toastText()); the label shows it shortened with an ellipsis
+            self.assertEqual(studioShell.toastText(), text)
+            label = studioShell._stickyToast.label
+            self.assertTrue(label.text.endswith("…"), label.text)
+            metrics = label.fontMetrics()
+            advance = getattr(metrics, "horizontalAdvance", None)
+            shownWidth = advance(label.text) if advance is not None else metrics.width(label.text)
+            self.assertLessEqual(shownWidth, label.width, (shownWidth, label.width))
+            # The plain toast too
+            studioShell.toast(text)
+            self._pump()
+            plain = studioShell._toast.label
+            plainRect = qt.QRect(plain.mapTo(centralWidget, qt.QPoint(0, 0)), plain.size)
+            self.assertFalse(plainRect.intersects(cornerBand), (plainRect, cornerBand))
+            self.assertFalse(plainRect.intersects(figure), (plainRect, figure))
+            self.assertEqual(studioShell.toastText(), text)
+        finally:
+            self.mainWindow.resize(oldSize)
+            self._pump()
+
     def test_figure_guard(self):
         """Paint over the figure changes no voxel, over Red it paints; wheel, keys and Link views keep Yellow at its slice."""
         from StudioLib import importer

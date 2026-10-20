@@ -113,6 +113,8 @@ class ModePill(hud.CornerPill):
     def __init__(self, parentWidget, callback, reserveFunction=None, rectFunction=None):
         hud.CornerPill.__init__(self, parentWidget, PILL_OBJECT_NAME, "", "x", callback, ui.tooltip(_("Back to navigating"), "Esc"))
         self.fullText = ""
+        #: The rectangle the pill was last centred on (``_targetRect()``), to notice layout changes
+        self.lastRect = None
         self.reserveFunction = reserveFunction
         self.rectFunction = rectFunction
         # The ✕ icon after the text
@@ -181,6 +183,7 @@ class ModePill(hud.CornerPill):
     def updatePosition(self):
         self._fit()
         rect = self._targetRect()
+        self.lastRect = qt.QRect(rect)
         x = rect.left() + (rect.width() - self.button.width) // 2
         x = max(0, min(x, self.parentWidget.width - self.button.width))
         self.button.move(x, max(0, rect.top()) + PILL_TOP)
@@ -234,6 +237,10 @@ class ModeController:
         self.canvasTimer.connect("timeout()", self._syncVisibility)
         self.resizeFilter = _ResizeFilter(self._onResized)
         self.centralWidget.installEventFilter(self.resizeFilter)
+        # A layout change (Alt+n, the layout menu, maximizing a view) moves the views without resizing the view area
+        self.layoutManager = slicer.app.layoutManager()
+        if self.layoutManager is not None:
+            self.layoutManager.connect("layoutChanged(int)", self._onLayoutChanged)
         self.sceneTags = [slicer.mrmlScene.AddObserver(event, self._onSceneChanged)
                           for event in (slicer.vtkMRMLScene.EndCloseEvent, slicer.vtkMRMLScene.EndImportEvent)]
         # Python event filters and observers must not run while the interpreter is finalized
@@ -314,6 +321,18 @@ class ModeController:
         if self.pill.isVisible():
             self.pill.updatePosition()
 
+    def _onLayoutChanged(self, layout=None):
+        # The new views get their geometry later: refresh now and let the canvas check follow the views
+        self._onNodeEvent()
+
+    def _followViews(self):
+        """Place the pill again when its view moved, was resized or is no longer shown (layout change, splitter)."""
+        if not self.pill.isVisible():
+            return
+        rect = self.pill._targetRect()
+        if self.pill.lastRect is None or rect != self.pill.lastRect:
+            self.pill.updatePosition()
+
     #
     # State
     #
@@ -356,9 +375,10 @@ class ModeController:
                 self.pill.hide()
                 self.targetView = None
                 return
-            if not self.pill.isVisible() or text != self.pill.fullText:
-                # A new mode (or another list): centre the pill on the view the user is working in
-                self.pill.fullText = text
+            self.pill.fullText = text
+            if not self.pill.isVisible() or self.targetView is None:
+                # A new mode: centre the pill on the view the user is working in; it stays there until the mode
+                # ends (another list keeps the view), unless that view is no longer shown
                 self.targetView = self._chooseTargetView()
             self.pill.setModeText(text)
             if not self.canvasTimer.isActive():
@@ -381,6 +401,8 @@ class ModeController:
                 self.pill.hide()
             elif not covered and not self.pill.isVisible():
                 self.refresh()
+            elif not covered:
+                self._followViews()
         except Exception:
             logging.error(f"Studio: mode pill check failed:\n{traceback.format_exc()}")
 
@@ -407,6 +429,11 @@ class ModeController:
         self.sceneTags = []
         if _isAlive(self.centralWidget):
             self.centralWidget.removeEventFilter(self.resizeFilter)
+        if self.layoutManager is not None and _isAlive(self.layoutManager):
+            try:
+                self.layoutManager.disconnect("layoutChanged(int)", self._onLayoutChanged)
+            except Exception:
+                pass
         for timer, slot in ((self.updateTimer, self.refresh), (self.canvasTimer, self._syncVisibility)):
             try:
                 timer.disconnect("timeout()", slot)
