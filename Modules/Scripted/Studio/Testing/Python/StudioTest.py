@@ -143,11 +143,28 @@ def keyCollisions(shortcutKeys, extraReserved=()):
     return collisions
 
 
+#: Keys of the Draw workspace (SPEC 5.4, Appendix A; D-A10 for M), checked while Draw is shown. Data: later work packages
+#: add their Draw keys here (for example L-29's Ctrl+V), and the collision test runs over every installed Studio key.
+DRAW_KEYS = ["P", "D", "M", "E", "L", "Shift+F", "O", "N", "Shift+N", "C", "Alt+Left", "Alt+Right", "Ctrl+Shift+S"]
+
+
+def studioShortcutKeys(studioShell):
+    """[(key, description)] of every enabled Studio QShortcut of the main window: the shell's (global and of the current
+    workspace) and the ones that other parts of Studio install (the Draw presentation of the Segment Editor), which carry
+    the ``studioShortcut`` property.
+    """
+    shortcuts = list(studioShell.shortcuts())
+    for shortcut in studioShell.mainWindow.findChildren("QShortcut"):
+        if shortcut.enabled and shortcut.property("studioShortcut") and shortcut not in shortcuts:
+            shortcuts.append(shortcut)
+    return [(shortcut.key, shortcut.property("studioDescription")) for shortcut in shortcuts if shortcut.enabled]
+
+
 def assertNoKeyCollisions(shortcutKeys=None, extraReserved=()):
     """Fail if a Studio shortcut uses a key of the views or of the Segment Editor (SPEC 9.6).
 
-    :param shortcutKeys: [(key sequence, description)]; by default the shortcuts that the live Studio
-      shell has installed (global shortcuts and those of the current workspace).
+    :param shortcutKeys: [(key sequence, description)]; by default every Studio shortcut installed now
+      (``studioShortcutKeys()``: global, of the current workspace and of the Draw presentation).
     :param extraReserved: more reserved keys [(key, any modifier, source)].
     """
     if shortcutKeys is None:
@@ -156,7 +173,7 @@ def assertNoKeyCollisions(shortcutKeys=None, extraReserved=()):
         studioShell = shell.instance()
         if studioShell is None:
             raise AssertionError("assertNoKeyCollisions: Studio is not active")
-        shortcutKeys = [(shortcut.key, shortcut.property("studioDescription")) for shortcut in studioShell.shortcuts()]
+        shortcutKeys = studioShortcutKeys(studioShell)
     collisions = keyCollisions(shortcutKeys, extraReserved)
     if collisions:
         raise AssertionError("Studio shortcuts collide with reserved keys:\n" + "\n".join(
@@ -229,6 +246,15 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
     def _pump(self, count=4):
         for index in range(count):
             slicer.app.processEvents()
+
+    def _wait(self, ms):
+        """Process events for ``ms`` milliseconds (timers fire)."""
+        import time
+
+        end = time.perf_counter() + ms / 1000.0
+        while time.perf_counter() < end:
+            slicer.app.processEvents()
+            time.sleep(0.005)
 
     def _applyStudio(self):
         from StudioLib import shell
@@ -406,7 +432,12 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self._pump()
             assertNoKeyCollisions()
             classicSwitch = self.mainWindow.findChild("QAction", "StudioInterfaceAction")
-            keys = [(shortcut.key, shortcut.property("studioDescription")) for shortcut in studioShell.shortcuts()]
+            keys = studioShortcutKeys(studioShell)
+            if ws.key == "draw":
+                # Every Draw key is installed (SPEC 5.4) and checked
+                installed = {portableKey(key) for key, _description in keys}
+                expected = [key for key in DRAW_KEYS if key != "M" or slicer.modules.SegmentEditorWidget.editor.effectByName("Smart fill") is not None]
+                self.assertEqual([key for key in expected if portableKey(key) not in installed], [])
             if classicSwitch is not None:
                 keys.append((classicSwitch.shortcut, "Classic switch"))
             assertNoKeyCollisions(keys)
@@ -624,18 +655,24 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         return int(slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, sourceVolumeNode).sum())
 
     def test_10_draw_round_trips(self):
-        """Draw arms Paint on arrival and keeps the tool and segment across round trips; Esc is respected (NAV-02, NFT-03)."""
-        from StudioLib import draw
+        """A dropped scan lands unarmed with Brush suggested; the chosen tool and segment survive round trips; Esc is
+        respected; a lesion opened to be traced (template, New lesion) arms Brush (NAV-02, NFT-03, D-U2).
+        """
+        from StudioLib import draw, importer
 
         studioShell = self._applyStudio()
         _path, editor = self._openScanInDraw(studioShell)
-        # First entry with a lesion segment and a source volume: Paint is armed
-        self.assertEqual(self._effect(editor), "Paint")
+        widget = slicer.modules.SegmentEditorWidget
+        # A plain scan lands with no tool armed: the Brush tile is suggested (outlined, not checked) and the card says how to start
+        self.assertIsNone(self._effect(editor))
+        self.assertIsNotNone(widget.tileOutline("Paint"))
+        self.assertIn("Pick Brush (P)", draw.extension().card.hintLabel.text)
         segmentationId, segmentId = editor.segmentationNodeID(), editor.currentSegmentID()
         self.assertTrue(segmentId)
 
         editor.setActiveEffectByName("Erase")
         self._pump()
+        self.assertIsNone(widget.tileOutline("Paint"))
         studioShell.switchTo("library")
         self._pump()
         self.assertIsNone(editor.activeEffect())
@@ -665,7 +702,7 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self._pump()
         self.assertEqual(self._effect(editor), "Erase")
 
-        # Esc (the Segment Editor's deactivate shortcut) inside Draw: the tool stays deselected
+        # Esc (the Segment Editor's deactivate shortcut) inside Draw: the tool stays deselected, Space resumes it (dashed outline)
         editor.setActiveEffect(None)
         self._pump()
         studioShell.switchTo("library")
@@ -673,48 +710,47 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         studioShell.switchTo("draw")
         self._pump()
         self.assertIsNone(editor.activeEffect())
+        self.assertIsNotNone(widget.tileOutline("Erase"))
 
-        # A tool that the editor dropped by itself (another segmentation) is armed again on the new one
+        # A tool that the editor dropped by itself is armed again on a lesion opened to be traced ("Lesion 2", New lesion)
         editor.setActiveEffectByName("Paint")
         self._pump()
-        otherSegmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Other")
+        otherSegmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesion 2")
         otherSegmentation.SetReferenceImageGeometryParameterFromVolumeNode(editor.sourceVolumeNode())
         editor.setSegmentationNode(otherSegmentation)
-        editor.setCurrentSegmentID(otherSegmentation.GetSegmentation().AddEmptySegment("", "Other lesion"))
+        editor.setCurrentSegmentID(otherSegmentation.GetSegmentation().AddEmptySegment("", "Lesion 2"))
         self._pump()
         self.assertEqual(self._effect(editor), "Paint")
 
-        # Esc is remembered for the lesion it was pressed on: a new case is a new landing, Paint is armed on it
-        from StudioLib import importer
-
-        editor.setActiveEffect(None)
-        self._pump()
-        self.assertIsNone(draw.drawState(studioShell).effect)
+        # A new patient scan dropped while drawing lands unarmed (its first drag navigates, D-U2)
         importer.loadFiles([self._scanFile("sub-08_T1w.nii.gz")], studioShell)
         self._pump(8)
         self.assertEqual(editor.sourceVolumeNode().GetName(), "sub-08_T1w")
-        self.assertEqual(self._effect(editor), "Paint")
+        self.assertIsNone(self._effect(editor))
 
-        # The same after the scene is closed (node IDs are reused) ...
-        editor.setActiveEffect(None)
-        self._pump()
+        # ... also after the scene is closed (node IDs are reused) and when opened while Draw is not shown
         slicer.mrmlScene.Clear(0)
         importer.loadFiles([self._scanFile("sub-09_T1w.nii.gz")], studioShell)
         self._pump(8)
-        self.assertEqual(self._effect(editor), "Paint")
-
-        # ... and when the new case is opened while Draw is not shown
-        editor.setActiveEffect(None)
-        self._pump()
+        self.assertIsNone(self._effect(editor))
         studioShell.switchTo("library")
         self._pump()
         importer.loadFiles([self._scanFile("sub-10_T1w.nii.gz")], studioShell)
         self._pump(8)
         self.assertEqual(studioShell.currentWorkspace(), "draw")
+        self.assertIsNone(self._effect(editor))
+
+        # New lesion (the card's ⋯, Search) arms Brush
+        draw.newLesion(studioShell)
+        self._pump(8)
         self.assertEqual(self._effect(editor), "Paint")
+        self.assertTrue(editor.segmentationNode().GetName().startswith("Lesion "))
 
     def test_11_save_lesion(self):
-        """Save lesion writes a NIfTI mask on the scan grid, readable by Slicer, with no node left behind (NFT-01, CRT-05)."""
+        """Save lesion writes a NIfTI mask on the lesion grid and a sidecar, no node left behind; empty lesions are not
+        written; the second save of a session is silent; the card follows Saved / Unsaved changes (NFT-01, CRT-05, U3, U4).
+        """
+        import json
         import os
 
         import numpy as np
@@ -728,38 +764,64 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertIsNotNone(saveButton)
         self.assertTrue(saveButton.isVisible())
         self.assertTrue(saveButton.enabled)
-        self.assertEqual(studioShell.primaryActionLabel(), "Save lesion…")
+        self.assertEqual(saveButton.text, studioShell.primaryActionLabel())
+        self.assertTrue(studioShell.primaryActionLabel().startswith("Save lesion · "))
         self.assertIn("Ctrl+Shift+S", [portableKey(shortcut.key) for shortcut in studioShell.shortcuts()])
-
-        voxels = self._paintCube(editor)
-        self.assertEqual(voxels, 64)
         segmentationNode, sourceVolumeNode = editor.segmentationNode(), editor.sourceVolumeNode()
-        self.assertEqual(draw.defaultLesionFileName(segmentationNode, sourceVolumeNode), "sub-07_lesion.nii.gz")
-        sourceVolumeNode.SetName("patient_T1")
-        segmentationNode.SetName("Lesions (patient_T1)")
-        sourceVolumeNode.GetStorageNode().SetFileName(path.replace("sub-07_T1w", "patient_T1"))
-        self.assertEqual(draw.defaultLesionFileName(segmentationNode, sourceVolumeNode), "patient_T1_lesion.nii.gz")
-        sourceVolumeNode.GetStorageNode().SetFileName(path)
+        self.assertEqual(draw.lesionSaveState(segmentationNode)[0], "never")
 
         settings = qt.QSettings()
         previousFolder = settings.value(draw.LAST_SAVE_FOLDER_KEY)
         settings.remove(draw.LAST_SAVE_FOLDER_KEY)
         try:
+            # An empty lesion: nothing is written
+            emptyPath = os.path.join(os.path.dirname(path), "empty", "sub-07_lesion.nii.gz")
+            self.assertIsNone(draw.saveLesionDialog(studioShell, path=emptyPath))
+            self.assertFalse(os.path.exists(emptyPath))
+            self.assertEqual(studioShell.toastText(), "The lesion is empty: nothing was saved")
+
+            voxels = self._paintCube(editor)
+            self.assertEqual(voxels, 64)
+            self.assertEqual(draw.defaultLesionFileName(segmentationNode, sourceVolumeNode), "sub-07_lesion.nii.gz")
+            sourceVolumeNode.SetName("patient_T1")
+            segmentationNode.SetName("Lesions (patient_T1)")
+            sourceVolumeNode.GetStorageNode().SetFileName(path.replace("sub-07_T1w", "patient_T1"))
+            self.assertEqual(draw.defaultLesionFileName(segmentationNode, sourceVolumeNode), "patient_T1_lesion.nii.gz")
+            segmentationNode.SetName("Lesion 2")
+            self.assertEqual(draw.defaultLesionFileName(segmentationNode, sourceVolumeNode), "patient_T1_lesion.nii.gz")
+            sourceVolumeNode.GetStorageNode().SetFileName(path)
+            sourceVolumeNode.SetName("sub-07_T1w")
+
             # The scan is in a temporary folder: the dialog proposes the home folder (or Documents), never the application folder
             directory = draw.defaultSaveDirectory(sourceVolumeNode)
             self.assertFalse(draw._isInside(directory, slicer.app.slicerHome))
             self.assertIn(directory, (qt.QDir.homePath(), os.path.join(qt.QDir.homePath(), "Documents")))
 
+            segmentationNode.SetAttribute(draw.NOTES_ATTRIBUTE, "Left MCA stroke")
+            segmentationNode.SetAttribute(draw.SOURCE_REFERENCE_ATTRIBUTE, "doi:10.1000/xyz, Fig. 2")
             nodeCount = slicer.mrmlScene.GetNumberOfNodes()
             outputPath = os.path.join(os.path.dirname(path), "lesions", "sub-07_lesion")
             written = draw.saveLesionDialog(studioShell, path=outputPath)
             self.assertEqual(written, outputPath + ".nii.gz")
             self.assertTrue(os.path.isfile(written))
-            self.assertEqual(os.listdir(os.path.dirname(written)), ["sub-07_lesion.nii.gz"])
+            self.assertEqual(sorted(os.listdir(os.path.dirname(written))), ["sub-07_lesion.json", "sub-07_lesion.nii.gz"])
             self.assertEqual(slicer.mrmlScene.GetNumberOfNodes(), nodeCount)
             self.assertEqual(slicer.util.settingsValue(draw.LAST_SAVE_FOLDER_KEY, ""), os.path.dirname(written))
             self.assertEqual(draw.defaultSaveDirectory(sourceVolumeNode), os.path.dirname(written))
-            self.assertEqual(studioShell._toast.text(), "Saved lesion to sub-07_lesion.nii.gz")
+            self.assertEqual(studioShell.toastText(), "Saved sub-07_lesion.nii.gz")
+            # Sidecar: the scan relative to the sidecar, the space, the notes; no absolute path
+            with open(os.path.join(os.path.dirname(written), "sub-07_lesion.json"), encoding="utf-8") as f:
+                sidecar = json.load(f)
+            self.assertEqual(sidecar["Source"], "../sub-07_T1w.nii.gz")
+            self.assertEqual(sidecar["Space"], "scanner")
+            self.assertEqual(sidecar["Notes"], "Left MCA stroke")
+            self.assertEqual(sidecar["SourceReference"], "doi:10.1000/xyz, Fig. 2")
+            self.assertTrue(sidecar["GeneratedBy"].startswith("Slicer Studio"))
+            # Saved state: attributes hold the base name and the time only
+            self.assertEqual(segmentationNode.GetAttribute(draw.SAVED_FILE_ATTRIBUTE), "sub-07_lesion.nii.gz")
+            self.assertEqual(draw.lesionSaveState(segmentationNode)[:2], ("saved", written))
+            self._pump(4)
+            self.assertTrue(draw.extension().card.saveStateLabel.text.startswith("Saved · sub-07_lesion.nii.gz"))
 
             labelmapNode = slicer.util.loadLabelVolume(written, {"show": False})
             try:
@@ -777,6 +839,25 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                 header = gzip.decompress(f.read())[:352]
             # NIfTI datatype 2: unsigned char
             self.assertEqual(int.from_bytes(header[70:72], "little"), 2)
+
+            # One more stroke: "Unsaved changes"; the CTA (Ctrl+Enter) re-saves silently to the same file
+            editor.saveStateForUndo()
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, editor.currentSegmentID(), sourceVolumeNode)
+            array[2:4, 2:4, 2:4] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, editor.currentSegmentID(), sourceVolumeNode)
+            self.assertEqual(draw.lesionSaveState(segmentationNode)[0], "unsaved")
+            self._pump(4)
+            slicer.app.processEvents()
+            self._wait(draw.METRICS_DEBOUNCE_MS + 100)
+            self.assertTrue(draw.extension().card.saveStateLabel.text.startswith("Unsaved changes"))
+            studioShell.triggerPrimaryAction()
+            self._pump()
+            self.assertEqual(draw.lesionSaveState(segmentationNode)[:2], ("saved", written))
+            self.assertEqual(sorted(os.listdir(os.path.dirname(written))), ["sub-07_lesion.json", "sub-07_lesion.nii.gz"])
+            # After the scene is saved and reopened: "Last saved as …" from the attributes
+            draw._savedRecords.clear()
+            self.assertEqual(draw.lesionSaveState(segmentationNode)[:2], ("previous", "sub-07_lesion.nii.gz"))
+            self.assertTrue(draw.saveStateText(segmentationNode)[0].startswith("Last saved as sub-07_lesion.nii.gz"))
         finally:
             if previousFolder is None:
                 settings.remove(draw.LAST_SAVE_FOLDER_KEY)
@@ -787,7 +868,7 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         segmentationNode.GetSegmentation().AddEmptySegment("", "Second lesion")
         written = draw.saveLesionDialog(studioShell, path=os.path.join(os.path.dirname(path), "lesions", "two.nii.gz"))
         self.assertIsNotNone(written)
-        self.assertIn("2 segments", studioShell._toast.text())
+        self.assertIn("2 segments", studioShell.toastText())
 
         # The footer is deleted when Draw is left, and created again on the next entry
         from StudioLib import ui
@@ -1095,3 +1176,495 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             menu.close()
             menu.deleteLater()
             self._pump()
+
+    #
+    # Draw workspace (W2-05): presentation, keys, Lesion card, save model, views
+    #
+
+    def _startOnTemplate(self, studioShell):
+        """Start on MNI template (Draw, Brush armed) and return the editor."""
+        from StudioLib import importer
+
+        importer.startOnTemplate(shell=studioShell)
+        self._pump(10)
+        self.addCleanup(importer._closeTemplateBanner)
+        return slicer.modules.SegmentEditorWidget.editor
+
+    def _drag(self, viewName, offsets, modifiers=None):
+        """A left-button drag in a slice view through ``offsets`` (pixels from the view centre)."""
+        import vtk
+
+        view = self.layoutManager.sliceWidget(viewName).sliceView()
+        interactor = view.interactor()
+        centerX, centerY = view.width // 2, view.height // 2
+        points = [(centerX + dx, centerY + dy) for dx, dy in offsets]
+        interactor.SetEventPosition(*points[0])
+        interactor.InvokeEvent(vtk.vtkCommand.MouseMoveEvent)
+        interactor.InvokeEvent(vtk.vtkCommand.LeftButtonPressEvent)
+        for point in points[1:]:
+            interactor.SetEventPosition(*point)
+            interactor.InvokeEvent(vtk.vtkCommand.MouseMoveEvent)
+        interactor.InvokeEvent(vtk.vtkCommand.LeftButtonReleaseEvent)
+        self._pump()
+        return view
+
+    @staticmethod
+    def _voxels(editor):
+        segmentationNode = editor.segmentationNode()
+        return int(slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, editor.currentSegmentID(), editor.sourceVolumeNode()).sum())
+
+    def _studioKeys(self, studioShell):
+        return {portableKey(key): description for key, description in studioShortcutKeys(studioShell)}
+
+    def test_18_draw_presentation_round_trip(self):
+        """Draw is the studio presentation of the Segment Editor; Classic restores every property of the classic table (SPEC 5.1)."""
+        import SegmentEditor
+
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        self._pump()
+        widget = slicer.modules.SegmentEditorWidget
+        editor = widget.editor
+        self.assertEqual(widget.presentation(), "studio")
+        for name, value in SegmentEditor.STUDIO_PROPERTIES.items():
+            if hasattr(editor, name) and name != "maximumNumberOfUndoStates":
+                self.assertEqual(getattr(editor, name), value, name)
+        self.assertGreaterEqual(editor.maximumNumberOfUndoStates, 20)
+        self.assertFalse(editor.findChild("QWidget", "UndoRedoGroupBox").isVisibleTo(editor))
+        self.assertTrue(editor.findChild("QWidget", "EffectHelpBrowser").isHidden())
+        self.assertFalse(editor.findChild("QWidget", "SegmentsTableResizableFrame").isVisibleTo(editor))
+        tiles = [(button.objectName, button.text) for button in widget._effectButtons() if button.isVisibleTo(editor)]
+        expected = [(name, text) for name, text in (("Paint", "Brush"), ("Draw", "Outline"), ("Smart fill", "Smart fill"), ("Erase", "Erase"),
+                                                    ("Fill between slices", "Fill gaps")) if editor.effectByName(name) is not None]
+        self.assertEqual(tiles, expected)
+        self.assertIn("Brush · P · 1", editor.findChild("QToolButton", "Paint").toolTip)
+        self.assertIsNotNone(self.mainWindow.findChild("QFrame", "StudioLesionCard"))
+        self.assertIsNotNone(self.mainWindow.findChild("QWidget", "StudioDisplayCard"))
+        # More tools: every effect, in the studio order
+        widget.setMoreToolsShown(True)
+        self._pump()
+        self.assertTrue(editor.findChild("QToolButton", "Level tracing").isVisibleTo(editor))
+        widget.setMoreToolsShown(False)
+        self._pump()
+        self.assertFalse(editor.findChild("QToolButton", "Level tracing").isVisibleTo(editor))
+        # The inline rename never writes the classic settings key that official Slicer reads
+        tableView = editor.findChild("qMRMLSegmentsTableView", "SegmentsTableView")
+        self.assertEqual(tableView.useTerminologySelectorSettingsKey, SegmentEditor.STUDIO_TERMINOLOGY_SETTINGS_KEY)
+        self.assertFalse(tableView.useTerminologySelector)
+
+        studioShell.classic(persist=False)
+        self._pump()
+        self.assertEqual(widget.presentation(), "classic")
+        table = {name: value for name, value in SegmentEditor.classicProperties().items() if hasattr(editor, name)}
+        self.assertEqual({name: getattr(editor, name) for name in table}, table)
+        self.assertTrue(editor.findChild("QWidget", "UndoRedoGroupBox").isVisibleTo(editor))
+        self.assertFalse(editor.findChild("QWidget", "EffectHelpBrowser").isHidden())
+        self.assertFalse(editor.findChild("QWidget", "SegmentsTableResizableFrame").isHidden())
+        self.assertEqual(list(editor.effectNameOrder()), [])
+        self.assertEqual(tableView.useTerminologySelectorSettingsKey, SegmentEditor.CLASSIC_TERMINOLOGY_SETTINGS_KEY)
+        for button in widget._effectButtons():
+            effect = widget._buttonEffect(button)
+            self.assertEqual(button.text, effect.title if effect is not None else "None")
+            self.assertIsNone(button.property("slicerRole"))
+        self.assertFalse(editor.findChild("QToolButton", "NULL").isHidden())
+        for objectName in ("StudioLesionCard", "SegmentEditorMoreToolsButton", "StudioDisplayCard"):
+            child = self.mainWindow.findChild("QWidget", objectName)
+            self.assertTrue(child is None or not child.isVisible(), objectName)
+        # The module navigation keys taken by Draw (Alt+Left/Right) are back
+        previousModule = self.mainWindow.findChild("QAction", "PreviousModuleAction")
+        self.assertIn(qt.QKeySequence(qt.QKeySequence.Back).toString(qt.QKeySequence.PortableText),
+                      [portableKey(key) for key in previousModule.shortcuts()])
+        self.assertEqual(widget.parent.sizePolicy.horizontalPolicy(), qt.QSizePolicy.Minimum)
+
+    def test_19_draw_first_click_paints(self):
+        """Start on MNI template: Brush armed at 3 mm, and a first drag in the axial view paints into "Lesion" (SPEC 5.3)."""
+        from StudioLib import draw
+
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        self.assertEqual(self._effect(editor), "Paint")
+        paint = editor.effectByName("Paint")
+        self.assertEqual(paint.integerParameter("BrushDiameterIsRelative"), 0)
+        self.assertAlmostEqual(paint.doubleParameter("BrushAbsoluteDiameter"), slicer.util.settingsValue(draw.BRUSH_DIAMETER_KEY, 3.0, converter=float), 3)
+        segment = editor.segmentationNode().GetSegmentation().GetSegment(editor.currentSegmentID())
+        self.assertEqual(segment.GetName(), "Lesion")
+        self._drag("Red", [(dx, 0) for dx in range(0, 40, 4)])
+        self.assertGreater(self._voxels(editor), 0)
+        # Voxel view is on by default on the MNI template (SPEC 5.3)
+        self.assertEqual(editor.sourceVolumeNode().GetDisplayNode().GetInterpolate(), 0)
+        # The brush size chips set the diameter of Brush and Erase
+        draw.extension().brushChips[6.0].click()
+        self._pump()
+        self.assertAlmostEqual(paint.doubleParameter("BrushAbsoluteDiameter"), 6.0, 3)
+        draw.extension().brushChips[3.0].click()
+        self._pump()
+
+    def test_20_draw_smartfill_tile(self):
+        """Smart fill has a labelled tile (third), the key M and a "Smart fill · M · 3" tooltip (D-A10)."""
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        if editor.effectByName("Smart fill") is None:
+            self.skipTest("Smart fill is not registered in this build")
+        widget = slicer.modules.SegmentEditorWidget
+        tile = editor.findChild("QToolButton", "Smart fill")
+        self.assertEqual(tile.text, "Smart fill")
+        self.assertFalse(tile.icon.isNull())
+        self.assertIn("Smart fill · M · 3", tile.toolTip)
+        self.assertEqual([button.objectName for button in widget._effectButtons()].index("Smart fill"), 3)
+        keys = {portableKey(shortcut.key): shortcut for shortcut in self.mainWindow.findChildren("QShortcut") if shortcut.enabled and shortcut.property("studioShortcut")}
+        keys["M"].activated()
+        self._pump()
+        self.assertEqual(self._effect(editor), "Smart fill")
+
+    def test_21_draw_keys(self):
+        """P D M E L Shift+F O and N C work in Draw, are removed outside Draw and collide with no view key (SPEC 5.4, 9.6)."""
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        keys = {portableKey(shortcut.key): shortcut for shortcut in self.mainWindow.findChildren("QShortcut") if shortcut.enabled and shortcut.property("studioShortcut")}
+        for key, effectName in (("P", "Paint"), ("D", "Draw"), ("L", "Level tracing"), ("Shift+F", "Fill between slices"), ("P", "Paint")):
+            keys[key].activated()
+            self._pump()
+            self.assertEqual(self._effect(editor), effectName, key)
+        keys["E"].activated()
+        self._pump()
+        self.assertEqual(self._effect(editor), "Erase")
+        keys["E"].activated()
+        self._pump()
+        self.assertEqual(self._effect(editor), "Paint")
+        displayNode = editor.segmentationNode().GetDisplayNode()
+        fill = displayNode.GetVisibility2DFill()
+        keys["O"].activated()
+        self.assertNotEqual(displayNode.GetVisibility2DFill(), fill)
+        keys["O"].activated()
+        assertNoKeyCollisions()
+        studioShell.switchTo("library")
+        self._pump()
+        remaining = self._studioKeys(studioShell)
+        for key in ("P", "D", "E", "L", "Shift+F", "O", "N", "C", "Alt+Left"):
+            self.assertNotIn(key, remaining)
+        studioShell.switchTo("draw")
+        self._pump()
+        self.assertIn("P", self._studioKeys(studioShell))
+
+    def test_22_lesion_metrics(self):
+        """Lesion metrics: parts (26-connectivity), gaps, centroid; mL equals Segment Statistics within 0.1%, in at most 15 ms (SPEC 5.2)."""
+        import time
+
+        import numpy as np
+
+        from StudioLib import draw, lesioncard
+
+        mask = np.zeros((10, 12, 14), bool)
+        mask[2:4, 3:6, 3:6] = True
+        mask[6:8, 3:6, 3:6] = True  # slices 4 and 5 are gaps along k
+        mask[7, 9, 11] = True  # a separate speck (no 26-neighbour)
+        matrix = np.diag([2.0, 2.0, 2.0, 1.0])
+        matrix[:3, 3] = (-10.0, 0.0, 0.0)
+        metrics = lesioncard.computeLesionMetrics(mask, (2, 2, 2), matrix, axis=0)
+        self.assertEqual(metrics["voxels"], int(mask.sum()))
+        self.assertAlmostEqual(metrics["ml"], mask.sum() * 8 / 1000.0)
+        self.assertEqual(metrics["parts"], 3)
+        self.assertEqual(metrics["gaps"], [4, 5])
+        _kk, _jj, ii = np.nonzero(mask)
+        self.assertAlmostEqual(metrics["centroid_ras"][0], -10.0 + 2.0 * ii.mean())
+        self.assertIn("2 parts", lesioncard.readoutHtml(dict(metrics, parts=2)))
+        self.assertEqual(lesioncard.computeLesionMetrics(np.zeros((3, 3, 3)), (1, 1, 1), np.eye(4))["voxels"], 0)
+
+        # A lesion on a 1 mm MNI-size grid against Segment Statistics
+        volumeNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "MetricsGrid")
+        slicer.util.updateVolumeFromArray(volumeNode, np.zeros((182, 218, 182), np.int16))
+        # The MNI152NLin6Asym 1 mm grid (FSL): LAS, origin (90, -126, -72)
+        volumeNode.SetIJKToRASMatrix(vtk_matrix([[-1, 0, 0, 90], [0, 1, 0, -126], [0, 0, 1, -72], [0, 0, 0, 1]]))
+        segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "MetricsLesion")
+        segmentationNode.CreateDefaultDisplayNodes()
+        segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(volumeNode)
+        segmentId = segmentationNode.GetSegmentation().AddEmptySegment("", "Lesion")
+        z, y, x = np.ogrid[0:182, 0:218, 0:182]
+        lesion = ((x - 120) ** 2 + (y - 100) ** 2 + (z - 90) ** 2 <= 14 ** 2).astype(np.uint8)
+        slicer.util.updateSegmentBinaryLabelmapFromArray(lesion, segmentationNode, segmentId, volumeNode)
+        times = []
+        for _index in range(5):
+            draw._metricsCache.clear()
+            start = time.perf_counter()
+            metrics = draw.lesionMetrics(segmentationNode, compute=True, segmentId=segmentId)
+            times.append((time.perf_counter() - start) * 1000.0)
+        import SegmentStatistics
+
+        logic = SegmentStatistics.SegmentStatisticsLogic()
+        logic.getParameterNode().SetParameter("Segmentation", segmentationNode.GetID())
+        logic.computeStatistics()
+        statistics = logic.getStatistics()
+        reference = statistics[segmentId, "LabelmapSegmentStatisticsPlugin.volume_cm3"]
+        self.assertLess(abs(metrics["mL"] - reference) / reference, 0.001)
+        self.assertEqual(metrics["parts"], 1)
+        self.assertLessEqual(sorted(times)[len(times) // 2], 15.0, times)
+        # MNI grid, x < 0: the left hemisphere
+        self.assertEqual(metrics["sides"], "Left")
+
+    def test_23_draw_save_keeps_lesion_grid(self):
+        """A 91x109x91 NLin6Asym mask shown on the 2009c template is saved on its own grid with identical voxels (U3)."""
+        import os
+        import tempfile
+
+        import numpy as np
+
+        from StudioLib import draw, importer
+
+        directory = tempfile.mkdtemp(prefix="StudioTestGrid", dir=slicer.app.temporaryPath)
+        maskNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "nlin6")
+        mask = np.zeros((91, 109, 91), np.uint8)
+        mask[40:44, 50:55, 20:24] = 1
+        slicer.util.updateVolumeFromArray(maskNode, mask)
+        ijkToRas = vtk_matrix([[-2, 0, 0, 90], [0, 2, 0, -126], [0, 0, 2, -72], [0, 0, 0, 1]])
+        maskNode.SetIJKToRASMatrix(ijkToRas)
+        maskPath = os.path.join(directory, "sub-01_lesion.nii.gz")
+        self.assertTrue(slicer.util.saveNode(maskNode, maskPath))
+        slicer.mrmlScene.Clear(0)
+
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        importer.loadFiles([maskPath], studioShell)
+        self._pump(10)
+        segmentationNode = editor.segmentationNode()
+        self.assertEqual(segmentationNode.GetName(), "sub-01_lesion")
+        outputPath = os.path.join(directory, "out", "saved_lesion.nii.gz")
+        written = draw.saveLesionDialog(studioShell, path=outputPath)
+        self.assertEqual(written, outputPath)
+        # Both files read the same way: same grid (dims and IJK to RAS, the sform) and identical voxels
+        original = slicer.util.loadLabelVolume(maskPath, {"show": False})
+        saved = slicer.util.loadLabelVolume(written, {"show": False})
+        try:
+            self.assertEqual(saved.GetImageData().GetDimensions(), (91, 109, 91))
+            savedMatrix, originalMatrix = vtk_matrix(), vtk_matrix()
+            saved.GetIJKToRASMatrix(savedMatrix)
+            original.GetIJKToRASMatrix(originalMatrix)
+            for row in range(4):
+                for column in range(4):
+                    self.assertAlmostEqual(savedMatrix.GetElement(row, column), originalMatrix.GetElement(row, column), 4)
+            self.assertTrue(np.array_equal(slicer.util.arrayFromVolume(saved) > 0, slicer.util.arrayFromVolume(original) > 0))
+            self.assertEqual(int((slicer.util.arrayFromVolume(saved) > 0).sum()), int(mask.sum()))
+        finally:
+            slicer.mrmlScene.RemoveNode(saved)
+            slicer.mrmlScene.RemoveNode(original)
+
+    def test_24_draw_place_keeps_tool(self):
+        """Place mode suspends the Draw tool and arms it again when the mode ends (U14)."""
+        from StudioLib import draw
+
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        editor.setActiveEffectByName("Erase")
+        self._pump()
+        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+        interactionNode.SetCurrentInteractionMode(slicer.vtkMRMLInteractionNode.Place)
+        self._pump()
+        self.assertEqual(draw.suspendedEffect(studioShell), "Erase")
+        self.assertIn("Erase resumes after", draw.extension().card.hintLabel.text)
+        interactionNode.SwitchToViewTransformMode()
+        self._pump(6)
+        self.assertEqual(self._effect(editor), "Erase")
+        self.assertIsNone(draw.suspendedEffect(studioShell))
+        self.assertEqual(draw.drawState(studioShell).effect, "Erase")
+
+    def test_25_draw_double_click_guard(self):
+        """A double-click with Paint active does not maximize the view; without a tool it still does (U12)."""
+        import vtk
+
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        layoutNode = self.layoutManager.layoutLogic().GetLayoutNode()
+        interactor = self.layoutManager.sliceWidget("Red").sliceView().interactor()
+        view = self.layoutManager.sliceWidget("Red").sliceView()
+        interactor.SetEventPosition(view.width // 2, view.height // 2)
+        self.assertEqual(self._effect(editor), "Paint")
+        interactor.InvokeEvent(vtk.vtkCommand.LeftButtonDoubleClickEvent)
+        self._pump()
+        self.assertEqual(layoutNode.GetNumberOfMaximizedViewNodes(), 0)
+        editor.setActiveEffect(None)
+        self._pump()
+        interactor.InvokeEvent(vtk.vtkCommand.LeftButtonDoubleClickEvent)
+        self._pump()
+        self.assertEqual(layoutNode.GetNumberOfMaximizedViewNodes(), 1)
+        layoutNode.RemoveAllMaximizedViewNodes()
+        self._pump()
+
+    def test_26_draw_empty_state(self):
+        """Draw without a scan creates no segmentation and shows what to do next; a figure is never the source (U11)."""
+        import numpy as np
+
+        studioShell = self._applyStudio()
+        nodeCount = slicer.mrmlScene.GetNumberOfNodes()
+        studioShell.switchTo("draw")
+        self._pump(6)
+        self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLSegmentationNode")), 0)
+        self.assertEqual(slicer.mrmlScene.GetNumberOfNodes(), nodeCount)
+        emptyState = self.mainWindow.findChild("QFrame", "StudioDrawEmptyState")
+        self.assertTrue(emptyState.isVisible())
+        for name in ("StudioDrawOpenButton", "StudioDrawStartOnTemplateButton", "StudioDrawLibraryButton"):
+            self.assertTrue(self.mainWindow.findChild("QPushButton", name).isVisible(), name)
+        self.assertFalse(slicer.modules.SegmentEditorWidget.editor.isVisible())
+        # A figure (Studio.Role) shown in the views is never the source volume
+        studioShell.switchTo("library")
+        self._pump()
+        figure = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLVectorVolumeNode", "figure")
+        slicer.util.updateVolumeFromArray(figure, np.zeros((1, 20, 30, 3), np.uint8))
+        figure.SetAttribute("Studio.Role", "figure")
+        slicer.util.setSliceViewerLayers(background=figure)
+        studioShell.switchTo("draw")
+        self._pump(6)
+        editor = slicer.modules.SegmentEditorWidget.editor
+        self.assertIsNone(editor.sourceVolumeNode())
+        self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLSegmentationNode")), 0)
+        self.assertTrue(emptyState.isVisible())
+
+    def test_27_draw_follow_and_center(self):
+        """After a stroke in Red the other views move to it (Follow); Center on lesion moves every view to the lesion (U9, U10)."""
+        from StudioLib import draw
+
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        settings = qt.QSettings()
+        settings.remove(draw.FOLLOW_STROKES_KEY)
+        red, green = (self.layoutManager.sliceWidget(name).mrmlSliceNode() for name in ("Red", "Green"))
+        redOffset = red.GetSliceOffset()
+        view = self._drag("Red", [(40 + dx, 30) for dx in range(0, 16, 4)])
+        self._wait(100)
+        self.assertGreater(self._voxels(editor), 0)
+        # The release point: 30 px above the centre of Red (screen y up = anterior)
+        ras = red.GetXYToRAS().MultiplyPoint((view.width // 2 + 52, view.height // 2 + 30, 0, 1))
+        self.assertLessEqual(abs(green.GetSliceOffset() - ras[1]), 2.0)
+        self.assertAlmostEqual(red.GetSliceOffset(), redOffset, 3)
+        # Follow off: the other views stay
+        settings.setValue(draw.FOLLOW_STROKES_KEY, False)
+        greenOffset = green.GetSliceOffset()
+        self._drag("Red", [(-60 + dx, -40) for dx in range(0, 16, 4)])
+        self._wait(100)
+        self.assertAlmostEqual(green.GetSliceOffset(), greenOffset, 3)
+        settings.remove(draw.FOLLOW_STROKES_KEY)
+        # Center on lesion: the visible button moves every view to the lesion centroid
+        centerButton = self.mainWindow.findChild("QToolButton", "StudioCenterOnLesionButton")
+        self.assertTrue(centerButton.isVisible())
+        centerButton.click()
+        self._pump()
+        centroid = draw.lesionMetrics(editor.segmentationNode(), compute=True)["centroid_ras"]
+        self.assertLessEqual(abs(green.GetSliceOffset() - centroid[1]), 2.0)
+        self.assertLessEqual(abs(red.GetSliceOffset() - centroid[2]), 2.0)
+
+    def test_28_draw_show_all_controls_and_help(self):
+        """⋯ Show all controls shows the classic controls inside Draw and back; "?" shows the active tool (U17, U18)."""
+        from StudioLib import draw
+
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        title, body = draw.helpHtml(studioShell)
+        self.assertEqual(title, "Draw · Brush")
+        self.assertIn("Draw keys", body)
+        (text, toggle, checked), = draw.moreMenuActions(studioShell)
+        self.assertEqual(text, "Show all controls")
+        self.assertFalse(checked)
+        try:
+            toggle()
+            self._pump()
+            self.assertEqual(studioShell.currentWorkspace(), "draw")
+            self.assertTrue(editor.findChild("QWidget", "UndoRedoGroupBox").isVisible())
+            self.assertTrue(editor.findChild("QWidget", "SegmentsTableResizableFrame").isVisible())
+            self.assertTrue(editor.segmentationNodeSelectorVisible)
+            draw.moreMenuActions(studioShell)[0][1]()
+            self._pump()
+            self.assertFalse(editor.findChild("QWidget", "UndoRedoGroupBox").isVisible())
+            self.assertFalse(editor.findChild("QWidget", "SegmentsTableResizableFrame").isVisible())
+        finally:
+            qt.QSettings().remove(draw.SHOW_ALL_CONTROLS_KEY)
+
+    def test_29_draw_cleanup_and_smooth_safety(self):
+        """Fill gaps and specks is one undo step; Smooth keeps a one-slice lesion and warns when it removes most of it (SPEC 5.2, U15)."""
+        from StudioLib import draw
+
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        segmentationNode, segmentId, source = editor.segmentationNode(), editor.currentSegmentID(), editor.sourceVolumeNode()
+        array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, source)
+        array[:] = 0
+        array[40:46, 50:56, 30:36] = 1
+        array[42, 52, 33] = 0  # a hole
+        array[60, 70, 60] = 1  # a speck
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, source)
+        before = self._voxels(editor)
+        result = draw.fillGapsAndSpecks(studioShell)
+        self.assertIsNotNone(result)
+        after = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, source)
+        self.assertEqual(int(after[60, 70, 60]), 0)
+        editor.undo()
+        self.assertEqual(self._voxels(editor), before)
+        # A one-slice lesion: Smooth switches to Closing, which keeps it
+        array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, source)
+        array[:] = 0
+        array[45, 40:60, 40:60] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, source)
+        self._wait(draw.METRICS_DEBOUNCE_MS + 50)
+        editor.setActiveEffectByName("Smoothing")
+        self._pump(4)
+        effect = editor.activeEffect()
+        self.assertEqual(effect.parameter("SmoothingMethod"), "MORPHOLOGICAL_CLOSING")
+        effect.self().onApply()
+        self._pump()
+        self.assertGreater(self._voxels(editor), 0)
+        # A destructive Smooth: a consequence toast with Undo
+        self._wait(draw.METRICS_DEBOUNCE_MS + 50)
+        effect.setParameter("SmoothingMethod", "MEDIAN")
+        effect.setParameter("KernelSizeMm", 9.0)
+        effect.self().onApply()
+        self._wait(draw.METRICS_DEBOUNCE_MS + 100)
+        self.assertTrue(studioShell.toastText().startswith("Smooth removed"), studioShell.toastText())
+        editor.setActiveEffect(None)
+
+    def test_30_draw_extension_points(self):
+        """Inspector cards, card rows and ⋯ items of other work packages; network maps leave Draw; assisted counts (LNM addendum)."""
+        import numpy as np
+
+        from StudioLib import draw
+
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        before, after = qt.QLabel("before tools"), qt.QLabel("after display")
+        draw.addInspectorCard("test.before", before, 10)
+        draw.addInspectorCard("test.after", after, 150)
+        self._pump()
+        self.assertTrue(before.isVisible() and after.isVisible())
+        header = self.mainWindow.findChild("QWidget", "StudioDrawHeader")
+        trailing = self.mainWindow.findChild("QWidget", "StudioDrawTrailing")
+        self.assertTrue(header.isAncestorOf(before))
+        self.assertTrue(trailing.isAncestorOf(after))
+        self.assertTrue(draw.removeInspectorCard("test.before"))
+        self.assertTrue(draw.removeInspectorCard("test.after"))
+        calls = []
+        card = draw.lesionCard()
+        card.addMenuAction("Test item", lambda: calls.append("item"))
+        card._fillMenu()
+        self.assertIn("Test item", [str(action.text) for action in card.menu.actions()])
+        card.removeMenuAction("Test item")
+        draw.notifyAssist("smartfill", 12, {"tolerance": 0.1})
+        self.assertEqual(draw.assistCounts()["smartfill"]["voxels"], 12)
+        # A network map in the foreground leaves the slice views when Draw is entered
+        networkMap = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "network map")
+        slicer.util.updateVolumeFromArray(networkMap, np.zeros((4, 4, 4), np.float32))
+        networkMap.SetAttribute("LNM.Result", "1")
+        slicer.util.setSliceViewerLayers(foreground=networkMap)
+        studioShell.switchTo("library")
+        self._pump()
+        studioShell.switchTo("draw")
+        self._pump()
+        compositeNode = self.layoutManager.sliceWidget("Red").mrmlSliceCompositeNode()
+        self.assertFalse(compositeNode.GetForegroundVolumeID())
+
+
+def vtk_matrix(rows=None):
+    """A vtkMatrix4x4 (identity, or the given rows)."""
+    import vtk
+
+    matrix = vtk.vtkMatrix4x4()
+    if rows is not None:
+        for row in range(4):
+            for column in range(4):
+                matrix.SetElement(row, column, rows[row][column])
+    return matrix
