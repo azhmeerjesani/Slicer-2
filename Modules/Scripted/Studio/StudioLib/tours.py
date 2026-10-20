@@ -254,7 +254,8 @@ _FROM_SLICER_STEPS = (
 
 _LIBRARY_STEPS = (
     Step("drop", "StudioDropZone", _("Drop anything here"),
-         _("Scans, lesion masks, scenes (.mrml, .mrb) and DICOM folders: drop them anywhere on the window."),
+         _("Scans, lesion masks, scenes (.mrml, .mrb) and DICOM folders: drop them anywhere on the window. A case-report figure "
+           "(PNG, JPEG, TIFF) is shown next to the template, a statistical map as an overlay."),
          rows=("add-data",), workspace="library"),
     Step("open", "StudioLibraryOpenButton", _("Open and Open folder"),
          _("Open… picks files; Open folder… reads a DICOM folder or a folder of NIfTI files."),
@@ -264,7 +265,7 @@ _LIBRARY_STEPS = (
          inSlicer=_("No single step: File > Add Data to load a template, then Add segment in the Segment Editor module."), workspace="library"),
     Step("recent", "StudioRecentList", _("Recent"), _("The files you opened last. A file that is already open is not opened twice."),
          rows=("recent",), workspace="library"),
-    Step("sample", "StudioLibrarySampleDataLink", _("Sample data"), _("The 3D Slicer sample data sets, downloaded when you choose one."),
+    Step("sample", "StudioLibrarySampleDataLink", _("Sample data"), _("The 3D Slicer sample data sets, downloaded when you choose one. A scan opens in Draw."),
          rows=("sample-data",), workspace="library"),
     Step("classic", "StudioLibraryClassicLink", _("Classic interface"),
          _("The 3D Slicer interface, exactly as you know it. Your scene stays as it is when you switch."),

@@ -5,8 +5,11 @@ application stays responsive while data arrives, and no MRML or VTK object is us
 thread. The file is written next to its destination (``<dest>.part``), checked with its SHA-256 checksum
 and only then renamed to its destination, so an interrupted or corrupted download never looks cached.
 
-``DownloadBanner`` is the card shown over the view area that offers a download, shows its progress
-with a Cancel button, and offers an action once the file is ready (for example "Switch to 1 mm").
+``DownloadBanner`` offers a download, shows its progress with a Cancel button, and offers an action once
+the file is ready (for example "Switch to 1 mm"). Studio uses it **embedded** (``embedded=True``): one
+height-for-width line built with ``ui.noticeLine()`` that the caller puts in the inspector notice slot
+(``shell.setInspectorNotice()``), so an offer never covers a view (USABILITY 6.4). The floating card over a
+widget (``embedded=False``) is kept for compatibility.
 """
 
 import hashlib
@@ -61,6 +64,26 @@ def _isAlive(qobject):
     except Exception:
         return False
     return True
+
+
+def _releaseLater(widget, owner):
+    """Delete ``widget`` after the current event, its buttons' Python callbacks disconnected first.
+
+    PythonQt would otherwise release the callbacks (bound methods of ``owner``) while the C++ widget is destroyed, and
+    ``owner`` freed then would delete wrappers of widgets that are being destroyed. ``owner`` lives until the release
+    (the card is often closed from one of its own buttons).
+    """
+    holder = [widget, owner]
+
+    def release():
+        target = holder[0]
+        if _isAlive(target):
+            for button in target.findChildren("QAbstractButton"):
+                button.disconnect("clicked()")
+            target.deleteLater()
+        holder.clear()
+
+    qt.QTimer.singleShot(0, release)
 
 
 def formatSize(numberOfBytes):
@@ -261,26 +284,39 @@ BANNER_MARGIN = 16
 
 
 class DownloadBanner(qt.QObject):
-    """Non-modal card at the bottom right of a widget (the view area) that offers a download.
+    """Non-modal offer of a download: a line of the inspector notice slot (``embedded``), or a card at the bottom right
+    of a widget.
 
-    States: "offer" (Download / ✕), "running" (progress bar and Cancel), "done" (the action button, for
-    example "Switch to 1 mm", and ✕) and "failed" (Retry / ✕). The card follows the size of its parent
-    widget and never blocks the application.
+    States: "offer" (Download / Not now / Details), "running" (progress and Cancel), "done" (the action button, for
+    example "Switch to 1 mm", and Not now) and "failed" (Retry / Not now). It never blocks the application.
 
-    :param parentWidget: widget over which the card is shown (``mainWindow().centralWidget()``).
-    :param offerText: text of the offer, for example "Download 1 mm template (13.7 MB) for finer tracing".
+    :param parentWidget: widget over which the card is shown (``mainWindow().centralWidget()``); None when embedded.
+    :param offerText: text of the offer, for example "Sharper 1 mm template available".
     :param url, sha256, dest: arguments of the ``Download``.
     :param readyText: text shown once the file is downloaded.
     :param actionText: text of the button shown once the file is downloaded.
-    :param onAction: ``onAction(path)`` is called when that button is clicked; the card then closes.
+    :param onAction: ``onAction(path)`` is called when that button is clicked; the offer then closes.
+    :param embedded: build one notice line (``ui.noticeLine()``, layout-managed, no absolute position, no parent) for
+      ``shell.setInspectorNotice()``.
+    :param onDismiss: called when the user chooses "Not now" (the offer then closes).
+    :param onDetails: called by the "Details" button of the embedded offer (no button when None).
+    :param onClosed: called once when the offer closes (before its widget is deleted).
+    :param progressText: text of the embedded offer while the file downloads, with ``{percent}`` (for example
+      "Downloading the 1 mm template… {percent}%").
     """
 
-    def __init__(self, parentWidget, offerText, url, sha256, dest, readyText, actionText, onAction):
+    def __init__(self, parentWidget, offerText, url, sha256, dest, readyText, actionText, onAction,
+                 embedded=False, onDismiss=None, onDetails=None, onClosed=None, progressText=None):
         qt.QObject.__init__(self)
         self.parentWidget = parentWidget
         self.offerText = offerText
         self.readyText = readyText
         self.onAction = onAction
+        self.embedded = bool(embedded)
+        self.onDismiss = onDismiss
+        self.onDetails = onDetails
+        self.onClosed = onClosed
+        self.progressText = progressText
         self.download = Download(url, sha256, dest)
         self.download.progress.connect(self._onProgress)
         self.download.finished.connect(self._onFinished)
@@ -288,6 +324,13 @@ class DownloadBanner(qt.QObject):
         self.state = None
         self._disposeOnQuit = False
         self._disposed = False
+        self.actionText = actionText
+        if self.embedded:
+            self._buildEmbedded()
+            slicer.app.connect("aboutToQuit()", self.dispose)
+            self._disposeOnQuit = True
+            self._setState("offer")
+            return
 
         self.widget = qt.QFrame(parentWidget)
         self.widget.setObjectName("StudioDownloadBanner")
@@ -350,7 +393,6 @@ class DownloadBanner(qt.QObject):
         self.primaryButton.connect("clicked()", self._onPrimaryClicked)
         buttonRow.addWidget(self.primaryButton)
         layout.addLayout(buttonRow)
-        self.actionText = actionText
 
         ui.addPaletteListener(self._refreshIcons)
         self._refreshIcons()
@@ -360,6 +402,31 @@ class DownloadBanner(qt.QObject):
         self._disposeOnQuit = True
         self._setState("offer")
 
+    def _buildEmbedded(self):
+        """One notice line: text and the buttons of every state (shown by ``_setState()``)."""
+        actions = [(_("Download"), self._onPrimaryClicked), (_("Not now"), self._onSecondaryClicked)]
+        if self.onDetails is not None:
+            actions.append((_("Details"), self._onDetailsClicked))
+        self.widget = ui.noticeLine(self.offerText, actions)
+        self.widget.setProperty("studioNotice", "StudioDownloadBanner")
+        self.textLabel = self.widget.findChild("QLabel", "StudioNoticeText")
+        buttons = list(self.widget.findChildren("QToolButton"))
+        self.primaryButton, self.secondaryButton = buttons[0], buttons[1]
+        self.detailsButton = buttons[2] if len(buttons) > 2 else None
+        # The names of the card's buttons (tests and the usability gate find the offer by them)
+        self.primaryButton.setObjectName("StudioDownloadBannerPrimaryButton")
+        self.secondaryButton.setObjectName("StudioDownloadBannerSecondaryButton")
+        if self.detailsButton is not None:
+            self.detailsButton.setObjectName("StudioDownloadBannerDetailsButton")
+        self.closeButton = None
+        self.iconLabel = None
+        self.progressBar = None
+        self.detailLabel = None
+
+    def _onDetailsClicked(self):
+        if self.onDetails is not None:
+            self.onDetails()
+
     @staticmethod
     def _setPixelSize(widget, pixelSize):
         font = qt.QFont(widget.font)
@@ -367,7 +434,7 @@ class DownloadBanner(qt.QObject):
         widget.setFont(font)
 
     def _refreshIcons(self):
-        if not _isAlive(self.widget):
+        if self.embedded or not _isAlive(self.widget):
             return
         iconName = {"failed": "triangle-alert", "done": "check"}.get(self.state, "download")
         color = {"failed": "warning", "done": "success"}.get(self.state, "accent-fg")
@@ -382,8 +449,8 @@ class DownloadBanner(qt.QObject):
         return self.isAlive() and self.widget.isVisible()
 
     def show(self):
-        """Show the card above the other children of its parent widget."""
-        if not self.isAlive():
+        """Show the card above the other children of its parent widget (embedded: its owner shows it in the notice slot)."""
+        if not self.isAlive() or self.embedded:
             return
         self.updatePosition()
         self.widget.show()
@@ -392,9 +459,9 @@ class DownloadBanner(qt.QObject):
     def setVisible(self, visible):
         """Show or hide the card without changing its stacking order (a canvas raised over it stays above).
 
-        The download goes on while the card is hidden.
+        The download goes on while the card is hidden. An embedded offer is shown and hidden by the notice slot.
         """
-        if not self.isAlive() or self.widget.isVisible() == bool(visible):
+        if not self.isAlive() or self.embedded or self.widget.isVisible() == bool(visible):
             return
         if visible:
             self.updatePosition()
@@ -407,23 +474,32 @@ class DownloadBanner(qt.QObject):
         self.dispose()
 
     def dispose(self):
+        if self._disposed:
+            return
         self._disposed = True
         if self._disposeOnQuit:
             slicer.app.disconnect("aboutToQuit()", self.dispose)
             self._disposeOnQuit = False
-        ui.removePaletteListener(self._refreshIcons)
+        if not self.embedded:
+            ui.removePaletteListener(self._refreshIcons)
         self.download.progress.disconnect()
         self.download.finished.disconnect()
         self.download.failed.disconnect()
         if self.download.isRunning():
             self.download.cancel()
-        if _isAlive(self.parentWidget):
+        if self.onClosed is not None:
+            try:
+                self.onClosed()
+            except Exception:
+                logging.error(f"Studio download banner close callback failed:\n{traceback.format_exc()}")
+        if self.parentWidget is not None and _isAlive(self.parentWidget) and not self.embedded:
             self.parentWidget.removeEventFilter(self)
         if _isAlive(self.widget):
             for widget in (self.widget, self.textLabel, self.detailLabel):
-                ui.bindStyleSheet(widget, None)
+                if widget is not None:
+                    ui.bindStyleSheet(widget, None)
             self.widget.hide()
-            self.widget.deleteLater()
+            _releaseLater(self.widget, self)
 
     def eventFilter(self, obj, event):
         if event.type() == qt.QEvent.Resize and obj == self.parentWidget:
@@ -431,7 +507,7 @@ class DownloadBanner(qt.QObject):
         return False
 
     def updatePosition(self):
-        if not _isAlive(self.widget):
+        if self.embedded or not _isAlive(self.widget):
             return
         self.widget.adjustSize()
         rect = self.parentWidget.rect
@@ -445,6 +521,9 @@ class DownloadBanner(qt.QObject):
 
     def _setState(self, state):
         self.state = state
+        if self.embedded:
+            self._setEmbeddedState(state)
+            return
         running = state == "running"
         self.progressBar.setVisible(running)
         self.detailLabel.setVisible(running or state == "failed")
@@ -471,6 +550,39 @@ class DownloadBanner(qt.QObject):
         if self.widget.isVisible():
             self.updatePosition()
 
+    def _setEmbeddedState(self, state, percent=None):
+        if not _isAlive(self.widget):
+            return
+        if state == "offer":
+            text = self.offerText
+            primary, secondary = _("Download"), _("Not now")
+        elif state == "running":
+            text = self.runningText(percent)
+            primary, secondary = None, _("Cancel")
+        elif state == "done":
+            text = self.readyText
+            primary, secondary = self.actionText, _("Not now")
+        else:
+            text = f"{self.download.errorMessage or _('Download failed')}"
+            primary, secondary = _("Retry"), _("Not now")
+        self.textLabel.setText(text)
+        self.primaryButton.setVisible(primary is not None)
+        if primary is not None:
+            self.primaryButton.setText(primary)
+        self.secondaryButton.setText(secondary)
+        if self.detailsButton is not None:
+            self.detailsButton.setVisible(state == "offer")
+
+    def runningText(self, percent=None):
+        """Text of the embedded offer while the file downloads."""
+        if self.progressText:
+            if percent is None:
+                return self.progressText.replace(" {percent}%", "").replace("{percent}%", "")
+            return self.progressText.format(percent=percent)
+        if percent is None:
+            return _("Downloading…")
+        return _("Downloading… {percent}%").format(percent=percent)
+
     def _onPrimaryClicked(self):
         if self.state in ("offer", "failed"):
             self.startDownload()
@@ -485,10 +597,19 @@ class DownloadBanner(qt.QObject):
             # Back to the offer: the download can be started again
             self.download.cancel()
         else:
+            if self.onDismiss is not None:
+                try:
+                    self.onDismiss()
+                except Exception:
+                    logging.error(f"Studio download banner dismiss callback failed:\n{traceback.format_exc()}")
             self.close()
 
     def _onProgress(self, bytesReceived, bytesTotal):
         if self.state != "running":
+            return
+        if self.embedded:
+            if _isAlive(self.widget):
+                self.textLabel.setText(self.runningText(int(100 * bytesReceived / bytesTotal) if bytesTotal > 0 else None))
             return
         if bytesTotal > 0:
             self.progressBar.setRange(0, 1000)
