@@ -1,9 +1,11 @@
-"""Ranking of the module finder in Slicer Studio, until the command palette (StudioLib/palette.py) exists.
+"""Ranking of the module finder and of Search (the command palette) in Slicer Studio.
 
-The search pill, Ctrl+K, Ctrl+F and "All tools..." open the classic module finder
-(``qSlicerModuleFinderDialog``). It matches substrings, lists the matches alphabetically and Enter opens
-the first row, so natural partial names opened the wrong module ("vol" opened Add Scalar Volumes,
-"mark" Landmark Registration, "trans" Transform Convert (BRAINS)).
+Search (``StudioLib.palette``, Ctrl+K) ranks every kind of entry with one function of this module,
+``searchTier()`` (see "Search tiers" below). The classic module finder (``qSlicerModuleFinderDialog``) is
+still reachable (``moduleSelector().showModuleFinder()``, and it is what the search pill opens in builds
+without the palette). It matches substrings, lists the matches alphabetically and Enter opens the first
+row, so natural partial names opened the wrong module ("vol" opened Add Scalar Volumes, "mark" Landmark
+Registration, "trans" Transform Convert (BRAINS)).
 
 In Studio, this plug-in ranks the matches like a person expects (``rankModules()``):
 
@@ -25,10 +27,26 @@ The ranking uses the filter model of the dialog: ``qSlicerModuleFactoryFilterMod
 shows only the listed modules, in the order of the list. When the filter text is empty the dialog's
 own filter is restored. ``uninstall(shell)`` disconnects everything and restores the dialog, so Classic
 is unchanged.
+
+Search tiers (SPEC 2.12, USABILITY 4; lower is better), for modules, tools, actions, view commands,
+layouts and the other entries of Search alike (``SearchKey``, ``searchTier()``):
+
+0. exact title or alias ("volumes", "segment editor" for Draw);
+1. command synonym, exact: synonyms of actions, view commands, tools and workspaces ("fiducial" -> Place point);
+2. module synonym, exact (``SYNONYMS``: "fiducial" -> Markups);
+3. title or alias prefix ("vol" -> Volumes, "four" -> Four-Up);
+4. synonym prefix, for queries of 3 characters or more;
+5. word starts in order ("seg ed" -> Draw through its alias Segment Editor);
+6. substring;
+7. full text (help text), only when nothing above matched (the caller decides; ``TIER_FULL_TEXT``).
+
+The module finder keeps its own module-only order (``rankModules()``, ranks ``RANK_*``). In that scale a
+module synonym is ``RANK_MODULE_SYNONYM``: after a command synonym and before a prefix, as in Search.
 """
 
 import logging
 import re
+import sys
 import traceback
 
 import qt
@@ -101,6 +119,19 @@ RANK_WORD_START = 3
 RANK_SYNONYM_PREFIX = 4
 RANK_SUBSTRING = 5
 RANK_FULL_TEXT = 6
+#: A module synonym when modules and commands are ranked together: after a command synonym (``RANK_SYNONYM``)
+#: and before a prefix (``RANK_PREFIX``). Search uses the integer tiers below (``TIER_MODULE_SYNONYM``).
+RANK_MODULE_SYNONYM = 1.5
+
+#: Tiers of Search (``searchTier()``; lower is better)
+TIER_EXACT = 0
+TIER_COMMAND_SYNONYM = 1
+TIER_MODULE_SYNONYM = 2
+TIER_PREFIX = 3
+TIER_SYNONYM_PREFIX = 4
+TIER_WORD_START = 5
+TIER_SUBSTRING = 6
+TIER_FULL_TEXT = 7
 
 #: Minimum query length for prefixes of synonyms
 SYNONYM_PREFIX_MINIMUM_LENGTH = 3
@@ -125,6 +156,15 @@ _finder = None
 
 def _normalized(text):
     return " ".join(str(text or "").lower().split())
+
+
+def normalizedQuery(text):
+    """Lowercase text with single spaces and without a trailing ellipsis ("Open…" and "open" are the same)."""
+    text = _normalized(text)
+    for ellipsis in ("…", "..."):
+        if text.endswith(ellipsis):
+            text = text[: -len(ellipsis)].rstrip()
+    return text
 
 
 def _compact(text):
@@ -220,6 +260,142 @@ def rankModules(query, entries, fullText=False):
     return [name for key, name in ranked]
 
 
+#
+# Search tiers (the command palette)
+#
+
+
+def _moduleSynonymIndex():
+    """{module name: synonyms of ``SYNONYMS`` that name it}."""
+    index = {}
+    for synonym, moduleNames in SYNONYMS.items():
+        for moduleName in moduleNames:
+            index.setdefault(moduleName, set()).add(synonym)
+    return {moduleName: frozenset(synonyms) for moduleName, synonyms in index.items()}
+
+
+_MODULE_SYNONYMS = _moduleSynonymIndex()
+
+
+def moduleSynonyms(moduleName):
+    """The synonyms of ``SYNONYMS`` that name the module ``moduleName``."""
+    return _MODULE_SYNONYMS.get(moduleName, frozenset())
+
+
+def queryWords(query):
+    """Words of a normalized query: separated by spaces, '-' or '_' (other punctuation must match)."""
+    return [word for word in _QUERY_SEPARATOR_PATTERN.split(query) if word]
+
+
+class SearchKey:
+    """What ``searchTier()`` needs to know about one entry of Search, lowercased once.
+
+    :param title: the name shown ("Volumes", "Window/level: Auto", "Four-Up").
+    :param aliases: other names that match like the title ("Segment Editor" for Draw).
+    :param commandSynonyms: words for what a command does ("fiducial" for Place point); tier 1.
+    :param moduleName: the module of a module entry: its name matches like the title ("SegmentEditor") and its
+        ``SYNONYMS`` are module synonyms (tier 2).
+    """
+
+    __slots__ = (
+        "commandSynonyms",
+        "compactExact",
+        "compactNames",
+        "compactSubstrings",
+        "exact",
+        "moduleSynonyms",
+        "prefixTexts",
+        "substringTexts",
+        "wordLists",
+    )
+
+    def __init__(self, title, aliases=(), commandSynonyms=(), moduleName=None):
+        texts = [normalizedQuery(text) for text in (title, *aliases) if text]
+        self.exact = frozenset(texts)
+        self.compactExact = frozenset(_compact(text) for text in texts) | ({moduleName.lower()} if moduleName else frozenset())
+        self.prefixTexts = tuple(texts)
+        self.compactNames = (moduleName.lower(),) if moduleName else ()
+        self.wordLists = tuple([word.lower() for word in _WORD_PATTERN.findall(text)] for text in texts)
+        if moduleName:
+            self.wordLists += ([word.lower() for word in _CAMEL_CASE_PATTERN.findall(moduleName)],)
+        self.substringTexts = tuple(texts)
+        self.compactSubstrings = self.compactNames
+        self.commandSynonyms = frozenset(normalizedQuery(synonym) for synonym in commandSynonyms if synonym)
+        self.moduleSynonyms = moduleSynonyms(moduleName) if moduleName else frozenset()
+
+
+def searchTier(key, query, compactQuery=None, words=None):
+    """Tier of an entry (its ``SearchKey``) for a normalized query (``normalizedQuery()``), None if it does not match.
+
+    The full text tier (``TIER_FULL_TEXT``) is not computed here: Search uses it only when no entry matched.
+    """
+    if not query:
+        return None
+    if compactQuery is None:
+        compactQuery = _compact(query)
+    if query in key.exact or (compactQuery and compactQuery in key.compactExact):
+        return TIER_EXACT
+    if query in key.commandSynonyms:
+        return TIER_COMMAND_SYNONYM
+    if query in key.moduleSynonyms:
+        return TIER_MODULE_SYNONYM
+    for text in key.prefixTexts:
+        if text.startswith(query):
+            return TIER_PREFIX
+    if compactQuery:
+        for name in key.compactNames:
+            if name.startswith(compactQuery):
+                return TIER_PREFIX
+    if len(query) >= SYNONYM_PREFIX_MINIMUM_LENGTH:
+        for synonym in key.commandSynonyms:
+            if synonym.startswith(query):
+                return TIER_SYNONYM_PREFIX
+        for synonym in key.moduleSynonyms:
+            if synonym.startswith(query):
+                return TIER_SYNONYM_PREFIX
+    if words is None:
+        words = queryWords(query)
+    if words:
+        for wordList in key.wordLists:
+            if _wordsStartInOrder(words, wordList):
+                return TIER_WORD_START
+    for text in key.substringTexts:
+        if query in text:
+            return TIER_SUBSTRING
+    if compactQuery:
+        for name in key.compactSubstrings:
+            if compactQuery in name:
+                return TIER_SUBSTRING
+    return None
+
+
+def matchedRanges(text, query):
+    """Character ranges ``[(start, end)]`` of ``text`` that match a normalized query, for highlighting.
+
+    The whole query where it is a substring (case insensitive), else the start of each word of the text that a
+    query word starts, in order. Empty when the entry matched by a synonym only.
+    """
+    if not text or not query:
+        return []
+    lowerText = text.lower()
+    position = lowerText.find(query)
+    if position >= 0:
+        return [(position, position + len(query))]
+    ranges = []
+    words = queryWords(query)
+    searchFrom = 0
+    textWords = [(match.start(), match.group(0).lower()) for match in _WORD_PATTERN.finditer(text)]
+    for queryWord in words:
+        while searchFrom < len(textWords) and not textWords[searchFrom][1].startswith(queryWord):
+            searchFrom += 1
+        if searchFrom == len(textWords):
+            return []
+        start = textWords[searchFrom][0]
+        ranges.append((start, start + len(queryWord)))
+        searchFrom += 1
+    return ranges
+
+
 def _moduleGroup(moduleName, title):
     """Core, other or demoted (CLI, BRAINS, registration, DICOM plug-ins, developer tools)."""
     if moduleName in CORE_MODULES:
@@ -241,6 +417,19 @@ def _moduleGroup(moduleName, title):
             if str(category).split(".")[0] in _DEMOTED_CATEGORIES:
                 return _GROUP_DEMOTED
     return _GROUP_OTHER
+
+
+#: Groups of Search, after the tier: workspaces, core modules and commands; other modules; demoted modules
+GROUP_CORE = _GROUP_CORE
+GROUP_OTHER = _GROUP_OTHER
+GROUP_DEMOTED = _GROUP_DEMOTED
+
+
+def moduleGroup(moduleName, title=None):
+    """``GROUP_CORE`` for the core modules, ``GROUP_DEMOTED`` for CLI, BRAINS, registration, DICOM plug-in and
+    developer modules, else ``GROUP_OTHER``.
+    """
+    return _moduleGroup(moduleName, title or moduleName)
 
 
 def _property(qobject, name):
@@ -397,8 +586,16 @@ def install(shell):
 
 
 def uninstall(shell):
-    """Disconnect from the module finder and restore its classic filter and title."""
+    """Disconnect from the module finder and restore its classic filter and title; close Search and the shortcut list."""
     global _finder
+    # Search (Ctrl+K) and the shortcut list (Ctrl+/) exist only while Studio is shown
+    for name in ("StudioLib.palette", "StudioLib.cheatsheet"):
+        module = sys.modules.get(name)
+        if module is not None and hasattr(module, "dispose"):
+            try:
+                module.dispose()
+            except Exception:
+                logging.error(f"Studio: {name}.dispose() failed:\n{traceback.format_exc()}")
     if _finder is None:
         return
     finder = _finder

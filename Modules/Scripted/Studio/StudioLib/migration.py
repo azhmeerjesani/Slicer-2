@@ -121,11 +121,12 @@ def keysIn(text):
 ROWS = (
     # Menus and toolbars
     Row("modules", _("Modules drop-down (Module Selection toolbar)"),
-        _("The Library, Draw and Map tabs for the lesion workflow; every other module is one search away: Search ({key:Ctrl+K})"),
-        key="Ctrl+K", target="StudioSearchPill", keywords="module selector modules list all tools find module",
+        _("The Library, Draw and Map tabs for the lesion workflow; every other module is one search away: Search ({key:Ctrl+K}), "
+          "which also finds Draw tools, layouts, menu commands, settings pages and sample data by name"),
+        key="Ctrl+K", target="StudioSearchPill", keywords="module selector modules list all tools find module palette command palette",
         note=_("A module opened from Search shows a ← back button that returns to your workspace (or press Esc)."), category="toolbar"),
-    Row("module-finder", _("View > Module Finder"), _("Search in the top bar ({key:Ctrl+K}; {key:Ctrl+F} also works)"), officialKey="Ctrl+F",
-        key="Ctrl+K", target="StudioSearchPill", keywords="find module search"),
+    Row("module-finder", _("View > Module Finder"), _("Search in the top bar ({key:Ctrl+K}); {key:Ctrl+F} opens Search with the modules only"),
+        officialKey="Ctrl+F", key="Ctrl+K", target="StudioSearchPill", keywords="find module search palette command"),
     Row("favorite-modules", _("Favorite Modules toolbar"), _("The workspace tabs Library, Draw and Map ({key:Ctrl+Alt+1}, {key:Ctrl+Alt+2}, {key:Ctrl+Alt+3})"),
         key="Ctrl+Alt+1", target="StudioWorkspaceSwitcher", keywords="favorites toolbar data volumes models transforms",
         note=_("Turn the toolbar on in ≡ > View > Toolbars > Favorite Modules if you miss it."), category="toolbar"),
@@ -136,7 +137,8 @@ ROWS = (
         note=_("The same readers as 3D Slicer: NIfTI, NRRD, .seg.nrrd, .mrml and .mrb open the same way in both.")),
     Row("add-dicom", _("File > Add DICOM Data"), _("Library > Open folder… (a DICOM folder); the DICOM module is one search away"),
         target="StudioLibraryOpenFolderButton", workspace="library", keywords="dicom import series database folder load dicom"),
-    Row("sample-data", _("File > Download Sample Data"), _("Library > Load sample data"), target="StudioLibrarySampleDataLink", workspace="library",
+    Row("sample-data", _("File > Download Sample Data"), _("Library > Load sample data, or Search ({key:Ctrl+K}) for a sample by name"),
+        target="StudioLibrarySampleDataLink", workspace="library",
         keywords="sample data download example mrhead"),
     Row("recent", _("File > Recent"), _("Library > Recent"), target="StudioRecentList", workspace="library", keywords="recent files history reopen"),
     Row("save-data", _("File > Save Data"), _("{key:Ctrl+S}, or ≡ > File > Save Data: saves the scene (.mrml, .mrb) as in 3D Slicer"),
@@ -147,7 +149,8 @@ ROWS = (
     Row("settings", _("Edit > Application Settings"), _("≡ > Settings… ({key:Ctrl+2})"), officialKey="Ctrl+2", key="Ctrl+2",
         target="StudioAppMenuButton", keywords="settings preferences options application settings",
         note=_("Settings are shared with your other 3D Slicer installations; Studio keeps its own choices under Studio/ and Appearance/.")),
-    Row("layout", _("View > Layout"), _("The layout button in the top bar: Focus, Single, Four-up, Row ({key:Alt+1} to {key:Alt+4}); More layouts… lists every 3D Slicer layout"),
+    Row("layout", _("View > Layout"), _("The layout button in the top bar: Focus, Single, Four-up, Row ({key:Alt+1} to {key:Alt+4}); More layouts… lists every "
+                                         "3D Slicer layout, and Search finds any layout by name"),
         key="Alt+1", target="StudioLayoutButton", keywords="layout conventional four-up four up one up red slice only views arrangement",
         note=_("The Layout Selection toolbar button of 3D Slicer offers the same layouts.")),
     Row("python-console", _("View > Python Console"), _("≡ > Python console ({key:Ctrl+3})"), officialKey="Ctrl+3", key="Ctrl+3",
@@ -163,8 +166,10 @@ ROWS = (
         target="StudioAppMenuButton", classic=True, keywords="status bar messages"),
     Row("toolbars", _("View > Toolbars"), _("≡ > View > Toolbars: a toolbar you turn on stays visible in Studio"), target="StudioAppMenuButton",
         keywords="toolbars toolbar show hide", category="toolbar"),
-    Row("shortcuts-reference", _("Help > Keyboard Shortcuts Reference"), _("≡ > Keyboard shortcuts ({key:Ctrl+/}); the 3D Slicer reference stays in ≡ > Help"),
-        key="Ctrl+/", target="StudioAppMenuButton", keywords="keyboard shortcuts keys hotkeys cheat sheet"),
+    Row("shortcuts-reference", _("Help > Keyboard Shortcuts Reference"),
+        _("≡ > Keyboard shortcuts ({key:Ctrl+/}): the keys of the workspace, the view gestures and the Esc steps, searchable; "
+          "the 3D Slicer reference stays in ≡ > Help"),
+        key="Ctrl+/", target="StudioAppMenuButton", keywords="keyboard shortcuts keys hotkeys cheat sheet gestures mouse"),
     Row("about", _("Help > About 3D Slicer"), _("≡ > Help > About 3D Slicer"), target="StudioAppMenuButton", same=True,
         keywords="about version license"),
     Row("documentation", _("Help > Documentation"), _("≡ > Help > Documentation ({key:Ctrl+1}); the ? button of the inspector shows help for the current tool"),
@@ -195,19 +200,26 @@ ROWS = (
     Row("segmentations-module", _("Segmentations module"), _("The Segmentations button in Draw, or Search > Segmentations"),
         target="SwitchToSegmentationsButton", workspace="draw", keywords="segmentations module representations closed surface import export",
         category="module"),
-    Row("markups", _("Markups toolbar / Place mode"), _("≡ > View > Toolbars > Markups (it stays visible in Studio), or Search > Markups; Esc leaves Place mode"),
+    Row("markups", _("Markups toolbar / Place mode"),
+        _("Search > Place point puts a point in a view; ≡ > View > Toolbars > Markups (it stays visible in Studio), or Search > Markups; "
+          "Esc leaves Place mode"),
         target="StudioAppMenuButton", keywords="markups fiducial point landmark ruler line place mode", category="toolbar"),
     Row("mouse-mode", _("Mouse Interaction toolbar (Window/level)"),
-        _("Drag with the left mouse button in a view to adjust window/level when no tool is active; the toolbar is in ≡ > View > Toolbars > Mouse Interaction"),
+        _("Drag with the left mouse button in a view to adjust window/level when no tool is active, or Search > Window/level: Auto; "
+          "the toolbar is in ≡ > View > Toolbars > Mouse Interaction"),
         target="qMRMLSliceWidgetRed/SliceView", workspace="draw", keywords="mouse mode window level adjust contrast interaction toolbar",
         category="toolbar"),
-    Row("crosshair", _("Crosshair Selection toolbar"), _("Shift + move the mouse in a view jumps the crosshair, as in 3D Slicer; the toolbar is in ≡ > View > Toolbars"),
+    Row("crosshair", _("Crosshair Selection toolbar"),
+        _("Shift + move the mouse in a view jumps the crosshair, as in 3D Slicer; Search > Show crosshair shows or hides it, and the toolbar "
+          "is in ≡ > View > Toolbars"),
         target="qMRMLSliceWidgetRed/SliceView", workspace="draw", same=True, keywords="crosshair cursor jump slices", category="toolbar"),
     Row("view-controllers", _("Slice view controller bars"), _("Above each view, as in 3D Slicer; the pin opens the full controls"),
         target="qMRMLSliceWidgetRed/SliceController", workspace="draw", same=True,
         keywords="slice controller bar pin link offset slider foreground background opacity view controllers", category="panel"),
-    Row("data-probe", _("Data Probe (bottom of the module panel)"), _("⋯ in the inspector header > Show Data Probe"),
-        target="StudioPanelMoreButton", workspace="draw", keywords="data probe pixel value coordinates ras intensity", category="panel"),
+    Row("data-probe", _("Data Probe (bottom of the module panel)"),
+        _("The probe at the bottom right of the view under the mouse: position (MNI or scanner), value and lesion; "
+          "⋯ in the inspector header > Show Data Probe shows the classic panel"),
+        target="StudioPanelMoreButton", workspace="draw", keywords="data probe pixel value coordinates ras intensity mni probe", category="panel"),
 )
 
 
