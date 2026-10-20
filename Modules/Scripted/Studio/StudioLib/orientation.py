@@ -31,6 +31,22 @@ bottom letter is: while a ruler is shown, the bottom letter is raised above its 
 part of the key compared by the timer, the ruler geometry is a fraction of the view height so the
 position follows resizes without any update).
 
+Display statement (plain words): axial and coronal views, whose screen-right direction (column 0 of
+SliceToRAS) is axis-aligned to x (|x| > 0.9), say in the bottom-left corner "Left is on screen right"
+(radiological, the default) or "Left is on screen left" (neurological, a flipped view). The statement is a
+12 px ``vtkTextActor`` above the lines of the corner annotation, updated with the letters. Sagittal and oblique
+views have none.
+
+Figure views (``space.isFigureView()``): a 2D figure has no patient directions of its own, so a figure view
+shows no A/P/S/I letters and no statement. It shows a tag "Figure · side unknown" until the figure's
+convention is answered, then "Figure · patient right on the left" with "R" on the left edge and "L" on the
+right edge (the importer mirrors a neurological figure, so the answer always ends so). These two side letters
+are separate actors (``StudioFigureLetter_*``), not ``StudioOrientationLetter_*``.
+
+Re-centring: when the background volume of a slice view changes and the slice offset is outside the new
+background along the view normal, the offset moves to the nearest bound, half a voxel inside, so that the view
+never stays black. Figure views are skipped, and a view whose offset is inside the volume never moves.
+
 This module is an optional plug-in of the Studio shell: ``install(shell)`` shows the letters while the
 shell is active (unless the ``Studio/OrientationLetters`` setting is false), ``uninstall(shell)``
 removes every actor and observer, so that Classic shows nothing new.
@@ -43,6 +59,7 @@ import traceback
 import qt
 import slicer
 import vtk
+from slicer.i18n import tr as _
 
 SETTINGS_KEY = "Studio/OrientationLetters"
 
@@ -77,7 +94,41 @@ EDGES = (
 _RULER_LINE_MARGIN = 0.015
 _RULER_TICK_LENGTHS = {1: 0.015, 2: 0.03}  # vtkMRMLAbstractViewNode.RulerTypeThin, RulerTypeThick
 
+#: Display statement and figure tag: bottom-left of the view, above the lines of the corner annotation
+STATEMENT_FONT_SIZE = 12
+STATEMENT_COLOR = (0.78, 0.78, 0.82)
+STATEMENT_OPACITY = 0.9
+#: Opacity of the dark box behind the figure tag and the figure side letters (a figure is mostly white)
+FIGURE_BACKGROUND_OPACITY = 0.6
+#: Position of the lower-left text of a vtkCornerAnnotation (SetTextActorsPosition) and the gap above it
+CORNER_ANNOTATION_MARGIN = 5
+STATEMENT_GAP = 6
+#: |x| of the screen-right direction from which a view is "axis-aligned" for the statement
+STATEMENT_AXIS_THRESHOLD = 0.9
+
 _controller = None
+_quitConnected = False
+
+
+def displayStatement(sliceToRAS):
+    """Plain-words display statement of a view: "Left is on screen right" or "Left is on screen left".
+
+    ``sliceToRAS`` is the ``vtkMatrix4x4`` SliceToRAS of the slice node. The statement exists only when the
+    screen-right direction (column 0) is along x (|x| > 0.9): axial and coronal views, flipped or not. An empty
+    string is returned for sagittal and oblique views.
+    """
+    x = sliceToRAS.GetElement(0, 0)
+    length = math.sqrt(sum(sliceToRAS.GetElement(row, 0) ** 2 for row in range(3)))
+    if length < 1e-9 or abs(x) / length <= STATEMENT_AXIS_THRESHOLD:
+        return ""
+    return _("Left is on screen right") if x < 0 else _("Left is on screen left")
+
+
+def figureTag(convention):
+    """Tag of a figure view for the convention of its figure ("radiological", "neurological", else unknown)."""
+    if convention in ("radiological", "neurological"):
+        return _("Figure · patient right on the left")
+    return _("Figure · side unknown")
 
 
 def directionLetters(direction):
@@ -148,8 +199,17 @@ def _isAlive(qobject):
     return True
 
 
+def _spaceModule():
+    """StudioLib.space (figure views), None if this build does not have it."""
+    try:
+        from . import space
+    except Exception:
+        return None
+    return space
+
+
 class _ViewLetters:
-    """The four edge letters of one slice view."""
+    """The edge letters, the display statement and the figure tag of one slice view."""
 
     def __init__(self, controller, sliceViewName, sliceWidget):
         self.controller = controller
@@ -159,14 +219,40 @@ class _ViewLetters:
         self.sliceNode = sliceWidget.mrmlSliceNode()
         self.renderer = self._findRenderer()
         self.directionKey = None
+        self.figureKey = None
         self.rulerType = 0
         self.letters = ("", "", "", "")
+        #: The patient directions of a figure whose convention was answered: ("R", "L"), else ("", "")
+        self.figureLetters = ("", "")
+        self.statement = ""
+        self.tag = ""
+        self.isFigure = False
+        self.convention = None
+        self.cornerText = None
+        self.statementOffset = 0
         self.actors = []
         for edgeName, reference, offset, horizontal, vertical in EDGES:
             self.actors.append(self._createActor(edgeName, reference, offset, horizontal, vertical))
-        for actor in self.actors:
+        #: Side letters of a figure whose convention is known (left edge: R, right edge: L)
+        self.figureActors = [self._createActor(edgeName, reference, offset, horizontal, vertical, "StudioFigureLetter_")
+                             for edgeName, reference, offset, horizontal, vertical in EDGES[:2]]
+        self.statementActor = self._createTextActor("StudioOrientationStatement", (0.0, 0.0), (CORNER_ANNOTATION_MARGIN, 0),
+                                                    "left", "bottom", STATEMENT_FONT_SIZE, False, STATEMENT_COLOR, STATEMENT_OPACITY)
+        self.tagActor = self._createTextActor("StudioFigureTag", (0.0, 0.0), (CORNER_ANNOTATION_MARGIN, 0),
+                                              "left", "bottom", STATEMENT_FONT_SIZE, False, STATEMENT_COLOR, 1.0, True)
+        self.otherActors = [*self.figureActors, self.statementActor, self.tagActor]
+        for actor in (*self.actors, *self.otherActors):
             self.renderer.AddViewProp(actor)
         self.observerTag = self.sliceNode.AddObserver(vtk.vtkCommand.ModifiedEvent, self._onSliceNodeModified)
+        # The composite node (background volume) and the background node (the attributes of a figure)
+        self.compositeNode = None
+        self.compositeTag = None
+        self.backgroundNode = None
+        self.backgroundTag = None
+        self.backgroundId = None
+        self._bindComposite()
+        self.backgroundId = self.compositeNode.GetBackgroundVolumeID() if self.compositeNode is not None else None
+        self._bindBackground()
 
     def _findRenderer(self):
         """The renderer of the corner annotation (the first renderer if it is not found)."""
@@ -179,10 +265,10 @@ class _ViewLetters:
         return renderers.GetFirstRenderer()
 
     @staticmethod
-    def _createActor(edgeName, reference, offset, horizontal, vertical):
+    def _createTextActor(objectName, reference, offset, horizontal, vertical, fontSize, bold, color, opacity, background=False):
         actor = vtk.vtkTextActor()
         if hasattr(actor, "SetObjectName"):
-            actor.SetObjectName(f"StudioOrientationLetter_{edgeName}")
+            actor.SetObjectName(objectName)
         actor.SetTextScaleModeToNone()
         actor.PickableOff()
         referenceCoordinate = vtk.vtkCoordinate()
@@ -194,11 +280,15 @@ class _ViewLetters:
         position.SetValue(offset[0], offset[1])
         textProperty = actor.GetTextProperty()
         textProperty.SetFontFamilyToArial()
-        textProperty.SetFontSize(FONT_SIZE)
-        textProperty.BoldOn()
+        textProperty.SetFontSize(fontSize)
+        textProperty.SetBold(bold)
         textProperty.ShadowOn()
-        textProperty.SetColor(*LETTER_COLOR)
-        textProperty.SetOpacity(LETTER_OPACITY)
+        textProperty.SetColor(*color)
+        textProperty.SetOpacity(opacity)
+        if background and hasattr(textProperty, "SetBackgroundOpacity"):
+            # A figure is mostly white: a translucent dark box keeps the light text readable
+            textProperty.SetBackgroundColor(0.0, 0.0, 0.0)
+            textProperty.SetBackgroundOpacity(FIGURE_BACKGROUND_OPACITY)
         {"left": textProperty.SetJustificationToLeft, "right": textProperty.SetJustificationToRight,
          "center": textProperty.SetJustificationToCentered}[horizontal]()
         {"top": textProperty.SetVerticalJustificationToTop, "bottom": textProperty.SetVerticalJustificationToBottom,
@@ -206,10 +296,43 @@ class _ViewLetters:
         actor.SetInput("")
         return actor
 
+    @classmethod
+    def _createActor(cls, edgeName, reference, offset, horizontal, vertical, prefix="StudioOrientationLetter_"):
+        return cls._createTextActor(f"{prefix}{edgeName}", reference, offset, horizontal, vertical, FONT_SIZE, True, LETTER_COLOR,
+                                    LETTER_OPACITY if prefix == "StudioOrientationLetter_" else 1.0, prefix != "StudioOrientationLetter_")
+
     def _onSliceNodeModified(self, caller, event):
         # Called for every slice node change (slice offset, pan, zoom...): only mark the view, the
         # comparison of the matrices runs once in the controller's 0 ms timer
         self.controller.markDirty(self.name)
+
+    def _onCompositeModified(self, caller, event):
+        # Background volume changes: figure state and re-centring, in the controller's 0 ms timer
+        self.controller.markDirty(self.name)
+
+    def _bindComposite(self):
+        """Observe the composite node of the view (it is replaced when the scene is closed)."""
+        compositeNode = self.sliceWidget.mrmlSliceCompositeNode() if hasattr(self.sliceWidget, "mrmlSliceCompositeNode") else None
+        if compositeNode == self.compositeNode:
+            return
+        if self.compositeNode is not None and self.compositeTag is not None:
+            self.compositeNode.RemoveObserver(self.compositeTag)
+        self.compositeNode = compositeNode
+        self.compositeTag = None
+        if compositeNode is not None:
+            self.compositeTag = compositeNode.AddObserver(vtk.vtkCommand.ModifiedEvent, self._onCompositeModified)
+
+    def _bindBackground(self):
+        """Observe the background volume of the view (its attributes: Studio.Role, Studio.FigureConvention)."""
+        node = slicer.mrmlScene.GetNodeByID(self.backgroundId) if self.backgroundId else None
+        if node == self.backgroundNode:
+            return
+        if self.backgroundNode is not None and self.backgroundTag is not None:
+            self.backgroundNode.RemoveObserver(self.backgroundTag)
+        self.backgroundNode = node
+        self.backgroundTag = None
+        if node is not None:
+            self.backgroundTag = node.AddObserver(vtk.vtkCommand.ModifiedEvent, self._onCompositeModified)
 
     def isCurrent(self, sliceWidget):
         """True if this object still shows the letters of ``sliceWidget`` (same widget and slice node)."""
@@ -226,19 +349,133 @@ class _ViewLetters:
         self.actors[3].GetPositionCoordinate().GetReferenceCoordinate().SetValue(reference[0], reference[1])
         return True
 
+    def _figureKey(self):
+        """What decides whether the view shows a figure and which convention it has (cheap: no scene search)."""
+        node = self.backgroundNode
+        if node is None:
+            return None
+        sliceToRAS = self.sliceNode.GetSliceToRAS()
+        normal = tuple(round(sliceToRAS.GetElement(row, 2), 3) for row in range(3))
+        return (node.GetID(), node.GetAttribute("Studio.Role"), node.GetAttribute("Studio.FigureConvention"), normal)
+
+    def _recentre(self):
+        """Move the slice offset into the new background volume (half a voxel inside the nearest bound).
+
+        Only a view whose offset is outside the volume along the view normal is moved. Figure views are skipped.
+        Return True if the offset changed.
+        """
+        if self.isFigure or self.backgroundNode is None:
+            return False
+        sliceLogic = self.sliceWidget.sliceLogic()
+        bounds = [0.0] * 6
+        sliceLogic.GetBackgroundSliceBounds(bounds)
+        low, high = bounds[4], bounds[5]
+        if not high > low:
+            return False
+        offset = self.sliceNode.GetSliceOffset()
+        if low <= offset <= high:
+            return False
+        spacing = sliceLogic.GetBackgroundSliceSpacing()
+        half = min(0.5 * abs(spacing[2]), 0.5 * (high - low))
+        sliceLogic.SetSliceOffset(low + half if offset < low else high - half)
+        return True
+
+    def _cornerTextHeight(self):
+        """Height in pixels of the lower-left text of the corner annotation (0 if it has none)."""
+        cornerAnnotation = self.sliceView.cornerAnnotation()
+        text = cornerAnnotation.GetText(0) if cornerAnnotation is not None else ""
+        if text == self.cornerText:
+            return self.statementOffset
+        self.cornerText = text
+        height = 0
+        if text.strip():
+            probe = vtk.vtkTextActor()
+            probe.GetTextProperty().ShallowCopy(cornerAnnotation.GetTextProperty())
+            probe.GetTextProperty().SetFontSize(max(cornerAnnotation.GetMinimumFontSize(), min(cornerAnnotation.GetMaximumFontSize(), 14)))
+            probe.SetInput(text)
+            box = [0.0] * 4
+            probe.GetBoundingBox(self.renderer, box)
+            height = math.ceil(box[3] - box[2])
+        self.statementOffset = height
+        return height
+
+    def _placeStatement(self):
+        """Put the statement and the tag above the lower-left lines of the corner annotation. Return True if they moved."""
+        previous = self.statementOffset
+        height = self._cornerTextHeight()
+        y = CORNER_ANNOTATION_MARGIN + (height + STATEMENT_GAP if height else 0)
+        for actor in (self.statementActor, self.tagActor):
+            actor.GetPositionCoordinate().SetValue(CORNER_ANNOTATION_MARGIN, y)
+        return height != previous
+
+    def _updateFigureState(self):
+        """Re-evaluate whether the view shows a figure (and its convention). Return True if the figure state changed."""
+        space = _spaceModule()
+        figure = False
+        convention = None
+        if space is not None and self.backgroundNode is not None:
+            try:
+                figure = bool(space.isFigureView(self.name))
+                convention = space.figureConvention(self.backgroundNode) if figure else None
+            except Exception:
+                logging.error(f"Studio: figure state of {self.name} failed:\n{traceback.format_exc()}")
+        changed = (figure, convention) != (self.isFigure, self.convention)
+        self.isFigure = figure
+        self.convention = convention
+        return changed
+
     def update(self):
-        """Update the letters if the in-plane directions or the ruler changed. Return True if a render was requested."""
+        """Update the letters, statement and tag if the view, its background or its figure state changed.
+
+        Return True if a render was requested.
+        """
         changed = self._updateBottomPosition()
+        self._bindComposite()
+        backgroundId = self.compositeNode.GetBackgroundVolumeID() if self.compositeNode is not None else None
+        backgroundChanged = backgroundId != self.backgroundId
+        if backgroundChanged:
+            self.backgroundId = backgroundId
+        self._bindBackground()
         sliceToRAS = self.sliceNode.GetSliceToRAS()
         key = _directionKey(sliceToRAS)
-        if key != self.directionKey:
+        figureKey = self._figureKey()
+        if key != self.directionKey or figureKey != self.figureKey or backgroundChanged:
+            self.figureKey = figureKey
+            self._updateFigureState()
+            if backgroundChanged and self._recentre():
+                changed = True
             self.directionKey = key
-            letters = edgeLetters(sliceToRAS)
+            if self.isFigure:
+                answered = self.convention in ("radiological", "neurological")
+                letters = ("", "", "", "")
+                figureLetters = ("R", "L") if answered else ("", "")
+                statement = ""
+                tag = figureTag(self.convention)
+            else:
+                letters = edgeLetters(sliceToRAS)
+                figureLetters = ("", "")
+                statement = displayStatement(sliceToRAS)
+                tag = ""
             if letters != self.letters:
                 self.letters = letters
                 for actor, text in zip(self.actors, letters, strict=True):
                     actor.SetInput(text)
                 changed = True
+            if figureLetters != self.figureLetters:
+                self.figureLetters = figureLetters
+                for actor, text in zip(self.figureActors, figureLetters, strict=True):
+                    actor.SetInput(text)
+                changed = True
+            if statement != self.statement:
+                self.statement = statement
+                self.statementActor.SetInput(statement)
+                changed = True
+            if tag != self.tag:
+                self.tag = tag
+                self.tagActor.SetInput(tag)
+                changed = True
+        if (self.statement or self.tag) and self._placeStatement():
+            changed = True
         if not changed:
             return False
         if _isAlive(self.sliceView):
@@ -249,9 +486,19 @@ class _ViewLetters:
         if self.observerTag is not None:
             self.sliceNode.RemoveObserver(self.observerTag)
             self.observerTag = None
-        for actor in self.actors:
+        if self.compositeNode is not None and self.compositeTag is not None:
+            self.compositeNode.RemoveObserver(self.compositeTag)
+        self.compositeNode = None
+        self.compositeTag = None
+        if self.backgroundNode is not None and self.backgroundTag is not None:
+            self.backgroundNode.RemoveObserver(self.backgroundTag)
+        self.backgroundNode = None
+        self.backgroundTag = None
+        for actor in (*self.actors, *self.otherActors):
             self.renderer.RemoveViewProp(actor)
         self.actors = []
+        self.figureActors = []
+        self.otherActors = []
         if _isAlive(self.sliceView):
             self.sliceView.scheduleRender()
 
@@ -268,6 +515,12 @@ class _OrientationLetters:
         self.updateTimer.setInterval(0)
         self.updateTimer.connect("timeout()", self._updateDirtyViews)
         self.layoutManager.connect("layoutChanged(int)", self._onLayoutChanged)
+        # A closed or imported scene replaces the composite and background nodes of the views
+        self.sceneTags = [slicer.mrmlScene.AddObserver(event, self._onSceneChanged)
+                          for event in (slicer.vtkMRMLScene.EndCloseEvent, slicer.vtkMRMLScene.EndImportEvent)]
+
+    def _onSceneChanged(self, caller=None, event=None):
+        self.markDirty(None)
 
     def markDirty(self, sliceViewName):
         self.dirty.add(sliceViewName)
@@ -322,6 +575,9 @@ class _OrientationLetters:
                 self.layoutManager.disconnect("layoutChanged(int)", self._onLayoutChanged)
             except Exception:
                 pass
+        for tag in self.sceneTags:
+            slicer.mrmlScene.RemoveObserver(tag)
+        self.sceneTags = []
         for view in self.views.values():
             try:
                 view.remove()
@@ -363,7 +619,26 @@ def viewLetters(sliceViewName):
     if _controller is None:
         return None
     view = _controller.views.get(sliceViewName)
-    return view.letters if view is not None else None
+    if view is None:
+        return None
+    # A figure whose convention is answered shows R and L only
+    return (*view.figureLetters, "", "") if view.isFigure else view.letters
+
+
+def viewStatement(sliceViewName):
+    """The display statement shown in a slice view ("Left is on screen right"), "" if it has none, None without letters."""
+    if _controller is None:
+        return None
+    view = _controller.views.get(sliceViewName)
+    return view.statement if view is not None else None
+
+
+def viewTag(sliceViewName):
+    """The figure tag shown in a slice view ("Figure · side unknown"), "" if it is not a figure, None without letters."""
+    if _controller is None:
+        return None
+    view = _controller.views.get(sliceViewName)
+    return view.tag if view is not None else None
 
 
 def update():
@@ -380,7 +655,7 @@ def install(shell):
 
     Nothing is shown in Classic, without a shell or if the ``Studio/OrientationLetters`` setting is off.
     """
-    global _controller
+    global _controller, _quitConnected
     uninstall(shell)
     if not _isShellActive(shell) or not isEnabled():
         return
@@ -389,6 +664,14 @@ def install(shell):
         return
     _controller = _OrientationLetters(layoutManager)
     _controller.synchronizeViews()
+    if not _quitConnected:
+        # Observers with Python callbacks must not outlive the interpreter
+        slicer.app.connect("aboutToQuit()", _onAboutToQuit)
+        _quitConnected = True
+
+
+def _onAboutToQuit():
+    uninstall(None)
 
 
 def uninstall(shell):

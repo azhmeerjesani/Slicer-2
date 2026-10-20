@@ -10,10 +10,16 @@ always restore the Classic interface. They cover:
 - the letters of the screen edges of the axial, coronal and sagittal views (radiological display),
   their update after an in-plane rotation and for oblique directions, and after layout changes;
 - the removal of every letter actor when Studio is left (Classic shows nothing new);
+- the display statement in plain words ("Left is on screen right" / "Left is on screen left"), only on axial and
+  coronal views, and none in Classic (U-04);
+- figure views: no A/P/S/I letters and no statement, the tag "Figure · side unknown" until the convention is
+  answered, then "Figure · patient right on the left" with R and L only (U-04);
+- the re-centring of a view whose slice offset is outside a new background volume (U-04);
 - the ranking of the module finder ("vol" -> Volumes, "mark" -> Markups, "fiducial" -> Markups...),
   Enter opening the best match, and the classic finder restored in Classic.
 """
 
+import numpy as np
 import qt
 import vtk
 
@@ -293,6 +299,301 @@ class StudioOrientationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                 settings.setValue(orientation.SETTINGS_KEY, previousSetting)
             else:
                 settings.remove(orientation.SETTINGS_KEY)
+
+    #
+    # Display statement, figure views, re-centring (U-04)
+    #
+
+    @staticmethod
+    def _flipScreenX(sliceNode):
+        """Neurological display of a view: screen x flipped to the patient's right."""
+        flip = vtk.vtkMatrix4x4()
+        flip.DeepCopy(sliceNode.GetSliceToRAS())
+        for row in range(3):
+            flip.SetElement(row, 0, -flip.GetElement(row, 0))
+        sliceNode.GetSliceToRAS().DeepCopy(flip)
+        sliceNode.UpdateMatrices()
+
+    @staticmethod
+    def _actorTexts(view, prefix):
+        """Texts of the actors of a slice view whose object name starts with ``prefix`` (name -> text)."""
+        found = {}
+        renderers = view.sliceView.renderWindow().GetRenderers()
+        for index in range(renderers.GetNumberOfItems()):
+            props = renderers.GetItemAsObject(index).GetViewProps()
+            for propIndex in range(props.GetNumberOfItems()):
+                prop = props.GetItemAsObject(propIndex)
+                name = prop.GetObjectName() if hasattr(prop, "GetObjectName") else ""
+                if str(name).startswith(prefix):
+                    found[str(name)] = prop.GetInput()
+        return found
+
+    def _addFigure(self, name="figure", dims=(200, 100, 1), tagged=True):
+        """A 2D RGB picture as a vector volume, tagged as a figure like the importer does."""
+        node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLVectorVolumeNode", name)
+        image = vtk.vtkImageData()
+        image.SetDimensions(*dims)
+        image.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 3)
+        image.GetPointData().GetScalars().Fill(128)
+        node.SetAndObserveImageData(image)
+        if tagged:
+            node.SetAttribute("Studio.Role", "figure")
+        return node
+
+    def _addVolume(self, name, size, spacing, origin):
+        """An empty scalar volume of ``size`` voxels per side."""
+        node = slicer.util.addVolumeFromArray(np.ones((size, size, size), dtype=np.uint8), name=name)
+        node.SetSpacing(spacing, spacing, spacing)
+        node.SetOrigin(*origin)
+        return node
+
+    def _setBackground(self, viewName, volumeNode):
+        compositeNode = self.layoutManager.sliceWidget(viewName).mrmlSliceCompositeNode()
+        compositeNode.SetBackgroundVolumeID(volumeNode.GetID() if volumeNode is not None else None)
+        self._pump()
+
+    def test_statement_words(self):
+        """Axial and coronal views say where the patient's left is; sagittal and oblique views say nothing."""
+        from StudioLib import orientation
+
+        studioShell = self._applyStudio()
+        self._ensureLetters(studioShell)
+        self._setFourUp()
+        orientation.update()
+        self.assertEqual(orientation.viewStatement("Red"), "Left is on screen right")
+        self.assertEqual(orientation.viewStatement("Green"), "Left is on screen right")
+        self.assertEqual(orientation.viewStatement("Yellow"), "")
+        view = orientation.instance().views["Red"]
+        self.assertEqual(view.statementActor.GetInput(), "Left is on screen right")
+        self.assertTrue(view.renderer.HasViewProp(view.statementActor))
+        self.assertEqual(view.statementActor.GetObjectName(), "StudioOrientationStatement")
+        self.assertEqual(view.statementActor.GetTextProperty().GetFontSize(), orientation.STATEMENT_FONT_SIZE)
+        self.assertEqual(view.tagActor.GetInput(), "")
+
+        # Flipped screen x (neurological display): through the same slice node observer as the letters
+        redNode = self.layoutManager.sliceWidget("Red").mrmlSliceNode()
+        self._flipScreenX(redNode)
+        self._pump()
+        self.assertEqual(orientation.viewStatement("Red"), "Left is on screen left")
+        self.assertEqual(view.statementActor.GetInput(), "Left is on screen left")
+        self.assertEqual(orientation.viewLetters("Red"), ("L", "R", "A", "P"))
+
+        # Oblique (45 degrees in the plane): none; back to axial: the default statement
+        redNode.SetOrientationToAxial()
+        self._rotateInPlane(redNode, 45)
+        self._pump()
+        self.assertEqual(orientation.viewStatement("Red"), "")
+        redNode.SetOrientationToAxial()
+        self._pump()
+        self.assertEqual(orientation.viewStatement("Red"), "Left is on screen right")
+
+        # The pure function: sagittal has no statement
+        yellowNode = self.layoutManager.sliceWidget("Yellow").mrmlSliceNode()
+        self.assertEqual(orientation.displayStatement(yellowNode.GetSliceToRAS()), "")
+
+        # The statement sits above the lines of the corner annotation (no volume: at the corner margin)
+        self.assertEqual(int(view.statementActor.GetPositionCoordinate().GetValue()[1]),
+                         orientation.CORNER_ANNOTATION_MARGIN + (orientation.STATEMENT_GAP + view.statementOffset if view.statementOffset else 0))
+
+    def test_statement_above_corner_annotation(self):
+        """With a background volume, the corner annotation has a line and the statement moves above it."""
+        from StudioLib import orientation
+
+        studioShell = self._applyStudio()
+        self._ensureLetters(studioShell)
+        self._setFourUp()
+        volumeNode = self._addVolume("annotated", 20, 2.0, (-20, -20, -20))
+        self._setBackground("Red", volumeNode)
+        orientation.update()
+        view = orientation.instance().views["Red"]
+        cornerText = self.layoutManager.sliceWidget("Red").sliceView().cornerAnnotation().GetText(0)
+        if cornerText.strip():
+            self.assertGreater(view.statementOffset, 0)
+            y = view.statementActor.GetPositionCoordinate().GetValue()[1]
+            self.assertGreater(y, orientation.CORNER_ANNOTATION_MARGIN + orientation.STATEMENT_GAP)
+
+    def test_letters_absent_in_classic(self):
+        """Classic shows no statement and no figure tag, and under --testing without Studio nothing exists."""
+        from StudioLib import orientation
+
+        self.assertIsNone(orientation.instance())
+        self.assertIsNone(orientation.viewStatement("Red"))
+        self._setFourUp()
+        self._pump()
+        self.assertIsNone(orientation.viewStatement("Red"))
+        studioShell = self._applyStudio()
+        controller = self._ensureLetters(studioShell)
+        self._setFourUp()
+        orientation.update()
+        views = list(controller.views.values())
+        self.assertEqual(orientation.viewStatement("Red"), "Left is on screen right")
+        studioShell.classic(persist=False)
+        self._pump()
+        if orientation.instance() is not None:
+            orientation.uninstall(None)
+        self.assertIsNone(orientation.viewStatement("Red"))
+        self.assertIsNone(orientation.viewTag("Red"))
+        for view in views:
+            self.assertEqual(view.actors, [])
+            self.assertEqual(view.otherActors, [])
+            self.assertIsNone(view.observerTag)
+            self.assertIsNone(view.compositeTag)
+        for name in self.layoutManager.sliceViewNames():
+            renderers = self.layoutManager.sliceWidget(name).sliceView().renderWindow().GetRenderers()
+            for index in range(renderers.GetNumberOfItems()):
+                props = renderers.GetItemAsObject(index).GetViewProps()
+                for propIndex in range(props.GetNumberOfItems()):
+                    prop = props.GetItemAsObject(propIndex)
+                    objectName = str(prop.GetObjectName()) if hasattr(prop, "GetObjectName") else ""
+                    self.assertFalse(objectName.startswith(("StudioOrientation", "StudioFigure")), objectName)
+
+    def test_figure_view_no_letters(self):
+        """A figure view has no A/P/S/I letters and no statement: a tag says the side is unknown until it is answered."""
+        from StudioLib import orientation
+
+        studioShell = self._applyStudio()
+        self._ensureLetters(studioShell)
+        self._setFourUp()
+        scanNode = self._addVolume("scan", 20, 2.0, (-20, -20, -20))
+        self._setBackground("Yellow", scanNode)
+        orientation.update()
+        self.assertEqual(orientation.viewLetters("Yellow"), ("A", "P", "S", "I"))
+        yellowNode = self.layoutManager.sliceWidget("Yellow").mrmlSliceNode()
+        yellowNode.SetOrientationToAxial()
+        self._pump()
+        self.assertEqual(orientation.viewStatement("Yellow"), "Left is on screen right")
+
+        figureNode = self._addFigure()
+        self._setBackground("Yellow", figureNode)
+        self._pump()
+        view = orientation.instance().views["Yellow"]
+        # No patient directions: every StudioOrientationLetter_* actor is empty, and there is no statement
+        self.assertEqual(orientation.viewLetters("Yellow"), ("", "", "", ""))
+        texts = self._actorTexts(view, "StudioOrientationLetter_")
+        self.assertEqual(len(texts), 4)
+        self.assertEqual(set(texts.values()), {""}, texts)
+        self.assertEqual(orientation.viewStatement("Yellow"), "")
+        self.assertEqual(orientation.viewTag("Yellow"), "Figure · side unknown")
+        self.assertEqual(view.tagActor.GetInput(), "Figure · side unknown")
+        self.assertEqual(set(self._actorTexts(view, "StudioFigureLetter_").values()), {""})
+        # The other views are unchanged
+        self.assertEqual(orientation.viewLetters("Red"), ("R", "L", "A", "P"))
+
+        # An answered convention: patient right on the left, R and L only (the importer mirrors a neurological figure)
+        figureNode.SetAttribute("Studio.FigureConvention", "radiological")
+        self._pump()
+        self.assertEqual(orientation.viewTag("Yellow"), "Figure · patient right on the left")
+        self.assertEqual(orientation.viewLetters("Yellow"), ("R", "L", "", ""))
+        self.assertEqual(self._actorTexts(view, "StudioFigureLetter_"), {"StudioFigureLetter_left": "R", "StudioFigureLetter_right": "L"})
+        self.assertEqual(set(self._actorTexts(view, "StudioOrientationLetter_").values()), {""})
+        self.assertEqual(orientation.viewStatement("Yellow"), "")
+        figureNode.SetAttribute("Studio.FigureConvention", "neurological")
+        self._pump()
+        self.assertEqual(orientation.viewTag("Yellow"), "Figure · patient right on the left")
+        self.assertEqual(orientation.viewLetters("Yellow"), ("R", "L", "", ""))
+        # "Not sure": the side stays unknown
+        figureNode.SetAttribute("Studio.FigureConvention", "unknown")
+        self._pump()
+        self.assertEqual(orientation.viewTag("Yellow"), "Figure · side unknown")
+        self.assertEqual(orientation.viewLetters("Yellow"), ("", "", "", ""))
+
+        # The scan comes back: letters and statement come back, the tag goes
+        self._setBackground("Yellow", scanNode)
+        self.assertEqual(orientation.viewLetters("Yellow"), ("R", "L", "A", "P"))
+        self.assertEqual(orientation.viewStatement("Yellow"), "Left is on screen right")
+        self.assertEqual(orientation.viewTag("Yellow"), "")
+        self.assertEqual(set(self._actorTexts(view, "StudioFigureLetter_").values()), {""})
+
+    def test_figure_view_single_slice_picture(self):
+        """A picture without the figure tag (one slice along the view normal) is a figure view as well."""
+        from StudioLib import orientation
+
+        studioShell = self._applyStudio()
+        self._ensureLetters(studioShell)
+        self._setFourUp()
+        pictureNode = self._addFigure("picture", tagged=False)
+        yellowNode = self.layoutManager.sliceWidget("Yellow").mrmlSliceNode()
+        yellowNode.SetOrientationToAxial()
+        self._setBackground("Yellow", pictureNode)
+        self.assertEqual(orientation.viewLetters("Yellow"), ("", "", "", ""))
+        self.assertEqual(orientation.viewTag("Yellow"), "Figure · side unknown")
+
+    def _sliceBounds(self, viewName):
+        bounds = [0.0] * 6
+        self.layoutManager.sliceWidget(viewName).sliceLogic().GetBackgroundSliceBounds(bounds)
+        return bounds[4], bounds[5]
+
+    def test_recentre_on_background_change(self):
+        """A view whose offset is outside the new background moves inside it; a view inside the volume does not move."""
+
+        studioShell = self._applyStudio()
+        self._ensureLetters(studioShell)
+        self._setFourUp()
+        bigNode = self._addVolume("big", 100, 2.0, (-100, -100, -100))
+        smallNode = self._addVolume("small", 20, 2.0, (-20, -20, -20))
+        self._setBackground("Green", bigNode)
+        greenLogic = self.layoutManager.sliceWidget("Green").sliceLogic()
+        greenNode = self.layoutManager.sliceWidget("Green").mrmlSliceNode()
+        # A -132.5 like the template's far slice: inside the big volume, outside the small one
+        greenLogic.SetSliceOffset(-80.0)
+        self._pump()
+        low, high = self._sliceBounds("Green")
+        self.assertTrue(low <= -80.0 <= high)
+
+        self._setBackground("Green", smallNode)
+        self._pump()
+        low, high = self._sliceBounds("Green")
+        offset = greenNode.GetSliceOffset()
+        self.assertTrue(low <= offset <= high, f"offset {offset} outside [{low}, {high}]")
+        # Nearest bound plus half a voxel (1 mm), not clamped to the very edge
+        self.assertAlmostEqual(min(abs(offset - low), abs(offset - high)), 1.0, delta=0.01)
+
+        # A view whose offset is inside the new volume is not moved
+        greenLogic.SetSliceOffset(2.5)
+        self._pump()
+        self._setBackground("Green", bigNode)
+        self.assertAlmostEqual(greenNode.GetSliceOffset(), 2.5, delta=1e-6)
+        self._setBackground("Green", smallNode)
+        self.assertAlmostEqual(greenNode.GetSliceOffset(), 2.5, delta=1e-6)
+
+        # The far side: offset above the volume goes half a voxel below the upper bound
+        self._setBackground("Green", bigNode)
+        greenLogic.SetSliceOffset(90.0)
+        self._pump()
+        self._setBackground("Green", smallNode)
+        low, high = self._sliceBounds("Green")
+        self.assertAlmostEqual(greenNode.GetSliceOffset(), high - 1.0, delta=0.01)
+
+    def test_recentre_skips_figure_views(self):
+        """A figure keeps the slice offset it has: it is not moved into the picture."""
+
+        studioShell = self._applyStudio()
+        self._ensureLetters(studioShell)
+        self._setFourUp()
+        yellowLogic = self.layoutManager.sliceWidget("Yellow").sliceLogic()
+        yellowNode = self.layoutManager.sliceWidget("Yellow").mrmlSliceNode()
+        yellowNode.SetOrientationToAxial()
+        yellowLogic.SetSliceOffset(30.0)
+        self._pump()
+        self._setBackground("Yellow", self._addFigure())
+        self.assertAlmostEqual(yellowNode.GetSliceOffset(), 30.0, delta=1e-6)
+
+    def test_recentre_not_in_classic(self):
+        """Without Studio (Classic and --testing) a background change never moves the slice offset."""
+        from StudioLib import orientation
+
+        self.assertIsNone(orientation.instance())
+        self._setFourUp()
+        bigNode = self._addVolume("big", 100, 2.0, (-100, -100, -100))
+        smallNode = self._addVolume("small", 20, 2.0, (-20, -20, -20))
+        self._setBackground("Green", bigNode)
+        greenLogic = self.layoutManager.sliceWidget("Green").sliceLogic()
+        greenNode = self.layoutManager.sliceWidget("Green").mrmlSliceNode()
+        greenLogic.SetSliceOffset(-80.0)
+        self._pump()
+        self._setBackground("Green", smallNode)
+        self._pump()
+        self.assertAlmostEqual(greenNode.GetSliceOffset(), -80.0, delta=1e-6)
 
     #
     # Module finder ranking
