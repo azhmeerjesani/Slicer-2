@@ -37,8 +37,9 @@ built-in entry by using its id, for example "draw.saveLesion").
 **Ranking** is ``finder.searchTier()`` for every entry (exact title or alias, command synonym, module
 synonym, prefix, synonym prefix, word starts, substring; the help text only when nothing matched). Within a
 tier: the most recently run entries first (``Studio/PaletteMRU``, last 20 ids), then the entry's priority
-(higher first), its group (workspaces, core modules and commands; other modules; CLI, BRAINS, registration
-and developer modules; 'Where did it go?' answers) and the shorter title.
+(higher first), its group (workspaces, core modules, commands and the picker's layouts; other modules and the
+other classic layouts; CLI, BRAINS, registration and developer modules; 'Where did it go?' answers) and the
+shorter title.
 
 **Empty query**: "Recent tools" (the most recently run entries), "Recent files" and "Favorites", built from the
 classic ``Modules/FavoriteModules`` setting, which is only read. A query without a match shows
@@ -951,7 +952,8 @@ class Index:
                 submenu = path[-1]
                 entryId = f"layout.{_slug(submenu)}.{_slug(text)}"
                 title = f"{submenu}: {text}"
-                entries.append(Entry(entryId, title, layoutTitle, action.trigger, KIND_LAYOUT, synonyms=(submenu.lower(),), iconName="layout-grid"))
+                entries.append(Entry(entryId, title, layoutTitle, action.trigger, KIND_LAYOUT, synonyms=(submenu.lower(),), group=finder.GROUP_OTHER,
+                                     iconName="layout-grid"))
                 continue
             data = action.data()
             try:
@@ -964,9 +966,11 @@ class Index:
                 seen.add(layoutId)
             title, key = pickerKeys.get(layoutId, (None, None))
             synonyms = ("four up", "2x2", "four views") if layoutId == slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView else ()
+            # The classic layouts that the picker does not offer ("Tabbed 3D", "Triple 3D") come after the core modules and
+            # commands of the same tier: "t" is Transforms, not a rarely used layout
             entries.append(Entry(f"layout.{layoutId}" if layoutId is not None else f"layout.{_slug(text)}", text, layoutTitle, action.trigger,
                                  KIND_LAYOUT, key, synonyms=synonyms, aliases=(title,) if title and title.lower() != text.lower() else (),
-                                 priority=1 if key else 0, iconName="layout-grid"))
+                                 priority=1 if key else 0, group=finder.GROUP_CORE if key else finder.GROUP_OTHER, iconName="layout-grid"))
         return entries
 
     def _compareLayoutEntries(self):
@@ -1095,6 +1099,11 @@ def _menuActions(menu, path=()):
 
 
 def _setLayout(shell, layoutId):
+    topBar = getattr(shell, "topBar", None) if shell is not None else None
+    if topBar is not None and hasattr(topBar, "setLayoutByUser"):
+        # A layout chosen in Search is announced in Library like one chosen in the picker
+        topBar.setLayoutByUser(layoutId)
+        return
     layoutManager = slicer.app.layoutManager()
     if layoutManager is None:
         return

@@ -1035,6 +1035,13 @@ class Shell:
         self._panelWidthTimer = None
         self._panelUpdateTimer = None
         self._pendingPanelShrink = False
+        self._windowOnScreenTimer = None
+        #: True while the main window is larger than its screen because Qt grew it to its minimum size (a layout or a
+        #: module needed more room), not because the user sized or placed it so: see keepWindowOnScreen()
+        self._windowGrownForMinimum = False
+        #: Size and position keepWindowOnScreen() last gave the main window (another size or position is the user's)
+        self._windowResizedTo = None
+        self._windowMovedTo = None
         #: Widest inspector width needed by each workspace module ({module name: px}), see _workspacePanelWidth()
         self._workspacePanelWidths = {}
         #: Contents of the module panel scroll area, watched for layout changes (a tool was chosen)
@@ -1242,11 +1249,17 @@ class Shell:
             self._deleteShortcut(shortcut)
         self._installedWorkspaceShortcuts = []
         self._shortcuts = []
-        for timer in (self._toolBarScanTimer, self._panelUpdateTimer, self._panelWidthTimer):
+        for timer in (self._toolBarScanTimer, self._panelUpdateTimer, self._panelWidthTimer, self._windowOnScreenTimer):
             if timer is not None:
                 timer.stop()
         self._toolBarScanTimer = None
         self._panelUpdateTimer = None
+        if self._windowOnScreenTimer is not None:
+            self._windowOnScreenTimer.disconnect("timeout()", self.keepWindowOnScreen)
+            self._windowOnScreenTimer = None
+        self._windowGrownForMinimum = False
+        self._windowResizedTo = None
+        self._windowMovedTo = None
         self._pendingPanelShrink = False
         for toolBar, slot in self._watchedToolBars:
             try:
@@ -2753,6 +2766,9 @@ class Shell:
     def _onLayoutChanged(self, layoutId=None):
         # The views of the new layout are found again
         self._viewTabStops = None
+        if layoutId == layouts.ROW_LAYOUT_ID:
+            # "Side by side": the same width for the three views (the splitter gets its widths when the event loop runs)
+            qt.QTimer.singleShot(0, layouts.equalizeRow)
         if self._inspectorHandle is not None and self._inspectorHandle.isVisible():
             # Keep the handle off the view bars of the new layout (placed once the views have their geometry)
             qt.QTimer.singleShot(0, self._updateInspectorHandlePosition)
@@ -2795,6 +2811,107 @@ class Shell:
             if member is not None:
                 member.stop()
         toast.label.hide()
+
+    def _onMainWindowResized(self, event):
+        """Note whether Qt grew the main window to its minimum size (then it may be corrected) or the user sized it."""
+        size = event.size() if callable(getattr(event, "size", None)) else None
+        oldSize = event.oldSize() if callable(getattr(event, "oldSize", None)) else None
+        if size is None or oldSize is None or not oldSize.isValid():
+            return
+        if size == oldSize:
+            return
+        if (size.width(), size.height()) == self._windowResizedTo:
+            # The size keepWindowOnScreen() asked for
+            self._windowResizedTo = None
+            return
+        minimum = self._mainWindowMinimumSize()
+        grownWidth = size.width() > oldSize.width() and size.width() <= minimum.width()
+        grownHeight = size.height() > oldSize.height() and size.height() <= minimum.height()
+        if grownWidth or grownHeight:
+            # setMinimumSize() made the window larger: Qt's doing, corrected when the event loop runs
+            self._windowGrownForMinimum = True
+            self._scheduleKeepWindowOnScreen()
+        else:
+            # A size the user chose: kept as it is
+            self._windowGrownForMinimum = False
+
+    def _mainWindowMinimumSize(self):
+        mainWindow = self.mainWindow
+        return mainWindow.minimumSizeHint.expandedTo(mainWindow.minimumSize)
+
+    @staticmethod
+    def _availableDesktop():
+        """Region of the available geometries of all screens (a window may span two monitors), None if unknown."""
+        region = qt.QRegion()
+        for screen in qt.QGuiApplication.screens():
+            screen = ui._validScreen(screen)
+            if screen is None:
+                continue
+            available = screen.availableGeometry
+            if callable(available):
+                available = available()
+            region = region.united(qt.QRegion(available))
+        return None if region.isEmpty() else region
+
+    def _scheduleKeepWindowOnScreen(self):
+        if self._windowOnScreenTimer is None:
+            self._windowOnScreenTimer = qt.QTimer()
+            self._windowOnScreenTimer.setSingleShot(True)
+            self._windowOnScreenTimer.setInterval(0)
+            self._windowOnScreenTimer.connect("timeout()", self.keepWindowOnScreen)
+        self._windowOnScreenTimer.start()
+
+    def keepWindowOnScreen(self):
+        """Bring a main window that Qt grew beyond the available area of the screens back within its screen, as far
+        as its minimum size allows (USABILITY: stable layout; the inspector and the search box stay on the screen).
+
+        Qt makes the window larger when the views of a layout (or a module) need more room than it has, and never
+        makes it smaller again. Only that case is corrected, now and when the minimum size becomes smaller (another
+        layout): a size or a position the user chose is kept, also across several monitors. A maximized, full-screen
+        or minimized window is left alone. Return True if the window was resized or moved.
+        """
+        mainWindow = self.mainWindow
+        if not self._windowGrownForMinimum:
+            return False
+        if not mainWindow.isVisible() or mainWindow.isMaximized() or mainWindow.isFullScreen() or mainWindow.isMinimized():
+            return False
+        frame = mainWindow.frameGeometry
+        if callable(frame):
+            frame = frame()
+        desktop = self._availableDesktop()
+        if desktop is not None and qt.QRegion(frame).subtracted(desktop).isEmpty():
+            # Within the screens (possibly spanning two of them): nothing left to correct
+            self._windowGrownForMinimum = False
+            return False
+        screen = ui.screenOf(mainWindow)
+        if screen is None:
+            return False
+        available = screen.availableGeometry
+        if callable(available):
+            available = available()
+        frameWidth = frame.width() - mainWindow.width
+        frameHeight = frame.height() - mainWindow.height
+        minimum = self._mainWindowMinimumSize()
+        width = max(min(mainWindow.width, available.width() - frameWidth), minimum.width())
+        height = max(min(mainWindow.height, available.height() - frameHeight), minimum.height())
+        changed = False
+        if width != mainWindow.width or height != mainWindow.height:
+            self._windowResizedTo = (width, height)
+            mainWindow.resize(width, height)
+            changed = True
+        frame = mainWindow.frameGeometry
+        if callable(frame):
+            frame = frame()
+        x = max(available.x(), min(frame.x(), available.x() + available.width() - frame.width()))
+        y = max(available.y(), min(frame.y(), available.y() + available.height() - frame.height()))
+        if x != frame.x() or y != frame.y():
+            self._windowMovedTo = (x, y)
+            mainWindow.move(x, y)
+            changed = True
+        if width <= available.width() - frameWidth and height <= available.height() - frameHeight:
+            # The window fits its screen now; until it does, a smaller minimum size (another layout) lets it come back
+            self._windowGrownForMinimum = False
+        return changed
 
     def _updateTopBarCompact(self):
         """Narrow mode of the top bar below ``NARROW_WINDOW_WIDTH`` (the window width, so it never oscillates)."""
@@ -3107,7 +3224,18 @@ class Shell:
                 self._schedulePanelWidthUpdate(shrink=False)
                 # The views under the canvas follow the window again (the size they were held at is stale)
                 self._releaseViewAreaSize()
+                self._onMainWindowResized(event)
+        elif eventType == qt.QEvent.Move and obj == self.mainWindow:
+            position = (self.mainWindow.pos.x(), self.mainWindow.pos.y())
+            if position != self._windowMovedTo:
+                # The user (or the window manager) placed the window: it stays where it is
+                self._windowGrownForMinimum = False
+            self._windowMovedTo = None
         elif eventType in (qt.QEvent.ChildAdded, qt.QEvent.ChildPolished, qt.QEvent.LayoutRequest) and obj == self.mainWindow:
+            if eventType == qt.QEvent.LayoutRequest and self._windowGrownForMinimum:
+                # The minimum size may have become smaller (another layout): a window that Qt had to grow beyond the
+                # screen comes back
+                self._scheduleKeepWindowOnScreen()
             # Toolbars added later (extensions) are hidden like the others. A toolbar constructed with
             # the main window as parent is a child before it is a QToolBar, and it may be put in a
             # toolbar area (which requests a layout) only later: look for new toolbars when the event

@@ -84,6 +84,14 @@
 
 namespace
 {
+/// Minimum width of the offset slider in the flat bar
+const int FlatSliderMinimumWidth = 48;
+/// Fixed space at the end of the bar layout (qMRMLViewControllerBarPrivate::init)
+const int FlatBarTrailingSpace = 5;
+/// Stretch of the optional parts of the flat bar (readout, fit button): they get the room they need before the
+/// offset slider (stretch 1) grows
+const int FlatOptionalStretch = 1000;
+
 //---------------------------------------------------------------------------
 /// Return the IJK to RAS matrix of the volume, with its parent transform (the same matrix as
 /// vtkMRMLSliceLogic::GetSliceIndexFromOffset).
@@ -610,14 +618,24 @@ void qMRMLSliceControllerWidgetPrivate::setupFlatBar()
   this->BarLayout->addWidget(this->OrientationButton);
 
   // Readout "S 96.0 mm · 97/193". It has a fixed size (its width only grows), so that a new text does not
-  // lay out the bar again at every slice change.
-  this->SliceIndexLabel = new QLabel(this->BarWidget);
+  // lay out the bar again at every slice change. Its holder may be narrower (minimum 1 px): the readout never
+  // sets the minimum width of the bar, the bar shortens or hides it instead (updateFlatBarWidgetsVisibility).
+  this->SliceIndexHolder = new QWidget(this->BarWidget);
+  this->SliceIndexHolder->setObjectName("SliceIndexHolder");
+  this->SliceIndexHolder->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+  this->SliceIndexHolder->setMinimumWidth(1);
+  this->SliceIndexHolder->setFixedHeight(this->OptionsButton->height());
+  QHBoxLayout* holderLayout = new QHBoxLayout(this->SliceIndexHolder);
+  holderLayout->setContentsMargins(0, 0, 0, 0);
+  holderLayout->setSpacing(0);
+  this->SliceIndexLabel = new QLabel(this->SliceIndexHolder);
   this->SliceIndexLabel->setObjectName("SliceIndexLabel");
   this->SliceIndexLabel->setFixedHeight(this->OptionsButton->height());
   this->SliceIndexLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-  this->SliceIndexLabel->setVisible(false);
-  this->FlatOnlyWidgets << this->SliceIndexLabel;
-  this->BarLayout->addWidget(this->SliceIndexLabel);
+  holderLayout->addWidget(this->SliceIndexLabel);
+  this->SliceIndexHolder->setVisible(false);
+  this->FlatOnlyWidgets << this->SliceIndexHolder;
+  this->BarLayout->addWidget(this->SliceIndexHolder);
 
   // Link toggle: "unlink" when off, "link" (and the checked background) when on
   this->BarLinkButton = this->createFlatToolButton("BarLinkButton");
@@ -640,7 +658,7 @@ void qMRMLSliceControllerWidgetPrivate::setupFlatBar()
   // Flat bar order: stripe, view label, orientation, offset slider (stretch), readout, link, fit, options, maximize
   this->FlatLeadingWidgets << this->OrientationButton;
   this->FlatTrailingWidgets.clear();
-  this->FlatTrailingWidgets << this->SliceIndexLabel << this->BarLinkButton << this->FitToWindowToolButton << this->OptionsButton << this->MaximizeViewButton;
+  this->FlatTrailingWidgets << this->SliceIndexHolder << this->BarLinkButton << this->FitToWindowToolButton << this->OptionsButton << this->MaximizeViewButton;
 }
 
 // --------------------------------------------------------------------------
@@ -669,13 +687,39 @@ void qMRMLSliceControllerWidgetPrivate::updateFlatStyle()
     this->actionFit_to_window->setIcon(this->FlatFitIcon);
     this->actionFit_to_window->setToolTip(Self::flatToolTip(qMRMLSliceControllerWidget::tr("Fit"), QString(), qMRMLSliceControllerWidget::tr("Fit the images to the view")));
     this->setFlatFixedSize(this->FitToWindowToolButton, this->OptionsButton->size());
+    // The optional parts (fit button, readout) and the slider neither set the minimum width of the bar nor make its
+    // size hint differ from one view to the other (splitters share the room by size hints): their horizontal size
+    // hints are ignored. A narrow bar hides the optional parts (updateFlatBarWidgetsVisibility); a shown part gets
+    // its room first (stretch), then the slider.
+    this->FitToWindowToolButton->setMinimumWidth(1);
     this->FitToWindowToolButton->setIconSize(this->OptionsButton->iconSize());
+    if (!this->ClassicSizePoliciesRecorded)
+    {
+      this->ClassicFitSizePolicy = this->FitToWindowToolButton->sizePolicy();
+      this->ClassicSliderSizePolicy = this->SliceOffsetSlider->sizePolicy();
+      this->ClassicSizePoliciesRecorded = true;
+    }
+    this->FitToWindowToolButton->setSizePolicy(QSizePolicy::Ignored, this->ClassicFitSizePolicy.verticalPolicy());
     // The readout replaces the offset spin box (and its black text)
     this->SliceOffsetSlider->spinBox()->setStyleSheet(QString());
     this->SliceOffsetSlider->setSpinBoxVisible(false);
+    if (!this->ClassicSizes.contains(this->SliceOffsetSlider))
+    {
+      this->ClassicSizes.insert(this->SliceOffsetSlider, ClassicSize{ this->SliceOffsetSlider->minimumSize(), this->SliceOffsetSlider->maximumSize() });
+    }
+    this->SliceOffsetSlider->setMinimumWidth(FlatSliderMinimumWidth);
+    this->SliceOffsetSlider->setSizePolicy(QSizePolicy::Ignored, this->ClassicSliderSizePolicy.verticalPolicy());
     if (sliderIndex >= 0)
     {
       this->BarLayout->setStretch(sliderIndex, 1);
+    }
+    for (QWidget* optional : { static_cast<QWidget*>(this->SliceIndexHolder), static_cast<QWidget*>(this->FitToWindowToolButton) })
+    {
+      int optionalIndex = this->BarLayout->indexOf(optional);
+      if (optionalIndex >= 0)
+      {
+        this->BarLayout->setStretch(optionalIndex, FlatOptionalStretch);
+      }
     }
     // Options popup: all the layer rows at once, no "more" expansion; link and orientation are on the bar
     this->MoreButton->setChecked(true);
@@ -687,7 +731,9 @@ void qMRMLSliceControllerWidgetPrivate::updateFlatStyle()
       this->BarLinkButton->setChecked(this->MRMLSliceCompositeNode->GetLinkedControl());
     }
     QFontMetrics fontMetrics(this->SliceIndexLabel->font());
-    this->SliceIndexLabel->setFixedWidth(fontMetrics.horizontalAdvance(QString::fromUtf8("S 000.0 mm \u00B7 000/000")) + 4);
+    this->FullReadoutWidth = std::max(this->FullReadoutWidth, fontMetrics.horizontalAdvance(QString::fromUtf8("S 000.0 mm \u00B7 000/000")) + 4);
+    this->CompactReadoutWidth = std::max(this->CompactReadoutWidth, fontMetrics.horizontalAdvance(QString("000/000")) + 4);
+    this->updateReadoutLabel();
     this->updateFlatBarFromMRMLSliceNode();
     this->updateFlatBarWidgetsVisibility();
   }
@@ -696,6 +742,12 @@ void qMRMLSliceControllerWidgetPrivate::updateFlatStyle()
     this->actionFit_to_window->setIcon(this->ClassicFitIcon);
     this->actionFit_to_window->setToolTip(this->ClassicFitToolTip);
     this->restoreClassicSize(this->FitToWindowToolButton);
+    this->restoreClassicSize(this->SliceOffsetSlider);
+    if (this->ClassicSizePoliciesRecorded)
+    {
+      this->FitToWindowToolButton->setSizePolicy(this->ClassicFitSizePolicy);
+      this->SliceOffsetSlider->setSizePolicy(this->ClassicSliderSizePolicy);
+    }
     this->FitToWindowToolButton->setIconSize(this->MaximizeViewButton->iconSize());
     this->FitToWindowToolButton->setVisible(true);
     this->SliceOffsetSlider->spinBox()->setStyleSheet(this->ClassicSpinBoxStyleSheet);
@@ -719,10 +771,13 @@ void qMRMLSliceControllerWidgetPrivate::updateFlatBarWidgetsVisibility()
   {
     return;
   }
-  // Narrow views: hide the fit button, then the readout, so that the slider keeps some room
+  // Narrow views: hide the fit button, then shorten the readout, then hide it, so that the slider keeps some room.
+  // The view color stripe, the view label, the orientation, the link, options and maximize buttons always stay.
+  // The decision only depends on the width of the bar, which these widgets do not set (their minimum width is
+  // 1 px), so it cannot oscillate.
   const int spacing = this->BarLayout->spacing();
   const QMargins margins = this->BarLayout->contentsMargins();
-  int required = margins.left() + margins.right() + 60; // offset slider
+  int required = margins.left() + margins.right() + FlatBarTrailingSpace + FlatSliderMinimumWidth + spacing;
   for (QWidget* widget : { static_cast<QWidget*>(this->ViewLabel),
                            static_cast<QWidget*>(this->OrientationButton),
                            static_cast<QWidget*>(this->BarLinkButton),
@@ -735,17 +790,63 @@ void qMRMLSliceControllerWidgetPrivate::updateFlatBarWidgetsVisibility()
     }
   }
   const int available = this->BarWidget->width();
-  const int readoutWidth = this->SliceIndexLabel->width() + spacing;
-  const int fitWidth = this->FitToWindowToolButton->width() + spacing;
-  const bool showReadout = (available >= required + readoutWidth);
-  const bool showFit = (available >= required + readoutWidth + fitWidth);
-  if (this->SliceIndexLabel->isHidden() == showReadout)
+  const int fullWidth = this->FullReadoutWidth + spacing;
+  const int compactWidth = this->CompactReadoutWidth + spacing;
+  const int fitWidth = this->OptionsButton->width() + spacing;
+  bool showReadout = true;
+  bool compact = false;
+  bool showFit = false;
+  if (available >= required + fullWidth + fitWidth)
   {
-    this->SliceIndexLabel->setVisible(showReadout);
+    showFit = true;
+  }
+  else if (available >= required + fullWidth)
+  {
+    // full readout, no fit button
+  }
+  else if (available >= required + compactWidth)
+  {
+    compact = true;
+  }
+  else
+  {
+    showReadout = false;
+  }
+  if (compact != this->CompactReadout)
+  {
+    this->CompactReadout = compact;
+    this->updateReadoutLabel();
+  }
+  if (this->SliceIndexHolder->isHidden() == showReadout)
+  {
+    this->SliceIndexHolder->setVisible(showReadout);
   }
   if (this->FitToWindowToolButton->isHidden() == showFit)
   {
     this->FitToWindowToolButton->setVisible(showFit);
+  }
+}
+
+// --------------------------------------------------------------------------
+void qMRMLSliceControllerWidgetPrivate::updateReadoutLabel()
+{
+  if (!this->SliceIndexLabel)
+  {
+    return;
+  }
+  const QString& text = this->CompactReadout ? this->CompactReadoutText : this->FullReadoutText;
+  const int width = this->CompactReadout ? this->CompactReadoutWidth : this->FullReadoutWidth;
+  if (this->SliceIndexLabel->minimumWidth() != width || this->SliceIndexLabel->maximumWidth() != width)
+  {
+    this->SliceIndexLabel->setFixedWidth(width);
+  }
+  if (this->SliceIndexHolder && this->SliceIndexHolder->maximumWidth() != width)
+  {
+    this->SliceIndexHolder->setMaximumWidth(width);
+  }
+  if (this->SliceIndexLabel->text() != text)
+  {
+    this->SliceIndexLabel->setText(text);
   }
 }
 
@@ -869,6 +970,7 @@ void qMRMLSliceControllerWidgetPrivate::updateFlatBarFromMRMLSliceNode()
     }
   }
   QString text = indexText.isEmpty() ? position : position + QString::fromUtf8(" \u00B7 ") + indexText;
+  QString compactText = indexText.isEmpty() ? position : indexText;
   QString description = position;
   if (!indexDescription.isEmpty())
   {
@@ -879,15 +981,22 @@ void qMRMLSliceControllerWidgetPrivate::updateFlatBarFromMRMLSliceNode()
     description += QString(" ") + qMRMLSliceControllerWidget::tr("(from the image origin, not the midline)");
   }
   QString toolTip = Self::flatToolTip(qMRMLSliceControllerWidget::tr("Slice position"), QString(), description);
-  if (this->SliceIndexLabel->text() != text)
+  if (this->FullReadoutText != text || this->CompactReadoutText != compactText)
   {
-    // The width only grows: a fixed width does not lay out the bar again when the text changes
-    int textWidth = this->SliceIndexLabel->fontMetrics().horizontalAdvance(text) + 4;
-    if (textWidth > this->SliceIndexLabel->width())
+    // The reserved widths only grow: a fixed width does not lay out the bar again when the text changes
+    const QFontMetrics fontMetrics = this->SliceIndexLabel->fontMetrics();
+    const int fullWidth = fontMetrics.horizontalAdvance(text) + 4;
+    const int compactWidth = fontMetrics.horizontalAdvance(compactText) + 4;
+    const bool grown = (fullWidth > this->FullReadoutWidth || compactWidth > this->CompactReadoutWidth);
+    this->FullReadoutWidth = std::max(this->FullReadoutWidth, fullWidth);
+    this->CompactReadoutWidth = std::max(this->CompactReadoutWidth, compactWidth);
+    this->FullReadoutText = text;
+    this->CompactReadoutText = compactText;
+    this->updateReadoutLabel();
+    if (grown)
     {
-      this->SliceIndexLabel->setFixedWidth(textWidth);
+      this->updateFlatBarWidgetsVisibility();
     }
-    this->SliceIndexLabel->setText(text);
   }
   if (this->SliceIndexLabel->toolTip() != toolTip)
   {

@@ -379,6 +379,116 @@ class StudioTopBarTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.mainWindow.resize(self.mainWindow.width + 10, 700)
         self.assertTrue(self._wait(lambda: not topBar.isCompact(), 2000))
 
+    def test_flat_bars_fit_a_small_screen(self):
+        """W2-I4: flat view bars shorten, then hide, their readout instead of setting the minimum width of the window, so
+        every layout fits 1366 px with the inspector and the narrow mode is reachable; a window that had to grow beyond the
+        screen comes back.
+        """
+        from StudioLib import layouts, shell
+
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        self._pump(10)
+        controllers = [self.layoutManager.sliceWidget(name).sliceController() for name in self.layoutManager.sliceViewNames()]
+        flatBefore = [controller.flatStyle for controller in controllers]
+        self._restores.append(lambda: [controller.setProperty("flatStyle", flat) for controller, flat in zip(controllers, flatBefore, strict=True)])
+        for controller in controllers:
+            controller.setProperty("flatStyle", True)
+        self.mainWindow.showNormal()
+        self.mainWindow.resize(1366, 740)
+        self._pump(10)
+        for key in ("row", "fourup", "focus3d", "focus"):
+            studioShell.setLayoutFromPicker(key)
+            self._pump(10)
+            self.assertLessEqual(self.mainWindow.minimumSizeHint.width(), 1366, f"minimum width in {key}")
+            self.assertLessEqual(self.mainWindow.width, 1366, f"window width after {key}")
+        # A Row of narrow views: the readouts are short or hidden, the view colour, orientation and options stay. The three
+        # views share the width equally, also after Focus (where the axial view was wide)
+        studioShell.setLayoutFromPicker("row")
+        self._pump(10)
+        widths = [self.layoutManager.sliceWidget(name).width for name in ("Red", "Green", "Yellow")]
+        self.assertLessEqual(max(widths) - min(widths), 3, widths)
+        for name in ("Red", "Green", "Yellow"):
+            bar = self.layoutManager.sliceWidget(name).sliceController().barWidget()
+            for objectName in ("ViewLabel", "OrientationButton", "OptionsButton"):
+                self.assertTrue(slicer.util.findChild(bar, objectName).isVisible(), f"{name} {objectName}")
+            self.assertLessEqual(bar.minimumSizeHint.width(), 300, name)
+        # The narrow mode of the top bar can be reached by a real window
+        self.mainWindow.resize(shell.NARROW_WINDOW_WIDTH - 60, 700)
+        self.assertTrue(self._wait(lambda: self.mainWindow.width < shell.NARROW_WINDOW_WIDTH, 2000), f"window {self.mainWindow.width} px")
+        self.assertTrue(self._wait(studioShell.topBar.isCompact, 2000))
+        # A window that Qt grew beyond the screen (a layout or a module needed more room) comes back within the screen
+        # once the room is no longer needed
+        screen = self.mainWindow.screen() if callable(getattr(self.mainWindow, "screen", None)) else None
+        available = screen.availableGeometry if screen is not None else None
+        if callable(available):
+            available = available()
+        if available is not None and available.width() >= 1000:
+            self.assertFalse(self._grownWindowStaysOnScreen(studioShell, available))
+            self._userWindowGeometryIsKept(studioShell, available)
+        self.assertTrue(layouts.isStudioLayout(self.layoutManager.layout))
+
+    def _frame(self):
+        frame = self.mainWindow.frameGeometry
+        return frame() if callable(frame) else frame
+
+    def _grownWindowStaysOnScreen(self, studioShell, available):
+        """Grow the window beyond the screen through the minimum size of its central widget, as a wide layout does."""
+        central = self.mainWindow.centralWidget()
+        minimumWidth = central.minimumWidth
+        self._restores.append(lambda: central.setMinimumWidth(minimumWidth))
+        self.mainWindow.move(available.x() + 100, available.y())
+        self.mainWindow.resize(1000, min(700, available.height()))
+        self._pump(10)
+        central.setMinimumWidth(available.width() + 300)
+        self.assertTrue(self._wait(lambda: self.mainWindow.width > available.width(), 2000), f"window {self._frame()}")
+        self._pump(4)
+        # The room is needed: the window cannot be smaller, it starts at the left edge of the screen
+        self.assertEqual(self._frame().left(), available.left())
+        central.setMinimumWidth(minimumWidth)
+        self.assertTrue(self._wait(lambda: self._frame().right() <= available.right() and self._frame().left() >= available.left(), 2000),
+                        f"window {self._frame()} on {available}")
+        return studioShell.keepWindowOnScreen()
+
+    def _userWindowGeometryIsKept(self, studioShell, available):
+        """A size or a position the user chose beyond the screen (a window across two monitors) is kept."""
+        self.mainWindow.move(available.x(), available.y())
+        self.mainWindow.resize(available.width() + 300, min(700, available.height()))
+        self.assertTrue(self._wait(lambda: self.mainWindow.width == available.width() + 300, 2000), f"window {self._frame()}")
+        studioShell.switchTo("library")
+        studioShell.switchTo("draw")
+        self._pump(10)
+        self.assertEqual(self.mainWindow.width, available.width() + 300)
+        self.assertFalse(studioShell.keepWindowOnScreen())
+        self.mainWindow.resize(1000, min(700, available.height()))
+        self.mainWindow.move(available.x() - 300, available.y())
+        self.assertTrue(self._wait(lambda: self._frame().left() == available.x() - 300, 2000), f"window {self._frame()}")
+        studioShell.switchTo("library")
+        studioShell.switchTo("draw")
+        self._pump(10)
+        self.assertEqual(self._frame().left(), available.x() - 300)
+        self.mainWindow.move(available.x(), available.y())
+        self._pump(4)
+
+    def test_no_startup_layout_toast(self):
+        """W2-I4: the layout set at startup or by code is not announced; only a layout the user chooses in Library is."""
+        from StudioLib import layouts
+
+        studioShell = self._applyStudio()
+        self._pump(10)
+        self.assertEqual([message for message in studioShell.recentMessages() if message[1].startswith("Layout:")], [])
+        studioShell.switchTo("library")
+        self._pump()
+        self.assertIsNotNone(studioShell.canvas())
+        layouts.register()
+        self.layoutManager.setLayout(layouts.ROW_LAYOUT_ID)
+        self.layoutManager.setLayout(0)
+        self._pump()
+        self.assertEqual([message for message in studioShell.recentMessages() if message[1].startswith("Layout:")], [])
+        studioShell.setLayoutFromPicker("fourup")
+        self._pump()
+        self.assertEqual(studioShell.recentMessages()[-1][1], "Layout: Four-up (shown in Draw)")
+
     #
     # Parent tab, Map unavailable and breadcrumb
     #

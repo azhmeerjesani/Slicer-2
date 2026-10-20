@@ -252,12 +252,14 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         else:
             self.assertIn("Map", studioShell.toastText())
         interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+        # "network" opened Map when it is available: Place point stays in that workspace
+        workspaceBefore = studioShell.currentWorkspace()
         self.assertEqual(self._openAndRun(studioShell, "fiducial"), "Place point")
         self.assertEqual(interactionNode.GetCurrentInteractionMode(), interactionNode.Place)
         selectionNode = slicer.app.applicationLogic().GetSelectionNode()
         pointList = slicer.mrmlScene.GetNodeByID(selectionNode.GetActivePlaceNodeID())
         self.assertEqual(pointList.GetName(), "Points")
-        self.assertEqual(studioShell.currentWorkspace(), "draw", "Place point stays in the current workspace")
+        self.assertEqual(studioShell.currentWorkspace(), workspaceBefore, "Place point stays in the current workspace")
         self.assertTrue(studioShell.handleEscape())
         self.assertEqual(interactionNode.GetCurrentInteractionMode(), interactionNode.ViewTransform)
 
@@ -288,6 +290,15 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(tiers["workspace.draw"], finder.TIER_WORD_START)
         self.assertNotIn("module.SegmentEditor", live.index.byId)
         self.assertNotIn("module.Studio", live.index.byId)
+        # Single letters reach the core modules: the classic layouts the picker does not offer ("Tabbed 3D", "Triple 3D")
+        # come after them in the same tier, the picker's layouts do not
+        self.assertEqual(self._first(studioShell, "v"), "Volumes")
+        self.assertEqual(self._first(studioShell, "t"), "Transforms")
+        self.assertEqual(self._first(studioShell, "tr"), "Transforms")
+        titles = [entry.title for entry in palette.search(studioShell, "t")]
+        self.assertIn("Tabbed 3D", titles)
+        self.assertLess(titles.index("Transforms"), titles.index("Tabbed 3D"))
+        self.assertEqual(self._first(studioShell, "four"), "Four-Up")
         # MRU reorders within a tier
         self.assertEqual(self._first(studioShell, "vol"), "Volumes")
         self.assertTrue(palette.runEntry(studioShell, "module.VolumeRendering"))

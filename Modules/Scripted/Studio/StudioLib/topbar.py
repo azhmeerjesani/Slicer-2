@@ -125,6 +125,10 @@ class TopBar:
         self._editor = None
         self._mapPopover = None
         self._moreLayoutsMenu = None
+        #: Layout requests of the user in progress (picker, Alt+1..5, palette, "More layouts…"): only these are
+        #: announced while Library is shown, never the layout set at startup or by a loaded scene
+        self._userLayoutRequests = 0
+        self._moreLayoutsMenuOpen = False
         self._threeDPrepared = False
         self._redSliceNode = None
         self._redSliceVisible = None
@@ -804,7 +808,11 @@ class TopBar:
         if layoutManager is None:
             return
         wasMaximized = layouts.isMaximized()
-        layouts.applyPickerEntry(key, self.shell.hoverTracker)
+        self._userLayoutRequests += 1
+        try:
+            layouts.applyPickerEntry(key, self.shell.hoverTracker)
+        finally:
+            self._userLayoutRequests -= 1
         if key == "single" and not wasMaximized and layouts.isMaximized():
             self._announceLibraryLayout(layouts.PICKER_ENTRIES[1][1])
         if key != "single" and wasMaximized and not layouts.isMaximized() and self.shell.canvas() is not None:
@@ -865,15 +873,35 @@ class TopBar:
             if layoutMenu is not None:
                 menu.addActions(layoutMenu.actions())
             menu.connect("aboutToShow()", self._updateMoreLayoutsMenu)
+            menu.connect("aboutToHide()", self._onMoreLayoutsMenuHidden)
         return self._moreLayoutsMenu
+
+    def _onMoreLayoutsMenuHidden(self):
+        # Qt hides the menu before it triggers the chosen action: the layout it sets is still a user request
+        qt.QTimer.singleShot(0, self._clearMoreLayoutsMenuOpen)
+
+    def _clearMoreLayoutsMenuOpen(self):
+        self._moreLayoutsMenuOpen = False
 
     def _setStudioLayout(self, layoutId):
         layouts.restoreMaximized()
+        self.setLayoutByUser(layoutId)
+
+    def setLayoutByUser(self, layoutId):
+        """Set a layout that the user chose (Search, "More layouts…"): Library says that it is shown in Draw."""
         layoutManager = slicer.app.layoutManager()
-        layouts.register()
-        layoutManager.setLayout(layoutId)
+        if layoutManager is None:
+            return
+        if layouts.isStudioLayout(layoutId):
+            layouts.register()
+        self._userLayoutRequests += 1
+        try:
+            layoutManager.setLayout(layoutId)
+        finally:
+            self._userLayoutRequests -= 1
 
     def _updateMoreLayoutsMenu(self):
+        self._moreLayoutsMenuOpen = True
         layoutManager = slicer.app.layoutManager()
         current = layoutManager.layout if layoutManager is not None else None
         for layoutId, action in self._moreLayoutsStudioActions:
@@ -904,7 +932,8 @@ class TopBar:
         if not self._threeDPrepared and layouts.threeDViewNamesInLayout() and self.shell.canvas() is None:
             # The 3D widget is laid out first (and the user sees it: the Library canvas covers the views)
             qt.QTimer.singleShot(0, self._prepareThreeD)
-        if self.shell.canvas() is not None and layoutId is not None and not self.shell.workspaces.isSwitching():
+        userRequest = self._userLayoutRequests > 0 or self._moreLayoutsMenuOpen
+        if userRequest and self.shell.canvas() is not None and layoutId is not None and layoutId > 0 and not self.shell.workspaces.isSwitching():
             self._announceLibraryLayout(layouts.layoutName(layoutId))
 
     def _announceLibraryLayout(self, name):

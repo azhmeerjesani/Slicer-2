@@ -346,7 +346,13 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 pass
 
     def _child(self, className, objectName):
-        return self.editor.findChild(className, objectName) if self.editor is not None else None
+        if self.editor is None:
+            return None
+        try:
+            return self.editor.findChild(className, objectName)
+        except ValueError:
+            # The editor widget was destroyed (application exit): a queued update has nothing to do
+            return None
 
     def _segmentsTableView(self):
         return self._child("qMRMLSegmentsTableView", "SegmentsTableView")
@@ -1046,6 +1052,11 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def cleanup(self):
         self._removePresentationShortcuts()
         self.removeObservers()
+        if self._columnTimer is not None:
+            self._columnTimer.stop()
+            self._columnTimer.disconnect("timeout()", self._updateColumnCount)
+            self._columnTimer = None
+        self._removeTileFilter()
         self.effectFactorySingleton.disconnect("effectRegistered(QString)", self.editorEffectRegistered)
 
 

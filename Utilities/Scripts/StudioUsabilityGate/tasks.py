@@ -990,10 +990,11 @@ def openSearch(g, how="key"):
 def searchAndOpen(g, title, natural=None, maxCharacters=16):
     """Open the search, type the natural query for ``title`` (1 action per character) and open the tool with Enter.
 
-    A person types the start of the name (``natural``: "vol" for Volumes). If the wanted tool is not the selected result then,
-    more characters of its name are typed until it is: this measures the ranking. When the tool is already selected on opening
-    (a most-recently-used list, the warm session), only Enter is needed. Return the number of characters typed, or None if the
-    tool was not found (the search is closed with Esc).
+    A person types the start of the name (``natural``: "vol" for Volumes) and watches the list: as soon as the wanted tool is
+    the selected result, they press Enter (the incremental search of USABILITY 4, and the policy of T7). If it is not selected
+    after the natural query, more characters of its name are typed until it is. So the count measures the ranking, including
+    the most-recently-used order of a warm session; when the tool is already selected on opening, only Enter is needed. Return
+    the number of characters typed, or None if the tool was not found (the search is closed with Esc).
     """
     natural = natural or title
     top = yield from openSearch(g)
@@ -1007,7 +1008,7 @@ def searchAndOpen(g, title, natural=None, maxCharacters=16):
     typed = 0
     if not selected():
         full = title.lower()
-        while typed < maxCharacters and (typed < len(natural) or not selected()) and typed < len(full):
+        while typed < maxCharacters and not selected() and typed < max(len(natural), len(full)):
             character = natural[typed] if typed < len(natural) else full[typed]
             yield from g.type(None, character, f"Type {character!r} in the search", perCharacter=True, settle=100)
             typed += 1
@@ -1984,8 +1985,12 @@ def lnm(g):
         yield from waitForDraw(g)
     g.shot("draw-after-load-all")
     g.note("loadedSegmentations", len(slicer.util.getNodesByClass("vtkMRMLSegmentationNode")))
-    # One-subject QC: Segment Statistics for the lesion that Draw shows
-    typed = yield from searchAndOpen(g, "Segment Statistics", "segm")
+    # One-subject QC (the walkthrough: the lesion volume, read in Segment Statistics). The lesion card of Draw (W2-05) shows the
+    # QC of the lesion it edits ("Left · 2.06 mL · 1 part · 0 gaps"): reading it is no action. Without the card, Segment
+    # Statistics is opened through the search (feature detection, as for the statistical map notice below).
+    readout = lesionCardReadout(g)
+    g.note("qcFromLesionCard", readout)
+    typed = (yield from searchAndOpen(g, "Segment Statistics", "segm")) if not readout else None
     if typed is not None:
         yield from waitTransient(g, "SegmentStatistics")
         selector = g.widget("segmentationSelector", "qMRMLNodeComboBox") or g.widget("SegmentationSelector", "qMRMLNodeComboBox")
@@ -2050,6 +2055,15 @@ def lnm(g):
     g.metric("A", g.actions - start)
     yield from lnmStudyPath(g)
     g.shot("end")
+
+
+def lesionCardReadout(g):
+    """The QC line of the lesion card ("Left · 2.06 mL · 1 part · 0 gaps") when it is shown with the lesion volume, else None."""
+    label = g.widget("StudioLesionReadout", "QLabel")
+    if label is None or not label.isVisible():
+        return None
+    text = re.sub(r"<[^>]+>", "", str(label.text)).strip()
+    return text if re.search(r"\d\s*mL\b", text) else None
 
 
 def loadedSetOf(g):

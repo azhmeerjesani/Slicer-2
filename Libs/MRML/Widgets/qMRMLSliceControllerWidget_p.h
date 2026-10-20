@@ -34,6 +34,7 @@
 
 // Qt includes
 #include <QIcon>
+#include <QSizePolicy>
 
 // CTK includes
 #include <ctkPimpl.h>
@@ -261,6 +262,24 @@ public:
   QAction* ReformatAction{ nullptr };
   QAction* ResetOrientationAction{ nullptr };
   QLabel* SliceIndexLabel{ nullptr };
+  /// Holds the readout in the bar layout: its minimum width is 1 px, so the readout never sets the minimum width
+  /// of the bar (the readout is shortened, then hidden, when the bar is narrow); the label keeps a fixed width
+  /// so that a new text does not lay out the bar again
+  QWidget* SliceIndexHolder{ nullptr };
+  /// Readout texts: "S 96.0 mm · 97/193" and the short form "97/193" (or "S 96.0 mm" without an image)
+  QString FullReadoutText;
+  QString CompactReadoutText;
+  /// The bar shows the short readout (updateFlatBarWidgetsVisibility)
+  bool CompactReadout{ false };
+  /// Width reserved for each readout form: it only grows, so the label does not change size at every slice
+  int FullReadoutWidth{ 0 };
+  int CompactReadoutWidth{ 0 };
+  /// Show the readout text of the current form in the label, with its reserved width.
+  void updateReadoutLabel();
+  /// Classic size policies of the widgets whose size hint the flat bar ignores
+  QSizePolicy ClassicFitSizePolicy;
+  QSizePolicy ClassicSliderSizePolicy;
+  bool ClassicSizePoliciesRecorded{ false };
   QToolButton* BarLinkButton{ nullptr };
   QIcon FlatFitIcon;
   QString ClassicViewLabelToolTip;

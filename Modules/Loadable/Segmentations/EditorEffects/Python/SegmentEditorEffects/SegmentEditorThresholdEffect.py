@@ -78,7 +78,10 @@ class SegmentEditorThresholdEffect(AbstractScriptedSegmentEditorEffect):
         # the object alive. For more details, see the parent class
         # cleanup() docstring or the following issue:
         # https://github.com/Slicer/Slicer/issues/7392
+        self.timer.stop()
         self.timer.disconnect("timeout()", self.preview)
+        # The composite node observers call this effect: remove them with it (also when it is still active)
+        self.removeSliceCompositeObservers()
 
     def clone(self):
         import qSlicerSegmentationsEditorEffectsPythonQt as effects
@@ -169,6 +172,12 @@ and set the threshold range from them.
         self._sliceCompositeObservers = []
 
     def onSliceCompositeNodeModified(self, caller, event):
+        try:
+            self.scriptedEffect.active()
+        except ValueError:
+            # The effect was destroyed without being deactivated (application exit): stop observing
+            self.removeSliceCompositeObservers()
+            return
         # Only update if the slice widget is visible
         layoutManager = slicer.app.layoutManager()
         if not layoutManager:

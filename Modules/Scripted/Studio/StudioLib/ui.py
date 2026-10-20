@@ -691,6 +691,13 @@ def installButtonKeys(button):
 
 #: Width below which a ``wrapRow()`` (and a ``noticeLine()``) stacks its widgets
 WRAP_ROW_WIDTH = 300
+#: Narrowest text column of a ``noticeLine()`` that keeps its buttons on the same row
+NOTICE_TEXT_MIN_WIDTH = 150
+#: Margins and spacings of a ``noticeLine()``
+NOTICE_MARGIN_LEFT = 12
+NOTICE_MARGIN_RIGHT = 8
+NOTICE_SPACING = 6
+NOTICE_BUTTON_SPACING = 2
 NOTICE_LINE_HEIGHT = 32
 _wrapFilter = None
 
@@ -744,22 +751,27 @@ def noticeLine(text, actions=()):
 
     ``actions`` are ``(text, callback)`` pairs. The text is the ``StudioNoticeText`` label and the buttons are
     named ``StudioNoticeButton``. The buttons go under the text when the inspector is narrow (below
-    ``WRAP_ROW_WIDTH``), and the notice has an Ignored horizontal size policy: it never widens the inspector.
+    ``WRAP_ROW_WIDTH``, or below the width that leaves the text ``NOTICE_TEXT_MIN_WIDTH`` px next to the buttons),
+    and the notice has an Ignored horizontal size policy: it never widens the inspector. The caller may rename the
+    frame: its look follows the ``studioNoticeLine`` property, not the object name.
     """
     frame = qt.QFrame()
     frame.setObjectName("StudioNoticeLine")
+    frame.setProperty("studioNoticeLine", True)
     frame.setMinimumHeight(NOTICE_LINE_HEIGHT)
     layout = qt.QBoxLayout(qt.QBoxLayout.LeftToRight, frame)
-    layout.setContentsMargins(12, 4, 8, 4)
-    layout.setSpacing(6)
+    layout.setContentsMargins(NOTICE_MARGIN_LEFT, 4, NOTICE_MARGIN_RIGHT, 4)
+    layout.setSpacing(NOTICE_SPACING)
     label = qt.QLabel(text)
     label.setObjectName("StudioNoticeText")
     label.setWordWrap(True)
     layout.addWidget(label, 1)
+    wrapWidth = WRAP_ROW_WIDTH
     if actions:
         buttonRow = qt.QHBoxLayout()
-        buttonRow.setSpacing(2)
+        buttonRow.setSpacing(NOTICE_BUTTON_SPACING)
         buttonRow.addStretch(1)
+        buttonsWidth = 0
         for buttonText, callback in actions:
             button = qt.QToolButton()
             button.setObjectName("StudioNoticeButton")
@@ -771,10 +783,13 @@ def noticeLine(text, actions=()):
             setRole(button, "ghost")
             installButtonKeys(button)
             buttonRow.addWidget(button)
+            buttonsWidth += button.sizeHint.width() + NOTICE_BUTTON_SPACING
         layout.addLayout(buttonRow)
-    _installWrap(frame, WRAP_ROW_WIDTH)
+        # Three buttons ("Take the tour · What moved · Not now") leave the text no room in a 340 px inspector
+        wrapWidth = max(wrapWidth, NOTICE_MARGIN_LEFT + NOTICE_MARGIN_RIGHT + NOTICE_SPACING + NOTICE_TEXT_MIN_WIDTH + buttonsWidth)
+    _installWrap(frame, wrapWidth)
     bindStyleSheet(frame, lambda: (
-        f"QFrame#StudioNoticeLine {{ background-color: {token('accent-subtle').name()}; border: none; border-bottom: 1px solid {token('hairline').name()}; }}"
+        f"QFrame[studioNoticeLine=\"true\"] {{ background-color: {token('accent-subtle').name()}; border: none; border-bottom: 1px solid {token('hairline').name()}; }}"
         f"QLabel#StudioNoticeText {{ color: {token('text').name()}; background: transparent; }}"))
     return frame
 

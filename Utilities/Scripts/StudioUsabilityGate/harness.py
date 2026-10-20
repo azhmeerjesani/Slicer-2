@@ -332,7 +332,12 @@ class SyntheticBackend:
 
     @staticmethod
     def _keyTarget():
-        return qt.QApplication.activePopupWidget() or qt.QApplication.focusWidget() or qt.QApplication.activeModalWidget() or slicer.util.mainWindow()
+        # Qt delivers the keys of an open popup to its focus widget (the search field of the Search popup), not to the popup frame
+        popup = qt.QApplication.activePopupWidget()
+        focus = qt.QApplication.focusWidget()
+        if popup is not None:
+            return focus if focus is not None and (focus is popup or popup.isAncestorOf(focus)) else popup
+        return focus or qt.QApplication.activeModalWidget() or slicer.util.mainWindow()
 
     def key(self, sequence):
         code, modifiers, text = toQtKey(sequence)
@@ -726,9 +731,47 @@ class Gate:
         yield SETTLE_MS * 4
         return True
 
+    def scrollIntoView(self, widget, description="", setup=False, localPoint=None):
+        """Scroll the scroll area that holds ``widget`` (the inspector on a small screen) until the widget (or the point
+        ``localPoint`` of it) is in the middle of its viewport, as a person does with the wheel, when it is outside the
+        viewport or covered (by the sticky footer of a full inspector): 1 action when a scroll was needed.
+        """
+        try:
+            if widget is None or not widget.isVisible():
+                return False
+        except Exception:
+            return False
+        area = widget.parentWidget()
+        guard = 0
+        while area is not None and not area.inherits("QScrollArea") and guard < 64:
+            area = area.parentWidget()
+            guard += 1
+        if area is None or not area.inherits("QScrollArea"):
+            return False
+        viewport = area.viewport()
+        y = int(localPoint[1]) if localPoint is not None else widget.height // 2
+        point = widget.mapTo(viewport, qt.QPoint(0, y))
+        _globalPoint, reason = self.clickability(widget, localPoint)
+        outside = point.y() < 8 or point.y() > viewport.height - 8
+        if not outside and not (reason or "").startswith("covered"):
+            return False
+        bar = area.verticalScrollBar()
+        before = bar.value
+        bar.setValue(bar.value + point.y() - viewport.height // 2)
+        if bar.value == before:
+            return False
+        self.addStep("scroll", f"Scroll the panel to {description or widgetText(widget)}", 0 if setup else 1, widgetText(area))
+        yield SETTLE_MS
+        return True
+
     def click(self, widget, description="", button=1, localPoint=None, double=False, modifiers=(), settle=SETTLE_MS, setup=False):
-        """Click a widget at ``localPoint`` (default: its centre). Return False (and record why) if a user could not."""
+        """Click a widget at ``localPoint`` (default: its centre). Return False (and record why) if a user could not.
+
+        A widget below the visible part of a scroll area (the inspector on a small screen) is scrolled into view first
+        (``scrollIntoView``, 1 action).
+        """
         description = description or "click " + widgetText(widget)
+        yield from self.scrollIntoView(widget, description, setup=setup, localPoint=localPoint)
         point, reason = self.clickability(widget, localPoint)
         if reason is not None:
             return self.refuse("click", description, reason, widgetText(widget))
@@ -764,6 +807,7 @@ class Gate:
         if widget is not None:
             focus = qt.QApplication.focusWidget()
             if not (focus is not None and isAncestorOrSelf(widget, focus)):
+                yield from self.scrollIntoView(widget, description)
                 point, reason = self.clickability(widget)
                 if reason is not None:
                     return self.refuse("type", description, reason, widgetText(widget))

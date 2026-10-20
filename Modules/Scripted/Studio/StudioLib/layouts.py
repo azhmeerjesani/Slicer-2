@@ -454,6 +454,27 @@ def applyPickerEntry(key, tracker=None):
     return layoutManager.layout
 
 
+def equalizeRow(layoutManager=None):
+    """Give the three views of the Row layout the same width (the shell calls it when Row is shown).
+
+    Qt's splitter keeps the widths the views had in the previous layout (a wide axial view after Focus), so "side by
+    side" would otherwise start uneven. Return True if the widths were set.
+    """
+    layoutManager = layoutManager or slicer.app.layoutManager()
+    if layoutManager is None or layoutManager.layout != ROW_LAYOUT_ID:
+        return False
+    sliceWidget = layoutManager.sliceWidget("Red")
+    splitter = sliceWidget.parentWidget() if sliceWidget is not None else None
+    if splitter is None or splitter.className() != "QSplitter" or splitter.count() != 3:
+        return False
+    total = sum(splitter.sizes())
+    if total <= 0:
+        return False
+    share = total // 3
+    splitter.setSizes([share, share, total - 2 * share])
+    return True
+
+
 #
 # View commands of the layout popover (crosshair, intersections, link, reset)
 #

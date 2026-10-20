@@ -445,9 +445,8 @@ class LesionCard:
         self.nameEdit.setName(name)
         self.switcher.setText(f"{name} ▾")
         self.switcher.setAccessibleName(_("Lesion {name}, {count} lesions").format(name=name, count=len(lesions)))
-        color = state.get("color")
-        if color is not None:
-            self._setSwatchColor(color)
+        # Without a segment yet (an empty lesion) the swatch is an empty outline: never an invisible button
+        self._setSwatchColor(state.get("color"))
         enabled = bool(state.get("enabled", True))
         for widget in (self.swatch, self.nameEdit, self.eyeButton, self.centerButton, self.cleanupButton, self.notesButton):
             widget.setEnabled(enabled)
@@ -492,9 +491,13 @@ class LesionCard:
             label.show()
 
     def _setSwatchColor(self, color):
-        qcolor = qt.QColor.fromRgbF(*color[:3])
-        styleSheet = (f"QToolButton#StudioLesionSwatch {{ background-color: {qcolor.name()}; border: 1px solid {ui.token('border').name()}; "
-                      f"border-radius: 4px; margin: 2px; }}")
+        if color is None:
+            styleSheet = (f"QToolButton#StudioLesionSwatch {{ background-color: transparent; border: 1px dashed {ui.token('text3').name()}; "
+                          f"border-radius: 4px; margin: 2px; }}")
+        else:
+            qcolor = qt.QColor.fromRgbF(*color[:3])
+            styleSheet = (f"QToolButton#StudioLesionSwatch {{ background-color: {qcolor.name()}; border: 1px solid {ui.token('border').name()}; "
+                          f"border-radius: 4px; margin: 2px; }}")
         if self.swatch.styleSheet != styleSheet:
             self.swatch.setStyleSheet(styleSheet)
 
