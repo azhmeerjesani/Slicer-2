@@ -2,7 +2,11 @@
 floating "Exit focus mode" pill.
 """
 
+import logging
+import traceback
+
 import qt
+import slicer
 
 from . import ui
 
@@ -15,8 +19,81 @@ PILL_MARGIN = 12
 PILL_TOP_MARGIN = 40
 
 
+def _mapRect(widget, parentWidget):
+    """The geometry of ``widget`` in the coordinates of ``parentWidget`` (an ancestor or not)."""
+    topLeft = parentWidget.mapFromGlobal(widget.mapToGlobal(qt.QPoint(0, 0)))
+    return qt.QRect(topLeft.x(), topLeft.y(), widget.width, widget.height)
+
+
+def viewRects(parentWidget):
+    """The visible views of the layout: [(name, QRect in ``parentWidget`` coordinates)], slice views first.
+
+    ``name`` is the slice view name ("Red") or the 3D view node's singleton tag ("1").
+    """
+    layoutManager = slicer.app.layoutManager()
+    if layoutManager is None or parentWidget is None:
+        return []
+    rects = []
+    try:
+        for name in layoutManager.sliceViewNames():
+            widget = layoutManager.sliceWidget(name)
+            if widget is not None and widget.isVisible() and widget.width > 0 and widget.height > 0:
+                rects.append((str(name), _mapRect(widget, parentWidget)))
+        for index in range(layoutManager.threeDViewCount):
+            widget = layoutManager.threeDWidget(index)
+            if widget is not None and widget.isVisible() and widget.width > 0 and widget.height > 0:
+                viewNode = widget.mrmlViewNode() if hasattr(widget, "mrmlViewNode") else None
+                name = viewNode.GetSingletonTag() if viewNode is not None else str(index)
+                rects.append((str(name), _mapRect(widget, parentWidget)))
+    except Exception:
+        logging.error(f"Studio: cannot list the views:\n{traceback.format_exc()}")
+        return []
+    return rects
+
+
+def figureViewName():
+    """The name of the slice view that shows a figure (Compare layout), None when no figure is shown."""
+    try:
+        from . import importer
+        controller = importer.figureController()
+    except Exception:
+        return None
+    return getattr(importer, "FIGURE_VIEW_NAME", None) if controller is not None else None
+
+
+def toastSpan(parentWidget):
+    """The horizontal span (left, width) in which a toast is centred.
+
+    It is the whole width of ``parentWidget``, except while a figure is shown beside the views (Compare layout):
+    the toast is then centred beside the figure view, so that it never covers the figure or its tag.
+    """
+    width = parentWidget.width
+    figureName = figureViewName()
+    if figureName is None:
+        return 0, width
+    figureRect = dict(viewRects(parentWidget)).get(figureName)
+    if figureRect is None:
+        return 0, width
+    left, right = max(0, figureRect.left()), min(width, figureRect.right() + 1)
+    # The larger free part beside the figure
+    if left >= width - right:
+        span = (0, left)
+    else:
+        span = (right, width - right)
+    return span if span[1] >= 160 else (0, width)
+
+
+def toastGeometry(parentWidget, preferredWidth):
+    """The geometry (x, y, width) of a toast of ``preferredWidth`` near the bottom of ``parentWidget``."""
+    left, spanWidth = toastSpan(parentWidget)
+    width = min(preferredWidth, max(120, spanWidth - 48))
+    return left + (spanWidth - width) // 2, parentWidget.height - TOAST_HEIGHT - TOAST_BOTTOM_MARGIN, width
+
+
 class Toast:
     """A 32 px pill near the bottom of a widget (the main window central widget) that fades out.
+
+    It is centred on the widget, or beside the figure view while a figure is shown (``toastSpan()``).
 
     The pill is transparent for mouse events and is raised above the Studio canvas.
     """
@@ -66,9 +143,9 @@ class Toast:
     def updatePosition(self):
         if not self.label.text:
             return
-        width = min(self.label.sizeHint.width(), max(120, self.parentWidget.width - 48))
+        x, y, width = toastGeometry(self.parentWidget, self.label.sizeHint.width())
         self.label.resize(width, TOAST_HEIGHT)
-        self.label.move((self.parentWidget.width - width) // 2, self.parentWidget.height - TOAST_HEIGHT - TOAST_BOTTOM_MARGIN)
+        self.label.move(x, y)
 
     def isVisible(self):
         return self.label.isVisible()

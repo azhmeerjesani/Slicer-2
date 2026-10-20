@@ -20,7 +20,9 @@
 
 // Qt includes
 #include <QDebug>
+#include <QEvent>
 #include <QFileDialog>
+#include <QFontDatabase>
 #include <QMainWindow>
 #include <QSettings>
 #include <QStyleFactory>
@@ -59,6 +61,16 @@ public:
   void updateThemeWidgets();
   /// Default accent color of the current palette (the accent color used when none is set).
   QColor defaultAccentColor() const;
+  /// Show the application font in the font button, without changing any setting.
+  void updateFontButton();
+  /// Font used when no font is chosen in Appearance/Font, as qSlicerApplication applies it at
+  /// startup: the font saved in the "font" setting if it is not the default platform font,
+  /// otherwise the default font of the fork (Appearance/ForkDefaultFontFamily and
+  /// Appearance/ForkDefaultFontPointSize). Return false if there is no such font.
+  bool defaultAppearanceFont(QFont& font) const;
+  /// Font saved in the "font" setting if it is set and is not the default platform font (a font chosen in
+  /// another Slicer installation, or before this one used Inter). Return false otherwise.
+  bool userFontSetting(QFont& font) const;
 
   /// Return true if the application palette is dark.
   static bool isDarkPalette();
@@ -73,7 +85,43 @@ public:
   /// Accent color name, empty for the default accent color
   QString AccentColor;
   bool UpdatingAccentColorWidgets{ false };
+  /// Font chosen in the Appearance settings, empty for the default font
+  QString AppearanceFont;
+  /// True if the font is saved in Appearance/Font instead of the "font" setting
+  bool UseAppearanceFont{ false };
+  /// Application font when the panel was created, before the font of the fork is applied
+  QFont PlatformFont;
+  bool UpdatingFontButton{ false };
 };
+
+namespace
+{
+//-----------------------------------------------------------------------------
+bool fontFromSettingsValue(const QVariant& value, QFont& font)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+  if (value.typeId() == QMetaType::QFont)
+#else
+  if (value.userType() == QMetaType::QFont)
+#endif
+  {
+    font = value.value<QFont>();
+    return !font.family().isEmpty();
+  }
+  QString fontString = value.toString();
+  return !fontString.isEmpty() && font.fromString(fontString) && !font.family().isEmpty();
+}
+
+//-----------------------------------------------------------------------------
+bool isFontFamilyAvailable(const QString& family)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+  return QFontDatabase::families().contains(family);
+#else
+  return QFontDatabase().families().contains(family);
+#endif
+}
+} // namespace
 
 // --------------------------------------------------------------------------
 // qSlicerSettingsStylesPanelPrivate methods
@@ -97,7 +145,28 @@ void qSlicerSettingsStylesPanelPrivate::init()
   QObject::connect(this->ShowToolButtonTextCheckBox, SIGNAL(toggled(bool)), q, SLOT(onShowToolButtonTextToggled(bool)));
 
   q->registerProperty("no-tooltip", this->ShowToolTipsCheckBox, /*no tr*/ "checked", SIGNAL(toggled(bool)));
-  q->registerProperty("font", this->FontButton, "currentFont", SIGNAL(currentFontChanged(QFont)));
+  // The "font" setting is shared with other Slicer installations. When the theme is applied,
+  // qSlicerApplication uses the font of the fork (Inter) at runtime unless the user changed the
+  // "font" setting, and a font chosen here is saved in Appearance/Font instead, so that the
+  // "font" setting is never written. The font button shows the font actually used.
+  this->UseAppearanceFont = !Self::isClassicAppearance();
+  if (this->UseAppearanceFont)
+  {
+    this->PlatformFont = QApplication::font();
+    q->registerProperty("Appearance/Font", q, "appearanceFont", SIGNAL(appearanceFontChanged(QString)), qSlicerSettingsStylesPanel::tr("Font"));
+    // Without a font chosen here, a font chosen in the "font" setting is applied as the classic panel does
+    // (qSlicerApplication applies Inter otherwise).
+    QFont userFont;
+    if (this->AppearanceFont.isEmpty() && this->userFontSetting(userFont) && userFont != QApplication::font())
+    {
+      qSlicerApplication::application()->setFont(userFont);
+    }
+    this->updateFontButton();
+  }
+  else
+  {
+    q->registerProperty("font", this->FontButton, "currentFont", SIGNAL(currentFontChanged(QFont)));
+  }
   q->registerProperty("MainWindow/ShowToolButtonText",
                       this->ShowToolButtonTextCheckBox,
                       /*no tr*/ "checked",
@@ -216,6 +285,82 @@ QColor qSlicerSettingsStylesPanelPrivate::defaultAccentColor() const
   QColor defaultColor = qSlicerStyle::tokenColor("accent", Self::isDarkPalette());
   qSlicerStyle::setAccentColor(accentColor);
   return defaultColor;
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsStylesPanelPrivate::updateFontButton()
+{
+  if (!this->UseAppearanceFont)
+  {
+    return;
+  }
+  bool wasUpdating = this->UpdatingFontButton;
+  this->UpdatingFontButton = true;
+  this->FontButton->setCurrentFont(QApplication::font());
+  this->UpdatingFontButton = wasUpdating;
+}
+
+// --------------------------------------------------------------------------
+bool qSlicerSettingsStylesPanelPrivate::userFontSetting(QFont& font) const
+{
+  qSlicerCoreApplication* app = qSlicerCoreApplication::application();
+  QSettings* settings = app ? app->userSettings() : nullptr;
+  QFont savedFont;
+  if (!settings || !settings->contains("font") || !fontFromSettingsValue(settings->value("font"), savedFont))
+  {
+    return false;
+  }
+  // Same rules as qSlicerApplicationPrivate::forkFont()
+  bool savedFontIsDefault =
+    !savedFont.bold() && !savedFont.italic()
+    && ((savedFont.family() == QLatin1String("Sans Serif") && qFuzzyCompare(savedFont.pointSizeF(), 9.0))
+        || (savedFont.family() == this->PlatformFont.family() && qFuzzyCompare(savedFont.pointSizeF(), this->PlatformFont.pointSizeF())));
+  if (savedFontIsDefault)
+  {
+    return false;
+  }
+  font = savedFont;
+  return true;
+}
+
+// --------------------------------------------------------------------------
+bool qSlicerSettingsStylesPanelPrivate::defaultAppearanceFont(QFont& font) const
+{
+  qSlicerCoreApplication* app = qSlicerCoreApplication::application();
+  QSettings* settings = app ? app->userSettings() : nullptr;
+  if (!settings)
+  {
+    return false;
+  }
+  // A font chosen in the "font" setting (by another Slicer installation) is kept
+  if (this->userFontSetting(font))
+  {
+    return true;
+  }
+  QFont savedFont;
+  bool hasSavedFont = settings->contains("font") && fontFromSettingsValue(settings->value("font"), savedFont);
+  QSettings* defaultSettings = app->defaultSettings();
+  QString family = settings
+                     ->value("Appearance/ForkDefaultFontFamily", //
+                             defaultSettings ? defaultSettings->value("Appearance/ForkDefaultFontFamily") : QVariant())
+                     .toString();
+  double pointSize = settings
+                       ->value("Appearance/ForkDefaultFontPointSize", //
+                               defaultSettings ? defaultSettings->value("Appearance/ForkDefaultFontPointSize") : QVariant())
+                       .toDouble();
+  if (family.isEmpty() || !isFontFamilyAvailable(family))
+  {
+    // No font of the fork: the platform font (or the saved one) is used.
+    font = hasSavedFont ? savedFont : this->PlatformFont;
+    return true;
+  }
+  font = this->PlatformFont;
+  font.setFamily(family);
+  if (pointSize > 0.0)
+  {
+    font.setPointSizeF(pointSize);
+  }
+  return true;
 }
 
 // --------------------------------------------------------------------------
@@ -549,9 +694,68 @@ void qSlicerSettingsStylesPanel::onDensityChanged(int index)
 }
 
 // --------------------------------------------------------------------------
+QString qSlicerSettingsStylesPanel::appearanceFont() const
+{
+  Q_D(const qSlicerSettingsStylesPanel);
+  return d->AppearanceFont;
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsStylesPanel::setAppearanceFont(const QString& fontString)
+{
+  Q_D(qSlicerSettingsStylesPanel);
+  QFont font;
+  bool validFont = fontFromSettingsValue(fontString, font) && isFontFamilyAvailable(font.family());
+  QString newFontString = validFont ? font.toString() : QString();
+  if (newFontString == d->AppearanceFont)
+  {
+    return;
+  }
+  d->AppearanceFont = newFontString;
+  if (d->UseAppearanceFont && (validFont || d->defaultAppearanceFont(font)))
+  {
+    if (font != QApplication::font())
+    {
+      qSlicerApplication::application()->setFont(font);
+    }
+    d->updateFontButton();
+  }
+  emit this->appearanceFontChanged(newFontString);
+}
+
+// --------------------------------------------------------------------------
 void qSlicerSettingsStylesPanel::onFontChanged(const QFont& font)
 {
-  qSlicerApplication::application()->setFont(font);
+  Q_D(qSlicerSettingsStylesPanel);
+  if (d->UpdatingFontButton)
+  {
+    return;
+  }
+  if (!d->UseAppearanceFont)
+  {
+    qSlicerApplication::application()->setFont(font);
+    return;
+  }
+  // Choosing the default font again clears the choice, so that the default keeps applying.
+  QFont defaultFont;
+  bool isDefault = d->defaultAppearanceFont(defaultFont) && font == defaultFont;
+  this->setAppearanceFont(isDefault ? QString() : font.toString());
+  // The default font may already be in the setting while another font is shown
+  if (font != QApplication::font())
+  {
+    qSlicerApplication::application()->setFont(font);
+  }
+}
+
+// --------------------------------------------------------------------------
+bool qSlicerSettingsStylesPanel::event(QEvent* event)
+{
+  Q_D(qSlicerSettingsStylesPanel);
+  if (event->type() == QEvent::ApplicationFontChange || event->type() == QEvent::Show)
+  {
+    d->updateFontButton();
+  }
+  return this->Superclass::event(event);
 }
 
 // --------------------------------------------------------------------------

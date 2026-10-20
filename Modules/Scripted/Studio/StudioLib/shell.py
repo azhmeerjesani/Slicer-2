@@ -129,6 +129,9 @@ _WORKSPACE_PANEL_WIDTHS_GROUP = "Studio/WorkspacePanelWidths"
 
 #: Part of the available screen area given to the main window when Slicer did not restore its geometry
 FIRST_RUN_WINDOW_FRACTION = 0.9
+#: Narrow mode of the top bar (SPEC 4.5, U-03): below this main window width (logical px) the search pill is an
+#: icon and the switcher shows icons only (``TopBar.setCompact``), so that the bar fits
+NARROW_WINDOW_WIDTH = 1100
 
 #: Main window actions that keep their classic behavior in Studio: they are not attached to the
 #: main window (Ctrl+Z/Y are owned by the Segment Editor, Ctrl+6 by "Hide panels", Ctrl+O, Ctrl+F and Ctrl+H
@@ -810,9 +813,9 @@ class StickyToast:
 
     def updatePosition(self):
         self.frame.adjustSize()
-        width = min(self.frame.sizeHint.width(), max(120, self.parentWidget.width - 48))
+        x, y, width = hud.toastGeometry(self.parentWidget, self.frame.sizeHint.width())
         self.frame.resize(width, hud.TOAST_HEIGHT)
-        self.frame.move((self.parentWidget.width - width) // 2, self.parentWidget.height - hud.TOAST_HEIGHT - hud.TOAST_BOTTOM_MARGIN)
+        self.frame.move(x, y)
 
     def isVisible(self):
         return self.frame.isVisible()
@@ -1001,6 +1004,8 @@ class Shell:
         self._classicSwitchSeparator = None
         self._canvas = None
         self._renderPausedByCanvas = False
+        #: (view area widget, its maximum size) while the canvas holds the size of the view area
+        self._heldViewArea = None
         self._toast = None
         self._footerSlot = None
         self._footerWidget = None
@@ -1476,6 +1481,7 @@ class Shell:
         self.topBar = topbar.TopBar(self)
         mainWindow.addToolBar(qt.Qt.TopToolBarArea, self.topBar.toolBar)
         self.topBar.toolBar.show()
+        self._updateTopBarCompact()
         self._makeTopBarFocusable()
         self._addTopBarShortcuts()
         self._toast = hud.Toast(mainWindow.centralWidget())
@@ -2646,15 +2652,44 @@ class Shell:
             if not self._renderPausedByCanvas and layoutManager is not None:
                 layoutManager.setRenderPaused(True)
                 self._renderPausedByCanvas = True
+            self._holdViewAreaSize(layoutManager)
             # No Tab stop under the canvas (the views are covered, not disabled: that costs 27-55 ms)
             self._coverFocusPolicies()
         else:
+            self._releaseViewAreaSize()
             if self._renderPausedByCanvas:
                 if layoutManager is not None:
                     layoutManager.setRenderPaused(False)
                 self._renderPausedByCanvas = False
             self._restoreCoveredFocusPolicies()
         self._updateInspectorHandle()
+
+    def _holdViewAreaSize(self, layoutManager):
+        """Keep the views at their size while the canvas covers them (it is released by ``_releaseViewAreaSize()``).
+
+        The Library empty state hides the inspector, which widens the central widget: without this, every switch
+        between Library and Draw resized the views twice (and re-created their render buffers and laid out their
+        bars), although they are covered. The area that the views leave free is covered by the canvas. When the
+        main window is resized, the views follow it again (``_onEvent()``).
+        """
+        if self._heldViewArea is not None:
+            return
+        viewport = layoutManager.viewport() if layoutManager is not None else None
+        if viewport is None or not viewport.isVisible():
+            return
+        self._heldViewArea = (viewport, viewport.maximumSize)
+        viewport.setMaximumSize(viewport.size)
+
+    def _releaseViewAreaSize(self):
+        if self._heldViewArea is None:
+            return
+        viewport, maximumSize = self._heldViewArea
+        self._heldViewArea = None
+        try:
+            viewport.setMaximumSize(maximumSize)
+        except Exception:
+            # Deleted with the layout manager
+            pass
 
     def canvas(self):
         return self._canvas
@@ -2753,6 +2788,12 @@ class Shell:
             if member is not None:
                 member.stop()
         toast.label.hide()
+
+    def _updateTopBarCompact(self):
+        """Narrow mode of the top bar below ``NARROW_WINDOW_WIDTH`` (the window width, so it never oscillates)."""
+        if self.topBar is None or not hasattr(self.topBar, "setCompact"):
+            return
+        self.topBar.setCompact(self.mainWindow.width < NARROW_WINDOW_WIDTH)
 
     def toastText(self):
         """Text of the visible toast (plain or consequence), "" if none is shown."""
@@ -3053,9 +3094,12 @@ class Shell:
             elif obj == self._panelDock():
                 self._onDockResized()
             elif obj == self.mainWindow:
+                self._updateTopBarCompact()
                 # In a small window the views keep their minimum width and the inspector gets narrower
                 # than the stored width: give it back when the window grows
                 self._schedulePanelWidthUpdate(shrink=False)
+                # The views under the canvas follow the window again (the size they were held at is stale)
+                self._releaseViewAreaSize()
         elif eventType in (qt.QEvent.ChildAdded, qt.QEvent.ChildPolished, qt.QEvent.LayoutRequest) and obj == self.mainWindow:
             # Toolbars added later (extensions) are hidden like the others. A toolbar constructed with
             # the main window as parent is a child before it is a QToolBar, and it may be put in a

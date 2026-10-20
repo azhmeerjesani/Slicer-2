@@ -311,6 +311,9 @@ public:
   /// Size of the spacer below the effect buttons when effects are on the left of the segments table
   QSize EffectsSpacerSize;
   QSizePolicy EffectsSpacerSizePolicy;
+  /// Size of the spacer at the bottom of the segments column (verticalSpacer) in the default layout
+  QSize OptionsSpacerSize;
+  QSizePolicy OptionsSpacerSizePolicy;
 
   /// List of registered effect instances
   QList<qSlicerSegmentEditorAbstractEffect*> RegisteredEffects;
@@ -530,6 +533,8 @@ void qMRMLSegmentEditorWidgetPrivate::init()
   this->MaskingTitleFilter = new qMRMLSegmentEditorMaskingTitleFilter(this, q);
   this->EffectsSpacerSize = this->verticalSpacer_2->sizeHint();
   this->EffectsSpacerSizePolicy = this->verticalSpacer_2->sizePolicy();
+  this->OptionsSpacerSize = this->verticalSpacer->sizeHint();
+  this->OptionsSpacerSizePolicy = this->verticalSpacer->sizePolicy();
 
   q->updateSliceRotateWarningButtonVisibility();
 }
@@ -3412,16 +3417,22 @@ void qMRMLSegmentEditorWidget::setEffectsAboveSegments(bool above)
   }
   d->EffectsAboveSegments = above;
   d->horizontalLayout->setDirection(above ? QBoxLayout::TopToBottom : QBoxLayout::LeftToRight);
-  // The spacer below the effect buttons would add a gap between the effects and the segments table
+  // The spacer below the effect buttons would add a gap between the effects and the segments table.
+  // The spacer below the options keeps taking the extra height, but without a minimum height: it would add
+  // a blank gap below the widget when the segments table and the options are hidden.
   if (above)
   {
     d->verticalSpacer_2->changeSize(0, 0, QSizePolicy::Minimum, QSizePolicy::Fixed);
+    d->verticalSpacer->changeSize(0, 0, d->OptionsSpacerSizePolicy.horizontalPolicy(), d->OptionsSpacerSizePolicy.verticalPolicy());
   }
   else
   {
     d->verticalSpacer_2->changeSize(
       d->EffectsSpacerSize.width(), d->EffectsSpacerSize.height(), d->EffectsSpacerSizePolicy.horizontalPolicy(), d->EffectsSpacerSizePolicy.verticalPolicy());
+    d->verticalSpacer->changeSize(
+      d->OptionsSpacerSize.width(), d->OptionsSpacerSize.height(), d->OptionsSpacerSizePolicy.horizontalPolicy(), d->OptionsSpacerSizePolicy.verticalPolicy());
   }
+  d->verticalLayout->invalidate();
   d->horizontalLayout->invalidate();
 }
 

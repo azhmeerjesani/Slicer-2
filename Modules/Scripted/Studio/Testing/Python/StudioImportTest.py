@@ -223,6 +223,25 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(len(result.figures), 1)
         return result.figures[0]
 
+    def _drawEmptyState(self):
+        """The Draw empty state (also its variant for a lesion in scan space, W2-05)."""
+        widget = self.mainWindow.findChild("QWidget", "StudioDrawEmptyState")
+        self.assertIsNotNone(widget)
+        return widget
+
+    def _drawEmptyStateButton(self, text):
+        for button in self._drawEmptyState().findChildren("QAbstractButton"):
+            if str(button.text) == text:
+                return button
+        self.fail(f"no button {text!r} in the Draw empty state")
+        return None
+
+    def _lesionCardSpaceLine(self):
+        """The space line of the Draw Lesion card (W2-05)."""
+        label = self.mainWindow.findChild("QLabel", "StudioLesionSpaceLine")
+        self.assertIsNotNone(label)
+        return label
+
     def _noticeButton(self, studioShell, text):
         notice = studioShell.inspectorNotice()
         self.assertIsNotNone(notice)
@@ -657,8 +676,11 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(space.spaceOf(lesion), ("MNI152NLin6Asym", 2))
         line = importer.lesionSpaceLine(lesion)
         self.assertEqual(line, "Lesion grid MNI152NLin6Asym 2 mm, shown on MNI152NLin2009cAsym (a few mm apart)")
-        self.assertEqual(studioShell.inspectorNoticeKey(), "lesion-space")
-        self.assertEqual(str(studioShell.inspectorNotice().findChild("QLabel", "StudioLesionSpaceNoticeText").text), line)
+        # The amber line is on the Draw Lesion card (W2-05: draw.showsLesionSpaceLine), not in an inspector notice
+        self.assertNotEqual(studioShell.inspectorNoticeKey(), "lesion-space")
+        self.assertIsNone(importer.noticeWidget("lesion-space"))
+        self.assertEqual(str(self._lesionCardSpaceLine().text), line)
+        self.assertTrue(self._lesionCardSpaceLine().isVisible())
         # Painting through the editor keeps the lesion grid
         editor.setActiveEffectByName("Paint")
         self._pump()
@@ -679,8 +701,11 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertIsNone(editor.sourceVolumeNode())
         self.assertFalse([node for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode") if importer._isTemplate(node)])
         self.assertEqual(studioShell.currentWorkspace(), "draw")
-        self.assertEqual(studioShell.inspectorNoticeKey(), "native-lesion")
-        text = str(studioShell.inspectorNotice().findChild("QLabel", "StudioNativeLesionNoticeText").text)
+        # The Draw empty-state variant offers the scan (W2-05: draw.showNativeLesionState), not an inspector notice
+        self.assertNotEqual(studioShell.inspectorNoticeKey(), "native-lesion")
+        emptyState = self._drawEmptyState()
+        self.assertTrue(emptyState.isVisible())
+        text = str(emptyState.findChild("QLabel", "StudioDrawEmptyStateText").text)
         self.assertEqual(text, "This lesion is in scan space. Open the scan it was drawn on.")
         self.assertTrue(lesion.GetAttribute("Studio.LesionGrid"))
 
@@ -712,7 +737,7 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         result = importer.loadFiles([path], studioShell)
         self._pump(8)
         lesion = result.segmentations[0]
-        button = self._noticeButton(studioShell, "Open with patient_T1.nii.gz")
+        button = self._drawEmptyStateButton("Open with patient_T1.nii.gz")
         nodesBefore = len(slicer.util.getNodesByClass("vtkMRMLSegmentationNode"))
         button.click()
         self._pump(10)
@@ -724,6 +749,7 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertTrue(lesion.GetDisplayNode().GetVisibility())
         self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLSegmentationNode")), nodesBefore)
         self.assertNotEqual(studioShell.inspectorNoticeKey(), "native-lesion")
+        self.assertFalse(self._drawEmptyState().isVisible())
         self.assertEqual(self._voxels(lesion), 27)
 
         # "Show on the MNI template anyway": bound on request, with the amber line
@@ -731,10 +757,11 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         result = importer.loadFiles([path], studioShell)
         self._pump(8)
         lesion = result.segmentations[0]
-        self._noticeButton(studioShell, "Show on the MNI template anyway").click()
+        self._drawEmptyStateButton("Show on the MNI template anyway").click()
         self._pump(8)
         self.assertEqual(editor.sourceVolumeNode().GetAttribute("Studio.Role"), "template")
         self.assertEqual(importer.lesionSpaceLine(lesion), "Shown on the MNI template; the lesion is in scan space")
+        self.assertEqual(str(self._lesionCardSpaceLine().text), "Shown on the MNI template; the lesion is in scan space")
 
     def test_loaded_set(self):
         """Six masks loaded at once: one visible, next() changes the visible lesion with no new node, close() removes exactly the set."""
@@ -1178,6 +1205,51 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
     #
     # Tables and Recent
     #
+
+    def test_loaded_lesion_painted_is_unsaved(self):
+        """A lesion loaded from its NIfTI file is "Saved"; painted, it has "Unsaved changes" (not "Not saved yet"), and
+        the Save call to action still asks for a file instead of overwriting the loaded one.
+        """
+        from StudioLib import draw, importer
+
+        maskNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "mask")
+        mask = np.zeros((20, 22, 24), np.uint8)
+        mask[8:12, 8:12, 8:12] = 1
+        slicer.util.updateVolumeFromArray(maskNode, mask)
+        path = os.path.join(self.directory, "sub-09_lesion.nii.gz")
+        self.assertTrue(slicer.util.saveNode(maskNode, path))
+        slicer.mrmlScene.RemoveNode(maskNode)
+        with open(path, "rb") as f:
+            before = f.read()
+        segmentationNode = importer.loadLesion(path)
+        self._pump()
+        state, statePath, _time = draw.lesionSaveState(segmentationNode)
+        self.assertEqual(state, "saved")
+        self.assertEqual(os.path.normcase(os.path.abspath(statePath)), os.path.normcase(os.path.abspath(path)))
+        # Paint: one more voxel
+        segmentId = segmentationNode.GetSegmentation().GetNthSegmentID(0)
+        array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId)
+        array[0, 0, 0] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId)
+        self._pump()
+        self.assertEqual(draw.lesionSaveState(segmentationNode)[0], "unsaved")
+        text, toolTip = draw.saveStateText(segmentationNode)
+        self.assertTrue(text.startswith("Unsaved changes"), text)
+        self.assertIn("sub-09_lesion.nii.gz", text)
+        # No record of a save in this session: Save asks for a file (here: cancelled) and the loaded file is untouched
+        dialogs = []
+        original = draw.saveLesionDialog
+        draw.saveLesionDialog = lambda shell=None, path=None: dialogs.append(path)
+        originalNodes = draw.lesionNodes
+        draw.lesionNodes = lambda: (segmentationNode, None)
+        try:
+            self.assertIsNone(draw.saveLesionNow())
+        finally:
+            draw.saveLesionDialog = original
+            draw.lesionNodes = originalNodes
+        self.assertEqual(dialogs, [None])
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), before)
 
     def test_tsv_drop_no_add_data(self):
         """A dropped participants.tsv never opens Add Data (a toast says what it holds); Shift+drop still does."""

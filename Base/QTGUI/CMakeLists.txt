@@ -236,9 +236,27 @@ if(Slicer_BUILD_DICOM_SUPPORT)
     )
 endif()
 
+# User interface fonts (see "User interface fonts" below).
+# They are not listed in qSlicerBaseQTGUI.qrc, which the application library (qSlicerApp) also
+# embeds: a resource file generated in the build tree embeds them in this library only.
+set(_ui_fonts
+  Inter-Regular.ttf
+  Inter-Medium.ttf
+  Inter-SemiBold.ttf
+  )
+set(_fonts_qrc "${CMAKE_CURRENT_BINARY_DIR}/qSlicerBaseQTGUIFonts.qrc")
+set(_fonts_qrc_content "<!DOCTYPE RCC><RCC version=\"1.0\">\n<qresource prefix=\"/\">\n")
+foreach(_font IN LISTS _ui_fonts)
+  string(APPEND _fonts_qrc_content "  <file alias=\"Fonts/${_font}\">${CMAKE_CURRENT_SOURCE_DIR}/Resources/Fonts/${_font}</file>\n")
+endforeach()
+string(APPEND _fonts_qrc_content "</qresource>\n</RCC>\n")
+# Only written when the content changes, so that the resources are not compiled again
+file(CONFIGURE OUTPUT "${_fonts_qrc}" CONTENT "${_fonts_qrc_content}" @ONLY)
+
 # Resources
 set(KIT_resources
   Resources/qSlicerBaseQTGUI.qrc
+  ${_fonts_qrc}
   ${qMRMLWidgets_SOURCE_DIR}/Resources/qMRMLWidgets.qrc
   )
 
@@ -271,9 +289,7 @@ SlicerMacroBuildBaseQtLibrary(
 # They are also copied to "<share>/Fonts", where the VTK text rendering (slice view annotations,
 # markups labels) can use them as font files (see Views/FontFile/SansSerif in qSlicerCoreApplication).
 set(_fonts
-  Inter-Regular.ttf
-  Inter-Medium.ttf
-  Inter-SemiBold.ttf
+  ${_ui_fonts}
   OFL.txt
   )
 foreach(_font IN LISTS _fonts)

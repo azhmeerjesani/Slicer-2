@@ -345,6 +345,34 @@ class StudioTopBarTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertEqual(int(button.toolButtonStyle), int(qt.Qt.ToolButtonTextBesideIcon))
         self._assertCentred(topBar, "after compact")
 
+    def test_narrow_window_is_compact(self):
+        """U-03 narrow mode: the top bar is compact below 1100 px of window width, and normal again above.
+
+        The window cannot always be made that narrow (the views and the inspector have minimum widths), so the
+        width the shell reads is also replaced by a stand-in.
+        """
+        from StudioLib import shell
+
+        studioShell = self._applyStudio()
+        topBar = studioShell.topBar
+        self.mainWindow.showNormal()
+        self.mainWindow.resize(max(shell.NARROW_WINDOW_WIDTH + 200, self.mainWindow.minimumSizeHint.width()), 700)
+        self._pump(6)
+        self.assertFalse(topBar.isCompact())
+        realMainWindow = studioShell.mainWindow
+        try:
+            for width, compact in ((shell.NARROW_WINDOW_WIDTH - 1, True), (shell.NARROW_WINDOW_WIDTH, False),
+                                   (960, True), (shell.NARROW_WINDOW_WIDTH + 300, False)):
+                studioShell.mainWindow = _Width(realMainWindow, width)
+                studioShell._updateTopBarCompact()
+                self.assertEqual(topBar.isCompact(), compact, f"{width} px")
+        finally:
+            studioShell.mainWindow = realMainWindow
+        # A real resize event of the main window updates it
+        topBar.setCompact(True)
+        self.mainWindow.resize(self.mainWindow.width + 10, 700)
+        self.assertTrue(self._wait(lambda: not topBar.isCompact(), 2000))
+
     #
     # Parent tab, Map unavailable and breadcrumb
     #
@@ -422,9 +450,9 @@ class StudioTopBarTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         # Ctrl+Alt+3 keeps the toast
         self._activateShortcut(studioShell, "Ctrl+Alt+3")
         self.assertIn("not available", studioShell.recentMessages()[-1][1])
-        # Map becomes available: checkable again
-        self._restores.pop()()
-        self._restores.pop()()
+        # Map becomes available: checkable again (the three patches of this test are undone: find_spec twice, isAvailable)
+        for _ in range(3):
+            self._restores.pop()()
         topBar.refreshWorkspaceAvailability()
         if original(workspaces.workspace("map")):
             self.assertTrue(mapButton.checkable)
@@ -835,3 +863,14 @@ class StudioTopBarTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertTrue(layouts.isMaximized())
         self._activateShortcut(studioShell, "Alt+2")
         self.assertFalse(layouts.isMaximized())
+
+
+class _Width:
+    """A stand-in for the main window with another width (the narrow mode only reads ``width``)."""
+
+    def __init__(self, widget, width):
+        self._widget = widget
+        self.width = width
+
+    def __getattr__(self, name):
+        return getattr(self._widget, name)

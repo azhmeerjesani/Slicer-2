@@ -49,6 +49,14 @@ class Q_SLICER_BASE_QTGUI_EXPORT qSlicerSettingsStylesPanel : public ctkSettings
   /// It is saved in the Appearance/Density setting and applied after restarting the application.
   /// \sa density(), setDensity(), densityChanged(), qSlicerStyle::setDensity()
   Q_PROPERTY(QString density READ density WRITE setDensity NOTIFY densityChanged)
+  /// Font chosen in the Appearance settings ("QFont::toString()" format), or an empty string
+  /// for the default font of the fork (Inter, or the font saved in the "font" setting if it was
+  /// changed from its default value).
+  /// It is saved in the Appearance/Font setting and applied immediately. It is only used when
+  /// the theme is applied (not when testing is enabled or the application runs without main
+  /// window): the "font" setting, shared with other Slicer installations, is then never written.
+  /// \sa appearanceFont(), setAppearanceFont(), appearanceFontChanged()
+  Q_PROPERTY(QString appearanceFont READ appearanceFont WRITE setAppearanceFont NOTIFY appearanceFontChanged)
 public:
   /// Superclass typedef
   typedef ctkSettingsPanel Superclass;
@@ -77,6 +85,9 @@ public:
   /// \sa density
   QString density() const;
 
+  /// \sa appearanceFont
+  QString appearanceFont() const;
+
   /// Return the theme used when the Appearance/Theme setting is not set:
   /// the Appearance/ForkDefaultTheme value of the default settings file, or "Dark".
   static QString defaultTheme();
@@ -95,6 +106,9 @@ public slots:
   /// \sa density
   void setDensity(const QString& density);
 
+  /// \sa appearanceFont
+  void setAppearanceFont(const QString& font);
+
 signals:
   /// Signal emitted when the current style is changed
   /// \sa currentStyle
@@ -108,6 +122,9 @@ signals:
 
   /// \sa density
   void densityChanged(const QString&);
+
+  /// \sa appearanceFont
+  void appearanceFontChanged(const QString&);
 
 protected slots:
   void onAdditionalStylePathsChanged();
@@ -125,6 +142,9 @@ protected slots:
   void onShowToolButtonTextToggled(bool enable);
 
 protected:
+  /// Show the application font in the font button when it changes or the panel is shown.
+  bool event(QEvent* event) override;
+
   QScopedPointer<qSlicerSettingsStylesPanelPrivate> d_ptr;
 
 private:

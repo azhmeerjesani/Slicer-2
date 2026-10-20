@@ -10,7 +10,7 @@ restore the Classic interface. They cover:
 - the pill of the Place mode (single and persistent) naming the point list, with its Esc exit (the shell's Esc
   ladder) and its ✕;
 - the name of the Draw tool that resumes after the mode ("Brush resumes after");
-- the pill of the window/level mode;
+- the pill of the window/level mode, on one view (four-up);
 - the pill being hidden while a canvas covers the views (Library), and shown again afterwards;
 - Classic and uninstall(): no pill, no observer, no timer.
 """
@@ -126,9 +126,11 @@ class StudioModesTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(pill.objectName, "StudioModePill")
         self.assertEqual(modes.instance().pill.fullText, "Placing Lesion centre point · click in a view · Esc to cancel")
         self.assertEqual(pill.parentWidget(), centralWidget)
-        # Top centre of the view area
-        self.assertAlmostEqual(pill.x + pill.width / 2, centralWidget.width / 2, delta=1.5)
-        self.assertEqual(pill.y, modes.PILL_TOP)
+        # Top centre of one view (the largest one when the mouse pointer is not over a view)
+        target = modes.instance()._targetViewRect()
+        self.assertIsNotNone(target)
+        self.assertAlmostEqual(pill.x + pill.width / 2, target.x() + target.width() / 2, delta=1.5)
+        self.assertEqual(pill.y, max(0, target.y()) + modes.PILL_TOP)
         self.assertGreaterEqual(pill.height, 24)
 
         # Persistent placement says "points"
@@ -257,6 +259,48 @@ class StudioModesTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertLessEqual(pill.width, 340 - 2 * modes.PILL_SIDE_RESERVE)
         self.assertTrue(pill.text.endswith("…"), pill.text)
         self.assertIn("Esc to cancel", pill.accessibleName)
+
+    def test_pill_on_one_view_in_four_up(self):
+        """Four-up: the pill is on one view (the hovered one, else the largest), never across the views."""
+        from StudioLib import hud, modes
+
+        self._applyStudio()
+        layoutManager = slicer.app.layoutManager()
+        layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
+        self._pump(10)
+        centralWidget = self.mainWindow.centralWidget()
+
+        def pillRect():
+            pill = modes.pill()
+            return qt.QRect(pill.mapTo(centralWidget, qt.QPoint(0, 0)), pill.size)
+
+        def viewsUnder(rect):
+            return [name for name, viewRect in hud.viewRects(centralWidget) if viewRect.intersects(rect)]
+
+        # No view under the mouse pointer: the largest view
+        qt.QCursor.setPos(self.mainWindow.mapToGlobal(qt.QPoint(2, 2)))
+        self.interactionNode.SetCurrentInteractionMode(self.interactionNode.AdjustWindowLevel)
+        self._pump()
+        self.assertTrue(modes.pill().isVisible())
+        self.assertEqual(len(viewsUnder(pillRect())), 1, viewsUnder(pillRect()))
+        self.interactionNode.SwitchToViewTransformMode()
+        self._pump()
+
+        # The mode starts with the mouse pointer over Green: the pill is on Green, and stays there when it moves
+        green = dict(hud.viewRects(centralWidget))["Green"]
+        qt.QCursor.setPos(centralWidget.mapToGlobal(green.center()))
+        self._pump()
+        self.interactionNode.SetCurrentInteractionMode(self.interactionNode.AdjustWindowLevel)
+        self._pump()
+        if modes.instance().pill._availableWidth(green) >= modes.instance().pill.fullWidth():
+            self.assertEqual(viewsUnder(pillRect()), ["Green"])
+        else:
+            self.assertEqual(len(viewsUnder(pillRect())), 1)
+        target = modes.instance().targetView
+        qt.QCursor.setPos(self.mainWindow.mapToGlobal(qt.QPoint(2, 2)))
+        modes.instance().refresh()
+        self._pump()
+        self.assertEqual(modes.instance().targetView, target)
 
     #
     # Library canvas, Classic

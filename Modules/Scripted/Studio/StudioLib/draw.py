@@ -1649,7 +1649,8 @@ def lesionSaveState(segmentationNode):
     """``(state, path or file name, time)`` of a lesion, ``state`` in:
 
     - "saved": saved in this session and not changed since (or loaded from a NIfTI file and not modified);
-    - "unsaved": saved in this session, changed since;
+    - "unsaved": saved in this session, changed since (or loaded from a NIfTI file and painted since: the path is the
+      file it was loaded from, which the Save call to action still never overwrites without asking);
     - "previous": only the attributes of an earlier save are known (after the scene was saved and reopened):
       the file name and the ISO 8601 time;
     - "never": never saved.
@@ -1662,8 +1663,8 @@ def lesionSaveState(segmentationNode):
         return ("saved" if stamp == _contentStamp(segmentationNode) else "unsaved"), path, savedTime
     storageNode = segmentationNode.GetStorageNode()
     fileName = storageNode.GetFileName() if storageNode is not None else None
-    if fileName and str(fileName).lower().endswith(NIFTI_EXTENSIONS) and _unchangedSinceRead(segmentationNode, storageNode):
-        return "saved", str(fileName), None
+    if fileName and str(fileName).lower().endswith(NIFTI_EXTENSIONS):
+        return ("saved" if _unchangedSinceRead(segmentationNode, storageNode) else "unsaved"), str(fileName), None
     savedFile = segmentationNode.GetAttribute(SAVED_FILE_ATTRIBUTE)
     if savedFile:
         return "previous", savedFile, segmentationNode.GetAttribute(SAVED_TIME_ATTRIBUTE)
@@ -2615,13 +2616,31 @@ class DrawExtension:
             paused = drawSession.pausedEffect() if drawSession is not None and suggested is None else None
             for effectName in EFFECT_APPEARANCE:
                 if effectName == suggested:
-                    widget.setTileOutline(effectName, ui.token("accent-fg"), dashed=False)
+                    self._setTileOutline(widget, effectName, ui.token("accent-fg"), dashed=False)
                 elif effectName == paused:
-                    widget.setTileOutline(effectName, ui.token("text2"), dashed=True)
+                    self._setTileOutline(widget, effectName, ui.token("text2"), dashed=True)
                 elif widget.tileOutline(effectName) is not None:
                     widget.setTileOutline(effectName, None)
         if self.displayCard is not None:
             self.displayCard.refresh(segmentationNode, sourceVolumeNode)
+
+    @staticmethod
+    def _setTileOutline(widget, effectName, color, dashed):
+        """Outline a tile, unless it already has this outline: setting its style sheet again polishes the outline
+        and repaints the window once more (every time Draw is entered and after each change of the editor).
+        """
+        key = f"{color.name()} {'dashed' if dashed else 'solid'}"
+        outline = widget.tileOutline(effectName)
+        if outline is not None and outline.property("studioOutlineKey") == key:
+            # Only follow the tile (as setTileOutline() does): no change, no repaint
+            updateTileOutline = getattr(widget, "_updateTileOutline", None)
+            if callable(updateTileOutline):
+                updateTileOutline(effectName)
+            return
+        widget.setTileOutline(effectName, color, dashed=dashed)
+        outline = widget.tileOutline(effectName)
+        if outline is not None:
+            outline.setProperty("studioOutlineKey", key)
 
     def _cardState(self, drawSession, editor, segmentationNode, sourceVolumeNode, activeName, computeMetrics):
         if segmentationNode is None:

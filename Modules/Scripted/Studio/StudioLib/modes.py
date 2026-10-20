@@ -12,6 +12,9 @@ Place deselects the active Segment Editor tool. Draw records it as *suspended* a
 ends (``draw.suspendedEffect()``), so the pill appends " · Brush resumes after" to tell the user that the brush
 comes back. The pill's ✕ calls ``SwitchToViewTransformMode()`` like Esc (``Shell.handleEscape()``, rung 1).
 
+The pill is centred on one view, never across several (four-up): the view under the mouse pointer when the mode
+starts if the whole text fits in it, else the largest view. It stays on that view until the mode ends.
+
 The pill is hidden in the default (view transform) mode, while a canvas covers the views (Library), and in
 Classic (the plug-in is only installed while Studio is applied). It is a ``hud.CornerPill`` named
 ``StudioModePill``, a child of the central widget, above the views and the canvas and below popups.
@@ -101,12 +104,17 @@ def modeText(mode, persistent=False, placeName="", tool=""):
 
 
 class ModePill(hud.CornerPill):
-    """The pill: a translucent button at the top centre of the view area; clicking it (its ✕) exits the mode."""
+    """The pill: a translucent button at the top centre of a view; clicking it (its ✕) exits the mode.
 
-    def __init__(self, parentWidget, callback, reserveFunction=None):
+    ``rectFunction()`` returns the rectangle (in ``parentWidget`` coordinates) of the view the pill is centred on,
+    or None for the whole view area.
+    """
+
+    def __init__(self, parentWidget, callback, reserveFunction=None, rectFunction=None):
         hud.CornerPill.__init__(self, parentWidget, PILL_OBJECT_NAME, "", "x", callback, ui.tooltip(_("Back to navigating"), "Esc"))
         self.fullText = ""
         self.reserveFunction = reserveFunction
+        self.rectFunction = rectFunction
         # The ✕ icon after the text
         self.button.setLayoutDirection(qt.Qt.RightToLeft)
         self.button.setSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Fixed)
@@ -128,9 +136,28 @@ class ModePill(hud.CornerPill):
         self.button.setAccessibleDescription(_("Click to leave this mode, or press Esc"))
         self._fit()
 
-    def _availableWidth(self):
-        reserve = PILL_SIDE_RESERVE + (self.reserveFunction() if self.reserveFunction is not None else 0)
-        return max(160, self.parentWidget.width - 2 * reserve)
+    def _targetRect(self):
+        """The view the pill is centred on, inside the view area (the whole view area if there is none)."""
+        area = qt.QRect(0, 0, self.parentWidget.width, self.parentWidget.height)
+        rect = self.rectFunction() if self.rectFunction is not None else None
+        if rect is None:
+            return area
+        rect = rect.intersected(area)
+        return rect if not rect.isEmpty() else area
+
+    def _availableWidth(self, rect=None):
+        rect = rect if rect is not None else self._targetRect()
+        reserve = PILL_SIDE_RESERVE
+        # The "Show panels" pill of the focus mode is at the top right of the view area
+        if rect.right() + 1 >= self.parentWidget.width - PILL_FOCUS_MODE_RESERVE and rect.top() <= PILL_TOP:
+            reserve += self.reserveFunction() if self.reserveFunction is not None else 0
+        return max(160, rect.width() - 2 * reserve)
+
+    def fullWidth(self):
+        """Width of the pill showing its whole text."""
+        self.button.setText(self.fullText)
+        self.button.adjustSize()
+        return self.button.width
 
     def _fit(self):
         text = self.fullText
@@ -153,7 +180,10 @@ class ModePill(hud.CornerPill):
 
     def updatePosition(self):
         self._fit()
-        self.button.move(max(0, (self.parentWidget.width - self.button.width) // 2), PILL_TOP)
+        rect = self._targetRect()
+        x = rect.left() + (rect.width() - self.button.width) // 2
+        x = max(0, min(x, self.parentWidget.width - self.button.width))
+        self.button.move(x, max(0, rect.top()) + PILL_TOP)
 
     def show(self):
         self.updatePosition()
@@ -188,7 +218,9 @@ class ModeController:
     def __init__(self, shell):
         self.shell = shell
         self.centralWidget = shell.mainWindow.centralWidget()
-        self.pill = ModePill(self.centralWidget, self.exitMode, self._focusModeReserve)
+        self.pill = ModePill(self.centralWidget, self.exitMode, self._focusModeReserve, self._targetViewRect)
+        #: Name of the view the pill is centred on ("Red"), chosen when the pill is shown
+        self.targetView = None
         self._observed = []  # [(node, tag)]
         self.interactionNode = None
         self.selectionNode = None
@@ -254,6 +286,30 @@ class ModeController:
         focusMode = getattr(self.shell, "focusMode", None)
         return PILL_FOCUS_MODE_RESERVE if focusMode is not None and focusMode() else 0
 
+    def _chooseTargetView(self):
+        """The view the pill is centred on: the hovered view if the whole text fits in it, else the largest one.
+
+        A figure view (Compare layout) is only chosen when it is hovered: points are placed on the image beside it.
+        """
+        rects = hud.viewRects(self.centralWidget)
+        if not rects:
+            return None
+        cursor = self.centralWidget.mapFromGlobal(qt.QCursor.pos())
+        fullWidth = self.pill.fullWidth()
+        for name, rect in rects:
+            if rect.contains(cursor) and self.pill._availableWidth(rect) >= fullWidth:
+                return name
+        figureName = hud.figureViewName()
+        candidates = [item for item in rects if item[0] != figureName] or rects
+        return max(candidates, key=lambda item: item[1].width() * item[1].height())[0]
+
+    def _targetViewRect(self):
+        """Rectangle of the view the pill is centred on, None for the whole view area."""
+        rects = dict(hud.viewRects(self.centralWidget))
+        if self.targetView not in rects:
+            self.targetView = self._chooseTargetView()
+        return rects.get(self.targetView)
+
     def _onResized(self):
         if self.pill.isVisible():
             self.pill.updatePosition()
@@ -298,7 +354,12 @@ class ModeController:
             if text is None or not self.shell.isActive():
                 self.canvasTimer.stop()
                 self.pill.hide()
+                self.targetView = None
                 return
+            if not self.pill.isVisible() or text != self.pill.fullText:
+                # A new mode (or another list): centre the pill on the view the user is working in
+                self.pill.fullText = text
+                self.targetView = self._chooseTargetView()
             self.pill.setModeText(text)
             if not self.canvasTimer.isActive():
                 self.canvasTimer.start()
