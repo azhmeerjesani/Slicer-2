@@ -52,7 +52,9 @@ Outputs in ``<bundle>/derived/reference/`` (all subjects of the bundle) or
     mu_r.npy  mu_z.npy  sigma_r.npy  hub_abs_z.npy   (V,) float32
     pcs.npy   (k, V) float32        eigvals.npy  (k,) float64        ev1.npy  (V,) float32 (optional)
     reference.json   definition, a text definition per map, inputs (manifest, data and mask sha256,
-                     subjects n/sha256/list name), parameters, convergence, created, elapsed, sha256 per file
+                     subjects n/sha256/list name, a fingerprint of the subjects' time series, the
+                     connectome's kind and preprocessing record), parameters, convergence, created,
+                     elapsed, sha256 per file
 
 Files are written atomically; reference.json is written last, and the previous reference.json is
 removed before new maps replace the old ones, so a reference.json always describes the files next to
@@ -60,13 +62,18 @@ it. Work in progress lives in ``.reference-build/`` (resume state, intermediate 
 ``--resume`` a stopped build skips the completed units ("maps" and each PC step).
 
 Nothing builds reference maps implicitly (decision D-A20): only ``reference build`` (or :func:`build`)
-does, and :func:`load_reference` returns None when they are missing or stale.
+does, and :func:`load_reference` returns None when they are missing or stale. A reference is stale when
+the data-defining keys of connectome.json (grid, subjects and runs, dtype), its "kind" or
+"preprocessing" record, the mask or the time series of its subjects changed. The time series are
+fingerprinted by the sha256 of each subject's ``<id>.norms.npy`` (:func:`subjects_data_sha256`), which
+any re-conversion with other data or preprocessing changes; editing only descriptive keys (description,
+citation, licence, subsets...) keeps the reference valid unless ``strict`` asks for the exact manifest.
 
 Command line (JSON events, see ``jobs``; exit codes 0 done, 1 error, 2 usage, 3 cancelled, 75 locked)::
 
     python -m LesionNetworkMappingLib.reference build --bundle B [--out DIR] [--subjects N | --subject-list SPEC]
         [--seeds 500] [--pcs 3] [--power-iters 3] [--oversample 7] [--ev1] [--seed 0] [--hub auto|compute]
-        [--memory-gb 1] [--threads K] [--cancel-file F] [--resume] [--run-root DIR] [--parent-run ID]
+        [--memory-gb 0.879] [--threads K] [--cancel-file F] [--resume] [--run-root DIR] [--parent-run ID]
     python -m LesionNetworkMappingLib.reference estimate --bundle B [--subjects N | --subject-list SPEC] [--seeds 500] ...
     python -m LesionNetworkMappingLib.reference compare --bundle B --external FILE.nii.gz [--reference DIR] [--subject-list SPEC]
 
@@ -254,6 +261,39 @@ def _data_sha256(bundle):
 
 def _manifest_sha256(bundle):
     return _file_sha256(os.path.join(bundle.path, "connectome.json"))
+
+
+_FILE_SHA_CACHE = {}  # (path, inode, size, mtime_ns) -> sha256, so that repeated loads hash the norms files once
+
+
+def _cached_file_sha256(path):
+    stat = os.stat(path)
+    key = (os.path.abspath(path), stat.st_ino, stat.st_size, stat.st_mtime_ns)
+    sha = _FILE_SHA_CACHE.get(key)
+    if sha is None:
+        sha = _FILE_SHA_CACHE[key] = _file_sha256(path)
+    return sha
+
+
+def subjects_data_sha256(bundle, subject_ids):
+    """Fingerprint of the time series of ``subject_ids``: sha256 over each id and the sha256 of its ``<id>.norms.npy``.
+
+    The norms (the L2 norms of each voxel's demeaned run segments, about 1.8 MB per GSP subject) change
+    whenever a subject is converted again from other data or with other preprocessing, which neither
+    the data-defining connectome.json keys nor the mask reveal. Hashes are cached per file
+    (path, inode, size, mtime), so repeated loads in one process read the files once.
+    """
+    bundle = _open_bundle(bundle)
+    digest = hashlib.sha256()
+    for subject_id in subject_ids:
+        norms_path = bundle.subject_files(subject_id)[1]
+        digest.update(f"{subject_id}\t{_cached_file_sha256(norms_path)}\n".encode())
+    return digest.hexdigest()
+
+
+def _data_provenance(bundle):
+    """The connectome.json records that describe how the data were made (a change makes a reference stale)."""
+    return {"kind": bundle.kind, "preprocessing": bundle.metadata.get("preprocessing")}
 
 
 def _peak_rss_mb():
