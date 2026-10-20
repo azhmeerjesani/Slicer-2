@@ -379,6 +379,22 @@ class TransformsTest(unittest.TestCase):
             transforms.warp_image(on_nlin6, xfm, on_nlin6, out)  # an NLin6 image through a from-2009c file
         with self.assertRaisesRegex(transforms.DirectionError, "TF2009-2mm grid"):
             transforms.warp_image(on_2009, xfm, on_2009, out)  # onto a 2009c grid with a tpl-NLin6 file
+        # SPM12 writes 2 mm images on the FSL 2 mm box (avg152, MNI152Lin): accepted as MNI152Lin images
+        from_spm = self.path("tpl-MNI152NLin2009cAsym_from-MNI152Lin_mode-image_xfm.h5")
+        sitk.WriteTransform(sitk.TranslationTransform(3), from_spm)
+        provenance = transforms.warp_image(on_nlin6, from_spm, on_2009, out, interpolation="nearest")
+        self.assertEqual(provenance["source_space"], "MNI152Lin")
+        with self.assertRaisesRegex(transforms.DirectionError, "TF2009-2mm grid"):
+            transforms.warp_image(on_2009, from_spm, on_2009, out)  # a 2009c grid image is not an SPM image
+
+    def test_threads_setting_is_restored(self):
+        previous = transforms.set_threads(3)
+        if previous is None:
+            self.skipTest("SimpleITK does not report its default number of threads")
+        self.addCleanup(transforms.set_threads, previous)
+        source, _ = self._delta("delta_threads.nii.gz", (30, 35, 30))
+        transforms.warp_image(source, self.forward, self.ref_b, self.path("delta_threads_b.nii.gz"), threads=1)
+        self.assertEqual(transforms.set_threads(3), 3)
 
     def test_brainsfit_two_step_composite(self):
         """A flattened two-step composite (rigid, then BRAINSFit's affine + BSpline), named from-<mod>_to-<tpl>."""
@@ -450,6 +466,18 @@ class TransformsCommandLineTest(unittest.TestCase):
         self.assertEqual(code, 0, events)
         np.testing.assert_allclose(transforms.read_points_table(out_table), [[24.0, 18.0, 14.0], [4.0, -2.0, -6.0]])
 
+        # Negative coordinates (left hemisphere), written with or without "="
+        code, events = self.run_cli("points", "--transform", self.backward, "--point", "-40,-20,10", "--point=-1.5,2,-3", "--source-space", "A", "--target-space", "B")
+        self.assertEqual(code, 0, events)
+        np.testing.assert_allclose(events[1]["points"], [[-36.0, -22.0, 4.0], [2.5, 0.0, -9.0]])
+        empty = os.path.join(self.tmp, "empty.tsv")
+        open(empty, "w", encoding="utf-8").close()
+        np.testing.assert_array_equal(transforms.read_points_table(empty).shape, (0, 3))
+        code, events = self.run_cli("points", "--transform", self.backward, "--input", empty)
+        self.assertEqual(code, 2)
+        self.assertEqual(events[-1]["code"], "usage")
+        self.assertIn("No points", events[-1]["message"])
+
         code, events = self.run_cli("points", "--transform", self.forward, "--point", "20,20,20", "--source-space", "A", "--target-space", "B")
         self.assertEqual(code, 1)
         self.assertEqual(events[-1]["code"], "direction")
@@ -461,6 +489,9 @@ class TransformsCommandLineTest(unittest.TestCase):
         self.assertEqual(result["named_direction"]["points"], {"from": "A", "to": "B"})
         self.assertLess(result["round_trip"]["max_mm"], 1e-6)
         self.assertEqual(result["round_trip"]["n"], 27)
+        code, events = self.run_cli("check", "--transform", self.backward, "--inverse", self.forward, "--point", "-40,-20,10", "--point", "-60,-90,-30")
+        self.assertEqual(code, 0, events)
+        self.assertEqual(events[1]["round_trip"]["n"], 2)
         code, events = self.run_cli("check", "--transform", self.backward, "--inverse", self.backward)
         self.assertEqual(code, 1)
         self.assertEqual(events[-1]["code"], "direction")
