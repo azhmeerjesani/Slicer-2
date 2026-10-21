@@ -95,7 +95,7 @@ GROUPS = (
                        "segment_editor_first_open_ms"), "measureModuleSwitch"),
     ("studio", ("studio_apply_ms", "workspace_switch_ms"), "measureStudio"),
     ("layout", ("layout_switch_ms",), "measureLayoutSwitch"),
-    ("slices", ("hover_ms", "scroll_step_ms", "noop_modified_ms", "slice_logic_modified_per_step",
+    ("slices", ("hover_ms", "crosshair_move_ms", "scroll_step_ms", "noop_modified_ms", "slice_logic_modified_per_step",
                 "slice_logic_modified_per_step_fg", "render_counts_other_views", "scroll_step_3d_ms"), "measureSlices"),
     ("paint_256", ("stroke_release_256_3d_ms", "surfaces_regenerated", "paint_hover_surfaces_ms", "undo_surfaces_ms"), "measurePaint256"),
     ("paint_mni", ("stroke_release_mni_ms", "stroke_release_mni_intensity_ms", "draw_apply_ms"), "measurePaintMNI"),
@@ -103,6 +103,17 @@ GROUPS = (
     ("effect_gui", ("effect_gui_refresh_ms",), "measureEffectGuiRefresh"),
     ("lnm", ("lnm_synthetic_s",), "measureLesionNetworkMapping"),
 )
+
+# View layout of each measurement group (a vtkMRMLLayoutNode constant name). Studio enters Draw in layout 7001 (Studio
+# Focus) since W2-I5, while earlier waves measured in four-up: each group sets its layout itself, so that the results of
+# different waves compare like for like. Only the groups listed here are pinned: the layout, slices, paint_256 and
+# paint_mni groups set the layouts they measure in themselves (details.group_end_layouts records every group).
+GROUP_LAYOUTS = {
+    "module_switch": "SlicerLayoutFourUpView",
+    "studio": "SlicerLayoutFourUpView",
+    "segment_ops": "SlicerLayoutFourUpView",
+    "effect_gui": "SlicerLayoutFourUpView",
+}
 
 # Run by --startup through --python-script: Slicer runs it once the event loop processes the command line, so
 # after startupCompleted and the Studio apply (both run within the "Showing the main window" phase).
@@ -424,6 +435,18 @@ class InSlicerBench:
             except Exception:
                 traceback.print_exc()
 
+    def pinLayout(self, group):
+        """Set the view layout of the measurement group (GROUP_LAYOUTS). In a Studio workspace it becomes the
+        layout remembered for that workspace, so that switching back to it does not change the layout again.
+        """
+        import slicer
+        layoutManager = slicer.app.layoutManager()
+        name = GROUP_LAYOUTS.get(group)
+        if layoutManager is None or name is None:
+            return
+        layoutManager.setLayout(getattr(slicer.vtkMRMLLayoutNode, name))
+        self.pump(4)
+
     def clearScene(self):
         import slicer
         slicer.mrmlScene.Clear(0)
@@ -575,6 +598,7 @@ class InSlicerBench:
 
     def measureModuleSwitch(self):
         import slicer
+        self.pinLayout("module_switch")
         self.mrHead()
         modules = ["SegmentEditor", "Volumes", "Data", "Markups", "Models"]
         self.details["segment_editor_widget_precreated"] = hasattr(slicer.modules, "SegmentEditorWidget")
@@ -626,6 +650,9 @@ class InSlicerBench:
             for key in ("draw", "library"):
                 shell.switchTo(key)
                 self.pump(4)
+                if key == "draw":
+                    # Remembered as the layout of Draw: switching to Draw again does not change the layout
+                    self.pinLayout("studio")
             times = {"draw": [], "library": []}
             for repetition in range(5):
                 for key in ("draw", "library"):
@@ -695,6 +722,26 @@ class InSlicerBench:
             self.record("hover_ms", statistics.median([burst(300) for _ in range(5)]))
             self.idleWait(100)
         self.attempt(["hover_ms"], hover)
+
+        def crosshairMove():
+            # Moving the crosshair (Shift+move) without jumping the slices: the cost of the synchronous observers of
+            # the crosshair node (the crosshair toolbar among them), per move
+            behavior = crosshair.GetCrosshairBehavior()
+            crosshair.SetCrosshairBehavior(slicer.vtkMRMLCrosshairNode.NoAction)
+            center = redNode.GetXYToRAS().MultiplyPoint([float(centerX), float(centerY), 0.0, 1.0])
+
+            def burst(count):
+                startTime = time.perf_counter()
+                for i in range(count):
+                    crosshair.SetCrosshairRAS([center[0] + (i % 40) * 0.5, center[1] + (i % 7), center[2]])
+                return self.elapsedMs(startTime) / count
+            try:
+                burst(100)
+                self.record("crosshair_move_ms", statistics.median([burst(1000) for _ in range(5)]), digits=5)
+            finally:
+                crosshair.SetCrosshairBehavior(behavior)
+                self.pump(4)
+        self.attempt(["crosshair_move_ms"], crosshairMove)
 
         def scroll():
             def run():
@@ -979,6 +1026,7 @@ class InSlicerBench:
         array[blob] += 600
         volumeNode = self.addVolume(array, "BenchOps256")
         del array
+        self.pinLayout("segment_ops")
         slicer.util.setSliceViewerLayers(background=volumeNode, foreground=None, label=None, fit=True)
         lesion = np.zeros((size, size, size), np.uint8)
         lesion[blob] = 1
@@ -1020,6 +1068,7 @@ class InSlicerBench:
         shape = (256, 384, 384)  # (k, j, i), 0.6 mm voxels
         spacing = 0.6
         volumeNode = self.addVolume((rng.random(shape, dtype=np.float32) * 100).astype(np.int16), "Bench384", spacing=(spacing, spacing, spacing))
+        self.pinLayout("effect_gui")
         slicer.util.setSliceViewerLayers(background=volumeNode, foreground=None, label=None, fit=True)
         kk, jj, ii = np.ogrid[:shape[0], :shape[1], :shape[2]]
 
@@ -1128,6 +1177,9 @@ class InSlicerBench:
             startTime = time.perf_counter()
             self.attempt(metricNames, getattr(self, methodName))
             self.details.setdefault("group_seconds", {})[group] = round(time.perf_counter() - startTime, 1)
+            layoutManager = slicer.app.layoutManager()
+            if layoutManager is not None:
+                self.details.setdefault("group_end_layouts", {})[group] = layoutManager.layout
             try:
                 if slicer.util.mainWindow() is not None:
                     slicer.util.selectModule("Data")

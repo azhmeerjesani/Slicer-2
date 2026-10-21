@@ -38,6 +38,47 @@
 #include <vtkMRMLModelNode.h>
 #include <vtkMRMLSliceDisplayNode.h>
 
+namespace
+{
+
+//---------------------------------------------------------------------------
+// The crosshair node whose state the toolbar shows: the one named "default", else the last crosshair node.
+// Called each time a crosshair node is modified (every move of the crosshair), so the scene is searched only if the
+// default crosshair node does not have its usual ID (the ID of a singleton node is its class name and its tag).
+vtkMRMLCrosshairNode* defaultCrosshairNode(vtkMRMLScene* scene)
+{
+  vtkMRMLCrosshairNode* crosshairNode = vtkMRMLCrosshairNode::SafeDownCast(scene->GetNodeByID("vtkMRMLCrosshairNodedefault"));
+  if (crosshairNode && crosshairNode->GetCrosshairName() && crosshairNode->GetCrosshairName() == std::string("default"))
+  {
+    return crosshairNode;
+  }
+  crosshairNode = nullptr;
+  vtkMRMLNode* node;
+  vtkCollectionSimpleIterator it;
+  vtkSmartPointer<vtkCollection> crosshairs;
+  crosshairs.TakeReference(scene->GetNodesByClass("vtkMRMLCrosshairNode"));
+  for (crosshairs->InitTraversal(it); (node = (vtkMRMLNode*)crosshairs->GetNextItemAsObject(it));)
+  {
+    crosshairNode = vtkMRMLCrosshairNode::SafeDownCast(node);
+    if (crosshairNode && crosshairNode->GetCrosshairName() == std::string("default"))
+    {
+      break;
+    }
+  }
+  return crosshairNode;
+}
+
+//---------------------------------------------------------------------------
+void setActionChecked(QAction* action, bool checked)
+{
+  if (action && action->isChecked() != checked)
+  {
+    action->setChecked(checked);
+  }
+}
+
+} // end of anonymous namespace
+
 //---------------------------------------------------------------------------
 // qSlicerViewersToolBarPrivate methods
 
@@ -506,19 +547,8 @@ void qSlicerViewersToolBarPrivate::updateWidgetFromMRML()
 {
   Q_ASSERT(this->MRMLScene);
 
-  vtkMRMLNode* node;
-  vtkCollectionSimpleIterator it;
-  vtkMRMLCrosshairNode* crosshairNode = nullptr;
-  vtkSmartPointer<vtkCollection> crosshairs;
-  crosshairs.TakeReference(this->MRMLScene->GetNodesByClass("vtkMRMLCrosshairNode"));
-  for (crosshairs->InitTraversal(it); (node = (vtkMRMLNode*)crosshairs->GetNextItemAsObject(it));)
-  {
-    crosshairNode = vtkMRMLCrosshairNode::SafeDownCast(node);
-    if (crosshairNode && crosshairNode->GetCrosshairName() == std::string("default"))
-    {
-      break;
-    }
-  }
+  // Only the actions whose state changed are updated: this runs at every move of the crosshair
+  vtkMRMLCrosshairNode* crosshairNode = defaultCrosshairNode(this->MRMLScene);
   if (crosshairNode)
   {
     // toggle on/off, jump slices, style of crosshair
@@ -528,30 +558,21 @@ void qSlicerViewersToolBarPrivate::updateWidgetFromMRML()
     if (this->CrosshairJumpSlicesMapper->mapping(crosshairNode->GetCrosshairBehavior()) != nullptr)
     {
       QAction* action = (QAction*)(this->CrosshairJumpSlicesMapper->mapping(crosshairNode->GetCrosshairBehavior()));
-      if (action)
-      {
-        action->setChecked(true);
-      }
+      setActionChecked(action, true);
     }
 
     // style of crosshair
     if (this->CrosshairMapper->mapping(crosshairNode->GetCrosshairMode()) != nullptr)
     {
       QAction* action = (QAction*)(this->CrosshairMapper->mapping(crosshairNode->GetCrosshairMode()));
-      if (action)
-      {
-        action->setChecked(true);
-      }
+      setActionChecked(action, true);
     }
 
     // thickness
     if (this->CrosshairThicknessMapper->mapping(crosshairNode->GetCrosshairThickness()) != nullptr)
     {
       QAction* action = (QAction*)(this->CrosshairThicknessMapper->mapping(crosshairNode->GetCrosshairThickness()));
-      if (action)
-      {
-        action->setChecked(true);
-      }
+      setActionChecked(action, true);
     }
 
     // cache the mode
@@ -565,16 +586,17 @@ void qSlicerViewersToolBarPrivate::updateWidgetFromMRML()
     // therefore this toggle action should be the last.
     if (this->CrosshairToolButton)
     {
-      this->CrosshairToggleAction->setChecked(crosshairNode->GetCrosshairMode() != vtkMRMLCrosshairNode::NoCrosshair);
+      setActionChecked(this->CrosshairToggleAction, crosshairNode->GetCrosshairMode() != vtkMRMLCrosshairNode::NoCrosshair);
     }
   }
 
   if (this->MRMLAppLogic)
   {
     // Slicer intersection visibility
-    this->IntersectingSlicesVisibleAction->setChecked(this->MRMLAppLogic->GetIntersectingSlicesEnabled(vtkMRMLApplicationLogic::IntersectingSlicesVisibility));
+    setActionChecked(this->IntersectingSlicesVisibleAction, this->MRMLAppLogic->GetIntersectingSlicesEnabled(vtkMRMLApplicationLogic::IntersectingSlicesVisibility));
     // Slicer intersection interactive
-    this->IntersectingSlicesInteractiveAction->setChecked(this->MRMLAppLogic->GetIntersectingSlicesEnabled(vtkMRMLApplicationLogic::IntersectingSlicesInteractive));
+    setActionChecked(this->IntersectingSlicesInteractiveAction, this->MRMLAppLogic->GetIntersectingSlicesEnabled(vtkMRMLApplicationLogic::IntersectingSlicesInteractive));
+    // (QAction::setEnabled() and QWidget::setEnabled() return immediately if the state does not change)
     this->SliceIntersectionsFullIntersectionAction->setEnabled(this->IntersectingSlicesInteractiveAction->isChecked());
     this->SliceIntersectionsSkipIntersectionAction->setEnabled(this->IntersectingSlicesInteractiveAction->isChecked());
     this->SliceIntersectionsFineAction->setEnabled(this->IntersectingSlicesInteractiveAction->isChecked());
@@ -582,8 +604,8 @@ void qSlicerViewersToolBarPrivate::updateWidgetFromMRML()
     this->SliceIntersectionsThickAction->setEnabled(this->IntersectingSlicesInteractiveAction->isChecked());
     // Interaction options
     this->IntersectingSlicesInteractionModesMenu->setEnabled(this->IntersectingSlicesVisibleAction->isChecked());
-    this->IntersectingSlicesTranslationEnabledAction->setChecked(this->MRMLAppLogic->GetIntersectingSlicesEnabled(vtkMRMLApplicationLogic::IntersectingSlicesTranslation));
-    this->IntersectingSlicesRotationEnabledAction->setChecked(this->MRMLAppLogic->GetIntersectingSlicesEnabled(vtkMRMLApplicationLogic::IntersectingSlicesRotation));
+    setActionChecked(this->IntersectingSlicesTranslationEnabledAction, this->MRMLAppLogic->GetIntersectingSlicesEnabled(vtkMRMLApplicationLogic::IntersectingSlicesTranslation));
+    setActionChecked(this->IntersectingSlicesRotationEnabledAction, this->MRMLAppLogic->GetIntersectingSlicesEnabled(vtkMRMLApplicationLogic::IntersectingSlicesRotation));
   }
 }
 

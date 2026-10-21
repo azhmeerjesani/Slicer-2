@@ -43,6 +43,22 @@ class vtkObject;
 class Q_SLICER_BASE_QTAPP_EXPORT qSlicerMainWindow : public QMainWindow
 {
   Q_OBJECT
+
+  /// Focus mode (View > Maximize view, Ctrl+6 or F11): the module panel, the toolbars and the dock widgets
+  /// are hidden, except toolbars and dock widgets that have the dynamic property SlicerKeepInFocusMode set to
+  /// true. Leaving the focus mode shows exactly what entering it hid. Showing the module panel (for example
+  /// by selecting a module) leaves the focus mode.
+  /// \sa focusModeChanged()
+  Q_PROPERTY(bool focusMode READ focusMode WRITE setFocusMode NOTIFY focusModeChanged)
+
+  /// Width of the module panel that is kept when another module is selected (0 if not known yet).
+  /// The panel is only made wider when the module needs more room. A width chosen by the user (by dragging
+  /// the panel edge) or set with setPanelWidth() is saved in the application settings (Studio/ClassicPanelWidth).
+  /// The width is not managed while the application manages it itself (the main window property
+  /// SlicerStudioConstrainedPanel is true, or the module panel has a larger minimum width than its layout needs),
+  /// nor in testing mode.
+  Q_PROPERTY(int panelWidth READ panelWidth WRITE setPanelWidth)
+
 public:
   typedef QMainWindow Superclass;
 
@@ -64,6 +80,12 @@ public:
   Q_INVOKABLE ctkErrorLogWidget* errorLogWidget() const;
   /// Return a pointer to the dock widget that shows the Error Log.
   Q_INVOKABLE QDockWidget* errorLogDockWidget() const;
+
+  /// \sa focusMode, setFocusMode()
+  bool focusMode() const;
+
+  /// \sa panelWidth, setPanelWidth()
+  int panelWidth() const;
 
 public slots:
   virtual void setHomeModuleCurrent();
@@ -125,15 +147,31 @@ public slots:
   /// - current view layout ID
   /// - favorite modules
   /// - recently loaded files
+  /// - module panel width
+  ///
+  /// The focus mode is left first, so that the saved state never has hidden panels.
   ///
   /// \sa restoreGUIState()
   virtual void saveGUIState(bool force = false);
 
   /// Read GUI state from application settings and update the user interface accordingly.
+  ///
+  /// Before the window is first shown, the main window state (toolbars and dock widgets) is restored only
+  /// when the window is first shown, once all modules have added their toolbars. Meanwhile the main window has
+  /// the dynamic property SlicerDeferRestoreState set to true: modules that add a toolbar do not need to
+  /// restore the main window state themselves.
   /// \sa saveGUIState()
   virtual void restoreGUIState(bool force = false);
 
   virtual void addFileToRecentFiles(const qSlicerIO::IOProperties& fileProperties);
+
+  /// Enter or leave the focus mode.
+  /// \sa focusMode
+  void setFocusMode(bool enabled);
+
+  /// Set the width of the module panel kept between modules.
+  /// \sa panelWidth
+  void setPanelWidth(int width);
 
   /// Refresh favorite modules toolbar from application settings
   virtual void on_FavoriteModulesChanged();
@@ -142,6 +180,31 @@ signals:
   /// Emitted when the window is first shown to the user.
   /// \sa showEvent(QShowEvent*)
   void initialWindowShown();
+
+  /// Emitted when the focus mode is entered or left.
+  /// \sa focusMode
+  void focusModeChanged(bool enabled);
+
+  /// Emitted instead of showing the startup disclaimer popup (when the event loop runs after the window is
+  /// first shown) if the application property SlicerDisclaimerHandledByApplication is true then: the application
+  /// shows the message itself. It is not emitted if the user chose not to show the message again.
+  /// \sa disclaimer()
+  void disclaimerRequested(const QString& message);
+
+  /// Emitted when the application is about to ask whether to save before exit, before it reads the main
+  /// window properties SlicerStudioCloseMode and SlicerStudioCloseSummary (cleared before the signal is
+  /// emitted). A handler connected with a direct connection may set them:
+  /// - "unsavedLesion": the summary is shown with the buttons "Save lesion...", "Don't save" and "Cancel";
+  /// - "lesionSaved": the summary is shown with the buttons "Quit", "Save session..." and "Cancel";
+  /// - empty (the default): the usual confirmation.
+  /// \sa saveRequested()
+  void closeSummaryRequested();
+
+  /// Emitted when the user chose "Save lesion..." in the exit confirmation. A handler connected with a direct
+  /// connection saves and sets the main window property SlicerStudioSaveResult to "saved" (anything else,
+  /// for example "cancelled", keeps the application open).
+  /// \sa closeSummaryRequested()
+  void saveRequested();
 
 protected slots:
   virtual void onModuleLoaded(const QString& moduleName);
@@ -176,6 +239,7 @@ protected:
   virtual void pythonConsoleInitialDisplay();
 
   /// Open a popup to warn the user Slicer is not for clinical use.
+  /// \sa disclaimerRequested()
   virtual void disclaimer();
 
   /// Forward the dragEnterEvent to the IOManager which will

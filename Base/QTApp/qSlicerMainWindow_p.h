@@ -24,6 +24,7 @@
 // Qt includes
 #include <QPointer>
 #include <QQueue>
+class QTimer;
 class QToolButton;
 
 // Slicer includes
@@ -64,6 +65,26 @@ public:
   virtual bool confirmCloseApplication();
   virtual bool confirmCloseScene();
 
+  /// Exit confirmations described by the application (closeSummaryRequested()). Return true to close.
+  bool confirmCloseApplicationUnsavedLesion(const QString& summary);
+  bool confirmCloseApplicationLesionSaved(const QString& summary);
+
+  /// Add the menu actions that have a shortcut to the main window, so that their shortcuts keep working
+  /// when the menu bar is hidden.
+  void addMenuShortcutActions();
+
+  /// Show the focus mode in the View menu action.
+  void updateFocusModeAction();
+
+  /// True if the main window keeps the module panel width between modules (see panelWidth).
+  bool isPanelWidthKept() const;
+  /// Set the module panel to the kept width (or wider if the module needs it) when the event loop runs again.
+  void schedulePanelWidthUpdate();
+  void updatePanelWidth();
+  /// The user resized the module panel: the new width is kept.
+  void onPanelResized();
+  void persistPanelWidth();
+
   void setErrorLogIconHighlighted(bool);
 
   void updatePythonConsolePalette();
@@ -95,6 +116,20 @@ public:
 
   bool                            WindowInitialShowCompleted{ false };
   bool                            IsClosing{ false };
+
+  // Main window state read by restoreGUIState() before the window is first shown, restored when it is shown
+  QByteArray                      DeferredWindowState;
+  bool                            WindowStateRestoreDeferred{ false };
+
+  bool                            FocusMode{ false };
+  bool                            FocusModeChanging{ false };
+  QList<QPointer<QWidget>>        FocusModeHiddenWidgets;
+
+  int                             PanelWidth{ 0 };
+  bool                            PanelWidthChosen{ false };
+  bool                            PanelWidthUpdatePending{ false };
+  QTimer*                         PanelWidthPersistTimer{ nullptr };
+  int                             PanelWidthPersistWindowWidth{ -1 };
   // clang-format on
 };
 
