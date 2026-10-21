@@ -25,23 +25,33 @@
 #include <QApplication>
 #include <QBitmap>
 #include <QComboBox>
+#include <QDateTime>
 #include <QStyleFactory>
 #include <QDebug>
 #include <QEvent>
 #include <QGroupBox>
 #include <QLabel>
 #include <QMenu>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPointer>
 #include <qdrawutil.h>
 #include <QScrollBar>
 #include <QSettings>
+#include <QSlider>
 #include <QStyleHints>
+#include <QStyleOption>
 #include <QStyleOptionComboBox>
 #include <QStyleOptionGroupBox>
 #include <QStyleOptionSpinBox>
+#include <QTabBar>
 #include <QToolButton>
 #include <QtMath>
+
+// STD includes
+#include <climits>
+#include <cmath>
 
 // Slicer includes
 #include "qSlicerApplication.h"
@@ -234,10 +244,34 @@ void applyAccentColor(QPalette& palette, bool dark)
 }
 
 //------------------------------------------------------------------------------
-/// Return true if the palette is dark (window color lightness < 128)
+/// Return true if the palette is dark (window color lightness < 128).
+/// The color of a gradient brush is black, so for a gradient window brush the lightness is the one
+/// that covers most of the widget: the mean lightness of the stops when the gradient is stretched
+/// over the widget (e.g. the classic view bars), otherwise the lightness of the last stop, which pads
+/// the rest of the widget (e.g. the colored stripe of the flat view bars).
 bool isDark(const QPalette& palette)
 {
-  return palette.color(QPalette::Window).lightness() < 128;
+  const QBrush& window = palette.brush(QPalette::Window);
+  const QGradient* gradient = window.gradient();
+  if (!gradient || gradient->stops().isEmpty())
+  {
+    return window.color().lightness() < 128;
+  }
+  const QGradientStops stops = gradient->stops();
+  if (gradient->coordinateMode() == QGradient::LogicalMode || stops.size() == 1)
+  {
+    return stops.last().second.lightness() < 128;
+  }
+  // Mean lightness of the piecewise linear gradient between its first and last stops
+  qreal integral = 0.;
+  for (int index = 1; index < stops.size(); ++index)
+  {
+    const qreal width = stops[index].first - stops[index - 1].first;
+    integral += width * (stops[index].second.lightness() + stops[index - 1].second.lightness()) / 2.;
+  }
+  const qreal span = stops.last().first - stops.first().first;
+  const qreal lightness = span > 0. ? integral / span : stops.last().second.lightness();
+  return lightness < 128.;
 }
 
 //------------------------------------------------------------------------------
@@ -457,31 +491,500 @@ void drawButtonPanel(const QStyleOption* option, QPainter* painter, const QWidge
 }
 
 //------------------------------------------------------------------------------
-/// Draw the frame of an input field (line edit, spin box, editable combo box): a 1 px
-/// "control-border" line ("accent-fg" when focused, "border" when disabled), which has a contrast
-/// of at least 3:1 with the window color.
+/// Radius of the frame of input fields (line edits, spin boxes and combo boxes)
+const qreal FieldRadius = 6.;
+
+//------------------------------------------------------------------------------
+/// Draw an input field (line edit, spin box, combo box): a 1 px "control-border" frame
+/// ("accent-fg" when focused or open, "text2" when \a hoverable and hovered, "border" when
+/// disabled), which has a contrast of at least 3:1 with the window color, rounded by 6 px.
+/// The field is filled with \a fill if it is valid.
 /// The base style (Fusion) frames fields with a color derived from the window color, which is
 /// almost invisible on dark palettes.
-/// \a rect is the rectangle framed by the base style, the frame has the same geometry to cover it.
-void drawFieldFrame(const QRect& rect, QStyle::State state, bool dark, QPainter* painter)
+void drawField(const QRect& rect, QStyle::State state, bool dark, const QColor& fill, bool hoverable, QPainter* painter)
 {
   QColor frameColor = qSlicerStyle::tokenColor("control-border", dark);
   if (!(state & QStyle::State_Enabled))
   {
     frameColor = qSlicerStyle::tokenColor("border", dark);
   }
-  else if (state & QStyle::State_HasFocus)
+  else if (state & (QStyle::State_HasFocus | QStyle::State_On))
   {
     frameColor = qSlicerStyle::tokenColor("accent-fg", dark);
   }
+  else if (hoverable && (state & QStyle::State_MouseOver))
+  {
+    frameColor = qSlicerStyle::tokenColor("text2", dark);
+  }
+  const QRectF fieldRect(rect);
+  drawRoundedBox(painter, fieldRect, qMin(FieldRadius, fieldRect.height() / 2.), fill, frameColor);
+}
+
+//------------------------------------------------------------------------------
+/// Draw the frame of an input field without fill (see drawField())
+void drawFieldFrame(const QRect& rect, QStyle::State state, bool dark, QPainter* painter)
+{
+  drawField(rect, state, dark, QColor(), false, painter);
+}
+
+//------------------------------------------------------------------------------
+/// Base color of an input field drawn with \a option
+QColor fieldFill(const QStyleOption* option)
+{
+  return option->palette.color((option->state & QStyle::State_Enabled) ? QPalette::Normal : QPalette::Disabled, QPalette::Base);
+}
+
+//------------------------------------------------------------------------------
+/// Fill the area of the arrow button \a subControl of a spin box or combo box when it is hovered
+/// or pressed. The fill stays inside the rounded frame of the field.
+void drawArrowButtonFill(const QStyleOptionComplex* option, QStyle::SubControl subControl, const QRect& buttonRect, bool stepEnabled, QPainter* painter)
+{
+  const QStyle::State state = option->state;
+  if (!(state & QStyle::State_Enabled) || !stepEnabled || !(option->activeSubControls & subControl))
+  {
+    return;
+  }
+  const bool pressed = state & QStyle::State_Sunken;
+  if (!pressed && !(state & QStyle::State_MouseOver))
+  {
+    return;
+  }
+  const QRectF fieldRect = QRectF(option->rect).adjusted(1., 1., -1., -1.);
+  const qreal radius = qMax<qreal>(0., qMin(FieldRadius, QRectF(option->rect).height() / 2.) - 1.);
+  QPainterPath interior;
+  interior.addRoundedRect(fieldRect, radius, radius);
   painter->save();
   painter->setRenderHint(QPainter::Antialiasing, true);
-  // Line on pixel centers, like the base style
-  painter->translate(0.5, 0.5);
-  painter->setPen(frameColor);
-  painter->setBrush(Qt::NoBrush);
-  painter->drawRoundedRect(QRectF(rect.adjusted(0, 0, -1, -1)), 2., 2.);
+  painter->setClipPath(interior, Qt::IntersectClip);
+  painter->fillRect(QRectF(buttonRect).intersected(fieldRect), optionToken(option, pressed ? "control-pressed" : "control-hover"));
   painter->restore();
+}
+
+//------------------------------------------------------------------------------
+/// Draw a flat spin box: a field, and the arrows (PE_IndicatorArrowUp/Down or
+/// PE_IndicatorSpinPlus/Minus) in the button rectangles of the base style, so that the arrows are
+/// where the base style handles the mouse (e.g. ctkDoubleSpinBox).
+void drawSpinBox(const QStyleOptionSpinBox* spinBox, QPainter* painter, const QWidget* widget, const QStyle* style)
+{
+  const bool dark = hasDarkPalette(spinBox);
+  if (spinBox->subControls & QStyle::SC_SpinBoxFrame)
+  {
+    if (spinBox->frame)
+    {
+      drawField(spinBox->rect, spinBox->state, dark, fieldFill(spinBox), false, painter);
+    }
+    else
+    {
+      painter->fillRect(spinBox->rect, fieldFill(spinBox));
+    }
+  }
+  if (spinBox->buttonSymbols == QAbstractSpinBox::NoButtons)
+  {
+    return;
+  }
+  const bool plusMinus = (spinBox->buttonSymbols == QAbstractSpinBox::PlusMinus);
+  for (QStyle::SubControl subControl : { QStyle::SC_SpinBoxUp, QStyle::SC_SpinBoxDown })
+  {
+    if (!(spinBox->subControls & subControl))
+    {
+      continue;
+    }
+    const QRect buttonRect = style->subControlRect(QStyle::CC_SpinBox, spinBox, subControl, widget);
+    if (!buttonRect.isValid())
+    {
+      continue;
+    }
+    const bool up = (subControl == QStyle::SC_SpinBoxUp);
+    const bool stepEnabled = spinBox->stepEnabled & (up ? QAbstractSpinBox::StepUpEnabled : QAbstractSpinBox::StepDownEnabled);
+    drawArrowButtonFill(spinBox, subControl, buttonRect, stepEnabled, painter);
+    QStyleOption arrow(*spinBox);
+    arrow.rect = buttonRect;
+    arrow.state &= ~(QStyle::State_Selected | QStyle::State_Sunken | QStyle::State_MouseOver);
+    if (!stepEnabled)
+    {
+      arrow.state &= ~QStyle::State_Enabled;
+    }
+    const QStyle::PrimitiveElement element = plusMinus ? (up ? QStyle::PE_IndicatorSpinPlus : QStyle::PE_IndicatorSpinMinus) //
+                                                       : (up ? QStyle::PE_IndicatorArrowUp : QStyle::PE_IndicatorArrowDown);
+    style->drawPrimitive(element, &arrow, painter, widget);
+  }
+}
+
+//------------------------------------------------------------------------------
+/// Draw a flat combo box: a field (only a hover fill without frame) and a chevron in the arrow
+/// rectangle of the base style. The current text and icon are drawn by CE_ComboBoxLabel.
+void drawComboBox(const QStyleOptionComboBox* comboBox, QPainter* painter, const QWidget* widget, const QStyle* style)
+{
+  const bool dark = hasDarkPalette(comboBox);
+  const QStyle::State state = comboBox->state;
+  const bool enabled = state & QStyle::State_Enabled;
+  if (comboBox->subControls & QStyle::SC_ComboBoxFrame)
+  {
+    if (comboBox->frame)
+    {
+      drawField(comboBox->rect, state, dark, fieldFill(comboBox), !comboBox->editable, painter);
+    }
+    else if (comboBox->editable)
+    {
+      // The edit field of a frameless editable combo box (PE_PanelLineEdit is not drawn for it)
+      painter->fillRect(comboBox->rect, fieldFill(comboBox));
+    }
+    else if (enabled && (state & (QStyle::State_MouseOver | QStyle::State_On)))
+    {
+      drawRoundedBox(painter, QRectF(comboBox->rect), qMin(FieldRadius, comboBox->rect.height() / 2.), optionToken(comboBox, "control-hover"), QColor());
+    }
+  }
+  if (comboBox->subControls & QStyle::SC_ComboBoxArrow)
+  {
+    const QRect arrowRect = style->subControlRect(QStyle::CC_ComboBox, comboBox, QStyle::SC_ComboBoxArrow, widget);
+    if (arrowRect.isValid())
+    {
+      if (comboBox->editable)
+      {
+        drawArrowButtonFill(comboBox, QStyle::SC_ComboBoxArrow, arrowRect, true, painter);
+      }
+      QStyleOption arrow(*comboBox);
+      const int side = qMin(10, qMin(arrowRect.width(), arrowRect.height()));
+      arrow.rect = QRect(0, 0, side, side);
+      arrow.rect.moveCenter(arrowRect.center());
+      arrow.state &= ~(QStyle::State_Selected | QStyle::State_Sunken | QStyle::State_MouseOver);
+      style->drawPrimitive(QStyle::PE_IndicatorArrowDown, &arrow, painter, widget);
+    }
+  }
+}
+
+//------------------------------------------------------------------------------
+/// Draw a flat slider: a 4 px "border" groove, filled with "accent-fg" from the minimum to the
+/// handle, subtle tick marks and a round handle.
+/// The groove is drawn on the rows of the range drawn by ctkRangeSlider (center - 2 to center + 1
+/// of the groove rectangle), which draws its groove with a position out of the range: the groove
+/// is then not filled.
+void drawSlider(const QStyleOptionSlider* slider, QPainter* painter, const QWidget* widget, const QStyle* style)
+{
+  const bool dark = hasDarkPalette(slider);
+  auto token = [dark](const char* name) { return qSlicerStyle::tokenColor(QLatin1String(name), dark); };
+  const QStyle::State state = slider->state;
+  const bool enabled = state & QStyle::State_Enabled;
+  const bool horizontal = slider->orientation == Qt::Horizontal;
+  const QRect groove = style->subControlRect(QStyle::CC_Slider, slider, QStyle::SC_SliderGroove, widget);
+  const QRect handle = style->subControlRect(QStyle::CC_Slider, slider, QStyle::SC_SliderHandle, widget);
+
+  if ((slider->subControls & QStyle::SC_SliderGroove) && groove.isValid())
+  {
+    const QPoint center = groove.center();
+    const QRectF band = horizontal ? QRectF(groove.left(), center.y() - 2, groove.width(), 4) //
+                                   : QRectF(center.x() - 2, groove.top(), 4, groove.height());
+    drawRoundedBox(painter, band, 2., enabled ? token("border") : token("hairline"), QColor());
+    const bool inRange = slider->maximum > slider->minimum && slider->sliderPosition >= slider->minimum && slider->sliderPosition <= slider->maximum;
+    if (inRange && handle.isValid())
+    {
+      QRectF filled(band);
+      const QPointF handleCenter = QRectF(handle).center();
+      // From the minimum: the left (top) end, or the right (bottom) end when upside down
+      if (horizontal && slider->upsideDown)
+      {
+        filled.setLeft(handleCenter.x());
+      }
+      else if (horizontal)
+      {
+        filled.setRight(handleCenter.x());
+      }
+      else if (slider->upsideDown)
+      {
+        filled.setTop(handleCenter.y());
+      }
+      else
+      {
+        filled.setBottom(handleCenter.y());
+      }
+      drawRoundedBox(painter, filled, 2., enabled ? token("accent-fg") : token("text-disabled"), QColor());
+    }
+  }
+
+  if ((slider->subControls & QStyle::SC_SliderTickmarks) && slider->tickPosition != QSlider::NoTicks && slider->maximum > slider->minimum)
+  {
+    const int length = style->pixelMetric(QStyle::PM_SliderLength, slider, widget);
+    const QRect rect = slider->rect;
+    const int available = (horizontal ? rect.width() : rect.height()) - length;
+    int interval = slider->tickInterval;
+    if (interval <= 0)
+    {
+      interval = slider->singleStep;
+      if (QStyle::sliderPositionFromValue(slider->minimum, slider->maximum, interval, available) //
+            - QStyle::sliderPositionFromValue(slider->minimum, slider->maximum, 0, available)
+          < 3)
+      {
+        interval = slider->pageStep;
+      }
+    }
+    // At most one tick every 2 pixels
+    if (interval > 0 && (qint64(slider->maximum) - slider->minimum) / interval <= available / 2)
+    {
+      QColor tickColor = token("text3");
+      tickColor.setAlphaF(enabled ? 0.6 : 0.3);
+      painter->save();
+      painter->setPen(tickColor);
+      const int tickLength = 3;
+      for (qint64 value = slider->minimum; value <= slider->maximum; value += interval)
+      {
+        const int position = QStyle::sliderPositionFromValue(slider->minimum, slider->maximum, int(value), available, slider->upsideDown) + length / 2;
+        for (QSlider::TickPosition side : { QSlider::TicksAbove, QSlider::TicksBelow })
+        {
+          if (!(slider->tickPosition & side))
+          {
+            continue;
+          }
+          if (horizontal)
+          {
+            const int x = rect.left() + position;
+            const int y = (side == QSlider::TicksAbove) ? rect.top() : rect.bottom() - tickLength + 1;
+            painter->drawLine(x, y, x, y + tickLength - 1);
+          }
+          else
+          {
+            const int y = rect.top() + position;
+            const int x = (side == QSlider::TicksAbove) ? rect.left() : rect.right() - tickLength + 1;
+            painter->drawLine(x, y, x + tickLength - 1, y);
+          }
+        }
+      }
+      painter->restore();
+    }
+  }
+
+  if ((slider->subControls & QStyle::SC_SliderHandle) && handle.isValid())
+  {
+    const bool active = enabled && (slider->activeSubControls & QStyle::SC_SliderHandle);
+    const bool pressed = active && (state & QStyle::State_Sunken);
+    const bool hover = active && (state & QStyle::State_MouseOver);
+    const bool focus = enabled && (state & QStyle::State_HasFocus) && (state & QStyle::State_KeyboardFocusChange);
+    // Round handle, inside the handle rectangle (ctkRangeSlider clips each handle to it)
+    const qreal side = qMin(handle.width(), handle.height());
+    QRectF circle(0., 0., side, side);
+    circle.moveCenter(QRectF(handle).center());
+    QColor fill = slider->palette.color(enabled ? QPalette::Normal : QPalette::Disabled, QPalette::Button);
+    if (pressed)
+    {
+      fill = token("control-pressed");
+    }
+    const bool ring = pressed || hover || focus;
+    const QColor border = !enabled ? token("border") : ring ? token("accent-fg") : token("control-border");
+    drawRoundedBox(painter, circle, side / 2., fill, border, ring ? 2. : 1.);
+  }
+}
+
+//------------------------------------------------------------------------------
+/// Return the rectangle of \a subControl of a scroll bar without step buttons: the groove is the
+/// whole scroll bar, the handle length is computed like in the common style (QCommonStyle).
+QRect thinScrollBarRect(const QStyleOptionSlider* scrollBar, QStyle::SubControl subControl, const QWidget* widget, const QStyle* style)
+{
+  const QRect rect = scrollBar->rect;
+  const bool horizontal = scrollBar->orientation == Qt::Horizontal;
+  const int length = horizontal ? rect.width() : rect.height();
+  const int thickness = horizontal ? rect.height() : rect.width();
+  int sliderLength = length;
+  if (scrollBar->maximum != scrollBar->minimum)
+  {
+    const qint64 range = qint64(scrollBar->maximum) - scrollBar->minimum;
+    sliderLength = int((qint64(scrollBar->pageStep) * length) / (range + scrollBar->pageStep));
+    const int sliderMinimum = style->pixelMetric(QStyle::PM_ScrollBarSliderMin, scrollBar, widget);
+    if (sliderLength < sliderMinimum || range > INT_MAX / 2)
+    {
+      sliderLength = sliderMinimum;
+    }
+    sliderLength = qMax(0, qMin(sliderLength, length));
+  }
+  const int sliderStart = QStyle::sliderPositionFromValue(scrollBar->minimum, scrollBar->maximum, scrollBar->sliderPosition, length - sliderLength, scrollBar->upsideDown);
+  const int sliderEnd = sliderStart + sliderLength;
+  QRect result;
+  switch (subControl)
+  {
+    case QStyle::SC_ScrollBarSubPage: result = horizontal ? QRect(0, 0, sliderStart, thickness) : QRect(0, 0, thickness, sliderStart); break;
+    case QStyle::SC_ScrollBarAddPage: result = horizontal ? QRect(sliderEnd, 0, length - sliderEnd, thickness) : QRect(0, sliderEnd, thickness, length - sliderEnd); break;
+    case QStyle::SC_ScrollBarSlider: result = horizontal ? QRect(sliderStart, 0, sliderLength, thickness) : QRect(0, sliderStart, thickness, sliderLength); break;
+    case QStyle::SC_ScrollBarGroove: result = QRect(0, 0, rect.width(), rect.height()); break;
+    default:
+      // No step buttons (SC_ScrollBarAddLine, SC_ScrollBarSubLine)
+      return QRect();
+  }
+  return QStyle::visualRect(scrollBar->direction, rect, result.translated(rect.topLeft()));
+}
+
+//------------------------------------------------------------------------------
+/// Draw a thin scroll bar: a transparent track and a rounded "text3" handle, which gets wider
+/// and more opaque when hovered or pressed.
+void drawThinScrollBar(const QStyleOptionSlider* scrollBar, QPainter* painter, const QWidget* widget, const QStyle* style)
+{
+  if (!(scrollBar->subControls & QStyle::SC_ScrollBarSlider) || scrollBar->maximum <= scrollBar->minimum)
+  {
+    // No handle when there is nothing to scroll
+    return;
+  }
+  const QRect slider = style->subControlRect(QStyle::CC_ScrollBar, scrollBar, QStyle::SC_ScrollBarSlider, widget);
+  if (slider.isEmpty())
+  {
+    return;
+  }
+  const QStyle::State state = scrollBar->state;
+  const bool enabled = state & QStyle::State_Enabled;
+  const bool active = enabled && (scrollBar->activeSubControls & QStyle::SC_ScrollBarSlider);
+  const bool pressed = active && (state & QStyle::State_Sunken);
+  const bool hover = active && (state & QStyle::State_MouseOver);
+  const bool horizontal = scrollBar->orientation == Qt::Horizontal;
+  const qreal inset = (pressed || hover) ? 0. : 1.;
+  const QRectF handle = horizontal ? QRectF(slider).adjusted(1., inset, -1., -inset) : QRectF(slider).adjusted(inset, 1., -inset, -1.);
+  QColor color = optionToken(scrollBar, enabled ? "text3" : "text-disabled");
+  color.setAlphaF(!enabled ? 0.3 : pressed ? 0.85 : hover ? 0.7 : 0.45);
+  const qreal thickness = horizontal ? handle.height() : handle.width();
+  drawRoundedBox(painter, handle, qMin<qreal>(5., thickness / 2.), color, QColor());
+}
+
+//------------------------------------------------------------------------------
+/// Draw a flat header section (or the empty area of a header): the window color, hover and
+/// pressed fills, a "border" line on the side of the items and hairlines between sections.
+void drawHeaderSection(const QStyleOption* option, QPainter* painter, bool emptyArea)
+{
+  const QStyle::State state = option->state;
+  const bool enabled = state & QStyle::State_Enabled;
+  bool horizontal = state & QStyle::State_Horizontal;
+  bool lastSection = false;
+  QColor fill = option->palette.color(QPalette::Window);
+  if (const QStyleOptionHeader* header = qstyleoption_cast<const QStyleOptionHeader*>(option))
+  {
+    horizontal = header->orientation == Qt::Horizontal;
+    lastSection = (header->position == QStyleOptionHeader::End || header->position == QStyleOptionHeader::OnlyOneSection);
+    if (enabled && (state & QStyle::State_Sunken))
+    {
+      fill = optionToken(option, "control-pressed");
+    }
+    else if (enabled && (state & QStyle::State_MouseOver))
+    {
+      fill = optionToken(option, "control-hover");
+    }
+  }
+  const QRect rect = option->rect;
+  painter->save();
+  painter->fillRect(rect, fill);
+  painter->setPen(optionToken(option, "border"));
+  if (horizontal)
+  {
+    painter->drawLine(rect.bottomLeft(), rect.bottomRight());
+  }
+  else
+  {
+    painter->drawLine(rect.topRight(), rect.bottomRight());
+  }
+  if (!emptyArea && !lastSection)
+  {
+    painter->setPen(optionToken(option, "hairline"));
+    if (horizontal)
+    {
+      const int margin = qMin(4, rect.height() / 4);
+      painter->drawLine(rect.right(), rect.top() + margin, rect.right(), rect.bottom() - margin);
+    }
+    else
+    {
+      painter->drawLine(rect.bottomLeft(), QPoint(rect.right() - 1, rect.bottom()));
+    }
+  }
+  painter->restore();
+}
+
+//------------------------------------------------------------------------------
+/// Draw the shape of a tab: no bevel, a hover fill, and a 2 px "accent-fg" line on the side of
+/// the selected tab that faces its page.
+void drawTabShape(const QStyleOptionTab* tab, QPainter* painter)
+{
+  const QStyle::State state = tab->state;
+  const bool enabled = state & QStyle::State_Enabled;
+  const bool selected = state & QStyle::State_Selected;
+  const QRectF rect(tab->rect);
+  if (!selected && enabled && (state & QStyle::State_MouseOver))
+  {
+    drawRoundedBox(painter, rect.adjusted(1., 2., -1., -2.), 4., optionToken(tab, "control-hover"), QColor());
+  }
+  if (!selected)
+  {
+    return;
+  }
+  const qreal lineWidth = 2.;
+  QRectF line;
+  switch (tab->shape)
+  {
+    case QTabBar::RoundedSouth:
+    case QTabBar::TriangularSouth: line = QRectF(rect.left(), rect.top(), rect.width(), lineWidth); break;
+    case QTabBar::RoundedWest:
+    case QTabBar::TriangularWest: line = QRectF(rect.right() + 1. - lineWidth, rect.top(), lineWidth, rect.height()); break;
+    case QTabBar::RoundedEast:
+    case QTabBar::TriangularEast: line = QRectF(rect.left(), rect.top(), lineWidth, rect.height()); break;
+    case QTabBar::RoundedNorth:
+    case QTabBar::TriangularNorth:
+    default: line = QRectF(rect.left(), rect.bottom() + 1. - lineWidth, rect.width(), lineWidth); break;
+  }
+  painter->fillRect(line, optionToken(tab, enabled ? "accent-fg" : "text-disabled"));
+}
+
+//------------------------------------------------------------------------------
+/// Space between the bar and the text of a horizontal progress bar
+constexpr int ProgressBarLabelSpacing = 6;
+/// Length of the bar that a long text of a horizontal progress bar leaves at least
+constexpr int ProgressBarMinimumLength = 40;
+
+//------------------------------------------------------------------------------
+/// Return the width reserved for the text of a horizontal progress bar drawn beside the bar:
+/// the width of "100%" at least, so that the bar does not change when the value changes, or the
+/// width of a longer text (e.g. a custom format), as long as it leaves ProgressBarMinimumLength
+/// pixels to the bar (or half of the progress bar). A text that does not fit is elided by
+/// CE_ProgressBarLabel. 0 if the text is not visible or the progress bar is busy.
+int progressBarLabelWidth(const QStyleOptionProgressBar* progressBar)
+{
+  if (!progressBar->textVisible || (progressBar->minimum == 0 && progressBar->maximum == 0))
+  {
+    return 0;
+  }
+  const QFontMetrics& metrics = progressBar->fontMetrics;
+  const int width = qMax(metrics.horizontalAdvance(progressBar->text), metrics.horizontalAdvance(QStringLiteral("100%")));
+  const int totalWidth = progressBar->rect.width();
+  const int maximumWidth = qMax(totalWidth / 2, totalWidth - ProgressBarMinimumLength - ProgressBarLabelSpacing);
+  return qMax(0, qMin(width, maximumWidth));
+}
+
+//------------------------------------------------------------------------------
+/// Return the 4 px pill of a progress bar drawn in \a rect (vertically centered)
+QRectF progressBarPill(const QRect& rect)
+{
+  const qreal thickness = qMin<qreal>(4., rect.height());
+  return QRectF(rect.left(), rect.top() + qRound((rect.height() - thickness) / 2.), rect.width(), thickness);
+}
+
+//------------------------------------------------------------------------------
+/// Return true if \a option is a horizontal progress bar, drawn as a pill (vertical progress bars
+/// are drawn by the base style)
+bool isPillProgressBar(const QStyleOption* option)
+{
+  return qstyleoption_cast<const QStyleOptionProgressBar*>(option) && (option->state & QStyle::State_Horizontal);
+}
+
+//------------------------------------------------------------------------------
+/// Draw a splitter handle (or a dock widget separator): a hairline along the handle, a 2 px
+/// "accent-fg" line when it is hovered or dragged.
+void drawSplitterHandle(const QStyleOption* option, QPainter* painter)
+{
+  const QStyle::State state = option->state;
+  const bool active = (state & QStyle::State_Enabled) && (state & (QStyle::State_MouseOver | QStyle::State_Sunken));
+  const qreal lineWidth = active ? 2. : 1.;
+  const QRectF rect(option->rect);
+  // A horizontal splitter has widgets side by side: its handle is a vertical line
+  QRectF line;
+  if (state & QStyle::State_Horizontal)
+  {
+    line = QRectF(qFloor(rect.center().x() - lineWidth / 2. + 0.5), rect.top(), lineWidth, rect.height());
+  }
+  else
+  {
+    line = QRectF(rect.left(), qFloor(rect.center().y() - lineWidth / 2. + 0.5), rect.width(), lineWidth);
+  }
+  painter->fillRect(line, optionToken(option, active ? "accent-fg" : "hairline"));
 }
 
 //------------------------------------------------------------------------------
@@ -965,6 +1468,79 @@ bool hasRoundedMask(const QWidget* widget)
   return qobject_cast<const QMenu*>(widget) || widget->inherits("QTipLabel");
 }
 
+//------------------------------------------------------------------------------
+// True while a slider handles a left button press on its handle (see SliderHandlePressFilter)
+bool SliderHandlePress = false;
+
+//------------------------------------------------------------------------------
+/// Return true if \a pos is on the handle of \a slider
+bool isOnSliderHandle(const QSlider* slider, const QPoint& pos)
+{
+  // Same options as QSlider::initStyleOption() (protected)
+  QStyleOptionSlider option;
+  option.initFrom(slider);
+  option.subControls = QStyle::SC_None;
+  option.activeSubControls = QStyle::SC_None;
+  option.orientation = slider->orientation();
+  option.maximum = slider->maximum();
+  option.minimum = slider->minimum();
+  option.tickPosition = slider->tickPosition();
+  option.tickInterval = slider->tickInterval();
+  option.upsideDown = (slider->orientation() == Qt::Horizontal) ? (slider->invertedAppearance() != (option.direction == Qt::RightToLeft)) //
+                                                                : !slider->invertedAppearance();
+  option.direction = Qt::LeftToRight; // QSlider uses upsideDown instead
+  option.sliderPosition = slider->sliderPosition();
+  option.sliderValue = slider->value();
+  option.singleStep = slider->singleStep();
+  option.pageStep = slider->pageStep();
+  if (slider->orientation() == Qt::Horizontal)
+  {
+    option.state |= QStyle::State_Horizontal;
+  }
+  return slider->style()->subControlRect(QStyle::CC_Slider, &option, QStyle::SC_SliderHandle, slider).contains(pos);
+}
+
+//------------------------------------------------------------------------------
+/// Event filter of the sliders in the Comfortable density, where a left click on the groove
+/// moves the handle there (SH_Slider_AbsoluteSetButtons): a left click on the handle grabs it
+/// where it is clicked, instead of moving its center to the mouse (which changes the value).
+class SliderHandlePressFilter : public QObject
+{
+public:
+  using QObject::QObject;
+  bool eventFilter(QObject* obj, QEvent* event) override
+  {
+    if (event->type() == QEvent::MouseButtonPress)
+    {
+      const QMouseEvent* mouseEvent = static_cast<const QMouseEvent*>(event);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+      const QPoint pos = mouseEvent->position().toPoint();
+#else
+      const QPoint pos = mouseEvent->pos();
+#endif
+      const QSlider* slider = qobject_cast<const QSlider*>(obj);
+      SliderHandlePress = slider && mouseEvent->button() == Qt::LeftButton && isOnSliderHandle(slider, pos);
+    }
+    else if (event->type() == QEvent::MouseButtonRelease)
+    {
+      SliderHandlePress = false;
+    }
+    return QObject::eventFilter(obj, event);
+  }
+};
+
+//------------------------------------------------------------------------------
+/// Return the event filter shared by the sliders (see SliderHandlePressFilter)
+QObject* sliderHandlePressFilter()
+{
+  static QPointer<QObject> filter;
+  if (!filter)
+  {
+    filter = new SliderHandlePressFilter(QCoreApplication::instance());
+  }
+  return filter;
+}
+
 } // namespace
 
 // --------------------------------------------------------------------------
@@ -1026,6 +1602,45 @@ QStyle::SubControl qSlicerStyle::hitTestComplexControl(ComplexControl cc, const 
   return sc;
 }
 
+//------------------------------------------------------------------------------
+QRect qSlicerStyle::subControlRect(ComplexControl control, const QStyleOptionComplex* option, SubControl subControl, const QWidget* widget) const
+{
+  if (control == QStyle::CC_ScrollBar && qSlicerStyle::density() == qSlicerStyle::Comfortable)
+  {
+    if (const QStyleOptionSlider* scrollBar = qstyleoption_cast<const QStyleOptionSlider*>(option))
+    {
+      return thinScrollBarRect(scrollBar, subControl, widget, this->proxy());
+    }
+  }
+  return this->Superclass::subControlRect(control, option, subControl, widget);
+}
+
+//------------------------------------------------------------------------------
+QRect qSlicerStyle::subElementRect(SubElement element, const QStyleOption* option, const QWidget* widget) const
+{
+  switch (element)
+  {
+    case QStyle::SE_ProgressBarGroove:
+    case QStyle::SE_ProgressBarContents:
+    case QStyle::SE_ProgressBarLabel:
+      if (isPillProgressBar(option))
+      {
+        // The text is drawn beside the bar, on the right
+        const QStyleOptionProgressBar* progressBar = qstyleoption_cast<const QStyleOptionProgressBar*>(option);
+        const QRect rect = progressBar->rect;
+        const int labelWidth = progressBarLabelWidth(progressBar);
+        const int spacing = labelWidth > 0 ? ProgressBarLabelSpacing : 0;
+        QRect result = (element == QStyle::SE_ProgressBarLabel) //
+                         ? QRect(rect.right() - labelWidth + 1, rect.top(), labelWidth, rect.height())
+                         : QRect(rect.left(), rect.top(), rect.width() - labelWidth - spacing, rect.height());
+        return QStyle::visualRect(progressBar->direction, rect, result);
+      }
+      break;
+    default: break;
+  }
+  return this->Superclass::subElementRect(element, option, widget);
+}
+
 // --------------------------------------------------------------------------
 int qSlicerStyle::pixelMetric(PixelMetric metric, const QStyleOption* option, const QWidget* widget) const
 {
@@ -1049,7 +1664,31 @@ int qSlicerStyle::pixelMetric(PixelMetric metric, const QStyleOption* option, co
       return qSlicerStyle::density() == qSlicerStyle::Comfortable ? 4 : 3; // 6 by default
       break;
     case QStyle::PM_SliderLength:
-      return 12; // default to 27
+      return qSlicerStyle::density() == qSlicerStyle::Comfortable ? 14 : 12; // default to 27
+      break;
+    case QStyle::PM_SliderThickness:
+      if (qSlicerStyle::density() == qSlicerStyle::Comfortable)
+      {
+        return 14; // round handle (15 by default)
+      }
+      break;
+    case QStyle::PM_ScrollBarExtent:
+      if (qSlicerStyle::density() == qSlicerStyle::Comfortable)
+      {
+        return 10; // thin scroll bars without step buttons (14 by default)
+      }
+      break;
+    case QStyle::PM_SplitterWidth:
+      if (qSlicerStyle::density() == qSlicerStyle::Comfortable)
+      {
+        return 4;
+      }
+      break;
+    case QStyle::PM_DockWidgetSeparatorExtent:
+      if (qSlicerStyle::density() == qSlicerStyle::Comfortable)
+      {
+        return 3; // 6 by default
+      }
       break;
     case QStyle::PM_ButtonIconSize:
       return 24; // Like with cleanlooks style
@@ -1223,6 +1862,17 @@ int qSlicerStyle::styleHint(StyleHint hint, const QStyleOption* opt, const QWidg
       res = this->Superclass::styleHint(hint, opt, widget, returnData);
       break;
     case QStyle::SH_ToolTip_WakeUpDelay: res = 500; break;
+    case QStyle::SH_Slider_AbsoluteSetButtons:
+    case QStyle::SH_Slider_PageSetButtons:
+      if (qSlicerStyle::density() == qSlicerStyle::Comfortable && !SliderHandlePress)
+      {
+        // A left click on the groove moves the handle there, the middle button moves by pages
+        // (a left click on the handle of a QSlider grabs it, see SliderHandlePressFilter)
+        res = static_cast<int>((hint == QStyle::SH_Slider_AbsoluteSetButtons) ? Qt::LeftButton : Qt::MiddleButton);
+        break;
+      }
+      res = this->Superclass::styleHint(hint, opt, widget, returnData);
+      break;
     case QStyle::SH_EtchDisabledText: res = 0; break;
     default: res = this->Superclass::styleHint(hint, opt, widget, returnData);
   }
@@ -1308,10 +1958,47 @@ void qSlicerStyle::drawPrimitive(PrimitiveElement element, const QStyleOption* o
       drawRoundedBox(painter, QRectF(option->rect), 6., background, qSlicerStyle::tokenColor("border", true));
       return;
     }
+    case QStyle::PE_PanelLineEdit:
+      if (const QStyleOptionFrame* panel = qstyleoption_cast<const QStyleOptionFrame*>(option))
+      {
+        // The line edit of a spin box or of a combo box is drawn by the complex control
+        if (widget && (qobject_cast<const QAbstractSpinBox*>(widget->parentWidget()) || qobject_cast<const QComboBox*>(widget->parentWidget())))
+        {
+          return;
+        }
+        if (panel->lineWidth > 0)
+        {
+          drawField(option->rect, option->state, hasDarkPalette(option), fieldFill(option), false, painter);
+          return;
+        }
+      }
+      break;
     case QStyle::PE_FrameLineEdit:
-      // Line edits (PE_PanelLineEdit fills them with the base color) and editable combo boxes
+      // Frame of line edits drawn without their panel
       drawFieldFrame(option->rect, option->state, hasDarkPalette(option), painter);
       return;
+    case QStyle::PE_FrameTabWidget: drawRoundedBox(painter, QRectF(option->rect), 6., QColor(), optionToken(option, "hairline")); return;
+    case QStyle::PE_FrameTabBarBase:
+      if (const QStyleOptionTabBarBase* tabBarBase = qstyleoption_cast<const QStyleOptionTabBarBase*>(option))
+      {
+        // A hairline on the side of the pages
+        const QRect rect = tabBarBase->rect;
+        painter->save();
+        painter->setPen(optionToken(option, "hairline"));
+        switch (tabBarBase->shape)
+        {
+          case QTabBar::RoundedSouth:
+          case QTabBar::TriangularSouth: painter->drawLine(rect.topLeft(), rect.topRight()); break;
+          case QTabBar::RoundedWest:
+          case QTabBar::TriangularWest: painter->drawLine(rect.topRight(), rect.bottomRight()); break;
+          case QTabBar::RoundedEast:
+          case QTabBar::TriangularEast: painter->drawLine(rect.topLeft(), rect.bottomLeft()); break;
+          default: painter->drawLine(rect.bottomLeft(), rect.bottomRight()); break;
+        }
+        painter->restore();
+        return;
+      }
+      break;
     case QStyle::PE_IndicatorToolBarHandle:
     {
       if (widgetRole(widget) == "topBar")
@@ -1403,7 +2090,133 @@ void qSlicerStyle::drawControl(ControlElement element, const QStyleOption* optio
           painter->restore();
           return;
         }
+        // Flat: no gradient and no bevel lines
+        painter->fillRect(option->rect, option->palette.color(QPalette::Window));
+        return;
+      case QStyle::CE_HeaderSection:
+      case QStyle::CE_HeaderEmptyArea: drawHeaderSection(option, painter, element == QStyle::CE_HeaderEmptyArea); return;
+      case QStyle::CE_TabBarTabShape:
+        if (const QStyleOptionTab* tab = qstyleoption_cast<const QStyleOptionTab*>(option))
+        {
+          drawTabShape(tab, painter);
+          return;
+        }
         break;
+      case QStyle::CE_TabBarTabLabel:
+        if (const QStyleOptionTab* tab = qstyleoption_cast<const QStyleOptionTab*>(option))
+        {
+          // Tabs that are not selected nor hovered have "text2" labels, unless the application set a text color
+          const bool enabled = tab->state & QStyle::State_Enabled;
+          const bool customColor = widget && tab->palette.color(QPalette::WindowText) != widget->palette().color(QPalette::WindowText);
+          if (enabled && !customColor && !(tab->state & (QStyle::State_Selected | QStyle::State_MouseOver)))
+          {
+            QStyleOptionTab label(*tab);
+            label.palette.setColor(QPalette::WindowText, optionToken(option, "text2"));
+            this->Superclass::drawControl(element, &label, painter, widget);
+            return;
+          }
+        }
+        break;
+      case QStyle::CE_ProgressBar:
+        if (isPillProgressBar(option))
+        {
+          // The parts are placed by subElementRect() (the base style may not ask the proxy style)
+          const QStyleOptionProgressBar* progressBar = qstyleoption_cast<const QStyleOptionProgressBar*>(option);
+          QStyleOptionProgressBar part(*progressBar);
+          part.rect = this->subElementRect(QStyle::SE_ProgressBarGroove, progressBar, widget);
+          this->proxy()->drawControl(QStyle::CE_ProgressBarGroove, &part, painter, widget);
+          part.rect = this->subElementRect(QStyle::SE_ProgressBarContents, progressBar, widget);
+          this->proxy()->drawControl(QStyle::CE_ProgressBarContents, &part, painter, widget);
+          if (progressBar->textVisible)
+          {
+            part.rect = this->subElementRect(QStyle::SE_ProgressBarLabel, progressBar, widget);
+            this->proxy()->drawControl(QStyle::CE_ProgressBarLabel, &part, painter, widget);
+          }
+          return;
+        }
+        break;
+      case QStyle::CE_ProgressBarGroove:
+        if (isPillProgressBar(option))
+        {
+          drawRoundedBox(painter, progressBarPill(option->rect), 2., optionToken(option, "border"), QColor());
+          return;
+        }
+        break;
+      case QStyle::CE_ProgressBarContents:
+        if (isPillProgressBar(option))
+        {
+          const QStyleOptionProgressBar* progressBar = qstyleoption_cast<const QStyleOptionProgressBar*>(option);
+          const bool enabled = option->state & QStyle::State_Enabled;
+          const QColor fill = optionToken(option, enabled ? "accent-fg" : "text-disabled");
+          const QRectF pill = progressBarPill(option->rect);
+          if (progressBar->minimum == 0 && progressBar->maximum == 0)
+          {
+            // Busy indicator: an accent segment moving along the groove. The (invisible) contents
+            // of the base style keep its animation running, which repaints the progress bar.
+            painter->save();
+            painter->setOpacity(0.);
+            this->Superclass::drawControl(element, option, painter, widget);
+            painter->restore();
+            const qreal period = 1500.;
+            const qreal phase = std::fmod(static_cast<qreal>(QDateTime::currentMSecsSinceEpoch()), period) / period;
+            const qreal segmentWidth = qMax<qreal>(12., pill.width() * 0.3);
+            QRectF segment(pill.left() - segmentWidth + phase * (pill.width() + segmentWidth), pill.top(), segmentWidth, pill.height());
+            if (progressBar->direction == Qt::RightToLeft)
+            {
+              segment.moveRight(pill.right() - (segment.left() - pill.left()));
+            }
+            QPainterPath clip;
+            clip.addRoundedRect(pill, 2., 2.);
+            painter->save();
+            painter->setClipPath(clip, Qt::IntersectClip);
+            drawRoundedBox(painter, segment, 2., fill, QColor());
+            painter->restore();
+            return;
+          }
+          if (progressBar->maximum <= progressBar->minimum || progressBar->progress < progressBar->minimum)
+          {
+            return;
+          }
+          const qreal ratio = qBound<qreal>(0., qreal(qint64(progressBar->progress) - progressBar->minimum) / (qint64(progressBar->maximum) - progressBar->minimum), 1.);
+          if (ratio <= 0.)
+          {
+            return;
+          }
+          const bool reverse = (progressBar->direction == Qt::RightToLeft) != progressBar->invertedAppearance;
+          QRectF filled(pill);
+          filled.setWidth(pill.width() * ratio);
+          if (reverse)
+          {
+            filled.moveRight(pill.right());
+          }
+          drawRoundedBox(painter, filled, 2., fill, QColor());
+          return;
+        }
+        break;
+      case QStyle::CE_ProgressBarLabel:
+        if (isPillProgressBar(option))
+        {
+          const QStyleOptionProgressBar* progressBar = qstyleoption_cast<const QStyleOptionProgressBar*>(option);
+          QPalette palette(progressBar->palette);
+          palette.setColor(QPalette::WindowText, optionToken(option, "text2"));
+          const Qt::Alignment alignment = Qt::AlignRight | Qt::AlignVCenter;
+          // A text longer than its slot keeps its beginning and ends with an ellipsis (the slot is
+          // measured with horizontalAdvance(), which is rounded, see progressBarLabelWidth())
+          const QFontMetrics& metrics = progressBar->fontMetrics;
+          const QString text = (metrics.horizontalAdvance(progressBar->text) <= option->rect.width()) //
+                                 ? progressBar->text
+                                 : metrics.elidedText(progressBar->text, Qt::ElideRight, option->rect.width());
+          this->proxy()->drawItemText(painter,
+                                      option->rect,
+                                      static_cast<int>(QStyle::visualAlignment(progressBar->direction, alignment)) | Qt::TextSingleLine,
+                                      palette,
+                                      progressBar->state & QStyle::State_Enabled,
+                                      text,
+                                      QPalette::WindowText);
+          return;
+        }
+        break;
+      case QStyle::CE_Splitter: drawSplitterHandle(option, painter); return;
       default: break;
     }
   }
@@ -1427,38 +2240,46 @@ void qSlicerStyle::drawComplexControl(ComplexControl control, const QStyleOption
       return;
     }
   }
+  if (painter && option)
+  {
+    switch (control)
+    {
+      case QStyle::CC_Slider:
+        if (const QStyleOptionSlider* slider = qstyleoption_cast<const QStyleOptionSlider*>(option))
+        {
+          drawSlider(slider, painter, widget, this->proxy());
+          return;
+        }
+        break;
+      case QStyle::CC_ScrollBar:
+        if (const QStyleOptionSlider* scrollBar = qstyleoption_cast<const QStyleOptionSlider*>(option))
+        {
+          // The Compact density keeps the scroll bars of the base style (with step buttons)
+          if (qSlicerStyle::density() == qSlicerStyle::Comfortable)
+          {
+            drawThinScrollBar(scrollBar, painter, widget, this->proxy());
+            return;
+          }
+        }
+        break;
+      case QStyle::CC_SpinBox:
+        if (const QStyleOptionSpinBox* spinBox = qstyleoption_cast<const QStyleOptionSpinBox*>(option))
+        {
+          drawSpinBox(spinBox, painter, widget, this->proxy());
+          return;
+        }
+        break;
+      case QStyle::CC_ComboBox:
+        if (const QStyleOptionComboBox* comboBox = qstyleoption_cast<const QStyleOptionComboBox*>(option))
+        {
+          drawComboBox(comboBox, painter, widget, this->proxy());
+          return;
+        }
+        break;
+      default: break;
+    }
+  }
   this->Superclass::drawComplexControl(control, option, painter, widget);
-  if (!painter || !option)
-  {
-    return;
-  }
-  // The base style (Fusion) draws the frame of spin boxes itself, and draws the arrow button of
-  // editable combo boxes over their PE_FrameLineEdit frame: draw the frame of fields over them.
-  const bool dark = hasDarkPalette(option);
-  switch (control)
-  {
-    case QStyle::CC_SpinBox:
-      if (const QStyleOptionSpinBox* spinBox = qstyleoption_cast<const QStyleOptionSpinBox*>(option))
-      {
-        if (spinBox->frame)
-        {
-          // The base style leaves one pixel above and below the frame
-          drawFieldFrame(spinBox->rect.adjusted(0, 1, 0, -1), spinBox->state, dark, painter);
-        }
-      }
-      break;
-    case QStyle::CC_ComboBox:
-      if (const QStyleOptionComboBox* comboBox = qstyleoption_cast<const QStyleOptionComboBox*>(option))
-      {
-        // Non-editable combo boxes are drawn as buttons
-        if (comboBox->editable && comboBox->frame)
-        {
-          drawFieldFrame(comboBox->rect, comboBox->state, dark, painter);
-        }
-      }
-      break;
-    default: break;
-  }
 }
 
 //------------------------------------------------------------------------------
@@ -1641,6 +2462,11 @@ void qSlicerStyle::polish(QWidget* widget)
       }
     }
   }
+  if (qSlicerStyle::density() == qSlicerStyle::Comfortable && qobject_cast<QSlider*>(widget) && !widget->inherits("ctkRangeSlider"))
+  {
+    // ctkRangeSlider handles the presses on its handles itself
+    widget->installEventFilter(sliderHandlePressFilter());
+  }
   if (hasRoundedMask(widget))
   {
     widget->installEventFilter(this);
@@ -1693,6 +2519,10 @@ void qSlicerStyle::polish(QWidget* widget)
 //------------------------------------------------------------------------------
 void qSlicerStyle::unpolish(QWidget* widget)
 {
+  if (qobject_cast<QSlider*>(widget))
+  {
+    widget->removeEventFilter(sliderHandlePressFilter());
+  }
   if (widget && hasRoundedMask(widget))
   {
     widget->removeEventFilter(this);

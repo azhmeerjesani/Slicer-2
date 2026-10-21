@@ -71,6 +71,19 @@ public:
 
   SubControl hitTestComplexControl(ComplexControl cc, const QStyleOptionComplex* opt, const QPoint& pt, const QWidget* widget) const override;
 
+  /// Return the rectangles of the base style, except for scroll bars in the Comfortable density:
+  /// they have no step buttons (SC_ScrollBarAddLine and SC_ScrollBarSubLine are empty) and their
+  /// groove is the whole scroll bar.
+  QRect subControlRect(ComplexControl control, const QStyleOptionComplex* option, SubControl subControl, const QWidget* widget = nullptr) const override;
+
+  /// Return the rectangles of the base style, except for horizontal progress bars: when their text
+  /// is visible, it is drawn beside the bar (SE_ProgressBarLabel on the right of SE_ProgressBarGroove).
+  QRect subElementRect(SubElement element, const QStyleOption* option, const QWidget* widget = nullptr) const override;
+
+  /// Return the metrics of the base style, with the layout spacing and margins of the density.
+  /// The Comfortable density also has thin scroll bars (PM_ScrollBarExtent 10), 14 px slider
+  /// handles (PM_SliderLength and PM_SliderThickness), 4 px splitter handles and 3 px dock widget
+  /// separators. The Compact density keeps the historical metrics.
   int pixelMetric(PixelMetric metric, const QStyleOption* option = nullptr, const QWidget* widget = nullptr) const override;
 
   /// Return the dark or light palette depending on theme().
@@ -79,6 +92,10 @@ public:
   QPalette standardPalette() const override;
   QPalette standardLightPalette() const;
   QPalette standardDarkPalette() const;
+
+  /// Return the hints of the base style, with tool tips after 500 ms, no etched disabled text and,
+  /// in the Comfortable density, a left click on the groove of a slider that moves the handle there
+  /// (SH_Slider_AbsoluteSetButtons; the middle button moves by pages).
   int styleHint(StyleHint hint, const QStyleOption* opt, const QWidget* widget, QStyleHintReturn* returnData) const override;
 
   /// Draw flat controls with the style tokens, on dark and light palettes:
@@ -87,23 +104,41 @@ public:
   ///   and a 1 px "accent-fg" border, so that the active tool or mode is obvious. Combo boxes keep
   ///   the base style;
   /// - keyboard focus (PE_FrameFocusRect): a 2 px "accent-fg" ring, only for keyboard focus changes;
-  /// - input fields (PE_FrameLineEdit): a 1 px "control-border" frame, "accent-fg" when focused;
+  /// - input fields (PE_PanelLineEdit, PE_FrameLineEdit): the base color and a 1 px "control-border"
+  ///   frame rounded by 6 px, "accent-fg" when focused;
   /// - arrows (PE_IndicatorArrow*): thin chevrons;
   /// - check boxes and radio buttons: a 1.5 px "control-border" outline and an accent fill when checked;
   /// - tool tips (PE_PanelTipLabel) and menus (PE_PanelMenu, PE_FrameMenu): rounded surfaces with a border;
   /// - tool bar handles and separators: two dots and a hairline;
-  /// - frames with the "card" slicerRole (PE_Frame, PE_Widget): rounded cards.
+  /// - frames with the "card" slicerRole (PE_Frame, PE_Widget): rounded cards;
+  /// - tab widget pages and tab bar bases (PE_FrameTabWidget, PE_FrameTabBarBase): hairlines.
   void drawPrimitive(PrimitiveElement element, const QStyleOption* option, QPainter* painter, const QWidget* widget = nullptr) const override;
 
-  /// Draw flat collapsible button headers (CE_PushButtonBevel of ctkCollapsibleButton), menu items
-  /// (CE_MenuItem: rounded selection, check marks, right-aligned shortcuts in "text3"), the frames of
-  /// labels and frames with a slicerRole (CE_ShapedFrame: card, chip, kbd, segmented) and tool bars
-  /// with the "topBar" slicerRole (CE_ToolBar). Other controls are drawn by the base style.
+  /// Draw flat controls:
+  /// - collapsible button headers (CE_PushButtonBevel of ctkCollapsibleButton);
+  /// - menu items (CE_MenuItem: rounded selection, check marks, right-aligned shortcuts in "text3");
+  /// - the frames of labels and frames with a slicerRole (CE_ShapedFrame: card, chip, kbd, segmented);
+  /// - tool bars (CE_ToolBar): a flat window fill, the "view-bar" color with the "topBar" slicerRole;
+  /// - header sections (CE_HeaderSection, CE_HeaderEmptyArea): flat, separated by hairlines;
+  /// - tabs (CE_TabBarTabShape): no bevel, a 2 px "accent-fg" line on the side of the selected tab
+  ///   that faces its page, "text2" labels for the other tabs;
+  /// - horizontal progress bars (CE_ProgressBar*): a 4 px pill, with the text beside it;
+  /// - splitter handles and dock widget separators (CE_Splitter): a hairline, "accent-fg" when hovered.
+  /// Other controls are drawn by the base style.
   void drawControl(ControlElement element, const QStyleOption* option, QPainter* painter, const QWidget* widget = nullptr) const override;
 
-  /// Draw complex controls with the base style. The frames of spin boxes and editable combo boxes
-  /// are then drawn like line edit frames, so that input fields have a visible boundary.
+  /// Draw flat complex controls:
+  /// - sliders (CC_Slider, also ctkSliderWidget, ctkRangeSlider and the slice offset slider): a 4 px
+  ///   "border" groove filled with "accent-fg" up to the handle, and a round handle (button color,
+  ///   1 px "control-border" outline, a 2 px "accent-fg" ring when hovered, pressed or focused);
+  /// - scroll bars (CC_ScrollBar), in the Comfortable density: a transparent track and a rounded
+  ///   "text3" handle, without step buttons;
+  /// - spin boxes and combo boxes (CC_SpinBox, CC_ComboBox): a field with the base color and a 1 px
+  ///   "control-border" outline ("accent-fg" when focused), rounded by 6 px. The arrows are drawn as
+  ///   PE_IndicatorArrow* primitives in the sub-control rectangles of the base style, so the hit
+  ///   areas of the arrows are unchanged (e.g. ctkDoubleSpinBox).
   /// Tool buttons with the "ghost", "toolTile" or segmented slicerRole have no menu indicator.
+  /// Other complex controls are drawn by the base style.
   void drawComplexControl(ComplexControl control, const QStyleOptionComplex* option, QPainter* painter, const QWidget* widget = nullptr) const override;
 
   /// Draw text with the base style, in SemiBold in ctkCollapsibleButton headers and with the
