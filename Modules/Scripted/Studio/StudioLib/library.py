@@ -12,6 +12,9 @@
   is loaded (no study, no volume or segmentation), the inspector is hidden and the canvas is full width.
 - ``setFooterLine()`` / ``clearFooterLine()``: one text line at the bottom of the canvas column (the
   research-use line of the first run).
+- ``showNotice(key, widget)`` / ``closeNotice(key)`` / ``notices()``: the keyed notice slot at the top of the canvas,
+  above the drop zone, the current work and the study page (A-01b: the autosave recovery card). Notices are never
+  shown over a view (USABILITY 6.4). Entering Library clears the inspector notice of the same key, which points here.
 
 "Close" is the only removal verb of Studio (Close scene, Close set, a row's Close); "Delete" stays the word of
 the Data module. Files are loaded by ``StudioLib.importer``.
@@ -3816,6 +3819,22 @@ class LibraryCanvas(qt.QObject):
         self.contentLayout.setSpacing(0)
         # The empty state is centred; the current work starts at the top
         self.contentLayout.addStretch(2)
+        # Keyed notices (A-01b, ``showNotice()``), above everything else of the page; the 16 px below them is part
+        # of the container, which is hidden while there is no notice
+        self.noticeContainer = qt.QWidget()
+        self.noticeContainer.setObjectName("StudioLibraryNotices")
+        noticeRow = qt.QHBoxLayout(self.noticeContainer)
+        noticeRow.setContentsMargins(0, 0, 0, NOTICE_SPACING_BELOW)
+        noticeRow.addStretch(1)
+        noticeColumn = qt.QWidget()
+        noticeColumn.setFixedWidth(COLUMN_WIDTH)
+        self.noticeLayout = qt.QVBoxLayout(noticeColumn)
+        self.noticeLayout.setContentsMargins(0, 0, 0, 0)
+        self.noticeLayout.setSpacing(8)
+        noticeRow.addWidget(noticeColumn)
+        noticeRow.addStretch(1)
+        self.noticeContainer.hide()
+        self.contentLayout.addWidget(self.noticeContainer)
         # With a study (W3-07): the study page, as wide as the window allows (up to STUDY_PAGE_MAX_WIDTH)
         self.studyContainer = qt.QWidget()
         self.studyContainer.setObjectName("StudioStudyContainer")
@@ -4093,9 +4112,9 @@ class LibraryCanvas(qt.QObject):
         self._studyShown = shown
         self.studyContainer.setVisible(shown)
         self.column.setVisible(not shown)
-        # Content stretches: top, study page, column row, bottom
-        self.contentLayout.setStretch(1, 1 if shown else 0)
-        self.contentLayout.setStretch(3, 0 if shown else 3)
+        # Content stretches: top, notices, study page, column row, bottom
+        self.contentLayout.setStretch(2, 1 if shown else 0)
+        self.contentLayout.setStretch(4, 0 if shown else 3)
         if shown:
             self.contentLayout.setStretch(0, 0)
         else:
@@ -4229,8 +4248,28 @@ class LibraryCanvas(qt.QObject):
             self.footerActionsLayout.addWidget(link)
         self.footerFrame.show()
 
+    def addNotice(self, widget):
+        """Show ``widget`` in the notice slot (``showNotice()``), after the notices already shown."""
+        self.noticeLayout.addWidget(widget)
+        widget.show()
+        self.noticeContainer.show()
+
+    def removeNotice(self, widget):
+        """Take ``widget`` out of the notice slot without deleting it."""
+        try:
+            self.noticeLayout.removeWidget(widget)
+            widget.hide()
+            widget.setParent(None)
+        except Exception:
+            # Deleted by its owner
+            pass
+        self.noticeContainer.setVisible(self.noticeLayout.count() > 0)
+
     def dispose(self):
         ui.removePaletteListener(self._refreshIcons)
+        # The notices belong to their owners: kept for the next canvas (``canvas()``)
+        for widget in list(_notices.values()):
+            self.removeNotice(widget)
         self.folderCardSlot.close()
         self.recentList.dispose()
         for card in (self._currentWork, self._loadedSet, self._studyPage):
@@ -4416,7 +4455,49 @@ def canvas():
         _canvas = LibraryCanvas()
         for key, (text, actions) in _footerLines.items():
             _canvas.setFooterLine(key, text, actions)
+        for key, widget in list(_notices.items()):
+            if _isAlive(widget):
+                _canvas.addNotice(widget)
+            else:
+                _notices.pop(key, None)
     return _canvas
+
+
+#: Notices of the canvas: key -> widget (``showNotice()``), shown again when the canvas is created again
+_notices = {}
+NOTICE_SPACING_BELOW = 16
+
+
+def showNotice(key, widget):
+    """Show ``widget`` at the top of the Library canvas, above the drop zone, the current work and the study page.
+
+    A notice with the same ``key`` is replaced (its widget is taken out, not deleted). The widget belongs to the
+    caller, who deletes it after ``closeNotice(key)``; it is at most ``COLUMN_WIDTH`` wide. The Library inspector
+    and Classic have no notice slot. Return the canvas.
+    """
+    previous = _notices.get(key)
+    if previous is not None and previous != widget:
+        closeNotice(key)
+    libraryCanvas = canvas()
+    _notices[key] = widget
+    if previous != widget or not _isAlive(previous):
+        libraryCanvas.addNotice(widget)
+    return libraryCanvas
+
+
+def closeNotice(key):
+    """Take the notice ``key`` out of the canvas (not deleted). Return its widget, or None if there is none."""
+    widget = _notices.pop(key, None)
+    if widget is not None and _canvas is not None and _isAlive(_canvas.widget):
+        _canvas.removeNotice(widget)
+    elif widget is not None and _isAlive(widget):
+        widget.hide()
+    return widget
+
+
+def notices():
+    """The notices of the canvas: {key: widget}."""
+    return dict(_notices)
 
 
 #: Footer lines that were set: key -> (text, actions), applied again when the canvas is created again
@@ -4498,6 +4579,9 @@ def enter(shell):
         # The values that jobs posted while another workspace was shown (LNM addendum: merged when Library is shown)
         studySession.applyInbox()
     libraryCanvas = canvas()
+    # An inspector notice with the key of a canvas notice points to it ("Show"): the user is here now
+    for key in _notices:
+        shell.clearInspectorNotice(key)
     # The canvas covers the views first: the views that the inspector change resizes are paused (no render), and the
     # edge handle of a hidden inspector is not shown for a moment
     shell.setCanvas(libraryCanvas.widget)

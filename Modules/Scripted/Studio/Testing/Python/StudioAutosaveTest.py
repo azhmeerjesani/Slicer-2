@@ -24,6 +24,17 @@ and dispose them. They cover:
 - (q) a tensor (DTI) volume is autosaved, and a node whose job fails does not stop the autosave of the others;
 - (r) recovering the oldest closed slot of the session keeps that slot while it is recovered;
 - (s) a generation starts IdleSeconds after the last change (poll timing).
+
+Studio surfaces (StudioLib/autosave_ui.py, A-01b), with ``Shell(force=True).apply()`` and the test service as
+``autosave.instance()``:
+
+- (t) the top-bar status: hidden, "Autosaving…", then "Autosaved · just now"; the tooltip says autosave is not
+  saving; the 4-action menu; icon only at 1366 px and in compact mode; the switcher stays centred; the slot records
+  the workspace; no new shortcuts and no key collision;
+- (u) the recovery card in the Library notice slot (above the drop zone and the study page) and not the dialog; the
+  inspector notice in Draw and its Show; Recover closes the card and returns to the recorded workspace; Later;
+- (v) Classic removes the status, the card and the notice and gives back the default presenter; Studio again shows
+  them; no visible string says "Saved".
 """
 
 import hashlib
@@ -813,3 +824,304 @@ class StudioAutosaveTest(unittest.TestCase):
         self.assertLessEqual(started, 6.5 + 0.6)
         self.assertTrue(service.waitForIdle(30.0))
         self.assertEqual(service.writer.generation, 2)
+
+    #
+    # Studio surfaces (A-01b)
+    #
+
+    def _pump(self, count=4):
+        for _index in range(count):
+            slicer.app.processEvents()
+            time.sleep(0.01)
+
+    def _applyStudio(self, service):
+        """Apply Studio with ``service`` as the running autosave service (restored at the end of the test)."""
+        from StudioLib import shell
+
+        mainWindow = slicer.util.mainWindow()
+        self.assertIsNotNone(mainWindow, "the Studio tests need the main window")
+        geometry = mainWindow.saveGeometry()
+        previous = self.autosave._service
+        self.autosave._service = service
+
+        def restore():
+            live = shell._shell
+            if live is not None:
+                live.dispose()
+            self.autosave._service = previous
+            mainWindow.restoreGeometry(geometry)
+            self._pump()
+
+        self.addCleanup(restore)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        self._pump()
+        if mainWindow.width < 1800:
+            mainWindow.showNormal()
+            mainWindow.resize(1800, max(mainWindow.height, 800))
+            self._pump(8)
+        return studioShell
+
+    def _crashedSessions(self, service, workspace="draw"):
+        """A copy of the session of ``service`` that looks crashed (its lock names an exited process)."""
+        from StudioLib import recovery
+
+        crashedId = "20260101-120000-1-abcd"
+        crashedDir = os.path.join(self.root, crashedId)
+        shutil.copytree(service.sessionDir, crashedDir, ignore=shutil.ignore_patterns(self.io.LOCK_FILE))
+        process = subprocess.Popen([sys.executable, "-c", "pass"])
+        process.wait()
+        with open(os.path.join(crashedDir, self.io.LOCK_FILE), "w") as f:
+            f.write(f"{process.pid}\nSlicer\n{qt.QSysInfo.machineHostName()}\n")
+        data = self.io.readJson(os.path.join(crashedDir, self.io.SESSION_FILE))
+        data.update(sessionId=crashedId, state="running", pid=process.pid)
+        for slot in data["slots"]:
+            slot["workspace"] = workspace
+            slot["unsaved"] = True
+        self.io.atomicWriteJson(os.path.join(crashedDir, self.io.SESSION_FILE), data)
+        sessions = [s for s in recovery.scan(self.root, service.sessionId) if s.presentable()]
+        self.assertEqual([s.sessionId for s in sessions], [crashedId])
+        return sessions
+
+    def _studioScene(self):
+        volume = slicer.util.addVolumeFromArray(np.arange(20 * 21 * 22, dtype=np.int16).reshape(20, 21, 22) % 300, name="MR Head")
+        volume.CreateDefaultDisplayNodes()
+        return volume
+
+    def _visibleStrings(self, root):
+        texts = []
+        for widget in [root, *root.findChildren("QWidget")]:
+            if not widget.isVisible():
+                continue
+            for name in ("text", "toolTip"):
+                value = widget.property(name)
+                if isinstance(value, str) and value:
+                    texts.append(value)
+        return texts
+
+    def test_t_studioStatus(self):
+        from StudioLib import autosave_ui, shell
+        from StudioTest import assertNoKeyCollisions
+
+        service = self._service()
+        studioShell = self._applyStudio(service)
+        topBar = studioShell.topBar
+        button = topBar.saveStatusButton
+        self.assertEqual(button.objectName, "StudioSaveStatus")
+        self.assertIsNotNone(autosave_ui.instance())
+        self.assertFalse(button.visible, "hidden while nothing was autosaved")
+        shortcutsBefore = sorted(str(item) for item in studioShell.shortcuts())
+
+        seen = []
+        service.addStatusListener(lambda status: seen.append((status.state, topBar.saveStatus()[0] if topBar.saveStatus() else None)))
+        self._studioScene()
+        self._generate(service)
+        self._pump()
+        self.assertIn(("saving", "Autosaving…"), seen)
+        self.assertEqual(seen[-1], ("idle", "Autosaved · just now"))
+        self.assertTrue(button.visible)
+        self.assertEqual(button.text, "Autosaved · just now")
+        self.assertIn("not saving", button.toolTip)
+        self.assertIn("not saving", topBar.saveStatus()[2])
+        self.assertTrue(autosave_ui.instance()._timer.isActive(), "refreshed every 30 s while shown")
+        self.assertEqual(autosave_ui.instance()._timer.interval, 30000)
+
+        # The 4-action menu (and its disabled header)
+        menu = button.menu()
+        self.assertIsNotNone(menu)
+        self.assertEqual(menu.objectName, "StudioSaveStatusMenu")
+        texts = [action.text for action in menu.actions() if not action.isSeparator()]
+        self.assertEqual(texts[1:], ["Autosave now", "Recover autosaved work…", "Open autosave folder", "Autosave settings…"])
+        self.assertTrue(texts[0].startswith("Last autosave "))
+        self.assertFalse(menu.actions()[0].enabled)
+        self.assertEqual(button.popupMode, qt.QToolButton.InstantPopup)
+
+        # The slot records where the user was
+        slot = service.slots[service.slotName()]
+        self.assertIn(slot.get("workspace"), ("library", "draw"))
+        sessionData = self.io.readJson(os.path.join(service.sessionDir, self.io.SESSION_FILE))
+        self.assertIn(sessionData["slots"][0].get("workspace"), ("library", "draw"))
+
+        # Icon only below 1500 px and in compact mode; the text stays in the tooltip; the switcher stays centred
+        mainWindow = slicer.util.mainWindow()
+        self.assertFalse(topBar.isSaveStatusCompact())
+        mainWindow.resize(1366, 768)
+        self._pump(8)
+        self.assertLessEqual(mainWindow.width, 1400)
+        self.assertTrue(topBar.isSaveStatusCompact())
+        self.assertIn("Autosaved · just now", button.toolTip)
+        switcher = topBar.switcherFrame
+        centre = switcher.mapTo(topBar.contents, qt.QPoint(switcher.width // 2, 0)).x()
+        self.assertLessEqual(abs(centre - topBar.contents.width // 2), 2)
+        mainWindow.resize(1800, 800)
+        self._pump(8)
+        self.assertGreaterEqual(mainWindow.width, 1700)
+        self.assertFalse(topBar.isSaveStatusCompact())
+        topBar.setCompact(True)
+        self.assertTrue(topBar.isSaveStatusCompact())
+        topBar.setCompact(False)
+        studioShell._updateTopBarCompact()
+
+        # Paused, then hidden when disabled
+        service._setState("paused", "The disk is full")
+        self.assertEqual(button.text, "Autosave paused")
+        self.assertIn("The disk is full", button.toolTip)
+        service._setState("idle")
+        self.assertEqual(button.text, "Autosaved · just now")
+
+        # No new shortcuts, no key collision
+        self.assertEqual(sorted(str(item) for item in studioShell.shortcuts()), shortcutsBefore)
+        assertNoKeyCollisions()
+        self.assertIsNotNone(shell.instance())
+
+    def test_u_studioRecoveryCard(self):
+        from StudioLib import autosave_ui, library, recovery
+
+        service = self._service()
+        self._studioScene()
+        self._generate(service)
+        sessions = self._crashedSessions(service, workspace="draw")
+        studioShell = self._applyStudio(service)
+        ui = autosave_ui.instance()
+        self.assertIsNotNone(ui)
+        self.assertEqual(service._presenter, ui.presentRecovery)
+        studioShell.switchTo("library")
+        self._pump()
+        dialogBefore = recovery._dialog
+
+        # The card goes at the top of the Library canvas, the dialog is not shown
+        service._presenter(sessions, startup=True)
+        self._pump()
+        self.assertIs(recovery._dialog, dialogBefore)
+        self.assertFalse(recovery._dialog is not None and recovery._dialog.isVisible())
+        canvas = library.canvas()
+        card = ui.card
+        self.assertIsNotNone(card)
+        self.assertEqual(card.widget.objectName, "StudioRecoveryCard")
+        self.assertEqual(library.notices(), {autosave_ui.NOTICE_KEY: card.widget})
+        self.assertTrue(card.widget.isVisible())
+        layout = canvas.contentLayout
+        self.assertLess(layout.indexOf(canvas.noticeContainer), layout.indexOf(canvas.studyContainer))
+        cardTop = card.widget.mapTo(canvas.widget, qt.QPoint(0, 0)).y()
+        dropTop = canvas.dropZone.mapTo(canvas.widget, qt.QPoint(0, 0)).y()
+        self.assertLess(cardTop + card.widget.height, dropTop + 1)
+        self.assertIsNone(studioShell.inspectorNoticeKey(), "no inspector notice in Library")
+        self.assertEqual(card.recoverButton.text, "Recover")
+        self.assertIn("closed unexpectedly", " ".join(label.text for label in card.widget.findChildren("QLabel")))
+        self.assertFalse(card.allButton.visible, "one autosaved scene")
+
+        # In Draw, an inspector notice points to it; Show goes to Library and clears it
+        studioShell.switchTo("draw")
+        self._pump()
+        ui.presentRecovery(sessions)
+        self._pump()
+        self.assertEqual(studioShell.inspectorNoticeKey(), autosave_ui.NOTICE_KEY)
+        showButton = [b for b in studioShell.inspectorNotice().findChildren("QToolButton") if b.text == "Show"]
+        self.assertEqual(len(showButton), 1)
+        showButton[0].click()
+        self._pump()
+        self.assertEqual(studioShell.currentWorkspace(), "library")
+        self.assertIsNone(studioShell.inspectorNoticeKey())
+        self.assertTrue(ui.card.widget.isVisible())
+
+        # Recover restores the scene, closes the card and returns to the recorded workspace (Draw)
+        slicer.mrmlScene.Clear(0)
+        ui.card.recoverButton.click()
+        self._pump()
+        self.assertIsNone(ui.card)
+        self.assertEqual(library.notices(), {})
+        self.assertFalse(canvas.noticeContainer.isVisible())
+        self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("MR Head"))
+        self.assertEqual(studioShell.currentWorkspace(), "draw")
+        self.assertFalse(sessions[0].presentable(), "marked recovered")
+
+        # A recovered session is not offered again
+        self.assertIsNone(ui.presentRecovery(sessions))
+
+    def test_v_studioClassic(self):
+        from StudioLib import autosave_ui, library
+
+        service = self._service()
+        self._studioScene()
+        self._generate(service)
+        sessions = self._crashedSessions(service)
+        service._pendingRecoveries = list(sessions)
+        studioShell = self._applyStudio(service)
+        ui = autosave_ui.instance()
+        # The scan already ran: the card is offered at install
+        self.assertIsNotNone(ui.card)
+        studioShell.switchTo("draw")
+        self._pump()
+        ui.presentRecovery(sessions)
+        self._pump()
+        self.assertEqual(studioShell.inspectorNoticeKey(), autosave_ui.NOTICE_KEY)
+        self.assertTrue(studioShell.topBar.saveStatusButton.visible)
+        texts = self._visibleStrings(slicer.util.mainWindow()) + self._visibleStrings(ui.card.widget)
+        saved = [text for text in texts if "Saved" in text.replace("Autosaved", "")]
+        self.assertEqual(saved, [], "autosave strings say Autosaved, never Saved")
+
+        studioShell.classic(persist=False)
+        self._pump()
+        self.assertIsNone(autosave_ui.instance())
+        self.assertIsNone(service._presenter, "the default presenter (A-01's dialog) is back")
+        self.assertEqual(library.notices(), {})
+        self.assertIsNone(studioShell.inspectorNoticeKey())
+        buttons = [b for b in slicer.util.mainWindow().findChildren("QToolButton") if b.objectName == "StudioSaveStatus" and b.isVisible()]
+        self.assertEqual(buttons, [])
+        self.assertNotIn(ui.context, service._contextProviders)
+
+        # Studio again: the status and the card come back
+        studioShell.apply(midSession=True)
+        self._pump()
+        ui = autosave_ui.instance()
+        self.assertIsNotNone(ui)
+        self.assertTrue(studioShell.topBar.saveStatusButton.visible)
+        self.assertIsNotNone(ui.card)
+        self.assertEqual(list(library.notices()), [autosave_ui.NOTICE_KEY])
+
+        # Later: not offered again in this run
+        ui.card.laterButton.click()
+        self._pump()
+        self.assertIsNone(ui.card)
+        self.assertEqual(library.notices(), {})
+        self.assertIsNone(ui.presentRecovery(sessions))
+        autosave_ui._dismissed.clear()
+
+    def test_w_studioStaleCard(self):
+        from StudioLib import autosave_ui, library
+
+        service = self._service()
+        self._studioScene()
+        self._generate(service)
+        sessions = self._crashedSessions(service)
+        studioShell = self._applyStudio(service)
+        studioShell.switchTo("library")
+        self._pump()
+        ui = autosave_ui.instance()
+
+        # Recovered meanwhile from "Recover autosaved work…" (session.json says so): Recover does not load it twice
+        card = ui.presentRecovery(sessions)
+        self.assertIsNotNone(card)
+        sessionFile = os.path.join(sessions[0].path, self.io.SESSION_FILE)
+        data = self.io.readJson(sessionFile)
+        data["state"] = "recovered"
+        self.io.atomicWriteJson(sessionFile, data)
+        slicer.mrmlScene.Clear(0)
+        card.recoverButton.click()
+        self._pump()
+        self.assertIsNone(ui.card, "the stale card closes")
+        self.assertEqual(library.notices(), {})
+        self.assertIsNone(slicer.mrmlScene.GetFirstNodeByName("MR Head"), "nothing loaded")
+
+        # The card's widget deleted from outside (for example with the canvas): closing and Classic still clean up
+        data["state"] = "running"
+        self.io.atomicWriteJson(sessionFile, data)
+        card = ui.presentRecovery(sessions)
+        self.assertIsNotNone(card)
+        card.widget.delete()
+        self._pump()
+        studioShell.classic(persist=False)
+        self._pump()
+        self.assertIsNone(autosave_ui.instance())
+        self.assertIsNone(service._presenter)
+        self.assertFalse(studioShell.topBar is not None and studioShell.topBar.saveStatusButton.visible)

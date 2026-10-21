@@ -12,6 +12,7 @@ must handle None.
 
 Public API (SPEC 2.10): ``instance()``, ``willApplyAtStartup()``, ``Shell.switchTo()``,
 ``currentWorkspace()``, ``toast()``, ``recentMessages()``, ``setBreadcrumb()``, ``setStatusChip()``,
+``setSaveStatus()``, ``setSaveStatusMenu()`` (the autosave status of the top bar, A-01b),
 ``setInspectorFooter()``, ``setInspectorNotice()``, ``clearInspectorNotice()``, ``setCanvas()``,
 ``setInspectorVisible()``, ``toggleInspector()``, ``setFocusMode()`` (named "Hide panels" in the UI),
 ``handleEscape()``, ``registerEscapeOverlay()``, ``unregisterEscapeOverlay()``, ``openPalette()``,
@@ -57,7 +58,7 @@ from . import hud, layouts, topbar, ui, workspaces
 #: Plug-ins installed when Studio is applied (``install(shell)``) and removed in Classic
 #: (``uninstall(shell)``). Missing modules are skipped.
 OPTIONAL_PLUGINS = ["StudioLib.importer", "StudioLib.probe", "StudioLib.journal", "StudioLib.study_ui", "StudioLib.orientation", "StudioLib.finder",
-                    "StudioLib.modes", "StudioLib.a11y", "StudioLib.firstrun", "StudioLib.tour"]
+                    "StudioLib.modes", "StudioLib.a11y", "StudioLib.firstrun", "StudioLib.tour", "StudioLib.autosave_ui"]
 
 DEFAULT_PANEL_WIDTH = 340
 MIN_PANEL_WIDTH = 300
@@ -3003,6 +3004,9 @@ class Shell:
         if self.topBar is None or not hasattr(self.topBar, "setCompact"):
             return
         self.topBar.setCompact(self.mainWindow.width < NARROW_WINDOW_WIDTH)
+        # The autosave status has its own, wider thresholds (setCompact() updates it too when the mode changes)
+        if hasattr(self.topBar, "updateSaveStatusCompact"):
+            self.topBar.updateSaveStatusCompact()
 
     def toastText(self):
         """Text of the visible toast (plain or consequence), "" if none is shown."""
@@ -3052,6 +3056,19 @@ class Shell:
         """Show a status chip next to the workspace switcher (level: neutral, busy, ok, warn). None hides it."""
         if self.topBar is not None:
             self.topBar.setStatusChip(text, level)
+
+    def setSaveStatus(self, text=None, level="neutral", toolTip="", iconName=None):
+        """Show the autosave status in the top bar ("Autosaved · 2 min ago"; level: neutral, busy, ok, warn). None hides it.
+
+        It says "Autosaved", never "Saved": autosave is not Save (SPEC 9.9). No-op without a top bar.
+        """
+        if self.topBar is not None and hasattr(self.topBar, "setSaveStatus"):
+            self.topBar.setSaveStatus(text, level, toolTip, iconName)
+
+    def setSaveStatusMenu(self, menu=None):
+        """Set the menu that the autosave status opens (None: no menu). No-op without a top bar."""
+        if self.topBar is not None and hasattr(self.topBar, "setSaveStatusMenu"):
+            self.topBar.setSaveStatusMenu(menu)
 
     def setPrimaryAction(self, callback=None, label=""):
         """Set the action of Ctrl+Enter (the primary button of the current workspace)."""

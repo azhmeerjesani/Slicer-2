@@ -5,8 +5,8 @@ on the window whatever the other columns hold (no fixed widths, the window can s
 
 - left: the app menu (``≡``) and the breadcrumb;
 - centre: the workspace switcher [Library | Draw | Map] (``Ctrl+Alt+1/2/3``);
-- right: the status chip, Undo/Redo (Draw only), the layout picker (``Alt+1..5``), the search pill (``Ctrl+K``)
-  and the error badge.
+- right: the status chip, the autosave status (``setSaveStatus()``, A-01b), Undo/Redo (Draw only), the layout picker
+  (``Alt+1..5``), the search pill (``Ctrl+K``) and the error badge.
 
 Every button takes the keyboard focus (Tab; the arrow keys move inside the switcher), is pressed by Space and
 Enter also in Draw, and has a "Name · key · description" tooltip. ``setCompact(bool)`` collapses the bar for a
@@ -43,6 +43,19 @@ UNAVAILABLE_OPACITY = 0.55
 _BREADCRUMB_PADDING = 16
 ICON_SIZE = 18
 UNDO_REDO_POLL_INTERVAL_MS = 250
+#: Autosave status (A-01b): icon size, and the window widths below which it shows its icon only (the text stays in
+#: the tooltip): always below SAVE_STATUS_COMPACT_WIDTH, and below SAVE_STATUS_CHIP_COMPACT_WIDTH while the status
+#: chip is shown too
+SAVE_STATUS_ICON_SIZE = 14
+SAVE_STATUS_COMPACT_WIDTH = 1500
+SAVE_STATUS_CHIP_COMPACT_WIDTH = 1700
+#: Level of the autosave status -> (icon, colour token). The busy icon is static: no spinner (SPEC 10)
+SAVE_STATUS_LEVELS = {
+    "neutral": ("history", "text2"),
+    "busy": ("loader-circle", "text2"),
+    "ok": ("check", "success"),
+    "warn": ("triangle-alert", "warning"),
+}
 #: Where the README explains the Map workspace (the section "Lesion network mapping")
 README_MAP_URL = "https://github.com/azhmeerjesani/Slicer-2#lesion-network-mapping"
 
@@ -236,6 +249,24 @@ class TopBar:
         self.statusChip.setObjectName("StudioStatusChip")
         self.statusChip.hide()
         rightLayout.addWidget(self.statusChip)
+        # Autosave status (A-01b): "Autosaved · 2 min ago" and its menu, hidden until something was autosaved
+        self.saveStatusButton = qt.QToolButton()
+        self.saveStatusButton.setObjectName("StudioSaveStatus")
+        self.saveStatusButton.setAutoRaise(True)
+        self.saveStatusButton.setFocusPolicy(qt.Qt.NoFocus)
+        self.saveStatusButton.setToolButtonStyle(qt.Qt.ToolButtonTextBesideIcon)
+        self.saveStatusButton.setIconSize(qt.QSize(SAVE_STATUS_ICON_SIZE, SAVE_STATUS_ICON_SIZE))
+        self.saveStatusButton.setPopupMode(qt.QToolButton.InstantPopup)
+        self.saveStatusButton.setFixedHeight(28)
+        ui._font(self.saveStatusButton, ui.fontPx(12))
+        policy = self.saveStatusButton.sizePolicy
+        policy.setRetainSizeWhenHidden(False)
+        self.saveStatusButton.setSizePolicy(policy)
+        self.saveStatusButton.setToolTip(ui.tooltip(_("Autosave"), None, _("Your work is copied to a private recovery folder. This is not saving.")))
+        self.saveStatusButton.hide()
+        self._saveStatus = None
+        ui.bindStyleSheet(self.saveStatusButton, self._saveStatusStyleSheet)
+        rightLayout.addWidget(self.saveStatusButton)
         rightLayout.addStretch(1)
 
         self.undoButton = _toolButton("StudioUndoButton", "undo-2", ui.tooltip(_("Undo"), "Ctrl+Z", _("Undo the last lesion edit")))
@@ -411,6 +442,7 @@ class TopBar:
             action.setIcon(ui.icon(action.property("studioIcon"), 16))
         self.errorBadge.setIcon(ui.icon("circle-alert", ICON_SIZE, role="danger"))
         self.searchIcon.setPixmap(ui.pixmap("search", 14, "text3"))
+        self._updateSaveStatusIcon()
 
     #
     # Geometry: the centred switcher and the compact mode
@@ -455,6 +487,7 @@ class TopBar:
             button.setToolButtonStyle(style)
         self.breadcrumbButton.setMaximumWidth(BREADCRUMB_COMPACT_MAX_WIDTH if compact else BREADCRUMB_MAX_WIDTH)
         self._elideBreadcrumb()
+        self.updateSaveStatusCompact()
         self.updateColumnMinimums()
 
     #
@@ -757,7 +790,78 @@ class TopBar:
             self.statusChip.setText(text)
             ui.setChipLevel(self.statusChip, level)
             self.statusChip.show()
+        self.updateSaveStatusCompact()
         self.updateColumnMinimums()
+
+    #
+    # Autosave status (A-01b)
+    #
+
+    def setSaveStatus(self, text=None, level="neutral", toolTip="", iconName=None):
+        """Show the autosave status ("Autosaved · 2 min ago"); level: neutral, busy, ok or warn. None hides it.
+
+        ``iconName`` replaces the icon of the level. The text is kept in the tooltip when the button shows its icon only
+        (``updateSaveStatusCompact()``).
+        """
+        if not text:
+            self._saveStatus = None
+            self.saveStatusButton.hide()
+            self.updateColumnMinimums()
+            return
+        if level not in SAVE_STATUS_LEVELS:
+            raise ValueError(f"Unknown save status level: {level}")
+        status = (text, level, toolTip or "", iconName)
+        if status == self._saveStatus and self.saveStatusButton.visible:
+            return
+        levelChanged = self._saveStatus is None or self._saveStatus[1] != level
+        self._saveStatus = status
+        self.saveStatusButton.setText(text)
+        self._updateSaveStatusIcon()
+        if levelChanged:
+            ui.bindStyleSheet(self.saveStatusButton, self._saveStatusStyleSheet)
+        self.saveStatusButton.show()
+        self.updateSaveStatusCompact()
+        self.updateColumnMinimums()
+
+    def saveStatus(self):
+        """``(text, level, toolTip, iconName)`` of the shown autosave status, or None."""
+        return self._saveStatus
+
+    def setSaveStatusMenu(self, menu=None):
+        """The menu that the autosave status opens (None: no menu)."""
+        self.saveStatusButton.setMenu(menu)
+
+    def isSaveStatusCompact(self):
+        return self.saveStatusButton.toolButtonStyle == qt.Qt.ToolButtonIconOnly
+
+    def updateSaveStatusCompact(self):
+        """Icon only (the text stays in the tooltip) in compact mode, below 1500 px, or below 1700 px with the status chip."""
+        width = self.shell.mainWindow.width if self.shell is not None and self.shell.mainWindow is not None else 0
+        compact = (self._compact or width < SAVE_STATUS_COMPACT_WIDTH
+                   or (not self.statusChip.isHidden() and width < SAVE_STATUS_CHIP_COMPACT_WIDTH))
+        style = qt.Qt.ToolButtonIconOnly if compact else qt.Qt.ToolButtonTextBesideIcon
+        if self.saveStatusButton.toolButtonStyle != style:
+            self.saveStatusButton.setToolButtonStyle(style)
+            self.updateColumnMinimums()
+        if self._saveStatus is not None:
+            # "Autosave · <status, when only the icon is shown> <description>" (USABILITY 10)
+            text, _level, toolTip, _iconName = self._saveStatus
+            description = "\n".join(part for part in ((f"{text}." if compact else ""), toolTip) if part)
+            self.saveStatusButton.setToolTip(ui.tooltip(_("Autosave"), None, description or None))
+        return compact
+
+    def _updateSaveStatusIcon(self):
+        if self._saveStatus is None:
+            return
+        _text, level, _toolTip, iconName = self._saveStatus
+        defaultIcon, color = SAVE_STATUS_LEVELS[level]
+        self.saveStatusButton.setIcon(qt.QIcon(ui.pixmap(iconName or defaultIcon, SAVE_STATUS_ICON_SIZE, color)))
+
+    def _saveStatusStyleSheet(self):
+        level = self._saveStatus[1] if self._saveStatus is not None else "neutral"
+        color = ui.token(SAVE_STATUS_LEVELS[level][1]).name()
+        return (f"QToolButton#StudioSaveStatus {{ color: {color}; padding: 0px 6px; margin-left: 10px; }}"
+                "QToolButton#StudioSaveStatus::menu-indicator { image: none; width: 0px; }")
 
     #
     # Undo/redo of the Segment Editor
@@ -1077,6 +1181,8 @@ class TopBar:
 
     def dispose(self):
         ui.removePaletteListener(self.refreshIcons)
+        self.setSaveStatusMenu(None)
+        ui.bindStyleSheet(self.saveStatusButton, None)
         self.undoRedoTimer.stop()
         self._breadcrumbTimer.stop()
         self._errorCountTimer.stop()
