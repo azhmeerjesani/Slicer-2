@@ -19,7 +19,9 @@ official behavior (the file is loaded again).
 
 Anything else (other file types, several folders, Shift+drop) opens the classic Add Data dialog with the
 dropped paths. A DICOM folder goes to the DICOM module; a folder with several NIfTI files is offered as
-a card in the Library. In Studio, loading a scan switches to Draw, on the lesion loaded with it or on a new
+a card in the Library, whose primary action is "Create study" (W3-07, ``StudioLib.study_ui``); a study folder
+(with a ``study.json``) opens the study. While a study is open, "Start on MNI template" adds a case to the study on
+its template, and ``loadedSet()`` is None (the study replaces the loaded set). In Studio, loading a scan switches to Draw, on the lesion loaded with it or on a new
 "Lesions (<scan name>)" segmentation bound to that scan (never on the segmentation of another scan, even if
 it has the same geometry, as scans normalized to MNI space do).
 
@@ -1190,11 +1192,16 @@ def loadRecentFile(properties, action=None, shell=None):
 
 
 def loadFolder(path, shell=None):
-    """Load a folder: DICOM to the DICOM module, several NIfTI files as a card, else the Add Data dialog.
+    """Load a folder: a study folder opens the study, DICOM goes to the DICOM module, several NIfTI files are offered in a
+    card (with Create study), else the Add Data dialog.
 
-    Return "dicom", "nifti" or "addData".
+    Return "study", "dicom", "nifti" or "addData".
     """
     shell = _currentShell(shell)
+    studyUi = _studyUiModule()
+    if studyUi is not None and os.path.isfile(os.path.join(path, "study.json")):
+        studyUi.openStudy(path, shell)
+        return "study"
     niftiFiles, isDicom = scanFolder(path)
     if isDicom:
         if importDicomFolder(path, shell):
@@ -1309,6 +1316,15 @@ def importDicomFolder(path, shell=None):
     return True
 
 
+def _studyUiModule():
+    """``StudioLib.study_ui`` when studies are available in this build, else None."""
+    try:
+        from . import study_ui
+    except ImportError:
+        return None
+    return study_ui if study_ui.isAvailable() else None
+
+
 def handleDrop(paths, addData=False, shell=None):
     """Load dropped paths: Shift+drop (``addData``) or several folders open the Add Data dialog."""
     paths = [str(path) for path in paths]
@@ -1375,11 +1391,10 @@ def recordFolder(path, kind, count):
 
 
 def _openParticipantsTable(path, shell):
-    """A participants table: handed to the study page when it exists, else a toast that says what it holds."""
-    try:
-        from . import study_ui
-    except ImportError:
-        study_ui = None
+    """A participants table: imported into the open study, else offered as a new study (``study_ui``); without studies in
+    this build, a toast that says what it holds.
+    """
+    study_ui = _studyUiModule()
     handler = getattr(study_ui, "openParticipantsTable", None) if study_ui is not None else None
     if handler is not None:
         try:
@@ -1390,7 +1405,7 @@ def _openParticipantsTable(path, shell):
     columns, rowCount = readTableHeader(path) or ([], 0)
     shown = [column for column in columns if column != "participant_id"][:4]
     columnText = ", ".join(shown) + ("…" if len(columns) - 1 > len(shown) else "")
-    shell.toast(_("{name}: {n} participants ({columns}). Studies come in a later version.").format(
+    shell.toast(_("{name}: {n} participants ({columns}). Studies are not available in this build.").format(
         name=os.path.basename(path), n=rowCount, columns=columnText or "participant_id"), 6000)
 
 
@@ -1780,11 +1795,22 @@ class LoadedSet:
                     slicer.mrmlScene.RemoveNode(other)
 
 
+def _studySession():
+    """The open study (``study_ui.session()``, W3-07), else None."""
+    try:
+        from . import study_ui
+    except ImportError:
+        return None
+    return study_ui.session()
+
+
 def loadedSet():
-    """The current loaded set (``LoadedSet``), None when there is none."""
+    """The current loaded set (``LoadedSet``), None when there is none or while a study is open (a study replaces it)."""
     global _loadedSet
     if _loadedSet is not None and not _loadedSet.nodes():
         _loadedSet.forget()
+    if _loadedSet is not None and _studySession() is not None:
+        return None
     return _loadedSet
 
 
@@ -1977,6 +2003,12 @@ def _templateVolume(sampleName, path=None, show=True):
     return _tagTemplate(volumeNode, sampleName)
 
 
+def studyTemplateVolume(sampleName=TEMPLATE_SAMPLE_2MM):
+    """The template volume of a study (a SampleData template: shared with "Start on MNI template", loaded once)."""
+    with _ownLoad():
+        return _templateVolume(sampleName)
+
+
 def _trackTemplate(volumeNode, segmentationNode):
     _templateNodeIds["volume"] = volumeNode.GetID()
     _templateNodeIds["segmentation"] = segmentationNode.GetID() if segmentationNode is not None else None
@@ -2057,6 +2089,12 @@ def startOnTemplate(res=2, shell=None, volumeNode=None):
     volume that is already loaded (from the Sample Data module) is used. Return ``(volumeNode, segmentationNode)``.
     """
     shell = _currentShell(shell)
+    studySession = _studySession()
+    if studySession is not None and volumeNode is None:
+        # With a study: a new case on the study template (one template node per session; W3-07). A saved lesion is never
+        # re-targeted: the case is a new subject whose lesion is written by Done -> next.
+        studySession.newCase()
+        return studySession.volumeNode(), studySession.segmentationNode()
     cached1mm = cachedTemplatePath(TEMPLATE_SAMPLE_1MM)
     with slicer.util.WaitCursor():
         if volumeNode is not None:

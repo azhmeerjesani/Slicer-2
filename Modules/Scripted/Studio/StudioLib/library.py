@@ -20,6 +20,8 @@ the Data module. Files are loaded by ``StudioLib.importer``.
 import html
 import logging
 import os
+import re
+import sys
 import time
 import traceback
 
@@ -303,6 +305,20 @@ def openFolder():
 def startOnTemplate():
     """Start on MNI template."""
     _runAction(lambda: _importer().startOnTemplate(shell=_shell()), _("Failed to load the MNI template."))
+
+
+def newStudy():
+    """New study… (``study_ui.newStudyDialog``)."""
+    studyUi = _studyUi()
+    if studyUi is not None:
+        _runAction(lambda: studyUi.newStudyDialog(_shell()), _("Failed to create the study."))
+
+
+def openStudy():
+    """Open study… (``study_ui.openStudyDialog``)."""
+    studyUi = _studyUi()
+    if studyUi is not None:
+        _runAction(lambda: studyUi.openStudyDialog(_shell()), _("Failed to open the study."))
 
 
 def openSampleData():
@@ -613,10 +629,12 @@ class RecentList(qt.QObject):
     def _settingsKey():
         """What the rows show besides the menu: the times and the folders that Studio recorded."""
         settings = qt.QSettings()
-        return (str(settings.value("Studio/RecentOpenTimes") or ""), str(settings.value("Studio/RecentFolders") or ""))
+        return (str(settings.value("Studio/RecentOpenTimes") or ""), str(settings.value("Studio/RecentFolders") or ""),
+                str(settings.value("Studio/RecentStudies") or ""))
 
     def refresh(self, force=True):
-        """Read the recently loaded files again: the folders opened in Studio first, then the files.
+        """Read the recently loaded files again: the studies first (``Studio/RecentStudies``), then the folders opened in Studio,
+        then the files.
 
         Without ``force`` (the page is shown again) nothing is read when the menu and the recorded times and folders did not change.
         """
@@ -626,8 +644,9 @@ class RecentList(qt.QObject):
             return
         self._shownKey = key
         self._dirty = False
-        folders = recentFolderEntries(min(RECENT_FOLDER_ROW_COUNT, self.rowCount))
-        self.entries = folders + recentEntries(self.rowCount - len(folders))
+        studies = recentStudyEntries(min(RECENT_STUDY_ROW_COUNT, self.rowCount))
+        folders = recentFolderEntries(min(RECENT_FOLDER_ROW_COUNT, self.rowCount - len(studies)))
+        self.entries = studies + folders + recentEntries(self.rowCount - len(studies) - len(folders))
         while len(self.rows) < len(self.entries):
             self._createRow()
         now = time.time()
@@ -1129,18 +1148,6 @@ def renameNode(node, name=None):
     return name
 
 
-def _studyUi():
-    """``StudioLib.study_ui`` (W3-07) when this build has it, else None."""
-    import importlib
-
-    try:
-        return importlib.import_module("StudioLib.study_ui")
-    except ModuleNotFoundError as e:
-        if e.name != "StudioLib.study_ui":
-            raise
-    return None
-
-
 def _pickFiles(folder):
     """Ask for the files of one subject, starting in ``folder``. Return the paths (empty when canceled)."""
     paths = qt.QFileDialog.getOpenFileNames(slicer.util.mainWindow(), _("Open one subject"), folder, _importer().FILE_DIALOG_FILTERS)
@@ -1580,7 +1587,7 @@ class LoadedSetCard(qt.QObject):
     """"Loaded set": the lesions loaded at once (2 to 60), reviewed one at a time in Draw.
 
     It names their number, grid and space, the ``participants.tsv`` found next to them, and lists the subjects with the
-    current one marked. Buttons: Review in Draw, Close set and (with the study page) Create study….
+    current one marked. Buttons: Review in Draw, Close set and (with the study page) Create study.
     """
 
     def __init__(self):
@@ -1616,7 +1623,7 @@ class LoadedSetCard(qt.QObject):
         buttonRow.layout().addWidget(self.closeButton, 2)
         self.createStudyButton = None
         if _studyUi() is not None:
-            self.createStudyButton = _roleButton(_("Create study…"), "StudioLoadedSetCreateStudyButton", self._createStudy, "secondary")
+            self.createStudyButton = _roleButton(_("Create study"), "StudioLoadedSetCreateStudyButton", self._createStudy, "secondary")
             buttonRow.layout().addWidget(self.createStudyButton, 2)
         layout.addWidget(buttonRow)
         self._signature = None
@@ -1656,11 +1663,15 @@ class LoadedSetCard(qt.QObject):
             reviewLoadedSet(_shell(), self.list.row(item))
 
     def _createStudy(self):
+        """Create a study of the files of the set; the set's nodes are closed (only the current subject stays in the scene)."""
         studyUi = _studyUi()
         loaded = self._loaded()
-        handler = getattr(studyUi, "createStudy", None) if studyUi is not None else None
-        if handler is not None and loaded is not None:
-            handler([nodeFile(node) for node in loaded.nodes() if nodeFile(node)], _shell())
+        if studyUi is None or loaded is None:
+            return None
+        files = [nodeFile(node) for node in loaded.nodes() if nodeFile(node)]
+        if not closeLoadedSet(confirm=True):
+            return None
+        return _runAction(lambda: studyUi.createStudy(files, _shell()), _("Failed to create the study."))
 
     def refresh(self):
         """Show or hide the card. Return True when it is shown."""
@@ -1957,6 +1968,1593 @@ class OpenNowCard(qt.QObject):
 
 
 #
+# Studies (W3-07): the libcard registry, the subject list and the inspector cards
+#
+
+#: Rows of the subject list and the height of its filter row (SPEC 3.1)
+STUDY_ROW_HEIGHT = 32
+FILTER_ROW_HEIGHT = 44
+#: The study page of the canvas is at most this wide (the list has more columns than the 480 px column)
+STUDY_PAGE_MAX_WIDTH = 1100
+#: Prefix of the Library extension modules (LNM addendum 6.2): StudioLib/libcard_<name>.py
+LIBCARD_PREFIX = "libcard_"
+#: Columns of the subject list: (row key, header)
+STUDY_COLUMNS = (("participant_id", "ID"), ("group", "Group"), ("volume_ml", "Lesion mL"), ("space", "Space"), ("status", "Status"), ("qc", "QC"))
+#: Sort orders of the list: (key, label)
+STUDY_SORTS = (("table", "Table order"), ("id", "ID"), ("volume", "Lesion mL"), ("group", "Group"), ("status", "Status"), ("qc", "QC"))
+#: Keys of the list (scoped to the list: they never reach the views), for the shortcut list: (key, description)
+STUDY_LIST_KEYS = (
+    ("Return", "Open the subject in Draw"),
+    ("P", "QC pass"),
+    ("X", "QC fail"),
+    ("U", "QC not reviewed"),
+    ("Delete", "Remove from the study (files are kept; Undo in the message)"),
+    ("Ctrl+A", "Select all subjects"),
+    ("/", "Search the subjects"),
+)
+
+
+def _studyUi():
+    """``StudioLib.study_ui`` (W3-07) when this build has it and the study library is importable, else None."""
+    import importlib
+
+    try:
+        module = importlib.import_module("StudioLib.study_ui")
+    except ModuleNotFoundError as e:
+        if e.name != "StudioLib.study_ui":
+            raise
+        return None
+    return module if module.isAvailable() else None
+
+
+def _studySession():
+    studyUi = _studyUi()
+    return studyUi.session() if studyUi is not None else None
+
+
+def _studyModule():
+    import importlib
+
+    return importlib.import_module("LesionNetworkMappingLib.study")
+
+
+#
+# Library extension registry (StudioLib/libcard_*.py)
+#
+
+_libcards = None
+
+
+def libcardModules(reload=False):
+    """The Library extension modules ``StudioLib/libcard_*.py``, imported once (sorted by name).
+
+    Each may expose ``CARD`` (an inspector card: a dict ``{"section": "study" | "batch" | "import", "order", "create": fn(session)
+    -> QWidget, "refresh": fn(widget, session, selectedIds)}`` or a callable ``fn(session) -> QWidget``), ``SUBJECT_SECTION``
+    (``{"order", "create": fn(session) -> QWidget, "refresh": fn(widget, session, sid)}``), ``COLUMNS`` (list columns: dicts
+    ``{"key", "header", "valueFn": fn(row) -> (text, level)}`` or tuples ``(header, valueFn)``), ``FILTERS`` and ``QUEUES``
+    (chips and Done → next queues: dicts ``{"key", "label", "predicate": fn(row) -> bool, "qcColumn": optional}`` or tuples
+    ``(label, predicate)``). A module that fails to import is skipped and logged.
+    """
+    global _libcards
+    if _libcards is not None and not reload:
+        return _libcards
+    import importlib
+    import pkgutil
+    import sys
+
+    modules = []
+    folder = os.path.dirname(os.path.abspath(__file__))
+    names = sorted(info.name for info in pkgutil.iter_modules([folder]) if info.name.startswith(LIBCARD_PREFIX))
+    names += sorted(name.split(".", 1)[1] for name in sys.modules if name.startswith("StudioLib." + LIBCARD_PREFIX) and name.split(".", 1)[1] not in names)
+    for name in names:
+        try:
+            modules.append(importlib.import_module("StudioLib." + name))
+        except Exception:
+            logging.error(f"Studio Library: the extension {name} is skipped:\n{traceback.format_exc()}")
+    _libcards = modules
+    return modules
+
+
+def _entries(attribute, fields):
+    """Normalized entries of a libcard attribute: dicts, or tuples in the order of ``fields``."""
+    out = []
+    for module in libcardModules():
+        for index, entry in enumerate(getattr(module, attribute, None) or ()):
+            if isinstance(entry, dict):
+                item = dict(entry)
+            elif isinstance(entry, (tuple, list)):
+                item = dict(zip(fields, entry, strict=False))
+            else:
+                continue
+            item.setdefault("key", f"{module.__name__.rsplit('.', 1)[-1]}.{index}")
+            item["module"] = module.__name__
+            out.append(item)
+    return out
+
+
+def libcardColumns():
+    """List columns of the extensions: ``[{"key", "header", "valueFn"}]``."""
+    return [entry for entry in _entries("COLUMNS", ("header", "valueFn")) if callable(entry.get("valueFn"))]
+
+
+def libcardFilters():
+    """Filter chips of the extensions: ``[{"key", "label", "predicate", "qcColumn"}]``."""
+    return [entry for entry in _entries("FILTERS", ("label", "predicate", "qcColumn")) if callable(entry.get("predicate"))]
+
+
+def libcardQueues():
+    """Done → next queues of the extensions: ``[{"key", "label", "predicate"}]`` (``StudySession.next(queue=key)``)."""
+    return [entry for entry in _entries("QUEUES", ("label", "predicate")) if callable(entry.get("predicate"))]
+
+
+def libcardCards(section):
+    """Inspector cards of the extensions for a section ("study", "batch" or "import"), by their order."""
+    cards = []
+    for module in libcardModules():
+        card = getattr(module, "CARD", None)
+        if card is None:
+            continue
+        entry = dict(card) if isinstance(card, dict) else {"create": card} if callable(card) else None
+        if entry is None or not callable(entry.get("create")):
+            continue
+        entry.setdefault("section", "study")
+        entry.setdefault("order", 50)
+        entry["key"] = module.__name__
+        if str(entry["section"]).lower() == section:
+            cards.append(entry)
+    return sorted(cards, key=lambda entry: entry["order"])
+
+
+def libcardSubjectSections():
+    """SUBJECT card sections of the extensions, by their order."""
+    sections = []
+    for module in libcardModules():
+        section = getattr(module, "SUBJECT_SECTION", None)
+        entry = dict(section) if isinstance(section, dict) else {"create": section} if callable(section) else None
+        if entry is None or not callable(entry.get("create")):
+            continue
+        entry.setdefault("order", 50)
+        entry["key"] = module.__name__
+        sections.append(entry)
+    return sorted(sections, key=lambda entry: entry["order"])
+
+
+#
+# Rows as the list shows them
+#
+
+
+def _missing(value):
+    return value is None or value == "" or value == "n/a"
+
+
+def spaceText(row):
+    """The space cell: "NLin6Asym 2 mm"... ("Native" for scan space; "MNI152NLin2009cAsym · normalized" for normalized rows)."""
+    value = row.get("space")
+    if _missing(value):
+        return "—", "neutral"
+    if not _missing(row.get("norm_method")):
+        return _("{space} · normalized").format(space=value), "neutral"
+    if value == "native":
+        return _("Native"), "muted"
+    return str(value).replace("MNI152", ""), "neutral"
+
+
+def studyCell(row, key):
+    """``(text, level)`` of a base column of the list."""
+    value = row.get(key)
+    if key == "participant_id":
+        return str(value), "neutral"
+    if key == "group":
+        return {"case": _("Case"), "control": _("Control")}.get(value, "—"), "neutral"
+    if key == "volume_ml":
+        if _missing(value):
+            return "—", "neutral"
+        try:
+            return f"{float(value):.2f}", "neutral"
+        except ValueError:
+            return str(value), "neutral"
+    if key == "space":
+        return spaceText(row)
+    if key == "status":
+        return {"untraced": (_("Untraced"), "muted"), "inprogress": (_("In progress"), "neutral"), "traced": (_("Traced"), "neutral"),
+                "mapped": (_("Mapped"), "ok")}.get(value, (str(value), "neutral"))
+    if key == "qc":
+        return {"pass": (_("Pass"), "ok"), "fail": (_("Fail"), "danger")}.get(value, ("—", "muted"))
+    return ("—" if _missing(value) else str(value)), "neutral"
+
+
+def _levelColor(level):
+    token = {"ok": "success", "warn": "warning", "danger": "danger", "muted": "text3"}.get(level)
+    return ui.token(token) if token else None
+
+
+def baseFilters():
+    """The chips of the list: [(key, label, predicate)]."""
+    return [
+        ("all", _("All"), None),
+        ("cases", _("Cases"), lambda row: row.get("group") == "case"),
+        ("controls", _("Controls"), lambda row: row.get("group") == "control"),
+        ("untraced", _("Untraced"), lambda row: row.get("status") == "untraced"),
+        ("qcfail", _("QC fail"), lambda row: row.get("qc") == "fail"),
+    ]
+
+
+def _sortKey(sortKey):
+    def number(value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float("-inf")
+
+    order = {"untraced": 0, "inprogress": 1, "traced": 2, "mapped": 3}
+    qcOrder = {"fail": 0, "unreviewed": 1, "pass": 2}
+    if sortKey == "id":
+        return lambda item: item[1]["participant_id"]
+    if sortKey == "volume":
+        return lambda item: -number(item[1].get("volume_ml"))
+    if sortKey == "group":
+        return lambda item: (str(item[1].get("group")), item[0])
+    if sortKey == "status":
+        return lambda item: (order.get(item[1].get("status"), 9), item[0])
+    if sortKey == "qc":
+        return lambda item: (qcOrder.get(item[1].get("qc"), 9), item[0])
+    return lambda item: item[0]
+
+
+class StudyTableModel(qt.QAbstractTableModel):
+    """The rows of the subject list (ID · Group · Lesion mL · Space · Status · QC, then the extension columns)."""
+
+    def __init__(self):
+        qt.QAbstractTableModel.__init__(self)
+        self.rows = []
+        self.columns = [{"key": key, "header": header, "valueFn": None} for key, header in STUDY_COLUMNS]
+        self.current = None
+        #: Short headers (the module panel): "mL" for "Lesion mL"
+        self.compact = False
+
+    def setColumns(self, extra):
+        self.beginResetModel()
+        self.columns = [{"key": key, "header": header, "valueFn": None} for key, header in STUDY_COLUMNS] + list(extra)
+        self.endResetModel()
+
+    def setRows(self, rows, current=None):
+        self.beginResetModel()
+        self.rows = list(rows)
+        self.current = current
+        self.endResetModel()
+
+    def rowCount(self, parent=qt.QModelIndex()):
+        return 0 if parent.isValid() else len(self.rows)
+
+    def columnCount(self, parent=qt.QModelIndex()):
+        return 0 if parent.isValid() else len(self.columns)
+
+    def cell(self, row, column):
+        entry = self.columns[column]
+        if entry.get("valueFn") is None:
+            return studyCell(row, entry["key"])
+        try:
+            value = entry["valueFn"](row)
+        except Exception:
+            logging.error(f"Studio Library: the column {entry.get('header')} failed:\n{traceback.format_exc()}")
+            return "?", "warn"
+        if isinstance(value, (tuple, list)):
+            return str(value[0]), (value[1] if len(value) > 1 else "neutral")
+        return str(value), "neutral"
+
+    def data(self, index, role=qt.Qt.DisplayRole):
+        if not index.isValid() or index.row() >= len(self.rows):
+            return None
+        row = self.rows[index.row()]
+        if role == qt.Qt.DisplayRole:
+            return self.cell(row, index.column())[0]
+        if role == qt.Qt.ForegroundRole:
+            color = _levelColor(self.cell(row, index.column())[1])
+            return qt.QBrush(color) if color is not None else None
+        if role == qt.Qt.FontRole and row["participant_id"] == self.current:
+            font = qt.QFont()
+            font.setWeight(qt.QFont.DemiBold)
+            return font
+        if role == qt.Qt.ToolTipRole:
+            parts = [row["participant_id"]]
+            for key in ("scan", "lesion"):
+                if not _missing(row.get(key)):
+                    parts.append(f"{key}: {row[key]}")
+            if not _missing(row.get("notes")):
+                parts.append(str(row["notes"]))
+            return "\n".join(parts)
+        if role == qt.Qt.TextAlignmentRole and self.columns[index.column()]["key"] == "volume_ml":
+            return int(qt.Qt.AlignRight | qt.Qt.AlignVCenter)
+        if role == qt.Qt.UserRole:
+            return row["participant_id"]
+        return None
+
+    def headerData(self, section, orientation, role=qt.Qt.DisplayRole):
+        if orientation == qt.Qt.Horizontal and role == qt.Qt.DisplayRole and 0 <= section < len(self.columns):
+            if self.compact and self.columns[section]["key"] == "volume_ml":
+                return _("mL")
+            return _(self.columns[section]["header"])
+        return None
+
+    def sid(self, row):
+        return self.rows[row]["participant_id"] if 0 <= row < len(self.rows) else None
+
+    def rowOf(self, sid):
+        return next((index for index, row in enumerate(self.rows) if row["participant_id"] == sid), -1)
+
+
+#: Selected subjects of the list (shared by the canvas list and the inspector cards)
+_studySelection = []
+_studyViews = []
+_studyListening = [False]
+
+
+def studySelection():
+    """participant_ids selected in the subject list."""
+    return list(_studySelection)
+
+
+def _setStudySelection(sids, source=None):
+    if list(sids) == _studySelection:
+        return
+    _studySelection[:] = list(sids)
+    for view in list(_studyViews):
+        if view is not source:
+            try:
+                view.onSelectionChanged()
+            except Exception:
+                logging.error(f"Studio Library: study selection update failed:\n{traceback.format_exc()}")
+
+
+def _listenToStudies():
+    if _studyListening[0]:
+        return
+    studyUi = _studyUi()
+    if studyUi is not None:
+        studyUi.addListener(_onStudyChanged)
+        _studyListening[0] = True
+
+
+def _onStudyChanged(studySession):
+    if studySession is None:
+        _studySelection[:] = []
+    else:
+        _studySelection[:] = [sid for sid in _studySelection if sid in studySession.study]
+    refreshStudy()
+
+
+def refreshStudy():
+    """Show the open study (or its absence) in the canvas and in the module panel."""
+    for view in list(_studyViews):
+        if not _isAlive(view.widget):
+            _studyViews.remove(view)
+            continue
+        try:
+            view.refresh()
+        except Exception:
+            logging.error(f"Studio Library: study view refresh failed:\n{traceback.format_exc()}")
+    if _canvas is not None and _isAlive(_canvas.widget):
+        _canvas.refreshData()
+    shell = _shell()
+    if shell is not None and shell.currentWorkspace() == "library":
+        # A study shows its cards in the inspector (also when it was opened while Library showed its empty state)
+        empty = isEmptyState(shell)
+        if _sceneWatcher is not None:
+            _sceneWatcher.empty = empty
+        shell.setInspectorVisible(not empty)
+    panel = _livePanel()
+    if panel is not None:
+        panel.refresh()
+
+
+class _ListKeys(qt.QObject):
+    """Keys of a subject list that are not shortcuts: Enter on the table opens the subject (Qt's activation differs per platform)."""
+
+    def __init__(self, studyList):
+        qt.QObject.__init__(self)
+        self.studyList = studyList
+
+    def eventFilter(self, obj, event):
+        if event.type() == qt.QEvent.KeyPress and event.key() in (qt.Qt.Key_Return, qt.Qt.Key_Enter) and not ui.hasKeyModifiers(event):
+            self.studyList.openSelected()
+            return True
+        return False
+
+
+class StudyList(qt.QObject):
+    """The subject list of a study: a 44 px filter row (search, chips, sort) over a table of 32 px rows.
+
+    Keys (scoped to the list): Enter opens in Draw, P / X / U set QC pass / fail / not reviewed, Delete removes from the
+    study (files are kept; Undo in the message), Ctrl+A selects all, / goes to the search field. ``compact`` puts the chips
+    on a second row (the module panel).
+    """
+
+    def __init__(self, compact=False):
+        qt.QObject.__init__(self)
+        _listenToStudies()
+        self.compact = compact
+        self.widget = qt.QFrame()
+        self.widget.setObjectName("StudioStudyList")
+        layout = qt.QVBoxLayout(self.widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0 if not compact else 6)
+        self.filterRow = qt.QWidget()
+        self.filterRow.setObjectName("StudioStudyFilterRow")
+        rowLayout = qt.QHBoxLayout(self.filterRow)
+        rowLayout.setContentsMargins(0, 6, 0, 6)
+        rowLayout.setSpacing(6)
+        self.search = qt.QLineEdit()
+        self.search.setObjectName("StudioStudySearch")
+        self.search.setPlaceholderText(_("Search subjects"))
+        self.search.setClearButtonEnabled(True)
+        self.search.setToolTip(ui.tooltip(_("Search subjects"), "/", _("filter the list by id, group, status or notes")))
+        self.search.connect("textChanged(QString)", lambda text: self.refresh())
+        self.search.setMinimumWidth(140)
+        rowLayout.addWidget(self.search, 1 if compact else 0)
+        self.chipGroup = qt.QButtonGroup(self.widget)
+        self.chipGroup.setExclusive(True)
+        self.chipLayout = qt.QHBoxLayout()
+        self.chipLayout.setSpacing(4)
+        self.chips = {}
+        self._filterKey = "all"
+        if compact:
+            self.filterRow.setFixedHeight(FILTER_ROW_HEIGHT)
+            layout.addWidget(self.filterRow)
+            chipRow = qt.QWidget()
+            chipRow.setObjectName("StudioStudyChipRow")
+            chipRow.setLayout(self.chipLayout)
+            self.chipLayout.setContentsMargins(0, 0, 0, 0)
+            layout.addWidget(chipRow)
+        else:
+            rowLayout.addLayout(self.chipLayout)
+        rowLayout.addStretch(1)
+        self.sortLabel = qt.QLabel(_("Sort"))
+        self.sortLabel.setObjectName("StudioStudySortLabel")
+        _setFont(self.sortLabel, 12)
+        rowLayout.addWidget(self.sortLabel)
+        self.sortCombo = qt.QComboBox()
+        self.sortCombo.setObjectName("StudioStudySort")
+        for key, label in STUDY_SORTS:
+            self.sortCombo.addItem(_(label), key)
+        self.sortCombo.connect("currentIndexChanged(int)", lambda index: self.refresh())
+        rowLayout.addWidget(self.sortCombo)
+        if not compact:
+            self.filterRow.setFixedHeight(FILTER_ROW_HEIGHT)
+            layout.addWidget(self.filterRow)
+        self.model = StudyTableModel()
+        self.model.compact = compact
+        self.table = qt.QTableView()
+        self.table.setObjectName("StudioStudyTable")
+        self.table.setModel(self.model)
+        self.table.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(qt.QAbstractItemView.ExtendedSelection)
+        self.table.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
+        self.table.setShowGrid(False)
+        self.table.setWordWrap(False)
+        self.table.setFocusPolicy(qt.Qt.StrongFocus)
+        self.table.verticalHeader().hide()
+        self.table.verticalHeader().setDefaultSectionSize(STUDY_ROW_HEIGHT)
+        self.table.verticalHeader().setMinimumSectionSize(STUDY_ROW_HEIGHT)
+        header = self.table.horizontalHeader()
+        header.setStretchLastSection(True)
+        header.setHighlightSections(False)
+        header.setDefaultAlignment(qt.Qt.AlignLeft | qt.Qt.AlignVCenter)
+        header.connect("sectionClicked(int)", self._onHeaderClicked)
+        self.table.connect("doubleClicked(QModelIndex)", lambda index: self.openSelected())
+        self.table.selectionModel().connect("selectionChanged(QItemSelection,QItemSelection)", self._onTableSelection)
+        self._keys = _ListKeys(self)
+        _installEventFilter(self.table, self._keys)
+        layout.addWidget(self.table, 1)
+        self.emptyLabel = qt.QLabel()
+        self.emptyLabel.setObjectName("StudioStudyEmpty")
+        self.emptyLabel.setWordWrap(True)
+        _setFont(self.emptyLabel, 12)
+        self.emptyLabel.setContentsMargins(4, 8, 4, 8)
+        self.emptyLabel.hide()
+        layout.addWidget(self.emptyLabel)
+        self.shortcuts = []
+        self._addShortcut("P", lambda: self.setQc("pass"), "LibraryQcPass", _("Subject list: QC pass"))
+        self._addShortcut("X", lambda: self.setQc("fail"), "LibraryQcFail", _("Subject list: QC fail"))
+        self._addShortcut("U", lambda: self.setQc("unreviewed"), "LibraryQcClear", _("Subject list: QC not reviewed"))
+        self._addShortcut("Delete", self.removeSelected, "LibraryRemoveFromStudy", _("Subject list: remove from the study (files are kept)"))
+        if sys.platform == "darwin":
+            self._addShortcut("Backspace", self.removeSelected, "LibraryRemoveFromStudyMac", _("Subject list: remove from the study (files are kept)"))
+        self._addShortcut("Ctrl+A", self.table.selectAll, "LibrarySelectAllSubjects", _("Subject list: select all"))
+        self._addShortcut("/", self.focusSearch, "LibrarySearchSubjects", _("Subject list: search"), parent=self.widget)
+        self._addShortcut("Return", self.openSelected, "LibraryOpenSubject", _("Subject list: open in Draw"))
+        self._columnSignature = None
+        self._signature = None
+        self._settingSelection = False
+        self.onSelection = None
+        ui.bindStyleSheet(self.widget, self._styleSheet)
+        _studyViews.append(self)
+
+    def _addShortcut(self, key, callback, name, description, parent=None):
+        shortcut = qt.QShortcut(qt.QKeySequence(key), parent or self.table)
+        shortcut.setObjectName("Studio" + name + "Shortcut")
+        shortcut.setContext(qt.Qt.WidgetWithChildrenShortcut)
+        # Listed in the shortcut list (Library section); not a window-wide Studio shortcut, so it never reaches the views
+        shortcut.setProperty("studioDescription", description)
+        shortcut.connect("activated()", callback)
+        self.shortcuts.append(shortcut)
+        return shortcut
+
+    @staticmethod
+    def _styleSheet():
+        t = {name: ui.token(name).name() for name in ("card", "text", "text2", "text3", "hairline", "accent-subtle", "accent-fg", "border")}
+        return (
+            f"QFrame#StudioStudyList {{ background: transparent; border: none; }}"
+            f"QTableView#StudioStudyTable {{ background-color: {t['card']}; border: 1px solid {t['hairline']}; border-radius: 8px; "
+            f"color: {t['text']}; selection-background-color: {t['accent-subtle']}; selection-color: {t['text']}; outline: none; }}"
+            f"QTableView#StudioStudyTable::item {{ padding: 0px 8px; border-bottom: 1px solid {t['hairline']}; }}"
+            f"QTableView#StudioStudyTable::item:focus {{ border: 1px solid {t['accent-fg']}; }}"
+            f"QTableView#StudioStudyTable:focus {{ border: 2px solid {t['accent-fg']}; }}"
+            f"QHeaderView::section {{ background-color: {t['card']}; color: {t['text2']}; border: none; border-bottom: 1px solid {t['border']}; "
+            "padding: 4px 8px; }"
+            f"QLabel#StudioStudySortLabel, QLabel#StudioStudyEmpty {{ color: {t['text2']}; }}"
+            f"QToolButton[studioChip=\"true\"] {{ border: 1px solid {t['border']}; border-radius: 12px; padding: 2px 10px; color: {t['text2']}; "
+            "background: transparent; }"
+            f"QToolButton[studioChip=\"true\"]:checked {{ background-color: {t['accent-subtle']}; border-color: {t['accent-fg']}; color: {t['text']}; }}"
+            f"QToolButton[studioChip=\"true\"]:focus {{ border: 2px solid {t['accent-fg']}; }}")
+
+    # Filters
+
+    def _filters(self):
+        filters = [{"key": key, "label": label, "predicate": predicate, "qcColumn": None} for key, label, predicate in baseFilters()]
+        return filters + libcardFilters()
+
+    def _rebuildChips(self):
+        filters = self._filters()
+        signature = tuple(entry["key"] for entry in filters)
+        if signature == tuple(self.chips):
+            return
+        for button in list(self.chips.values()):
+            self.chipGroup.removeButton(button)
+            _discard(button)
+        self.chips = {}
+        for entry in filters:
+            button = qt.QToolButton()
+            button.setObjectName("StudioStudyFilterChip")
+            button.setProperty("studioChip", True)
+            button.setText(entry["label"])
+            button.setCheckable(True)
+            button.setAutoRaise(True)
+            button.setFocusPolicy(qt.Qt.TabFocus)
+            button.setChecked(entry["key"] == self._filterKey)
+            button.connect("clicked()", lambda key=entry["key"]: self.setFilter(key))
+            self.chipGroup.addButton(button)
+            self.chipLayout.addWidget(button)
+            self.chips[entry["key"]] = button
+        if self._filterKey not in self.chips:
+            self.setFilter("all")
+
+    def setFilter(self, key):
+        """Show the rows of a chip ("all", "cases", "controls", "untraced", "qcfail" or an extension filter key)."""
+        self._filterKey = key
+        button = self.chips.get(key)
+        if button is not None and not button.isChecked():
+            button.setChecked(True)
+        self.refresh()
+
+    def filterKey(self):
+        return self._filterKey
+
+    def _activeFilter(self):
+        return next((entry for entry in self._filters() if entry["key"] == self._filterKey), None)
+
+    def qcColumn(self):
+        """The column that P / X / U write: the active filter's ``qcColumn`` (for example norm_qc), else qc."""
+        entry = self._activeFilter()
+        return (entry or {}).get("qcColumn") or "qc"
+
+    def sortKey(self):
+        return str(self.sortCombo.itemData(self.sortCombo.currentIndex) or "table")
+
+    def setSort(self, key):
+        index = self.sortCombo.findData(key)
+        if index >= 0:
+            self.sortCombo.setCurrentIndex(index)
+
+    def _onHeaderClicked(self, section):
+        key = self.model.columns[section]["key"] if 0 <= section < len(self.model.columns) else None
+        sortKey = {"participant_id": "id", "volume_ml": "volume", "group": "group", "status": "status", "qc": "qc"}.get(key)
+        if sortKey is not None:
+            self.setSort("table" if self.sortKey() == sortKey else sortKey)
+
+    # Content
+
+    def visibleRows(self, studySession):
+        """The rows that the filter, the search and the sort show, in their order."""
+        rows = studySession.study.subjects
+        entry = self._activeFilter()
+        predicate = entry.get("predicate") if entry else None
+        query = str(self.search.text).strip().lower()
+        shown = []
+        for index, row in enumerate(rows):
+            if predicate is not None:
+                try:
+                    if not predicate(row):
+                        continue
+                except Exception:
+                    logging.error(f"Studio Library: the filter {entry.get('label')} failed:\n{traceback.format_exc()}")
+                    continue
+            if query:
+                haystack = " ".join(str(row.get(key, "")) for key in ("participant_id", "group", "status", "qc", "notes", "source_id")).lower()
+                if query not in haystack:
+                    continue
+            shown.append((index, row))
+        shown.sort(key=_sortKey(self.sortKey()))
+        return [row for _index, row in shown]
+
+    def refresh(self):
+        studySession = _studySession()
+        if studySession is None:
+            self.model.setRows([])
+            for shortcut in self.shortcuts:
+                shortcut.setEnabled(False)
+            return
+        for shortcut in self.shortcuts:
+            shortcut.setEnabled(True)
+        self._rebuildChips()
+        extra = libcardColumns()
+        signature = tuple(entry["key"] for entry in extra)
+        if signature != self._columnSignature:
+            self._columnSignature = signature
+            self.model.setColumns(extra)
+        rows = self.visibleRows(studySession)
+        selected = studySelection()
+        self._settingSelection = True
+        try:
+            self.model.setRows(rows, studySession.current())
+            selectionModel = self.table.selectionModel()
+            for sid in selected:
+                row = self.model.rowOf(sid)
+                if row >= 0:
+                    selectionModel.select(self.model.index(row, 0), qt.QItemSelectionModel.Select | qt.QItemSelectionModel.Rows)
+        finally:
+            self._settingSelection = False
+        self._sizeColumns()
+        total = len(studySession.study)
+        if not rows:
+            self.emptyLabel.setText(_("No subject matches. Choose All or clear the search.") if total else
+                                    _("This study has no subjects yet. Add files in the Import card, or drop a folder."))
+        self.emptyLabel.setVisible(not rows)
+
+    def _sizeColumns(self):
+        header = self.table.horizontalHeader()
+        widths = {"participant_id": 140, "group": 90, "volume_ml": 90, "space": 170, "status": 100, "qc": 70}
+        if self.compact:
+            widths = {"participant_id": 96, "group": 64, "volume_ml": 64, "space": 96, "status": 80, "qc": 48}
+        for index, entry in enumerate(self.model.columns):
+            header.resizeSection(index, widths.get(entry["key"], 110))
+
+    # Selection
+
+    def selectedIds(self):
+        rows = sorted({index.row() for index in self.table.selectionModel().selectedRows()})
+        return [self.model.sid(row) for row in rows if self.model.sid(row)]
+
+    def _onTableSelection(self, selected=None, deselected=None):
+        if self._settingSelection:
+            return
+        _setStudySelection(self.selectedIds(), source=self)
+        if self.onSelection is not None:
+            self.onSelection()
+
+    def onSelectionChanged(self):
+        """The shared selection changed elsewhere: follow it."""
+        self._settingSelection = True
+        try:
+            selectionModel = self.table.selectionModel()
+            selectionModel.clearSelection()
+            for sid in studySelection():
+                row = self.model.rowOf(sid)
+                if row >= 0:
+                    selectionModel.select(self.model.index(row, 0), qt.QItemSelectionModel.Select | qt.QItemSelectionModel.Rows)
+        finally:
+            self._settingSelection = False
+        if self.onSelection is not None:
+            self.onSelection()
+
+    def selectIds(self, sids):
+        _setStudySelection(list(sids))
+        self.onSelectionChanged()
+
+    def focusSearch(self):
+        self.search.setFocus(qt.Qt.ShortcutFocusReason)
+        self.search.selectAll()
+
+    def focusTable(self):
+        self.table.setFocus(qt.Qt.OtherFocusReason)
+        if not self.table.selectionModel().selectedRows() and self.model.rowCount() > 0:
+            studySession = _studySession()
+            row = max(0, self.model.rowOf(studySession.current())) if studySession is not None else 0
+            self.table.selectRow(row)
+
+    # Actions
+
+    def openSelected(self):
+        """Open the selected (else the current) subject in Draw."""
+        studySession = _studySession()
+        if studySession is None:
+            return False
+        sids = self.selectedIds()
+        sid = sids[0] if sids else self.model.sid(self.table.currentIndex().row()) if self.table.currentIndex().isValid() else None
+        if sid is None:
+            return False
+        return _runAction(lambda: studySession.open(sid), _("Failed to open {sid}.").format(sid=sid))
+
+    def setQc(self, value):
+        """P / X / U on the selected subjects."""
+        studySession = _studySession()
+        sids = self.selectedIds()
+        if studySession is None or not sids:
+            return
+        column = self.qcColumn()
+        studySession.setQc(sids, value, column)
+        shell = _shell()
+        if shell is not None:
+            label = {"pass": _("pass"), "fail": _("fail"), "unreviewed": _("not reviewed")}.get(value, value)
+            shell.toast(_("{column} {value}: {n} subjects").format(column=column.upper() if column == "qc" else column, value=label, n=len(sids))
+                        if len(sids) > 1 else _("{sid}: {column} {value}").format(sid=sids[0], column=column.upper() if column == "qc" else column, value=label))
+
+    def removeSelected(self):
+        """Delete: remove the selected subjects from the study (files are kept; Undo in the message)."""
+        studySession = _studySession()
+        sids = self.selectedIds()
+        if studySession is None or not sids:
+            return 0
+        count = studySession.removeSubjects(sids)
+        _setStudySelection([])
+        shell = _shell()
+        if shell is not None and count:
+            shell.toast(_("Removed {n} from the study (files are kept)").format(n=sids[0] if count == 1 else _("{n} subjects").format(n=count)),
+                        action=studySession.undoRemove, actionText=_("Undo"), level="consequence")
+        return count
+
+    def dispose(self):
+        if self in _studyViews:
+            _studyViews.remove(self)
+        for shortcut in self.shortcuts:
+            with _suppress():
+                shortcut.setEnabled(False)
+                shortcut.disconnect("activated()")
+        self.shortcuts = []
+        if _isAlive(self.widget):
+            ui.bindStyleSheet(self.widget, None)
+
+
+class _suppress:
+    """``contextlib.suppress(Exception)`` (a deleted Qt object raises from PythonQt)."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return True
+
+
+#
+# Study page of the canvas
+#
+
+
+class StudyPage(qt.QObject):
+    """The canvas with a study (SPEC 3.1): the study's name and counts, the subject list, and Open in Draw."""
+
+    def __init__(self):
+        qt.QObject.__init__(self)
+        self.widget = qt.QWidget()
+        self.widget.setObjectName("StudioStudyPage")
+        self.widget.setMaximumWidth(STUDY_PAGE_MAX_WIDTH)
+        layout = qt.QVBoxLayout(self.widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        headerRow = qt.QHBoxLayout()
+        headerRow.setSpacing(8)
+        titleColumn = qt.QVBoxLayout()
+        titleColumn.setSpacing(2)
+        self.titleLabel = qt.QLabel()
+        self.titleLabel.setObjectName("StudioStudyPageTitle")
+        self.titleLabel.setTextFormat(qt.Qt.PlainText)
+        _setFont(self.titleLabel, 16, qt.QFont.DemiBold)
+        titleColumn.addWidget(self.titleLabel)
+        self.countsLabel = qt.QLabel()
+        self.countsLabel.setObjectName("StudioStudyPageCounts")
+        self.countsLabel.setTextFormat(qt.Qt.PlainText)
+        _setFont(self.countsLabel, 12)
+        titleColumn.addWidget(self.countsLabel)
+        headerRow.addLayout(titleColumn, 1)
+        buttonRow = _buttonRow()
+        self.newCaseButton = _roleButton(_("New case on template"), "StudioStudyNewCaseButton", self._newCase, "secondary")
+        self.newCaseButton.setToolTip(_("Add a case without a scan and draw its lesion on the study template"))
+        self.openButton = _roleButton(_("Open in Draw →"), "StudioStudyOpenButton", self._open, "primary")
+        self.openButton.setToolTip(ui.tooltip(_("Open in Draw"), "Return", _("the selected subject, else the next untraced one")))
+        buttonRow.layout().addWidget(self.newCaseButton)
+        buttonRow.layout().addWidget(self.openButton)
+        buttonRow.setSizePolicy(qt.QSizePolicy.Maximum, qt.QSizePolicy.Fixed)
+        headerRow.addWidget(buttonRow)
+        layout.addLayout(headerRow)
+        self.mismatchLabel = qt.QLabel()
+        self.mismatchLabel.setObjectName("StudioStudyPageMismatch")
+        self.mismatchLabel.setWordWrap(True)
+        _setFont(self.mismatchLabel, 12)
+        self.mismatchLabel.hide()
+        layout.addWidget(self.mismatchLabel)
+        self.list = StudyList()
+        layout.addWidget(self.list.widget, 1)
+        self.hintLabel = qt.QLabel(_("Enter opens in Draw · P / X / U set QC · Delete removes from the study (files are kept) · / searches"))
+        self.hintLabel.setObjectName("StudioStudyPageHint")
+        self.hintLabel.setWordWrap(True)
+        _setFont(self.hintLabel, 12)
+        layout.addWidget(self.hintLabel)
+        ui.bindStyleSheet(self.widget, lambda: (
+            "QWidget#StudioStudyPage { background: transparent; }"
+            f"QLabel#StudioStudyPageTitle {{ color: {ui.token('text').name()}; }}"
+            f"QLabel#StudioStudyPageCounts, QLabel#StudioStudyPageHint {{ color: {ui.token('text2').name()}; }}"
+            f"QLabel#StudioStudyPageMismatch {{ color: {ui.token('warning').name()}; }}"))
+
+    def refresh(self):
+        studySession = _studySession()
+        if studySession is None:
+            return
+        self.titleLabel.setText(studySession.study.name)
+        self.countsLabel.setText(studyCounts(studySession.study))
+        studyUi = _studyUi()
+        mismatch = studyUi.templateMismatch(studySession.study) if studyUi is not None else None
+        self.mismatchLabel.setText(mismatch or "")
+        self.mismatchLabel.setVisible(bool(mismatch))
+        self.list.refresh()
+
+    def _open(self):
+        studySession = _studySession()
+        if studySession is None:
+            return None
+        sids = self.list.selectedIds()
+        sid = sids[0] if sids else studySession.current() or studySession.study.next_subject(None, status="untraced") or (
+            studySession.study.subject_ids[0] if len(studySession.study) else None)
+        if sid is None:
+            return None
+        return _runAction(lambda: studySession.open(sid), _("Failed to open {sid}.").format(sid=sid))
+
+    def _newCase(self):
+        studySession = _studySession()
+        if studySession is not None:
+            _runAction(studySession.newCase, _("Failed to add a case."))
+
+    def focusFirst(self):
+        self.list.focusTable()
+
+    def dispose(self):
+        self.list.dispose()
+        if _isAlive(self.widget):
+            ui.bindStyleSheet(self.widget, None)
+
+
+def studyCounts(studyObject):
+    """"42 subjects · 40 traced · 30 cases / 12 controls"."""
+    rows = studyObject.subjects
+    traced = sum(1 for row in rows if row.get("status") in ("traced", "mapped"))
+    cases = sum(1 for row in rows if row.get("group") == "case")
+    controls = sum(1 for row in rows if row.get("group") == "control")
+    text = (_("1 subject") if len(rows) == 1 else _("{n} subjects").format(n=len(rows))) + " · " + _("{traced} traced").format(traced=traced)
+    if cases or controls:
+        text += " · " + (_("1 case") if cases == 1 else _("{n} cases").format(n=cases)) + " / " + (
+            _("1 control") if controls == 1 else _("{n} controls").format(n=controls))
+    return text
+
+
+#
+# Inspector cards of a study (STUDY, SUBJECT, BATCH, IMPORT)
+#
+
+
+def _cardLabel(objectName, pixelSize=12, color="text2"):
+    label = qt.QLabel()
+    label.setObjectName(objectName)
+    label.setWordWrap(True)
+    label.setTextFormat(qt.Qt.PlainText)
+    label.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+    _setFont(label, pixelSize)
+    ui.bindStyleSheet(label, lambda: f"QLabel#{objectName} {{ color: {ui.token(color).name()}; }}")
+    return label
+
+
+def _rowButton(text, objectName, callback, role="secondary"):
+    row = _buttonRow()
+    button = _roleButton(text, objectName, callback, role)
+    row.layout().addWidget(button)
+    return row, button
+
+
+class StudyCard(qt.QObject):
+    """STUDY: name, folder, counts, save status, tracing template, grid questions, and the study actions."""
+
+    def __init__(self):
+        qt.QObject.__init__(self)
+        self.widget, layout = ui.card(_("Study"))
+        self.widget.setObjectName("StudioStudyCard")
+        self.nameLabel = _cardLabel("StudioStudyCardName", 14, "text")
+        _setFont(self.nameLabel, 14, qt.QFont.DemiBold)
+        layout.addWidget(self.nameLabel)
+        self.folderLink = _linkButton("", "StudioStudyCardFolder", self._showFolder)
+        self.folderLink.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+        ui.bindStyleSheet(self.folderLink, lambda: (
+            f"QPushButton#StudioStudyCardFolder {{ background: transparent; border: none; color: {ui.token('accent-fg').name()}; "
+            "padding: 0px; text-align: left; }"))
+        layout.addWidget(self.folderLink)
+        self.countsLabel = _cardLabel("StudioStudyCardCounts")
+        layout.addWidget(self.countsLabel)
+        self.saveLabel = _cardLabel("StudioStudyCardSaved")
+        layout.addWidget(self.saveLabel)
+        self.templateLabel = _cardLabel("StudioStudyCardTemplate")
+        layout.addWidget(self.templateLabel)
+        self.mismatchLabel = _cardLabel("StudioStudyCardMismatch", 12, "warning")
+        layout.addWidget(self.mismatchLabel)
+        self.templateRow, self.templateButton = _rowButton(_("Get MNI152NLin6Asym 1 mm template…"), "StudioStudyNlin6Button", self._getNlin6)
+        self.templateButton.setToolTip(_("FSL licence terms apply (non-commercial); downloaded on request"))
+        layout.addWidget(self.templateRow)
+        self.questionsLayout = qt.QVBoxLayout()
+        self.questionsLayout.setSpacing(6)
+        layout.addLayout(self.questionsLayout)
+        self.extraLayout = qt.QVBoxLayout()
+        self.extraLayout.setSpacing(6)
+        layout.addLayout(self.extraLayout)
+        actions = _buttonRow()
+        self.mergeButton = _roleButton(_("Merge job results"), "StudioStudyMergeButton", self._merge, "secondary")
+        self.mergeButton.setToolTip(_("Merge the values that background jobs posted (.studio/inbox)"))
+        self.closeButton = _roleButton(_("Close study"), "StudioStudyCloseButton", self._close, "secondary")
+        actions.layout().addWidget(self.mergeButton)
+        actions.layout().addWidget(self.closeButton)
+        layout.addWidget(actions)
+        self._extras = []
+        self._questionsSignature = None
+
+    def refresh(self):
+        studySession = _studySession()
+        if studySession is None:
+            return
+        studyObject = studySession.study
+        self.nameLabel.setText(studyObject.name)
+        self.folderLink.setText(_elideMiddle(studyObject.path, 46))
+        self.folderLink.setToolTip(studyObject.path)
+        self.countsLabel.setText(studyCounts(studyObject))
+        text, when = studySession.saveStatus()
+        self.saveLabel.setText(text + (" · " + relativeTime(when) if when else ""))
+        template = studyObject.template or {}
+        self.templateLabel.setText(_("Tracing template: {id} {res} mm").format(id=template.get("id", "—"), res=template.get("res", "")))
+        studyUi = _studyUi()
+        mismatch = studyUi.templateMismatch(studyObject) if studyUi is not None else None
+        self.mismatchLabel.setText(mismatch or "")
+        self.mismatchLabel.setVisible(bool(mismatch))
+        self.templateRow.setVisible(studyObject.trace_policy.get("space") == "MNI152NLin6Asym" and template.get("id") != "MNI152NLin6Asym")
+        self._refreshQuestions(studySession)
+        self._refreshExtras(studySession)
+
+    def _refreshQuestions(self, studySession):
+        questions = studySession.gridQuestions()
+        signature = tuple((gridId, tuple(candidates), count) for gridId, candidates, count in questions)
+        if signature == self._questionsSignature:
+            return
+        self._questionsSignature = signature
+        _clearLayout(self.questionsLayout)
+        for gridId, candidates, count in questions:
+            label = _cardLabel("StudioStudyGridQuestion", 12, "text")
+            label.setText(_("{n} files are on the {grid} grid, which several templates share. Which space are they in?").format(n=count, grid=gridId))
+            self.questionsLayout.addWidget(label)
+            row = qt.QWidget()
+            rowLayout = qt.QHBoxLayout(row)
+            rowLayout.setContentsMargins(0, 0, 0, 0)
+            rowLayout.setSpacing(4)
+            for candidate in candidates:
+                button = qt.QPushButton(candidate.replace("MNI152", ""))
+                button.setObjectName("StudioStudyGridAnswer")
+                button.setToolTip(candidate)
+                ui.setRole(button, "secondary")
+                button.connect("clicked()", lambda gridId=gridId, candidate=candidate: studySession.answerGrid(gridId, candidate))
+                rowLayout.addWidget(button)
+            self.questionsLayout.addWidget(row)
+
+    def _refreshExtras(self, studySession):
+        cards = libcardCards("study")
+        if [card["key"] for card in cards] != [key for key, _widget, _card in self._extras]:
+            for _key, widget, _card in self._extras:
+                _discard(widget)
+            self._extras = []
+            for card in cards:
+                try:
+                    widget = card["create"](studySession)
+                except Exception:
+                    logging.error(f"Studio Library: the card {card['key']} failed:\n{traceback.format_exc()}")
+                    continue
+                if widget is not None:
+                    self.extraLayout.addWidget(widget)
+                    self._extras.append((card["key"], widget, card))
+        for _key, widget, card in self._extras:
+            refresh = card.get("refresh")
+            if callable(refresh):
+                try:
+                    refresh(widget, studySession, studySelection())
+                except Exception:
+                    logging.error(f"Studio Library: the card {card['key']} failed:\n{traceback.format_exc()}")
+
+    def _showFolder(self):
+        studySession = _studySession()
+        if studySession is not None:
+            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(studySession.study.path))
+
+    def _merge(self):
+        studySession = _studySession()
+        if studySession is not None:
+            applied = studySession.applyInbox()
+            shell = _shell()
+            if shell is not None:
+                shell.toast(_("Merged {n} job results").format(n=len(applied)) if applied else _("No job results to merge"))
+
+    def _close(self):
+        studyUi = _studyUi()
+        if studyUi is not None:
+            _runAction(studyUi.closeStudy, _("Failed to close the study."))
+
+    def _getNlin6(self):
+        studySession = _studySession()
+        if studySession is None:
+            return
+        if not slicer.util.confirmOkCancelDisplay(_("MNI152NLin6Asym is distributed under the FSL licence terms (non-commercial use). "
+                                                    "Download the 1 mm template (about 3 MB) and trace on it?"), windowTitle=_("Tracing template")):
+            return
+        studyUi = _studyUi()
+
+        def download():
+            import SampleData
+
+            SampleData.SampleDataLogic().downloadSample(studyUi.NLIN6_1MM_SAMPLE)
+            studyObject = studySession.study
+            studyObject.metadata["template"] = {"id": "MNI152NLin6Asym", "res": 1, "source": "sampledata:" + studyUi.NLIN6_1MM_SAMPLE}
+            policy = studyObject.trace_policy
+            policy["res"] = 1
+            studyObject.trace_policy = policy
+            studySession.flush()
+            refreshStudy()
+
+        _runAction(download, _("Failed to download the MNI152NLin6Asym template."))
+
+    def dispose(self):
+        for _key, widget, _card in self._extras:
+            _discard(widget)
+        self._extras = []
+
+
+_resolutions = {}
+
+
+def _gridResolution(path):
+    """"1 mm", "2 mm" or "1.1 mm" of a NIfTI file (its header, cached by modification time), None when unknown."""
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        key = (path, os.path.getmtime(path))
+    except OSError:
+        return None
+    if key not in _resolutions:
+        try:
+            import importlib
+
+            nifti = importlib.import_module("LesionNetworkMappingLib.nifti")
+            affine = nifti.read_nifti_header(path)["affine"]
+            sizes = sorted({round(float((affine[0][axis] ** 2 + affine[1][axis] ** 2 + affine[2][axis] ** 2) ** 0.5), 2) for axis in range(3)})
+            _resolutions[key] = (f"{sizes[0]:g} mm" if len(sizes) == 1 else TIMES.join(f"{size:g}" for size in sizes) + " mm")
+        except Exception:
+            _resolutions[key] = None
+    return _resolutions[key]
+
+
+def _elideMiddle(text, length):
+    text = str(text)
+    if len(text) <= length:
+        return text
+    half = (length - 1) // 2
+    return text[:half] + "…" + text[-(length - 1 - half):]
+
+
+class SubjectCard(qt.QObject):
+    """SUBJECT: id, scan and lesion, space chip, volume, group, scores, notes and Open in Draw (the selected or current subject)."""
+
+    def __init__(self):
+        qt.QObject.__init__(self)
+        self.widget, layout = ui.card(_("Subject"))
+        self.widget.setObjectName("StudioSubjectCard")
+        self.sid = None
+        idRow = qt.QHBoxLayout()
+        idRow.setSpacing(8)
+        self.idLabel = _cardLabel("StudioSubjectCardId", 14, "text")
+        _setFont(self.idLabel, 14, qt.QFont.DemiBold)
+        idRow.addWidget(self.idLabel, 1)
+        self.spaceChip = ui.chip("", "neutral")
+        self.spaceChip.setObjectName("StudioSubjectSpaceChip")
+        idRow.addWidget(self.spaceChip)
+        layout.addLayout(idRow)
+        self.filesLabel = _cardLabel("StudioSubjectCardFiles")
+        layout.addWidget(self.filesLabel)
+        self.metricsLabel = _cardLabel("StudioSubjectCardMetrics", 12, "text")
+        layout.addWidget(self.metricsLabel)
+        groupRow = qt.QHBoxLayout()
+        groupLabel = _cardLabel("StudioSubjectCardGroupLabel")
+        groupLabel.setText(_("Group"))
+        groupRow.addWidget(groupLabel)
+        self.groupFrame, self.groupButtons = ui.segmented([_("Case"), _("Control"), "—"])
+        self.groupFrame.setObjectName("StudioSubjectGroup")
+        # QButtonGroup.buttonClicked(int) is gone in Qt 6; idClicked(int) exists since Qt 5.15
+        self.groupButtons.connect("idClicked(int)" if hasattr(self.groupButtons, "idClicked") else "buttonClicked(int)", self._onGroup)
+        groupRow.addWidget(self.groupFrame)
+        groupRow.addStretch(1)
+        layout.addLayout(groupRow)
+        self.scoresLabel = _cardLabel("StudioSubjectCardScores", 12, "text")
+        layout.addWidget(self.scoresLabel)
+        self.warpRow, self.warpButton = _rowButton(_("Warp to MNI152NLin6Asym…"), "StudioSubjectWarpButton", self._warp)
+        self.warpButton.setToolTip(_("Resample the 2009c lesion onto the connectome's FSL MNI152 grid (the original is kept)"))
+        layout.addWidget(self.warpRow)
+        self.notesEdit = qt.QLineEdit()
+        self.notesEdit.setObjectName("StudioSubjectNotes")
+        self.notesEdit.setPlaceholderText(_("Notes"))
+        self.notesEdit.connect("editingFinished()", self._onNotes)
+        layout.addWidget(self.notesEdit)
+        self.recoverRow, self.recoverButton = _rowButton(_("Recover unsaved tracing"), "StudioSubjectRecoverButton", self._recover)
+        layout.addWidget(self.recoverRow)
+        self.extraLayout = qt.QVBoxLayout()
+        layout.addLayout(self.extraLayout)
+        self._extras = []
+        self.openRow, self.openButton = _rowButton(_("Open in Draw"), "StudioSubjectOpenButton", self._open, "primary")
+        layout.addWidget(self.openRow)
+
+    def refresh(self, sid):
+        studySession = _studySession()
+        self.sid = sid
+        if studySession is None or sid is None or sid not in studySession.study:
+            self.widget.hide()
+            return
+        self.widget.show()
+        row = studySession.study.subject(sid)
+        current = studySession.current() == sid
+        self.idLabel.setText(sid + ("  ·  " + _("open in Draw") if current else ""))
+        text, level = spaceText(row)
+        studyUi = _studyUi()
+        target = studySession.study.trace_policy.get("space")
+        if not _missing(row.get("space")) and target and row.get("space") not in (target, "native") and _missing(row.get("norm_method")):
+            text, level = _("{space} ≠ connectome").format(space=str(row["space"]).replace("MNI152", "")), "warn"
+        resolution = _gridResolution(studySession.study.abspath(row.get("lesion")) or studySession.study.abspath(row.get("scan")))
+        if resolution and level != "warn" and row.get("space") != "native":
+            text = f"{text} {resolution}"
+        self.spaceChip.setText(text)
+        # Scan space is amber on the chip (Map needs MNI lesions), plain in the list
+        ui.setChipLevel(self.spaceChip, "warn" if level == "warn" or row.get("space") == "native" else "neutral")
+        files = []
+        for key, label in (("scan", _("Scan")), ("lesion", _("Lesion"))):
+            files.append(f"{label}: {row.get(key) if not _missing(row.get(key)) else '—'}")
+        self.filesLabel.setText("\n".join(files))
+        metrics = [studyCell(row, "volume_ml")[0] + " mL"]
+        if not _missing(row.get("n_parts")):
+            metrics.append(_("{n} parts").format(n=row["n_parts"]) if row["n_parts"] != "1" else _("1 part"))
+        if current and studyUi is not None:
+            node = studySession.segmentationNode()
+            draw = _draw()
+            lesion = draw.lesionMetrics(node, compute=False) if draw is not None and node is not None else None
+            if lesion and lesion.get("sides"):
+                metrics.insert(0, lesion["sides"])
+        metrics.append(studyCell(row, "status")[0])
+        self.metricsLabel.setText(" · ".join(metrics))
+        group = row.get("group")
+        index = {"case": 0, "control": 1}.get(group, 2)
+        button = self.groupButtons.button(index)
+        if button is not None and not button.isChecked():
+            button.setChecked(True)
+        scores = []
+        for column, confirmed in studySession.study.score_columns():
+            value = row.get(column)
+            if not _missing(value):
+                scores.append(f"{column}: {value}" + ("" if confirmed else " ?"))
+        self.scoresLabel.setText("  ·  ".join(scores))
+        self.scoresLabel.setVisible(bool(scores))
+        notes = "" if _missing(row.get("notes")) else str(row["notes"])
+        if not self.notesEdit.hasFocus() and str(self.notesEdit.text) != notes:
+            self.notesEdit.setText(notes)
+        journal = getattr(studySession, "_journal", None)
+        self.recoverRow.setVisible(bool(current and journal is not None and journal.pendingRecovery(sid) is not None))
+        self.warpRow.setVisible(bool(studyUi is not None and studyUi.canWarpToConnectomeSpace(studySession, sid)))
+        self.openButton.setText(_("Open in Draw") if not current else _("Continue in Draw →"))
+        self._refreshExtras(studySession, sid)
+
+    def _refreshExtras(self, studySession, sid):
+        sections = libcardSubjectSections()
+        if [section["key"] for section in sections] != [key for key, _widget, _section in self._extras]:
+            for _key, widget, _section in self._extras:
+                _discard(widget)
+            self._extras = []
+            for section in sections:
+                try:
+                    widget = section["create"](studySession)
+                except Exception:
+                    logging.error(f"Studio Library: the subject section {section['key']} failed:\n{traceback.format_exc()}")
+                    continue
+                if widget is not None:
+                    self.extraLayout.addWidget(widget)
+                    self._extras.append((section["key"], widget, section))
+        for _key, widget, section in self._extras:
+            refresh = section.get("refresh")
+            if callable(refresh):
+                try:
+                    refresh(widget, studySession, sid)
+                except Exception:
+                    logging.error(f"Studio Library: the subject section {section['key']} failed:\n{traceback.format_exc()}")
+
+    def _onGroup(self, index):
+        studySession = _studySession()
+        if studySession is None or self.sid is None:
+            return
+        group = ("case", "control", "n/a")[index]
+        if studySession.study.subject(self.sid).get("group") != group:
+            studySession.setValues([self.sid], {"group": group})
+
+    def _onNotes(self):
+        studySession = _studySession()
+        if studySession is None or self.sid is None or self.sid not in studySession.study:
+            return
+        text = str(self.notesEdit.text).strip()
+        current = studySession.study.subject(self.sid).get("notes")
+        if text != ("" if _missing(current) else current):
+            studySession.setValues([self.sid], {"notes": text or None})
+
+    def _open(self):
+        studySession = _studySession()
+        if studySession is not None and self.sid is not None:
+            _runAction(lambda: studySession.open(self.sid), _("Failed to open {sid}.").format(sid=self.sid))
+
+    def _warp(self):
+        studyUi = _studyUi()
+        if studyUi is not None and self.sid is not None:
+            _runAction(lambda: studyUi.warpToConnectomeSpace(self.sid, shell=_shell()), _("Failed to warp {sid}.").format(sid=self.sid))
+
+    def _recover(self):
+        studySession = _studySession()
+        journal = getattr(studySession, "_journal", None) if studySession is not None else None
+        if journal is not None:
+            journal.recover(self.sid)
+            refreshStudy()
+
+    def dispose(self):
+        for _key, widget, _section in self._extras:
+            _discard(widget)
+        self._extras = []
+
+
+class BatchCard(qt.QObject):
+    """BATCH (several subjects selected): set the group, set a score column, remove from the study (files are kept)."""
+
+    def __init__(self):
+        qt.QObject.__init__(self)
+        self.widget, layout = ui.card(_("Batch"))
+        self.widget.setObjectName("StudioBatchCard")
+        self.countLabel = _cardLabel("StudioBatchCount", 12, "text")
+        layout.addWidget(self.countLabel)
+        groupRow = _buttonRow()
+        for text, group, objectName in ((_("Case"), "case", "StudioBatchCaseButton"), (_("Control"), "control", "StudioBatchControlButton"),
+                                        (_("No group"), "n/a", "StudioBatchNoGroupButton")):
+            groupRow.layout().addWidget(_roleButton(text, objectName, lambda group=group: self._setValue("group", group), "secondary"))
+        layout.addWidget(groupRow)
+        scoreRow = qt.QHBoxLayout()
+        scoreRow.setSpacing(6)
+        self.scoreColumn = qt.QComboBox()
+        self.scoreColumn.setObjectName("StudioBatchScoreColumn")
+        self.scoreColumn.setEditable(True)
+        self.scoreColumn.setToolTip(_("A score column (choose one, or type a new name)"))
+        self.scoreColumn.lineEdit().setPlaceholderText(_("Score column"))
+        scoreRow.addWidget(self.scoreColumn, 1)
+        self.scoreValue = qt.QLineEdit()
+        self.scoreValue.setObjectName("StudioBatchScoreValue")
+        self.scoreValue.setPlaceholderText(_("Value"))
+        scoreRow.addWidget(self.scoreValue, 1)
+        self.scoreButton = qt.QPushButton(_("Set"))
+        self.scoreButton.setObjectName("StudioBatchScoreButton")
+        ui.setRole(self.scoreButton, "secondary")
+        self.scoreButton.connect("clicked()", self._setScore)
+        scoreRow.addWidget(self.scoreButton)
+        layout.addLayout(scoreRow)
+        self.removeRow, self.removeButton = _rowButton(_("Remove from study"), "StudioBatchRemoveButton", self._remove)
+        self.removeButton.setToolTip(_("The subjects leave the study; their files are never deleted (Delete in the list; Undo in the message)"))
+        layout.addWidget(self.removeRow)
+        self.extraLayout = qt.QVBoxLayout()
+        layout.addLayout(self.extraLayout)
+        self._extras = []
+
+    def refresh(self, sids):
+        studySession = _studySession()
+        if studySession is None or len(sids) < 2:
+            self.widget.hide()
+            return
+        self.widget.show()
+        self.countLabel.setText(_("{n} subjects selected").format(n=len(sids)))
+        columns = [column for column, _confirmed in studySession.study.score_columns()]
+        current = str(self.scoreColumn.currentText)
+        if [str(self.scoreColumn.itemText(index)) for index in range(self.scoreColumn.count)] != columns:
+            self.scoreColumn.clear()
+            for column in columns:
+                self.scoreColumn.addItem(column)
+            if current:
+                self.scoreColumn.setEditText(current)
+        cards = libcardCards("batch")
+        if [card["key"] for card in cards] != [key for key, _widget, _card in self._extras]:
+            for _key, widget, _card in self._extras:
+                _discard(widget)
+            self._extras = []
+            for card in cards:
+                try:
+                    widget = card["create"](studySession)
+                except Exception:
+                    logging.error(f"Studio Library: the card {card['key']} failed:\n{traceback.format_exc()}")
+                    continue
+                if widget is not None:
+                    self.extraLayout.addWidget(widget)
+                    self._extras.append((card["key"], widget, card))
+        for _key, widget, card in self._extras:
+            if callable(card.get("refresh")):
+                try:
+                    card["refresh"](widget, studySession, list(sids))
+                except Exception:
+                    logging.error(f"Studio Library: the card {card['key']} failed:\n{traceback.format_exc()}")
+
+    def _setValue(self, column, value):
+        studySession = _studySession()
+        sids = studySelection()
+        if studySession is not None and sids:
+            _runAction(lambda: studySession.setValues(sids, {column: value}), _("Failed to set {column}.").format(column=column))
+
+    def _setScore(self):
+        column = re.sub(r"\s+", "_", str(self.scoreColumn.currentText).strip())
+        if not column:
+            return
+        if column in _studyModule().STANDARD_COLUMNS:
+            slicer.util.errorDisplay(_("{column} is a standard column of the study, not a score").format(column=column))
+            return
+        self._setValue(column, str(self.scoreValue.text).strip() or None)
+
+    def _remove(self):
+        canvasList = _canvas.studyPage.list if _canvas is not None and _canvas._studyPage is not None else None
+        target = canvasList if canvasList is not None and _isAlive(canvasList.widget) else next(iter(_studyViews), None)
+        if target is not None:
+            target.removeSelected()
+
+    def dispose(self):
+        for _key, widget, _card in self._extras:
+            _discard(widget)
+        self._extras = []
+
+
+class ImportCard(qt.QObject):
+    """IMPORT (collapsed): the lesion and id rules, Add files…, Add folder…, Import participants.tsv…."""
+
+    def __init__(self):
+        qt.QObject.__init__(self)
+        self.widget = ctk.ctkCollapsibleButton()
+        self.widget.setObjectName("StudioImportCard")
+        self.widget.text = _("Import")
+        self.widget.collapsed = True
+        layout = qt.QFormLayout(self.widget)
+        layout.setSpacing(6)
+        self.lesionRule = qt.QLineEdit()
+        self.lesionRule.setObjectName("StudioImportLesionRule")
+        self.lesionRule.setToolTip(_("File names with one of these whole words are lesion masks (a regular expression)"))
+        self.lesionRule.connect("editingFinished()", self._saveRules)
+        layout.addRow(_("Lesion rule"), self.lesionRule)
+        self.idRule = qt.QLineEdit()
+        self.idRule.setObjectName("StudioImportIdRule")
+        self.idRule.setToolTip(_("Subject ids in file and folder names (a regular expression)"))
+        self.idRule.connect("editingFinished()", self._saveRules)
+        layout.addRow(_("ID rule"), self.idRule)
+        for text, objectName, callback in ((_("Add files…"), "StudioImportAddFilesButton", self._addFiles),
+                                           (_("Add folder…"), "StudioImportAddFolderButton", self._addFolder),
+                                           (_("Import participants.tsv…"), "StudioImportTableButton", self._importTable)):
+            row, _button = _rowButton(text, objectName, callback)
+            layout.addRow(row)
+        self.extraLayout = qt.QVBoxLayout()
+        layout.addRow(self.extraLayout)
+        self._extras = []
+
+    def refresh(self):
+        studySession = _studySession()
+        if studySession is None:
+            return
+        rules = studySession.study.rules
+        for edit, key in ((self.lesionRule, "lesion"), (self.idRule, "id")):
+            if not edit.hasFocus() and str(edit.text) != rules[key]:
+                edit.setText(rules[key])
+        cards = libcardCards("import")
+        if [card["key"] for card in cards] != [key for key, _widget, _card in self._extras]:
+            for _key, widget, _card in self._extras:
+                _discard(widget)
+            self._extras = []
+            for card in cards:
+                try:
+                    widget = card["create"](studySession)
+                except Exception:
+                    logging.error(f"Studio Library: the card {card['key']} failed:\n{traceback.format_exc()}")
+                    continue
+                if widget is not None:
+                    self.extraLayout.addWidget(widget)
+                    self._extras.append((card["key"], widget, card))
+
+    def _saveRules(self):
+        studySession = _studySession()
+        if studySession is None:
+            return
+        rules = {"lesion": str(self.lesionRule.text).strip(), "id": str(self.idRule.text).strip()}
+        for key, value in rules.items():
+            try:
+                re.compile(value)
+            except re.error as e:
+                slicer.util.errorDisplay(_("The {key} rule is not a valid regular expression: {error}").format(key=key, error=e))
+                return
+        if rules != {key: studySession.study.rules[key] for key in ("lesion", "id")}:
+            studySession.study.metadata["rules"] = rules
+            studySession.flush()
+
+    def _addFiles(self):
+        studySession = _studySession()
+        if studySession is None:
+            return
+        paths = qt.QFileDialog.getOpenFileNames(slicer.util.mainWindow(), _("Add files to the study"), studySession.study.path, "NIfTI (*.nii *.nii.gz)")
+        if paths:
+            self._report(studySession, _runAction(lambda: studySession.addFiles([str(path) for path in paths]), _("Failed to add the files.")))
+
+    def _addFolder(self):
+        studySession = _studySession()
+        if studySession is None:
+            return
+        folder = qt.QFileDialog.getExistingDirectory(slicer.util.mainWindow(), _("Add a folder to the study"), studySession.study.path)
+        if folder:
+            self._report(studySession, _runAction(lambda: studySession.addFiles([str(folder)]), _("Failed to add the folder.")))
+
+    def _importTable(self):
+        studySession = _studySession()
+        if studySession is None:
+            return
+        path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Import participants table"), studySession.study.path,
+                                              _("Participants table") + " (*.tsv *.csv)")
+        if path:
+            result = _runAction(lambda: studySession.importTable(str(path)), _("Failed to import the table."))
+            shell = _shell()
+            if result and shell is not None:
+                shell.toast(_("{added} added, {updated} updated").format(added=len(result["added"]), updated=len(result["updated"])))
+
+    @staticmethod
+    def _report(studySession, report):
+        shell = _shell()
+        if report and shell is not None:
+            shell.toast(_("{added} subjects added, {updated} updated, {skipped} files skipped").format(
+                added=len(report["added"]), updated=len(report["updated"]), skipped=len(report["skipped"])), ms=4000)
+
+    def dispose(self):
+        for _key, widget, _card in self._extras:
+            _discard(widget)
+        self._extras = []
+
+
+class StudyCards(qt.QObject):
+    """The inspector of Library with a study: STUDY, SUBJECT (one selected or the current subject), BATCH (several selected),
+    IMPORT, and in Classic the subject list itself (the canvas is not used there).
+    """
+
+    def __init__(self, withList=False):
+        qt.QObject.__init__(self)
+        self.widget = qt.QWidget()
+        self.widget.setObjectName("StudioStudyCards")
+        layout = qt.QVBoxLayout(self.widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        self.studyCard = StudyCard()
+        layout.addWidget(self.studyCard.widget)
+        self.list = None
+        if withList:
+            self.list = StudyList(compact=True)
+            self.list.widget.setMinimumHeight(260)
+            layout.addWidget(self.list.widget)
+        self.subjectCard = SubjectCard()
+        layout.addWidget(self.subjectCard.widget)
+        self.batchCard = BatchCard()
+        layout.addWidget(self.batchCard.widget)
+        self.importCard = ImportCard()
+        layout.addWidget(self.importCard.widget)
+        self.view = _CardsView(self)
+        _studyViews.append(self.view)
+
+    def refresh(self):
+        studySession = _studySession()
+        if studySession is None:
+            self.widget.hide()
+            return
+        self.widget.show()
+        self.studyCard.refresh()
+        if self.list is not None:
+            self.list.refresh()
+        self.refreshSelection()
+        self.importCard.refresh()
+
+    def refreshSelection(self):
+        studySession = _studySession()
+        if studySession is None:
+            return
+        sids = studySelection()
+        self.subjectCard.refresh(sids[0] if len(sids) == 1 else (studySession.current() if not sids else None))
+        self.batchCard.refresh(sids)
+
+    def dispose(self):
+        if self.view in _studyViews:
+            _studyViews.remove(self.view)
+        for card in (self.studyCard, self.subjectCard, self.batchCard, self.importCard):
+            card.dispose()
+        if self.list is not None:
+            self.list.dispose()
+
+
+class _CardsView:
+    """Registers the inspector cards as a study view (selection changes refresh the SUBJECT and BATCH cards)."""
+
+    def __init__(self, cards):
+        self.cards = cards
+        self.widget = cards.widget
+
+    def refresh(self):
+        self.cards.refresh()
+
+    def onSelectionChanged(self):
+        self.cards.refreshSelection()
+
+
+#
+# Recent studies (Studio/RecentStudies, listed first in Recent)
+#
+
+
+class RecentStudyEntry:
+    """A study opened before (``Studio/RecentStudies``): "Study · <folder>"; it opens the study again."""
+
+    kind = "study"
+
+    def __init__(self, record):
+        self.path = str(record.get("path", ""))
+        self.name = str(record.get("name") or os.path.basename(self.path.rstrip("/\\")))
+        self.openedTime = record.get("time")
+        self.folder = _("Study · {folder}").format(folder=self.path)
+        self.properties = {}
+        self.action = None
+
+    def exists(self):
+        return os.path.isfile(os.path.join(self.path, "study.json"))
+
+    def timeText(self, now=None):
+        return _("opened {when}").format(when=relativeTime(self.openedTime, now)) if self.openedTime else ""
+
+    def load(self, shell=None):
+        studyUi = _studyUi()
+        return studyUi.openStudy(self.path, shell) if studyUi is not None else None
+
+    def __repr__(self):
+        return f"RecentStudyEntry({self.path!r})"
+
+
+RECENT_STUDY_ROW_COUNT = 3
+
+
+def recentStudyEntries(limit=RECENT_STUDY_ROW_COUNT):
+    """The studies opened before that still exist, most recent first."""
+    studyUi = _studyUi()
+    if studyUi is None:
+        return []
+    entries = [RecentStudyEntry(record) for record in studyUi.recentStudies()]
+    return [entry for entry in entries if entry.exists()][:limit]
+
+
+#
 # Folder card
 #
 
@@ -1964,7 +3562,8 @@ class OpenNowCard(qt.QObject):
 class FolderCard:
     """Card offered for a folder with several NIfTI files: "N NIfTI files found", the reason when there are too many to
     load at once, and an enabled way on: Load all (up to ``MAX_LOAD_ALL_FILES`` files), Open one subject…, and
-    Create study… when the study page (W3-07) is part of this build.
+    Create study when the study page (W3-07) is part of this build: the primary button for any number of files, with the
+    group mapping of a participants table whose groups are not case / control.
     """
 
     def __init__(self, folder, files, onClose=None):
@@ -2006,8 +3605,13 @@ class FolderCard:
             self.participantsLabel = self._textLabel(line, "StudioFolderCardParticipants")
             layout.addWidget(self.participantsLabel)
 
+        self.participantsPath = table
         # The reason is in the card, not in a tool tip
         self.studyAvailable = _studyUi() is not None
+        self.groupColumn = None
+        self.groupCombos = {}
+        if self.studyAvailable:
+            self._addStudyPlan(layout, folder, table)
         self.reasonLabel = None
         if self.tooMany:
             if self.studyAvailable:
@@ -2022,8 +3626,10 @@ class FolderCard:
         buttonRow.addStretch(1)
         self.createStudyButton = None
         if self.studyAvailable:
-            # The study is the way on for a folder of subjects
-            self.createStudyButton = qt.QPushButton(_("Create study…"))
+            # The study is the way on for a folder of subjects (any number of files)
+            self.createStudyButton = qt.QPushButton(_("Create study"))
+            self.createStudyButton.setToolTip(_("Make a study of this folder: study.json, participants.tsv and lesions/ are written here; "
+                                                "your scans and masks are never changed"))
             self.createStudyButton.setObjectName("StudioFolderCardCreateStudyButton")
             self.createStudyButton.connect("clicked()", self.createStudy)
         self.openOneButton = qt.QPushButton(_("Open one subject…"))
@@ -2039,7 +3645,7 @@ class FolderCard:
         else:
             self.loadAllButton.setToolTip("\n".join(os.path.basename(path) for path in self.files))
         self.loadAllButton.connect("clicked()", self.loadAll)
-        # The rightmost button is the primary one: Create study…, else the way on (Open one subject… for a large folder, else Load all)
+        # The rightmost button is the primary one: Create study, else the way on (Open one subject… for a large folder, else Load all)
         order = [self.loadAllButton, self.openOneButton] if self.tooMany else [self.openOneButton, self.loadAllButton]
         if self.createStudyButton is not None:
             order.append(self.createStudyButton)
@@ -2082,12 +3688,67 @@ class FolderCard:
         self.close()
         return _runAction(lambda: _importer().loadFiles(paths, _shell()), _("Failed to load the files."))
 
-    def createStudy(self):
+    def _addStudyPlan(self, layout, folder, table):
+        """Where the study goes and, for a participants table whose groups are not case / control, how they map (L-01)."""
         studyUi = _studyUi()
-        handler = getattr(studyUi, "createStudy", None) if studyUi is not None else None
-        if handler is not None:
-            return _runAction(lambda: handler(self.files, _shell()), _("Failed to create the study."))
-        return None
+        self.planLabel = self._textLabel(_("Create study writes study.json and lesions/ in this folder; your files are not changed."),
+                                         "StudioFolderCardStudyPlan")
+        layout.addWidget(self.planLabel)
+        if not table:
+            return
+        try:
+            columns, rows = studyUi.readTable(table)
+            proposal = studyUi.groupMappingProposal(columns, rows)
+        except Exception:
+            logging.warning(f"Studio Library: {table} could not be read:\n{traceback.format_exc()}")
+            return
+        if proposal is None:
+            return
+        self.groupColumn, mapping = proposal
+        label = self._textLabel(_("Groups in column '{column}':").format(column=self.groupColumn), "StudioFolderCardGroupTitle")
+        layout.addWidget(label)
+        targets = ((_("Case"), "case"), (_("Control"), "control"), (_("Exclude"), "exclude"), ("—", None))
+        for value, target in list(mapping.items())[:8]:
+            row = qt.QHBoxLayout()
+            row.setSpacing(8)
+            valueLabel = self._textLabel(f"{value}  →", "StudioFolderCardGroupValue")
+            row.addWidget(valueLabel, 1)
+            combo = qt.QComboBox()
+            combo.setObjectName("StudioFolderCardGroupCombo")
+            for text, data in targets:
+                combo.addItem(text, data)
+            combo.setCurrentIndex(next(index for index, (_text, data) in enumerate(targets) if data == target))
+            row.addWidget(combo)
+            layout.addLayout(row)
+            self.groupCombos[value] = combo
+
+    def groupMapping(self):
+        """{value: "case" | "control" | "exclude" | None} as chosen in the card (None without a group column to map)."""
+        if not self.groupCombos:
+            return None
+        return {value: combo.itemData(combo.currentIndex) for value, combo in self.groupCombos.items()}
+
+    def createStudy(self):
+        """Create the study of this folder (and open its subject list): one click, the group mapping as shown."""
+        studyUi = _studyUi()
+        if studyUi is None:
+            return None
+        files, folder, table = self.files, self.folder, self.participantsPath
+        groupColumn, mapping = self.groupColumn, self.groupMapping()
+
+        def create():
+            inFolder = table is not None and os.path.normcase(os.path.dirname(os.path.abspath(table))) == os.path.normcase(os.path.abspath(folder))
+            studySession = studyUi.createStudy(files, _shell(), folder=folder, groupColumn=groupColumn if inFolder else None,
+                                               groupMapping=mapping if inFolder else None)
+            if table is not None and not inFolder:
+                # A participants table of the parent folder (BIDS): imported into the new study
+                studySession.importTable(table, groupColumn, mapping)
+            return studySession
+
+        studySession = _runAction(create, _("Failed to create the study."))
+        if studySession is not None:
+            self.close()
+        return studySession
 
     def close(self):
         ui.removePaletteListener(self._refreshIcons)
@@ -2155,11 +3816,22 @@ class LibraryCanvas(qt.QObject):
         self.contentLayout.setSpacing(0)
         # The empty state is centred; the current work starts at the top
         self.contentLayout.addStretch(2)
+        # With a study (W3-07): the study page, as wide as the window allows (up to STUDY_PAGE_MAX_WIDTH)
+        self.studyContainer = qt.QWidget()
+        self.studyContainer.setObjectName("StudioStudyContainer")
+        studyRow = qt.QHBoxLayout(self.studyContainer)
+        studyRow.setContentsMargins(0, 0, 0, 0)
+        self.studyRow = studyRow
+        self.studyContainer.hide()
+        self.contentLayout.addWidget(self.studyContainer)
+        self._studyPage = None
+        self._studyShown = False
         columnRow = qt.QHBoxLayout()
         columnRow.addStretch(1)
         column = qt.QWidget()
         column.setObjectName("StudioLibraryColumn")
         column.setFixedWidth(COLUMN_WIDTH)
+        self.column = column
         columnRow.addWidget(column)
         columnRow.addStretch(1)
         self.contentLayout.addLayout(columnRow)
@@ -2276,6 +3948,17 @@ class LibraryCanvas(qt.QObject):
         linkRow = qt.QHBoxLayout()
         linkRow.setSpacing(4)
         linkRow.addStretch(1)
+        self.newStudyLink = None
+        self.openStudyLink = None
+        if _studyUi() is not None:
+            self.newStudyLink = self._link(_("New study…"), "StudioLibraryNewStudyLink", newStudy)
+            self.newStudyLink.setToolTip(_("Make a study of a folder of scans and lesion masks"))
+            self.openStudyLink = self._link(_("Open study…"), "StudioLibraryOpenStudyLink", openStudy)
+            for link in (self.newStudyLink, self.openStudyLink):
+                linkRow.addWidget(link)
+                separator = qt.QLabel("·")
+                separator.setObjectName("StudioLibraryLinkSeparator")
+                linkRow.addWidget(separator)
         self.sampleDataLink = self._link(_("Load sample data"), "StudioLibrarySampleDataLink", openSampleData)
         linkRow.addWidget(self.sampleDataLink)
         separator = qt.QLabel("·")
@@ -2393,11 +4076,48 @@ class LibraryCanvas(qt.QObject):
         """True if the scene has data to show (``library.hasData()``): the page then shows the current work."""
         return hasData()
 
+    @property
+    def studyPage(self):
+        """The study page (created when a study is open for the first time)."""
+        if self._studyPage is None:
+            self._studyPage = StudyPage()
+            self.studyRow.addStretch(1)
+            self.studyRow.addWidget(self._studyPage.widget, 40)
+            self.studyRow.addStretch(1)
+        return self._studyPage
+
+    def _showStudy(self, shown):
+        """The study page replaces the column (drop zone, buttons, Recent) while a study is open (R7)."""
+        if shown == self._studyShown:
+            return
+        self._studyShown = shown
+        self.studyContainer.setVisible(shown)
+        self.column.setVisible(not shown)
+        # Content stretches: top, study page, column row, bottom
+        self.contentLayout.setStretch(1, 1 if shown else 0)
+        self.contentLayout.setStretch(3, 0 if shown else 3)
+        if shown:
+            self.contentLayout.setStretch(0, 0)
+        else:
+            self._dataShown = None  # _setStrip() sets the top stretch again
+
     def refreshData(self):
-        """Show the current work (and the loaded set) when data is loaded, else the empty state."""
-        shell = _shell()
-        study = shell is not None and getattr(shell, "studySession", None) is not None
-        data = hasData() and not study
+        """Show the open study, else the current work (and the loaded set) when data is loaded, else the empty state."""
+        studySession = _studySession()
+        if studySession is not None:
+            self._showStudy(True)
+            try:
+                self.studyPage.refresh()
+            except Exception:
+                logging.error(f"Studio Library: the study page failed:\n{traceback.format_exc()}")
+            for card in (self._currentWork, self._loadedSet):
+                if card is not None:
+                    card.widget.hide()
+            self.dataSection.hide()
+            return True
+        if self._studyPage is not None:
+            self._showStudy(False)
+        data = hasData()
         shown = False
         if data:
             # A card that fails never keeps the page from showing
@@ -2435,8 +4155,12 @@ class LibraryCanvas(qt.QObject):
         self.recentList.refresh(force=False)
 
     def focusFirst(self):
-        """Focus "Continue in Draw" when the current work is shown, else the first recent file (Enter loads it), else Open…."""
-        if self.isStrip() and self.currentWork.widget.isVisible() and self.currentWork.continueButton.isEnabled():
+        """Focus the subject list of an open study, else "Continue in Draw" when the current work is shown, else the first recent
+        file (Enter loads it), else Open….
+        """
+        if self._studyPage is not None and self._studyShown:
+            self._studyPage.focusFirst()
+        elif self.isStrip() and self.currentWork.widget.isVisible() and self.currentWork.continueButton.isEnabled():
             self.currentWork.continueButton.setFocus(qt.Qt.OtherFocusReason)
         elif self.isStrip() and self.loadedSet.widget.isVisible():
             self.loadedSet.reviewButton.setFocus(qt.Qt.OtherFocusReason)
@@ -2509,7 +4233,7 @@ class LibraryCanvas(qt.QObject):
         ui.removePaletteListener(self._refreshIcons)
         self.folderCardSlot.close()
         self.recentList.dispose()
-        for card in (self._currentWork, self._loadedSet):
+        for card in (self._currentWork, self._loadedSet, self._studyPage):
             if card is not None:
                 card.dispose()
         _clearLayout(self.footerActionsLayout)
@@ -2548,6 +4272,7 @@ class LibraryPanel(qt.QObject):
         self.folderCardSlot = None
         self.recentCard = None
         self.recentList = None
+        self.studyCards = None
         self._sceneRefresher = _SceneRefresher(self.refresh)
         _installEventFilter(self.widget, self)
         _panels.append(self)
@@ -2562,13 +4287,19 @@ class LibraryPanel(qt.QObject):
         layout = qt.QVBoxLayout(self.widget)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
+        _listenToStudies()
 
         self.openCard, openLayout = ui.card(_("Open"))
         self.openCard.setObjectName("StudioLibraryOpenCard")
         self.openButton = _secondaryButton(_("Open…"), "StudioOpenButton", openFiles)
         self.openFolderButton = _secondaryButton(_("Open folder…"), "StudioOpenFolderButton", openFolder)
         self.templateButton = _secondaryButton(_("Start on MNI template"), "StudioStartOnTemplateButton", startOnTemplate)
-        for button in (self.openButton, self.openFolderButton, self.templateButton):
+        buttons = [self.openButton, self.openFolderButton, self.templateButton]
+        self.openStudyButton = None
+        if _studyUi() is not None:
+            self.openStudyButton = _secondaryButton(_("Open study…"), "StudioOpenStudyButton", openStudy)
+            buttons.append(self.openStudyButton)
+        for button in buttons:
             row = _buttonRow()
             row.layout().addWidget(button)
             openLayout.addWidget(row)
@@ -2597,16 +4328,37 @@ class LibraryPanel(qt.QObject):
         return _shell() is not None
 
     def refresh(self):
-        """Show the cards that fit: with the canvas, what is open; without it, the Open buttons, Recent and what is open."""
+        """Show the cards that fit: with a study, its cards (STUDY, SUBJECT, BATCH, IMPORT, and in Classic the subject list);
+        with the canvas, what is open; without it, the Open buttons, Recent and what is open.
+        """
         if not self.isBuilt():
             return
         withCanvas = self.withCanvas()
+        studySession = _studySession()
+        if studySession is not None:
+            self._ensureStudyCards(withList=not withCanvas)
+            for card in (self.openCard, self.recentCard, self.openNowCard.widget):
+                card.hide()
+            self.studyCards.refresh()
+            return
+        if self.studyCards is not None:
+            self.studyCards.widget.hide()
         data = hasData()
         self.openCard.setVisible(not withCanvas)
         self.recentCard.setVisible(not withCanvas)
         self.openNowCard.widget.setVisible(withCanvas or data)
         if self.openNowCard.widget.isVisible():
             self.openNowCard.refresh()
+
+    def _ensureStudyCards(self, withList):
+        """The study cards (created when a study is first shown; created again when Studio and Classic swap the list)."""
+        if self.studyCards is not None and (self.studyCards.list is not None) == withList:
+            return
+        if self.studyCards is not None:
+            self.studyCards.dispose()
+            _discard(self.studyCards.widget)
+        self.studyCards = StudyCards(withList=withList)
+        self.widget.layout().insertWidget(0, self.studyCards.widget)
 
     def eventFilter(self, obj, event):
         if obj == self.widget:
@@ -2637,6 +4389,8 @@ def _livePanel():
     for panel in list(_panels):
         if not _isAlive(panel.widget):
             _panels.remove(panel)
+            if panel.studyCards is not None:
+                panel.studyCards.dispose()
             if panel.recentList is not None:
                 panel.recentList.dispose()
             panel._sceneRefresher.dispose()
@@ -2689,7 +4443,7 @@ def clearFooterLine(key):
 
 def isEmptyState(shell=None):
     """True when the Library shows its empty state: no study and no data loaded (SPEC 2.5)."""
-    if shell is not None and getattr(shell, "studySession", None) is not None:
+    if _studySession() is not None or (shell is not None and getattr(shell, "studySession", None) is not None):
         return False
     return not hasData()
 
@@ -2738,6 +4492,11 @@ class _SceneWatcher(VTKObservationMixin):
 def enter(shell):
     """Library becomes the current workspace: show the canvas (the views are paused) and focus Recent."""
     global _sceneWatcher
+    _listenToStudies()
+    studySession = _studySession()
+    if studySession is not None:
+        # The values that jobs posted while another workspace was shown (LNM addendum: merged when Library is shown)
+        studySession.applyInbox()
     libraryCanvas = canvas()
     # The canvas covers the views first: the views that the inspector change resizes are paused (no render), and the
     # edge handle of a hidden inspector is not shown for a moment
