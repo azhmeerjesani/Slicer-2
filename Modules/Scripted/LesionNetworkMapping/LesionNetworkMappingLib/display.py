@@ -6,6 +6,12 @@ alpha of the 256 entries (0 for entries that do not pass), so moving a threshold
 image data of the map. The colour table is a standard ``vtkMRMLColorTableNode`` that is saved with the
 scene (a ``.ctbl`` file with alpha), so a saved map renders the same in official 3D Slicer.
 
+One colour table cannot hold two thresholds: the map of the Result card uses the shared "LNM Diverging"
+table, and every other map shown at the same time (group maps of the Cohort card, a second loaded map)
+gets its own copy (:func:`volumeLUT`, named "LNM Diverging (<map name>)", attribute ``LNM.ColorTable`` =
+"copy"), found again through the map's display node. Group maps (overlap, sensitivity, legacy maps,
+conjunction) are shown with :func:`applyGroupMapDisplay`.
+
 Needs the Slicer application (MRML); the module imports it lazily. Every function must be called on
 the main thread. ``applyTwoSidedThreshold(volumeNode, t)`` is the one implementation of the |value| >= t
 display shared by the Map module and the statistical-map overlay of the Library importer.
@@ -20,8 +26,9 @@ from . import colormaps
 
 #: Name of the colour table node of the module
 LUT_NAME = "LNM Diverging"
-#: Node attribute that marks the colour table node of the module
+#: Node attribute that marks the colour table node of the module ("1"), or one of its per-map copies ("copy")
 LUT_ATTRIBUTE = "LNM.ColorTable"
+LUT_COPY = "copy"
 #: Number of entries of the colour table
 LUT_ENTRIES = colormaps.DEFAULT_ENTRIES
 #: Node attribute of result volumes, so that Draw can hide them (W2-05 (d))
@@ -34,6 +41,12 @@ SIGN_ATTRIBUTE = "LNM.Sign"
 WINDOW_PERCENTILE = 99.5
 #: Lesion outline colour on a map (SPEC 7.10)
 OUTLINE_COLOR = (1.0, 1.0, 1.0)
+
+
+#: Node attribute of a group map volume: its "desc" (overlapCount, overlapPct, sens90, legacyWelchT, ...)
+GROUP_MAP_ATTRIBUTE = "LNM.GroupMap"
+#: Displayed p maps show p <= this value
+P_MAP_ALPHA = 0.05
 
 
 def _scene(scene=None):
@@ -91,6 +104,43 @@ def ensureLUT(scene=None):
     if created:
         scene.AddNode(node)
     return node
+
+
+def volumeLUT(volume):
+    """The map's own copy of the "LNM Diverging" colour table (created on first use), for a map shown next to the
+    Result card's map: thresholds of two maps never share one table. Saved with the scene like the shared table.
+    """
+    scene = volume.GetScene() or slicer.mrmlScene
+    displayNode = volume.GetDisplayNode()
+    current = displayNode.GetColorNode() if displayNode is not None else None
+    colors = _colors()
+    if current is not None and current.GetAttribute(LUT_ATTRIBUTE) == LUT_COPY and current.GetNumberOfColors() == LUT_ENTRIES:
+        name = f"{LUT_NAME} ({volume.GetName()})"
+        if current.GetName() != name:
+            current.SetName(name)
+        return current
+    node = slicer.vtkMRMLColorTableNode()
+    node.SetName(f"{LUT_NAME} ({volume.GetName()})")
+    node.SetTypeToUser()
+    node.SetNumberOfColors(LUT_ENTRIES)
+    node.SetSaveWithScene(True)
+    node.SetAttribute(LUT_ATTRIBUTE, LUT_COPY)
+    node.SetAttribute("Category", "Lesion network mapping")
+    wasModifying = node.StartModify()
+    for index, (r, g, b) in enumerate(colors):
+        node.SetColor(index, f"lnm{index:03d}", r, g, b, 1.0)
+    node.EndModify(wasModifying)
+    scene.AddNode(node)
+    return node
+
+
+def removeVolumeLUT(volume):
+    """Remove the map's own colour table copy (when the map leaves the scene); the shared table is kept."""
+    displayNode = volume.GetDisplayNode() if volume is not None else None
+    lut = displayNode.GetColorNode() if displayNode is not None else None
+    if lut is not None and lut.GetAttribute(LUT_ATTRIBUTE) == LUT_COPY and lut.GetScene() is not None:
+        displayNode.SetAndObserveColorNodeID(None)
+        lut.GetScene().RemoveNode(lut)
 
 
 _COLORS = []
@@ -217,16 +267,72 @@ def applyResultDisplay(volume, lut=None, window=None, threshold=None, sign=None,
     return window
 
 
-def applyTwoSidedThreshold(volumeNode, threshold, window=None, sign="both"):
+def setAlphaRange(lut, window, low, high):
+    """Rewrite only the alphas: 1 for the entries whose centre value lies in [low, high] (a p map: (0, 0.05])."""
+    alphas = [1.0 if low <= value <= high else 0.0 for value in colormaps.entry_values(lut.GetNumberOfColors(), window)]
+    lookupTable = lut.GetLookupTable()
+    wasModifying = lut.StartModify()
+    for index, alpha in enumerate(alphas):
+        r, g, b, a = lookupTable.GetTableValue(index)
+        if a != alpha:
+            lut.SetColor(index, r, g, b, alpha)
+    lut.EndModify(wasModifying)
+    return int(sum(alphas))
+
+
+def groupMapKind(desc):
+    """How a group map is shown: "count", "percent", "binary" (sensitivity, conjunction: +1/-1), "p" or "stat"."""
+    desc = desc or ""
+    if desc.startswith("overlapCount"):
+        return "count"
+    if desc.startswith("overlapPct"):
+        return "percent"
+    if desc.startswith(("sens", "conj")) and not desc.startswith("sensNull"):
+        return "binary"
+    if desc.endswith(("P", "PFwe", "PFdr", "PUnc", "Q")):
+        return "p"
+    return "stat"
+
+
+def applyGroupMapDisplay(volume, desc, lut=None, alpha=P_MAP_ALPHA):
+    """Show a group map with a colour table of its own (:func:`volumeLUT`): counts and percents on the positive half
+    (zero hidden), sensitivity and conjunction maps as +1 / -1, p maps where p <= ``alpha``, statistics on a
+    symmetric window with near-zero values hidden. Only the display changes. Returns the window W.
+    """
+    if volume.GetDisplayNode() is None:
+        volume.CreateDefaultDisplayNodes()
+    lut = lut if lut is not None else volumeLUT(volume)
+    array = slicer.util.arrayFromVolume(volume)
+    finite = array[np.isfinite(array)] if array.dtype.kind == "f" else array
+    largest = float(np.abs(finite).max()) if finite.size else 0.0
+    kind = groupMapKind(desc)
+    volume.SetAttribute(GROUP_MAP_ATTRIBUTE, desc or "")
+    if kind == "count":
+        window = max(largest, 1.0)
+        return applyResultDisplay(volume, lut, window=window, threshold=0.5, sign="pos")
+    if kind == "percent":
+        return applyResultDisplay(volume, lut, window=100.0, threshold=0.5, sign="pos")
+    if kind == "binary":
+        return applyResultDisplay(volume, lut, window=1.0, threshold=0.5, sign="both")
+    if kind == "p":
+        window = applyResultDisplay(volume, lut, window=1.0, sign="pos")
+        setAlphaRange(lut, window, 1e-12, float(alpha))
+        volume.SetAttribute(THRESHOLD_ATTRIBUTE, f"{alpha:.6g}")
+        return window
+    window = symmetricWindow(array)
+    return applyResultDisplay(volume, lut, window=window, threshold=window / 64.0, sign="both")
+
+
+def applyTwoSidedThreshold(volumeNode, threshold, window=None, sign="both", lut=None):
     """Show ``volumeNode`` with |value| >= ``threshold`` (both tails), through the colour table alphas only.
 
     The volume gets the module colour table and a symmetric window: ``window``, else its recorded
     ``LNM.Window``, else computed once; the displayed window is widened when the threshold reaches its
     edge (:func:`shownWindow`), so that voxels that pass are always visible. Returns ``(window, passing)``:
     the half-width of the displayed window and the number of voxels that pass (0 gives the explicit
-    empty-result state).
+    empty-result state). ``lut``: another colour table than the shared one (a :func:`volumeLUT` copy).
     """
-    lut = ensureLUT(volumeNode.GetScene())
+    lut = lut if lut is not None else ensureLUT(volumeNode.GetScene())
     displayNode = volumeNode.GetDisplayNode()
     array = slicer.util.arrayFromVolume(volumeNode)
     if window is None:

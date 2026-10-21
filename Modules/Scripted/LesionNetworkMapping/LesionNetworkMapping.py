@@ -3,7 +3,11 @@
 From a traced lesion (a segment) and a registered normative connectome bundle, the module computes the
 lesion's network maps (mean r, mean Fisher z and T over the connectome subjects) in a subprocess, shows
 them with the "LNM Diverging" colour table and threshold rules, and exports them with sidecars and
-provenance. The cards are built in code; cards added by later work packages are plug-ins discovered in
+provenance. With Seed = Cohort it maps every analysable lesion of a study in batched engine passes
+(``LesionNetworkMappingLib.cohortmaps``) for the Cohort card's group maps. A map file can also be shown
+on its own (``showMapFile``: opened from Library, or browsed subject by subject). The Connectome card's
+Manage… opens the connectome manager (add, convert, reference maps, hubness, remove, demo). The cards
+are built in code; cards added by later work packages are plug-ins discovered in
 ``LesionNetworkMappingUI`` (``card_*.py``).
 
 Run as a module (``PythonSlicer -m LesionNetworkMapping job <module> [arguments]``) this file is the job
@@ -192,6 +196,10 @@ from slicer.util import VTKObservationMixin
 CONNECTOMES_SETTING = "Studio/LNM/Connectomes"
 ACCEPTED_TERMS_SETTING = "Studio/LNM/AcceptedTerms"
 FETCH_SETTING = "Studio/LNM/EnableConnectomeFetch"
+#: The study of the Cohort seed chosen with "Open study…" (a local path: kept in the settings, never in the scene)
+COHORT_STUDY_SETTING = "Studio/LNM/CohortStudy"
+#: Where conversions write bundles and optional packages (h5py) are installed (read only here; A-03b's key)
+DATA_DIRECTORY_SETTING = "Studio/LNM/DataDirectory"
 
 #: Default threshold rule (thresholds.DEFAULT_RULE as compact JSON)
 DEFAULT_RULE_JSON = '{"alpha":0.05,"kind":"fwe_bonferroni"}'
@@ -204,6 +212,12 @@ ENGINE_NICE = 10
 DEFERRED_STEP_MS = 30
 #: Node attribute of the temporary result volume of a run that has not produced a map yet
 COMPUTING_ATTRIBUTE = "LNM.Computing"
+#: Node attribute of a map shown from a file (``showMapFile``): its file name (never a path)
+LOADED_MAP_ATTRIBUTE = "LNM.LoadedMap"
+#: Statistic of a per-lesion map file from its "desc" label (engine.OUTPUT_KEYS)
+DESC_STATISTICS = {"T": "T", "AvgRFz": "Fz", "AvgR": "r"}
+#: Subfolder of a study's derivatives/lnm/conn-<label>[_n-<N>] that holds the cohort maps and group maps
+COHORT_FOLDER = "cohort"
 
 #: Where GSP1000 is obtained (SPEC 7.9 empty state); the app never downloads it here
 GSP_DATAVERSE_URL = "https://doi.org/10.7910/DVN/ILXIKS"
@@ -377,6 +391,12 @@ def paletteEntries(shell=None):
          "description": _("Compute the network map of the lesion")},
         {"id": "lnm.add-connectome", "title": _("Add connectome…"), "category": _("Map"), "synonyms": ["connectome bundle", "add bundle", "register connectome"],
          "callback": lambda: _openMap(lambda widget: widget.onAddBundle()), "description": _("Register a connectome bundle (.lnmc folder)")},
+        {"id": "lnm.manage-connectomes", "title": _("Manage connectomes…"), "category": _("Map"),
+         "synonyms": ["connectome manager", "convert connectome", "lead-dbs connectome", "reference maps", "hubness"],
+         "callback": lambda: _openMap(lambda widget: widget.openManager()), "description": _("Add, convert, check and remove connectome bundles")},
+        {"id": "lnm.map-cohort", "title": _("Map all lesions (maps only)"), "category": _("Map"), "synonyms": ["cohort maps", "map cohort", "batch lnm"],
+         "callback": lambda: _openMap(lambda widget: widget.computeCohort()), "enabled": lambda: (_existingWidget() is None or _existingWidget().cohortComputeState()[0]),
+         "description": _("Compute the network map of every analysable lesion of the study")},
     ]
 
 
@@ -408,7 +428,8 @@ class LesionNetworkMappingParameterNode:
 
     seedMode - "lesion", "cohort" or "coordinates".
     seedSegmentation, seedSegmentId - the lesion seed (A-03b sets them too).
-    studyPath - the open study folder, if any (read only: this version never writes it).
+    studyPath - scenes of earlier versions: a study folder (read, never written: a study chosen with "Open study…" is kept
+      in the fork-only setting Studio/LNM/CohortStudy, so scenes never hold its local path; SPEC 9.7 rule 10).
     connectome - the connectome bundle in use, as its portable identifier (``connectomeIdentifier``): scenes and
       .mrb files are shared, so they never hold a local path (SPEC 9.7 rule 10); the bundle folder is found on load
       among the registered bundles (``Studio/LNM/Connectomes``).
@@ -943,6 +964,165 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
                 return node
         return None
 
+    #
+    # Cohort
+    #
+
+    @staticmethod
+    def isTemplateConnectome(bundle):
+        """True for a connectome on a template (MNI) grid, or one that declares its template space (the demo)."""
+        from LesionNetworkMappingLib import geometry
+
+        if bundle is None:
+            return False
+        declared = (getattr(bundle, "metadata", None) or {}).get("space")
+        return geometry.detect_space((bundle.shape, bundle.affine)) is not None or geometry.space_family(declared) not in ("native", "unknown")
+
+    @classmethod
+    def cohortSeeds(cls, study, bundle=None, includeUnreviewed=False):
+        """The lesions of a study that the Cohort seed maps, and why the others are not mapped.
+
+        Uses ``cohortmaps.study_lesions`` (``Study.analysis_rows``: include = 1, review approval when the study requires
+        it, normalization QC). With a connectome on an MNI grid, lesions in native space are left out (they must be
+        normalized to MNI first, as for a single lesion). Returns {lesions [(sid, path)], excluded {reason: [sids]},
+        native [sids], groups {group: count}, n}.
+        """
+        from LesionNetworkMappingLib import cohortmaps
+        from LesionNetworkMappingLib.study import detect_file_space, is_missing
+
+        lesions, excluded = cohortmaps.study_lesions(study, includeUnreviewed)
+        checkSpace = cls.isTemplateConnectome(bundle)
+        kept, native = [], []
+        for sid, path, _sha in lesions:
+            row = study.subject(sid)
+            space = row.get("space") if checkSpace else None
+            if checkSpace and is_missing(space):
+                try:
+                    space = detect_file_space(path)
+                except Exception:
+                    space = None
+            if space == "native":
+                native.append(sid)
+            else:
+                kept.append((sid, path))
+        groups = {}
+        for sid, _path in kept:
+            group = study.subject(sid).get("group") or "n/a"
+            groups[group] = groups.get(group, 0) + 1
+        return {"lesions": kept, "excluded": excluded, "native": native, "groups": groups, "n": len(kept)}
+
+    @staticmethod
+    def cohortOutputDir(studyPath, bundleName, n=None):
+        """``<study>/derivatives/lnm/conn-<label>[_n-<N>]/cohort``: the cohort maps (maps.tsv) and the group maps."""
+        from LesionNetworkMappingLib import export
+
+        return os.path.join(export.derivatives_dir(studyPath, bundleName, n), COHORT_FOLDER)
+
+    def startCohortMaps(self, config, onEvent=None, onDone=None, context=None):
+        """Map the cohort's lesions with ``cohortmaps`` (batched engine passes, per-lesion cache) through the job runner.
+
+        ``config`` keys: studyPath, bundlePath, outDir, lesions [(sid, path)] (written to <outDir>/lesions.tsv with paths
+        relative to it), previewN, previewSeed. Returns the ``jobrunner.Job``.
+        """
+        from LesionNetworkMappingUI import jobrunner
+
+        outDir = config["outDir"]
+        os.makedirs(outDir, exist_ok=True)
+        tsv = os.path.join(outDir, "lesions.tsv")
+        lines = ["participant_id\tlesion"]
+        for sid, path in config["lesions"]:
+            relative = os.path.relpath(path, outDir) if os.path.splitdrive(path)[0] == os.path.splitdrive(outDir)[0] else path
+            lines.append(f"{sid}\t{relative.replace(os.sep, '/')}")
+        with open(tsv, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(lines) + "\n")
+        args = ["--study", config["studyPath"], "--lesions-tsv", tsv, "--bundle", config["bundlePath"], "--out", outDir, "--resume"]
+        if config.get("previewN"):
+            args += ["--subjects", str(int(config["previewN"])), "--random", "--seed", str(int(config.get("previewSeed", 0)))]
+        spec = jobrunner.JobSpec(
+            "LesionNetworkMappingLib.cohortmaps", args, title=_("Mapping the cohort"), heavy=True, kind="cohortmaps", runRoot=config["studyPath"],
+            onEvent=onEvent, onDone=onDone, name="cohortmaps", statusText=_mappingStatusText, nice=ENGINE_NICE)
+        runner = context.runner if context is not None else jobrunner.instance()
+        return runner.submit(spec, context=context)
+
+    #
+    # Map files
+    #
+
+    @staticmethod
+    def mapFileInfo(path):
+        """What a map file says about itself: {statistic, n, name, connectome (label), siblings {statistic: path}, sidecar, lesion}.
+
+        The statistic comes from the engine's "desc" label (T, AvgRFz, AvgR), else the NIfTI intent (T for t and z maps);
+        N from the sidecar (``<name>_conn-<label>[_desc-<suffix>]_lnm.json``), else from a T map's intent (df = N - 1).
+        """
+        from LesionNetworkMappingLib import nifti
+
+        folder, base = os.path.split(os.path.abspath(path))
+        match = re.match(r"^(?P<name>.+?)_conn-(?P<label>[A-Za-z0-9]+)_desc-(?P<desc>AvgRFz|AvgR|T)(?P<suffix>[A-Za-z0-9]*)_funcmap\.nii(?:\.gz)?$", base)
+        info = {"path": os.path.abspath(path), "statistic": "T", "n": None, "name": re.sub(r"(?i)\.nii(\.gz)?$", "", base), "label": None, "connectome": None,
+                "siblings": {}, "sidecar": None, "lesion": None, "preview": False}
+        if match is not None:
+            info.update(statistic=DESC_STATISTICS[match.group("desc")], name=match.group("name"), connectome=match.group("label"), preview=match.group("suffix").startswith("PreviewN"))
+            extension = ".nii.gz" if base.endswith(".gz") else ".nii"
+            for desc, statistic in DESC_STATISTICS.items():
+                sibling = os.path.join(folder, f"{match.group('name')}_conn-{match.group('label')}_desc-{desc}{match.group('suffix')}_funcmap{extension}")
+                if os.path.isfile(sibling):
+                    info["siblings"][statistic] = sibling
+            descText = f"_desc-{match.group('suffix')}" if match.group("suffix") else ""
+            sidecar = os.path.join(folder, f"{match.group('name')}_conn-{match.group('label')}{descText}_lnm.json")
+            if os.path.isfile(sidecar):
+                info["sidecar"] = sidecar
+                try:
+                    with open(sidecar, encoding="utf-8") as f:
+                        record = json.load(f)
+                    info["n"] = int(record["N"]) if record.get("N") else None
+                    lesion = (record.get("lesion") or {}).get("file")
+                    if lesion:
+                        lesionPath = lesion if os.path.isabs(lesion) else os.path.normpath(os.path.join(folder, *lesion.split("/")))
+                        info["lesion"] = lesionPath if os.path.isfile(lesionPath) else None
+                except (OSError, ValueError, TypeError):
+                    pass
+        try:
+            header = nifti.read_nifti_header(path)
+        except Exception:
+            header = None
+        if header is not None:
+            if match is None and header.get("intent_code") not in (3, 5):
+                info["statistic"] = "r" if header.get("intent_code") == 2 else "T"
+            if info["n"] is None and header.get("intent_code") == 3 and header["intent_params"][0] > 0:
+                info["n"] = round(header["intent_params"][0]) + 1
+        if info["n"] is None and info["siblings"].get("T") and os.path.normpath(info["siblings"]["T"]) != info["path"]:
+            try:
+                header = nifti.read_nifti_header(info["siblings"]["T"])  # an Fz or r map: the N of its T map
+                if header.get("intent_code") == 3 and header["intent_params"][0] > 0:
+                    info["n"] = round(header["intent_params"][0]) + 1
+            except Exception:
+                pass
+        return info
+
+
+#: Shortest time between two progress-row updates from job events (QProgressBar.setValue repaints synchronously)
+PROGRESS_UPDATE_S = 0.1
+
+
+def updateProgressQuietly(progressRow, force=False):
+    """``progressRow.update()`` at most every 100 ms (``force``: now), with the bar repainted later instead of in the call.
+
+    ``QProgressBar.setValue`` repaints at once; in the Studio inspector that costs about 30 ms per call, and a job's
+    events arrive in bursts, so unthrottled updates blocked the application for 0.7 s (W3-08 measurement).
+    """
+    now = time.monotonic()
+    if not force and now - getattr(progressRow, "_lnmUpdatedAt", 0.0) < PROGRESS_UPDATE_S:
+        return False
+    progressRow._lnmUpdatedAt = now
+    bar = progressRow.bar
+    bar.setUpdatesEnabled(False)
+    try:
+        progressRow.update()
+    finally:
+        bar.setUpdatesEnabled(True)  # schedules an ordinary (asynchronous) repaint
+    return True
+
 
 def _formatBytes(count):
     for unit, size in (("TB", 1e12), ("GB", 1e9), ("MB", 1e6), ("kB", 1e3)):
@@ -997,6 +1177,559 @@ class _FitHeightFilter(qt.QObject):
             self.widget.setMinimumHeight(height)
 
 
+def _dataDirectory():
+    """``Studio/LNM/DataDirectory`` (only read): A-03b's ``normalize_controller.dataDirectory`` (one default for both)."""
+    try:
+        from LesionNetworkMappingUI import normalize_controller
+
+        return normalize_controller.dataDirectory()
+    except ImportError:
+        pass
+    value = str(qt.QSettings().value(DATA_DIRECTORY_SETTING) or "").strip()
+    if value:
+        return value
+    if os.environ.get("SLICER_STUDIO_WEB") or os.path.exists("/.dockerenv"):
+        return "/data/SlicerStudio"
+    documents = qt.QStandardPaths.writableLocation(qt.QStandardPaths.DocumentsLocation) or os.path.expanduser("~")
+    return os.path.join(documents, "SlicerStudio")
+
+
+def _pythonPackagesDirectory():
+    """Where optional packages (h5py) are installed after the user agreed: ``<DataDirectory>/python-packages``."""
+    return os.path.join(_dataDirectory(), "python-packages")
+
+
+class ConvertConnectomeDialog(qt.QDialog):
+    """Convert… of the connectome manager: the source (a NIfTI time series folder or a Lead-DBS connectome folder),
+    its metadata and data use terms, the size and free-space estimate, then a resumable conversion job.
+    """
+
+    def __init__(self, manager, parent=None):
+        qt.QDialog.__init__(self, parent)
+        self.manager = manager
+        self.estimateJob = None
+        self.estimate = None
+        self.setObjectName("LNMConvertDialog")
+        self.setWindowTitle(_("Convert into a connectome bundle"))
+        self.setMinimumWidth(520)
+        layout = qt.QVBoxLayout(self)
+        intro = qt.QLabel(_("Converts connectome data that is already on this computer into a bundle (.lnmc folder). Nothing is downloaded. "
+                            "A stopped conversion keeps the subjects already written: Convert again with Resume ticked."))
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        form = qt.QFormLayout()
+        self.sourceCombo = qt.QComboBox()
+        self.sourceCombo.setObjectName("LNMConvertSource")
+        for source, text in (("nifti", _("NIfTI time series folder")), ("leaddbs", _("Lead-DBS connectome folder"))):  # manager.SOURCES
+            self.sourceCombo.addItem(text, source)
+        self.sourceCombo.connect("currentIndexChanged(int)", self.onSourceChanged)
+        form.addRow(_("Source"), self.sourceCombo)
+        self.inputEdit, inputRow = self._pathRow("LNMConvertInput", self.onBrowseInput)
+        form.addRow(_("Folder"), inputRow)
+        self.maskEdit, self.maskRow = self._pathRow("LNMConvertMask", self.onBrowseMask)
+        form.addRow(_("Mask"), self.maskRow)
+        self.groupingEdit = qt.QLineEdit()
+        self.groupingEdit.setObjectName("LNMConvertGrouping")
+        self.groupingEdit.setPlaceholderText(_("optional: (?P<subject>sub-[A-Za-z0-9]+)_run"))
+        self.groupingEdit.setToolTip(_("Regular expression: files with the same 'subject' group are runs of one subject"))
+        form.addRow(_("Runs of a subject"), self.groupingEdit)
+        self.nameEdit = qt.QLineEdit()
+        self.nameEdit.setObjectName("LNMConvertName")
+        form.addRow(_("Name"), self.nameEdit)
+        self.outEdit, outRow = self._pathRow("LNMConvertOut", self.onBrowseOut)
+        form.addRow(_("Bundle folder"), outRow)
+        self.gsrCombo = qt.QComboBox()
+        self.gsrCombo.setObjectName("LNMConvertGsr")
+        for text, value in ((_("not stated"), "unknown"), (_("with global signal regression"), "true"), (_("without global signal regression"), "false")):
+            self.gsrCombo.addItem(text, value)
+        form.addRow(_("Preprocessing"), self.gsrCombo)
+        layout.addLayout(form)
+        layout.addWidget(qt.QLabel(_("Data use terms (shown before Compute; paste the provider's text):")))
+        self.termsEdit = qt.QPlainTextEdit()
+        self.termsEdit.setObjectName("LNMConvertTerms")
+        self.termsEdit.setMaximumHeight(90)
+        layout.addWidget(self.termsEdit)
+        self.resumeCheckBox = qt.QCheckBox(_("Resume an interrupted conversion into this folder"))
+        self.resumeCheckBox.setObjectName("LNMConvertResume")
+        layout.addWidget(self.resumeCheckBox)
+        self.estimateLabel = qt.QLabel("")
+        self.estimateLabel.setObjectName("LNMConvertEstimate")
+        self.estimateLabel.setWordWrap(True)
+        layout.addWidget(self.estimateLabel)
+        buttons = qt.QHBoxLayout()
+        self.estimateButton = qt.QPushButton(_("Estimate size"))
+        self.estimateButton.setObjectName("LNMConvertEstimateButton")
+        self.estimateButton.connect("clicked()", self.runEstimate)
+        buttons.addWidget(self.estimateButton)
+        buttons.addStretch(1)
+        self.convertButton = qt.QPushButton(_("Convert"))
+        self.convertButton.setObjectName("LNMConvertButton")
+        self.convertButton.setProperty("slicerRole", "primary")
+        self.convertButton.connect("clicked()", self.onConvert)
+        buttons.addWidget(self.convertButton)
+        closeButton = qt.QPushButton(_("Cancel"))
+        closeButton.connect("clicked()", self.close)
+        buttons.addWidget(closeButton)
+        layout.addLayout(buttons)
+        self.onSourceChanged(0)
+
+    def _pathRow(self, objectName, callback):
+        row = qt.QWidget()
+        rowLayout = qt.QHBoxLayout(row)
+        rowLayout.setContentsMargins(0, 0, 0, 0)
+        edit = qt.QLineEdit()
+        edit.setObjectName(objectName)
+        edit.connect("editingFinished()", self._inputsChanged)
+        rowLayout.addWidget(edit, 1)
+        button = qt.QToolButton()
+        button.setText("…")
+        button.connect("clicked()", callback)
+        rowLayout.addWidget(button)
+        return edit, row
+
+    def source(self):
+        return self.sourceCombo.currentData or "nifti"
+
+    def onSourceChanged(self, index):
+        nifti = self.source() == "nifti"
+        self.maskRow.setEnabled(nifti)
+        self.groupingEdit.setEnabled(nifti)
+        self._inputsChanged()
+
+    def _inputsChanged(self):
+        self.estimate = None
+        self.estimateLabel.setText(_("Estimate the size before converting: a GSP1000-size bundle needs about 126 GB."))
+        path = self.inputEdit.text.strip()
+        if path and not self.nameEdit.text.strip():
+            self.nameEdit.setText(os.path.basename(path.rstrip("/\\")) or "connectome")
+        if path and not self.outEdit.text.strip():
+            name = LesionNetworkMappingLogic.connectomeIdentifierName(self.nameEdit.text.strip() or "connectome")
+            self.outEdit.setText(os.path.join(_dataDirectory(), "connectomes", f"{_safeName(name, 'connectome')}.lnmc"))
+
+    def onBrowseInput(self):
+        path = qt.QFileDialog.getExistingDirectory(self, _("Choose the folder of the time series") if self.source() == "nifti" else _("Choose the Lead-DBS connectome folder"),
+                                                   self.inputEdit.text)
+        if path:
+            self.inputEdit.setText(path)
+            self._inputsChanged()
+
+    def onBrowseMask(self):
+        path = qt.QFileDialog.getOpenFileName(self, _("Choose the mask of the connectome grid"), self.inputEdit.text, "NIfTI (*.nii.gz *.nii)")
+        if path:
+            self.maskEdit.setText(path)
+            self._inputsChanged()
+
+    def onBrowseOut(self):
+        path = qt.QFileDialog.getExistingDirectory(self, _("Choose where the bundle folder is written"), os.path.dirname(self.outEdit.text))
+        if path:
+            name = _safeName(self.nameEdit.text.strip() or "connectome", "connectome")
+            self.outEdit.setText(os.path.join(path, f"{name}.lnmc"))
+            self._inputsChanged()
+
+    def sourceArguments(self):
+        args = ["--source", self.source(), "--input", self.inputEdit.text.strip()]
+        if self.source() == "nifti" and self.maskEdit.text.strip():
+            args += ["--mask", self.maskEdit.text.strip()]
+        packages = _pythonPackagesDirectory()
+        if os.path.isdir(packages):
+            args += ["--python-packages", packages]
+        return args
+
+    def runEstimate(self, then=None):
+        """The size of the bundle and the free space (a light job that reads only headers)."""
+        from LesionNetworkMappingUI import jobrunner
+
+        if not self.inputEdit.text.strip():
+            self.estimateLabel.setText(_("Choose the folder to convert."))
+            return None
+        args = ["estimate", *self.sourceArguments()]
+        if self.outEdit.text.strip():
+            args += ["--out", self.outEdit.text.strip()]
+        self.estimateLabel.setText(_("Estimating…"))
+
+        def onDone(job):
+            self.estimateJob = None
+            result = next((event for event in job.results if event.get("kind") == "estimate"), None)
+            if not job.succeeded() or result is None:
+                self.estimateLabel.setText(_("The estimate failed: {reason}").format(reason=job.failureReason or _("unknown error")))
+                self.manager.offerPackages(job)
+                return
+            self.estimate = result
+            self.estimateLabel.setText(self.estimateText(result))
+            if then is not None:
+                then()
+
+        spec = jobrunner.JobSpec("LesionNetworkMappingLib.manager", args, title=_("Estimate"), heavy=False, kind="convert-estimate", name="estimate",
+                                 runRoot=jobrunner.defaultRunRoot(), onDone=onDone)
+        self.estimateJob = jobrunner.instance().submit(spec)
+        return self.estimateJob
+
+    @staticmethod
+    def estimateText(estimate):
+        text = _("About {size} for {runs} runs ({points:,} time points, {voxels:,} voxels)").format(
+            size=estimate["size"], runs=estimate["runs"], points=estimate["time_points"], voxels=estimate["n_voxels"])
+        if not estimate.get("exact"):
+            text += " " + _("(estimated from a sample of the runs)")
+        if estimate.get("free"):
+            text += " · " + _("{free} free").format(free=estimate["free"])
+            if estimate.get("enough") is False:
+                text += " · " + _("not enough space")
+        return text
+
+    def onConvert(self):
+        if self.estimate is None:
+            self.runEstimate(then=self.onConvert)
+            return
+        if self.estimate.get("enough") is False and not self.resumeCheckBox.checked:
+            slicer.util.errorDisplay(self.estimateText(self.estimate), windowTitle=_("Not enough free space"))
+            return
+        args = ["convert", *self.sourceArguments(), "--out", self.outEdit.text.strip(), "--gsr", self.gsrCombo.currentData or "unknown"]
+        if self.nameEdit.text.strip():
+            args += ["--name", self.nameEdit.text.strip()]
+        if self.source() == "nifti" and self.groupingEdit.text.strip():
+            args += ["--runs-grouping", self.groupingEdit.text.strip()]
+        terms = self.termsEdit.toPlainText().strip()
+        if terms:
+            from LesionNetworkMappingUI import jobrunner
+
+            folder = os.path.join(jobrunner.defaultRunRoot(), "convert")
+            os.makedirs(folder, exist_ok=True)
+            termsPath = os.path.join(folder, f"terms-{time.strftime('%Y%m%d-%H%M%S')}.txt")  # read by the job into connectome.json
+            with open(termsPath, "w", encoding="utf-8") as f:
+                f.write(terms + "\n")
+            args += ["--terms-file", termsPath]
+        if self.resumeCheckBox.checked:
+            args.append("--resume")
+        self.manager.startConversion(args, self.outEdit.text.strip())
+        self.close()
+
+
+class ConnectomeManagerDialog(qt.QDialog):
+    """The connectome manager (Manage… of the Connectome card): the registered bundles and their actions.
+
+    Lists every bundle registered on this computer (``Studio/LNM/Connectomes``: local paths stay in the settings, never
+    in scenes) with its subjects, time points, voxels, size, space, terms and reference maps, and the provenance line of
+    the selected one. Actions: Add bundle…, Convert… (a resumable job), Build reference maps… (time and disk estimate
+    first, never automatic: D-A20), Build hubness map (the degree job), Remove from the list (the files are kept),
+    Create synthetic demo, and the ``manager_*.py`` plug-in actions (the catalog and fetcher of later work packages).
+    Non-modal; every job runs through the shared job runner with progress and Stop.
+    """
+
+    COLUMNS = (_("Name"), _("Subjects"), _("Time points"), _("Voxels"), _("Size"), _("Space"), _("Terms"), _("Reference"))
+
+    def __init__(self, widget, parent=None):
+        qt.QDialog.__init__(self, parent)
+        self.widget = widget
+        self.logic = widget.logic
+        self.job = None
+        self.rows = []
+        self.convertDialog = None
+        self.setObjectName("LNMConnectomeManager")
+        self.setWindowTitle(_("Connectomes"))
+        self.setMinimumSize(720, 420)
+        layout = qt.QVBoxLayout(self)
+        intro = qt.QLabel(_("Connectome bundles registered on this computer. Connectomes are never bundled or downloaded automatically; "
+                            "register a bundle you have, or convert data you have into one."))
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        self.table = widget.widgets.tableView(list(self.COLUMNS))
+        self.table.setObjectName("LNMManagerTable")
+        self.table.connect("itemSelectionChanged()", self.onSelectionChanged)
+        layout.addWidget(self.table, 1)
+        self.provenanceLabel = qt.QLabel("")
+        self.provenanceLabel.setObjectName("LNMManagerProvenance")
+        self.provenanceLabel.setWordWrap(True)
+        self.provenanceLabel.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
+        layout.addWidget(self.provenanceLabel)
+        rowA = qt.QHBoxLayout()
+        self.addButton = self._button(rowA, _("Add bundle…"), "LNMManagerAddButton", widget.onAddBundle, _("Register a bundle folder (.lnmc) on this computer"))
+        self.convertButton = self._button(rowA, _("Convert…"), "LNMManagerConvertButton", self.openConvert, _("Convert NIfTI time series or a Lead-DBS connectome into a bundle"))
+        self.demoButton = self._button(rowA, _("Create synthetic demo"), "LNMManagerDemoButton", widget.onCreateDemo, _("SYNTHETIC — not real data"))
+        rowA.addStretch(1)
+        layout.addLayout(rowA)
+        rowB = qt.QHBoxLayout()
+        self.referenceButton = self._button(rowB, _("Build reference maps…"), "LNMManagerReferenceButton", self.buildReference,
+                                            _("μC_r, PC1-3 and hubness of the selected connectome (lnm-reference-v1), for the QA of every map"))
+        self.hubnessButton = self._button(rowB, _("Build hubness map"), "LNMManagerHubnessButton", self.buildHubness, _("The degree map (mean |Fz| to 1000 seeds)"))
+        self.removeButton = self._button(rowB, _("Remove from the list"), "LNMManagerRemoveButton", self.removeSelected, _("Unregister the bundle (its files are kept)"))
+        self.pluginButtons = []
+        try:
+            from LesionNetworkMappingUI import discoverManagerActions
+
+            for spec in discoverManagerActions():
+                button = self._button(rowB, str(spec["label"]), f"LNMManagerAction_{spec['id']}", lambda spec=spec: self.runPluginAction(spec), "")
+                self.pluginButtons.append(button)
+        except Exception:
+            logging.exception("Lesion network mapping: the connectome actions could not be discovered")
+        rowB.addStretch(1)
+        layout.addLayout(rowB)
+        self.progress = widget.widgets.progressRow(objectNamePrefix="LNMManager")
+        self.progress.widget.hide()
+        layout.addWidget(self.progress.widget)
+        self.statusLabel = qt.QLabel("")
+        self.statusLabel.setObjectName("LNMManagerStatus")
+        self.statusLabel.setWordWrap(True)
+        layout.addWidget(self.statusLabel)
+        closeRow = qt.QHBoxLayout()
+        closeRow.addStretch(1)
+        closeButton = qt.QPushButton(_("Close"))
+        closeButton.connect("clicked()", self.close)
+        closeRow.addWidget(closeButton)
+        layout.addLayout(closeRow)
+        self.refresh()
+
+    def _button(self, row, text, objectName, callback, toolTip):
+        button = qt.QPushButton(text)
+        button.setObjectName(objectName)
+        button.setProperty("slicerRole", "secondary")
+        if toolTip:
+            button.setToolTip(toolTip)
+        button.connect("clicked()", callback)
+        row.addWidget(button)
+        return button
+
+    def refresh(self, select=None):
+        """Re-read the registered bundles (``manager.bundle_summary``) and fill the table."""
+        from LesionNetworkMappingLib import manager as managerLib
+
+        current = select or self.selectedPath() or self.widget.connectomePath()
+        self.rows = [managerLib.bundle_summary(path) for path in self.logic.registeredConnectomes()]
+        table = self.table
+        table.setRowCount(len(self.rows))
+        selectRow = -1
+        for index, row in enumerate(self.rows):
+            if row.get("error"):
+                values = [row["name"], "—", "—", "—", "—", "—", "—", _("cannot be opened")]
+                terms = None
+            else:
+                try:
+                    accepted = self.logic.termsAccepted(self.logic.openBundle(row["path"]))
+                except Exception:
+                    accepted = False
+                terms = _("accepted") if accepted else _("not accepted")
+                name = row["name"] + (f" ({DEMO_LABEL})" if row.get("synthetic") else "")
+                values = [name, f"{row['n_subjects']:,}", f"{row['time_points']:,}", f"{row['n_voxels']:,}", row["size"], row.get("space") or "—", terms,
+                          _("yes") if row.get("has_reference") else _("no")]
+            for column, value in enumerate(values):
+                item = qt.QTableWidgetItem(str(value))
+                item.setToolTip(row["path"] if column == 0 else str(value))
+                table.setItem(index, column, item)
+            if current and os.path.normpath(row["path"]) == os.path.normpath(current):
+                selectRow = index
+        if selectRow < 0 and self.rows:
+            selectRow = 0
+        if selectRow >= 0:
+            table.selectRow(selectRow)
+        self.onSelectionChanged()
+
+    def selectedRow(self):
+        rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() is not None else []
+        index = rows[0].row() if rows else -1
+        return self.rows[index] if 0 <= index < len(self.rows) else None
+
+    def selectedPath(self):
+        row = self.selectedRow()
+        return row["path"] if row is not None else None
+
+    def onSelectionChanged(self):
+        from LesionNetworkMappingLib import manager as managerLib
+
+        row = self.selectedRow()
+        busy = self.job is not None and not self.job.isFinished()
+        ok = row is not None and not row.get("error")
+        self.provenanceLabel.setText(managerLib.provenance_line(row) if row is not None else _("No connectome registered: Add bundle…, Convert… or Create synthetic demo."))
+        self.referenceButton.setEnabled(ok and not busy)
+        self.hubnessButton.setEnabled(ok and not busy and not row.get("has_degree"))
+        self.hubnessButton.setToolTip(_("This connectome has a hubness (degree) map") if ok and row.get("has_degree") else _("The degree map (mean |Fz| to 1000 seeds)"))
+        self.removeButton.setEnabled(row is not None)
+        self.convertButton.setEnabled(not busy)
+        for button in self.pluginButtons:
+            button.setEnabled(ok)
+
+    #
+    # Jobs
+    #
+
+    def detachJobs(self):
+        """Stop calling back into this dialog (and its Convert dialog): the module is cleaned up while a job may still run."""
+        jobs = [self.job]
+        if self.convertDialog is not None:
+            jobs.append(self.convertDialog.estimateJob)
+            self.convertDialog.estimateJob = None
+        for job in jobs:
+            if job is not None and not job.isFinished():
+                job.spec.onDone = None
+                job.spec.onEvent = None
+        self.job = None
+        self.progress.setJob(None)
+
+    def _submit(self, spec, done):
+        from LesionNetworkMappingUI import jobrunner
+
+        def onDone(job):
+            updateProgressQuietly(self.progress, force=True)
+            self.job = None
+            try:
+                done(job)
+            finally:
+                self.onSelectionChanged()
+
+        spec.onDone = onDone
+        spec.onEvent = lambda event: updateProgressQuietly(self.progress, force=event.get("event") != "progress")
+        self.job = jobrunner.instance().submit(spec)
+        self.progress.setJob(self.job)
+        self.progress.widget.show()
+        self.onSelectionChanged()
+        return self.job
+
+    def openConvert(self):
+        if self.convertDialog is None:
+            self.convertDialog = ConvertConnectomeDialog(self, self)
+        self.convertDialog.show()
+        self.convertDialog.raise_()
+        return self.convertDialog
+
+    def startConversion(self, args, outPath):
+        """Run ``manager convert`` (resumable, with progress and Stop); register the bundle when it is written."""
+        from LesionNetworkMappingUI import jobrunner
+
+        self.statusLabel.setText(_("Converting into {path}…").format(path=outPath))
+
+        def done(job):
+            if job.succeeded():
+                try:
+                    bundle = self.logic.registerConnectome(outPath)
+                except Exception as exc:
+                    self.statusLabel.setText(_("The bundle was written but cannot be opened: {error}").format(error=exc))
+                    return
+                self.statusLabel.setText(_("Converted and registered: {name}. Accept its data use terms in the Connectome card to map.").format(name=bundle.name))
+                self.widget.refreshConnectomes(select=bundle.path)
+                self.refresh(select=bundle.path)
+            elif job.state == "cancelled":
+                self.statusLabel.setText(_("Stopped: the subjects already written are kept. Convert again with Resume ticked to continue."))
+            else:
+                self.statusLabel.setText(_("The conversion failed: {reason}").format(reason=job.failureReason))
+                self.offerPackages(job, retry=lambda: self.startConversion(self._withPackages(args), outPath))
+
+        spec = jobrunner.JobSpec("LesionNetworkMappingLib.manager", args, title=_("Converting the connectome"), heavy=True, kind="convert", name="convert",
+                                 runRoot=jobrunner.defaultRunRoot())
+        return self._submit(spec, done)
+
+    @staticmethod
+    def _withPackages(args):
+        args = list(args)
+        if "--python-packages" not in args:
+            args += ["--python-packages", _pythonPackagesDirectory()]
+        return args
+
+    def offerPackages(self, job, retry=None):
+        """A MATLAB v7.3 connectome needs h5py: install it only after the user agrees (never under tests)."""
+        error = job.errorEvent or {}
+        if error.get("needs") != "h5py" or slicer.app.testingEnabled():
+            return False
+        target = _pythonPackagesDirectory()
+        if not slicer.util.confirmYesNoDisplay(
+                _("These MATLAB v7.3 files can be read with the h5py package (a few MB from the Python Package Index, PyPI). "
+                  "Install h5py into {folder}? It is used only by connectome conversions.").format(folder=target), windowTitle=_("Install h5py")):
+            return False
+        try:
+            os.makedirs(target, exist_ok=True)
+            with slicer.util.WaitCursor():
+                slicer.util.pip_install(["--no-deps", "--target", target, "h5py"])
+        except Exception as exc:
+            slicer.util.errorDisplay(_("h5py could not be installed: {error}").format(error=exc), windowTitle=_("Install h5py"))
+            return False
+        if retry is not None:
+            retry()
+        return True
+
+    def buildHubness(self):
+        """The degree ("hubness") map of the selected connectome (``qa degree``)."""
+        from LesionNetworkMappingUI import jobrunner
+
+        path = self.selectedPath()
+        if not path:
+            return None
+        self.statusLabel.setText(_("Building the hubness map…"))
+
+        def done(job):
+            self.statusLabel.setText(_("Hubness map built.") if job.succeeded() else _("The hubness map could not be built: {reason}").format(reason=job.failureReason))
+            self.refresh()
+
+        spec = jobrunner.JobSpec("LesionNetworkMapping", ["job", "LesionNetworkMappingLib.qa", "degree", "--bundle", path], title=_("Hubness map"), heavy=True,
+                                 kind="degree", name="degree", runRoot=jobrunner.defaultRunRoot())
+        return self._submit(spec, done)
+
+    def buildReference(self, confirm=True):
+        """Reference maps (``reference build``): estimate the time and disk use first and ask (D-A20); never automatic."""
+        from LesionNetworkMappingUI import jobrunner
+
+        path = self.selectedPath()
+        if not path:
+            return None
+        self.statusLabel.setText(_("Estimating the reference build…"))
+
+        def estimated(job):
+            info = next((event for event in job.results if event.get("kind") == "estimate"), None)
+            if not job.succeeded() or info is None:
+                self.statusLabel.setText(_("The reference build cannot be estimated: {reason}").format(reason=job.failureReason))
+                return
+            seconds = info.get("seconds")
+            minutes = max(1, round(seconds / 60)) if seconds else None
+            disk = int(info.get("output_bytes") or 0) + int(info.get("n_voxels", 0)) * 4 * int(info.get("columns") or 10) * 2
+            text = _("Build reference maps ({time})? They read the connectome {passes} times ({read}) and use about {disk} of disk in the bundle folder.").format(
+                time=_("~{m} min").format(m=minutes) if minutes else _("time unknown"), passes=info.get("passes"), read=_formatBytes(int(info.get("read_bytes") or 0)),
+                disk=_formatBytes(disk))
+            self.lastReferenceEstimate = dict(info, disk_bytes=disk, text=text)
+            if confirm and not slicer.util.confirmYesNoDisplay(text, windowTitle=_("Build reference maps")):
+                self.statusLabel.setText(_("Reference maps not built."))
+                return
+            self._startReference(path)
+
+        spec = jobrunner.JobSpec("LesionNetworkMapping", ["job", "LesionNetworkMappingLib.reference", "estimate", "--bundle", path], title=_("Estimate"), heavy=False,
+                                 kind="reference-estimate", name="reference-estimate", runRoot=jobrunner.defaultRunRoot(), onDone=estimated)
+        self.job = jobrunner.instance().submit(spec)
+        return self.job
+
+    def _startReference(self, path):
+        from LesionNetworkMappingUI import jobrunner
+
+        self.statusLabel.setText(_("Building the reference maps…"))
+
+        def done(job):
+            if job.succeeded():
+                self.statusLabel.setText(_("Reference maps built."))
+            elif job.state == "cancelled":
+                self.statusLabel.setText(_("Stopped: Build reference maps again to resume."))
+            else:
+                self.statusLabel.setText(_("The reference maps could not be built: {reason}").format(reason=job.failureReason))
+            self.refresh()
+
+        spec = jobrunner.JobSpec("LesionNetworkMappingLib.reference", ["build", "--bundle", path, "--resume"], title=_("Reference maps"), heavy=True,
+                                 kind="reference", name="reference", runRoot=path)
+        return self._submit(spec, done)
+
+    def removeSelected(self):
+        path = self.selectedPath()
+        if not path:
+            return
+        if os.path.normpath(path) == os.path.normpath(self.widget.connectomePath() or ""):
+            self.widget.onRemoveBundle()
+        else:
+            self.logic.unregisterConnectome(path)
+            self.widget.refreshConnectomes()
+        self.statusLabel.setText(_("Removed from the list (the files are kept): {path}").format(path=path))
+        self.refresh()
+
+    def runPluginAction(self, spec):
+        try:
+            spec["factory"](self.widget.ctx, self.selectedPath())
+        except Exception as exc:
+            logging.exception(f"Lesion network mapping: the connectome action {spec['id']} failed")
+            slicer.util.errorDisplay(str(exc), windowTitle=str(spec["label"]))
+        self.refresh()
+
+
 class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     """The Map inspector: Seed, Connectome, Compute and Result cards, plug-in cards and the disclaimer footer."""
 
@@ -1039,6 +1772,14 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self._refreshGeneration = 0
         self._preloading = False
         self._pumpTimer = None
+        #: Cohort seed: the study, what it maps (``cohortSeeds``), the cohort map job and its maps.tsv
+        self.cohortStudy = None
+        self.cohortInfo = None
+        self.cohortJob = None
+        self.cohortMapsPath = None
+        #: A map shown from a file or found in the scene, not from a run of this session ({path, statistic, n, name, ...})
+        self.loadedMap = None
+        self.managerDialog = None
 
     #
     # Setup
@@ -1148,6 +1889,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         from LesionNetworkMappingUI import visibleSpecs
 
         visible = {spec["id"] for spec in visibleSpecs([spec for spec, _widget in self._cardWidgets.values()], self.seedMode(), self._classic())}
+        if self.seedMode() == "cohort" and self.loadedMap is None:
+            visible.discard("result")  # the cohort's maps are in the Cohort card; Result shows a browsed lesion map
         for cardId, (spec, widget) in self._cardWidgets.items():
             widget.setVisible(cardId in visible)
 
@@ -1212,13 +1955,23 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         layout = qt.QVBoxLayout(card)
         # Seed modes offered by this build: Lesion, plus the modes that plug-ins implement (Cohort: W3-08/A-04c, Coordinates: L-49)
         modes = ["lesion"] + [mode for mode in plugins.SEED_MODES[1:] if any(mode in spec.get("modes", ()) and tuple(spec.get("modes", ())) != plugins.SEED_MODES for spec in self.pluginSpecs)]
-        labels = {"lesion": _("Lesion"), "cohort": _("Cohort"), "coordinates": _("Coordinates"), "stimulation": _("Stimulation")}
+        self.seedModeLabels = {"lesion": _("Lesion"), "cohort": _("Cohort"), "coordinates": _("Coordinates"), "stimulation": _("Stimulation")}
         self.seedModes = modes
-        self.seedModeFrame, self.seedModeGroup = self.widgets.segmented([labels[mode] for mode in modes])
+        self.seedModeFrame, self.seedModeGroup = self.widgets.segmented([self.seedModeLabels[mode] for mode in modes])
         self.seedModeFrame.setObjectName("LNMSeedModeSegmented")
         self.seedModeFrame.setVisible(len(modes) > 1)
         self.seedModeGroup.connect("idClicked(int)", self.onSeedModeClicked)
         layout.addWidget(self.seedModeFrame)
+
+        self.lesionSeedPanel = qt.QWidget()
+        self.lesionSeedPanel.setObjectName("LNMLesionSeedPanel")
+        lesionLayout = qt.QVBoxLayout(self.lesionSeedPanel)
+        lesionLayout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.lesionSeedPanel)
+        self.cohortSeedPanel = self._buildCohortSeedPanel()
+        self.cohortSeedPanel.hide()
+        layout.addWidget(self.cohortSeedPanel)
+        layout = lesionLayout
 
         form = qt.QFormLayout()
         self.segmentationSelector = slicer.qMRMLNodeComboBox()
@@ -1267,12 +2020,164 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         layout.addLayout(self.seedActions)
         return card
 
+    def _buildCohortSeedPanel(self):
+        """Seed = Cohort: the study and what it maps (its analysable lesions, the excluded and native ones)."""
+        panel = qt.QWidget()
+        panel.setObjectName("LNMCohortSeedPanel")
+        layout = qt.QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.cohortStudyLabel = self._label("", objectName="LNMCohortStudy")
+        layout.addWidget(self.cohortStudyLabel)
+        self.cohortExcludedLabel = self._label("", role="secondaryText", objectName="LNMCohortExcluded")
+        layout.addWidget(self.cohortExcludedLabel)
+        self.cohortNativeBanner = self.widgets.banner("", ((_("Normalize in Library"), self.onNormalizeInLibrary),), level="warn")
+        self.cohortNativeBanner.setObjectName("LNMCohortNativeBanner")
+        self.cohortNativeBanner.hide()
+        layout.addWidget(self.cohortNativeBanner)
+        row = qt.QHBoxLayout()
+        self.cohortOpenStudyButton = qt.QPushButton(_("Open study…"))
+        self.cohortOpenStudyButton.setObjectName("LNMCohortOpenStudyButton")
+        self.cohortOpenStudyButton.setProperty("slicerRole", "secondary")
+        self.cohortOpenStudyButton.setToolTip(_("Choose a study folder (study.json and participants.tsv)"))
+        self.cohortOpenStudyButton.connect("clicked()", self.onOpenCohortStudy)
+        row.addWidget(self.cohortOpenStudyButton)
+        row.addStretch(1)
+        layout.addLayout(row)
+        return panel
+
     def onSeedModeClicked(self, index):
         if self._parameterNode is None or index < 0 or index >= len(self.seedModes):
             return
         self._parameterNode.seedMode = self.seedModes[index]
+        self._showSeedMode()
         self.updateCardVisibility()
         self.updateComputeState()
+
+    def _showSeedMode(self):
+        cohort = self.seedMode() == "cohort"
+        self.lesionSeedPanel.setVisible(not cohort)
+        self.cohortSeedPanel.setVisible(cohort)
+        self.nullCheckBox.setVisible(not cohort)
+        if cohort and self.cohortInfo is None:
+            self.refreshCohort()
+
+    #
+    # Seed: cohort
+    #
+
+    def _sessionStudy(self):
+        shell = self._shell()
+        session = getattr(shell, "studySession", None) if shell is not None else None
+        return getattr(session, "study", None) if session is not None else None
+
+    def refreshCohort(self):
+        """The study of the Cohort seed (the Studio study session's, else the one chosen with Open study…) and its lesions."""
+        from LesionNetworkMappingLib.study import Study
+
+        study = self._sessionStudy()
+        if study is None:
+            path = self.cohortStudy.path if self.cohortStudy is not None else str(qt.QSettings().value(COHORT_STUDY_SETTING) or "")
+            node = self._parameterNode
+            if not path and node is not None and node.studyPath:
+                path = node.studyPath  # scenes of earlier versions
+            if path and os.path.isfile(os.path.join(path, "study.json")):
+                try:
+                    study = self.cohortStudy if self.cohortStudy is not None and self.cohortStudy.path == os.path.abspath(path) else Study.open(path)
+                except Exception:
+                    logging.exception("Lesion network mapping: the cohort study could not be opened")
+                    study = None
+        self.cohortStudy = study
+        self.cohortInfo = None
+        if study is not None:
+            try:
+                self.cohortInfo = self.logic.cohortSeeds(study, self.bundle)
+            except Exception as exc:
+                logging.exception("Lesion network mapping: the cohort could not be read")
+                self.cohortInfo = {"lesions": [], "excluded": {}, "native": [], "groups": {}, "n": 0, "error": str(exc)}
+            self._findCohortMaps()
+        if study is not None and study is not self.ctx.study:
+            self.ctx.setStudy(study)
+            self._notifyControllers("onStudyChanged")
+        self._showCohort()
+        self.updateComputeState()
+        self._notifyControllers("onCohortChanged")
+
+    def _showCohort(self):
+        info, study = self.cohortInfo, self.cohortStudy
+        if "cohort" in self.seedModes:
+            label = self.seedModeLabels["cohort"] + (f" ({info['n']})" if info else "")
+            self.seedModeGroup.button(self.seedModes.index("cohort")).setText(label)
+        self.cohortOpenStudyButton.setVisible(self._sessionStudy() is None)
+        self.cohortOpenStudyButton.setText(_("Open study…") if study is None else _("Other study…"))
+        if study is None:
+            self.cohortStudyLabel.setText(_("Open a study to map its lesions (a study folder made in Library, with participants.tsv)."))
+            self.cohortExcludedLabel.hide()
+            self.cohortNativeBanner.hide()
+            return
+        groups = info.get("groups", {}) if info else {}
+        groupText = ""
+        if groups.get("case") or groups.get("control"):
+            groupText = " · " + _("{cases} cases / {controls} controls").format(cases=groups.get("case", 0), controls=groups.get("control", 0))
+        self.cohortStudyLabel.setText(_("Study “{name}” · {n} lesions to map").format(name=study.name, n=info["n"] if info else 0) + groupText)
+        excluded = (info or {}).get("excluded") or {}
+        if excluded or (info or {}).get("error"):
+            parts = [f"{len(sids)} {reason}" for reason, sids in excluded.items() if sids]
+            text = _("Not mapped: {parts}").format(parts=" · ".join(parts)) if parts else ""
+            if info.get("error"):
+                text = _("The study cannot be read: {error}").format(error=info["error"])
+            self.cohortExcludedLabel.setText(text)
+            self.cohortExcludedLabel.setVisible(bool(text))
+        else:
+            self.cohortExcludedLabel.hide()
+        native = (info or {}).get("native") or []
+        if native:
+            self.widgets.setBannerText(self.cohortNativeBanner, _("{n} native lesions not yet normalized (not mapped): normalize them to MNI first.").format(n=len(native)))
+        self.cohortNativeBanner.setVisible(bool(native))
+
+    def onOpenCohortStudy(self):
+        """Choose the study of the Cohort seed (kept in Studio/LNM/CohortStudy, never in the scene)."""
+        start = self.cohortStudy.path if self.cohortStudy is not None else str(qt.QSettings().value(COHORT_STUDY_SETTING) or "")
+        path = qt.QFileDialog.getExistingDirectory(slicer.util.mainWindow(), _("Choose a study folder"), start)
+        if not path:
+            return
+        self.openCohortStudy(path)
+
+    def openCohortStudy(self, path):
+        """Use the study at ``path`` for the Cohort seed; return the study, or None when the folder is not a study."""
+        from LesionNetworkMappingLib.study import Study
+
+        if not os.path.isfile(os.path.join(path, "study.json")):
+            slicer.util.errorDisplay(_("This folder is not a study (it has no study.json). Create the study in Library first."), windowTitle=_("Open study"))
+            return None
+        try:
+            study = Study.open(path)
+        except Exception as exc:
+            slicer.util.errorDisplay(_("The study cannot be opened: {error}").format(error=exc), windowTitle=_("Open study"))
+            return None
+        qt.QSettings().setValue(COHORT_STUDY_SETTING, study.path)
+        self.cohortStudy = study
+        self.cohortMapsPath = None
+        self.refreshCohort()
+        return study
+
+    def onNormalizeInLibrary(self):
+        """Native lesions of the cohort: Library's batch normalization (Studio), else the Studio module (Classic)."""
+        shell = self._shell()
+        if shell is not None:
+            shell.switchTo("library")
+        elif hasattr(slicer.modules, "studio"):
+            slicer.util.selectModule("Studio")
+
+    def _findCohortMaps(self):
+        """The finished cohort maps (maps.tsv) of this study, connectome and subjects (All, or the Preview N), if any."""
+        study, bundle = self.cohortStudy, self.bundle
+        self.cohortMapsPath = None
+        if study is not None and bundle is not None:
+            candidate = os.path.join(self.cohortOutputDir(), "maps.tsv")
+            if os.path.isfile(candidate) and os.path.isfile(os.path.join(os.path.dirname(candidate), "cohortmaps.json")):
+                self.cohortMapsPath = candidate
+        self.ctx.cohortMaps = self.cohortMapsPath
+        return self.cohortMapsPath
 
     def onSegmentationChanged(self, node):
         if self._updatingGui:
@@ -1474,6 +2379,12 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.demoButton.setToolTip(_("Create a small synthetic connectome (SYNTHETIC — not real data) to try Map"))
         self.demoButton.connect("clicked()", self.onCreateDemo)
         buttons.addWidget(self.demoButton)
+        self.convertEmptyButton = qt.QPushButton(_("Convert…"))
+        self.convertEmptyButton.setObjectName("LNMConvertConnectomeButton")
+        self.convertEmptyButton.setProperty("slicerRole", "secondary")
+        self.convertEmptyButton.setToolTip(_("Convert NIfTI time series or a Lead-DBS connectome that is on this computer into a bundle"))
+        self.convertEmptyButton.connect("clicked()", lambda: self.openManager().openConvert())
+        buttons.addWidget(self.convertEmptyButton)
         buttons.addStretch(1)
         emptyLayout.addLayout(buttons)
         emptyLayout.addWidget(self.widgets.helpLink(_("GSP1000 on the Harvard Dataverse"), GSP_DATAVERSE_URL))
@@ -1488,7 +2399,10 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
 
         menu = self.manageMenu
         menu.clear()
+        menu.addAction(_("Manage connectomes…"), self.openManager)
+        menu.addSeparator()
         menu.addAction(_("Add bundle…"), self.onAddBundle)
+        menu.addAction(_("Convert…"), lambda: self.openManager().openConvert())
         menu.addAction(_("Create synthetic demo"), self.onCreateDemo)
         path = self._connectomePath
         removeAction = menu.addAction(_("Remove from the list"), self.onRemoveBundle)
@@ -1516,6 +2430,16 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
     def connectomePath(self):
         """Local folder of the connectome bundle in use ("" without one)."""
         return self._connectomePath
+
+    def openManager(self):
+        """Show the connectome manager (non-modal, one per module widget); return it."""
+        if self.managerDialog is None:
+            self.managerDialog = ConnectomeManagerDialog(self, slicer.util.mainWindow())
+        else:
+            self.managerDialog.refresh()
+        self.managerDialog.show()
+        self.managerDialog.raise_()
+        return self.managerDialog
 
     def refreshConnectomes(self, select=None):
         """Fill the connectome combo from the registered bundles and open the selected one.
@@ -1553,6 +2477,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             index = 0
         self.connectomeCombo.setCurrentIndex(index)
         self.connectomeCombo.blockSignals(wasBlocked)
+        if self.managerDialog is not None and self.managerDialog.isVisible():
+            self.managerDialog.refresh()
         if missing:
             self._showMissingConnectome(missing)
             return
@@ -1594,6 +2520,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.ctx.setBundle(self.bundle)
         self._showConnectome()
         self.scheduleSeedUpdate()
+        if self.seedMode() == "cohort" and getattr(self, "cohortSeedPanel", None) is not None:
+            self.refreshCohort()
         self.updateComputeState()
 
     def _showConnectome(self):
@@ -1752,6 +2680,14 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.computeButton.setMinimumHeight(36)
         self.computeButton.connect("clicked()", self.onPrimary)
         layout.addWidget(self.computeButton)
+        # Seed = Cohort with a "Run everything" card (A-04c): the cohort maps alone are the secondary "Maps only"
+        self.mapsOnlyButton = qt.QPushButton(_("Maps only"))
+        self.mapsOnlyButton.setObjectName("LNMMapsOnlyButton")
+        self.mapsOnlyButton.setProperty("slicerRole", "secondary")
+        self.mapsOnlyButton.setToolTip(_("Compute the network map of every lesion of the study, without the group analyses"))
+        self.mapsOnlyButton.connect("clicked()", self.computeCohort)
+        self.mapsOnlyButton.hide()
+        layout.addWidget(self.mapsOnlyButton)
         self.computeReasonLabel = self._label("", role="secondaryText", objectName="LNMComputeReason")
         layout.addWidget(self.computeReasonLabel)
         self.progress = self.widgets.progressRow(objectNamePrefix="LNM")
@@ -1768,6 +2704,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         if self._parameterNode is not None:
             self._parameterNode.subjectsMode = "preview" if index == 1 else "all"
         self._showSubjectsText()
+        if self.seedMode() == "cohort":
+            self._findCohortMaps()
+            self._notifyControllers("onCohortMapsChanged", self.cohortMapsPath)
         self.refreshResult(reloadMaps=False)
 
     def onNullToggled(self, checked):
@@ -1810,6 +2749,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             return enabled, "" if enabled else _("Not ready")
         if self.job is not None and (self.job.isRunning() or self.job.isQueued()):
             return False, _("Mapping…")
+        if mode == "cohort":
+            return self.cohortComputeState()
         if mode != "lesion":
             return False, _("This seed mode is not available yet.")
         if self.bundle is None:
@@ -1828,16 +2769,46 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             return True, _("Another computation is running: this one will wait for it.")
         return True, ""
 
+    def cohortComputeState(self):
+        """(enabled, reason) of mapping the cohort's lesions (the cohort maps job)."""
+        from LesionNetworkMappingUI import jobrunner
+
+        if self.cohortJob is not None and (self.cohortJob.isRunning() or self.cohortJob.isQueued()):
+            return False, _("Mapping the cohort…")
+        if self.cohortStudy is None:
+            return False, _("Open a study to map its lesions.")
+        if self.bundle is None:
+            return False, _("Add a connectome, or use the demo, to map.")
+        if not self.acceptTermsCheckBox.checked:
+            return False, _("Accept the data use terms of {name} to map.").format(name=self.bundle.name)
+        if not self.cohortInfo or not self.cohortInfo.get("n"):
+            return False, _("The study has no lesion to map (see the Seed card).")
+        if not self.ctx.computeEnabled():
+            return False, " ".join(self.ctx.computeDisabledReasons()) or _("Not ready")
+        if jobrunner.instance().isBusy():
+            return True, _("Another computation is running: this one will wait for it.")
+        return True, ""
+
+    def _cohortButtonText(self):
+        n = (self.cohortInfo or {}).get("n") or 0
+        return _("Map all {n} lesions").format(n=n) if n else _("Map all lesions")
+
     def updateComputeState(self):
         if not hasattr(self, "computeButton"):
             return
         mode = self.seedMode()
         override = self.ctx.primaryOverride(mode)
-        self.computeButton.setText(override[0] if override is not None else _("Map network"))
+        if override is not None:
+            self.computeButton.setText(override[0])
+        else:
+            self.computeButton.setText(self._cohortButtonText() if mode == "cohort" else _("Map network"))
         enabled, reason = self.computeState()
         self.computeButton.setEnabled(enabled)
         self.computeReasonLabel.setText(reason)
         self.computeReasonLabel.setVisible(bool(reason))
+        if hasattr(self, "mapsOnlyButton"):
+            self.mapsOnlyButton.setVisible(mode == "cohort" and override is not None)
+            self.mapsOnlyButton.setEnabled(self.cohortComputeState()[0])
         self._updatePrimaryAction()
         self._updateStatusChip()
 
@@ -1847,6 +2818,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         override = self.ctx.primaryOverride(mode)
         if override is not None:
             override[1]()
+            return
+        if mode == "cohort":
+            self.computeCohort()
             return
         if self._seedDirty or self.seedTimer.isActive() or self.seedCheck is None:
             self.updateSeed()
@@ -1886,7 +2860,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         rule = self.currentRule()
         # The shown result is kept, untouched, until the new run has a map; it comes back if the run ends without one
         self._previousRun = {"volume": node.resultVolume, "ctxVolume": self.ctx.resultVolume, "run": self.ctx.currentRun, "mapStamp": dict(self._mapStamp),
-                             "state": (self.lesionName, self.runDir, self.runOutputs, self.runN, self.runPartial, self.runPreviewN, self.runDescSuffix)}
+                             "state": (self.lesionName, self.runDir, self.runOutputs, self.runN, self.runPartial, self.runPreviewN, self.runDescSuffix),
+                             "loadedMap": self.loadedMap}
+        self.loadedMap = None
         self.lesionName, self.runDir = lesionName, runDir
         self.runOutputs, self.runN, self.runPartial = {}, None, False
         self.runPreviewN = previewN
@@ -1909,6 +2885,66 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.progress.widget.show()
         self.updateComputeState()
         return self.job
+
+    #
+    # Compute: cohort
+    #
+
+    def cohortOutputDir(self):
+        """Where the cohort maps go: ``<study>/derivatives/lnm/conn-<label>[_n-<N>]/cohort`` (N for a Preview)."""
+        if self.cohortStudy is None or self.bundle is None:
+            return None
+        previewN = self.plannedN() if self._parameterNode is not None and self._parameterNode.subjectsMode == "preview" and self.plannedN() < self.bundle.n_subjects else None
+        return self.logic.cohortOutputDir(self.cohortStudy.path, self.bundle.name, previewN)
+
+    def computeCohort(self):
+        """Map every analysable lesion of the cohort's study with ``cohortmaps`` (batched, cached); return the job or None."""
+        if self.seedMode() != "cohort":
+            self._parameterNode.seedMode = "cohort"
+            self.updateGUIFromParameterNode()
+        if self.cohortInfo is None:
+            self.refreshCohort()
+        enabled, reason = self.cohortComputeState()
+        if not enabled:
+            self.computeReasonLabel.setText(reason)
+            self.computeReasonLabel.setVisible(bool(reason))
+            return None
+        if not self._preflight():
+            return None
+        node = self._parameterNode
+        outDir = self.cohortOutputDir()
+        previewN = self.plannedN() if node.subjectsMode == "preview" and self.plannedN() < self.bundle.n_subjects else None
+        config = {"studyPath": self.cohortStudy.path, "bundlePath": self.bundle.path, "outDir": outDir, "lesions": self.cohortInfo["lesions"],
+                  "previewN": previewN, "previewSeed": node.previewSeed}
+        self.widgets.setBannerText(self.computeBanner, "")
+        self.computeBanner.hide()
+        self.cohortJob = self.logic.startCohortMaps(config, onEvent=self.onCohortEvent, onDone=self.onCohortDone, context=self.ctx)
+        self.progress.setJob(self.cohortJob)
+        self.progress.widget.show()
+        self.updateComputeState()
+        self._notifyControllers("onCohortJobStarted", self.cohortJob)
+        return self.cohortJob
+
+    def onCohortEvent(self, event):
+        kind = event.get("event")
+        if kind in ("progress", "stage", "queued", "start"):
+            updateProgressQuietly(self.progress, force=kind != "progress")
+        self._notifyControllers("onCohortEvent", event)
+
+    def onCohortDone(self, job):
+        from LesionNetworkMappingUI import jobrunner
+
+        updateProgressQuietly(self.progress, force=True)
+        if job.state == "failed":
+            self._showRunFailure(job)
+        self._findCohortMaps()
+        qt.QTimer.singleShot(jobrunner.FINISHED_CHIP_MS + 200, self._refreshStatusChip)
+        self.updateComputeState()
+        self._notifyControllers("onCohortMapsChanged", self.cohortMapsPath)
+        shell = self._shell()
+        if shell is not None and job.state == "done" and self.cohortMapsPath:
+            done = job.doneEvent or {}
+            shell.toast(_("{n} lesion maps ready · {hits} from the cache").format(n=done.get("n", "?"), hits=done.get("cache_hits", 0)), 3000)
 
     def _prepareResultVolume(self):
         """Set up the result volume on the connectome grid before the run (empty, with the colour table and the
@@ -1987,7 +3023,12 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         done, total = event.get("done"), event.get("total")
         eta = jobrunner.formatEta(event.get("eta"))
         text = _("{done:,} / {total:,} subjects").format(done=int(done or 0), total=int(total or 0)) + (f" · ~{eta}" if eta else "")
-        self.progress.setProgress((done or 0) / total if total else None, text)
+        bar = self.progress.bar
+        bar.setUpdatesEnabled(False)  # repainted later, not inside setValue (about 30 ms each in the Studio inspector)
+        try:
+            self.progress.setProgress((done or 0) / total if total else None, text)
+        finally:
+            bar.setUpdatesEnabled(True)
 
     def _outputsByKey(self, outputs):
         """{"T", "AvgFz", "AvgR": path} of the run's lesion from an event's output list."""
@@ -2066,6 +3107,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             volume = None  # removed during the run
         if volume is not None:
             (self.lesionName, self.runDir, self.runOutputs, self.runN, self.runPartial, self.runPreviewN, self.runDescSuffix) = previous["state"]
+            self.loadedMap = previous.get("loadedMap")
             self._mapStamp.clear()
             self._mapStamp.update(previous["mapStamp"])
             run, ctxVolume = previous["run"], previous["ctxVolume"]
@@ -2286,7 +3328,15 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         return node.statistic if node is not None and node.statistic in STATISTICS else "T"
 
     def onStatisticClicked(self, index):
-        if self._parameterNode is None:
+        if self._parameterNode is None or self._updatingGui:
+            return
+        loaded = self.loadedMap
+        if loaded is not None and STATISTICS[index] != loaded.get("statistic") and not (loaded.get("siblings") or {}).get(STATISTICS[index]):
+            # A map shown from a file or a scene: only the statistics whose files are next to it can be shown
+            self.statisticGroup.button(STATISTICS.index(loaded.get("statistic", "T"))).setChecked(True)
+            shell = self._shell()
+            if shell is not None:
+                shell.toast(_("Only the {statistic} map is open: its {other} map is not next to it.").format(statistic=loaded.get("statistic"), other=STATISTICS[index]))
             return
         self._parameterNode.statistic = STATISTICS[index]
         self.refreshResult(reloadMaps=True)
@@ -2305,8 +3355,80 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             return rule.get("statistic", "Fz")
         return "Fz" if rule["kind"] == "fz_abs" else "T"
 
+    def _hasResult(self):
+        """True when the Result card has a map: a run's (with its connectome) or one shown from a file or a scene."""
+        return (bool(self.runOutputs) and self.bundle is not None) or self.loadedMap is not None
+
+    def _loadedOnBundleGrid(self):
+        """True when the loaded map lies on the grid of the open connectome (its mask then gives V and the voxels)."""
+        node = self._parameterNode
+        volume = node.resultVolume if node is not None else None
+        if self.bundle is None or volume is None or volume.GetImageData() is None:
+            return False
+        if tuple(volume.GetImageData().GetDimensions()) != tuple(self.bundle.shape):
+            return False
+        import numpy as np
+
+        matrix = vtk.vtkMatrix4x4()
+        volume.GetIJKToRASMatrix(matrix)
+        affine = np.array([[matrix.GetElement(row, column) for column in range(4)] for row in range(4)])
+        return bool(np.allclose(affine, self.bundle.affine, atol=1e-4))
+
+    def _loadedGeometry(self, array):
+        """(grid, voxel indices) of a loaded map: the connectome mask on its grid, else the finite non-zero voxels of the map."""
+        import numpy as np
+
+        from LesionNetworkMappingLib.geometry import Grid
+
+        if self._loadedOnBundleGrid():
+            return self.bundle.grid, self.bundle.mask_indices
+        node = self._parameterNode
+        matrix = vtk.vtkMatrix4x4()
+        node.resultVolume.GetIJKToRASMatrix(matrix)
+        affine = np.array([[matrix.GetElement(row, column) for column in range(4)] for row in range(4)])
+        ijk = np.transpose(np.asarray(array), (2, 1, 0))
+        flat = ijk.ravel()
+        indices = np.flatnonzero(np.isfinite(flat) & (flat != 0))
+        return Grid(ijk.shape, affine), indices
+
+    def _loadedValues(self, statistic):
+        """Voxel values of the loaded map of ``statistic`` (the shown volume, or its sibling file), with their geometry."""
+        import numpy as np
+
+        node = self._parameterNode
+        volume = node.resultVolume if node is not None else None
+        if volume is None or volume.GetImageData() is None:
+            return None
+        if statistic == self.loadedMap.get("statistic"):
+            stamp = ("loaded", statistic, volume.GetImageData().GetMTime())
+            cached = self._valuesCache.get(statistic)
+            if cached is not None and cached[0] == stamp:
+                return cached[1]
+            array = slicer.util.arrayFromVolume(volume)
+        else:
+            path = (self.loadedMap.get("siblings") or {}).get(statistic)
+            if not path or not os.path.isfile(path):
+                return None
+            stamp = ("loaded", path, os.stat(path).st_mtime_ns)
+            cached = self._valuesCache.get(statistic)
+            if cached is not None and cached[0] == stamp:
+                return cached[1]
+            array, _affine = self.logic.readMap(path)
+        grid, indices = self._loadedGeometry(slicer.util.arrayFromVolume(volume))
+        values = np.transpose(np.asarray(array), (2, 1, 0)).ravel()[indices].astype(np.float64)
+        self._valuesCache[statistic] = (stamp, (values, grid, indices))
+        return values, grid, indices
+
+    def _resultN(self):
+        if self.loadedMap is not None:
+            return self.loadedMap.get("n")
+        return self.runN if self.runN else self.plannedN()
+
     def _mapValues(self, statistic):
         """In-mask values of the run's map of ``statistic`` (read from its file, cached per file version)."""
+        if self.loadedMap is not None:
+            loaded = self._loadedValues(statistic)
+            return loaded[0] if loaded is not None else None
         path = self.runOutputs.get(STATISTIC_KEYS[statistic])
         if not path or self.bundle is None or not os.path.isfile(path):
             return None
@@ -2320,6 +3442,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         return values
 
     def _resultName(self, statistic):
+        if self.loadedMap is not None:
+            n = self.loadedMap.get("n")
+            return f"{self.loadedMap.get('label') or self.loadedMap.get('name')} LNM {statistic}" + (f" N={n}" if n else "")
         name = f"{self.lesionName or 'lesion'} LNM {statistic} N={self.runN}"
         if self.runPreviewN:
             name += " Preview"
@@ -2354,6 +3479,11 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
 
         # Map: load or update the volume (never on a pure threshold change)
         mapChanged = False
+        loaded = self.loadedMap
+        if loaded is not None and reloadMaps and statistic != loaded.get("statistic") and (loaded.get("siblings") or {}).get(statistic):
+            # A map shown from a file: the other statistic of the same lesion, in the same volume
+            self.showMapFile(loaded["siblings"][statistic], label=loaded.get("label"))
+            return
         if hasMap and (reloadMaps or resultVolume is None):
             path = self.runOutputs.get(STATISTIC_KEYS[statistic])
             if path and os.path.isfile(path):
@@ -2386,12 +3516,19 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         node = self._parameterNode
         rule = self.currentRule()
         statistic = self.currentStatistic()
-        n = self.runN if self.runN else self.plannedN()
+        n = self._resultN()
         resultVolume = node.resultVolume if node is not None else None
-        hasMap = bool(self.runOutputs) and self.bundle is not None
-        for button in (self.binarizeButton, self.resultExportButton):
-            button.setEnabled(hasMap and resultVolume is not None)
-        if hasMap:
+        hasMap = self._hasResult()
+        loaded = self.loadedMap
+        self.binarizeButton.setEnabled(hasMap and resultVolume is not None)
+        self.resultExportButton.setEnabled(hasMap and resultVolume is not None and loaded is None)
+        if loaded is not None:
+            state = _("N={n}").format(n=n) if n else _("N unknown")
+            if loaded.get("partial"):
+                state = _("N={n} (partial)").format(n=n)
+            source = _("from the scene") if loaded.get("fromScene") else _("opened from a file")
+            self.resultTitleLabel.setText(f"{loaded.get('label') or loaded.get('name')} · {statistic} · {state} · {source}")
+        elif hasMap:
             self.resultTitleLabel.setText(_("{name} · {state}").format(
                 name=f"{self.lesionName} · {statistic}", state=(_("N={n} (partial)") if self.runPartial else _("N={n}")).format(n=self.runN)
                 + (_(" · Preview") if self.runPreviewN else "")))
@@ -2410,12 +3547,16 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         # Rule: re-resolved for the current N on every update
         self.resolved = None
         banner, notes, empty = "", [], ""
-        if self.bundle is not None and n:
+        resolvable = (self.bundle is not None and n) or (loaded is not None and (n or rule["kind"] in ("fz_abs", "top_pct")))
+        if resolvable:
             ruleStatistic = self._ruleStatistic(rule)
             values = self._mapValues(ruleStatistic) if hasMap else None
-            note = "partial" if self.runPartial else ("preview" if (self.runPreviewN if hasMap else node is not None and node.subjectsMode == "preview") else None)
+            if loaded is not None:
+                note = "partial" if loaded.get("partial") else ("preview" if loaded.get("preview") else None)
+            else:
+                note = "partial" if self.runPartial else ("preview" if (self.runPreviewN if hasMap else node is not None and node.subjectsMode == "preview") else None)
             try:
-                self.resolved = self.logic.resolveRule(rule, n, self.bundle, values=values, note=note)
+                self.resolved = self._resolveRule(rule, n or 1, values, note)
             except ValueError as exc:
                 self.derivedLabel.setText(str(exc))
             if self.resolved is not None:
@@ -2428,8 +3569,14 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
                 if not self.resolved.allowed and not banner:
                     banner = _("This rule is not applied to this map.")
                 notes = list(self.resolved.notes)
+                if loaded is not None and not self._loadedOnBundleGrid():
+                    notes.append(_("V = {v:,} non-zero voxels of this map (its connectome is not open).").format(v=self.resolved.v))
+        elif loaded is not None:
+            self.derivedLabel.setText(_("The N of this map is unknown (no sidecar): use an Fz or Top x% rule, or open its run."))
         else:
             self.derivedLabel.setText(_("Choose a connectome to resolve the threshold rule."))
+        if loaded is not None and self.bundle is None and self.bundleError:
+            notes.insert(0, _("Its connectome is not on this computer: {error}").format(error=self.bundleError))
         self.widgets.setBannerText(self.ruleBanner, banner)
         self.ruleBanner.setVisible(bool(banner))
         self.ruleNotesLabel.setText(" ".join(notes))
@@ -2470,6 +3617,20 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             self.peaksTable.hide()
         self._updateStatusChip()
 
+    def _resolveRule(self, rule, n, values, note):
+        """The rule for a map with ``n`` subjects: V and the GSR flag of the connectome, or for a loaded map that is
+        not on the open connectome's grid, V = its non-zero voxels.
+        """
+        from LesionNetworkMappingLib import thresholds
+
+        if self.loadedMap is not None and not self._loadedOnBundleGrid():
+            v = len(values) if values is not None else 0
+            if not v:
+                loaded = self._loadedValues(self.loadedMap.get("statistic"))
+                v = len(loaded[0]) if loaded is not None else 1
+            return thresholds.resolve(rule, n, max(int(v), 1), note=note, values=values)
+        return self.logic.resolveRule(rule, n, self.bundle, values=values, note=note)
+
     def _displayWindow(self, volume, recompute):
         from LesionNetworkMappingLib import display
 
@@ -2483,23 +3644,153 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         volume.SetAttribute(display.WINDOW_ATTRIBUTE, f"{window:.6g}")
         return window
 
+    def _mappage(self):
+        """``StudioLib.mappage`` while Studio is active (it saves and restores the layers of Map), else None."""
+        if self._shell() is None:
+            return None
+        try:
+            from StudioLib import mappage
+        except ImportError:
+            return None
+        return mappage
+
+    def _templateUnderMaps(self, load):
+        mappage = self._mappage()
+        if mappage is not None:
+            return mappage.templateVolume(self.bundle, load=load)
+        return self.logic.templateVolume()
+
     def _showLayers(self, volume):
         from LesionNetworkMappingLib import display
 
+        mappage = self._mappage()
+        if mappage is not None:
+            mappage.captureLayers()  # the layers seen before Map come back when Map is left
         node = self._parameterNode
-        display.showLayers(self.logic.templateVolume(), volume, node.opacity if node is not None else 0.8)
+        display.showLayers(self._templateUnderMaps(load=True), volume, node.opacity if node is not None else 0.8)
         segNode, segmentId = self.ctx.seed()
-        if segNode is not None and self._outlineState is None:
+        if segNode is not None and self._outlineState is None and self.seedMode() == "lesion":
             self._outlineState = display.lesionOutline(segNode, segmentId)
+
+    def showMapLayers(self):
+        """Studio Map entered (``mappage.enter``): with a result, the template, the result at 0.8 with the module colour
+        table and no label layer; the lesion as a white outline. Without a result the views keep their layers (the
+        lesion's own scan, which may be in native space) and nothing is loaded.
+        """
+        from LesionNetworkMappingLib import display
+
+        node = self._parameterNode
+        volume = node.resultVolume if node is not None else None
+        if volume is not None and volume.GetScene() is None:
+            volume = None
+        if volume is not None:
+            display.showLayers(self._templateUnderMaps(load=True), volume, node.opacity if node is not None else 0.8)
+        segNode, segmentId = self.ctx.seed()
+        if segNode is not None and self.seedMode() == "lesion" and self._outlineState is None:
+            self._outlineState = display.lesionOutline(segNode, segmentId)
+
+    def restoreLesionDisplay(self):
+        """Give the lesion its own look back (Map left)."""
+        if self._outlineState is not None:
+            from LesionNetworkMappingLib import display
+
+            display.restoreLesionDisplay(self._outlineState)
+            self._outlineState = None
+
+    #
+    # Maps shown from files (Library, browsing) and from scenes
+    #
+
+    def _loadedVolume(self):
+        """The volume of maps shown from files (reused, so that browsing keeps one volume in the scene), or None."""
+        node = self._parameterNode
+        volume = node.resultVolume if node is not None else None
+        if volume is not None and volume.GetScene() is not None and volume.GetAttribute(LOADED_MAP_ATTRIBUTE):
+            return volume
+        for candidate in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
+            if candidate.GetAttribute(LOADED_MAP_ATTRIBUTE):
+                return candidate
+        return None
+
+    def showMapFile(self, path, label=None):
+        """Show a network or statistical map file as the Result card's map; return its volume node.
+
+        Used for maps opened from Library or dropped (``mappage.loadMap``) and for browsing a set of maps one at a
+        time: every file shown this way reuses one volume (``LNM.LoadedMap``), so the scene does not grow with the
+        number of maps. The volume is a statistical map for Studio (``Studio.Role`` = "statmap": Draw never takes it
+        as a scan, no segmentation is created on it) and a result for Draw (``LNM.Result``). N comes from the map's
+        sidecar or its NIfTI header; the threshold rule is resolved for it as for a run.
+        """
+        if self.job is not None and (self.job.isRunning() or self.job.isQueued()):
+            raise RuntimeError(_("A map is being computed: stop it before showing another map."))
+        info = self.logic.mapFileInfo(path)
+        info["label"] = label or info.get("name")
+        node = self._parameterNode
+        if node is None:
+            self.initializeParameterNode()
+            node = self._parameterNode
+        statistic = info["statistic"]
+        attributes = {"LNM.Statistic": statistic, "LNM.N": info["n"] or "", "LNM.Partial": "0", LOADED_MAP_ATTRIBUTE: os.path.basename(path), "Studio.Role": "statmap"}
+        name = f"{info['label']} LNM {statistic}" + (f" N={info['n']}" if info["n"] else "")
+        previous = self._loadedVolume()
+        volume = self.logic.loadMap(path, name, previous, saveWithScene=True, attributes=attributes)
+        if volume.GetAttribute(COMPUTING_ATTRIBUTE) is not None:
+            volume.RemoveAttribute(COMPUTING_ATTRIBUTE)
+        # The Result card follows this map; an earlier run's map stays in the scene
+        self.runOutputs, self.runN, self.runPartial, self.runPreviewN, self.runDescSuffix, self.runDir = {}, None, False, None, "", None
+        self.loadedMap = info
+        self._valuesCache.clear()
+        self._mapStamp.clear()
+        self._updatingGui = True
+        try:
+            node.statistic = statistic if statistic in STATISTICS else "T"
+            self.statisticGroup.button(STATISTICS.index(self.currentStatistic())).setChecked(True)
+        finally:
+            self._updatingGui = False
+        node.resultVolume = volume
+        self.ctx.setCurrentRun(None)
+        self.ctx.setResultVolume(volume)
+        self._displayWindow(volume, True)
+        self._showLayers(volume)
+        self.updateCardVisibility()
+        self.refreshResult(reloadMaps=False, peaks=True)
+        return volume
+
+    def _adoptSceneResult(self):
+        """A result volume of the scene without a run of this session (a reloaded scene): the Result card shows it,
+        with what its attributes say (statistic, N), also when its connectome is not on this computer.
+        """
+        node = self._parameterNode
+        volume = node.resultVolume if node is not None else None
+        if self.runOutputs or self.loadedMap is not None or volume is None or volume.GetScene() is None or volume.GetImageData() is None:
+            return False
+        if volume.GetAttribute(COMPUTING_ATTRIBUTE) == "1" or (self.job is not None and not self.job.isFinished()):
+            return False
+        statistic = volume.GetAttribute("LNM.Statistic") or self.currentStatistic()
+        try:
+            n = int(float(volume.GetAttribute("LNM.N") or 0)) or None
+        except ValueError:
+            n = None
+        name = re.sub(r" LNM .*$", "", volume.GetName()) or volume.GetName()
+        self.loadedMap = {"path": None, "statistic": statistic if statistic in STATISTICS else "T", "n": n, "name": name, "label": name, "siblings": {},
+                          "sidecar": None, "lesion": None, "preview": "Preview" in volume.GetName(), "partial": volume.GetAttribute("LNM.Partial") == "1",
+                          "fromScene": True}
+        self.ctx.setResultVolume(volume)
+        return True
 
     def _updatePeaks(self, statistic):
         from LesionNetworkMappingLib import stats
 
-        values = self._mapValues(statistic)
         self._peaks = []
-        if values is not None and self.bundle is not None:
+        if self.loadedMap is not None:
+            loaded = self._loadedValues(statistic)
+            values, grid, indices = loaded if loaded is not None else (None, None, None)
+        else:
+            values = self._mapValues(statistic)
+            grid, indices = (self.bundle.grid, self.bundle.mask_indices) if self.bundle is not None else (None, None)
+        if values is not None and grid is not None:
             try:
-                self._peaks = stats.peak_table(values, self.bundle.grid, top_k=5, min_distance_mm=10.0, mask_indices=self.bundle.mask_indices, sign=self._sign())
+                self._peaks = stats.peak_table(values, grid, top_k=5, min_distance_mm=10.0, mask_indices=indices, sign=self._sign())
             except Exception:
                 logging.exception("Lesion network mapping: the peak table could not be computed")
         table = self.peaksTable
@@ -2565,8 +3856,19 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         shell = self._shell()
         if shell is None or not getattr(self, "_entered", False) or jobrunner.instance().ownsStatusChip():
             return
-        if self.bundle is None:
+        cohortDone = self.cohortMapsPath and self.cohortInfo
+        if self.bundle is None and self.loadedMap is None:
             text, level = _("No connectome"), "neutral"
+        elif self.seedMode() == "cohort":
+            if cohortDone:
+                text, level = _("Done · {n} lesion maps").format(n=self.cohortInfo.get("n", 0)), "ok"
+            elif self.bundle is None:
+                text, level = _("No connectome"), "neutral"
+            else:
+                text, level = _("Ready"), "neutral"
+        elif self.loadedMap is not None:
+            n = self.loadedMap.get("n")
+            text, level = (_("Map · N={n:,}").format(n=n) if n else _("Map")), "neutral"
         elif self.runOutputs and self.runN:
             if self.runPartial:
                 text, level = _("Stopped · N={n} (partial)").format(n=self.runN), "neutral"
@@ -2592,6 +3894,10 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.initializeParameterNode()
         self._syncStudy()
         self.refreshConnectomes()
+        if self._adoptSceneResult():
+            self._displayWindow(self._parameterNode.resultVolume, False)
+        if self.seedMode() == "cohort":
+            self.refreshCohort()
         shell = self._shell()
         if shell is not None:
             # The disclaimer stays visible below the inspector (the sticky footer slot) while Map is shown
@@ -2681,14 +3987,15 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self._footerInShell = False
         self._statusChipText = None
         self.footer.show()
-        if self._outlineState is not None:
-            from LesionNetworkMappingLib import display
-
-            display.restoreLesionDisplay(self._outlineState)
-            self._outlineState = None
+        self.restoreLesionDisplay()
 
     def cleanup(self):
         self._refreshGeneration += 1
+        if self.managerDialog is not None:
+            self.managerDialog.detachJobs()
+            self.managerDialog.close()
+            self.managerDialog.deleteLater()
+            self.managerDialog = None
         for timer in (self.seedTimer, self.progressTimer, self.refreshTimer, self._pumpTimer):
             if timer is not None:
                 timer.stop()
@@ -2707,6 +4014,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
 
     def onSceneEndClose(self, caller, event):
         self.runOutputs, self.runN, self.runPartial, self.runDir = {}, None, False, None
+        self.loadedMap = None
         self._valuesCache.clear()
         self._mapStamp.clear()
         self.ctx.setResultVolume(None)
@@ -2762,6 +4070,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self._observeSeed(node.seedSegmentation)
         self._showRuleControls(self.currentRule())
         self._showSubjectsText()
+        self._showSeedMode()
         self.updateCardVisibility()
         self.scheduleSeedUpdate()
         self.updateComputeState()

@@ -123,6 +123,16 @@ def _mapAvailable(shell=None):
     return _workspaceAvailable("map")
 
 
+def _cohortSeedAvailable(shell=None):
+    """True when Map offers the Cohort seed (its Cohort card plug-in is part of this build)."""
+    import importlib.util
+
+    try:
+        return _mapAvailable() and importlib.util.find_spec("LesionNetworkMappingUI.card_cohort") is not None
+    except (ImportError, ValueError):
+        return False
+
+
 def _leftDragWindowLevel(shell=None):
     """True if left-drag adjusts window/level in the views (Studio only, ``Studio/LeftDragWindowLevel``)."""
     windowLevelWidget = getattr(slicer, "vtkMRMLWindowLevelWidget", None)
@@ -352,9 +362,15 @@ _MAP_STEPS = (
          _("The segmentation and the segment that hold the lesion (by default the segment named Lesion). The lesion is used on its own grid."),
          inSlicer=_("Not part of official 3D Slicer. The lesion is a segment, as in the Segment Editor module."),
          workspace="map", inspector=True, placement="left"),
+    Step("seed-mode", "LNMSeedModeSegmented", _("Lesion or cohort"),
+         _("Lesion maps one lesion. Cohort maps every lesion of a study that may be analysed (included, reviewed, in MNI space), "
+           "in batched passes with a cache, for the Cohort card: overlap, sensitivity and the group analyses."),
+         inSlicer=_("Not part of official 3D Slicer."), workspace="map", inspector=True, placement="left",
+         when=lambda shell: _cohortSeedAvailable()),
     Step("connectome", "LNMConnectomeCard", _("Connectome"),
-         _("A connectome is a folder on this computer (a .lnmc bundle): add one with Add connectome… or Manage…, or try Map with the demo, "
-           "a small synthetic connectome (not real data). Nothing is downloaded unless you ask, and its data use terms must be accepted first."),
+         _("A connectome is a folder on this computer (a .lnmc bundle): add one with Add connectome…, convert data you have with Manage… > "
+           "Convert…, or try Map with the demo, a small synthetic connectome (not real data). Nothing is downloaded unless you ask, and its data "
+           "use terms must be accepted first."),
          rows=("connectome",), workspace="map", inspector=True, placement="left"),
     Step("compute", "LNMComputeButton", _("Map network"),
          _("Computes the network map of the lesion with the chosen connectome, in the background. Specificity QA maps relocated copies of "
@@ -363,7 +379,8 @@ _MAP_STEPS = (
     Step("result", "LNMResultCard", _("Result: statistic, rule and threshold"),
          _("The map opens in the views. Its threshold is a rule (FWE, the |T| ≥ 7 convention, an Fz effect size, a custom T or the top x%), "
            "worked out again from the number of subjects, so a T threshold is never silently reused on another N. "
-           "The statistic, the sign (±, +, −) and the opacity change only what is shown."),  # noqa: RUF001
+           "The statistic, the sign (±, +, −) and the opacity change only what is shown. A map opened from Library is shown here too; "  # noqa: RUF001
+           "Alt+← / Alt+→ show the maps next to it, one at a time."),
          inSlicer=_("Not part of official 3D Slicer. The map is an ordinary volume: the Volumes and Data modules work on it as usual."),
          workspace="map", inspector=True, placement="left"),
     Step("disclaimer", "LNMDisclaimer", _("Research use only"),
