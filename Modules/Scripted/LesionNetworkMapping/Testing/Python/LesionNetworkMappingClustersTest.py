@@ -119,8 +119,8 @@ class TwoBlobTest(unittest.TestCase):
         self.assertEqual([(row["sign"], row["voxels"]) for row in table], [("pos", 3), ("neg", 3)])
 
     def test_threshold_is_inclusive(self):
-        table = clusters.cluster_table(self.volume, grid(), None, 4.0)
-        self.assertEqual([row["voxels"] for row in table], [27])
+        table = clusters.cluster_table(self.volume, grid(), None, 4.0)  # |x| >= 4: the positive block and the -5 voxel
+        self.assertEqual([row["voxels"] for row in table], [27, 1])
         self.assertEqual([row["voxels"] for row in clusters.cluster_table(self.volume, grid(), None, 3.0)], [27, 16])
 
     def test_connectivity(self):
@@ -195,9 +195,10 @@ class SubpeakTest(unittest.TestCase):
         # 12 mm: i=9 is 10 mm from i=4 (dropped), i=11 is 14 mm away (kept), i=15 is 8 mm from i=11 (dropped)
         table = clusters.cluster_table(self.bar(), grid(), None, 2.0, subpeak_min_mm=12)
         self.assertEqual([(row["id"], row["ijk"][0]) for row in table], [("1", 4), ("1a", 11)])
-        # a peak exactly at the minimum distance is dropped (nilearn keeps peaks farther than min_distance)
+        # a peak exactly at the minimum distance is dropped (nilearn keeps peaks farther than min_distance):
+        # i=9 (10 mm from i=4) and i=15 (8 mm from i=11) go, the end of the bar (i=17, a local maximum) stays
         table = clusters.cluster_table(self.bar(), grid(), None, 2.0, subpeak_min_mm=10)
-        self.assertEqual([row["ijk"][0] for row in table], [4, 11, 15])
+        self.assertEqual([row["ijk"][0] for row in table], [4, 11, 17])
 
     def test_plateau_gives_one_peak(self):
         volume = np.zeros(SHAPE)
@@ -227,9 +228,8 @@ class MinimumExtentTest(unittest.TestCase):
 class NaiveReferenceTest(unittest.TestCase):
     def test_matches_naive_reference(self):
         rng = np.random.default_rng(19)
-        mask = np.zeros(SHAPE, dtype=bool)
         centre = np.array(SHAPE) / 2.0 - 0.5
-        mask[tuple(np.argwhere(((np.indices(SHAPE).reshape(3, -1).T - centre) ** 2 / (np.array(SHAPE) / 2.2) ** 2).sum(1) <= 1).T)] = True
+        mask = (((np.indices(SHAPE).reshape(3, -1).T - centre) ** 2 / (np.array(SHAPE) / 2.2) ** 2).sum(1) <= 1).reshape(SHAPE)  # an ellipsoid
         indices = mask_indices(mask)
         compared = 0
         for seed_shift, connectivity, min_extent, max_subpeaks in ((0, 26, 0.0, 3), (1, 6, 0.0, 3), (2, 26, 40.0, 1), (3, 18, 0.0, 2)):
@@ -282,7 +282,7 @@ class LabelTest(unittest.TestCase):
         family = space_family("MNI152NLin6Asym")
         atlas = atlases.Atlas("halves", data, AFFINE, {1: "7Networks_LH_Vis_1", 2: "7Networks_RH_Default_PCC_1"}, family=family, space="MNI152NLin6Asym", networks="schaefer")
         table = clusters.cluster_table(self.volume, grid(), None, 2.0, labeler=clusters.atlas_labeler([atlas], space="MNI152NLin6Asym"))
-        self.assertEqual([row["labels"] for row in table], [[("halves", "7Networks_LH_Vis_1", 100.0)], [("halves", "7Networks_RH_Default_PCC_1", 100.0)]])
+        self.assertEqual([[(atlas, label, round(pct, 6)) for atlas, label, pct in row["labels"]] for row in table], [[("halves", "7Networks_LH_Vis_1", 100.0)], [("halves", "7Networks_RH_Default_PCC_1", 100.0)]])
         self.assertEqual([row["network"] for row in table], ["Vis", "Default"])
         self.assertEqual(table.atlases, ["halves"])
         self.assertIn("halves", clusters.cluster_caption(table))
@@ -329,7 +329,7 @@ class WriterTest(unittest.TestCase):
             with open(tsv, encoding="utf-8") as stream:
                 rows = list(csv.DictReader(stream, delimiter="\t"))
             self.assertEqual(list(rows[0]), ["cluster_id", "sign", "voxels", "volume_mm3", "peak", "Fz", "x", "y", "z", "hemisphere", "cog_x", "cog_y", "cog_z", "labels", "network"])
-            self.assertEqual([(r["cluster_id"], r["sign"], r["voxels"], r["volume_mm3"], r["peak"], r["x"], r["hemisphere"]) for r in rows], [("1", "+", "27", "216", "12", "-11.0", "L"), ("2", "−", "16", "128", "-8", "9.0", "R")])
+            self.assertEqual([(r["cluster_id"], r["sign"], r["voxels"], r["volume_mm3"], r["peak"], r["x"], r["hemisphere"]) for r in rows], [("1", "+", "27", "216", "12", "-11.0", "L"), ("2", "−", "16", "128", "-8", "7.0", "R")])
             self.assertEqual(rows[0]["labels"], "HO<cort>: Frontal & Pole (62.5%)")
             self.assertEqual(rows[0]["Fz"], "0.3")
             with open(page, encoding="utf-8") as stream:
