@@ -16,6 +16,7 @@ Classic interface. They cover:
 """
 
 import importlib.util
+import logging
 import os
 import re
 import tempfile
@@ -979,6 +980,46 @@ class StudioTopBarTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertTrue(layouts.isMaximized())
         self._activateShortcut(studioShell, "Alt+2")
         self.assertFalse(layouts.isMaximized())
+
+    def test_error_badge_ignores_first_dicom_use(self):
+        """The CTK messages of a profile's first DICOM use are not counted; the same SQL error later and others are."""
+        from StudioLib import topbar
+
+        studioShell = self._applyStudio()
+        topBar = studioShell.topBar
+        self._pump()
+        topBar._scanErrors()
+        before = topBar.errorCount()
+        sqlError = "SQL failed:\n \nError: \nDriver not loaded Driver not loaded"
+        # (Messages of different levels alternate, as in the real log: the log groups consecutive ones of a level)
+        logging.error("Database folder does not contain ctkDICOM.sql file: /tmp/x/SlicerDICOMDatabase")
+        logging.warning("QSqlQuery::prepare: database not open")
+        logging.error(sqlError)
+        logging.warning("QSqlQuery::prepare: database not open")
+        logging.error(sqlError)
+        self._pump(10)
+        topBar._scanErrors()
+        self.assertEqual(topBar.errorCount(), before)
+        # Other errors are counted, and so is the same SQL error later (after other log rows)
+        for index in range(6):
+            logging.warning(f"unrelated message {index}")
+            logging.error(f"unrelated error {index}")
+        logging.warning("unrelated message")
+        logging.error(sqlError)
+        self._pump(10)
+        topBar._scanErrors()
+        self.assertEqual(topBar.errorCount(), before + 7)
+        self.assertTrue(topBar.errorBadge.isVisibleTo(topBar.toolBar))
+        # A sustained burst after the notice is counted beyond the few errors CTK logs
+        logging.warning("unrelated message")
+        logging.error("Database folder does not contain ctkDICOM.sql file: /tmp/x/SlicerDICOMDatabase")
+        for index in range(10):
+            logging.warning("QSqlQuery::prepare: database not open")
+            logging.error(sqlError)
+        self._pump(10)
+        topBar._scanErrors()
+        self.assertEqual(topBar.errorCount(), before + 7 + 10 - topbar._DICOM_FIRST_RUN_MAX_SQL_ERRORS)
+        topBar._onErrorLogViewed()
 
 
 class _Width:

@@ -160,6 +160,12 @@ class AppMenu:
         self._helpActions = []
         self._helpSeparator = None
 
+        # The other theme in one step ("Light theme" while dark, "Dark theme" while light); the Appearance
+        # submenu keeps the three themes (System included) and the density
+        self.toggleThemeAction = self.menu.addAction(_("Light theme"))
+        self.toggleThemeAction.setObjectName("StudioToggleThemeAction")
+        self.toggleThemeAction.setProperty("studioIcon", "sun")
+        self.toggleThemeAction.connect("triggered()", self.toggleTheme)
         self.appearanceMenu = self.menu.addMenu(_("Appearance"))
         self.appearanceMenu.setObjectName("StudioAppearanceMenu")
         self.themeGroup = qt.QActionGroup(self.appearanceMenu)
@@ -251,6 +257,8 @@ class AppMenu:
         return action
 
     def refreshIcons(self):
+        # Also when the palette changed: the theme item names the other theme
+        self._updateToggleThemeAction()
         for action in self.menu.actions() + self.appearanceMenu.actions():
             iconName = action.property("studioIcon")
             if iconName:
@@ -267,6 +275,7 @@ class AppMenu:
         for name, action in self.themeActions.items():
             action.setEnabled(name in themes)
             action.setChecked(name == theme)
+        self._updateToggleThemeAction(themes)
         density = currentDensity()
         for name, action in self.densityActions.items():
             action.setEnabled(density is not None)
@@ -274,6 +283,26 @@ class AppMenu:
 
     def _setTheme(self, theme):
         setTheme(theme)
+
+    def otherTheme(self):
+        """The theme that ``toggleTheme()`` applies: "Light" while the application is dark (also with System), else "Dark"."""
+        return "Light" if ui.isDark() else "Dark"
+
+    def _updateToggleThemeAction(self, themes=None):
+        themes = availableThemes() if themes is None else themes
+        other = self.otherTheme()
+        self.toggleThemeAction.setText(_("Light theme") if other == "Light" else _("Dark theme"))
+        iconName = "sun" if other == "Light" else "moon"
+        if self.toggleThemeAction.property("studioIcon") != iconName:
+            self.toggleThemeAction.setProperty("studioIcon", iconName)
+            self.toggleThemeAction.setIcon(ui.icon(iconName, 16))
+        self.toggleThemeAction.setEnabled(other in themes)
+
+    def toggleTheme(self):
+        """Switch to the other theme (≡ > Light theme / Dark theme)."""
+        theme = self.otherTheme()
+        if theme in availableThemes():
+            setTheme(theme)
 
     def _setDensity(self, density):
         if currentDensity() == density:

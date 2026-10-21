@@ -43,7 +43,7 @@ import tempfile
 import traceback
 import weakref
 
-import numpy as np
+from StudioLib import lazyNumpy as np
 import qt
 import slicer
 import vtk

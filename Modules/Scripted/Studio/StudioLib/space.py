@@ -15,7 +15,7 @@ This module is the single source of truth for two questions that several Studio 
 Pure functions: no observer, no Qt widget, no settings. Every Studio plug-in may import this module.
 """
 
-import numpy as np
+from StudioLib import lazyNumpy as np
 
 import slicer
 import vtk

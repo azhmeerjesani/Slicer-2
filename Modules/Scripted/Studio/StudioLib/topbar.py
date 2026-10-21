@@ -49,6 +49,19 @@ README_MAP_URL = "https://github.com/azhmeerjesani/Slicer-2#lesion-network-mappi
 _ERROR_LEVEL = 0x40  # ctkErrorLogLevel::Error
 _FATAL_LEVEL = 0x100  # ctkErrorLogLevel::Fatal (Critical is 0x80, None is 0x200)
 _ERROR_LEVEL_NAMES = ("Error", "Critical", "Fatal")
+#: Columns of ctkErrorLogAbstractModel
+_LEVEL_COLUMN = 2
+_DESCRIPTION_COLUMN = 4
+#: The first DICOM use of a profile (no database yet): CTK logs that the database folder has no database, then
+#: SQL errors of queries sent before the new database is open; official Slicer logs the same. The badge does not
+#: count them (they stay in the error log): the notice, and the "Driver not loaded" SQL errors that follow it
+#: within a few log rows. The same SQL error elsewhere is counted.
+_DICOM_FIRST_RUN_NOTICE = "Database folder does not contain ctkDICOM.sql file"
+#: Lines of those SQL errors (the log groups consecutive messages of a level in one row: any other line is counted)
+_DICOM_FIRST_RUN_SQL_LINES = re.compile(r"^(?:SQL failed:.*|Error:\s*|Driver not loaded Driver not loaded|\s*)$")
+_DICOM_FIRST_RUN_ROWS = 8
+#: At most this many of those SQL errors per notice (CTK logs three): a longer burst is counted
+_DICOM_FIRST_RUN_MAX_SQL_ERRORS = 4
 
 #: Description of each workspace in its tooltip
 _WORKSPACE_DESCRIPTIONS = {
@@ -976,6 +989,8 @@ class TopBar:
         self._scannedRows = 0
         self._errorRows = 0
         self._seenErrorRows = 0
+        self._dicomFirstRunRow = None
+        self._dicomFirstRunSqlErrors = 0
         self._errorCountTimer = qt.QTimer(self.toolBar)
         self._errorCountTimer.setSingleShot(True)
         self._errorCountTimer.setInterval(100)
@@ -995,17 +1010,37 @@ class TopBar:
         if rowCount < self._scannedRows:
             self._rescanErrors()
             return
-        levelColumn = 2  # ctkErrorLogAbstractModel::LogLevelColumn
         for row in range(self._scannedRows, rowCount):
-            if model.index(row, levelColumn).data() in _ERROR_LEVEL_NAMES:
+            isError = model.index(row, _LEVEL_COLUMN).data() in _ERROR_LEVEL_NAMES
+            if not self._isExpectedFirstRunMessage(row, isError) and isError:
                 self._errorRows += 1
         self._scannedRows = rowCount
         self._updateErrorBadge()
+
+    def _isExpectedFirstRunMessage(self, row, isError):
+        """True for the messages of the first DICOM use of a profile (``_DICOM_FIRST_RUN_NOTICE``), not counted."""
+        description = self.errorLogModel.index(row, _DESCRIPTION_COLUMN).data() or ""
+        if description.startswith(_DICOM_FIRST_RUN_NOTICE):
+            self._dicomFirstRunRow = row
+            self._dicomFirstRunSqlErrors = 0
+            return True
+        if not isError or self._dicomFirstRunRow is None or row - self._dicomFirstRunRow > _DICOM_FIRST_RUN_ROWS:
+            return False
+        if self._dicomFirstRunSqlErrors >= _DICOM_FIRST_RUN_MAX_SQL_ERRORS:
+            return False
+        lines = description.splitlines()
+        if lines and lines[0].startswith("SQL failed:") and all(_DICOM_FIRST_RUN_SQL_LINES.match(line) for line in lines):
+            self._dicomFirstRunRow = row  # the next query of the same burst
+            self._dicomFirstRunSqlErrors += 1
+            return True
+        return False
 
     def _rescanErrors(self, *args):
         # The log was cleared or filtered
         self._scannedRows = 0
         self._errorRows = 0
+        self._dicomFirstRunRow = None
+        self._dicomFirstRunSqlErrors = 0
         self._scanErrors()
         self._seenErrorRows = min(self._seenErrorRows, self._errorRows)
         self._updateErrorBadge()

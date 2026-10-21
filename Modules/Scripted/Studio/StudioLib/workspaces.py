@@ -209,6 +209,11 @@ class WorkspaceController:
         self.transientModule = None
         self._switching = False
         self._placeholderCanvas = None
+        #: True once the layout was changed (other than by a workspace switch) or a scene was opened since Studio was
+        #: applied: Draw or Map entered by a module selection then keep the layout (``_applyRememberedLayoutOverInitial``)
+        self._layoutChosen = False
+        #: The layout last seen by ``onLayoutChanged`` (layoutChanged is also emitted when a layout is only redefined)
+        self._lastLayout = None
 
     def currentWorkspace(self):
         """Key of the current workspace, or None while a transient module is shown."""
@@ -216,6 +221,16 @@ class WorkspaceController:
 
     def isSwitching(self):
         return self._switching
+
+    def resetLayoutChoice(self):
+        """The current layout is nobody's choice (Studio was just applied): see ``_applyRememberedLayoutOverInitial``."""
+        self._layoutChosen = False
+        layoutManager = slicer.app.layoutManager()
+        self._lastLayout = layoutManager.layout if layoutManager is not None else None
+
+    def onSceneImported(self):
+        """A scene was opened: its layout is kept when Draw or Map is entered by a module selection."""
+        self._layoutChosen = True
 
     def rememberedLayout(self, ws):
         if ws.defaultLayout is None:
@@ -322,6 +337,7 @@ class WorkspaceController:
                     self.shell.setCanvas(self._libraryPlaceholderCanvas().widget)
                 elif ws.key != "library":
                     self.shell.setCanvas(None)
+                self._applyRememberedLayoutOverInitial(ws)
                 self._enter(ws, shrinkPanel=False)
             finally:
                 self._switching = False
@@ -334,8 +350,28 @@ class WorkspaceController:
         self.shell.setCanvas(None)
         self.shell._onTransientModuleEntered(moduleName)
 
+    def _applyRememberedLayoutOverInitial(self, ws):
+        """Show the workspace's layout when the views still have the startup layout (D5).
+
+        The startup layout (``SlicerLayoutInitialView``, four-up, or the layout restored from the previous session,
+        which the close guard saves as a conventional one) is nobody's choice: Library never switches layout, so
+        entering Draw or Map by a module selection would otherwise keep it, and a scene saved there would not record
+        7001 although Draw and Map share it. A layout chosen since Studio was applied (or a scene's) is kept.
+        """
+        layoutManager = slicer.app.layoutManager()
+        if layoutManager is None:
+            return
+        if self._layoutChosen and layoutManager.layout != slicer.vtkMRMLLayoutNode.SlicerLayoutInitialView:
+            return
+        layoutId = self.rememberedLayout(ws)
+        if layoutId is not None and layoutId != layoutManager.layout:
+            layoutManager.setLayout(layoutId)
+
     def onLayoutChanged(self, layoutId):
         """Remember the layout chosen in a workspace."""
+        if not self._switching and layoutId != self._lastLayout:
+            self._layoutChosen = True
+        self._lastLayout = layoutId
         if self._switching or self.current is None or self.transientModule is not None:
             return
         ws = workspace(self.current)

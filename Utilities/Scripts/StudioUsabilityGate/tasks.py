@@ -655,6 +655,32 @@ def appMenuButton(g):
     return g.widget("StudioAppMenuButton", "QToolButton")
 
 
+def appMenuAction(g, objectName):
+    """The action ``objectName`` of the ≡ menu, or None (a lookup, not a user action)."""
+    menu = g.mainWindow.findChild("QMenu", "StudioAppMenu")
+    if menu is None:
+        return None
+    for action in menu.actions():
+        if action.objectName == objectName and action.isVisible():
+            return action
+    return None
+
+
+def searchEntryTitle(g, entryId):
+    """The title of the Search entry ``entryId`` if this build offers it, else None (a lookup, not a user action)."""
+    try:
+        from StudioLib import palette
+    except ImportError:
+        return None
+    shell = g.shell()
+    if shell is None or not hasattr(palette, "Index"):
+        return None
+    index = palette.Index(shell)
+    index.refresh()
+    entry = index.entry(entryId)
+    return entry.title if entry is not None else None
+
+
 def appMenu(g, path, description=""):
     """Click through the ≡ menu: ``["View", "Toolbars", "Markups"]`` (1 action per click)."""
     return (yield from g.menu(appMenuButton(g), path, description or "≡ > " + " > ".join(path)))
@@ -1126,10 +1152,17 @@ def findToolsBody(g, warm=False):
         taskCounts[name] = g.actions - taskCounts[name]
         g.log("task-part", part=name, actions=taskCounts[name])
 
-    # T1: a Display (window/level) preset of Volumes, and back with the tool armed
+    # T1: a Display (window/level) preset of Volumes, and back with the tool armed. Search offers the CT presets of
+    # Volumes directly (applied in Draw, nothing to close); without them, through the Volumes module.
     begin("T1")
-    typed = yield from searchAndOpen(g, "Volumes", "vol")
-    if typed is not None:
+    presetTitle = searchEntryTitle(g, "view.displayPreset.CT_BRAIN")
+    if presetTitle is not None:
+        levelBefore = windowLevel()
+        typed = yield from searchAndOpen(g, presetTitle, "ct brain")
+        yield 300
+        g.note("T1-windowLevel", {"before": levelBefore, "after": windowLevel(), "search": True})
+        g.check("effect-after-return", g.effectName() == baseTool, f"tool after T1: {g.effectName()}, before: {baseTool}")
+    elif (yield from searchAndOpen(g, "Volumes", "vol")) is not None:
         yield from waitTransient(g, "Volumes")
         g.shot("T1-volumes")
         preset = None
@@ -1179,12 +1212,22 @@ def findToolsBody(g, warm=False):
         yield from closeTransient(g, "Close Transforms and return to Draw")
         g.check("effect-after-return", g.effectName() == baseTool, f"tool after T3: {g.effectName()}, before: {baseTool}")
     end("T3")
-    # T4: the theme
+    # T4: the theme (one step, ≡ > Light theme / Dark theme, when the menu has it; else ≡ > Appearance > Light)
     begin("T4")
-    yield from appMenu(g, ["Appearance", "Light"], "≡ > Appearance > Light")
-    yield 800
-    g.shot("T4-light")
-    yield from appMenu(g, ["Appearance", "Dark"], "≡ > Appearance > Dark")
+    toggleTheme = appMenuAction(g, "StudioToggleThemeAction")
+    if toggleTheme is not None:
+        # The item names the other theme: "Light theme" while dark (the default), "Dark theme" while light (--testing)
+        first = str(toggleTheme.text)
+        yield from appMenu(g, [first], f"≡ > {first}")
+        yield 800
+        g.shot("T4-light")
+        second = str(toggleTheme.text)
+        yield from appMenu(g, [second], f"≡ > {second}")
+    else:
+        yield from appMenu(g, ["Appearance", "Light"], "≡ > Appearance > Light")
+        yield 800
+        g.shot("T4-light")
+        yield from appMenu(g, ["Appearance", "Dark"], "≡ > Appearance > Dark")
     yield 800
     end("T4")
     # T5: the Python console and the error log

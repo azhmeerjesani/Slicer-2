@@ -262,6 +262,82 @@ Montreal Neurological Institute, McGill University (see LICENSE-MNI152NLin2009cA
 """)
         if not slicer.app.testingEnabled():
             slicer.app.connect("startupCompleted()", registerPaletteProvider)
+        if not installSceneMigration():
+            slicer.app.connect("startupCompleted()", installSceneMigration)
+
+
+#
+# Scenes of earlier versions: the connectome's absolute path is replaced in the scene, not only in the widget
+#
+
+#: Priority of the scene observers of ``installSceneMigration``: before the module widget reads the parameter node
+SCENE_MIGRATION_PRIORITY = 10.0
+
+
+def installSceneMigration():
+    """Observe the scene (import and save) to replace a legacy ``connectomePath`` (``migrateLegacyConnectomePaths``).
+
+    Scenes of earlier versions hold the connectome bundle's absolute path. It is replaced as soon as such a scene
+    is loaded, and again before every save, whether or not the Map module was opened, so that a scene saved again
+    never holds the path (SPEC 9.7 rule 10). Return False when there is no scene yet.
+    """
+    scene = getattr(slicer, "mrmlScene", None)
+    if scene is None:
+        return False
+    if getattr(installSceneMigration, "_tags", None) is not None:
+        return True
+
+    def onSceneEvent(caller, event):
+        try:
+            migrateLegacyConnectomePaths(caller)
+        except Exception:
+            logging.exception("Lesion network mapping: the connectome path of an earlier scene could not be replaced")
+
+    installSceneMigration._tags = [scene.AddObserver(event, onSceneEvent, SCENE_MIGRATION_PRIORITY)
+                                   for event in (slicer.vtkMRMLScene.EndImportEvent, slicer.vtkMRMLScene.StartSaveEvent)]
+    return True
+
+
+def legacyConnectomeName(path):
+    """Name-only connectome identifier of a legacy path whose bundle is not on this computer: its folder name."""
+    name = re.split(r"[/\\]", (path or "").rstrip("/\\"))[-1]
+    return name.replace("#", "") or "connectome"
+
+
+def migrateLegacyConnectomePaths(scene=None):
+    """Replace the legacy ``connectomePath`` of the Map parameter nodes of ``scene`` by a connectome identifier.
+
+    When the bundle is at that path, the identifier is its full ``connectomeIdentifier`` and the bundle is
+    registered (``Studio/LNM/Connectomes``), so that it is found again in later sessions; otherwise it is the
+    folder name only (``legacyConnectomeName``), which ``resolveConnectome`` matches by name and Map reports as
+    missing. The path is cleared in both cases. Return the number of parameter nodes changed.
+    """
+    scene = scene or slicer.mrmlScene
+    nodes = scene.GetNodesByClass("vtkMRMLScriptedModuleNode")
+    logic, changed = None, 0
+    for index in range(nodes.GetNumberOfItems()):
+        node = nodes.GetItemAsObject(index)
+        if node.GetAttribute("ModuleName") != "LesionNetworkMapping":
+            continue
+        legacy = node.GetParameter("connectomePath")
+        if not legacy:
+            continue
+        identifier = node.GetParameter("connectome")
+        if not identifier:
+            if os.path.isfile(os.path.join(legacy, "connectome.json")):
+                logic = logic or LesionNetworkMappingLogic()
+                try:
+                    bundle = logic.openBundle(legacy)
+                    identifier = logic.rememberConnectome(bundle)
+                    logic.registerConnectome(bundle.path)
+                except Exception:
+                    logging.warning(f"Lesion network mapping: the connectome bundle of an earlier scene cannot be opened ({legacy})")
+                    identifier = ""
+            identifier = identifier or legacyConnectomeName(legacy)
+            node.SetParameter("connectome", identifier)
+        node.SetParameter("connectomePath", "")
+        changed += 1
+    return changed
 
 
 #
@@ -332,8 +408,11 @@ class LesionNetworkMappingParameterNode:
 
     seedMode - "lesion", "cohort" or "coordinates".
     seedSegmentation, seedSegmentId - the lesion seed (A-03b sets them too).
-    studyPath - the open study folder, if any.
-    connectomePath - the registered connectome bundle in use.
+    studyPath - the open study folder, if any (read only: this version never writes it).
+    connectome - the connectome bundle in use, as its portable identifier (``connectomeIdentifier``): scenes and
+      .mrb files are shared, so they never hold a local path (SPEC 9.7 rule 10); the bundle folder is found on load
+      among the registered bundles (``Studio/LNM/Connectomes``).
+    connectomePath - scenes of earlier versions only: the bundle's absolute path, read on load and then cleared.
     subjectsMode - "all" or "preview" (previewN subjects at random with previewSeed).
     thresholdRule - the threshold rule as JSON (thresholds.py).
     statistic - the map shown: "T", "Fz" or "r"; sign - "both", "pos" or "neg".
@@ -345,6 +424,7 @@ class LesionNetworkMappingParameterNode:
     seedSegmentation: vtkMRMLSegmentationNode
     seedSegmentId: str = ""
     studyPath: str = ""
+    connectome: str = ""
     connectomePath: str = ""
     subjectsMode: str = "all"
     previewN: int = 100
@@ -379,6 +459,9 @@ def _safeName(text, default="lesion"):
 
 class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
     """Computation and data handling of the Map module, usable without the GUI (tests, scripts)."""
+
+    #: {connectome identifier: local bundle path} of the bundles opened in this session (shared by all logic instances)
+    _knownConnectomes = {}
 
     def __init__(self):
         ScriptedLoadableModuleLogic.__init__(self)
@@ -417,6 +500,53 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
         """Remove a bundle from the registered list (its files are kept)."""
         paths = [item for item in LesionNetworkMappingLogic.registeredConnectomes() if os.path.normpath(item) != os.path.normpath(path)]
         qt.QSettings().setValue(CONNECTOMES_SETTING, paths)
+
+    @staticmethod
+    def connectomeIdentifier(bundle):
+        """Portable identifier of a connectome bundle, saved in scenes instead of its local path (SPEC 9.7 rule 10).
+
+        ``"<name>#<fingerprint>"``: the bundle name and the first 16 hex digits of ``export.data_sha256`` (grid,
+        subjects and format of connectome.json; no data file is read), so the same bundle in another folder or on
+        another computer has the same identifier.
+        """
+        from LesionNetworkMappingLib.export import data_sha256
+
+        return f"{bundle.name}#{data_sha256(bundle.metadata)[:16]}"
+
+    @staticmethod
+    def connectomeIdentifierName(identifier):
+        """The bundle name of a connectome identifier (the whole text for one without a fingerprint)."""
+        return (identifier or "").rsplit("#", 1)[0]
+
+    def rememberConnectome(self, bundle):
+        """Remember where the bundle of this session is (``resolveConnectome``); return its identifier."""
+        identifier = self.connectomeIdentifier(bundle)
+        LesionNetworkMappingLogic._knownConnectomes[identifier] = bundle.path
+        return identifier
+
+    def resolveConnectome(self, identifier):
+        """Local folder of the connectome with this identifier, "" if it is not on this computer.
+
+        Looks among the bundles opened in this session and the registered bundles (the fork-only setting
+        ``Studio/LNM/Connectomes``, which keeps the local paths out of the scene).
+        """
+        if not identifier:
+            return ""
+        name = self.connectomeIdentifierName(identifier)
+        nameOnly = "#" not in identifier  # a legacy scene whose bundle was missing: its folder name (legacyConnectomeName)
+        known = LesionNetworkMappingLogic._knownConnectomes.get(identifier)
+        candidates = ([known] if known else []) + [path for path in self.registeredConnectomes() if path != known]
+        for path in candidates:
+            try:
+                bundle = self.openBundle(path)
+            except Exception:
+                continue
+            if nameOnly:
+                if name in (bundle.name, legacyConnectomeName(bundle.path)):
+                    return bundle.path
+            elif bundle.name == name and self.connectomeIdentifier(bundle) == identifier:
+                return bundle.path
+        return ""
 
     def openBundle(self, path):
         """The open ``ConnectomeBundle`` of ``path`` (cached while connectome.json is unchanged)."""
@@ -878,6 +1008,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self._parameterNode = None
         self.bundle = None
         self.bundleError = None
+        #: Local folder of the connectome in use (the parameter node holds its portable identifier only)
+        self._connectomePath = ""
         self.seedCheck = None
         self.job = None
         self.lesionName = None
@@ -1358,7 +1490,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         menu.clear()
         menu.addAction(_("Add bundle…"), self.onAddBundle)
         menu.addAction(_("Create synthetic demo"), self.onCreateDemo)
-        path = self._parameterNode.connectomePath if self._parameterNode is not None else ""
+        path = self._connectomePath
         removeAction = menu.addAction(_("Remove from the list"), self.onRemoveBundle)
         removeAction.setEnabled(bool(path))
         try:
@@ -1374,17 +1506,35 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             action.setEnabled(bool(path))
 
     def _runManagerAction(self, spec):
-        path = self._parameterNode.connectomePath if self._parameterNode is not None else ""
+        path = self._connectomePath
         try:
             spec["factory"](self.ctx, path)
         except Exception as exc:
             logging.exception(f"Lesion network mapping: the connectome action {spec['id']} failed")
             slicer.util.errorDisplay(str(exc), windowTitle=str(spec["label"]))
 
+    def connectomePath(self):
+        """Local folder of the connectome bundle in use ("" without one)."""
+        return self._connectomePath
+
     def refreshConnectomes(self, select=None):
-        """Fill the connectome combo from the registered bundles and open the selected one."""
+        """Fill the connectome combo from the registered bundles and open the selected one.
+
+        Without ``select``, the parameter node's connectome (its identifier, resolved on this computer) is opened;
+        a connectome that is not found is reported and the parameter node keeps it (no other bundle is chosen silently).
+        """
         paths = self.logic.registeredConnectomes()
-        current = select or (self._parameterNode.connectomePath if self._parameterNode is not None else "") or ""
+        node = self._parameterNode
+        current, missing = select or "", ""
+        if not current and node is not None:
+            if node.connectome:
+                current = self.logic.resolveConnectome(node.connectome)
+                missing = "" if current else self.logic.connectomeIdentifierName(node.connectome)
+            elif node.connectomePath:
+                # A scene of an earlier version: the bundle's absolute path (replaced by the identifier once opened)
+                legacy = node.connectomePath
+                current = legacy if os.path.isfile(os.path.join(legacy, "connectome.json")) else ""
+                missing = "" if current else os.path.basename(legacy.rstrip("/\\")) or legacy
         if current and current not in paths and os.path.isdir(current):
             paths.append(current)
         wasBlocked = self.connectomeCombo.blockSignals(True)
@@ -1399,24 +1549,47 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             self.connectomeCombo.addItem(label, path)
             self.connectomeCombo.setItemData(self.connectomeCombo.count - 1, path, qt.Qt.ToolTipRole)
         index = self.connectomeCombo.findData(current) if current else -1
-        if index < 0 and self.connectomeCombo.count:
+        if index < 0 and self.connectomeCombo.count and not missing:
             index = 0
         self.connectomeCombo.setCurrentIndex(index)
         self.connectomeCombo.blockSignals(wasBlocked)
+        if missing:
+            self._showMissingConnectome(missing)
+            return
         self._selectConnectome(self.connectomeCombo.itemData(index) if index >= 0 else "")
 
     def onConnectomeActivated(self, index):
         self._selectConnectome(self.connectomeCombo.itemData(index) if index >= 0 else "")
 
     def _selectConnectome(self, path):
-        if self._parameterNode is not None and (self._parameterNode.connectomePath or "") != (path or ""):
-            self._parameterNode.connectomePath = path or ""
+        self._connectomePath = path or ""
         self.bundle, self.bundleError = None, None
+        identifier = ""
         if path:
             try:
                 self.bundle = self.logic.openBundle(path)
+                identifier = self.logic.rememberConnectome(self.bundle)
             except Exception as exc:
+                self.bundle = None
                 self.bundleError = str(exc)
+        node = self._parameterNode
+        if node is not None:
+            # The scene keeps the identifier, never the local path (SPEC 9.7 rule 10)
+            if (node.connectome or "") != identifier:
+                node.connectome = identifier
+            if node.connectomePath:
+                node.connectomePath = ""
+        self._afterConnectomeChanged()
+
+    def _showMissingConnectome(self, name):
+        """The scene's connectome is not on this computer: say so, keep the parameter node as it is."""
+        self._connectomePath = ""
+        self.bundle = None
+        self.bundleError = _("the scene uses the connectome “{name}”, which is not registered on this computer. "
+                             "Add its folder with Manage > Add bundle…").format(name=name)
+        self._afterConnectomeChanged()
+
+    def _afterConnectomeChanged(self):
         self._valuesCache.clear()
         self.ctx.setBundle(self.bundle)
         self._showConnectome()
@@ -1486,7 +1659,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
 
     def onAddBundle(self):
         """Register a connectome bundle folder chosen by the user (validated by ``ConnectomeBundle.open``)."""
-        start = os.path.dirname(self._parameterNode.connectomePath) if self._parameterNode is not None and self._parameterNode.connectomePath else ""
+        start = os.path.dirname(self._connectomePath) if self._connectomePath else ""
         path = qt.QFileDialog.getExistingDirectory(slicer.util.mainWindow(), _("Choose a connectome bundle (.lnmc folder)"), start)
         if not path:
             return
@@ -1498,11 +1671,12 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.refreshConnectomes(select=bundle.path)
 
     def onRemoveBundle(self):
-        path = self._parameterNode.connectomePath if self._parameterNode is not None else ""
+        path = self._connectomePath
         if not path:
             return
         self.logic.unregisterConnectome(path)
         if self._parameterNode is not None:
+            self._parameterNode.connectome = ""
             self._parameterNode.connectomePath = ""
         self.refreshConnectomes()
 
@@ -2889,4 +3063,114 @@ class LesionNetworkMappingTest(ScriptedLoadableModuleTest):
         self.assertFalse(check["ok"])
         self.assertEqual(check["kind"], "native")
         self.assertTrue(plugins.discoverCards())
+
+        self._testScenePrivacy(widget, bundle)
         self.delayDisplay("Test passed")
+
+    def _testScenePrivacy(self, widget, bundle):
+        """Scenes name the connectome by its identifier, never by a local path (SPEC 9.7 rule 10); old scenes still load."""
+        import zipfile
+
+        self.delayDisplay("Saved scenes hold the connectome identifier, not its folder")
+        logic = widget.logic
+        identifier = logic.connectomeIdentifier(bundle)
+        self.assertEqual(widget._parameterNode.connectome, identifier)
+        self.assertEqual(widget._parameterNode.connectomePath, "")
+        scenePath = os.path.join(self.tempDir, "privacy.mrb")
+        self.assertTrue(slicer.util.saveScene(scenePath))
+        with zipfile.ZipFile(scenePath) as archive:
+            texts = [archive.read(name).decode("utf-8", "replace") for name in archive.namelist() if name.endswith(".mrml")]
+        self.assertEqual(len(texts), 1)
+        for private in {self.tempDir, os.path.realpath(self.tempDir), os.path.dirname(os.path.abspath(bundle.path))}:
+            self.assertNotIn(private, texts[0])
+
+        self.delayDisplay("A reloaded scene finds the connectome on this computer")
+        slicer.mrmlScene.Clear(0)
+        slicer.util.loadScene(scenePath)
+        widget.initializeParameterNode()
+        widget.refreshConnectomes()
+        node = widget._parameterNode
+        self.assertEqual(node.connectome, identifier)
+        self.assertEqual(os.path.normpath(widget.connectomePath()), os.path.normpath(bundle.path))
+        self.assertIsNotNone(widget.bundle)
+
+        self.delayDisplay("Scenes of earlier versions (an absolute connectomePath) still load")
+        node.connectome = ""
+        node.connectomePath = bundle.path
+        widget.refreshConnectomes()
+        self.assertEqual(node.connectome, identifier)
+        self.assertEqual(node.connectomePath, "")
+        self.assertIsNotNone(widget.bundle)
+
+        self.delayDisplay("A connectome that is not on this computer is reported and kept")
+        elsewhere = "Elsewhere#0123456789abcdef"
+        node.connectome = elsewhere
+        widget.refreshConnectomes()
+        self.assertIsNone(widget.bundle)
+        self.assertIn("Elsewhere", widget.bundleError)
+        self.assertEqual(node.connectome, elsewhere)
+        self.assertEqual(widget.connectomePath(), "")
+        widget.refreshConnectomes(select=bundle.path)
+        self.assertEqual(node.connectome, identifier)
+
+        self._testLegacySceneResave(widget, bundle, identifier, scenePath)
+
+    def _mrbSceneText(self, path):
+        import zipfile
+
+        with zipfile.ZipFile(path) as archive:
+            return "".join(archive.read(name).decode("utf-8", "replace") for name in archive.namelist() if name.endswith(".mrml"))
+
+    def _testLegacySceneResave(self, widget, bundle, identifier, privacyScenePath):
+        """A scene of an earlier version saved again, without opening Map, no longer holds the connectome's path."""
+        logic = widget.logic
+        legacyDir = os.path.join(self.tempDir, "legacy")
+        os.makedirs(legacyDir, exist_ok=True)
+
+        def legacyScene(name, connectomePath):
+            path = os.path.join(legacyDir, name + ".mrml")
+            with open(path, "w", encoding="utf-8") as file:
+                file.write('<MRML version="Slicer4.4.0" userTags="">\n'
+                           ' <ScriptedModule id="vtkMRMLScriptedModuleNodeLesionNetworkMapping" name="LesionNetworkMapping" hideFromEditors="true" '
+                           'singletonTag="LesionNetworkMapping" attributes="ModuleName:LesionNetworkMapping" '
+                           f'parameter0= "connectomePath {connectomePath}" parameter1= "seedMode lesion" ></ScriptedModule>\n</MRML>\n')
+            return path
+
+        def lnmNode():
+            return slicer.mrmlScene.GetSingletonNode("LesionNetworkMapping", "vtkMRMLScriptedModuleNode")
+
+        self.delayDisplay("An earlier scene saved again without opening Map: the identifier replaces the path")
+        missingPath = os.path.join(self.tempDir, "elsewhere", "Gone.lnmc")
+        for name, path, expected in (("present", bundle.path, identifier), ("missing", missingPath, "Gone.lnmc")):
+            slicer.mrmlScene.Clear(0)
+            slicer.util.loadScene(legacyScene(name, path))
+            node = lnmNode()
+            self.assertIsNotNone(node)
+            self.assertEqual(node.GetParameter("connectome"), expected)
+            self.assertEqual(node.GetParameter("connectomePath"), "")
+            resaved = os.path.join(legacyDir, f"resaved-{name}.mrb")
+            self.assertTrue(slicer.util.saveScene(resaved))
+            text = self._mrbSceneText(resaved)
+            self.assertNotIn(os.path.dirname(path), text)
+            self.assertIn(f"connectome {expected}", text)
+
+        self.delayDisplay("A legacy path set after loading is replaced before saving; a missing bundle is reported by name")
+        node = lnmNode()
+        node.SetParameter("connectome", "")
+        node.SetParameter("connectomePath", missingPath)
+        resaved = os.path.join(legacyDir, "resaved-late.mrb")
+        self.assertTrue(slicer.util.saveScene(resaved))
+        self.assertNotIn(os.path.dirname(missingPath), self._mrbSceneText(resaved))
+        widget.initializeParameterNode()
+        widget.refreshConnectomes()
+        self.assertIsNone(widget.bundle)
+        self.assertIn("Gone.lnmc", widget.bundleError)
+        self.assertEqual(widget._parameterNode.connectome, "Gone.lnmc")
+        self.assertEqual(logic.resolveConnectome(legacyConnectomeName(bundle.path)), bundle.path)
+
+        # Leave the scene as the privacy section had it
+        slicer.mrmlScene.Clear(0)
+        slicer.util.loadScene(privacyScenePath)
+        widget.initializeParameterNode()
+        widget.refreshConnectomes()
+        self.assertEqual(widget._parameterNode.connectome, identifier)

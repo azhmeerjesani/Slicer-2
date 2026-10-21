@@ -514,6 +514,21 @@ def _software(run_meta, software):
     return out
 
 
+def _portable_file(path, folder):
+    """``path`` relative to ``folder`` with "/" separators (its file name on another drive), None for None.
+
+    Sidecars are shared with the maps, so they never hold an absolute local path (SPEC 9.7 rules 9 and 10);
+    provenance.json and reproduce.sh keep the exact command line for reproducing the run on this computer.
+    """
+    if not path:
+        return path
+    try:
+        relative = os.path.relpath(os.path.abspath(os.fspath(path)), os.path.abspath(os.fspath(folder)))
+    except ValueError:
+        return os.path.basename(os.fspath(path))
+    return relative.replace(os.sep, "/")
+
+
 def write_run(out_dir, maps, lesion_names, bundle, rule=None, resolved=None, qa=None, run_meta=None, preview_n=None, software=None):
     """Export a network-mapping run: maps, one sidecar per lesion, provenance.json, methods.md and reproduce.sh.
 
@@ -607,7 +622,7 @@ def write_run(out_dir, maps, lesion_names, bundle, rule=None, resolved=None, qa=
             "Description": "Lesion network map: seed-based functional connectivity of the lesion with a normative connectome",
             "software": software,
             "connectome": connectome,
-            "lesion": lesion,
+            "lesion": {**lesion, "file": _portable_file(lesion["file"], out_dir)},
             "N": n,
             "df": max(n - 1, 0),
             "subject_ids_sha256": subject_hash,

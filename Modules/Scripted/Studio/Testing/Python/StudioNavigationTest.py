@@ -1566,3 +1566,55 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             studioShell.toast(f"message {index}", 10)
         self.assertEqual(len(studioShell.recentMessages()), 20)
         self.assertEqual(studioShell.recentMessages()[-1][1], "message 29")
+
+    def test_24_module_selection_leaves_startup_layout(self):
+        """Draw or Map entered by a module selection replace the startup layout by theirs; a chosen layout is kept (D5)."""
+        from StudioLib import workspaces
+
+        studioShell = self._applyStudio()
+        studioShell.switchTo("library")
+        self._pump()
+        initial = slicer.vtkMRMLLayoutNode.SlicerLayoutInitialView
+        self.layoutManager.setLayout(initial)
+        self._pump()
+        key = "map" if workspaces.isAvailable(workspaces.workspace("map")) else "draw"
+        ws = workspaces.workspace(key)
+        slicer.util.selectModule(ws.moduleName)
+        self._pump()
+        self.assertEqual(studioShell.currentWorkspace(), key)
+        self.assertEqual(self.layoutManager.layout, studioShell.workspaces.rememberedLayout(ws))
+        self.assertNotEqual(self.layoutManager.layout, initial)
+
+        # A layout chosen before the module selection (here four-up by its own id) is kept
+        studioShell.switchTo("library")
+        self._pump()
+        fourUp = slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView
+        self.layoutManager.setLayout(fourUp)
+        self._pump()
+        slicer.util.selectModule("SegmentEditor")
+        self._pump()
+        self.assertEqual(studioShell.currentWorkspace(), "draw")
+        self.assertEqual(self.layoutManager.layout, fourUp)
+
+        # The layout restored from the previous session (the close guard saves a conventional one) is not a choice
+        conventional = slicer.vtkMRMLLayoutNode.SlicerLayoutConventionalView
+        studioShell.switchTo("library")
+        self._pump()
+        self.layoutManager.setLayout(conventional)
+        self._pump()
+        studioShell.workspaces.resetLayoutChoice()
+        slicer.util.selectModule(ws.moduleName)
+        self._pump()
+        self.assertEqual(self.layoutManager.layout, studioShell.workspaces.rememberedLayout(ws))
+
+        # The layout of a scene that was opened is kept
+        studioShell.switchTo("library")
+        self._pump()
+        self.layoutManager.setLayout(conventional)
+        self._pump()
+        studioShell.workspaces.resetLayoutChoice()
+        slicer.mrmlScene.StartState(slicer.vtkMRMLScene.ImportState)
+        slicer.mrmlScene.EndState(slicer.vtkMRMLScene.ImportState)
+        slicer.util.selectModule(ws.moduleName)
+        self._pump()
+        self.assertEqual(self.layoutManager.layout, conventional)

@@ -16,7 +16,7 @@ The index is built on the first open and refreshed incrementally on later opens:
   scene, Save scene, Place point, Python console, Error log, Settings…, Keyboard shortcuts, Recent
   messages, theme, density, Hide panels, Show inspector, Reset panel width, Show Data Probe);
 - view commands (Show crosshair, Slice intersections, Link views, Reset views, Maximize view,
-  Window/level: Auto, Brain, Narrow and Reset);
+  Window/level: Auto, Brain, Narrow and Reset, and the CT display presets of the Volumes module, applied in place);
 - layouts, one entry per layout id (the picker's and the Layout menu's, Studio Focus, Focus + 3D, Row,
   Compare while a figure is shown);
 - recent files (``importer.loadRecentFile``: a file that is open is shown again, never loaded twice),
@@ -56,7 +56,6 @@ import sys
 import time
 import traceback
 
-import numpy as np
 import qt
 import slicer
 from slicer.i18n import tr as _
@@ -143,6 +142,9 @@ NARROW_PERCENTILES = (25.0, 95.0)
 _PRESET_SAMPLE_VOXELS = 2_000_000
 
 _WINDOW_LEVEL_SYNONYMS = ("window level", "window/level", "window", "level", "w/l", "wl", "contrast", "brightness")
+#: Display presets of the Volumes module offered in Search (``vtkSlicerVolumesLogic`` preset IDs starting with this
+#: prefix: CT-Bone, CT-Air, CT-Brain, CT-Abdomen, CT-Lung); PET and DTI also change the colour table and are left out
+_VOLUMES_PRESET_PREFIX = "CT_"
 
 _providers = []
 _palette = None
@@ -553,6 +555,9 @@ def _rememberWindowLevel(volumeNode, displayNode):
 
 
 def _sampledNonZero(volumeNode):
+    # numpy is imported here, not with the module: the palette module is imported at startup, numpy is not (~0.2 s)
+    import numpy as np
+
     array = slicer.util.arrayFromVolume(volumeNode)
     step = max(1, round((array.size / _PRESET_SAMPLE_VOXELS) ** (1.0 / 3.0)))
     sample = array[::step, ::step, ::step].astype(np.float64, copy=False).ravel()
@@ -569,6 +574,8 @@ def windowLevelPreset(volumeNode, preset):
     values = _sampledNonZero(volumeNode)
     if values.size == 0:
         return None
+    import numpy as np
+
     low, high = (float(value) for value in np.percentile(values, percentiles))
     if high <= low:
         return None
@@ -602,6 +609,39 @@ def applyWindowLevel(preset, shell=None, volumeNode=None):
             return False
         displayNode.AutoWindowLevelOff()
         displayNode.SetWindowLevel(*windowLevel)
+    _toast(shell, _("Window/level {window:.0f} / {level:.0f}").format(window=displayNode.GetWindow(), level=displayNode.GetLevel()))
+    return True
+
+
+def volumesDisplayPresets():
+    """``[(preset ID, title)]`` of the Volumes display presets offered in Search, for example ("CT_BRAIN", "CT-Brain")."""
+    module = getattr(slicer.modules, "volumes", None)
+    logic = module.logic() if module is not None else None
+    if logic is None or not hasattr(logic, "GetVolumeDisplayPresetIDs"):
+        return []
+    presets = []
+    for presetId in logic.GetVolumeDisplayPresetIDs():
+        presetId = str(presetId)
+        if presetId.startswith(_VOLUMES_PRESET_PREFIX):
+            # The names of VolumeDisplayPresets.json ("CT-Brain"); the name itself is not wrapped in Python
+            presets.append((presetId, "CT-" + presetId[len(_VOLUMES_PRESET_PREFIX):].capitalize()))
+    return presets
+
+
+def applyDisplayPreset(presetId, shell=None, volumeNode=None):
+    """Apply a display preset of the Volumes module ("CT_BRAIN"...) to the scan of Draw (else the Red view), without
+    leaving the workspace. "Window/level: Reset" restores the window/level from before.
+    """
+    volumeNode = volumeNode or _targetVolume(shell)
+    displayNode = volumeNode.GetDisplayNode() if volumeNode is not None else None
+    if displayNode is None or not hasattr(displayNode, "SetAutoWindowLevel"):
+        _toast(shell, _("Open a scan first: window/level applies to the scan in the views"))
+        return False
+    if volumeNode.GetID() not in _savedWindowLevels:
+        _rememberWindowLevel(volumeNode, displayNode)
+    if not slicer.modules.volumes.logic().ApplyVolumeDisplayPreset(displayNode, presetId):
+        _toast(shell, _("This preset could not be applied"))
+        return False
     _toast(shell, _("Window/level {window:.0f} / {level:.0f}").format(window=displayNode.GetWindow(), level=displayNode.GetLevel()))
     return True
 
@@ -929,6 +969,14 @@ class Index:
             entries.append(Entry(f"view.windowLevel.{preset}", title, view, lambda preset=preset: applyWindowLevel(preset, shell),
                                  synonyms=_WINDOW_LEVEL_SYNONYMS, priority=priority, enabled=lambda: _targetVolume() is not None,
                                  description=_("Window/level of the scan; drag in a view when no tool is active"), iconName="contrast"))
+        # The display presets of the Volumes module, applied in place (no detour through the Volumes module); their name
+        # in Volumes ("CT-Brain") is an alias, so the name typed by a Slicer user finds them
+        for presetId, name in volumesDisplayPresets():
+            entries.append(Entry(f"view.displayPreset.{presetId}", _("Window/level: {preset}").format(preset=name), view,
+                                 lambda presetId=presetId: applyDisplayPreset(presetId, shell),
+                                 synonyms=(name.lower().replace("-", " "), "ct", "preset", "display preset", "volumes preset"),
+                                 aliases=(name,), enabled=lambda: _targetVolume() is not None,
+                                 description=_("Display preset of the Volumes module, on the scan in the views"), iconName="contrast"))
         return entries
 
     def _layoutEntries(self, layoutMenu):

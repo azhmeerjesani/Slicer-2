@@ -17,6 +17,41 @@ from slicer.i18n import translate
 import time
 import datetime
 
+
+class _CustomWidgetsUiLoader(qt.QUiLoader):
+    """QUiLoader that creates the CTK and Slicer widgets of a .ui file itself.
+
+    Used only in builds without the Qt Designer plugins (``Slicer_BUILD_QT_DESIGNER_PLUGINS=OFF``, for example
+    the Slicer Studio packages), where QUiLoader creates their Qt base classes instead (a ``QTreeView`` without
+    ``setMRMLScene``, a plain ``QWidget`` for a collapsible button).
+    """
+
+    def createWidget(self, className, parent=None, name=""):
+        module = ctk if className.startswith("ctk") else slicer if className.startswith(("qMRML", "qSlicer")) else None
+        widgetClass = getattr(module, className, None) if module is not None else None
+        if widgetClass is None:
+            return qt.QUiLoader.createWidget(self, className, parent, name)
+        widget = widgetClass(parent)
+        widget.setObjectName(name)
+        return widget
+
+
+def _loadUI(path):
+    """``slicer.util.loadUI``, which needs the Qt Designer plugins for custom widgets; without them, ``_CustomWidgetsUiLoader``."""
+    if "ctkCollapsibleButton" in qt.QUiLoader().availableWidgets():
+        return slicer.util.loadUI(path)
+    uiFile = qt.QFile(path)
+    if not uiFile.open(qt.QFile.ReadOnly):
+        return slicer.util.loadUI(path)  # raises the usual error
+    try:
+        widget = _CustomWidgetsUiLoader().load(uiFile)
+    finally:
+        uiFile.close()
+    if not widget:
+        raise RuntimeError(f"Could not load UI file: {path}")
+    return widget
+
+
 #
 # Custom QDockWidget that notifies when it's closed
 #
@@ -855,7 +890,7 @@ class DICOMWidget(ScriptedLoadableModuleWidget):
         self.browserWidget = None
 
         # Load widget from .ui file (created by Qt Designer)
-        uiWidget = slicer.util.loadUI(self.resourcePath("UI/DICOM.ui"))
+        uiWidget = _loadUI(self.resourcePath("UI/DICOM.ui"))
         self.layout.addWidget(uiWidget)
         self.ui = slicer.util.childWidgetVariables(uiWidget)
 

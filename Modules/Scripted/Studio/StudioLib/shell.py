@@ -318,7 +318,17 @@ def fitWindowToScreen(mainWindow, fraction=FIRST_RUN_WINDOW_FRACTION):
     height = int(available.height() * fraction)
     if mainWindow.width >= width and mainWindow.height >= height:
         return False
-    mainWindow.resize(width, height)
+    # The window is already shown (startupCompleted): without updates, the views are not painted at once at the
+    # new size during the resize (each OpenGL view renders on resize), only once afterwards (-0.15 s at startup)
+    updatesEnabled = mainWindow.updatesEnabled
+    if callable(updatesEnabled):
+        # A method when the property is not wrapped as an attribute
+        updatesEnabled = updatesEnabled()
+    mainWindow.setUpdatesEnabled(False)
+    try:
+        mainWindow.resize(width, height)
+    finally:
+        mainWindow.setUpdatesEnabled(updatesEnabled)
     mainWindow.move(available.x() + (available.width() - width) // 2, available.y() + (available.height() - height) // 2)
     return True
 
@@ -326,6 +336,17 @@ def fitWindowToScreen(mainWindow, fraction=FIRST_RUN_WINDOW_FRACTION):
 #
 # Saved window state guard
 #
+
+
+class _LabelTextToolTipFilter(qt.QObject):
+    """Show a label's whole text as its tooltip (for labels that may be cut)."""
+
+    def eventFilter(self, obj, event):
+        if event.type() == qt.QEvent.ToolTip and hasattr(obj, "text"):
+            text = obj.text
+            if text and obj.toolTip != text:
+                obj.toolTip = text
+        return False
 
 
 class MainWindowCloseGuard(qt.QObject):
@@ -344,6 +365,8 @@ class MainWindowCloseGuard(qt.QObject):
         #: Function that returns the classic window state to save, or None (Studio not shown)
         self.classicStateProvider = None
         self._closing = False
+        #: MainWindow/windowState when the close started: Slicer saved the state if it changed since
+        self._stateAtClose = None
         mainWindow.installEventFilter(self)
         slicer.app.connect("aboutToQuit()", self._onAboutToQuit)
 
@@ -353,6 +376,7 @@ class MainWindowCloseGuard(qt.QObject):
         eventType = event.type()
         if eventType == qt.QEvent.Close:
             self._closing = True
+            self._stateAtClose = qt.QSettings().value("MainWindow/windowState")
             qt.QTimer.singleShot(0, self._checkCloseCancelled)
         elif eventType == qt.QEvent.Hide and self._closing:
             # The close was accepted: the window state and the layout have just been saved
@@ -371,16 +395,25 @@ class MainWindowCloseGuard(qt.QObject):
             self._closing = False
 
     def _onAboutToQuit(self):
-        if self._closing:
-            self._closing = False
-            self._fixSavedState()
+        """A close accepted without a Hide event (a hidden window): fix what Slicer saved.
 
-    def _fixSavedState(self):
+        The application can also quit while the exit confirmation is still open (``slicer.app.exit()``
+        from a script or a signal): Slicer saved nothing then, so neither does the guard. The window state is
+        replaced only if Slicer saved one since the close started; a fork layout is always made portable.
+        """
+        if not self._closing:
+            return
+        self._closing = False
+        if slicer.app.activeModalWidget() is not None:
+            return
+        self._fixSavedState(windowState=qt.QSettings().value("MainWindow/windowState") != self._stateAtClose)
+
+    def _fixSavedState(self, windowState=True):
         settings = qt.QSettings()
         if not slicer.util.toBool(settings.value("MainWindow/RestoreGeometry", False)):
             # Slicer did not save the window state and layout
             return
-        classicState = self.classicStateProvider() if self.classicStateProvider is not None else None
+        classicState = self.classicStateProvider() if windowState and self.classicStateProvider is not None else None
         if classicState is not None:
             settings.setValue("MainWindow/windowState", classicState)
         try:
@@ -1084,6 +1117,7 @@ class Shell:
         self._classicSceneRoot = None
         self._studioSceneRoot = None
         self._sceneCloseObservation = None
+        self._sceneImportObservation = None
         #: Focus policies of the view widgets covered by the canvas ({id(widget): (widget, policy)})
         self._coveredFocusPolicies = {}
         #: Widgets of the view area whose focus policy accepts Tab, visible or not, found by the last full scan
@@ -1244,6 +1278,9 @@ class Shell:
         if self._sceneCloseObservation is not None:
             slicer.mrmlScene.RemoveObserver(self._sceneCloseObservation)
             self._sceneCloseObservation = None
+        if self._sceneImportObservation is not None:
+            slicer.mrmlScene.RemoveObserver(self._sceneImportObservation)
+            self._sceneImportObservation = None
         self._restoreSceneRootDirectory()
         for shortcut in self._installedWorkspaceShortcuts + self._shortcuts:
             self._deleteShortcut(shortcut)
@@ -1517,6 +1554,7 @@ class Shell:
         self._connect(modulePanel, "moduleAdded(QString)", self._onModuleAdded)
         layoutManager = slicer.app.layoutManager()
         if layoutManager is not None:
+            self.workspaces.resetLayoutChoice()
             self._connect(layoutManager, "layoutChanged(int)", self.workspaces.onLayoutChanged)
             self._connect(layoutManager, "layoutChanged(int)", self._onLayoutChanged)
         self._connect(dock.toggleViewAction(), "triggered(bool)", self._onPanelToggleTriggered)
@@ -1538,6 +1576,7 @@ class Shell:
         self._setSegmentEditorPresentation("studio")
         self._fixSceneRootDirectory()
         self._sceneCloseObservation = slicer.mrmlScene.AddObserver(slicer.vtkMRMLScene.EndCloseEvent, self._onSceneEndClose)
+        self._sceneImportObservation = slicer.mrmlScene.AddObserver(slicer.vtkMRMLScene.EndImportEvent, self._onSceneEndImport)
         self._installPlugins()
 
         # Build the heavy workspace pages when the application is idle
@@ -1915,8 +1954,52 @@ class Shell:
             _("Back to {workspace}").format(workspace=origin.title), "Esc", _("Close {module} and return").format(module=title)))
         self._showInspectorForModule()
         self._updateInspectorNotice()
+        if moduleName == "DICOM":
+            # Now if the module widget exists, else once the module panel has created it
+            self._fitDicomBrowser()
+            qt.QTimer.singleShot(0, self._fitDicomBrowser)
         # The keyboard focus starts on the module panel itself (neutral for Tab and Esc), not on its first input
         qt.QTimer.singleShot(0, lambda moduleName=moduleName: self._focusTransientModule(moduleName))
+
+    #: Messages of the DICOM browser (CTK) that hold a folder path: one line, as wide as the path
+    _DICOM_BROWSER_MESSAGE_LABELS = ("DatabaseDirectoryProblemLabel", "InformationMessageLabel")
+
+    def _fitDicomBrowser(self):
+        """Keep the DICOM browser from widening the window beyond the screen (1366 x 768).
+
+        On a fresh profile its message "No valid DICOM database found in folder <path>" is one line as wide as
+        the path, and the browser fills the views area: the window grew and pushed the inspector off the screen.
+        The message labels wrap and give up their minimum width (a path that does not fit is cut at the right
+        edge; the full text is in the tooltip). CTK is not changed; the labels stay so for the session.
+        """
+        if not self._active:
+            return
+        widget = getattr(slicer.modules, "DICOMWidget", None)
+        browser = getattr(getattr(widget, "browserWidget", None), "dicomBrowser", None)
+        if browser is None or getattr(self, "_dicomBrowserFitted", None) is browser:
+            return
+        self._dicomBrowserFitted = browser
+        for name in self._DICOM_BROWSER_MESSAGE_LABELS:
+            labels = slicer.util.findChildren(browser, name=name)
+            label = labels[0] if labels else None
+            if label is None or label.property("studioFitted"):
+                continue
+            label.setProperty("studioFitted", True)
+            # Then word wrap, which keeps the policy and adds height-for-width (the frame grows a line)
+            label.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+            label.setWordWrap(True)
+            label.installEventFilter(self._dicomLabelTooltipFilter())
+            label.updateGeometry()
+        # The window may have grown already (the browser was laid out before): back within the screen, and the
+        # inspector width taken by the browser back to the inspector
+        self._scheduleKeepWindowOnScreen()
+        self._schedulePanelWidthUpdate(shrink=False)
+
+    def _dicomLabelTooltipFilter(self):
+        """Event filter that shows the full text of a DICOM browser message as its tooltip."""
+        if getattr(self, "_dicomTooltipFilter", None) is None:
+            self._dicomTooltipFilter = _LabelTextToolTipFilter()
+        return self._dicomTooltipFilter
 
     def _focusTransientModule(self, moduleName):
         if not self._active or self.workspaces is None or self.workspaces.transientModule != moduleName:
@@ -2821,8 +2904,10 @@ class Shell:
         if size == oldSize:
             return
         if (size.width(), size.height()) == self._windowResizedTo:
-            # The size keepWindowOnScreen() asked for
+            # The size keepWindowOnScreen() asked for. Qt took the width from the inspector: give it back its
+            # width (from the views, as far as their minimum width allows)
             self._windowResizedTo = None
+            self._schedulePanelWidthUpdate(shrink=False)
             return
         minimum = self._mainWindowMinimumSize()
         grownWidth = size.width() > oldSize.width() and size.width() <= minimum.width()
@@ -3359,6 +3444,10 @@ class Shell:
     def _onSceneEndClose(self, caller=None, event=None):
         if self._active:
             self._fixSceneRootDirectory()
+
+    def _onSceneEndImport(self, caller=None, event=None):
+        if self._active:
+            self.workspaces.onSceneImported()
 
     def _onErrorLogVisibilityChanged(self, visible):
         """The error log opens at the bottom in Studio (tabbed with the Python console when that is there).

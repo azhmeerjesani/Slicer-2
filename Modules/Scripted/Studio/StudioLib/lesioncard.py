@@ -22,15 +22,30 @@ strip, policy card) add their rows and ⋯ items without editing this file.
 
 import html
 
-import numpy as np
+from StudioLib import lazyNumpy as np
 import qt
 import slicer
 from slicer.i18n import tr as _
 
 from . import ui
 
-#: Connectivity of the parts of a lesion: 26 neighbours (faces, edges and corners)
-PARTS_STRUCTURE = np.ones((3, 3, 3), dtype=bool)
+_partsStructure = None
+
+
+def partsStructure():
+    """Connectivity of the parts of a lesion: 26 neighbours (faces, edges and corners); also ``PARTS_STRUCTURE``."""
+    global _partsStructure
+    if _partsStructure is None:
+        _partsStructure = np.ones((3, 3, 3), dtype=bool)
+    return _partsStructure
+
+
+def __getattr__(name):
+    # PARTS_STRUCTURE is made on first use, so that importing this module does not import numpy
+    if name == "PARTS_STRUCTURE":
+        return partsStructure()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 #: Link targets of the readout line
 LINK_KEEP_LARGEST = "keep-largest"
@@ -100,7 +115,7 @@ def computeLesionMetrics(array_kji, spacing, ijkToRAS, axis=0, brainMask=None):
 
     from scipy import ndimage
 
-    _labels, parts = ndimage.label(crop, structure=PARTS_STRUCTURE)
+    _labels, parts = ndimage.label(crop, structure=partsStructure())
 
     # Gap slices: empty slices between the first and the last slice of the lesion along the axis
     otherAxes = tuple(index for index in range(3) if index != axis)
