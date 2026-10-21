@@ -144,6 +144,8 @@ def _rgba(color, alpha):
 _listeners = []
 _boundStyleSheets = []  # [widget, function]
 _watcher = None
+#: Application font size (px) of the last refresh: a different size is an application font change
+_lastApplicationFontPx = None
 
 
 class _PaletteWatcher(qt.QObject):
@@ -168,9 +170,10 @@ class _PaletteWatcher(qt.QObject):
 
 
 def _ensureWatcher():
-    global _watcher
+    global _watcher, _lastApplicationFontPx
     if _watcher is None:
         _watcher = _PaletteWatcher()
+        _lastApplicationFontPx = applicationFontPx()
 
 
 def addPaletteListener(callback):
@@ -194,7 +197,12 @@ def _isAlive(widget):
 
 
 def _refresh():
+    global _lastApplicationFontPx
     _iconCache.clear()
+    fontPixelSize = applicationFontPx()
+    if _lastApplicationFontPx is not None and fontPixelSize != _lastApplicationFontPx:
+        _refreshStudioWidgetFonts(_lastApplicationFontPx)
+    _lastApplicationFontPx = fontPixelSize
     _refreshFonts()
     for entry in list(_boundStyleSheets):
         widget, function = entry
@@ -451,6 +459,8 @@ def setRole(widget, role):
 #: font changes (USABILITY 9.4). Deleted widgets are dropped when the list is refreshed or has grown.
 _fontRegistry = []
 _fontRegistryPruneSize = 256
+#: Dynamic property of the widgets in ``_fontRegistry``
+_FONT_REGISTERED_PROPERTY = "studioFontRegistered"
 
 
 def _applyFont(widget, pixelSize, weight, letterSpacing):
@@ -469,18 +479,75 @@ def _font(widget, pixelSize, weight=None, letterSpacing=None):
     ``pixelSize`` is the size for the current application font: a ``fontPx()`` value, or a size designed for the 13 px
     body. When the application font changes, the widget gets the same ratio of the new font (``_refreshFonts()``).
     """
-    global _fontRegistryPruneSize
     _ensureWatcher()
     _applyFont(widget, pixelSize, weight, letterSpacing)
-    designPx = pixelSize * DESIGN_BODY_PX / applicationFontPx()
-    for entry in _fontRegistry:
-        if entry[0] == widget:
-            entry[1:] = [designPx, weight, letterSpacing]
-            return
+    _register(widget, pixelSize * DESIGN_BODY_PX / applicationFontPx(), weight, letterSpacing)
+
+
+def _register(widget, designPx, weight, letterSpacing):
+    """Keep ``widget`` at ``designPx`` (px at a 13 px body) in the ``_font()`` registry."""
+    global _fontRegistryPruneSize
+    if widget.property(_FONT_REGISTERED_PROPERTY):
+        for entry in _fontRegistry:
+            if entry[0] == widget:
+                entry[1:] = [designPx, weight, letterSpacing]
+                return
+    widget.setProperty(_FONT_REGISTERED_PROPERTY, True)
     _fontRegistry.append([widget, designPx, weight, letterSpacing])
     if len(_fontRegistry) > _fontRegistryPruneSize:
         _fontRegistry[:] = [entry for entry in _fontRegistry if _isAlive(entry[0])]
         _fontRegistryPruneSize = max(256, 2 * len(_fontRegistry))
+
+
+def _isStudioWidget(widget):
+    """True if ``widget`` or the closest named part of the window above it is a Studio widget (``Studio*`` object name).
+
+    The search stops at a Slicer widget (``qMRML*``, ``qSlicer*``: views, module panels, the main window).
+    """
+    while widget is not None:
+        if str(widget.objectName).startswith("Studio"):
+            return True
+        if widget.className().startswith(("qMRML", "qSlicer")):
+            return False
+        widget = widget.parentWidget()
+    return False
+
+
+def _refreshStudioWidgetFonts(previousApplicationFontPx):
+    """Make every Studio widget of the main window follow an application font change (USABILITY 9.4).
+
+    - A widget under a stylesheet keeps the font that the stylesheet style resolved when it was polished: Qt marks it
+      as set on the widget, so it no longer follows the application font. Under each topmost Studio stylesheet, the
+      widgets whose font the application did not set get an empty font (the inherited one again), then the stylesheet
+      is set again, which polishes them with the new font and the font rules of the stylesheets.
+    - A Studio widget with a pixel font set directly (``widget.setFont()``, not ``_font()``) joins the ``_font()``
+      registry with the same ratio to the previous application font, so that ``_refreshFonts()`` resizes it now and
+      after each later change.
+    """
+    mainWindow = slicer.util.mainWindow() if hasattr(slicer.util, "mainWindow") else None
+    if mainWindow is None:
+        return
+    styled = []
+    explicit = []
+    for widget in mainWindow.findChildren("QWidget"):
+        if widget.styleSheet and str(widget.objectName).startswith("Studio"):
+            styled.append(widget)
+        if widget.testAttribute(qt.Qt.WA_SetFont) and widget.font.pixelSize() > 0 and not widget.property(_FONT_REGISTERED_PROPERTY):
+            explicit.append(widget)
+    for index, root in enumerate(styled):
+        # isAncestorOf() is also true for the widget itself
+        if any(other.isAncestorOf(root) for otherIndex, other in enumerate(styled) if otherIndex != index):
+            continue
+        # Parents before children (findChildren() lists the tree depth first)
+        for widget in [root] + list(root.findChildren("QWidget")):
+            if not widget.testAttribute(qt.Qt.WA_SetFont):
+                widget.setFont(qt.QFont())
+        styleSheet = root.styleSheet
+        root.setStyleSheet("")
+        root.setStyleSheet(styleSheet)
+    for widget in explicit:
+        if _isStudioWidget(widget):
+            _register(widget, widget.font.pixelSize() * DESIGN_BODY_PX / previousApplicationFontPx, None, None)
 
 
 def _refreshFonts():

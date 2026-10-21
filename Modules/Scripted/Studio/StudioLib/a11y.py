@@ -3,10 +3,12 @@
 A Studio plug-in (``shell.OPTIONAL_PLUGINS``): ``install(shell)`` runs when Studio is applied and ``uninstall(shell)``
 in Classic, which then behaves exactly as before.
 
-- **AltGr guard** (CM-19). On Windows AltGr is reported as Ctrl+Alt, so AltGr+2 ('@' on several European layouts)
-  would run the Ctrl+Alt+2 workspace shortcut instead of typing. While a text input has the keyboard focus (line edit,
-  text edit, spin box, Python console), a Ctrl+Alt key that types a printable character is kept by the input. In a
-  view, AltGr+digit still acts as Ctrl+Alt+digit (Qt cannot tell them apart): documented in the shortcut list.
+- **AltGr guard** (CM-19), Windows only (``ALTGR_IS_CTRL_ALT``). On Windows AltGr is reported as Ctrl+Alt, so AltGr+2
+  ('@' on several European layouts) would run the Ctrl+Alt+2 workspace shortcut instead of typing. While a text input
+  has the keyboard focus (line edit, text edit, spin box, Python console), a Ctrl+Alt key that types a printable
+  character is kept by the input. In a view, AltGr+digit still acts as Ctrl+Alt+digit (Qt cannot tell them apart):
+  documented in the shortcut list. On Linux and macOS AltGr (Option) is not Ctrl+Alt, and a real Ctrl+Alt+digit has
+  the digit as its text (X11): there the guard would take the workspace keys from the text inputs, so it is off.
 - **Focus frame of the views** (CM-04). A slice view that gets the keyboard focus with Tab, Shift+Tab or a shortcut
   (F6) shows a 2 px accent frame; a mouse press or leaving the view hides it. The frame is driven by the application's
   ``focusChanged`` signal; only the view that shows the frame has an event filter. Hovering, rendering and focus
@@ -19,6 +21,7 @@ Nothing is written to the settings.
 """
 
 import logging
+import sys
 import traceback
 
 import qt
@@ -26,6 +29,8 @@ import slicer
 
 from . import ui
 
+#: True where AltGr arrives as Ctrl+Alt (Windows): only there the AltGr guard is installed
+ALTGR_IS_CTRL_ALT = sys.platform.startswith("win")
 #: Classes of the widgets that keep printable Ctrl+Alt (AltGr) characters
 TEXT_INPUT_CLASSES = ("QLineEdit", "QTextEdit", "QPlainTextEdit", "QAbstractSpinBox", "ctkConsole")
 #: Width of the view focus frame
@@ -168,17 +173,24 @@ def _mouseButtonsPressed():
         return buttons != qt.Qt.NoButton
 
 
-def isKeyboardFocusChange(widget):
+def isKeyboardFocusChange(widget, previousFocus=None, previousCursor=None):
     """True if ``widget`` has just got the focus from the keyboard (Tab, Shift+Tab, F6, a shortcut), not from the mouse.
 
-    Called from ``focusChanged``, after the focus event, whose reason is not available: the focus came from the mouse
-    when a button is pressed or when the pointer is over the widget (a click, or focus follows the mouse). Hence Tab
-    back into the view under a resting pointer shows no frame.
+    Called from ``focusChanged``, after the focus event, whose reason is not available. The focus came from the mouse
+    when a button is pressed (a click). Without a button, it came from the keyboard when the pointer is outside the
+    widget, or when the pointer is over it but the focus left a text input (focus follows the mouse never takes the
+    focus from a text input, ``qMRMLSliceView::enterEvent``) or the pointer has not moved since the previous focus
+    change (focus follows the mouse acts when the pointer enters the view, so it has just moved). ``previousFocus`` and
+    ``previousCursor`` (global position at the previous focus change, or None) are given by ``Accessibility``.
     """
     if _mouseButtonsPressed():
         return False
-    position = widget.mapFromGlobal(qt.QCursor.pos())
-    return not widget.rect.contains(position)
+    cursor = qt.QCursor.pos()
+    if not widget.rect.contains(widget.mapFromGlobal(cursor)):
+        return True
+    if isTextInput(previousFocus):
+        return True
+    return previousCursor is not None and previousCursor == cursor
 
 
 class Accessibility:
@@ -189,6 +201,8 @@ class Accessibility:
         self.altGrGuard = _AltGrGuard()
         #: The text input that has the AltGr guard
         self._guarded = None
+        #: Global pointer position at the last focus change (keyboard focus detection of the views)
+        self._focusCursor = None
         #: Slice view name -> _ViewFocusFrame
         self.viewFrames = {}
         self._layoutManager = None
@@ -202,6 +216,7 @@ class Accessibility:
 
     def install(self):
         slicer.app.connect("focusChanged(QWidget*,QWidget*)", self._onFocusChanged)
+        self._focusCursor = qt.QCursor.pos()
         self._guard(slicer.app.focusWidget())
         self._layoutManager = slicer.app.layoutManager()
         if self._layoutManager is not None:
@@ -235,8 +250,8 @@ class Accessibility:
     #
 
     def _guard(self, widget):
-        """Move the AltGr guard to ``widget`` if it is a text input (else nowhere)."""
-        widget = widget if isTextInput(widget) else None
+        """Move the AltGr guard to ``widget`` if it is a text input (else nowhere). Only where AltGr is Ctrl+Alt."""
+        widget = widget if ALTGR_IS_CTRL_ALT and isTextInput(widget) else None
         if self._guarded is not None and not _isAlive(self._guarded):
             # Deleted with its filter
             self._guarded = None
@@ -250,13 +265,15 @@ class Accessibility:
 
     def _onFocusChanged(self, old, new):
         self._guard(new)
+        previousCursor = self._focusCursor
+        self._focusCursor = qt.QCursor.pos()
         if not self.viewFrames:
             return
         for viewFrame in self.viewFrames.values():
             if old is not None and viewFrame.focusWidget == old:
                 viewFrame.hide()
             elif new is not None and viewFrame.focusWidget == new:
-                if isKeyboardFocusChange(new):
+                if isKeyboardFocusChange(new, old, previousCursor):
                     viewFrame.show()
                 else:
                     viewFrame.hide()

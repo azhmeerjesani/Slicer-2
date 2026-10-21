@@ -83,8 +83,8 @@ Its three workspaces follow the path of a lesion network mapping study:
 Alt+1..4 change the view layout, Ctrl+\\ (or F6) shows or hides the inspector,
 F11 toggles the focus mode, Esc backs out of the place and window/level modes, a maximized view
 and the focus mode, and Ctrl+Alt+0 switches to the Classic interface and back
-(also View &gt; Studio interface). Text fields keep the characters typed with AltGr (for example @);
-in a view, AltGr+digit acts as Ctrl+Alt+digit on Windows, where the two keys cannot be told apart.</p>
+(also View &gt; Studio interface). On Windows, where AltGr and Ctrl+Alt cannot be told apart, text fields
+keep the characters typed with AltGr (for example @) and in a view AltGr+digit acts as Ctrl+Alt+digit.</p>
 <p>The Classic interface is never removed. Studio is not used when testing,
 without main window, with the SLICER_CLASSIC_UI=1 environment variable,
 or when the Studio/Enabled setting is false.</p>

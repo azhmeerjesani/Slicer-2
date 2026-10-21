@@ -7,7 +7,8 @@ Run with the main window and testing enabled:
 Studio never runs by itself under --testing; the tests apply it with ``Shell(force=True)`` and always restore the
 Classic interface. They cover:
 
-- the AltGr guard: a focused text input keeps a printable Ctrl+Alt character ('@'), a view keeps the workspace keys;
+- the AltGr guard (Windows only): a focused text input keeps a printable Ctrl+Alt character ('@'), a view keeps the
+  workspace keys; elsewhere a text input leaves Ctrl+Alt+digit to the workspace keys;
 - visible keyboard focus: the focus ring of the buttons (>= 3:1 against the unfocused state) and the focus frame of
   the slice views (Tab or F6 shows it, a mouse press hides it);
 - Studio fonts that follow the application font live, with the panel title larger than the body text;
@@ -127,7 +128,9 @@ class StudioAccessibilityTest(ScriptedLoadableModule.ScriptedLoadableModuleTest)
     #
 
     def test_altgr_guard(self):
-        """A focused line edit keeps AltGr+2 ('@', Ctrl+Alt on Windows); in a view Ctrl+Alt+2 still switches workspace."""
+        """A focused line edit keeps AltGr+2 ('@', Ctrl+Alt on Windows); in a view Ctrl+Alt+2 still switches workspace.
+        Where AltGr is not Ctrl+Alt (Linux, macOS) there is no guard: Ctrl+Alt+1 (text '1' on X11) stays a workspace key.
+        """
         from StudioLib import a11y
 
         studioShell = self._applyStudio()
@@ -138,6 +141,9 @@ class StudioAccessibilityTest(ScriptedLoadableModule.ScriptedLoadableModuleTest)
         lineEdit.setObjectName("StudioAccessibilityTestLineEdit")
         lineEdit.setGeometry(10, 60, 200, 24)
         lineEdit.show()
+        platformGuard = a11y.ALTGR_IS_CTRL_ALT
+        # The guard as on Windows (read when the focus changes)
+        a11y.ALTGR_IS_CTRL_ALT = True
         try:
             if not self._focus(lineEdit):
                 self.skipTest("the window cannot take the keyboard focus here")
@@ -169,7 +175,27 @@ class StudioAccessibilityTest(ScriptedLoadableModule.ScriptedLoadableModuleTest)
             shortcut.activated()
             self._pump()
             self.assertEqual(studioShell.currentWorkspace(), "library")
+
+            # Linux and macOS: no guard, a real Ctrl+Alt+1 in a text input (text '1' on X11) switches the workspace
+            a11y.ALTGR_IS_CTRL_ALT = False
+            studioShell.switchTo("draw")
+            self._pump()
+            lineEdit.show()
+            lineEdit.raise_()
+            redWidget.setFocus(qt.Qt.OtherFocusReason)
+            self._pump()
+            if not self._focus(lineEdit):
+                self.skipTest("the window cannot take the keyboard focus here")
+            self.assertIsNone(a11y.instance()._guarded)
+            override = self._keyEvent(qt.QEvent.ShortcutOverride, qt.Qt.Key_1, ctrlAlt, "1")
+            qt.QApplication.sendEvent(lineEdit, override)
+            self.assertFalse(override.isAccepted(), "Ctrl+Alt+1 must stay a workspace key")
+            shortcut.activated()
+            self._pump()
+            self.assertEqual(studioShell.currentWorkspace(), "library")
+            self.assertEqual(lineEdit.text, "@")
         finally:
+            a11y.ALTGR_IS_CTRL_ALT = platformGuard
             lineEdit.hide()
             lineEdit.setParent(None)
             lineEdit.deleteLater()
@@ -308,6 +334,36 @@ class StudioAccessibilityTest(ScriptedLoadableModule.ScriptedLoadableModuleTest)
         self.assertTrue(plugin.viewFrame("Yellow").isVisible())
         self.assertEqual([name for name, viewFrame in plugin.viewFrames.items() if viewFrame.filtering], ["Yellow"])
 
+        # F6 into the view under a resting pointer (Shell._focusView picks the last hovered view): the pointer has not
+        # moved since the focus left for the inspector, so the focus did not follow the mouse
+        qt.QCursor.setPos(redWidget.mapToGlobal(qt.QPoint(redWidget.width // 2, redWidget.height // 2)))
+        self._pump()
+        helpButton = self.mainWindow.findChild("QToolButton", "StudioPanelHelpButton")
+        self.assertIsNotNone(helpButton)
+        self._focus(helpButton, qt.Qt.ShortcutFocusReason)
+        self.assertFalse(any(viewFrame.isShown() for viewFrame in plugin.viewFrames.values()))
+        self.assertTrue(self._focus(redWidget, qt.Qt.ShortcutFocusReason))
+        self.assertTrue(frame.isVisible())
+        # From a text input with the pointer moved over the view since (focus follows the mouse never leaves a text
+        # input): a keyboard focus change too
+        lineEdit = qt.QLineEdit(self.mainWindow)
+        lineEdit.setObjectName("StudioAccessibilityTestLineEdit")
+        lineEdit.setGeometry(10, 60, 200, 24)
+        lineEdit.show()
+        try:
+            qt.QCursor.setPos(studioShell.topBar.toolBar.mapToGlobal(qt.QPoint(5, 5)))
+            self._focus(lineEdit)
+            self.assertFalse(frame.isVisible())
+            qt.QCursor.setPos(redWidget.mapToGlobal(qt.QPoint(redWidget.width // 3, redWidget.height // 3)))
+            self._pump()
+            self.assertTrue(lineEdit.hasFocus())
+            self.assertTrue(self._focus(redWidget, qt.Qt.ShortcutFocusReason))
+            self.assertTrue(frame.isVisible())
+        finally:
+            lineEdit.hide()
+            lineEdit.setParent(None)
+            lineEdit.deleteLater()
+
         # Classic: no frame and no filter
         studioShell.classic(persist=False)
         self._pump()
@@ -320,10 +376,27 @@ class StudioAccessibilityTest(ScriptedLoadableModule.ScriptedLoadableModuleTest)
     #
 
     def test_font_scaling_live(self):
-        """With a 14 pt application font the Studio labels grow without a restart; the panel title stays larger than the body."""
+        """With a 14 pt application font the Studio labels grow without a restart; the panel title stays larger than the body.
+
+        Library labels with a font set directly (drop zone title, links), buttons that inherit the font under a Studio
+        stylesheet (Open…, the workspace switcher) and the panel title all grow, and get their size back afterwards.
+        """
         from StudioLib import ui
 
         studioShell = self._applyStudio()
+        studioShell.switchTo("library")
+        self._pump(8)
+
+        def pixelSizes(names):
+            sizes = {}
+            for name in names:
+                widget = self.mainWindow.findChild("QWidget", name)
+                self.assertIsNotNone(widget, name)
+                sizes[name] = qt.QFontInfo(widget.font).pixelSize()
+            return sizes
+
+        libraryNames = ("StudioDropZoneTitle", "StudioLibraryClassicLink", "StudioLibraryOpenButton", "StudioLibraryWorkspaceButton")
+        libraryBefore = pixelSizes(libraryNames)
         studioShell.switchTo("draw")
         self._pump(8)
         title = self.mainWindow.findChild("QLabel", "StudioPanelHeaderTitle")
@@ -339,6 +412,13 @@ class StudioAccessibilityTest(ScriptedLoadableModule.ScriptedLoadableModuleTest)
             qt.QApplication.setFont(font)
             self._pump(8)
             bodyPx = ui.applicationFontPx()
+            studioShell.switchTo("library")
+            self._pump(8)
+            libraryAfter = pixelSizes(libraryNames)
+            for name in libraryNames:
+                self.assertGreater(libraryAfter[name], libraryBefore[name], name)
+            studioShell.switchTo("draw")
+            self._pump(8)
             titleAfter = qt.QFontInfo(title.font).pixelSize()
             self.assertGreater(titleAfter, titleBefore)
             self.assertGreater(titleAfter, bodyPx)
@@ -350,6 +430,9 @@ class StudioAccessibilityTest(ScriptedLoadableModule.ScriptedLoadableModuleTest)
             self._pump(8)
             frame.deleteLater()
         self.assertEqual(qt.QFontInfo(title.font).pixelSize(), titleBefore)
+        studioShell.switchTo("library")
+        self._pump(8)
+        self.assertEqual(pixelSizes(libraryNames), libraryBefore)
 
     def test_narrow_mode(self):
         """At 960x540 (QT_SCALE_FACTOR=2 on a 1080p screen) the top bar is compact and no control is beyond the window
