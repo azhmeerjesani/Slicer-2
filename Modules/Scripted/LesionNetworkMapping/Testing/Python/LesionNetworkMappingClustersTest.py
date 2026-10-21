@@ -162,6 +162,8 @@ class TwoBlobTest(unittest.TestCase):
             clusters.cluster_table(self.volume, grid(), None, 2.0, sign="up")
         with self.assertRaises(ValueError):
             clusters.cluster_table(self.volume, grid(), None, 2.0, connectivity=8)
+        with self.assertRaises(ValueError):
+            clusters.cluster_table(self.volume, grid(), None, 2.0, max_subpeaks=27)
         for bad in (0.0, -1.0, float("nan")):
             with self.assertRaises(ValueError):
                 clusters.cluster_table(self.volume, grid(), None, bad)
@@ -290,7 +292,8 @@ class LabelTest(unittest.TestCase):
         other = atlases.Atlas("other", data, AFFINE, {1: "a", 2: "b"}, family="2009" if family != "2009" else "fsl6")
         table = clusters.cluster_table(self.volume, grid(), None, 2.0, labeler=clusters.atlas_labeler([other], space="MNI152NLin6Asym"))
         self.assertEqual(table[0]["labels"], [])
-        self.assertEqual({notice["code"] for notice in table.notices}, {"family_mismatch"})
+        self.assertGreater(len(table.clusters), 1)
+        self.assertEqual([notice["code"] for notice in table.notices], ["family_mismatch"])  # once, not once per cluster
 
 
 class HomologueTest(unittest.TestCase):
@@ -338,7 +341,15 @@ class WriterTest(unittest.TestCase):
             self.assertIn("no cluster-extent inference", text)
             self.assertIn("<caption>", text)
             self.assertEqual(sorted(os.listdir(directory)), ["clusters.html", "clusters.tsv"])
+            umask = os.umask(0)
+            os.umask(umask)
+            self.assertEqual(os.stat(tsv).st_mode & 0o777, 0o666 & ~umask)
+            self.assertEqual(os.stat(page).st_mode & 0o777, 0o666 & ~umask)
             clusters.write_clusters(list(table), tsv, None, caption="custom")
+            large = [dict(table[0], voxels=1225043, mm3=1225043.0), dict(table[0], voxels=3658, mm3=12345.75)]
+            clusters.write_clusters(large, tsv, None, caption="volumes")
+            with open(tsv, encoding="utf-8") as stream:
+                self.assertEqual([r["volume_mm3"] for r in csv.DictReader(stream, delimiter="\t")], ["1225043", "12345.75"])
             with self.assertRaises(ValueError):
                 clusters.write_clusters(list(table), tsv)
 

@@ -36,7 +36,7 @@ from . import thresholds
 SIGNS = ("pos", "neg")
 CONNECTIVITY_RANK = {6: 1, 18: 2, 26: 3}  # ndimage.generate_binary_structure(3, rank)
 MIDLINE_MM = 0.5  # |x| below this is "midline"
-DESCRIPTIVE_NOTE = "descriptive extents (no cluster-extent inference)"
+DESCRIPTIVE_NOTE = "Extents are descriptive (no cluster-extent inference)."
 SIGN_LABELS = {"pos": "+", "neg": "-"}  # ASCII, so that the TSV reads anywhere
 
 
@@ -141,7 +141,8 @@ def _peaks(score, cluster, offset, grid, min_mm, max_subpeaks):
     world = grid.voxel_to_world(ijk)
     kept = []
     for index in range(len(ijk)):
-        if all(np.sqrt(((world[index] - world[other]) ** 2).sum()) > min_mm for other in kept):
+        # The tolerance keeps the boundary grid-independent: on an oblique affine 10 mm computes as 10.000000000000002
+        if all(np.sqrt(((world[index] - world[other]) ** 2).sum()) > min_mm + 1e-9 for other in kept):
             kept.append(index)
             if len(kept) > max_subpeaks:
                 break
@@ -151,7 +152,9 @@ def _peaks(score, cluster, offset, grid, min_mm, max_subpeaks):
 def _label_rows(labels, table):
     """Normalize labeler output to [(atlas, label, pct)] and the network of its largest overlap."""
     rows, network = [], None
-    table.notices.extend(getattr(labels, "notices", None) or [])
+    for notice in getattr(labels, "notices", None) or []:
+        if notice not in table.notices:  # one notice per atlas, not one per cluster
+            table.notices.append(notice)
     for item in labels or []:
         atlas, label, pct = item[0], item[1], float(item[2])
         rows.append((atlas, label, pct))
@@ -190,6 +193,8 @@ def cluster_table(values, grid, mask_indices, threshold, sign="both", connectivi
         raise ValueError("sign must be 'both', 'pos' or 'neg'")
     if connectivity not in CONNECTIVITY_RANK:
         raise ValueError("connectivity must be 6, 18 or 26")
+    if not 0 <= int(max_subpeaks) <= len(string.ascii_lowercase):
+        raise ValueError("max_subpeaks must be between 0 and 26")
     value, resolved, statistic = _threshold_of(threshold, statistic)
     volume, positions = _as_volume(values, grid, mask_indices)
     extras = {}
@@ -339,7 +344,7 @@ def cluster_caption(table, n=None, df=None, atlases=None, space="MNI"):
     parts.append(f"x, y, z: {space} coordinates (mm) of the peak voxel; CoG: value-weighted centre of gravity")
     names = list(atlases) if atlases is not None else list(table.atlases)
     parts.append(f"labels: {', '.join(names)} (% of the cluster)" if names else "no atlas labels")
-    return "; ".join(parts) + f". {DESCRIPTIVE_NOTE[0].upper()}{DESCRIPTIVE_NOTE[1:]}."
+    return "; ".join(parts) + ". " + DESCRIPTIVE_NOTE
 
 
 def _extra_names(rows):
@@ -360,7 +365,7 @@ def _cells(row, extras, digits=4):
         row["id"],
         SIGN_LABELS[row["sign"]],
         "" if row["voxels"] is None else str(row["voxels"]),
-        "" if row["mm3"] is None else f"{row['mm3']:g}",
+        "" if row["mm3"] is None else f"{row['mm3']:.10g}",  # 1225043 and 12345.75, never 1.22504e+06
         _format_number(row["peak"], digits),
         *[_format_number(row["extra"].get(name), digits) for name in extras],
         *coord(row["xyz"]),
@@ -381,6 +386,9 @@ def _write_atomic(path, text):
     try:
         with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
             stream.write(text)
+        umask = os.umask(0)  # mkstemp creates 0600: give the file the mode open() would (as the other LNM writers do)
+        os.umask(umask)
+        os.chmod(temporary, 0o666 & ~umask)
         os.replace(temporary, path)
     except BaseException:
         if os.path.exists(temporary):
