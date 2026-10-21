@@ -155,7 +155,7 @@ class Toast:
         # Tooltip colors: an inverted pill that reads well over images and over the canvas
         return (
             f"QLabel#StudioToast {{ background-color: {ui._rgba(ui.token('tooltip'), 0.92)}; color: {ui.token('tooltip-text').name()};"
-            f" border: 1px solid {ui._rgba(ui.token('tooltip-text'), 0.12)}; border-radius: {TOAST_HEIGHT // 2}px; padding: 0px 16px; font-size: 13px; }}")
+            f" border: 1px solid {ui._rgba(ui.token('tooltip-text'), 0.12)}; border-radius: {TOAST_HEIGHT // 2}px; padding: 0px 16px; font-size: {ui.fontPx(13)}px; }}")
 
     def show(self, text, ms=1600):
         """Show ``text`` for ``ms`` milliseconds, then fade out. A new message replaces the current one."""
@@ -227,8 +227,11 @@ class CornerPill:
         text = ui.token("tooltip-text")
         return (
             f"QToolButton#{objectName} {{ background-color: {ui._rgba(background, 0.55)}; color: {ui._rgba(text, 0.8)};"
-            f" border: 1px solid {ui._rgba(text, 0.12)}; border-radius: {PILL_HEIGHT // 2}px; padding: 0px 12px 0px 10px; font-size: 12px; }}"
-            f"QToolButton#{objectName}:hover {{ background-color: {ui._rgba(background, 0.92)}; color: {text.name()}; }}")
+            f" border: 1px solid {ui._rgba(text, 0.12)}; border-radius: {PILL_HEIGHT // 2}px; padding: 0px 12px 0px 10px; font-size: {ui.fontPx(12)}px; }}"
+            f"QToolButton#{objectName}:hover {{ background-color: {ui._rgba(background, 0.92)}; color: {text.name()}; }}"
+            # Keyboard focus (USABILITY 9.2) if a pill is made focusable: a 2 px ring, the padding 1 px smaller (same size)
+            f"QToolButton#{objectName}:focus {{ background-color: {ui._rgba(background, 0.92)}; color: {text.name()};"
+            f" border: 2px solid {ui.token('accent-fg').name()}; padding: 0px 11px 0px 9px; }}")
 
     def refreshIcon(self):
         self.button.setIcon(qt.QIcon(ui.pixmap(self.iconName, 14, "tooltip-text")))

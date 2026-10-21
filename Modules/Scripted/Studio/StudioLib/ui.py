@@ -147,7 +147,7 @@ _watcher = None
 
 
 class _PaletteWatcher(qt.QObject):
-    """Event filter on a hidden top-level widget: it receives the application palette and style changes."""
+    """Event filter on a hidden top-level widget: it receives the application palette, style and font changes."""
 
     def __init__(self):
         qt.QObject.__init__(self)
@@ -160,8 +160,9 @@ class _PaletteWatcher(qt.QObject):
         self.timer.connect("timeout()", _refresh)
 
     def eventFilter(self, obj, event):
-        if event.type() in (qt.QEvent.ApplicationPaletteChange, qt.QEvent.PaletteChange, qt.QEvent.StyleChange):
-            # The style and the palette are often changed together: refresh once
+        if event.type() in (qt.QEvent.ApplicationPaletteChange, qt.QEvent.PaletteChange, qt.QEvent.StyleChange, qt.QEvent.ApplicationFontChange):
+            # The style and the palette are often changed together: refresh once. A font change resizes the Studio
+            # fonts (``_font()``) and rebuilds the stylesheets, whose font sizes come from ``fontPx()``.
             self.timer.start()
         return False
 
@@ -194,6 +195,7 @@ def _isAlive(widget):
 
 def _refresh():
     _iconCache.clear()
+    _refreshFonts()
     for entry in list(_boundStyleSheets):
         widget, function = entry
         if not _isAlive(widget):
@@ -362,20 +364,25 @@ def _roleStyleSheet(role):
     if role == "card":
         return (
             f'QFrame[slicerRole="card"] {{ background-color: {t["card"]}; border: 1px solid {t["hairline"]}; border-radius: 8px; }}'
-            f'QFrame[slicerRole="card"] QLabel[slicerRole="sectionHeader"] {{ color: {t["text2"]}; font-size: 11px; font-weight: 600; border: none; background: transparent; }}'
+            f'QFrame[slicerRole="card"] QLabel[slicerRole="sectionHeader"] {{ color: {t["text2"]}; font-size: {fontPx(11)}px; font-weight: 600; border: none; background: transparent; }}'
             f'QFrame[slicerRole="card"] QLabel {{ border: none; background: transparent; }}')
     if role == "primary":
         return (
             f'*[slicerRole="primary"] {{ background-color: {t["accent"]}; color: #ffffff; border: none; border-radius: 6px; padding: 0px 14px; min-height: 32px; font-weight: 600; }}'
             f'*[slicerRole="primary"]:hover {{ background-color: {t["accent-hover"]}; }}'
             f'*[slicerRole="primary"]:pressed {{ background-color: {t["accent-pressed"]}; }}'
-            f'*[slicerRole="primary"]:disabled {{ background-color: {t["border"]}; color: {t["text-disabled"]}; }}')
+            f'*[slicerRole="primary"]:disabled {{ background-color: {t["border"]}; color: {t["text-disabled"]}; }}'
+            # Keyboard focus (USABILITY 9.2): a ring, the padding and minimum height reduced by its width so that the size does
+            # not change. On the accent fill the ring has the text color (accent-fg would not stand out) and is 3 px wide:
+            # the antialiased rounded edge of a 2 px border leaves less than a 2 px ring at 3:1 there.
+            f'*[slicerRole="primary"]:focus {{ border: 3px solid {t["text"]}; padding: 0px 11px; min-height: 26px; }}')
     if role == "secondary":
         return (
             f'*[slicerRole="secondary"] {{ background-color: {t["button"]}; color: {t["text"]}; border: 1px solid {t["control-border"]}; border-radius: 6px; padding: 0px 12px; min-height: 28px; }}'
             f'*[slicerRole="secondary"]:hover {{ background-color: {t["control-hover"]}; }}'
             f'*[slicerRole="secondary"]:pressed {{ background-color: {t["control-pressed"]}; }}'
-            f'*[slicerRole="secondary"]:disabled {{ color: {t["text-disabled"]}; }}')
+            f'*[slicerRole="secondary"]:disabled {{ color: {t["text-disabled"]}; }}'
+            f'*[slicerRole="secondary"]:focus {{ border: 2px solid {t["accent-fg"]}; padding: 0px 11px; min-height: 26px; }}')
     if role == "ghost":
         return (
             f'*[slicerRole="ghost"] {{ background-color: transparent; color: {t["text2"]}; border: 1px solid transparent; border-radius: 6px; padding: 3px; }}'
@@ -383,14 +390,16 @@ def _roleStyleSheet(role):
             f'*[slicerRole="ghost"]:pressed {{ background-color: {t["control-pressed"]}; }}'
             f'*[slicerRole="ghost"]:checked {{ background-color: {t["accent-subtle"]}; border-color: {t["accent-fg"]}; color: {t["text"]}; }}'
             f'*[slicerRole="ghost"]:disabled {{ color: {t["text-disabled"]}; }}'
+            f'*[slicerRole="ghost"]:focus {{ border: 2px solid {t["accent-fg"]}; padding: 2px; }}'
             f'QToolButton[slicerRole="ghost"]::menu-indicator {{ image: none; width: 0px; }}')
     if role == "segmented":
         return (
             f'QFrame[slicerRole="segmented"] {{ background-color: {t["control-pressed"]}; border: 1px solid {t["hairline"]}; border-radius: 8px; }}'
-            f'QFrame[slicerRole="segmented"] QToolButton {{ background-color: transparent; color: {t["text2"]}; border: none; border-radius: 6px; padding: 3px 12px; font-size: 13px; }}'
+            f'QFrame[slicerRole="segmented"] QToolButton {{ background-color: transparent; color: {t["text2"]}; border: none; border-radius: 6px; padding: 3px 12px; font-size: {fontPx(13)}px; }}'
             f'QFrame[slicerRole="segmented"] QToolButton:hover {{ background-color: {t["control-hover"]}; color: {t["text"]}; }}'
             f'QFrame[slicerRole="segmented"] QToolButton:checked {{ background-color: {t["accent-subtle"]}; color: {t["text"]}; }}'
-            f'QFrame[slicerRole="segmented"] QToolButton:disabled {{ color: {t["text-disabled"]}; }}')
+            f'QFrame[slicerRole="segmented"] QToolButton:disabled {{ color: {t["text-disabled"]}; }}'
+            f'QFrame[slicerRole="segmented"] QToolButton:focus {{ border: 2px solid {t["accent-fg"]}; padding: 1px 10px; }}')
     if role == "chip":
         neutral = (t["control-hover"], t["text2"])
         levels = {
@@ -400,13 +409,13 @@ def _roleStyleSheet(role):
             "warn": (_rgba(token("warning"), 0.16), t["warning"]),
             "danger": (_rgba(token("danger"), 0.16), t["danger"]),
         }
-        styleSheet = f'QLabel[slicerRole="chip"] {{ border: none; border-radius: 10px; padding: 0px 8px; min-height: 20px; max-height: 20px; font-size: 12px; background-color: {neutral[0]}; color: {neutral[1]}; }}'
+        styleSheet = f'QLabel[slicerRole="chip"] {{ border: none; border-radius: 10px; padding: 0px 8px; min-height: 20px; max-height: 20px; font-size: {fontPx(12)}px; background-color: {neutral[0]}; color: {neutral[1]}; }}'
         for level, (background, foreground) in levels.items():
             styleSheet += f'QLabel[slicerRole="chip"][chipLevel="{level}"] {{ background-color: {background}; color: {foreground}; }}'
         return styleSheet
     if role == "kbd":
         return (
-            f'QLabel[slicerRole="kbd"] {{ background-color: transparent; color: {t["text2"]}; border: 1px solid {t["border"]}; border-radius: 4px; padding: 0px 5px; font-size: 11px; }}')
+            f'QLabel[slicerRole="kbd"] {{ background-color: transparent; color: {t["text2"]}; border: 1px solid {t["border"]}; border-radius: 4px; padding: 0px 5px; font-size: {fontPx(11)}px; }}')
     if role == "topBar":
         return (
             f'QToolBar[slicerRole="topBar"] {{ background-color: {t["view-bar"]}; border: none; border-bottom: 1px solid {t["hairline"]}; padding: 0px; spacing: 0px; }}')
@@ -438,14 +447,54 @@ def setRole(widget, role):
 #
 
 
-def _font(widget, pixelSize, weight=None, letterSpacing=None):
+#: Widgets sized by ``_font()``: [widget, size at a 13 px body, weight, letter spacing], resized when the application
+#: font changes (USABILITY 9.4). Deleted widgets are dropped when the list is refreshed or has grown.
+_fontRegistry = []
+_fontRegistryPruneSize = 256
+
+
+def _applyFont(widget, pixelSize, weight, letterSpacing):
     font = qt.QFont(widget.font)
-    font.setPixelSize(pixelSize)
+    font.setPixelSize(max(1, round(pixelSize)))
     if weight is not None:
         font.setWeight(weight)
     if letterSpacing is not None:
         font.setLetterSpacing(qt.QFont.AbsoluteSpacing, letterSpacing)
     widget.setFont(font)
+
+
+def _font(widget, pixelSize, weight=None, letterSpacing=None):
+    """Set a font of ``pixelSize`` px on ``widget`` and keep it in proportion to the application font.
+
+    ``pixelSize`` is the size for the current application font: a ``fontPx()`` value, or a size designed for the 13 px
+    body. When the application font changes, the widget gets the same ratio of the new font (``_refreshFonts()``).
+    """
+    global _fontRegistryPruneSize
+    _ensureWatcher()
+    _applyFont(widget, pixelSize, weight, letterSpacing)
+    designPx = pixelSize * DESIGN_BODY_PX / applicationFontPx()
+    for entry in _fontRegistry:
+        if entry[0] == widget:
+            entry[1:] = [designPx, weight, letterSpacing]
+            return
+    _fontRegistry.append([widget, designPx, weight, letterSpacing])
+    if len(_fontRegistry) > _fontRegistryPruneSize:
+        _fontRegistry[:] = [entry for entry in _fontRegistry if _isAlive(entry[0])]
+        _fontRegistryPruneSize = max(256, 2 * len(_fontRegistry))
+
+
+def _refreshFonts():
+    """Size the widgets of ``_font()`` for the current application font."""
+    alive = []
+    for entry in _fontRegistry:
+        widget, designPx, weight, letterSpacing = entry
+        if not _isAlive(widget):
+            continue
+        alive.append(entry)
+        pixelSize = fontPx(designPx)
+        if widget.font.pixelSize() != pixelSize:
+            _applyFont(widget, pixelSize, weight, letterSpacing)
+    _fontRegistry[:] = alive
 
 
 def card(title=None):
@@ -460,7 +509,7 @@ def card(title=None):
         label = qt.QLabel(title.upper())
         label.setObjectName("StudioCardTitle")
         label.setProperty("slicerRole", "sectionHeader")
-        _font(label, 11, qt.QFont.DemiBold, 0.6)
+        _font(label, fontPx(11), qt.QFont.DemiBold, 0.6)
         layout.addWidget(label)
     return frame, layout
 

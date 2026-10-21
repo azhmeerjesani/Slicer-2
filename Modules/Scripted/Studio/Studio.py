@@ -1,3 +1,5 @@
+import os
+
 import qt
 
 import slicer
@@ -18,6 +20,19 @@ def _onStartupCompleted():
     # Imported lazily, so that the module costs nothing at startup when Studio is not used
     from StudioLib import shell
 
+    if slicer.app.property("SlicerDisclaimerHandledByApplication"):
+        # Receive the research-use disclaimer that the main window does not show (W3-03): it may come before Studio is
+        # applied. Studio shows it as a Library footer line, Classic as the official dialog.
+        try:
+            from StudioLib import firstrun
+
+            firstrun.connectDisclaimer()
+        except Exception:
+            import logging
+            import traceback
+
+            slicer.app.setProperty("SlicerDisclaimerHandledByApplication", False)
+            logging.error("Studio: cannot receive the disclaimer:\n" + traceback.format_exc())
     shell.onStartupCompleted(startTime)
     # Scene autosave and crash recovery, in Classic and in Studio (after the Studio apply time measurement)
     try:
@@ -29,6 +44,22 @@ def _onStartupCompleted():
         import traceback
 
         logging.error("Autosave could not be started:\n" + traceback.format_exc())
+
+
+def _studioWillApplyAtStartup():
+    """True if Studio will be applied when the application has started.
+
+    The same rules as ``StudioLib.shell.willApplyAtStartup()``, without importing the shell (startup time) and before
+    the main window exists (the module is created first): not testing, a main window, ``SLICER_CLASSIC_UI`` is not
+    "1", ``Studio/Enabled`` and ``Studio/Mode`` is not "classic".
+    """
+    if slicer.app.testingEnabled() or slicer.app.commandOptions().noMainWindow:
+        return False
+    if os.environ.get("SLICER_CLASSIC_UI") == "1":
+        return False
+    if not slicer.util.settingsValue("Studio/Enabled", True, converter=slicer.util.toBool):
+        return False
+    return str(slicer.util.settingsValue("Studio/Mode", "studio")).lower() != "classic"
 
 
 class Studio(ScriptedLoadableModule):
@@ -52,7 +83,8 @@ Its three workspaces follow the path of a lesion network mapping study:
 Alt+1..4 change the view layout, Ctrl+\\ (or F6) shows or hides the inspector,
 F11 toggles the focus mode, Esc backs out of the place and window/level modes, a maximized view
 and the focus mode, and Ctrl+Alt+0 switches to the Classic interface and back
-(also View &gt; Studio interface).</p>
+(also View &gt; Studio interface). Text fields keep the characters typed with AltGr (for example @);
+in a view, AltGr+digit acts as Ctrl+Alt+digit on Windows, where the two keys cannot be told apart.</p>
 <p>The Classic interface is never removed. Studio is not used when testing,
 without main window, with the SLICER_CLASSIC_UI=1 environment variable,
 or when the Studio/Enabled setting is false.</p>
@@ -74,6 +106,10 @@ copyright (c) The Inter Project Authors.</p>
 """)
         if not slicer.app.testingEnabled():
             slicer.app.connect("startupCompleted()", _onStartupCompleted)
+            if _studioWillApplyAtStartup():
+                # Set before the main window is first shown: it emits disclaimerRequested() instead of opening its
+                # disclaimer dialog, and Studio shows a non-modal research-use line (StudioLib/firstrun.py)
+                slicer.app.setProperty("SlicerDisclaimerHandledByApplication", True)
 
 
 #
