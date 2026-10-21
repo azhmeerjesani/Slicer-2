@@ -37,7 +37,7 @@ SIGNS = ("pos", "neg")
 CONNECTIVITY_RANK = {6: 1, 18: 2, 26: 3}  # ndimage.generate_binary_structure(3, rank)
 MIDLINE_MM = 0.5  # |x| below this is "midline"
 DESCRIPTIVE_NOTE = "descriptive extents (no cluster-extent inference)"
-SIGN_LABELS = {"pos": "+", "neg": "−"}
+SIGN_LABELS = {"pos": "+", "neg": "-"}  # ASCII, so that the TSV reads anywhere
 
 
 class ClusterTable(list):
@@ -207,7 +207,7 @@ def cluster_table(values, grid, mask_indices, threshold, sign="both", connectivi
     number = 0
     for current in SIGNS if sign == "both" else (sign,):
         score = np.where(finite, volume if current == "pos" else -volume, -np.inf)
-        labels, count = ndimage.label(score >= value, structure=structure)
+        labels, _count = ndimage.label(score >= value, structure=structure)
         found = []
         for index, region in enumerate(ndimage.find_objects(labels), start=1):
             cluster = labels[region] == index
@@ -322,12 +322,12 @@ def cluster_caption(table, n=None, df=None, atlases=None, space="MNI"):
     resolved = table.resolved
     n = n if n is not None else (resolved.n if resolved is not None else None)
     df = df if df is not None else (resolved.df if resolved is not None else None)
-    quantity = {"both": f"|{table.statistic}|", "pos": table.statistic, "neg": f"−{table.statistic}"}[table.sign]
+    quantity = {"both": f"|{table.statistic}|", "pos": table.statistic, "neg": f"-{table.statistic}"}[table.sign]
     parts = [f"Clusters of the {table.statistic} map at {quantity} ≥ {_format_number(table.threshold, 4)}"]
     if resolved is not None:
         rule = thresholds.rule_label(resolved.rule)
         alpha = resolved.rule.get("alpha")
-        rule += f", α = {alpha:g}" if alpha is not None else ""
+        rule += f", α = {alpha:g}" if alpha is not None else ""  # noqa: RUF001
         rule += f", p_unc ≤ {thresholds.format_p(resolved.p_unc)}" if resolved.p_unc is not None else ""
         parts[0] += f" (rule: {rule})"
     counts = [f"N = {n}" if n is not None else None, f"df = {df}" if df is not None else None]
@@ -339,7 +339,7 @@ def cluster_caption(table, n=None, df=None, atlases=None, space="MNI"):
     parts.append(f"x, y, z: {space} coordinates (mm) of the peak voxel; CoG: value-weighted centre of gravity")
     names = list(atlases) if atlases is not None else list(table.atlases)
     parts.append(f"labels: {', '.join(names)} (% of the cluster)" if names else "no atlas labels")
-    return "; ".join(parts) + f". Extents are {DESCRIPTIVE_NOTE}."
+    return "; ".join(parts) + f". {DESCRIPTIVE_NOTE[0].upper()}{DESCRIPTIVE_NOTE[1:]}."
 
 
 def _extra_names(rows):

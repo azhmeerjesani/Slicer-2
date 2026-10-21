@@ -316,7 +316,7 @@ class WriterTest(unittest.TestCase):
         resolved = thresholds.resolve({"kind": "fwe_bonferroni", "alpha": 0.05}, 1000, 228483)
         table = clusters.cluster_table(volume, grid(), None, resolved, extra_maps={"Fz": volume / 40}, labeler=lambda mask, g: [("HO<cort>", "Frontal & Pole", 62.5)])
         caption = clusters.cluster_caption(table)
-        for expected in ("FWE (Bonferroni)", "α = 0.05", "N = 1000", "df = 999", "|T| ≥ 5.", "26-connected", "two-sided", "HO<cort>", "descriptive", "no cluster-extent inference"):
+        for expected in ("FWE (Bonferroni)", "α = 0.05", "N = 1000", "df = 999", "|T| ≥ 5.", "26-connected", "two-sided", "HO<cort>", "descriptive", "no cluster-extent inference"):  # noqa: RUF001
             self.assertIn(expected, caption)
         plain = clusters.cluster_caption(clusters.cluster_table(volume, grid(), None, 3.0, sign="pos", statistic="Fz"), n=50)
         self.assertIn("Fz ≥ 3", plain)
@@ -329,7 +329,7 @@ class WriterTest(unittest.TestCase):
             with open(tsv, encoding="utf-8") as stream:
                 rows = list(csv.DictReader(stream, delimiter="\t"))
             self.assertEqual(list(rows[0]), ["cluster_id", "sign", "voxels", "volume_mm3", "peak", "Fz", "x", "y", "z", "hemisphere", "cog_x", "cog_y", "cog_z", "labels", "network"])
-            self.assertEqual([(r["cluster_id"], r["sign"], r["voxels"], r["volume_mm3"], r["peak"], r["x"], r["hemisphere"]) for r in rows], [("1", "+", "27", "216", "12", "-11.0", "L"), ("2", "−", "16", "128", "-8", "7.0", "R")])
+            self.assertEqual([(r["cluster_id"], r["sign"], r["voxels"], r["volume_mm3"], r["peak"], r["x"], r["hemisphere"]) for r in rows], [("1", "+", "27", "216", "12", "-11.0", "L"), ("2", "-", "16", "128", "-8", "7.0", "R")])
             self.assertEqual(rows[0]["labels"], "HO<cort>: Frontal & Pole (62.5%)")
             self.assertEqual(rows[0]["Fz"], "0.3")
             with open(page, encoding="utf-8") as stream:
