@@ -40,6 +40,9 @@ The user pays for any usage beyond their plans, so even an accidental use costs 
 
 - Files saved by Slicer Studio must open in official 3D Slicer, and files saved by official 3D Slicer
   must open in Slicer Studio.
+- Files meant to be shared (scenes, `.mrb`, sidecars, exported tables) must not contain absolute local
+  paths: store paths relative to the file, or a portable identifier, and keep local paths in fork-only
+  settings. Provenance and reproduce scripts are the exception, by design.
 - Settings are shared with official installations (`Slicer.ini`): write fork-only keys under
   `Studio/*` or `Appearance/*`, and never rewrite official keys.
 - Never bundle or automatically download connectomes (for example GSP1000). The app may download one
