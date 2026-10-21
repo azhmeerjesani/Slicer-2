@@ -1,0 +1,933 @@
+{
+  "format": "slicer-lnm-catalog",
+  "version": 1,
+  "catalog": "atlases",
+  "updated": "2026-10-21",
+  "note": "Label atlases fetched on request, never bundled. Sizes and sha256 were measured on the files named here; 'record-on-first-download' entries store the sha256 in the cache manifest at the first download and verify it on reuse.",
+  "entries": [
+    {
+      "id": "schaefer2018-400-7n-2mm",
+      "title": "Schaefer2018 400 parcels, 7 networks (2 mm, MNI152NLin6Asym)",
+      "kind": "atlas",
+      "urls": [
+        "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin6Asym/tpl-MNI152NLin6Asym_res-02_atlas-Schaefer2018_desc-400Parcels7Networks_dseg.nii.gz"
+      ],
+      "filename": "tpl-MNI152NLin6Asym_res-02_atlas-Schaefer2018_desc-400Parcels7Networks_dseg.nii.gz",
+      "size": 87753,
+      "checksum": {
+        "algo": "sha256",
+        "value": "3bc579ab8a00eaf86c5f311b1808b482327ec97670a57393678a50fafc408e8c"
+      },
+      "licence": "MIT",
+      "badge": "green",
+      "terms_url": "https://github.com/ThomasYeoLab/CBIG/blob/master/LICENSE.md",
+      "citation": "Schaefer A, Kong R, Gordon EM, Laumann TO, Zuo XN, Holmes AJ, Eickhoff SB, Yeo BTT. Local-global parcellation of the human cerebral cortex from intrinsic functional connectivity MRI. Cerebral Cortex 28:3095-3114 (2018). doi:10.1093/cercor/bhx179",
+      "space": "MNI152NLin6Asym",
+      "family": "fsl6",
+      "grid": "NLin6-2mm",
+      "resolution_mm": 2,
+      "networks": "schaefer",
+      "label_table": {
+        "format": "tsv",
+        "source": "TemplateFlow dseg table",
+        "urls": [
+          "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin6Asym/tpl-MNI152NLin6Asym_atlas-Schaefer2018_desc-400Parcels7Networks_dseg.tsv"
+        ],
+        "filename": "tpl-MNI152NLin6Asym_atlas-Schaefer2018_desc-400Parcels7Networks_dseg.tsv",
+        "size": 15164,
+        "checksum": {
+          "algo": "sha256",
+          "value": "91fe503df22267bb6c9ab3b9e9e82eec0e08f496d4f9dcb9661e67d1abb14f07"
+        }
+      },
+      "note": "The FSL MNI152 2 mm grid is the grid of the common connectome releases. Network membership comes from the parcel names (for example 7Networks_LH_Vis_1).",
+      "parcels": 400
+    },
+    {
+      "id": "schaefer2018-400-17n-2mm",
+      "title": "Schaefer2018 400 parcels, 17 networks (2 mm, MNI152NLin6Asym)",
+      "kind": "atlas",
+      "urls": [
+        "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin6Asym/tpl-MNI152NLin6Asym_res-02_atlas-Schaefer2018_desc-400Parcels17Networks_dseg.nii.gz"
+      ],
+      "filename": "tpl-MNI152NLin6Asym_res-02_atlas-Schaefer2018_desc-400Parcels17Networks_dseg.nii.gz",
+      "size": 87513,
+      "checksum": {
+        "algo": "sha256",
+        "value": "23acdd50664e659674cd594fcba66bf44e14777ae4d6ed170a6d7da1f616bff1"
+      },
+      "licence": "MIT",
+      "badge": "green",
+      "terms_url": "https://github.com/ThomasYeoLab/CBIG/blob/master/LICENSE.md",
+      "citation": "Schaefer A, Kong R, Gordon EM, Laumann TO, Zuo XN, Holmes AJ, Eickhoff SB, Yeo BTT. Local-global parcellation of the human cerebral cortex from intrinsic functional connectivity MRI. Cerebral Cortex 28:3095-3114 (2018). doi:10.1093/cercor/bhx179",
+      "space": "MNI152NLin6Asym",
+      "family": "fsl6",
+      "grid": "NLin6-2mm",
+      "resolution_mm": 2,
+      "networks": "schaefer",
+      "label_table": {
+        "format": "tsv",
+        "source": "TemplateFlow dseg table",
+        "urls": [
+          "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin6Asym/tpl-MNI152NLin6Asym_atlas-Schaefer2018_desc-400Parcels17Networks_dseg.tsv"
+        ],
+        "filename": "tpl-MNI152NLin6Asym_atlas-Schaefer2018_desc-400Parcels17Networks_dseg.tsv",
+        "size": 16514,
+        "checksum": {
+          "algo": "sha256",
+          "value": "397f737ad575f60f66122e6f121bf5093e8845dc729d094cb170c20960275604"
+        }
+      },
+      "note": "The FSL MNI152 2 mm grid is the grid of the common connectome releases. Network membership comes from the parcel names (for example 7Networks_LH_Vis_1).",
+      "parcels": 400
+    },
+    {
+      "id": "schaefer2018-1000-7n-2mm",
+      "title": "Schaefer2018 1000 parcels, 7 networks (2 mm, MNI152NLin6Asym)",
+      "kind": "atlas",
+      "urls": [
+        "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin6Asym/tpl-MNI152NLin6Asym_res-02_atlas-Schaefer2018_desc-1000Parcels7Networks_dseg.nii.gz"
+      ],
+      "filename": "tpl-MNI152NLin6Asym_res-02_atlas-Schaefer2018_desc-1000Parcels7Networks_dseg.nii.gz",
+      "size": 102284,
+      "checksum": {
+        "algo": "sha256",
+        "value": "8aa83d2e0ed9148cccfa6a27bd59d8dc3775d987180574229451c2bb080f4b54"
+      },
+      "licence": "MIT",
+      "badge": "green",
+      "terms_url": "https://github.com/ThomasYeoLab/CBIG/blob/master/LICENSE.md",
+      "citation": "Schaefer A, Kong R, Gordon EM, Laumann TO, Zuo XN, Holmes AJ, Eickhoff SB, Yeo BTT. Local-global parcellation of the human cerebral cortex from intrinsic functional connectivity MRI. Cerebral Cortex 28:3095-3114 (2018). doi:10.1093/cercor/bhx179",
+      "space": "MNI152NLin6Asym",
+      "family": "fsl6",
+      "grid": "NLin6-2mm",
+      "resolution_mm": 2,
+      "networks": "schaefer",
+      "label_table": {
+        "format": "tsv",
+        "source": "TemplateFlow dseg table",
+        "urls": [
+          "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin6Asym/tpl-MNI152NLin6Asym_atlas-Schaefer2018_desc-1000Parcels7Networks_dseg.tsv"
+        ],
+        "filename": "tpl-MNI152NLin6Asym_atlas-Schaefer2018_desc-1000Parcels7Networks_dseg.tsv",
+        "size": 38231,
+        "checksum": {
+          "algo": "sha256",
+          "value": "f0fe4a0db6bac7dce520ef0ff7550ae3960a651b499f2b464f8d761da3a533e2"
+        }
+      },
+      "note": "The FSL MNI152 2 mm grid is the grid of the common connectome releases. Network membership comes from the parcel names (for example 7Networks_LH_Vis_1).",
+      "parcels": 1000
+    },
+    {
+      "id": "schaefer2018-400-7n-2mm-2009c",
+      "title": "Schaefer2018 400 parcels, 7 networks (2 mm, MNI152NLin2009cAsym)",
+      "kind": "atlas",
+      "urls": [
+        "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin2009cAsym/tpl-MNI152NLin2009cAsym_res-02_atlas-Schaefer2018_desc-400Parcels7Networks_dseg.nii.gz"
+      ],
+      "filename": "tpl-MNI152NLin2009cAsym_res-02_atlas-Schaefer2018_desc-400Parcels7Networks_dseg.nii.gz",
+      "size": 91904,
+      "checksum": {
+        "algo": "sha256",
+        "value": "e5dfdc5674fe6122609fa8d223d7d7c17f989ff1b03d7746559c95b11da1d264"
+      },
+      "licence": "MIT",
+      "badge": "green",
+      "terms_url": "https://github.com/ThomasYeoLab/CBIG/blob/master/LICENSE.md",
+      "citation": "Schaefer A, Kong R, Gordon EM, Laumann TO, Zuo XN, Holmes AJ, Eickhoff SB, Yeo BTT. Local-global parcellation of the human cerebral cortex from intrinsic functional connectivity MRI. Cerebral Cortex 28:3095-3114 (2018). doi:10.1093/cercor/bhx179",
+      "space": "MNI152NLin2009cAsym",
+      "family": "2009",
+      "grid": "TF2009-2mm",
+      "resolution_mm": 2,
+      "networks": "schaefer",
+      "label_table": {
+        "format": "tsv",
+        "source": "TemplateFlow dseg table",
+        "urls": [
+          "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin2009cAsym/tpl-MNI152NLin2009cAsym_atlas-Schaefer2018_desc-400Parcels7Networks_dseg.tsv"
+        ],
+        "filename": "tpl-MNI152NLin2009cAsym_atlas-Schaefer2018_desc-400Parcels7Networks_dseg.tsv",
+        "size": 15164,
+        "checksum": {
+          "algo": "sha256",
+          "value": "91fe503df22267bb6c9ab3b9e9e82eec0e08f496d4f9dcb9661e67d1abb14f07"
+        }
+      },
+      "note": "TemplateFlow's copy of the parcellation on the 2009c grid, for lesions and maps that are in the 2009 family.",
+      "parcels": 400
+    },
+    {
+      "id": "schaefer2018-400-17n-2mm-2009c",
+      "title": "Schaefer2018 400 parcels, 17 networks (2 mm, MNI152NLin2009cAsym)",
+      "kind": "atlas",
+      "urls": [
+        "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin2009cAsym/tpl-MNI152NLin2009cAsym_res-02_atlas-Schaefer2018_desc-400Parcels17Networks_dseg.nii.gz"
+      ],
+      "filename": "tpl-MNI152NLin2009cAsym_res-02_atlas-Schaefer2018_desc-400Parcels17Networks_dseg.nii.gz",
+      "size": 91723,
+      "checksum": {
+        "algo": "sha256",
+        "value": "3ee61016960fde4b1296fd6632da338d80561ff3610796189a568bb2c79e6948"
+      },
+      "licence": "MIT",
+      "badge": "green",
+      "terms_url": "https://github.com/ThomasYeoLab/CBIG/blob/master/LICENSE.md",
+      "citation": "Schaefer A, Kong R, Gordon EM, Laumann TO, Zuo XN, Holmes AJ, Eickhoff SB, Yeo BTT. Local-global parcellation of the human cerebral cortex from intrinsic functional connectivity MRI. Cerebral Cortex 28:3095-3114 (2018). doi:10.1093/cercor/bhx179",
+      "space": "MNI152NLin2009cAsym",
+      "family": "2009",
+      "grid": "TF2009-2mm",
+      "resolution_mm": 2,
+      "networks": "schaefer",
+      "label_table": {
+        "format": "tsv",
+        "source": "TemplateFlow dseg table",
+        "urls": [
+          "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin2009cAsym/tpl-MNI152NLin2009cAsym_atlas-Schaefer2018_desc-400Parcels17Networks_dseg.tsv"
+        ],
+        "filename": "tpl-MNI152NLin2009cAsym_atlas-Schaefer2018_desc-400Parcels17Networks_dseg.tsv",
+        "size": 16514,
+        "checksum": {
+          "algo": "sha256",
+          "value": "397f737ad575f60f66122e6f121bf5093e8845dc729d094cb170c20960275604"
+        }
+      },
+      "note": "TemplateFlow's copy of the parcellation on the 2009c grid, for lesions and maps that are in the 2009 family.",
+      "parcels": 400
+    },
+    {
+      "id": "yeo2011-7n",
+      "title": "Yeo2011 7 networks (1 mm, MNI152, FreeSurfer-conformed)",
+      "kind": "atlas",
+      "urls": [
+        "https://raw.githubusercontent.com/ThomasYeoLab/CBIG/master/stable_projects/brain_parcellation/Yeo2011_fcMRI_clustering/1000subjects_reference/Yeo_JNeurophysiol11_MNI152/Yeo2011_7Networks_MNI152_FreeSurferConformed1mm_LiberalMask.nii.gz"
+      ],
+      "filename": "Yeo2011_7Networks_MNI152_FreeSurferConformed1mm_LiberalMask.nii.gz",
+      "checksum": "record-on-first-download",
+      "url_checked": false,
+      "licence": "MIT",
+      "badge": "green",
+      "terms_url": "https://github.com/ThomasYeoLab/CBIG/blob/master/LICENSE.md",
+      "citation": "Yeo BTT, Krienen FM, Sepulcre J, Sabuncu MR, Lashkari D, Hollinshead M, Roffman JL, Smoller JW, Zoller L, Polimeni JR, Fischl B, Liu H, Buckner RL. The organization of the human cerebral cortex estimated by intrinsic functional connectivity. J Neurophysiol 106:1125-1165 (2011). doi:10.1152/jn.00338.2011",
+      "space": "MNI152NLin6Asym",
+      "family": "fsl6",
+      "resolution_mm": 1,
+      "networks": "yeo7",
+      "label_table": {
+        "format": "inline",
+        "names": {
+          "1": "Vis",
+          "2": "SomMot",
+          "3": "DorsAttn",
+          "4": "SalVentAttn",
+          "5": "Limbic",
+          "6": "Cont",
+          "7": "Default"
+        },
+        "source": "fixed Yeo 2011 network order"
+      },
+      "note": "Hosted on the CBIG repository, which could not be reached when this catalog was made: the size and sha256 are recorded at the first download. The volume uses FreeSurfer's conformed MNI152 grid, which is mapped through its affine."
+    },
+    {
+      "id": "yeo2011-17n",
+      "title": "Yeo2011 17 networks (1 mm, MNI152, FreeSurfer-conformed)",
+      "kind": "atlas",
+      "urls": [
+        "https://raw.githubusercontent.com/ThomasYeoLab/CBIG/master/stable_projects/brain_parcellation/Yeo2011_fcMRI_clustering/1000subjects_reference/Yeo_JNeurophysiol11_MNI152/Yeo2011_17Networks_MNI152_FreeSurferConformed1mm_LiberalMask.nii.gz"
+      ],
+      "filename": "Yeo2011_17Networks_MNI152_FreeSurferConformed1mm_LiberalMask.nii.gz",
+      "checksum": "record-on-first-download",
+      "url_checked": false,
+      "licence": "MIT",
+      "badge": "green",
+      "terms_url": "https://github.com/ThomasYeoLab/CBIG/blob/master/LICENSE.md",
+      "citation": "Yeo BTT, Krienen FM, Sepulcre J, Sabuncu MR, Lashkari D, Hollinshead M, Roffman JL, Smoller JW, Zoller L, Polimeni JR, Fischl B, Liu H, Buckner RL. The organization of the human cerebral cortex estimated by intrinsic functional connectivity. J Neurophysiol 106:1125-1165 (2011). doi:10.1152/jn.00338.2011",
+      "space": "MNI152NLin6Asym",
+      "family": "fsl6",
+      "resolution_mm": 1,
+      "label_table": {
+        "format": "inline",
+        "names": {
+          "1": "17Networks_1",
+          "2": "17Networks_2",
+          "3": "17Networks_3",
+          "4": "17Networks_4",
+          "5": "17Networks_5",
+          "6": "17Networks_6",
+          "7": "17Networks_7",
+          "8": "17Networks_8",
+          "9": "17Networks_9",
+          "10": "17Networks_10",
+          "11": "17Networks_11",
+          "12": "17Networks_12",
+          "13": "17Networks_13",
+          "14": "17Networks_14",
+          "15": "17Networks_15",
+          "16": "17Networks_16",
+          "17": "17Networks_17"
+        },
+        "source": "generic names (the 17-network order is not hard-coded)"
+      },
+      "note": "Hosted on the CBIG repository, which could not be reached when this catalog was made: the size and sha256 are recorded at the first download. The volume uses FreeSurfer's conformed MNI152 grid, which is mapped through its affine."
+    },
+    {
+      "id": "tian-s1-2mm",
+      "title": "Tian subcortex scale I (3T, 2 mm, MNI152NLin6Asym)",
+      "kind": "atlas",
+      "urls": [
+        "https://www.nitrc.org/frs/download.php/13364/Tian2020MSA_v1.4.zip"
+      ],
+      "filename": "Tian2020MSA_v1.4.zip",
+      "size": 17983522,
+      "checksum": {
+        "algo": "sha256",
+        "value": "87b80c9c3fdea87a1775f687365f325a658ca6b0987cebe28bfa18ca49202fcc"
+      },
+      "unzip_member": "Tian2020MSA/3T/Subcortex-Only/Tian_Subcortex_S1_3T.nii.gz",
+      "member_sha256": "5a6ab101308a7d8582fe8335c97a41296974656aaae8efa6833c7796c0061e08",
+      "licence": "Melbourne-MSA",
+      "badge": "green",
+      "terms_url": "https://www.nitrc.org/projects/msa/",
+      "citation": "Tian Y, Margulies DS, Breakspear M, Zalesky A. Topographic organization of the human subcortex unveiled with functional connectivity gradients. Nature Neuroscience 23:1421-1432 (2020). doi:10.1038/s41593-020-00711-6",
+      "space": "MNI152NLin6Asym",
+      "family": "fsl6",
+      "grid": "NLin6-2mm",
+      "resolution_mm": 2,
+      "networks": "tian",
+      "label_table": {
+        "format": "lines",
+        "unzip_member": "Tian2020MSA/3T/Subcortex-Only/Tian_Subcortex_S1_3T_label.txt",
+        "member_sha256": "f8dc7acae3483952d41d49b9145b4d13c5bc28da1c410114a561a5efda55db8c",
+        "source": "label.txt of the archive (one name per line, in label order)"
+      },
+      "note": "Melbourne Subcortex Atlas License (MIT-style, free of charge; publications cite Tian et al. 2020). One 18 MB archive serves all scales."
+    },
+    {
+      "id": "tian-s1-2mm-2009c",
+      "title": "Tian subcortex scale I (3T, 2 mm, MNI152NLin2009cAsym)",
+      "kind": "atlas",
+      "urls": [
+        "https://www.nitrc.org/frs/download.php/13364/Tian2020MSA_v1.4.zip"
+      ],
+      "filename": "Tian2020MSA_v1.4.zip",
+      "size": 17983522,
+      "checksum": {
+        "algo": "sha256",
+        "value": "87b80c9c3fdea87a1775f687365f325a658ca6b0987cebe28bfa18ca49202fcc"
+      },
+      "unzip_member": "Tian2020MSA/3T/Subcortex-Only/Tian_Subcortex_S1_3T_2009cAsym.nii.gz",
+      "member_sha256": "8dfc445aebd2177c30e4f116dba4aee6be0dd96a0dfc522a95037e5ab09cf36a",
+      "licence": "Melbourne-MSA",
+      "badge": "green",
+      "terms_url": "https://www.nitrc.org/projects/msa/",
+      "citation": "Tian Y, Margulies DS, Breakspear M, Zalesky A. Topographic organization of the human subcortex unveiled with functional connectivity gradients. Nature Neuroscience 23:1421-1432 (2020). doi:10.1038/s41593-020-00711-6",
+      "space": "MNI152NLin2009cAsym",
+      "family": "2009",
+      "grid": "TF2009-2mm",
+      "resolution_mm": 2,
+      "networks": "tian",
+      "label_table": {
+        "format": "lines",
+        "unzip_member": "Tian2020MSA/3T/Subcortex-Only/Tian_Subcortex_S1_3T_label.txt",
+        "member_sha256": "f8dc7acae3483952d41d49b9145b4d13c5bc28da1c410114a561a5efda55db8c",
+        "source": "label.txt of the archive (one name per line, in label order)"
+      },
+      "note": "Melbourne Subcortex Atlas License (MIT-style, free of charge; publications cite Tian et al. 2020). One 18 MB archive serves all scales."
+    },
+    {
+      "id": "tian-s2-2mm",
+      "title": "Tian subcortex scale II (3T, 2 mm, MNI152NLin6Asym)",
+      "kind": "atlas",
+      "urls": [
+        "https://www.nitrc.org/frs/download.php/13364/Tian2020MSA_v1.4.zip"
+      ],
+      "filename": "Tian2020MSA_v1.4.zip",
+      "size": 17983522,
+      "checksum": {
+        "algo": "sha256",
+        "value": "87b80c9c3fdea87a1775f687365f325a658ca6b0987cebe28bfa18ca49202fcc"
+      },
+      "unzip_member": "Tian2020MSA/3T/Subcortex-Only/Tian_Subcortex_S2_3T.nii.gz",
+      "member_sha256": "83f03d700e47a1396a1097d82fc7bb1e7deec7e6bf0034b5105b0e1a39a9f497",
+      "licence": "Melbourne-MSA",
+      "badge": "green",
+      "terms_url": "https://www.nitrc.org/projects/msa/",
+      "citation": "Tian Y, Margulies DS, Breakspear M, Zalesky A. Topographic organization of the human subcortex unveiled with functional connectivity gradients. Nature Neuroscience 23:1421-1432 (2020). doi:10.1038/s41593-020-00711-6",
+      "space": "MNI152NLin6Asym",
+      "family": "fsl6",
+      "grid": "NLin6-2mm",
+      "resolution_mm": 2,
+      "networks": "tian",
+      "label_table": {
+        "format": "lines",
+        "unzip_member": "Tian2020MSA/3T/Subcortex-Only/Tian_Subcortex_S2_3T_label.txt",
+        "member_sha256": "f1c498182107b1a3ceae737f3c140e8053e045d0e9ec0a71bfa05ae8a17d2be5",
+        "source": "label.txt of the archive (one name per line, in label order)"
+      },
+      "note": "Melbourne Subcortex Atlas License (MIT-style, free of charge; publications cite Tian et al. 2020). One 18 MB archive serves all scales."
+    },
+    {
+      "id": "tian-s2-2mm-2009c",
+      "title": "Tian subcortex scale II (3T, 2 mm, MNI152NLin2009cAsym)",
+      "kind": "atlas",
+      "urls": [
+        "https://www.nitrc.org/frs/download.php/13364/Tian2020MSA_v1.4.zip"
+      ],
+      "filename": "Tian2020MSA_v1.4.zip",
+      "size": 17983522,
+      "checksum": {
+        "algo": "sha256",
+        "value": "87b80c9c3fdea87a1775f687365f325a658ca6b0987cebe28bfa18ca49202fcc"
+      },
+      "unzip_member": "Tian2020MSA/3T/Subcortex-Only/Tian_Subcortex_S2_3T_2009cAsym.nii.gz",
+      "member_sha256": "8ba4adc6b50fc68f9ccc70c16e627486e6bb44306997af578cc3682f8103fa58",
+      "licence": "Melbourne-MSA",
+      "badge": "green",
+      "terms_url": "https://www.nitrc.org/projects/msa/",
+      "citation": "Tian Y, Margulies DS, Breakspear M, Zalesky A. Topographic organization of the human subcortex unveiled with functional connectivity gradients. Nature Neuroscience 23:1421-1432 (2020). doi:10.1038/s41593-020-00711-6",
+      "space": "MNI152NLin2009cAsym",
+      "family": "2009",
+      "grid": "TF2009-2mm",
+      "resolution_mm": 2,
+      "networks": "tian",
+      "label_table": {
+        "format": "lines",
+        "unzip_member": "Tian2020MSA/3T/Subcortex-Only/Tian_Subcortex_S2_3T_label.txt",
+        "member_sha256": "f1c498182107b1a3ceae737f3c140e8053e045d0e9ec0a71bfa05ae8a17d2be5",
+        "source": "label.txt of the archive (one name per line, in label order)"
+      },
+      "note": "Melbourne Subcortex Atlas License (MIT-style, free of charge; publications cite Tian et al. 2020). One 18 MB archive serves all scales."
+    },
+    {
+      "id": "tian-s3-2mm",
+      "title": "Tian subcortex scale III (3T, 2 mm, MNI152NLin6Asym)",
+      "kind": "atlas",
+      "urls": [
+        "https://www.nitrc.org/frs/download.php/13364/Tian2020MSA_v1.4.zip"
+      ],
+      "filename": "Tian2020MSA_v1.4.zip",
+      "size": 17983522,
+      "checksum": {
+        "algo": "sha256",
+        "value": "87b80c9c3fdea87a1775f687365f325a658ca6b0987cebe28bfa18ca49202fcc"
+      },
+      "unzip_member": "Tian2020MSA/3T/Subcortex-Only/Tian_Subcortex_S3_3T.nii.gz",
+      "member_sha256": "d45037e686dabab69c065bb2dbada445f7d15a45a14a9eb8992c82af9a6980ee",
+      "licence": "Melbourne-MSA",
+      "badge": "green",
+      "terms_url": "https://www.nitrc.org/projects/msa/",
+      "citation": "Tian Y, Margulies DS, Breakspear M, Zalesky A. Topographic organization of the human subcortex unveiled with functional connectivity gradients. Nature Neuroscience 23:1421-1432 (2020). doi:10.1038/s41593-020-00711-6",
+      "space": "MNI152NLin6Asym",
+      "family": "fsl6",
+      "grid": "NLin6-2mm",
+      "resolution_mm": 2,
+      "networks": "tian",
+      "label_table": {
+        "format": "lines",
+        "unzip_member": "Tian2020MSA/3T/Subcortex-Only/Tian_Subcortex_S3_3T_label.txt",
+        "member_sha256": "66f0415163459e4b9e8524efeff138b8889a04f635c6e053f663c93fbacb215d",
+        "source": "label.txt of the archive (one name per line, in label order)"
+      },
+      "note": "Melbourne Subcortex Atlas License (MIT-style, free of charge; publications cite Tian et al. 2020). One 18 MB archive serves all scales."
+    },
+    {
+      "id": "tian-s3-2mm-2009c",
+      "title": "Tian subcortex scale III (3T, 2 mm, MNI152NLin2009cAsym)",
+      "kind": "atlas",
+      "urls": [
+        "https://www.nitrc.org/frs/download.php/13364/Tian2020MSA_v1.4.zip"
+      ],
+      "filename": "Tian2020MSA_v1.4.zip",
+      "size": 17983522,
+      "checksum": {
+        "algo": "sha256",
+        "value": "87b80c9c3fdea87a1775f687365f325a658ca6b0987cebe28bfa18ca49202fcc"
+      },
+      "unzip_member": "Tian2020MSA/3T/Subcortex-Only/Tian_Subcortex_S3_3T_2009cAsym.nii.gz",
+      "member_sha256": "f996886fe9cc497b29b0502b8a202022152868c3880f7df8c4f0b07eddb2fd04",
+      "licence": "Melbourne-MSA",
+      "badge": "green",
+      "terms_url": "https://www.nitrc.org/projects/msa/",
+      "citation": "Tian Y, Margulies DS, Breakspear M, Zalesky A. Topographic organization of the human subcortex unveiled with functional connectivity gradients. Nature Neuroscience 23:1421-1432 (2020). doi:10.1038/s41593-020-00711-6",
+      "space": "MNI152NLin2009cAsym",
+      "family": "2009",
+      "grid": "TF2009-2mm",
+      "resolution_mm": 2,
+      "networks": "tian",
+      "label_table": {
+        "format": "lines",
+        "unzip_member": "Tian2020MSA/3T/Subcortex-Only/Tian_Subcortex_S3_3T_label.txt",
+        "member_sha256": "66f0415163459e4b9e8524efeff138b8889a04f635c6e053f663c93fbacb215d",
+        "source": "label.txt of the archive (one name per line, in label order)"
+      },
+      "note": "Melbourne Subcortex Atlas License (MIT-style, free of charge; publications cite Tian et al. 2020). One 18 MB archive serves all scales."
+    },
+    {
+      "id": "tian-s4-2mm",
+      "title": "Tian subcortex scale IV (3T, 2 mm, MNI152NLin6Asym)",
+      "kind": "atlas",
+      "urls": [
+        "https://www.nitrc.org/frs/download.php/13364/Tian2020MSA_v1.4.zip"
+      ],
+      "filename": "Tian2020MSA_v1.4.zip",
+      "size": 17983522,
+      "checksum": {
+        "algo": "sha256",
+        "value": "87b80c9c3fdea87a1775f687365f325a658ca6b0987cebe28bfa18ca49202fcc"
+      },
+      "unzip_member": "Tian2020MSA/3T/Subcortex-Only/Tian_Subcortex_S4_3T.nii.gz",
+      "member_sha256": "15930ca9cf9551a4b34875589588d0c24c0a704f0a14eb983c2b05131c3976e1",
+      "licence": "Melbourne-MSA",
+      "badge": "green",
+      "terms_url": "https://www.nitrc.org/projects/msa/",
+      "citation": "Tian Y, Margulies DS, Breakspear M, Zalesky A. Topographic organization of the human subcortex unveiled with functional connectivity gradients. Nature Neuroscience 23:1421-1432 (2020). doi:10.1038/s41593-020-00711-6",
+      "space": "MNI152NLin6Asym",
+      "family": "fsl6",
+      "grid": "NLin6-2mm",
+      "resolution_mm": 2,
+      "networks": "tian",
+      "label_table": {
+        "format": "lines",
+        "unzip_member": "Tian2020MSA/3T/Subcortex-Only/Tian_Subcortex_S4_3T_label.txt",
+        "member_sha256": "cf83c88cddc3254ced389be1788cd172db4a01cb00f205fdd428804d994b930b",
+        "source": "label.txt of the archive (one name per line, in label order)"
+      },
+      "note": "Melbourne Subcortex Atlas License (MIT-style, free of charge; publications cite Tian et al. 2020). One 18 MB archive serves all scales."
+    },
+    {
+      "id": "tian-s4-2mm-2009c",
+      "title": "Tian subcortex scale IV (3T, 2 mm, MNI152NLin2009cAsym)",
+      "kind": "atlas",
+      "urls": [
+        "https://www.nitrc.org/frs/download.php/13364/Tian2020MSA_v1.4.zip"
+      ],
+      "filename": "Tian2020MSA_v1.4.zip",
+      "size": 17983522,
+      "checksum": {
+        "algo": "sha256",
+        "value": "87b80c9c3fdea87a1775f687365f325a658ca6b0987cebe28bfa18ca49202fcc"
+      },
+      "unzip_member": "Tian2020MSA/3T/Subcortex-Only/Tian_Subcortex_S4_3T_2009cAsym.nii.gz",
+      "member_sha256": "b7cbc4a73df19e2f0e00afb03e0bc8a112be934699ab61b9a07cf171f92d029a",
+      "licence": "Melbourne-MSA",
+      "badge": "green",
+      "terms_url": "https://www.nitrc.org/projects/msa/",
+      "citation": "Tian Y, Margulies DS, Breakspear M, Zalesky A. Topographic organization of the human subcortex unveiled with functional connectivity gradients. Nature Neuroscience 23:1421-1432 (2020). doi:10.1038/s41593-020-00711-6",
+      "space": "MNI152NLin2009cAsym",
+      "family": "2009",
+      "grid": "TF2009-2mm",
+      "resolution_mm": 2,
+      "networks": "tian",
+      "label_table": {
+        "format": "lines",
+        "unzip_member": "Tian2020MSA/3T/Subcortex-Only/Tian_Subcortex_S4_3T_label.txt",
+        "member_sha256": "cf83c88cddc3254ced389be1788cd172db4a01cb00f205fdd428804d994b930b",
+        "source": "label.txt of the archive (one name per line, in label order)"
+      },
+      "note": "Melbourne Subcortex Atlas License (MIT-style, free of charge; publications cite Tian et al. 2020). One 18 MB archive serves all scales."
+    },
+    {
+      "id": "harvard-oxford-cortical-th25-2mm",
+      "title": "Harvard-Oxford cortical, lateralised, th25 (2 mm, MNI152NLin6Asym)",
+      "kind": "atlas",
+      "urls": [
+        "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin6Asym/tpl-MNI152NLin6Asym_res-02_atlas-HOCPAL_desc-th25_dseg.nii.gz"
+      ],
+      "filename": "tpl-MNI152NLin6Asym_res-02_atlas-HOCPAL_desc-th25_dseg.nii.gz",
+      "size": 51547,
+      "checksum": {
+        "algo": "sha256",
+        "value": "9653637c37831d784fa8a1338fd6699012f2e6d4e622f4d21ba86385ca2deca3"
+      },
+      "licence": "CC-BY-SA-4.0",
+      "badge": "amber",
+      "terms_url": "https://fsl.fmrib.ox.ac.uk/fsl/docs/license.html",
+      "citation": "Harvard-Oxford cortical and subcortical structural atlases (Harvard Center for Morphometric Analysis), as distributed with FSL: Desikan RS et al. NeuroImage 31:968-980 (2006). doi:10.1016/j.neuroimage.2006.01.021",
+      "space": "MNI152NLin6Asym",
+      "family": "fsl6",
+      "grid": "NLin6-2mm",
+      "resolution_mm": 2,
+      "label_table": {
+        "format": "tsv",
+        "source": "TemplateFlow dseg table",
+        "urls": [
+          "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin6Asym/tpl-MNI152NLin6Asym_atlas-HOCPAL_dseg.tsv"
+        ],
+        "filename": "tpl-MNI152NLin6Asym_atlas-HOCPAL_dseg.tsv",
+        "size": 2053,
+        "checksum": {
+          "algo": "sha256",
+          "value": "91ed5531f39472fa3e39f4f70766b6cf8ad0e22259796a95a92924616c974583"
+        },
+        "id_offset": 1,
+        "complete": {
+          "sides": [
+            "Left",
+            "Right"
+          ],
+          "names": [
+            "Frontal Pole",
+            "Insular Cortex",
+            "Superior Frontal Gyrus",
+            "Middle Frontal Gyrus",
+            "Inferior Frontal Gyrus, pars triangularis",
+            "Inferior Frontal Gyrus, pars opercularis",
+            "Precentral Gyrus",
+            "Temporal Pole",
+            "Superior Temporal Gyrus, anterior division",
+            "Superior Temporal Gyrus, posterior division",
+            "Middle Temporal Gyrus, anterior division",
+            "Middle Temporal Gyrus, posterior division",
+            "Middle Temporal Gyrus, temporooccipital part",
+            "Inferior Temporal Gyrus, anterior division",
+            "Inferior Temporal Gyrus, posterior division",
+            "Inferior Temporal Gyrus, temporooccipital part",
+            "Postcentral Gyrus",
+            "Superior Parietal Lobule",
+            "Supramarginal Gyrus, anterior division",
+            "Supramarginal Gyrus, posterior division",
+            "Angular Gyrus",
+            "Lateral Occipital Cortex, superior division",
+            "Lateral Occipital Cortex, inferior division",
+            "Intracalcarine Cortex",
+            "Frontal Medial Cortex",
+            "Juxtapositional Lobule Cortex (formerly Supplementary Motor Cortex)",
+            "Subcallosal Cortex",
+            "Paracingulate Gyrus",
+            "Cingulate Gyrus, anterior division",
+            "Cingulate Gyrus, posterior division",
+            "Precuneous Cortex",
+            "Cuneal Cortex",
+            "Frontal Orbital Cortex",
+            "Parahippocampal Gyrus, anterior division",
+            "Parahippocampal Gyrus, posterior division",
+            "Lingual Gyrus",
+            "Temporal Fusiform Cortex, anterior division",
+            "Temporal Fusiform Cortex, posterior division",
+            "Temporal Occipital Fusiform Cortex",
+            "Occipital Fusiform Gyrus",
+            "Frontal Operculum Cortex",
+            "Central Opercular Cortex",
+            "Parietal Operculum Cortex",
+            "Planum Polare",
+            "Heschl's Gyrus (includes H1 and H2)",
+            "Planum Temporale",
+            "Supracalcarine Cortex",
+            "Occipital Pole"
+          ],
+          "source": "FSL Harvard-Oxford cortical order of 48 areas, left then right (label value = 2 * area + side + 1)"
+        }
+      },
+      "note": "Share-alike licence. The volume stores each label as index + 1 (0 is background) while TemplateFlow's table starts at index 0: the table is shifted by one. TemplateFlow's table lists only 52 of the 96 labels: the other names are completed from FSL's standard order of the 48 areas (they agree with all 52 listed rows, and the centroids of the completed labels fit their names)."
+    },
+    {
+      "id": "harvard-oxford-subcortical-th25-2mm",
+      "title": "Harvard-Oxford subcortical, lateralised, th25 (2 mm, MNI152NLin6Asym)",
+      "kind": "atlas",
+      "urls": [
+        "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin6Asym/tpl-MNI152NLin6Asym_res-02_atlas-HOSPA_desc-th25_dseg.nii.gz"
+      ],
+      "filename": "tpl-MNI152NLin6Asym_res-02_atlas-HOSPA_desc-th25_dseg.nii.gz",
+      "size": 47599,
+      "checksum": {
+        "algo": "sha256",
+        "value": "29fb7de1c25210a7c51a750c9f18cf45fbdf34b7d50b289a1d2b6401d2d15500"
+      },
+      "licence": "CC-BY-SA-4.0",
+      "badge": "amber",
+      "terms_url": "https://fsl.fmrib.ox.ac.uk/fsl/docs/license.html",
+      "citation": "Harvard-Oxford cortical and subcortical structural atlases (Harvard Center for Morphometric Analysis), as distributed with FSL: Desikan RS et al. NeuroImage 31:968-980 (2006). doi:10.1016/j.neuroimage.2006.01.021",
+      "space": "MNI152NLin6Asym",
+      "family": "fsl6",
+      "grid": "NLin6-2mm",
+      "resolution_mm": 2,
+      "label_table": {
+        "format": "tsv",
+        "source": "TemplateFlow dseg table",
+        "urls": [
+          "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin6Asym/tpl-MNI152NLin6Asym_atlas-HOSPA_dseg.tsv"
+        ],
+        "filename": "tpl-MNI152NLin6Asym_atlas-HOSPA_dseg.tsv",
+        "size": 678,
+        "checksum": {
+          "algo": "sha256",
+          "value": "0503599182be67d206deb8b6c6d3288fa9eecba3e1a158008c649d1836573d25"
+        }
+      },
+      "note": "Share-alike licence. Includes the lateral ventricles (labels 3 and 14) and the brainstem as one label; no cerebellum."
+    },
+    {
+      "id": "buckner2011-cerebellum-7n-1mm",
+      "title": "Buckner2011 cerebellar networks, 7 networks (1 mm, MNI152NLin6Asym)",
+      "kind": "atlas",
+      "urls": [
+        "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin6Asym/tpl-MNI152NLin6Asym_res-01_atlas-Buckner2011_seg-7n_dseg.nii.gz"
+      ],
+      "filename": "tpl-MNI152NLin6Asym_res-01_atlas-Buckner2011_seg-7n_dseg.nii.gz",
+      "size": 74944,
+      "checksum": {
+        "algo": "sha256",
+        "value": "c3232a140f62ceb21815607782b05edc1f52e0f0ae3a75251cb2e627afc8b800"
+      },
+      "licence": "unknown",
+      "badge": "grey",
+      "terms_url": "https://doi.org/10.1152/jn.00339.2011",
+      "citation": "Buckner RL, Krienen FM, Castellanos A, Diaz JC, Yeo BTT. The organization of the human cerebellum estimated by intrinsic functional connectivity. J Neurophysiol 106:2322-2345 (2011). doi:10.1152/jn.00339.2011",
+      "space": "MNI152NLin6Asym",
+      "family": "fsl6",
+      "grid": "NLin6-1mm",
+      "resolution_mm": 1,
+      "networks": "yeo7",
+      "label_table": {
+        "format": "tsv",
+        "source": "TemplateFlow dseg table",
+        "urls": [
+          "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin6Asym/tpl-MNI152NLin6Asym_res-01_atlas-Buckner2011_seg-7n_dseg.tsv"
+        ],
+        "filename": "tpl-MNI152NLin6Asym_res-01_atlas-Buckner2011_seg-7n_dseg.tsv",
+        "size": 150,
+        "checksum": {
+          "algo": "sha256",
+          "value": "51afccd0fbda343ec78e0d5d89b5b9adcbdb09f48ed352b97bf769d083d9194a"
+        }
+      },
+      "note": "Terms not stated in TemplateFlow (the atlas is distributed with FreeSurfer): see the source. Network numbers follow Yeo 2011."
+    },
+    {
+      "id": "buckner2011-cerebellum-17n-1mm",
+      "title": "Buckner2011 cerebellar networks, 17 networks (1 mm, MNI152NLin6Asym)",
+      "kind": "atlas",
+      "urls": [
+        "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin6Asym/tpl-MNI152NLin6Asym_res-01_atlas-Buckner2011_seg-17n_dseg.nii.gz"
+      ],
+      "filename": "tpl-MNI152NLin6Asym_res-01_atlas-Buckner2011_seg-17n_dseg.nii.gz",
+      "size": 79963,
+      "checksum": {
+        "algo": "sha256",
+        "value": "205ced55e87a3c345af6eeaaaa781c0afe6d2dd20710b7ade84bbbf128ee70c2"
+      },
+      "licence": "unknown",
+      "badge": "grey",
+      "terms_url": "https://doi.org/10.1152/jn.00339.2011",
+      "citation": "Buckner RL, Krienen FM, Castellanos A, Diaz JC, Yeo BTT. The organization of the human cerebellum estimated by intrinsic functional connectivity. J Neurophysiol 106:2322-2345 (2011). doi:10.1152/jn.00339.2011",
+      "space": "MNI152NLin6Asym",
+      "family": "fsl6",
+      "grid": "NLin6-1mm",
+      "resolution_mm": 1,
+      "label_table": {
+        "format": "tsv",
+        "source": "TemplateFlow dseg table",
+        "urls": [
+          "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin6Asym/tpl-MNI152NLin6Asym_res-01_atlas-Buckner2011_seg-17n_dseg.tsv"
+        ],
+        "filename": "tpl-MNI152NLin6Asym_res-01_atlas-Buckner2011_seg-17n_dseg.tsv",
+        "size": 375,
+        "checksum": {
+          "algo": "sha256",
+          "value": "7a517d0fa0c947673087ddf3d04af7a85ef01d5e8336923448e95db19a0538d2"
+        }
+      },
+      "note": "Terms not stated in TemplateFlow (the atlas is distributed with FreeSurfer): see the source. Network numbers follow Yeo 2011."
+    },
+    {
+      "id": "mial67-thalamic-nuclei-1mm",
+      "title": "MIAL67 thalamic nuclei (1 mm, MNI152NLin2009cAsym)",
+      "kind": "atlas",
+      "urls": [
+        "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin2009cAsym/tpl-MNI152NLin2009cAsym_res-01_atlas-MIAL67ThalamicNuclei_dseg.nii.gz"
+      ],
+      "filename": "tpl-MNI152NLin2009cAsym_res-01_atlas-MIAL67ThalamicNuclei_dseg.nii.gz",
+      "size": 45949,
+      "checksum": {
+        "algo": "sha256",
+        "value": "d3be50ff04dc8e5d2355ee965a1b942354d8e5371428d081f85328eb8c27b6dd"
+      },
+      "licence": "CC-BY-4.0",
+      "badge": "green",
+      "terms_url": "https://zenodo.org/doi/10.5281/zenodo.1241074",
+      "citation": "Najdenovska E, Aleman-Gomez Y, Battistella G, Descoteaux M, Hagmann P, Jacquemont S, Maeder P, Thiran JP, Fornari E, Bach Cuadra M. In-vivo probabilistic atlas of human thalamic nuclei based on diffusion-weighted magnetic resonance imaging. Scientific Data 5:180270 (2018). doi:10.1038/sdata.2018.270",
+      "space": "MNI152NLin2009cAsym",
+      "family": "2009",
+      "grid": "TF2009-1mm",
+      "resolution_mm": 1,
+      "label_table": {
+        "format": "tsv",
+        "source": "TemplateFlow dseg table",
+        "urls": [
+          "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin2009cAsym/tpl-MNI152NLin2009cAsym_atlas-MIAL67ThalamicNuclei_dseg.tsv"
+        ],
+        "filename": "tpl-MNI152NLin2009cAsym_atlas-MIAL67ThalamicNuclei_dseg.tsv",
+        "size": 610,
+        "checksum": {
+          "algo": "sha256",
+          "value": "34e007a61472ffd69965c984bd3e53bf54405892a2a71ca78d17d4861250e2ca"
+        }
+      },
+      "note": "2009c family only: labelling a mask from another family is refused unless it is allowed explicitly."
+    },
+    {
+      "id": "massp20-1mm",
+      "title": "MASSP20 subcortical structures (1 mm, MNI152NLin2009cAsym)",
+      "kind": "atlas",
+      "urls": [
+        "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin2009cAsym/tpl-MNI152NLin2009cAsym_res-01_atlas-MASSP20_dseg.nii.gz"
+      ],
+      "filename": "tpl-MNI152NLin2009cAsym_res-01_atlas-MASSP20_dseg.nii.gz",
+      "size": 73686,
+      "checksum": {
+        "algo": "sha256",
+        "value": "cacd6e263bab6a42483afc1887b175c0d49b1174b2388e23ef553ab38006d8e3"
+      },
+      "licence": "unknown",
+      "badge": "grey",
+      "terms_url": "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin2009cAsym/template_description.json",
+      "citation": "Bazin PL, Alkemade A, Mulder MJ, Henry AG, Forstmann BU. Multi-contrast anatomical subcortical structures parcellation. eLife 9:e59430 (2020). doi:10.7554/eLife.59430 (MASSP in TemplateFlow's MNI152NLin2009cAsym; citation to be confirmed at the source)",
+      "space": "MNI152NLin2009cAsym",
+      "family": "2009",
+      "grid": "TF2009-1mm",
+      "resolution_mm": 1,
+      "label_table": {
+        "format": "tsv",
+        "source": "TemplateFlow dseg table",
+        "urls": [
+          "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin2009cAsym/tpl-MNI152NLin2009cAsym_res-01_atlas-MASSP20_dseg.tsv"
+        ],
+        "filename": "tpl-MNI152NLin2009cAsym_res-01_atlas-MASSP20_dseg.tsv",
+        "size": 1526,
+        "checksum": {
+          "algo": "sha256",
+          "value": "bedfe29cd1afd171aeffa9c87e8c87f5fbae51fa67f180018cb5baa319c7930c"
+        }
+      },
+      "note": "Terms not stated in TemplateFlow: see the source. 2009c family only."
+    },
+    {
+      "id": "harvard-aan-v2",
+      "title": "Harvard Ascending Arousal Network atlas v2.0, brainstem nuclei (1 mm, MNI152)",
+      "kind": "atlas",
+      "urls": [
+        "https://datadryad.org/dataset/doi:10.5061/dryad.zw3r228d2"
+      ],
+      "filename": "AAN_Brainstem_MNI152_1mm_v2p0.nii",
+      "size": 28884480,
+      "checksum": {
+        "algo": "sha256",
+        "value": "e6a7746f13a8c5e3f79aa3701e3a088fcc9f7b7365fc6fed7249884a64e2eb47"
+      },
+      "dataset_size": 187759909,
+      "link_out": true,
+      "licence": "CC0-1.0",
+      "badge": "green",
+      "terms_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "citation": "Edlow BL et al. Harvard Ascending Arousal Network Atlas, version 2.0. Dryad (2023). doi:10.5061/dryad.zw3r228d2",
+      "space": "MNI152 (to be read from the file header)",
+      "resolution_mm": 1,
+      "label_table": {
+        "format": "lut",
+        "filename": "AAN_Brainstem_v2p0_Color_LUT_FreeSurfer.txt",
+        "size": 681,
+        "checksum": {
+          "algo": "sha256",
+          "value": "b6cc5d69748965de155bd68065ff9b0160083318d071d7ae301032eef7770b88"
+        },
+        "source": "Dryad colour table"
+      },
+      "note": "The whole Dryad dataset is 187,759,909 B (one volume per nucleus plus the combined volume listed here, 28.9 MB). Dryad only serves files to signed-in users and the app never uses credentials: download the combined volume and its colour table in a browser, then use Adopt. The space and family are taken from the grid of the file when it is loaded."
+    },
+    {
+      "id": "aal3v1",
+      "title": "AAL3 v1 (2 mm, MNI Colin27 convention)",
+      "kind": "atlas",
+      "urls": [
+        "https://www.gin.cnrs.fr/wp-content/uploads/AAL3v1_for_SPM12.zip"
+      ],
+      "filename": "AAL3v1_for_SPM12.zip",
+      "checksum": "record-on-first-download",
+      "url_checked": false,
+      "unzip_member": "AAL3v1.nii",
+      "licence": "unknown",
+      "badge": "grey",
+      "terms_url": "https://www.gin.cnrs.fr/en/tools/aal/",
+      "citation": "Rolls ET, Huang CC, Lin CP, Feng J, Joliot M. Automated anatomical labelling atlas 3. NeuroImage 206:116189 (2020). doi:10.1016/j.neuroimage.2019.116189",
+      "space": "MNIColin27",
+      "family": "colin",
+      "resolution_mm": 2,
+      "label_table": {
+        "format": "lut",
+        "unzip_member": "AAL3v1.nii.txt",
+        "id_column": "auto",
+        "source": "AAL3v1.nii.txt of the archive"
+      },
+      "note": "The AAL3 readme mentions the GNU GPL, but the site could not be read when this catalog was made: check the terms at the source. The size and sha256 are recorded at the first download, and the member names inside the archive are matched by file name. AAL is in the Colin27 convention: to label a mask of another family, allow it explicitly."
+    },
+    {
+      "id": "hcp-mmp1-volumetric",
+      "title": "HCP-MMP1.0 volumetric projection (1 mm, MNI152 ICBM2009a)",
+      "kind": "atlas",
+      "urls": [
+        "https://ndownloader.figshare.com/files/5594363"
+      ],
+      "filename": "HCP-MMP1_on_MNI152_ICBM2009a_nlin.nii.gz",
+      "size": 366745,
+      "checksum": {
+        "algo": "md5",
+        "value": "4a6a53f08e56413cddf56f9629a17bf1"
+      },
+      "sha256": "99a6ae33753687e3ef37330dac7b6b9ececd46750938fb1c58e7ed7b157ba1a1",
+      "licence": "CC-BY-4.0",
+      "badge": "green",
+      "terms_url": "https://creativecommons.org/licenses/by/4.0/",
+      "citation": "Glasser MF et al. A multi-modal parcellation of human cerebral cortex. Nature 536:171-178 (2016). doi:10.1038/nature18933. Volumetric projection onto MNI152 ICBM2009a by Andreas Horn, figshare doi:10.6084/m9.figshare.3501911.v5",
+      "space": "MNI152NLin2009aSym",
+      "family": "2009",
+      "grid": "McGill2009a-1mm",
+      "resolution_mm": 1,
+      "hemisphere_split": {
+        "offset": 1000,
+        "left_prefix": "L_",
+        "right_prefix": "R_"
+      },
+      "label_table": {
+        "format": "lut",
+        "urls": [
+          "https://ndownloader.figshare.com/files/5534027"
+        ],
+        "filename": "HCP-MMP1_on_MNI152_ICBM2009a_nlin.txt",
+        "size": 2457,
+        "checksum": {
+          "algo": "md5",
+          "value": "13dee6127b5a6248f39c4775574bfdfc"
+        },
+        "sha256": "d008cea4903e4047079020cf1d31f8b1fd8ca092d6ac8b060a8e71da40836e57",
+        "source": "figshare table (180 areas)"
+      },
+      "warning": "The author of this volumetric version writes that it should be used and applied with great care, and under certain circumstances only: the fine parcellation was only realizable on the surface, so volumetric nonlinear registration does not suit it.",
+      "note": "The volume numbers the 180 areas 1-180 on both hemispheres; the loader tells the hemispheres apart by the sign of x and names them L_ or R_. It is on the original McGill ICBM2009a grid (197x233x189), not on TemplateFlow's 2009c grid."
+    },
+    {
+      "id": "brainnetome-246",
+      "title": "Brainnetome atlas, 246 regions",
+      "kind": "atlas",
+      "urls": [
+        "http://atlas.brainnetome.org/download.html"
+      ],
+      "filename": "BN_Atlas_246_1mm.nii.gz",
+      "checksum": "record-on-first-download",
+      "link_out": true,
+      "licence": "custom",
+      "badge": "amber",
+      "terms_url": "http://atlas.brainnetome.org/download.html",
+      "citation": "Fan L et al. The Human Brainnetome Atlas: a new brain atlas based on connectional architecture. Cerebral Cortex 26:3508-3526 (2016). doi:10.1093/cercor/bhw157",
+      "space": "MNI152NLin6Asym",
+      "family": "fsl6",
+      "resolution_mm": 1,
+      "label_table": {
+        "format": "lut",
+        "filename": "BN_Atlas_246_LUT.txt",
+        "id_column": "auto",
+        "source": "LUT of the download"
+      },
+      "note": "Registration form, non-commercial use, attribution and share-alike: the app only links to the download page. Download it in a browser, then use Adopt (the checksum is recorded at the first adoption)."
+    }
+  ]
+}
