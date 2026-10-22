@@ -1010,6 +1010,7 @@ class NormalizeController(VTKObservationMixin):
             if not slicer.util.saveNode(request.initialTransformNode, initialTransform):
                 raise RuntimeError("The rough alignment could not be saved")
         self.outDir = request.outDir or defaultOutputDirectory(request.scanNode, request.scanPath, request.subject, request.studyPath, request.sid)
+        self._jobRunRoot = os.path.join(os.fspath(request.studyPath), ".studio", "jobs") if request.studyPath else None
         self.args = self.arguments(request, scanPath, lesionPath, anatPath, initialTransform, self.outDir)
         if writes:
             self._setState(PREPARING)
@@ -1144,8 +1145,12 @@ class NormalizeController(VTKObservationMixin):
             return
         self._submit()
 
+    def _privateRunRoot(self):
+        """Folder of the job logs: the study's private ``.studio/jobs`` or the application cache, never the shared output folder (job logs hold absolute local paths)."""
+        return getattr(self, "_jobRunRoot", None) or _jobrunner.defaultRunRoot()
+
     def _submit(self):
-        spec = _jobrunner.JobSpec(JOB_MODULE, self.args, title=_("Normalizing"), heavy=True, kind="normalization", runRoot=self.outDir,
+        spec = _jobrunner.JobSpec(JOB_MODULE, self.args, title=_("Normalizing"), heavy=True, kind="normalization", runRoot=self._privateRunRoot(),
                                   onEvent=self._onEvent, onDone=self._onJobDone, statusText=self._statusText, name="normalize")
         self._setState(QUEUED)
         self.job = self.runner.submit(spec)
@@ -1716,7 +1721,7 @@ class NormalizeController(VTKObservationMixin):
             if error is not None:
                 self._notify("failed", {"message": _("The lesion could not be exported: {error}").format(error=error), "code": "export_failed", "event": {}, "job": None})
                 return
-            spec = _jobrunner.JobSpec(JOB_MODULE, args, title=_("Updating the MNI lesion"), heavy=False, kind="normalization-warp", runRoot=result.outDir,
+            spec = _jobrunner.JobSpec(JOB_MODULE, args, title=_("Updating the MNI lesion"), heavy=False, kind="normalization-warp", runRoot=self._privateRunRoot(),
                                       onDone=finished, name="normalize-warp")
             self.warpJob = self.runner.submit(spec)
 

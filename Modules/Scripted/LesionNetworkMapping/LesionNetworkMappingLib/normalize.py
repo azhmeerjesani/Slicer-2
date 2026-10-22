@@ -760,6 +760,30 @@ class _Runner:
             portable.append(_rel(arg, self.out_dir) if os.path.isabs(arg) else arg)
         return portable
 
+    def _scrubber(self, args):
+        """A function that rewrites absolute local paths in a log line: the logs sit in a shareable study folder (derivatives/normalization/<sid>/logs), so they hold paths relative to ``out_dir`` like the argv of normalization.json."""
+        swaps = {}
+        exe_dir = os.path.dirname(args[0])
+        if exe_dir:
+            swaps[exe_dir + os.sep] = ""
+        for arg in args[1:]:
+            if os.path.isabs(arg):
+                swaps[arg] = _rel(arg, self.out_dir)
+        swaps[os.path.abspath(self.out_dir) + os.sep] = ""
+        out_abs = os.path.abspath(self.out_dir)
+        swaps[os.path.abspath(self.logs_dir) + os.sep] = ""
+        ordered = sorted(swaps.items(), key=lambda item: -len(item[0]))
+
+        out_pattern = re.compile(re.escape(out_abs) + r"(?![\w.-])")
+
+        def scrub(line):
+            for old, new in ordered:
+                if old and old in line:
+                    line = line.replace(old, new)
+            return out_pattern.sub(".", line)
+
+        return scrub
+
     def run(self, exe, options, log_name, expected_s):
         """Run ``exe`` with --key value options (True: flag; tuples: comma-joined); return the elapsed seconds."""
         args = [exe]
@@ -779,14 +803,15 @@ class _Runner:
         self.cancel.raise_if_cancelled(done=done_stages)
         started = time.monotonic()
         floor = {"value": 0.0}
+        scrub = self._scrubber(args)
         with open(log_path, "w", encoding="utf-8", errors="replace") as log:
-            log.write(" ".join(args) + "\n")
+            log.write(scrub(" ".join([os.path.basename(args[0])] + args[1:])) + "\n")
             log.flush()
             process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, text=True, errors="replace", **_child_flags())
 
             def read():
                 for line in process.stdout:
-                    log.write(line)
+                    log.write(scrub(line))
                     match = _STAGE_LINE.search(line)
                     if match:
                         if match.group(1) and match.group(3) == "2":
@@ -1863,6 +1888,7 @@ def _method_record(ctx):
         "attempts": ctx.attempts,
         "options": ctx.method_options,
         "argv": ctx.runner.argv,
+        "logs": "logs/*.log hold the child output with paths relative to this folder",
         "note": NOTE,
     }
 
