@@ -62,6 +62,8 @@ ASSERTIONS = {
     "no-invisible-focus-stop": dict(text="No Tab stop on Library is invisible (from wave 2)", guard="U-01", fromWave=2),
     "window-fits-screen": dict(text="The main window never grows beyond the screen when layouts change: the inspector and the search box stay on the screen (1366x768)", guard="U-06", fromWave=2),
     "hover-only-control": dict(text="No control that a task needs is shown only while the pointer hovers its opener (the pin popup of the Classic view bars)", guard="W2-03", fromWave=2),
+    "probe-shows-value": dict(text="Pointing at a slice view shows the intensity under the pointer (the in-view probe), without the Data Probe panel", guard="W3-06", fromWave=3),
+    "pageup-steps-hovered-view": dict(text="PageUp over a slice view steps its slice, also when the focus is on the tool tiles of Draw", guard="W3-I2", fromWave=3),
     "tmap-thresholded": dict(text="The T map opened from Library is shown over the template in colour with the typed threshold (values below it are transparent)", guard="W3-08", fromWave=2),
     "not-discoverable": dict(text="Every control that a task drives is visible, enabled and not covered when it is driven", guard="gate", fromWave=1),
     "task-completed": dict(text="The task ran to the end without an exception", guard="gate", fromWave=1),
@@ -751,6 +753,22 @@ def layoutMenuItem(g, text, description=""):
     return (yield from g.clickMenuItem(menu, text, description or f"Choose {text}"))
 
 
+def inViewProbe(g):
+    """The in-view probe of Studio (``StudioLib.probe``) while it is installed, else None (a lookup, not a user action)."""
+    try:
+        from StudioLib import probe
+    except ImportError:
+        return None
+    return probe.instance() if hasattr(probe, "instance") else None
+
+
+def probeValueShown(g, name):
+    """True if the in-view probe of the view ``name`` shows a position and a value ("L 11.2 · P 17.8 · S 9.5 (scanner) · 412")."""
+    live = inViewProbe(g)
+    text = live.text(name) if live is not None else ""
+    return bool(re.search(r"\)\s*·\s*-?\d", text or ""))
+
+
 def redSliceLinked():
     composite = slicer.app.layoutManager().sliceWidget("Red").mrmlSliceCompositeNode()
     return bool(composite.GetLinkedControl()) if composite is not None else None
@@ -797,7 +815,16 @@ def nav(g):
         yield from g.hover(g.sliceView("Red"), "Point at the axial view")
         before = sliceOffset(g)
         yield from g.key("PageUp", "PageUp steps the slice")
-        g.note("pageUp", {"moved": abs(sliceOffset(g) - before) > 1e-6})
+        yield 200
+        step = abs(sliceOffset(g) - before)
+        moved = step > 1e-6
+        # One page step (Studio/PageStepSlices slices, less at the end of the volume), not two
+        shell = g.shell()
+        pageSlices = shell.navigationBehaviours()["pageStepSlices"] if shell is not None and hasattr(shell, "navigationBehaviours") else 1
+        pageStep = max(1, pageSlices) * g.sliceWidget("Red").sliceLogic().GetLowestVolumeSliceSpacing()[2]
+        g.note("pageUp", {"moved": moved, "step": round(step, 3), "pageStep": round(pageStep, 3)})
+        g.check("pageup-steps-hovered-view", moved and step <= pageStep + 1e-3,
+                f"slice offset {before:.2f} -> {sliceOffset(g):.2f} after PageUp over the axial view (one page step: {pageStep:.2f})")
     else:
         g.note("pageUp", "not mapped")
     # Zoom (Ctrl+wheel), pan (middle drag) and fit
@@ -844,11 +871,18 @@ def nav(g):
     window = g.mainWindow
     right, bottom = window.x + window.width, window.y + window.height
     g.check("window-fits-screen", right <= screenWidth and bottom <= screenHeight, f"the main window is {window.width}x{window.height} at ({window.x}, {window.y}) on a {screenWidth}x{screenHeight} screen after the layouts")
-    # Link the views: the View section of the layout popover (U-06), else a link toggle, the flat bar's link button (W2-03)
-    # or the hover popup of the Classic bars
+    # Link the views: the link button of the view's own bar (W2-03; one click where the person looks, always shown in the
+    # flat bars of Studio), else a link toggle, the View section of the layout popover (U-06) or the hover popup of the
+    # Classic bars
     linkToggle = planned(g, "linkToggle")
     barLink = sliceBarWidget(g, "Red", "BarLinkButton", "QToolButton")
-    if hasLayoutMenuItem(g, "Link views"):
+    if barLink is not None and barLink.isVisible() and not g.isHoverOnly(barLink):
+        yield from g.click(barLink, "Link the views (link button of the Red bar)")
+        g.note("linkedFromBar", redSliceLinked())
+        yield from g.wheel(g.sliceView("Red"), -3, "Zoom out while linked", modifiers=("ctrl",))
+        yield from g.click(sliceBarWidget(g, "Red", "BarLinkButton", "QToolButton"), "Unlink the views (link button of the Red bar)")
+        g.note("unlinkedFromBar", not redSliceLinked())
+    elif hasLayoutMenuItem(g, "Link views"):
         yield from layoutMenuItem(g, "Link views", "Choose Link views")
         g.note("linkedFromLayoutMenu", redSliceLinked())
         yield from g.wheel(g.sliceView("Red"), -3, "Zoom out while linked", modifiers=("ctrl",))
@@ -858,10 +892,6 @@ def nav(g):
         yield from g.click(linkToggle, "Link the views")
         yield from g.wheel(g.sliceView("Red"), -3, "Zoom out while linked", modifiers=("ctrl",))
         yield from g.click(linkToggle, "Unlink the views")
-    elif barLink is not None and barLink.isVisible():
-        yield from g.click(barLink, "Link the views (link button of the Red bar)")
-        yield from g.wheel(g.sliceView("Red"), -3, "Zoom out while linked", modifiers=("ctrl",))
-        yield from g.click(sliceBarWidget(g, "Red", "BarLinkButton", "QToolButton"), "Unlink the views")
     else:
         pins = sorted(g.widgets("PinButton", "QToolButton"), key=lambda w: (w.mapToGlobal(qt.QPoint(0, 0)).y(), w.mapToGlobal(qt.QPoint(0, 0)).x()))
         pin = pins[0] if pins else None
@@ -899,8 +929,16 @@ def nav(g):
     yield 300
     restored = layoutManager.layoutLogic().GetLayoutNode().GetNumberOfMaximizedViewNodes() == 0
     g.check("esc-ladder", (not maximized) or restored, f"maximized view after Esc: {not restored}")
-    # The intensity under the pointer: the in-view probe when it exists, else ⋯ > Show Data Probe
-    if planned(g, "probe") is None:
+    # The intensity under the pointer: the in-view probe when it exists (W3-06: a text drawn in the hovered view, so it is
+    # detected through StudioLib.probe, not as a widget; pointing at the view is enough), else ⋯ > Show Data Probe
+    if inViewProbe(g) is not None:
+        # The person points at the frontal lobe (the pointer moves: the probe follows the mouse, it is not a click)
+        probePoint = sliceViewPoint(g, "Red", (blob[0] - 14.0, blob[1] + 4.0, sliceOffset(g)))
+        yield from g.hover(g.sliceView("Red"), "Point at the frontal lobe: the probe shows the intensity", localPoint=probePoint)
+        yield from g.until(lambda: probeValueShown(g, "Red"), 2000, what="probe text")
+        text = inViewProbe(g).text("Red")
+        g.check("probe-shows-value", probeValueShown(g, "Red"), f"probe text in the Red view: {text!r}")
+    elif planned(g, "probe") is None:
         yield from g.click(g.widget("StudioPanelMoreButton", "QToolButton"), "Open the panel menu (⋯)")
         yield from g.until(lambda: qt.QApplication.activePopupWidget() is not None, 2000)
         menu = qt.QApplication.activePopupWidget()
@@ -1180,19 +1218,26 @@ def findToolsBody(g, warm=False):
         yield from closeTransient(g, "Close Volumes and return to Draw")
         g.check("effect-after-return", g.effectName() == baseTool, f"tool after T1: {g.effectName()}, before: {baseTool}")
     end("T1")
-    # T2: place a point (Markups), and back with the tool still armed and painting
+    # T2: place a point, and back with the tool still armed and painting. Search offers "Place point" (W3-06): place mode
+    # in Draw, nothing to open or close; without it, through the Markups module (Point List, then close Markups).
     begin("T2")
-    typed = yield from searchAndOpen(g, "Markups", "mark")
-    if typed is not None:
-        yield from waitTransient(g, "Markups")
-        create = g.widget("CreateFiducialPushButton", "QPushButton")
-        yield from g.click(create, "Click 'Point List' to place points")
-        yield 400
+    placeTitle = searchEntryTitle(g, "action.placePoint")
+    if placeTitle is not None:
+        placing = (yield from searchAndOpen(g, placeTitle, "point")) is not None
+        yield 300
+    else:
+        placing = (yield from searchAndOpen(g, "Markups", "mark")) is not None
+        if placing:
+            yield from waitTransient(g, "Markups")
+            yield from g.click(g.widget("CreateFiducialPushButton", "QPushButton"), "Click 'Point List' to place points")
+            yield 400
+    if placing:
         yield from g.click(g.sliceView("Red"), "Click in the axial view to place a point", localPoint=(g.sliceView("Red").width // 2 + 120, g.sliceView("Red").height // 2 + 80))
         yield 300
         fiducials = slicer.util.getNodesByClass("vtkMRMLMarkupsFiducialNode")
         g.note("T2-points", [node.GetNumberOfControlPoints() for node in fiducials])
-        yield from closeTransient(g, "Close Markups and return to Draw")
+        if placeTitle is None:
+            yield from closeTransient(g, "Close Markups and return to Draw")
         g.check("effect-after-return", g.effectName() == baseTool, f"tool after T2 (Place point): {g.effectName()}, before: {baseTool}")
         keepsTool = g.effectName() == baseTool
         if not keepsTool:

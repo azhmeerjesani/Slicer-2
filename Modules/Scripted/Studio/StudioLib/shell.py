@@ -253,6 +253,23 @@ def _isTextInput(widget):
     return False
 
 
+_VIEW_CLASSES = ("ctkVTKAbstractView", "qMRMLSliceView", "qMRMLThreeDView", "qMRMLPlotView")
+_RENDER_WIDGET_CLASSES = ("QVTKOpenGLNativeWidget", "QVTKOpenGLStereoWidget", "QVTKOpenGLWidget", "QVTKRenderWidget")
+
+
+def _isInView(widget):
+    """True if ``widget`` is a view (slice, 3D, plot) or is inside one, such as its render widget."""
+    if widget is None:
+        return False
+    if any(widget.inherits(className) for className in _RENDER_WIDGET_CLASSES):
+        return True
+    while widget is not None:
+        if any(widget.inherits(className) for className in _VIEW_CLASSES):
+            return True
+        widget = widget.parentWidget()
+    return False
+
+
 def _leavesFieldOnEscape(focusWidget):
     """True for a spin box or a closed combo box (or their line edit): Esc moves the focus out of it and runs the ladder."""
     if focusWidget is None:
@@ -1036,6 +1053,9 @@ class Shell:
         #: Study session of the Library (set by the study plug-in), None if no study is open
         self.studySession = None
         self.hoverTracker = None
+        #: Scroll area of the module panel (PageUp and PageDown over a slice view go to the view)
+        self._panelScrollArea = None
+        self._forwardingSliceKey = False
         self.workspaces = None
         self.topBar = None
         self.panelHeader = None
@@ -1572,6 +1592,10 @@ class Shell:
         mainWindow.installEventFilter(self._eventFilter)
         mainWindow.centralWidget().installEventFilter(self._eventFilter)
         dock.installEventFilter(self._eventFilter)
+        # PageUp and PageDown that the inspector would use to scroll itself step the slice view under the pointer
+        self._panelScrollArea = dock.findChild("QScrollArea", "ScrollArea")
+        if self._panelScrollArea is not None:
+            self._panelScrollArea.installEventFilter(self._eventFilter)
 
         # 7. Draw presentation of the Segment Editor, if it exists already. The folder of the Save dialog (Ctrl+S).
         self._setSegmentEditorPresentation("studio")
@@ -3292,6 +3316,9 @@ class Shell:
         """Event filter of the main window, its central widget and the inspector. Return True to consume the event."""
         eventType = event.type()
         if eventType in (qt.QEvent.ShortcutOverride, qt.QEvent.KeyPress, qt.QEvent.KeyRelease):
+            if (eventType == qt.QEvent.KeyPress and event.key() in (qt.Qt.Key_PageUp, qt.Qt.Key_PageDown)
+                    and (obj == self.mainWindow or obj == self._panelScrollArea) and self._forwardSliceKey(event)):
+                return True
             if obj != self.mainWindow:
                 return False
             key = event.key()
@@ -3359,11 +3386,56 @@ class Shell:
             self._updateInspectorHandle()
         return False
 
+    def _forwardSliceKey(self, event):
+        """PageUp or PageDown that would scroll the inspector, or that no widget used, step the slice view under the
+        pointer, as the keyboard shortcuts say. Focus follows the mouse only when the pointer enters a view: after a
+        scan is dropped or opened, the pointer is still over the view and the focus is on the tool tiles of Draw, so
+        the keys scrolled the inspector instead. With the pointer over the inspector it scrolls as before; text
+        inputs, popups and dialogs keep their keys, and so do chords (Ctrl+PageUp...). Return True if the key was given
+        to a view.
+        """
+        if self._forwardingSliceKey:
+            # (The view does not accept the key event: it comes back up through the main window while it is sent)
+            return False
+        if ui.hasKeyModifiers(event):
+            return False
+        if qt.QApplication.activePopupWidget() is not None or qt.QApplication.activeModalWidget() is not None:
+            return False
+        focusWidget = qt.QApplication.focusWidget()
+        if _isTextInput(focusWidget) or _isInView(focusWidget):
+            # A view that has the focus already stepped its slice (it does not accept the key event, so the event
+            # comes up to the main window afterwards): forwarding it again would step twice, or step a second view
+            return False
+        hovered = qt.QApplication.widgetAt(qt.QCursor.pos())
+        view = hovered
+        while view is not None and not view.inherits("qMRMLSliceView"):
+            view = view.parentWidget()
+        if view is None or not hovered.isVisible():
+            return False
+        # The render widget handles the key (the widget under the pointer may be a child drawn over it)
+        target = view.VTKWidget() if hasattr(view, "VTKWidget") else None
+        if target is None:
+            target = hovered
+        target.setFocus(qt.Qt.MouseFocusReason)
+        self._forwardingSliceKey = True
+        try:
+            qt.QApplication.sendEvent(target, qt.QKeyEvent(qt.QEvent.KeyPress, event.key(), event.modifiers(), event.text()))
+        finally:
+            self._forwardingSliceKey = False
+        return True
+
     def _removeEventFilters(self):
         if self._eventFilter is None:
             return
         for obj in (self.mainWindow, self.mainWindow.centralWidget(), self._panelDock()):
             obj.removeEventFilter(self._eventFilter)
+        if self._panelScrollArea is not None:
+            try:
+                self._panelScrollArea.removeEventFilter(self._eventFilter)
+            except Exception:
+                # Deleted with the module panel
+                pass
+            self._panelScrollArea = None
         if self._watchedPanelContents is not None:
             try:
                 self._watchedPanelContents.removeEventFilter(self._eventFilter)

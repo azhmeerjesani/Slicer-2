@@ -718,9 +718,11 @@ class Gate:
         return False
 
     # primitives
-    def hover(self, widget, description=""):
-        """Move the pointer over a widget (counts 0). Needed before driving a control that a hover reveals."""
-        point, reason = self.clickability(widget)
+    def hover(self, widget, description="", localPoint=None):
+        """Move the pointer over a widget (counts 0), at ``localPoint`` (default: its centre). Needed before driving a
+        control that a hover reveals, or to read what the view shows under the pointer.
+        """
+        point, reason = self.clickability(widget, localPoint)
         if reason is not None:
             return self.refuse("hover", description or widgetText(widget), reason, widgetText(widget))
         self.focus()

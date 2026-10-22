@@ -20,7 +20,8 @@ always restore the Classic interface. They cover:
   menu hooks, the scene root directory (Ctrl+S folder), the contrast tokens, the Studio-only navigation
   behaviours, the error log docking, the names and platform keys, F10 / Alt menus, F6 regions, Space and
   Enter on focused buttons, no invisible Tab stop over the Library canvas, the inspector edge handle and the
-  consequence toasts.
+  consequence toasts;
+- PageUp and PageDown stepping the slice view under the pointer when the focus is on the inspector.
 """
 
 import os
@@ -1618,3 +1619,106 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         slicer.util.selectModule(ws.moduleName)
         self._pump()
         self.assertEqual(self.layoutManager.layout, conventional)
+
+    def test_25_page_keys_step_the_hovered_view(self):
+        """PageUp and PageDown step the slice view under the pointer also when the focus is on a tool tile of Draw (they
+        used to scroll the inspector); over the inspector they scroll it as before; a text input keeps them. A view
+        that has the focus steps once (not again through the main window), and only itself.
+        """
+        from StudioLib import shell
+
+        volume, segmentation = self._loadScanAndSegmentation()
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        slicer.util.setSliceViewerLayers(background=volume, fit=True)
+        self._pump()
+        sliceView = self._redSliceView()
+        logic = self.layoutManager.sliceWidget("Red").sliceLogic()
+        scrollArea = self._dock().findChild("QScrollArea", "ScrollArea")
+        self.assertIsNotNone(scrollArea)
+        self.mainWindow.activateWindow()
+        qt.QCursor.setPos(sliceView.mapToGlobal(qt.QPoint(sliceView.width // 2, sliceView.height // 2)))
+        self._pump()
+        hit = qt.QApplication.widgetAt(qt.QCursor.pos())
+        if hit is None or not (hit == sliceView or sliceView.isAncestorOf(hit)):
+            self.skipTest("the pointer cannot be put over the view on this display")
+        bounds = [0.0] * 6
+        logic.GetLowestVolumeSliceBounds(bounds)
+        logic.SetSliceOffset((bounds[4] + bounds[5]) / 2.0)
+        self._pump()
+        # The key goes to a button of the inspector (the focus after a scan is opened), then up to the scroll area. The
+        # button has the focus (the pointer over the view may have given it to the view, which then takes the key itself)
+        buttons = [widget for widget in self._dock().findChildren("QAbstractButton") if widget.isVisible() and widget.focusPolicy != qt.Qt.NoFocus]
+        self.assertTrue(buttons)
+        button = buttons[0]
+        if not self._focus(button):
+            self.skipTest("the focus cannot be given to the inspector on this display")
+        pageStep = max(1, studioShell.navigationBehaviours()["pageStepSlices"]) * logic.GetLowestVolumeSliceSpacing()[2]
+        before = logic.GetSliceOffset()
+        self._sendKey(button, qt.Qt.Key_PageUp)
+        self._pump()
+        self.assertAlmostEqual(logic.GetSliceOffset() - before, pageStep, places=3, msg="PageUp over the view did not step its slice once")
+        # The view took the focus: the next key is its own, and it steps once
+        renderWidget = sliceView.VTKWidget()
+        self.assertEqual(slicer.app.focusWidget(), renderWidget)
+        self._sendKey(renderWidget, qt.Qt.Key_PageDown)
+        self._pump()
+        self.assertAlmostEqual(logic.GetSliceOffset(), before, places=3, msg="PageDown in the view did not step back once")
+        # A chord keeps its target
+        self.assertTrue(self._focus(button))
+        self._sendKey(button, qt.Qt.Key_PageUp, qt.Qt.ControlModifier)
+        self._pump()
+        self.assertAlmostEqual(logic.GetSliceOffset(), before, places=3, msg="Ctrl+PageUp was given to the view")
+        # The view has the focus: it steps its slice itself, once (the key event also comes up to the main window)
+        if self._focus(renderWidget):
+            self._sendKey(renderWidget, qt.Qt.Key_PageUp)
+            self._pump()
+            self.assertAlmostEqual(logic.GetSliceOffset() - before, pageStep, places=3, msg="PageUp in the focused view stepped twice")
+            self._sendKey(renderWidget, qt.Qt.Key_PageDown)
+            self._pump()
+            self.assertAlmostEqual(logic.GetSliceOffset(), before, places=3, msg="PageDown in the focused view did not step back once")
+            # The pointer over another view: only the focused view steps
+            yellowView = self.layoutManager.sliceWidget("Yellow").sliceView()
+            yellowLogic = self.layoutManager.sliceWidget("Yellow").sliceLogic()
+            if yellowView.isVisible():
+                qt.QCursor.setPos(yellowView.mapToGlobal(qt.QPoint(yellowView.width // 2, yellowView.height // 2)))
+                self._pump()
+                yellowBefore = yellowLogic.GetSliceOffset()
+                self._sendKey(renderWidget, qt.Qt.Key_PageUp)
+                self._pump()
+                self.assertAlmostEqual(logic.GetSliceOffset() - before, pageStep, places=3, msg="The focused view did not step once")
+                self.assertAlmostEqual(yellowLogic.GetSliceOffset(), yellowBefore, places=3, msg="The hovered view also stepped")
+                self._sendKey(renderWidget, qt.Qt.Key_PageDown)
+                self._pump()
+                qt.QCursor.setPos(sliceView.mapToGlobal(qt.QPoint(sliceView.width // 2, sliceView.height // 2)))
+                self._pump()
+            self.assertTrue(shell._isInView(renderWidget))
+        self.assertAlmostEqual(logic.GetSliceOffset(), before, places=3)
+        # Over the inspector the key is the scroll area's, as before
+        qt.QCursor.setPos(scrollArea.mapToGlobal(qt.QPoint(scrollArea.width // 2, scrollArea.height // 2)))
+        self._pump()
+        self.assertTrue(self._focus(button))
+        self._sendKey(button, qt.Qt.Key_PageUp)
+        self._pump()
+        self.assertAlmostEqual(logic.GetSliceOffset(), before, places=3, msg="PageUp over the inspector stepped the slice")
+        # A line edit keeps its keys (over the view too)
+        qt.QCursor.setPos(sliceView.mapToGlobal(qt.QPoint(sliceView.width // 2, sliceView.height // 2)))
+        self._pump()
+        edit = qt.QLineEdit(self._dock())
+        edit.show()
+        try:
+            if self._focus(edit):
+                self._sendKey(edit, qt.Qt.Key_PageUp)
+                self._pump()
+                self.assertAlmostEqual(logic.GetSliceOffset(), before, places=3, msg="PageUp in a line edit stepped the slice")
+        finally:
+            edit.hide()
+            edit.deleteLater()
+        # Classic: the keys are not redirected
+        studioShell.classic(persist=False)
+        self._pump()
+        self._sendKey(self.mainWindow, qt.Qt.Key_PageUp)
+        self._pump()
+        self.assertAlmostEqual(logic.GetSliceOffset(), before, places=3, msg="Classic redirected PageUp")
+        slicer.mrmlScene.RemoveNode(segmentation)
+        slicer.mrmlScene.RemoveNode(volume)

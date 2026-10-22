@@ -761,3 +761,45 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                 self.mainWindow.showMaximized()
             else:
                 self.mainWindow.setGeometry(geometry)
+
+    def test_13_more_tools_in_search(self):
+        """Every Draw tool is in Search, also the ones under "More tools" (no key while they are hidden): "th" is
+        Threshold, "t" is still Transforms, the guided tours come after the core entries, and choosing a hidden tool
+        shows it in Draw.
+        """
+        from StudioLib import finder, importer, palette
+
+        studioShell = self._applyStudio()
+        importer.startOnTemplate(shell=studioShell)
+        self._pump()
+        widget = slicer.modules.SegmentEditorWidget
+        if hasattr(widget, "setMoreToolsShown"):
+            widget.setMoreToolsShown(False)
+        self._pump()
+        palette.search(studioShell, "x")
+        live = palette._palette
+        threshold = live.index.entry("tool.Threshold")
+        self.assertIsNotNone(threshold, "Threshold (under More tools) is in Search")
+        self.assertIsNone(threshold.key, "a hidden tool has no positional key")
+        self.assertEqual(threshold.group, palette.GROUP_MORE_TOOLS)
+        self.assertIsNotNone(live.index.entry("tool.Smoothing"))
+        brush = live.index.entry("tool.Paint")
+        self.assertEqual((brush.key, brush.group), ("1", finder.GROUP_CORE))
+        self.assertEqual(self._first(studioShell, "th"), "Threshold")
+        self.assertEqual(self._first(studioShell, "t"), "Transforms")
+        titles = [entry.title for entry in palette.search(studioShell, "t")][:6]
+        self.assertIn("Threshold", titles)
+        self.assertFalse([title for title in titles if title.startswith("Take a tour")], titles)
+        if any(entry.kind == palette.KIND_TOUR and entry.id != "tour.whereDidItGo" for entry in live.index.entries):
+            self.assertTrue(palette.search(studioShell, "tour")[0].title.startswith("Take a tour"))
+        # Choosing a hidden tool arms it and shows it among the tiles of Draw
+        self.assertTrue(palette.runEntry(studioShell, "tool.Threshold"))
+        self._pump()
+        self.assertEqual(widget.editor.activeEffect().name, "Threshold")
+        if hasattr(widget, "_moreToolsShown"):
+            self.assertTrue(widget._moreToolsShown())
+        live.index.refresh()
+        self.assertIsNotNone(live.index.entry("tool.Threshold").key, "a shown tool has its positional key")
+        widget.editor.setActiveEffect(None)
+        if hasattr(widget, "setMoreToolsShown"):
+            widget.setMoreToolsShown(False)

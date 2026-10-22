@@ -105,6 +105,8 @@ KIND_PROVIDER = "provider"
 
 #: Group of the 'Where did it go?' answers: after every other entry of the same tier
 GROUP_WHERE = finder.GROUP_DEMOTED + 1
+#: Group of the Draw tools under "More tools": after the core modules, commands and shown tools, before the other modules
+GROUP_MORE_TOOLS = (finder.GROUP_CORE + finder.GROUP_OTHER) / 2.0
 
 #: Workspace modules: listed as their workspace, never as a module
 _WORKSPACE_MODULES = tuple(ws.moduleName for ws in workspaces.WORKSPACES)
@@ -692,6 +694,11 @@ def _selectTool(shell, effectName):
     if editor.sourceVolumeNode() is None:
         shell.toast(_("Open a scan or start on the MNI template first, then pick the tool"), 3500)
         return
+    if effectName not in [name for name, index in _toolNamesAndIndexes(editor) if index is not None]:
+        # A tool under "More tools": its tile is shown, so that the active tool is visible in Draw
+        widget = getattr(slicer.modules, "SegmentEditorWidget", None)
+        if widget is not None and hasattr(widget, "setMoreToolsShown"):
+            widget.setMoreToolsShown(True)
     editor.setActiveEffectByName(effectName)
 
 
@@ -1067,22 +1074,27 @@ class Index:
         return entries
 
     def _toolEntries(self, editor):
+        """Every tool of Draw: the tiles with their positional key, then the tools under "More tools" (no key while
+        they are not shown: their key is positional), so that "th" finds Threshold whether or not More tools is open.
+        A tool under "More tools" comes after the core modules and commands of the same tier ("t" is Transforms, then
+        Threshold) and before the other modules and layouts ("th" is Threshold, not "Three over three").
+        """
         if editor is None:
             return []
         shell = self.shell
         entries = []
-        for index in range(1, 21):
-            effect = editor.effectByIndex(index)
+        for name, index in _toolNamesAndIndexes(editor):
+            effect = editor.effectByName(name)
             if effect is None:
                 continue
-            name = str(effect.name)
             title, synonyms = TOOL_NAMES.get(name, (None, ()))
             effectTitle = str(getattr(effect, "title", "") or name)
             title = title or effectTitle
             aliases = tuple(alias for alias in {name, effectTitle} if alias.lower() != title.lower())
-            key = str(index % 10) if index <= 10 else f"Shift+{index % 10}"
+            key = (str(index % 10) if index <= 10 else f"Shift+{index % 10}") if index is not None else None
             entries.append(Entry(f"tool.{name}", title, _("Draw tool"), lambda name=name: _selectTool(shell, name), KIND_TOOL, key,
-                                 synonyms=synonyms, aliases=aliases, iconName="brush"))
+                                 synonyms=synonyms, aliases=aliases, group=finder.GROUP_CORE if index is not None else GROUP_MORE_TOOLS,
+                                 iconName="brush"))
         return entries
 
     def _recentEntries(self, mainWindow):
@@ -1116,10 +1128,12 @@ class Index:
         entries = []
         for item in tours:
             tourId = item.get("id")
+            # After the tools, commands and core modules of the same tier: "t" is Transforms or Threshold before five
+            # "Take a tour" rows (a tour is found by "tour", "tutorial" or its name)
             entries.append(Entry(f"tour.{tourId}", _("Take a tour: {title}").format(title=item.get("title", tourId)), _("Tour"),
                                  lambda tourId=tourId: tour.startTour(tourId), KIND_TOUR,
                                  synonyms=("tour", "take a tour", "tutorial", "getting started", "learn", "onboarding", "help"),
-                                 description=item.get("description", ""), iconName="signpost"))
+                                 description=item.get("description", ""), group=finder.GROUP_OTHER, iconName="signpost"))
         entries.append(Entry("tour.whereDidItGo", _("Where did it go?"), _("Tour"), tour.showMigrationMap, KIND_TOUR,
                              synonyms=("where", "where is", "moved", "coming from slicer", "migration", "where did it go", "missing menu"),
                              description=_("Where the places of 3D Slicer are in Slicer Studio"), iconName="compass"))
@@ -1208,14 +1222,28 @@ def _sampleSignature():
     return sum(len(items) for items in sources.values()) if isinstance(sources, dict) else 0
 
 
+def _toolNamesAndIndexes(editor):
+    """``[(effect name, positional index or None)]`` of Draw: the shown tools in their order (index 1, 2...), then the
+    other available tools (the ones under "More tools"), without an index.
+    """
+    shown = []
+    for index in range(1, 21):
+        effect = editor.effectByIndex(index)
+        if effect is not None:
+            shown.append((str(effect.name), index))
+    names = {name for name, index in shown}
+    try:
+        available = [str(name) for name in editor.availableEffectNames()]
+    except Exception:
+        available = []
+    hidden = [(name, None) for name in available if name and name not in names and name != "None"]
+    return shown + hidden
+
+
 def _toolSignature(editor):
     if editor is None:
         return None
-    names = []
-    for index in range(1, 21):
-        effect = editor.effectByIndex(index)
-        names.append(str(effect.name) if effect is not None else "")
-    return tuple(names)
+    return tuple(_toolNamesAndIndexes(editor))
 
 
 #
