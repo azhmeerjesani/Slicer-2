@@ -42,6 +42,10 @@
 #include "qSlicerDataDialog_p.h"
 #include "qSlicerIOManager.h"
 #include "qSlicerIOOptionsWidget.h"
+#include "qSlicerVTKFileReader.h"
+#include "vtkMRMLFileIOHandler.h"
+#include "vtkMRMLFileIOManager.h"
+#include "vtkMRMLIOProperties.h"
 #include "vtkMRMLMessageCollection.h"
 
 /// VTK includes
@@ -153,6 +157,13 @@ void qSlicerDataDialogPrivate::addFiles()
 //-----------------------------------------------------------------------------
 void qSlicerDataDialogPrivate::addDirectory(const QDir& directory)
 {
+  this->addDirectoryRecursively(directory);
+  this->resetColumnWidths();
+}
+
+//-----------------------------------------------------------------------------
+void qSlicerDataDialogPrivate::addDirectoryRecursively(const QDir& directory)
+{
   bool recursive = true;
   QDir::Filters filters = QDir::AllDirs | QDir::Files | QDir::Readable | QDir::NoDotAndDotDot;
   QFileInfoList fileInfoList = directory.entryInfoList(filters);
@@ -166,11 +177,10 @@ void qSlicerDataDialogPrivate::addDirectory(const QDir& directory)
     }
     else if (entry.isDir() && recursive)
     {
-      this->addDirectory(entry.absoluteFilePath());
+      this->addDirectoryRecursively(entry.absoluteFilePath());
     }
   }
   this->addFileInfoList(files);
-  this->resetColumnWidths();
 }
 
 //-----------------------------------------------------------------------------
@@ -224,7 +234,7 @@ void qSlicerDataDialogPrivate::addFile(const QFileInfo& file, const QString& rea
   {
     return;
   }
-  if (!this->FileWidget->findItems(file.absoluteFilePath(), Qt::MatchExactly).isEmpty())
+  if (this->AddedFilePaths.contains(file.absoluteFilePath()))
   {
     return; // file already exists
   }
@@ -262,6 +272,7 @@ void qSlicerDataDialogPrivate::addFile(const QFileInfo& file, const QString& rea
   this->FileWidget->setSortingEnabled(false);
   int row = this->FileWidget->rowCount();
   this->FileWidget->insertRow(row);
+  this->AddedFilePaths.insert(file.absoluteFilePath());
   // File name
   QTableWidgetItem* fileItem = new QTableWidgetItem(file.absoluteFilePath());
   fileItem->setFlags((fileItem->flags() | Qt::ItemIsUserCheckable) & ~Qt::ItemIsEditable);
@@ -282,20 +293,14 @@ void qSlicerDataDialogPrivate::addFile(const QFileInfo& file, const QString& rea
   }
   // adding items to the combobox automatically selects the first item
   // let's select none, connect the signal and then selecting the first will
-  // automatically create the option widget
+  // automatically create the option widget (if needed, see onFileTypeChanged)
   descriptionComboBox->setCurrentIndex(-1);
   QObject::connect(descriptionComboBox, &QComboBox::currentTextChanged, this, &qSlicerDataDialogPrivate::onFileTypeChanged);
   QObject::connect(descriptionComboBox, &QComboBox::textActivated, this, &qSlicerDataDialogPrivate::onFileTypeActivated);
   this->FileWidget->setCellWidget(row, TypeColumn, descriptionComboBox);
+  this->AddingRow = row;
   descriptionComboBox->setCurrentIndex(0);
-  if (!readerDescription.isEmpty() && ioProperties != nullptr)
-  {
-    qSlicerIOOptionsWidget* ioOptionsWidget = dynamic_cast<qSlicerIOOptionsWidget*>(this->FileWidget->cellWidget(row, OptionsColumn));
-    if (ioOptionsWidget)
-    {
-      ioOptionsWidget->updateGUI(*ioProperties);
-    }
-  }
+  this->AddingRow = -1;
 
   this->FileWidget->setSortingEnabled(sortingEnabled);
 }
@@ -321,6 +326,7 @@ void qSlicerDataDialogPrivate::dropEvent(QDropEvent* event)
 void qSlicerDataDialogPrivate::reset()
 {
   this->FileWidget->setRowCount(0);
+  this->AddedFilePaths.clear();
   // forceFileColumnStretch=true to make the widgets nicely fill the available space
   this->resetColumnWidths(true);
 }
@@ -360,6 +366,17 @@ void qSlicerDataDialogPrivate::resetColumnWidths(bool forceFileColumnStretch /*=
 void qSlicerDataDialogPrivate::showOptions(bool show)
 {
   this->ShowOptionsCheckBox->setChecked(show);
+  if (show)
+  {
+    // Options widgets are created only when they are needed
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    for (int row = 0; row < this->FileWidget->rowCount(); ++row)
+    {
+      this->createOptionsWidget(row, /*resizeOptionsColumn=*/false);
+    }
+    this->FileWidget->resizeColumnToContents(OptionsColumn);
+    QApplication::restoreOverrideCursor();
+  }
   this->FileWidget->setColumnHidden(OptionsColumn, !show);
   this->resetColumnWidths();
   if (show)
@@ -403,6 +420,8 @@ QList<qSlicerIO::IOProperties> qSlicerDataDialogPrivate::selectedFiles() const
     else
     {
       properties["fileName"] = fileItem->text();
+      // The options widget was not needed: use the default options, as the widget would
+      properties.insert(this->describedOptionValues(descriptionComboBox->currentText(), properties));
     }
     files << properties;
   }
@@ -412,9 +431,25 @@ QList<qSlicerIO::IOProperties> qSlicerDataDialogPrivate::selectedFiles() const
 //-----------------------------------------------------------------------------
 void qSlicerDataDialogPrivate::onFileTypeChanged(const QString& description)
 {
-  int row = this->senderRow();
-  QString fileName = this->FileWidget->item(row, FileColumn)->text();
-  this->setFileOptions(row, fileName, description);
+  int row = this->AddingRow >= 0 ? this->AddingRow : this->senderRow();
+  if (row < 0)
+  {
+    return;
+  }
+  if (this->AddingRow >= 0 && this->FileWidget->isColumnHidden(OptionsColumn) && this->hasOptionsDescription(description))
+  {
+    // A row that is being added gets an options widget only when options are shown (see showOptions),
+    // which saves time when many files are added. The options are computed from the reader's description.
+    QWidget* previousOptionsWidget = this->FileWidget->cellWidget(row, OptionsColumn);
+    if (previousOptionsWidget)
+    {
+      this->FileWidget->removeCellWidget(row, OptionsColumn);
+    }
+    return;
+  }
+  // The type changed: replace the options widget by one for the new type
+  this->FileWidget->removeCellWidget(row, OptionsColumn);
+  this->createOptionsWidget(row);
 }
 
 //-----------------------------------------------------------------------------
@@ -441,7 +476,7 @@ void qSlicerDataDialogPrivate::onFileTypeActivated(const QString& description)
 }
 
 //-----------------------------------------------------------------------------
-void qSlicerDataDialogPrivate::setFileOptions(int row, const QString& fileName, const QString& fileDescription)
+void qSlicerDataDialogPrivate::setFileOptions(int row, const QString& fileName, const QString& fileDescription, bool resizeOptionsColumn /*=true*/)
 {
   qSlicerCoreIOManager* coreIOManager = qSlicerCoreApplication::application()->coreIOManager();
   // Options
@@ -461,7 +496,65 @@ void qSlicerDataDialogPrivate::setFileOptions(int row, const QString& fileName, 
     delete options;
   }
   this->FileWidget->setCellWidget(row, OptionsColumn, optionsWidget);
-  this->FileWidget->resizeColumnToContents(OptionsColumn);
+  if (resizeOptionsColumn)
+  {
+    this->FileWidget->resizeColumnToContents(OptionsColumn);
+  }
+}
+
+//-----------------------------------------------------------------------------
+void qSlicerDataDialogPrivate::createOptionsWidget(int row, bool resizeOptionsColumn /*=true*/)
+{
+  QTableWidgetItem* fileItem = this->FileWidget->item(row, FileColumn);
+  QComboBox* descriptionComboBox = qobject_cast<QComboBox*>(this->FileWidget->cellWidget(row, TypeColumn));
+  if (!fileItem || !descriptionComboBox)
+  {
+    return;
+  }
+  if (this->FileWidget->cellWidget(row, OptionsColumn))
+  {
+    // Keep the existing widget, with the options the user may have edited
+    return;
+  }
+  const QString description = descriptionComboBox->currentText();
+  this->setFileOptions(row, fileItem->text(), description, resizeOptionsColumn);
+  qSlicerIOOptionsWidget* ioOptionsWidget = dynamic_cast<qSlicerIOOptionsWidget*>(this->FileWidget->cellWidget(row, OptionsColumn));
+  if (ioOptionsWidget && !description.isEmpty() && description == fileItem->data(GroupReaderDescriptionRole).toString())
+  {
+    // Properties that the reader set when it recognized the group of files
+    ioOptionsWidget->updateGUI(fileItem->data(GroupPropertiesRole).toMap());
+  }
+}
+
+//-----------------------------------------------------------------------------
+bool qSlicerDataDialogPrivate::hasOptionsDescription(const QString& fileDescription) const
+{
+  qSlicerCoreIOManager* coreIOManager = qSlicerCoreApplication::application()->coreIOManager();
+  // A VTK-based reader has no options widget of its own: its options are displayed by the generic
+  // options widget, which gets all its values from the reader's description of options.
+  qSlicerVTKFileReader* reader = qobject_cast<qSlicerVTKFileReader*>(coreIOManager->reader(fileDescription));
+  return reader && reader->ioHandler();
+}
+
+//-----------------------------------------------------------------------------
+qSlicerIO::IOProperties qSlicerDataDialogPrivate::describedOptionValues(const QString& fileDescription, const qSlicerIO::IOProperties& properties) const
+{
+  qSlicerCoreIOManager* coreIOManager = qSlicerCoreApplication::application()->coreIOManager();
+  qSlicerVTKFileReader* reader = qobject_cast<qSlicerVTKFileReader*>(coreIOManager->reader(fileDescription));
+  vtkMRMLFileIOHandler* ioHandler = reader ? reader->ioHandler() : nullptr;
+  if (!ioHandler)
+  {
+    return qSlicerIO::IOProperties();
+  }
+  if (!ioHandler->GetScene())
+  {
+    reader->setMRMLScene(coreIOManager->fileIOManager()->GetScene());
+  }
+  vtkNew<vtkMRMLIOProperties> context;
+  qSlicerIO::toVTKProperties(properties, context);
+  vtkNew<vtkMRMLIOProperties> values;
+  ioHandler->GetOptionValues(context, values);
+  return qSlicerIO::fromVTKProperties(values);
 }
 
 //-----------------------------------------------------------------------------

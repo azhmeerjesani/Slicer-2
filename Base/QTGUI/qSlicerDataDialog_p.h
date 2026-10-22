@@ -17,6 +17,9 @@
 #include <QDir>
 #include <QFileInfo>
 
+// Qt includes
+#include <QSet>
+
 // CTK includes
 #include <ctkPimpl.h>
 
@@ -73,7 +76,10 @@ protected:
     GroupPropertiesRole
   };
 
+  /// Add the files of the directory and its subdirectories, then resize the columns once.
   void addDirectory(const QDir& directory);
+  /// Add the files of the directory and its subdirectories (columns are not resized).
+  void addDirectoryRecursively(const QDir& directory);
   /// Add files to the list. Groups of files that readers recognize as a single data set
   /// (such as an image series) are added as a single item.
   void addFileInfoList(QFileInfoList fileInfoList);
@@ -82,7 +88,19 @@ protected:
   // If a readerDescription is specified then only that reader will be offered. If ioProperties is specified as well then
   // it will be used to initialize the reader properties widget.
   void addFile(const QFileInfo& file, const QString& readerDescription = QString(), qSlicerIO::IOProperties* ioProperties = nullptr);
-  void setFileOptions(int row, const QString& filePath, const QString& fileDescription);
+  /// Create the options widget of the row for the reader of fileDescription.
+  /// If resizeOptionsColumn is false then the options column is not resized to its contents
+  /// (the caller does it once when it sets the options of many rows).
+  void setFileOptions(int row, const QString& filePath, const QString& fileDescription, bool resizeOptionsColumn = true);
+  /// Create the options widget of the row if it does not have one yet.
+  /// Properties of the recognized group of files are set in the widget if the row is loaded with the group's reader.
+  void createOptionsWidget(int row, bool resizeOptionsColumn = true);
+  /// Return true if the options of the reader can be computed without an options widget
+  /// (the reader describes its options, see vtkMRMLFileIOHandler::GetOptionsDescription).
+  /// Rows of such readers get an options widget only when options are shown or the user changes the row's type.
+  bool hasOptionsDescription(const QString& fileDescription) const;
+  /// Default option values of the reader for the file (the values an options widget would have).
+  qSlicerIO::IOProperties describedOptionValues(const QString& fileDescription, const qSlicerIO::IOProperties& properties) const;
   /// Return the row the last signal comes from.
   int senderRow() const;
   bool propagateChange(int changedRow) const;
@@ -95,6 +113,10 @@ protected:
   bool checkAndHandleArchive(const QFileInfo& file);
   /// A holder for the temporary directory so that it doesn't go out of scope before loading.
   QScopedPointer<QTemporaryDir> temporaryArchiveDirectory;
+  /// Absolute paths of the files in the list (to skip files that are already added)
+  QSet<QString> AddedFilePaths;
+  /// Row that addFile is adding (-1 if no row is being added)
+  int AddingRow{ -1 };
 
 private:
   friend class qSlicerDataDialog;
