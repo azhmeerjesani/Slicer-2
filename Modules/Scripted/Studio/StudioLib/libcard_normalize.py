@@ -620,7 +620,7 @@ class _Run:
                 self.durations.append(time.monotonic() - self._subjectStarted)
             self.manager.unmerged.add(sid)
             self.manager.failures.pop(sid, None)
-            self.manager.merge()
+            self.manager.requestMerge()
         elif state in ("failed", "locked", "skipped"):
             self.status[sid] = state
             self.reasons[sid] = str(event.get("reason") or event.get("code") or state)
@@ -793,6 +793,17 @@ class _Manager:
 
     # Merging
 
+    def requestMerge(self):
+        """Merge in the next event-loop turn: the merge (a locked save of participants.tsv) then does not add to the turn
+        that handles the job's events.
+        """
+        if not self._mergeTimer.isActive():
+            self._mergeTimer.start(0)
+
+    def _newestFirst(self):
+        """The runs, newest first: a live run (``runs``) is always newer than a finished one (``history``)."""
+        return self.runs[::-1] + self.history[::-1]
+
     def merge(self):
         """Merge the posted results on the main thread (the session writes participants.tsv).
 
@@ -809,11 +820,11 @@ class _Manager:
             return []
         edited = {}
         for sid in self.unmerged:
-            run = next((run for run in reversed(self.runs + self.history) if sid in run.lesionAtStart), None)
+            run = next((run for run in self._newestFirst() if sid in run.lesionAtStart), None)
             row = session.study.subject(sid) if sid in session.study else None
             if run is not None and row is not None and not _missing(row.get("lesion")) and row.get("lesion") != run.lesionAtStart.get(sid):
                 edited[sid] = row["lesion"]
-        with _subjectClosed(session, current if affected else None):
+        with _subjectClosed(session, current if affected else None, deferReopen=True):
             applied = session.applyInbox()
         merged = {sid for _path, sids in applied for sid in sids}
         self.unmerged -= merged
@@ -1016,8 +1027,12 @@ def _install():
 
 
 @contextlib.contextmanager
-def _subjectClosed(session, sid):
-    """Leave ``sid`` if it is the open subject (its edits are written), run the body, and open it again."""
+def _subjectClosed(session, sid, deferReopen=False):
+    """Leave ``sid`` if it is the open subject (its edits are written), run the body, and open it again.
+
+    With ``deferReopen`` the subject is opened again in the next event-loop turn (when the user has not moved on), so that
+    the two subject switches are not one long freeze of the window.
+    """
     neighbor = None
     if sid is not None and session.current() == sid:
         ids = list(session.study.subject_ids)
@@ -1030,8 +1045,15 @@ def _subjectClosed(session, sid):
     try:
         yield
     finally:
-        if neighbor is not None and sid in session.study:
+        if neighbor is not None and deferReopen:
+            qt.QTimer.singleShot(0, lambda: _reopen(session, sid, neighbor))
+        elif neighbor is not None and sid in session.study:
             session.open(sid, switchToDraw=False)
+
+
+def _reopen(session, sid, neighbor):
+    if _session() is session and sid in session.study and session.current() == neighbor:
+        session.open(sid, switchToDraw=False)
 
 
 def normalizeSubjects(sids, options=None, auto=False, redo=False):
@@ -1276,7 +1298,7 @@ def rewarpSubject(sid, onDone=None):
 def commandLineFor(sid):
     """The command line of the last batch that included ``sid`` (for Copy command line), else a plain one."""
     current = _manager
-    for run in reversed((current.runs + current.history) if current is not None else []):
+    for run in current._newestFirst() if current is not None else []:
         if sid in run.sids:
             return shlex.join(["PythonSlicer", "-m", JOB_MODULE, *run.args])
     session = _session()

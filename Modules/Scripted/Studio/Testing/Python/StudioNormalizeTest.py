@@ -560,6 +560,52 @@ class StudioNormalizeTest(unittest.TestCase):
         self.assertEqual(row["norm_qc"], "unreviewed")  # a new result needs a new review
         self.assertEqual(row["scan_native"], before["scan_native"])
         self.assertEqual(self.chips(["sub-01"])["sub-01"] in ("Unreviewed", "Review"), True)
+        # The native lesion stays the native one (the newest run of the row is compared, not the one before it)
+        self.assertEqual(row["lesion_native"], before["lesion_native"])
+        self.assertEqual(len(self.auditEvents(path, "norm_lesion_edited")), 0)
+        ln.refreshStale(wait=True)
+        self.assertNotEqual(self.chips(["sub-01"])["sub-01"], "Stale")
+
+    def test_06b_normalize_stale_row(self):
+        from StudioLib import libcard_normalize as ln
+
+        np = self.np
+        path = self.makeStudy("stale", native=1, templateRows=0)
+        session = self.openStudy(path)
+        card = self.card()
+        card.primary.click()
+        self.waitIdle()
+        first = dict(self.disk(path, "sub-01"))
+        native = first["lesion_native"]
+        self.assertNotIn("derivatives", native)
+        # Edit the native lesion: the row is Stale
+        nativePath = session.study.abspath(native)
+        data, affine, _header = self.nifti.read_nifti(nativePath)
+        edited = np.asarray(data).copy()
+        edited[edited > 0] = 0
+        center = np.argwhere(np.asarray(data) > 0).mean(axis=0).astype(int)
+        edited[tuple(slice(max(0, c - 4), c + 4) for c in center)] = 1
+        self.nifti.write_nifti(nativePath, edited.astype(np.uint8), affine, sform_code=self.nifti.XFORM_SCANNER, qform_code=self.nifti.XFORM_SCANNER)
+        ln.refreshStale(wait=True)
+        self.assertEqual(self.chips(["sub-01"]), {"sub-01": "Stale"})
+        card.refresh()
+        self.assertEqual(str(card.primary.text), "Normalize 1 native subject")
+        # Normalize on the Stale row (the earlier run is finished; the new one is live when its first result is merged)
+        card.primary.click()
+        self.waitIdle()
+        row = self.disk(path, "sub-01")
+        self.assertNotEqual(row["norm_fingerprint"], first["norm_fingerprint"])
+        self.assertEqual(row["lesion_native"], native)  # not the MNI lesion of the first normalization
+        self.assertNotIn("derivatives", row["lesion_native"])
+        self.assertEqual(row["norm_qc"], "unreviewed")
+        self.assertEqual(len(self.auditEvents(path, "norm_lesion_edited")), 0)
+        ln.refreshStale(wait=True)
+        self.assertNotEqual(self.chips(["sub-01"])["sub-01"], "Stale")
+        self.assertFalse(ln.needsNormalization(session.study.subject("sub-01")))
+        # Revert gives the native scan and lesion again
+        self.assertTrue(ln.revertToNative("sub-01", announce=False))
+        row = self.disk(path, "sub-01")
+        self.assertEqual((row["space"], row["lesion"]), ("native", native))
 
     #
     # Automatic mode
