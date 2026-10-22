@@ -390,7 +390,7 @@ class DrawPipeline:
 
             # Apply poly data on modifier labelmap
             segmentationNode = self.scriptedEffect.parameterSetNode().GetSegmentationNode()
-            self.scriptedEffect.appendPolyMask(modifierLabelmap, self.polyData, self.sliceWidget, segmentationNode)
+            modificationExtent = self.appendPolyMask(modifierLabelmap, segmentationNode)
 
         self.resetPolyData()
         if lineExists:
@@ -399,7 +399,32 @@ class DrawPipeline:
                 modificationMode = slicer.qSlicerSegmentEditorAbstractEffect.ModificationModeRemove
             else:
                 modificationMode = slicer.qSlicerSegmentEditorAbstractEffect.ModificationModeAdd
-            self.scriptedEffect.modifySelectedSegmentByLabelmap(modifierLabelmap, modificationMode)
+            if modificationExtent is not None:
+                # Only the voxels of the outline's slab are processed (masking, merging, surface update)
+                self.scriptedEffect.modifySelectedSegmentByLabelmap(modifierLabelmap, modificationMode, modificationExtent)
+            else:
+                self.scriptedEffect.modifySelectedSegmentByLabelmap(modifierLabelmap, modificationMode)
+
+    def appendPolyMask(self, modifierLabelmap, segmentationNode):
+        """Rasterize the outline onto the modifier labelmap.
+
+        Returns the modified extent (a list of 6 ints, in the voxel coordinates of the modifier labelmap) when the
+        editor logic can report it, None otherwise (older builds: the whole labelmap is then processed).
+        """
+        logic = getattr(slicer, "vtkSlicerSegmentEditorLogic", None)
+        if logic is not None and hasattr(logic, "AppendPolyMask"):
+            modificationExtent = [0, -1, 0, -1, 0, -1]
+            try:
+                logic.AppendPolyMask(modifierLabelmap, self.polyData, self.sliceWidget.mrmlSliceNode(), segmentationNode, modificationExtent)
+            except TypeError:
+                # No overload with the extent output in this build
+                pass
+            else:
+                # An invalid extent (max < min) means that the outline is outside the labelmap: nothing to modify,
+                # which modifySelectedSegmentByLabelmap handles as "the whole labelmap" (all zeros, no change)
+                return modificationExtent if modificationExtent[0] <= modificationExtent[1] else None
+        self.scriptedEffect.appendPolyMask(modifierLabelmap, self.polyData, self.sliceWidget, segmentationNode)
+        return None
 
     def resetPolyData(self):
         # Return the polyline to initial state with no points

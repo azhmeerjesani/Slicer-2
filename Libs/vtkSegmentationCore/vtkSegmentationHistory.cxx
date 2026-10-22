@@ -27,12 +27,30 @@
 #include <vtkNew.h>
 #include <vtkObjectFactory.h>
 #include <vtkCallbackCommand.h>
+#include <vtkPolyData.h>
 
 // std includes
 #include <algorithm>
+#include <cstring>
+#include <set>
 
 //----------------------------------------------------------------------------
 vtkStandardNewMacro(vtkSegmentationHistory);
+
+//----------------------------------------------------------------------------
+bool vtkSegmentationHistory::ShallowDerivedRepresentations = true;
+
+//----------------------------------------------------------------------------
+void vtkSegmentationHistory::SetShallowDerivedRepresentations(bool enabled)
+{
+  vtkSegmentationHistory::ShallowDerivedRepresentations = enabled;
+}
+
+//----------------------------------------------------------------------------
+bool vtkSegmentationHistory::GetShallowDerivedRepresentations()
+{
+  return vtkSegmentationHistory::ShallowDerivedRepresentations;
+}
 
 //----------------------------------------------------------------------------
 vtkSegmentationHistory::vtkSegmentationHistory()
@@ -130,6 +148,7 @@ bool vtkSegmentationHistory::SaveState()
   this->Segmentation->GetSegmentIDs(segmentIDs);
   newSegmentationState.SegmentIds = segmentIDs;
   std::map<vtkDataObject*, vtkDataObject*> savedObjects;
+  const std::string sourceRepresentationName = this->Segmentation->GetSourceRepresentationName();
   for (std::vector<std::string>::iterator segmentIDIt = segmentIDs.begin(); segmentIDIt != segmentIDs.end(); ++segmentIDIt)
   {
     vtkSegment* segment = this->Segmentation->GetSegment(*segmentIDIt);
@@ -151,8 +170,12 @@ bool vtkSegmentationHistory::SaveState()
     }
 
     vtkSmartPointer<vtkSegment> segmentClone = vtkSmartPointer<vtkSegment>::New();
-    vtkSegmentation::CopySegment(segmentClone, segment, baselineSegment, savedObjects);
+    vtkSegmentationHistory::CopySegmentToSnapshot(segmentClone, segment, baselineSegment, savedObjects, sourceRepresentationName);
     newSegmentationState.Segments[*segmentIDIt] = segmentClone;
+    // Remember which source representation object the state was saved from, so that RestoreState can skip
+    // the segments that have not changed since.
+    vtkDataObject* sourceRepresentation = segment->GetRepresentation(sourceRepresentationName);
+    newSegmentationState.SourceRepresentations[*segmentIDIt] = std::make_pair(sourceRepresentation, sourceRepresentation ? sourceRepresentation->GetMTime() : 0);
   }
   this->SegmentationStates.push_back(newSegmentationState);
 
@@ -166,6 +189,102 @@ bool vtkSegmentationHistory::SaveState()
 
   this->Modified();
   return true;
+}
+
+//---------------------------------------------------------------------------
+void vtkSegmentationHistory::CopySegmentToSnapshot(vtkSegment* destination,
+                                                   vtkSegment* source,
+                                                   vtkSegment* baseline,
+                                                   std::map<vtkDataObject*, vtkDataObject*>& cachedRepresentations,
+                                                   const std::string& sourceRepresentationName)
+{
+  if (!vtkSegmentationHistory::ShallowDerivedRepresentations)
+  {
+    vtkSegmentation::CopySegment(destination, source, baseline, cachedRepresentations);
+    return;
+  }
+
+  destination->RemoveAllRepresentations();
+  destination->DeepCopyMetadata(source);
+
+  std::vector<std::string> representationNames;
+  source->GetContainedRepresentationNames(representationNames);
+  for (const std::string& representationName : representationNames)
+  {
+    vtkDataObject* sourceRepresentation = source->GetRepresentation(representationName);
+    std::map<vtkDataObject*, vtkDataObject*>::iterator cachedIt = cachedRepresentations.find(sourceRepresentation);
+    if (cachedIt != cachedRepresentations.end())
+    {
+      // The same object (i.e. shared labelmap) has already been copied for a previous segment: point to that copy
+      destination->AddRepresentation(representationName, cachedIt->second);
+      continue;
+    }
+
+    vtkDataObject* baselineRepresentation = baseline ? baseline->GetRepresentation(representationName) : nullptr;
+    if (baselineRepresentation != nullptr && baselineRepresentation->GetMTime() > sourceRepresentation->GetMTime())
+    {
+      // The baseline already holds an up-to-date copy, reuse it
+      destination->AddRepresentation(representationName, baselineRepresentation);
+      cachedRepresentations[sourceRepresentation] = baselineRepresentation;
+      continue;
+    }
+
+    vtkDataObject* representationCopy = vtkSegmentationConverterFactory::GetInstance()->ConstructRepresentationObjectByClass(sourceRepresentation->GetClassName());
+    if (!representationCopy)
+    {
+      vtkErrorWithObjectMacro(nullptr, "CopySegmentToSnapshot: Unable to construct representation type class '" << sourceRepresentation->GetClassName() << "'");
+      continue;
+    }
+    if (representationName != sourceRepresentationName && vtkPolyData::SafeDownCast(sourceRepresentation) != nullptr)
+    {
+      // Derived poly data (such as a closed surface) is shared with the segmentation: the conversion rules
+      // replace its arrays through ShallowCopy instead of modifying them in place, so the snapshot stays valid
+      // and the state costs no more than the source representation. Derived image data stays deep-copied.
+      representationCopy->ShallowCopy(sourceRepresentation);
+    }
+    else
+    {
+      representationCopy->DeepCopy(sourceRepresentation);
+    }
+    destination->AddRepresentation(representationName, representationCopy);
+    cachedRepresentations[sourceRepresentation] = representationCopy;
+    representationCopy->Delete(); // this representation is now owned by the segment
+  }
+}
+
+//---------------------------------------------------------------------------
+bool vtkSegmentationHistory::IsSameMetadata(vtkSegment* segment1, vtkSegment* segment2)
+{
+  if (!segment1 || !segment2)
+  {
+    return false;
+  }
+  const char* name1 = segment1->GetName();
+  const char* name2 = segment2->GetName();
+  if ((name1 == nullptr) != (name2 == nullptr) || (name1 != nullptr && strcmp(name1, name2) != 0))
+  {
+    return false;
+  }
+  double color1[3] = { 0.0, 0.0, 0.0 };
+  double color2[3] = { 0.0, 0.0, 0.0 };
+  segment1->GetColor(color1);
+  segment2->GetColor(color2);
+  for (int i = 0; i < 3; ++i)
+  {
+    if (color1[i] != color2[i])
+    {
+      return false;
+    }
+  }
+  if (segment1->GetLabelValue() != segment2->GetLabelValue())
+  {
+    return false;
+  }
+  std::map<std::string, std::string> tags1;
+  std::map<std::string, std::string> tags2;
+  segment1->GetTags(tags1);
+  segment2->GetTags(tags2);
+  return tags1 == tags2;
 }
 
 //---------------------------------------------------------------------------
@@ -224,6 +343,44 @@ bool vtkSegmentationHistory::RestoreState(unsigned int stateIndex)
 
   SegmentationState restoredState = this->SegmentationStates[stateIndex];
 
+  // Segments that have not changed since the state was saved (same source representation object with the same
+  // MTime, same metadata) are left alone: their derived representations are consistent with their source, and
+  // not touching them keeps their display pipelines. Segments sharing one source representation object are
+  // restored together, so that the sharing is kept.
+  const std::string sourceRepresentationName = this->Segmentation->GetSourceRepresentationName();
+  std::map<vtkDataObject*, bool> unchangedSourceRepresentations;
+  std::set<std::string> unchangedSegmentIDs;
+  if (vtkSegmentationHistory::ShallowDerivedRepresentations)
+  {
+    for (SegmentsMap::iterator restoredSegmentsIt = restoredState.Segments.begin(); restoredSegmentsIt != restoredState.Segments.end(); ++restoredSegmentsIt)
+    {
+      vtkSegment* segment = this->Segmentation->GetSegment(restoredSegmentsIt->first);
+      vtkDataObject* sourceRepresentation = segment ? segment->GetRepresentation(sourceRepresentationName) : nullptr;
+      if (!sourceRepresentation)
+      {
+        continue;
+      }
+      SourceRepresentationsMap::const_iterator savedIt = restoredState.SourceRepresentations.find(restoredSegmentsIt->first);
+      bool unchanged = savedIt != restoredState.SourceRepresentations.end()          //
+                       && savedIt->second.first == sourceRepresentation              //
+                       && savedIt->second.second == sourceRepresentation->GetMTime() //
+                       && vtkSegmentationHistory::IsSameMetadata(segment, restoredSegmentsIt->second);
+      std::map<vtkDataObject*, bool>::iterator sharedIt = unchangedSourceRepresentations.find(sourceRepresentation);
+      if (sharedIt == unchangedSourceRepresentations.end())
+      {
+        unchangedSourceRepresentations[sourceRepresentation] = unchanged;
+      }
+      else
+      {
+        sharedIt->second = sharedIt->second && unchanged;
+      }
+      if (unchanged)
+      {
+        unchangedSegmentIDs.insert(restoredSegmentsIt->first);
+      }
+    }
+  }
+
   std::set<std::string> segmentIDsToKeep;
   std::map<vtkDataObject*, vtkDataObject*> restoredRepresentations;
   for (SegmentsMap::iterator restoredSegmentsIt = restoredState.Segments.begin(); restoredSegmentsIt != restoredState.Segments.end(); ++restoredSegmentsIt)
@@ -235,6 +392,12 @@ bool vtkSegmentationHistory::RestoreState(unsigned int stateIndex)
     {
       segment = vtkSmartPointer<vtkSegment>::New();
       this->Segmentation->AddSegment(segment, restoredSegmentsIt->first);
+    }
+    else if (unchangedSegmentIDs.find(restoredSegmentsIt->first) != unchangedSegmentIDs.end() //
+             && unchangedSourceRepresentations[segment->GetRepresentation(sourceRepresentationName)])
+    {
+      // Unchanged since the state was saved
+      continue;
     }
 
     std::vector<std::string> restoredRepresentationNames;

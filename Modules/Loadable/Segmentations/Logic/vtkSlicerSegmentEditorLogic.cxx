@@ -54,7 +54,6 @@ Copyright (c) Laboratory for Percutaneous Surgery (PerkLab)
 #include <vtkGeneralTransform.h>
 #include <vtkImageExtractComponents.h>
 #include <vtkImageFillROI.h>
-#include <vtkImageMathematics.h>
 #include <vtkImageThreshold.h>
 #include <vtkMatrix4x4.h>
 #include <vtkNew.h>
@@ -1532,23 +1531,72 @@ bool IsSegmentIDValid(const std::string& segmentID)
 //-----------------------------------------------------------------------------
 void vtkSlicerSegmentEditorLogic::AppendImage(vtkOrientedImageData* inputImage, vtkOrientedImageData* appendedImage)
 {
+  int modifiedExtent[6] = { 0, -1, 0, -1, 0, -1 };
+  vtkSlicerSegmentEditorLogic::AppendImage(inputImage, appendedImage, modifiedExtent);
+}
+
+//-----------------------------------------------------------------------------
+void vtkSlicerSegmentEditorLogic::AppendImage(vtkOrientedImageData* inputImage, vtkOrientedImageData* appendedImage, int modifiedExtent[6])
+{
+  if (modifiedExtent)
+  {
+    vtkOrientedImageDataResample::InvalidateExtent(modifiedExtent);
+  }
   if (!inputImage || !appendedImage)
   {
     vtkErrorWithObjectMacro(nullptr, "" << __func__ << ": Invalid inputs!");
     return;
   }
 
-  // Make sure appended image has the same lattice as the input image
-  vtkSmartPointer<vtkOrientedImageData> resampledAppendedImage = vtkSmartPointer<vtkOrientedImageData>::New();
-  vtkOrientedImageDataResample::ResampleOrientedImageToReferenceOrientedImage(appendedImage, inputImage, resampledAppendedImage);
+  // Extent of the input image that the appended image covers: the corners of the appended image's extent in
+  // the voxel coordinates of the input image, extended by one voxel for rounding and clipped to the input image.
+  // Only this part is resampled and combined (the appended image is usually a thin slab of a few slices
+  // of the input image, which may be as large as the reference geometry).
+  vtkNew<vtkTransform> appendedToInputTransform;
+  vtkOrientedImageDataResample::GetTransformBetweenOrientedImages(appendedImage, inputImage, appendedToInputTransform);
+  int coveredExtent[6] = { 0, -1, 0, -1, 0, -1 };
+  vtkOrientedImageDataResample::TransformExtent(appendedImage->GetExtent(), appendedToInputTransform, coveredExtent);
+  int inputExtent[6] = { 0, -1, 0, -1, 0, -1 };
+  inputImage->GetExtent(inputExtent);
+  for (int axis = 0; axis < 3; ++axis)
+  {
+    if (coveredExtent[axis * 2] > coveredExtent[axis * 2 + 1])
+    {
+      // Empty appended image
+      return;
+    }
+    coveredExtent[axis * 2] = std::max(coveredExtent[axis * 2] - 1, inputExtent[axis * 2]);
+    coveredExtent[axis * 2 + 1] = std::min(coveredExtent[axis * 2 + 1] + 1, inputExtent[axis * 2 + 1]);
+    if (coveredExtent[axis * 2] > coveredExtent[axis * 2 + 1])
+    {
+      // The appended image is outside the input image: nothing to append
+      return;
+    }
+  }
 
-  // Add image created from poly data to input image
-  vtkSmartPointer<vtkImageMathematics> imageMath = vtkSmartPointer<vtkImageMathematics>::New();
-  imageMath->SetInput1Data(inputImage);
-  imageMath->SetInput2Data(resampledAppendedImage);
-  imageMath->SetOperationToMax();
-  imageMath->Update();
-  inputImage->DeepCopy(imageMath->GetOutput());
+  // Make sure appended image has the same lattice as the input image (computed for the covered extent only)
+  vtkNew<vtkMatrix4x4> inputImageToWorldMatrix;
+  inputImage->GetImageToWorldMatrix(inputImageToWorldMatrix);
+  vtkNew<vtkOrientedImageData> coveredGeometry;
+  coveredGeometry->SetImageToWorldMatrix(inputImageToWorldMatrix);
+  coveredGeometry->SetExtent(coveredExtent);
+  vtkNew<vtkOrientedImageData> resampledAppendedImage;
+  if (!vtkOrientedImageDataResample::ResampleOrientedImageToReferenceOrientedImage(appendedImage, coveredGeometry, resampledAppendedImage))
+  {
+    vtkErrorWithObjectMacro(nullptr, "" << __func__ << ": Failed to resample the appended image");
+    return;
+  }
+
+  // Add image created from poly data to input image (maximum, in place, within the covered extent)
+  if (!vtkOrientedImageDataResample::ModifyImage(inputImage, resampledAppendedImage, vtkOrientedImageDataResample::OPERATION_MAXIMUM, coveredExtent))
+  {
+    vtkErrorWithObjectMacro(nullptr, "" << __func__ << ": Failed to append the image");
+    return;
+  }
+  if (modifiedExtent)
+  {
+    std::copy(coveredExtent, coveredExtent + 6, modifiedExtent);
+  }
 }
 
 //-----------------------------------------------------------------------------
@@ -1556,6 +1604,17 @@ void vtkSlicerSegmentEditorLogic::AppendPolyMask(vtkOrientedImageData* input,
                                                  vtkPolyData* polyData,
                                                  vtkMRMLSliceNode* sliceWidget,
                                                  vtkMRMLSegmentationNode* segmentationNode /*=nullptr*/)
+{
+  int modifiedExtent[6] = { 0, -1, 0, -1, 0, -1 };
+  vtkSlicerSegmentEditorLogic::AppendPolyMask(input, polyData, sliceWidget, segmentationNode, modifiedExtent);
+}
+
+//-----------------------------------------------------------------------------
+void vtkSlicerSegmentEditorLogic::AppendPolyMask(vtkOrientedImageData* input,
+                                                 vtkPolyData* polyData,
+                                                 vtkMRMLSliceNode* sliceWidget,
+                                                 vtkMRMLSegmentationNode* segmentationNode,
+                                                 int modifiedExtent[6])
 {
   // Rasterize a poly data onto the input image into the slice view
   // - Points are specified in current XY space
@@ -1581,7 +1640,7 @@ void vtkSlicerSegmentEditorLogic::AppendPolyMask(vtkOrientedImageData* input,
   }
 
   // Append poly mask onto input image
-  vtkSlicerSegmentEditorLogic::AppendImage(input, polyMaskImage);
+  vtkSlicerSegmentEditorLogic::AppendImage(input, polyMaskImage, modifiedExtent);
 }
 
 //-----------------------------------------------------------------------------
