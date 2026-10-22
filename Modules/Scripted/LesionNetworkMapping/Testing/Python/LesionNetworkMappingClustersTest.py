@@ -326,6 +326,12 @@ class WriterTest(unittest.TestCase):
         self.assertIn("N = 50", plain)
         self.assertIn("no atlas labels", plain)
         self.assertIn("descriptive", plain)
+        # A map of unknown N (a T map without a sidecar): "N unknown", never "N = 0, df = 0"
+        unknown = thresholds.resolve_unknown_n({"kind": "custom_t", "value": 7.0}, 228483)
+        unknown_caption = clusters.cluster_caption(clusters.cluster_table(volume, grid(), None, unknown))
+        self.assertIn("N unknown", unknown_caption)
+        self.assertNotIn("N = 0", unknown_caption)
+        self.assertNotIn("df = 0", unknown_caption)
         with tempfile.TemporaryDirectory() as directory:
             tsv, page = os.path.join(directory, "clusters.tsv"), os.path.join(directory, "clusters.html")
             self.assertEqual(clusters.write_clusters(table, tsv, page), caption)

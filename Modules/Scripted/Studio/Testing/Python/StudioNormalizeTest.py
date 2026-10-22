@@ -354,6 +354,9 @@ class StudioNormalizeTest(unittest.TestCase):
         for sid in ("sub-01", "sub-02", "sub-03"):
             self.assertIn(chips[sid], ("Review", "Unreviewed"), chips)
         self.assertEqual(chips["sub-04"], "—")
+        # The batch itself keeps CPUs - 1 cores busy (BRAINSFit): the machine is idle only if it was before and after it
+        load = max(load, _load())
+        print(f"StudioNormalizeTest batch: max gap {probe.maxGapMs():.1f} ms (load {load:.1f}, {elapsed:.0f} s)")
         self.assertLessEqual(probe.maxGapMs(), MAX_GAP_IDLE_MS if load < 1.0 else MAX_GAP_BUSY_MS, f"max gap {probe.maxGapMs():.0f} ms (load {load:.1f}, {elapsed:.0f} s); long gaps {probe.longGaps()}")
         # participants.tsv: written by the main thread only, with the values of A-03's inbox contract
         self.assertTrue(self.saveThreads and all(self.saveThreads), self.saveThreads)

@@ -556,17 +556,31 @@ def _record_fields(record, field, convert):
         node[keys[-1]] = [convert(item) if isinstance(item, str) and item else item for item in value]
 
 
+def _portable_argv_token(token, folder):
+    """A command-line token with its absolute path made relative to ``folder``: a whole path ("--opt", "/a/b")
+    or the value of the "--opt=/a/b" form (argparse accepts both); other tokens are kept.
+    """
+    if os.path.isabs(token):
+        return _portable_file(token, folder)
+    option, has_value, value = token.partition("=")
+    if has_value and option.startswith("-") and os.path.isabs(value):
+        return f"{option}={_portable_file(value, folder)}"
+    return token
+
+
 def portable_record_paths(record, folder, fields, argv_fields=("argv",)):
     """A copy of a JSON run record (cohortmaps.json, glm.json...) whose path ``fields`` (dotted keys) are relative
     to ``folder``, the record's folder (:func:`_portable_file`; SPEC 9.7 rule 10: shared files hold no absolute
-    local path). In ``argv_fields`` (command lines) only the absolute paths are made relative.
-    Only provenance.json and reproduce.sh keep the exact local paths, by design.
+    local path). In ``argv_fields`` (command lines) only the absolute paths are made relative, including the
+    values of "--opt=/abs/path" tokens. Only provenance.json and reproduce.sh keep the exact local paths, by design.
     """
     import copy
 
     out = copy.deepcopy(record)
-    for field in (*fields, *argv_fields):
+    for field in fields:
         _record_fields(out, field, lambda value: _portable_file(value, folder) if os.path.isabs(value) else value)
+    for field in argv_fields:
+        _record_fields(out, field, lambda token: _portable_argv_token(token, folder))
     return out
 
 

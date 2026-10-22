@@ -1620,6 +1620,41 @@ def _onSceneClosed():
     _mniCache.clear()
 
 
+#: The scene observed by ``_installImportGuard()`` and its observer tag
+_importGuard = {"scene": None, "tag": None}
+
+
+def _installImportGuard():
+    """Observe the scene loads for ``_onSceneStartImport()`` (once per scene; Draw's own observers end when Draw is left)."""
+    scene = slicer.mrmlScene
+    if scene is None or _importGuard["scene"] is scene:
+        return
+    _importGuard["tag"] = scene.AddObserver(scene.StartImportEvent, _onSceneStartImport)
+    _importGuard["scene"] = scene
+
+
+def _onSceneStartImport(caller=None, event=None):
+    """A scene is loaded in Studio while Draw is not shown: the editor stops following its parameter node until Draw is
+    entered again (``SegmentEditor.enter()`` selects it). The loaded Segment Editor node names the tool that was armed when
+    the scene was saved before its segmentation is in the scene, and the editor would try (and fail) to activate it outside
+    Draw ("setSourceRepresentationToBinaryLabelmap failed: No segmentation node"). Classic is unchanged.
+    """
+    try:
+        from . import shell as shellModule
+
+        studioShell = shellModule.instance()
+        if studioShell is None or not studioShell.isActive() or _isModuleEntered():
+            return
+        widget, editor = _moduleWidget(), segmentEditor()
+        if widget is None or editor is None or editor.mrmlSegmentEditorNode() is None:
+            return
+        editor.setMRMLSegmentEditorNode(None)
+        if hasattr(widget, "parameterSetNode"):
+            widget.parameterSetNode = None
+    except Exception:
+        logging.error("Studio Draw: preparing the scene load failed:\n" + traceback.format_exc())
+
+
 def _savedRecord(segmentationNode):
     if segmentationNode is None:
         return None
@@ -3225,6 +3260,7 @@ def extension():
     global _extension
     if _extension is None:
         _extension = DrawExtension()
+        _installImportGuard()
     return _extension
 
 
@@ -3384,3 +3420,7 @@ def focusFirst(shell):
         if button.objectName == effectName and button.isVisible():
             button.setFocus(qt.Qt.OtherFocusReason)
             return
+
+
+# Scene loads in Studio while Draw is not shown: the Segment Editor widget can exist before Draw is entered
+_installImportGuard()

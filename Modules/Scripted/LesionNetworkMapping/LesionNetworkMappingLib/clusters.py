@@ -325,8 +325,10 @@ def cluster_caption(table, n=None, df=None, atlases=None, space="MNI"):
     :param atlases: label atlas names (default: ``table.atlases``).
     """
     resolved = table.resolved
-    n = n if n is not None else (resolved.n if resolved is not None else None)
-    df = df if df is not None else (resolved.df if resolved is not None else None)
+    # A rule resolved for a map of unknown N (thresholds.resolve_unknown_n) records n = df = 0: "N unknown"
+    n_unknown = n is None and resolved is not None and thresholds.N_UNKNOWN_NOTE in (resolved.notes or ())
+    n = n if n is not None or n_unknown else (resolved.n if resolved is not None else None)
+    df = df if df is not None or n_unknown else (resolved.df if resolved is not None else None)
     quantity = {"both": f"|{table.statistic}|", "pos": table.statistic, "neg": f"-{table.statistic}"}[table.sign]
     parts = [f"Clusters of the {table.statistic} map at {quantity} ≥ {_format_number(table.threshold, 4)}"]
     if resolved is not None:
@@ -335,7 +337,7 @@ def cluster_caption(table, n=None, df=None, atlases=None, space="MNI"):
         rule += f", α = {alpha:g}" if alpha is not None else ""  # noqa: RUF001
         rule += f", p_unc ≤ {thresholds.format_p(resolved.p_unc)}" if resolved.p_unc is not None else ""
         parts[0] += f" (rule: {rule})"
-    counts = [f"N = {n}" if n is not None else None, f"df = {df}" if df is not None else None]
+    counts = ["N unknown" if n_unknown else f"N = {n}" if n is not None else None, f"df = {df}" if df is not None else None]
     if any(counts):
         parts.append(", ".join(text for text in counts if text))
     sides = {"both": "two-sided, positive and negative clusters split by sign", "pos": "positive clusters", "neg": "negative clusters"}[table.sign]

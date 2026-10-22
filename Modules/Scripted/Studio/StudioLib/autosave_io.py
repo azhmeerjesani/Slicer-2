@@ -59,8 +59,10 @@ SNAPSHOT_MIN_MB = 1
 #: Final generations (scene closed or application quit without saving) write volumes up to this size; larger
 #: volumes keep their previous autosave (raw NRRD writes run at about 2-3 GB/s: 17 MB in 8 ms, 256 MB in 90 ms)
 MAIN_THREAD_VOLUME_MB = 48
-#: Snapshots are copied by slabs of at most this size per main-thread tick
-SNAPSHOT_CHUNK_MB = 64
+#: Snapshots are copied by slabs of at most this size: about 1 ms each, but up to 20 times longer while other threads
+#: use the memory bandwidth (with software rendering of the views: up to 73 ms for 8 MB, 490 ms for 64 MB), so
+#: that a tick never exceeds HARD_SLICE_MS
+SNAPSHOT_CHUNK_MB = 4
 #: Main-thread time used per tick of a generation
 SLICE_BUDGET_MS = 40
 #: A generation tick must never block the main thread longer than this
@@ -1167,7 +1169,7 @@ class SlotWriter:
             if finished:
                 plan.jobs.popleft()
             elapsed = (time.perf_counter() - start) * 1000.0
-            if elapsed >= budgetMs or getattr(job, "waiting", False):
+            if elapsed >= budgetMs or getattr(job, "waiting", False) or getattr(job, "yieldTick", False):
                 break
         elapsed = (time.perf_counter() - start) * 1000.0
         plan.metrics["mainThreadMs"] += elapsed
@@ -1427,6 +1429,23 @@ class _WriteJob:
         return True
 
 
+def _prefault(array, chunkBytes=SNAPSHOT_CHUNK_MB << 20):
+    """Start a daemon thread that writes zeros to the (contiguous) numpy ``array`` by chunks, so that its memory pages are
+    mapped before the main thread copies into it; return the thread. numpy releases the GIL while it fills large arrays, and
+    the thread touches nothing but this array (SPEC D19).
+    """
+    flat = array.reshape(-1)
+    step = max(1, chunkBytes // max(1, array.itemsize))
+
+    def touch():
+        for start in range(0, flat.size, step):
+            flat[start : start + step] = 0
+
+    thread = threading.Thread(target=touch, name="StudioAutosavePrefault", daemon=True)
+    thread.start()
+    return thread
+
+
 class _SnapshotJob:
     """Copy a large scalar volume into a numpy array by slabs (main thread), then write it in the background."""
 
@@ -1438,6 +1457,9 @@ class _SnapshotJob:
         self.scalars = None
         self.nextSlice = 0
         self.waiting = False
+        self.yieldTick = False  # stopped before a slab that would end the tick after the budget
+        self.maxSlabMs = 0.0  # the longest slab copy of this snapshot (the copy slows down while other threads are busy)
+        self.prefault = None  # the thread that maps the pages of the snapshot buffer (_prefault())
         self.inFlight = 0
 
     def release(self):
@@ -1465,14 +1487,33 @@ class _SnapshotJob:
             self.mtimes = (self.imageData.GetMTime(), self.scalars.GetMTime(), node.GetMTime())
             self.plan.snapshotBytesInFlight += size
             self.inFlight = size
+            # The first write to new memory costs page faults (up to 150 ms per 4 MB slab measured on a virtual machine,
+            # 1 ms once the pages are mapped): a worker thread maps the pages before the main thread copies into them
+            self.prefault = _prefault(self.snapshot)
+        if self.prefault is not None:
+            if self.prefault.is_alive():
+                self.waiting = True
+                return False
+            self.prefault = None
+            self.waiting = False
         rowBytes = max(1, self.source[0].nbytes)
         rowsPerSlab = max(1, (SNAPSHOT_CHUNK_MB << 20) // rowBytes)
         depth = self.source.shape[0]
+        copied = False
+        self.yieldTick = False
         while self.nextSlice < depth:
+            # Stop before a slab that would end the tick after the budget (judged by the longest slab so far)
+            if copied and (time.perf_counter() - sliceStart) * 1000.0 + self.maxSlabMs > budgetMs:
+                self.yieldTick = True
+                break
+            slabStart = time.perf_counter()
             end = min(depth, self.nextSlice + rowsPerSlab)
             self.snapshot[self.nextSlice : end] = self.source[self.nextSlice : end]
             self.nextSlice = end
-            if (time.perf_counter() - sliceStart) * 1000.0 >= budgetMs:
+            copied = True
+            now = time.perf_counter()
+            self.maxSlabMs = max(self.maxSlabMs, (now - slabStart) * 1000.0)
+            if (now - sliceStart) * 1000.0 >= budgetMs:
                 break
         if self.nextSlice < depth:
             return False

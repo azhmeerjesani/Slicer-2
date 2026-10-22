@@ -240,7 +240,10 @@ def _effectRows():
 
 
 def _bracketKeysOn():
-    return slicer.util.settingsValue("Studio/BracketKeysResizeBrush", False, converter=slicer.util.toBool)
+    """Whether [ and ] resize the brush in Draw: the user's choice, else on (in Studio's Draw, the studio presentation of
+    the Segment Editor; qSlicerSegmentEditorPaintEffect has the same default, and Classic keeps 3D Slicer's keys).
+    """
+    return slicer.util.settingsValue("Studio/BracketKeysResizeBrush", True, converter=slicer.util.toBool)
 
 
 def _drawStaticRows():

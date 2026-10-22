@@ -130,7 +130,25 @@ def _absolute_strings(value):
         return [item for child in value.values() for item in _absolute_strings(child)]
     if isinstance(value, list):
         return [item for child in value for item in _absolute_strings(child)]
-    return [value] if isinstance(value, str) and os.path.isabs(value) else []
+    if not isinstance(value, str):
+        return []
+    option, has_value, option_value = value.partition("=")
+    # A whole absolute path, or the value of a "--opt=/abs/path" command-line token
+    return [value] if os.path.isabs(value) or (has_value and option.startswith("-") and os.path.isabs(option_value)) else []
+
+
+class PortableRecordTest(unittest.TestCase):
+    def test_command_line_paths_are_relative_in_both_option_forms(self):
+        folder = os.path.abspath(os.path.join(os.sep, "data", "study", "derivatives", "lnm", "cohort"))
+        bundle = os.path.abspath(os.path.join(os.sep, "data", "Connectomes", "synth.lnmc"))
+        record = {"bundle": {"path": bundle}, "argv": ["--bundle", bundle, f"--maps={bundle}", "--label=a=b", "--out=relative/dir", "--threads", "1"]}
+        stored = export.portable_record_paths(record, folder, ("bundle.path",))
+        relative = export._portable_file(bundle, folder)
+        self.assertEqual(stored["bundle"]["path"], relative)
+        self.assertEqual(stored["argv"], ["--bundle", relative, f"--maps={relative}", "--label=a=b", "--out=relative/dir", "--threads", "1"])
+        self.assertEqual(_absolute_strings(stored), [])
+        self.assertEqual(_absolute_strings(record), [bundle, bundle, f"--maps={bundle}"])
+        self.assertEqual(record["argv"][2], f"--maps={bundle}")  # the input record is not changed
 
 
 class BatchPlanTest(unittest.TestCase):
@@ -690,13 +708,18 @@ class CommandLineTest(CohortMapsTestBase):
         with open(garbage, "wb") as f:
             f.write(b"garbage" * 50)
         tsv = self._lesions_tsv([*((sid, path, "n/a") for sid, path in self.lesions(2)), ("sub-bad", garbage, "n/a")])
-        code, events, stderr = self._cli("--lesions-tsv", tsv, "--bundle", self.meta["path"], "--out", self.path("out"), "--cache", self.path("cache"), "--threads", "1")
+        # The "--opt=/abs/path" form of the options (argparse accepts both forms)
+        code, events, stderr = self._cli(f"--lesions-tsv={tsv}", f"--bundle={self.meta['path']}", "--out", self.path("out"), f"--cache={self.path('cache')}", "--threads", "1")
         self.assertEqual(code, 0, stderr + json.dumps(events[-3:]))
         unreadable = [event for event in events if event["event"] == "warning" and event.get("code") == "unreadable"]
         self.assertEqual([(event["participant_id"], event["path"]) for event in unreadable], [("sub-bad", garbage)])
         self.assertEqual((events[-1]["event"], events[-1]["n"]), ("done", 2))
         with open(self.path("out", "cohortmaps.json"), encoding="utf-8") as f:
-            self.assertEqual(json.load(f)["excluded"], {cohortmaps.EXCLUDED_UNREADABLE: ["sub-bad"]})
+            stored = json.load(f)
+        self.assertEqual(stored["excluded"], {cohortmaps.EXCLUDED_UNREADABLE: ["sub-bad"]})
+        # The shared record holds no absolute local path, in the command line either (SPEC 9.7 rule 10)
+        self.assertEqual(_absolute_strings(stored), [])
+        self.assertIn(f"--bundle={export._portable_file(self.meta['path'], self.path('out'))}", stored["argv"])
 
     def test_cli_usage_errors(self):
         code, events, _ = self._cli("--bundle", self.meta["path"], "--out", self.path("out"))

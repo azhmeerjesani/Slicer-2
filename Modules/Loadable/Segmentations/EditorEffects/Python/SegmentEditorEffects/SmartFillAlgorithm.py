@@ -54,7 +54,8 @@ MIN_EDGE_GAIN = 2.0  # a real lesion edge has >= 2x the boundary contrast of the
 NOISE_EDGE_SIGMAS = 4.0  # a boundary contrast below 4 sigma is noise, not a lesion edge
 CONTINUE_REACH = 0.75  # extend the radius only when the chosen region already reaches 75 % of it
 SLAB_PLANES = 16  # planes of k per streamed step of the morphological filters
-SPHERE_SLAB_PLANES = 64  # planes per step of the ROI sphere mask
+SPHERE_SLAB_PLANES = 64  # planes per step of the ROI sphere mask (at most)
+SPHERE_SLAB_VOXELS = 400_000  # voxels per step of the ROI sphere mask: 64 planes of a 4M-voxel ROI took 25-57 ms, this ~6-15 ms
 PERCENTILE_DIRECT_VOXELS = 1_000_000  # larger arrays: percentiles in bounded steps (numpy.percentile takes 75 ms at 4M)
 PERCENTILE_BINS = 4096
 ADD, REMOVE = 1, 2
@@ -260,8 +261,9 @@ class RegionGrower:
         shellInner = max(radius - 1.5 * spacing.max(), 0.0) ** 2 if radius > 1.5 * spacing.max() else -1.0
         planeSize = sub.shape[1] * sub.shape[2]
         allowedRoi = allowed[self.roi] if allowed is not None else None
-        for k0 in range(0, sub.shape[0], SPHERE_SLAB_PLANES):
-            k1 = min(sub.shape[0], k0 + SPHERE_SLAB_PLANES)
+        slabPlanes = int(min(SPHERE_SLAB_PLANES, max(1, SPHERE_SLAB_VOXELS // max(planeSize, 1))))
+        for k0 in range(0, sub.shape[0], slabPlanes):
+            k1 = min(sub.shape[0], k0 + slabPlanes)
             gridK = numpy.arange(k0, k1).reshape(-1, 1, 1)
             distance2 = ((gridK - localSeed[0]) * spacing[0]) ** 2 + distanceJI
             ok = distance2 <= radius * radius

@@ -1128,6 +1128,7 @@ void qSlicerSegmentEditorPaintEffectPrivate::addFeedbackPoints()
 //-----------------------------------------------------------------------------
 bool qSlicerSegmentEditorPaintEffectPrivate::bracketKeysResizeBrush() const
 {
+  Q_Q(const qSlicerSegmentEditorPaintEffect);
   qSlicerApplication* app = qSlicerApplication::application();
   if (!app || app->testAttribute(qSlicerCoreApplication::AA_EnableTesting) || !app->mainWindow())
   {
@@ -1135,8 +1136,12 @@ bool qSlicerSegmentEditorPaintEffectPrivate::bracketKeysResizeBrush() const
     // of the slice view, whatever the settings say
     return false;
   }
+  // Without an explicit choice of the user (Studio/BracketKeysResizeBrush), [ and ] resize the brush only in the
+  // Slicer Studio presentation of the segment editor (the "studioPresentation" property that the segment editor
+  // widget sets on its effects); in the classic presentation they keep cycling the volumes, as in 3D Slicer.
+  const bool studioPresentation = q->property("studioPresentation").toBool();
   QSettings* settings = app->userSettings();
-  return settings ? settings->value("Studio/BracketKeysResizeBrush", true).toBool() : true;
+  return settings ? settings->value("Studio/BracketKeysResizeBrush", studioPresentation).toBool() : studioPresentation;
 }
 
 //-----------------------------------------------------------------------------

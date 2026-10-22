@@ -335,11 +335,18 @@ class StudioAutosaveTest(unittest.TestCase):
         node = slicer.util.addVolumeFromArray(big, name="Big CT")
         del big
         slicer.util.setSliceViewerLayers(background=node, fit=True)
-        # Let the first renderings of the large volume finish (they block the main thread without autosave too)
-        settle = time.perf_counter() + 2.0
-        while time.perf_counter() < settle:
+        # Let the first renderings of the large volume finish (they block the main thread without autosave too): wait until
+        # the event loop has been quiet (no step over 20 ms) for one second, at least 2 s and at most 15 s
+        start = last = quietSince = time.perf_counter()
+        while last - start < 15.0:
             slicer.app.processEvents()
             time.sleep(0.005)
+            now = time.perf_counter()
+            if now - last > 0.020:
+                quietSince = now
+            last = now
+            if now - start >= 2.0 and now - quietSince >= 1.0:
+                break
         intervals = []
         last = [time.perf_counter()]
 

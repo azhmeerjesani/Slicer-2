@@ -251,7 +251,7 @@ _STUDIO_STEPS = (
     # The status appears with the first autosave: until then (or with autosave off) the step shows the ≡ menu, where recovery is
     Step("autosave", ("StudioSaveStatus", "StudioAppMenuButton"), _("Autosave"),
          _("Studio autosaves your work to a private folder and offers to recover it after a crash: the top bar shows "
-           "\"Autosaved\" once it has, and ≡ › File › Recover Autosaved Work… brings it back. "
+           "\"Autosaved\" once it has, and File > Recover Autosaved Work… in the ≡ menu brings it back. "
            "Autosave is not Save: your files change only when you save."),
          inSlicer=_("No autosave: you save with File > Save Data ({key:Ctrl+S})."), placement="below"),
     Step("classic", "StudioLibraryClassicLink", _("Classic interface, one switch away"),

@@ -51,6 +51,11 @@ THUMBNAIL_INTERVAL_S = 300
 THUMBNAIL_SIZE = 240
 #: Main-thread budget left in a tick for a thumbnail
 THUMBNAIL_BUDGET_MS = 15
+#: The thumbnail is grabbed in a tick of its own (one that did no other work than this): grabbing a view renders it, about
+#: 15 ms but up to 45 ms with software rendering
+THUMBNAIL_ALONE_MS = 5
+#: Ticks the thumbnail waits for a quiet tick; after them it is skipped in this generation (the next one tries again)
+THUMBNAIL_MAX_DEFERRALS = 20
 #: A generation is aborted when a modal dialog is shown longer than this
 MODAL_ABORT_S = 2.0
 #: Slots of earlier scenes of a session closed without saving that are kept
@@ -644,14 +649,18 @@ class AutosaveService:
             return
         if self._thumbnailDue(plan):
             elapsed = (time.perf_counter() - start) * 1000.0
-            if io.SLICE_BUDGET_MS - elapsed < THUMBNAIL_BUDGET_MS:
-                return  # in the next tick (the main-thread jobs are done)
-            plan.thumbnailChecked = True
-            thumbnailStart = time.perf_counter()
-            self._updateThumbnail(plan)
-            thumbnailMs = (time.perf_counter() - thumbnailStart) * 1000.0
-            plan.metrics["mainThreadMs"] += thumbnailMs
-            plan.metrics["maxSliceMs"] = max(plan.metrics["maxSliceMs"], elapsed + thumbnailMs)
+            if io.SLICE_BUDGET_MS - elapsed < THUMBNAIL_BUDGET_MS or elapsed >= THUMBNAIL_ALONE_MS:
+                plan.thumbnailDeferrals = getattr(plan, "thumbnailDeferrals", 0) + 1
+                if plan.thumbnailDeferrals <= THUMBNAIL_MAX_DEFERRALS:
+                    return  # in the next tick (the main-thread jobs are done)
+                plan.thumbnailChecked = True  # no quiet tick: finalize without a new thumbnail
+            else:
+                plan.thumbnailChecked = True
+                thumbnailStart = time.perf_counter()
+                self._updateThumbnail(plan)
+                thumbnailMs = (time.perf_counter() - thumbnailStart) * 1000.0
+                plan.metrics["mainThreadMs"] += thumbnailMs
+                plan.metrics["maxSliceMs"] = max(plan.metrics["maxSliceMs"], elapsed + thumbnailMs)
         self._tickTimer.stop()
         self.writer.submitFinalize(plan, onDone=self._generationDone, onError=self._generationFailed)
 

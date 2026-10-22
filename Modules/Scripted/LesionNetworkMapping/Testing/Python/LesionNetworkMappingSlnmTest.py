@@ -53,7 +53,11 @@ def _absolute_strings(value):
         return [item for child in value.values() for item in _absolute_strings(child)]
     if isinstance(value, list):
         return [item for child in value for item in _absolute_strings(child)]
-    return [value] if isinstance(value, str) and os.path.isabs(value) else []
+    if not isinstance(value, str):
+        return []
+    option, has_value, option_value = value.partition("=")
+    # A whole absolute path, or the value of a "--opt=/abs/path" command-line token
+    return [value] if os.path.isabs(value) or (has_value and option.startswith("-") and os.path.isabs(option_value)) else []
 
 
 class _StudyTestCase(unittest.TestCase):
@@ -424,6 +428,7 @@ class CommandLineTest(_StudyTestCase):
     def test_end_to_end(self):
         out = self.path("slnm-out")
         argv = self.argv(out, "--covariates", "volume_ml", "--perm", "200", "--lodo", "--control-scores", "age", "--compare-perm", "100")
+        argv[:2] = [f"--maps={argv[1]}"]  # the "--opt=/abs/path" form must not leave an absolute path in slnm.json
         result = subprocess.run([sys.executable, "-m", "LesionNetworkMappingLib.slnm", *argv], check=False, capture_output=True, text=True, env=_env(), cwd=self.tmp, timeout=600)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         events = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
