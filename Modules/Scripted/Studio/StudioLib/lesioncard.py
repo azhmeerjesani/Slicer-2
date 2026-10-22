@@ -14,13 +14,17 @@ Two parts:
     Row 4   space line (amber or neutral), when there is one
     Row 5   hint line (the suggested tool, the active tool), when there is one
     Row 6   [Fill gaps and specks] ...... [Notes ▸]   and the Notes fields when open
-            chip rows added with ``addChipRow()``
+            chip rows added with ``addChipRow()``; the QC chips (side against the report, location, CSF, mask checks,
+            duplicates and the dimensionality chip "2D · axial · 1 slice → 2 mm") are the third chip row, made by
+            ``StudioLib.lesionqc`` (L-28; ``LesionCard.qc``)
 
 ``addChipRow(key, widget)`` and ``addMenuAction(label, callback)`` let other work packages (figure card, case
 strip, policy card) add their rows and ⋯ items without editing this file.
 """
 
 import html
+import logging
+import traceback
 
 from StudioLib import lazyNumpy as np
 import qt
@@ -424,6 +428,15 @@ class LesionCard:
         self._notesTimer.connect("timeout()", self._commitNotes)
         ui.addPaletteListener(self._onPaletteChanged)
 
+        # The QC chips (L-28): evaluated 300 ms after the last change of the lesion, in a third chip row
+        self.qc = None
+        try:
+            from . import lesionqc
+
+            self.qc = lesionqc.attach(self)
+        except Exception:
+            logging.error(f"Studio: the lesion QC chips could not be added:\n{traceback.format_exc()}")
+
     def _label(self, objectName, basePx, links=False):
         label = qt.QLabel()
         label.setObjectName(objectName)
@@ -490,6 +503,8 @@ class LesionCard:
         sourceTyped = self.sourceReferenceEdit.hasFocus() or self.sourceReferenceEdit.isModified()
         if (switched or not sourceTyped) and str(self.sourceReferenceEdit.text) != (state.get("sourceReference") or ""):
             self.sourceReferenceEdit.setText(state.get("sourceReference") or "")
+        if self.qc is not None:
+            self.qc.notify(state)
 
     def _setText(self, label, text, colorToken=None):
         if not text:
@@ -610,7 +625,10 @@ class LesionCard:
         elif target == LINK_FILL:
             self.controller.fillGaps()
         elif target == LINK_CLIP:
-            self.controller.clipToBrain()
+            if self.qc is not None:
+                self.qc.clip()
+            else:
+                self.controller.clipToBrain()
 
     def _onNotesChanged(self):
         self._notesTimer.start()
@@ -687,6 +705,9 @@ class LesionCard:
     def dispose(self):
         ui.removePaletteListener(self._onPaletteChanged)
         self._notesTimer.stop()
+        if self.qc is not None:
+            self.qc.dispose()
+            self.qc = None
         for label in (self.readoutLabel,):
             try:
                 label.disconnect("linkActivated(QString)", self._onLinkActivated)
