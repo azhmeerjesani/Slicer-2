@@ -20,7 +20,9 @@
 // Qt includes
 #include <QDebug>
 #include <QEvent>
+#include <QHash>
 #include <QSettings>
+#include <QSpinBox>
 
 // QtGUI includes
 #include "qSlicerApplication.h"
@@ -46,6 +48,15 @@
 namespace
 {
 const char* const ThreeDViewDefaultsGroup = "Appearance/Default3DView/";
+
+/// Navigation behaviours that only the Slicer Studio interface applies (in the Studio module), with their defaults.
+/// Official Slicer installations sharing the same settings file ignore these keys.
+const char* const StudioLeftDragWindowLevelKey = "Studio/LeftDragWindowLevel";
+const char* const StudioFocusFollowsMouseKey = "Studio/FocusFollowsMouse";
+const char* const StudioPageStepSlicesKey = "Studio/PageStepSlices";
+const bool StudioLeftDragWindowLevelDefault = true;
+const bool StudioFocusFollowsMouseDefault = true;
+const int StudioPageStepSlicesDefault = 10;
 
 /// Default 3D view background and box, see qSlicerSettingsViewsPanel::threeDViewDefault()
 struct ThreeDViewDefaults
@@ -160,6 +171,24 @@ public:
 
   /// Last 3D view defaults applied to the views
   ThreeDViewDefaults AppliedThreeDViewDefaults;
+
+  /// Settings that hold the Studio/* navigation keys (the settings of the panel, or the application settings).
+  QSettings* studioNavigationSettings() const;
+  /// Show the current Studio/* navigation settings (or their defaults) in the "Navigation in Studio" widgets.
+  void updateStudioNavigationWidgets();
+  /// Save a Studio/* navigation setting changed by the user. The panel does not apply it:
+  /// the Studio interface applies these settings while it is active.
+  void setStudioNavigationSetting(const QString& key, const QVariant& value);
+  /// Remember the stored Studio/* navigation settings, restored by resetStudioNavigationSettings().
+  void saveStudioNavigationSettings();
+  /// Restore the Studio/* navigation settings remembered by saveStudioNavigationSettings().
+  void resetStudioNavigationSettings();
+
+  /// Stored values of the Studio/* navigation settings when the settings were last loaded or applied
+  /// (invalid if not set)
+  QHash<QString, QVariant> StudioNavigationSavedValues;
+  /// Fallback settings if the panel has no settings
+  QScopedPointer<QSettings> DefaultSettings;
 };
 
 // --------------------------------------------------------------------------
@@ -205,6 +234,18 @@ void qSlicerSettingsViewsPanelPrivate::init()
   QObject::connect(this->ThreeDBoxVisibleCheckBox, SIGNAL(toggled(bool)), q, SLOT(onThreeDBoxVisibleToggled(bool)));
   QObject::connect(this->ThreeDBoxColorButton, SIGNAL(colorChanged(QColor)), q, SLOT(onThreeDBoxColorChanged(QColor)));
   QObject::connect(this->ThreeDBackgroundResetButton, SIGNAL(clicked()), q, SLOT(resetThreeDViewDefaults()));
+
+  // Navigation in Studio. These behaviours are applied only by the Slicer Studio interface while it is
+  // active, so the classic interface and tests are not affected. The settings are fork-only (Studio/*)
+  // and are written only when the user changes them: they are not registered with registerProperty(),
+  // which would save the defaults.
+  this->updateStudioNavigationWidgets();
+  this->saveStudioNavigationSettings();
+  QObject::connect(
+    this->StudioLeftDragWindowLevelCheckBox, &QCheckBox::toggled, q, [this](bool checked) { this->setStudioNavigationSetting(StudioLeftDragWindowLevelKey, checked); });
+  QObject::connect(this->StudioFocusFollowsMouseCheckBox, &QCheckBox::toggled, q, [this](bool checked) { this->setStudioNavigationSetting(StudioFocusFollowsMouseKey, checked); });
+  QObject::connect(
+    this->StudioPageStepSlicesSpinBox, QOverload<int>::of(&QSpinBox::valueChanged), q, [this](int value) { this->setStudioNavigationSetting(StudioPageStepSlicesKey, value); });
 
   // MSAA Setting
   // "Off" is the default, and should be the zeroth index to ensure that
@@ -383,6 +424,89 @@ void qSlicerSettingsViewsPanelPrivate::updateThreeDViewDefaults()
 }
 
 // --------------------------------------------------------------------------
+QSettings* qSlicerSettingsViewsPanelPrivate::studioNavigationSettings() const
+{
+  Q_Q(const qSlicerSettingsViewsPanel);
+  if (q->settings())
+  {
+    return q->settings();
+  }
+  if (this->DefaultSettings.isNull())
+  {
+    const_cast<qSlicerSettingsViewsPanelPrivate*>(this)->DefaultSettings.reset(new QSettings());
+  }
+  return this->DefaultSettings.data();
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsViewsPanelPrivate::updateStudioNavigationWidgets()
+{
+  QSettings* settings = this->studioNavigationSettings();
+  bool ok = false;
+  int pageStepSlices = settings->value(StudioPageStepSlicesKey, StudioPageStepSlicesDefault).toInt(&ok);
+  if (!ok)
+  {
+    pageStepSlices = StudioPageStepSlicesDefault;
+  }
+  QSignalBlocker blocker1(this->StudioLeftDragWindowLevelCheckBox);
+  QSignalBlocker blocker2(this->StudioFocusFollowsMouseCheckBox);
+  QSignalBlocker blocker3(this->StudioPageStepSlicesSpinBox);
+  this->StudioLeftDragWindowLevelCheckBox->setChecked(settings->value(StudioLeftDragWindowLevelKey, StudioLeftDragWindowLevelDefault).toBool());
+  this->StudioFocusFollowsMouseCheckBox->setChecked(settings->value(StudioFocusFollowsMouseKey, StudioFocusFollowsMouseDefault).toBool());
+  // Clamped to the range of the spin box (1-100)
+  this->StudioPageStepSlicesSpinBox->setValue(pageStepSlices);
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsViewsPanelPrivate::setStudioNavigationSetting(const QString& key, const QVariant& value)
+{
+  Q_Q(qSlicerSettingsViewsPanel);
+  QSettings* settings = this->studioNavigationSettings();
+  if (settings->value(key) == value)
+  {
+    return;
+  }
+  settings->setValue(key, value);
+  // Let the settings dialog know that there is a change to apply or reset
+  emit q->settingChanged(key, value);
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsViewsPanelPrivate::saveStudioNavigationSettings()
+{
+  QSettings* settings = this->studioNavigationSettings();
+  this->StudioNavigationSavedValues.clear();
+  for (const char* key : { StudioLeftDragWindowLevelKey, StudioFocusFollowsMouseKey, StudioPageStepSlicesKey })
+  {
+    this->StudioNavigationSavedValues[key] = settings->contains(key) ? settings->value(key) : QVariant();
+  }
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsViewsPanelPrivate::resetStudioNavigationSettings()
+{
+  QSettings* settings = this->studioNavigationSettings();
+  for (auto it = this->StudioNavigationSavedValues.constBegin(); it != this->StudioNavigationSavedValues.constEnd(); ++it)
+  {
+    QVariant current = settings->contains(it.key()) ? settings->value(it.key()) : QVariant();
+    if (current == it.value())
+    {
+      // Unchanged: nothing is written
+      continue;
+    }
+    if (it.value().isValid())
+    {
+      settings->setValue(it.key(), it.value());
+    }
+    else
+    {
+      settings->remove(it.key());
+    }
+  }
+  this->updateStudioNavigationWidgets();
+}
+
+// --------------------------------------------------------------------------
 // qSlicerSettingsViewsPanel methods
 
 // --------------------------------------------------------------------------
@@ -511,6 +635,46 @@ void qSlicerSettingsViewsPanel::resetThreeDViewDefaults()
     settings.remove(ThreeDViewDefaultsGroup + QString(name));
   }
   d->updateThreeDViewDefaults();
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsViewsPanel::applySettings()
+{
+  Q_D(qSlicerSettingsViewsPanel);
+  this->Superclass::applySettings();
+  d->saveStudioNavigationSettings();
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsViewsPanel::resetSettings()
+{
+  Q_D(qSlicerSettingsViewsPanel);
+  this->Superclass::resetSettings();
+  d->resetStudioNavigationSettings();
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsViewsPanel::restoreDefaultSettings()
+{
+  Q_D(qSlicerSettingsViewsPanel);
+  this->Superclass::restoreDefaultSettings();
+  // Restoring the defaults is an explicit user request: the Studio/* navigation settings are removed,
+  // so that the defaults apply.
+  QSettings* settings = d->studioNavigationSettings();
+  for (const char* key : { StudioLeftDragWindowLevelKey, StudioFocusFollowsMouseKey, StudioPageStepSlicesKey })
+  {
+    settings->remove(key);
+  }
+  d->updateStudioNavigationWidgets();
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsViewsPanel::reloadSettings()
+{
+  Q_D(qSlicerSettingsViewsPanel);
+  this->Superclass::reloadSettings();
+  d->updateStudioNavigationWidgets();
+  d->saveStudioNavigationSettings();
 }
 
 // --------------------------------------------------------------------------

@@ -91,6 +91,14 @@ public slots:
   void setThreeDRulerType(const QString&);
   void sliceViewOrientationChangedByUser();
 
+  /// Reimplemented to also handle the "Navigation in Studio" settings (Studio/LeftDragWindowLevel,
+  /// Studio/FocusFollowsMouse, Studio/PageStepSlices). They are saved only when the user changes them
+  /// and are applied by the Slicer Studio interface while it is active, never by the panel.
+  void applySettings() override;
+  void resetSettings() override;
+  void restoreDefaultSettings() override;
+  void reloadSettings() override;
+
 signals:
   /// Signal emitted when the current value is changed
   void currentMSAAChanged(const QString&);

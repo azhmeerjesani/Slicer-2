@@ -124,6 +124,8 @@ By default 3D Slicer uses window/level setting that is specified in the DICOM fi
 
 Window/level can be manually adjusted anytime by clicking on "Adjust window/level" button on the toolbar then left-click-and-drag in any of the slice viewers. Optimal window/level can be computed for a chosen area by lef-click-and-dragging while holding down <kbd>Ctrl</kbd> key.
 
+In the Slicer Studio interface, left-click-and-drag in a slice view adjusts window/level without switching mouse mode, whenever no tool or mode is active (see [Navigation in Studio](#navigation-in-studio)).
+
 [![](https://img.youtube.com/vi/u1B0F1KcVsk/0.jpg)](https://youtu.be/u1B0F1KcVsk "Demo video of how to adjust image window/level")
 
 Additional window/level options, presets, intensity histogram, automatic adjustments are available in Display section of [Volumes](modules/volumes.md) module.  Presets are also available in the context menu of the Slice views.  You can reset to the automatically calculated window/level settings using the context menu or by using `Ctrl` + `left-double-click` on the Slice view.
@@ -239,7 +241,8 @@ The following shortcuts are available when a slice view is active. To
 activate a view, click inside the view: if you do not want to change
 anything in the view, just activate it then do `right-click` without
 moving the mouse. Note that simply hovering over the mouse over a slice
-view will not activate the view.
+view will not activate the view (except in the Slicer Studio interface, see
+[Navigation in Studio](#navigation-in-studio)).
 
 | Shortcut | Operation |
 | -------- | --------- |
@@ -264,8 +267,9 @@ view will not activate the view.
 The following shortcuts are available when a 3D view is active. To
 activate a view, click inside the view: if you do not want to change
 anything in the view, just activate it then do `right-click` without
-moving the mouse. Note that simply hovering over the mouse over a slice
-view will not activate the view.
+moving the mouse. Note that simply hovering over the mouse over a 3D
+view will not activate the view (except in the Slicer Studio interface, see
+[Navigation in Studio](#navigation-in-studio)).
 
 | Shortcut | Operation |
 | -------- | --------- |
@@ -300,6 +304,38 @@ Simulation if shortcuts not available on your device:
 - Trackpad: instead of `right-click` do `two-finger click`
 
 :::
+
+### Navigation in Studio
+
+The Slicer Studio interface adds the following behaviours to the slice and 3D views. They apply only while
+the Studio interface is active: the Classic interface (and Slicer started with `--testing`) keeps the
+standard behaviour described above, and switching back to Classic restores it immediately.
+
+| Shortcut | Operation |
+| -------- | --------- |
+| hover the mouse over a view | the view under the mouse becomes active: its keyboard shortcuts work without a click |
+| `Page Up` / `Page Down` (slice view) | move 10 slices forward/backward (the number of slices is configurable) |
+| `Home` / `End` (slice view) | move to the first/last slice of the volume |
+| `left arrow` / `right arrow`, `mouse wheel`, `Page Up` / `Page Down` (slice view) | stop at the first and last slice of the volume instead of moving past it |
+| `Ctrl` + `mouse wheel` (slice view) | zoom in and out by the same factor, so that one step in and one step out cancel exactly |
+| `left-click` + `drag` (slice view) | adjust window/level when no tool or mode is active; Markups placement and Segment Editor tools keep the left button |
+| `Space` (while a Draw tool is active) | pause or resume the tool; while it is paused, `left-click` + `drag` adjusts window/level |
+
+Notes:
+- Hovering does not take the keyboard focus away from a text field (for example a search field, a spin
+  box or the Python console), and not while a menu, popup or dialog is open, or while the window is not
+  active.
+- In 3D views, `Page Down`, `Home` and `End` keep their standard meaning (rotate to a standard view).
+- The behaviours can be changed in *Application Settings > Views > Navigation in Studio*:
+
+| Setting | Default | Description |
+| ------- | ------- | ----------- |
+| Left-drag adjusts window/level (`Studio/LeftDragWindowLevel`) | on | Left-click-and-drag adjusts window/level in slice views when no tool or mode is active |
+| Keys act on the view under the mouse (`Studio/FocusFollowsMouse`) | on | Slice and 3D views become active when the mouse enters them |
+| Page Up / Page Down step (`Studio/PageStepSlices`) | 10 | Number of slices that `Page Up` and `Page Down` move (1-100) |
+
+Changes take effect when the settings dialog is closed. These settings are used only by Slicer Studio;
+other Slicer installations that share the same settings file ignore them.
 
 ### Python console
 

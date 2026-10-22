@@ -62,6 +62,88 @@
         </widget>
        </item>
        <item>
+        <widget class="ctkCollapsibleGroupBox" name="StudioNavigationGroupBox">
+         <property name="title">
+          <string>Navigation in Studio</string>
+         </property>
+         <layout class="QFormLayout" name="StudioNavigationFormLayout">
+          <property name="fieldGrowthPolicy">
+           <enum>QFormLayout::AllNonFixedFieldsGrow</enum>
+          </property>
+          <item row="0" column="0" colspan="2">
+           <widget class="QLabel" name="StudioNavigationNoteLabel">
+            <property name="text">
+             <string>Applies in the Studio interface; Classic keeps the standard behaviour.</string>
+            </property>
+            <property name="wordWrap">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="0">
+           <widget class="QLabel" name="StudioLeftDragWindowLevelLabel">
+            <property name="text">
+             <string>Left-drag adjusts window/level:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="1">
+           <widget class="ctkCheckBox" name="StudioLeftDragWindowLevelCheckBox">
+            <property name="toolTip">
+             <string>In the Studio interface, dragging with the left mouse button in a view adjusts the window and level of the image when no tool or mode is active. Markups and Segment Editor tools keep the left button.</string>
+            </property>
+            <property name="checked">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
+          <item row="2" column="0">
+           <widget class="QLabel" name="StudioFocusFollowsMouseLabel">
+            <property name="text">
+             <string>Keys act on the view under the mouse:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="2" column="1">
+           <widget class="ctkCheckBox" name="StudioFocusFollowsMouseCheckBox">
+            <property name="toolTip">
+             <string>In the Studio interface, a slice or 3D view takes the keyboard focus when the mouse enters it, without a click. Text fields, menus and dialogs keep the focus.</string>
+            </property>
+            <property name="checked">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
+          <item row="3" column="0">
+           <widget class="QLabel" name="StudioPageStepSlicesLabel">
+            <property name="text">
+             <string>Page Up / Page Down step:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="3" column="1">
+           <widget class="QSpinBox" name="StudioPageStepSlicesSpinBox">
+            <property name="toolTip">
+             <string>In the Studio interface, number of slices that Page Up and Page Down move the slice view under the mouse.</string>
+            </property>
+            <property name="suffix">
+             <string> slices</string>
+            </property>
+            <property name="minimum">
+             <number>1</number>
+            </property>
+            <property name="maximum">
+             <number>100</number>
+            </property>
+            <property name="value">
+             <number>10</number>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+       <item>
         <widget class="ctkCollapsibleGroupBox" name="CollapsibleGroupBox">
          <property name="title">
           <string>Slice viewer defaults</string>
