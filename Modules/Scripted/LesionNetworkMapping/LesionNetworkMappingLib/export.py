@@ -19,6 +19,12 @@ All files are plain NIfTI-1, JSON, Markdown and shell text.
 :func:`check_poolable` and :func:`compare_runs` tell whether maps of several runs may be pooled
 (same connectome manifest, subject list, statistic, resampling and library version; see
 :func:`compatibility_key`) and how two runs differ.
+
+Reporting v2 (study level, from the run registry and files; see :mod:`.methods` and :mod:`.checklist`):
+:func:`write_methods` writes methods.md/.html/.txt and checklist.md, :func:`supplementary_lesions_tsv`
+the numbered case table, :func:`publication_manifest` the list of files to publish and
+:func:`neurovault_metadata` the NeuroVault image metadata (nothing is uploaded). ``methods.md`` of a
+single run (:func:`methods_text`) is rendered from :func:`.methods.run_sections`.
 """
 
 import datetime
@@ -31,6 +37,7 @@ import re
 import shlex
 import shutil
 import sys
+from typing import NamedTuple
 
 # SPEC_LNM_ADDENDUM section 3.11 (exact text): both sides of the 2026 debate are cited
 DISCLAIMER = (
@@ -668,7 +675,7 @@ def write_run(out_dir, maps, lesion_names, bundle, rule=None, resolved=None, qa=
         "disclaimer": DISCLAIMER,
     }
     write_json_atomic(provenance_path, _clean(provenance))
-    _write_text_atomic(methods_path, methods_text(info, n, subset, threshold, lesions, run_meta))
+    _write_text_atomic(methods_path, methods_text(info, n, subset, threshold, lesions, run_meta, software=software))
     _write_text_atomic(reproduce_path, reproduce_script(run_meta, info, lesions, preview_n), mode=0o755)
     return {
         "maps": [p for name in lesion_names for p in written_maps[name].values()],
@@ -733,105 +740,13 @@ def _format_number(value, digits=2):
     return f"{value:.{digits}f}"
 
 
-def methods_text(info, n, subset, threshold, lesions, run_meta=None):
-    """Generated methods.md: a paragraph, the parameters, QA values, citations and the disclaimer."""
-    run_meta = run_meta or {}
-    null = run_meta.get("null") or {}
-    resolved = threshold["resolved"]
-    spacing = info.get("voxel_size_mm") or []
-    spacing_text = "x".join(f"{v:g}" for v in spacing) + " mm" if spacing else "connectome"
-    subject_list = _subject_list(run_meta, partial=subset["partial"])
-    if subset["preview"]:
-        subset_text = f" (preview: a {'random ' if subset['random'] else ''}subset of {n} of {info.get('n_subjects')} subjects{', seed ' + str(subset['seed']) if subset['random'] else ''})"
-    elif subset["partial"]:
-        subset_text = f" (partial run: {n} of {info.get('n_subjects')} subjects)"
-    elif subject_list["name"]:
-        subset_text = f" (the named subject subset \"{subject_list['name']}\" of the connectome's {info.get('n_subjects')} subjects)"
-    elif subject_list["sha256"]:
-        subset_text = f" (a subject list of {n} of {info.get('n_subjects')} subjects)"
-    else:
-        subset_text = ""
-    # Connectome identity, when known: DOI, dataset version, named subset and global signal regression
-    identity = []
-    if info.get("doi"):
-        identity.append(f"doi:{info['doi']}")
-    if info.get("dataset_version"):
-        identity.append(f"dataset version {info['dataset_version']}")
-    if subject_list["name"]:
-        identity.append(f"subset \"{subject_list['name']}\"")
-    if info.get("gsr") is True:
-        identity.append("preprocessed with global signal regression")
-    elif info.get("gsr") is False:
-        identity.append("preprocessed without global signal regression")
-    identity_text = f"; {', '.join(identity)}" if identity else ""
-    if resolved["statistic"] == "Fz":
-        threshold_text = f"Maps were displayed at |mean Fz| ≥ {resolved['value']:g} (effect size; maps are stored unthresholded)."
-    else:
-        p_text = f", two-sided p_unc ≤ {resolved['p_unc']:.2g}" if resolved.get("p_unc") is not None else ""
-        threshold_text = f"T maps were thresholded at |T| ≥ {_format_number(resolved['value'])} (rule {threshold['rule']['kind']}, df = {resolved['df']}, V = {resolved['v']:,} voxels{p_text}); maps are stored unthresholded."
-    qa_text = "Specificity QA followed van den Heuvel et al. (2026): the spatial correlation between each T map and the connectome degree map was computed when the degree map was available"
-    if null.get("k"):
-        qa_text += (
-            f", and each lesion was rigidly relocated to {null['k']} random positions inside the brain mask "
-            f"(integer voxel shifts on the connectome grid, ≥ {int(100 * null.get('min_inside', 0.95))}% of the lesion weight inside, overlap with the original lesion allowed, seed {null.get('seed', 0)}) "
-            "and mapped in the same pass"
-        )
-        if any((lesion.get("qa") or {}).get("null") for lesion in lesions):
-            qa_text += "; the similarity between each map and the maps of its relocated lesions is reported"
-        else:
-            qa_text += "; the similarity to the relocated-lesion maps is not available for this run (it is computed when a run completes)"
-    qa_text += "."
-    paragraph = (
-        f"Lesion network maps were computed with the lesion network mapping library of 3D Slicer ({LIBRARY_NAME} {LIBRARY_VERSION}). "
-        f"Each lesion was resampled onto the {spacing_text} grid of the {info.get('name')} normative functional connectome ({info.get('n_voxels', 0):,} voxels{identity_text}) as fractional voxel occupancy. "
-        f"For each of N = {n} subjects{subset_text}, the occupancy-weighted time course of the lesion was correlated (Pearson r) with the time course of every voxel, "
-        "the correlations were averaged over runs and Fisher z-transformed, and maps of the mean r, the mean Fisher z and the voxelwise one-sample t statistic of Fisher z "
-        f"across subjects (df = {max(n - 1, 0)}) were computed (Boes et al., 2015; Fox, 2018). {threshold_text} {qa_text}"
-    )
-    lines = [
-        "# Methods",
-        "",
-        paragraph,
-        "",
-        "## Parameters",
-        "",
-        "| Parameter | Value |",
-        "|---|---|",
-        f"| Connectome | {info.get('name')} (manifest sha256 {info.get('manifest_sha256') or 'n/a'}) |",
-        f"| Connectome DOI and version | {('doi:' + info['doi']) if info.get('doi') else NOT_RECORDED}; version {info.get('dataset_version') or NOT_RECORDED} |",
-        f"| Global signal regression | {'yes' if info.get('gsr') is True else 'no' if info.get('gsr') is False else NOT_RECORDED} |",
-        f"| Connectome mask sha256 | {info.get('mask_sha256') or NOT_RECORDED} |",
-        f"| Data use terms | {info.get('licence') or NOT_RECORDED} |",
-        f"| Subjects (N) | {n} of {info.get('n_subjects')} |",
-        f"| Subset | {'preview' if subset['preview'] else 'partial' if subset['partial'] else 'subject list' if subject_list['sha256'] else 'all'}; random {str(subset['random']).lower()}; seed {subset['seed']} |",
-        f"| Subject list | {_subject_list_text(subject_list)} |",
-        f"| Threshold rule | `{json.dumps(threshold['rule'], sort_keys=True)}` |",
-        f"| Resolved threshold | {threshold['derived']} |",
-        f"| Relocated-lesion null | {null.get('k', 0)} per lesion, seed {null.get('seed', 0)} |",
-        "",
-        "## Lesions and QA",
-        "",
-        "| Lesion | Voxels on connectome grid | Fractional sum | Degree r | Degree rho | Null r (median) | Null r (mean map) | Null percentile |",
-        "|---|---|---|---|---|---|---|---|",
-    ]
-    for lesion in lesions:
-        qa = lesion.get("qa") or {}
-        null_summary = qa.get("null") or {}
-        lines.append(
-            f"| {lesion['name']} | {lesion.get('voxels_on_connectome_grid') if lesion.get('voxels_on_connectome_grid') is not None else 'n/a'} | {_format_number(lesion.get('fractional_sum'), 1)} | "
-            f"{_format_number(qa.get('degree_r'))} | {_format_number(qa.get('degree_rho'))} | {_format_number(null_summary.get('r_median'))} | "
-            f"{_format_number(null_summary.get('r_mean_map'))} | {_format_number(null_summary.get('percentile'), 0)} |",
-        )
-    lines += ["", "## Citations", ""]
-    lines += [f"- {CITATIONS['boes2015']}", f"- {CITATIONS['fox2018']}"]
-    if info.get("citation"):
-        lines.append(f"- Connectome: {info['citation']}")
-    lines += [f"- {CITATIONS[key]}" for key in DEBATE_CITATIONS]
-    acknowledgement = info.get("acknowledgement") or (GSP_ACKNOWLEDGEMENT if info.get("licence") == GSP_LICENCE else None)
-    if acknowledgement:
-        lines += ["", "## Acknowledgements", "", acknowledgement]
-    lines += ["", "## Disclaimer", "", DISCLAIMER, ""]
-    return "\n".join(lines)
+def methods_text(info, n, subset, threshold, lesions, run_meta=None, software=None):
+    """Generated methods.md of one run: the sectioned methods of :func:`.methods.run_sections` (the maps
+    paragraph, parameters, lesions and QA, software, citations, acknowledgements and the disclaimer).
+    """
+    from . import methods
+
+    return methods.render(methods.run_sections(info, n, subset, threshold, lesions, run_meta, software=software), "md")
 
 
 def _subject_list_text(subject_list):
@@ -942,3 +857,400 @@ def reproduce_script(run_meta, info, lesions, preview_n=None):
     lines += [f"  {shlex.quote(token)} \\" for token in arguments]
     lines += ['  --out "$OUT" --run-json "$OUT/run.json"', ""]
     return "\n".join(lines)
+
+
+# Reporting v2: methods files, supplementary case table, publication manifest, NeuroVault metadata
+
+SUPPLEMENTARY_COLUMNS = ("case", "participant_id", "citation", "figure", "panel", "age", "sex", "side", "reported_location", "dimensionality", "volume_ml", "trace_method", "review_status")
+PUBLICATION_FORMAT = "slicer-lnm-publication"
+NEUROVAULT_FORMAT = "slicer-lnm-neurovault"
+METHODS_FORMATS = ("md", "html", "txt")
+# Desc suffixes of p-value maps (plain p, 1 outside the mask); other group maps are unthresholded statistics
+P_MAP_SUFFIXES = ("PUnc", "PFwe", "PFdr", "TfcePFwe")
+# Files listed by the publication manifest, by kind (``required`` kinds are reported as missing when absent)
+PUBLICATION_KINDS = ("unthresholded_map", "p_map", "design", "palm_export", "reproduce", "checklist", "neurovault", "methods")
+_SKIPPED_FOLDERS = ("cache", ".studio")
+_GROUP_MAP = re.compile(r"_desc-([A-Za-z0-9]+)_map\.nii(?:\.gz)?$")
+_LESION_MAP = re.compile(r"_desc-([A-Za-z0-9]+)_funcmap\.nii(?:\.gz)?$")
+
+
+def write_methods(root, out_dir, formats=METHODS_FORMATS, study=None, runs=None, software=None, checklist=True):
+    """Write the sectioned methods of a study (:func:`.methods.methods_sections`) as methods.<fmt> files
+    in ``out_dir`` (HTML as a standalone page), and checklist.md with the battery when ``checklist``.
+
+    ``out_dir`` is also searched for run outputs (provenance.json, glm.json, pipeline.json), so the
+    methods of a pipeline export include its own run before it is registered.
+
+    :return: {fmt: path, ..., "checklist": path or None, "items": checklist items or None, "battery": dots or None}.
+    """
+    from . import checklist as checklistlib
+    from . import methods
+
+    unknown = [fmt for fmt in formats if fmt not in METHODS_FORMATS]
+    if unknown:
+        raise ValueError(f"Unknown methods format(s) {unknown} (md, html or txt)")
+    os.makedirs(out_dir, exist_ok=True)
+    records = methods.Records(root, study=study, runs=runs, software=software, include_dirs=[out_dir])
+    sections = methods.methods_sections(root, records=records)
+    out = {}
+    for fmt in formats:
+        path = os.path.join(out_dir, f"methods.{fmt}")
+        _write_text_atomic(path, methods.render(sections, fmt, standalone=fmt == "html"))
+        out[fmt] = path
+    out.update({"checklist": None, "items": None, "battery": None})
+    if checklist:
+        out["checklist"], out["items"], out["battery"] = checklistlib.write_checklist(root, out_dir, records=records)
+    return out
+
+
+def gallery_order(study):
+    """Participant ids in gallery order: lesionset.json "gallery" (or "order") when recorded, else the
+    included rows of participants.tsv in table order.
+    """
+    included = [row["participant_id"] for row in study.subjects if row.get("include", "1") != "0"]
+    path = os.path.join(study.path, "derivatives", "lnm", "lesionset.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {}
+    summary = data.get("summary") if isinstance(data, dict) else None
+    for source in (data, summary or {}):
+        order = source.get("gallery") or source.get("order") if isinstance(source, dict) else None
+        if isinstance(order, dict):
+            order = order.get("sids") or order.get("order")
+        if isinstance(order, list) and order:
+            ordered = [sid for sid in order if sid in included]
+            return ordered + [sid for sid in included if sid not in ordered]
+    return included
+
+
+def supplementary_lesions_tsv(study, out, order=None):
+    """Write the supplementary case table (one row per included lesion, numbered in gallery order):
+    case, participant_id, citation, figure, panel, age, sex, side, reported location, dimensionality,
+    volume (mL), trace method and review status; empty values are "not recorded".
+
+    :param study: ``study.Study`` or a study folder.
+    :param order: participant ids in gallery order (default :func:`gallery_order`); ids that are not
+      in participants.tsv, and repeats, are skipped.
+    :return: the TSV path.
+    """
+    from .study import Study, is_missing
+
+    if not hasattr(study, "subjects"):
+        study = Study.open(study)
+    if order is None:
+        order = gallery_order(study)
+    else:
+        known = set(study.subject_ids)  # a stale gallery entry (a removed participant) is skipped
+        order = [sid for sid in dict.fromkeys(order) if sid in known]
+
+    def value(row, *columns):
+        for column in columns:
+            text = row.get(column)
+            if not is_missing(text) and str(text).strip():
+                return str(text).replace("\t", " ").replace("\n", " ")
+        return NOT_RECORDED
+
+    lines = ["\t".join(SUPPLEMENTARY_COLUMNS)]
+    for number, sid in enumerate(order, 1):
+        row = study.subject(sid)
+        citation = value(row, "citation")
+        if citation == NOT_RECORDED and not is_missing(row.get("doi")):
+            citation = f"doi:{row['doi']}"
+        cells = [
+            str(number),
+            sid,
+            citation,
+            value(row, "figure"),
+            value(row, "panel"),
+            value(row, "age"),
+            value(row, "sex"),
+            value(row, "reported_side", "hemisphere"),
+            value(row, "reported_location"),
+            value(row, "dimensionality"),
+            value(row, "volume_ml"),
+            value(row, "trace_method"),
+            value(row, "review_status"),
+        ]
+        lines.append("\t".join(cells))
+    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+    _write_text_atomic(out, "\n".join(lines) + "\n")
+    return out
+
+
+def _publication_kind(name, folder_names):
+    if name in ("design.json", "design_matrix.tsv"):
+        return "design"
+    if name in ("reproduce.sh", "reproduce_pipeline.sh"):
+        return "reproduce"
+    if name == "checklist.md":
+        return "checklist"
+    if name in ("methods.md", "methods.html", "methods.txt"):
+        return "methods"
+    if "run_palm.sh" in folder_names and (name == "run_palm.sh" or not name.endswith(".nii.gz")):
+        return "palm_export"
+    group = _GROUP_MAP.search(name)
+    if group:
+        return "p_map" if group.group(1).endswith(P_MAP_SUFFIXES) else "unthresholded_map"
+    lesion = _LESION_MAP.search(name)
+    if lesion and not lesion.group(1).startswith("Relocated"):
+        return "unthresholded_map"
+    return None
+
+
+def publication_manifest(root, out=None, hashes=True):
+    """List the files to publish under ``root`` (a study or output folder): unthresholded maps and p maps,
+    design files, the PALM export, reproduce scripts, checklist.md, methods and neurovault/images.json.
+
+    Paths are relative to ``root`` with "/" separators (no absolute local paths). Kinds that the runs
+    should have produced but are absent are listed in "missing" (design, p maps and the PALM export
+    only when a group analysis exists).
+
+    :param out: optional path of the manifest JSON to write (e.g. derivatives/lnm/publication/manifest.json).
+    :param hashes: add the sha256 of every file.
+    :return: {"format", "version", "created", "files": [{"path", "kind", "bytes", "sha256"}], "missing", "disclaimer"}.
+    """
+    root = os.path.abspath(os.fspath(root))
+    bases = [folder for folder in (os.path.join(root, "derivatives", "lnm"), os.path.join(root, "neurovault")) if os.path.isdir(folder)] or [root]
+    out_abs = os.path.abspath(out) if out else None
+    files, seen, group_analysis = [], set(), False
+    for base in bases:
+        for folder, folders, names in os.walk(base):
+            folders[:] = sorted(name for name in folders if name not in _SKIPPED_FOLDERS and not name.startswith("."))
+            for name in sorted(names):
+                path = os.path.join(folder, name)
+                if path == out_abs or os.path.realpath(path) in seen:
+                    continue
+                if name in ("glm.json", "slnm.json"):
+                    group_analysis = True
+                kind = "neurovault" if name == "images.json" and os.path.basename(folder) == "neurovault" else _publication_kind(name, names)
+                if kind is None:
+                    continue
+                seen.add(os.path.realpath(path))
+                entry = {"path": os.path.relpath(path, root).replace(os.sep, "/"), "kind": kind, "bytes": os.path.getsize(path)}
+                if hashes:
+                    entry["sha256"] = file_sha256(path)
+                files.append(entry)
+    required = ["unthresholded_map", "reproduce", "checklist", "neurovault"]
+    if group_analysis:
+        required[1:1] = ["p_map", "design", "palm_export"]
+    present = {entry["kind"] for entry in files}
+    manifest = {
+        "format": PUBLICATION_FORMAT,
+        "version": 1,
+        "created": now_iso(),
+        "files": files,
+        "missing": [kind for kind in required if kind not in present],
+        "disclaimer": DISCLAIMER,
+    }
+    if out:
+        os.makedirs(os.path.dirname(out_abs), exist_ok=True)
+        write_json_atomic(out_abs, manifest)
+    return manifest
+
+
+def _lesion_sidecar_for(path):
+    """The per-lesion sidecar (*_lnm.json) in the folder of a map file that lists it, or None."""
+    folder, name = os.path.split(os.path.abspath(path))
+    try:
+        candidates = sorted(entry for entry in os.listdir(folder) if entry.endswith("_lnm.json"))
+    except OSError:
+        return None
+    for candidate in candidates:
+        try:
+            with open(os.path.join(folder, candidate), encoding="utf-8") as f:
+                sidecar = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if name in (sidecar.get("maps") or {}).values():
+            return sidecar
+    return None
+
+
+def _read_json_or_none(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+class _ConnectomeSource(NamedTuple):
+    connectome: dict
+    n: object
+
+
+def _connectome_source(source):
+    """_ConnectomeSource(bundle info, connectome N or None) from a connectome description: a bundle
+    info dict, a run record holding one (cohortmaps.json "bundle", provenance.json "connectome",
+    glm.json/slnm.json "connectome"."bundle"), the path of such a JSON file, or a folder holding one.
+    """
+    if isinstance(source, _ConnectomeSource):
+        return source
+    if source is None:
+        return _ConnectomeSource({}, None)
+    if isinstance(source, (str, os.PathLike)):
+        path = os.fspath(source)
+        if os.path.isdir(path):
+            for name in ("cohortmaps.json", "provenance.json", "glm.json", "slnm.json"):
+                if os.path.isfile(os.path.join(path, name)):
+                    path = os.path.join(path, name)
+                    break
+        source = _read_json_or_none(path) or {}
+    if not isinstance(source, dict):
+        return _ConnectomeSource({}, None)
+    if isinstance(source.get("bundle"), dict):  # cohortmaps.json
+        return _ConnectomeSource(source["bundle"], source.get("n"))
+    connectome = source.get("connectome")
+    if isinstance(connectome, dict):
+        if isinstance(connectome.get("bundle"), dict):  # glm.json, slnm.json
+            return _ConnectomeSource(connectome["bundle"], None)
+        return _ConnectomeSource(connectome, source.get("N"))  # provenance.json, *_lnm.json
+    return _ConnectomeSource(source, None)  # a bundle info dict (its n_subjects may cover a larger set than was used)
+
+
+def study_connectomes(root):
+    """{bundle name: connectome source} of the cohortmaps runs of a study (their cohortmaps.json under
+    derivatives/, cache folders and hidden folders skipped). A per-lesion map in a shared cohortmaps cache
+    folder records only its bundle name (entry.json); this resolves its licence, space and acknowledgement.
+    """
+    found = {}
+    top = os.path.join(os.fspath(root), "derivatives")
+    for folder, folders, names in os.walk(top):
+        folders[:] = sorted(name for name in folders if name not in _SKIPPED_FOLDERS and not name.startswith("."))
+        if "cohortmaps.json" in names:
+            source = _connectome_source(os.path.join(folder, "cohortmaps.json"))
+            name = source.connectome.get("name")
+            if name:
+                found.setdefault(name, []).append(source)
+    return found
+
+
+def neurovault_image(item, connectome=None):
+    """NeuroVault metadata of one map (see :func:`neurovault_metadata`).
+
+    :param connectome: optional connectome source used when the map's folder records none (see
+      :func:`neurovault_metadata`); item["connectome"] takes precedence.
+    """
+    item = {"path": item} if not isinstance(item, dict) else dict(item)
+    path = os.fspath(item["path"])
+    name = os.path.basename(path)
+    folder = os.path.dirname(os.path.abspath(path))
+    lesion = _LESION_MAP.search(name)
+    group = _GROUP_MAP.search(name)
+    desc = (lesion or group).group(1) if (lesion or group) else ""
+    fallback = _connectome_source(item["connectome"] if item.get("connectome") is not None else connectome)
+    licence, connectome = item.get("licence"), {}
+    df, n_subjects, sign, description = item.get("df"), item.get("number_of_subjects", item.get("n_lesions")), item.get("sign_coding"), item.get("description")
+    if name.endswith(("_mask.nii.gz", "_mask.nii")):
+        map_type = "R"
+    elif lesion:
+        sidecar = _lesion_sidecar_for(path) or {}
+        provenance = _read_json_or_none(os.path.join(folder, "provenance.json")) or {}
+        # A cohortmaps cache entry holds only entry.json (bundle name and connectome N)
+        entry = {} if (sidecar or provenance) else (_read_json_or_none(os.path.join(folder, "entry.json")) or {})
+        entry = entry if isinstance(entry, dict) else {}
+        if entry.get("bundle") and fallback.connectome.get("name") not in (None, entry["bundle"]):
+            fallback = _ConnectomeSource({}, None)  # a connectome other than the one that made the map
+        connectome = sidecar.get("connectome") or provenance.get("connectome") or fallback.connectome or {}
+        licence = licence or sidecar.get("terms") or provenance.get("terms") or connectome.get("licence")
+        n = item.get("connectome_n", sidecar.get("N", provenance.get("N", entry.get("n", fallback.n))))
+        statistic = "T" if re.fullmatch(r"T(?:PreviewN\d+|Subset[A-Za-z0-9]*)?", desc) else "Fz" if desc.startswith("AvgRFz") else "R" if desc.startswith("AvgR") else desc
+        map_type = "T" if statistic == "T" else "Other"
+        if map_type == "T" and df is None and n is not None:
+            df = int(n) - 1  # per-lesion one-sample t over the connectome subjects
+        n_subjects = 1 if n_subjects is None else n_subjects
+        sign = sign or "Positive values: voxels whose resting-state time course correlates positively with the lesion's mean time course; negative values: anticorrelated voxels."
+        description = description or f"Lesion network map ({ {'T': 'one-sample t of Fisher z across connectome subjects', 'Fz': 'mean Fisher z', 'R': 'mean r'}.get(statistic, desc) }; connectome N = {n if n is not None else NOT_RECORDED}); unthresholded."
+    else:
+        record = _read_json_or_none(os.path.join(folder, "glm.json")) or _read_json_or_none(os.path.join(folder, "slnm.json")) or {}
+        connectome = ((record.get("connectome") or {}).get("bundle")) or {}
+        connectome = (connectome if isinstance(connectome, dict) else {}) or fallback.connectome
+        licence = licence or connectome.get("licence")
+        if n_subjects is None:
+            n_subjects = record.get("n")
+        is_p = desc.endswith(P_MAP_SUFFIXES)
+        is_t = desc.endswith("Tstat")
+        map_type = "T" if is_t else "Other"
+        if is_t and df is None:
+            df = record.get("df")
+            if df is None and record.get("n") is not None and (record.get("contrast") or {}).get("columns"):
+                df = int(record["n"]) - len(record["contrast"]["columns"])  # n - p
+        if sign is None:
+            if is_p:
+                sign = "Plain p-values (not 1 - p, not -log10 p); 1 outside the mask."
+            elif record.get("score"):
+                flip = " The score was multiplied by -1 before mapping." if record.get("flip") else ""
+                sign = f"Positive values: stronger connectivity with the lesion goes with a higher {record['score']} score.{flip}"
+            elif record.get("contrast"):
+                contrast = record["contrast"]
+                sign = f"Positive values: the contrast {contrast.get('label') or NOT_RECORDED} ({contrast.get('spec') or NOT_RECORDED}) is positive."
+            else:
+                sign = NOT_RECORDED
+        description = description or f"Group lesion network map ({desc}); {'p-value map' if is_p else 'unthresholded statistic'}."
+    space = str(connectome.get("space") or "")
+    image = {
+        "name": item.get("name") or re.sub(r"\.nii(\.gz)?$", "", name),
+        "file": item.get("file") or name,
+        "map_type": item.get("map_type") or map_type,
+        "modality": "fMRI-BOLD",
+        "analysis_level": "G",
+        "is_thresholded": False,
+        "number_of_subjects": n_subjects,
+        "statistic_parameters": df,
+        "sign_coding": sign,
+        "description": description,
+        "target_template_image": "GenericMNI" if space.upper().startswith("MNI") else NOT_RECORDED,
+        "data_use_terms": licence or NOT_RECORDED,
+    }
+    acknowledgement = connectome.get("acknowledgement") or (GSP_ACKNOWLEDGEMENT if licence == GSP_LICENCE else None)
+    if acknowledgement:
+        image["acknowledgement"] = acknowledgement
+    return image
+
+
+def neurovault_metadata(maps, out=None, connectome=None, root=None):
+    """NeuroVault metadata of maps (nothing is uploaded): map_type "T" (T maps), "R" (ROI/mask files) or
+    "Other"; modality fMRI-BOLD; analysis_level G; number_of_subjects = the number of lesions (1 for a
+    per-lesion map, the design n for a group map); statistic_parameters = df of T maps (connectome N - 1
+    for a per-lesion T map, n - p for a group GLM T map); an explicit sign coding; the data use terms and
+    the GSP acknowledgement for GSP-DUT-2014 maps.
+
+    :param maps: map paths, or dicts {"path", optional "map_type", "df", "number_of_subjects" (or
+      "n_lesions"), "connectome_n", "licence", "sign_coding", "description", "name", "file"} that
+      override what is read from the sidecars, provenance.json, entry.json (a cohortmaps cache entry:
+      connectome N), glm.json or slnm.json next to the map; "connectome" (see below) for this map only.
+    :param connectome: connectome of maps whose folder does not describe it (cohortmaps cache entries,
+      copied maps): a bundle info dict, a cohortmaps.json/provenance.json/glm.json record, its path or
+      its folder. A cohortmaps.json also gives the connectome N (df = N - 1 of per-lesion T maps).
+    :param root: study folder; its cohortmaps runs resolve the connectome of cache entries by bundle name
+      when ``connectome`` is not given.
+    :param out: optional path of the JSON to write (neurovault/images.json); "file" entries are then
+      relative to the folder that holds the neurovault folder.
+    :return: {"format", "version", "images": [...], "disclaimer"}.
+    """
+    images = []
+    base = os.path.dirname(os.path.dirname(os.path.abspath(out))) if out else None
+    default = _connectome_source(connectome)
+    by_name = study_connectomes(root) if root is not None and connectome is None else {}
+    for item in maps:
+        source = default
+        if by_name and not (isinstance(item, dict) and item.get("connectome")):
+            path = os.fspath(item["path"] if isinstance(item, dict) else item)
+            entry = _read_json_or_none(os.path.join(os.path.dirname(os.path.abspath(path)), "entry.json"))
+            candidates = by_name.get(entry.get("bundle")) if isinstance(entry, dict) else None
+            if candidates:
+                # Prefer the run with the same connectome N (subject subset) as the entry
+                source = next((c for c in candidates if c.n == entry.get("n")), candidates[0])
+        image = neurovault_image(item, connectome=source)
+        if base and not (isinstance(item, dict) and item.get("file")):
+            path = os.path.abspath(os.fspath(item["path"] if isinstance(item, dict) else item))
+            image["file"] = _portable_file(path, base)
+        images.append(image)
+    content = {"format": NEUROVAULT_FORMAT, "version": 1, "images": images, "disclaimer": DISCLAIMER}
+    if out:
+        os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+        write_json_atomic(out, _clean(content))
+    return content

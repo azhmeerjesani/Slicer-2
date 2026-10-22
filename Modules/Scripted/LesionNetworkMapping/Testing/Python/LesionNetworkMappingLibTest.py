@@ -1535,6 +1535,11 @@ class ExportTest(_TempDirTestCase):
         self.assertEqual(provenance["lesions"][0]["sidecar"], sidecar_name)
         with open(os.path.join(out, "methods.md"), encoding="utf-8") as f:
             methods = f.read()
+        # Deliberate wording changes of reporting v2 (L-18; no phrase asserted here changed): the maps
+        # paragraph has a "## Network maps" heading; "Specificity QA followed van den Heuvel" became
+        # "Connectome-confound QA followed van den Heuvel" (neutral wording); a "## Software" section with
+        # RRID:SCR_005619 and the 3D Slicer citation (Fedorov et al., 2012) were added; pipes in Markdown
+        # table cells are escaped (\\|T\\|). LesionNetworkMappingReportingTest covers the new text.
         for text in (export.DISCLAIMER, "doi:10.1093/brain/awv228", "doi:10.1056/NEJMra1706158", "doi:10.1038/s41593-025-02196-7", "N = 3 subjects (preview", "relocated to 4 random positions"):
             self.assertIn(text, methods)
         self.assertIn("maps of its relocated lesions is reported", methods)
