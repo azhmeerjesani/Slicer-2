@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 
 import numpy as np
 import qt
@@ -61,6 +62,7 @@ ASSERTIONS = {
     "no-invisible-focus-stop": dict(text="No Tab stop on Library is invisible (from wave 2)", guard="U-01", fromWave=2),
     "window-fits-screen": dict(text="The main window never grows beyond the screen when layouts change: the inspector and the search box stay on the screen (1366x768)", guard="U-06", fromWave=2),
     "hover-only-control": dict(text="No control that a task needs is shown only while the pointer hovers its opener (the pin popup of the Classic view bars)", guard="W2-03", fromWave=2),
+    "tmap-thresholded": dict(text="The T map opened from Library is shown over the template in colour with the typed threshold (values below it are transparent)", guard="W3-08", fromWave=2),
     "not-discoverable": dict(text="Every control that a task drives is visible, enabled and not covered when it is driven", guard="gate", fromWave=1),
     "task-completed": dict(text="The task ran to the end without an exception", guard="gate", fromWave=1),
 }
@@ -2062,7 +2064,7 @@ def lnm(g):
     tmap = g.fixtures["tmap"]["path"]
     yield from openFileThroughDialog(g, tmap)
     yield from g.until(lambda: any(node.GetName().startswith("sub-05_desc-T") for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")), 10000, what="the T map")
-    yield from g.until(lambda: g.currentWorkspace() == "draw", 4000)
+    yield from g.until(lambda: g.currentWorkspace() in ("draw", "map"), 4000)  # a statistical map opens in Map since W3-08
     yield 800
     g.shot("tmap-opened")
     tmapNode = next((node for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode") if node.GetName().startswith("sub-05_desc-T")), None)
@@ -2077,6 +2079,21 @@ def lnm(g):
         yield from g.type(edit, str(g.fixtures["tmap"]["threshold"]), "Type the threshold in the map notice", selectAll=True, enter=True)
         yield 500
         g.note("tmapThreshold", {"notice": float(statmapThreshold.value), "wanted": g.fixtures["tmap"]["threshold"]})
+        g.shot("tmap-threshold")
+    # Since W3-08 a statistical map opens in Map (it supersedes the notice of U-07): the threshold is the Map's rule, "Custom T"
+    # and its value. Without it, the colour table and the threshold are set in the Volumes module.
+    ruleValue = g.widget("LNMRuleValue", "QDoubleSpinBox") if statmapThreshold is None and g.currentWorkspace() == "map" else None
+    if ruleValue is not None:
+        statmapThreshold = ruleValue
+        ruleCombo = g.widget("LNMRuleCombo", "QComboBox")
+        if ruleCombo is not None and ruleCombo.itemData(ruleCombo.currentIndex) != "custom_t":
+            yield from chooseFromCombo(g, ruleCombo, "Custom T", "Choose the threshold rule 'Custom T'")
+            yield 400
+        edit = next((child for child in ruleValue.findChildren("QLineEdit") if child.isVisible()), None)
+        yield from g.type(edit, str(g.fixtures["tmap"]["threshold"]), "Type the threshold in Map", selectAll=True, enter=True)
+        yield 500
+        g.note("tmapThreshold", {"map": float(ruleValue.value), "rule": str(ruleCombo.currentText) if ruleCombo is not None else None,
+                                 "wanted": g.fixtures["tmap"]["threshold"]})
         g.shot("tmap-threshold")
     typed = (yield from searchAndOpen(g, "Volumes", "vol")) if statmapThreshold is None else None
     if typed is not None:
@@ -2095,9 +2112,54 @@ def lnm(g):
         yield 500
         g.shot("tmap-threshold")
         yield from closeTransient(g, "Close Volumes and return to Draw")
-    g.metric("A", g.actions - start)
+    # The goal of A is reached only when the map is shown thresholded: typing the value into a field is not enough
+    tmapNode = next((node for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode") if node.GetName().startswith("sub-05_desc-T")), None)
+    thresholded, detail = statMapThresholded(tmapNode, g.fixtures["tmap"]["threshold"])
+    g.check("tmap-thresholded", thresholded, detail)
+    g.note("tmapDisplay", detail)
+    if thresholded:
+        g.metric("A", g.actions - start)
+    else:
+        g.note("AActionsWithoutGoal", g.actions - start)
+        g.metric("A", None)
     yield from lnmStudyPath(g)
     g.shot("end")
+
+
+def statMapThresholded(volume, threshold):
+    """Whether ``volume`` is shown in colour with ``threshold`` applied, and a one-line description of its display.
+
+    Thresholded means: a colour table that is not grey, and either the display node's threshold at ``threshold`` (the
+    Volumes module) or a colour table whose entries are transparent at 0 and at 0.9 x ``threshold`` and opaque at
+    1.1 x ``threshold`` (the LNM colour table, whose alphas carry the threshold).
+    """
+    if volume is None:
+        return False, "the T map is not in the scene"
+    displayNode = volume.GetDisplayNode()
+    colorNode = displayNode.GetColorNode() if displayNode is not None else None
+    if colorNode is None:
+        return False, "the T map has no colour table"
+    if displayNode.GetApplyThreshold():
+        # The Volumes module: any colour table but Grey, with the display threshold at the typed value
+        lower = displayNode.GetLowerThreshold()
+        state = f"colour table {colorNode.GetName()}, display threshold from {lower:.4g}"
+        return colorNode.GetName() != "Grey" and abs(lower - threshold) <= max(0.01 * abs(threshold), 0.05), state
+    lookupTable = colorNode.GetLookupTable()
+    if lookupTable is None:
+        return False, f"colour table {colorNode.GetName()} without entries and no display threshold"
+    entries = colorNode.GetNumberOfColors()
+    window, level = displayNode.GetWindow(), displayNode.GetLevel()
+    low = level - window / 2.0
+
+    def rgba(value):
+        index = int((value - low) / window * entries) if window > 0 else 0
+        return lookupTable.GetTableValue(min(max(index, 0), entries - 1))
+
+    above, below, zero, negative = rgba(1.1 * threshold), rgba(0.9 * threshold), rgba(0.0), rgba(-1.1 * threshold)
+    coloured = not (abs(above[0] - above[1]) < 1e-6 and abs(above[1] - above[2]) < 1e-6)
+    state = (f"colour table {colorNode.GetName()}, window {window:.4g} at level {level:.4g}, alpha at 1.1t/0.9t/0/-1.1t "
+             f"{above[3]:.2g}/{below[3]:.2g}/{zero[3]:.2g}/{negative[3]:.2g}, LNM.Threshold {volume.GetAttribute('LNM.Threshold')}")
+    return coloured and above[3] > 0 and below[3] == 0 and zero[3] == 0, state
 
 
 def lesionCardReadout(g):
@@ -2119,15 +2181,20 @@ def loadedSetOf(g):
     return loadedSet if loadedSet is not None else planned(g, "loadedSet")
 
 
-#: The buttons of the study path (B), found by their text: create the study, map every lesion, group statistics, export
+#: The study path (B) after "Create study", per step (W3-07, W3-08; USABILITY section 16): the Map workspace, Seed = Cohort, a
+#: connectome, map every lesion, group statistics, export. Each step is found by its objectName, else by its text.
 STUDY_STEPS = (
-    ("map every lesion", r"map all|map \d+ lesions|run everything|map network"),
-    ("group statistics", r"group|statistics|overlap|sensitivity"),
-    ("export", r"export"),
+    ("map every lesion", "LNMComputeButton", r"map all|map \d+ lesions|run everything"),
+    ("group statistics", "LNMOverlapComputeButton", r"compute group maps|group maps"),
 )
 
 
-def visibleButton(g, pattern):
+def visibleButton(g, pattern, objectName=None):
+    """A visible, enabled button: the one named ``objectName`` when there is one, else the first whose text matches ``pattern``."""
+    if objectName:
+        named = g.widget(objectName, "QAbstractButton")
+        if named is not None and named.isEnabled():
+            return named
     regex = re.compile(pattern, re.I)
     for button in g.mainWindow.findChildren("QAbstractButton"):
         if button.isVisible() and button.isEnabled() and regex.search(str(button.text).replace("&", "")):
@@ -2135,16 +2202,28 @@ def visibleButton(g, pattern):
     return None
 
 
+def _mapWidget():
+    return getattr(slicer.modules, "LesionNetworkMappingWidget", None)
+
+
+def _studyPathEnd(g, start, reason):
+    g.metric("B", None)
+    g.note("studyPath", f"needs code: {reason} after {g.actions - start} actions")
+    g.shot("study-path-stopped")
+
+
 def lnmStudyPath(g):
-    """Study path (B): folder, study, maps of every lesion, group statistics, export, with no code and no terminal. Needs W3-07 (study),
-    W3-08 (maps) and A-04: while the folder card says "Create study (coming)" the metric B is None (needs code) and the reason is
-    recorded. When the button exists, the next buttons are found by their text (STUDY_STEPS); a missing one ends the path with None
-    and names the step.
+    """Study path (B): folder, study, maps of every lesion, group statistics, export, with no code and no terminal.
+
+    Create study (folder card, W3-07), then in Map (W3-08): Seed = Cohort, a connectome (the synthetic demo when none is
+    registered: "Use the demo" and its data use terms), "Map all N lesions", "Compute group maps" (Overlap tab of the Cohort
+    card) and Ctrl+E (export: the group maps' folder). Waiting for a job is no action. A step that cannot be done ends the
+    path with B = None and names the step.
     """
     yield from g.click(g.widget("StudioLibraryWorkspaceButton", "QToolButton"), "Click Library")
     yield 600
     yield from openFolderThroughDialog(g, g.fixtures["cohort"]["folder"])
-    # The folder card; its "Create study…" button exists only when the study UI is part of the build (W3-07)
+    # The folder card; its "Create study" button exists only when the study UI is part of the build (W3-07)
     yield from g.until(lambda: g.widget("StudioFolderCardLoadAllButton", "QPushButton") is not None, 5000, what="folder card")
     start = g.actions
     button = g.widget("StudioFolderCardCreateStudyButton", "QPushButton")
@@ -2153,17 +2232,89 @@ def lnmStudyPath(g):
         g.note("studyPath", f"needs code: the folder card says {str(button.text) if button is not None else 'nothing'!r} (W3-07, W3-08 and A-04 are not in this build)")
         return
     yield from g.click(button, "Click 'Create study'")
-    yield 1500
-    for label, pattern in STUDY_STEPS:
-        found = yield from g.until(lambda pattern=pattern: visibleButton(g, pattern) is not None, 8000, what=label)
+    try:
+        from StudioLib import study_ui
+    except ImportError:
+        study_ui = None
+    yield from g.until(lambda: study_ui is not None and study_ui.session() is not None, 8000, what="the study")
+    yield 1000
+    studySession = study_ui.session() if study_ui is not None else None
+    g.note("studyCreated", studySession is not None and len(studySession.study.subject_ids))
+    if studySession is None:
+        return _studyPathEnd(g, start, "no study session after 'Create study'")
+    # Map
+    if g.currentWorkspace() != "map":
+        mapButton = g.widget("StudioMapWorkspaceButton", "QToolButton")
+        if mapButton is None:
+            return _studyPathEnd(g, start, "no Map workspace")
+        yield from g.click(mapButton, "Click Map")
+        yield from g.until(lambda: g.currentWorkspace() == "map" and _mapWidget() is not None, 8000, what="Map")
+        yield 800
+    widget = _mapWidget()
+    if widget is None:
+        return _studyPathEnd(g, start, "no Map module")
+    # Seed = Cohort
+    if widget.seedMode() != "cohort":
+        frame = g.widget("LNMSeedModeSegmented")
+        cohort = next((b for b in (frame.findChildren("QAbstractButton") if frame is not None else []) if str(b.text).startswith("Cohort") and b.isVisible()), None)
+        if cohort is None:
+            return _studyPathEnd(g, start, "no Cohort seed")
+        yield from g.click(cohort, "Seed: click 'Cohort'")
+        yield from g.until(lambda: widget.seedMode() == "cohort", 3000)
+        yield 600
+    # A connectome: the synthetic demo when none is registered (a fresh profile)
+    if widget.bundle is None:
+        demo = g.widget("LNMUseDemoButton", "QPushButton")
+        if demo is None or not demo.isEnabled():
+            return _studyPathEnd(g, start, "no connectome and no 'Use the demo'")
+        yield from g.click(demo, "Click 'Use the demo' (synthetic connectome)")
+        yield from g.until(lambda: widget.bundle is not None, 120000, what="the demo connectome")
+        yield 800
+    g.note("connectome", widget.bundle.name if widget.bundle is not None else None)
+    # The data use terms of the connectome (shown once the connectome is selected: wait until Map asks for them)
+    yield from g.until(lambda: "terms" in str(widget.computeReasonLabel.text) or widget.computeButton.isEnabled(), 10000, what="the terms")
+    yield 600
+    terms = g.widget("LNMAcceptTermsCheckBox", "QCheckBox")
+    if terms is not None and not terms.checked:
+        # On the box (the checkbox spans the panel; Qt toggles it only on the box or its text)
+        yield from g.click(terms, "Accept the data use terms", localPoint=(9, terms.height // 2))
+        yield from g.until(lambda: terms.checked, 3000, what="the terms accepted")
+        yield 400
+        g.note("termsAccepted", bool(terms.checked))
+    # Map every lesion, then the group statistics
+    for label, objectName, pattern in STUDY_STEPS:
+        found = yield from g.until(lambda objectName=objectName, pattern=pattern: visibleButton(g, pattern, objectName) is not None, 15000, what=label)
         if not found:
-            g.metric("B", None)
-            g.note("studyPath", f"needs code: no button for the step '{label}' after {g.actions - start} actions")
-            return
-        yield from g.click(visibleButton(g, pattern), f"Click '{label}'")
-        yield 2000
+            return _studyPathEnd(g, start, f"no enabled button for the step '{label}' ({str(getattr(widget, 'computeReasonLabel', None) and widget.computeReasonLabel.text)})")
+        yield from g.click(visibleButton(g, pattern, objectName), f"Click '{label}'")
+        if label == "map every lesion":
+            yield from g.until(lambda: widget.cohortJob is not None and not (widget.cohortJob.isRunning() or widget.cohortJob.isQueued()), 300000, what="the cohort maps")
+            g.note("cohortMaps", widget.cohortMapsPath)
+        else:
+            card = widget.ctx.card("cohort")
+            yield from g.until(lambda card=card: card is not None and bool(card.overlap.outputs), 300000, what="the group maps")
+            g.note("groupMaps", sorted(os.path.basename(p) for p in (card.overlap.outputs.values() if card is not None else [])))
+        yield 1000
+    # Export: Ctrl+E in Map (with Seed = Cohort: the group maps and their folder). The group maps are on disk before Ctrl+E,
+    # so the export is checked by what Ctrl+E itself does: its message naming the folder with peaks.tsv and cohort.json
+    shell = g.shell()
+    pressed = time.time()
+    yield from g.key("Ctrl+E", "Ctrl+E: export the group maps")
+    yield 1000
+    card = widget.ctx.card("cohort")
+    folder = card.folder() if card is not None else None
+    g.note("exportFolder", os.path.relpath(folder, g.fixtures["cohort"]["folder"]) if folder else None)
+    if not folder or not os.path.isdir(folder) or not any(name.endswith(".nii.gz") for name in os.listdir(folder)):
+        return _studyPathEnd(g, start, "no group maps on disk after export")
+    messages = [str(text) for when, text, _level in shell.recentMessages() if when >= pressed] if shell is not None and hasattr(shell, "recentMessages") else []
+    exported = [text for text in messages if folder in text]
+    g.note("exportMessage", exported[-1] if exported else messages)
+    missing = [name for name in ("peaks.tsv", "cohort.json") if not os.path.isfile(os.path.join(folder, name))]
+    if not exported or missing:
+        return _studyPathEnd(g, start, f"Ctrl+E did not export (message: {bool(exported)}, missing: {', '.join(missing) or 'none'})")
     g.metric("B", g.actions - start)
     g.note("studyPath", "UI only")
+    g.shot("study-path-done")
 
 
 #
