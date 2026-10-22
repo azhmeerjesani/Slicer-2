@@ -248,8 +248,11 @@ _STUDIO_STEPS = (
          _("File, Edit, View and Help are all here, with Settings, the Python console and the error log, and Help > Take a tour to see this again."),
          inSlicer=_("The menu bar: File, Edit, View and Help; Edit > Application Settings ({key:Ctrl+2}); View > Python Console ({key:Ctrl+3})."),
          keys=((("F10",), _("open the menu")),), placement="below"),
-    Step("autosave", "StudioSaveStatus", _("Autosave"),
-         _("Studio autosaves your work to a private folder and offers to recover it after a crash. Autosave is not Save: your files change only when you save."),
+    # The status appears with the first autosave: until then (or with autosave off) the step shows the ≡ menu, where recovery is
+    Step("autosave", ("StudioSaveStatus", "StudioAppMenuButton"), _("Autosave"),
+         _("Studio autosaves your work to a private folder and offers to recover it after a crash: the top bar shows "
+           "\"Autosaved\" once it has, and ≡ › File › Recover Autosaved Work… brings it back. "
+           "Autosave is not Save: your files change only when you save."),
          inSlicer=_("No autosave: you save with File > Save Data ({key:Ctrl+S})."), placement="below"),
     Step("classic", "StudioLibraryClassicLink", _("Classic interface, one switch away"),
          _("Everything you know from 3D Slicer is one switch away: menus, toolbars and the module panel, exactly as in 3D Slicer. "

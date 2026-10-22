@@ -13,6 +13,10 @@ Rule kinds::
     {"kind": "top_pct", "value": 10, "statistic": "Fz", "sign": "both"}
                                                               the top 10% of |map| (rank rule, any N)
 
+A map whose N is unknown (a T map opened from a file without a sidecar) can only take the rules that do
+not need N (:data:`N_FREE_KINDS`, :func:`resolve_unknown_n`): a custom |T| value is applied as typed,
+without p-values, and the rules derived from N (FWE, the |T| >= 7 convention) are not resolved.
+
 Rules that carry a ``reference_n`` get a banner when N differs from it by more than 10%. The
 ``t_convention`` rule is not allowed below N = 900 unless the user chose to keep it
 (``"override": true``, recorded in provenance).
@@ -53,6 +57,8 @@ SIGNS = ("both", "pos", "neg")
 GSR_BANNER = "Non-GSR connectomes centre uninformative connections above 0; consider asymmetric or effect-size thresholds (Cohen & Fox 2021)."
 NEGATIVE_PEAKS_NOTE = "The magnitude and extent of negative correlations are influenced by global signal regression (Murphy & Fox 2017)."
 TOP_PCT_NEEDS_VALUES = "The top-x% rule needs the map values."
+N_FREE_KINDS = ("custom_t", "fz_abs", "top_pct")  # rules that can be applied to a map whose N is unknown
+N_UNKNOWN_NOTE = "The N of this map is unknown: no p-value."
 
 
 @dataclass(frozen=True)
@@ -281,6 +287,40 @@ def resolve(rule, n, v, note=None, gsr=None, values=None):
     return resolved
 
 
+def resolve_unknown_n(rule, v, values=None):
+    """Resolve a rule for a map whose number of subjects is unknown (a map file without a sidecar).
+
+    Only the rules of :data:`N_FREE_KINDS` can be resolved: ``custom_t`` is applied as typed (no
+    p-value, and a banner when the rule records a ``reference_n``), ``fz_abs`` and ``top_pct`` as for
+    any N. The result has ``n`` = ``df`` = 0 and :data:`N_UNKNOWN_NOTE` in ``notes``, which :func:`describe`
+    shows as "N unknown".
+
+    :param v: number of voxels tested (e.g. the non-zero voxels of the map).
+    :param values: optional map values (required by ``top_pct``; gives ``fraction``).
+    :raises ValueError: a rule that needs N (FWE, the |T| >= 7 convention); the message says so.
+    """
+    import dataclasses
+
+    rule = normalize_rule(rule)
+    kind = rule["kind"]
+    if kind not in N_FREE_KINDS:
+        raise ValueError(f"The {RULE_LABELS[kind]} rule needs the number of subjects (N) of the map, which is unknown.")
+    v = int(v)
+    if v < 1:
+        raise ValueError(f"The number of voxels must be at least 1, got {v}")
+    if kind == "custom_t":
+        banner = None
+        if rule.get("reference_n") is not None:
+            banner = f"This threshold was defined for N≈{rule['reference_n']}; the N of this map is unknown. Use effect size where you can."
+        resolved = Resolved("T", rule["value"], 0, None, None, banner, True, 0, v, rule, kind, notes=(N_UNKNOWN_NOTE,))
+    else:
+        resolved = _resolve(rule, 1, v, None, values)
+        resolved = dataclasses.replace(resolved, n=0, df=0, notes=(*resolved.notes, N_UNKNOWN_NOTE))
+    if values is not None and math.isfinite(resolved.value):
+        resolved = dataclasses.replace(resolved, fraction=fraction_connected(values, resolved))
+    return resolved
+
+
 def _resolve(rule, n, v, note, values):
     kind = rule["kind"]
     df = max(n - 1, 0)
@@ -367,14 +407,18 @@ def describe(resolved, fraction=None):
       appended as " · 63% of in-mask voxels".
     """
     suffix = "" if fraction is None or not math.isfinite(fraction) else f" · {_format_fraction(fraction)} of in-mask voxels"
+    unknown_n = N_UNKNOWN_NOTE in resolved.notes
+    at_n = "N unknown" if unknown_n else f"N={resolved.n}"
+    if unknown_n and resolved.rule.get("kind") == "custom_t" and math.isfinite(resolved.value):
+        return f"⇒ |T| ≥ {resolved.value:.2f} at {at_n}, V={resolved.v:,} · as typed (no p-value)" + suffix
     if resolved.rule.get("kind") == "top_pct":
         sign = resolved.rule.get("sign", "both")
         quantity = {"both": f"|{resolved.statistic}|", "pos": resolved.statistic, "neg": f"-{resolved.statistic}"}[sign]
         cut = f" (≥ {resolved.value:.3g})" if math.isfinite(resolved.value) else ""
-        line = f"⇒ top {resolved.rule['value']:g}% of {quantity}{cut} at N={resolved.n}, V={resolved.v:,} · rank rule (no p-value)"
+        line = f"⇒ top {resolved.rule['value']:g}% of {quantity}{cut} at {at_n}, V={resolved.v:,} · rank rule (no p-value)"
         return line + suffix
     if resolved.statistic == "Fz":
-        return f"⇒ |Fz| ≥ {resolved.value:g} at N={resolved.n}, V={resolved.v:,} · effect size (no p-value)" + suffix
+        return f"⇒ |Fz| ≥ {resolved.value:g} at {at_n}, V={resolved.v:,} · effect size (no p-value)" + suffix
     if not math.isfinite(resolved.value):
         return f"⇒ no T threshold at N={resolved.n} (at least 2 subjects are needed)"
     return f"⇒ |T| ≥ {resolved.value:.2f} at N={resolved.n} (df={resolved.df}), V={resolved.v:,} · p_unc ≤ {format_p(resolved.p_unc)}" + suffix

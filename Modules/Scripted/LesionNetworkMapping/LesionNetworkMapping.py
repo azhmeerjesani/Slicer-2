@@ -3547,7 +3547,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         # Rule: re-resolved for the current N on every update
         self.resolved = None
         banner, notes, empty = "", [], ""
-        resolvable = (self.bundle is not None and n) or (loaded is not None and (n or rule["kind"] in ("fz_abs", "top_pct")))
+        resolvable = (self.bundle is not None and n) or (loaded is not None and (n or rule["kind"] in thresholds.N_FREE_KINDS))
         if resolvable:
             ruleStatistic = self._ruleStatistic(rule)
             values = self._mapValues(ruleStatistic) if hasMap else None
@@ -3556,7 +3556,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             else:
                 note = "partial" if self.runPartial else ("preview" if (self.runPreviewN if hasMap else node is not None and node.subjectsMode == "preview") else None)
             try:
-                self.resolved = self._resolveRule(rule, n or 1, values, note)
+                self.resolved = self._resolveRule(rule, n, values, note)
             except ValueError as exc:
                 self.derivedLabel.setText(str(exc))
             if self.resolved is not None:
@@ -3572,7 +3572,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
                 if loaded is not None and not self._loadedOnBundleGrid():
                     notes.append(_("V = {v:,} non-zero voxels of this map (its connectome is not open).").format(v=self.resolved.v))
         elif loaded is not None:
-            self.derivedLabel.setText(_("The N of this map is unknown (no sidecar): use an Fz or Top x% rule, or open its run."))
+            # A rule derived from N (FWE, the |T| >= 7 convention) cannot be resolved for a map whose N is unknown: say so
+            self.derivedLabel.setText(_("The N of this map is unknown (no sidecar): {rule} needs N. Use Custom T, an Fz or a Top x% rule, or open its run.").format(
+                rule=thresholds.RULE_LABELS.get(rule["kind"], rule["kind"])))
         else:
             self.derivedLabel.setText(_("Choose a connectome to resolve the threshold rule."))
         if loaded is not None and self.bundle is None and self.bundleError:
@@ -3604,7 +3606,13 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
                 if passing == 0:
                     quantity = {"both": f"|{ruleStatistic}|", "pos": ruleStatistic, "neg": f"−{ruleStatistic}"}[sign]  # noqa: RUF001
                     advice = _("switch to the Fz rule or use a larger connectome") if ruleStatistic == "T" else _("lower the threshold")
-                    empty = _("0 voxels pass {quantity} ≥ {value:.2f} at N={n}: {advice}.").format(quantity=quantity, value=self.resolved.value, n=n, advice=advice)
+                    atN = _("at N={n}").format(n=n) if n else _("at N unknown")
+                    empty = _("0 voxels pass {quantity} ≥ {value:.2f} {atN}: {advice}.").format(quantity=quantity, value=self.resolved.value, atN=atN, advice=advice)
+        elif hasMap and resultVolume is not None and loaded is not None:
+            # A map shown from a file whose N is unknown, with a rule that needs N: the module colour table, unthresholded
+            window = self._displayWindow(resultVolume, mapChanged)
+            display.applyResultDisplay(resultVolume, window=window, threshold=window / 64.0, sign=self._sign())
+            empty = _("The map is shown unthresholded: choose Custom T and type the threshold, or an Fz or Top x% rule.")
         self.emptyResultLabel.setText(empty)
         self.emptyResultLabel.setVisible(bool(empty))
         if hasMap and (mapChanged or peaks):
@@ -3619,7 +3627,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
 
     def _resolveRule(self, rule, n, values, note):
         """The rule for a map with ``n`` subjects: V and the GSR flag of the connectome, or for a loaded map that is
-        not on the open connectome's grid, V = its non-zero voxels.
+        not on the open connectome's grid, V = its non-zero voxels. ``n`` is None for a loaded map whose N is unknown:
+        only the rules that do not need N resolve (``thresholds.resolve_unknown_n``; a custom T is applied as typed).
         """
         from LesionNetworkMappingLib import thresholds
 
@@ -3628,7 +3637,11 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             if not v:
                 loaded = self._loadedValues(self.loadedMap.get("statistic"))
                 v = len(loaded[0]) if loaded is not None else 1
+            if not n:
+                return thresholds.resolve_unknown_n(rule, max(int(v), 1), values=values)
             return thresholds.resolve(rule, n, max(int(v), 1), note=note, values=values)
+        if self.loadedMap is not None and not n:
+            return thresholds.resolve_unknown_n(rule, self.bundle.n_voxels, values=values)
         return self.logic.resolveRule(rule, n, self.bundle, values=values, note=note)
 
     def _displayWindow(self, volume, recompute):

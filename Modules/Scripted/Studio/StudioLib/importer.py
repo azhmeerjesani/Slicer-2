@@ -3181,14 +3181,23 @@ def _routeStatMap(path, shell, result, mapNode=None):
     becomes a scan of Draw (no segmentation is bound to it).
     """
     reopened = None if mapNode is not None else _openReference(path, space.ROLE_STATMAP)
-    if mapNode is None and reopened is None:
+    if mapNode is None:
+        # Since W3-08 a statistical map file opens in Map (``mappage.loadMap``); one that Map already shows is shown again
         try:
             from . import mappage
         except ImportError:
             mappage = None
-        if mappage is not None and callable(getattr(mappage, "loadMap", None)):
-            mappage.loadMap(path, shell)
+        shown = mappage.showOpenMap(path, shell) if mappage is not None and callable(getattr(mappage, "showOpenMap", None)) else None
+        if shown is not None:
+            result.alreadyOpen.append(shown)
+            if shell is not None:
+                shell.toast(_("{name} is already open").format(name=shown.GetName()))
             return True
+        if reopened is None and mappage is not None and callable(getattr(mappage, "loadMap", None)):
+            volume = mappage.loadMap(path, shell)
+            if volume is not None:
+                result.statmaps.append(volume)
+            return volume is not None
     if reopened is not None:
         mapNode = reopened
         result.alreadyOpen.append(mapNode)

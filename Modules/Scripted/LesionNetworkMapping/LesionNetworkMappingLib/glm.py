@@ -80,12 +80,14 @@ from scipy import linalg as scipy_linalg
 from . import design as designlib
 from . import jobs, nifti, runs
 from . import tfce as tfcelib
-from .export import DISCLAIMER, LIBRARY_VERSION, connectome_label, file_sha256, group_map_path, now_iso, versions
+from .export import DISCLAIMER, GROUP_RECORD_PATH_FIELDS, LIBRARY_VERSION, connectome_label, file_sha256, group_map_path, now_iso, versions
 from .geometry import mask_indices
 
 FORMAT_NAME = "slicer-lnm-glm"
 FORMAT_VERSION = 1
 GLM_JSON = "glm.json"
+#: Paths of glm.json and slnm.json (dotted keys), stored relative to the record's folder (:func:`read_record`, SPEC 9.7 rule 10)
+RECORD_PATH_FIELDS = GROUP_RECORD_PATH_FIELDS
 RESUME_NAME = ".glm-resume.json"
 RESUME_ARRAYS = ".glm-resume.npz"
 MAPS_MEMMAP = ".glm-maps.npy"
@@ -1111,6 +1113,32 @@ def _read_json(path):
     return data if isinstance(data, dict) else None
 
 
+def write_record(path, record):
+    """Write a group record (glm.json, slnm.json) atomically with its paths (``RECORD_PATH_FIELDS``, the absolute
+    paths of the command line) relative to its folder: the record is shared with the study (SPEC 9.7 rule 10).
+    """
+    from .export import portable_record_paths
+
+    jobs.write_json_atomic(path, portable_record_paths(record, os.path.dirname(os.path.abspath(path)), RECORD_PATH_FIELDS))
+
+
+def read_record(path):
+    """A group record (glm.json, slnm.json) with its paths (``RECORD_PATH_FIELDS``) absolute, or None. Records written
+    before relative paths were stored hold absolute paths, kept as they are.
+    """
+    from .export import resolve_record_paths
+
+    record = _read_json(path)
+    return resolve_record_paths(record, os.path.dirname(os.path.abspath(path)), RECORD_PATH_FIELDS) if record is not None else None
+
+
+def cohortmaps_record(path):
+    """The cohortmaps.json at ``path`` with absolute paths (``cohortmaps.read_record``), or None."""
+    from .cohortmaps import read_record as read_cohortmaps_record
+
+    return read_cohortmaps_record(path)
+
+
 def _load_study(participants):
     """(Study, is a study folder): the study holding participants.tsv, or an in-memory study of the table."""
     from .study import PARTICIPANTS_JSON, Study, _parse_dictionary, read_tsv
@@ -1328,7 +1356,7 @@ def _run_cli(args, argv):
         maps_tsv = os.path.abspath(args.maps)
         mapped = _map_rows(maps_tsv, column)
         cohort_json = os.path.join(os.path.dirname(maps_tsv), "cohortmaps.json")
-        cohort = _read_json(cohort_json)
+        cohort = cohortmaps_record(cohort_json)
         cohort_run = (cohort or {}).get("run_id")
         bundle = (cohort or {}).get("bundle") or {}
         label = args.conn_label or bundle.get("name") or os.path.basename(os.path.dirname(os.path.abspath(args.mask))) or "connectome"
@@ -1584,7 +1612,7 @@ def _run_cli(args, argv):
         })
         record.pop("tfce_fwe", None)
         json_path = os.path.join(out_dir, GLM_JSON)
-        jobs.write_json_atomic(json_path, record)
+        write_record(json_path, record)
         for path in [*paths.values(), design_json, design_tsv, json_path]:
             emit("result", kind="glm", path=path)
         state_file.clear()
@@ -1606,7 +1634,7 @@ def _run_cli(args, argv):
     except jobs.Cancelled as exc:
         if record is not None:
             record.update({"status": "cancelled", "end": now_iso(), "stop_reason": exc.reason, "permutations_done": exc.done})
-            jobs.write_json_atomic(os.path.join(out_dir, GLM_JSON), record)
+            write_record(os.path.join(out_dir, GLM_JSON), record)
         if run_id:
             runs.update(run_root, run_id, status="cancelled", ended=now_iso())
         raise

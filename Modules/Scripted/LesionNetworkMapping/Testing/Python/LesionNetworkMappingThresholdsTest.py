@@ -23,6 +23,50 @@ from LesionNetworkMappingLib import robustness, thresholds
 from LesionNetworkMappingLib.geometry import Grid
 
 
+class UnknownNRuleTest(unittest.TestCase):
+    """A map whose N is unknown (a T map file without a sidecar): only the rules that do not need N resolve (W3-I1)."""
+
+    def setUp(self):
+        self.values = np.linspace(-20.0, 26.0, 1001)
+
+    def test_custom_t_as_typed(self):
+        resolved = thresholds.resolve_unknown_n({"kind": "custom_t", "value": 14.62}, len(self.values), values=self.values)
+        self.assertEqual((resolved.statistic, resolved.value, resolved.n, resolved.df), ("T", 14.62, 0, 0))
+        self.assertTrue(resolved.allowed)
+        self.assertIsNone(resolved.banner)
+        self.assertIsNone(resolved.p_unc)
+        self.assertIn(thresholds.N_UNKNOWN_NOTE, resolved.notes)
+        self.assertAlmostEqual(resolved.fraction, float((np.abs(self.values) >= 14.62).mean()))
+        line = thresholds.describe(resolved, resolved.fraction)
+        self.assertIn("|T| ≥ 14.62 at N unknown", line)
+        self.assertIn("no p-value", line)
+        # Round trip through JSON (provenance)
+        self.assertEqual(thresholds.Resolved.from_json(resolved.to_json()), resolved)
+
+    def test_custom_t_with_reference_n_has_banner(self):
+        resolved = thresholds.resolve_unknown_n({"kind": "custom_t", "value": 5.0, "reference_n": 120}, 100)
+        self.assertTrue(resolved.allowed)
+        self.assertIn("N≈120", resolved.banner)
+
+    def test_n_free_rules(self):
+        fz = thresholds.resolve_unknown_n({"kind": "fz_abs", "value": 0.1}, 100)
+        self.assertTrue(fz.allowed)
+        self.assertIn("at N unknown", thresholds.describe(fz))
+        top = thresholds.resolve_unknown_n({"kind": "top_pct", "value": 10, "statistic": "T"}, len(self.values), values=self.values)
+        self.assertTrue(top.allowed)
+        self.assertAlmostEqual(top.fraction, 0.1, delta=0.002)
+        self.assertIn("at N unknown", thresholds.describe(top))
+
+    def test_rules_that_need_n(self):
+        for rule in ({"kind": "fwe_bonferroni", "alpha": 0.05}, {"kind": "t_convention"}):
+            with self.subTest(rule=rule["kind"]), self.assertRaisesRegex(ValueError, "needs the number of subjects"):
+                thresholds.resolve_unknown_n(rule, 100)
+
+    def test_known_n_unchanged(self):
+        resolved = thresholds.resolve({"kind": "fz_abs", "value": 0.1}, 0, 100)
+        self.assertIn("at N=0", thresholds.describe(resolved))
+
+
 class TopPercentRuleTest(unittest.TestCase):
     def setUp(self):
         rng = np.random.default_rng(7)

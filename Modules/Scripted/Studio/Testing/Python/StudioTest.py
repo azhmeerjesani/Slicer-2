@@ -295,7 +295,9 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         closeSceneAction = mainWindow.findChild("QAction", "FileCloseSceneAction")
         addDataAction = mainWindow.findChild("QAction", "FileAddDataAction")
         addDataShortcuts = [portableKey(key) for key in addDataAction.shortcuts()]
-        self.assertNotIn(mainWindow, shell.associatedWidgets(closeSceneAction))
+        # Menu actions with a window shortcut are also actions of the main window in every mode (W3-03), so that their
+        # keys work while the menubar is hidden
+        self.assertIn(mainWindow, shell.associatedWidgets(closeSceneAction))
 
         studioShell = self._applyStudio()
         self.assertIs(shell.instance(), studioShell)
@@ -341,7 +343,7 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertFalse(titleBar.isHidden())
         self.assertFalse(mainWindow.menuBar().isHidden())
         self.assertIsNone(mainWindow.findChild("QToolBar", "StudioTopBar"))
-        self.assertNotIn(mainWindow, shell.associatedWidgets(closeSceneAction))
+        self.assertIn(mainWindow, shell.associatedWidgets(closeSceneAction))
         self.assertEqual([portableKey(key) for key in addDataAction.shortcuts()], addDataShortcuts)
         self.assertEqual(mainWindow.dockWidgetArea(dock), qt.Qt.LeftDockWidgetArea)
 

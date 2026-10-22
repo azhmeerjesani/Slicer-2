@@ -202,6 +202,10 @@ class DrawNormalizeCard:
 
         ``checkEmpty`` reads the lesion's voxels again (after edits); state changes of the job reuse the last answer.
         """
+        try:
+            self.widget.objectName  # noqa: B018 (a deferred refresh can arrive after the Draw panel was deleted, at exit)
+        except Exception:
+            return
         ctx = self._context(ctx)
         self._observe(ctx)
         nc = self.nc
@@ -399,6 +403,12 @@ class DrawNormalizeCard:
             except Exception:
                 logging.exception("Studio: the Map seed could not be set")
                 return False
+        try:
+            from . import mappage
+
+            mappage.noteSeedChoice()  # an explicit choice: entering Map keeps it (no Draw adoption)
+        except Exception:
+            logging.exception("Studio: the Map seed choice could not be recorded")
         self.controller.showInViews(result)
         if self.shell is not None:
             self.shell.switchTo("map")

@@ -602,8 +602,10 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
     #
 
     def test_statmap_overlay(self):
-        """A T map: a two-sided thresholded overlay with a colour legend on the template, one threshold control, no segmentation."""
-        from StudioLib import importer
+        """A T map: dropped, it opens in Map (W3-08) over the template with the LNM colour table and no segmentation; loaded
+        by a route of 3D Slicer, it is a two-sided thresholded overlay with a colour legend and one threshold control.
+        """
+        from StudioLib import importer, mappage
 
         studioShell = self._applyStudio()
         dims = GRID_2009C_2MM[0]
@@ -618,10 +620,35 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         studioShell.switchTo("library")
         self._pump()
         segmentationsBefore = 0
+
+        # Dropped (or opened from Library): Map shows it
         result = importer.handleDrop([path], shell=studioShell)
         self._pump(8)
         self.assertEqual(len(result.statmaps), 1)
+        mapNode = result.statmaps[0]
+        self.assertEqual(mapNode.GetAttribute("Studio.Role"), "statmap")
+        self.assertEqual(studioShell.currentWorkspace(), "map")
+        self.assertEqual(self._composite("Red").GetForegroundVolumeID(), mapNode.GetID())
+        self.assertAlmostEqual(self._composite("Red").GetForegroundOpacity(), mappage.MAP_OPACITY)
+        self.assertEqual(self._background("Red").GetAttribute("Studio.Role"), "template")
+        self.assertTrue(mapNode.GetDisplayNode().GetColorNode().GetName().startswith("LNM Diverging"))
+        self.assertIsNone(importer.statMapOverlay(mapNode))
+        for segmentation in slicer.util.getNodesByClass("vtkMRMLSegmentationNode"):
+            role = slicer.vtkMRMLSegmentationNode.GetReferenceImageGeometryReferenceRole()
+            self.assertNotEqual(segmentation.GetNodeReferenceID(role), mapNode.GetID())
+        slicer.mrmlScene.Clear(0)
+        self._pump(6)
+
+        # Loaded by a route of 3D Slicer (not tagged): the importer's thresholded overlay, in Draw
+        studioShell.switchTo("library")
+        self._pump()
+        loaded = slicer.util.loadVolume(path, {"singleFile": True, "show": False})
+        result = importer.LoadResult()
+        importer._routeReferenceNode(loaded, studioShell, result)
+        self._pump(8)
+        self.assertEqual(len(result.statmaps), 1)
         statmap = result.statmaps[0]
+        self.assertIs(statmap, loaded)
         self.assertEqual(statmap.GetAttribute("Studio.Role"), "statmap")
         self.assertEqual(studioShell.currentWorkspace(), "draw")
         for viewName in ("Red",):
@@ -1032,7 +1059,7 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertNotEqual(self._editor().sourceVolumeNode().GetID(), picture.GetID())
         picture.SetAttribute("Studio.Role", "figure")
 
-        # T map: overlay removed, then re-opened from Recent
+        # T map (opens in Map since W3-08): removed, then re-opened from Recent
         slicer.mrmlScene.Clear(0)
         self._pump(6)
         mapPath = self._writeTMap()
@@ -1040,7 +1067,8 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self._pump()
         result = importer.handleDrop([mapPath], shell=studioShell)
         self._pump(8)
-        importer.statMapOverlay(result.statmaps[0]).remove()
+        self.assertEqual(studioShell.currentWorkspace(), "map")
+        slicer.mrmlScene.RemoveNode(result.statmaps[0])
         self._pump(6)
         studioShell.switchTo("library")
         self._pump()
@@ -1050,16 +1078,18 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         mapNode = result.statmaps[0]
         self.assertEqual(mapNode.GetAttribute("Studio.Role"), "statmap")
         self.assertEqual(self._composite("Red").GetForegroundVolumeID(), mapNode.GetID())
-        self.assertEqual(studioShell.inspectorNoticeKey(), "statmap")
-        self.assertNotEqual(self._editor().sourceVolumeNode().GetID(), mapNode.GetID())
+        self.assertNotEqual(self._editor().sourceVolumeNode().GetID() if self._editor().sourceVolumeNode() else None, mapNode.GetID())
         self.assertEqual(boundTo(mapNode), [])
-        self.assertEqual(studioShell.currentWorkspace(), "draw")
-        # Already open: its overlay is shown again, nothing is loaded
+        self.assertEqual(studioShell.currentWorkspace(), "map")
+        # Already open: Map shows it again, nothing is loaded
+        studioShell.switchTo("library")
+        self._pump()
         self._composite("Red").SetForegroundVolumeID(None)
         count = slicer.mrmlScene.GetNumberOfNodes()
         importer.loadRecentFile({"fileName": mapPath, "fileType": "VolumeFile", "singleFile": True}, None, studioShell)
         self._pump(6)
         self.assertEqual(slicer.mrmlScene.GetNumberOfNodes(), count)
+        self.assertEqual(studioShell.currentWorkspace(), "map")
         self.assertEqual(self._composite("Red").GetForegroundVolumeID(), mapNode.GetID())
         self.assertEqual(studioShell.toastText(), f"{mapNode.GetName()} is already open")
 

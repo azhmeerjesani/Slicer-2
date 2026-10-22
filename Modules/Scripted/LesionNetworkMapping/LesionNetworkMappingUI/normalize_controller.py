@@ -994,6 +994,9 @@ class NormalizeController(VTKObservationMixin):
         self.eta = None
         self._stopRequested = False
         self._runGeneration = self._sceneGeneration
+        # A pending or running edit check of the previous result must not mark the new one as edited
+        self._editGeneration += 1
+        self._editTimer.stop()
         self._setEdited(False, False)
         self._tmpDir = os.path.join(slicer.app.temporaryPath, "LNMNormalize", uuid.uuid4().hex)
         writes = []

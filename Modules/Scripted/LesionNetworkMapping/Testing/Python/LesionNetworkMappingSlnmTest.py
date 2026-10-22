@@ -46,6 +46,16 @@ def _partial_corr(x, Y, Z):
     return (rx @ rY) / np.sqrt((rx @ rx) * np.einsum("nv,nv->v", rY, rY))
 
 
+
+def _absolute_strings(value):
+    """The strings of a JSON value that are absolute local paths (shared records hold none, SPEC 9.7 rule 10)."""
+    if isinstance(value, dict):
+        return [item for child in value.values() for item in _absolute_strings(child)]
+    if isinstance(value, list):
+        return [item for child in value for item in _absolute_strings(child)]
+    return [value] if isinstance(value, str) and os.path.isabs(value) else []
+
+
 class _StudyTestCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="lnm-slnm-test-")
@@ -437,6 +447,7 @@ class CommandLineTest(_StudyTestCase):
             record = json.load(f)
         self.assertEqual(record["status"], "done")
         self.assertEqual(record["format"], "slicer-lnm-slnm")
+        self.assertEqual(_absolute_strings(record), [])
         self.assertEqual((record["score"], record["method"], record["flip"]), ("nihss", "pearson", False))
         self.assertEqual(record["n"], 36)
         self.assertEqual(record["excluded"], {"missing nihss": ["sub-noscore"], "no map in maps.tsv": ["sub-nomap"]})

@@ -536,6 +536,55 @@ def _portable_file(path, folder):
     return relative.replace(os.sep, "/")
 
 
+#: Paths of the group records glm.json and slnm.json (dotted keys), stored relative to the record's folder
+GROUP_RECORD_PATH_FIELDS = ("inputs.maps_tsv", "inputs.participants", "inputs.design", "inputs.mask", "inputs.cohortmaps_json", "connectome.bundle.path",
+                            "comparison.reference.path")
+
+
+def _record_fields(record, field, convert):
+    """Apply ``convert`` to the path(s) at the dotted key ``field`` of a JSON record (in place; a list holds paths)."""
+    keys = field.split(".")
+    node = record
+    for key in keys[:-1]:
+        node = node.get(key) if isinstance(node, dict) else None
+        if not isinstance(node, dict):
+            return
+    value = node.get(keys[-1])
+    if isinstance(value, str) and value:
+        node[keys[-1]] = convert(value)
+    elif isinstance(value, list):
+        node[keys[-1]] = [convert(item) if isinstance(item, str) and item else item for item in value]
+
+
+def portable_record_paths(record, folder, fields, argv_fields=("argv",)):
+    """A copy of a JSON run record (cohortmaps.json, glm.json...) whose path ``fields`` (dotted keys) are relative
+    to ``folder``, the record's folder (:func:`_portable_file`; SPEC 9.7 rule 10: shared files hold no absolute
+    local path). In ``argv_fields`` (command lines) only the absolute paths are made relative.
+    Only provenance.json and reproduce.sh keep the exact local paths, by design.
+    """
+    import copy
+
+    out = copy.deepcopy(record)
+    for field in (*fields, *argv_fields):
+        _record_fields(out, field, lambda value: _portable_file(value, folder) if os.path.isabs(value) else value)
+    return out
+
+
+def resolve_record_paths(record, folder, fields):
+    """Inverse of :func:`portable_record_paths` for ``fields`` (not the command line): absolute paths, joined to
+    ``folder``; the absolute paths of records written before relative paths were stored are kept as they are.
+    """
+    import copy
+
+    if not isinstance(record, dict):
+        return record
+    out = copy.deepcopy(record)
+    base = os.path.abspath(os.fspath(folder))
+    for field in fields:
+        _record_fields(out, field, lambda value: value if os.path.isabs(value) else os.path.normpath(os.path.join(base, *value.split("/"))))
+    return out
+
+
 def write_run(out_dir, maps, lesion_names, bundle, rule=None, resolved=None, qa=None, run_meta=None, preview_n=None, software=None):
     """Export a network-mapping run: maps, one sidecar per lesion, provenance.json, methods.md and reproduce.sh.
 

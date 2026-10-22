@@ -1182,6 +1182,23 @@ def _read_json(path):
     return data if isinstance(data, dict) else None
 
 
+def _read_record(path):
+    """A run record (``_read_json``) with the paths that cohortmaps.json, glm.json and slnm.json store relative to their
+    folder made absolute (``export.resolve_record_paths``).
+    """
+    from .export import GROUP_RECORD_PATH_FIELDS, resolve_record_paths
+
+    record = _read_json(path)
+    name = os.path.basename(path)
+    if record is None or name not in ("cohortmaps.json", "glm.json", "slnm.json"):
+        return record
+    if name == "cohortmaps.json":
+        from .cohortmaps import RECORD_PATH_FIELDS as fields
+    else:
+        fields = GROUP_RECORD_PATH_FIELDS
+    return resolve_record_paths(record, os.path.dirname(os.path.abspath(path)), fields)
+
+
 def _record_n(record):
     for key in ("N", "n", "n_subjects"):
         value = record.get(key)
@@ -1260,10 +1277,10 @@ def _collect_outputs(source, kind):
         out["rows"] = rows
         out["maps"] = [row[key] for row in rows or () for key in MAP_KEYS if not schema.is_missing(row.get(key))]
         out["record_path"] = os.path.join(folder, COHORTMAPS_JSON)
-        out["record"] = _read_json(out["record_path"])
+        out["record"] = _read_record(out["record_path"])
         return out
     out["record_path"] = path
-    record = _read_json(path)
+    record = _read_record(path)
     out["record"] = record
     if record is None:
         return out

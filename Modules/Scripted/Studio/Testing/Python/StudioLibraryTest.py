@@ -494,7 +494,9 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertIsNone(library.canvas().folderCard())
 
     def test_folder_card_small(self):
-        """Up to 20 files: Load all is the way on (the primary button); Open one subject… is there too."""
+        """Up to 20 files: Load all and Open one subject… are there; the primary button is Create study when studies are
+        available (W3-07: the study is the way on for a folder of subjects; without studies it is Load all).
+        """
         from StudioLib import importer, library
 
         studioShell = self._applyStudio()
@@ -505,8 +507,11 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertIsNotNone(card)
         self.assertIsNone(card.reasonLabel)
         self.assertTrue(card.loadAllButton.isEnabled())
-        self.assertEqual(card.loadAllButton.property("slicerRole"), "primary")
         self.assertTrue(card.openOneButton.isEnabled())
+        self.assertIsNotNone(card.createStudyButton)  # StudioLib.study_ui is part of this build
+        self.assertEqual(card.createStudyButton.property("slicerRole"), "primary")
+        self.assertEqual(card.loadAllButton.property("slicerRole"), "secondary")
+        self.assertEqual(card.openOneButton.property("slicerRole"), "secondary")
         card.close()
         self._pump(4)
 

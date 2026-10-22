@@ -736,7 +736,9 @@ def _run(args, argv, rule, legacy, emit, cancel):
         if not os.path.isfile(maps_tsv):
             raise jobs.JobError(f"maps.tsv not found: {maps_tsv}", code="input")
         rows = read_maps_tsv(maps_tsv)
-        meta = _read_json(os.path.join(os.path.dirname(os.path.abspath(maps_tsv)), COHORTMAPS_JSON)) or {}
+        from .cohortmaps import read_record
+
+        meta = read_record(os.path.join(os.path.dirname(os.path.abspath(maps_tsv)), COHORTMAPS_JSON)) or {}
         bundle_meta = meta.get("bundle") or {}
         label = bundle_meta.get("label")
         n = n or meta.get("n")

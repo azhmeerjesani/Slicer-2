@@ -121,6 +121,16 @@ def _reference_tfce(volume, mask, H=2.0, E=0.5, steps=100, connectivity=26, two_
     return result - positive(-volume) if two_sided else result
 
 
+
+def _absolute_strings(value):
+    """The strings of a JSON value that are absolute local paths (shared records hold none, SPEC 9.7 rule 10)."""
+    if isinstance(value, dict):
+        return [item for child in value.values() for item in _absolute_strings(child)]
+    if isinstance(value, list):
+        return [item for child in value for item in _absolute_strings(child)]
+    return [value] if isinstance(value, str) and os.path.isabs(value) else []
+
+
 class FitTest(unittest.TestCase):
     def setUp(self):
         self.rng = np.random.default_rng(7)
@@ -613,6 +623,10 @@ class CommandLineTest(_StudyTestCase):
             record = json.load(f)
         self.assertEqual(record["status"], "done")
         self.assertEqual(record["design_type"], "within_cohort")
+        self.assertEqual(_absolute_strings(record), [])
+        resolved = glm.read_record(os.path.join(out, "glm.json"))
+        self.assertTrue(os.path.isabs(resolved["inputs"]["maps_tsv"]) and os.path.isfile(resolved["inputs"]["maps_tsv"]))
+        self.assertTrue(os.path.isfile(resolved["inputs"]["mask"]))
         self.assertEqual(record["n"], 16)
         self.assertEqual(record["excluded"], {"no map in maps.tsv": ["sub-x00"]})
         self.assertEqual(record["volume_filled_from_maps"], 1)

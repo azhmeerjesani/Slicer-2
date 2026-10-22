@@ -25,18 +25,19 @@ sha256 is computed from the bytes that are mapped: each lesion file is read once
 hashed, and parsed from those bytes.
 
 The run writes ``<out>/maps.tsv`` (one row per mapped lesion: participant_id, lesion (see below),
-lesion_sha256, key, AvgR, AvgFz and T as absolute paths of the cache files, volume_ml,
+lesion_sha256, key, AvgR, AvgFz and T (the cache files), volume_ml,
 voxels_in_mask, fractional_sum, the pooling compatibility fields of ``export.compatibility_key`` and
 the per-lesion QA) and
 ``<out>/cohortmaps.json`` (run id, connectome info, subject list, excluded subjects, cache folder).
 cohortmaps.json is also a run record that ``export.check_poolable`` and ``compare_runs`` accept.
 
-Lesion paths are never stored as absolute local paths (SPEC 9.7 rule 10): the lesion column of maps.tsv
-and the excluded lesion files of cohortmaps.json are relative to <out>, and the lesion of entry.json
-is relative to the entry folder ("/" separators; the file name alone when the lesion is on another
-drive; its sha256 identifies it). :func:`resolve_lesion_path` turns a stored path back into an
-absolute one, and also accepts the absolute paths of files written before this rule;
-:func:`read_maps_tsv` and :func:`read_entry` return absolute lesion paths.
+Paths are never stored as absolute local paths (SPEC 9.7 rule 10): the lesion and map columns of maps.tsv,
+and the paths of cohortmaps.json (excluded lesion files, connectome, cache folders, maps.tsv, inbox files, the
+absolute paths of the command line) are relative to <out>, the cache folder of runs.jsonl is relative to the run
+root, and the lesion of entry.json is relative to the entry folder ("/" separators; the file name alone when the
+file is on another drive; the sha256 and the cache key identify it). :func:`resolve_lesion_path` turns a stored
+path back into an absolute one, and also accepts the absolute paths of files written before this rule;
+:func:`read_maps_tsv`, :func:`read_record` and :func:`read_entry` return absolute paths.
 
 Inclusion: with a study, the rows come from ``Study.analysis_rows``: rows with include = 0, rows not
 approved by review when the study requires review (unless ``--include-unreviewed``) and rows that
@@ -92,6 +93,8 @@ QA_FORMAT = "slicer-lnm-cache-qa"
 FORMAT_VERSION = 1
 MAPS_TSV = "maps.tsv"
 COHORTMAPS_JSON = "cohortmaps.json"
+#: Paths of cohortmaps.json (dotted keys; "inbox" is a list), stored relative to its folder (:func:`read_record`)
+RECORD_PATH_FIELDS = ("bundle.path", "cache_root", "cache_dir", "maps_tsv", "inbox", "null.brain_mask")
 ENTRY_JSON = "entry.json"
 WEIGHTS_NAME = "weights.npz"
 RESUME_NAME = ".cohortmaps-resume.json"
@@ -725,9 +728,19 @@ def _format(value, digits=6):
 
 
 def write_maps_tsv(path, rows):
-    """Write maps.tsv (``MAPS_COLUMNS``; "n/a" for missing values) atomically."""
+    """Write maps.tsv (``MAPS_COLUMNS``; "n/a" for missing values) atomically.
+
+    The lesion and map columns (``MAP_KEYS``) are written relative to the maps.tsv folder (:func:`portable_lesion_path`):
+    the file is shared with the study, so it holds no absolute local path (SPEC 9.7 rule 10).
+    """
+    folder = os.path.dirname(os.path.abspath(os.fspath(path)))
     lines = ["\t".join(MAPS_COLUMNS)]
     for row in rows:
+        row = dict(row)
+        for column in ("lesion", *MAP_KEYS):
+            value = row.get(column)
+            if isinstance(value, str) and os.path.isabs(value):
+                row[column] = portable_lesion_path(value, folder)
         lines.append("\t".join(_format(row.get(column)).replace("\t", " ") for column in MAPS_COLUMNS))
     tmp_path = f"{path}.{os.getpid()}.tmp"
     try:
@@ -743,8 +756,8 @@ def write_maps_tsv(path, rows):
 def read_maps_tsv(path, resolve_paths=True):
     """Rows of a maps.tsv as dicts of text ("n/a" kept), in file order.
 
-    :param resolve_paths: return the lesion column as absolute paths (it is stored relative to the
-      maps.tsv folder; older files hold absolute paths, kept as they are).
+    :param resolve_paths: return the lesion and map columns (``MAP_KEYS``) as absolute paths (they are stored
+      relative to the maps.tsv folder; older files hold absolute paths, kept as they are).
     """
     from .study import read_tsv
 
@@ -752,16 +765,36 @@ def read_maps_tsv(path, resolve_paths=True):
     if resolve_paths:
         folder = os.path.dirname(os.path.abspath(os.fspath(path)))
         for row in rows:
-            if "lesion" in row:
-                row["lesion"] = resolve_lesion_path(row["lesion"], folder) or row["lesion"]
+            for column in ("lesion", *MAP_KEYS):
+                if column in row:
+                    row[column] = resolve_lesion_path(row[column], folder) or row[column]
     return rows
 
 
+def read_record(path):
+    """The cohortmaps.json record at ``path`` with its paths (``RECORD_PATH_FIELDS``) absolute, or None when it
+    cannot be read. The file stores them relative to its folder; older files hold absolute paths, kept as they are.
+    """
+    from .export import resolve_record_paths
+
+    try:
+        with open(path, encoding="utf-8") as f:
+            record = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    return resolve_record_paths(record, os.path.dirname(os.path.abspath(os.fspath(path))), RECORD_PATH_FIELDS)
+
+
 def _file_record(record, out_dir):
-    """The cohortmaps.json content of a run record: the excluded lesion files relative to ``out_dir``.
+    """The cohortmaps.json content of a run record: the excluded lesion files and the paths of
+    ``RECORD_PATH_FIELDS`` (connectome, cache, maps.tsv, inbox files, command line) relative to ``out_dir``.
 
     The record returned by :func:`run` keeps absolute paths for the caller of this process.
     """
+    from .export import portable_record_paths
+
     details = {}
     for sid, detail in (record.get("excluded_details") or {}).items():
         detail = dict(detail)
@@ -771,7 +804,7 @@ def _file_record(record, out_dir):
             if isinstance(detail.get("message"), str):
                 detail["message"] = detail["message"].replace(os.path.abspath(path), detail["path"])
         details[sid] = detail
-    return {**record, "excluded_details": details}
+    return portable_record_paths({**record, "excluded_details": details}, out_dir, RECORD_PATH_FIELDS)
 
 
 def _qa_row(qa):
@@ -908,7 +941,7 @@ def run(
                 "cohortmaps",
                 out_dir,
                 parents=list(parent_runs or ()),
-                params={**params, "cache_dir": context.cache_dir, "n_lesions": len(items)},
+                params={**params, "cache_dir": portable_lesion_path(context.cache_dir, run_root), "n_lesions": len(items)},
                 seeds={"subjects": context.seed, "null": context.null_seed},
             )
         record = {

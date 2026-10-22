@@ -124,6 +124,15 @@ class CohortMapsTestBase(unittest.TestCase):
         return cohortmaps.run(kwargs.pop("lesions", None) or self.lesions(), self.bundle, self.path(out), cache_root=cache or self.path("cache"), emit=events or _Events(), **kwargs)
 
 
+def _absolute_strings(value):
+    """The strings of a JSON value that are absolute local paths."""
+    if isinstance(value, dict):
+        return [item for child in value.values() for item in _absolute_strings(child)]
+    if isinstance(value, list):
+        return [item for child in value for item in _absolute_strings(child)]
+    return [value] if isinstance(value, str) and os.path.isabs(value) else []
+
+
 class BatchPlanTest(unittest.TestCase):
     def test_plan_batches(self):
         v = 228_483
@@ -290,6 +299,25 @@ class CohortMapsTest(CohortMapsTestBase):
             self.assertIsNotNone(cohortmaps.read_entry(os.path.dirname(os.path.dirname(row["T"])), row["key"]))
         self.assert_maps_equal(rows_after[4], self._single_pass(), 4)
 
+    def test_files_with_absolute_paths_still_read(self):
+        """maps.tsv and cohortmaps.json written before relative paths were stored (absolute paths) still read the same."""
+        record = self.run_cohort()
+        tsv = self.path("out", "maps.tsv")
+        rows = cohortmaps.read_maps_tsv(tsv)
+        columns, raw = read_tsv(tsv)
+        for row, resolved in zip(raw, rows, strict=True):
+            for name in ("lesion", "AvgR", "AvgFz", "T"):
+                row[name] = resolved[name]
+        with open(tsv, "w", encoding="utf-8") as f:
+            f.write("\t".join(columns) + "\n" + "".join("\t".join(row[column] for column in columns) + "\n" for row in raw))
+        with open(self.path("out", "cohortmaps.json"), "w", encoding="utf-8") as f:
+            json.dump({**record, "excluded_details": {}}, f)
+        self.assertEqual(cohortmaps.read_maps_tsv(tsv), rows)
+        read = cohortmaps.read_record(self.path("out", "cohortmaps.json"))
+        for field in ("cache_dir", "cache_root", "maps_tsv"):
+            self.assertEqual(read[field], os.path.normpath(record[field]), field)
+        self.assertEqual(read["bundle"]["path"], os.path.normpath(record["bundle"]["path"]))
+
     def test_maps_tsv_columns(self):
         record = self.run_cohort()
         columns, rows = read_tsv(self.path("out", "maps.tsv"))
@@ -298,11 +326,16 @@ class CohortMapsTest(CohortMapsTestBase):
             self.assertIn(required, columns)
         self.assertEqual(len(rows), N_LESIONS)
         key = export.compatibility_key(record)
+        out = self.path("out")
+        resolved = cohortmaps.read_maps_tsv(self.path("out", "maps.tsv"))
         for index, row in enumerate(rows):
-            self.assertEqual(row["lesion"], os.path.abspath(self.lesion_paths[index]))
+            # Shared file: the lesion and map paths are relative to the maps.tsv folder (SPEC 9.7 rule 10)
+            self.assertEqual(row["lesion"], cohortmaps.portable_lesion_path(self.lesion_paths[index], out))
+            self.assertEqual(resolved[index]["lesion"], os.path.abspath(self.lesion_paths[index]))
             self.assertEqual(row["lesion_sha256"], export.file_sha256(self.lesion_paths[index]))
             for name in ("AvgR", "AvgFz", "T"):
-                self.assertTrue(os.path.isabs(row[name]) and os.path.isfile(row[name]))
+                self.assertFalse(os.path.isabs(row[name]), row[name])
+                self.assertTrue(os.path.isabs(resolved[index][name]) and os.path.isfile(resolved[index][name]))
             self.assertGreater(float(row["volume_ml"]), 0.1)  # a 3.5 mm sphere is about 0.18 ml
             self.assertLess(float(row["volume_ml"]), 0.25)
             self.assertGreater(int(row["voxels_in_mask"]), 0)
@@ -316,7 +349,13 @@ class CohortMapsTest(CohortMapsTestBase):
         self.assertEqual(stored["format"], "slicer-lnm-cohortmaps")
         self.assertEqual(stored["status"], "done")
         self.assertEqual(stored["subject_ids"], self.bundle.subject_ids)
-        self.assertEqual(stored["cache_dir"], record["cache_dir"])
+        # No absolute local path in the shared record; read_record gives them back
+        self.assertEqual(stored["cache_dir"], cohortmaps.portable_lesion_path(record["cache_dir"], out))
+        self.assertEqual(_absolute_strings(stored), [])
+        read = cohortmaps.read_record(self.path("out", "cohortmaps.json"))
+        for field in ("cache_dir", "cache_root", "maps_tsv"):
+            self.assertEqual(read[field], os.path.normpath(record[field]), field)
+        self.assertEqual(read["bundle"]["path"], os.path.normpath(record["bundle"]["path"]))
         self.assertEqual(export.check_poolable([stored, stored]), [])
         self.assertEqual(stored["compatibility_key"], list(key))
         self.assertEqual(stored["bundle"]["manifest_sha256"], export.file_sha256(os.path.join(self.bundle.path, "connectome.json")))

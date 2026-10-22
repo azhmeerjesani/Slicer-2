@@ -951,7 +951,7 @@ def _run_cli(args, argv, controls, covariates):
         maps_tsv = os.path.abspath(args.maps)
         mapped = glm._map_rows(maps_tsv, column)
         cohort_json = os.path.join(os.path.dirname(maps_tsv), "cohortmaps.json")
-        cohort = glm._read_json(cohort_json)
+        cohort = glm.cohortmaps_record(cohort_json)
         cohort_run = (cohort or {}).get("run_id")
         bundle_info = (cohort or {}).get("bundle") or {}
         label = args.conn_label or bundle_info.get("name") or os.path.basename(os.path.dirname(os.path.abspath(args.mask))) or "connectome"
@@ -1317,7 +1317,7 @@ def _run_cli(args, argv, controls, covariates):
             "disclaimer": DISCLAIMER,
         })
         json_path = os.path.join(out_dir, SLNM_JSON)
-        jobs.write_json_atomic(json_path, record)
+        glm.write_record(json_path, record)
         outputs = [*paths.values(), json_path, design_json, design_tsv]
         for path in outputs:
             emit("result", kind="slnm", path=path)
@@ -1340,7 +1340,7 @@ def _run_cli(args, argv, controls, covariates):
     except jobs.Cancelled as exc:
         if record is not None:
             record.update({"status": "cancelled", "end": now_iso(), "stop_reason": exc.reason, "permutations_done": exc.done})
-            jobs.write_json_atomic(os.path.join(out_dir, SLNM_JSON), record)
+            glm.write_record(os.path.join(out_dir, SLNM_JSON), record)
         if run_id:
             runs.update(run_root, run_id, status="cancelled", ended=now_iso())
         raise

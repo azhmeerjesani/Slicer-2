@@ -32,6 +32,7 @@ import logging
 import os
 import re
 import traceback
+import weakref
 
 import slicer
 from slicer.i18n import tr as _
@@ -53,7 +54,10 @@ NLIN6_TEMPLATE_FILE = "tpl-MNI152NLin6Asym_res-02_T1w.nii.gz"
 _MAP_NAME = re.compile(r"^(?P<name>.+?)_conn-(?P<label>[A-Za-z0-9]+)_desc-(?P<desc>AvgRFz|AvgR|T)(?P<suffix>[A-Za-z0-9]*)_funcmap\.nii(?:\.gz)?$")
 _SUBJECT = re.compile(r"(sub-[A-Za-z0-9]+)")
 
-_state = {"layers": None, "shell": None, "shortcutsShell": None, "takenActions": {}}
+_state = {"layers": None, "shell": None, "shortcutsShell": None, "takenActions": {},
+          # Draw's lesion (segmentation node id, segment id) when the Map seed was last chosen or adopted, and the
+          # contexts whose seed changes are watched (an explicit seed choice wins over the Draw adoption)
+          "drawLesionAtSeedChoice": None, "adopting": False, "seedWatched": []}
 
 
 #
@@ -204,10 +208,10 @@ def templateVolume(bundle=None, load=True):
 #
 
 
-def _adoptDrawSeed(widget):
-    """The current segment of the Segment Editor (Draw) becomes the lesion seed: its "Lesion" segment, else the selected one."""
-    if widget is None or widget.seedMode() != "lesion":
-        return
+def _drawLesion():
+    """Draw's current lesion: ``(segmentationNode, segmentId)`` of the Segment Editor (its "Lesion" segment, else the
+    selected one), or (None, None).
+    """
     try:
         from . import draw
 
@@ -216,15 +220,59 @@ def _adoptDrawSeed(widget):
         editor = None
     segmentationNode = editor.segmentationNode() if editor is not None else None
     if segmentationNode is None or segmentationNode.GetAttribute(BROWSE_LESION_ATTRIBUTE) == "1":
-        return
+        return None, None
     segmentation = segmentationNode.GetSegmentation()
     segmentId = segmentation.GetSegmentIdBySegmentName("Lesion") or segmentation.GetSegmentIdBySegmentName("lesion") or editor.currentSegmentID()
     if not segmentId or segmentation.GetSegment(segmentId) is None:
+        return segmentationNode, None
+    return segmentationNode, segmentId
+
+
+def _seedKey(segmentationNode, segmentId):
+    return (segmentationNode.GetID() if segmentationNode is not None else None, segmentId or None)
+
+
+def noteSeedChoice():
+    """Record that the Map seed was chosen explicitly (Draw's "Use for Map", the Seed card): entering Map then keeps it
+    and adopts Draw's lesion only when Draw shows another lesion than at this choice.
+    """
+    if not _state["adopting"]:
+        _state["drawLesionAtSeedChoice"] = _seedKey(*_drawLesion())
+
+
+def _watchSeed(widget):
+    """Seed changes made in Map (or by its cards) count as explicit choices (``noteSeedChoice``)."""
+    ctx = getattr(widget, "ctx", None)
+    observers = getattr(ctx, "seedChanged", None)
+    if observers is None or any(watched() is ctx for watched in _state["seedWatched"]):
+        return
+    observers.append(noteSeedChoice)
+    _state["seedWatched"] = [watched for watched in _state["seedWatched"] if watched() is not None] + [weakref.ref(ctx)]
+
+
+def _adoptDrawSeed(widget):
+    """The current segment of the Segment Editor (Draw) becomes the lesion seed: its "Lesion" segment, else the selected
+    one. An explicit seed choice (``noteSeedChoice``) wins: Draw's lesion is adopted only when it changed since then.
+    """
+    if widget is None or widget.seedMode() != "lesion":
+        return
+    segmentationNode, segmentId = _drawLesion()
+    if segmentationNode is None or not segmentId:
         return
     current = widget.ctx.seed()
+    key = _seedKey(segmentationNode, segmentId)
     if current[0] is segmentationNode and current[1] == segmentId:
+        _state["drawLesionAtSeedChoice"] = key
         return
-    widget.ctx.setSeed(segmentationNode, segmentId)
+    chosen = current[0] is not None and current[0].GetScene() is not None and current[1]
+    if chosen and _state["drawLesionAtSeedChoice"] == key:
+        return  # Draw still shows the lesion it showed when the seed was chosen: the choice stands
+    _state["adopting"] = True
+    try:
+        widget.ctx.setSeed(segmentationNode, segmentId)
+    finally:
+        _state["adopting"] = False
+    _state["drawLesionAtSeedChoice"] = key
     widget.updateGUIFromParameterNode()
 
 
@@ -274,6 +322,7 @@ def enter(shell):
         return
     _takeActionShortcuts(shell)
     _installShortcuts(shell)
+    _watchSeed(widget)
     _adoptDrawSeed(widget)
     try:
         widget.showMapLayers()
@@ -355,6 +404,33 @@ def loadMap(path, shell=None):
         shell.switchTo("map")
     else:
         _browser.showLesion()
+    return volume
+
+
+def showOpenMap(path, shell=None):
+    """Show again the map file that Map already shows (re-opened from Recent or dropped again): Map is entered with its
+    layers and nothing is loaded. Return its volume, or None when Map does not show ``path``.
+    """
+    widget = moduleWidget(create=False)
+    loaded = getattr(widget, "loadedMap", None) if widget is not None else None
+    node = getattr(widget, "_parameterNode", None) if widget is not None else None
+    volume = node.resultVolume if node is not None else None
+    if not path or not loaded or not loaded.get("path") or volume is None or volume.GetScene() is None:
+        return None
+
+    def normalized(value):
+        return os.path.normcase(os.path.realpath(os.path.abspath(str(value))))
+
+    if normalized(loaded["path"]) != normalized(path):
+        return None
+    shell = _shellOrNone(shell)
+    if shell is not None and shell.currentWorkspace() != "map":
+        shell.switchTo("map")  # enter() shows the map's layers
+    else:
+        try:
+            widget.showMapLayers()
+        except Exception:
+            logging.error(f"Studio Map: cannot show the map layers:\n{traceback.format_exc()}")
     return volume
 
 
