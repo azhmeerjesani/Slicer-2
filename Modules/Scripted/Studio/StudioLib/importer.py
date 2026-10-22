@@ -31,7 +31,9 @@ Studio import routes (USABILITY 2, 6.4, 7, 8, 13; U-07). Nothing here hides a fo
   layout (7005), next to the template (Red, where you draw). It is tagged ``Studio.Role`` = "figure", never becomes
   the Segment Editor source, cannot be painted into (interactor guard) and never follows linked views or the
   wheel off its single slice. A notice asks on which side of the figure the patient's right is; "Right" mirrors the
-  figure pane. Removing the figure restores the previous layout and the Yellow view;
+  figure pane. Removing the figure restores the previous layout and the Yellow view. On a template the figure also
+  opens for tracing (``StudioLib.figure``, L-29): the Figure card of Draw crops it, fits it to a cut plane of the
+  template with landmarks and shows it over the template; on a scan in scan space it stays this reference only;
 - a **statistical map** (``*_statmap``, ``*_desc-T_*``... or a NIfTI intent code TTEST, ZSCORE, CORREL) is shown as a
   thresholded two-sided overlay with a colour legend on the anatomy, with one threshold control in a notice;
 - a **lesion without a scan** is shown on the template only when it is on an MNI grid (``space.spaceOf()``), on its
@@ -54,6 +56,7 @@ import logging
 import os
 import re
 import struct
+import sys
 import time
 import traceback
 
@@ -962,7 +965,7 @@ def loadFiles(paths, shell=None, pairedLesion=None):
             if _routeStatMap(path, shell, result):
                 loadedPaths.append(path)
         if figurePaths:
-            if _routeFigure(figurePaths[0], shell, result):
+            if _openFigure(figurePaths[0], shell, result):
                 loadedPaths.append(figurePaths[0])
             if len(figurePaths) > 1:
                 logging.info(f"Studio: only the first figure is shown ({len(figurePaths)} were opened)")
@@ -1022,6 +1025,29 @@ def _afterLoad(result, shell):
     _showLoaded(result, shell, scans, openScans, openLesions)
     for node in references:
         _routeReferenceNode(node, shell, result)
+
+
+def _figureModule():
+    """``StudioLib.figure`` (trace from a figure, L-29), None if this build does not have it."""
+    try:
+        from . import figure
+    except ImportError:
+        return None
+    return figure
+
+
+def _openFigure(path, shell, result):
+    """A figure on a template opens for tracing (``figure.openFigure``: Compare layout first, with the Figure card); on a
+    scan in scan space it stays a reference in the Compare layout (U-07's route, the non-Trace fallback).
+    """
+    figure = _figureModule()
+    if figure is not None:
+        try:
+            if figure.canTrace():
+                return figure.openFigure(path, shell, result) is not None
+        except Exception:
+            logging.error(f"Studio: cannot open {path} for figure tracing:\n{traceback.format_exc()}")
+    return _routeFigure(path, shell, result)
 
 
 def _routeReferenceNode(volumeNode, shell, result):
@@ -3416,6 +3442,12 @@ def install(shell):
     _watchTemplate()
     if _figureController is not None:
         _figureController.resume(shell)
+    figure = _figureModule()
+    if figure is not None:
+        try:
+            figure.install(shell)
+        except Exception:
+            logging.error(f"Studio: figure tracing could not be installed:\n{traceback.format_exc()}")
     # The notices that waited in Classic are shown again once the shell is active, and a figure shown in Yellow is guarded
     qt.QTimer.singleShot(0, _refreshNotices)
     qt.QTimer.singleShot(0, lambda: adoptShownFigure(shell))
@@ -3442,6 +3474,12 @@ def uninstall(shell):
         _transientWatcher = None
     if _figureController is not None:
         _figureController.suspend()
+    figure = sys.modules.get("StudioLib.figure")
+    if figure is not None:
+        try:
+            figure.uninstall(shell)
+        except Exception:
+            logging.error(f"Studio: figure tracing could not be uninstalled:\n{traceback.format_exc()}")
     if shell is not None:
         _clearNotices(shell)
     if _dropHandler is None:

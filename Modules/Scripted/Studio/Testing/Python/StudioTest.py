@@ -19,7 +19,9 @@ from slicer import ScriptedLoadableModule
 #
 # Keys used by the views and the Segment Editor. Studio shortcuts must not take them (SPEC 9.6).
 # Each entry is (Qt portable key sequence, any modifier, source). With "any modifier", the key
-# collides whatever the modifiers of the Studio shortcut are.
+# collides whatever other modifiers the Studio shortcut adds to the entry's own: "[" with any
+# modifier collides with Ctrl+[, and "Shift+V" (the keysym "V", which VTK only gets with Shift:
+# vtkMRMLSliceIntersectionWidget.cxx:223) collides with Ctrl+Shift+V but not with Ctrl+V (keysym "v").
 #
 
 VTK_KEY_BINDINGS = [
@@ -138,14 +140,15 @@ def keyCollisions(shortcutKeys, extraReserved=()):
         modifiers, base = _splitKey(key)
         for reservedKey, anyModifier, source in reserved:
             reservedModifiers, reservedBase = _splitKey(reservedKey)
-            if base == reservedBase and (anyModifier or modifiers == reservedModifiers):
+            if base == reservedBase and ((anyModifier and reservedModifiers <= modifiers) or modifiers == reservedModifiers):
                 collisions.append((key, description, reservedKey, source))
     return collisions
 
 
-#: Keys of the Draw workspace (SPEC 5.4, Appendix A; D-A10 for M), checked while Draw is shown. Data: later work packages
-#: add their Draw keys here (for example L-29's Ctrl+V), and the collision test runs over every installed Studio key.
-DRAW_KEYS = ["P", "D", "M", "E", "L", "Shift+F", "O", "N", "Shift+N", "C", "Alt+Left", "Alt+Right", "Ctrl+Shift+S"]
+#: Keys of the Draw workspace (SPEC 5.4, Appendix A; D-A10 for M; SPEC_LNM_ADDENDUM 7.4 for Ctrl+V, "paste a figure",
+#: enabled while the clipboard holds an image), checked while Draw is shown. Data: later work packages add their Draw keys
+#: here, and the collision test runs over every installed Studio key.
+DRAW_KEYS = ["P", "D", "M", "E", "L", "Shift+F", "O", "N", "Shift+N", "C", "Alt+Left", "Alt+Right", "Ctrl+Shift+S", "Ctrl+V"]
 
 
 def studioShortcutKeys(studioShell):
@@ -425,8 +428,18 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         from StudioLib import workspaces
 
         studioShell = self._applyStudio()
+        # Ctrl+V (paste a figure, L-29) is enabled in Draw only while the clipboard holds an image: give it one
+        clipboard = qt.QApplication.clipboard()
+        image = qt.QImage(8, 8, qt.QImage.Format_RGB32)
+        image.fill(qt.QColor(255, 255, 255))
+        clipboard.setImage(image)
+        self.addCleanup(clipboard.clear)
         self.assertEqual(keyCollisions([("Ctrl+Z", "self check")]), [("Ctrl+Z", "self check", "Ctrl+Z", "Segment Editor shortcut")])
         self.assertTrue(keyCollisions([("Ctrl+]", "any modifier check")]))
+        # Keysym "V" needs Shift (whatever else is held); Ctrl+V gives "v", which the views bind without modifier only
+        self.assertTrue(keyCollisions([("Ctrl+Shift+V", "any modifier check")]))
+        self.assertTrue(keyCollisions([("V", "plain key check")]))
+        self.assertEqual(keyCollisions([("Ctrl+V", "paste check")]), [])
         for ws in workspaces.WORKSPACES:
             if not workspaces.isAvailable(ws):
                 continue
@@ -438,7 +451,8 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             if ws.key == "draw":
                 # Every Draw key is installed (SPEC 5.4) and checked
                 installed = {portableKey(key) for key, _description in keys}
-                expected = [key for key in DRAW_KEYS if key != "M" or slicer.modules.SegmentEditorWidget.editor.effectByName("Smart fill") is not None]
+                expected = [key for key in DRAW_KEYS if (key != "M" or slicer.modules.SegmentEditorWidget.editor.effectByName("Smart fill") is not None)
+                            and (key != "Ctrl+V" or _hasFigureTracing())]
                 self.assertEqual([key for key in expected if portableKey(key) not in installed], [])
             if classicSwitch is not None:
                 keys.append((classicSwitch.shortcut, "Classic switch"))
@@ -1828,6 +1842,141 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertIsNot(editor.segmentationNode(), saved)
         self.assertEqual(self._effect(editor), "Paint")
         self.assertFalse(card.newLesionButton.isVisible())
+
+    #
+    # Trace from a figure (L-29)
+    #
+
+    def test_33_figure_round_trip(self):
+        """A synthetic figure and 5 landmark pairs: RMS < 0.5 mm; the crop and fit file are saved; Show source rebuilds the
+        overlay in <= 300 ms with the same fit; Ctrl+V follows the clipboard; the trace views are restored on close.
+        """
+        import os
+        import tempfile
+        import time
+
+        import numpy as np
+        import vtk
+
+        if not _hasFigureTracing():
+            self.skipTest("figure tracing is not in this build")
+        from LesionNetworkMappingLib import figurefit
+        from StudioLib import figure, importer, layouts
+
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        self.addCleanup(lambda: figure.closeFigure(removeNodes=True))
+        directory = tempfile.mkdtemp(prefix="StudioTestFigure", dir=slicer.app.temporaryPath)
+        # A 160 x 120 figure with an asymmetric pattern
+        image = qt.QImage(160, 120, qt.QImage.Format_RGB32)
+        image.fill(qt.QColor(20, 20, 20))
+        painter = qt.QPainter(image)
+        painter.fillRect(20, 15, 50, 30, qt.QColor(230, 230, 230))
+        painter.fillRect(100, 70, 30, 40, qt.QColor(150, 150, 150))
+        painter.end()
+        path = os.path.join(directory, "case-7_fig1.png")
+        self.assertTrue(image.save(path))
+        importer.handleDrop([path], shell=studioShell)
+        self._pump(10)
+        session = figure.session()
+        self.assertIsNotNone(session)
+        self.assertEqual(len(session.panels), 1)
+        card = self.mainWindow.findChild("QFrame", "StudioFigureCard")
+        self.assertIsNotNone(card)
+        self.assertTrue(card.isVisible())
+        panel = session.panel()
+        self.assertEqual(panel.convention, "unknown")
+        self.assertEqual(panel.fitConvention, "radiological")
+        for node in (panel.figure(), panel.transform(), panel.figureLandmarks(), panel.templateLandmarks()):
+            self.assertEqual(node.GetAttribute("StudioFigure"), "1")
+        # Truth: an axial cut at z = 10 mm, pitch 6, similarity 0.9 mm per pixel turned 5 degrees
+        session.setCut(z=10.0, pitch=6.0, roll=0.0)
+        cut = figurefit.cut_plane("axial", 10.0, 6.0, 0.0)
+        angle = np.radians(5.0)
+        truth = np.array([[0.9 * np.cos(angle), -0.9 * np.sin(angle), 70.0], [0.9 * np.sin(angle), 0.9 * np.cos(angle), -50.0], [0.0, 0.0, 1.0]])
+        planePoints = np.array([[-40.0, -30.0], [40.0, -35.0], [0.0, 45.0], [-25.0, 20.0], [30.0, 10.0]])
+        pixels = figurefit.apply_2d(figurefit.convention_matrix("radiological"), figurefit.apply_2d(np.linalg.inv(truth), planePoints))
+        pixels += np.random.default_rng(3).normal(0.0, 0.2, pixels.shape)
+        for index, (pixel, ras) in enumerate(zip(pixels, cut.to_ras(planePoints), strict=True)):
+            panel.figureLandmarks().AddControlPoint(vtk.vtkVector3d(*panel.localOf(pixel)))
+            panel.templateLandmarks().AddControlPointWorld(vtk.vtkVector3d(*ras))
+            panel.templateLandmarks().SetNthControlPointLabel(index, f"L{index + 1}")
+        session.updateFit()
+        self.assertEqual(panel.pairCount(), 5)
+        self.assertIsNotNone(panel.fit, panel.fitError)
+        self.assertLess(panel.fit.rms_mm, 0.5)
+        self.assertIn("(5 pairs)", card.findChild("QLabel", "StudioFigureResidualChip").text)
+        # The affine model needs at least 4 pairs
+        self.assertTrue(card.findChild("QFrame", "StudioFigureModel").findChildren("QToolButton")[1].enabled)
+        # Trace views: layout 7001, template + figure in Red, the figure alone in Green; restored on close
+        layoutBefore = layouts.FOCUS_LAYOUT_ID
+        session.enterTrace()
+        self._pump(6)
+        self.assertEqual(self.layoutManager.layout, layouts.FOCUS_LAYOUT_ID)
+        red = self.layoutManager.sliceWidget("Red").mrmlSliceCompositeNode()
+        green = self.layoutManager.sliceWidget("Green").mrmlSliceCompositeNode()
+        self.assertEqual(red.GetBackgroundVolumeID(), editor.sourceVolumeNode().GetID())
+        self.assertEqual(red.GetForegroundVolumeID(), panel.figureId)
+        self.assertAlmostEqual(red.GetForegroundOpacity(), figure.DEFAULT_OPACITY)
+        self.assertEqual(green.GetBackgroundVolumeID(), panel.figureId)
+        # The card's Side control confirms the convention (idClicked(int) on Qt 6, where buttonClicked(int) is gone)
+        figure.card().conventionGroup.button(1).click()
+        self._pump(2)
+        self.assertEqual(panel.convention, "neurological")
+        self.assertTrue(panel.confirmed)
+        # The convention is confirmed once (every panel of the paper), then saved
+        session.setConvention("radiological")
+        self.assertTrue(panel.confirmed)
+        # Only what the user stated goes to the study row: no record_id, and no figure / panel without labels
+        self.assertFalse({"record_id", "figure", "panel"} & set(session.columns()))
+        written = session.saveFigures(os.path.join(directory, "sources", "case-7"))
+        self.assertEqual(sorted(os.path.basename(name) for name in written), ["fig-1.png", "fig-1_fit.json"])
+        jsonPath = next(name for name in written if name.endswith(".json"))
+        record = figurefit.read_fit_json(jsonPath)
+        self.assertEqual(record["plane"], "axial")
+        self.assertEqual(len(record["landmarks"]), 5)
+        self.assertTrue(record["convention_confirmed"])
+        self.assertLess(record["rms_mm"], 0.5)
+        rms = panel.fit.rms_mm
+        figure.closeFigure(removeNodes=True)
+        self._pump(4)
+        self.assertEqual(figure.figureNodes(), [])
+        self.assertEqual(self.layoutManager.layout, layoutBefore)
+        self.assertNotEqual(red.GetForegroundVolumeID(), panel.figureId)
+        # Show source: the overlay from the fit file in <= 300 ms (best of 3: the first build warms caches)
+        times = []
+        for attempt in range(3):
+            start = time.perf_counter()
+            rebuilt, _ms = figure.showSource(jsonPath, studioShell)
+            times.append((time.perf_counter() - start) * 1000.0)
+            self.assertAlmostEqual(rebuilt.fit.rms_mm, rms, places=6)
+            self.assertTrue(rebuilt.confirmed)
+            if attempt < 2:
+                figure.closeFigure(removeNodes=True)
+                self._pump(2)
+        self.assertLessEqual(min(times), figure.REBUILD_BUDGET_MS, times)
+        self.assertEqual(red.GetForegroundVolumeID(), figure.session().panel().figureId)
+        # Ctrl+V: a Draw shortcut, enabled only while the clipboard holds an image
+        clipboard = qt.QApplication.clipboard()
+        self.addCleanup(clipboard.clear)
+        clipboard.setText("text")
+        self._pump(2)
+        paste = [shortcut for shortcut in studioShell.shortcuts() if portableKey(shortcut.key) == "Ctrl+V"]
+        self.assertEqual(len(paste), 1)
+        self.assertFalse(paste[0].enabled)
+        clipboard.setImage(image)
+        self._pump(2)
+        self.assertTrue(paste[0].enabled)
+
+
+def _hasFigureTracing():
+    """True when this build has trace-from-figure (StudioLib.figure, L-29)."""
+    try:
+        from StudioLib import figure  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
 
 def vtk_matrix(rows=None):
     """A vtkMatrix4x4 (identity, or the given rows)."""
