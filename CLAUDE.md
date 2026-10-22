@@ -10,6 +10,10 @@
   `Slicer Studio packages`) are also disabled on the repository; keep them that way.
 - Do not use any other GitHub feature: no API calls (`api.github.com`, `gh`, GitHub MCP tools), pull
   requests, issues, releases, packages (`ghcr.io`), Git LFS, Codespaces or artifacts.
+- In-app updates (decision D-U1): the app reads the public "latest release" download of this repository
+  at run time. The user creates and uploads releases by hand with the files that
+  `Utilities/Scripts/SlicerStudioRelease/make_release.py` prepares; never create, edit or upload a
+  release yourself.
 - Build packages locally instead. The macOS disk image is built on the user's Mac with
   `Utilities/Scripts/SlicerStudioMacOS/build_dmg.sh`, and the Linux package with `make package` in
   the build tree (see `Docs/user_guide/install_studio.md`).
