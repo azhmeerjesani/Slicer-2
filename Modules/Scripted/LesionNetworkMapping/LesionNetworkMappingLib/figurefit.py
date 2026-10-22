@@ -12,8 +12,8 @@ Coordinates
   ``(i, j)`` voxel indices of the figure volume (``k = 0``).
 - **Convention** (:func:`convention_matrix`): a radiological figure (patient left on the image right,
   the default of clinical figures) is mirrored, ``u -> -u``, before the fit; a neurological figure is
-  not. Fits never contain a reflection (:func:`umeyama_similarity` refuses them), so the L/R
-  convention is always an explicit, recorded choice and never something a fit decides silently. For
+  not. Fits never contain a reflection (:func:`umeyama_similarity` and :func:`affine_2d` refuse
+  them, :func:`validate_record` refuses a recorded one), so the L/R convention is always an explicit, recorded choice and never something a fit decides silently. For
   sagittal figures "radiological" means anterior on the image left.
 - **Cut plane** (:func:`cut_plane`): the template plane the figure is fitted to, as the N, T and P
   arguments of ``vtkMRMLSliceNode.SetSliceToRASByNTP(..., CutPlane.ORIENTATION)``. Pitch tilts the top
@@ -70,6 +70,7 @@ MIRROR_SUSPECT_RATIO = 0.5
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _TOLERANCE = 1e-6
+_RESIDUAL_TOLERANCE_MM = 1e-4
 
 #: Slicer's standard slice axes per plane (vtkMRMLSliceNode::Get*SliceToRASMatrix): x (screen right),
 #: y (screen up), z, and the RAS axis that z_mm is measured along
@@ -199,22 +200,29 @@ def umeyama_similarity(src_xy, dst_xy):
     return matrix
 
 
-def affine_2d(src, dst, min_pairs=MIN_AFFINE_PAIRS):
+def affine_2d(src, dst):
     """Least-squares 2D affine (6 DOF) from src to dst.
 
-    Raises ValueError with fewer than ``min_pairs`` (default 4) pairs, because 3 pairs fit exactly with
-    RMS 0, or when the source points are collinear. ``min_pairs`` below 4 is only used by
-    :func:`loo_rms`, whose held-out residuals stay meaningful for exact 3-pair fits.
+    Raises ValueError with fewer than :data:`MIN_AFFINE_PAIRS` (4) pairs, because 3 pairs fit exactly
+    with RMS 0, when the source points are collinear, or when the best fit contains a reflection
+    (determinant <= 0): like :func:`umeyama_similarity`, the fit never decides the L/R convention.
 
     :return: 3x3 homogeneous matrix.
     """
-    src, dst = _pairs(src, dst, max(3, int(min_pairs)), "affine fit")
+    return _affine_lstsq(src, dst, MIN_AFFINE_PAIRS)
+
+
+def _affine_lstsq(src, dst, min_pairs):
+    """Affine least squares with at least ``min_pairs`` pairs (3 only for the folds of :func:`loo_rms`)."""
+    src, dst = _pairs(src, dst, min_pairs, "affine fit")
     design = np.column_stack([src, np.ones(len(src))])
     solution, _residuals, rank, _singular = np.linalg.lstsq(design, dst, rcond=None)
     if rank < 3:
         raise ValueError("affine fit: the figure landmarks are collinear")
     matrix = np.eye(3)
     matrix[:2, :] = solution.T
+    if np.linalg.det(matrix[:2, :2]) <= 0:
+        raise ValueError("affine fit: the landmarks need a reflection (check the L/R convention)")
     return matrix
 
 
@@ -254,7 +262,8 @@ def loo_rms(kind, src, dst):
 
     Affine folds may have 3 pairs (exact fits that still predict the held-out pair). Returns None when
     a fold cannot be fitted (similarity with fewer than 3 pairs, affine with fewer than 4, or
-    degenerate folds).
+    degenerate or reflected folds). This algorithm is part of fit-file version :data:`VERSION`
+    (:func:`validate_record` recomputes it); changing it needs a new version.
     """
     src = np.asarray(src, dtype=float).reshape(-1, 2)
     dst = np.asarray(dst, dtype=float).reshape(-1, 2)
@@ -269,7 +278,7 @@ def loo_rms(kind, src, dst):
             if kind == "similarity":
                 model = umeyama_similarity(src[keep], dst[keep])
             else:
-                model = affine_2d(src[keep], dst[keep], min_pairs=3)
+                model = _affine_lstsq(src[keep], dst[keep], 3)
         except ValueError:
             return None
         held_out.append(residuals(model, src[index : index + 1], dst[index : index + 1])[0])
@@ -305,14 +314,15 @@ def residual_level(rms_mm):
     """Green below 2 mm, amber 2 to 4 mm, red above 4 mm ("none" when no residual is available)."""
     if rms_mm is None or not math.isfinite(float(rms_mm)):
         return ResidualLevel("none", f"No residual yet; the residual {RESIDUAL_NOTE}.")
-    value = float(rms_mm)
+    # classify the value as displayed (one decimal), so that "2.0 mm" is never green
+    value = round(float(rms_mm), 1)
     if value < RESIDUAL_GREEN_MM:
         level = "green"
     elif value <= RESIDUAL_RED_MM:
         level = "amber"
     else:
         level = "red"
-    return ResidualLevel(level, f"RMS {value:.1f} mm {RESIDUAL_NOTE}.")
+    return ResidualLevel(level, f"RMS {value:.1f} mm — the residual {RESIDUAL_NOTE}.")
 
 
 def residual_chip(rms_mm, loo_rms_mm, n_pairs):
@@ -472,18 +482,18 @@ def fit_figure(fig_px, tpl_ras, plane_frame, convention=DEFAULT_CONVENTION, mode
     )
 
 
-def initial_fit(size_px, pixel_spacing):
+def initial_fit(size_px, pixel_spacing, convention=DEFAULT_CONVENTION):
     """3x3 placement before any landmark: ``pixel_spacing`` mm per pixel, crop centre at the plane origin.
 
-    Applies to mirrored pixels; since the mirror maps the centre to its negative, the centred
-    placement is the same for both conventions.
+    Like a fit, it applies to the pixels mirrored according to ``convention``.
     """
     width, height = (float(value) for value in size_px)
     spacing = float(pixel_spacing)
     if not (width > 0 and height > 0 and math.isfinite(spacing) and spacing > 0):
         raise ValueError("initial placement needs a positive crop size and pixel spacing")
+    centre = apply_2d(convention_matrix(convention), [(width - 1) / 2.0, (height - 1) / 2.0])[0]
     matrix = np.diag([spacing, spacing, 1.0])
-    matrix[:2, 2] = -spacing * np.array([(width - 1) / 2.0, (height - 1) / 2.0])
+    matrix[:2, 2] = -spacing * centre
     return matrix
 
 
@@ -503,7 +513,7 @@ def figure_ijk_to_ras(fit, plane_frame, pixel_spacing=None, convention=DEFAULT_C
     if fit is None:
         if pixel_spacing is None or size_px is None:
             raise ValueError("the initial placement needs pixel_spacing and size_px")
-        matrix_2d = initial_fit(size_px, pixel_spacing)
+        matrix_2d = initial_fit(size_px, pixel_spacing, convention)
     else:
         matrix_2d = np.asarray(fit.matrix if isinstance(fit, FigureFit) else fit, dtype=float)
     if matrix_2d.shape != (3, 3) or not np.isfinite(matrix_2d).all():
@@ -603,7 +613,12 @@ def make_record(
 
 
 def _is_number(value):
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:  # an integer too large for a float
+        return False
 
 
 def _vector(value, length):
@@ -619,7 +634,9 @@ def validate_record(record):
 
     Besides types and ranges, the record must be self-consistent: the cut plane equals
     ``cut_plane(plane, z_mm, pitch_deg, roll_deg)``, ``matrix`` equals the matrix rebuilt from
-    ``fit_2d``, the cut plane and the convention, and the model has enough landmark pairs.
+    ``fit_2d``, the cut plane and the convention, ``fit_2d`` has no reflection (and is a scaled
+    rotation for a similarity), the model has enough landmark pairs, and ``rms_mm`` and ``loo_rms_mm``
+    equal the residuals recomputed from the landmarks.
     """
     if not isinstance(record, dict):
         raise FigureFitError(["the fit record must be a JSON object"])
@@ -658,6 +675,15 @@ def validate_record(record):
         errors.append(f"a {model} fit needs at least {MIN_PAIRS[model]} landmark pairs, the record has {len(landmarks)}")
     if not _matrix(record.get("fit_2d"), 3, 3):
         errors.append("fit_2d must be a 3x3 matrix of finite numbers")
+    else:
+        fit_2d = np.asarray(record["fit_2d"], dtype=float)
+        linear = fit_2d[:2, :2]
+        if not np.allclose(fit_2d[2], [0, 0, 1]):
+            errors.append("fit_2d must have the last row [0, 0, 1]")
+        if np.linalg.det(linear) <= 0:
+            errors.append("fit_2d must not contain a reflection (the L/R convention is recorded in convention)")
+        elif model == "similarity" and not np.allclose([linear[0, 0], linear[0, 1]], [linear[1, 1], -linear[1, 0]], rtol=1e-6, atol=1e-9 * float(np.abs(linear).max())):
+            errors.append("fit_2d of a similarity must be a scaled rotation")
     if not _matrix(record.get("matrix"), 4, 4):
         errors.append("matrix must be a 4x4 matrix of finite numbers")
     elif not np.allclose(np.asarray(record["matrix"])[3], [0, 0, 0, 1]):
@@ -693,9 +719,11 @@ def validate_record(record):
         errors.append("tracer must be text")
     created = record.get("created")
     try:
-        datetime.datetime.fromisoformat(created)
+        created_ok = "T" in created and datetime.datetime.fromisoformat(created).tzinfo is not None
     except (TypeError, ValueError):
-        errors.append("created must be an ISO 8601 date and time")
+        created_ok = False
+    if not created_ok:
+        errors.append("created must be an ISO 8601 date and time with a UTC offset")
     if not errors and cut_ok:
         expected = cut_plane(plane, cut["z_mm"], cut["pitch_deg"], cut["roll_deg"])
         for key, value in (("origin_ras", expected.origin), ("normal", expected.normal), ("transverse", expected.transverse)):
@@ -709,9 +737,26 @@ def validate_record(record):
             else:
                 if not np.allclose(record["matrix"], rebuilt, atol=1e-5):
                     errors.append("matrix does not match fit_2d, cut_plane and convention")
+        if not errors:
+            errors.extend(_residual_errors(record, expected))
     if errors:
         raise FigureFitError(errors)
     return record
+
+
+def _residual_errors(record, cut):
+    """rms_mm and loo_rms_mm must be the residuals of the recorded landmarks (auditable, not just stated)."""
+    mirrored = apply_2d(convention_matrix(record["convention"]), [item["fig_px"] for item in record["landmarks"]])
+    plane_points = cut.to_plane([item["tpl_ras"] for item in record["landmarks"]])[0]
+    errors = []
+    expected_rms = rms(np.asarray(record["fit_2d"], dtype=float), mirrored, plane_points)
+    if not math.isclose(record["rms_mm"], expected_rms, rel_tol=1e-6, abs_tol=_RESIDUAL_TOLERANCE_MM):
+        errors.append(f"rms_mm {record['rms_mm']:g} does not match the landmarks and fit_2d ({expected_rms:g} mm)")
+    expected_loo = loo_rms(record["model"], mirrored, plane_points)
+    loo = record["loo_rms_mm"]
+    if (loo is None) != (expected_loo is None) or (loo is not None and not math.isclose(loo, expected_loo, rel_tol=1e-6, abs_tol=_RESIDUAL_TOLERANCE_MM)):
+        errors.append(f"loo_rms_mm {loo} does not match the landmarks ({expected_loo})")
+    return errors
 
 
 def record_cut_plane(record):
@@ -729,6 +774,8 @@ def write_fit_json(path, record):
     try:
         with open(tmp_path, "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp_path, path)
     finally:
         if os.path.exists(tmp_path):
@@ -740,6 +787,8 @@ def read_fit_json(path):
     with open(path, encoding="utf-8") as f:
         try:
             record = json.load(f)
-        except json.JSONDecodeError as error:
+        except UnicodeDecodeError as error:
+            raise FigureFitError([f"not UTF-8 text: {error}"]) from error
+        except (json.JSONDecodeError, RecursionError) as error:
             raise FigureFitError([f"not valid JSON: {error}"]) from error
     return validate_record(record)
