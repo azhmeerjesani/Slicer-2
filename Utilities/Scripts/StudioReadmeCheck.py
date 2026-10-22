@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-r"""Check README.md of Slicer Studio against the source tree and the state of the work packages (A-05).
+r"""Check README.md of Slicer Studio against the source tree and the state of the work packages (A-05, A-05b).
 
 The README makes many small claims (settings keys, shortcuts, command line options, file paths, what is
 implemented). This script rejects the ones that are no longer true. It uses only the Python standard library
@@ -68,6 +68,30 @@ FEATURE_WPS = [
     (r"usability gate", ["U-05"]),
     (r"mode pill", ["U-04"]),
     (r"study schema|job protocol|threshold rules v2|design builder|permutation|reference maps", ["L-01"]),
+    # Wave 3 (A-05b)
+    (r"autosave status|recovery card|reopen study", ["A-01b"]),
+    (r"study loop|done → next|subject list|recover unsaved tracing|new study", ["W3-07"]),
+    (r"normaliz\w* (?:to mni|of native|native)|normalize native|one-click normalization|normalization (?:card|command line)", ["A-03"]),
+    (r"normalize to mni card|normalize card|use for map", ["A-03b"]),
+    (r"normalize (?:\d+|n) native|norm column|norm_qc|normalization review|review gate|library batch", ["A-03c"]),
+    (r"cohort statistics|cohort card|overlap tab|connectome manager|browse lesion maps|map browsing", ["W3-08"]),
+    (r"contrast tab|symptom tab", ["L-20"]),
+    (r"slnm|symptom mapping", ["L-12"]),
+    (r"intake check|lesionops", ["L-13"]),
+    (r"lesion-set diagnostics|lesionset", ["L-14"]),
+    (r"multi-atlas|atlas label|fetch layer", ["L-15"]),
+    (r"engine v2|parcel run|split-half", ["L-16"]),
+    (r"preflight", ["L-17"]),
+    (r"reporting checklist|reporting v2|neurovault|methods text", ["L-18"]),
+    (r"cluster table|peak table|cluster and peak", ["L-19"]),
+    (r"normalization qc|normqc", ["L-21"]),
+    (r"figure fit|figure-fit", ["L-22"]),
+    (r"navigation in studio|navigation settings", ["W3-02b"]),
+    (r"focus mode|maximize view", ["W3-03"]),
+    (r"series grouping|labelmap names?", ["W3-04"]),
+    (r"brush-size label|brush hover|brush-size display", ["W3-05"]),
+    (r"thin slider|thin scroll bar", ["W3-01"]),
+    (r"altgr|research-use line|close prompt|keyboard and low-vision", ["U-03"]),
 ]
 
 #: Words that make a line about a work package that did not pass acceptable
@@ -731,9 +755,38 @@ _SELF_TEST_ERRORS = {
 }
 
 
+def selfTestFeatureTable():
+    """The keywords of ``FEATURE_WPS`` find the work package that did not pass (wave 3 examples)."""
+    problems = []
+    examples = {
+        "The study loop is Implemented.": "W3-07",
+        "Autosave status and recovery card in Studio: Implemented.": "A-01b",
+        "Normalize N native subjects is Available.": "A-03c",
+        "The Draw card, normalize to MNI card, is Available.": "A-03b",
+        "One-click normalization is Implemented.": "A-03",
+        "The Contrast tab is Available.": "L-20",
+        "Symptom mapping (sLNM 2.0) is Implemented.": "L-12",
+        "The preflight is Implemented.": "L-17",
+        "Cluster tables are Available.": "L-19",
+        "Thin sliders and scroll bars are Available.": "W3-01",
+    }
+    # A sentence may name several work packages (Autosave: A-01 and A-01b): the others have passed
+    allPassed = {identifier: "passed" for _pattern, identifiers in FEATURE_WPS for identifier in identifiers}
+    for sentence, identifier in examples.items():
+        failures = []
+        checkClaims(sentence, sentence, {**allPassed, identifier: "failed"}, failures)
+        if not any(failure.kind == "claim-state" and identifier in failure.message for failure in failures):
+            problems.append(f"{identifier} is not found in: {sentence}")
+        failures = []
+        checkClaims(sentence, sentence, allPassed, failures)
+        if any(failure.kind == "claim-state" for failure in failures):
+            problems.append(f"a passed work package is rejected in: {sentence}")
+    return problems
+
+
 def selfTest():
     """Run the checker on a small embedded README: it must pass, and one error of each kind must be reported."""
-    problems = []
+    problems = selfTestFeatureTable()
     with tempfile.TemporaryDirectory() as directory:
         for relative, content in _SELF_TEST_SOURCE.items():
             path = os.path.join(directory, relative)

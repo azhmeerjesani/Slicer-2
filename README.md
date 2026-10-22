@@ -4,26 +4,31 @@ Slicer Studio is an edition of [3D Slicer](https://www.slicer.org) for one kind 
 lesions slice by slice and computing lesion network maps (LNM). It opens on a simple Library page, puts
 the Segment Editor next to a large axial view in a Draw workspace, and computes a lesion's network from a
 normative connectome in a Map workspace (you provide the connectome; a small synthetic demo connectome
-is there to try it). While you work, the scene is autosaved, so that unsaved work can be recovered after a crash.
-The layout borrows from photo editors such as Lightroom: a library to choose what to work on, a focused
-editing space and a quiet dark interface. Underneath it is 3D Slicer 5.13, so its files open in official
-3D Slicer and the other way round. Its packaging scripts build a macOS disk image, a Linux package and a
-version that runs in a web browser on your own computer; no package has been published yet.
+is there to try it). While you work, the scene is autosaved, so that unsaved work can be recovered after a
+crash. A study (a folder of subjects) lets you trace lesion after lesion with *Done → next*, and a lesion
+traced on a patient's own scan can be normalized to MNI space in one click. The layout borrows from photo
+editors such as Lightroom: a library to choose what to work on, a focused editing space and a quiet dark
+interface. Underneath it is 3D Slicer 5.13, so its files open in official 3D Slicer and the other way round.
+Its packaging scripts build a macOS disk image, a Linux package and a version that runs in a web browser on
+your own computer; no package has been published yet.
 
 > [!NOTE]
-> **Early development, no release yet.** Waves 1 and 2 of 5 and the packaging work are implemented: the
+> **Early development, no release yet.** Waves 1 to 3 of 5 and the packaging work are implemented: the
 > Studio interface (Library, Draw and Map), a command palette and a shortcut list, guided tours, the
-> streamlined Draw panel with Smart fill (assisted tracing), autosave and crash recovery, flat view bars
-> and faster slice navigation, a first round of usability work (an `Esc` that backs out one state at a
-> time, visible mouse modes, a Library that shows the current work, safer file import), the Map
-> workspace, the lesion network mapping library with its command lines, file compatibility checks and
-> the packaging scripts. The Qt 6 start-up problems found so far are fixed. Planned next, wave 3: the
-> study loop (a subject list and *Done → next*), the autosave status and recovery card in Studio,
-> one-click normalization of native-space scans to MNI space (command line, Draw and Map card, Library
-> batch) and the cohort statistics screens. Wave 4: the *Run everything* cohort pipeline with an HTML
-> report, then performance work and the user guide. Packages are built on your own computer (see
-> [Install](#install)); no disk image, Linux package or web image has been published yet. See
-> [Status and roadmap](#status-and-roadmap).
+> streamlined Draw panel with Smart fill (assisted tracing), autosave and crash recovery (with a status and a
+> recovery card in Studio), flat view bars, thin sliders and faster slice navigation, usability work (an `Esc`
+> that backs out one state at a time, visible mouse modes, a Library that shows the current work, safer file
+> import, accessibility and a first-run flow), the Map workspace, the lesion network mapping library with
+> its command lines, file compatibility checks and the packaging scripts. Wave 3 added the study loop (a
+> subject list in the Library and *Done → next*), one-click normalization of native-space scans to MNI
+> space (command line, a card in Draw and in Map, a Library batch with a review step), the cohort statistics
+> screens of Map and a connectome manager, a settings page for the navigation behaviors, a brush-size
+> display, loading fixes for lesion masks, and more lesion network mapping numerics (symptom mapping,
+> preflight checks, cluster tables, a reporting checklist). The Qt 6 start-up problems found so far are
+> fixed. Planned next, wave 4: the *Run everything* cohort pipeline with an HTML report, then performance
+> work and the user guide; wave 5: the research features of the LNM plan (see
+> [Status and roadmap](#status-and-roadmap)). Packages are built on your own computer (see
+> [Install](#install)); no disk image, Linux package or web image has been published yet.
 
 > [!WARNING]
 > **Research use only.** Slicer Studio, like 3D Slicer, is not a medical device. Lesion network maps must
@@ -68,9 +73,10 @@ On a normal launch Slicer Studio shows its own interface, Studio, instead of the
   (workspaces, the File, Edit, View and Help menus, Appearance, Settings, Python console, Error log and
   Classic interface), a breadcrumb that names the current work (the scan and the lesion, or the loaded
   set), the **Library | Draw | Map** switcher in the centre, a status chip, Undo and Redo (in Draw), a
-  layout picker, **Search** and an error badge. Every control of the bar takes the keyboard focus and has
-  a tooltip of the form "Name · key · description". In a window narrower than 1100 px, Search and the
-  switcher shrink to icons.
+  layout picker, **Search**, the autosave status ("Autosaved · 2 min ago", see
+  [Autosave and crash recovery](#autosave-and-crash-recovery)) and an error badge. Every control of the bar
+  takes the keyboard focus and has a tooltip of the form "Name · key · description". In a window narrower
+  than 1100 px, Search and the switcher shrink to icons.
 - **One inspector.** The module panel is a panel on the right, 340 px wide by default (300–480 px). A
   workspace is a module shown in it. The workspaces share one width: if a tool of the Segment Editor
   needs more than that (up to 600 px), the inspector takes that width once, remembers it, and keeps it
@@ -96,12 +102,24 @@ On a normal launch Slicer Studio shows its own interface, Studio, instead of the
   and says how the same thing is done in 3D Slicer; *Where did it go?* is a searchable list for people who
   come from 3D Slicer (see [Coming from 3D Slicer](Docs/user_guide/studio_coming_from_slicer.md)). The
   tour is offered once, in a small card that never blocks anything.
+- **Keyboard and low-vision access.** A slice view that gets the keyboard focus with `Tab`, `Shift+Tab` or
+  `F6` shows a 2 px accent frame. Studio's labels and buttons follow a change of the application font size
+  at once and return to their sizes when it is restored. Below 1100 px the top bar is compact and the
+  inspector may be as narrow as 300 px; Draw fits a 1080p screen at a scale factor of 2
+  (`QT_SCALE_FACTOR=2`), which a script checks (nothing is cut off at the right, the inspector's controls
+  fit). On Windows, where AltGr arrives as `Ctrl+Alt`, a text field keeps the characters that AltGr types
+  instead of running a workspace key (written for Windows, not tried there).
+- **First run and closing.** The research-use notice is a line at the bottom of the Library ("Research use
+  only, not for clinical use · Don't show again") instead of a dialog; *Don't show again* writes the official
+  key. Classic keeps the official dialog. Closing the application after you saved the lesion asks one
+  question (*Quit*, *Save session…*, *Cancel*); closing with unsaved edits of the lesion offers *Save
+  lesion…* first, and the autosave line is added when autosave runs.
 
 | Workspace | What you do there | State |
 |---|---|---|
-| **Library** | Open scans, lesion masks, scenes, figures or DICOM folders, or start on the MNI template. A drop zone, *Open…*, *Open folder…*, *Start on MNI template* and the most recent files are shown over the views. Once data is loaded, a *Current work* card lists the scans and lesions that are open, with *Continue in Draw →*. | Available (W1-08, U-02) |
-| **Draw** | Trace the lesion. The views use the *Studio Focus* layout: a large axial view, with the coronal and sagittal views stacked on its right. The inspector shows a lesion card, labelled tool tiles (Brush, Outline, Smart fill, Erase, Fill gaps) and a *Save lesion* button at the bottom. See [Drawing](#drawing). | Available (W2-05, A-02) |
-| **Map** | Compute and read the lesion's network map from a connectome that you provide (or the synthetic demo). See [Lesion network mapping library](#lesion-network-mapping-library). | Available (W2-06) |
+| **Library** | Open scans, lesion masks, scenes, figures or DICOM folders, or start on the MNI template. A drop zone, *Open…*, *Open folder…*, *Start on MNI template* and the most recent files are shown over the views. Once data is loaded, a *Current work* card lists the scans and lesions that are open, with *Continue in Draw →*. *New study…* and *Open study…* make or open a study: a subject list with QC, filters and batch actions (see [Studies and the study loop](#studies-and-the-study-loop)). After a crash, a recovery card is shown at the top. | Available (W1-08, U-02, W3-07, A-01b) |
+| **Draw** | Trace the lesion. The views use the *Studio Focus* layout: a large axial view, with the coronal and sagittal views stacked on its right. The inspector shows a lesion card, labelled tool tiles (Brush, Outline, Smart fill, Erase, Fill gaps) and a *Save lesion* button at the bottom (*Done → next* in a study). A *Normalize to MNI* card appears when the source scan is in native space. See [Drawing](#drawing). | Available (W2-05, A-02, A-03b) |
+| **Map** | Compute and read the lesion's network map from a connectome that you provide (or the synthetic demo). The seed is a lesion or, with a study, a cohort (overlap, contrast and symptom tabs); a connectome manager adds, converts and removes connectomes. See [Lesion network mapping library](#lesion-network-mapping-library). | Available (W2-06, W3-08, L-20, A-03b) |
 
 Keyboard (on macOS, `Ctrl` is `Cmd` and `Alt` is `Option`; the full list is in `Ctrl+/`):
 
@@ -114,16 +132,19 @@ Keyboard (on macOS, `Ctrl` is `Cmd` and `Alt` is `Option`; the full list is in `
 | `Ctrl+/` | Keyboard shortcuts |
 | `Alt+1` / `2` / `3` / `4` / `5` | Focus / Single / Four-up / Row / Focus + 3D layout |
 | `Ctrl+\` or `Ctrl+5` | Show or hide the inspector (`Tab` keeps its normal job of moving the keyboard focus) |
-| `F11` or `Ctrl+6` | Hide panels: hide the inspector and the top bar (formerly focus mode) |
+| `F11` or `Ctrl+6` | Hide panels (focus mode): hide the inspector and the top bar. In Classic, *View > Maximize view* does the same for the module panel, the toolbars and the dock widgets, and showing the module panel leaves it |
 | `F6` / `Shift+F6` | Move the keyboard focus between the top bar, the inspector and the views |
 | `F10` | Open the `≡` menu (on Windows and Linux also `Alt+F`, `Alt+E` and `Alt+H` for its File, Edit and Help menus) |
 | `Esc` | Backs out of one state per press: closes a popover, Search or the shortcut list; leaves Place or window/level mode; restores a maximized or single view; shows hidden panels; deselects the Draw tool; returns from a module opened by Search to the workspace |
 | `Ctrl+Z` / `Ctrl+Y` | Undo / redo the lesion (in Draw; `Ctrl+Shift+Z` also redoes) |
-| `Ctrl+Enter` | The primary button of the inspector: *Save lesion* in Draw, *Map network* in Map |
+| `Ctrl+Enter` | The primary button of the inspector: *Save lesion* in Draw (*Done → next* in a study), *Map network* in Map |
+| `Ctrl+E` | Map: export |
 | `Ctrl+Shift+S` | Save lesion… (in Draw) |
 | `P` / `D` / `M` / `E` / `L` / `Shift+F` / `O` | Draw: Brush / Outline / Smart fill / Erase / Auto outline / Fill gaps / fill or outline only. `1` to `0` pick the tools in order. |
 | `N` / `Shift+N` / `C` | Draw: next / previous slice with a gap in the lesion / center the views on the lesion |
-| `Alt+Left` / `Alt+Right` | Draw: previous / next lesion of a loaded set |
+| `Alt+Left` / `Alt+Right` | Draw: previous / next lesion of a loaded set, or subject of a study (written like *Done → next*, without marking the subject traced). Map: previous / next map of a browsed set |
+| `[` / `]` | Draw, Brush: smaller / larger brush (setting `Studio/BracketKeysResizeBrush`, see [Settings added by Slicer Studio](#settings-added-by-slicer-studio)) |
+| `P` / `X` / `U` | Library subject list: QC pass / fail / not reviewed; `Delete` removes the subjects from the study (the files are kept) and `/` searches the list |
 | `PageUp` / `PageDown` / `Home` / `End` | In a slice view: several slices at once / first and last slice (see [Slicing and navigation](#slicing-and-navigation)) |
 
 Slicer's own shortcuts, such as `Ctrl+S` (save), `Ctrl+2` (settings) or `Ctrl+3` (Python console), keep
@@ -164,13 +185,20 @@ and the options of the active tool:
   are tracing on ("on T1 ▾"). *Fill gaps and specks* closes gaps up to 2 mm and removes islands under
   10 mm³.
 - **Brush size** chips (1, 3, 6 and 12 mm) set the brush; the diameter is remembered
-  (`Studio/BrushDiameterMm`).
+  (`Studio/BrushDiameterMm`). A small label next to the brush ("Ø 3.0 mm") shows the diameter for about a
+  second after the size changes and while `Shift` is held; `[` and `]` make the brush smaller and larger.
 - **Tool tiles:** Brush, Outline, Smart fill, Erase and Fill gaps, with *More tools ▾* for the others (the
   Segment Editor effects keep their names in the Segment Editor itself). Tools have letter keys (see the
   keyboard table above); `Esc` deselects the tool and `Space` pauses it, so that a left-drag adjusts
   window/level.
-- A **Display** card (collapsed) and, at the bottom, the primary button: *Save lesion* (`Ctrl+Enter`).
+- A **Display** card (collapsed) and, at the bottom, the primary button: *Save lesion* (`Ctrl+Enter`), or
+  *Done → next* when a study is open (see [Studies and the study loop](#studies-and-the-study-loop)).
   *⋯ > Show all controls* of the panel brings back the classic Segment Editor controls.
+- A **Normalize to MNI** card, shown when the source scan is in native space: one click registers the scan
+  to the MNI template with the lesion masked out, in the background, and makes the lesion in MNI space the
+  seed of Map (*Use for Map →*). *Normalize scan only* is for tracing directly on the warped scan, and
+  *Update MNI lesion* re-warps a lesion that you edited afterwards, in a few seconds, without registering
+  again. See [Normalize native-space lesions](#normalize-native-space-lesions).
 
 **Smart fill** (assisted tracing, tool tile *Smart fill*, key `M`). Click inside a lesion and the lesion
 is grown from that point; the intensity tolerance is chosen from the contrast at its boundary. The result
@@ -208,6 +236,11 @@ Other changes are in the Segment Editor itself, so they also apply in the Classi
   After a stroke, only segments whose voxels changed get their 3D surface rebuilt. This also fixes 3D
   surfaces that official Slicer 5.12 and 5.13 leave out of date after erasing in segments that share a
   layer.
+- **Paint effect: hover and strokes.** Moving the brush over a view renders only the view under the mouse (the
+  other slice views and the 3D view are rendered only when the brush outline reaches them), and the
+  brush-size label and the `[` `]` keys described above are part of the effect. The five test strokes of the
+  work package's check paint the same voxels as the official 5.13 nightly (0 voxels differ). Measured numbers
+  are in [Performance](#performance).
 - **Threshold and Fill between slices.** Threshold no longer costs anything until it is used, and no
   longer recomputes a histogram on every mouse move; a click no longer resets the range silently, and the
   option *Paint within this range* is explained. *Fill between slices* can act on the selected segment
@@ -217,6 +250,44 @@ Other changes are in the Segment Editor itself, so they also apply in the Classi
   size limits follow the volume's geometry.
 - In the compatibility test, the segmentation files (`.seg.nrrd`) that Slicer Studio saves are
   byte-identical to those of official 3D Slicer 5.12.4 and 5.13.
+
+### Studies and the study loop
+
+A **study** is a plain folder that other tools can read: `study.json`, a BIDS-style `participants.tsv`, a
+`lesions` folder, a `derivatives` folder and a hidden `.studio` folder (the journal of the lesion being
+traced, an inbox for background jobs, a heartbeat while the study is open, caches). In the Library, *New
+study…* makes one from a folder, and *Create study* does the same for a folder or a set of lesion files that
+you opened; *Open study…* and the recent studies reopen one. Creating a study reads file headers only: no
+image is loaded. A folder that already has a `participants.tsv` is adopted in place: its columns and their
+order are kept, a backup is written once to `.studio/participants.orig.tsv`, and the values of a group column
+("patient", "HC", "1") are proposed as case, control or exclude.
+
+- **Subject list.** Columns ID, Group, Lesion mL, Space, Status, QC and Norm (the normalization state, see
+  [Normalize native-space lesions](#normalize-native-space-lesions)); sortable; filter chips (All, Cases,
+  Controls, Untraced, QC fail, and *Needs normalization* and *Normalization to review*). `Enter` opens the
+  selected subject in Draw (else the next untraced one); `P`, `X` and `U` set QC; *New case on template* adds a
+  case without a scan, to draw on the study template. The inspector has the *Study*, *Subject* and *Batch* cards
+  (group, scores and other columns; *Remove from study* never deletes files).
+- **One subject at a time** is in the scene. Opening a subject replaces the previous subject's scan and lesion
+  (the shared study template stays) and puts the lesion in Draw; the undo history goes with the removed lesion.
+- **Done → next** (`Ctrl+Enter`) writes the lesion as a NIfTI mask on the grid it was traced on, to
+  `lesions/<sid>_space-<space>_desc-lesion_mask.nii.gz` with its sidecar, updates `participants.tsv` (status,
+  volume, parts, gaps, centroid, tracing time) and opens the next untraced subject. A pending Smart fill preview
+  is applied first. `Alt+Left` and `Alt+Right` move to the previous and next subject and write the lesion in
+  the same way, without marking the subject traced. A lesion file that is not in the `lesions` folder (in
+  `derivatives`, or in the files of an adopted folder) is never overwritten: the row is repointed to the new
+  file. An erased lesion writes nothing (its file is kept), and edits that cancel out leave the file untouched.
+- **Journal.** Two seconds after the last change of the lesion, its voxels are written to
+  `<study>/.studio/journal/<sid>.nii.gz` by a background thread. If Slicer stopped before the lesion was
+  written, opening the subject offers "Recover unsaved tracing of sub-012 (2 min ago)" (*Recover* is one undo
+  step; *Discard* removes the journal). Writing the lesion removes the journal. The journal covers the lesion
+  inside the study; the scene autosave (see [Autosave and crash recovery](#autosave-and-crash-recovery)) covers
+  the scene.
+- **One writer.** `participants.tsv` is written only by the Studio session, on the main thread and under a
+  lock. Background jobs (normalization, maps) post their values to `.studio/inbox`, which the session merges
+  when a study is opened, when the Library is shown and on request. Nothing is written outside the study folder.
+- **Classic.** The study session also works in the Classic interface: the Studio module panel lists the
+  subjects there.
 
 ### Slicing and navigation
 
@@ -240,7 +311,11 @@ Other changes are in the Segment Editor itself, so they also apply in the Classi
   zoom in and zoom out cancel exactly, the keys of a view work on the view under the mouse without a
   click (`Studio/FocusFollowsMouse`), and a left-drag adjusts window/level when no tool or mode is active
   (`Studio/LeftDragWindowLevel`). Markups and Segment Editor tools still win over the left-drag. All of
-  it is off in Classic and with `--testing`, which keep Slicer's behavior.
+  it is off in Classic and with `--testing`, which keep Slicer's behavior. *Application Settings > Views >
+  Navigation in Studio* has a switch or a value for each of the three keys, and the 3D views follow the mouse
+  too (a 3D view takes the keyboard focus when the mouse enters it; text fields, menus and dialogs keep the
+  focus). The user guide lists them in
+  [Navigation in Studio](Docs/user_guide/user_interface.md#navigation-in-studio).
 - **In-view probe.** The slice view under the mouse shows one line at its bottom-right corner: the
   position, the value and the lesion, for example "Left 11.2 · P 17.8 · S 9.5 (MNI) · 412 · Lesion". MNI
   or scanner space is stated; hemisphere words are shown only where they are true (MNI), and a figure shows
@@ -257,19 +332,38 @@ Other changes are in the Segment Editor itself, so they also apply in the Classi
   25 degrees of an anatomical axis one letter is shown; otherwise the letters of the axes involved are
   combined (for example `RA`). The default display is radiological. `Studio/OrientationLetters`
   (default true) turns them off. A figure is labelled as a figure and gets no patient letters.
-- **Planned (wave 3):** thin sliders and scroll bars (W3-01) and a settings page for the navigation
-  behaviors above (W3-02b).
+- **Thin sliders and scroll bars.** Sliders have a 4 px groove with an accent-colored fill and a round
+  handle (also the range sliders and the slice offset slider), scroll bars are thin, combo and spin boxes are
+  flat with working arrows, and progress bars (a 4 px bar with the text beside it), tabs, splitters and header
+  sections follow the theme. The thin scroll bars (no step buttons) and the 14 px slider handles are those of
+  the Comfortable density; the Compact density and `--testing` keep the historical metrics. This is in the
+  application style, so it applies in Classic too.
+- **Focus mode and shortcuts without a menu bar.** Menu-only shortcuts keep working with the menu bar hidden.
+  *View > Maximize view* (`Ctrl+6` or `F11`) is a focus mode of the main window that hides the module panel,
+  the toolbars and the dock widgets and shows exactly what it hid when you leave it. The module panel keeps
+  its width when you select another module (`Studio/ClassicPanelWidth`, Classic), and the main window state is
+  restored once, when the window is first shown.
+- **Loading lesion masks.** A 3D NIfTI file is never grouped with its numbered neighbors into an image
+  series, so a folder of numbered lesion masks (`sub-001_lesion.nii.gz` … `sub-100_lesion.nii.gz`) gives one
+  row per file in *Add Data* instead of one volume. A file whose name has *lesion*, *mask* or *roi* as a whole
+  word (any case) is offered as a labelmap, except probability maps (`lesion_prob`). The *Add Data* dialog
+  builds the options of each file only when *Show Options* is on, so large lists open faster (see
+  [Performance](#performance)). These are fixes of the data loading, so they apply in Classic too.
 
 ### Lesion network mapping library
 
 - `LesionNetworkMappingLib`: a numpy/scipy library and command lines that map one or many lesions
   against a normative functional connectome in one streaming pass, with N-aware threshold rules,
   specificity QA (connectome degree similarity, relocated-lesion null, similarity to the connectome's
-  reference maps), a plain-file study model and an export package with provenance. It has 271 unit
-  tests on synthetic data, without network access.
+  reference maps), a plain-file study model, a lesion-aware normalization of native scans to MNI space and an
+  export package with provenance. It has 546 unit tests on synthetic data, without network access (the
+  normalization tests run BRAINSFit on a synthetic subject made from the bundled template).
 - **Map workspace** (the Slicer module around the library; `Ctrl+Alt+3`). A column of cards in the
   inspector:
-  - *Seed*: the lesion (a segment) to map, with the grid it is resampled onto.
+  - *Seed*: *Lesion* (a segment to map, with the grid it is resampled onto) or *Cohort* (the subjects of a
+    study, see *Cohort* below).
+  - *Normalize to MNI*, right under Seed when the seed lesion is in native space: see
+    [Normalize native-space lesions](#normalize-native-space-lesions).
   - *Connectome*: a connectome bundle (`.lnmc` folder, see below) that you add from this computer with
     *Add connectome…*, or *Use the demo*, a small synthetic connectome that is labelled "SYNTHETIC — not
     real data" everywhere and exists to try the workspace. The connectome's data use terms are shown and
@@ -277,30 +371,94 @@ Other changes are in the Segment Editor itself, so they also apply in the Classi
   - *Compute*: *Map network* (`Ctrl+Enter`) for all subjects, or a *Preview* with N random subjects. The
     computation runs in a separate process with progress and a time estimate; the map appears with the
     first partial result, and a run can be stopped (a stopped run is a partial run and is exported as
-    one). Optionally, 50 relocated lesions are mapped in the same pass for the specificity check.
+    one). Optionally, 50 relocated lesions are mapped in the same pass for the specificity check. Before
+    it starts, the cards check what they can (for example that the lesion is in the connectome's space) and
+    show a message with a fix button when something is wrong.
   - *Result*: the maps (mean r, mean Fisher z and T) with a diverging color table, and the threshold rule
     with its resolved value. Thresholds are rules, re-resolved for the run's N and number of voxels.
   - *QA*: the similarity of the map with the connectome's degree map, the relocated-lesion null (always
     stated, also when it was not run), the similarity with the reference maps, and the coverage of the
     lesion on the connectome. The card opens itself when a check is amber or red.
-  - *Export*: the maps, one JSON sidecar per lesion, `provenance.json`, `methods.md` and `reproduce.sh`.
-    The sidecars, `provenance.json` and `methods.md` carry the research-use disclaimer (see
+  - *Export*: the maps, one JSON sidecar per lesion, `provenance.json`, `methods.md` and `reproduce.sh`
+    (`Ctrl+E`). The sidecars, `provenance.json` and `methods.md` carry the research-use disclaimer (see
     [Disclaimer](#disclaimer)).
+  - *Cohort* (Seed = *Cohort*), described below.
 
   A network map that you open from a file (a `_funcmap` file, for example) is shown as a thresholded
   overlay with a color legend, and Draw never shows a network map. The lesion must be in the connectome's
-  MNI space; normalizing native-space scans is planned (wave 3). Connectomes: today you add a local folder
-  or use the demo. Planned (wave 5): a *Get a connectome…* action that downloads a connectome only when you
-  ask and have accepted the provider's terms (see [Data and licensing](#data-and-licensing)).
-- Also in the library, with command lines and no user interface yet (planned, wave 3 and later): a study
-  schema with optional columns, roles, `participants.json`, lesion sidecars and listwise exclusion; a
-  shared job protocol (JSON event lines, a cancel file, resume, a run registry with provenance); connectome
-  provenance (DOI, version, global signal regression, population, terms), named subject subsets and a
-  guard against pooling maps of different connectomes; a registry of coordinate spaces and
-  template-family transforms; a design builder (design types, covariates, nesting and permutation
-  schemes, PALM export); a voxelwise GLM with Freedman-Lane permutation inference (FWE, FDR, optional
-  TFCE); cohort map orchestration with a per-lesion cache; reference maps per connectome; and QA numerics
-  that compare a map with null maps. See [Lesion network mapping](#lesion-network-mapping).
+  MNI space: a lesion traced on a native scan is normalized first (see
+  [Normalize native-space lesions](#normalize-native-space-lesions)). In Studio, entering Map shows the
+  template of the connectome's space behind the result (80% opacity, the lesion as an outline) and leaving
+  it puts back the layers you had; the status chip reads "No connectome", "Ready", "Done · N=1000" or
+  "Mapping 34% · 2 min left", `Ctrl+E` exports, and `Alt+Left` and `Alt+Right` browse the per-lesion maps of
+  a cohort one at a time (one volume is reused, so the scene does not fill up).
+- **Connectomes.** *Manage…* of the Connectome card opens the connectome manager. It lists the bundles
+  registered on this computer (`Studio/LNM/Connectomes`: the local paths stay in the settings, never in a
+  scene) with subjects, time points, voxels, size, space, terms and reference maps, and has *Add bundle…*,
+  *Convert…* (a folder of preprocessed 4D NIfTI time series, or a Lead-DBS connectome folder, as a job that
+  you can stop and resume, after an estimate of the size on disk), *Build reference maps…* and *Build
+  hubness map* (never automatic, with a time and disk estimate first), *Remove from the list* (the files are
+  kept) and *Create synthetic demo*. MATLAB v7.3 run files need the `h5py` package, which is installed only
+  after you agree. Connectomes are never bundled or downloaded: you add a local folder or use the demo.
+  Planned (wave 5): a *Get a connectome…* action that downloads a connectome only when you ask and have
+  accepted the provider's terms (see [Data and licensing](#data-and-licensing)).
+- **Cohort** (Seed = *Cohort*): the subjects of the study that is open in the Library, or a study folder
+  chosen with *Open study…* in Map (kept in `Studio/LNM/CohortStudy`, so scenes hold no local path; this also
+  works in Classic). *Map all N lesions* maps every included lesion in one batched pass with a per-lesion
+  cache, then the tabs of the Cohort card work on those maps. Lesions in native space (the card says how many
+  were left out and points to the normalization), lesions that the study's review has not approved, and
+  normalized lesions whose review is not *Pass* are left out of the analyses.
+  - *Overlap*: each lesion's map is thresholded with the Result card's rule (re-resolved for N), and the card
+    shows the overlap count and percent, and a sensitivity map (voxels in at least k % of the lesions, 90% by
+    default; over the cases when the study has case and control groups). It is the classic sensitivity map,
+    labelled as such. Optional legacy two-group maps (Welch t of the mean Fz maps, Liebermeister p of the
+    binarized maps, "legacy two-group, no covariates", descriptive) and their conjunction with the
+    sensitivity map.
+  - *Contrast*: a group contrast of the per-lesion maps by a voxelwise GLM with Freedman-Lane permutation
+    inference (max-statistic FWE as the primary result, FDR secondary, optional TFCE with its estimated time).
+    Every decision of the design is shown before it runs: the groups and the contrast, the covariates (lesion
+    volume is on, and turning it off needs a reason that is recorded), how the permutations are done and why
+    (for example "group is nested in dataset"), and a design preview with the design matrix, rank, variance
+    inflation, the number of unique permutations and the smallest attainable p. A blocking check disables
+    Run. No parametric p is shown. *Export for PALM…* and *Import PALM results…* hand the design and maps to
+    PALM or FSL randomise and bring the results back.
+  - *Symptom*: where the maps covary with a score (sLNM 2.0): the partial r with lesion volume (and other
+    covariates), Pearson or Spearman, Freedman-Lane permutation of the score (within datasets when the
+    design says so), FWE p and FDR q maps, optional leave-one-dataset-out and control-score comparisons
+    ("r = 0.56 → partial(PC1, μC) r = 0.30, p_perm = 0.11"), and *Use as circuit*. A column whose role you
+    have not confirmed is marked "(role not confirmed)".
+
+  The results go under `<study>/derivatives/lnm/`; each job records itself in the run registry.
+- Also in the library, with a command line or a Python API and without a screen of their own yet:
+  - a study schema with optional columns, roles, `participants.json`, lesion sidecars and listwise
+    exclusion; a shared job protocol (JSON event lines, a cancel file, resume, a run registry with
+    provenance); connectome provenance (DOI, version, global signal regression, population, terms), named
+    subject subsets and a guard against pooling maps of different connectomes; a registry of coordinate
+    spaces and template-family transforms; reference maps per connectome; and QA numerics that compare a
+    map with null maps (the Map workspace and the Cohort card use these through jobs);
+  - *Intake checks* (`lesionops`): 2D, multi-2D and 3D lesions, an exact-thickness extrusion with stated
+    semantics, an approximate world mirror, mask hygiene, the traced side against the reported side, the
+    share of the lesion in CSF, and duplicate candidates; *lesion-set diagnostics* (`lesionset`): exact
+    integer overlap maps, pairwise Dice, volumes, tissue fractions of the same template family and case and
+    control balance;
+  - *Preflight* (`preflight`): before a run, block, warn or inform about what will be analysed (missing,
+    empty or non-3D lesions, mixed template families, unreviewed or unnormalized lesions, duplicates,
+    too few subjects per group, disk space), each with a fix, in 88 to 91 ms for 300 lesions (three runs),
+    and assertions on the outputs after a run;
+  - *Reference files* (`fetch`, `atlases`): a verified, resumable and offline-tolerant fetch of atlases,
+    templates and tissue priors with a licence badge for each, and space-aware multi-atlas labels that refuse
+    to mix template families. Nothing is bundled and nothing is downloaded unless a command asks for one entry;
+  - *Cluster and peak tables* (`clusters`): two-sided, 26-connected clusters with sub-peaks, extents in mm³ and
+    atlas labels, descriptive only (there is no cluster-extent inference);
+  - *Reporting v2* (`methods`, `checklist`, `export`): a sectioned methods text generated from what was
+    run (with "not recorded" and "not run" where that is true), a 15-item reporting checklist with a
+    six-dot battery, a supplementary case table, a publication manifest and NeuroVault metadata (nothing is
+    uploaded);
+  - *Figure fit* (`figurefit`): the landmark fits, cut planes and fit files behind a future "trace from a
+    published figure"; fits never contain a reflection, so the left-right convention of a figure is always an
+    explicit choice.
+
+  See [Lesion network mapping](#lesion-network-mapping).
 
 ### Autosave and crash recovery
 
@@ -330,11 +488,32 @@ Save) and the exit prompt keep their meaning. Use *File > Save* to keep your wor
   (mode `0700` on Linux and macOS), has a `README.txt` that says what it is, and is not synchronized by
   Slicer Studio; choose a private folder if you change it. *Application Settings > Autosave > Delete all
   autosaves…* removes them all.
-- **Recovery.** If Slicer closed unexpectedly, or you closed it without saving, a window at the next
-  start lists what can be recovered, with a thumbnail and a summary; the same list is *File > Recover
-  Autosaved Work…*. A recovered scene is put back on the original files of your data, never on the
-  autosave folder, and still counts as unsaved. Planned (wave 3, A-01b): a status line and a recovery
-  card in Studio.
+- **Recovery.** If Slicer closed unexpectedly, or you closed it without saving, the next start lists what can
+  be recovered, with a thumbnail and a summary: in the Classic interface as a window, in Studio as a card
+  (below). The same list is *File > Recover Autosaved Work…*. A recovered scene is put back on the original
+  files of your data, never on the autosave folder, and still counts as unsaved.
+- **Status in Studio.** After the first autosave of a scene, the top bar shows a quiet status: "Autosaving…",
+  "Autosaved · 2 min ago" (refreshed every 30 seconds) or "Autosave paused" (after a disk error or when the
+  disk is nearly full). Nothing is shown while nothing was autosaved. Its tooltip says that autosave is not
+  Save ("This is not saving: use File › Save (Ctrl+S) to save your files") and gives the time and size of the
+  last autosave. Clicking it opens a menu: the last autosave, *Autosave now*, *Recover autosaved work…*,
+  *Open autosave folder* and *Autosave settings…*. In a window narrower than 1500 px (1700 px while the
+  status chip is shown), or when the top bar is compact, it is an icon and the text moves to the tooltip.
+  When a study is open, the tooltip also shows when the study's journal was last saved.
+- **Recovery card in Studio.** After a crash, a card at the top of the Library lists the sessions that can be
+  recovered (the card never covers a view): *Recover*, *Discard*, *All autosaves…* (the full list of Classic's
+  window) and ✕ (later; the sessions stay in *File > Recover Autosaved Work…*). In another workspace, a
+  one-line notice at the top of the inspector ("Unsaved work from a previous session can be recovered ·
+  Show") points to it. *Recover* puts the scene back and returns to the workspace (Draw or Map) that was
+  current at the autosave. Every autosave records the workspace and the open study and subject for this. If
+  the autosave was made with a study open, *Recover* reads *Reopen study at sub-012*: it reopens the study at
+  that subject (where the journal offers the lesion, below) instead of loading the scene. Switching to
+  Classic removes the status and the card, and Classic's window and status-bar messages take over.
+- **Study journal and scene autosave.** The two work side by side. The scene autosave copies the whole
+  scene to the private folder above. The journal of an open study (see
+  [Studies and the study loop](#studies-and-the-study-loop)) writes only the lesion being traced, to
+  `<study>/.studio/journal/<sid>.nii.gz`, two seconds after the last change, so it is inside the folder of
+  the study (and holds the patient's lesion). Autosave pauses while a subject is switched.
 - **Official Slicer.** The `Scene.mrml` of an autosave opens in official 3D Slicer 5.12 and 5.13
   (*File > Load Scene*), which the compatibility check tests with `--autosave`.
 - **Off.** `SLICER_STUDIO_AUTOSAVE=0` turns autosave off for a run. The *Autosave the scene* option of
@@ -372,18 +551,27 @@ classic behavior, so most of these keys have no effect there. The ones you may w
 | `Studio/SmartFill/StayInsideBrain` | `true` | Stay inside the brain mask of an MNI template grid |
 | `Studio/SmartFill/ApplyOnClick` | `false` | Apply each click at once |
 | `Studio/BrushDiameterMm` | `3` | Brush diameter, remembered between sessions |
+| `Studio/BracketKeysResizeBrush` | `true` (not under `--testing`) | `[` and `]` resize the Paint brush; `false` keeps the official meaning (they cycle the volumes of the slice view). Not in a settings page: edit `Slicer.ini` |
 | `Studio/FollowStrokes` | `true` | The other views move to each stroke |
-| `Studio/PageStepSlices` | `10` | Slices moved by `PageUp` and `PageDown` |
-| `Studio/FocusFollowsMouse` | `true` | The keys of a view act on the view under the mouse |
-| `Studio/LeftDragWindowLevel` | `true` | Left-drag adjusts window/level when no tool is active |
+| `Studio/PageStepSlices` | `10` | Slices moved by `PageUp` and `PageDown` (1 to 100; same settings page) |
+| `Studio/FocusFollowsMouse` | `true` | The keys of a slice or 3D view act on the view under the mouse (same settings page) |
+| `Studio/ClassicPanelWidth` | (what you dragged) | Width of the module panel of the Classic window, kept between modules |
+| `Studio/RecentStudies` | (list) | The recently opened studies (a JSON list of local paths) |
+| `Studio/LeftDragWindowLevel` | `true` | Left-drag adjusts window/level when no tool is active (Application Settings > Views > Navigation in Studio) |
 | `Studio/OrientationLetters` | `true` | Orientation letters on the slice views |
 | `Appearance/FlatViewBars` | `true` (not under `--testing`) | Flat view bars (Application Settings > Views, restart needed) |
 | `Appearance/Default3DView/*` | follows the theme | 3D view background and box colors |
 | `Studio/LNM/MaxJobThreads` | (CPUs minus one) | Most threads of a Map job |
+| `Studio/LNM/Normalize/LastOptions` | (none) | Normalization options (template, quality, modality, margin), written when you tick *Remember these options* |
+| `Studio/LNM/DataDirectory` | `Documents/SlicerStudio` (`/data/SlicerStudio` in the web version) | Where normalization results go when no study is open. Only read: set it yourself |
+| `Studio/LNM/CohortStudy` | (none) | The study folder of the Cohort seed that you chose with *Open study…* in Map |
+| `Studio/RaterName` | the operating-system user | The name recorded with a normalization review. Only read: set it yourself |
 
-Smart fill keys are written when you change the options of the tool. The Autosave and Appearance
-settings are in *Application Settings*. Map also keeps `Studio/LNM/Connectomes` (the connectomes you
-added) and the data use terms you accepted, under `Studio/LNM/*`.
+Smart fill keys are written when you change the options of the tool. The Autosave, Appearance and
+navigation settings are in *Application Settings*. Map also keeps `Studio/LNM/Connectomes` (the
+connectomes you added) and the data use terms you accepted, under `Studio/LNM/*`. A study keeps its own
+choices in its folder, not in the settings: `study.json` has an additive `normalization` entry
+(`auto_after_done`, `template`, `quality`, `dilate_mm`) for the automatic normalization of the Library.
 
 ### Performance
 
@@ -409,9 +597,17 @@ load of the machine, so only compare the two values in the same row.
 | Same, paced at 125 Hz (main-thread CPU) | 1185 ms | 529 ms | same |
 | One scroll step in the Studio interface (`scroll_step_ms` of StudioBench) | 59.5 ms | 45.7 ms | wave 2 fix (W2-I2): the wave 2 tree before and after the fix, same build tree and day, median of 3 runs, loaded machine. At the end of wave 1 the same metric was 32.5 ms on a quieter machine, and the unchanged official 5.13 binary measured 60.6 ms that day |
 | Switching workspaces (`workspace_switch_ms`) | 168 ms | 72 ms | same (49 ms at the end of wave 1, on the quieter machine) |
+| Brush hover over a slice view, time per mouse move (three volumes and a lesion segment) | 64.7 ms | 21.1 ms | wave 3 (W3-05): the same script on the tree before and after, one run each; a second run, in review, gave 26.8 ms |
+| Views rendered by 30 hover moves, same scene | 30 of 30 in each slice view and in the 3D view | 29 of 30 in the view under the mouse, 0 in the others | same |
+| Paint stroke, time per mouse move, first 20 moves | 68.5 ms | 40.1 ms | same (33.3 ms in the review run) |
+| *Add Data* with 400 files named `lesion_aa.nii.gz` … (time until the table is built) | 4,377 ms | 638 ms | wave 3 (W3-04): same script before and after, median of 3 runs |
+| Same, 100 files | 928 ms | 153 ms | same |
+| Warm module switch in Classic, with the thin sliders and scroll bars of the style (`module_switch_warm_ms`) | 56.2 ms | 56.5 ms | wave 3 (W3-01): StudioBench before and after, median of 3 runs |
 
 The scroll and workspace-switch rows are not comparable with the earlier rows of the table: they are other
 metrics, measured on a more loaded machine, with the flat view bars and the wave 2 Studio panels in place.
+The wave 3 rows are other metrics again. A folder of 400 numbered lesion masks (`sub-001_lesion.nii.gz` …) used
+to give one row in *Add Data* (25 ms, all files grouped as one image series); it gives 400 rows in 610 ms now.
 
 Not faster yet:
 
@@ -419,7 +615,9 @@ Not faster yet:
   interface adds about 0.1 s. Startup work is planned for wave 4.
 - **Undo with 3D surfaces.** Not faster than official 5.13 (Studio 174–292 ms, official 191–249 ms
   across sessions). Planned for wave 4.
-- **Brush hover with 3D surfaces.** Unchanged. Planned for wave 3.
+- **Brush hover with large 3D surfaces.** The hover renders only the view under the mouse (table above), but
+  it was not measured with several large 3D surfaces: the plan's goal of 10 ms was not reached in the scene
+  above (21 to 27 ms).
 
 A build made on Ubuntu 24.04 (before the Studio changes) started in 2.5–3.3 s, against 6.1–6.4 s for
 the official Linux nightly package on the same idle machine. This comes from Ubuntu's linker default
@@ -438,6 +636,13 @@ builds this way is planned (wave 4).
   folders and `.mrb` bundles, in normal and `--testing` mode, last run on 2026-10-20 with the tree of
   the end of wave 2. The LNM outputs and the scene autosave (see
   [Autosave and crash recovery](#autosave-and-crash-recovery)) written by Slicer Studio load in all three.
+- **Wave 3.** The files of wave 3 add no format. Normalization results are standard NIfTI files (the lesion
+  and the scan in template space, with the exact TemplateFlow header), `.h5` transforms, JSON and PNG; the
+  study files (`study.json`, `participants.tsv`, the journal, the lesion sidecars) are plain files that official
+  Slicer does not read. A scene saved after a normalization (the template-space volume and lesion and the
+  transform) loads in official 5.12.4 and the 5.13 nightly with the same voxels, and the compatibility check
+  passed in the same way on 2026-10-21 (A-03b, 4 writers and 3 checkers). It has not been run again on the
+  tree at the end of wave 3.
 - **No new formats.** No new node classes, storage node classes or file formats, and no changes to MRML
   defaults. Existing writers produce the same output, except that a layout node with a Studio layout
   also writes a `studioViewArrangement` XML attribute (see *Portable layouts*). Module state is kept in
@@ -619,8 +824,9 @@ Slicer-SuperBuild-Release/Slicer-build/Slicer
    Fill gaps (`Shift+F`); *More tools* has the others (Auto outline, Threshold, Smooth, Islands, Margin
    and more). `Ctrl+Z` and `Ctrl+Y` undo and redo. The lesion card shows the lesion's volume, parts and
    gaps as you draw. The scene is autosaved while you work (see
-   [Autosave and crash recovery](#autosave-and-crash-recovery)). *Planned (wave 3):* the study loop
-   (*Done → next*).
+   [Autosave and crash recovery](#autosave-and-crash-recovery)). For many subjects, make a study first
+   (*New study…* in the Library): the primary button is then *Done → next*, which writes the lesion, updates
+   `participants.tsv` and opens the next subject (see [Studies and the study loop](#studies-and-the-study-loop)).
 4. **Save.** *Save lesion* (bottom of the inspector in Draw, `Ctrl+Shift+S` or `Ctrl+Enter`) writes the
    lesion as a NIfTI mask (`.nii.gz`, 0/1 values, `uint8`) on the lesion's own grid, with a small `.json`
    sidecar next to it: a lesion mask that you opened on the FSL MNI152 2 mm grid is saved on that grid, not
@@ -630,14 +836,18 @@ Slicer-SuperBuild-Release/Slicer-build/Slicer
    file, which also opens in official 3D Slicer. An autosave is not a save: only these commands write your
    files. For other export options, open the Segmentations module (`Ctrl+K`, type "Segmentations") and use
    *Export to files*.
-5. **Map the network.** Open Map (`Ctrl+Alt+3`). Choose the lesion and a connectome (*Add connectome…* for
-   a `.lnmc` bundle on your computer, or *Use the demo* to try Map with synthetic data), accept its data
-   use terms, and click *Map network* (`Ctrl+Enter`). Read the maps, the threshold rule and the QA, and
-   *Export…* them. See [Lesion network mapping library](#lesion-network-mapping-library) and, for the
-   command line, [Lesion network mapping](#lesion-network-mapping). The lesion must be in the
-   connectome's MNI space. Note that the template that comes with Slicer Studio (MNI152NLin2009cAsym)
-   and the FSL MNI152 template used by GSP1000 (MNI152NLin6Asym) differ by a few millimeters. Normalizing
-   native-space scans to MNI is planned (wave 3).
+5. **Map the network (normalize native scans first).** Open Map (`Ctrl+Alt+3`). Choose the lesion and a
+   connectome (*Add connectome…* for a `.lnmc` bundle on your computer, or *Use the demo* to try Map with
+   synthetic data), accept its data use terms, and click *Map network* (`Ctrl+Enter`). Read the maps, the
+   threshold rule and the QA, and *Export…* them. See
+   [Lesion network mapping library](#lesion-network-mapping-library) and, for the command line,
+   [Lesion network mapping](#lesion-network-mapping). The lesion must be in the connectome's MNI space.
+   If you traced it on the patient's own scan, click *Normalize to MNI* first (the card in Draw, or the card
+   under Seed in Map, or *Normalize N native subjects* in a study): it runs in the background, and you
+   check the alignment in the QC mosaic before you use the result (see
+   [Normalize native-space lesions](#normalize-native-space-lesions)). Note that the template that comes
+   with Slicer Studio (MNI152NLin2009cAsym) and the FSL MNI152 template used by GSP1000
+   (MNI152NLin6Asym) differ by a few millimeters.
 
 ## Lesion network mapping
 
@@ -729,6 +939,9 @@ PythonSlicer -m LesionNetworkMappingLib.engine \
 | `--snapshot-every K` | Write partial maps every K subjects. |
 | `--null-relocations K` | Specificity QA: also map K rigid relocations of each lesion inside the brain mask, in the same pass (`--null-seed`, `--brain-mask`, `--null-voxels`, `--write-null`). |
 | `--threshold-rule JSON` | Recorded with the run; maps are always written unthresholded. |
+| `--parcels LABELS` | A parcel run instead of lesions: map every label of a label image as a seed (`parcel_fz.f16.npy`, `parcel_C_fz.npy`, `parcel_labels.json`). |
+| `--accumulate welford\|mean` | `welford` (default for lesions) gives the AvgR, AvgRFz and T maps; `mean` (always used by `--parcels`) keeps float32 sums, with less memory and time, and gives AvgR and AvgRFz only. |
+| `--split-half` | Also write the mean Fz maps of the odd and even subjects and report their spatial r (stability of the connectome sampling). |
 | `--run-json FILE` | Run record: arguments, subject list hash, seeds, versions, times. |
 | `--threads K` | BLAS threads (default 2). |
 
@@ -749,8 +962,8 @@ export.export_run("results", "results-export")  # partial=True exports the last 
 ```
 
 The other command lines of the library write the same job protocol (one JSON object per line) and
-take `--threads`; `cohortmaps` and `glm` also take `--cancel-file`, `--resume`, `--run-root` and
-`--parent-run`:
+take `--threads`; most of them also take `--cancel-file`, and `cohortmaps`, `glm`, `slnm`, `cohort` and
+`normalize` also take `--resume`, `--run-root` and `--parent-run` (`--help` lists them):
 
 | Module (`PythonSlicer -m ...`) | What it does |
 |---|---|
@@ -759,6 +972,13 @@ take `--threads`; `cohortmaps` and `glm` also take `--cancel-file`, `--resume`, 
 | `LesionNetworkMappingLib.reference` | `build`, `estimate` and `compare` the reference maps of a connectome |
 | `LesionNetworkMappingLib.transforms` | `warp`, `points` and `check` for template-family transform files |
 | `LesionNetworkMappingLib.qa` | `degree`: the connectome degree map |
+| `LesionNetworkMappingLib.normalize` | `run`, `batch`, `warp` and `check`: lesion-aware normalization to MNI (see [Normalize native-space lesions](#normalize-native-space-lesions)) |
+| `LesionNetworkMappingLib.cohort` | Group maps of a cohort from `maps.tsv` or a study: overlap, sensitivity, legacy two-group maps, conjunction |
+| `LesionNetworkMappingLib.slnm` | Symptom mapping (sLNM 2.0): partial r, Spearman, score permutation, leave-one-dataset-out, control scores |
+| `LesionNetworkMappingLib.preflight` | Checks before a run (exit code 5 when something blocks), `--save` writes the report under `derivatives/qc` |
+| `LesionNetworkMappingLib.lesionset` | Lesion-set diagnostics: overlap maps, pairwise Dice, volumes, tissue fractions, case and control balance |
+| `LesionNetworkMappingLib.fetch` | `get`, `list` and `adopt` atlases, templates and priors of the catalogs (one entry at a time, checksum verified) |
+| `LesionNetworkMappingLib.manager` | `convert` and `estimate` for the connectome manager |
 
 Speed, measured on synthetic data with one BLAS thread: 0.08 s per subject for 1 lesion, 0.11 s for 10
 lesions and 0.21 s for 50 lesions (230,000 voxels, 240 time points, in memory); 0.13 s per subject for
@@ -791,9 +1011,132 @@ QA, following the critique by van den Heuvel et al. (2026):
   (`LesionNetworkMappingLib.reference`) and shown as chips, calibrated against the relocated-lesion null
   when that was run.
 
-Also in the library, with a user interface planned: cohort statistics (overlap, sensitivity, Welch t,
-Liebermeister test, max-statistic permutation FWE, conjunction, symptom correlation, peak table) and a
-plain-file study model (`study.json` plus a BIDS-style `participants.tsv`).
+Cohort statistics (overlap, sensitivity, Welch t, Liebermeister test, conjunction, the permutation GLM with
+max-statistic FWE, and symptom mapping) are in the Cohort card of Map and also run from the command line
+(`cohort`, `glm`, `slnm`). Cluster and peak tables of thresholded maps are a Python API
+(`LesionNetworkMappingLib.clusters`) without a screen of their own yet. The study model is a plain-file one
+(`study.json` plus a BIDS-style `participants.tsv`), which the Library's studies use.
+
+### Normalize native-space lesions
+
+A lesion traced on a patient's own (native) scan has to be in the connectome's MNI space before it can be
+mapped. `LesionNetworkMappingLib.normalize` registers the scan to an MNI template and carries the lesion
+across, in one command or one click. It runs BRAINSFit, BRAINSResample and BRAINSROIAuto, which ship with
+every Slicer, as child processes of `PythonSlicer`; there is nothing to install.
+
+**Method.**
+
+- **Cost-function masking.** The lesion, dilated by 3 mm (`--dilate-mm`), is left out of the similarity metric
+  (Brett et al., 2001; Andersen et al., 2010), so that the lesion does not pull the registration. An affine
+  stage is followed by a BSpline stage (a grid of 8×8×8 at *Standard* quality, 14×10×12 at *Fine*; *Affine*
+  stops after the first stage); the affine is kept when the BSpline lowers the match inside the brain by more
+  than 0.02.
+- **Tilt recovery.** When the first alignment is poor (NCC inside the template brain, minus the lesion, below
+  0.40), it retries by itself: a head-to-head rigid registration against the whole-head template, then a
+  seven-start rigid search. The 1.8 MB whole-head template is not bundled (see the limits below).
+- **Two steps for other contrasts.** For FLAIR, T2w, DWI or CT, give the same subject's T1w (`--anat`): the
+  scan is registered to the T1w first and the T1w to the template, and the final transform is one flattened
+  composite.
+- **The lesion in MNI space.** It is warped by linear interpolation onto the 1 mm grid of the template family,
+  once as a fraction (`desc-lesionProb`, float32) and once binarized at 0.5 (`desc-lesion`, uint8), with the
+  exact TemplateFlow header, so that it lies on the same grid as other files of that space. The scan is
+  warped as well, for review (`desc-preproc`).
+- **Reuse and safety.** A run whose inputs, template files, method and tool versions have the same
+  fingerprint as a complete earlier result is reported as reused and not computed again (`--no-reuse` forces
+  a rerun). The final files replace the earlier ones only after QC, so a failed or stopped run keeps the
+  previous result, and a lock keeps two jobs out of the same folder (exit code 75). BRAINSFit samples at
+  random and uses several threads, so a rerun with `--no-reuse` can differ slightly.
+
+**Where results go.** With a study: `<study>/derivatives/normalization/sub-<id>/`. Without one:
+`Documents/SlicerStudio/normalization/<name>-<hash>`, or the folder in `Studio/LNM/DataDirectory`
+(`/data/SlicerStudio` in the web version). The folder holds the transforms (`.h5`), the lesion and the scan in
+template space, the cost-function mask, `normalization.json` (inputs, fingerprint, tool versions),
+logs, and the QC files `sub-<id>_desc-normqc.png` (a 3×3 mosaic: axial, coronal and sagittal through the lesion,
+patient's left on the image left) and `sub-<id>_desc-normqc.json`.
+
+**QC, and a person looks.** The metrics are the match inside the brain minus the lesion (NCC), the Dice of the
+warped and template brain masks, the lesion volume change after dividing by the global brain-size ratio (so
+that a small head is not flagged only for being small), the log-Jacobian in the lesion relative to the brain,
+folding, and the share of the warped lesion outside the brain. From them the run gives a suggestion,
+*looks-ok* or *review* with the reasons, which is never a verdict: image similarity alone missed a collapse of a
+small lesion in the measurements behind it (NCC 0.774, as good as a good run), so the volume and Jacobian
+checks are needed. A person then judges the alignment from the mosaic, or in the views (the template behind,
+the warped scan in front at 50%, the lesion outline, `T` to flicker): *Looks right* or *Doesn't look right*
+is stored as `norm_qc` (`pass` or `fail`) with the name in `Studio/RaterName` (default: the operating-system
+user). **A normalized lesion whose `norm_qc` is not `pass` is left out of cohort analyses** (the cohort maps and
+the preflight checks exclude it and say so).
+
+**Measured accuracy and time** (MRHead, the 1 mm Slicer sample head, with synthetic chronic-stroke lesions of
+45 mL and 3 mL; one run of each case on a shared 4-core virtual machine; synthetic lesions on one brain, not
+patient data):
+
+| Case | Result |
+|---|---|
+| Lesion masked (default), Standard quality | Dice with the same lesion carried by the registration of the lesion-free head: 0.94 (45 mL), 0.91 (3 mL); 41.5–45.4 s per subject |
+| Lesion not masked (`--dilate-mm -1`, diagnostics only) | Dice 0.34 and 0.79; the 45 mL lesion shrank to 12.3 mL in MNI space against 61.7 mL when masked (normalized volume ratio 0.23 against 1.17), and the run is marked *review* |
+| Head tilted by 20° and by 35° | The first alignment failed (NCC 0.13 and 0.05); the head-to-head rigid step (20°, second attempt) and the seven-start search (35°, third attempt) recovered it, Dice 0.996 and 0.995 with the untilted run; 72 s and 100 s; both marked *review* (the 35° one also for folding of 1.8%) |
+| FLAIR with the same subject's T1w | *looks-ok*; 69 s |
+| FLAIR alone | Affine only, NCC 0.07, marked *review* |
+| Quality *Affine* / *Standard* / *Fine* | 22 s / 41.5–45.4 s / 83 s |
+
+**Limits.**
+
+- This build has no SyN (the ANTs registration is not built): BRAINSFit's affine and BSpline only.
+- Without the same subject's T1w, a FLAIR, T2w, DWI or CT is registered to the T1 template by an affine only
+  and is always marked *review*: the program's own message gives a measured error of 5–9 mm for this case.
+- MNI152NLin2009cAsym (the bundled template) and MNI152NLin6Asym (the FSL grid of GSP1000) differ by a few
+  millimeters. The template is chosen with the study's space or the connectome's family, and can be set in
+  *Options*.
+- A scan or a lesion whose header has left and right swapped cannot be detected by the normalization (the
+  registration succeeds and the lesion lands on the wrong side). `lesionops.side_check` compares the traced
+  hemisphere with a recorded `reported_side`, but nothing runs it for you yet; the preflight only reports the
+  lesions that were mirrored with the Library's tools.
+- **Templates are downloaded only when you click.** The 2 mm MNI152NLin2009cAsym brain and its mask come with
+  the application. The whole-head template for tilted heads (1.8 MB) and the MNI152NLin6Asym 2 mm template
+  (1.4 MB, under the FSL license terms, non-commercial) are fetched from TemplateFlow into the application
+  cache after an explicit click on *Download…* in the options or in the message that offers it, checked by
+  SHA-256, and never under `--testing`.
+- The numbers above come from one image on one machine. No measurement on patient scans, or against a manual
+  normalization, has been made.
+
+**Command line.** The first command below normalizes a scan (the paths contain spaces); the second normalizes two
+subjects of a study (without `--subjects`, every native subject with a scan and a lesion). One JSON object per
+line is printed (on a terminal, text; `--events json` forces JSON). The exit code is 0 when done, 3 when
+stopped, 4 when there is nothing to do (an empty lesion, a scan that is already in template space, no eligible
+row) and 75 when the folder is locked.
+
+```console example
+PythonSlicer -m LesionNetworkMappingLib.normalize run --scan "My Study/sub-01_T1w.nii.gz" --lesion "My Study/sub-01_lesion.nii.gz" --out "My Study/derivatives/normalization/sub-01"
+PythonSlicer -m LesionNetworkMappingLib.normalize batch --study "My Study" --subjects sub-02,sub-03
+```
+
+`warp` carries another native image across with the transforms of a finished run, and `check` tells whether
+BRAINSFit and the templates are found. `batch` skips a row whose lesion was edited in template space unless
+`--force` is given. It posts each subject's values to the study's inbox and never writes `participants.tsv` or
+the `lesions` folder itself.
+
+**In the application.**
+
+- **Draw** (Studio): the *Normalize to MNI* card, with *Use for Map →*, *Normalize scan only* and *Update MNI
+  lesion* (see [Drawing](#drawing)).
+- **Map**, in the card under Seed (Studio and Classic): *Scan*, *Normalize to MNI* and *Options…* (template,
+  quality, modality, the anatomical T1w, the lesion margin, the two *Download…* buttons, *Help it: rough
+  manual alignment…* which starts the registration from a position you set with the Transforms module, and
+  *Remember these options*, which stores them in `Studio/LNM/Normalize/LastOptions`). The scan and the
+  lesion are exported in the background, the job runs with progress and *Stop*, and the result is loaded as
+  the volume "*scan* (MNI152NLin2009cAsym)" and the segmentation "Lesion (MNI152NLin2009cAsym)" (made the
+  seed), with the QC mosaic, the suggestion and the metrics, *Review in views*, *Load transform* and *Redo*.
+  Editing the native lesion afterwards offers *Update MNI lesion* (a re-warp with the same transform) or, if
+  the edit leaves the masked margin, *Re-register*.
+- **Library** (Studio, and the Studio module panel in Classic): the Normalization card of a study. *Normalize N
+  native subjects* runs `batch` as one queued background job, one subject at a time, with progress, an estimate,
+  *Stop* and *Resume*, while you keep tracing. The list has a **Norm** column (*Native*, *Queued*, *Running
+  40%*, *Review*, *Unreviewed*, *Pass*, *Fail*, *Stale*, *Needs scan*), the filters *Needs normalization* and
+  *Normalization to review*, and *Review N →*, a queue in which `P` and `X` set `norm_qc`. The Subject card
+  has the QC panel (*Looks right*, *Doesn't look right*) and a menu with *Review in Draw*, *Redo*, *Re-warp the
+  edited lesion* and *Revert to native…*. *Normalize native lesions automatically after Done → next* is off
+  by default and is stored in `study.json` (`normalization`: `auto_after_done`, `template`, `quality`,
+  `dilate_mm`). *Stale* means that the native lesion changed after the normalization.
 
 ### Data and licensing
 
@@ -875,20 +1218,30 @@ application today.
 | Guided tours and the *Where did it go?* list | T-01 | `StudioTourTest` |
 | Usability work: `Esc` ladder, back button, mode pill, Library that shows the current work, top bar tooltips and focus, import routes that never hijack the views | U-01, U-02, U-04, U-06, U-07 | `StudioNavigationTest`, `StudioModesTest`, `StudioLibraryTest`, `StudioImportTest`, `StudioTopBarTest` |
 | Usability regression gate: the walkthrough tasks re-run headless, with action counts | U-05 | `StudioUsabilityGateTest`, `StudioUsabilityGate.py` |
-| LNM foundations: study schema v2, job protocol, connectome provenance, threshold rules v2, space registry, design builder, GLM permutation engine, cohort maps, reference maps, QA v2, Map plug-in framework | L-01 to L-11 | LNM unit tests (271) |
+| LNM foundations: study schema v2, job protocol, connectome provenance, threshold rules v2, space registry, design builder, GLM permutation engine, cohort maps, reference maps, QA v2, Map plug-in framework | L-01 to L-11 | LNM unit tests (546 at the end of wave 3) |
 | Wave 2 integration fixes: the lesion is never overwritten when you start on the template again, exhaustive permutation orientations in the design builder, flat view bars on by default, faster scrolling and workspace switching, Inter embedded once, mode pill and toast placement, a compact top bar, the Map demo built off the main thread | W2-I1, W2-I2, W2-I3 | `Studio*Test` suites, `StudioBench.py`, usability gate |
+| Studio autosave status and recovery card (top bar, Library card, inspector notice, *Reopen study at*) | A-01b | `StudioAutosaveTest`, `StudioAutosaveCrashCheck.py --studio` |
+| Library study loop: study folder, subject list, *Done → next*, `Alt+Left` and `Alt+Right`, crash-safe journal, QC, batch actions | W3-07 | `LesionNetworkMappingStudyTest`, `StudioNormalizeTest`, a headless walkthrough that is not in the repository |
+| Lesion-aware normalization to MNI: command line (`run`, `batch`, `warp`, `check`), Draw and Map cards, Library batch with the `norm_qc` review, QC numerics | A-03, A-03b, A-03c, L-21 | `LesionNetworkMappingNormalizeTest`, `LesionNetworkMappingNormQcTest`, `LesionNetworkMappingNormalizeUITest`, `StudioNormalizeTest`; official 5.12.4 and 5.13 load the results |
+| Map: cohort mode with the Overlap, Contrast and Symptom tabs, connectome manager, Studio layers, status chip and map browsing | W3-08, L-20 | `selftest LesionNetworkMapping`, `StudioTourTest`, `StudioImportTest` |
+| LNM numerics: symptom mapping (sLNM 2.0), intake checks, lesion-set diagnostics, fetch and atlas labels, engine v2 (parcels, split-half), preflight, reporting v2, cluster tables, figure-fit numerics | L-12 to L-19, L-22 | LNM unit tests (`LesionNetworkMappingSlnmTest`, `LesionNetworkMappingLesionOpsTest`, `LesionNetworkMappingLesionSetTest`, `LesionNetworkMappingFetchTest`, `LesionNetworkMappingEngineV2Test`, `LesionNetworkMappingPreflightTest`, `LesionNetworkMappingReportingTest`, `LesionNetworkMappingClustersTest`, `LesionNetworkMappingFigureFitTest`) |
+| Thin sliders and scroll bars, flat combo and spin boxes, progress bars, tabs and splitters in the application style | W3-01 | `StudioTest`, `StudioTopBarTest`, `StudioModesTest`, `StudioBench.py` |
+| Main window hooks: shortcuts without a menu bar, focus mode, stable panel width, one deferred state restore; hover focus in 3D views and the *Navigation in Studio* settings | W3-03, W3-02b | `StudioNavigationTest`, `StudioTest`, `StudioBench.py` |
+| Data loading: no series grouping for 3D NIfTI, lesion, mask and roi names as labelmaps, lazy *Add Data* options | W3-04 | the timing script of the work package (not in the repository), `StudioImportTest` |
+| Brush-size display, `[` `]` keys, hover that renders one view, faster strokes | W3-05 | the work package's script (not in the repository), Segment Editor self-test |
+| Accessibility and first run: focus frames, AltGr guard, live text size, narrow windows, the research-use line, the close prompt | U-03 | `StudioAccessibilityTest` |
 
 ### Roadmap
 
 Planned items are listed by wave, with the identifiers of the work packages. Titles are shortened and the
 plan may change.
 
-| Wave | Planned contents | State |
+| Wave | Contents | State |
 |---|---|---|
 | Wave 1: foundation | W1-01 to W1-09 (see *Done*) | Done |
 | Packaging | P-01, P-02 (see *Done*); P-03: web container environment and LNM smoke checks for packages | P-01, P-02 done; P-03 planned (wave 4) |
 | Wave 2: streamlined editor, navigation, autosave, Smart fill, Map v1, LNM foundations | A-01, A-02, L-01 to L-11, U-01 to U-07, W2-01 to W2-07, W3-02a, W3-06 and the integration fixes W2-I1 to W2-I4 (see *Done*) | Done |
-| Wave 3: study loop, normalization, cohort statistics | W3-01 thin sliders and scroll bars; W3-03 main-window hooks and shell speed; W3-04 NIfTI loading fixes; W3-05 brush size display and paint speed; W3-07 Library study loop (subject list, switching); W3-08 cohort statistics UI, connectome manager, Map integration; W3-02b navigation settings UI; U-03 accessibility and first-run/close flow; A-01b autosave status and recovery card in Studio; A-03, A-03b, A-03c one-click normalization to MNI for a lesion and for a study; L-12 to L-22 research numerics and the cohort Contrast and Symptom tabs; A-05b README update | Planned |
+| Wave 3: study loop, normalization, cohort statistics | W3-01 thin sliders and scroll bars; W3-03 main-window hooks and shell speed; W3-04 NIfTI loading fixes; W3-05 brush size display and paint speed; W3-07 Library study loop (subject list, switching); W3-08 cohort statistics UI, connectome manager, Map integration; W3-02b navigation settings UI; U-03 accessibility and first-run/close flow; A-01b autosave status and recovery card in Studio; A-03, A-03b, A-03c one-click normalization to MNI for a lesion and for a study; L-12 to L-22 research numerics and the cohort Contrast and Symptom tabs (see *Done*) | Done |
 | Wave 4: cohort pipeline, report, performance, user guide | A-04, A-04b, A-04c *Run everything* cohort pipeline and the HTML cohort report; W4-01 faster Draw and Scissors apply and cheaper undo; W4-02 Library grid with thumbnails; W4-03 lazy Python wrappers; W4-04 linker option `--as-needed` for packaged builds; W4-05 user guide; L-23 to L-34 figures, nulls, validation, robustness, Draw intake and Map QA surfaces, connectome converters, Lead-DBS interoperability; P-03; A-06 README update | Planned |
 | Wave 5: LNM research features | L-35 to L-54 connectome fetcher, Validate, Robust and Nulls cards, analysis recipes, control-lesion sets, review workflow, blind double tracing, case series, share-safe study export, headless twin, pipeline calibration, coordinate seeds, VLSM, literature sources, reference maps, tutorial cohorts, LNM documentation; A-07 README update | Planned |
 
@@ -897,9 +1250,9 @@ The automation work, by feature:
 | Feature | Work packages | State |
 |---|---|---|
 | Autosave and crash recovery | A-01 | Implemented |
-| Autosave status line and recovery card in Studio | A-01b | Planned (wave 3) |
+| Autosave status and recovery card in Studio | A-01b | Implemented |
 | Smart fill, assisted tracing | A-02 | Implemented |
-| One-click normalization of native-space scans to MNI space: command line; card in Draw and Map; Library batch | A-03, A-03b, A-03c | Planned (wave 3) |
+| One-click normalization of native-space scans to MNI space: command line; card in Draw and Map; Library batch with a review | A-03, A-03b, A-03c | Implemented |
 | *Run everything*: the cohort pipeline from lesions to an HTML report | A-04, A-04b, A-04c | Planned (wave 4) |
 
 Connectomes are never bundled. Planned (wave 5): a connectome is downloaded only when you ask for it and
@@ -908,28 +1261,44 @@ have accepted the provider's terms. Templates are downloaded only when you ask.
 Known limitations today:
 
 - **Map** needs a connectome that you provide (or the synthetic demo, which is not real data) and a lesion
-  in the connectome's MNI space; normalizing native-space scans is planned (wave 3). There is no cohort
-  statistics screen yet: cohort numerics run from the command line.
+  in the connectome's MNI space (or normalized, see below). The Cohort card has the Overlap, Contrast and
+  Symptom tabs; the Nulls, Validate and Robust cards, voxelwise lesion-symptom mapping, *Run everything* and the
+  HTML report are planned (wave 4 and 5), and the intake checks, lesion-set diagnostics, cluster tables,
+  reporting checklist and figure fit are libraries without a screen of their own yet. The tests use synthetic
+  data and the demo connectome: no real connectome is in the repository.
+- **Normalization** uses BRAINSFit (no SyN in this build). It was measured on one head with synthetic lesions,
+  on one machine (41.5 to 45.4 s per subject at *Standard* quality), not on patient scans. A FLAIR, T2w, DWI or
+  CT without the same subject's T1w is unreliable (5 to 9 mm of error was measured in the work package) and a
+  left-right swap in a header cannot be detected. A person must review each result (`norm_qc`) before it
+  enters a cohort. The 1.8 MB whole-head template (tilted heads) and MNI152NLin6Asym are downloaded only when
+  you click. Not yet tried on macOS or in the web version.
+- **Studies** have a subject list, not yet a grid with thumbnails (planned, wave 4). The study session assumes
+  one Slicer per study folder (a heartbeat file marks an open study, and `participants.tsv` is written under a
+  lock); two Slicers editing the same study have not been tested.
 - **Smart fill** needs visible contrast between the lesion and its surroundings. There is nothing to find
   on the bare MNI template: use the patient's scan as the source volume. Lesions with grey-matter-like
   intensity on T1 images are ambiguous, and a click near the edge of a lesion can give a different
   region than a click well inside it. It is assisted tracing: review every result.
 - **Autosave** is not Save. Modified data above 2 GB is not autosaved, very large modified data is
-  autosaved at most every 10 minutes, and an autosave may contain copies of patient data. The Windows
-  folder and the web version (stopping the container) have not been tried. The status line and recovery
-  card in Studio are planned (wave 3): today recovery is a window at start and *File > Recover
-  Autosaved Work…*.
-- The navigation behaviors of Studio (page step, focus follows the mouse, left-drag window/level) have no
-  settings page yet; they are the `Studio/*` keys of
-  [Settings added by Slicer Studio](#settings-added-by-slicer-studio).
+  autosaved at most every 10 minutes, and an autosave may contain copies of patient data (so may the journal
+  of a study, which is inside the study folder). The Windows folder and the web version (stopping the
+  container) have not been tried.
+- The `[` and `]` keys resize the Paint brush by default (also in the Classic interface, but not under
+  `--testing`), which differs from official Slicer, where they cycle the volumes of the slice view;
+  `Studio/BracketKeysResizeBrush` set to `false` brings the official meaning back. Its settings key has no
+  settings page, and the shortcut list (`Ctrl+/`) shows the `[ ]` row only when that key is written in the
+  settings as `true`.
+- Wave 3 was run on Linux with Qt 5.15 only. The AltGr guard of text fields is written for Windows and has not
+  been tried there, and nothing of wave 3 has been run on macOS (Qt 6). The compatibility check has not been run
+  on the final tree of wave 3.
 - The Draw inspector width is chosen from what the tools need (up to 600 px, remembered), so it can be
   wider than the 340 px default after you have used the tools.
 - The *System* theme follows the light or dark setting of the operating system on Windows and with Qt 6.5
   or newer, and the desktop palette with Qt 5 on Linux (light when that is unknown). It has not been
   tried on macOS.
 - Slicer Studio has been run on Linux with Qt 5.15. The macOS packages (Qt 6) passed the start-up test
-  on macOS 15 with Apple Silicon only, on a disk image built before wave 2: the wave 2 features have not
-  been run on macOS.
+  on macOS 15 with Apple Silicon only, on a disk image built before wave 2: the features of waves 2 and 3
+  have not been run on macOS.
 
 ## Development
 
@@ -938,9 +1307,13 @@ Known limitations today:
 | Path | Contents |
 |---|---|
 | [Modules/Scripted/Studio](Modules/Scripted/Studio) | Studio interface (`StudioLib/`): shell, top bar, workspaces, layouts, Library page, importer, downloads, Draw (`draw.py`, `lesioncard.py`), Search (`palette.py`, `finder.py`), shortcut list (`cheatsheet.py`), in-view probe (`probe.py`), mode pill (`modes.py`), orientation letters, guided tours (`tour.py`, `tours.py`, `migration.py`); the `Studio*Test` suites in `Testing/Python` |
-| [Modules/Scripted/Studio/StudioLib](Modules/Scripted/Studio/StudioLib) | Autosave and recovery: `autosave.py` (the service, menu actions), `autosave_io.py` (writing of autosave scenes), `recovery.py` (scan, recover, discard, recovery window), `autosave_settings.py` (the settings panel) |
+| [Modules/Scripted/Studio/StudioLib](Modules/Scripted/Studio/StudioLib) | Autosave and recovery: `autosave.py` (the service, menu actions), `autosave_io.py` (writing of autosave scenes), `recovery.py` (scan, recover, discard, recovery window), `autosave_settings.py` (the settings panel), `autosave_ui.py` (the top-bar status, the Library recovery card and the inspector notice) |
+| [Modules/Scripted/Studio/StudioLib](Modules/Scripted/Studio/StudioLib) | Studies: `study_ui.py` (the session: open, *Done → next*, inbox, `shell.studySession`), `journal.py` (the crash-safe journal), `library.py` (subject list, inspector cards, and the `libcard_*.py` extension point); `libcard_normalize.py` (the Library batch normalization, the Norm column and the review); `drawcard_normalize.py` (the Draw card; `drawcard_*.py` is the extension point of Draw); `mappage.py` (Map layers, status chip, map browsing); `a11y.py` and `firstrun.py` (accessibility, the research-use line, the close prompt) |
 | [Modules/Loadable/Segmentations/EditorEffects/Python/SegmentEditorEffects](Modules/Loadable/Segmentations/EditorEffects/Python/SegmentEditorEffects) | Smart fill: `SegmentEditorSmartFillEffect.py` (the effect) and `SmartFillAlgorithm.py` (the computation, numpy and VTK only) |
 | [Modules/Scripted/LesionNetworkMapping](Modules/Scripted/LesionNetworkMapping) | `LesionNetworkMappingLib` and its unit tests, the Map module (`LesionNetworkMapping.py`) and its card plug-ins (`LesionNetworkMappingUI/`) |
+| [Modules/Scripted/LesionNetworkMapping/LesionNetworkMappingLib](Modules/Scripted/LesionNetworkMapping/LesionNetworkMappingLib) | Wave 3 numerics: `normalize.py` (lesion-aware normalization, command line) and `normqc.py` (its QC), `slnm.py` (symptom mapping), `cohort.py` (group maps), `manager.py` (connectome conversion jobs), `preflight.py`, `lesionops.py`, `lesionset.py`, `fetch.py` and `atlases.py` (with the catalogs in `catalog/`), `clusters.py`, `methods.py` and `checklist.py` (reporting), `figurefit.py` |
+| [Modules/Scripted/LesionNetworkMapping/LesionNetworkMappingUI](Modules/Scripted/LesionNetworkMapping/LesionNetworkMappingUI) | Map cards: `normalize_controller.py` (the controller that Map and Draw share) and `card_normalize.py`, `card_cohort.py` with the `cohort_*.py` tabs (`cohort_contrast.py`, `cohort_symptom.py`), `jobrunner.py` (one heavy job at a time) |
+| [Base/QTApp/qSlicerMainWindow.cxx](Base/QTApp/qSlicerMainWindow.cxx), [Base/QTGUI/qSlicerSettingsViewsPanel.cxx](Base/QTGUI/qSlicerSettingsViewsPanel.cxx), [Base/QTGUI/qSlicerDataDialog.cxx](Base/QTGUI/qSlicerDataDialog.cxx), [Modules/Loadable/Volumes/Logic/vtkSlicerVolumesReader.cxx](Modules/Loadable/Volumes/Logic/vtkSlicerVolumesReader.cxx), [Modules/Loadable/Segmentations/EditorEffects/qSlicerSegmentEditorPaintEffect.cxx](Modules/Loadable/Segmentations/EditorEffects/qSlicerSegmentEditorPaintEffect.cxx) | Wave 3 in C++: focus mode, panel width and the disclaimer and close hooks of the main window; *Navigation in Studio* settings; *Add Data* and volume loading; the brush-size display and hover of the Paint effect |
 | [Modules/Scripted/SampleData](Modules/Scripted/SampleData) | "MNI152 (neuro)" category: bundled 2 mm template, TemplateFlow downloads |
 | [Base/QTGUI/qSlicerStyle.cxx](Base/QTGUI/qSlicerStyle.cxx) | Palettes, color tokens, density, accent color |
 | [Libs/MRML/Core/vtkMRMLLayoutNode.cxx](Libs/MRML/Core/vtkMRMLLayoutNode.cxx), [Libs/MRML/Logic/vtkMRMLLayoutLogic.cxx](Libs/MRML/Logic/vtkMRMLLayoutLogic.cxx) | Studio layouts and their portable saving |
@@ -958,6 +1331,9 @@ Known limitations today:
 SLICER=~/Slicer-SuperBuild-Release/Slicer-build/Slicer
 python3 Utilities/Scripts/StudioTestRunner.py --slicer "$SLICER" unittest Studio StudioTest
 python3 Utilities/Scripts/StudioTestRunner.py --slicer "$SLICER" unittest Studio StudioAutosaveTest
+python3 Utilities/Scripts/StudioTestRunner.py --slicer "$SLICER" unittest Studio StudioNormalizeTest
+python3 Utilities/Scripts/StudioTestRunner.py --slicer "$SLICER" unittest Studio StudioAccessibilityTest
+python3 Utilities/Scripts/StudioTestRunner.py --slicer "$SLICER" unittest LesionNetworkMapping LesionNetworkMappingNormalizeUITest
 python3 Utilities/Scripts/StudioTestRunner.py --slicer "$SLICER" unittest Segmentations SegmentEditorSmartFillTest
 python3 Utilities/Scripts/StudioTestRunner.py --slicer "$SLICER" pyunit Segmentations Testing/Python/SmartFillAlgorithmTest.py
 python3 Utilities/Scripts/StudioTestRunner.py --slicer "$SLICER" unittest Applications/SlicerApp/Testing/Python StudioLayoutPortabilityTest
@@ -968,16 +1344,24 @@ python3 Utilities/Scripts/StudioTestRunner.py --slicer "$SLICER" --generic-dir "
 `selftest LesionNetworkMapping`); `pyunit DIR FILE` runs a pure Python test with `PythonSlicer`. Upstream
 tests run the same way, for example `unittest Segmentations SegmentEditorLogicTest`. The Studio suites are
 `StudioTest`, `StudioNavigationTest`, `StudioOrientationTest`, `StudioTopBarTest`, `StudioPaletteTest`,
-`StudioLibraryTest`, `StudioImportTest`, `StudioModesTest`, `StudioTourTest`, `StudioAutosaveTest` and
-`StudioUsabilityGateTest`; a new `Studio*Test.py` file in `Testing/Python` is registered without editing
+`StudioLibraryTest`, `StudioImportTest`, `StudioModesTest`, `StudioTourTest`, `StudioAutosaveTest`,
+`StudioAccessibilityTest`, `StudioNormalizeTest` and `StudioUsabilityGateTest`; a new `Studio*Test.py` file in `Testing/Python` is registered without editing
 the CMake file.
 
-The LNM unit tests (271 tests in 12 files, about a minute, no network) need only `PythonSlicer`:
+The LNM unit tests (546 tests in 24 files, 3 skipped, about 3.5 minutes on the 4-core test machine, no
+network) need only `PythonSlicer`. The normalization tests run BRAINSFit on a synthetic subject. The test that
+needs the whole-head template is skipped unless that template is in a folder named by
+`LNM_TEST_TEMPLATE_DIR`, and the files that need the Slicer application (`LesionNetworkMappingNormalizeUITest`
+and `StudioNormalizeTest`) skip themselves under a plain `PythonSlicer`, so run the files with `discover`:
 
 ```console
 cd Modules/Scripted/LesionNetworkMapping
-PythonSlicer -m unittest Testing/Python/LesionNetworkMapping*Test.py
+PythonSlicer -m unittest discover -s Testing/Python -p 'LesionNetworkMapping*Test.py'
 ```
+
+At the end of wave 3 one of the 546 fails: `test_maps_tsv_columns` of `LesionNetworkMappingCohortMapsTest.py`
+still expects absolute lesion paths in `maps.tsv`, and `cohortmaps` now writes paths relative to the file (a
+file that may be shared must hold no absolute local path). The test needs the update.
 
 The usability gate re-runs the walkthrough tasks headless and counts the actions from the input events that
 it sends. Run it in `Slicer-build`, with a throwaway settings folder:
