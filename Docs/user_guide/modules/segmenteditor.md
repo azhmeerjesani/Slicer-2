@@ -30,6 +30,35 @@ The following keyboard shortcuts are active when you are in the Segment Editor m
 | `Shift` + `1`, `2`, … `0` | select effect (11-20)                  |
 | `i`                       | toggle masking by intensity range      |
 
+The number keys select the effect at that position of the **effect list as it is shown**, so the key of an effect
+depends on the order of the effects. The hover text of each effect button shows the effect's name, a one-line
+description and its key. In Slicer Studio, **Ctrl+/** opens a list of every key that is active at that moment, made from
+the live order of the effects (see [Slicer Studio in the Segment Editor](#slicer-studio-in-the-segment-editor)).
+
+## Slicer Studio in the Segment Editor
+
+In Slicer Studio the Segment Editor is the **Draw** workspace (see [Slicer Studio](studio.md#draw)). It is the same
+module with the same effects, shown differently, and it can be switched back to the standard layout with the classic
+interface (**Ctrl+Alt+0**).
+
+- **The first segment is created for you.** Choosing an effect that needs a segment when the segmentation has none
+  adds one (in Slicer Studio, named "Lesion") and selects it, so the first click draws. (The same setting is on in the
+  classic interface of this fork, except under `--testing`.) When a segment already exists but none is selected, the
+  first one is selected.
+- **Five tools in front.** The effects are labelled buttons: **Brush** (Paint, `P`), **Outline** (Draw, `D`), **Smart
+  fill** (`M`), **Erase** (`E`) and **Fill gaps** (Fill between slices, `Shift+F`), then **More tools**: Auto outline
+  (Level tracing, `L`), Threshold, Grow from seeds, Smooth, Islands, Margin, Scissors, Combine (Logical operators),
+  Hollow and Mask volume. Effects from extensions follow.
+- **Keys.** The letters work on the view under the mouse, only in Draw, and never while you type in a text field. The
+  tool keys are listed in [Slicer Studio](studio.md#draw-keys). `Esc` deselects the tool, `Space` pauses it (left-drag
+  then adjusts window/level), and `E` pressed again returns to the previous tool.
+- **Undo.** The editor remembers the last 20 states (up to 30 in Slicer Studio when the build supports shallow history). An undo restores
+  only the segments that changed since the state was saved, so it stays fast with a 3D surface shown.
+- **Smaller panel.** The Segmentation and Source volume selectors, the Add/Remove and 3D buttons, the undo buttons
+  and the effect help are hidden (the top bar has Undo and Redo; **?** in the panel header shows the help of the
+  active tool). The segments table is hidden while there is only one segment, and the masking section is collapsed
+  and summarised in one line, for example "Paint everywhere · overwrite other segments" or "Only inside Lesion · intensity 25–75".
+
 ## Tutorials
 
 - [Segmentation tutorials](https://training.slicer.org/#segmentation-tutorials)
@@ -69,7 +98,7 @@ Table columns:
 
 - **Effect toolbar**: Select the desired effect here. See below for more information about each effect.
 - **Options**: Options for the selected effect will be displayed here.
-- **Undo/Redo**: The module saves state of segmentation before each effect is applied. This is useful for experimentation and error correction. By default the last 10 states are remembered.
+- **Undo/Redo**: The module saves state of segmentation before each effect is applied. This is useful for experimentation and error correction. By default the last 20 states are remembered (up to 30 in Slicer Studio when the build supports shallow history).
 
 ### Masking options
 
@@ -90,6 +119,19 @@ Effects operate either by clicking the Apply button in the effect options sectio
 
 Use Threshold to determine a threshold range and save results to selected segment or use it as Editable intensity range.
 
+Options added in this version (they do not change the defaults of the classic interface):
+
+- **Paint within this range** limits painting to the intensity range (it sets the editable intensity range of the
+  Masking section; it was called "Use for masking").
+- **Local histogram**: while this section is open, click-drag in a slice view to sample the intensities of a lesion
+  and set the range from them. The sampling only happens while the section is open, so ordinary clicks in the view are
+  not captured.
+- **Keep Threshold active after Apply**: the effect stays selected after Apply, so the range can be adjusted and applied
+  again.
+- **Static preview**: the preview is shown at constant opacity and the views are redrawn only when the range or the
+  segmentation changes, which is lighter on large images.
+- The histogram is computed faster, and the range sliders send one update per movement.
+
 ### ![](https://github.com/Slicer/Slicer/releases/download/docs-resources/module_segmenteditor_paint.png) Paint
 
 - Pick the radius (in millimeters) of the brush to apply
@@ -109,12 +151,19 @@ Use Threshold to determine a threshold range and save results to selected segmen
 - Left click to lay individual points of an outline
 - Left drag to lay down a continuous line of points
 - Left double-click to add a point and fill the contour. Alternatively, right click to fill the current contour without adding any more points.
+- **Add** or **Subtract**: the outline adds the region inside it to the selected segment (Add, default) or removes the
+  region inside it from the segment (Subtract). Use Subtract to cut a piece out of a lesion with a few clicks.
+- **Apply on release (lasso)**: when this option is on, drawing by dragging closes and applies the outline as soon as you
+  release the mouse button (the outline must be a drag of at least a few pixels with at least 3 points). Clicking
+  points still works as before. Slicer Studio turns this option on by default; the classic interface leaves it off.
+- Esc deselects the effect; an outline that has not been applied is discarded.
 
 | Key               | Operation                               |
 | ----------------- | --------------------------------------- |
 | `x`               | delete the last point added             |
 | `a`               | apply segment                           |
 | `Enter`           | apply segment                           |
+| `Esc`             | deselect the effect (discards an unapplied outline) |
 
 :::{note}
 
@@ -161,7 +210,12 @@ Notes:
 
 ### ![](https://github.com/Slicer/Slicer/releases/download/docs-resources/module_segmenteditor_fill_between_slices.png) Fill between slices
 
-Create complete segmentation on selected slices using any editor effect. You can skip any number of slices between segmented slices. This method will fill the skipped slices by interpolating between segmented slices.
+Create complete segmentation on selected slices using any editor effect. You can skip any number of slices between segmented slices. This method will fill the skipped slices by interpolating between segmented slices. In Slicer Studio this effect is called **Fill gaps**.
+
+- **Fill** interpolates and applies in one step, as one undo step. (**Initialize** and **Apply** still let you look at the
+  result before it is applied.)
+- **Selected segment only**: when checked, only the selected segment is interpolated, even if it is hidden. When it is
+  off, all visible segments are interpolated. It is off in the classic interface and on in Slicer Studio.
 
 - Initialize: Click this button after initial segmentation is completed (by using other editor effects).
 Initial computation may take more time than subsequent updates.
@@ -179,6 +233,40 @@ Notes:
 - Only visible segments are used by this effect.
 - The method does not use the source volume, only the shape of the specified segments.
 - The method uses *ND morphological contour interpolation algorithm* described in this paper: <https://insight-journal.org/browse/publication/977>
+
+### Smart fill
+
+Click inside a lesion and it is filled automatically, by growing a region from the clicked point. A preview is shown
+first. It is meant as **assisted tracing**: it proposes a region, and you decide whether it is right. It never
+approves a result by itself. Smart fill is the effect `M` in Slicer Studio, and is listed after the built-in effects in
+the classic interface.
+
+How to use it:
+
+- Click inside the lesion. The preview shows what would be added, with its volume. Press `Enter` (or **Apply**) to apply it
+  to the selected segment as one undo step, or `Backspace` (or **Discard**) to throw it away.
+- **Tolerance.** With **Auto** on, each click picks its own tolerance from the contrast at the lesion's boundary. Drag
+  sideways, use `Shift` + `mouse wheel` or `+` `-` to change it by hand (turning Auto off).
+- **Shift+click** adds a second region to the preview. **Ctrl+click** (**⌘+click** on a Mac) removes a region from it.
+- **Mode:** **3D** (default) fills the lesion in three dimensions; **This slice** fills only the clicked slice.
+- **Leakage control:** **Max radius** (default 100 mm; a first pass uses at most 50 mm and is extended
+  automatically when the lesion continues); **Leak guard** (default 1.5 mm) cuts thin bridges to neighbouring structures;
+  **Fill holes and smooth edges** (on); **Stay inside brain mask** (on; available when the segmentation uses an MNI152
+  template grid whose brain mask is present).
+- **Apply on click** (off by default) applies each click immediately instead of waiting for `Enter`.
+
+The masking of the Segment Editor (editable area, intensity range, overwrite) applies when the preview is applied.
+
+The defaults you change are remembered in the settings `Studio/SmartFill/*` (fork-only; ignored when Slicer runs with
+`--testing`).
+
+**Limits.** Smart fill finds a boundary where the intensity changes, so it needs contrast between the lesion and its
+surroundings. It does nothing useful on the bare template, which has no lesion in it. A lesion that has almost the
+same intensity as the grey matter around it on a T1-weighted scan is ambiguous, and the result may be partial or may
+leak: in the project's tests with synthetic lesions of that kind the overlap with the true lesion (Dice) ranged from about
+0.56 to 0.84. Click well inside the lesion; clicks close to the boundary fail more often (in the project's tests, in 20 to
+40% of the clicks). Always check the preview in all three views. The effect does not propagate from slice to slice,
+snap to edges or find candidates by itself.
 
 ### ![](https://github.com/Slicer/Slicer/releases/download/docs-resources/module_segmenteditor_margin.png) Margin
 
@@ -220,8 +308,10 @@ By enabling `Apply to visible segments`, all visible segments of the segmentatio
 
 Use this tool to process "islands", i.e., connected regions that are defined as groups of non-empty voxels which touch each other but are surrounded by empty voxels.
 
-- `Keep largest island`: keep the larges connected region.
-- `Remove small islands`: keep all connected regions that are larger than `minimum size`.
+- `Keep largest island`: keep the largest connected region. The minimum size does not apply to this option (its field is
+  disabled), so the largest region is always kept.
+- `Remove small islands`: keep all connected regions that are larger than `minimum size`. The minimum size is shown in voxels and
+  in mm³. If every region is smaller than the minimum, a message tells you instead of silently emptying the segment.
 - `Split islands to segments`: create a unique segment for each connected region of the selected segment.
 - `Keep selected island`: after selecting this mode, click in a non-empty area in a slice view to keep that region and remove all other regions.
 - `Remove selected island`: after selecting this mode, click in a non-empty area in a slice view to remove that region and preserve all other regions.
@@ -246,6 +336,7 @@ This is useful for removing irrelevant details from an image (for example remove
 
 ## Tips
 
+- Keys of Slicer Studio's Draw workspace are shown on the hover text of each tool and in the list opened with `Ctrl+/`.
 - A large radius paint brush with threshold painting is often a very fast way to segment anatomy that is consistently brighter or darker than the surrounding region, but partially connected to similar nearby structures (this happens a lot).
 - Use the slice viewer menus to control the label map opacity and display mode (to show outlines only or full volume).
 
@@ -300,7 +391,7 @@ Segment Editor allows editing of segmentation on slices of arbitrary orientation
 
 ## Information for Developers
 
-See examples for creating and modifying segmentation nodes and using segment editor effects from your own modules in [Developer guide](../../developer_guide/modules/segmenteditor) and [Slicer script repository](../../developer_guide/script_repository.md#segmentations)
+See examples for creating and modifying segmentation nodes and using segment editor effects from your own modules in [Developer guide](../../developer_guide/modules/segmenteditor.md) and [Slicer script repository](../../developer_guide/script_repository.md#segmentations)
 
 ## Contributors
 

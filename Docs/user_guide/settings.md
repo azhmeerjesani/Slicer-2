@@ -77,6 +77,67 @@ The overall theme of Slicer is controlled by the selected Style:
 - Light Slicer: application window background is bright, regardless of operating system settings.
 - Dark Slicer: application window background is dark, regardless of operating system settings.
 
+#### Slicer Studio appearance
+
+In Slicer Studio the Appearance panel has more choices, applied as soon as you make them (density after a restart).
+They are saved under the fork's own keys `Appearance/*`, and none of them changes the settings that official 3D Slicer
+reads, so other 3D Slicer installations that share your settings file keep their own look.
+
+- **Theme** (`Appearance/Theme`): System, Dark or Light. Dark is the default. System follows the operating system,
+  as the Style does. The Theme sets the colours of the *Slicer* style
+  described above. Choosing *Dark Slicer* or *Light Slicer* as the Style in the Advanced section is an explicit
+  choice of a fixed style and overrides the theme.
+- **Accent color** (`Appearance/Accent`): the color of selected items, links and highlighted controls. The **Reset**
+  button returns to the default accent of the theme.
+- **Density** (`Appearance/Density`): *Comfortable* (default) or *Compact*, which uses the spacing of earlier
+  3D Slicer versions. Takes effect after a restart.
+- **Font and size** (`Appearance/Font`): the interface font is *Inter*. While you have not chosen another font, Inter
+  is applied when the application starts and nothing is written to the settings; the `font` key that official 3D Slicer uses
+  is not changed. A font that you choose here is saved under `Appearance/Font` and applied by Slicer Studio only.
+  In the classic interface and with `--testing`, the standard font setting of 3D Slicer is used as before.
+
+These choices have no effect when Slicer is started with `--testing`, which always uses the light theme and
+the standard sizes.
+
+### Views
+
+The **Views** panel has the usual defaults for new slice and 3D views, and these additions:
+
+- **Flat view bars** (`Appearance/FlatViewBars`): shows compact, flat bars above the slice and 3D views (orientation,
+  slice position, link, options, maximize). Uncheck to use the classic bars. On by default in Slicer Studio, off with
+  `--testing`. Takes effect after a restart.
+- **3D view background** (*Top color*, *Bottom color*, *Show box*, *Box color*): defaults of new 3D views, which follow
+  the theme until you change them. They are saved immediately under `Appearance/Default3DView/*`, which other
+  installations ignore. **Use theme colors** returns to the theme.
+- **Navigation in Studio**: three behaviours that apply only while the Studio interface is shown (see
+  [Navigation in Studio](user_interface.md#navigation-in-studio)): **Left-drag adjusts window/level**
+  (`Studio/LeftDragWindowLevel`, on), **Keys act on the view under the mouse** (`Studio/FocusFollowsMouse`, on) and the
+  **Page Up / Page Down step** (`Studio/PageStepSlices`, 10 slices). The Classic interface, `--testing` and
+  scripts keep the official behaviour whatever these say.
+
+### Autosave
+
+The **Autosave** panel (in the Application Settings of Slicer Studio and of its classic interface; the autosave status in
+the top bar of Studio also leads to it) controls the automatic safety copy of your scene. See
+[Autosave and recovery](modules/studio.md#autosave-and-recovery) for what it does. The panel has:
+
+| Setting | Key | Default | Range |
+| ------- | --- | ------- | ----- |
+| **Autosave the scene** | `Studio/Autosave/Enabled` | on | |
+| **At most every** (minutes) | `Studio/Autosave/IntervalMinutes` | 2 | 1-60 |
+| **or after a pause of** (seconds) | `Studio/Autosave/IdleSeconds` | 10 | 3-300 |
+| **Location** | `Studio/Autosave/Directory` | empty, meaning the private folder `StudioAutosave` in the application data folder | a folder |
+| **Keep** (sessions) | `Studio/Autosave/KeepSessions` | 5 | 1-50 |
+| **Max size** (MB) | `Studio/Autosave/MaxDiskMB` | 2048 | 256-102400 |
+| **Delete after** (days) | `Studio/Autosave/MaxAgeDays` | 14 | 1-365 |
+| **Skip data larger than** (MB) | `Studio/Autosave/MaxNodeMB` | 2048 | 16-102400 |
+
+The buttons **Recover autosaved work…**, **Autosave now** and **Delete all autosaves…** (permanent, for closed
+sessions) are in the panel too. The environment variable `SLICER_STUDIO_AUTOSAVE_DIR` overrides the location and
+`SLICER_STUDIO_AUTOSAVE=0` turns autosave off. The panel is not present and autosave does not run with `--testing`
+or `--no-main-window`. Choose a private folder: autosaves can contain patient data, and a folder that is synchronized
+to the cloud or shared is not private.
+
 ### Developer
 
 #### Developer mode
@@ -90,6 +151,80 @@ Enable the following features:
 
 modules/webserver.html
 
+
+## Slicer Studio settings
+
+Slicer Studio stores its own choices under keys that start with `Studio/` or `Appearance/`. Official 3D Slicer
+does not read them, so installations that share your settings file are not affected. Slicer Studio **never rewrites a
+key that official 3D Slicer reads** (for example `Styles/Style`, `font`, `Modules/*` or `Views/*`); only a change you make
+yourself in the Application Settings of that installation does. The one thing Studio does write back is the window: when you
+close the window it stores the classic window state and a portable layout under `MainWindow/windowState` and
+`MainWindow/layout`, so an official installation that shares `Slicer.ini` opens with its normal window and layout, not with Studio's. When Slicer is started with `--testing` or
+`--disable-settings`, the temporary settings are used and none of the keys below is written.
+
+Most keys are written by the application and need not be edited. The keys that you may want to set (in
+`Slicer.ini`, see [Settings file location](#settings-file-location)):
+
+| Key | Default | Meaning |
+| --- | ------- | ------- |
+| `Studio/Enabled` | true | Set to false to start in the classic interface always. Environment variable `SLICER_CLASSIC_UI=1` does it once |
+| `Studio/Mode` | studio | `classic` when you left the Studio interface with Ctrl+Alt+0; changed by the switch |
+| `Studio/StartWorkspace` | Library | The workspace the window opens on (Library, Draw or Map) |
+| `Studio/LastWorkspace` | | The workspace you used last |
+| `Studio/PanelWidth` | 340 | Width of the inspector in pixels (300-480; changed by dragging its edge) |
+| `Studio/BrushDiameterMm` | 3.0 | Size of the brush in millimetres, remembered between sessions |
+| `Studio/FollowStrokes` | true | The "Follow" option of Draw: views follow the strokes |
+| `Studio/BracketKeysResizeBrush` | true (false with `--testing`) | `[` and `]` change the brush size |
+| `Studio/LeftDragWindowLevel`, `Studio/FocusFollowsMouse`, `Studio/PageStepSlices` | true, true, 10 | Navigation in Studio, see above |
+| `Studio/LastSaveFolder` | | The folder of the last lesion you saved |
+| `Studio/RecentStudies`, `Studio/RecentFolders`, `Studio/RecentOpenTimes` | | The recent lists of Library |
+| `Studio/PaletteMRU` | | The entries of Search that you ran last |
+| `Studio/AllowedToolbars` | | Toolbars you chose to show with "Show toolbar…" |
+| `Studio/Library/StudyView`, `Studio/Library/GridThumbSize` | list, 160 | The subject view of Library (list or grid) and the size of the grid cards |
+| `Studio/Tour/Offered`, `Studio/Tour/Completed` | | Whether the guided tour was offered, and the tours you completed |
+| `Studio/LazyPythonWrappers` | true | Load the Python wrappers of the modules when they are first used, which shortens the start. Set to false for the old behaviour |
+| `Studio/SmartFill/*` | see [Segment Editor](modules/segmenteditor.md#smart-fill) | The defaults of Smart fill: `Mode`, `AutoTolerance`, `TolerancePercent`, `MaxRadiusMm`, `LeakGuardMm`, `FillHoles`, `StayInsideBrain`, `ApplyOnClick`. Written only when you change them; ignored with `--testing` |
+| `Studio/Autosave/*` | see the table above | The autosave settings |
+| `Studio/LNM/Connectomes` | | The connectomes registered in the module (their folders, in the setting only: never in a shared file) |
+| `Studio/LNM/DataDirectory` | the `SlicerStudio` folder in your documents | Where network mapping data and normalization outputs go when no study is open |
+| `Studio/LNM/AcceptedTerms/<sha>` | false | You ticked "I accept these data use terms" for the connectome with this manifest hash |
+| `Studio/LNM/MaxJobThreads` | number of cores minus one | The most threads a background job uses |
+| `Studio/LNM/MemoryBudgetGB` | the smaller of a quarter of the memory and 4 | The memory a cohort pass may use |
+| `Studio/LNM/Normalize/LastOptions` | | The options of the last normalization (JSON) |
+| `Studio/LNM/Pipeline/Options` | | The options of Run everything (JSON) |
+| `Appearance/Theme`, `Appearance/Accent`, `Appearance/Density`, `Appearance/Font`, `Appearance/FlatViewBars`, `Appearance/Default3DView/*` | see above | The look of the interface |
+
+Study-level choices are not in `Slicer.ini` but in the study's `study.json` (for example `normalization`, with the options
+of automatic normalization), so that they travel with the study.
+
+## Compatibility with official 3D Slicer
+
+Slicer Studio is 3D Slicer with a different default interface, and it is built to exchange data with the official
+releases.
+
+- **Scenes and data saved by Slicer Studio load in official 3D Slicer 5.12 and 5.13, and the other way round.** Volumes, segmentations,
+  markups, tables, colour tables, transforms and scenes keep their formats. No new node or storage types are added and
+  the files written by the existing storage nodes are unchanged.
+- **Layouts are portable.** The layouts of Slicer Studio (Focus, Focus + 3D, Row, Compare) are saved in a scene as the
+  Conventional layout together with an extra attribute. Official 3D Slicer shows its Conventional layout (slice and 3D
+  views), and Slicer Studio restores its own layout.
+- **Settings are shared.** All installations of one user read and write `Slicer.ini`. Slicer Studio writes only its
+  own keys (above) and never rewrites a key that official versions read (apart from the window state and layout written back when you close the window, above), so using Slicer Studio does not change how
+  your official installation looks or behaves. (The one exception is a change that you make yourself in the
+  Application Settings.)
+- **Extra files are harmless.** The sidecars next to lesion masks (`.json`), the files of a study, and the maps of
+  lesion network mapping are standard NIfTI, JSON and TSV files. Official 3D Slicer, FSL and FSLeyes ignore the
+  sidecars.
+- **Check it yourself.** `Utilities/Scripts/SlicerFileCompatibilityCheck.py` saves a test scene in each installation you
+  name and loads it in every other one, then compares what was loaded. It runs each installation with its own temporary
+  settings, so your settings are not touched:
+
+      python3 Utilities/Scripts/SlicerFileCompatibilityCheck.py \
+          --slicer fork=/path/to/Slicer \
+          --slicer official=/path/to/official/Slicer --out compat-report
+
+  The result is in `report.txt` and `report.json` in the output folder; the exit code is not zero if a check
+  fails. See [Slicer Studio](modules/studio.md#compatibility-with-official-3d-slicer).
 
 ## Information for Advanced Users
 

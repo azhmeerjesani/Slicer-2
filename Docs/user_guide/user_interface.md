@@ -57,6 +57,33 @@ Toolbar provides quick access to commonly used functions. Individual toolbar pan
 
 This panel may display application status, such as current operation in progress. Clicking the little **X** icons displays the Error Log window.
 
+## Slicer Studio and the classic interface
+
+This fork of 3D Slicer starts in the **Slicer Studio** interface. The description above, with the menu bar, toolbars,
+module panel on the left and the status bar, is the **classic interface**, which Slicer Studio keeps unchanged and which
+official 3D Slicer shows. The two are two faces of the same application: the same modules, files and Python interface.
+
+**Studio.** One 44 px top bar holds the ≡ menu, the breadcrumb, the switcher **Library | Draw | Map**, Undo/Redo, the layout
+picker, **Search** and the autosave status. The module panel moves to the right as the **inspector**. Library, Draw and Map are
+the workspaces; every other module opens in the inspector from Search (**Ctrl+K**), with a back button such as "← Draw".
+The Data Probe, status bar, menu bar and toolbars are hidden, and everything they offer is in Search or in the ≡ menu (File,
+Edit, View and Help are submenus of ≡).
+
+**Switching.** **Ctrl+Alt+0**, **≡ > Classic interface** or **⋯ > Open in Classic** switches to the classic interface, and
+**View > Studio interface** (or Ctrl+Alt+0 again) switches back. The choice is remembered. To start in the classic
+interface once, set the environment variable `SLICER_CLASSIC_UI=1`; to turn Studio off, set `Studio/Enabled` to false
+(see [Settings](settings.md#slicer-studio-settings)). Slicer started with `--testing` or `--no-main-window` always behaves as the
+classic interface.
+
+**What is where.** Application Settings is in ≡ (or Ctrl+2). The module list is in Search. The Python console is Ctrl+3
+and the error log Ctrl+0, as before. The module panel is toggled with **Ctrl+\\** or **Ctrl+5** in Studio (Ctrl+5 is the
+classic key). **F11** or **Ctrl+6** hides all panels; **Esc** takes you one step back at a time. The Studio keys and the Esc ladder
+are described in [Slicer Studio](modules/studio.md#keyboard-reference); the **Help > Take a tour…** tour and the
+**Where did it go?** search show the place of every classic control in Studio.
+
+**Keyboard access.** **F10** opens the ≡ menu; **F6** and **Shift+F6** move the focus between the top bar, the inspector
+and the active view; **Tab** and **Shift+Tab** move the focus and never hide the inspector.
+
 ## Review loaded data
 
 Data available in Slicer can be reviewed in the Data module, which can be found on the toolbar or the modules list ![](../../Modules/Loadable/Data/Resources/Icons/SubjectHierarchy.png). More details about the module can be found on the [Slicer wiki](https://www.slicer.org/wiki/Documentation/Nightly/Modules/Data).
