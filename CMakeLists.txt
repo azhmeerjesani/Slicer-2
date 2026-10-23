@@ -175,6 +175,23 @@ if(UNIX AND NOT APPLE)
       CACHE STRING "Flags used by the linker"
       FORCE)
   endif()
+
+  # Link shared and module libraries with --as-needed, so that each library only records
+  # the libraries it uses (DT_NEEDED). Without it, the transitive ITK/VTK/Qt link interface
+  # adds hundreds of entries to every library, which slows down each dlopen at startup.
+  # Executables keep the --no-as-needed logic above (issue 2321).
+  # Toolchains that already link with --as-needed by default (for example Ubuntu) are not affected.
+  option(Slicer_USE_LINKER_AS_NEEDED "Link shared and module libraries with -Wl,--as-needed on Linux" ON)
+  mark_as_advanced(Slicer_USE_LINKER_AS_NEEDED)
+  mark_as_superbuild(Slicer_USE_LINKER_AS_NEEDED:BOOL)
+  if(Slicer_USE_LINKER_AS_NEEDED)
+    foreach(_linker_flags_var IN ITEMS CMAKE_SHARED_LINKER_FLAGS CMAKE_MODULE_LINKER_FLAGS)
+      if(NOT " ${${_linker_flags_var}} " MATCHES " -Wl,--as-needed ")
+        # Normal (non-cache) variable: the cached value set by the user is kept as is.
+        set(${_linker_flags_var} "${${_linker_flags_var}} -Wl,--as-needed")
+      endif()
+    endforeach()
+  endif()
 endif()
 
 #-----------------------------------------------------------------------------
