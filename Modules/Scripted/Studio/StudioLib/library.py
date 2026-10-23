@@ -15,6 +15,9 @@
 - ``showNotice(key, widget)`` / ``closeNotice(key)`` / ``notices()``: the keyed notice slot at the top of the canvas,
   above the drop zone, the current work and the study page (A-01b: the autosave recovery card). Notices are never
   shown over a view (USABILITY 6.4). Entering Library clears the inspector notice of the same key, which points here.
+- With a study, the canvas lists the subjects (``StudyList``) as rows or as a grid of cards (``StudyGrid``, W4-02) with an
+  axial lesion thumbnail computed off the main thread (``StudioLib.thumbnails``); both share the model, the selection,
+  the keys and the context menu.
 
 "Close" is the only removal verb of Studio (Close scene, Close set, a row's Close); "Delete" stays the word of
 the Data module. Files are loaded by ``StudioLib.importer``.
@@ -2321,6 +2324,7 @@ def _listenToStudies():
 
 def _onStudyChanged(studySession):
     if studySession is None:
+        stopThumbnails()
         _studySelection[:] = []
     else:
         _studySelection[:] = [sid for sid in _studySelection if sid in studySession.study]
@@ -2349,6 +2353,22 @@ def refreshStudy():
     panel = _livePanel()
     if panel is not None:
         panel.refresh()
+
+
+class _ResizeWatcher(qt.QObject):
+    """Calls a function when the watched widget is resized."""
+
+    def __init__(self, callback):
+        qt.QObject.__init__(self)
+        self.callback = callback
+
+    def eventFilter(self, obj, event):
+        if event.type() == qt.QEvent.Resize:
+            try:
+                self.callback()
+            except Exception:
+                logging.error(f"Studio Library: resize handler failed:\n{traceback.format_exc()}")
+        return False
 
 
 class _ListKeys(qt.QObject):
@@ -2409,8 +2429,19 @@ class StudyList(qt.QObject):
             chipRow.setLayout(self.chipLayout)
             self.chipLayout.setContentsMargins(0, 0, 0, 0)
             layout.addWidget(chipRow)
+            self.chipRow = None
         else:
-            rowLayout.addLayout(self.chipLayout)
+            # The chips stay in the filter row while they fit, else they go to a row of their own below it (_placeChips)
+            self.chipRow = qt.QWidget()
+            self.chipRow.setObjectName("StudioStudyChipRow")
+            chipRowLayout = qt.QHBoxLayout(self.chipRow)
+            chipRowLayout.setContentsMargins(0, 0, 0, 0)
+            chipRowLayout.addLayout(self.chipLayout)
+            chipRowLayout.addStretch(1)
+            # Ignored: the chips never make the page wider than the canvas (they move below instead)
+            self.chipRow.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+            rowLayout.addWidget(self.chipRow, 1)
+        self._chipsInRow = not compact
         rowLayout.addStretch(1)
         self.sortLabel = qt.QLabel(_("Sort"))
         self.sortLabel.setObjectName("StudioStudySortLabel")
@@ -2422,7 +2453,12 @@ class StudyList(qt.QObject):
             self.sortCombo.addItem(_(label), key)
         self.sortCombo.connect("currentIndexChanged(int)", lambda index: self.refresh())
         rowLayout.addWidget(self.sortCombo)
+        # Grid / list toggle and card size (W4-02; the canvas list only)
+        self.grid = None
+        self.viewButtons = {}
+        self.sizeSlider = None
         if not compact:
+            self._addViewControls(rowLayout)
             self.filterRow.setFixedHeight(FILTER_ROW_HEIGHT)
             layout.addWidget(self.filterRow)
         self.model = StudyTableModel()
@@ -2448,7 +2484,13 @@ class StudyList(qt.QObject):
         self.table.selectionModel().connect("selectionChanged(QItemSelection,QItemSelection)", self._onTableSelection)
         self._keys = _ListKeys(self)
         _installEventFilter(self.table, self._keys)
-        layout.addWidget(self.table, 1)
+        self.table.setContextMenuPolicy(qt.Qt.CustomContextMenu)
+        self.table.connect("customContextMenuRequested(QPoint)", lambda point: self._showContextMenu(self.table, point))
+        # The list and the grid share the model, the selection, the keys (shortcuts on this stack) and the context menu
+        self.views = qt.QStackedWidget()
+        self.views.setObjectName("StudioStudyViews")
+        self.views.addWidget(self.table)
+        layout.addWidget(self.views, 1)
         self.emptyLabel = qt.QLabel()
         self.emptyLabel.setObjectName("StudioStudyEmpty")
         self.emptyLabel.setWordWrap(True)
@@ -2472,9 +2514,14 @@ class StudyList(qt.QObject):
         self.onSelection = None
         ui.bindStyleSheet(self.widget, self._styleSheet)
         _studyViews.append(self)
+        if not compact and _savedStudyView() == "grid":
+            self.setViewMode("grid")
+        if not compact:
+            self._resizeWatcher = _ResizeWatcher(self._placeChips)
+            _installEventFilter(self.widget, self._resizeWatcher)
 
     def _addShortcut(self, key, callback, name, description, parent=None):
-        shortcut = qt.QShortcut(qt.QKeySequence(key), parent or self.table)
+        shortcut = qt.QShortcut(qt.QKeySequence(key), parent or self.views)
         shortcut.setObjectName("Studio" + name + "Shortcut")
         shortcut.setContext(qt.Qt.WidgetWithChildrenShortcut)
         # Listed in the shortcut list (Library section); not a window-wide Studio shortcut, so it never reaches the views
@@ -2531,6 +2578,36 @@ class StudyList(qt.QObject):
             self.chips[entry["key"]] = button
         if self._filterKey not in self.chips:
             self.setFilter("all")
+        self._placeChips()
+
+    def _placeChips(self):
+        """Chips in the filter row when the row is wide enough for all of them, else on a row of their own below it."""
+        if self.compact or self.chipRow is None or not _isAlive(self.widget):
+            return
+        rowLayout = self.filterRow.layout()
+        others = [self.search, self.sortLabel, self.sortCombo, *self.viewButtons.values()]
+        if self.sizeSlider is not None and not self.sizeSlider.isHidden():
+            others.append(self.sizeSlider)
+        spacing = rowLayout.spacing
+        fixed = sum(max(widget.minimumWidth, widget.sizeHint.width()) for widget in others) + spacing * (len(others) + 1)
+        buttons = list(self.chips.values())
+        chips = sum(button.sizeHint.width() for button in buttons) + self.chipLayout.spacing * max(0, len(buttons) - 1)
+        inRow = fixed + chips <= self.widget.width
+        if inRow == self._chipsInRow:
+            return
+        self._chipsInRow = inRow
+        listLayout = self.widget.layout()
+        if inRow:
+            listLayout.removeWidget(self.chipRow)
+            rowLayout.insertWidget(1, self.chipRow, 1)
+        else:
+            rowLayout.removeWidget(self.chipRow)
+            listLayout.insertWidget(listLayout.indexOf(self.filterRow) + 1, self.chipRow)
+        self.chipRow.show()
+
+    def chipsInFilterRow(self):
+        """True while the chips are in the filter row (False: on their own row below it)."""
+        return self._chipsInRow
 
     def setFilter(self, key):
         """Show the rows of a chip ("all", "cases", "controls", "untraced", "qcfail" or an extension filter key)."""
@@ -2607,6 +2684,8 @@ class StudyList(qt.QObject):
             self.model.setColumns(extra)
         rows = self.visibleRows(studySession)
         selected = studySelection()
+        # A model reset scrolls to the top: keep the place of the user (a QC key, a thumbnail or a save refreshes the rows)
+        scrolls = [(view, view.verticalScrollBar().value) for view in self._itemViews()]
         self._settingSelection = True
         try:
             self.model.setRows(rows, studySession.current())
@@ -2618,6 +2697,12 @@ class StudyList(qt.QObject):
         finally:
             self._settingSelection = False
         self._sizeColumns()
+        if self.grid is not None and self.viewMode() == "grid":
+            self.grid.prepare(studySession, rows)
+        for view, value in scrolls:
+            if value:
+                view.doItemsLayout()
+                view.verticalScrollBar().setValue(value)
         total = len(studySession.study)
         if not rows:
             self.emptyLabel.setText(_("No subject matches. Choose All or clear the search.") if total else
@@ -2669,11 +2754,115 @@ class StudyList(qt.QObject):
         self.search.selectAll()
 
     def focusTable(self):
-        self.table.setFocus(qt.Qt.OtherFocusReason)
+        """Focus the subject list, or the grid when it is shown (selecting the current subject when nothing is selected)."""
+        view = self.currentView()
+        view.setFocus(qt.Qt.OtherFocusReason)
         if not self.table.selectionModel().selectedRows() and self.model.rowCount() > 0:
             studySession = _studySession()
             row = max(0, self.model.rowOf(studySession.current())) if studySession is not None else 0
             self.table.selectRow(row)
+
+    # Grid / list (W4-02)
+
+    def _addViewControls(self, rowLayout):
+        """The list / grid toggle and the card size slider (shown in grid mode), at the end of the filter row."""
+        group = qt.QButtonGroup(self.widget)
+        group.setExclusive(True)
+        for mode, iconName, label in (("list", "list", _("List")), ("grid", "layout-grid", _("Grid"))):
+            button = qt.QToolButton()
+            button.setObjectName("StudioStudyListViewButton" if mode == "list" else "StudioStudyGridViewButton")
+            button.setProperty("studioChip", True)
+            button.setCheckable(True)
+            button.setAutoRaise(True)
+            button.setChecked(mode == "list")
+            button.setFocusPolicy(qt.Qt.TabFocus)
+            button.setIcon(ui.icon(iconName, 16))
+            button.setToolTip(ui.tooltip(_("Show as a list") if mode == "list" else _("Show as a grid"), None,
+                                         _("rows with every column") if mode == "list" else _("cards with an axial view of each lesion")))
+            button.setAccessibleName(label)
+            button.connect("clicked()", lambda mode=mode: self.setViewMode(mode))
+            group.addButton(button)
+            rowLayout.addWidget(button)
+            self.viewButtons[mode] = button
+        self.sizeSlider = qt.QSlider(qt.Qt.Horizontal)
+        self.sizeSlider.setObjectName("StudioStudyGridSizeSlider")
+        self.sizeSlider.setRange(GRID_SIZE_MIN, GRID_SIZE_MAX)
+        self.sizeSlider.setSingleStep(10)
+        self.sizeSlider.setPageStep(20)
+        self.sizeSlider.setValue(_savedGridSize())
+        self.sizeSlider.setFixedWidth(80)
+        self.sizeSlider.setToolTip(_("Card size"))
+        self.sizeSlider.setAccessibleName(_("Card size"))
+        self.sizeSlider.connect("valueChanged(int)", self._onSizeChanged)
+        self.sizeSlider.hide()
+        rowLayout.addWidget(self.sizeSlider)
+
+    def viewMode(self):
+        """Return "grid" when the cards are shown, else "list"."""
+        return "grid" if self.grid is not None and self.views.currentWidget() is self.grid.view else "list"
+
+    def currentView(self):
+        return self.grid.view if self.viewMode() == "grid" else self.table
+
+    def _itemViews(self):
+        return [self.table] + ([self.grid.view] if self.grid is not None else [])
+
+    def setViewMode(self, mode):
+        """Show the subjects as a list ("list") or as cards with lesion thumbnails ("grid"; not in the module panel)."""
+        if self.compact or mode not in ("list", "grid") or mode == self.viewMode():
+            return
+        hadFocus = self.currentView().hasFocus()
+        if mode == "grid":
+            if self.grid is None:
+                self.grid = StudyGrid(self)
+                self.views.addWidget(self.grid.view)
+            self.views.setCurrentWidget(self.grid.view)
+            studySession = _studySession()
+            if studySession is not None:
+                self.grid.prepare(studySession, self.model.rows)
+        else:
+            self.views.setCurrentWidget(self.table)
+        for key, button in self.viewButtons.items():
+            if button.isChecked() != (key == mode):
+                button.setChecked(key == mode)
+        if self.sizeSlider is not None:
+            self.sizeSlider.setVisible(mode == "grid")
+        self._placeChips()
+        current = self.table.currentIndex()
+        if current.isValid():
+            self.currentView().scrollTo(current)
+        if hadFocus:
+            self.currentView().setFocus(qt.Qt.OtherFocusReason)
+        _saveSetting(STUDY_VIEW_KEY, mode)
+
+    def _onSizeChanged(self, value):
+        if self.grid is not None:
+            self.grid.setThumbSize(value)
+        _saveSetting(GRID_SIZE_KEY, int(value))
+
+    def _showContextMenu(self, view, point):
+        """Right-click on a row or a card: the actions of the list keys (shared by the list and the grid)."""
+        index = view.indexAt(point)
+        if index.isValid() and not self.table.selectionModel().isSelected(index):
+            self.selectIds([self.model.sid(index.row())])
+        sids = self.selectedIds()
+        if not sids:
+            return
+        menu = qt.QMenu(view)
+        menu.setObjectName("StudioStudyContextMenu")
+        # The keys are shown after a tab (a hint, not a second shortcut: the list's own shortcuts handle them)
+        openAction = menu.addAction(_("Open in Draw") + "\t" + ui.keyText("Return"))
+        openAction.setEnabled(len(sids) == 1)
+        openAction.connect("triggered()", self.openSelected)
+        menu.addSeparator()
+        for key, value, label in (("P", "pass", _("QC pass")), ("X", "fail", _("QC fail")), ("U", "unreviewed", _("QC not reviewed"))):
+            action = menu.addAction(label + "\t" + key)
+            action.connect("triggered()", lambda value=value: self.setQc(value))
+        menu.addSeparator()
+        removeAction = menu.addAction(_("Remove from study (files are kept)") + "\t" + ui.keyText("Delete"))
+        removeAction.connect("triggered()", self.removeSelected)
+        _execMenu(menu, view.viewport().mapToGlobal(point))
+        menu.deleteLater()
 
     # Actions
 
@@ -2724,8 +2913,666 @@ class StudyList(qt.QObject):
                 shortcut.setEnabled(False)
                 shortcut.disconnect("activated()")
         self.shortcuts = []
+        if self.grid is not None:
+            self.grid.dispose()
         if _isAlive(self.widget):
             ui.bindStyleSheet(self.widget, None)
+
+
+#
+# Grid of the study page (W4-02): cards with an axial lesion thumbnail
+#
+
+#: Fork-only settings: the subject view of the canvas ("list" or "grid") and the thumbnail size of the cards
+STUDY_VIEW_KEY = "Studio/Library/StudyView"
+GRID_SIZE_KEY = "Studio/Library/GridThumbSize"
+#: Thumbnail side on a card: the slider range and the default (a 168 x 196 card)
+GRID_SIZE_MIN = 120
+GRID_SIZE_MAX = 220
+GRID_SIZE_DEFAULT = 160
+#: Card padding, footer (id, QC mark, status dot) and the gap between cards
+CARD_PAD = 4
+CARD_FOOTER = 32
+CARD_GAP = 8
+CARD_RADIUS = 8
+#: Main-thread budgets (ms): new cards rendered inside one paint event, and per pre-render tick
+RENDER_BUDGET_MS = 4.0
+PRERENDER_BUDGET_MS = 10.0
+#: Colours drawn over a thumbnail (always on the dark thumbnail backdrop, in both themes)
+THUMB_BACKDROP = "#0e0e10"
+THUMB_CHIP_COLORS = {"ok": "#3fb950", "warn": "#e3b341", "danger": "#f85149", "neutral": "#ececf0", "muted": "#b4b4bc", "busy": "#9ec1ff"}
+#: Patient directions drawn at the left and right edges of a thumbnail (radiological, like the Red axial view)
+LATERALITY_CUES = ("R", "L")
+#: Status dots: grey untraced, blue traced (a ring while in progress), green mapped
+STATUS_DOT_TOKENS = {"untraced": "text3", "inprogress": "accent-fg", "traced": "accent-fg", "mapped": "success"}
+
+
+def _readSetting(key, default):
+    try:
+        return qt.QSettings().value(key, default)
+    except Exception:
+        return default
+
+
+def _saveSetting(key, value):
+    if slicer.app.testingEnabled():
+        return  # tests never change the saved choice of the user
+    try:
+        qt.QSettings().setValue(key, value)
+    except Exception:
+        logging.warning(f"Studio Library: could not save {key}")
+
+
+def _savedStudyView():
+    value = str(_readSetting(STUDY_VIEW_KEY, "list") or "list")
+    return value if value in ("list", "grid") and not slicer.app.testingEnabled() else "list"
+
+
+def _savedGridSize():
+    try:
+        value = int(_readSetting(GRID_SIZE_KEY, GRID_SIZE_DEFAULT))
+    except (TypeError, ValueError):
+        value = GRID_SIZE_DEFAULT
+    return min(GRID_SIZE_MAX, max(GRID_SIZE_MIN, value))
+
+
+def _thumbnailsModule():
+    from . import thumbnails
+
+    return thumbnails
+
+
+#: The thumbnail service of the open study: {"root": study folder, "service": ThumbnailService, "template": file}
+_thumbs = {"root": None, "service": None, "template": None}
+
+
+def thumbnailService(studySession=None, create=True):
+    """The ``thumbnails.ThumbnailService`` of the open study (one worker thread per study), else None.
+
+    Opening another study, or closing it, stops the previous worker.
+    """
+    root = studySession.root if studySession is not None else None
+    if _thumbs["service"] is not None and _thumbs["root"] != root:
+        _thumbs["service"].stop()
+        _thumbs.update(root=None, service=None, template=None)
+    if root is None or not create:
+        return _thumbs["service"]
+    if _thumbs["service"] is None:
+        thumbnails = _thumbnailsModule()
+        _thumbs.update(root=root, service=thumbnails.ThumbnailService(root), template=_studyTemplateFile(studySession))
+    return _thumbs["service"]
+
+
+def stopThumbnails():
+    """Stop the thumbnail worker (the study closed)."""
+    thumbnailService(None)
+
+
+def _studyTemplateFile(studySession):
+    """The study template's NIfTI file (the thumbnails' background), else None."""
+    studyUi = _studyUi()
+    try:
+        record = studySession.templateRecord() or {}
+    except Exception:
+        return None
+    source = str(record.get("source") or "")
+    if not source.startswith("sampledata:"):
+        path = studySession.study.abspath(source) if source else None
+        return path if path and os.path.isfile(path) else None
+    if studyUi is None:
+        return None
+    path = studyUi.sampleFile(source[len("sampledata:"):])
+    return path or studyUi.sampleFile(studyUi.DEFAULT_TEMPLATE_SAMPLE)
+
+
+def _hiddenColumns(studyObject):
+    """Columns hidden from tracers when the study sets ``blind_tracing``: group, scores and symptoms (LNM addendum 7.1)."""
+    if not getattr(studyObject, "blind_tracing", False):
+        return set()
+    hidden = {"group"}
+    try:
+        hidden.update(name for name, _confirmed in studyObject.score_columns())
+    except Exception:
+        pass
+    try:
+        hidden.update(studyObject.group_columns())
+    except Exception:
+        pass
+    return hidden
+
+
+class _CardInfo:
+    """What a card shows, computed once per refresh (painting reads it): id, status, QC, chips and the thumbnail request."""
+
+    __slots__ = ("bottomChips", "current", "note", "qc", "request", "sid", "signature", "status", "thumbKey", "topChips")
+
+    def __init__(self, row, studySession, extraColumns, hidden, service, template):
+        self.sid = row["participant_id"]
+        self.status = row.get("status") or "untraced"
+        self.qc = row.get("qc") or "unreviewed"
+        self.current = self.sid == studySession.current()
+        spaceValue = row.get("space")
+        bottom = []
+        if spaceValue == "native":
+            bottom.append((_("Native"), "warn"))
+        elif not _missing(spaceValue):
+            bottom.append(("MNI", "neutral"))
+        volume = row.get("volume_ml")
+        if not _missing(volume):
+            try:
+                bottom.append((_("{ml} mL").format(ml=f"{float(volume):.2f}"), "neutral"))
+            except ValueError:
+                pass
+        self.bottomChips = tuple(bottom)
+        top = []
+        for entry in extraColumns:
+            if entry.get("key") in hidden:
+                continue
+            try:
+                value = entry["valueFn"](row)
+            except Exception:
+                logging.error(f"Studio Library: the column {entry.get('header')} failed:\n{traceback.format_exc()}")
+                continue
+            text, level = (str(value[0]), value[1] if len(value) > 1 else "neutral") if isinstance(value, (tuple, list)) else (str(value), "neutral")
+            if _missing(text) or text == "—" or level == "muted":
+                continue
+            top.append((f"{_(entry.get('header') or '')}: {text}" if entry.get("key") == "norm" else text, level))
+        self.topChips = tuple(top)
+        # The thumbnail: participant id and file paths only (never a hidden column: blind tracing)
+        studyObject = studySession.study
+        lesion = None if _missing(row.get("lesion")) else studyObject.abspath(row.get("lesion"))
+        scan = None if _missing(row.get("scan")) else studyObject.abspath(row.get("scan"))
+        normalized = not _missing(row.get("norm_method"))
+        if normalized and scan:
+            background = scan  # the template-space scan of a normalized row (A-03c)
+        elif spaceValue == "native" or (_missing(spaceValue) and scan):
+            background = scan
+        else:
+            background = template
+        self.request = None
+        hasLesion = bool(lesion) and os.path.isfile(lesion)
+        lesionMissing = bool(lesion) and not hasLesion
+        if service is not None and not lesionMissing:
+            sid = self.sid if hasLesion or background != template else None
+            self.request = service.requestFor(sid, lesion if hasLesion else None, background)
+        self.thumbKey = self.request.key if self.request is not None else None
+        if lesionMissing:
+            self.note = _("Lesion file missing")  # never a background alone, which would read as an empty lesion
+        else:
+            self.note = _("No lesion yet") if self.status == "untraced" else _("No preview")
+        self.signature = (self.status, self.qc, self.current, self.bottomChips, self.topChips, self.thumbKey)
+
+
+class _GridView(qt.QListView):
+    """The card grid (a ``QListView`` in icon mode over the list's model).
+
+    Each paint event is timed: ``paintMs`` (the whole event) and ``delegateMs`` (the time spent in the card delegate).
+    """
+
+    def __init__(self):
+        qt.QListView.__init__(self)
+        self.paintMs = []
+        self.delegateMs = []
+        self.delegateS = 0.0
+        self.paintCount = 0
+        self.paintStart = 0.0
+
+    def paintEvent(self, event):
+        start = self.paintStart = time.perf_counter()
+        self.delegateS = 0.0
+        qt.QListView.paintEvent(self, event)
+        self.paintCount += 1
+        if len(self.paintMs) >= 4000:
+            del self.paintMs[:2000]
+            del self.delegateMs[:2000]
+        self.paintMs.append((time.perf_counter() - start) * 1000.0)
+        self.delegateMs.append(self.delegateS * 1000.0)
+
+
+class _CardDelegate(qt.QStyledItemDelegate):
+    """Paints a card through the grid (cached per card state) and gives the card size."""
+
+    def __init__(self, grid):
+        qt.QStyledItemDelegate.__init__(self, grid.view)
+        self.grid = grid
+
+    def paint(self, painter, option, index):
+        start = time.perf_counter()
+        try:
+            self.grid.paintCard(painter, option, index)
+        except Exception:
+            logging.error(f"Studio Library: painting a card failed:\n{traceback.format_exc()}")
+        self.grid.view.delegateS += time.perf_counter() - start
+
+    def sizeHint(self, option, index):
+        return self.grid.cardSize()
+
+
+class _GridHover(qt.QObject):
+    """Clears the hovered card when the mouse leaves the grid."""
+
+    def __init__(self, grid):
+        qt.QObject.__init__(self)
+        self.grid = grid
+
+    def eventFilter(self, obj, event):
+        if event.type() == qt.QEvent.Leave:
+            self.grid.setHoverRow(-1)
+        return False
+
+
+class StudyGrid(qt.QObject):
+    """Cards of the study's subjects (SPEC 3.1, W4-02): an axial lesion MIP over the template (``thumbnails``), the id,
+    the space and volume chips, the extension columns' chips (Flags, Norm, Review...), the QC mark and a status dot.
+
+    It shares the subject list's model, selection, keys and context menu; only the cards on screen are painted, and
+    each card is drawn once per state into a cached pixmap.
+    """
+
+    def __init__(self, studyList):
+        qt.QObject.__init__(self)
+        self.list = studyList
+        self.thumbSize = _savedGridSize()
+        self.infos = {}
+        self.hoverRow = -1
+        self._cards = {}
+        self._cardKeys = {}
+        self._colors = None
+        self._service = None
+        #: Card render times (ms), for the verification
+        self.renderMs = []
+        self._paintContext_ = (None,)
+        self._prerenderTimer = qt.QTimer()
+        self._prerenderTimer.setSingleShot(True)
+        self._prerenderTimer.setInterval(0)
+        self._prerenderTimer.connect("timeout()", self._prerender)
+        view = _GridView()
+        view.setObjectName("StudioStudyGrid")
+        view.setModel(studyList.model)
+        view.setModelColumn(0)
+        view.setSelectionModel(studyList.table.selectionModel())
+        view.setViewMode(qt.QListView.IconMode)
+        view.setMovement(qt.QListView.Static)
+        view.setResizeMode(qt.QListView.Adjust)
+        view.setFlow(qt.QListView.LeftToRight)
+        view.setWrapping(True)
+        view.setUniformItemSizes(True)
+        view.setSpacing(0)
+        view.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
+        view.setSelectionMode(qt.QAbstractItemView.ExtendedSelection)
+        view.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
+        view.setVerticalScrollMode(qt.QAbstractItemView.ScrollPerPixel)
+        view.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+        view.setFocusPolicy(qt.Qt.StrongFocus)
+        view.setMouseTracking(True)
+        view.setFrameShape(qt.QFrame.NoFrame)
+        view.setAccessibleName(_("Subjects (grid)"))
+        self.view = view
+        self.delegate = _CardDelegate(self)
+        view.setItemDelegate(self.delegate)
+        self._applySize()
+        view.connect("doubleClicked(QModelIndex)", lambda index: studyList.openSelected())
+        view.connect("entered(QModelIndex)", lambda index: self.setHoverRow(index.row()))
+        _installEventFilter(view, studyList._keys)
+        self._hover = _GridHover(self)
+        _installEventFilter(view.viewport(), self._hover)
+        view.setContextMenuPolicy(qt.Qt.CustomContextMenu)
+        view.connect("customContextMenuRequested(QPoint)", lambda point: studyList._showContextMenu(view, point))
+        view.verticalScrollBar().setSingleStep(24)
+        ui.addPaletteListener(self._onPalette)
+
+    # Geometry
+
+    def cardSize(self):
+        """168 x 196 for a 160 px thumbnail."""
+        return qt.QSize(self.thumbSize + 2 * CARD_PAD, self.thumbSize + CARD_PAD + CARD_FOOTER)
+
+    def _applySize(self):
+        size = self.cardSize()
+        self.view.setGridSize(qt.QSize(size.width() + CARD_GAP, size.height() + CARD_GAP))
+        self.view.verticalScrollBar().setSingleStep(max(24, size.height() // 4))
+
+    def setThumbSize(self, value):
+        """Card size from the slider (120-220 px thumbnails); the selection and the current card stay in view."""
+        value = min(GRID_SIZE_MAX, max(GRID_SIZE_MIN, int(value)))
+        if value == self.thumbSize:
+            return
+        self.thumbSize = value
+        self._cards.clear()
+        self._cardKeys.clear()
+        self._applySize()
+        self.view.doItemsLayout()
+        current = self.view.currentIndex()
+        if current.isValid():
+            self.view.scrollTo(current)
+        self.view.viewport().update()
+
+    # Content
+
+    def prepare(self, studySession, rows):
+        """Compute the cards of the rows (a refresh) and queue their thumbnails in the list order."""
+        service = thumbnailService(studySession)
+        if service is not self._service:
+            if self._service is not None and self._onThumbnails in self._service.listeners:
+                self._service.listeners.remove(self._onThumbnails)
+            self._service = service
+            self._cards.clear()
+            self._cardKeys.clear()
+            if service is not None:
+                service.listeners.append(self._onThumbnails)
+        # Re-read on every refresh: switching the study template changes the background (and the thumbnail names)
+        template = _studyTemplateFile(studySession) if service is not None else None
+        _thumbs["template"] = template
+        extra = libcardColumns()
+        hidden = _hiddenColumns(studySession.study)
+        infos = {}
+        for row in rows:
+            try:
+                infos[row["participant_id"]] = _CardInfo(row, studySession, extra, hidden, service, template)
+            except Exception:
+                logging.error(f"Studio Library: card of {row.get('participant_id')} failed:\n{traceback.format_exc()}")
+        self.infos = infos
+        stale = [sid for sid in self._cardKeys if sid not in infos]
+        for sid in stale:
+            self._cards.pop(self._cardKeys.pop(sid), None)
+        if service is not None:
+            for info in infos.values():
+                service.request(info.request)
+        self.view.viewport().update()
+
+    def _onThumbnails(self, keys):
+        """Thumbnails arrived (main thread): repaint the cards on screen that show them."""
+        if not _isAlive(self.view) or not self.view.isVisible():
+            return
+        keys = set(keys)
+        viewport = self.view.viewport()
+        visible = viewport.rect
+        for row, entry in enumerate(self.list.model.rows):
+            info = self.infos.get(entry["participant_id"])
+            if info is None or info.thumbKey not in keys:
+                continue
+            rect = self.view.visualRect(self.list.model.index(row, 0))
+            if rect.intersects(visible):
+                viewport.update(rect)
+        self._schedulePrerender()
+
+    def _schedulePrerender(self):
+        if not self._prerenderTimer.isActive():
+            self._prerenderTimer.start()
+
+    def _prerender(self):
+        """Render the cards on screen and one screen ahead and behind (main thread, about 10 ms per tick)."""
+        if not _isAlive(self.view) or not self.view.isVisible():
+            return
+        start = time.perf_counter()
+        viewport = self.view.viewport()
+        visible = viewport.rect
+        ahead = visible.adjusted(0, -visible.height(), 0, visible.height())
+        pending = False
+        for row, entry in enumerate(self.list.model.rows):
+            rect = self.view.visualRect(self.list.model.index(row, 0))
+            if not rect.intersects(ahead):
+                continue
+            sid = entry["participant_id"]
+            info = self.infos.get(sid)
+            if info is None or self._card(sid, info, False) is not None:
+                continue
+            if (time.perf_counter() - start) * 1000.0 > PRERENDER_BUDGET_MS:
+                pending = True
+                break
+            self._card(sid, info, True)
+            if rect.intersects(visible):
+                viewport.update(rect)
+        if pending:
+            self._prerenderTimer.start()
+
+    def setHoverRow(self, row):
+        if row == self.hoverRow:
+            return
+        viewport = self.view.viewport()
+        for old in (self.hoverRow, row):
+            if old >= 0:
+                viewport.update(self.view.visualRect(self.list.model.index(old, 0)))
+        self.hoverRow = row
+
+    def _onPalette(self):
+        self._colors = None
+        self._cards.clear()
+        self._cardKeys.clear()
+        if _isAlive(self.view):
+            self.view.viewport().update()
+
+    def colors(self):
+        if self._colors is None:
+            names = ("card", "hairline", "text", "text2", "text3", "accent-fg", "success", "warning", "danger", "control-border")
+            self._colors = {name: ui.token(name) for name in names}
+            self._colors["backdrop"] = qt.QColor(THUMB_BACKDROP)
+        return self._colors
+
+    # Painting
+
+    def _card(self, sid, info, render, front=False, dpr=None):
+        """The cached card pixmap of a subject in its current state; rendered when ``render`` (else None if not cached)."""
+        service = self._service
+        pixmap = service.pixmap(info.thumbKey) if service is not None and info.thumbKey else None
+        if pixmap is None and service is not None and info.request is not None:
+            service.request(info.request, front=front)
+        state = "ready" if pixmap is not None else "failed" if (service is None or info.request is None or service.failed(info.thumbKey)) else "pending"
+        if dpr is None:
+            dpr = float(self.view.devicePixelRatioF()) if hasattr(self.view, "devicePixelRatioF") else 1.0
+        key = (sid, info.signature, self.thumbSize, state, dpr)
+        card = self._cards.get(key)
+        if card is None and render:
+            start = time.perf_counter()
+            card = self._renderCard(info, pixmap, state, dpr)
+            self.renderMs.append((time.perf_counter() - start) * 1000.0)
+            if len(self.renderMs) > 4000:
+                del self.renderMs[:2000]
+            previous = self._cardKeys.get(sid)
+            if previous is not None:
+                self._cards.pop(previous, None)
+            self._cards[key] = card
+            self._cardKeys[sid] = key
+        return card
+
+    def _paintContext(self):
+        """What the cards of one paint event share: device pixel ratio, card size, selected subjects and the focused row."""
+        if self._paintContext_[0] != self.view.paintStart:
+            view = self.view
+            dpr = float(view.devicePixelRatioF()) if hasattr(view, "devicePixelRatioF") else 1.0
+            size = self.cardSize()
+            selected = set(_studySelection)  # the shared selection (kept equal to the views' selection model)
+            focusedRow = view.currentIndex().row() if view.hasFocus() else -2
+            self._paintContext_ = (view.paintStart, dpr, size.width(), size.height(), selected, focusedRow)
+        return self._paintContext_
+
+    def paintCard(self, painter, option, index):
+        row = index.row()
+        sid = self.list.model.sid(row)
+        info = self.infos.get(sid)
+        if info is None:
+            return
+        _stamp, dpr, width, height, selectedIds, focusedRow = self._paintContext()
+        # A paint event renders new cards only within its budget; the others show their previous state (or a blank card)
+        # and are rendered right after by the pre-renderer, so scrolling never waits for many new cards at once
+        withinBudget = (time.perf_counter() - self.view.paintStart) * 1000.0 < RENDER_BUDGET_MS
+        card = self._card(sid, info, withinBudget, front=True, dpr=dpr)
+        if card is None:
+            previous = self._cardKeys.get(sid)
+            card = self._cards.get(previous) if previous is not None else None
+            self._schedulePrerender()
+        rect = option.rect
+        x = rect.x() + (rect.width() - width) // 2
+        y = rect.y() + (rect.height() - height) // 2
+        size = qt.QSize(width, height)
+        if card is not None:
+            painter.drawPixmap(x, y, card)
+        else:
+            colors = self.colors()
+            painter.save()
+            painter.setRenderHint(qt.QPainter.Antialiasing, True)
+            painter.setPen(qt.QPen(colors["hairline"], 1))
+            painter.setBrush(qt.QBrush(colors["card"]))
+            painter.drawRoundedRect(qt.QRectF(x + 0.5, y + 0.5, size.width() - 1, size.height() - 1), CARD_RADIUS, CARD_RADIUS)
+            painter.restore()
+        selected = sid in selectedIds
+        focused = row == focusedRow
+        if selected or focused or row == self.hoverRow:
+            colors = self.colors()
+            painter.save()
+            painter.setRenderHint(qt.QPainter.Antialiasing, True)
+            painter.setBrush(qt.QBrush(qt.Qt.NoBrush))
+            frame = qt.QRectF(x + 1, y + 1, size.width() - 2, size.height() - 2)
+            if selected:
+                painter.setPen(qt.QPen(colors["accent-fg"], 2))
+                painter.drawRoundedRect(frame, CARD_RADIUS, CARD_RADIUS)
+            elif row == self.hoverRow:
+                painter.setPen(qt.QPen(colors["control-border"], 1))
+                painter.drawRoundedRect(frame, CARD_RADIUS, CARD_RADIUS)
+            if focused:
+                pen = qt.QPen(colors["accent-fg"], 1)
+                pen.setStyle(qt.Qt.DashLine)
+                painter.setPen(pen)
+                painter.drawRoundedRect(frame.adjusted(3, 3, -3, -3), CARD_RADIUS - 2, CARD_RADIUS - 2)
+            painter.restore()
+
+    def _font(self, pixelSize, weight=None):
+        font = qt.QFont(self.view.font)
+        font.setPixelSize(ui.fontPx(pixelSize))
+        if weight is not None:
+            font.setWeight(weight)
+        return font
+
+    def _chip(self, painter, x, y, text, level, maxRight):
+        """A chip over the thumbnail at (x, y); returns its width (0 when it does not fit)."""
+        metrics = painter.fontMetrics()
+        width = min(metrics.horizontalAdvance(text) if hasattr(metrics, "horizontalAdvance") else metrics.width(text), 999) + 10
+        if x + width > maxRight:
+            width = maxRight - x
+            if width < 28:
+                return 0
+            text = metrics.elidedText(text, qt.Qt.ElideRight, width - 10)
+        rect = qt.QRectF(x, y, width, 18)
+        painter.setPen(qt.Qt.NoPen)
+        painter.setBrush(qt.QBrush(qt.QColor(0, 0, 0, 160)))
+        painter.drawRoundedRect(rect, 4, 4)
+        painter.setPen(qt.QColor(THUMB_CHIP_COLORS.get(level, THUMB_CHIP_COLORS["neutral"])))
+        painter.drawText(rect, int(qt.Qt.AlignCenter), text)
+        return width
+
+    def _lateralityCues(self, painter, thumbRect):
+        """Patient directions of the axial thumbnail: R at the left edge, L at the right (radiological, as the Red view).
+
+        Drawn at the vertical middle, clear of the chips at the top and the bottom.
+        """
+        painter.save()
+        painter.setFont(self._font(10, qt.QFont.DemiBold))
+        side = 16.0
+        top = thumbRect.center().y() - side / 2.0
+        for text, left in ((LATERALITY_CUES[0], thumbRect.left() + 3), (LATERALITY_CUES[1], thumbRect.right() - 3 - side)):
+            rect = qt.QRectF(left, top, side, side)
+            painter.setPen(qt.Qt.NoPen)
+            painter.setBrush(qt.QBrush(qt.QColor(0, 0, 0, 160)))
+            painter.drawRoundedRect(rect, 4, 4)
+            painter.setPen(qt.QColor(THUMB_CHIP_COLORS["muted"]))
+            painter.drawText(rect, int(qt.Qt.AlignCenter), text)
+        painter.restore()
+
+    def _renderCard(self, info, pixmap, state, dpr):
+        colors = self.colors()
+        size = self.cardSize()
+        width, height = size.width(), size.height()
+        card = qt.QPixmap(round(width * dpr), round(height * dpr))
+        card.setDevicePixelRatio(dpr)
+        card.fill(qt.QColor(0, 0, 0, 0))
+        painter = qt.QPainter(card)
+        try:
+            painter.setRenderHint(qt.QPainter.Antialiasing, True)
+            painter.setRenderHint(qt.QPainter.SmoothPixmapTransform, True)
+            painter.setPen(qt.QPen(colors["hairline"], 1))
+            painter.setBrush(qt.QBrush(colors["card"]))
+            painter.drawRoundedRect(qt.QRectF(0.5, 0.5, width - 1, height - 1), CARD_RADIUS, CARD_RADIUS)
+            side = self.thumbSize
+            thumbRect = qt.QRectF(CARD_PAD, CARD_PAD, side, side)
+            clip = qt.QPainterPath()
+            clip.addRoundedRect(thumbRect, CARD_RADIUS - 2, CARD_RADIUS - 2)
+            painter.fillPath(clip, qt.QBrush(colors["backdrop"]))
+            if pixmap is not None:
+                painter.save()
+                painter.setClipPath(clip)
+                painter.drawPixmap(thumbRect.toRect(), pixmap)
+                painter.restore()
+                self._lateralityCues(painter, thumbRect)
+            else:
+                painter.setFont(self._font(11))
+                painter.setPen(qt.QColor(THUMB_CHIP_COLORS["muted"]))
+                note = _("Making preview…") if state == "pending" else info.note
+                painter.drawText(thumbRect, int(qt.Qt.AlignCenter), note)
+            # Chips: extension columns at the top, space and volume at the bottom of the thumbnail
+            painter.setFont(self._font(11))
+            right = CARD_PAD + side - 6
+            x = CARD_PAD + 6
+            for text, level in info.topChips:
+                used = self._chip(painter, x, CARD_PAD + 6, text, level, right)
+                if not used:
+                    break
+                x += used + 4
+            x = CARD_PAD + 6
+            for text, level in info.bottomChips:
+                used = self._chip(painter, x, CARD_PAD + side - 24, text, level, right)
+                if not used:
+                    break
+                x += used + 4
+            # Footer: id, QC mark, status dot
+            footerTop = CARD_PAD + side
+            centerY = footerTop + CARD_FOOTER / 2.0
+            dotX = width - 14
+            dotColor = colors.get(STATUS_DOT_TOKENS.get(info.status, "text3"), colors["text3"])
+            if info.status == "inprogress":
+                painter.setPen(qt.QPen(dotColor, 2))
+                painter.setBrush(qt.QBrush(qt.Qt.NoBrush))
+                painter.drawEllipse(qt.QPointF(dotX, centerY), 4, 4)
+            else:
+                painter.setPen(qt.Qt.NoPen)
+                painter.setBrush(qt.QBrush(dotColor))
+                painter.drawEllipse(qt.QPointF(dotX, centerY), 5, 5)
+            textRight = dotX - 10
+            if info.qc in ("pass", "fail"):
+                markX = dotX - 18
+                pen = qt.QPen(colors["success"] if info.qc == "pass" else colors["danger"], 2)
+                pen.setCapStyle(qt.Qt.RoundCap)
+                pen.setJoinStyle(qt.Qt.RoundJoin)
+                painter.setPen(pen)
+                painter.setBrush(qt.QBrush(qt.Qt.NoBrush))
+                mark = qt.QPainterPath()
+                if info.qc == "pass":
+                    mark.moveTo(markX - 5, centerY)
+                    mark.lineTo(markX - 1.5, centerY + 3.5)
+                    mark.lineTo(markX + 5, centerY - 4)
+                else:
+                    mark.moveTo(markX - 4, centerY - 4)
+                    mark.lineTo(markX + 4, centerY + 4)
+                    mark.moveTo(markX + 4, centerY - 4)
+                    mark.lineTo(markX - 4, centerY + 4)
+                painter.drawPath(mark)
+                textRight = markX - 10
+            painter.setFont(self._font(13, qt.QFont.DemiBold))
+            painter.setPen(colors["accent-fg"] if info.current else colors["text"])
+            textRect = qt.QRectF(CARD_PAD + 4, footerTop, max(0, textRight - CARD_PAD - 4), CARD_FOOTER)
+            painter.drawText(textRect, int(qt.Qt.AlignLeft | qt.Qt.AlignVCenter),
+                             painter.fontMetrics().elidedText(info.sid, qt.Qt.ElideMiddle, int(textRect.width())))
+        finally:
+            painter.end()
+        return card
+
+    def dispose(self):
+        ui.removePaletteListener(self._onPalette)
+        self._prerenderTimer.stop()
+        if self._service is not None and self._onThumbnails in self._service.listeners:
+            self._service.listeners.remove(self._onThumbnails)
+        self._service = None
+        self._cards.clear()
+        self._cardKeys.clear()
 
 
 class _suppress:
