@@ -494,6 +494,242 @@ def importModuleObjects(from_module_name, dest_module_name, type_info):
             setattr(dest_module, item_name, item)
 
 
+# Lazy import of the loadable-module Python wrappers (setting Studio/LazyPythonWrappers).
+#
+# Instead of importing every wrapper of a directory at the first module instantiation,
+# qSlicerScriptedUtils::importModulePythonExtensions registers the class index generated at
+# build time (Utilities/Scripts/GenerateSlicerWrapperIndex.py). Then:
+#
+# - ``slicer.<Class>`` imports the wrapper of the class on first access (``slicer.__getattr__``),
+#   and copies its classes into ``slicer`` as the eager import does;
+# - an object of a VTK class returned from C++ gets its actual class: vtkPythonUtil imports the
+#   wrapper listed in ``vtkmodules._CLASS_MODULES``;
+# - after ``startupCompleted``, the remaining wrappers are imported one per event-loop pass while
+#   the application is idle, so that the namespace converges to the eager one within seconds.
+
+_lazyWrapperState = {
+    "indexes": [],  # registered (directory, index path)
+    "classes": {},  # class name -> wrapper module name, for classes not copied into slicer yet
+    "kinds": {},  # wrapper module name -> "vtk" or "qt"
+    "pending": [],  # wrapper modules not imported yet, in eager import order
+    "imported": set(),
+    "startupCompleted": False,
+    "timer": None,
+}
+
+_LAZY_WRAPPER_PATTERNS = (
+    ("vtkSlicer*ModuleLogicPython.*", "vtk"),
+    ("vtkSlicer*ModuleMRMLPython.*", "vtk"),
+    ("vtkSlicer*ModuleMRMLDisplayableManagerPython.*", "vtk"),
+    ("vtkSlicer*ModuleVTKWidgetsPython.*", "vtk"),
+    ("qSlicer*PythonQt.*", "qt"),
+)
+
+
+def _lazyWrapperMatches(item, kind):
+    """Return True if ``item`` is copied into ``slicer`` by the eager import of a ``kind`` wrapper."""
+    if kind == "vtk":
+        from vtk import vtkObjectBase
+
+        try:
+            return issubclass(item, vtkObjectBase)
+        except TypeError:
+            return False
+    return type(item).__name__ == "PythonQtClassWrapper"
+
+
+def _registerLazyWrapperIndex(directory, indexPath):
+    """Register the wrapper class index of ``directory`` instead of importing its wrappers.
+
+    Called by qSlicerScriptedUtils::importModulePythonExtensions when the setting
+    ``Studio/LazyPythonWrappers`` is on and ``indexPath`` exists. Wrappers of the directory that
+    the index does not list (a stale index) are imported right away. Returns False, after doing
+    nothing, if the index cannot be used; the caller then imports the wrappers eagerly.
+    """
+    import fnmatch
+    import json
+    import os
+
+    state = _lazyWrapperState
+    key = (os.path.normcase(os.path.abspath(directory)), os.path.normcase(os.path.abspath(indexPath)))
+    if key in state["indexes"]:
+        return True
+
+    # Objects returned from C++ get their actual class only if vtkPythonUtil can import the
+    # wrapper of their class on demand (Slicer's VTK); otherwise stay eager.
+    try:
+        import vtkmodules
+
+        classModules = vtkmodules._CLASS_MODULES
+    except (ImportError, AttributeError):
+        return False
+    if not isinstance(classModules, dict):
+        return False
+
+    try:
+        with open(indexPath, encoding="utf-8") as stream:
+            index = json.load(stream)
+        if index.get("format") != 1:
+            return False
+        indexedModules = [(str(name), str(kind)) for name, kind in index["modules"]]
+        indexedClasses = {str(name): str(module) for name, module in index["classes"].items()}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return False
+
+    # Wrappers present in the directory, in eager import order
+    try:
+        fileNames = sorted(os.listdir(directory))
+    except OSError:
+        return False
+    present = []
+    for pattern, kind in _LAZY_WRAPPER_PATTERNS:
+        for fileName in fileNames:
+            if fnmatch.fnmatch(fileName, pattern):
+                moduleName = os.path.splitext(fileName)[0]
+                if moduleName not in [name for name, _ in present]:
+                    present.append((moduleName, kind))
+    indexedKinds = dict(indexedModules)
+    presentNames = {name for name, _ in present}
+
+    state["indexes"].append(key)
+    unindexed = []
+    for moduleName, kind in present:
+        if moduleName in state["imported"] or moduleName in state["pending"]:
+            continue
+        state["kinds"][moduleName] = kind
+        if indexedKinds.get(moduleName) == kind:
+            state["pending"].append(moduleName)
+        else:
+            unindexed.append(moduleName)
+    for className, moduleName in indexedClasses.items():
+        if moduleName not in presentNames or moduleName in state["imported"]:
+            continue
+        # A class that a later directory defines again is copied into slicer when that directory's
+        # wrapper is imported (at the latest by the prefetch), as with the eager import.
+        state["classes"][className] = moduleName
+        if indexedKinds.get(moduleName) == "vtk" and className not in classModules:
+            classModules[className] = moduleName
+
+    for moduleName in unindexed:
+        state["pending"].append(moduleName)
+        _importLazyWrapperModule(moduleName)
+
+    if state["startupCompleted"]:
+        _startLazyWrapperPrefetch()
+    elif len(state["indexes"]) == 1:
+        try:
+            import slicer
+
+            slicer.app.connect("startupCompleted()", _onStartupCompletedLazyWrapperPrefetch)
+        except AttributeError:
+            pass  # no application (PythonSlicer): wrappers are imported on demand only
+    return True
+
+
+def _importLazyWrapperModule(moduleName):
+    """Import one wrapper module and copy its classes into ``slicer``, as the eager import does."""
+    import importlib
+    import sys
+
+    state = _lazyWrapperState
+    if moduleName in state["imported"]:
+        return
+    state["imported"].add(moduleName)
+    if moduleName in state["pending"]:
+        state["pending"].remove(moduleName)
+    kind = state["kinds"].get(moduleName, "vtk")
+    try:
+        module = importlib.import_module(moduleName)
+    except ImportError as detail:
+        print(detail, file=sys.stderr)
+        module = None
+    slicerModule = sys.modules["slicer"]
+    classes = state["classes"]
+    if module is not None:
+        for itemName in dir(module):
+            item = getattr(module, itemName)
+            if not _lazyWrapperMatches(item, kind):
+                continue
+            owner = classes.get(itemName)
+            if owner == moduleName:
+                setattr(slicerModule, itemName, item)
+                del classes[itemName]
+            elif owner is None and itemName not in slicerModule.__dict__:
+                # Not in the index, for example an abstract Qt base class that PythonQt registers
+                # with the first wrapped subclass.
+                setattr(slicerModule, itemName, item)
+    # Indexed names that the eager import would not have copied (not a class of this kind)
+    for className in [name for name, owner in classes.items() if owner == moduleName]:
+        del classes[className]
+
+
+def _importPendingLazyWrappers():
+    """Import all wrapper modules that are not imported yet."""
+    state = _lazyWrapperState
+    while state["pending"]:
+        _importLazyWrapperModule(state["pending"][0])
+
+
+_LAZY_WRAPPER_CLASS_NAME = None
+
+
+def _resolveLazyWrapperAttribute(name):
+    """Return ``slicer.<name>``, importing the wrapper that provides it (``slicer.__getattr__``)."""
+    import re
+    import sys
+
+    global _LAZY_WRAPPER_CLASS_NAME
+    state = _lazyWrapperState
+    slicerModule = sys.modules["slicer"]
+    moduleName = state["classes"].get(name)
+    if moduleName is not None:
+        _importLazyWrapperModule(moduleName)
+    elif state["pending"]:
+        # A class that the index cannot list (an abstract Qt base class registered with a subclass):
+        # import the remaining wrappers, as the eager import would have done.
+        if _LAZY_WRAPPER_CLASS_NAME is None:
+            _LAZY_WRAPPER_CLASS_NAME = re.compile(r"^(q|vtk|ctk)[A-Z]\w*$")
+        if _LAZY_WRAPPER_CLASS_NAME.match(name):
+            _importPendingLazyWrappers()
+    if name in slicerModule.__dict__:
+        return slicerModule.__dict__[name]
+    raise AttributeError(f"module 'slicer' has no attribute {name!r}")
+
+
+def _lazyWrapperClassNames():
+    """Return the names of the indexed classes that are not copied into ``slicer`` yet."""
+    return list(_lazyWrapperState["classes"])
+
+
+def _onStartupCompletedLazyWrapperPrefetch():
+    _lazyWrapperState["startupCompleted"] = True
+    _startLazyWrapperPrefetch()
+
+
+def _startLazyWrapperPrefetch():
+    """Import the remaining wrappers one per event-loop pass, while the application is idle."""
+    import qt
+
+    state = _lazyWrapperState
+    if not state["pending"] or state["timer"] is not None:
+        return
+    timer = qt.QTimer()
+    timer.setInterval(0)  # a zero timer fires when the event loop has no other events to process
+
+    def importNext():
+        try:
+            if state["pending"]:
+                _importLazyWrapperModule(state["pending"][0])
+        finally:
+            if not state["pending"]:
+                timer.stop()
+                state["timer"] = None
+
+    timer.connect("timeout()", importNext)
+    state["timer"] = timer
+    timer.start()
+
+
 #
 # UI
 #
