@@ -1,0 +1,1114 @@
+{
+  "format": "slicer-lnm-catalog",
+  "version": 1,
+  "catalog": "connectomes",
+  "updated": "2026-10-23",
+  "note": "Normative connectomes that can be obtained. Nothing is bundled and nothing is downloaded automatically: a download needs an explicit click and the acceptance of the provider's live terms text (stored per terms sha256). Sources whose terms are not stated are links only. Sizes and MD5s are those the Dataverse API lists for the versions named here; this file is refreshed only when the user asks.",
+  "entries": [
+    {
+      "id": "gsp1000-ilxiks",
+      "title": "GSP1000 Preprocessed Connectome (NIfTI, v3.0)",
+      "kind": "timeseries",
+      "status": "supported",
+      "source": {
+        "type": "dataverse",
+        "doi": "10.7910/DVN/ILXIKS",
+        "version": "3.0",
+        "released": "2021-04-17",
+        "url": "https://doi.org/10.7910/DVN/ILXIKS",
+        "api": "https://dataverse.harvard.edu/api/datasets/:persistentId/?persistentId=doi:10.7910/DVN/ILXIKS"
+      },
+      "size": 235963445564,
+      "files": [
+        {
+          "name": "GSP1000_v2_00.tar",
+          "folder": "GSP1000",
+          "id": 4461112,
+          "size": 11482373120,
+          "checksum": {
+            "algo": "md5",
+            "value": "d05a9ede5f23258e713324fcbb76fe18"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_v2_01.tar",
+          "folder": "GSP1000",
+          "id": 4461154,
+          "size": 12690134528,
+          "checksum": {
+            "algo": "md5",
+            "value": "97ce2177fb37e863104dc752778022ca"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_v2_02.tar",
+          "folder": "GSP1000",
+          "id": 4461177,
+          "size": 12421768704,
+          "checksum": {
+            "algo": "md5",
+            "value": "f3eb12a0feeee68dacd18d4612ee82d3"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_v2_03.tar",
+          "folder": "GSP1000",
+          "id": 4461206,
+          "size": 12553946112,
+          "checksum": {
+            "algo": "md5",
+            "value": "f65f9f96184c72ebbac609cbd4ca7d2e"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_v2_04.tar",
+          "folder": "GSP1000",
+          "id": 4461244,
+          "size": 11884839936,
+          "checksum": {
+            "algo": "md5",
+            "value": "b7a70b50e609c391ce793bf4bfbd2c32"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_v2_05.tar",
+          "folder": "GSP1000",
+          "id": 4461475,
+          "size": 11752374784,
+          "checksum": {
+            "algo": "md5",
+            "value": "dd436fb053362ff2a5fca18ae5f5f66b"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_v2_06.tar",
+          "folder": "GSP1000",
+          "id": 4461494,
+          "size": 11080361472,
+          "checksum": {
+            "algo": "md5",
+            "value": "6d76dd62c0f153f4d867387497721fbf"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_v2_07.tar",
+          "folder": "GSP1000",
+          "id": 4461507,
+          "size": 11751437824,
+          "checksum": {
+            "algo": "md5",
+            "value": "b3a944b9eaeb90d1d00f3c1bd9f05dcb"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_v2_08.tar",
+          "folder": "GSP1000",
+          "id": 4461514,
+          "size": 11617636352,
+          "checksum": {
+            "algo": "md5",
+            "value": "4fcf447cdaa98873e17e590527c4d980"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_v2_09.tar",
+          "folder": "GSP1000",
+          "id": 4461577,
+          "size": 10947090432,
+          "checksum": {
+            "algo": "md5",
+            "value": "758966d0949f4aee728d8235140f1484"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_v2_10.tar",
+          "folder": "GSP1000",
+          "id": 4461600,
+          "size": 11751750656,
+          "checksum": {
+            "algo": "md5",
+            "value": "467c5a92d921e7adf9f8bec3747afbd2"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_v2_11.tar",
+          "folder": "GSP1000",
+          "id": 4461605,
+          "size": 12555038720,
+          "checksum": {
+            "algo": "md5",
+            "value": "1d5c30c44487e9bcf92e30d972fa3c01"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_v2_12.tar",
+          "folder": "GSP1000",
+          "id": 4461633,
+          "size": 12421181440,
+          "checksum": {
+            "algo": "md5",
+            "value": "263f37768825548c4c4b871be162c0af"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_v2_13.tar",
+          "folder": "GSP1000",
+          "id": 4461643,
+          "size": 11349543936,
+          "checksum": {
+            "algo": "md5",
+            "value": "0f67f3232cd50bc7b5c10d3db230a355"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_v2_14.tar",
+          "folder": "GSP1000",
+          "id": 4461659,
+          "size": 11884695552,
+          "checksum": {
+            "algo": "md5",
+            "value": "297f7c8962e99e1b544977d291717496"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_v2_15.tar",
+          "folder": "GSP1000",
+          "id": 4461756,
+          "size": 11216059904,
+          "checksum": {
+            "algo": "md5",
+            "value": "2b02f9d4298606a9f8b515000f9c06b8"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_v2_16.tar",
+          "folder": "GSP1000",
+          "id": 4560882,
+          "size": 11616475136,
+          "checksum": {
+            "algo": "md5",
+            "value": "2ba0f9d7ef09e464bf5c162ec0af3605"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_v2_17.tar",
+          "folder": "GSP1000",
+          "id": 4461752,
+          "size": 11885331968,
+          "checksum": {
+            "algo": "md5",
+            "value": "ed5e555d9a176dd0fa8eb4e809e1c3ba"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_v2_18.tar",
+          "folder": "GSP1000",
+          "id": 4461812,
+          "size": 11751383552,
+          "checksum": {
+            "algo": "md5",
+            "value": "e0386b0031e3f600ba0649b96613cb7f"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_v2_19.tar",
+          "folder": "GSP1000",
+          "id": 4461927,
+          "size": 11349965312,
+          "checksum": {
+            "algo": "md5",
+            "value": "9cd83aec412ee08ab3d904638c40eb07"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000.txt",
+          "folder": "GSP1000",
+          "id": 4461088,
+          "size": 9000,
+          "checksum": {
+            "algo": "md5",
+            "value": "3f89fd937b283de9a0d584f52f31d599"
+          },
+          "role": "docs"
+        },
+        {
+          "name": "Legacy_GSP_fwhm7.config",
+          "folder": "GSP1000/code",
+          "id": 4171058,
+          "size": 1242,
+          "checksum": {
+            "algo": "md5",
+            "value": "a8ee1d68048896f358c74334c2a5bd44"
+          },
+          "role": "docs"
+        },
+        {
+          "name": "README",
+          "folder": "GSP1000",
+          "id": 4174521,
+          "size": 3844,
+          "checksum": {
+            "algo": "md5",
+            "value": "51305cdfb196b8a28936f056e3026b87"
+          },
+          "role": "docs"
+        },
+        {
+          "name": "dataset_description.json",
+          "folder": "GSP1000",
+          "id": 4171059,
+          "size": 521,
+          "checksum": {
+            "algo": "md5",
+            "value": "8e7954819996acba48f559cb1246e8ae"
+          },
+          "role": "docs"
+        },
+        {
+          "name": "participants.json",
+          "folder": "GSP1000",
+          "id": 4174519,
+          "size": 685,
+          "checksum": {
+            "algo": "md5",
+            "value": "e9037f5587a84b728811145908d3d60d"
+          },
+          "role": "participants"
+        },
+        {
+          "name": "participants.tab",
+          "folder": "GSP1000",
+          "id": 4174738,
+          "size": 40832,
+          "checksum": {
+            "algo": "md5",
+            "value": "373b5d21f4469a9e73bbef52aaf77f9a"
+          },
+          "role": "participants"
+        }
+      ],
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "terms": {
+        "title": "GSP Open Access Data Use Terms (2014-Apr-22)",
+        "fetch": "live",
+        "field": "data.latestVersion.termsOfUse",
+        "url": "https://doi.org/10.7910/DVN/ILXIKS",
+        "api": "https://dataverse.harvard.edu/api/datasets/:persistentId/?persistentId=doi:10.7910/DVN/ILXIKS"
+      },
+      "citation": "GSP1000 Preprocessed Connectome, Harvard Dataverse, version 3.0 (2021). doi:10.7910/DVN/ILXIKS. Holmes AJ, Hollinshead MO, O'Keefe TM, et al. Brain Genomics Superstruct Project initial data release with structural, functional, and behavioral measures. Scientific Data 2:150031 (2015). doi:10.1038/sdata.2015.31",
+      "acknowledgement": "Data were provided [in part] by the Brain Genomics Superstruct Project of Harvard University and the Massachusetts General Hospital, (Principal Investigators: Randy Buckner, Joshua Roffman, and Jordan Smoller), with support from the Center for Brain Science Neuroinformatics Research Group, the Athinoula A. Martinos Center for Biomedical Imaging, and the Center for Human Genetic Research. 20 individual investigators at Harvard and MGH generously contributed data to the overall project.",
+      "upstream": "Derived from the Brain Genomics Superstruct Project (raw release doi:10.7910/DVN/25833). Under the GSP Open Access Data Use Terms, derived data (bundles, maps, indexes) may be redistributed only under the same terms, and publications must carry the acknowledgement.",
+      "space": "MNI152NLin6Asym",
+      "family": "fsl6",
+      "grid": "NLin6-2mm",
+      "resolution_mm": 2,
+      "population": {
+        "n": 1000,
+        "age_range": [
+          18,
+          36
+        ],
+        "sex_ratio": "1:1",
+        "scanners": "Siemens 3T Tim Trio (5 scanners, consoles B13-B17)"
+      },
+      "tr_s": 3.0,
+      "preprocessing": {
+        "gsr": true,
+        "smoothing_mm": 7,
+        "bandpass_hz": [
+          0.0001,
+          0.08
+        ],
+        "nuisance": "CBIG_fMRI_Preproc2016 regression (see the configuration file of the dataset)",
+        "pipeline_url": "https://github.com/bchcohenlab/CBIG/tree/master/stable_projects/preprocessing/CBIG_fMRI_Preproc2016"
+      },
+      "converter": "gsp_ilxiks",
+      "disk": {
+        "subjects": 1000,
+        "voxels": 292019,
+        "timepoints_per_run": 120,
+        "runs_per_subject": [
+          1,
+          2
+        ],
+        "stored_bytes": [
+          126000000000,
+          140000000000
+        ],
+        "basis": "Runs are 91x109x91x120 float32 (433 MB each, 1-2 per subject); the bundle keeps the mask voxels as float16 (about 126-140 GB, addendum 4.2)."
+      },
+      "note": "20 tar archives of 11-12.7 GB, streamed into the bundle one at a time (no archive is stored). The mask is the non-zero voxels of the first run (the GSP finalmask support)."
+    },
+    {
+      "id": "gsp1000-kktjqc",
+      "title": "GSP1000 Preprocessed Connectome for Lead-DBS (GSP 1000 v2, Cohen 2023, v4.0)",
+      "kind": "timeseries",
+      "status": "supported",
+      "source": {
+        "type": "dataverse",
+        "doi": "10.7910/DVN/KKTJQC",
+        "version": "4.0",
+        "released": "2025-05-19",
+        "url": "https://doi.org/10.7910/DVN/KKTJQC",
+        "api": "https://dataverse.harvard.edu/api/datasets/:persistentId/?persistentId=doi:10.7910/DVN/KKTJQC"
+      },
+      "size": 218932842997,
+      "files": [
+        {
+          "name": "GSP1000_leadDBS_00.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7611704,
+          "size": 6142536704,
+          "checksum": {
+            "algo": "md5",
+            "value": "5877590a6dcb9b5879368f9702deac9e"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_01.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7611708,
+          "size": 6269285376,
+          "checksum": {
+            "algo": "md5",
+            "value": "929f54b3403312397e261a56fc71429a"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_02.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7611709,
+          "size": 6269563392,
+          "checksum": {
+            "algo": "md5",
+            "value": "a3780effda50da654dff8fc5c0a65965"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_03.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7612743,
+          "size": 6270397440,
+          "checksum": {
+            "algo": "md5",
+            "value": "60da1d99090c56e1f5668dbfbe191bbd"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_04.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7612744,
+          "size": 6269744128,
+          "checksum": {
+            "algo": "md5",
+            "value": "3014d3afaaa2d782cb5e778b659eb7ce"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_05.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7612746,
+          "size": 6269561344,
+          "checksum": {
+            "algo": "md5",
+            "value": "006413c1e15c58014c1cd11433a0c78c"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_06.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7612747,
+          "size": 6268104704,
+          "checksum": {
+            "algo": "md5",
+            "value": "f71cb449562f0346d7bb11b2df568508"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_07.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7612756,
+          "size": 6269067264,
+          "checksum": {
+            "algo": "md5",
+            "value": "30c12c5e5c26de530c1a983e0d4a38b7"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_08.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7612817,
+          "size": 6268318720,
+          "checksum": {
+            "algo": "md5",
+            "value": "4a01d1421303def467f0dc796d71b0ed"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_09.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7612844,
+          "size": 6269735936,
+          "checksum": {
+            "algo": "md5",
+            "value": "856493a997f5f42db2f055e28b3776cc"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_10.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7612913,
+          "size": 6270212608,
+          "checksum": {
+            "algo": "md5",
+            "value": "337bb859769216ffb14c6da86ebfd675"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_11.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7612914,
+          "size": 6269484544,
+          "checksum": {
+            "algo": "md5",
+            "value": "0f9e0d0e93bbb1a534fb93bf5db8d1d5"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_12.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7612917,
+          "size": 6269851136,
+          "checksum": {
+            "algo": "md5",
+            "value": "97ebf1b420fb32d9b13c3c42d7d011f2"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_13.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7612961,
+          "size": 6269012480,
+          "checksum": {
+            "algo": "md5",
+            "value": "5b578cc761008f43d4f366b75fdac800"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_14.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7612968,
+          "size": 6269215232,
+          "checksum": {
+            "algo": "md5",
+            "value": "4b60d1efb50966a3a0b403e87044dcff"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_15.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7612971,
+          "size": 6270123520,
+          "checksum": {
+            "algo": "md5",
+            "value": "1399ff6bb1112a2ca1334beca02f7a92"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_16.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7612973,
+          "size": 6269361664,
+          "checksum": {
+            "algo": "md5",
+            "value": "7ec037f3c541743834f5323706300849"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_17.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7613009,
+          "size": 6271344640,
+          "checksum": {
+            "algo": "md5",
+            "value": "37810cd1ea212e65d1fad4380bd04ad8"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_18.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7613097,
+          "size": 6269627904,
+          "checksum": {
+            "algo": "md5",
+            "value": "6036e2df1271f05679608f87bd1e50db"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_19.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7613167,
+          "size": 6269739520,
+          "checksum": {
+            "algo": "md5",
+            "value": "9404bc1103f1f23ea4fe93bde2e79e82"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_20.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7613346,
+          "size": 6268455936,
+          "checksum": {
+            "algo": "md5",
+            "value": "c64012363af589789d630d0474f50876"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_21.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7613672,
+          "size": 6269213184,
+          "checksum": {
+            "algo": "md5",
+            "value": "277cbcf3d5972c03ac59070beee14f17"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_22.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7613740,
+          "size": 6269089792,
+          "checksum": {
+            "algo": "md5",
+            "value": "211443b7202dbbe0325845d74bb78dbc"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_23.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7613804,
+          "size": 6269406720,
+          "checksum": {
+            "algo": "md5",
+            "value": "d37b187ff1a327cfa34d5d69e7a07ab1"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_24.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7613897,
+          "size": 6269859840,
+          "checksum": {
+            "algo": "md5",
+            "value": "4b5bf38885faa83fddd52916b2fb692b"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_25.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7613968,
+          "size": 6269807616,
+          "checksum": {
+            "algo": "md5",
+            "value": "96e341d4e7d2a93054432021d82674fb"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_26.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7615347,
+          "size": 6269944832,
+          "checksum": {
+            "algo": "md5",
+            "value": "6aeb586fcbcbd0b80cb778ac6c425f37"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_27.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7614038,
+          "size": 6269011456,
+          "checksum": {
+            "algo": "md5",
+            "value": "959f7e97373f4525b8497a606c51c200"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_28.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7614101,
+          "size": 6268562432,
+          "checksum": {
+            "algo": "md5",
+            "value": "2146e58ef7246a322f243140966afc17"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_29.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7614181,
+          "size": 6268871168,
+          "checksum": {
+            "algo": "md5",
+            "value": "21373ebb941ff9d4d3ef7fc3129575ad"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_30.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7614259,
+          "size": 6270990336,
+          "checksum": {
+            "algo": "md5",
+            "value": "7289338addfb96a97baeeb7952bd2c89"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_31.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7614309,
+          "size": 6268421120,
+          "checksum": {
+            "algo": "md5",
+            "value": "c46428d65253e9621cff24d13c76aa20"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_32.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7614378,
+          "size": 6269055488,
+          "checksum": {
+            "algo": "md5",
+            "value": "10c65ff4a1641d9891758bd23f53be69"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_33.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7614459,
+          "size": 6269453312,
+          "checksum": {
+            "algo": "md5",
+            "value": "91baead8259295060a85a48f76762a57"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "GSP1000_leadDBS_34.tar",
+          "folder": "GSP1000-LeadDBS/vol",
+          "id": 7614525,
+          "size": 5893967360,
+          "checksum": {
+            "algo": "md5",
+            "value": "1eec3e560c942af1aa3beb11af92437a"
+          },
+          "role": "archive"
+        },
+        {
+          "name": "dataset_info.json",
+          "id": 11539066,
+          "size": 4733,
+          "checksum": {
+            "algo": "md5",
+            "value": "ff8ce4749fcdb74b79dcc4b75d83320e"
+          },
+          "role": "metadata"
+        },
+        {
+          "name": "dataset_info.mat",
+          "id": 11058539,
+          "size": 2228896,
+          "checksum": {
+            "algo": "md5",
+            "value": "3e8f5aefeae5e68cd015dc11fccd83bd"
+          },
+          "role": "metadata"
+        },
+        {
+          "name": "dataset_volsurf.mat",
+          "id": 11058538,
+          "size": 2210520,
+          "checksum": {
+            "algo": "md5",
+            "value": "452c75d43d0bd6c5ddf5683ed35024d3"
+          },
+          "role": "metadata"
+        }
+      ],
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "terms": {
+        "title": "GSP Open Access Data Use Terms (2014-Apr-22)",
+        "fetch": "live",
+        "field": "data.latestVersion.termsOfUse",
+        "url": "https://doi.org/10.7910/DVN/KKTJQC",
+        "api": "https://dataverse.harvard.edu/api/datasets/:persistentId/?persistentId=doi:10.7910/DVN/KKTJQC"
+      },
+      "citation": "Cohen A, Al-Fatly B, Horn A. GSP1000 Preprocessed Connectome for Lead DBS. Harvard Dataverse, version 4.0 (2023). doi:10.7910/DVN/KKTJQC. Holmes AJ, Hollinshead MO, O'Keefe TM, et al. Brain Genomics Superstruct Project initial data release with structural, functional, and behavioral measures. Scientific Data 2:150031 (2015). doi:10.1038/sdata.2015.31",
+      "acknowledgement": "Data were provided [in part] by the Brain Genomics Superstruct Project of Harvard University and the Massachusetts General Hospital, (Principal Investigators: Randy Buckner, Joshua Roffman, and Jordan Smoller), with support from the Center for Brain Science Neuroinformatics Research Group, the Athinoula A. Martinos Center for Biomedical Imaging, and the Center for Human Genetic Research. 20 individual investigators at Harvard and MGH generously contributed data to the overall project.",
+      "upstream": "Derived from the Brain Genomics Superstruct Project (raw release doi:10.7910/DVN/25833). Under the GSP Open Access Data Use Terms, derived data (bundles, maps, indexes) may be redistributed only under the same terms, and publications must carry the acknowledgement. This is the Lead-DBS (.mat) version of doi:10.7910/DVN/ILXIKS.",
+      "space": null,
+      "space_note": "The grid and voxels are read from dataset_volsurf.mat (vol.space, vol.outidx) at conversion.",
+      "family": null,
+      "grid": null,
+      "resolution_mm": null,
+      "population": {
+        "n": 1000,
+        "age_range": [
+          18,
+          36
+        ],
+        "sex_ratio": "1:1",
+        "scanners": "Siemens 3T Tim Trio (5 scanners, consoles B13-B17)"
+      },
+      "tr_s": 3.0,
+      "preprocessing": {
+        "gsr": true,
+        "smoothing_mm": 7,
+        "bandpass_hz": [
+          0.0001,
+          0.08
+        ],
+        "nuisance": "CBIG_fMRI_Preproc2016 regression (see the configuration file of the dataset)",
+        "pipeline_url": "https://github.com/bchcohenlab/CBIG/tree/master/stable_projects/preprocessing/CBIG_fMRI_Preproc2016"
+      },
+      "converter": "leaddbs_vol",
+      "subsets": {
+        "Full Set": 1000,
+        "First 100 Subjects": 100,
+        "First 5 Subjects": 5,
+        "First Subject": 1
+      },
+      "disk": {
+        "subjects": 1000,
+        "voxels": null,
+        "timepoints_per_run": null,
+        "runs_per_subject": [
+          1,
+          2
+        ],
+        "stored_bytes": null,
+        "basis": "The Lead-DBS mask (vol.outidx) is only known from dataset_volsurf.mat, so the bundle size is known when the conversion starts."
+      },
+      "note": "35 tar archives of about 6.3 GB (vol/*.mat run files) plus dataset_info.json, dataset_info.mat and dataset_volsurf.mat. The Lead-DBS named subsets (for example \"First 100 Subjects\") are kept in the bundle."
+    },
+    {
+      "id": "ukb-migp-grouppca",
+      "title": "UK Biobank MIGP group-PCA (Wishart-adjusted weighted eigenvectors)",
+      "kind": "group_pca",
+      "status": "unsupported",
+      "status_note": "Not supported in this version: a group-level dense connectome gives group r maps, not per-subject Fisher z, so it cannot give the one-sample T map or the N-dependent thresholds (deferred, addendum DE-06).",
+      "source": {
+        "type": "http",
+        "doi": null,
+        "version": "2017-07-05",
+        "url": "https://www.fmrib.ox.ac.uk/ukbiobank/"
+      },
+      "size": 1199307960,
+      "files": [
+        {
+          "name": "groupPCArow2.nii.gz",
+          "url": "https://www.fmrib.ox.ac.uk/ukbiobank/group_means/groupPCArow2.nii.gz",
+          "size": 1199307960,
+          "checksum": "record-on-first-download",
+          "role": "data"
+        }
+      ],
+      "licence": "CC-BY-4.0",
+      "badge": "green",
+      "terms": {
+        "title": "Creative Commons Attribution 4.0",
+        "fetch": "none",
+        "url": "https://www.fmrib.ox.ac.uk/ukbiobank/"
+      },
+      "citation": "FMRIB UK Biobank group-average resources (MIGP group-PCA), https://www.fmrib.ox.ac.uk/ukbiobank/. Smith SM, Hyvarinen A, Varoquaux G, Miller KL, Beckmann CF. Group-PCA for very large fMRI datasets. NeuroImage 101:738-749 (2014). doi:10.1016/j.neuroimage.2014.07.051",
+      "acknowledgement": "",
+      "upstream": "Derived from UK Biobank imaging data; the source page states that the group-average resources are released under CC BY 4.0.",
+      "space": "MNI152NLin6Asym",
+      "family": "fsl6",
+      "grid": "NLin6-2mm",
+      "resolution_mm": 2,
+      "population": {
+        "n": null,
+        "age_range": null,
+        "sex_ratio": null,
+        "scanners": null
+      },
+      "tr_s": null,
+      "preprocessing": {
+        "gsr": "unknown"
+      },
+      "converter": null,
+      "disk": {
+        "subjects": null,
+        "voxels": null,
+        "timepoints_per_run": null,
+        "runs_per_subject": null,
+        "stored_bytes": [
+          550000000,
+          700000000
+        ],
+        "basis": "91x109x91x1200 float32; masked to 228-292k voxels as float16 it would be 0.55-0.70 GB."
+      },
+      "note": "Middle-aged to older adults (UK Biobank imaging cohort); the source does not state the N of this file."
+    },
+    {
+      "id": "leaddbs-ppmi-fgroup2017",
+      "title": "PPMI 74 PD + 15 controls functional connectome (Lead-DBS, Horn 2017)",
+      "kind": "timeseries",
+      "status": "link_out",
+      "link_out": true,
+      "link_url": "https://www.lead-dbs.org/?p=7692",
+      "source": {
+        "type": "lead-dbs",
+        "doi": null,
+        "version": null,
+        "url": "https://www.lead-dbs.org/?p=7692"
+      },
+      "size": 8042457187,
+      "files": [],
+      "checksum_note": "Lead-DBS download links redirect to sciebo (Nextcloud), which sends an OC-Checksum SHA1 header.",
+      "licence": "unknown",
+      "badge": "grey",
+      "terms": {
+        "title": "Terms not stated - see source",
+        "fetch": "none",
+        "url": "https://www.lead-dbs.org/?p=7692"
+      },
+      "citation": "Horn A, Reich M, Vorwerk J, et al. Connectivity predicts deep brain stimulation outcome in Parkinson disease. Annals of Neurology 82:67-78 (2017). doi:10.1002/ana.24974",
+      "acknowledgement": "",
+      "upstream": "Derived from PPMI; the PPMI data use agreement may apply.",
+      "space": null,
+      "space_note": "Lead-DBS space of the download; check its dataset_info.json.",
+      "family": null,
+      "grid": null,
+      "resolution_mm": null,
+      "population": {
+        "n": 89,
+        "age_range": null,
+        "sex_ratio": null,
+        "scanners": null
+      },
+      "tr_s": null,
+      "preprocessing": {
+        "gsr": "unknown"
+      },
+      "converter": null,
+      "disk": {
+        "subjects": 89,
+        "voxels": null,
+        "timepoints_per_run": null,
+        "runs_per_subject": null,
+        "stored_bytes": null
+      },
+      "note": "The Lead-DBS page states no licence or terms for this connectome: the app only links to it."
+    },
+    {
+      "id": "leaddbs-torpd",
+      "title": "Toronto Parkinson's disease functional connectome (Lead-DBS, 75 patients)",
+      "kind": "timeseries",
+      "status": "link_out",
+      "link_out": true,
+      "link_url": "https://www.lead-dbs.org/?p=7692",
+      "source": {
+        "type": "lead-dbs",
+        "doi": null,
+        "version": null,
+        "url": "https://www.lead-dbs.org/?p=7692"
+      },
+      "size": 25665221855,
+      "files": [],
+      "checksum_note": "Lead-DBS download links redirect to sciebo (Nextcloud), which sends an OC-Checksum SHA1 header.",
+      "licence": "unknown",
+      "badge": "grey",
+      "terms": {
+        "title": "Terms not stated - see source",
+        "fetch": "none",
+        "url": "https://www.lead-dbs.org/?p=7692"
+      },
+      "citation": "TorPD normative functional connectome, Zenodo record 4310182 (distributed through Lead-DBS).",
+      "acknowledgement": "",
+      "upstream": "Derived from Toronto Western Hospital PD scans; their terms may apply.",
+      "space": null,
+      "space_note": "Lead-DBS space of the download; check its dataset_info.json.",
+      "family": null,
+      "grid": null,
+      "resolution_mm": null,
+      "population": {
+        "n": 75,
+        "age_range": null,
+        "sex_ratio": null,
+        "scanners": null
+      },
+      "tr_s": null,
+      "preprocessing": {
+        "gsr": "unknown"
+      },
+      "converter": null,
+      "disk": {
+        "subjects": 75,
+        "voxels": null,
+        "timepoints_per_run": null,
+        "runs_per_subject": null,
+        "stored_bytes": null
+      },
+      "note": "The Lead-DBS page states no licence or terms for this connectome: the app only links to it."
+    },
+    {
+      "id": "leaddbs-pediatric",
+      "title": "Pediatric functional connectome (Lead-DBS, 100 children aged 6-18, Al-Fatly 2023)",
+      "kind": "timeseries",
+      "status": "link_out",
+      "link_out": true,
+      "link_url": "https://www.lead-dbs.org/?p=7692",
+      "source": {
+        "type": "lead-dbs",
+        "doi": null,
+        "version": null,
+        "url": "https://www.lead-dbs.org/?p=7692"
+      },
+      "size": 17008253598,
+      "files": [],
+      "checksum_note": "Lead-DBS download links redirect to sciebo (Nextcloud), which sends an OC-Checksum SHA1 header.",
+      "licence": "unknown",
+      "badge": "grey",
+      "terms": {
+        "title": "Terms not stated - see source",
+        "fetch": "none",
+        "url": "https://www.lead-dbs.org/?p=7692"
+      },
+      "citation": "Al-Fatly B, Giesler SJ, Oxenford S, et al. Neuroimaging-based large-scale circuit reconstructions in children (pediatric normative connectome). NeuroImage: Clinical (2023). doi:10.1016/j.nicl.2023.103449",
+      "acknowledgement": "",
+      "upstream": "Derived from CoRR NYU2; its terms may apply. In a pediatric MNI space.",
+      "space": null,
+      "space_note": "Lead-DBS space of the download; check its dataset_info.json.",
+      "family": null,
+      "grid": null,
+      "resolution_mm": null,
+      "population": {
+        "n": 100,
+        "age_range": [
+          6,
+          18
+        ],
+        "sex_ratio": null,
+        "scanners": null
+      },
+      "tr_s": null,
+      "preprocessing": {
+        "gsr": "unknown"
+      },
+      "converter": null,
+      "disk": {
+        "subjects": 100,
+        "voxels": null,
+        "timepoints_per_run": null,
+        "runs_per_subject": null,
+        "stored_bytes": null
+      },
+      "note": "The Lead-DBS page states no licence or terms for this connectome: the app only links to it."
+    },
+    {
+      "id": "synthetic-demo",
+      "title": "Synthetic demo (generated on this computer, not real data)",
+      "kind": "timeseries",
+      "status": "local",
+      "source": {
+        "type": "local",
+        "doi": null,
+        "version": null,
+        "url": null
+      },
+      "size": 0,
+      "files": [],
+      "licence": "CC0-1.0",
+      "badge": "green",
+      "citation": "Synthetic connectome generated by Slicer Studio from random numbers with planted networks (not real data).",
+      "acknowledgement": "",
+      "upstream": "",
+      "space": "MNI152NLin2009cAsym",
+      "family": "2009",
+      "grid": null,
+      "resolution_mm": 6,
+      "population": {
+        "n": 120,
+        "age_range": null,
+        "sex_ratio": null,
+        "scanners": null
+      },
+      "tr_s": null,
+      "preprocessing": {
+        "gsr": "unknown"
+      },
+      "converter": "synthetic",
+      "disk": {
+        "subjects": 120,
+        "voxels": 6360,
+        "timepoints_per_run": 20,
+        "runs_per_subject": [
+          2,
+          2
+        ],
+        "stored_bytes": null,
+        "basis": "Map > Get the demo: 120 subjects, 2 runs of 20 time points, 6,360 voxels of 6 mm."
+      },
+      "note": "Made by Map's demo action (no download)."
+    }
+  ]
+}

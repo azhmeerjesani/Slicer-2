@@ -9,6 +9,8 @@ Bundle layout::
     subjects/<id>.norms.npy  (nRuns, V) float32 L2 norms of the demeaned run segments
     derived/degree.npy       optional (V,) float32 connectome degree map (see compute_degree)
     derived/degree_fz.npy    optional (V,) float32 signed mean Fz degree map (compute_degree measure "fz")
+    .stream-staging/         only while archives are converted as streams (from_tar_stream): masked runs
+                             of subjects whose other runs are in an archive not read yet
 
 connectome.json::
 
@@ -44,20 +46,28 @@ seed is a single matrix product (see engine.py). A "float32" dtype (``<id>.f32.n
 import copy
 import glob
 import hashlib
+import io
 import json
 import math
 import os
+import posixpath
 import queue
 import re
 import shutil
+import struct
+import tarfile
 import threading
 import time
+import warnings
+import zlib
 from typing import NamedTuple
 
 import numpy as np
 from numpy.lib import format as npy_format
 
-from .geometry import Grid, affine_from_spm_mat, mask_indices
+from .geometry import GRID_BY_ID, Grid, affine_from_spm_mat, mask_indices
+from .nifti import HEADER_SIZE as NIFTI_HEADER_SIZE
+from .nifti import _parse_header as parse_nifti_header
 from .nifti import read_nifti, read_nifti_header, write_nifti
 
 FORMAT_NAME = "lnmc"
@@ -864,6 +874,12 @@ class ConnectomeWriter:
         _save_npy_atomic(data_path, data)
         _save_npy_atomic(norms_path, norms)
         self.metadata["subjects"].append({"id": subject_id, "runs": lengths})
+        self.save_partial()
+
+    def save_partial(self):
+        """Write connectome.partial.json (the subjects saved so far and the pending provenance), which
+        ``resume=True`` reads; :meth:`add_subject` calls it after each subject.
+        """
         partial = {**self.metadata, _PENDING_PROVENANCE_KEY: self.provenance} if self.provenance else self.metadata
         _write_json_atomic(os.path.join(self.path, PARTIAL_MANIFEST_NAME), partial)
 
@@ -1073,13 +1089,25 @@ def _copy_participants(source, bundle_path):
 
 
 def _loadmat(path, **kwargs):
+    """``scipy.io.loadmat(path, simplify_cells=True)`` of a MATLAB v5/v7 file.
+
+    :param path: a file path, or a seekable binary file object (for example the ``io.BytesIO`` of an
+      archive member, whose ``name`` attribute, when present, names it in errors).
+    """
     from scipy import io as sio
 
-    with open(path, "rb") as f:
-        head = f.read(520)
+    if hasattr(path, "read"):
+        label = getattr(path, "name", "MATLAB data")
+        start = path.tell()
+        head = path.read(520)
+        path.seek(start)
+    else:
+        label = path
+        with open(path, "rb") as f:
+            head = f.read(520)
     if b"MATLAB 7.3" in head[:116] or head[512:520] == b"\x89HDF\r\n\x1a\n":
         raise UnsupportedFormatError(
-            f"{path} is a MATLAB v7.3 (HDF5) file, which scipy cannot read. Install h5py "
+            f"{label} is a MATLAB v7.3 (HDF5) file, which scipy cannot read. Install h5py "
             "(for example slicer.util.pip_install('h5py')) and convert it, or re-save it in MATLAB "
             "with save(filename, '-struct', 's', '-v7').",
         )
@@ -1151,23 +1179,26 @@ def _leaddbs_citation_text(info):
     return ""
 
 
-def from_leaddbs(dataset_dir, out_dir, name=None, description="", citation="", data_use_terms="", dtype="float16", max_subjects=None, resume=False, overwrite=False, progress=None, cancel=None, provenance=None):
-    """Convert a Lead-DBS fMRI connectome folder (dataset_volsurf.mat, dataset_info.json, vol/*.mat).
+class _LeadDbsDataset(NamedTuple):
+    """The layout of a Lead-DBS fMRI connectome folder (dataset_volsurf.mat and dataset_info.json)."""
 
-    ``vol.outidx`` holds 1-based MATLAB (Fortran-order) voxel indices into ``vol.space`` (an SPM
-    volume with a 1-based ``mat``); ``vol.subIDs`` lists, per subject, the id followed by one file
-    per run, each containing ``gmtc`` (T x V in format 1.1, V x T in format 1.0). Voxels are reordered
-    to the bundle's C order. Only MATLAB v5/v7 files are supported (v7.3 raises UnsupportedFormatError).
+    path: str  # the dataset folder
+    info: dict  # dataset_info.json ({} when there is none)
+    affine: np.ndarray  # 4x4 voxel-to-RAS of vol.space
+    mask: np.ndarray  # boolean mask of the vol.outidx voxels on the vol.space grid
+    order: np.ndarray  # reorders the outidx voxels (rows of a run) to the bundle's C order
+    entries: list  # per subject: [id, run file, ...] (limited to max_subjects)
+    subject_ids: list  # sanitized subject ids of the entries
+    n_listed: int  # number of subjects listed in vol.subIDs
+    format_version: float  # dataset_info.json "formatversion" (1.0 when absent)
 
-    The named subsets of dataset_info.json (for example "First 100 Subjects", given as 1-based indices
-    into vol.subIDs) become "subsets" of connectome.json, and its name, tag, citation and DOI are
-    recorded as "source". Without ``citation`` the dataset's citation text is used.
+    @property
+    def n_voxels(self):
+        return len(self.order)
 
-    :param max_subjects: optional limit on the number of converted subjects.
-    :param provenance: optional provenance keys for connectome.json (see :func:`set_metadata`);
-      its "source" keys are added to the ones read from dataset_info.json.
-    :return: bundle path, or None if cancelled.
-    """
+
+def _read_leaddbs_dataset(dataset_dir, max_subjects=None):
+    """Read dataset_info.json and dataset_volsurf.mat of a Lead-DBS fMRI connectome folder (see :func:`from_leaddbs`)."""
     dataset_dir = os.fspath(dataset_dir)
     info = {}
     info_path = os.path.join(dataset_dir, "dataset_info.json")
@@ -1189,7 +1220,6 @@ def from_leaddbs(dataset_dir, out_dir, name=None, description="", citation="", d
     order = np.argsort(c_index, kind="stable")
     mask = np.zeros(int(np.prod(shape)), dtype=bool)
     mask[c_index] = True
-    n_voxels = len(outidx)
 
     entries = _leaddbs_subject_entries(vol["subIDs"])
     n_listed = len(entries)
@@ -1202,46 +1232,780 @@ def from_leaddbs(dataset_dir, out_dir, name=None, description="", citation="", d
         subject_ids.append(sanitize_subject_id(entry[0]))
         if subject_ids.count(subject_ids[-1]) > 1:
             raise ValueError(f"vol.subIDs has duplicate subject id {entry[0]!r} (as {subject_ids[-1]!r})")
+    return _LeadDbsDataset(dataset_dir, info, affine, mask.reshape(shape), order, entries, subject_ids, n_listed, float(info.get("formatversion", 1.0)))
+
+
+def _leaddbs_provenance(dataset, provenance, subject_ids=None):
+    """The provenance of a Lead-DBS conversion: the caller's keys plus the dataset's "source" and named
+    "subsets" (only those whose subjects are all in ``subject_ids``, default the dataset's converted subjects).
+    """
     provenance = dict(provenance or {})
-    source = {**_leaddbs_source(info), **(provenance.get("source") or {})}
+    source = {**_leaddbs_source(dataset.info), **(provenance.get("source") or {})}
     if source:
         provenance["source"] = source
-    subsets = {**_leaddbs_subsets(info, subject_ids, n_listed), **(provenance.get("subsets") or {})}
+    ids = dataset.subject_ids if subject_ids is None else list(subject_ids)
+    if subject_ids is None:
+        subsets = _leaddbs_subsets(dataset.info, ids, dataset.n_listed)
+    else:  # subjects converted in any order (streamed archives): keep the subsets that are complete
+        written = set(ids)
+        listed = _leaddbs_subsets(dataset.info, dataset.subject_ids, dataset.n_listed)
+        subsets = {name: members for name, members in listed.items() if written.issuperset(members)}
+    subsets = {**subsets, **(provenance.get("subsets") or {})}
     if subsets:
         provenance["subsets"] = subsets
+    return provenance
+
+
+def _leaddbs_run(gmtc, dataset, label):
+    """One Lead-DBS run (``gmtc``, T x V or V x T) as a (V, T) float32 array in the bundle's voxel order."""
+    gmtc = np.asarray(gmtc, dtype=np.float32)
+    n_voxels = dataset.n_voxels
+    if gmtc.ndim != 2 or n_voxels not in gmtc.shape:
+        raise ValueError(f"{label}: gmtc has shape {gmtc.shape}, expected T x {n_voxels}")
+    voxel_major = gmtc.shape[0] == n_voxels and (gmtc.shape[1] != n_voxels or dataset.format_version < 1.1)
+    return (gmtc if voxel_major else gmtc.T)[dataset.order]
+
+
+def from_leaddbs(dataset_dir, out_dir, name=None, description="", citation="", data_use_terms="", dtype="float16", max_subjects=None, resume=False, overwrite=False, progress=None, cancel=None, provenance=None):
+    """Convert a Lead-DBS fMRI connectome folder (dataset_volsurf.mat, dataset_info.json, vol/*.mat).
+
+    ``vol.outidx`` holds 1-based MATLAB (Fortran-order) voxel indices into ``vol.space`` (an SPM
+    volume with a 1-based ``mat``); ``vol.subIDs`` lists, per subject, the id followed by one file
+    per run, each containing ``gmtc`` (T x V in format 1.1, V x T in format 1.0). Voxels are reordered
+    to the bundle's C order. Only MATLAB v5/v7 files are supported (v7.3 raises UnsupportedFormatError).
+
+    The named subsets of dataset_info.json (for example "First 100 Subjects", given as 1-based indices
+    into vol.subIDs) become "subsets" of connectome.json, and its name, tag, citation and DOI are
+    recorded as "source". Without ``citation`` the dataset's citation text is used.
+
+    :param max_subjects: optional limit on the number of converted subjects.
+    :param provenance: optional provenance keys for connectome.json (see :func:`set_metadata`);
+      its "source" keys are added to the ones read from dataset_info.json.
+    :return: bundle path, or None if cancelled.
+    """
+    dataset = _read_leaddbs_dataset(dataset_dir, max_subjects)
     writer = ConnectomeWriter(
         out_dir,
-        mask.reshape(shape),
-        affine,
+        dataset.mask,
+        dataset.affine,
         name=name or _default_name(out_dir),
         description=description,
-        citation=citation or _leaddbs_citation_text(info),
+        citation=citation or _leaddbs_citation_text(dataset.info),
         data_use_terms=data_use_terms,
         dtype=dtype,
         overwrite=overwrite,
         resume=resume,
-        provenance=provenance,
+        provenance=_leaddbs_provenance(dataset, provenance),
     )
-    format_version = float(info.get("formatversion", 1.0))
     start = time.perf_counter()
-    for done, (subject, entry) in enumerate(zip(subject_ids, entries, strict=True), 1):
+    for done, (subject, entry) in enumerate(zip(dataset.subject_ids, dataset.entries, strict=True), 1):
         if _is_cancelled(cancel):
             return None
         if not writer.has_subject(subject):
             runs = []
             for run_file in entry[1:]:
-                path = os.path.join(dataset_dir, "vol", run_file)
+                path = os.path.join(dataset.path, "vol", run_file)
                 if not os.path.exists(path) and os.path.exists(path + ".mat"):
                     path += ".mat"
-                gmtc = np.asarray(_loadmat(path, variable_names=["gmtc"])["gmtc"], dtype=np.float32)
-                if gmtc.ndim != 2 or n_voxels not in gmtc.shape:
-                    raise ValueError(f"{path}: gmtc has shape {gmtc.shape}, expected T x {n_voxels}")
-                voxel_major = gmtc.shape[0] == n_voxels and (gmtc.shape[1] != n_voxels or format_version < 1.1)
-                runs.append((gmtc if voxel_major else gmtc.T)[order])
+                runs.append(_leaddbs_run(_loadmat(path, variable_names=["gmtc"])["gmtc"], dataset, path))
             writer.add_subject(subject, runs)
         if progress:
-            progress(done, len(entries), time.perf_counter() - start)
+            progress(done, len(dataset.entries), time.perf_counter() - start)
     return writer.finalize()
+
+
+# Streaming conversion of tar archives (no archive on disk)
+#
+# GSP1000 (doi:10.7910/DVN/ILXIKS) is published as 20 tar archives of 11-12.7 GB, its Lead-DBS version
+# (doi:10.7910/DVN/KKTJQC) as 35 of about 6.3 GB. Extracting them before a conversion needs about 320 GB of
+# scratch space; from_tar_stream reads one archive as a stream (for example the body of an HTTP download)
+# and writes each subject into the bundle as soon as its runs are read, so neither the archive nor the
+# extracted runs are ever stored.
+
+STREAM_LAYOUTS = ("gsp_ilxiks", "leaddbs_vol")
+MASK_POLICIES = ("first_run_support", "file")
+STAGING_DIR_NAME = ".stream-staging"
+#: The run grid of GSP1000 (ILXIKS): 91 x 109 x 91 voxels of 2 mm with FSL's radiological sform (x = -2, origin 90, -126, -72)
+GSP_RUN_GRID = GRID_BY_ID["NLin6-2mm"].grid
+GSP_RUN_SUFFIX = "_finalmask.nii.gz"
+_SUBJECT_DIR_PATTERN = re.compile(r"^sub-[A-Za-z0-9]+$")
+_GZIP_MAGIC = b"\x1f\x8b"
+_GZIP_READ_BYTES = 1 << 20
+_GZIP_OUT_BYTES = 1 << 22
+_TAR_BUFFER_BYTES = 1 << 20
+
+
+class StreamIntegrityError(ValueError):
+    """A streamed archive or one of its members is damaged: a gzip CRC32 or ISIZE mismatch, a corrupt or
+    truncated deflate stream, image data shorter than its NIfTI header says, or an archive that ends
+    without its end-of-archive marker (a truncated download).
+    """
+
+
+class ConversionWarning(UserWarning):
+    """A detail of a streamed conversion worth reporting (also listed in the checkpoints' "warnings")."""
+
+
+class SupportMismatchWarning(ConversionWarning):
+    """The non-zero voxels of a run differ from the connectome mask (see :func:`from_tar_stream`)."""
+
+
+class _Cancelled(Exception):
+    pass
+
+
+def _gunzip_chunks(fileobj, label, cancel=None):
+    """Decompress the gzip stream read from ``fileobj``, yielding the data in chunks of at most 4 MB.
+
+    Every gzip member (RFC 1952; a file may hold several) is checked: its header, its deflate stream, and
+    the CRC32 and ISIZE of its trailer. Damage raises :class:`StreamIntegrityError`. A member's trailer is
+    checked after its last chunk, so a consumer must read the generator to the end.
+    """
+    pending = b""
+    exhausted = False
+
+    def fill(count):
+        nonlocal pending, exhausted
+        while len(pending) < count and not exhausted:
+            data = fileobj.read(_GZIP_READ_BYTES)
+            if data:
+                pending += data
+            else:
+                exhausted = True
+        return len(pending) >= count
+
+    members = 0
+    while True:
+        if not fill(1):
+            if members:
+                return
+            raise StreamIntegrityError(f"{label}: empty file (no gzip data)")
+        if members and not (fill(2) and pending[:2] == _GZIP_MAGIC):
+            while True:  # only zero padding may follow the last member
+                if pending.strip(b"\0"):
+                    raise StreamIntegrityError(f"{label}: unexpected data after the end of the gzip stream")
+                pending = b""
+                if not fill(1):
+                    return
+        if not fill(10):
+            raise StreamIntegrityError(f"{label}: truncated gzip header")
+        if pending[:2] != _GZIP_MAGIC:
+            raise StreamIntegrityError(f"{label}: not a gzip file")
+        if pending[2] != 8:
+            raise StreamIntegrityError(f"{label}: unsupported gzip compression method {pending[2]}")
+        flags = pending[3]
+        position = 10
+        if flags & 0x04:  # FEXTRA
+            if not fill(position + 2):
+                raise StreamIntegrityError(f"{label}: truncated gzip header")
+            position += 2 + int.from_bytes(pending[position:position + 2], "little")
+        for flag in (0x08, 0x10):  # FNAME, FCOMMENT: zero-terminated
+            if flags & flag:
+                while pending.find(b"\0", position) < 0:
+                    if not fill(len(pending) + 1):
+                        raise StreamIntegrityError(f"{label}: truncated gzip header")
+                position = pending.find(b"\0", position) + 1
+        if flags & 0x02:  # FHCRC
+            position += 2
+        if not fill(position):
+            raise StreamIntegrityError(f"{label}: truncated gzip header")
+        data = pending[position:]
+        pending = b""
+        decompressor = zlib.decompressobj(-zlib.MAX_WBITS)
+        crc = size = 0
+        full = False  # the last call filled its output: zlib may hold more output for the same input
+        while not decompressor.eof:
+            if _is_cancelled(cancel):
+                raise _Cancelled()
+            if not data and not full:
+                data = fileobj.read(_GZIP_READ_BYTES)
+                if not data:
+                    raise StreamIntegrityError(f"{label}: truncated gzip data (the deflate stream ends early)")
+            try:
+                chunk = decompressor.decompress(data, _GZIP_OUT_BYTES)
+            except zlib.error as exc:
+                raise StreamIntegrityError(f"{label}: corrupt gzip data ({exc})") from None
+            data = decompressor.unconsumed_tail
+            full = len(chunk) == _GZIP_OUT_BYTES
+            if chunk:
+                crc = zlib.crc32(chunk, crc)
+                size += len(chunk)
+                yield chunk
+        pending = decompressor.unused_data + data
+        if not fill(8):
+            raise StreamIntegrityError(f"{label}: truncated gzip trailer")
+        stored_crc, stored_size = struct.unpack("<II", pending[:8])
+        pending = pending[8:]
+        if stored_crc != crc:
+            raise StreamIntegrityError(f"{label}: gzip CRC32 mismatch (stored {stored_crc:08x}, data {crc:08x}): the member is damaged")
+        if stored_size != size & 0xFFFFFFFF:
+            raise StreamIntegrityError(f"{label}: gzip ISIZE mismatch (stored {stored_size}, data {size & 0xFFFFFFFF}): the member is damaged")
+        members += 1
+
+
+class _StreamedRun(NamedTuple):
+    """A run read by :func:`_read_streamed_run`."""
+
+    header: dict  # nifti header dictionary
+    support: np.ndarray  # (i, j, k) bool: voxels with a non-zero stored value at any time point (NaN counts)
+    data: object  # the 4D image in file order and byte order, unscaled (read without a mask), else None
+    run: object  # (V, T) float32 time series of the mask voxels (read with a mask), else None
+
+
+def _read_streamed_run(fileobj, label, cancel=None, check=None, mask=None):
+    """Read a gzip-compressed 4D NIfTI-1 run from a stream (an archive member), with the checks of :func:`_gunzip_chunks`.
+
+    :param check: optional callback(header), called before the image data are read (to refuse a wrong grid early).
+    :param mask: when given (an (i, j, k) bool array on the run grid), the run is read volume by volume and only
+      the mask voxels are kept (``run``, like :func:`_masked_run`); otherwise the whole image is kept (``data``).
+    """
+    chunks = _gunzip_chunks(fileobj, label, cancel)
+    leftover = np.empty(0, dtype=np.uint8)
+
+    def read_into(target):
+        """Fill the uint8 array ``target`` from the decompressed stream; return the number of bytes filled."""
+        nonlocal leftover
+        filled = 0
+        while filled < len(target):
+            if not len(leftover):
+                leftover = np.frombuffer(next(chunks, b""), dtype=np.uint8)
+                if not len(leftover):
+                    break
+            count = min(len(leftover), len(target) - filled)
+            target[filled:filled + count] = leftover[:count]
+            leftover = leftover[count:]
+            filled += count
+        return filled
+
+    raw = np.empty(NIFTI_HEADER_SIZE, dtype=np.uint8)
+    if read_into(raw) < NIFTI_HEADER_SIZE:
+        raise StreamIntegrityError(f"{label}: too short for a NIfTI-1 image")
+    header = parse_nifti_header(raw.tobytes(), label)
+    if check is not None:
+        check(header)
+    shape = tuple(header["shape"])
+    if len(shape) != 4:
+        raise ValueError(f"{label}: expected a 4D time series, found shape {shape}")
+    offset = int(header["vox_offset"])
+    if offset < NIFTI_HEADER_SIZE:
+        offset = NIFTI_HEADER_SIZE + 4
+    extension = np.empty(offset - NIFTI_HEADER_SIZE, dtype=np.uint8)
+    if read_into(extension) < len(extension):
+        raise StreamIntegrityError(f"{label}: truncated NIfTI image data")
+    if mask is None:
+        flat = np.empty(int(np.prod(shape, dtype=np.int64)), dtype=header["dtype"])
+        if read_into(flat.view(np.uint8)) < flat.nbytes:
+            raise StreamIntegrityError(f"{label}: truncated NIfTI image data")
+        data = flat.reshape(shape, order="F")
+        result = _StreamedRun(header, _run_support(data), data, None)
+    else:
+        # Volume by volume (each is contiguous in the file's F order): only one volume and the mask voxels
+        # are held, gathered into a (T, V) array whose transpose is the run
+        f_index = np.ravel_multi_index(np.nonzero(mask), mask.shape, order="F")
+        volume = np.empty(int(np.prod(shape[:3], dtype=np.int64)), dtype=header["dtype"])
+        support = np.zeros(volume.shape, dtype=bool)
+        columns = np.empty((shape[3], len(f_index)), dtype=header["dtype"])
+        for t in range(shape[3]):
+            if read_into(volume.view(np.uint8)) < volume.nbytes:
+                raise StreamIntegrityError(f"{label}: truncated NIfTI image data")
+            support |= volume != 0
+            np.take(volume, f_index, out=columns[t])
+        result = _StreamedRun(header, support.reshape(shape[:3], order="F"), None, _scaled_run(columns.T, header))
+    for _ in chunks:  # the rest of the member (normally nothing) and the gzip trailer checks
+        pass
+    return result
+
+
+def _scaled_run(values, header):
+    """Stored (V, T) values as float32 with the header's scl_slope/scl_inter applied (native byte order), with the
+    same values as ``read_nifti(path)[0][mask].astype(np.float32)``.
+    """
+    if not values.dtype.isnative:
+        values = values.astype(values.dtype.newbyteorder("="))
+    slope, inter = header["scl_slope"], header["scl_inter"]
+    if np.isfinite(slope) and slope != 0 and (slope != 1 or (np.isfinite(inter) and inter != 0)):
+        float_type = np.result_type(values.dtype, np.float32)
+        values = values.astype(float_type) * float_type.type(slope) + float_type.type(inter if np.isfinite(inter) else 0.0)
+    return values.astype(np.float32, copy=False)
+
+
+def _masked_run(data, header, mask):
+    """The (V, T) float32 time series of the mask voxels of a 4D image read whole by :func:`_read_streamed_run`."""
+    # Gathered volume by volume (each is contiguous in F order) into a (T, V) array: much faster than data[mask]
+    f_index = np.ravel_multi_index(np.nonzero(mask), mask.shape, order="F")
+    columns = np.empty((data.shape[3], len(f_index)), dtype=data.dtype)
+    for t in range(data.shape[3]):
+        np.take(data[..., t].reshape(-1, order="F"), f_index, out=columns[t])
+    return _scaled_run(columns.T, header)
+
+
+def _run_support(data):
+    """Voxels of a 4D image with a non-zero stored value at any time point (NaN counts as non-zero)."""
+    support = np.zeros(data.shape[:3], dtype=bool)
+    for t in range(data.shape[3]):
+        support |= data[..., t] != 0
+    return support
+
+
+def _describe_grid(grid):
+    origin = ", ".join(f"{v:g}" for v in grid.affine[:3, 3])
+    spacing = "/".join(f"{v:g}" for v in grid.spacing)
+    return f"{'x'.join(str(n) for n in grid.shape)} voxels of {spacing} mm, origin ({origin}), x axis {'-' if grid.affine[0, 0] < 0 else '+'}"
+
+
+def _check_stream_run(header, label, grid):
+    """Check the header of a streamed run: a 4D time series with an sform on ``grid`` (None: any grid); return its Grid."""
+    shape = header["shape"]
+    if len(shape) != 4 or shape[3] < 2:
+        raise ValueError(f"{label}: expected a 4D time series with at least 2 volumes, found shape {tuple(shape)}")
+    if header["sform_code"] <= 0:
+        raise ValueError(f"{label}: the image has no sform (sform_code 0); the run grid is defined by the sform")
+    run_grid = Grid(shape[:3], header["sform"])
+    if grid is not None and not run_grid.matches(grid, atol=1e-3):
+        raise ValueError(f"{label}: not on the expected grid ({_describe_grid(grid)}); found {_describe_grid(run_grid)}")
+    return run_grid
+
+
+def _is_junk_member(name):
+    """macOS and pax side files that archives created on a Mac carry (._*, .DS_Store, PaxHeader*/, __MACOSX/)."""
+    parts = [part for part in name.split("/") if part not in ("", ".")]
+    return any(part.startswith("._") or part == ".DS_Store" or part.startswith("PaxHeader") or part == "__MACOSX" for part in parts)
+
+
+class _EndMarkerTarInfo(tarfile.TarInfo):
+    """A TarInfo that records on the TarFile whether the archive ended with its end-of-archive marker
+    (tarfile's stream mode otherwise treats a stream that stops between two members as a normal end).
+    """
+
+    @classmethod
+    def fromtarfile(cls, tarfile_):
+        try:
+            return super().fromtarfile(tarfile_)
+        except tarfile.EOFHeaderError:
+            tarfile_.lnm_end_marker = True
+            raise
+
+
+def _staging_dir(bundle_path):
+    return os.path.join(bundle_path, STAGING_DIR_NAME)
+
+
+def _load_staging(bundle_path):
+    """Runs staged by an earlier stream: {subject id: {run key: .npy path}} in subject order."""
+    root = _staging_dir(bundle_path)
+    staged = {}
+    if os.path.isdir(root):
+        for subject_id in sorted(os.listdir(root)):
+            folder = os.path.join(root, subject_id)
+            if not os.path.isdir(folder) or not _SUBJECT_ID_PATTERN.match(subject_id):
+                continue
+            runs = {name[: -len(".npy")]: os.path.join(folder, name) for name in sorted(os.listdir(folder)) if name.endswith(".npy")}
+            if runs:
+                staged[subject_id] = runs
+    return staged
+
+
+def _drop_staging(bundle_path, subject_id):
+    folder = os.path.join(_staging_dir(bundle_path), subject_id)
+    if os.path.isdir(folder):
+        shutil.rmtree(folder, ignore_errors=True)
+    root = _staging_dir(bundle_path)
+    if os.path.isdir(root) and not os.listdir(root):
+        os.rmdir(root)
+
+
+class _TarStreamConverter:
+    """State of one :func:`from_tar_stream` call (see there)."""
+
+    def __init__(self, fileobj, out_dir, layout, name, mask_policy, mask_path, resume, start_offset, progress, cancel, provenance, description, citation, data_use_terms, dtype, overwrite, finalize, dataset_dir, grid):
+        self.fileobj = fileobj
+        self.path = os.path.abspath(os.fspath(out_dir))
+        self.layout = layout
+        self.resume = resume
+        self.start_offset = int(start_offset)
+        self.progress = progress
+        self.cancel = cancel
+        self.finalize = finalize
+        self.writer_options = {
+            "name": name or _default_name(out_dir),
+            "description": description,
+            "citation": citation,
+            "data_use_terms": data_use_terms,
+            "dtype": dtype,
+            "overwrite": overwrite,
+            "resume": resume,
+        }
+        self.provenance = dict(provenance or {})
+        # Subsets are set when the bundle is finalized: they may only list subjects that are in it
+        self.user_subsets = self.provenance.pop("subsets", None)
+        self.writer = None
+        self.dataset = None
+        self.run_map = {}
+        self.pending = {}  # subject id -> {"runs": {key: array or staged .npy path}, "first": absolute offset or None, "skip": bool}
+        self.written = set()  # subjects written by this call
+        self.done = 0
+        self.warnings = []
+        self.mask_info = None
+        self.grid = None
+        self.started = time.perf_counter()
+
+        manifests = [os.path.join(self.path, n) for n in (MANIFEST_NAME, PARTIAL_MANIFEST_NAME)]
+        if not resume:
+            if os.path.isfile(manifests[0]) and not overwrite:
+                raise FileExistsError(f"A connectome bundle already exists at {self.path}")
+            shutil.rmtree(_staging_dir(self.path), ignore_errors=True)
+        existing = None
+        if resume and os.path.isfile(os.path.join(self.path, "mask.nii.gz")) and any(os.path.isfile(p) for p in manifests):
+            data, affine, _ = read_nifti(os.path.join(self.path, "mask.nii.gz"))
+            existing = (data.reshape(data.shape[:3]) != 0, affine)
+
+        if layout == "leaddbs_vol":
+            if dataset_dir is None:
+                raise ValueError("The leaddbs_vol layout needs dataset_dir: the Lead-DBS folder with dataset_volsurf.mat (and dataset_info.json)")
+            if mask_policy not in (None, "volsurf"):
+                raise ValueError("A Lead-DBS connectome's mask is the vol.outidx of dataset_volsurf.mat (mask_policy must be None)")
+            self.dataset = _read_leaddbs_dataset(dataset_dir)
+            for subject_index, entry in enumerate(self.dataset.entries):
+                for run_index, run_file in enumerate(entry[1:]):
+                    key = _leaddbs_run_key(run_file)
+                    if key in self.run_map:
+                        raise ValueError(f"vol.subIDs lists the run file {run_file!r} twice")
+                    self.run_map[key] = (subject_index, run_index)
+            self.provenance = _leaddbs_provenance(self.dataset, self.provenance, subject_ids=[])
+            self.writer_options["citation"] = citation or _leaddbs_citation_text(self.dataset.info)
+            self._create_writer(self.dataset.mask, self.dataset.affine, {"source": "Lead-DBS dataset_volsurf.mat (vol.outidx)", "policy": "volsurf"})
+        else:
+            self.mask_policy = mask_policy or "first_run_support"
+            if self.mask_policy not in MASK_POLICIES:
+                raise ValueError(f"mask_policy must be one of {', '.join(MASK_POLICIES)}")
+            self.grid = GSP_RUN_GRID if grid is None else (None if grid is False else grid)
+            if self.mask_policy == "file":
+                if not mask_path:
+                    raise ValueError("mask_policy 'file' needs mask_path")
+                data, affine, _ = read_nifti(mask_path)
+                mask = data.reshape(data.shape[:3]) != 0
+                if self.grid is not None and not Grid(mask.shape, affine).matches(self.grid, atol=1e-3):
+                    raise ValueError(f"The mask {os.path.basename(os.fspath(mask_path))} is not on the run grid ({_describe_grid(self.grid)})")
+                self._create_writer(mask, affine, {"source": f"file: {os.path.basename(os.fspath(mask_path))}", "policy": "file"})
+            elif mask_path:
+                raise ValueError("mask_path is only used with mask_policy 'file'")
+            elif existing is not None:
+                self._create_writer(*existing, None)  # resumed: the mask (and its recorded source) of the bundle being built
+
+    def _create_writer(self, mask, affine, mask_info):
+        provenance = dict(self.provenance)
+        if mask_info is not None:
+            provenance["mask"] = {**mask_info, **(provenance.get("mask") or {})}
+        self.writer = ConnectomeWriter(self.path, mask, affine, provenance=provenance, **self.writer_options)
+        self.writer.save_partial()  # keeps the mask's source for a resumed conversion
+        self.mask_info = (self.writer.provenance.get("mask") or {}) if isinstance(self.writer.provenance.get("mask"), dict) else {}
+        for subject_id, runs in _load_staging(self.path).items():
+            if self.writer.has_subject(subject_id):
+                _drop_staging(self.path, subject_id)
+            else:
+                self.pending[subject_id] = {"runs": dict(runs), "first": None, "skip": False}
+
+    # Checkpoints
+
+    def _safe_offset(self, candidate):
+        """The offset where a resumed stream must start so that nothing pending is lost."""
+        firsts = [entry["first"] for entry in self.pending.values() if entry["first"] is not None and not entry["skip"]]
+        return min([candidate, *firsts])
+
+    def _warn(self, message, category=ConversionWarning):
+        warnings.warn(message, category, stacklevel=4)
+        self.warnings.append(message)
+        return message
+
+    def _write(self, subject_id, next_offset):
+        """Write (or skip) a pending subject; return its checkpoint."""
+        entry = self.pending.pop(subject_id)
+        runs = 0
+        if not entry["skip"]:
+            arrays = []
+            for key in sorted(entry["runs"]):
+                value = entry["runs"][key]
+                if isinstance(value, str):
+                    value = np.load(value)
+                    if value.ndim != 2 or value.shape[0] != self.writer.n_voxels:
+                        raise ValueError(f"The staged run {key} of {subject_id} does not match the bundle mask; delete {STAGING_DIR_NAME} and convert again")
+                arrays.append(value)
+            self.writer.add_subject(subject_id, arrays)
+            self.written.add(subject_id)
+            runs = len(arrays)
+        _drop_staging(self.path, subject_id)
+        self.done += 1
+        if self.progress:
+            self.progress(self.done, None, time.perf_counter() - self.started)
+        return {"member_offset": self._safe_offset(next_offset), "subject": subject_id, "skipped": entry["skip"], "runs": runs, "subjects_done": self.done, "warnings": entry.get("warnings", [])}
+
+    def _stage(self, subject_id):
+        entry = self.pending.pop(subject_id)
+        if not entry["runs"]:
+            return
+        folder = os.path.join(_staging_dir(self.path), subject_id)
+        os.makedirs(folder, exist_ok=True)
+        for key, value in entry["runs"].items():
+            if not isinstance(value, str):
+                _save_npy_atomic(os.path.join(folder, f"{key}.npy"), np.asarray(value, dtype=np.float32))
+
+    # Members
+
+    def _entry(self, subject_id, offset):
+        entry = self.pending.setdefault(subject_id, {"runs": {}, "first": offset, "skip": False})
+        if entry["first"] is None:
+            entry["first"] = offset
+        return entry
+
+    def _gsp_member(self, tar, member, offset):
+        parts = [part for part in member.name.split("/") if part not in ("", ".")]
+        subject_dir = next((part for part in parts[:-1] if _SUBJECT_DIR_PATTERN.match(part)), None)
+        if subject_dir is None:
+            return
+        subject_id = sanitize_subject_id(subject_dir)
+        for other in [s for s in self.pending if s != subject_id]:
+            # the members of a subject are contiguous: a member of another subject completes the pending ones
+            yield self._write(other, offset)
+        if not (len(parts) >= 3 and parts[-3] == subject_dir and parts[-2] == "func" and parts[-1].endswith(GSP_RUN_SUFFIX)):
+            return
+        if subject_id in self.written:
+            self._warn(f"{member.name}: a run of {subject_id} comes after the subject was written; it is ignored", ConversionWarning)
+            return
+        if subject_id not in self.pending and self.writer is not None and self.writer.has_subject(subject_id):
+            self.pending[subject_id] = {"runs": {}, "first": offset, "skip": True}  # converted before (resume)
+            return
+        entry = self._entry(subject_id, offset)
+        if entry["skip"]:
+            return
+        key = parts[-1][: -len(".nii.gz")]
+        entry["runs"][key] = self._read_gsp_run(tar, member, entry)
+
+    def _read_gsp_run(self, tar, member, entry):
+        def check(header):
+            run_grid = _check_stream_run(header, member.name, self.grid)
+            if self.writer is not None and not run_grid.matches(Grid(self.writer.mask.shape, self.writer.affine), atol=1e-3):
+                raise ValueError(f"{member.name}: not on the grid of the connectome mask ({_describe_grid(Grid(self.writer.mask.shape, self.writer.affine))})")
+
+        if self.writer is None:  # first_run_support: the non-zero voxels of the first run are the mask
+            image = _read_streamed_run(tar.extractfile(member), member.name, self.cancel, check)
+            if not image.support.any():
+                raise ValueError(f"{member.name}: the first run has no non-zero voxel, so it defines no mask")
+            self._create_writer(image.support, image.header["sform"], {"source": f"first_run_support: non-zero voxels of {member.name}", "policy": "first_run_support", "run": member.name})
+            return _masked_run(image.data, image.header, self.writer.mask)
+        image = _read_streamed_run(tar.extractfile(member), member.name, self.cancel, check, mask=self.writer.mask)
+        outside = int(np.count_nonzero(image.support & ~self.writer.mask))
+        missing = int(np.count_nonzero(self.writer.mask & ~image.support))
+        if outside or missing:
+            message = self._warn(
+                f"{member.name}: its non-zero voxels differ from the connectome mask ({outside} voxel(s) outside the mask are dropped, "
+                f"{missing} mask voxel(s) are zero in this run and get zero-variance time series)",
+                SupportMismatchWarning,
+            )
+            entry.setdefault("warnings", []).append(message)
+        return image.run
+
+    def _leaddbs_member(self, tar, member, offset, next_offset):
+        hit = self.run_map.get(_leaddbs_run_key(member.name))
+        if hit is None:
+            return
+        subject_index, run_index = hit
+        subject_id = self.dataset.subject_ids[subject_index]
+        if self.writer.has_subject(subject_id):
+            _drop_staging(self.path, subject_id)
+            return
+        entry = self._entry(subject_id, offset)
+        buffer = io.BytesIO(_read_member(tar, member, self.cancel))
+        buffer.name = member.name
+        entry["runs"][f"{run_index:03d}"] = _leaddbs_run(_loadmat(buffer, variable_names=["gmtc"])["gmtc"], self.dataset, member.name)
+        if len(entry["runs"]) == len(self.dataset.entries[subject_index]) - 1:
+            yield self._write(subject_id, next_offset)
+
+    # The stream
+
+    def run(self):
+        try:
+            tar = tarfile.open(fileobj=self.fileobj, mode="r|", bufsize=_TAR_BUFFER_BYTES, tarinfo=_EndMarkerTarInfo)
+        except tarfile.TarError as exc:
+            raise StreamIntegrityError(f"Not a readable tar archive stream: {exc}") from None
+        offset = self.start_offset
+        try:
+            while True:
+                if _is_cancelled(self.cancel):
+                    raise _Cancelled()
+                try:
+                    member = tar.next()
+                except tarfile.TarError as exc:
+                    raise StreamIntegrityError(f"The archive stream is damaged or truncated after offset {offset}: {exc}") from None
+                if member is None:
+                    break
+                offset = self.start_offset + member.offset  # the first header of the member (its pax header, when it has one)
+                if not member.isfile() or _is_junk_member(member.name):
+                    continue
+                try:
+                    if self.layout == "gsp_ilxiks":
+                        yield from self._gsp_member(tar, member, offset)
+                    else:
+                        yield from self._leaddbs_member(tar, member, offset, self.start_offset + tar.offset)
+                except tarfile.TarError as exc:
+                    raise StreamIntegrityError(f"{member.name}: the archive stream is damaged or truncated: {exc}") from None
+        except _Cancelled:
+            yield {"cancelled": True, "member_offset": self._safe_offset(offset), "subject": None, "subjects_done": self.done, "warnings": list(self.warnings)}
+            return
+        if not getattr(tar, "lnm_end_marker", False):
+            raise StreamIntegrityError(f"The archive stream ends at offset {self.start_offset + tar.offset} without the tar end-of-archive marker: the download is truncated or the archive damaged")
+        end = self.start_offset + tar.offset
+        staged = []
+        for subject_id in list(self.pending):
+            entry = self.pending[subject_id]
+            if entry["skip"] or (self.layout == "gsp_ilxiks" and self.finalize):
+                yield self._write(subject_id, end)
+            else:
+                self._stage(subject_id)  # its other runs are in an archive not read yet
+                staged.append(subject_id)
+        path = None
+        incomplete = []
+        if self.finalize:
+            if self.writer is None:
+                raise ValueError(f"No run ({'sub-*/func/*' + GSP_RUN_SUFFIX if self.layout == 'gsp_ilxiks' else 'vol/*.mat'}) in the archive stream, so there is nothing to convert")
+            subsets = {}
+            if self.layout == "leaddbs_vol":
+                ids = [entry["id"] for entry in self.writer.metadata["subjects"]]
+                subsets.update(_leaddbs_provenance(self.dataset, {}, subject_ids=ids).get("subsets") or {})
+            subsets.update(self.writer.provenance.get("subsets") or {})  # recorded when an earlier archive finalized the bundle
+            subsets.update(self.user_subsets or {})
+            if subsets:
+                self.writer.provenance["subsets"] = subsets
+            path = self.writer.finalize()
+            incomplete = sorted(_load_staging(self.path))
+            if incomplete:
+                self._warn(f"{len(incomplete)} subject(s) miss runs that were not in the archives read, and are not in the bundle: {', '.join(incomplete[:10])}{' ...' if len(incomplete) > 10 else ''}")
+        yield {
+            "done": True,
+            "member_offset": end,
+            "subject": None,
+            "subjects_done": self.done,
+            "path": path,
+            "finalized": bool(path),
+            "subjects": len(self.writer.metadata["subjects"]) if self.writer is not None else 0,
+            "staged": staged,
+            "incomplete": incomplete,
+            "mask": dict(self.mask_info or {}),
+            "warnings": list(self.warnings),
+        }
+
+
+def _leaddbs_run_key(name):
+    """The name of a Lead-DBS run file without folder and ".mat" (how vol.subIDs and archive members are matched)."""
+    base = posixpath.basename(str(name).replace("\\", "/"))
+    return base[:-4] if base.lower().endswith(".mat") else base
+
+
+def _read_member(tar, member, cancel=None):
+    """All bytes of a tar member read from a stream (checking ``cancel`` between 4 MB blocks)."""
+    source = tar.extractfile(member)
+    out = bytearray()
+    while True:
+        if _is_cancelled(cancel):
+            raise _Cancelled()
+        block = source.read(_GZIP_OUT_BYTES)
+        if not block:
+            break
+        out += block
+    if len(out) != member.size:
+        raise StreamIntegrityError(f"{member.name}: truncated member ({len(out)} of {member.size} bytes)")
+    return bytes(out)
+
+
+def from_tar_stream(
+    fileobj,
+    out_dir,
+    layout="gsp_ilxiks",
+    name=None,
+    mask_policy=None,
+    mask_path=None,
+    resume=True,
+    start_offset=0,
+    progress=None,
+    cancel=None,
+    provenance=None,
+    description="",
+    citation="",
+    data_use_terms="",
+    dtype="float16",
+    overwrite=False,
+    finalize=True,
+    dataset_dir=None,
+    grid=None,
+):
+    """Convert one tar archive, read as a stream, into a bundle: a generator of checkpoints.
+
+    Nothing of the archive is written to disk: the archive is read once from ``fileobj`` (``tarfile`` mode
+    "r|"), the members that are needed are decompressed in memory and every subject is written with
+    :class:`ConnectomeWriter` as soon as its runs have been read. A conversion of several archives (GSP1000
+    has 20) calls this once per archive on the same ``out_dir`` (``resume=True``) with ``finalize=False``
+    for all but the last one.
+
+    Layouts:
+
+    - ``"gsp_ilxiks"`` (GSP1000 Preprocessed Connectome, doi:10.7910/DVN/ILXIKS): only the members
+      ``sub-*/func/*_finalmask.nii.gz`` are read; the runs of a subject (1 or 2) are the run members of its
+      ``sub-*`` folder, in name order. ``anat/`` and ``vol/`` members, top-level files and macOS side files
+      (``._*``, ``.DS_Store``, ``PaxHeader*``) are skipped. Each run is gunzipped in memory (about 433 MB for a
+      GSP run) with the CRC32 and ISIZE of every gzip member checked, and its header must be a 4D time series
+      on ``grid`` with an sform (default :data:`GSP_RUN_GRID`: 91 x 109 x 91, 2 mm, FSL radiological sform).
+      The members of a subject are contiguous in the archives, so a member of another subject completes it.
+    - ``"leaddbs_vol"`` (a Lead-DBS fMRI connectome such as GSP1000 v2, doi:10.7910/DVN/KKTJQC): the run files
+      ``vol/*.mat`` of the archive are matched by name with ``vol.subIDs`` of ``dataset_dir/dataset_volsurf.mat``
+      and read with ``scipy`` from memory; a MATLAB v7.3 file raises :class:`UnsupportedFormatError` unless
+      h5py was installed with the user's consent (``manager`` installs its h5py reader). A subject is written
+      when all its run files have been read; the named subsets of dataset_info.json whose subjects are all
+      in the bundle are recorded when it is finalized. Subjects are written in archive order.
+
+    Mask (recorded as ``mask{source, policy, sha256}`` in connectome.json, with ``nVoxels`` = V):
+
+    - ``"first_run_support"`` (GSP default): the non-zero voxels of the first run converted into the bundle
+      (the GSP ``finalmask`` support, which all GSP runs share). A resumed or continued conversion keeps the
+      bundle's mask, so the mask never depends on where a stream starts. The support of every later run is
+      compared with it, and a difference is reported as a :class:`SupportMismatchWarning`: voxels outside the
+      mask are dropped and mask voxels that are zero in a run get zero-variance (all zero) time series.
+    - ``"file"``: the mask NIfTI ``mask_path`` (on ``grid``).
+    - Lead-DBS: always the ``vol.outidx`` voxels of dataset_volsurf.mat (``mask_policy`` must be None).
+
+    Checkpoints (dicts) are yielded after every subject written (or skipped because the bundle already has
+    it): ``member_offset`` is where a resumed stream must start (``start_offset=member_offset`` with
+    ``fileobj`` reading the archive from that byte) so that no pending run is lost. It is the
+    ``TarInfo.offset`` of a member, that is the first header of that member (its pax or GNU long-name header
+    when it has one). The other keys are ``subject``, ``skipped``, ``runs``, ``subjects_done`` and
+    ``warnings``. When ``cancel`` is set the generator yields ``{"cancelled": True, "member_offset", ...}``
+    and stops; runs read since the last checkpoint are dropped. The last item is ``{"done": True,
+    "member_offset" (the end of the archive), "path" (the bundle, or None when not finalized), "finalized",
+    "subjects" (in the bundle), "staged", "incomplete", "mask", "warnings"}``.
+
+    Runs of subjects that are not complete at the end of the archive (Lead-DBS subjects whose other run files
+    are in another archive; with ``finalize=False`` the last GSP subject, whose second run may open the next
+    archive) are kept in ``<bundle>/.stream-staging`` (masked float32 runs) until a later archive completes
+    them. A stream that stops without the tar end-of-archive marker (a truncated download), a damaged gzip
+    member or an unreadable header raises :class:`StreamIntegrityError` (resume from the last checkpoint).
+
+    :param fileobj: binary file object read sequentially (``read(n)``), for example an HTTP response body.
+    :param out_dir: the bundle folder (``.lnmc``).
+    :param resume: continue a bundle that ``out_dir`` already holds (its subjects are skipped, its mask is
+      kept); with False, an existing bundle raises FileExistsError unless ``overwrite``.
+    :param start_offset: the archive offset of the first byte of ``fileobj`` (when a stream is resumed at a
+      checkpoint); checkpoint offsets are archive offsets.
+    :param progress: optional callback(subjects done in this call, None, elapsed_s).
+    :param cancel: optional threading.Event or callable, checked between members and while decompressing.
+    :param provenance: optional provenance keys for connectome.json (see :func:`set_metadata`).
+    :param finalize: write connectome.json at the end of this archive (False while more archives follow).
+    :param dataset_dir: the Lead-DBS dataset folder (``leaddbs_vol`` only).
+    :param grid: the expected run grid (a :class:`geometry.Grid`); None is :data:`GSP_RUN_GRID`, False any grid.
+    """
+    if layout not in STREAM_LAYOUTS:
+        raise ValueError(f"layout must be one of {', '.join(STREAM_LAYOUTS)}")
+    if dtype not in SUBJECT_DTYPES:
+        raise ValueError(f"dtype must be one of {sorted(SUBJECT_DTYPES)}")
+    converter = _TarStreamConverter(fileobj, out_dir, layout, name, mask_policy, mask_path, resume, start_offset, progress, cancel, provenance, description, citation, data_use_terms, dtype, overwrite, finalize, dataset_dir, grid)
+    return converter.run()
 
 
 def make_synthetic(out_dir, shape=(20, 24, 20), n_subjects=6, runs=(30, 30), seed=0, amplitude=1.5, radius=3.0, affine=None, name="Synthetic", dtype="float16", overwrite=True):
