@@ -68,6 +68,8 @@ PUMP_MS = 15
 PUMP_SLEEP_S = 0.008
 #: A run of another process is followed this often (progress.json) while the card is visible
 EXTERNAL_POLL_MS = 2000
+#: Stop of a run of another process: the STOP file is written again this many times, once a second, while it runs
+STOP_REPEATS = 10
 #: Load maps: one map per tick
 LOAD_TICK_MS = 30
 #: At most this many maps are loaded by Load maps
@@ -128,7 +130,7 @@ ROWS = (
     ("export", "Export", ("export",)),
     ("report", "Report", ("report", "finish")),
 )
-GLYPHS = {"pending": "○", "running": "●", "done": "✓", "reused": "↺", "skipped": "–", "failed": "!"}
+GLYPHS = {"pending": "○", "running": "●", "done": "✓", "reused": "↺", "skipped": "–", "failed": "!"}  # noqa: RUF001 (the en dash is the glyph)
 GLYPH_LEVELS = {"pending": "text3", "running": "accent", "done": "ok", "reused": "text2", "skipped": "text3", "failed": "danger"}
 #: Stage statuses of the pipeline (events, pipeline.json, plan) and the row status they count as
 STAGE_STATUS = {"running": "running", "done": "done", "reused": "reused", "reuse": "reused", "skipped": "skipped", "skip": "skipped", "unavailable": "skipped",
@@ -166,6 +168,14 @@ def _samePath(a, b):
     if not a or not b:
         return False
     return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def formatLeft(seconds):
+    """"~12 min left", "< 1 min left" ("" when unknown)."""
+    text = formatDuration(seconds)
+    if not text:
+        return ""
+    return _("{eta} left").format(eta=text) if text == _("< 1 min") else _("~{eta} left").format(eta=text)
 
 
 def formatDuration(seconds):
@@ -234,7 +244,7 @@ def _setLevel(label, level):
     if label.property("lnmLevel") == key:
         return
     label.setProperty("lnmLevel", key)
-    palette = qt.QPalette(label.palette)
+    palette = qt.QPalette(slicer.app.palette())  # the current theme's palette, with the level's text colour
     palette.setColor(qt.QPalette.WindowText, _levelColor(level))
     label.setPalette(palette)
 
@@ -313,14 +323,29 @@ def _toast(text, ms=3000):
         logging.exception("Lesion network mapping: the toast could not be shown")
 
 
+_manifestShas = {}  # connectome.json path: ((size, mtime), sha256)
+
+
 def termsAccepted(bundle):
-    """Whether the data use terms of ``bundle`` were accepted (``Studio/LNM/AcceptedTerms/<manifest sha256>``; read only)."""
+    """Whether the data use terms of ``bundle`` were accepted (``Studio/LNM/AcceptedTerms/<manifest sha256>``; read only).
+
+    The key is the Map module's (``LesionNetworkMappingLogic.termsSettingKey``); the manifest's sha256 is cached by its
+    size and modification time, so that the check costs one stat and one settings read.
+    """
     if bundle is None:
         return False
     try:
-        from LesionNetworkMapping import LesionNetworkMappingLogic
+        from LesionNetworkMapping import ACCEPTED_TERMS_SETTING
+        from LesionNetworkMappingLib.export import file_sha256
 
-        return bool(LesionNetworkMappingLogic.termsAccepted(bundle))
+        manifest = os.path.join(bundle.path, "connectome.json")
+        info = os.stat(manifest)
+        stamp = (info.st_size, info.st_mtime_ns)
+        cached = _manifestShas.get(manifest)
+        if cached is None or cached[0] != stamp:
+            cached = _manifestShas[manifest] = (stamp, file_sha256(manifest))
+        value = qt.QSettings().value(f"{ACCEPTED_TERMS_SETTING}/{cached[1]}")
+        return str(value).lower() in ("true", "1")
     except Exception:
         logging.exception("Lesion network mapping: the data use terms could not be checked")
         return False
@@ -355,19 +380,29 @@ def saveOptions(options):
     qt.QSettings().setValue(OPTIONS_SETTING, json.dumps(kept, sort_keys=True))
 
 
-def _atlasPaths(choice):
+_atlasCache = {}  # choice: (monotonic time, (atlas, labels))
+#: How long the cache lookup of the atlas is reused (the fetch layer hashes small cached files on every lookup)
+ATLAS_CACHE_S = 30.0
+
+
+def _atlasPaths(choice, refresh=False):
     """(atlas, labels) paths of the chosen atlas when it is cached (never downloads), else (None, None)."""
     if choice != "schaefer400":
         return None, None
+    cached = _atlasCache.get(choice)
+    if cached is not None and not refresh and time.monotonic() - cached[0] < ATLAS_CACHE_S:
+        return cached[1]
     try:
         from LesionNetworkMappingLib import fetch
 
         resource = fetch.find_resource(SCHAEFER_ID)
         path = fetch.cached_path(resource)
         labels = fetch.label_table_path(resource) if path else None
+        result = (path, labels) if path else (None, None)
     except Exception:
-        return None, None
-    return (path, labels) if path else (None, None)
+        result = (None, None)
+    _atlasCache[choice] = (time.monotonic(), result)
+    return result
 
 
 def configDict(studyPath, bundlePath, options, rule=None, software=None, acceptTerms=False, parentPid=None, recompute=False):
@@ -446,7 +481,7 @@ def commandArguments(config):
 
 def planKey(config):
     """What the staleness plan depends on (the analysis settings, not the run options)."""
-    ignored = ("accept_terms", "parent_pid", "software", "events", "nice", "keep_awake", "threads", "recompute")
+    ignored = ("accept_terms", "parent_pid", "software", "events", "nice", "keep_awake", "threads", "recompute", "atlas", "atlas_labels")
     return json.dumps({key: value for key, value in config.items() if key not in ignored}, sort_keys=True, default=str)
 
 
@@ -483,7 +518,7 @@ def summarizePlan(result):
         "groups": groups,
         "review": sum(1 for row in result.rows if row.get("reason") == pipeline.NORM_NEEDS_REVIEW),
         "estimate_s": float(result.estimate_s),
-        "passes": int(math.ceil(toMap / batch)) if toMap else 0,
+        "passes": math.ceil(toMap / batch) if toMap else 0,
         "bundle": result.bundle.name,
         "n_subjects": result.n_subjects,
         "blocks": [dict(block) for block in result.blocks],
@@ -676,7 +711,7 @@ class PipelineModel:
 
     def eta(self):
         """Seconds left: the current stage's own estimate, then the planned estimates of the stages after it; None when unknown."""
-        if not self.stages:
+        if not self.stages or self.state != "running":
             return None
         names = [stage.get("name") for stage in self.stages]
         weights = {stage.get("name"): float(stage.get("estimate_s") or 0.0) for stage in self.stages}
@@ -719,9 +754,9 @@ class PipelineModel:
             parts.append(f"{fields['done']}/{fields['total']}" + (f" {unit}" if unit and unit != "units" else ""))
         eta = fields.get("eta")
         if eta is not None:
-            text = formatDuration(eta)
+            text = formatLeft(eta)
             if text:
-                parts.append(_("~{eta} left").format(eta=text))
+                parts.append(text)
         return " · ".join(parts)
 
 
@@ -768,6 +803,8 @@ def modelFor(job):
         model.apply({"event": "queued"} if job.isQueued() else {"event": "stage", "name": "prepare", "status": "running"})
         if job.startEvent:
             model.apply(job.startEvent)
+        if job.isFinished():
+            model.finish(job)  # e.g. after this module was reloaded: never shown as running
     return model
 
 
@@ -969,16 +1006,22 @@ def headlineMaps(record, alpha=0.05):
 
 
 class _VisibilityFilter(qt.QObject):
-    """Calls ``callback()`` when the watched widget is shown."""
+    """Calls ``shown()`` when the watched widget is shown and ``restyled()`` when the palette or style changes (theme)."""
 
-    def __init__(self, widget, callback):
+    RESTYLE_EVENTS = (qt.QEvent.PaletteChange, qt.QEvent.StyleChange, qt.QEvent.ApplicationPaletteChange)
+
+    def __init__(self, widget, shown, restyled):
         qt.QObject.__init__(self, widget)
-        self.callback = callback
+        self.shown = shown
+        self.restyled = restyled
         widget.installEventFilter(self)
 
     def eventFilter(self, obj, event):
-        if event.type() == qt.QEvent.Show:
-            self.callback()
+        kind = event.type()
+        if kind == qt.QEvent.Show:
+            self.shown()
+        elif kind in self.RESTYLE_EVENTS:
+            self.restyled()
         return False
 
 
@@ -995,6 +1038,7 @@ class PipelineCard:
         self.planAt = 0.0
         self.record = None  # pipeline.json of the output folder
         self.recordStatus = None  # pipeline.status() of the output folder
+        self.recordOut = None  # the output folder that record, recordStatus and external were read from
         self.note = ""  # a second line (unsaved Draw edits, statuses not merged)
         self.viewers = []
         self.optionsDialog = None
@@ -1009,6 +1053,11 @@ class PipelineCard:
         self._quitConnected = False
         self.applyCount = 0
         self.applySeconds = 0.0
+        self.applyMaxSeconds = 0.0  # longest apply() (measurements)
+        self._cleanedUp = False
+        self._restylePending = False
+        self._memo = None  # values computed once per apply()
+        self._scoreCache = None  # (study, confirmed score columns), refreshed by recheck()
         self.worker = PlanWorker(self._onPlan)
         self._buildWidget()
         self.applyTimer = qt.QTimer()
@@ -1026,7 +1075,7 @@ class PipelineCard:
         self.loadTimer.setSingleShot(True)
         self.loadTimer.setInterval(LOAD_TICK_MS)
         self.loadTimer.connect("timeout()", self._loadNext)
-        self._visibility = _VisibilityFilter(self.widget, self.scheduleRecheck)
+        self._visibility = _VisibilityFilter(self.widget, self.scheduleRecheck, self._onRestyled)
         for name in ("studyChanged", "bundleChanged", "ruleChanged"):
             getattr(ctx, name).append(self.scheduleRecheck)
         ctx.computeEnabledChanged.append(self.scheduleApply)
@@ -1081,12 +1130,11 @@ class PipelineCard:
 
         row = qt.QHBoxLayout()
         row.setSpacing(6)
-        onAccent = slicer.app.palette().color(qt.QPalette.Active, qt.QPalette.HighlightedText)
-        self.runButton = self._button(_("Run everything"), "LNMPipelineRunButton", self.run, "secondary", _lucideIcon("play", 16, onAccent))
+        self.runButton = self._button(_("Run everything"), "LNMPipelineRunButton", self.run, "secondary")
         self.runButton.setFixedHeight(32)
         self.runButton.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
         row.addWidget(self.runButton, 1)
-        self.stopButton = self._button(_("Stop"), "LNMPipelineStopButton", self.stop, "secondary", _lucideIcon("square", 16))
+        self.stopButton = self._button(_("Stop"), "LNMPipelineStopButton", self.stop, "secondary")
         self.stopButton.setFixedHeight(32)
         self.stopButton.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
         self.stopButton.setToolTip(_("Stop the cohort analysis. Completed work is kept: the next run resumes from it."))
@@ -1142,7 +1190,7 @@ class PipelineCard:
         buttons.setSpacing(4)
         self.openReportButton = self._button(_("Open report"), "LNMPipelineOpenReportButton", self.openReport, "secondary")
         self.openReportButton.setToolTip(_("Open report.html of the last run (figures, statistics, methods)"))
-        self.showFolderButton = self._button(_("Show folder"), "LNMPipelineShowFolderButton", self.showFolder, "secondary", _lucideIcon("folder-open", 14))
+        self.showFolderButton = self._button(_("Show folder"), "LNMPipelineShowFolderButton", self.showFolder, "secondary")
         self.showFolderButton.setToolTip(_("Show the output folder of the cohort analysis"))
         self.loadMapsButton = self._button(_("Load maps"), "LNMPipelineLoadMapsButton", self.loadMaps, "secondary")
         self.loadMapsButton.setToolTip(_("Show the headline group maps over the template (conjunction, specificity, sensitivity, overlap, sLNM)"))
@@ -1157,6 +1205,8 @@ class PipelineCard:
         result.addLayout(extra)
         self.resultFrame.hide()
         layout.addWidget(self.resultFrame)
+
+        self._setIcons()
 
         # Tab order: Run → Options → Stop → Open report → Show folder → Load maps (→ Warnings)
         qt.QWidget.setTabOrder(self.runButton, self.optionsButton)
@@ -1173,6 +1223,30 @@ class PipelineCard:
         self.runAction.connect("triggered()", self.run)
         self.widget.addAction(self.runAction)
         self.widget.setContextMenuPolicy(qt.Qt.ActionsContextMenu)
+
+    def _setIcons(self):
+        """The Lucide icons of the buttons, tinted for the current theme (text-only without the Studio module)."""
+        palette = slicer.app.palette()
+        primary = self.runButton.property("slicerRole") == "primary"
+        text = palette.color(qt.QPalette.Active, qt.QPalette.ButtonText)
+        onAccent = palette.color(qt.QPalette.Active, qt.QPalette.HighlightedText)
+        for button, name, size, color in ((self.runButton, "play", 16, onAccent if primary else text), (self.stopButton, "square", 16, text),
+                                          (self.showFolderButton, "folder-open", 14, text)):
+            icon = _lucideIcon(name, size, color)
+            button.setIcon(icon if icon is not None else qt.QIcon())
+
+    def _onRestyled(self):
+        """The theme changed: colours and icons follow it (on the next event, once the palette is complete)."""
+        if not self._restylePending:
+            self._restylePending = True
+            qt.QTimer.singleShot(0, self._restyle)
+
+    def _restyle(self):
+        self._restylePending = False
+        if not self.alive():
+            return
+        self._setIcons()
+        self.apply()
 
     #
     # Inputs
@@ -1239,8 +1313,23 @@ class PipelineCard:
         return int(self.cohortInfo().get("n") or 0)
 
     def _currentPlanKey(self):
+        memo = self._memo
+        if memo is not None and "planKey" in memo:
+            return memo["planKey"]
         config = self.config()
-        return planKey(config) if config is not None else None
+        key = planKey(config) if config is not None else None
+        if memo is not None:
+            memo["planKey"] = key
+        return key
+
+    def _termsAccepted(self, bundle):
+        memo = self._memo
+        if memo is not None and "terms" in memo:
+            return memo["terms"]
+        accepted = termsAccepted(bundle)
+        if memo is not None:
+            memo["terms"] = accepted
+        return accepted
 
     #
     # State
@@ -1260,6 +1349,9 @@ class PipelineCard:
         """``(enabled, reason)`` of Run everything; the reason is shown in the tooltip and the state line."""
         if self.running():
             return False, _("The cohort analysis is running.")
+        blocked = self.foreignComputeBlocks()
+        if blocked is not None:
+            return False, blocked
         study, bundle = self.study(), self.bundle()
         if study is None:
             return False, _("Open a study with traced lesions (Seed card).")
@@ -1267,13 +1359,30 @@ class PipelineCard:
             return False, _("Choose a connectome (Connectome card).")
         if self.eligibleCount() < 2:
             return False, _("The analysis needs at least 2 lesions that can be mapped.")
-        if not termsAccepted(bundle):
+        if not self._termsAccepted(bundle):
             return False, _("Accept the data use terms in the Connectome card.")
         if self.externalRunning():
             return False, _("Another run writes to this output folder.")
         if jobrunner.instance().isBusy():
             return False, _("Another lesion network mapping job is running; run everything when it is done.")
         return True, ""
+
+    def foreignComputeBlocks(self):
+        """The reason another Map plug-in (e.g. Preflight) blocks Compute, or None (this card's own block is ignored).
+
+        The Preflight card keeps its block current as the settings change; the ``beforeCompute`` hooks are not run on
+        the click (a stale preflight report takes ~80 ms to remake), since the pipeline runs preflight itself and stops
+        with exit code 5 on a blocking check.
+        """
+        if not hasattr(self.ctx, "computeEnabled") or self.ctx.computeEnabled():
+            return None
+        blocks = getattr(self.ctx, "_computeDisabled", None)
+        if isinstance(blocks, dict):
+            reasons = [reason for key, reason in blocks.items() if key != "pipeline"]
+            if not reasons:
+                return None
+            return " ".join(reason for reason in reasons if reason) or _("Not ready")
+        return " ".join(self.ctx.computeDisabledReasons()) or _("Not ready")
 
     def canRun(self):
         return self.runState()[0]
@@ -1313,6 +1422,8 @@ class PipelineCard:
         elif self.record is not None and self.record.get("status") == "done_with_failures":
             failedStages = list(self.record.get("failed_stages") or [])
         status = (self.record or {}).get("status")
+        if model is None and status == "running" and (self.recordStatus or {}).get("status") == "error":
+            return _("Failed: the last run ended unexpectedly"), "danger"
         if status == "error" and model is None:
             error = (self.record or {}).get("error") or {}
             return _("Failed: {message}").format(message=error.get("message") or _("see pipeline.log")), "danger"
@@ -1359,10 +1470,13 @@ class PipelineCard:
     def _scores(self, study):
         if self.plan is not None and self.planKey == self._currentPlanKey():
             return list(self.plan.get("scores") or [])
-        try:
-            return [column for column, confirmed in study.score_columns() if confirmed]
-        except Exception:
-            return []
+        if self._scoreCache is None or self._scoreCache[0] is not study:
+            try:
+                scores = [column for column, confirmed in study.score_columns() if confirmed]
+            except Exception:
+                scores = []
+            self._scoreCache = (study, scores)
+        return self._scoreCache[1]
 
     def estimateLine(self):
         if self.plan is None or self.planKey != self._currentPlanKey():
@@ -1373,7 +1487,10 @@ class PipelineCard:
             detail = _plural(passes, "{n} pass over {bundle}", "{n} passes over {bundle}", bundle=bundle)
         else:
             detail = _("every map is reused")
-        return _("≈ {time} (estimate; {detail})").format(time=formatDuration(self.plan.get("estimate_s")) or _("< 1 min"), detail=detail)
+        seconds = float(self.plan.get("estimate_s") or 0.0)
+        if seconds < 60:
+            return _("< 1 min (estimate; {detail})").format(detail=detail)
+        return _("≈ {time} (estimate; {detail})").format(time=formatDuration(seconds), detail=detail)
 
     def stageStatuses(self):
         """{row id: (status, detail, tooltip)} of the stage list, and the set of rows to show."""
@@ -1406,8 +1523,7 @@ class PipelineCard:
             if status == "running" and model is not None and detailFor in stages:
                 detail = model.detail()
             elif status == "running" and self.externalRunning():
-                eta = formatDuration(self.external.get("eta"))
-                detail = _("~{eta} left").format(eta=eta) if eta else ""
+                detail = formatLeft(self.external.get("eta"))
             rows[rowId] = (status, detail, "\n".join(tips))
         shown = {rowId for rowId, _label, _stages in ROWS}
         if rows["normalize"][0] in ("skipped", "pending") and not (model is not None and model.startEvent and int(model.startEvent.get("n_normalize") or 0)):
@@ -1431,13 +1547,34 @@ class PipelineCard:
     # Applying the state (coalesced, at most every 100 ms)
     #
 
+    def alive(self):
+        """False once the card's widget was deleted (the module widget is gone, the application quits)."""
+        try:
+            self.widget.objectName
+        except Exception:
+            return False
+        return True
+
     def scheduleApply(self):
-        if not self.applyTimer.isActive():
+        if self.alive() and not self.applyTimer.isActive():
             self.applyTimer.start()
 
     def apply(self):
         """Show the state: change-detected texts, the stage rows, the buttons and the primary action (≤ 5 ms)."""
+        if not self.alive():
+            self.cleanup()
+            return
         started = time.perf_counter()
+        self._memo = {}
+        try:
+            self._apply()
+        finally:
+            self._memo = None
+        self.applyCount += 1
+        self.applySeconds = time.perf_counter() - started
+        self.applyMaxSeconds = max(self.applyMaxSeconds, self.applySeconds)
+
+    def _apply(self):
         self.adoptRunningJob()
         model = self.model()
         running = model is not None and model.isActive()
@@ -1454,7 +1591,7 @@ class PipelineCard:
         enabled, reason = self.runState()
         _setVisible(self.runButton, not (running or external))
         _setVisible(self.stopButton, running or external)
-        self.stopButton.setEnabled(not (model is not None and model.job is not None and model.job.stopRequested))
+        self.stopButton.setEnabled(not (running and model.job is not None and model.job.stopRequested))
         _setText(self.runButton, _("Run everything"))
         self.runButton.setEnabled(enabled)
         self.runAction.setEnabled(enabled)
@@ -1463,6 +1600,7 @@ class PipelineCard:
             self.runButton.setProperty("slicerRole", "primary" if primary else "secondary")
             self.runButton.style().unpolish(self.runButton)
             self.runButton.style().polish(self.runButton)
+            self._setIcons()
         _setToolTip(self.runButton, reason if not enabled else _("Map every new or changed lesion with the connectome, then run the group analyses, the null models, "
                                                                  "the statistics and the report.\nResumes: only new or changed lesions are mapped."))
         rows, shown = self.stageStatuses()
@@ -1485,7 +1623,12 @@ class PipelineCard:
         else:
             value = 0
         if self.progressBar.value != value:
-            self.progressBar.setValue(value)
+            # QProgressBar.setValue repaints at once (about 30 ms in the inspector): repaint with the next paint instead
+            self.progressBar.setUpdatesEnabled(False)
+            try:
+                self.progressBar.setValue(value)
+            finally:
+                self.progressBar.setUpdatesEnabled(True)
         report = self.reportPath()
         showResult = not (running or external) and self.record is not None
         _setVisible(self.resultFrame, showResult or (model is not None and model.state == jobrunner.FAILED))
@@ -1495,14 +1638,23 @@ class PipelineCard:
         failed = model is not None and model.state == jobrunner.FAILED
         _setText(self.warningsButton, _("Details (log)") if failed else _("Warnings ({n})").format(n=len(warnings)))
         _setVisible(self.warningsButton, bool(warnings) or failed)
-        self._publishPrimary()
-        self._blockCompute(running or external)
+        primary = (self.primaryLabel(), enabled)
+        if primary != self._publishedPrimary or (running or external) != self._computeBlocked:
+            qt.QTimer.singleShot(0, self._publishState)  # the Map widget updates its buttons in its own event
         if external and not self.externalTimer.isActive():
             self.externalTimer.start()
         elif not external and self.externalTimer.isActive():
             self.externalTimer.stop()
-        self.applyCount += 1
-        self.applySeconds = time.perf_counter() - started
+
+    def _publishState(self):
+        if not self.alive():
+            return
+        model = self.model()
+        wasRegistered = self.ctx.primaryOverride("cohort") is not None if hasattr(self.ctx, "primaryOverride") else False
+        self._publishPrimary()
+        self._blockCompute((model is not None and model.isActive()) or self.externalRunning())
+        if not wasRegistered:
+            self.scheduleApply()  # the Run button is secondary once the primary action is the card's
 
     def _publishPrimary(self):
         """The primary action of Seed = Cohort (D-A26): "Run everything · N lesions" (re-published when it changes)."""
@@ -1525,12 +1677,14 @@ class PipelineCard:
     #
 
     def scheduleRecheck(self):
-        self.recheckTimer.start()
+        if self.alive():
+            self.recheckTimer.start()
 
     def recheck(self):
         """Read pipeline.json and the lock of the output folder, and plan in the worker thread (no hashing here)."""
+        self._scoreCache = None
         out = self.outDir()
-        self.record, self.recordStatus, self.external = None, None, None
+        self.record, self.recordStatus, self.external, self.recordOut = None, None, None, out
         if out:
             pipeline = _pipeline()
             self.record = _readJson(os.path.join(out, pipeline.PIPELINE_JSON))
@@ -1569,6 +1723,7 @@ class PipelineCard:
         except Exception:
             info = None
         if info is None or info.get("status") != "running":
+            self.plan, self.planKey = None, None  # the other run changed what is up to date
             self.recheck()
             return
         self.external = info
@@ -1576,9 +1731,15 @@ class PipelineCard:
 
     def adoptRunningJob(self):
         """Follow the runner's pipeline job of this output folder (a card created while it runs re-attaches to it)."""
+        out = self.outDir()
+        if self.job is not None and self.job.isFinished() and not _samePath(getattr(self.job.spec, "lnmOut", None), out):
+            self.job, self.note = None, ""  # a run of another study, connectome or option set
+        if out != self.recordOut and not _samePath(out, self.recordOut):
+            # Another output folder: forget the last one's record until the re-check reads this one
+            self.record, self.recordStatus, self.external, self.recordOut = None, None, None, out
+            self.scheduleRecheck()
         if self.job is not None and self.job.isFinished() is False:
             return
-        out = self.outDir()
         jobs = pipelineJobs(out) if out else []
         if jobs and jobs[-1] is not self.job:
             self.job = jobs[-1]
@@ -1616,10 +1777,14 @@ class PipelineCard:
             widget = _mapWidget()
             if widget is not None and hasattr(widget, "updateComputeState"):
                 qt.QTimer.singleShot(0, widget.updateComputeState)
+            self.plan, self.planKey = None, None
             self.recheck()
         self.scheduleApply()
 
     def cleanup(self):
+        if self._cleanedUp:
+            return
+        self._cleanedUp = True
         if self in _cards:
             _cards.remove(self)
         for name in ("studyChanged", "bundleChanged", "ruleChanged"):
@@ -1681,6 +1846,7 @@ class PipelineCard:
                                  env=_localeEnvironment(args), threads=config.get("threads"), statusText=lambda job: modelFor(job).statusText(), name="pipeline")
         spec.lnmOut = out
         spec.lnmStudy = study.path
+        self.plan, self.planKey = None, None  # what is up to date changes with the run: planned again when it ends
         self.job = self.ctx.submit(spec)
         modelFor(self.job)
         self.external = None
@@ -1694,8 +1860,22 @@ class PipelineCard:
         if model is not None and model.isActive() and model.job is not None:
             model.job.stop()
         elif self.externalRunning():
-            self._writeStop(self.outDir())
+            self._stopExternal(self.outDir(), STOP_REPEATS)
         self.apply()
+
+    def _stopExternal(self, out, repeats):
+        """Write the STOP file of a run of another process, again every second while it runs (a run that is just starting
+        removes a STOP file left from before it took its lock).
+        """
+        if not out:
+            return
+        self._writeStop(out)
+        try:
+            running = _pipeline().status(out).get("status") == "running"
+        except Exception:
+            running = False
+        if running and repeats > 0:
+            qt.QTimer.singleShot(1000, lambda: self._stopExternal(out, repeats - 1))
 
     @staticmethod
     def _writeStop(out):
@@ -2115,7 +2295,7 @@ class OptionsDialog:
         t7.setToolTip("" if t7.enabled else _("The |T| ≥ 7 convention needs about 1000 connectome subjects (N = {n}).").format(n=n))
         if not t7.enabled:
             t7.setChecked(False)
-        self.sensitivitySpin.setValue(int(round(float(options.get("sensitivity") or 90))))
+        self.sensitivitySpin.setValue(round(float(options.get("sensitivity") or 90)))
         self._select(self.specificityCombo, options.get("specificity") or "auto")
         groups = (card.plan or {}).get("groups") or card.cohortInfo().get("groups") or {}
         small = [name for name in ("case", "control") if int(groups.get(name, 0)) < MIN_PER_GROUP]
@@ -2173,8 +2353,8 @@ class OptionsDialog:
             self.scoreChecks[column] = (box, bool(confirmed))
             self.scoresLayout.addWidget(box)
 
-    def _atlasCached(self):
-        return _atlasPaths("schaefer400")[0] is not None
+    def _atlasCached(self, refresh=False):
+        return _atlasPaths("schaefer400", refresh)[0] is not None
 
     def _update(self):
         preview = self.subjectsGroup.checkedId() == 1
@@ -2274,10 +2454,12 @@ class OptionsDialog:
             if state["done"]:
                 timer.stop()
                 if state["error"]:
-                    self.atlasStatus.setText(_("The download failed: {error}").format(error=state["error"]))
                     self.atlasJob = None
+                    self._update()
+                    self.atlasStatus.setText(_("The download failed: {error}").format(error=state["error"]))
                     return
                 self.atlasJob = None
+                self._atlasCached(refresh=True)
                 self._update()
                 return
             time.sleep(0.01)  # lends the interpreter to the download thread
