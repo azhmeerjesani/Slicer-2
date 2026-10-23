@@ -165,9 +165,38 @@ RUN set -eux; \
   chmod 0755 /usr/local/bin/slicer-studio-web-entrypoint; \
   if [ ! -e /opt/slicer/slicer.org ]; then ln -s /home/slicer/.config/slicer.org /opt/slicer/slicer.org; fi
 
+# Startup script of the web build (SLICERRC replaces ~/.slicerrc.py, so it runs that file too): the file
+# dialogs of Slicer Studio start in /data (the data folder shared with the host) until the user picks
+# another folder. It writes only the fork keys Studio/LastSaveFolder (save dialogs) and
+# Studio/LastOpenDirectory (open dialogs), and only when no valid folder is set.
+RUN set -eux; \
+  mkdir -p /etc/slicer-studio-web; \
+  printf '%s\n' \
+    '# Slicer Studio web build: file dialogs start in /data.' \
+    'import os' \
+    'import qt' \
+    'try:' \
+    '    _settings = qt.QSettings()' \
+    '    for _key in ("Studio/LastSaveFolder", "Studio/LastOpenDirectory"):' \
+    '        _folder = str(_settings.value(_key) or "")' \
+    '        if os.path.isdir("/data") and not (_folder and os.path.isdir(_folder)):' \
+    '            _settings.setValue(_key, "/data")' \
+    'except Exception as error:  # a settings problem must not stop the start-up' \
+    '    print("Could not set the default folder of the file dialogs: %s" % error)' \
+    '_userRc = os.path.expanduser("~/.slicerrc.py")' \
+    'if os.path.isfile(_userRc):' \
+    '    exec(compile(open(_userRc, encoding="utf-8").read(), _userRc, "exec"))' \
+    > /etc/slicer-studio-web/slicerrc.py; \
+  chmod 0644 /etc/slicer-studio-web/slicerrc.py
+
+# SLICER_STUDIO_WEB=1 marks the browser build: Slicer Studio reads it to know that there is no image
+# clipboard or host drag-and-drop, that the system browser cannot be seen (reports open in the app) and
+# that connectome downloads must go to /data.
 ENV LANG=C.UTF-8 \
     HOME=/home/slicer \
-    SLICER_EXECUTABLE=/opt/slicer/Slicer
+    SLICER_EXECUTABLE=/opt/slicer/Slicer \
+    SLICER_STUDIO_WEB=1 \
+    SLICERRC=/etc/slicer-studio-web/slicerrc.py
 
 USER slicer
 WORKDIR /home/slicer

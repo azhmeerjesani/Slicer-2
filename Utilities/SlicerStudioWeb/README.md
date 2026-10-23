@@ -182,6 +182,26 @@ the Qt 5 of Ubuntu 24.04, which is why the image is based on Ubuntu 24.04.
   Docker Desktop enough resources (Settings > Resources: 4 or more CPUs, 8 GB or more
   memory).
 
+## Lesion network mapping in the browser build
+
+- The container sets `SLICER_STUDIO_WEB=1`. Slicer Studio uses it to know that this is
+  the browser build, so reports open inside Slicer (the browser of the container
+  cannot be seen) and connectome downloads are checked against `/data`.
+- **Connectome downloads must go to `/data`** (the data folder you chose with `--data`).
+  Everything else in the container is lost when it is removed, and a connectome is
+  large. Choose a folder under `/data` for "Get a connectome..." and for the data
+  folder of the Map module.
+- **Figures enter through "Open figure...".** The browser build has no image clipboard
+  and no drag-and-drop from your computer into Slicer, so paste and drop do not work;
+  use "Open figure..." and pick the file from `/data`.
+- **File dialogs start in `/data`** until you choose another folder (the container's
+  start-up script sets the Studio settings `Studio/LastSaveFolder` and `Studio/LastOpenDirectory` when they are empty or point to a missing folder).
+- **Apple Silicon.** The image is `linux/amd64`, so on an Apple Silicon Mac it runs under
+  emulation. The heavy lesion network mapping jobs (normalization to the template,
+  mapping, permutation tests) are 3 to 5 times slower than natively, and the time
+  estimate shown in the app grows accordingly. For a whole cohort, the macOS disk
+  image is recommended.
+
 ## Security
 
 - By default the server listens on `127.0.0.1` only: only this computer can open

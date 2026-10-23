@@ -12,9 +12,13 @@ callbacks (for example while the Studio shell is applied) are printed but do
 not stop the application.
 """
 
+import importlib.util
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
+import time
 
 import numpy as np
 import qt
@@ -98,5 +102,60 @@ try:
           "the lesion changed after reloading the NIfTI file")
 finally:
     shutil.rmtree(outputDir, ignore_errors=True)
+
+
+def findPythonSlicer():
+    """The PythonSlicer launcher of this application (the package, or the python-install folder of a build tree)."""
+    home = slicer.app.slicerHome
+    names = ("PythonSlicer.exe", "PythonSlicer") if sys.platform == "win32" else ("PythonSlicer",)
+    folders = [os.path.join(home, "bin"), os.path.join(os.path.dirname(home), "python-install", "bin")]
+    for folder in folders:
+        for name in names:
+            path = os.path.join(folder, name)
+            if os.path.isfile(path) and os.access(path, os.X_OK):
+                return path
+    return None
+
+
+def lnmChecks():
+    """The bundled PythonSlicer finds BRAINSFit, the templates and the pipeline command line (skipped when absent)."""
+    modules = {}
+    for name in ("normalize", "pipeline"):
+        try:
+            modules[name] = importlib.util.find_spec("LesionNetworkMappingLib." + name)
+        except (ImportError, ValueError):
+            modules[name] = None
+    if not any(modules.values()):
+        print("SLICER_STUDIO_SMOKE_SKIP lnm: LesionNetworkMappingLib.normalize and .pipeline are not in this build")
+        return
+    pythonSlicer = findPythonSlicer()
+    if pythonSlicer is None:
+        print("SLICER_STUDIO_SMOKE_SKIP lnm: PythonSlicer was not found in this build")
+        return
+    spec = next(spec for spec in modules.values() if spec is not None)
+    libraryParent = os.path.dirname(os.path.dirname(spec.origin))
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = os.pathsep.join(filter(None, [libraryParent, environment.get("PYTHONPATH")]))
+    environment["LANG"] = environment.get("LANG") or "C.UTF-8"
+    commands = {
+        "normalize": ("normalize", "check"),
+        "pipeline": ("pipeline", "--help"),
+    }
+    for key, (module, argument) in commands.items():
+        if modules[key] is None:
+            print("SLICER_STUDIO_SMOKE_SKIP lnm: LesionNetworkMappingLib.%s is not in this build" % module)
+            continue
+        started = time.time()
+        result = subprocess.run([pythonSlicer, "-m", "LesionNetworkMappingLib." + module, argument], env=environment, check=False,
+                                capture_output=True, text=True, timeout=120)
+        elapsed = time.time() - started
+        check(result.returncode == 0, "PythonSlicer -m LesionNetworkMappingLib.%s %s exited with %d: %s" % (
+            module, argument, result.returncode, (result.stdout + result.stderr).strip()[-600:]))
+        print(f"SLICER_STUDIO_SMOKE lnm {module} {argument} ok in {elapsed:.2f} s")
+        # Interpreter start-up is not ours to budget; the command itself must not import numpy or the stage modules.
+        check(key != "pipeline" or elapsed <= 2.0, "pipeline --help took %.2f s" % elapsed)
+
+
+lnmChecks()
 
 print("SLICER_STUDIO_SMOKE_OK")
