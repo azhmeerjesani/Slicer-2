@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-r"""Check README.md of Slicer Studio against the source tree and the state of the work packages (A-05, A-05b).
+r"""Check README.md of Slicer Studio against the source tree and the state of the work packages (A-05, A-05b, A-06).
 
 The README makes many small claims (settings keys, shortcuts, command line options, file paths, what is
 implemented). This script rejects the ones that are no longer true. It uses only the Python standard library
@@ -37,7 +37,17 @@ Checks (the kind of each failure is in brackets)
   [``planned-wording``].
 - With ``--run-examples``, the commands of fences whose info string is ``console example`` are run with
   ``--help`` (scripts of this repository and ``python -m LesionNetworkMappingLib.<module>``), and every
-  flag of the command must appear in the help text [``example``].
+  flag of the command must appear in the help text [``example``]. The commands of fences whose info string is
+  ``console example fixture`` are run as written, in a temporary folder that holds a synthetic fixture (a folder
+  ``lesions/`` of lesion masks, a table ``scores.csv`` with the columns participant_id, group, space and
+  aphasia_score, and a synthetic connectome ``GSP1000.lnmc``; made by the library's own test fixture), with
+  ``PythonSlicer`` replaced by the real launcher: each must exit with 0, and a ``pipeline run`` must write a
+  ``report.html`` [``example``].
+- Claims that go stale are rejected, because this script cannot check them: a count of tests ("546 tests")
+  [``test-count``], a test named as failing [``stale-claim``], a compatibility check "that has not been run"
+  [``stale-claim``] (write the date of the last run instead), and a statement of what the bracket keys do in the
+  Classic interface that does not match the default in ``qSlicerSegmentEditorPaintEffect.cxx``
+  [``bracket-keys``].
 """
 
 import argparse
@@ -46,6 +56,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -92,6 +103,29 @@ FEATURE_WPS = [
     (r"brush-size label|brush hover|brush-size display", ["W3-05"]),
     (r"thin slider|thin scroll bar", ["W3-01"]),
     (r"altgr|research-use line|close prompt|keyboard and low-vision", ["U-03"]),
+    # Wave 4 (A-06)
+    (r"run everything|cohort pipeline|reproduce_pipeline|pipeline\.json", ["A-04"]),
+    (r"report\.html|html report|cohort report", ["A-04b"]),
+    (r"run everything card|analysis card|open report", ["A-04c"]),
+    (r"in-app update|check for updates|studio-update|updates panel", ["A-08"]),
+    (r"library grid|grid view|grid of cards|thumbnail", ["W4-02"]),
+    (r"lazy python wrapper|lazy wrapper|lazypythonwrappers", ["W4-03"]),
+    (r"as-needed", ["W4-04"]),
+    (r"user guide page|modules/studio\.md|modules/lesionnetworkmapping\.md", ["W4-05"]),
+    (r"cheaper undo|undo snapshot|faster undo|scissors", ["W4-01"]),
+    (r"figure renderer|headless figure|publication figure", ["L-23"]),
+    (r"parcel index|fast parcel|fastmap", ["L-24"]),
+    (r"null suite|cohort null|null models", ["L-25"]),
+    (r"cross-validated|circuit validation|validate circuit", ["L-26"]),
+    (r"robustness|leave-one-lesion-out|lesion split-half", ["L-27"]),
+    (r"qc chip|lesion qc|2d extrusion|extrusion policy|flags column", ["L-28"]),
+    (r"figure card|trace from a figure|trace lesions from|trace from figure", ["L-29"]),
+    (r"qa card|preflight card", ["L-30"]),
+    (r"columns card|case section|cohort diagnostics|lesion overview|volume-matched", ["L-31"]),
+    (r"clusters card|networks card|yeo", ["L-32"]),
+    (r"tar stream|connectome catalog|streamed tar", ["L-33"]),
+    (r"lead-dbs import|import lead-dbs|verify against lead-dbs|lead-dbs maps", ["L-34"]),
+    (r"web build|browser build|web container", ["P-03"]),
 ]
 
 #: Words that make a line about a work package that did not pass acceptable
@@ -510,6 +544,45 @@ def checkBanned(text, failures):
         failures.append(Failure("todo", text.count("\n", 0, match.start()) + 1, "TODO in the README"))
 
 
+TEST_COUNT = re.compile(r"\b\d[\d,]*\s+(?:LNM\s+)?(?:unit\s+)?tests?\b", re.IGNORECASE)
+FAILING_TEST = re.compile(r"\btest_\w+[^.\n]{0,80}\b(?:fails?|failing|failed)\b|\b(?:fails?|failing|failed)\b[^.\n]{0,60}\btest_\w+", re.IGNORECASE)
+STALE_COMPATIBILITY = re.compile(r"compatibility check\b[^.\n]{0,80}\b(?:has|have) not been run|\bnot been run on the final tree", re.IGNORECASE)
+BRACKET_UNIT = re.compile(r"BracketKeysResizeBrush|`\[`\s*(?:and|/)\s*`\]`|bracket keys", re.IGNORECASE)
+
+
+def bracketKeysDefault(source):
+    """The default of ``Studio/BracketKeysResizeBrush`` in ``qSlicerSegmentEditorPaintEffect.cxx`` (the C++ expression), or None."""
+    for relative, content in source.perFile().items():
+        if relative.endswith("qSlicerSegmentEditorPaintEffect.cxx"):
+            match = re.search(r'value\(\s*"Studio/BracketKeysResizeBrush"\s*,\s*([^)]+?)\s*\)', content)
+            return match.group(1) if match else None
+    return None
+
+
+def checkStaleClaims(text, masked, source, failures):
+    """Statements that become false without anyone touching them: counts of tests, failing tests, an unrun compatibility check, bracket keys."""
+    for match in TEST_COUNT.finditer(masked):
+        failures.append(Failure("test-count", masked.count("\n", 0, match.start()) + 1, f"'{match.group(0)}': the number of tests changes with every work package; name the command instead"))
+    for match in FAILING_TEST.finditer(masked):
+        failures.append(Failure("stale-claim", masked.count("\n", 0, match.start()) + 1, "a test named as failing: this is true only until it is fixed; the checker cannot see that"))
+    for match in STALE_COMPATIBILITY.finditer(masked):
+        failures.append(Failure("stale-claim", masked.count("\n", 0, match.start()) + 1, "the compatibility check 'has not been run': write the date and the tree of its last run"))
+    default = bracketKeysDefault(source)
+    if default is None:
+        return
+    units = [(number, unit) for number, unit in claimUnits(masked) if BRACKET_UNIT.search(unit)]
+    if default == "studioPresentation":
+        for number, unit in units:
+            if re.search(r"\balso in (?:the )?classic|\bin (?:the )?classic[^.]{0,40}\b(?:resize|by default)", unit, re.IGNORECASE) and not re.search(r"\bunless\b|\bkeeps? (?:the )?official", unit, re.IGNORECASE):
+                failures.append(Failure("bracket-keys", number, "in the Classic interface the bracket keys keep the official meaning unless the setting says otherwise (default in qSlicerSegmentEditorPaintEffect.cxx: Studio presentation only)"))
+        for number, unit in units:
+            if unit.startswith("|") and "BracketKeysResizeBrush" in unit and not re.search(r"\bstudio\b[^|]*\b(?:draw|presentation)\b|\bdraw\b[^|]*\bstudio\b", unit.split("|", 3)[2] if unit.count("|") >= 3 else unit, re.IGNORECASE):
+                failures.append(Failure("bracket-keys", number, "the default of Studio/BracketKeysResizeBrush in the settings table must say that it is on in Studio's Draw only"))
+        keyUnits = [unit for _number, unit in units if "BracketKeysResizeBrush" in unit]
+        if keyUnits and not any(re.search(r"\bclassic\b", unit, re.IGNORECASE) and re.search(r"\bcycle", unit, re.IGNORECASE) for unit in keyUnits):
+            failures.append(Failure("bracket-keys", units[0][0], "the text on Studio/BracketKeysResizeBrush must say that Classic keeps the official meaning (the keys cycle the volumes of the slice view)"))
+
+
 def parseDisclaimer(source):
     """The text of ``DISCLAIMER`` in LesionNetworkMappingLib/export.py (parsed, not imported), or None."""
     for relative in source.files():
@@ -630,12 +703,90 @@ def checkClaims(text, masked, state, failures):
             failures.append(Failure("planned-wording", number, f"mentions {', '.join(notPassed)}, which did not pass, without saying it is planned or pending"))
 
 
-def runExamples(fences, source, pythonSlicer, failures):
-    """Run the commands of ``console example`` fences with --help and compare their flags with the help text."""
+#: Run by PythonSlicer: writes the synthetic fixture of the ``console example fixture`` fences (arguments: the folder of
+#: ``LesionNetworkMappingLib``'s parent, the folder to fill). It uses the fixture of the pipeline tests (20-subject
+#: synthetic connectome with planted networks; 8 cases and 4 controls), and lays it out as a user would have it.
+FIXTURE_SCRIPT = r"""
+import csv, os, shutil, sys
+module_dir, target = sys.argv[1], sys.argv[2]
+sys.path.insert(0, module_dir)
+sys.path.insert(0, os.path.join(module_dir, "Testing", "Python"))
+import lnm_pipeline_fixture as fixture
+from LesionNetworkMappingLib.study import Study
+made = fixture.make_fixture(os.path.join(target, "_fixture"), extra_rows=False)
+study = Study.open(made["study"])
+os.makedirs(os.path.join(target, "lesions"))
+rows = [["participant_id", "group", "space", "aphasia_score"]]
+for sid in made["sids"]:
+    row = study.subject(sid)
+    shutil.copyfile(study.abspath(row["lesion"]), os.path.join(target, "lesions", sid + "_lesion.nii.gz"))
+    rows.append([sid, row["group"], fixture.SPACE, row["aphasia_score"]])
+with open(os.path.join(target, "scores.csv"), "w", newline="", encoding="utf-8") as stream:
+    csv.writer(stream).writerows(rows)
+shutil.copytree(made["bundle"], os.path.join(target, "GSP1000.lnmc"))
+"""
+
+
+def buildExampleFixture(source, pythonSlicer, environment, directory):
+    """Write the fixture of the ``console example fixture`` fences into ``directory``. Return an error text, or None."""
+    moduleDir = os.path.join(source.root, "Modules", "Scripted", "LesionNetworkMapping")
+    try:
+        result = subprocess.run([pythonSlicer, "-c", FIXTURE_SCRIPT, moduleDir, directory], capture_output=True, text=True, timeout=300, env=environment, cwd=directory, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return f"could not make the fixture: {error}"
+    if result.returncode != 0:
+        return f"could not make the fixture (exit {result.returncode}): {(result.stdout + result.stderr).strip()[-300:]}"
+    return None
+
+
+def runFixtureExample(firstLine, lines, source, pythonSlicer, environment, failures, builder=buildExampleFixture):
+    """Run the commands of one ``console example fixture`` fence as written, in a folder with the synthetic fixture."""
+    commands = fenceCommands([(firstLine, "", lines)])
+    with tempfile.TemporaryDirectory() as directory:
+        error = builder(source, pythonSlicer, environment, directory)
+        if error:
+            failures.append(Failure("example", firstLine, error))
+            return
+        ranRun = False
+        for line, command in commands:
+            try:
+                arguments = shlex.split(command)
+            except ValueError as problem:
+                failures.append(Failure("example", line, f"cannot parse the command: {problem}"))
+                continue
+            while arguments and re.fullmatch(r"[A-Za-z_]\w*=\S*", arguments[0]):
+                arguments = arguments[1:]
+            if not arguments:
+                continue
+            if arguments[0] == "PythonSlicer":
+                arguments[0] = pythonSlicer
+            ranRun = ranRun or "run" in arguments
+            try:
+                result = subprocess.run(arguments, capture_output=True, text=True, timeout=900, env=environment, cwd=directory, check=False)
+            except (OSError, subprocess.TimeoutExpired) as problem:
+                failures.append(Failure("example", line, f"could not run the command: {problem}"))
+                return
+            if result.returncode != 0:
+                failures.append(Failure("example", line, f"the command exited with {result.returncode} on the fixture: {(result.stdout + result.stderr).strip()[-300:]}"))
+                return
+        if ranRun and "pipeline" in "".join(lines):
+            reports = [name for base, _directories, names in os.walk(directory) for name in names if name == "report.html" and "derivatives" in base]
+            if not reports:
+                failures.append(Failure("example", firstLine, "the pipeline run on the fixture wrote no report.html"))
+
+
+def runExamples(fences, source, pythonSlicer, failures, fixtureBuilder=buildExampleFixture):
+    """Run the commands of ``console example`` fences with --help and compare their flags with the help text.
+
+    The fences marked ``console example fixture`` are run as written on a synthetic fixture instead.
+    """
     environment = dict(os.environ)
     environment["PYTHONPATH"] = os.pathsep.join([os.path.join(source.root, "Modules", "Scripted", "LesionNetworkMapping")] + ([environment["PYTHONPATH"]] if environment.get("PYTHONPATH") else []))
     for firstLine, info, lines in fences:
         if info.split()[:2] != ["console", "example"]:
+            continue
+        if info.split()[2:3] == ["fixture"]:
+            runFixtureExample(firstLine, lines, source, pythonSlicer, environment, failures, fixtureBuilder)
             continue
         for line, command in fenceCommands([(firstLine, info, lines)]):
             try:
@@ -654,7 +805,9 @@ def runExamples(fences, source, pythonSlicer, failures):
                 module = arguments[arguments.index("-m") + 1]
                 if not module.startswith("LesionNetworkMappingLib."):
                     continue
-                run = [pythonSlicer, "-m", module, "--help"]
+                after = arguments[arguments.index("-m") + 2:]
+                subcommand = [after[0]] if after and not after[0].startswith("-") and re.fullmatch(r"[a-z][a-z0-9-]*", after[0]) else []
+                run = [pythonSlicer, "-m", module, *subcommand, "--help"]
             elif program in ("python3", "python") and len(arguments) > 1 and arguments[1].endswith(".py"):
                 script = os.path.join(source.root, arguments[1])
                 if not os.path.exists(script):
@@ -677,7 +830,7 @@ def runExamples(fences, source, pythonSlicer, failures):
                     failures.append(Failure("example", line, f"{flag} is not in the help text of {' '.join(run[-3:-1])}"))
 
 
-def checkReadme(readmePath, sourceRoot, statePath, examples=False, pythonSlicer="PythonSlicer"):
+def checkReadme(readmePath, sourceRoot, statePath, examples=False, pythonSlicer="PythonSlicer", fixtureBuilder=buildExampleFixture):
     """Run every check. Return the list of ``Failure``."""
     with open(readmePath, encoding="utf-8") as stream:
         text = stream.read()
@@ -691,11 +844,12 @@ def checkReadme(readmePath, sourceRoot, statePath, examples=False, pythonSlicer=
     checkExternalAnchors(source, anchors, failures)
     checkCode(text, masked, fences, source, failures)
     checkBanned(text, failures)
+    checkStaleClaims(text, masked, source, failures)
     checkDisclaimer(text, source, failures)
     if statePath:
         checkClaims(text, masked, state, failures)
     if examples:
-        runExamples(fences, source, pythonSlicer, failures)
+        runExamples(fences, source, pythonSlicer, failures, fixtureBuilder)
     failures.sort(key=lambda failure: (failure.line, failure.kind))
     return failures
 
@@ -707,11 +861,13 @@ def checkReadme(readmePath, sourceRoot, statePath, examples=False, pythonSlicer=
 _SELF_TEST_SOURCE = {
     "Modules/Scripted/Studio/StudioLib/shell.py": (
         'KEY = "Studio/Autosave/Enabled"\nENV = "SLICER_STUDIO_AUTOSAVE"\nname = "StudioTopBar"\nopen = "Ctrl+K"\n'
-        'F = "--real-flag"\nGROUP = "Studio/Group"\nitem = "Item"\nkeys = "Ctrl+Alt+" + str(n)\n'),
+        'F = "--real-flag"\nGROUP = "Studio/Group"\nB = "Studio/BracketKeysResizeBrush"\nitem = "Item"\nkeys = "Ctrl+Alt+" + str(n)\n'),
     "Modules/Scripted/LesionNetworkMapping/LesionNetworkMappingLib/export.py": 'DISCLAIMER = (\n    "Research use only. "\n    "Specificity is debated."\n)\n',
     "Modules/Scripted/LesionNetworkMapping/LesionNetworkMappingLib/engine.py": "# engine\n",
     "Docs/other.md": "See [the README](../README.md#missing-anchor) and [fine](../README.md#a-heading).\n",
     "Docs/target.md": "# Target\n\n## Section Two\n",
+    "Modules/Loadable/Segmentations/EditorEffects/qSlicerSegmentEditorPaintEffect.cxx": (
+        'return settings ? settings->value("Studio/BracketKeysResizeBrush", studioPresentation).toBool() : studioPresentation;\n'),
 }
 
 _SELF_TEST_STATE = {"A-01": "passed", "A-02": "failed", "W2-I4": "pending"}
@@ -723,9 +879,14 @@ Contents: [heading](#a-heading) and [target](Docs/target.md#section-two).
 - Key `Studio/Autosave/Enabled`, group `Studio/Group/Item`, variable `SLICER_STUDIO_AUTOSAVE`, widget `StudioTopBar`.
 - Path `Docs/target.md`, shortcuts `Ctrl+K` and `Ctrl+Alt+2`, flag `--real-flag`, module `LesionNetworkMappingLib.engine`.
 - Autosave is Implemented (A-01). Smart fill is planned (A-02).
+- In Classic the bracket keys cycle the volumes of the slice view unless `Studio/BracketKeysResizeBrush` is set.
 
 ```console example
 python3 Utilities/Scripts/Tool.py --out x
+```
+
+```console example fixture
+PythonSlicer Utilities/Scripts/Tool.py --out y
 ```
 
 ### Disclaimer
@@ -752,11 +913,14 @@ _SELF_TEST_ERRORS = {
     "planned-wording": "The W2-I4 work is done.",
     "disclaimer": None,  # comes from a different quote
     "fence": None,  # comes from an unbalanced fence
+    "test-count": "The suite has 546 tests.",
+    "stale-claim": "The test test_maps_tsv_columns still fails.",
+    "bracket-keys": "`Studio/BracketKeysResizeBrush` resizes the brush by default, also in the Classic interface.",
 }
 
 
 def selfTestFeatureTable():
-    """The keywords of ``FEATURE_WPS`` find the work package that did not pass (wave 3 examples)."""
+    """The keywords of ``FEATURE_WPS`` find the work package that did not pass (examples of waves 3 and 4)."""
     problems = []
     examples = {
         "The study loop is Implemented.": "W3-07",
@@ -769,6 +933,16 @@ def selfTestFeatureTable():
         "The preflight is Implemented.": "L-17",
         "Cluster tables are Available.": "L-19",
         "Thin sliders and scroll bars are Available.": "W3-01",
+        # Wave 4
+        "Run everything is Implemented.": "A-04",
+        "The HTML report is Available.": "A-04b",
+        "The Library grid is Available.": "W4-02",
+        "In-app updates are Implemented.": "A-08",
+        "The Columns card is Available.": "L-31",
+        "The Clusters card is Available.": "L-32",
+        "The figure card is Available.": "L-29",
+        "Lead-DBS import is Available.": "L-34",
+        "Faster undo is Implemented.": "W4-01",
     }
     # A sentence may name several work packages (Autosave: A-01 and A-01b): the others have passed
     allPassed = {identifier: "passed" for _pattern, identifiers in FEATURE_WPS for identifier in identifiers}
@@ -782,6 +956,13 @@ def selfTestFeatureTable():
         if any(failure.kind == "claim-state" for failure in failures):
             problems.append(f"a passed work package is rejected in: {sentence}")
     return problems
+
+
+def _selfTestFixtureBuilder(source, _pythonSlicer, _environment, directory):
+    """A stand-in for ``buildExampleFixture``: the folder gets the tool that the example runs."""
+    os.makedirs(os.path.join(directory, "Utilities", "Scripts"))
+    shutil.copyfile(os.path.join(source.root, "Utilities", "Scripts", "Tool.py"), os.path.join(directory, "Utilities", "Scripts", "Tool.py"))
+    return None
 
 
 def selfTest():
@@ -805,7 +986,8 @@ def selfTest():
         # The good README passes (the link to the other file of the tree needs its anchor: Docs/other.md links a-heading)
         with open(readmePath, "w", encoding="utf-8") as stream:
             stream.write(_SELF_TEST_GOOD)
-        failures = [failure for failure in checkReadme(readmePath, directory, statePath, examples=True) if failure.kind != "anchor-external"]
+        failures = [failure for failure in checkReadme(readmePath, directory, statePath, examples=True, pythonSlicer=sys.executable, fixtureBuilder=_selfTestFixtureBuilder)
+                    if failure.kind != "anchor-external"]
         # anchor-external is expected once for #missing-anchor
         external = [failure for failure in checkReadme(readmePath, directory, statePath) if failure.kind == "anchor-external"]
         if failures:
@@ -827,9 +1009,15 @@ def selfTest():
         # The example of a missing flag is reported with --run-examples
         with open(readmePath, "w", encoding="utf-8") as stream:
             stream.write(_SELF_TEST_GOOD.replace("--out x", "--bogus x"))
-        kinds = {failure.kind for failure in checkReadme(readmePath, directory, statePath, examples=True)}
+        kinds = {failure.kind for failure in checkReadme(readmePath, directory, statePath, examples=True, pythonSlicer=sys.executable, fixtureBuilder=_selfTestFixtureBuilder)}
         if "example" not in kinds:
             problems.append("a flag that the help text does not list was not reported by --run-examples")
+        # A command of a fixture example that fails on the fixture is reported
+        with open(readmePath, "w", encoding="utf-8") as stream:
+            stream.write(_SELF_TEST_GOOD.replace("--out y", "--bogus y"))
+        failures = checkReadme(readmePath, directory, statePath, examples=True, pythonSlicer=sys.executable, fixtureBuilder=_selfTestFixtureBuilder)
+        if not any(failure.kind == "example" and "exited with" in failure.message for failure in failures):
+            problems.append("a failing command of a 'console example fixture' fence was not reported by --run-examples")
     # Anchor rules
     expectedSlugs = {"A heading: with `code` & more!": "a-heading-with-code--more", "Under_score-and-dash": "under_score-and-dash"}
     for heading, slug in expectedSlugs.items():
