@@ -44,7 +44,7 @@ NOT_SET = "unknown"
 CASE_GROUPS = (
     ("source", "Source", ("source_type", "source_dataset", "source_id", "doi", "pmid", "citation", "figure", "panel", "case_label")),
     ("imaging", "Imaging", ("image_modality", "fig_convention", "planes", "dimensionality")),
-    ("case", "Case", ("dataset", "age", "sex", "handedness", "etiology", "onset_to_imaging_days", "symptom", "domain", "reported_side", "reported_location")),
+    ("case", "Patient and lesion", ("dataset", "age", "sex", "handedness", "etiology", "onset_to_imaging_days", "symptom", "domain", "reported_side", "reported_location")),
     ("workflow", "Workflow", ("tracer", "reviewer", "image_quality", "multifocal")),
 )
 #: Shown read-only under the groups (derived or recorded by the application): (column, label)
@@ -60,6 +60,7 @@ FIELD_LABELS = {
 #: Expanded groups of the Case section (kept while the application runs: the section is rebuilt with the card)
 _expanded = {"source": False, "imaging": False, "case": True, "workflow": False}
 DOI_PATTERN = re.compile(r"10\.\d{4,9}/\S+", re.IGNORECASE)
+DOI_WITH_PREFIX_PATTERN = re.compile(r"(?:(?:https?://(?:dx\.)?doi\.org/|doi\s*:?)\s*)?10\.\d{4,9}/\S+", re.IGNORECASE)
 FIGURE_PATTERN = re.compile(r"\b(?:fig(?:ure)?\.?)\s*([0-9]+[A-Za-z]?)", re.IGNORECASE)
 
 
@@ -171,6 +172,9 @@ def scoreLeakReason(study, name, role):
     if role != "score":
         return None
     current = study.column_spec(name).role
+    registered = _lnm("schema").registered(name)
+    if registered is not None and registered.role in ("bookkeeping", "metadata"):
+        current = registered.role  # the registry says it must not be a score, whatever role was confirmed in between
     if current not in ("bookkeeping", "metadata"):
         return None
     if current == "bookkeeping":
@@ -198,6 +202,15 @@ def confirmScore(names, reasons, parent=None):
         if box.clickedButton() == use:
             accepted.append(name)
     return accepted
+
+
+def _readOnly(item):
+    """Make a table item not editable (the flags are taken from the item: Qt 5 takes an int, Qt 6 the flags)."""
+    flags = item.flags()
+    try:
+        item.setFlags(flags & ~qt.Qt.ItemIsEditable)
+    except (TypeError, ValueError):
+        item.setFlags(int(flags) & ~int(qt.Qt.ItemIsEditable))
 
 
 def parseLevels(text):
@@ -295,7 +308,10 @@ class ColumnsDialog:
         self.onlyUnset.connect("toggled(bool)", lambda checked: self._applyFilter())
         filterRow.addWidget(self.onlyUnset)
         filterRow.addStretch(1)
-        self.countLabel = library._cardLabel("StudioColumnsCount", 12, "text2")
+        self.countLabel = qt.QLabel()
+        self.countLabel.setObjectName("StudioColumnsCount")
+        library._setFont(self.countLabel, 12)
+        ui.bindStyleSheet(self.countLabel, lambda: f"QLabel#StudioColumnsCount {{ color: {ui.token('text2').name()}; }}")
         filterRow.addWidget(self.countLabel)
         layout.addLayout(filterRow)
         self.table = qt.QTableWidget(0, 6)
@@ -314,6 +330,7 @@ class ColumnsDialog:
         self.noteLabel = library._cardLabel("StudioColumnsNote", 12, "warning")
         layout.addWidget(self.noteLabel)
         self.helpLabel = library._cardLabel("StudioColumnsRoleHelp", 12, "text2")
+        self.helpLabel.hide()
         layout.addWidget(self.helpLabel)
         buttons = qt.QHBoxLayout()
         buttons.addStretch(1)
@@ -357,19 +374,21 @@ class ColumnsDialog:
             row = self.table.rowCount
             self.table.insertRow(row)
             nameItem = qt.QTableWidgetItem(name)
-            nameItem.setFlags(qt.Qt.ItemIsEnabled | qt.Qt.ItemIsSelectable)
+            _readOnly(nameItem)
             tip = _("A standard column of every study: its role is fixed") if info["standard"] else (
                 _("A registered column: its role is the registry's until you confirm another") if info["registered"] and not info["confirmed"] else "")
             nameItem.setToolTip(tip)
             self.table.setItem(row, COL_NAME, nameItem)
             typeCombo = self._combo(f"StudioColumnsType_{name}", [(typeName, typeName) for typeName in schema.TYPES], spec.type)
             typeCombo.setEnabled(not info["standard"])
+            typeCombo.setAccessibleName(_("Type of {name}").format(name=name))
             self.table.setCellWidget(row, COL_TYPE, typeCombo)
             roles = [(roleLabel(NOT_SET), NOT_SET)] if spec.role == schema.UNKNOWN_ROLE else []
             roles += [(roleLabel(role), role) for role in schema.ROLES]
             roleCombo = self._combo(f"StudioColumnsRole_{name}", roles, spec.role)
             roleCombo.setEnabled(not info["standard"])
             roleCombo.setToolTip(tip or roleHelp(spec.role))
+            roleCombo.setAccessibleName(_("Role of {name}").format(name=name))
             roleCombo.connect("currentIndexChanged(int)", lambda index, row=row: self._showHelp(row))
             self.table.setCellWidget(row, COL_ROLE, roleCombo)
             units = spec.units or ""
@@ -378,7 +397,10 @@ class ColumnsDialog:
             for column, text in ((COL_UNITS, units), (COL_LEVELS, levels), (COL_DESCRIPTION, description)):
                 item = qt.QTableWidgetItem(text)
                 if info["standard"] and column != COL_DESCRIPTION:
-                    item.setFlags(qt.Qt.ItemIsEnabled | qt.Qt.ItemIsSelectable)
+                    _readOnly(item)
+                elif column == COL_UNITS and info["registered"] and schema.registered(name).units:
+                    _readOnly(item)  # the registry's units show through: they cannot be removed
+                    item.setToolTip(_("The units of a registered column are the registry's"))
                 self.table.setItem(row, column, item)
             self.original[name] = {"role": spec.role, "type": spec.type, "units": units, "levels": levels, "description": description, "standard": info["standard"]}
         self.table.resizeColumnToContents(COL_NAME)
@@ -386,7 +408,7 @@ class ColumnsDialog:
             self.table.setColumnWidth(column, width)
         self.table.setColumnWidth(COL_NAME, max(140, self.table.columnWidth(COL_NAME) + 12))
         self._applyFilter()
-        self.noteLabel.setText("")
+        self._setNote("")
 
     def rowOf(self, name):
         for row in range(self.table.rowCount):
@@ -421,14 +443,19 @@ class ColumnsDialog:
         unset = sum(1 for values in self.original.values() if values["role"] == NOT_SET)
         self.countLabel.setText(_("{n} columns · {unset} without a role").format(n=len(self.original), unset=unset))
 
+    def _setNote(self, text):
+        self.noteLabel.setText(text)
+        self.noteLabel.setVisible(bool(text))
+
     def _showHelp(self, row):
-        if row < 0 or row >= self.table.rowCount:
-            self.helpLabel.setText("")
-            return
-        name = self.table.item(row, COL_NAME).text()
-        combo = self.table.cellWidget(row, COL_ROLE)
-        role = combo.itemData(combo.currentIndex)
-        self.helpLabel.setText(f"{name}: {roleLabel(role)}. {roleHelp(role)}")
+        text = ""
+        if 0 <= row < self.table.rowCount:
+            name = self.table.item(row, COL_NAME).text()
+            combo = self.table.cellWidget(row, COL_ROLE)
+            role = combo.itemData(combo.currentIndex)
+            text = f"{name}: {roleLabel(role)}. {roleHelp(role)}"
+        self.helpLabel.setText(text)
+        self.helpLabel.setVisible(bool(text))
 
     # Changes
 
@@ -468,7 +495,7 @@ class ColumnsDialog:
         """Confirm: write the changed rows (a bookkeeping or metadata column becomes a score only after the question). Return the result of :func:`applyChanges`."""
         changes, problems = self.changes()
         if not changes:
-            self.noteLabel.setText(" ".join(problems.values()) or _("Nothing changed."))
+            self._setNote(" ".join(problems.values()) or _("Nothing changed."))
             return {"applied": [], "declined": [], "errors": problems}
         result = applyChanges(self.session, changes, confirm=lambda names, reasons: confirmScore(names, reasons, self.widget))
         notes = list(problems.values()) + [f"{name}: {message}" for name, message in result["errors"].items()]
@@ -477,7 +504,7 @@ class ColumnsDialog:
         if result["applied"]:
             _toast(_("Roles saved for {n} columns").format(n=len(result["applied"])) if len(result["applied"]) != 1 else _("Role saved for {name}").format(name=result["applied"][0]))
             self.fill()
-        self.noteLabel.setText(" ".join(notes))
+        self._setNote(" ".join(notes))
         result["errors"].update(problems)
         if result["applied"] and not notes and not result["declined"]:
             self.widget.accept()
@@ -500,11 +527,10 @@ def showColumns(session=None):
         _toast(_("Open a study first"))
         return None
     for old in list(_dialogs):
-        if not library._isAlive(old.widget) or not old.widget.isVisible():
-            _dialogs.remove(old)
-        else:
+        _dialogs.remove(old)
+        if library._isAlive(old.widget):
             old.widget.close()
-            _dialogs.remove(old)
+            library._discard(old.widget)
     dialog = ColumnsDialog(session)
     _dialogs.append(dialog)
     dialog.show()
@@ -602,18 +628,25 @@ def openExternalUrl(url):
 
 
 def parseSourceReference(text):
-    """Columns for the interim source reference of Draw ("doi:10.1000/xyz, Fig. 2"): ``{"doi", "figure"}`` or, without either, ``{"citation": text}``."""
+    """Columns for the interim source reference of Draw ("doi:10.1000/xyz, Fig. 2"): ``{"doi", "figure"}``.
+
+    When anything else is left once the DOI, its "doi:" or web address prefix and the figure are taken out ("Smith et al. 2020, Fig. 3"),
+    the full original text is also kept in ``"citation"``, so that nothing the user typed is lost when the interim field is removed.
+    """
     text = str(text or "").strip()
     if not text:
         return {}
     values = {}
+    rest = text
     doi = doiOf(text)
     if doi:
         values["doi"] = doi
+        rest = DOI_WITH_PREFIX_PATTERN.sub(" ", rest, count=1)
     figure = FIGURE_PATTERN.search(text)
     if figure:
         values["figure"] = figure.group(1)
-    if not values:
+        rest = FIGURE_PATTERN.sub(" ", rest, count=1)
+    if not values or re.search(r"[^\W_]", rest):
         values["citation"] = text
     return values
 
@@ -682,7 +715,8 @@ class CaseSection:
         button.setToolButtonStyle(qt.Qt.ToolButtonTextBesideIcon)
         button.setArrowType(qt.Qt.DownArrow if button.isChecked() else qt.Qt.RightArrow)
         button.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
-        button.setStyleSheet("QToolButton { text-align: left; border: none; padding: 2px 0px; }")
+        objectName = button.objectName
+        ui.bindStyleSheet(button, lambda: f"QToolButton#{objectName} {{ color: {ui.token('text').name()}; text-align: left; border: none; padding: 2px 0px; }}")
         button.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
         library._setFont(button, 12, qt.QFont.DemiBold)
         layout.addWidget(button)
@@ -700,6 +734,7 @@ class CaseSection:
             label = qt.QLabel(_(FIELD_LABELS.get(column, column)))
             label.setObjectName(f"StudioCaseLabel_{column}")
             library._setFont(label, 12)
+            label.setFixedWidth(ui.fontPx(112))
             tooltip = (spec.description or "") + (f" ({spec.units})" if spec.units else "")
             label.setToolTip(tooltip)
             editor = self._editorFor(column, spec)
@@ -917,6 +952,8 @@ class CaseSection:
             return False
         current = session.study.subject(self.sid).get(column)
         text = str(text).strip()
+        if column == "doi" and doiOf(text):
+            text = doiOf(text)  # "doi:10.1000/x" and the doi.org address are stored as the bare DOI
         if text == ("" if _missing(current) else str(current)):
             return False
         try:
