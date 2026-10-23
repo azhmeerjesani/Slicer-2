@@ -17,6 +17,12 @@ Examples::
     python3 slicer_studio_web.py              # same as "run"
     python3 slicer_studio_web.py stop
     python3 slicer_studio_web.py local --slicer ~/Slicer-SuperBuild/Slicer-build/Slicer
+    python3 slicer_studio_web.py update       # download, verify and install the latest release
+
+Updates: ``run`` checks the public latest release of Slicer Studio on GitHub (one anonymous request; no API, no
+account). A required update stops it with instructions, an optional one prints a notice. ``update`` (or ``--update``)
+downloads the launcher bundle and the Linux package of the latest release, checks their size and SHA-256 against
+the release manifest, unpacks the launcher next to this one and builds the image from the verified package.
 
 The script only uses the Python standard library (Python 3.8 or later). See
 README.md next to this script for details.
@@ -31,6 +37,7 @@ import hashlib
 import http.client
 import importlib.util
 import ipaddress
+import json
 import os
 import re
 import shutil
@@ -79,6 +86,20 @@ PROXY_VARIABLES = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https
 LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "::1")
 # Process names of the Slicer launcher and application.
 SLICER_PROCESS_NAMES = ("Slicer", "SlicerApp-real")
+
+# In-app updates (decision D-U1): the manifest of the latest public release (no GitHub API, no token). The
+# environment variable SLICER_STUDIO_UPDATE_FEED replaces the address (tests); "off" turns update checks off.
+UPDATE_REPOSITORY = "azhmeerjesani/Slicer-2"
+UPDATE_FEED_URL = f"https://github.com/{UPDATE_REPOSITORY}/releases/latest/download/studio-update.json"
+UPDATE_DOWNLOAD_URL = "https://github.com/{repository}/releases/download/{tag}/{name}"
+UPDATE_FEED_VARIABLE = "SLICER_STUDIO_UPDATE_FEED"
+UPDATE_ALLOWED_HOSTS = ("github.com",)
+UPDATE_ALLOWED_HOST_SUFFIXES = (".githubusercontent.com",)
+UPDATE_CHECK_TIMEOUT = 5
+UPDATE_MANIFEST_MAX_BYTES = 256 * 1024
+# Docker image label with the Slicer Studio version of the package the image was built from
+VERSION_LABEL = "org.slicerstudio.version"
+VERSION_FILE_IN_SOURCE = SCRIPT_DIR.parent.parent / "Modules" / "Scripted" / "Studio" / "StudioLib" / "version.py"
 
 DOCKER_INSTALL_HINT = "Install Docker Desktop (macOS, Windows: https://www.docker.com/products/docker-desktop/) or Docker Engine (Linux: https://docs.docker.com/engine/install/)."
 
@@ -438,6 +459,9 @@ def build_image(args, package, docker_architecture):
         shutil.copytree(DOCKER_FILES_DIR, context / "docker")
         link_or_copy(package, context / package.name)
         build_arguments = ["--build-arg", f"SLICER_PACKAGE={package.name}"]
+        package_version = package_studio_version(package)
+        if package_version:
+            build_arguments += ["--label", f"{VERSION_LABEL}={package_version}"]
         if args.extra_ca_cert:
             shutil.copy2(Path(args.extra_ca_cert).expanduser(), context / "extra-ca.crt")
             build_arguments += ["--build-arg", "EXTRA_CA_CERT_FILE=extra-ca.crt"]
@@ -558,6 +582,286 @@ def open_browser(url, enabled):
 
 
 # ---------------------------------------------------------------------------
+# Versions and updates (no GitHub API: the public "latest release" download address only)
+
+
+_STUDIO_VERSION_PATTERN = re.compile(rb'^STUDIO_VERSION\s*=\s*"([^"]+)"', re.MULTILINE)
+_SEMVER_PATTERN = re.compile(r"^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z.-]+)?$")
+_ASSET_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,254}$")
+
+
+def version_key(text):
+    """Sort key of a semantic version (a pre-release sorts before its release); ValueError if not a version."""
+    match = _SEMVER_PATTERN.match(str(text or "").strip())
+    if not match:
+        raise ValueError(f"not a version: {text!r}")
+    pre = match.group(4)
+    parts = tuple((0, int(p), "") if p.isdigit() else (1, 0, p) for p in pre.split(".")) if pre else ()
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3)), 0 if pre else 1, parts)
+
+
+def launcher_version():
+    """Slicer Studio version of this launcher: the VERSION file of a release bundle, else version.py of the source tree."""
+    version_file = SCRIPT_DIR / "VERSION"
+    if version_file.is_file():
+        text = version_file.read_text(encoding="utf-8").strip()
+        return text or None
+    try:
+        match = _STUDIO_VERSION_PATTERN.search(VERSION_FILE_IN_SOURCE.read_bytes())
+    except OSError:
+        return None
+    return match.group(1).decode() if match else None
+
+
+def package_studio_version(package):
+    """STUDIO_VERSION inside a Slicer Linux package (read without extracting it), or None."""
+    import tarfile
+
+    try:
+        with tarfile.open(package, "r:*") as archive:
+            for member in archive:
+                if member.isfile() and member.name.endswith("qt-scripted-modules/StudioLib/version.py"):
+                    stream = archive.extractfile(member)
+                    match = _STUDIO_VERSION_PATTERN.search(stream.read()) if stream else None
+                    return match.group(1).decode() if match else None
+    except (OSError, tarfile.TarError, EOFError):
+        return None
+    return None
+
+
+def image_studio_version(image):
+    """Slicer Studio version of a Docker image (its label), or None."""
+    result = docker("image", "inspect", "--format", f'{{{{index .Config.Labels "{VERSION_LABEL}"}}}}', image, check=False)
+    value = result.stdout.strip() if result.returncode == 0 else ""
+    return value if value and value != "<no value>" else None
+
+
+def update_feed():
+    value = os.environ.get(UPDATE_FEED_VARIABLE, "").strip()
+    if value.lower() in ("off", "0", "none", "false"):
+        return None
+    return value or UPDATE_FEED_URL
+
+
+def _update_url_allowed(url, feed):
+    parts = urllib.parse.urlsplit(url)
+    scheme, host = parts.scheme.lower(), (parts.hostname or "").lower()
+    overridden = feed != UPDATE_FEED_URL
+    extra = {(urllib.parse.urlsplit(feed).hostname or "").lower()} if overridden else set()
+    allowed = host in UPDATE_ALLOWED_HOSTS or host.endswith(UPDATE_ALLOWED_HOST_SUFFIXES) or host in extra
+    if scheme == "https" and allowed:
+        return True
+    if overridden and scheme == "file":
+        return True
+    return overridden and scheme == "http" and allowed and host in ("localhost", "127.0.0.1", "::1")
+
+
+class _UpdateRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def __init__(self, feed):
+        urllib.request.HTTPRedirectHandler.__init__(self)
+        self.feed = feed
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        newurl = urllib.parse.urljoin(req.full_url, newurl)
+        if not _update_url_allowed(newurl, self.feed):
+            raise LauncherError(f"Refused a redirect to {urllib.parse.urlsplit(newurl).hostname}: updates come only from GitHub over HTTPS.")
+        return urllib.request.HTTPRedirectHandler.redirect_request(self, req, fp, code, msg, headers, newurl)
+
+
+def _update_open(url, feed, timeout):
+    if not _update_url_allowed(url, feed):
+        raise LauncherError(f"Refused to download {url}: updates come only from GitHub over HTTPS.")
+    opener = urllib.request.build_opener(_UpdateRedirectHandler(feed))
+    request = urllib.request.Request(url, headers={"User-Agent": f"SlicerStudioWeb/{launcher_version() or 'unknown'}"})
+    try:
+        return opener.open(request, timeout=timeout)
+    except urllib.error.HTTPError as error:
+        raise LauncherError(f"{url}: the server answered {error.code} {error.reason}")
+    except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as error:
+        raise LauncherError(f"Cannot reach the update server: {getattr(error, 'reason', error)}")
+
+
+def fetch_update_manifest(feed=None, timeout=UPDATE_CHECK_TIMEOUT):
+    """The validated manifest of the latest release (a dict). Raise LauncherError."""
+    feed = feed or update_feed()
+    if not feed:
+        raise LauncherError(f"Update checks are turned off ({UPDATE_FEED_VARIABLE}=off).")
+    with _update_open(feed, feed, timeout) as response:
+        content = response.read(UPDATE_MANIFEST_MAX_BYTES + 1)
+    if len(content) > UPDATE_MANIFEST_MAX_BYTES:
+        raise LauncherError("The update manifest is too large.")
+    try:
+        manifest = json.loads(content.decode("utf-8"))
+        version_key(manifest["version"])
+        if manifest.get("minimumSupported"):
+            version_key(manifest["minimumSupported"])
+        if not isinstance(manifest.get("required", False), bool):
+            raise ValueError("required")
+        assets = manifest.get("assets") or {}
+        for key in ("web", "linux-x86_64"):
+            asset = assets.get(key)
+            if asset is None:
+                continue
+            if (not _ASSET_NAME_PATTERN.match(str(asset.get("name"))) or ".." in asset["name"] or not isinstance(asset.get("size"), int)
+                    or asset["size"] <= 0 or not re.match(r"^[0-9a-f]{64}$", str(asset.get("sha256", "")).lower())):
+                raise ValueError(f"assets.{key}")
+    except (ValueError, KeyError, TypeError, UnicodeDecodeError) as error:
+        raise LauncherError(f"The update manifest is not valid ({error}).")
+    return manifest
+
+
+def update_status(manifest, current):
+    """'none', 'optional' or 'required' for the version ``current`` (None: unknown version)."""
+    if not current:
+        return "optional" if manifest.get("required") else "none"
+    try:
+        newer = version_key(manifest["version"]) > version_key(current)
+        below = bool(manifest.get("minimumSupported")) and version_key(current) < version_key(manifest["minimumSupported"])
+    except ValueError:
+        return "none"
+    if not newer:
+        return "none"
+    return "required" if manifest.get("required") or below else "optional"
+
+
+def check_for_updates(current, quiet_failure=True):
+    """At launcher start: stop on a required update, print a notice for an optional one."""
+    if update_feed() is None:
+        return "off"
+    try:
+        manifest = fetch_update_manifest()
+    except LauncherError as error:
+        if not quiet_failure:
+            raise
+        info(f"(Could not check for updates: {error})")
+        return "unknown"
+    status = update_status(manifest, current)
+    if status == "required":
+        raise LauncherError(
+            f"Slicer Studio {manifest['version']} is a required update (you have {current or 'an unknown version'}).\n"
+            f"  Update with: {script_command('update')}\n"
+            f"  then start it again. Release notes: https://github.com/{UPDATE_REPOSITORY}/releases/tag/v{manifest['version']}")
+    if status == "optional":
+        info(f"Slicer Studio {manifest['version']} is available (you have {current or 'an unknown version'}). Update with: {script_command('update')}")
+    return status
+
+
+def download_update_asset(manifest, key, directory, feed=None):
+    """Download a release file of the manifest to directory and verify its size and SHA-256. Return its path."""
+    asset = (manifest.get("assets") or {}).get(key)
+    if asset is None:
+        raise LauncherError(f"The release {manifest['version']} has no '{key}' file.")
+    feed = feed or update_feed()
+    name = asset["name"]
+    if feed and feed != UPDATE_FEED_URL:
+        url = urllib.parse.urljoin(feed, urllib.parse.quote(name))
+    else:
+        url = UPDATE_DOWNLOAD_URL.format(repository=UPDATE_REPOSITORY, tag=f"v{manifest['version']}", name=urllib.parse.quote(name))
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / name
+    if path.is_file() and path.stat().st_size == asset["size"] and file_sha256(path) == asset["sha256"].lower():
+        info(f"Using {name} downloaded before (checked).")
+        return path
+    partial = path.with_name(name + ".part")
+    digest = hashlib.sha256()
+    received = 0
+    reported = -1
+    info(f"Downloading {name} ({asset['size'] / 1e6:.0f} MB)")
+    try:
+        with _update_open(url, feed, 60) as response, open(partial, "wb") as stream:
+            for block in iter(lambda: response.read(1024 * 1024), b""):
+                received += len(block)
+                if received > asset["size"]:
+                    raise LauncherError(f"{name} is larger than the release file: refused.")
+                digest.update(block)
+                stream.write(block)
+                percent = received * 100 // asset["size"]
+                if percent >= reported + 10:
+                    reported = percent
+                    info(f"  {percent}%")
+        if received != asset["size"]:
+            raise LauncherError(f"{name} has the wrong size ({received} bytes instead of {asset['size']}): refused.")
+        if digest.hexdigest() != asset["sha256"].lower():
+            raise LauncherError(f"{name} does not have the SHA-256 checksum of the release: refused.")
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise
+    partial.replace(path)
+    return path
+
+
+def unpack_web_bundle(bundle, destination):
+    """Unpack the launcher bundle (one top folder) into destination. Return the new launcher folder."""
+    with zipfile.ZipFile(bundle) as archive:
+        names = archive.namelist()
+        tops = {name.split("/", 1)[0] for name in names}
+        if len(tops) != 1 or any(name.startswith("/") or ".." in name.split("/") or "\\" in name for name in names):
+            raise LauncherError(f"{bundle.name} is not a valid launcher bundle.")
+        target = destination / tops.pop()
+        if target.resolve() == SCRIPT_DIR:
+            raise LauncherError(f"{target} is the folder of this launcher; choose another --dest.")
+        if target.exists():
+            shutil.rmtree(target)
+        destination.mkdir(parents=True, exist_ok=True)
+        archive.extractall(destination)
+        for info_entry in archive.infolist():
+            mode = (info_entry.external_attr >> 16) & 0o777
+            if mode:
+                os.chmod(destination / info_entry.filename, mode)
+    if not (target / "slicer_studio_web.py").is_file():
+        raise LauncherError(f"{bundle.name} does not contain slicer_studio_web.py.")
+    return target
+
+
+def command_update(args):
+    """Download, verify and install the latest release of the web version."""
+    feed = update_feed()
+    if feed is None:
+        raise LauncherError(f"Update checks are turned off ({UPDATE_FEED_VARIABLE}=off).")
+    manifest = fetch_update_manifest(feed, timeout=30)
+    version = manifest["version"]
+    current = None
+    if not args.no_build:
+        try:
+            ensure_docker_running()
+            current = image_studio_version(args.image)
+        except LauncherError:
+            current = None
+    current = current or launcher_version()
+    status = update_status(manifest, current)
+    if status == "none" and not args.force:
+        info(f"Slicer Studio is up to date ({current}; the latest release is {version}).")
+        return 0
+    info(f"Updating to Slicer Studio {version} (you have {current or 'an unknown version'}).")
+    directory = cache_dir() / "updates" / version
+    package = download_update_asset(manifest, "linux-x86_64", directory, feed)
+    launcher_dir = SCRIPT_DIR
+    if (manifest.get("assets") or {}).get("web"):
+        bundle = download_update_asset(manifest, "web", directory, feed)
+        if args.dest:
+            destination = Path(args.dest).expanduser().resolve()
+        elif (SCRIPT_DIR / "VERSION").is_file():
+            destination = SCRIPT_DIR.parent  # next to the launcher bundle this one came from
+        else:
+            destination = cache_dir() / "launcher"  # not inside a source checkout
+        launcher_dir = unpack_web_bundle(bundle, destination)
+        info(f"New launcher: {launcher_dir}")
+    else:
+        warn(f"The release {version} has no launcher bundle; the image is built with this launcher.")
+    new_script = launcher_dir / "slicer_studio_web.py"
+    if args.no_build:
+        info(f"Verified package: {package}")
+        info(f"Build the image with: python3 {new_script} build --package {package}")
+        return 0
+    command = [sys.executable, str(new_script), "build", "--package", str(package), "--image", args.image]
+    info("Building the image with the new launcher.")
+    if subprocess.call(command) != 0:
+        raise LauncherError("Building the image of the update failed (see above); the previous image is kept.")
+    info("")
+    info(f"Slicer Studio {version} is installed. Start it with: python3 {new_script} run --recreate")
+    return 0
+
+# ---------------------------------------------------------------------------
 # Commands: build, run, stop, logs, status
 
 
@@ -573,6 +877,9 @@ def command_build(args):
 def command_run(args):
     architecture = ensure_docker_running()
     emulated = needs_amd64_emulation(architecture)
+    if not args.no_update_check:
+        current = (image_studio_version(args.image) if image_exists(args.image) else None) or launcher_version()
+        check_for_updates(current)
     state = container_state(args.name)
     if state == "running" and not args.recreate:
         url = container_url(args.name) or browser_url(args.listen, args.port)
@@ -685,10 +992,13 @@ def command_status(args):
         info(str(error))
         return 1
     info(f"Docker: running ({architecture})" + (" - the amd64 image runs with emulation" if needs_amd64_emulation(architecture) else ""))
+    info(f"Launcher: Slicer Studio {launcher_version() or 'version unknown'}")
     result = docker("image", "inspect", "--format", "{{.Size}}|{{.Created}}", args.image, check=False)
     if result.returncode == 0:
         size, created = result.stdout.strip().split("|", 1)
-        info(f"Image: {args.image} ({int(size) / 1e9:.1f} GB, created {created[:19].replace('T', ' ')})")
+        image_version = image_studio_version(args.image)
+        info(f"Image: {args.image} ({int(size) / 1e9:.1f} GB, created {created[:19].replace('T', ' ')}"
+             + (f", Slicer Studio {image_version}" if image_version else "") + ")")
     else:
         info(f"Image: {args.image} is not built yet (see '{script_command('build')} --help')")
     data_format = '{{.State.Status}}|{{.State.StartedAt}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}|{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}'
@@ -1097,6 +1407,7 @@ def build_parser():
                      help=f"Docker volume that keeps Slicer settings between runs (default {DEFAULT_HOME_VOLUME}; on Linux, {DEFAULT_HOME_VOLUME}-UID for user ids other than 1000; empty: do not keep them)")
     run.add_argument("--recreate", action="store_true", help="replace a running container")
     run.add_argument("--timeout", type=int, metavar="SECONDS", help="how long to wait for the server (default 180, 600 with emulation)")
+    run.add_argument("--no-update-check", action="store_true", help=f"do not check for a new Slicer Studio release (also {UPDATE_FEED_VARIABLE}=off)")
     add_package_options(run)
     run.set_defaults(handler=command_run)
 
@@ -1111,6 +1422,12 @@ def build_parser():
     status = commands.add_parser("status", parents=[docker_options], help="show the Docker image and container state")
     status.set_defaults(handler=command_status)
 
+    update = commands.add_parser("update", parents=[docker_options], help="download, verify and install the latest Slicer Studio release (also --update)")
+    update.add_argument("--dest", metavar="DIR", help="where to unpack the new launcher (default: next to this launcher bundle, else the cache folder)")
+    update.add_argument("--no-build", action="store_true", help="only download and verify; print the build command")
+    update.add_argument("--force", action="store_true", help="install the latest release even if it is not newer")
+    update.set_defaults(handler=command_update)
+
     local = commands.add_parser("local", help="Linux only, without Docker: run a local Slicer on a virtual display")
     add_server_options(local)
     local.add_argument("--slicer", metavar="PATH", help="Slicer launcher (installation or Slicer-build of a build tree; default: search usual places)")
@@ -1122,7 +1439,9 @@ def build_parser():
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    commands = ("build", "run", "stop", "logs", "status", "local")
+    commands = ("build", "run", "stop", "logs", "status", "local", "update")
+    if "--update" in argv and (not argv or argv[0] not in commands):
+        argv = ["update"] + [arg for arg in argv if arg != "--update"]
     if not argv or (argv[0] not in commands and argv[0] not in ("-h", "--help")):
         argv.insert(0, "run")
     # Everything after "--" goes to Slicer.

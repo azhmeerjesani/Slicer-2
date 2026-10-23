@@ -665,6 +665,15 @@ resolve_locations() {
   LOG_DIR="${WORK_DIR}/logs"
 }
 
+studio_version() {
+  # STUDIO_VERSION of Modules/Scripted/Studio/StudioLib/version.py: the version
+  # of Slicer Studio, written into Info.plist (CFBundleShortVersionString) and
+  # the disk image name. The in-app updater compares it with the release
+  # manifest (Utilities/Scripts/SlicerStudioRelease).
+  local file="${SOURCE_DIR}/Modules/Scripted/Studio/StudioLib/version.py"
+  sed -n 's/^STUDIO_VERSION *= *"\([0-9A-Za-z.+-]*\)".*/\1/p' "${file}" 2>/dev/null | head -n 1
+}
+
 source_minimum_macos() {
   # Lowest CMAKE_OSX_DEPLOYMENT_TARGET accepted by the source tree.
   sed -n 's/^ *set(required_deployment_target "\([0-9.]*\)").*/\1/p' \
@@ -1421,11 +1430,17 @@ make_studio_dmg() {
   # Rename the application. This must happen before signing: Info.plist is
   # sealed by the code signature. The new identifier keeps macOS (Launch
   # Services, the Dock, privacy permissions) from confusing it with an
-  # official Slicer installation.
+  # official Slicer installation. CFBundleShortVersionString is the version of
+  # Slicer Studio (the updater checks it before installing a downloaded image).
+  local studio
+  studio=$(studio_version)
+  [ -n "${studio}" ] || die "${EXIT_PACKAGE}" "could not read STUDIO_VERSION from ${SOURCE_DIR}/Modules/Scripted/Studio/StudioLib/version.py"
+  info "Slicer Studio version: ${studio}"
   if ! {
     run plutil -replace CFBundleName -string "${APP_NAME}" "${plist}" &&
       run plutil -replace CFBundleDisplayName -string "${APP_NAME}" "${plist}" &&
       run plutil -replace CFBundleIdentifier -string "${APP_BUNDLE_ID}" "${plist}" &&
+      run plutil -replace CFBundleShortVersionString -string "${studio}" "${plist}" &&
       run plutil -lint "${plist}"
   }; then
     die "${EXIT_PACKAGE}" "updating ${plist} failed"
@@ -1438,6 +1453,7 @@ make_studio_dmg() {
     if [ -z "${version}" ]; then
       die "${EXIT_PACKAGE}" "could not read CFBundleVersion from ${plist}"
     fi
+    info "3D Slicer version of the package: ${version}"
     check_bundle "${app}"
     # Let Finder refuse to start the application on a too old macOS instead
     # of failing to load its libraries.
@@ -1475,7 +1491,9 @@ make_studio_dmg() {
 
   run ln -s /Applications "${stage}/Applications" || die "${EXIT_PACKAGE}" "could not create the Applications link"
 
-  FINAL_DMG="${OUT_DIR}/${DMG_PREFIX}-${version}-macos-${HOST_ARCH}.dmg"
+  # The disk image is named after the Slicer Studio version (the release files
+  # of make_release.py and the in-app updater use that name).
+  FINAL_DMG="${OUT_DIR}/${DMG_PREFIX}-${studio}-macos-${HOST_ARCH}.dmg"
   local size="<application size + 15%>m"
   if [ "${DRY_RUN}" = 0 ]; then
     rm -f "${FINAL_DMG}" "${FINAL_DMG}.sha256"

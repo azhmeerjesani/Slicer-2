@@ -2,8 +2,8 @@
 
 It reuses the File, Edit, View and Help menus of the main window (plug-ins add Studio items to Help with
 ``addHelpActions()``, removed when Studio is left), and offers the workspaces,
-Search, the inspector and "Hide panels" toggles, Appearance (theme and density), common dialogs and
-the switch to the Classic interface. While Studio is shown, View also has "Recent messages…" (the
+Search, the inspector and "Hide panels" toggles, Appearance (theme and density), common dialogs, "Check for
+updates…" (A-08) and the switch to the Classic interface. While Studio is shown, View also has "Recent messages…" (the
 last toast messages). The menu opens with F10 (and Alt, Alt+F/E/V/H on Windows and Linux, see the shell).
 
 Appearance settings are changed through the Appearance settings panel, so they are stored in
@@ -193,6 +193,11 @@ class AppMenu:
 
         self.menu.addSeparator()
         self._addMainWindowAction(_("Settings…"), "Ctrl+2", mainWindow.findChild("QAction", "EditApplicationSettingsAction"), "settings")
+        # In-app updates (A-08): "Update to X…" when an update is known, else "Check for updates…"
+        self.updatesAction = self.menu.addAction(_("Check for updates…"))
+        self.updatesAction.setObjectName("StudioAppMenuUpdatesAction")
+        self.updatesAction.setProperty("studioIcon", "download")
+        self.updatesAction.connect("triggered()", self._onUpdatesTriggered)
         self._addMainWindowAction(_("Python console"), "Ctrl+3", self._pythonConsoleAction(), "terminal")
         self._addMainWindowAction(_("Error log"), "Ctrl+0", mainWindow.errorLogDockWidget().toggleViewAction(), "circle-alert")
         shortcuts = self.menu.addAction(_menuText(_("Keyboard shortcuts"), "Ctrl+/"))
@@ -280,6 +285,29 @@ class AppMenu:
         for name, action in self.densityActions.items():
             action.setEnabled(density is not None)
             action.setChecked(name == density)
+        self._updateUpdatesAction()
+
+    @staticmethod
+    def _updatesModule():
+        import sys
+
+        # Only once the update service runs (imported by the Studio module at startup)
+        return sys.modules.get("StudioLib.updates")
+
+    def _updateUpdatesAction(self):
+        updates = self._updatesModule()
+        available = updates.availableUpdate() if updates is not None else None
+        self.updatesAction.setText(_("Update to {version}…").format(version=available) if available else _("Check for updates…"))
+        self.updatesAction.setEnabled(updates is not None and updates.instance() is not None)
+
+    def _onUpdatesTriggered(self):
+        updates = self._updatesModule()
+        if updates is None or updates.instance() is None:
+            return
+        if updates.availableUpdate():
+            updates.updateNow()
+        else:
+            updates.showUpdates(check=True)
 
     def _setTheme(self, theme):
         setTheme(theme)

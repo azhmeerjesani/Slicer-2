@@ -34,7 +34,30 @@ def _onStartupCompleted():
             slicer.app.setProperty("SlicerDisclaimerHandledByApplication", False)
             logging.error("Studio: cannot receive the disclaimer:\n" + traceback.format_exc())
     shell.onStartupCompleted(startTime)
-    # Scene autosave and crash recovery, in Classic and in Studio (after the Studio apply time measurement)
+    # In-app updates (A-08), in Classic and in Studio. A required update is shown before the recovery offer, so
+    # autosave (and its recovery offer) starts when the startup check is done: at once without an automatic check,
+    # after at most 5 s with one, and not at all when the application quits to install a required update.
+    started = []
+
+    def startAutosave():
+        if not started:
+            started.append(True)
+            _startAutosave()
+
+    try:
+        from StudioLib import updates
+
+        updates.onStartupCompleted(startAutosave)
+    except Exception:
+        import logging
+        import traceback
+
+        logging.error("Updates could not be started:\n" + traceback.format_exc())
+        startAutosave()
+
+
+def _startAutosave():
+    """Scene autosave and crash recovery, in Classic and in Studio (after the Studio apply time measurement)."""
     try:
         from StudioLib import autosave
 
@@ -96,6 +119,10 @@ Autosave is not Save: use File &gt; Save to keep your work. If Slicer closes une
 without saving, the work can be recovered at the next start or with File &gt; Recover Autosaved Work.
 The location, the frequency and how long autosaves are kept are set in the Autosave panel of the
 application settings.</p>
+<p>Updates: Slicer Studio checks for a new version when it starts (one anonymous request to github.com) and
+offers it in the Updates panel of the application settings (also ≡ &gt; Check for updates…, or Help &gt; Check for
+Updates… in Classic). An update is downloaded, checked against its published SHA-256 checksum and installed when
+Slicer Studio restarts. Automatic checks can be turned off in the Updates panel.</p>
 """)
         self.parent.acknowledgementText = _("""
 <p>Icons: <a href="https://lucide.dev">Lucide</a> 0.468.0, ISC License,

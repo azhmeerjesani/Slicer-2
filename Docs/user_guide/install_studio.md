@@ -166,3 +166,100 @@ The second command starts Slicer Studio and opens the browser. Stop it with
 
 On Linux, the launcher can also run without Docker, on a local Slicer
 installation or build tree (`slicer_studio_web.py local`).
+
+## Updates
+
+Slicer Studio updates itself from the public releases of its repository,
+<https://github.com/azhmeerjesani/Slicer-2/releases>. The publisher creates each
+release by hand (see [Publish a release](#publish-a-release)); nothing needs an
+account or costs anything.
+
+### How checks work
+
+- **When.** An installed Slicer Studio (the macOS application or the Linux
+  package) checks when it starts and then once a day while it runs. The startup
+  waits for the check at most 5 seconds; without a network connection it starts
+  as usual.
+- **What is sent.** One anonymous HTTPS request to github.com for the small file
+  `studio-update.json` of the latest release
+  (`https://github.com/azhmeerjesani/Slicer-2/releases/latest/download/studio-update.json`).
+  Nothing about you, your computer or your data is sent, and no GitHub account or
+  API is used. Downloads are accepted only from github.com and GitHub's download
+  servers (`*.githubusercontent.com`).
+- **Turn automatic checks off** in **Settings** > **Updates** ("Check for
+  updates automatically when Slicer Studio starts"). **Check now** in the same
+  panel still works. The setting is stored as `Studio/Updates/AutoCheck`.
+- **Development builds** (a build tree) never check by themselves and never
+  install updates; **Check now** shows what the latest release is.
+
+### Optional and required updates
+
+- An **optional** update shows a quiet notice, "Update 1.2.0 available ·
+  Update now · Skip", at the top of the Library (or in the inspector), and the
+  **Updates** panel of the settings shows the version, the release notes and
+  **Update now**. **Skip** hides the notice for that version. You also find the
+  update in ≡ > **Check for updates…** (**Help** > **Check for Updates…** in the
+  Classic interface) and by searching for "update" (`Ctrl+K`).
+- A **required** update (marked so by the publisher, or because your version is
+  older than the release's minimum supported version) shows a dialog when Slicer
+  Studio starts, before anything else: **Update now** or **Quit**. If the check
+  cannot reach GitHub, a required update found earlier is shown as a warning
+  only, and you can keep working. The same warning (with **Update now** when it
+  can be installed) appears when the release has no file for your computer yet,
+  or when it is found while Slicer Studio is already running.
+
+### What Update now does
+
+1. It downloads the file of your computer (the disk image on macOS, the package
+   on Linux) with a progress bar and a **Cancel** button.
+2. It checks the size and the SHA-256 checksum of the download against the
+   release. A file that does not match is deleted and nothing is installed.
+3. It prepares the new version next to the installed one, then closes Slicer
+   Studio. The usual question about unsaved changes appears; unsaved work is also
+   autosaved and offered for recovery when the new version starts.
+4. After Slicer Studio has closed, the new version replaces the old one and
+   starts. If anything goes wrong, the previous version is put back, and the next
+   start says why.
+
+On macOS, if the Applications folder is not writable for you, macOS asks for an
+administrator password; you can instead quit, open the downloaded disk image and
+drag Slicer Studio to Applications. If Slicer Studio runs from the disk image or
+from the Downloads folder (macOS "App Translocation"), move it to Applications
+first. On Linux, the folder of the package must be writable; otherwise extract the
+new package yourself. **Install when I quit** installs the downloaded update the
+next time you quit, without restarting.
+
+### Web version
+
+`slicer_studio_web.py` checks for a new release when it starts Slicer Studio. A
+required update stops it with instructions; an optional one prints a notice. To
+update, run:
+
+```console
+python3 slicer_studio_web.py update
+```
+
+It downloads the launcher bundle and the Linux package of the latest release,
+checks their size and SHA-256 checksum, unpacks the new launcher next to the old
+one (or in the cache folder when run from a source tree) and builds the Docker
+image from the verified package. Start the new version with
+`python3 <new launcher folder>/slicer_studio_web.py run --recreate`.
+`--no-update-check` (or the environment variable
+`SLICER_STUDIO_UPDATE_FEED=off`) skips the check.
+
+### Publish a release
+
+Releases are made by hand. `Utilities/Scripts/SlicerStudioRelease/make_release.py`
+prepares the files and prints the steps; it never contacts GitHub:
+
+1. Raise `STUDIO_VERSION` in `Modules/Scripted/Studio/StudioLib/version.py` and
+   build the packages (macOS disk images with `build_dmg.sh`, the Linux package
+   with `make package`).
+2. Run `python3 Utilities/Scripts/SlicerStudioRelease/make_release.py <packages>
+   --notes notes.md` (add `--required` or `--minimum-supported X.Y.Z` to force the
+   update). It writes `studio-update.json` with the size and SHA-256 of each
+   package, and the web launcher bundle.
+3. On GitHub, create the release `v<version>`, attach every listed file, mark it
+   as the latest release and publish it.
+
+`Utilities/Scripts/SlicerStudioRelease/README.md` has the details.
