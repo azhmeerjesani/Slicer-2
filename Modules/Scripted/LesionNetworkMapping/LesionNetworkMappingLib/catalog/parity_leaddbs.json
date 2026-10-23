@@ -1,0 +1,1577 @@
+{
+  "format": "slicer-lnm-catalog",
+  "version": 1,
+  "catalog": "parity_leaddbs",
+  "updated": "2026-10-23",
+  "note": "Reference lesions for 'Verify against Lead-DBS': lesion masks and the Lead-DBS GSP1000v2 FullSet AvgR and T maps published in the van den Heuvel 2026 repository, at raw URLs pinned to one commit. Nothing here is bundled or downloaded automatically: the files are fetched only when the user starts a parity run after the GSP data use terms were shown. Each file's git blob id is pinned (verified after download); its sha256 is recorded in the cache manifest at the first download. The Lead-DBS maps are GSP-derived (terms GSP-DUT-2014).",
+  "source": {
+    "repository": "https://github.com/dutchconnectomelab/lesionnetworkmapping",
+    "commit": "ca410e63f01dfaa03985aa013195288693830ccb",
+    "licence": "none stated (vdH repo)",
+    "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6)"
+  },
+  "reference": {
+    "software": "Lead-DBS (cs_fmri_conseed_seed_tc)",
+    "connectome": "GSP 1000 v2 (Cohen 2023)",
+    "tag": "GSP1000v2",
+    "subset": "Full Set",
+    "label": "GSP1000v2xFullSet",
+    "doi": "10.7910/DVN/KKTJQC",
+    "n_subjects": 1000,
+    "grid": "MNI152 2 mm (91 x 109 x 91)",
+    "terms": "GSP-DUT-2014",
+    "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+    "citation": "Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833"
+  },
+  "thresholds": {
+    "t_flip": 7.0,
+    "top_fraction": 0.1
+  },
+  "lesions": [
+    {
+      "id": "aphasia-M2001",
+      "set": "APHASIA_RECOVERY",
+      "mask": "aphasia-M2001/mask",
+      "AvgR": "aphasia-M2001/AvgR",
+      "T": "aphasia-M2001/T"
+    },
+    {
+      "id": "aphasia-M2055",
+      "set": "APHASIA_RECOVERY",
+      "mask": "aphasia-M2055/mask",
+      "AvgR": "aphasia-M2055/AvgR",
+      "T": "aphasia-M2055/T"
+    },
+    {
+      "id": "aphasia-M2116",
+      "set": "APHASIA_RECOVERY",
+      "mask": "aphasia-M2116/mask",
+      "AvgR": "aphasia-M2116/AvgR",
+      "T": "aphasia-M2116/T"
+    },
+    {
+      "id": "aphasia-M2172",
+      "set": "APHASIA_RECOVERY",
+      "mask": "aphasia-M2172/mask",
+      "AvgR": "aphasia-M2172/AvgR",
+      "T": "aphasia-M2172/T"
+    },
+    {
+      "id": "aphasia-M2235",
+      "set": "APHASIA_RECOVERY",
+      "mask": "aphasia-M2235/mask",
+      "AvgR": "aphasia-M2235/AvgR",
+      "T": "aphasia-M2235/T"
+    },
+    {
+      "id": "aphasia-M2310",
+      "set": "APHASIA_RECOVERY",
+      "mask": "aphasia-M2310/mask",
+      "AvgR": "aphasia-M2310/AvgR",
+      "T": "aphasia-M2310/T"
+    },
+    {
+      "id": "addiction-0675",
+      "set": "ADDICTION",
+      "mask": "addiction-0675/mask",
+      "AvgR": "addiction-0675/AvgR",
+      "T": "addiction-0675/T"
+    },
+    {
+      "id": "addiction-2611",
+      "set": "ADDICTION",
+      "mask": "addiction-2611/mask",
+      "AvgR": "addiction-2611/AvgR",
+      "T": "addiction-2611/T"
+    },
+    {
+      "id": "addiction-3165",
+      "set": "ADDICTION",
+      "mask": "addiction-3165/mask",
+      "AvgR": "addiction-3165/AvgR",
+      "T": "addiction-3165/T"
+    },
+    {
+      "id": "addiction-r148",
+      "set": "ADDICTION",
+      "mask": "addiction-r148/mask",
+      "AvgR": "addiction-r148/AvgR",
+      "T": "addiction-r148/T"
+    },
+    {
+      "id": "addiction-r183",
+      "set": "ADDICTION",
+      "mask": "addiction-r183/mask",
+      "AvgR": "addiction-r183/AvgR",
+      "T": "addiction-r183/T"
+    },
+    {
+      "id": "addiction-r255",
+      "set": "ADDICTION",
+      "mask": "addiction-r255/mask",
+      "AvgR": "addiction-r255/AvgR",
+      "T": "addiction-r255/T"
+    },
+    {
+      "id": "epilepsy-lesion1",
+      "set": "EPILEPSY",
+      "mask": "epilepsy-lesion1/mask",
+      "AvgR": "epilepsy-lesion1/AvgR",
+      "T": "epilepsy-lesion1/T",
+      "pairing_note": "The Lead-DBS output keeps an earlier file name of this lesion; paired by the identifier the two names share"
+    },
+    {
+      "id": "epilepsy-lesion122",
+      "set": "EPILEPSY",
+      "mask": "epilepsy-lesion122/mask",
+      "AvgR": "epilepsy-lesion122/AvgR",
+      "T": "epilepsy-lesion122/T",
+      "pairing_note": "The Lead-DBS output keeps an earlier file name of this lesion; paired by the identifier the two names share"
+    },
+    {
+      "id": "epilepsy-lesion27",
+      "set": "EPILEPSY",
+      "mask": "epilepsy-lesion27/mask",
+      "AvgR": "epilepsy-lesion27/AvgR",
+      "T": "epilepsy-lesion27/T",
+      "pairing_note": "The Lead-DBS output keeps an earlier file name of this lesion; paired by the identifier the two names share"
+    },
+    {
+      "id": "epilepsy-lesion50",
+      "set": "EPILEPSY",
+      "mask": "epilepsy-lesion50/mask",
+      "AvgR": "epilepsy-lesion50/AvgR",
+      "T": "epilepsy-lesion50/T",
+      "pairing_note": "The Lead-DBS output keeps an earlier file name of this lesion; paired by the identifier the two names share"
+    },
+    {
+      "id": "epilepsy-lesion74",
+      "set": "EPILEPSY",
+      "mask": "epilepsy-lesion74/mask",
+      "AvgR": "epilepsy-lesion74/AvgR",
+      "T": "epilepsy-lesion74/T",
+      "pairing_note": "The Lead-DBS output keeps an earlier file name of this lesion; paired by the identifier the two names share"
+    },
+    {
+      "id": "epilepsy-lesion99",
+      "set": "EPILEPSY",
+      "mask": "epilepsy-lesion99/mask",
+      "AvgR": "epilepsy-lesion99/AvgR",
+      "T": "epilepsy-lesion99/T",
+      "pairing_note": "The Lead-DBS output keeps an earlier file name of this lesion; paired by the identifier the two names share"
+    },
+    {
+      "id": "synthetic-ROI1015",
+      "set": "SyntheticLesions",
+      "mask": "synthetic-ROI1015/mask",
+      "AvgR": "synthetic-ROI1015/AvgR",
+      "T": "synthetic-ROI1015/T",
+      "pairing_note": "The Lead-DBS output keeps an earlier file name of this lesion; paired by the identifier the two names share"
+    },
+    {
+      "id": "synthetic-ROI1235",
+      "set": "SyntheticLesions",
+      "mask": "synthetic-ROI1235/mask",
+      "AvgR": "synthetic-ROI1235/AvgR",
+      "T": "synthetic-ROI1235/T",
+      "pairing_note": "The Lead-DBS output keeps an earlier file name of this lesion; paired by the identifier the two names share"
+    },
+    {
+      "id": "synthetic-ROI1408",
+      "set": "SyntheticLesions",
+      "mask": "synthetic-ROI1408/mask",
+      "AvgR": "synthetic-ROI1408/AvgR",
+      "T": "synthetic-ROI1408/T",
+      "pairing_note": "The Lead-DBS output keeps an earlier file name of this lesion; paired by the identifier the two names share"
+    },
+    {
+      "id": "synthetic-ROI2074",
+      "set": "SyntheticLesions",
+      "mask": "synthetic-ROI2074/mask",
+      "AvgR": "synthetic-ROI2074/AvgR",
+      "T": "synthetic-ROI2074/T",
+      "pairing_note": "The Lead-DBS output keeps an earlier file name of this lesion; paired by the identifier the two names share"
+    },
+    {
+      "id": "synthetic-ROI2303",
+      "set": "SyntheticLesions",
+      "mask": "synthetic-ROI2303/mask",
+      "AvgR": "synthetic-ROI2303/AvgR",
+      "T": "synthetic-ROI2303/T",
+      "pairing_note": "The Lead-DBS output keeps an earlier file name of this lesion; paired by the identifier the two names share"
+    },
+    {
+      "id": "synthetic-ROI2498",
+      "set": "SyntheticLesions",
+      "mask": "synthetic-ROI2498/mask",
+      "AvgR": "synthetic-ROI2498/AvgR",
+      "T": "synthetic-ROI2498/T",
+      "pairing_note": "The Lead-DBS output keeps an earlier file name of this lesion; paired by the identifier the two names share"
+    }
+  ],
+  "entries": [
+    {
+      "id": "aphasia-M2001/mask",
+      "title": "aphasia-M2001 lesion mask (MNI 2 mm)",
+      "kind": "lesion",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/lesion_masks/APHASIA_RECOVERY/sub_M2001_lesion.nii.gz"
+      ],
+      "filename": "sub_M2001_lesion.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "8b3c32f2ccea6a2b7b8c28d5c26d4fe383314b10",
+      "repo_path": "data/lesion_masks/APHASIA_RECOVERY/sub_M2001_lesion.nii.gz",
+      "licence": "not-stated",
+      "badge": "grey",
+      "licence_note": "none stated (vdH repo): the repository has no LICENSE file; the source datasets keep their own terms",
+      "terms_url": "https://github.com/dutchconnectomelab/lesionnetworkmapping",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6)"
+    },
+    {
+      "id": "aphasia-M2001/AvgR",
+      "title": "aphasia-M2001 Lead-DBS GSP1000v2xFullSet AvgR map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/APHASIA_RECOVERY/sub_M2001_lesion.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz"
+      ],
+      "filename": "sub_M2001_lesion.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "bd2c2ec2cbc36a78408d479e26d5ea9bc4466e3e",
+      "repo_path": "data/leadDBS_output/APHASIA_RECOVERY/sub_M2001_lesion.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "aphasia-M2001/T",
+      "title": "aphasia-M2001 Lead-DBS GSP1000v2xFullSet T map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/APHASIA_RECOVERY/sub_M2001_lesion.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz"
+      ],
+      "filename": "sub_M2001_lesion.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "84484d584ddf5a92a30d8c158ee73f761c424482",
+      "repo_path": "data/leadDBS_output/APHASIA_RECOVERY/sub_M2001_lesion.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "aphasia-M2055/mask",
+      "title": "aphasia-M2055 lesion mask (MNI 2 mm)",
+      "kind": "lesion",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/lesion_masks/APHASIA_RECOVERY/sub_M2055_lesion.nii.gz"
+      ],
+      "filename": "sub_M2055_lesion.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "bb95f1399972ae2fa5b5db8068f3db924c616e46",
+      "repo_path": "data/lesion_masks/APHASIA_RECOVERY/sub_M2055_lesion.nii.gz",
+      "licence": "not-stated",
+      "badge": "grey",
+      "licence_note": "none stated (vdH repo): the repository has no LICENSE file; the source datasets keep their own terms",
+      "terms_url": "https://github.com/dutchconnectomelab/lesionnetworkmapping",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6)"
+    },
+    {
+      "id": "aphasia-M2055/AvgR",
+      "title": "aphasia-M2055 Lead-DBS GSP1000v2xFullSet AvgR map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/APHASIA_RECOVERY/sub_M2055_lesion.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz"
+      ],
+      "filename": "sub_M2055_lesion.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "da42aced398d8e886000cc3ac7a7bdee75441627",
+      "repo_path": "data/leadDBS_output/APHASIA_RECOVERY/sub_M2055_lesion.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "aphasia-M2055/T",
+      "title": "aphasia-M2055 Lead-DBS GSP1000v2xFullSet T map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/APHASIA_RECOVERY/sub_M2055_lesion.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz"
+      ],
+      "filename": "sub_M2055_lesion.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "7dc8db1c71bad024f219bf41a0e87dfb3c1d1133",
+      "repo_path": "data/leadDBS_output/APHASIA_RECOVERY/sub_M2055_lesion.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "aphasia-M2116/mask",
+      "title": "aphasia-M2116 lesion mask (MNI 2 mm)",
+      "kind": "lesion",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/lesion_masks/APHASIA_RECOVERY/sub_M2116_lesion.nii.gz"
+      ],
+      "filename": "sub_M2116_lesion.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "0afc0cbd46b7898615e92bbed69a1cc53bd974bd",
+      "repo_path": "data/lesion_masks/APHASIA_RECOVERY/sub_M2116_lesion.nii.gz",
+      "licence": "not-stated",
+      "badge": "grey",
+      "licence_note": "none stated (vdH repo): the repository has no LICENSE file; the source datasets keep their own terms",
+      "terms_url": "https://github.com/dutchconnectomelab/lesionnetworkmapping",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6)"
+    },
+    {
+      "id": "aphasia-M2116/AvgR",
+      "title": "aphasia-M2116 Lead-DBS GSP1000v2xFullSet AvgR map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/APHASIA_RECOVERY/sub_M2116_lesion.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz"
+      ],
+      "filename": "sub_M2116_lesion.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "4c524a4e3327d165a007b1d1166ac47e7157a7a0",
+      "repo_path": "data/leadDBS_output/APHASIA_RECOVERY/sub_M2116_lesion.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "aphasia-M2116/T",
+      "title": "aphasia-M2116 Lead-DBS GSP1000v2xFullSet T map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/APHASIA_RECOVERY/sub_M2116_lesion.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz"
+      ],
+      "filename": "sub_M2116_lesion.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "ae75eec7a87bf6228fff0155ff7ec687631b974a",
+      "repo_path": "data/leadDBS_output/APHASIA_RECOVERY/sub_M2116_lesion.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "aphasia-M2172/mask",
+      "title": "aphasia-M2172 lesion mask (MNI 2 mm)",
+      "kind": "lesion",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/lesion_masks/APHASIA_RECOVERY/sub_M2172_lesion.nii.gz"
+      ],
+      "filename": "sub_M2172_lesion.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "a1dfe0356ff79c503070d4ca929f3b9984a0c171",
+      "repo_path": "data/lesion_masks/APHASIA_RECOVERY/sub_M2172_lesion.nii.gz",
+      "licence": "not-stated",
+      "badge": "grey",
+      "licence_note": "none stated (vdH repo): the repository has no LICENSE file; the source datasets keep their own terms",
+      "terms_url": "https://github.com/dutchconnectomelab/lesionnetworkmapping",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6)"
+    },
+    {
+      "id": "aphasia-M2172/AvgR",
+      "title": "aphasia-M2172 Lead-DBS GSP1000v2xFullSet AvgR map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/APHASIA_RECOVERY/sub_M2172_lesion.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz"
+      ],
+      "filename": "sub_M2172_lesion.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "4e5ef193742722664ea53d3485fa9eb0235e7e97",
+      "repo_path": "data/leadDBS_output/APHASIA_RECOVERY/sub_M2172_lesion.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "aphasia-M2172/T",
+      "title": "aphasia-M2172 Lead-DBS GSP1000v2xFullSet T map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/APHASIA_RECOVERY/sub_M2172_lesion.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz"
+      ],
+      "filename": "sub_M2172_lesion.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "f9e8e35dc6bbec4b3b630282e281a681599a4c9c",
+      "repo_path": "data/leadDBS_output/APHASIA_RECOVERY/sub_M2172_lesion.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "aphasia-M2235/mask",
+      "title": "aphasia-M2235 lesion mask (MNI 2 mm)",
+      "kind": "lesion",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/lesion_masks/APHASIA_RECOVERY/sub_M2235_lesion.nii.gz"
+      ],
+      "filename": "sub_M2235_lesion.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "43ac6636a95382edcf4b1e41d4f95b511692c3b0",
+      "repo_path": "data/lesion_masks/APHASIA_RECOVERY/sub_M2235_lesion.nii.gz",
+      "licence": "not-stated",
+      "badge": "grey",
+      "licence_note": "none stated (vdH repo): the repository has no LICENSE file; the source datasets keep their own terms",
+      "terms_url": "https://github.com/dutchconnectomelab/lesionnetworkmapping",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6)"
+    },
+    {
+      "id": "aphasia-M2235/AvgR",
+      "title": "aphasia-M2235 Lead-DBS GSP1000v2xFullSet AvgR map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/APHASIA_RECOVERY/sub_M2235_lesion.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz"
+      ],
+      "filename": "sub_M2235_lesion.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "0a4118cd02cd418e16ad9281f20999acc388c2f5",
+      "repo_path": "data/leadDBS_output/APHASIA_RECOVERY/sub_M2235_lesion.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "aphasia-M2235/T",
+      "title": "aphasia-M2235 Lead-DBS GSP1000v2xFullSet T map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/APHASIA_RECOVERY/sub_M2235_lesion.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz"
+      ],
+      "filename": "sub_M2235_lesion.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "fac6433e3f7153d164cd7d268f3861d884c23939",
+      "repo_path": "data/leadDBS_output/APHASIA_RECOVERY/sub_M2235_lesion.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "aphasia-M2310/mask",
+      "title": "aphasia-M2310 lesion mask (MNI 2 mm)",
+      "kind": "lesion",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/lesion_masks/APHASIA_RECOVERY/sub_M2310_lesion.nii.gz"
+      ],
+      "filename": "sub_M2310_lesion.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "766b7e28dff2796e8185ad4d8efd5e8eda30208c",
+      "repo_path": "data/lesion_masks/APHASIA_RECOVERY/sub_M2310_lesion.nii.gz",
+      "licence": "not-stated",
+      "badge": "grey",
+      "licence_note": "none stated (vdH repo): the repository has no LICENSE file; the source datasets keep their own terms",
+      "terms_url": "https://github.com/dutchconnectomelab/lesionnetworkmapping",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6)"
+    },
+    {
+      "id": "aphasia-M2310/AvgR",
+      "title": "aphasia-M2310 Lead-DBS GSP1000v2xFullSet AvgR map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/APHASIA_RECOVERY/sub_M2310_lesion.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz"
+      ],
+      "filename": "sub_M2310_lesion.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "446b330afc05afd369c5383b08dfc5bd1cae6b2f",
+      "repo_path": "data/leadDBS_output/APHASIA_RECOVERY/sub_M2310_lesion.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "aphasia-M2310/T",
+      "title": "aphasia-M2310 Lead-DBS GSP1000v2xFullSet T map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/APHASIA_RECOVERY/sub_M2310_lesion.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz"
+      ],
+      "filename": "sub_M2310_lesion.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "7f4eec83acba2c82f4fc35e4d465ade8a8a6311a",
+      "repo_path": "data/leadDBS_output/APHASIA_RECOVERY/sub_M2310_lesion.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "addiction-0675/mask",
+      "title": "addiction-0675 lesion mask (MNI 2 mm)",
+      "kind": "lesion",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/lesion_masks/ADDICTION/0675_lesion_MNI.nii.gz"
+      ],
+      "filename": "0675_lesion_MNI.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "c76b2252234a1014db3abc64be16c4c255760b7e",
+      "repo_path": "data/lesion_masks/ADDICTION/0675_lesion_MNI.nii.gz",
+      "licence": "not-stated",
+      "badge": "grey",
+      "licence_note": "none stated (vdH repo): the repository has no LICENSE file; the source datasets keep their own terms",
+      "terms_url": "https://github.com/dutchconnectomelab/lesionnetworkmapping",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6)"
+    },
+    {
+      "id": "addiction-0675/AvgR",
+      "title": "addiction-0675 Lead-DBS GSP1000v2xFullSet AvgR map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/ADDICTION/0675_lesion_MNI_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz"
+      ],
+      "filename": "0675_lesion_MNI_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "fb5d181d5d96298c0a141f7d277e36188263f771",
+      "repo_path": "data/leadDBS_output/ADDICTION/0675_lesion_MNI_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "addiction-0675/T",
+      "title": "addiction-0675 Lead-DBS GSP1000v2xFullSet T map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/ADDICTION/0675_lesion_MNI_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz"
+      ],
+      "filename": "0675_lesion_MNI_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "2761b59e9dbe5c1f0cdfd57b087885a14aeec154",
+      "repo_path": "data/leadDBS_output/ADDICTION/0675_lesion_MNI_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "addiction-2611/mask",
+      "title": "addiction-2611 lesion mask (MNI 2 mm)",
+      "kind": "lesion",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/lesion_masks/ADDICTION/2611_lesion_MNI.nii.gz"
+      ],
+      "filename": "2611_lesion_MNI.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "18ac1d9b182ba7f040e8b746ba4191b9e9dcd799",
+      "repo_path": "data/lesion_masks/ADDICTION/2611_lesion_MNI.nii.gz",
+      "licence": "not-stated",
+      "badge": "grey",
+      "licence_note": "none stated (vdH repo): the repository has no LICENSE file; the source datasets keep their own terms",
+      "terms_url": "https://github.com/dutchconnectomelab/lesionnetworkmapping",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6)"
+    },
+    {
+      "id": "addiction-2611/AvgR",
+      "title": "addiction-2611 Lead-DBS GSP1000v2xFullSet AvgR map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/ADDICTION/2611_lesion_MNI_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz"
+      ],
+      "filename": "2611_lesion_MNI_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "16266c688d7d8240b78a41214fae486f5938fe85",
+      "repo_path": "data/leadDBS_output/ADDICTION/2611_lesion_MNI_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "addiction-2611/T",
+      "title": "addiction-2611 Lead-DBS GSP1000v2xFullSet T map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/ADDICTION/2611_lesion_MNI_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz"
+      ],
+      "filename": "2611_lesion_MNI_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "7777350b94fd8cd596af01bbfb81b96135308aef",
+      "repo_path": "data/leadDBS_output/ADDICTION/2611_lesion_MNI_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "addiction-3165/mask",
+      "title": "addiction-3165 lesion mask (MNI 2 mm)",
+      "kind": "lesion",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/lesion_masks/ADDICTION/3165_lesion_MNI.nii.gz"
+      ],
+      "filename": "3165_lesion_MNI.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "6276946564d826da9e9cd1ff9c22a8773592495d",
+      "repo_path": "data/lesion_masks/ADDICTION/3165_lesion_MNI.nii.gz",
+      "licence": "not-stated",
+      "badge": "grey",
+      "licence_note": "none stated (vdH repo): the repository has no LICENSE file; the source datasets keep their own terms",
+      "terms_url": "https://github.com/dutchconnectomelab/lesionnetworkmapping",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6)"
+    },
+    {
+      "id": "addiction-3165/AvgR",
+      "title": "addiction-3165 Lead-DBS GSP1000v2xFullSet AvgR map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/ADDICTION/3165_lesion_MNI_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz"
+      ],
+      "filename": "3165_lesion_MNI_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "5ba2381b6a31f986c81cd2ecaaca178305ad25a8",
+      "repo_path": "data/leadDBS_output/ADDICTION/3165_lesion_MNI_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "addiction-3165/T",
+      "title": "addiction-3165 Lead-DBS GSP1000v2xFullSet T map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/ADDICTION/3165_lesion_MNI_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz"
+      ],
+      "filename": "3165_lesion_MNI_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "88edd45ebe22bbfd510ebc974c9ee595d15e0246",
+      "repo_path": "data/leadDBS_output/ADDICTION/3165_lesion_MNI_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "addiction-r148/mask",
+      "title": "addiction-r148 lesion mask (MNI 2 mm)",
+      "kind": "lesion",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/lesion_masks/ADDICTION/r148_lesion_MNI.nii.gz"
+      ],
+      "filename": "r148_lesion_MNI.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "44ee8ca701fc267efaa53f874d4319fc67725219",
+      "repo_path": "data/lesion_masks/ADDICTION/r148_lesion_MNI.nii.gz",
+      "licence": "not-stated",
+      "badge": "grey",
+      "licence_note": "none stated (vdH repo): the repository has no LICENSE file; the source datasets keep their own terms",
+      "terms_url": "https://github.com/dutchconnectomelab/lesionnetworkmapping",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6)"
+    },
+    {
+      "id": "addiction-r148/AvgR",
+      "title": "addiction-r148 Lead-DBS GSP1000v2xFullSet AvgR map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/ADDICTION/r148_lesion_MNI_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz"
+      ],
+      "filename": "r148_lesion_MNI_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "2da4a30f952c8986af41cd087fe2d827b7f56e59",
+      "repo_path": "data/leadDBS_output/ADDICTION/r148_lesion_MNI_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "addiction-r148/T",
+      "title": "addiction-r148 Lead-DBS GSP1000v2xFullSet T map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/ADDICTION/r148_lesion_MNI_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz"
+      ],
+      "filename": "r148_lesion_MNI_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "fc7aab3ea1c258f644f0091bbaea2765fff152fe",
+      "repo_path": "data/leadDBS_output/ADDICTION/r148_lesion_MNI_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "addiction-r183/mask",
+      "title": "addiction-r183 lesion mask (MNI 2 mm)",
+      "kind": "lesion",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/lesion_masks/ADDICTION/r183_lesion_MNI.nii.gz"
+      ],
+      "filename": "r183_lesion_MNI.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "27e89efd7ae0fa93052dc80bf3f292eb3d047061",
+      "repo_path": "data/lesion_masks/ADDICTION/r183_lesion_MNI.nii.gz",
+      "licence": "not-stated",
+      "badge": "grey",
+      "licence_note": "none stated (vdH repo): the repository has no LICENSE file; the source datasets keep their own terms",
+      "terms_url": "https://github.com/dutchconnectomelab/lesionnetworkmapping",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6)"
+    },
+    {
+      "id": "addiction-r183/AvgR",
+      "title": "addiction-r183 Lead-DBS GSP1000v2xFullSet AvgR map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/ADDICTION/r183_lesion_MNI_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz"
+      ],
+      "filename": "r183_lesion_MNI_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "f0f0354bf81505e0dee9d0031db0814656858abd",
+      "repo_path": "data/leadDBS_output/ADDICTION/r183_lesion_MNI_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "addiction-r183/T",
+      "title": "addiction-r183 Lead-DBS GSP1000v2xFullSet T map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/ADDICTION/r183_lesion_MNI_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz"
+      ],
+      "filename": "r183_lesion_MNI_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "aafbb15718f77830f8d091f1a6a61b7f7c53531a",
+      "repo_path": "data/leadDBS_output/ADDICTION/r183_lesion_MNI_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "addiction-r255/mask",
+      "title": "addiction-r255 lesion mask (MNI 2 mm)",
+      "kind": "lesion",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/lesion_masks/ADDICTION/r255_lesion_MNI.nii.gz"
+      ],
+      "filename": "r255_lesion_MNI.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "6c50d5c156f36946745ab3ffae6560a6e0aa6f3c",
+      "repo_path": "data/lesion_masks/ADDICTION/r255_lesion_MNI.nii.gz",
+      "licence": "not-stated",
+      "badge": "grey",
+      "licence_note": "none stated (vdH repo): the repository has no LICENSE file; the source datasets keep their own terms",
+      "terms_url": "https://github.com/dutchconnectomelab/lesionnetworkmapping",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6)"
+    },
+    {
+      "id": "addiction-r255/AvgR",
+      "title": "addiction-r255 Lead-DBS GSP1000v2xFullSet AvgR map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/ADDICTION/r255_lesion_MNI_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz"
+      ],
+      "filename": "r255_lesion_MNI_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "56fe264038aecea58c1d2f303c9fa03123de2f4a",
+      "repo_path": "data/leadDBS_output/ADDICTION/r255_lesion_MNI_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "addiction-r255/T",
+      "title": "addiction-r255 Lead-DBS GSP1000v2xFullSet T map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/ADDICTION/r255_lesion_MNI_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz"
+      ],
+      "filename": "r255_lesion_MNI_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "17ef4352a0b9d145014226c92bfc8eb8d4be838f",
+      "repo_path": "data/leadDBS_output/ADDICTION/r255_lesion_MNI_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "epilepsy-lesion1/mask",
+      "title": "epilepsy-lesion1 lesion mask (MNI 2 mm)",
+      "kind": "lesion",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/lesion_masks/EPILEPSY/lesion1_EPILEPSY_JI_MNI152.nii.gz"
+      ],
+      "filename": "lesion1_EPILEPSY_JI_MNI152.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "bd8e0fc6d991e2532b1a1d4698ce8a4ae181e743",
+      "repo_path": "data/lesion_masks/EPILEPSY/lesion1_EPILEPSY_JI_MNI152.nii.gz",
+      "licence": "not-stated",
+      "badge": "grey",
+      "licence_note": "none stated (vdH repo): the repository has no LICENSE file; the source datasets keep their own terms",
+      "terms_url": "https://github.com/dutchconnectomelab/lesionnetworkmapping",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6)"
+    },
+    {
+      "id": "epilepsy-lesion1/AvgR",
+      "title": "epilepsy-lesion1 Lead-DBS GSP1000v2xFullSet AvgR map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/EPILEPSY/lesion1_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz"
+      ],
+      "filename": "lesion1_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "e4196dbba39d69dc01939508d41d8d3a65b9abf5",
+      "repo_path": "data/leadDBS_output/EPILEPSY/lesion1_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "epilepsy-lesion1/T",
+      "title": "epilepsy-lesion1 Lead-DBS GSP1000v2xFullSet T map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/EPILEPSY/lesion1_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz"
+      ],
+      "filename": "lesion1_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "15d86ed9265d8d0f8f4b822c4e1726120d56d5f3",
+      "repo_path": "data/leadDBS_output/EPILEPSY/lesion1_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "epilepsy-lesion122/mask",
+      "title": "epilepsy-lesion122 lesion mask (MNI 2 mm)",
+      "kind": "lesion",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/lesion_masks/EPILEPSY/lesion122_EPILEPSY_JI_MNI152.nii.gz"
+      ],
+      "filename": "lesion122_EPILEPSY_JI_MNI152.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "ad93295ff10ec28353131325a9e56ccd64f82ef8",
+      "repo_path": "data/lesion_masks/EPILEPSY/lesion122_EPILEPSY_JI_MNI152.nii.gz",
+      "licence": "not-stated",
+      "badge": "grey",
+      "licence_note": "none stated (vdH repo): the repository has no LICENSE file; the source datasets keep their own terms",
+      "terms_url": "https://github.com/dutchconnectomelab/lesionnetworkmapping",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6)"
+    },
+    {
+      "id": "epilepsy-lesion122/AvgR",
+      "title": "epilepsy-lesion122 Lead-DBS GSP1000v2xFullSet AvgR map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/EPILEPSY/lesion122_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz"
+      ],
+      "filename": "lesion122_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "80c20a90bc6b30fefc6429a1f92d75dc9c9b80cc",
+      "repo_path": "data/leadDBS_output/EPILEPSY/lesion122_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "epilepsy-lesion122/T",
+      "title": "epilepsy-lesion122 Lead-DBS GSP1000v2xFullSet T map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/EPILEPSY/lesion122_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz"
+      ],
+      "filename": "lesion122_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "4b979c9c187209433ace16274a2c1e9fc2e36985",
+      "repo_path": "data/leadDBS_output/EPILEPSY/lesion122_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "epilepsy-lesion27/mask",
+      "title": "epilepsy-lesion27 lesion mask (MNI 2 mm)",
+      "kind": "lesion",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/lesion_masks/EPILEPSY/lesion27_EPILEPSY_JI_MNI152.nii.gz"
+      ],
+      "filename": "lesion27_EPILEPSY_JI_MNI152.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "dba5a34c90228742633ec54fcb9045d2843db60e",
+      "repo_path": "data/lesion_masks/EPILEPSY/lesion27_EPILEPSY_JI_MNI152.nii.gz",
+      "licence": "not-stated",
+      "badge": "grey",
+      "licence_note": "none stated (vdH repo): the repository has no LICENSE file; the source datasets keep their own terms",
+      "terms_url": "https://github.com/dutchconnectomelab/lesionnetworkmapping",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6)"
+    },
+    {
+      "id": "epilepsy-lesion27/AvgR",
+      "title": "epilepsy-lesion27 Lead-DBS GSP1000v2xFullSet AvgR map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/EPILEPSY/lesion27_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz"
+      ],
+      "filename": "lesion27_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "eeb1bb234079d3ab29b885159818d817692a5122",
+      "repo_path": "data/leadDBS_output/EPILEPSY/lesion27_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "epilepsy-lesion27/T",
+      "title": "epilepsy-lesion27 Lead-DBS GSP1000v2xFullSet T map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/EPILEPSY/lesion27_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz"
+      ],
+      "filename": "lesion27_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "1206718bda5a6e96f4c494149e80e863e86b6d5e",
+      "repo_path": "data/leadDBS_output/EPILEPSY/lesion27_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "epilepsy-lesion50/mask",
+      "title": "epilepsy-lesion50 lesion mask (MNI 2 mm)",
+      "kind": "lesion",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/lesion_masks/EPILEPSY/lesion50_EPILEPSY_JI_MNI152.nii.gz"
+      ],
+      "filename": "lesion50_EPILEPSY_JI_MNI152.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "f31d09f334c98912254dd51cbe608c7db0309079",
+      "repo_path": "data/lesion_masks/EPILEPSY/lesion50_EPILEPSY_JI_MNI152.nii.gz",
+      "licence": "not-stated",
+      "badge": "grey",
+      "licence_note": "none stated (vdH repo): the repository has no LICENSE file; the source datasets keep their own terms",
+      "terms_url": "https://github.com/dutchconnectomelab/lesionnetworkmapping",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6)"
+    },
+    {
+      "id": "epilepsy-lesion50/AvgR",
+      "title": "epilepsy-lesion50 Lead-DBS GSP1000v2xFullSet AvgR map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/EPILEPSY/lesion50_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz"
+      ],
+      "filename": "lesion50_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "23ae33053bc043613fd60c1c15c7824d9e8cde8d",
+      "repo_path": "data/leadDBS_output/EPILEPSY/lesion50_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "epilepsy-lesion50/T",
+      "title": "epilepsy-lesion50 Lead-DBS GSP1000v2xFullSet T map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/EPILEPSY/lesion50_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz"
+      ],
+      "filename": "lesion50_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "079f2e1045b5e1302b9ae2b2386f6aca2aac0d4d",
+      "repo_path": "data/leadDBS_output/EPILEPSY/lesion50_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "epilepsy-lesion74/mask",
+      "title": "epilepsy-lesion74 lesion mask (MNI 2 mm)",
+      "kind": "lesion",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/lesion_masks/EPILEPSY/lesion74_EPILEPSY_JI_MNI152.nii.gz"
+      ],
+      "filename": "lesion74_EPILEPSY_JI_MNI152.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "5adb8ecaf90af401fa3c678032d660a0284ce337",
+      "repo_path": "data/lesion_masks/EPILEPSY/lesion74_EPILEPSY_JI_MNI152.nii.gz",
+      "licence": "not-stated",
+      "badge": "grey",
+      "licence_note": "none stated (vdH repo): the repository has no LICENSE file; the source datasets keep their own terms",
+      "terms_url": "https://github.com/dutchconnectomelab/lesionnetworkmapping",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6)"
+    },
+    {
+      "id": "epilepsy-lesion74/AvgR",
+      "title": "epilepsy-lesion74 Lead-DBS GSP1000v2xFullSet AvgR map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/EPILEPSY/lesion74_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz"
+      ],
+      "filename": "lesion74_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "75586abf1323c76fe9bffac64ac16b14c208d9b7",
+      "repo_path": "data/leadDBS_output/EPILEPSY/lesion74_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "epilepsy-lesion74/T",
+      "title": "epilepsy-lesion74 Lead-DBS GSP1000v2xFullSet T map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/EPILEPSY/lesion74_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz"
+      ],
+      "filename": "lesion74_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "f4e0df09f5f1c0d8b2fcff6b72bb27357c1b3c52",
+      "repo_path": "data/leadDBS_output/EPILEPSY/lesion74_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "epilepsy-lesion99/mask",
+      "title": "epilepsy-lesion99 lesion mask (MNI 2 mm)",
+      "kind": "lesion",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/lesion_masks/EPILEPSY/lesion99_EPILEPSY_JI_MNI152.nii.gz"
+      ],
+      "filename": "lesion99_EPILEPSY_JI_MNI152.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "6be00b149edad4d934eaab4ede121cdadc30b12d",
+      "repo_path": "data/lesion_masks/EPILEPSY/lesion99_EPILEPSY_JI_MNI152.nii.gz",
+      "licence": "not-stated",
+      "badge": "grey",
+      "licence_note": "none stated (vdH repo): the repository has no LICENSE file; the source datasets keep their own terms",
+      "terms_url": "https://github.com/dutchconnectomelab/lesionnetworkmapping",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6)"
+    },
+    {
+      "id": "epilepsy-lesion99/AvgR",
+      "title": "epilepsy-lesion99 Lead-DBS GSP1000v2xFullSet AvgR map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/EPILEPSY/lesion99_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz"
+      ],
+      "filename": "lesion99_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "6a63736d871aed4e19f4edc47bb23af19bccd42e",
+      "repo_path": "data/leadDBS_output/EPILEPSY/lesion99_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "epilepsy-lesion99/T",
+      "title": "epilepsy-lesion99 Lead-DBS GSP1000v2xFullSet T map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/EPILEPSY/lesion99_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz"
+      ],
+      "filename": "lesion99_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "54630fad42a68f8cfb337c42763f604c0822e75a",
+      "repo_path": "data/leadDBS_output/EPILEPSY/lesion99_EPILEPSY_JI_ONLYNEG_111_exp6mm.nii.gz_MNI152_222.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "synthetic-ROI1015/mask",
+      "title": "synthetic-ROI1015 lesion mask (MNI 2 mm)",
+      "kind": "lesion",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/lesion_masks/SyntheticLesions/simulated_lesion_schaefer1000_ROI1015_dilated.nii.gz"
+      ],
+      "filename": "simulated_lesion_schaefer1000_ROI1015_dilated.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "169957ffe8793905aef4fef3959ac0c5d766c1a5",
+      "repo_path": "data/lesion_masks/SyntheticLesions/simulated_lesion_schaefer1000_ROI1015_dilated.nii.gz",
+      "licence": "not-stated",
+      "badge": "grey",
+      "licence_note": "none stated (vdH repo): the repository has no LICENSE file; the source datasets keep their own terms",
+      "terms_url": "https://github.com/dutchconnectomelab/lesionnetworkmapping",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6)"
+    },
+    {
+      "id": "synthetic-ROI1015/AvgR",
+      "title": "synthetic-ROI1015 Lead-DBS GSP1000v2xFullSet AvgR map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/SyntheticLesions/simulated_lesion_schaefer1000_ROI1015_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz"
+      ],
+      "filename": "simulated_lesion_schaefer1000_ROI1015_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "abad24dbffa1f0b2c299558cc282d43638e0309c",
+      "repo_path": "data/leadDBS_output/SyntheticLesions/simulated_lesion_schaefer1000_ROI1015_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "synthetic-ROI1015/T",
+      "title": "synthetic-ROI1015 Lead-DBS GSP1000v2xFullSet T map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/SyntheticLesions/simulated_lesion_schaefer1000_ROI1015_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz"
+      ],
+      "filename": "simulated_lesion_schaefer1000_ROI1015_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "4b11cee6ea6a112edbc1bb779df2a7d8ad91e78d",
+      "repo_path": "data/leadDBS_output/SyntheticLesions/simulated_lesion_schaefer1000_ROI1015_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "synthetic-ROI1235/mask",
+      "title": "synthetic-ROI1235 lesion mask (MNI 2 mm)",
+      "kind": "lesion",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/lesion_masks/SyntheticLesions/simulated_lesion_schaefer1000_ROI1235_dilated.nii.gz"
+      ],
+      "filename": "simulated_lesion_schaefer1000_ROI1235_dilated.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "5a51c8540893fd7722282c6fc2bb421f97939c76",
+      "repo_path": "data/lesion_masks/SyntheticLesions/simulated_lesion_schaefer1000_ROI1235_dilated.nii.gz",
+      "licence": "not-stated",
+      "badge": "grey",
+      "licence_note": "none stated (vdH repo): the repository has no LICENSE file; the source datasets keep their own terms",
+      "terms_url": "https://github.com/dutchconnectomelab/lesionnetworkmapping",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6)"
+    },
+    {
+      "id": "synthetic-ROI1235/AvgR",
+      "title": "synthetic-ROI1235 Lead-DBS GSP1000v2xFullSet AvgR map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/SyntheticLesions/simulated_lesion_schaefer1000_ROI1235_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz"
+      ],
+      "filename": "simulated_lesion_schaefer1000_ROI1235_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "69f799aa84a96a1717ef1b397a32b301514cfbe5",
+      "repo_path": "data/leadDBS_output/SyntheticLesions/simulated_lesion_schaefer1000_ROI1235_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "synthetic-ROI1235/T",
+      "title": "synthetic-ROI1235 Lead-DBS GSP1000v2xFullSet T map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/SyntheticLesions/simulated_lesion_schaefer1000_ROI1235_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz"
+      ],
+      "filename": "simulated_lesion_schaefer1000_ROI1235_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "98f628b432de412555d07a536d2695f14d6c25a9",
+      "repo_path": "data/leadDBS_output/SyntheticLesions/simulated_lesion_schaefer1000_ROI1235_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "synthetic-ROI1408/mask",
+      "title": "synthetic-ROI1408 lesion mask (MNI 2 mm)",
+      "kind": "lesion",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/lesion_masks/SyntheticLesions/simulated_lesion_schaefer1000_ROI1408_dilated.nii.gz"
+      ],
+      "filename": "simulated_lesion_schaefer1000_ROI1408_dilated.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "0b4e4252cf8d7f2e749c220d8120f08d1aa290ac",
+      "repo_path": "data/lesion_masks/SyntheticLesions/simulated_lesion_schaefer1000_ROI1408_dilated.nii.gz",
+      "licence": "not-stated",
+      "badge": "grey",
+      "licence_note": "none stated (vdH repo): the repository has no LICENSE file; the source datasets keep their own terms",
+      "terms_url": "https://github.com/dutchconnectomelab/lesionnetworkmapping",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6)"
+    },
+    {
+      "id": "synthetic-ROI1408/AvgR",
+      "title": "synthetic-ROI1408 Lead-DBS GSP1000v2xFullSet AvgR map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/SyntheticLesions/simulated_lesion_schaefer1000_ROI1408_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz"
+      ],
+      "filename": "simulated_lesion_schaefer1000_ROI1408_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "595b2e3d449fef730754b9273b14ee0b451be509",
+      "repo_path": "data/leadDBS_output/SyntheticLesions/simulated_lesion_schaefer1000_ROI1408_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "synthetic-ROI1408/T",
+      "title": "synthetic-ROI1408 Lead-DBS GSP1000v2xFullSet T map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/SyntheticLesions/simulated_lesion_schaefer1000_ROI1408_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz"
+      ],
+      "filename": "simulated_lesion_schaefer1000_ROI1408_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "88504234c37f32a66c3b57f232b7168a5842e1f3",
+      "repo_path": "data/leadDBS_output/SyntheticLesions/simulated_lesion_schaefer1000_ROI1408_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "synthetic-ROI2074/mask",
+      "title": "synthetic-ROI2074 lesion mask (MNI 2 mm)",
+      "kind": "lesion",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/lesion_masks/SyntheticLesions/simulated_lesion_schaefer1000_ROI2074_dilated.nii.gz"
+      ],
+      "filename": "simulated_lesion_schaefer1000_ROI2074_dilated.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "dadeeebc560431dcdcafda275c18bbbb56b6e954",
+      "repo_path": "data/lesion_masks/SyntheticLesions/simulated_lesion_schaefer1000_ROI2074_dilated.nii.gz",
+      "licence": "not-stated",
+      "badge": "grey",
+      "licence_note": "none stated (vdH repo): the repository has no LICENSE file; the source datasets keep their own terms",
+      "terms_url": "https://github.com/dutchconnectomelab/lesionnetworkmapping",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6)"
+    },
+    {
+      "id": "synthetic-ROI2074/AvgR",
+      "title": "synthetic-ROI2074 Lead-DBS GSP1000v2xFullSet AvgR map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/SyntheticLesions/simulated_lesion_schaefer1000_ROI2074_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz"
+      ],
+      "filename": "simulated_lesion_schaefer1000_ROI2074_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "6fa05828465f422fd6215c4674e93057edb75098",
+      "repo_path": "data/leadDBS_output/SyntheticLesions/simulated_lesion_schaefer1000_ROI2074_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "synthetic-ROI2074/T",
+      "title": "synthetic-ROI2074 Lead-DBS GSP1000v2xFullSet T map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/SyntheticLesions/simulated_lesion_schaefer1000_ROI2074_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz"
+      ],
+      "filename": "simulated_lesion_schaefer1000_ROI2074_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "489c9152724b055e717bf519715d6793038f4e4d",
+      "repo_path": "data/leadDBS_output/SyntheticLesions/simulated_lesion_schaefer1000_ROI2074_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "synthetic-ROI2303/mask",
+      "title": "synthetic-ROI2303 lesion mask (MNI 2 mm)",
+      "kind": "lesion",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/lesion_masks/SyntheticLesions/simulated_lesion_schaefer1000_ROI2303_dilated.nii.gz"
+      ],
+      "filename": "simulated_lesion_schaefer1000_ROI2303_dilated.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "cd262e8fb2a4d006e9ab5ac023cd8ebbe9298f2c",
+      "repo_path": "data/lesion_masks/SyntheticLesions/simulated_lesion_schaefer1000_ROI2303_dilated.nii.gz",
+      "licence": "not-stated",
+      "badge": "grey",
+      "licence_note": "none stated (vdH repo): the repository has no LICENSE file; the source datasets keep their own terms",
+      "terms_url": "https://github.com/dutchconnectomelab/lesionnetworkmapping",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6)"
+    },
+    {
+      "id": "synthetic-ROI2303/AvgR",
+      "title": "synthetic-ROI2303 Lead-DBS GSP1000v2xFullSet AvgR map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/SyntheticLesions/simulated_lesion_schaefer1000_ROI2303_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz"
+      ],
+      "filename": "simulated_lesion_schaefer1000_ROI2303_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "8e2bc7559e5b9cd0df71f8250edf3c4ac796e67f",
+      "repo_path": "data/leadDBS_output/SyntheticLesions/simulated_lesion_schaefer1000_ROI2303_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "synthetic-ROI2303/T",
+      "title": "synthetic-ROI2303 Lead-DBS GSP1000v2xFullSet T map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/SyntheticLesions/simulated_lesion_schaefer1000_ROI2303_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz"
+      ],
+      "filename": "simulated_lesion_schaefer1000_ROI2303_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "514f31a93d86e435518c94817e43ad66e45d151f",
+      "repo_path": "data/leadDBS_output/SyntheticLesions/simulated_lesion_schaefer1000_ROI2303_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "synthetic-ROI2498/mask",
+      "title": "synthetic-ROI2498 lesion mask (MNI 2 mm)",
+      "kind": "lesion",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/lesion_masks/SyntheticLesions/simulated_lesion_schaefer1000_ROI2498_dilated.nii.gz"
+      ],
+      "filename": "simulated_lesion_schaefer1000_ROI2498_dilated.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "ca6536f593909c391baf7ec2a6dfc11e3d0b1e27",
+      "repo_path": "data/lesion_masks/SyntheticLesions/simulated_lesion_schaefer1000_ROI2498_dilated.nii.gz",
+      "licence": "not-stated",
+      "badge": "grey",
+      "licence_note": "none stated (vdH repo): the repository has no LICENSE file; the source datasets keep their own terms",
+      "terms_url": "https://github.com/dutchconnectomelab/lesionnetworkmapping",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6)"
+    },
+    {
+      "id": "synthetic-ROI2498/AvgR",
+      "title": "synthetic-ROI2498 Lead-DBS GSP1000v2xFullSet AvgR map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/SyntheticLesions/simulated_lesion_schaefer1000_ROI2498_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz"
+      ],
+      "filename": "simulated_lesion_schaefer1000_ROI2498_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "cdf55772c6b6bebb83e05164237256ff797ab167",
+      "repo_path": "data/leadDBS_output/SyntheticLesions/simulated_lesion_schaefer1000_ROI2498_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-AvgR_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "synthetic-ROI2498/T",
+      "title": "synthetic-ROI2498 Lead-DBS GSP1000v2xFullSet T map",
+      "kind": "leaddbs_map",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/leadDBS_output/SyntheticLesions/simulated_lesion_schaefer1000_ROI2498_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz"
+      ],
+      "filename": "simulated_lesion_schaefer1000_ROI2498_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "5bdc74ae3ce44c0f36e783997b0a674ca15eb6ea",
+      "repo_path": "data/leadDBS_output/SyntheticLesions/simulated_lesion_schaefer1000_ROI2498_dilated_extensive.nii_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    },
+    {
+      "id": "degree",
+      "title": "GSP1000 voxel degree map (van den Heuvel 2026)",
+      "kind": "degree",
+      "urls": [
+        "https://raw.githubusercontent.com/dutchconnectomelab/lesionnetworkmapping/ca410e63f01dfaa03985aa013195288693830ccb/data/degree/GSP1000_degree.nii.gz"
+      ],
+      "filename": "GSP1000_degree.nii.gz",
+      "size": null,
+      "checksum": "record-on-first-download",
+      "git_blob": "e500a8c5eaf659dd2f4927385578e9895a9de9ad",
+      "repo_path": "data/degree/GSP1000_degree.nii.gz",
+      "licence": "GSP-DUT-2014",
+      "badge": "amber",
+      "licence_note": "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence",
+      "terms_url": "https://doi.org/10.7910/DVN/KKTJQC",
+      "citation": "van den Heuvel MP et al. Lesion network mapping: a critical appraisal. Nat Neurosci (2026). doi:10.1038/s41593-025-02196-7; data and code: https://github.com/dutchconnectomelab/lesionnetworkmapping (commit ca410e6); Cohen A, Al-Fatly B, Horn A (2023). GSP1000 in Lead-DBS format. Harvard Dataverse, doi:10.7910/DVN/KKTJQC; Buckner RL, Roffman JL, Smoller JW. Brain Genomics Superstruct Project (GSP). Harvard Dataverse (2014), doi:10.7910/DVN/25833",
+      "terms": "GSP-DUT-2014"
+    }
+  ]
+}
