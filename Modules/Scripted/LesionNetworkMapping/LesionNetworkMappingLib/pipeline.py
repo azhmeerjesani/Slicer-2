@@ -123,6 +123,8 @@ LOCK_NAME = "lock.json"
 PROGRESS_JSON = "progress.json"
 PLAN_JSON = "plan.json"
 LESIONS_TSV = "lesions.tsv"
+#: maps.tsv of the kept lesions, written next to the cohortmaps maps.tsv when some lesions are excluded after mapping
+PIPELINE_MAPS_TSV = "maps_kept.tsv"
 MASK_NAME = "mask.nii.gz"
 LOG_NAME = "pipeline.log"
 LOG_MAX_BYTES = 5 * 1024**2
@@ -195,7 +197,7 @@ ENGINE_NULL_S = 0.0005
 ENGINE_REFERENCE = 292_019 * 216  # V x time points of the measurements
 READ_RATE = 400e6  # bytes per second of a connectome pass
 ENGINE_BYTES_PER_VOXEL = 36  # addendum §3.13 (L_max = budget / (36 V))
-GLM_PERM_S = 0.030  # per permutation at V = 292,019 (3 threads)
+GLM_PERM_S = 0.011  # per permutation at V = 292,019 (3 threads; glm.py measured 10.8 ms at n = 40, 6.8 ms at n = 200)
 TFCE_PERM_S = 2.6
 REFERENCE_PC_S = 900.0
 NORMALIZE_SUBJECT_S = 31.0
@@ -214,7 +216,10 @@ NATIVE_SKIPPED = "native space: skipped (--native skip)"
 NATIVE_EXCLUDED = "native space: not normalized"
 CHANGED_SNAPSHOT = "changed during snapshot"
 CHANGED_RUN = "changed during the run"
+OUTSIDE_MASK = "no lesion voxel inside the connectome mask (its maps would be all zero)"
 QC_FAIL = "qc=fail"
+#: Sidecar "kind" of the nulls job's group maps (nulls.OUTPUT_DESCS): the excess is in signed percentage points
+NULL_MAP_KINDS = {"sensNullExcess": "stat", "sensNullP": "p", "sensNullQ": "p", "sensNullPFwe": "p", "sensNullBias": "fraction"}
 UNIVERSAL_NOTE = "Group maps of the pipeline are descriptive unless they carry a permutation p-value; specificity is never claimed from overlap maps."
 
 _DESC = re.compile(r"[^A-Za-z0-9]")
@@ -255,6 +260,14 @@ def _read_json(path):
     except (OSError, ValueError):
         return None
     return data
+
+
+def _number(value):
+    """``value`` as a float, or None when it is missing or not a number ("n/a")."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _write_text_atomic(path, text, mode=None):
@@ -536,12 +549,13 @@ class PipelineConfig:
     recompute: bool = False
     software: dict = dataclasses.field(default_factory=dict)
     parent_pid: int | None = None
+    parent_run: list = dataclasses.field(default_factory=list)
     events: str = "auto"
     slicer: str | None = None
     accept_terms: bool = False
 
     #: Keys that are about this invocation, not about the analysis (not stored in pipeline.json "config")
-    RUN_KEYS = ("out", "recompute", "parent_pid", "events", "accept_terms", "slicer", "nice", "keep_awake", "threads", "memory_budget_gb")
+    RUN_KEYS = ("out", "recompute", "parent_pid", "parent_run", "events", "accept_terms", "slicer", "nice", "keep_awake", "threads", "memory_budget_gb")
     #: Path keys (stored relative to pipeline.json's folder)
     PATH_KEYS = ("study", "bundle", "out", "atlas", "atlas_labels", "template")
 
@@ -587,6 +601,9 @@ class PipelineConfig:
             raise ValueError("--threads must be at least 1")
         if not isinstance(self.software, dict):
             raise ValueError("--software must be a JSON object")
+        if isinstance(self.parent_run, str):
+            self.parent_run = [self.parent_run]
+        self.parent_run = [str(run_id) for run_id in (self.parent_run or []) if run_id]
         return self
 
     @property
@@ -695,7 +712,7 @@ class Emitter:
         self.log_path = None
         self.progress_path = None
         self.replacements = []
-        self.progress = {"pid": os.getpid(), "run_id": None, "started": _now_iso(), "updated": None, "stage": None, "index": 0, "total": len(STAGES), "done": None, "n": None, "eta": None, "percent": 0.0, "message": None}
+        self.progress = {"pid": os.getpid(), "run_id": None, "started": _now_iso(), "updated": None, "stage": "prepare", "index": 1, "total": len(STAGES), "done": None, "n": None, "eta": None, "percent": 0.0, "message": None}
         self.weights = {}
         self._last_progress = 0.0
         self._last_file = 0.0
@@ -757,8 +774,8 @@ class Emitter:
     def text(self, event, fields):
         """Readable line of an event (``--events text``)."""
         stage = fields.get("stage") or fields.get("name")
-        index, total = self.progress.get("index"), self.progress.get("total")
-        head = f"[{index}/{total} {STAGE_LABELS.get(stage, stage)}]" if stage in STAGE_LABELS else ""
+        names = [name for name, _ in STAGES]
+        head = f"[{names.index(stage) + 1}/{len(STAGES)} {STAGE_LABELS[stage]}]" if stage in STAGE_LABELS else ""
         if event == "start":
             return f"Pipeline {fields.get('run_id') or ''}: {fields.get('n_rows')} subjects, {fields.get('n_compute')} to map, {fields.get('n_reuse')} reused, {fields.get('n_excluded')} excluded; about {_duration_text(fields.get('estimate_s'))}"
         if event == "stage":
@@ -1474,8 +1491,9 @@ class Runner:
             self.emit("cancelled", stage=self.current, kept=self.kept, done=exc.done, reason=exc.reason or self.cancel.reason)
             return EXIT_CANCELLED
         except PipelineError as exc:
-            self._write_pipeline_json("error", error={"code": exc.code, "message": exc.message, "stage": self.current})
-            self._update_run("failed")
+            if self.run_id:
+                self._write_pipeline_json("error", error={"code": exc.code, "message": exc.message, "stage": self.current})
+                self._update_run("failed")
             self.emit("error", code=exc.code, message=exc.message, stage=self.current, **exc.fields)
             return exc.exit_code
         except Exception as exc:
@@ -1533,7 +1551,7 @@ class Runner:
 
         runs.register_kind("pipeline")
         self.run_id = runs.new_run_id("pipeline")
-        runs.register(self.study.path, "pipeline", self.out, params=config.to_json(base=self.out, analysis_only=True), seeds={"preview": config.preview_seed, "permutation": config.perm_seed, "null": config.null_seed},
+        runs.register(self.study.path, "pipeline", self.out, parents=config.parent_run, params=config.to_json(base=self.out, analysis_only=True), seeds={"preview": config.preview_seed, "permutation": config.perm_seed, "null": config.null_seed},
                       run_id=self.run_id)
         if isinstance(self.emit, Emitter):
             self.emit.progress["run_id"] = self.run_id
@@ -1566,7 +1584,13 @@ class Runner:
         for name, _label in STAGES[1:-1]:
             self.cancel.raise_if_cancelled()
             self.current = name
+            if name == "maps" and not self.mapped_rows:
+                raise PipelineError("No lesion can be analysed: every subject is excluded.", code="no_eligible", exit_code=EXIT_NO_LESION,
+                                    excluded={row["participant_id"]: row["reason"] for row in self.rows})
             self._stage(name)
+            if name == "maps" and not self.mapped_rows:
+                raise PipelineError("No lesion can be analysed: every subject is excluded.", code="no_eligible", exit_code=EXIT_NO_LESION,
+                                    excluded={row["participant_id"]: row["reason"] for row in self.rows})
         self.current = "finish"
         return self._finish()
 
@@ -1590,6 +1614,7 @@ class Runner:
                 self.info("report not available in this build", code="report_unavailable")
             return
         self.current_outputs = []
+        self.stage_event(name, "running")  # the current stage of progress.json (a GUI re-attaches to it)
         outcome = method(planned)
         status = outcome.get("status", "done")
         record.update({
@@ -1670,13 +1695,15 @@ class Runner:
         env = dict(os.environ)
         env["PYTHONPATH"] = LIB_PARENT + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
         env["PYTHONIOENCODING"] = "utf-8"
+        if sys.platform.startswith("linux") and not any("UTF-8" in env.get(key, "").upper().replace("UTF8", "UTF-8") for key in ("LC_ALL", "LC_CTYPE", "LANG")):
+            env["LC_CTYPE"] = "C.UTF-8"  # the CTK launcher (PythonSlicer) drops non-ASCII arguments under the POSIX locale
         os.makedirs(folder, exist_ok=True)
         log_path = os.path.join(folder, "job.log")
         events = collections.deque(maxlen=50)
         terminal, run_id = None, None
         with open(log_path, "a", encoding="utf-8") as log:
             shown = [os.path.basename(command[0]), *(self._portable(token) for token in command[1:])]
-            log.write(f"# {_now_iso()} {stage}: {' '.join(shlex.quote(token) for token in shown)}\n")
+            log.write(f"# {_now_iso()} {stage}: {shlex.join(shown)}\n")
             log.flush()
             proc = subprocess.Popen(command, cwd=LIB_PARENT, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=log, text=True, encoding="utf-8", errors="replace")
             self.children.append(proc)
@@ -1711,7 +1738,7 @@ class Runner:
                             run_id = event.get("run_id") or run_id
                         elif kind == "progress":
                             fields = {key: value for key, value in event.items() if key not in ("event", "t", "stage")}
-                            fields.setdefault("unit", "units")
+                            fields.setdefault("unit", {"maps": "subject passes", "specificity": "permutations", "slnm": "permutations", "normalize": "subjects"}.get(stage, "units"))
                             self.emit("progress", stage=stage, child_stage=event.get("stage"), **fields)
                         elif kind == "warning":
                             fields = {key: value for key, value in event.items() if key not in ("event", "t", "message", "code", "stage")}
@@ -1984,31 +2011,42 @@ class Runner:
         maps_tsv = os.path.join(folder, cohortmaps.MAPS_TSV)
         record = cohortmaps.read_record(os.path.join(folder, cohortmaps.COHORTMAPS_JSON)) or {}
         mapped = cohortmaps.read_maps_tsv(maps_tsv)
-        failures = preflight.assert_run_outputs(maps_tsv, expected_n=len(self.subject_ids), kind="cohortmaps", reference_header=self.bundle.path, expected_lesions=len(mapped))
-        if failures:
-            return {"status": "failed", "reason": "; ".join(f"{item['code']}: {item['message']}" for item in failures[:5]), "fingerprint": fp}
         excluded = {sid: reason for reason, sids in (record.get("excluded") or {}).items() for sid in sids}
+        # A lesion without any voxel in the connectome mask has all-zero maps: exclude that subject only (like an
+        # empty lesion), and give the later stages a maps.tsv of the kept lesions (next to cohortmaps.json)
+        outside = {item["participant_id"] for item in mapped if _number(item.get("voxels_in_mask")) == 0}
+        if outside:
+            mapped = [item for item in mapped if item["participant_id"] not in outside]
+            excluded.update(dict.fromkeys(outside, OUTSIDE_MASK))
+            maps_tsv = self._filter_maps_tsv(maps_tsv, os.path.join(folder, PIPELINE_MAPS_TSV), outside)
+        if mapped:
+            failures = preflight.assert_run_outputs(maps_tsv, expected_n=len(self.subject_ids), kind="cohortmaps", reference_header=self.bundle.path, expected_lesions=len(mapped))
+            if failures:
+                return {"status": "failed", "reason": "; ".join(f"{item['code']}: {item['message']}" for item in failures[:5]), "fingerprint": fp}
         qa_values = record.get("qa") or {}
         result_maps, outputs = {}, [maps_tsv, os.path.join(folder, cohortmaps.COHORTMAPS_JSON)]
         for item in mapped:
             sid = item["participant_id"]
             files = {key: item[key] for key in cohortmaps.MAP_KEYS}
             outputs += list(files.values())
-
-            def number(value):
-                try:
-                    return float(value)
-                except (TypeError, ValueError):
-                    return None
-
-            volume = number(item.get("volume_ml"))
-            meta = {"voxels_in_mask": number(item.get("voxels_in_mask")), "weight_total": number(item.get("fractional_sum")), "volume_mm3": None if volume is None else volume * 1000.0,
-                    "weight_outside_fraction": number(item.get("weight_outside_fraction")), "volume_ml": volume}
+            volume = _number(item.get("volume_ml"))
+            meta = {"voxels_in_mask": _number(item.get("voxels_in_mask")), "weight_total": _number(item.get("fractional_sum")), "volume_mm3": None if volume is None else volume * 1000.0,
+                    "weight_outside_fraction": _number(item.get("weight_outside_fraction")), "volume_ml": volume}
             result_maps[sid] = {"files": {key: self.rel(value) for key, value in files.items()}, "lesion_sha256": item.get("lesion_sha256"), "meta": meta, "qa": qa_values.get(sid), "cache": item.get("cache")}
         lesions = record.get("lesions") or {}
         result = {"maps_tsv": self.rel(maps_tsv), "maps": result_maps, "excluded": excluded, "computed": lesions.get("computed"), "cache_hits": lesions.get("cache_hits"), "provider": "cohortmaps",
                   "run_id": record.get("run_id")}
         return self._save("maps", fp, result, outputs, child_run_id=child.run_id, events=child.events, start=start)
+
+    @staticmethod
+    def _filter_maps_tsv(source, target, drop):
+        """Copy the maps.tsv ``source`` to ``target`` (same folder: its relative paths stay valid) without the rows of ``drop``."""
+        with open(source, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+        column = lines[0].split("\t").index("participant_id") if lines else 0
+        kept = lines[:1] + [line for line in lines[1:] if line and line.split("\t")[column] not in drop]
+        _write_text_atomic(target, "\n".join(kept) + "\n")
+        return target
 
     def _maps_engine(self, rows, fp, start):
         """Fallback: the wave-1 engine CLI per batch (stages/maps/batch-<sha12>), per-lesion fingerprints in the stage state."""
@@ -2059,12 +2097,15 @@ class Runner:
                                                   "meta": {key: entry.get(key) for key in ("voxels_in_mask", "weight_total", "volume_mm3", "weight_outside_fraction")}, "qa": qa_values.get(entry["name"])}
             jobs.write_json_atomic(state_path, {"status": "running", "fingerprint": None, "lesions": lesions})
             self.emit("progress", stage="maps", batch=number + 1, batches=len(batches), done=number + 1, total=len(batches), unit="batches", final=True)
-        result_maps, outputs = {}, []
+        result_maps, outputs, excluded = {}, [], {}
         for row in rows:
             entry = lesions.get(row["participant_id"])
             if not entry:
                 continue
             meta = dict(entry.get("meta") or {})
+            if _number(meta.get("voxels_in_mask")) == 0:
+                excluded[row["participant_id"]] = OUTSIDE_MASK
+                continue
             if meta.get("volume_mm3") is not None:
                 meta["volume_ml"] = float(meta["volume_mm3"]) / 1000.0
             result_maps[row["participant_id"]] = {"files": entry["maps"], "lesion_sha256": entry.get("lesion_sha256"), "meta": meta, "qa": entry.get("qa")}
@@ -2072,7 +2113,7 @@ class Runner:
         maps_tsv = os.path.join(folder, "maps.tsv")
         self._write_fallback_maps_tsv(maps_tsv, rows, result_maps)
         outputs.append(maps_tsv)
-        result = {"maps_tsv": self.rel(maps_tsv), "maps": result_maps, "excluded": {}, "computed": len(todo), "cache_hits": len(rows) - len(todo), "provider": "engine"}
+        result = {"maps_tsv": self.rel(maps_tsv), "maps": result_maps, "excluded": excluded, "computed": len(todo), "cache_hits": len(rows) - len(todo), "provider": "engine"}
         outcome = self._save("maps", fp, result, outputs, start=start)
         state = _read_json(state_path)
         state["lesions"] = lesions
@@ -2184,10 +2225,15 @@ class Runner:
             return self._skip("nulls", planned["reason"] or "skipped", "unavailable" if mode == "unavailable" else "skipped")
         from . import thresholds
 
-        params = {"mode": mode, "kind": "rl_independent", "rule": self.config.rule, "overlap": self.config.sensitivity, "seed": self.config.null_seed, "k": 1000}
+        # the nulls job takes the cases from --participants: the group of every mapped subject is a parameter
+        population = self._population(self.mapped_rows)[0]
+        params = {"mode": mode, "kind": "rl_independent", "rule": self.config.rule, "overlap": self.config.sensitivity, "seed": self.config.null_seed, "k": 1000, "groups": self._groups_fp(),
+                  "population": population}
         fp, reused = self._cached("nulls", params, ("maps",))
         if reused:
             return reused
+        if population == "all" and any(row["group"] == "case" for row in self.mapped_rows):
+            self.info("The null models compare the cases with their null cohorts; the overlap maps use all mapped lesions (--sensitivity-population all).", code="nulls_population")
         start = _now_iso()
         folder = self.stage_dir("nulls")
         args = ["--maps", self.maps_tsv, "--bundle", self.bundle.path, "--kind", "rl_independent", "--mode", mode, "--k", "1000", "--rule", thresholds.rule_to_json(self.config.rule),
@@ -2204,7 +2250,8 @@ class Runner:
         groups, outputs = [], []
         for name in sorted(os.listdir(folder)):
             if name.startswith("group_conn-") and name.endswith("_map.nii.gz"):
-                kind = "p" if re.search(r"(P|Q|PFwe)_map", name) else "fraction" if "Bias" in name else "count"
+                desc = re.search(r"_desc-([A-Za-z0-9]+)_map", name).group(1)
+                kind = NULL_MAP_KINDS.get(desc, "p" if desc.endswith(("P", "Q", "PFwe")) else "stat")
                 desc, target, side = self._copy_group(os.path.join(folder, name), kind, "nulls", statistic=record.get("statistic"), caption=record.get("caption"), mode=record.get("mode_label"),
                                                       k=record.get("k"), k_pool=record.get("k_pool"), rule=self.config.rule, sign=record.get("sign"))
                 groups.append(desc)
@@ -2241,7 +2288,7 @@ class Runner:
         n, v = len(self.subject_ids), self.bundle.n_voxels
         k = round(self.config.sensitivity)
         thresholds_out, outputs, counts = [], [], {row["participant_id"]: {} for row in rows}
-        loaded = {}
+        loaded, primary_cuts = {}, None
         for index, rule in enumerate(self.config.rules):
             self.cancel.raise_if_cancelled()
             tag = "" if index == 0 else rule_tag(rule)
@@ -2281,6 +2328,9 @@ class Runner:
                     count, percent = stats.overlap(binary)
                     sens = stats.sensitivity_map(percent, self.config.sensitivity).astype(np.uint8)
                     population_rows = [rows[i] for i in case_index]
+                if index == 0 and rule["kind"] == "top_pct" and primary_cuts is None:
+                    # a rank rule has a cut per map: the export stage records each lesion's own cut in its sidecar
+                    primary_cuts = {row["participant_id"]: values[i] for i, row in enumerate(rows)}
                 for i, row in enumerate(rows):
                     passing = Y[i] >= values[i] if sign == "pos" else Y[i] <= -values[i]
                     counts[row["participant_id"]][f"{entry['tag']}{suffix}"] = int(np.count_nonzero(passing))
@@ -2301,6 +2351,8 @@ class Runner:
                                        note="Mean of the per-lesion T maps (descriptive; not a test statistic).")
         outputs += [path, side]
         result = {"thresholds": thresholds_out, "per_lesion_counts": counts, "population": population, "n_population": len(members), "sensitivity": self.config.sensitivity, "k": k}
+        if primary_cuts is not None:
+            result["primary_cuts"] = {sid: float(value) if math.isfinite(value) else None for sid, value in primary_cuts.items()}
         return self._save("overlap", fp, result, outputs, start=start)
 
     # Lesion set
@@ -2468,7 +2520,7 @@ class Runner:
 
         rows = self.mapped_rows
         params = {"scores": columns, "values": self._participant_values([*columns, *self.config.covariates], rows), "perm": self.config.perm, "seed": self.config.perm_seed, "method": self.config.slnm_method,
-                  "covariates": self.config.covariates, "min_n": self.config.min_slnm_n}
+                  "covariates": self.config.covariates, "min_n": self.config.min_slnm_n, "input": self.config.input, "alpha": self.config.alpha, "volume_off_reason": self.config.volume_off_reason}
         fp, reused = self._cached("slnm", params, ("maps",))
         if reused:
             return reused
@@ -2777,7 +2829,7 @@ class Runner:
         rows = self.mapped_rows
         sids = [row["participant_id"] for row in rows]
         params = {"config": self.config.to_json(analysis_only=True, base=self.out), "software": self.config.software, "rows": [(row["participant_id"], row["sha256"], row.get("lesion")) for row in rows]}
-        fp, reused = self._cached("export", params, tuple(name for name, _ in STAGES[1:14]))
+        fp, reused = self._cached("export", params, tuple(name for name, _ in STAGES[1:13]))
         if reused:
             return reused
         start = _now_iso()
@@ -2804,18 +2856,33 @@ class Runner:
         }
         maps = {row["participant_id"]: {key: row["maps"][key] for key in ("AvgR", "AvgFz", "T")} for row in rows}
         qa = {sid: (self.results.get("qa") or {}).get("lesions", {}).get(sid) for sid in sids}
-        resolved = thresholds.resolve(self.config.rule, len(self.subject_ids), self.bundle.n_voxels) if self.config.rule["kind"] != "top_pct" else None
+        per_lesion = self._top_pct_resolved(rows) if self.config.rule["kind"] == "top_pct" else {}
+        if per_lesion:
+            # a rank rule has no single value: the run records the first lesion's cut, and each sidecar its own (below)
+            resolved = per_lesion[sids[0]]
+        else:
+            resolved = thresholds.resolve(self.config.rule, len(self.subject_ids), self.bundle.n_voxels)
         package = export.write_run(self.out, maps, sids, self.bundle, rule=self.config.rule, resolved=resolved, qa=qa, run_meta=run_meta, preview_n=self.config.preview_n, software=self.config.software or None)
         outputs = list(package["maps"]) + list(package["sidecars"]) + [package["provenance"], package["reproduce"]]
         self.current_outputs += outputs
         for row, sidecar in zip(rows, package["sidecars"], strict=True):
             content = _read_json(sidecar) or {}
+            if row["participant_id"] in per_lesion and isinstance(content.get("threshold"), dict):
+                own = per_lesion[row["participant_id"]]
+                content["threshold"] = {**content["threshold"], "resolved": own.to_dict(), "derived": thresholds.describe(own)}
             content["pipeline"] = {"run_id": self.run_id, "source": row.get("lesion"), "group": row["group"], "export_link_mode": LINK_MODE}
             jobs.write_json_atomic(sidecar, content)
         methods_result = {"provider": "export.write_run"}
         self._write_pipeline_json("running")
+        written = None
         if self.providers["export"].kind == "preferred":
-            written = export.write_methods(self.study.path, self.out, formats=("md", "html", "txt"))
+            try:
+                written = export.write_methods(self.study.path, self.out, formats=("md", "html", "txt"))
+            except jobs.Cancelled:
+                raise
+            except Exception as exc:  # the data outputs are complete: keep write_run's methods.md
+                self.warn(f"The methods sections could not be written ({type(exc).__name__}: {exc}); methods.md is the export's methods paragraph.", code="methods_failed")
+        if written:
             methods_result = {"provider": "methods (L-18)", "files": [os.path.basename(written[fmt]) for fmt in ("md", "html", "txt")], "checklist": os.path.basename(written["checklist"]) if written.get("checklist") else None,
                               "battery": written.get("battery"), "items": written.get("items")}
             outputs += [written[fmt] for fmt in ("md", "html", "txt")] + ([written["checklist"]] if written.get("checklist") else [])
@@ -2838,6 +2905,28 @@ class Runner:
                   "dataset_description": relpath(dataset, self.out) if dataset else None, "export_link_mode": LINK_MODE}
         return self._save("export", fp, json.loads(jobs.to_json(result)), outputs, start=start)
 
+    def _top_pct_resolved(self, rows):
+        """{participant_id: thresholds.Resolved} of the top-x% primary rule, each with the lesion's own cut.
+
+        The cuts come from the overlap stage; a lesion without one is resolved from its map.
+        """
+        from . import thresholds
+
+        rule = self.config.rule
+        n, v = len(self.subject_ids), self.bundle.n_voxels
+        cuts = (self.results.get("overlap") or {}).get("primary_cuts") or {}
+        column = "T" if rule.get("statistic") == "T" else "AvgFz"
+        out = {}
+        for row in rows:
+            cut = cuts.get(row["participant_id"])
+            if cut is not None:
+                # what thresholds.resolve gives for the map's values, without the fraction of passing voxels
+                out[row["participant_id"]] = dataclasses.replace(thresholds.resolve(rule, n, v), value=float(cut), banner=None, allowed=True, fraction=None)
+            else:
+                self.cancel.raise_if_cancelled()
+                out[row["participant_id"]] = thresholds.resolve(rule, n, v, values=self._load_vector(row["maps"][column]))
+        return out
+
     def _write_reproduce_pipeline(self):
         from .export import DISCLAIMER
 
@@ -2854,9 +2943,11 @@ class Runner:
             f"# {DISCLAIMER}",
             "set -e",
             'HERE="$(cd "$(dirname "$0")" && pwd)"',
-            f'PYTHONSLICER="${{PYTHONSLICER:-{pythonslicer}}}"',
+            f"DEFAULT_PYTHONSLICER={shlex.quote(pythonslicer)}",
+            'PYTHONSLICER="${PYTHONSLICER:-$DEFAULT_PYTHONSLICER}"',
             'OUT="${OUT:-reproduced}"',
-            f'LNM_LIBRARY_DIR="${{LNM_LIBRARY_DIR:-{LIB_PARENT}}}"',
+            f"DEFAULT_LNM_LIBRARY_DIR={shlex.quote(LIB_PARENT)}",
+            'LNM_LIBRARY_DIR="${LNM_LIBRARY_DIR:-$DEFAULT_LNM_LIBRARY_DIR}"',
             'PYTHONPATH="$LNM_LIBRARY_DIR${PYTHONPATH:+:$PYTHONPATH}"',
             "export PYTHONPATH",
             '"$PYTHONSLICER" -m LesionNetworkMappingLib.pipeline run --config "$HERE/pipeline.json" --out "$OUT" --recompute ${ACCEPT_TERMS:+--accept-terms}',
@@ -3154,17 +3245,17 @@ def _session_live(study_path):
 
 
 def _read_table(path):
-    """(columns, rows) of a TSV or CSV file (delimiter from the extension, else sniffed)."""
+    """(columns, rows) of a TSV or CSV file (tab for .tsv, else the separator sniffed from the header line)."""
     import csv
 
     with open(path, encoding="utf-8-sig", newline="") as f:
         text = f.read()
     if path.lower().endswith(".tsv"):
         delimiter = "\t"
-    elif path.lower().endswith(".csv"):
-        delimiter = ","
     else:
-        delimiter = "\t" if text.count("\t") >= text.count(",") else ","
+        # a .csv may use ";" (spreadsheets with a decimal comma): the most frequent separator of the header line
+        header = next((line for line in text.splitlines() if line.strip()), "")
+        delimiter = max((",", ";", "\t"), key=header.count) if any(char in header for char in ",;\t") else ","
     reader = csv.reader(text.splitlines(), delimiter=delimiter)
     lines = [line for line in reader if any(cell.strip() for cell in line)]
     if not lines:
@@ -3356,7 +3447,7 @@ def config_from_args(args):
 def _print_plan(result, as_json):
     data = result.to_json(portable=False)
     if as_json or not sys.stdout.isatty():
-        sys.stdout.write(json.dumps(data, ensure_ascii=True, indent=1) + "\n")
+        sys.stdout.write(json.dumps(data, ensure_ascii=True) + "\n")
         return
     lines = [f"Plan for {result.study.name} with {result.bundle.name} (N = {result.n_subjects}); output {result.out}", ""]
     lines.append(f"{'participant':<16}{'group':<10}{'status':<11}reason")

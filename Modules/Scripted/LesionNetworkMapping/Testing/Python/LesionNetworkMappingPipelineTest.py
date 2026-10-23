@@ -16,12 +16,10 @@ Run without Slicer's GUI:
 """
 
 import glob
-import hashlib
 import json
 import os
 import re
 import shutil
-import signal
 import socket
 import subprocess
 import sys
@@ -40,8 +38,8 @@ for folder in (MODULE_DIR, TEST_DIR):
 import numpy as np
 
 import lnm_pipeline_fixture as fixture
-from LesionNetworkMappingLib import cohort, cohortmaps, connectome, export, jobs, lesionset, nifti, pipeline, preflight, runs, thresholds
-from LesionNetworkMappingLib.study import Study
+from LesionNetworkMappingLib import cohort, cohortmaps, connectome, export, jobs, lesionset, nifti, pipeline, runs, thresholds
+from LesionNetworkMappingLib.study import Study, read_tsv, write_tsv
 
 FAST = ["--nulls", "off"]  # the null models take most of a synthetic run; scenario runs leave them out
 HEADER_FIELDS = ("qform_code", "sform_code", "quatern_b", "quatern_c", "quatern_d", "qoffset_x", "qoffset_y", "qoffset_z", "srow_x", "srow_y", "srow_z", "pixdim")
@@ -69,7 +67,7 @@ def cli(*args, env=None, timeout=600, on_event=None, launcher=None):
     command = [launcher or sys.executable, "-m", "LesionNetworkMappingLib.pipeline", *args]
     started = time.monotonic()
     if on_event is None:
-        result = subprocess.run(command, cwd=MODULE_DIR, env=env or _env(), capture_output=True, text=True, encoding="utf-8", timeout=timeout)
+        result = subprocess.run(command, cwd=MODULE_DIR, env=env or _env(), capture_output=True, text=True, encoding="utf-8", timeout=timeout, check=False)
         return result.returncode, _events(result.stdout), result.stdout, result.stderr, time.monotonic() - started
     process = subprocess.Popen(command, cwd=MODULE_DIR, env=env or _env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
     events, lines = [], []
@@ -295,7 +293,7 @@ class PipelineChecks:
         script = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(MODULE_DIR))), "Utilities", "Scripts", "StudioPrivacyCheck.py")
         if not os.path.isfile(script):
             self.skipTest("StudioPrivacyCheck.py not found")
-        result = subprocess.run([sys.executable, script, self.out], capture_output=True, text=True)
+        result = subprocess.run([sys.executable, script, self.out], capture_output=True, text=True, check=False)
         failing = [line for line in result.stdout.splitlines() if line.startswith("FAIL") and "reproduce_pipeline.sh" not in line]
         self.assertEqual(failing, [], result.stdout[-3000:])
 
@@ -459,6 +457,75 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         self.assertEqual(done_event(events)["computed"], 12)
         self.assertEqual(read_json(os.path.join(preview, "pipeline.json"))["subjects"]["n"], 10)
 
+    def test_fingerprints_follow_groups_and_input(self):
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f8"))
+        cheap = ["--specificity", "off", "--parent-run", "pipeline-20260101T000000-abcd"]
+        code, events, _stdout, stderr, _wall = cli(*run_args(fx, *cheap))
+        self.assertEqual(code, 0, stderr[-2000:])
+        self.assertEqual(stage_status(events)["nulls"], "done")
+        run_id = done_event(events).get("run_id") or next(event["run_id"] for event in events if event["event"] == "start")
+        self.assertEqual(runs.load(fx["study"])[run_id]["parents"], ["pipeline-20260101T000000-abcd"])
+        # A control that becomes a case changes the case set of the null models
+        table = os.path.join(fx["study"], "participants.tsv")
+        columns, rows = read_tsv(table)
+        for row in rows:
+            if row["participant_id"] == "sub-09":
+                self.assertEqual(row["group"], "control")
+                row["group"] = "case"
+        write_tsv(table, columns, rows)
+        code, events, _stdout, stderr, _wall = cli(*run_args(fx, *cheap))
+        self.assertEqual(code, 0, stderr[-2000:])
+        status = stage_status(events)
+        self.assertEqual((status["nulls"], status["overlap"]), ("done", "done"))
+        # --input T recomputes the sLNM maps (the null models do not depend on it)
+        code, events, _stdout, stderr, _wall = cli(*run_args(fx, *cheap, "--input", "T"))
+        self.assertEqual(code, 0, stderr[-2000:])
+        status = stage_status(events)
+        self.assertEqual((status["slnm"], status["nulls"]), ("done", "reused"))
+
+    def test_top_pct_primary_rule(self):
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f9"))
+        rule = {"kind": "top_pct", "value": 10}
+        code, events, _stdout, stderr, _wall = cli(*run_args(fx, *FAST, "--specificity", "off", "--scores", "none", "--rule", json.dumps(rule)))
+        self.assertEqual(code, 0, stderr[-2000:] + str(done_event(events)))
+        out = fx["out"]
+        provenance = read_json(os.path.join(out, "provenance.json"))
+        self.assertIsNotNone(provenance["threshold"]["resolved"]["value"])
+        self.assertTrue(os.path.isfile(os.path.join(out, "methods.md")))
+        self.assertFalse([event for event in events if event["event"] == "warning" and event.get("code") == "methods_failed"])
+        n = read_json(os.path.join(out, pipeline.PIPELINE_JSON))["subjects"]["n"]
+        for sid in ("sub-01", "sub-07"):
+            sidecar = read_json(export.sidecar_path(out, sid, self.bundle.name))
+            expected = thresholds.resolve(rule, n, self.bundle.n_voxels, values=masked(export.map_paths(out, sid, self.bundle.name)["AvgFz"], self.bundle))
+            self.assertAlmostEqual(sidecar["threshold"]["resolved"]["value"], expected.value, places=5)
+
+    def test_lesion_outside_mask_is_excluded(self):
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f10"))
+        study = Study.open(fx["study"])
+        mask = np.zeros(fx["fine_shape"], np.uint8)
+        mask[0:3, 0:3, 0:3] = 1  # the grid corner, outside the connectome mask
+        path = os.path.join(fx["study"], "lesions", f"sub-99_space-{fixture.SPACE}_desc-lesion_mask.nii.gz")
+        nifti.write_nifti(path, mask, fx["fine_affine"])
+        study.add_subject("sub-99", {"group": "case", "lesion": study.relpath(path), "status": "traced", "space": fixture.SPACE, "volume_ml": 0.027, "aphasia_score": 5.0})
+        study.save()
+        code, events, _stdout, stderr, _wall = cli(*run_args(fx, *FAST))
+        self.assertEqual(code, 0, stderr[-2000:] + str(done_event(events)))
+        data = read_json(os.path.join(fx["out"], pipeline.PIPELINE_JSON))
+        rows = {row["participant_id"]: row for row in data["inputs"]["rows"]}
+        self.assertEqual((rows["sub-99"]["status"], rows["sub-99"]["reason"]), ("excluded", pipeline.OUTSIDE_MASK))
+        self.assertEqual(data["cohort"]["n_cases"] + data["cohort"]["n_controls"], 12)
+        kept = cohortmaps.read_maps_tsv(os.path.join(fx["out"], "stages", "cohortmaps", pipeline.PIPELINE_MAPS_TSV))
+        self.assertEqual(sorted(row["participant_id"] for row in kept), self.mapped_sids())
+        self.assertFalse(os.path.exists(export.map_paths(fx["out"], "sub-99", self.bundle.name)["T"]))
+        status = stage_status(events)
+        self.assertEqual((status["specificity"], status["slnm"]), ("done", "done"))
+        # The rerun reuses the maps stage and excludes the lesion again
+        code, events, _stdout, stderr, _wall = cli(*run_args(fx, *FAST))
+        self.assertEqual(code, 0, stderr[-2000:])
+        self.assertEqual(stage_status(events)["maps"], "reused")
+        rows = {row["participant_id"]: row for row in read_json(os.path.join(fx["out"], pipeline.PIPELINE_JSON))["inputs"]["rows"]}
+        self.assertEqual(rows["sub-99"]["status"], "excluded")
+
     def test_batching_and_reproduction(self):
         fx = self.fx
         bundle = self.bundle
@@ -481,7 +548,7 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         # reproduce.sh recomputes every map in one engine pass
         pythonslicer = shutil.which("PythonSlicer") or os.path.join(os.path.dirname(sys.executable), "PythonSlicer")
         target = os.path.join(self.tmp, "reproduced")
-        result = subprocess.run(["sh", os.path.join(self.out, "reproduce.sh")], env=_env(OUT=target, PYTHONSLICER=pythonslicer if os.path.isfile(pythonslicer) else sys.executable), capture_output=True, text=True)
+        result = subprocess.run(["sh", os.path.join(self.out, "reproduce.sh")], env=_env(OUT=target, PYTHONSLICER=pythonslicer if os.path.isfile(pythonslicer) else sys.executable), capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr[-2000:])
         self.assertEqual(sum(1 for line in result.stdout.splitlines() if '"event": "start"' in line), 1)
         for sid in self.mapped_sids():
@@ -489,7 +556,7 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         # reproduce_pipeline.sh reproduces the cohort numbers
         target2 = os.path.join(self.tmp, "reproduced-pipeline")
         result = subprocess.run(["sh", os.path.join(self.out, "reproduce_pipeline.sh")], env=_env(OUT=target2, ACCEPT_TERMS="1", PYTHONSLICER=pythonslicer if os.path.isfile(pythonslicer) else sys.executable),
-                                capture_output=True, text=True)
+                                capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr[-2000:] + result.stdout[-2000:])
         again = read_json(os.path.join(target2, "pipeline.json"))
         for key in ("n_mapped", "n_cases", "n_controls", "per_lesion_counts", "conjunction"):
@@ -534,7 +601,7 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
                 open(os.path.join(out, pipeline.PRIVATE_DIR, pipeline.STOP_NAME), "w").close()
                 stopped["at"] = event["_wall"]
 
-        code, events, _stdout, stderr, wall = cli(*args, on_event=on_event)
+        code, _events, _stdout, stderr, wall = cli(*args, on_event=on_event)
         self.assertIn("at", stopped)
         self.assertEqual(code, 3, stderr[-2000:])
         self.assertLessEqual(wall - stopped["at"], 3.0)
@@ -548,7 +615,7 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
                 resumed["first"] = event.get("done")
                 open(os.path.join(out, pipeline.PRIVATE_DIR, pipeline.STOP_NAME), "w").close()
 
-        code, events, _stdout, stderr, _wall = cli(*args, on_event=on_event_again)
+        code, _events, _stdout, stderr, _wall = cli(*args, on_event=on_event_again)
         self.assertEqual(code, 3, stderr[-2000:])
         self.assertGreaterEqual(resumed["first"], cursor - 1, "the GLM resumes from its cursor")
 
@@ -564,7 +631,7 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
                 parent.wait()
                 killed["at"] = event["_wall"]
 
-        code, events, _stdout, stderr, wall = cli(*run_args(self.fx, "--recompute", "--null-relocations", "50", "--memory-budget-gb", repr(1.2 * per_lesion / 1024**3), "--out", out, *FAST,
+        code, _events, _stdout, stderr, wall = cli(*run_args(self.fx, "--recompute", "--null-relocations", "50", "--memory-budget-gb", repr(1.2 * per_lesion / 1024**3), "--out", out, *FAST,
                                                            "--specificity", "off", "--scores", "none", "--parent-pid", str(parent.pid)), on_event=on_event)
         self.assertIn("at", killed)
         self.assertEqual(code, 3, stderr[-2000:])
@@ -608,6 +675,11 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         self.assertEqual(error["code"], "terms_not_accepted")
         self.assertIn("data_use_terms", error)
         self.assertFalse(os.path.exists(out), "nothing is written")
+        # Run-level blocks (here: per-subject blocks made run-level by --strict) stop the run with exit code 5
+        code, events, _stdout, _stderr, _wall = cli(*run_args(self.fx, "--strict", "--out", os.path.join(self.tmp, "strict")))
+        self.assertEqual(code, 5)
+        self.assertEqual(done_event(events)["code"], "blocked")
+        self.assertTrue(done_event(events)["fixes"])
 
     def test_lock(self):
         out = os.path.join(self.tmp, "locked")
@@ -634,17 +706,17 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         fx = fixture.make_fixture(os.path.join(self.tmp, "f4"))
         native = "sub-15"
         cheap = ["--specificity", "off", "--scores", "none", *FAST]
-        code, events, _stdout, stderr, _wall = cli(*run_args(fx, *cheap, "--out", os.path.join(self.tmp, "native-base")), env=_env(**{pipeline.PROVIDERS_ENV: "baseline"}))
+        code, _events, _stdout, stderr, _wall = cli(*run_args(fx, *cheap, "--out", os.path.join(self.tmp, "native-base")), env=_env(**{pipeline.PROVIDERS_ENV: "baseline"}))
         self.assertEqual(code, 0, stderr[-2000:])
         rows = {row["participant_id"]: row for row in read_json(os.path.join(self.tmp, "native-base", "pipeline.json"))["inputs"]["rows"]}
         self.assertEqual(rows[native]["reason"], pipeline.NATIVE_UNAVAILABLE)
         stub = fixture.make_normalizer_stub(self.tmp, fx["bundle"])
         env = _env(**{pipeline.NORMALIZER_ENV: stub})
-        code, events, _stdout, stderr, _wall = cli(*run_args(fx, *cheap, "--out", os.path.join(self.tmp, "native-stub")), env=env)
+        code, _events, _stdout, stderr, _wall = cli(*run_args(fx, *cheap, "--out", os.path.join(self.tmp, "native-stub")), env=env)
         self.assertEqual(code, 0, stderr[-2000:])
         rows = {row["participant_id"]: row for row in read_json(os.path.join(self.tmp, "native-stub", "pipeline.json"))["inputs"]["rows"]}
         self.assertEqual(rows[native]["reason"], pipeline.NORM_NEEDS_REVIEW)
-        code, events, _stdout, stderr, _wall = cli(*run_args(fx, *cheap, "--native", "include-unreviewed", "--out", os.path.join(self.tmp, "native-include")), env=env)
+        code, _events, _stdout, stderr, _wall = cli(*run_args(fx, *cheap, "--native", "include-unreviewed", "--out", os.path.join(self.tmp, "native-include")), env=env)
         self.assertEqual(code, 0, stderr[-2000:])
         data = read_json(os.path.join(self.tmp, "native-include", "pipeline.json"))
         rows = {row["participant_id"]: row for row in data["inputs"]["rows"]}
@@ -679,6 +751,11 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         self.assertEqual(created.subject("sub-06")["group"], "control")
         self.assertIn(("aphasia_score", True), created.score_columns())
         self.assertEqual(tree_digest(source), before, "the source files are never modified")
+        # A .csv may be separated by semicolons (spreadsheets with a decimal comma)
+        semicolon = os.path.join(self.tmp, "semicolon.csv")
+        with open(semicolon, "w", encoding="utf-8") as f:
+            f.write("participant_id;aphasia_score\nsub-01;1,5\n")
+        self.assertEqual(pipeline._read_table(semicolon), (["participant_id", "aphasia_score"], [{"participant_id": "sub-01", "aphasia_score": "1,5"}]))
         # A live GUI session refuses init
         session = os.path.join(target, ".studio", "session.json")
         with open(session, "w", encoding="utf-8") as f:
@@ -698,13 +775,13 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         self.assertIn("done:", stdout)
         self.assertFalse(any(line.startswith("{") for line in stdout.splitlines()))
         started = time.monotonic()
-        result = subprocess.run([sys.executable, "-m", "LesionNetworkMappingLib.pipeline", "--help"], cwd=MODULE_DIR, env=_env(), capture_output=True, text=True)
+        result = subprocess.run([sys.executable, "-m", "LesionNetworkMappingLib.pipeline", "--help"], cwd=MODULE_DIR, env=_env(), capture_output=True, text=True, check=False)
         wall = time.monotonic() - started
         self.assertEqual(result.returncode, 0)
         self.assertIn("init", result.stderr + result.stdout)
         self.assertLessEqual(wall, 0.3 if not os.environ.get("LNM_SLOW_HOST") else 1.0)
         probe = subprocess.run([sys.executable, "-c", "import sys; from LesionNetworkMappingLib import pipeline; pipeline._parser().format_help(); print('numpy' in sys.modules)"], cwd=MODULE_DIR, env=_env(),
-                               capture_output=True, text=True)
+                               capture_output=True, text=True, check=False)
         self.assertEqual(probe.stdout.strip(), "False")
 
     def test_plan_speed_300_lesions(self):
