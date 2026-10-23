@@ -23,6 +23,16 @@ STUDIO_ALL_EFFECTS_ORDER = ("Paint", "Draw", "Smart fill", "Erase", "Fill betwee
 UNDO_STATES = 20
 STUDIO_UNDO_STATES_SHALLOW_HISTORY = 30
 
+
+def _cheapUndoSnapshots():
+    """True if segmentation undo states share derived representations (closed surfaces) instead of copying them
+    (vtkSegmentationHistory of this build has the marker, and it is enabled): then a deeper undo history is cheap.
+    """
+    history = getattr(slicer, "vtkSegmentationHistory", None)
+    getter = getattr(history, "GetShallowDerivedRepresentations", None)
+    return bool(getter()) if getter is not None else False
+
+
 #: Explicit property tables (nothing is restored from remembered values). Properties missing on older
 #: qMRMLSegmentEditorWidget builds are skipped.
 CLASSIC_PROPERTIES = {
@@ -401,8 +411,7 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def _applyStudio(self):
         showAll = self._showAllControls()
-        history = getattr(slicer, "vtkSegmentationHistory", None)
-        undoStates = STUDIO_UNDO_STATES_SHALLOW_HISTORY if hasattr(history, "SetShallowDerivedRepresentations") else UNDO_STATES
+        undoStates = STUDIO_UNDO_STATES_SHALLOW_HISTORY if _cheapUndoSnapshots() else UNDO_STATES
         properties = {**STUDIO_PROPERTIES, "maximumNumberOfUndoStates": undoStates}
         if showAll:
             # "Show all controls": the classic controls of the Segment Editor inside Draw

@@ -90,7 +90,9 @@ public:
   /// objects that share their arrays with the segmentation. Conversion rules replace those arrays through
   /// ShallowCopy instead of modifying them in place, so the shared arrays stay valid. Restoring a state also
   /// skips every segment that is unchanged since the state was saved (same source representation object and
-  /// MTime, same metadata), so an undo touches only the segments that differ.
+  /// MTime, shared by the same segments, same metadata, same contained representations), so an undo touches
+  /// only the segments that differ. Code must not modify the points or cells of a derived closed surface in
+  /// place (for example through GetPoints()->SetPoint()): that would also change the saved states.
   /// Static: it applies to every history (and lets scripts detect the cheap snapshots).
   static void SetShallowDerivedRepresentations(bool enabled);
   static bool GetShallowDerivedRepresentations();

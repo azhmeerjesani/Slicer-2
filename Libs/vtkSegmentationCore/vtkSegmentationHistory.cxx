@@ -344,14 +344,38 @@ bool vtkSegmentationHistory::RestoreState(unsigned int stateIndex)
   SegmentationState restoredState = this->SegmentationStates[stateIndex];
 
   // Segments that have not changed since the state was saved (same source representation object with the same
-  // MTime, same metadata) are left alone: their derived representations are consistent with their source, and
-  // not touching them keeps their display pipelines. Segments sharing one source representation object are
-  // restored together, so that the sharing is kept.
+  // MTime, same metadata, same contained representations) are left alone: their derived representations are
+  // consistent with their source, and not touching them keeps their display pipelines. Segments sharing one
+  // source representation object are restored together, so that the sharing is kept.
   const std::string sourceRepresentationName = this->Segmentation->GetSourceRepresentationName();
   std::map<vtkDataObject*, bool> unchangedSourceRepresentations;
   std::set<std::string> unchangedSegmentIDs;
   if (vtkSegmentationHistory::ShallowDerivedRepresentations)
   {
+    // A source representation object can only be kept if it is still shared by exactly the segments that shared
+    // it when the state was saved (a segment may have been given another object, or added to this one, without
+    // modifying it).
+    std::map<vtkDataObject*, std::set<std::string>> savedSharing;
+    for (SourceRepresentationsMap::const_iterator savedIt = restoredState.SourceRepresentations.begin(); savedIt != restoredState.SourceRepresentations.end(); ++savedIt)
+    {
+      if (savedIt->second.first)
+      {
+        savedSharing[savedIt->second.first].insert(savedIt->first);
+      }
+    }
+    std::map<vtkDataObject*, std::set<std::string>> liveSharing;
+    std::vector<std::string> liveSegmentIDs;
+    this->Segmentation->GetSegmentIDs(liveSegmentIDs);
+    for (const std::string& liveSegmentID : liveSegmentIDs)
+    {
+      vtkSegment* liveSegment = this->Segmentation->GetSegment(liveSegmentID);
+      vtkDataObject* liveSourceRepresentation = liveSegment ? liveSegment->GetRepresentation(sourceRepresentationName) : nullptr;
+      if (liveSourceRepresentation)
+      {
+        liveSharing[liveSourceRepresentation].insert(liveSegmentID);
+      }
+    }
+
     for (SegmentsMap::iterator restoredSegmentsIt = restoredState.Segments.begin(); restoredSegmentsIt != restoredState.Segments.end(); ++restoredSegmentsIt)
     {
       vtkSegment* segment = this->Segmentation->GetSegment(restoredSegmentsIt->first);
@@ -361,10 +385,21 @@ bool vtkSegmentationHistory::RestoreState(unsigned int stateIndex)
         continue;
       }
       SourceRepresentationsMap::const_iterator savedIt = restoredState.SourceRepresentations.find(restoredSegmentsIt->first);
-      bool unchanged = savedIt != restoredState.SourceRepresentations.end()          //
-                       && savedIt->second.first == sourceRepresentation              //
-                       && savedIt->second.second == sourceRepresentation->GetMTime() //
-                       && vtkSegmentationHistory::IsSameMetadata(segment, restoredSegmentsIt->second);
+      bool unchanged = savedIt != restoredState.SourceRepresentations.end()                           //
+                       && savedIt->second.first == sourceRepresentation                               //
+                       && savedIt->second.second == sourceRepresentation->GetMTime()                  //
+                       && vtkSegmentationHistory::IsSameMetadata(segment, restoredSegmentsIt->second) //
+                       && savedSharing[sourceRepresentation] == liveSharing[sourceRepresentation];
+      if (unchanged)
+      {
+        // The segment must also contain the same representations (for example, closed surfaces may have been
+        // removed or created since the state was saved): otherwise it is restored, like the other segments.
+        std::vector<std::string> currentRepresentationNames;
+        segment->GetContainedRepresentationNames(currentRepresentationNames);
+        std::vector<std::string> restoredRepresentationNames;
+        restoredSegmentsIt->second->GetContainedRepresentationNames(restoredRepresentationNames);
+        unchanged = (currentRepresentationNames == restoredRepresentationNames);
+      }
       std::map<vtkDataObject*, bool>::iterator sharedIt = unchangedSourceRepresentations.find(sourceRepresentation);
       if (sharedIt == unchangedSourceRepresentations.end())
       {
