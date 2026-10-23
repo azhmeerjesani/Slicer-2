@@ -136,11 +136,12 @@ class QACard:
         self.ctx = ctx
         self.degreeJob = None
         self.referenceJob = None
+        self.groupQaStale = False  # the Nulls run found was of other maps
         self.qa = None
         self.qc = None
         self._eta = {}
         self._reference = None  # (bundle path, Reference) loaded for the overlays
-        self._overlays = {}  # kind -> (volume node, run dir)
+        self._overlays = {}  # kind -> (volume node, run dir, statistic label)
         self._shown = None  # kind of the overlay in the foreground
         self.widget = widgets.card(_("QA"), objectName="LNMQACard", collapsed=True)
         layout = qt.QVBoxLayout(self.widget)
@@ -411,26 +412,74 @@ class QACard:
         return level, chipText, text
 
     def _findGroupQa(self):
-        """The group map QA of an L-25 Nulls run next to the cohort maps ("group_qa" of nulls.json), or None."""
+        """The group map QA of a Nulls run (L-25) of the current cohort maps, or None.
+
+        ``nulls.json`` carries ``group_qa`` = {"overlap": values, "mean": values, ...}: the percentile of r(group map, μC_r)
+        among the null cohorts' maps. The mean map of the rule's statistic is the group map of the Map module, so it is
+        preferred; the run folder is ``nulls`` next to the cohort maps (the newest one wins), or the maps folder itself.
+        A run of other maps is not used (``self.groupQaStale`` is then True): see :meth:`_nullsMatchMaps`.
+        """
+        self.groupQaStale = False
         mapsPath = getattr(self.ctx, "cohortMaps", None)
         if not mapsPath:
             return None
         folder = os.path.dirname(os.fspath(mapsPath))
-        for name in NULLS_RECORDS:
-            path = os.path.join(folder, name)
-            if not os.path.isfile(path):
+        candidates = [os.path.join(folder, name) for name in NULLS_RECORDS]
+        candidates += glob.glob(os.path.join(folder, "nulls*", "nulls.json"))
+        found = []
+        for path in dict.fromkeys(candidates):
+            try:
+                found.append((os.stat(path).st_mtime_ns, path))
+            except OSError:
                 continue
+        for stamp, path in sorted(found, reverse=True):
             try:
                 with open(path, encoding="utf-8") as f:
                     record = json.load(f)
             except (OSError, ValueError):
                 continue
-            values = record.get("group_qa") if isinstance(record, dict) else None
-            if isinstance(values, dict) and "reference" in values:
-                values = values["reference"]
-            if isinstance(values, dict):
-                return values
+            group = record.get("group_qa") if isinstance(record, dict) else None
+            if not isinstance(group, dict):
+                continue
+            if not self._nullsMatchMaps(record, stamp, os.fspath(mapsPath)):
+                self.groupQaStale = True
+                continue
+            for key in ("mean", "overlap"):
+                values = group.get(key)
+                if isinstance(values, dict) and "level" in values:
+                    return values
+            if "level" in group and group.get("available", True):
+                return group
         return None
+
+    @staticmethod
+    def _nullsMatchMaps(record, stamp, mapsPath):
+        """True when a Nulls run (its ``nulls.json`` record, modified at ``stamp`` ns) belongs to the cohort maps at ``mapsPath``.
+
+        The run must be newer than the maps.tsv, name the same cohortmaps run when both know one, and have analysed the
+        maps.tsv subjects (the cases of the maps, the others listed as excluded): a run of an earlier cohort says nothing
+        about the current group map.
+        """
+        try:
+            if stamp < os.stat(mapsPath).st_mtime_ns:
+                return False
+        except OSError:
+            return False
+        from LesionNetworkMappingLib import cohortmaps
+
+        try:
+            ids = {row["participant_id"] for row in cohortmaps.read_maps_tsv(mapsPath, resolve_paths=False)}
+            current = (cohortmaps.read_record(os.path.join(os.path.dirname(mapsPath), cohortmaps.COHORTMAPS_JSON)) or {}).get("run_id")
+        except (OSError, ValueError, KeyError):
+            return False
+        used = (record.get("inputs") or {}).get("cohortmaps_run")
+        if used and current and used != current:
+            return False
+        participants = record.get("participants")
+        if not isinstance(participants, list):
+            return False
+        accounted = set(participants) | {item.get("participant_id") for item in record.get("excluded") or [] if isinstance(item, dict)}
+        return bool(ids) and set(participants) <= ids and accounted == ids
 
     def refresh(self, running=False, n=None, partial=None):
         run = self.ctx.currentRun
@@ -486,13 +535,15 @@ class QACard:
                 self._setCalibrated("neutral", _("Not calibrated"), _("Group maps: choose a connectome."))
             elif not hasFiles:
                 self._setCalibrated("warn", _("Not calibrated"), _("Group maps: not calibrated, this connectome has no reference maps yet."))
+            elif group is None and self.groupQaStale:
+                self._setCalibrated("neutral", _("Not calibrated"), _("Group maps: not calibrated — the Nulls run is of other maps, run Nulls again."))
             elif group is None:
                 self._setCalibrated("neutral", _("Not calibrated"), _("Group maps: not calibrated — run Nulls to compare a group map with null cohorts."))
             else:
                 level, chipText, text = self._calibratedFromValues(group)
                 self._setCalibrated(level, chipText, _("Group map: {text}").format(text=text))
                 levels.append(group.get("level") or "not_calibrated")
-                shownValues = group
+                shownValues = group if group.get("mu_r") is not None else None
         elif bundle is None:
             self._setCalibrated("neutral", _("Not calibrated"), _("Choose a connectome to calibrate the QA."))
         elif running or partial:
@@ -806,10 +857,10 @@ class QACard:
         from LesionNetworkMappingLib import similarity
 
         run, bundle = self.ctx.currentRun, self.ctx.bundle
-        cached = self._overlays.get("debiased")
-        if cached is not None and cached[0].GetScene() is not None and run is not None and cached[1] == run.runDir:
-            return cached[0]
         label = self._displayedLabel()
+        cached = self._overlays.get("debiased")
+        if cached is not None and cached[0].GetScene() is not None and run is not None and cached[1] == run.runDir and cached[2] == label:
+            return cached[0]
         source = self._statisticPath(label)
         reference = self._loadedReference()
         if run is None or bundle is None or source is None or reference is None:
@@ -829,7 +880,7 @@ class QACard:
             self.debiasedLabel.setText(_("The debiased view could not be made: {reason}").format(reason=exc))
             return None
         self._removeOverlay("debiased")
-        self._overlays["debiased"] = (volume, run.runDir)
+        self._overlays["debiased"] = (volume, run.runDir, label)
         self.debiasedLabel.setText(_("Descriptive; not an inferential correction: {label} minus what μC_r and PC1 explain, in the volume {name}.").format(label=label, name=volume.GetName()))
         return volume
 
@@ -876,7 +927,7 @@ class QACard:
             self.analyticLabel.setText(_("The analytic z could not be made: {reason}").format(reason=exc))
             return None
         self._removeOverlay("analytic")
-        self._overlays["analytic"] = (volume, run.runDir)
+        self._overlays["analytic"] = (volume, run.runDir, "AvgR")
         self.analyticLabel.setText(qaLib.ANALYTIC_RL_LABEL[:1].upper() + qaLib.ANALYTIC_RL_LABEL[1:] + ".")
         return volume
 

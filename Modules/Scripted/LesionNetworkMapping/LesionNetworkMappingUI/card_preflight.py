@@ -78,7 +78,6 @@ class PreflightCard:
         self.report = None  # the latest report (a dict of preflight.run_preflight)
         self.reportAt = 0.0
         self.reportSignature = None
-        self.savedSignature = None
         self.savedPath = None
         self.overrides = set()  # warn-level exclusions included anyway
         self.probabilistic = False
@@ -211,6 +210,8 @@ class PreflightCard:
         self.schedule()
 
     def onCohortChanged(self):
+        # refreshCohort() rebuilt the cohort list without the review overrides: put them back before checking
+        self._syncCohortOverrides()
         self.schedule()
 
     def onRunSettingsChanged(self):
@@ -375,7 +376,13 @@ class PreflightCard:
             os.makedirs(folder, exist_ok=True)
         except OSError:
             folder = os.path.join(study.path, ".studio")
-            os.makedirs(folder, exist_ok=True)
+            try:
+                os.makedirs(folder, exist_ok=True)
+            except OSError as exc:  # a read-only study
+                self.progressLabel.setText(_("The preflight check failed: {reason}").format(reason=exc))
+                self.progressLabel.show()
+                widgets.setChipLevel(self.chip, "warn", _("Not checked"))
+                return
         outPath = os.path.join(folder, "preflight-live.json")
         try:
             os.remove(outPath)
@@ -516,14 +523,16 @@ class PreflightCard:
         changed = state != self._state
         self._state = state
         if blocking:
-            widgets.setChipLevel(self.chip, "danger", _("Blocked"))
+            level, chipText = "danger", _("Blocked")
             text = _("{n} blocking · {included} of {subjects} subjects would be analysed").format(n=len(blocking), included=included, subjects=subjects)
         elif nWarn:
-            widgets.setChipLevel(self.chip, "warn", _("{n} to review").format(n=nWarn))
+            level, chipText = "warn", _("{n} to review").format(n=nWarn)
             text = _("{included} of {subjects} subjects will be analysed").format(included=included, subjects=subjects)
         else:
-            widgets.setChipLevel(self.chip, "ok", _("All {n} checks passed").format(n=self.checkedCount()))
+            level, chipText = "ok", _("All {n} checks passed").format(n=self.checkedCount())
             text = _("{included} of {subjects} subjects will be analysed").format(included=included, subjects=subjects)
+        if self.runFailure is None:  # the chip keeps saying "Run failed" until the next run
+            widgets.setChipLevel(self.chip, level, chipText)
         if changed and not self.runFailure:
             self.widget.collapsed = state[0] == "ok"  # opens when something needs a decision, closes when it is all green; the user's own toggling is kept between checks
         self.summaryLabel.setText(text)
@@ -584,8 +593,8 @@ class PreflightCard:
         from LesionNetworkMappingLib import preflight
 
         blocking = preflight.blocking_checks(report)
-        self._saveReport(report)
         if not blocking:
+            self._saveReport(report)  # only a run that is started has a record
             return (True, "", None)
         first = blocking[0]
         fix = first.get("fix")
@@ -597,14 +606,11 @@ class PreflightCard:
         return (False, message, action)
 
     def _saveReport(self, report):
-        """Write the report to the study's derivatives/qc (once per report)."""
-        if self.savedSignature == self.reportSignature and self.savedPath:
-            return self.savedPath
+        """Write the report of a run that is started to the study's derivatives/qc: one file for each started run."""
         from LesionNetworkMappingLib import preflight
 
         try:
-            self.savedPath = preflight.save_report(self.ctx.study, report)
-            self.savedSignature = self.reportSignature
+            self.savedPath = preflight.save_report(self.ctx.study, dict(report))  # the copy gets this run's own run_id
         except Exception:
             logging.exception("Lesion network mapping: the preflight report could not be saved")
             self.savedPath = None
@@ -689,6 +695,8 @@ class PreflightCard:
     def _onJobFinished(self, job):
         """A job failed its output assertions: say so in the card and make the status chip red (the runner showed it amber)."""
         reason = self._failedJobs.pop(getattr(job, "id", None), None)
+        if reason is None and job.state == jobrunner.DONE and getattr(getattr(job, "spec", None), "kind", None) in ASSERTED_KINDS:
+            self.clearRunFailure()  # a run whose outputs passed replaces the failure of the previous one
         if reason is None or job.state != jobrunner.FAILED:
             return
         text = _("Run failed: {reason}").format(reason=reason)
@@ -715,6 +723,9 @@ class PreflightCard:
             self.runFailure.hide()
             self.runFailure.deleteLater()
             self.runFailure = None
+            if self.report is not None:
+                self._state = None
+                self._show()  # the chip shows the checks again instead of "Run failed"
 
     def onRunEvent(self, event):
         if event.get("event") in ("start", "queued"):
@@ -834,6 +845,7 @@ class PreflightCard:
         widget.cohortInfo = fresh
         try:
             widget._findCohortMaps()
+            widget._showCohort()  # the Seed card shows the same lesions as the Compute button
             widget.updateComputeState()
         except Exception:
             logging.exception("Lesion network mapping: the cohort lesion list could not be refreshed")
