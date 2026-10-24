@@ -13,8 +13,9 @@ the file; provenance and reproduce files are the exception, by design):
                  written with paths relative to the run folder)  shared: a hit fails
   other          anything else that is text                      shared: a hit fails
   report         .html / .md / .txt                              reported, not a failure
-  run-record     argv / inputs of a run: runs.jsonl, normalization.json, provenance.json, reproduce.sh, job and
-                 design records                                  provenance by design: reported, not a failure
+  run-record     argv / inputs of a run: runs.jsonl, normalization.json, provenance.json, reproduce*.sh (for example the
+                 pipeline's reproduce_pipeline.sh), job and design records
+                                                                 provenance by design: reported, not a failure
   app-state      .studio, cache, work folders                    never shared: reported, not a failure
 
 --strict also counts cohortmaps.json and glm.json as shared outputs (their paths are relative since W3-I1).
@@ -41,7 +42,7 @@ def classify(rel, name, strict=False):
         return "scene"
     if name.endswith((".tsv", ".csv")):
         return "table"
-    if name in RUN_RECORDS or (name in RUN_RECORDS_LOOSE and not strict):
+    if name in RUN_RECORDS or (name in RUN_RECORDS_LOOSE and not strict) or (name.startswith("reproduce") and name.endswith(".sh")):
         return "run-record"
     if name.endswith(".log"):
         return "log"
@@ -83,6 +84,11 @@ def main(argv):
     roots = [a for a in argv if a != "--strict"]
     if not roots:
         print(__doc__)
+        return 2
+    # A missing root would scan nothing and pass: refuse it
+    missing = [root for root in roots if not os.path.isdir(root)]
+    if missing:
+        print(f"PRIVACY ERROR: not a folder: {', '.join(missing)}")
         return 2
     return 1 if scan(roots, strict) else 0
 

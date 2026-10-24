@@ -1677,25 +1677,33 @@ def arrangeFigureViews(g, path):
 
 
 def answerConvention(g, neurological):
-    """Answer the convention question of a figure when the build asks it: the patient's right on the Left/Right of the image."""
-    chip = planned(g, "conventionChip")
-    if chip is None:
-        # The notice line has no promised object name: it is the container of the buttons Left, Right and Not sure
-        for button in g.mainWindow.findChildren("QAbstractButton"):
-            if button.isVisible() and str(button.text).strip().lower() == "not sure" and button.parent() is not None:
-                chip = button.parent()
-                break
-    if chip is None:
+    """Answer the convention question of a figure when the build asks it: the patient's right on the Left/Right of the image.
+
+    The question is any visible container whose object name matches ``PLANNED["conventionChip"]`` (U-07's chip, or the
+    Side step of L-29's Figure card, "StudioFigureConvention") or the notice line holding Left, Right and Not sure. Since L-29
+    several widgets match the name (the Side buttons, their text and state labels): the first one holding the answer is used.
+    """
+    pattern = re.compile(PLANNED["conventionChip"])
+    candidates = [widget for top in g.topLevelsInOrder() + [g.mainWindow] if top is not None for widget in top.findChildren("QWidget")
+                  if widget.objectName and pattern.search(widget.objectName) and widget.isVisible()]
+    # The notice line has no promised object name: it is the container of the buttons Left, Right and Not sure
+    for button in g.mainWindow.findChildren("QAbstractButton"):
+        if button.isVisible() and str(button.text).strip().lower() == "not sure" and button.parent() is not None:
+            candidates.append(button.parent())
+            break
+    if not candidates:
         g.note("conventionQuestion", False)
         return False
     g.note("conventionQuestion", True)
     wanted = "right" if neurological else "left"
-    for button in chip.findChildren("QAbstractButton"):
-        label = str(button.text).strip().lower()
-        if button.isVisible() and label == wanted:
-            yield from g.click(button, f"Answer: the patient's right is on the {wanted} of the figure")
-            yield 500
-            return True
+    for chip in candidates:
+        for button in chip.findChildren("QAbstractButton"):
+            label = str(button.text).strip().lower()
+            if button.isVisible() and label == wanted:
+                g.note("conventionAnsweredIn", str(chip.objectName) or str(chip.className()))
+                yield from g.click(button, f"Answer: the patient's right is on the {wanted} of the figure")
+                yield 500
+                return True
     g.warn("the convention question has no answer button named " + wanted)
     return False
 
@@ -2257,6 +2265,40 @@ def _studyPathEnd(g, start, reason):
     g.shot("study-path-stopped")
 
 
+def _lnmRunEverything(g, widget, start):
+    """Study path (B) from wave 4: the primary button of Map (Seed = Cohort) is "Run everything" (A-04c); its job maps every
+    lesion and writes the group maps, the exported files and report.html. Waiting for the job is no action. B ends when the
+    run is done and its outputs are on disk (group maps under the output folder, report.html).
+    """
+    card = widget.ctx.card("pipeline")
+    # The card's own button: it is on screen below the Preflight card (the primary button of the Compute card, which runs the
+    # same, is further down the panel)
+    button = g.widget("LNMPipelineRunButton", "QPushButton")
+    ready = yield from g.until(lambda: button is not None and button.isVisible() and button.isEnabled(), 30000, what="Run everything")
+    if not ready:
+        return _studyPathEnd(g, start, f"Run everything is not available ({str(widget.computeReasonLabel.text)!r}, card: {str(card.stateLabel.text)!r})")
+    yield from g.click(button, "Click 'Run everything'")
+    yield from g.until(lambda: card.job is not None, 5000, what="the cohort analysis job")
+    yield from g.until(lambda: card.job is not None and str(card.job.state) in ("done", "failed", "cancelled", "error"), 360000, what="the cohort analysis")
+    yield 1500
+    job = card.job
+    g.note("pipelineState", str(job.state) if job is not None else None)
+    out = card.outDir()
+    g.note("pipelineOut", os.path.relpath(out, g.fixtures["cohort"]["folder"]) if out else None)
+    if job is None or str(job.state) != "done":
+        return _studyPathEnd(g, start, f"the cohort analysis did not finish: {job.state if job is not None else None} {getattr(job, 'failureReason', '')}")
+    report = os.path.join(out, "report.html") if out else None
+    maps = sorted(os.path.relpath(os.path.join(d, n), out) for d, _dirs, names in os.walk(out) for n in names if n.endswith(".nii.gz") and n.startswith("group_")) if out else []
+    g.note("reportHtml", bool(report and os.path.isfile(report)))
+    g.note("groupMaps", maps[:12])
+    g.note("openReportEnabled", bool(card.openReportButton.isVisible() and card.openReportButton.enabled))
+    if not report or not os.path.isfile(report) or not maps:
+        return _studyPathEnd(g, start, f"Run everything finished without report.html ({bool(report and os.path.isfile(report))}) or group maps ({len(maps)})")
+    g.metric("B", g.actions - start)
+    g.note("studyPath", "UI only (Run everything)")
+    g.shot("study-path-done")
+
+
 def lnmStudyPath(g):
     """Study path (B): folder, study, maps of every lesion, group statistics, export, with no code and no terminal.
 
@@ -2326,6 +2368,10 @@ def lnmStudyPath(g):
         yield from g.until(lambda: terms.checked, 3000, what="the terms accepted")
         yield 400
         g.note("termsAccepted", bool(terms.checked))
+    # Wave 4 (A-04c): with Seed = Cohort the primary button runs everything (maps, nulls, group statistics, QA, clusters,
+    # export and report.html in the study's derivatives) in one job
+    if widget.ctx.card("pipeline") is not None:
+        return (yield from _lnmRunEverything(g, widget, start))
     # Map every lesion, then the group statistics
     for label, objectName, pattern in STUDY_STEPS:
         found = yield from g.until(lambda objectName=objectName, pattern=pattern: visibleButton(g, pattern, objectName) is not None, 15000, what=label)
