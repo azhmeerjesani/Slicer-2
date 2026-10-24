@@ -1,0 +1,40 @@
+{
+  "format": "slicer-lnm-recipe",
+  "version": 1,
+  "id": "darby2019_cnm",
+  "recipe_version": "1",
+  "title": "Coordinate network mapping (Darby 2019)",
+  "status": "adapted",
+  "cited_as": "Darby et al. 2019",
+  "citations": [
+    "10.1093/brain/awy292"
+  ],
+  "differences_from_source": [
+    "Coordinates (for example atrophy or activation peaks) become spherical seeds that are mapped by this library's engine; their maps are thresholded with the N-aware Bonferroni FWE rule instead of a fixed |T|.",
+    "Connectome QA chips (degree and PC1) are added."
+  ],
+  "description": "Network mapping of heterogeneous neuroimaging coordinates: the overlap of the networks of coordinate seeds.",
+  "parameters": {
+    "overlap": 75.0,
+    "nulls": {
+      "mode": "off"
+    }
+  },
+  "steps": [
+    "coordinates",
+    "maps",
+    "overlap",
+    "qa",
+    "clusters",
+    "report"
+  ],
+  "requires": [
+    "clusters",
+    "cohort",
+    "cohortmaps",
+    "coords",
+    "methods",
+    "qa",
+    "report"
+  ]
+}

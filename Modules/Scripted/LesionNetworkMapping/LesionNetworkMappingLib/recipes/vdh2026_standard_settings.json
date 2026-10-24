@@ -1,0 +1,60 @@
+{
+  "format": "slicer-lnm-recipe",
+  "version": 1,
+  "id": "vdh2026_standard_settings",
+  "recipe_version": "1",
+  "title": "Standard settings with a random-lesion reference (van den Heuvel 2026)",
+  "status": "adapted",
+  "cited_as": "van den Heuvel et al. 2026",
+  "citations": [
+    "10.1038/s41593-025-02196-7"
+  ],
+  "differences_from_source": [
+    "The source compared published lesion network maps with maps of randomly placed lesions; here the reference is this library's pooled exact relocation null of the cohort (rl_independent: each lesion relocated independently in the brain, 20 relocations per lesion, 1000 null cohorts).",
+    "The similarity of the maps to connectome degree and PC1 is reported with the lnm-reference-v1 reference maps of the chosen connectome.",
+    "Specificity uses this library's permutation GLM with a lesion-volume covariate."
+  ],
+  "description": "Group results on mean Fz maps, reported against a random-lesion (relocation) null, the degree/PC1 QA and a threshold and connectome robustness sweep.",
+  "parameters": {
+    "overlap": 90.0,
+    "nulls": {
+      "mode": "exact",
+      "kinds": [
+        "rl_independent"
+      ],
+      "k": 1000
+    },
+    "design": {
+      "test": "two_group",
+      "contrast": "A>B",
+      "covariates": [
+        "volume_ml"
+      ]
+    },
+    "robustness": {
+      "second_connectome": true
+    }
+  },
+  "steps": [
+    "maps",
+    "overlap",
+    "nulls",
+    "specificity",
+    "qa",
+    "robustness",
+    "clusters",
+    "report"
+  ],
+  "requires": [
+    "clusters",
+    "cohort",
+    "cohortmaps",
+    "design",
+    "glm",
+    "methods",
+    "nulls",
+    "qa",
+    "report",
+    "robustness"
+  ]
+}

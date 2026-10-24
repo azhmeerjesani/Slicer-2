@@ -1,0 +1,67 @@
+{
+  "format": "slicer-lnm-recipe",
+  "version": 1,
+  "id": "comprehensive_battery",
+  "recipe_version": "1",
+  "title": "Comprehensive diagnostics battery",
+  "status": "adapted",
+  "cited_as": "van den Heuvel et al. 2026; Siddiqi et al. 2026; Zalesky & Cash 2026",
+  "citations": [
+    "10.1038/s41593-025-02196-7",
+    "10.64898/2026.02.24.707529",
+    "10.1038/s41593-026-02259-3"
+  ],
+  "differences_from_source": [
+    "Not a published pipeline: it runs every diagnostic of the Map battery strip that the cited papers debate (degree/PC1 QA, a relocation null reference, specificity with label permutation and a volume covariate, validation against baselines, threshold and connectome robustness, provenance).",
+    "Each diagnostic uses this library's implementation and defaults (addendum section 3)."
+  ],
+  "description": "Every diagnostic of the battery strip in one run. It takes the longest; it does not make a result specific.",
+  "parameters": {
+    "overlap": 90.0,
+    "nulls": {
+      "mode": "auto",
+      "kinds": [
+        "rl_independent"
+      ],
+      "k": 1000
+    },
+    "design": {
+      "test": "two_group",
+      "contrast": "A>B",
+      "covariates": [
+        "volume_ml"
+      ]
+    },
+    "validation": {
+      "scheme": "auto"
+    },
+    "robustness": {
+      "second_connectome": true
+    }
+  },
+  "steps": [
+    "maps",
+    "overlap",
+    "nulls",
+    "specificity",
+    "conjunction",
+    "qa",
+    "validation",
+    "robustness",
+    "clusters",
+    "report"
+  ],
+  "requires": [
+    "clusters",
+    "cohort",
+    "cohortmaps",
+    "design",
+    "glm",
+    "methods",
+    "nulls",
+    "qa",
+    "report",
+    "robustness",
+    "validate"
+  ]
+}
