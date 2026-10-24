@@ -38,6 +38,12 @@ failures.
 ``--only`` takes metric names or measurement group names (see ``--list``). A group always measures
 all of its metrics, but only the requested metrics are written.
 
+The ``lnm`` group measures the lesion network mapping scenarios of the workbench: ``lnm_synthetic_s`` (engine CLI),
+``lnm_glm_perm_ms`` (GLM, n=200, V of about 228k, ms per permutation), ``lnm_preflight_300_s``, ``lnm_qc_chips_ms``,
+``lnm_done_next_ms``, ``lnm_figure_rebuild_ms``, ``lnm_library_filter_1000_ms`` and ``lnm_duplicate_index_1000_s``. The
+three that need the Studio interface (Done to next, figure rebuild, Library filter) are listed in ``details["skipped"]``
+when Studio is not active (Classic, ``--testing``, no main window).
+
 Exit codes: 0 success, 1 failed measurement, budget exceeded or regression found, 2 usage or
 internal error.
 """
@@ -87,7 +93,18 @@ BUDGETS = {
     "draw_apply_ms": 40,  # Draw apply (W4-01)
     "lesion_card_refresh_ms": 15,  # Lesion card refresh
     "lnm_synthetic_s": 10,  # LNM synthetic end to end (CLI)
+    # LNM workbench scenarios (L-54; SPEC_LNM_ADDENDUM section 6)
+    "lnm_glm_perm_ms": 60,  # GLM permutation, n=200, V about 228k: ms per permutation
+    "lnm_preflight_300_s": 1.0,  # Preflight of a 300-lesion study (header-only)
+    "lnm_qc_chips_ms": 15,  # Lesion QC chips, first stage on the main thread (lesionqc.CHIP_BUDGET_MS)
+    "lnm_done_next_ms": 300,  # Done to next case (prefetched)
+    "lnm_figure_rebuild_ms": 300,  # Show source: rebuild a figure overlay (figure.REBUILD_BUDGET_MS)
+    "lnm_library_filter_1000_ms": 50,  # Library filter on a 1000-subject study
+    "lnm_duplicate_index_1000_s": 2.0,  # Duplicate index: update and candidates of 1000 lesions (2 mm grid)
 }
+
+LNM_METRICS = ("lnm_synthetic_s", "lnm_glm_perm_ms", "lnm_preflight_300_s", "lnm_qc_chips_ms", "lnm_done_next_ms",
+               "lnm_figure_rebuild_ms", "lnm_library_filter_1000_ms", "lnm_duplicate_index_1000_s")
 
 # Measurement groups: (group name, metrics it produces, InSlicerBench method).
 GROUPS = (
@@ -101,7 +118,7 @@ GROUPS = (
     ("paint_mni", ("stroke_release_mni_ms", "stroke_release_mni_intensity_ms", "draw_apply_ms"), "measurePaintMNI"),
     ("segment_ops", ("smoothing_median3_ms", "islands_keep_largest_ms", "margin_2mm_ms"), "measureSegmentOperations"),
     ("effect_gui", ("effect_gui_refresh_ms",), "measureEffectGuiRefresh"),
-    ("lnm", ("lnm_synthetic_s",), "measureLesionNetworkMapping"),
+    ("lnm", LNM_METRICS, "measureLesionNetworkMapping"),
 )
 
 # View layout of each measurement group (a vtkMRMLLayoutNode constant name). Studio enters Draw in layout 7001 (Studio
@@ -1092,16 +1109,37 @@ class InSlicerBench:
         self.record("effect_gui_refresh_ms", statistics.median(times))
         editor.setActiveEffectByName("")
 
-    def measureLesionNetworkMapping(self):
-        import numpy as np
+    def lnmLibrary(self):
+        """Import path of LesionNetworkMappingLib (the build's own, else the source tree); None if there is none."""
         moduleDir = os.path.join(SOURCE_DIR, "Modules", "Scripted", "LesionNetworkMapping")
         try:
             import LesionNetworkMappingLib  # noqa: F401
         except ImportError:
             if not os.path.isdir(os.path.join(moduleDir, "LesionNetworkMappingLib")):
-                self.skip("lnm_synthetic_s", "LesionNetworkMappingLib is not available")
-                return
+                return None
             sys.path.insert(0, moduleDir)
+        return moduleDir
+
+    def measureLesionNetworkMapping(self):
+        """The lesion network mapping scenarios; each one fails or is skipped on its own."""
+        if self.lnmLibrary() is None:
+            for name in LNM_METRICS:
+                self.skip(name, "LesionNetworkMappingLib is not available")
+            return
+        for name, method in (
+            ("lnm_synthetic_s", self.measureLnmSynthetic),
+            ("lnm_glm_perm_ms", self.measureLnmGlm),
+            ("lnm_preflight_300_s", self.measureLnmPreflight),
+            ("lnm_duplicate_index_1000_s", self.measureLnmDuplicateIndex),
+            ("lnm_qc_chips_ms", self.measureLnmChips),
+            ("lnm_figure_rebuild_ms", self.measureLnmFigureRebuild),
+            ("lnm_library_filter_1000_ms", self.measureLnmLibraryFilter),
+            ("lnm_done_next_ms", self.measureLnmDoneNext),
+        ):
+            self.attempt((name,), method)
+
+    def measureLnmSynthetic(self):
+        import numpy as np
         from LesionNetworkMappingLib import connectome, nifti
         libraryDir = os.path.dirname(os.path.dirname(os.path.abspath(connectome.__file__)))
         python = shutil.which("PythonSlicer") or sys.executable
@@ -1130,6 +1168,287 @@ class InSlicerBench:
                 raise RuntimeError(f"engine CLI failed (exit code {process.returncode}, events {events}): {process.stderr[-2000:]}")
             self.record("lnm_synthetic_s", elapsed)
             self.details["lnm_python"] = python
+
+    def measureLnmGlm(self, n=200, voxels=228000, permutations=50):
+        """Freedman-Lane GLM: n=200 rows, V about 228k voxels; the metric is the median ms per permutation (batched GEMM)."""
+        import numpy as np
+        from LesionNetworkMappingLib import design, glm
+        rng = np.random.default_rng(3)
+        group = (np.arange(n) % 2).astype(float)
+        volume = rng.uniform(1, 40, n)
+        X = np.column_stack([np.ones(n), group, volume - volume.mean()])
+        C = np.array([[0.0, 1.0, 0.0]])
+        Y = rng.standard_normal((n, voxels), dtype=np.float32)
+        Y[:, :2000] += (0.6 * group)[:, None].astype(np.float32)
+        shufflings = list(design.permutations(n, None, "free", permutations + 1, seed=5))
+        # Warm up the BLAS threads and the allocator on a small test, then time the real one
+        glm.permutation_test(Y[:, :5000], X, C, iter(shufflings[:6]), stat="t", tails=2, dtype=np.float32)
+        times = []
+        for _ in range(3):
+            startTime = time.perf_counter()
+            result = glm.permutation_test(Y, X, C, iter(shufflings), stat="t", tails=2, dtype=np.float32)
+            times.append((time.perf_counter() - startTime) * 1000.0 / permutations)
+        if result.n_perm != permutations + 1:
+            raise RuntimeError(f"expected {permutations + 1} shufflings, the GLM used {result.n_perm}")
+        self.details["lnm_glm_perm"] = {"n": n, "voxels": voxels, "permutations": permutations, "ms_per_perm_runs": [round(t, 2) for t in times],
+                                         "precision": str(getattr(result, "precision", ""))}
+        self.record("lnm_glm_perm_ms", statistics.median(times))
+
+    def measureLnmPreflight(self, count=300):
+        """Open a 300-lesion study and run the preflight with a design (header-only for rows with fresh metrics)."""
+        import numpy as np
+        from LesionNetworkMappingLib import connectome, nifti, preflight
+        from LesionNetworkMappingLib.study import Study
+        space = "MNI152NLin6Asym"
+        with tempfile.TemporaryDirectory(prefix="StudioBench-preflight-") as tempDir:
+            meta = connectome.make_synthetic(os.path.join(tempDir, "synthetic.lnmc"), n_subjects=6, name="Synthetic")
+            connectome.set_metadata(meta["path"], space=space)
+            bundle = connectome.ConnectomeBundle.open(meta["path"])
+            shape = tuple(bundle.shape)
+            study = Study.create(os.path.join(tempDir, "study"), name="Bench", space=space)
+            ijk = np.indices(shape).reshape(3, -1).T
+            for index in range(count):
+                sid = f"sub-{index:03d}"
+                center = (5 + index % 10, 6 + (index // 10) % 12, 5 + (index // 120) % 10)
+                data = (np.linalg.norm(ijk - np.asarray(center), axis=1) <= 1 + index % 3).reshape(shape).astype(np.uint8)
+                path = os.path.join(study.path, "lesions", f"{sid}_space-{space}_desc-lesion_mask.nii.gz")
+                nifti.write_nifti(path, data, bundle.affine)
+                voxels = float(data.sum())
+                stat = os.stat(path)
+                study.add_subject(sid, {"lesion": study.relpath(path), "space": space, "status": "traced", "volume_ml": round(voxels * 0.008, 6),
+                                        "fractional_sum": voxels, "lesion_mtime": round(stat.st_mtime, 3), "lesion_size": stat.st_size,
+                                        "group": "case" if index % 2 else "control", "age": 40 + index % 30})
+            study.save()
+            spec = {"test": "two_group", "levels": ["case", "control"]}
+            times = []
+            for _ in range(3):
+                preflight._SHA_CACHE.clear()
+                startTime = time.perf_counter()
+                opened = Study.open(study.path)
+                report = preflight.run_preflight(opened, bundle=bundle, recipe_rule={"kind": "fwe_bonferroni"}, design_spec=spec, accepted_terms=True)
+                times.append(time.perf_counter() - startTime)
+            if report["blocked"] or report["counts"]["included"] != count:
+                raise RuntimeError(f"preflight of the bench study is blocked or incomplete: {report['counts']}")
+            self.details["lnm_preflight_300_runs_s"] = [round(t, 3) for t in times]
+            self.record("lnm_preflight_300_s", statistics.median(times))
+
+    def measureLnmDuplicateIndex(self, count=1000):
+        """LesionIndex.update of 1000 random ellipsoid lesions on the 2 mm NLin6 grid and one candidates() query each."""
+        import numpy as np
+        from LesionNetworkMappingLib import geometry, lesionops
+        grid = geometry.GRID_BY_ID["NLin6-2mm"].grid
+        rng = np.random.default_rng(7)
+        lesions = []
+        for _ in range(count):
+            centre = rng.uniform([-60, -90, -40], [60, 60, 70])
+            radii = rng.uniform(3, 20, 3)
+            ijkCentre = geometry.world_to_voxel(centre[None], grid.affine)[0]
+            reach = np.ceil(radii / grid.spacing.min()).astype(int) + 1
+            low = np.maximum(np.floor(ijkCentre).astype(int) - reach, 0)
+            high = np.minimum(np.floor(ijkCentre).astype(int) + reach + 1, grid.shape)
+            ijk = np.stack(np.meshgrid(*[np.arange(a, b) for a, b in zip(low, high, strict=True)], indexing="ij"), -1).reshape(-1, 3)
+            inside = (((geometry.voxel_to_world(ijk, grid.affine) - centre) / radii) ** 2).sum(1) <= 1
+            lesions.append(np.ravel_multi_index(ijk[inside].T, grid.shape))
+        buffer = np.zeros(grid.n_voxels, dtype=np.uint8)
+        index = lesionops.LesionIndex()
+        updateTime = 0.0
+        for number, flat in enumerate(lesions):
+            buffer[flat] = 1
+            startTime = time.perf_counter()
+            index.update(f"sub-{number:04d}", buffer.reshape(grid.shape), grid.affine)
+            updateTime += time.perf_counter() - startTime
+            buffer[flat] = 0
+        startTime = time.perf_counter()
+        pairs = sum(len(index.candidates(sid)) for sid in index.sids())
+        queryTime = time.perf_counter() - startTime
+        self.details["lnm_duplicate_index"] = {"update_s": round(updateTime, 3), "query_s": round(queryTime, 3), "candidate_pairs": pairs}
+        self.record("lnm_duplicate_index_1000_s", updateTime + queryTime)
+
+    # -- LNM scenarios that need the Studio interface
+
+    def needStudio(self, name):
+        """The Studio shell and its modules for the scenario ``name``, or None after recording the skip."""
+        shell = self.studioShell()
+        if shell is None or not shell.isActive():
+            self.skip(name, "Studio is not active (Classic, --testing or no main window)")
+            return None
+        return shell
+
+    @staticmethod
+    def templateStudyFiles(folder, count, traced=None):
+        """Write ``count`` ball lesions on the 2 mm MNI152NLin2009cAsym grid into folder; return the paths."""
+        import numpy as np
+        from LesionNetworkMappingLib import nifti
+        shape = (97, 115, 97)  # i, j, k
+        affine = np.diag([2.0, 2.0, 2.0, 1.0])
+        affine[:3, 3] = (-96.5, -132.5, -78.5)
+        k, j, i = np.indices(shape[::-1])
+        os.makedirs(folder, exist_ok=True)
+        paths = []
+        for number in range(count if traced is None else traced):
+            x = 30 + 2 * (number % 30)
+            mask = (((i - x) ** 2 + (j - 50 - number % 17) ** 2 + (k - 40 - number % 11) ** 2) <= (3 + number % 3) ** 2).astype(np.uint8)
+            path = os.path.join(folder, f"sub-b{number:04d}_lesion.nii.gz")
+            nifti.write_nifti(path, np.transpose(mask, (2, 1, 0)), affine, sform_code=4, qform_code=4)
+            paths.append(path)
+        return paths
+
+    def measureLnmChips(self):
+        """Lesion QC chips (first stage, main thread): evaluateCore and buildChips of a lesion crop, resources loaded."""
+        import numpy as np
+        shell = self.needStudio("lnm_qc_chips_ms")
+        if shell is None:
+            return
+        from StudioLib import lesionqc
+        core = lesionqc.core()
+        core.ensureResources()
+        core.waitIdle(60)
+        resources = core.resources
+        shape = (97, 115, 97)
+        affine = np.diag([2.0, 2.0, 2.0, 1.0])
+        affine[:3, 3] = (-96.5, -132.5, -78.5)
+        k, j, i = np.indices(shape[::-1])
+        mask = (((i - 36) ** 2 + (j - 60) ** 2 + (k - 42) ** 2) <= 5 ** 2) | (((i - 60) ** 2 + (j - 70) ** 2 + (k - 40) ** 2) <= 2 ** 2)
+        crop = lesionqc.lesionCrop(np.ascontiguousarray(mask.astype(np.uint8)), affine)
+        if crop is None:
+            raise RuntimeError("the bench lesion has no crop")
+        values, cropAffine, _box = crop
+        times = []
+        for _ in range(25):
+            startTime = time.perf_counter()
+            result = lesionqc.evaluateCore(values, cropAffine, mni=True, space="MNI152NLin2009cAsym", reportedSide="L", resources=resources)
+            lesionqc.buildChips(result, row={"reported_side": "L"}, mni=True)
+            times.append(self.elapsedMs(startTime))
+        self.details["lnm_qc_chips"] = {"resources_state": resources.state, "brain_families": sorted(resources.brain), "runs_ms": [round(t, 2) for t in times[:5]]}
+        self.record("lnm_qc_chips_ms", statistics.median(times))
+
+    def measureLnmFigureRebuild(self):
+        """Show source: rebuild a figure overlay from its fit file and crop in the trace views."""
+        import numpy as np
+        shell = self.needStudio("lnm_figure_rebuild_ms")
+        if shell is None:
+            return
+        from LesionNetworkMappingLib import figurefit
+        from PIL import Image
+        from StudioLib import figure, importer
+        importer.startOnTemplate(shell=shell)
+        self.pump(10)
+        with tempfile.TemporaryDirectory(prefix="StudioBench-figure-") as tempDir:
+            rng = np.random.default_rng(1)
+            yy, xx = np.mgrid[0:360, 0:300]
+            brain = (((xx - 150) / 120.0) ** 2 + ((yy - 180) / 150.0) ** 2 <= 1).astype(np.float32)
+            image = (brain * (140 + 40 * rng.random((360, 300)))).astype(np.uint8)
+            pngPath = os.path.join(tempDir, "fig-1.png")
+            Image.fromarray(np.stack([image] * 3, axis=-1)).save(pngPath, format="PNG")
+            cut = figurefit.cut_plane("axial", 10.0, 0.0, 0.0)
+            figPx = np.array([[150.0, 30.0], [150.0, 330.0], [30.0, 180.0], [270.0, 180.0]])
+            plane = figurefit.apply_2d(np.array([[0.5, 0, -75], [0, -0.5, 90], [0, 0, 1.0]]), figurefit.apply_2d(figurefit.convention_matrix("radiological"), figPx))
+            tplRas = cut.to_ras(plane)
+            fit = figurefit.fit_figure(figPx, tplRas, cut, "radiological", "similarity")
+            names = figurefit.suggested_landmarks("axial")
+            landmarks = [{"name": names[n], "fig_px": figPx[n], "tpl_ras": tplRas[n]} for n in range(len(figPx))]
+            record = figurefit.make_record(fit, "axial", "radiological", landmarks, cut, image_sha256=figurefit.image_sha256(pngPath), crop_px=[0, 0, 300, 360],
+                                           template={"id": "MNI152NLin2009cAsym", "res": 2, "sha256": None}, tracer="bench", z_mm=10.0)
+            fitPath = os.path.join(tempDir, "fig-1_fit.json")
+            figurefit.write_fit_json(fitPath, record)
+            times = []
+            try:
+                for attempt in range(4):
+                    _panel, elapsed = figure.showSource(fitPath, shell)
+                    self.pump(2)
+                    times.append(elapsed)
+                    figure.closeFigure(removeNodes=True)
+                    self.pump(2)
+            finally:
+                try:
+                    figure.closeFigure(removeNodes=True)
+                except Exception:
+                    pass
+        self.details["lnm_figure_rebuild_runs_ms"] = [round(t, 1) for t in times]
+        # The first rebuild loads the Pillow edge image and the PNG reader: the metric is the median of the warm ones
+        self.record("lnm_figure_rebuild_ms", statistics.median(times[1:]))
+
+    def measureLnmLibraryFilter(self, count=1000):
+        """Library: choose a filter chip on a 1000-subject study (the list model and the view are refreshed)."""
+        from LesionNetworkMappingLib.study import Study
+        shell = self.needStudio("lnm_library_filter_1000_ms")
+        if shell is None:
+            return
+        from StudioLib import library, study_ui
+        with tempfile.TemporaryDirectory(prefix="StudioBench-library-") as tempDir:
+            study = Study.create(os.path.join(tempDir, "study"), name="Bench1000", space="MNI152NLin2009cAsym")
+            for number in range(count):
+                study.add_subject(f"sub-{number:04d}", {"group": "case" if number % 3 else "control", "status": "untraced" if number % 4 == 0 else "traced",
+                                                        "qc": "unreviewed" if number % 5 else "pass", "volume_ml": round(1 + number % 37 / 3.0, 2)})
+            study.save()
+            study_ui.openStudy(study.path, shell)
+            self.pump(10)
+            shell.switchTo("library")
+            self.idleWait(300)
+            page = library.canvas().studyPage
+            keys = ["cases", "controls", "untraced", "all"]
+            available = {entry["key"] for entry in page.list._filters()}
+            keys += [key for key in ("needs_review", "has_flags") if key in available]
+            times = []
+            for _ in range(3):
+                for key in keys:
+                    startTime = time.perf_counter()
+                    page.list.setFilter(key)
+                    self.pump(1)
+                    times.append(self.elapsedMs(startTime))
+            page.list.setFilter("all")
+            rows = len(page.list.model.rows)
+            study_ui.closeStudy()
+            self.pump(4)
+        if rows != count:
+            raise RuntimeError(f"the Library shows {rows} of {count} subjects")
+        self.details["lnm_library_filter"] = {"filters": keys, "max_ms": round(max(times), 1)}
+        self.record("lnm_library_filter_1000_ms", statistics.median(times))
+
+    def measureLnmDoneNext(self, count=12):
+        """Done to next: Done writes the lesion of this case and opens the next one (prefetched; the median over the series)."""
+        shell = self.needStudio("lnm_done_next_ms")
+        if shell is None:
+            return
+        import slicer
+        from StudioLib import draw, study_ui
+        with tempfile.TemporaryDirectory(prefix="StudioBench-donenext-") as tempDir:
+            folder = os.path.join(tempDir, "study")
+            files = self.templateStudyFiles(folder, count)
+            session = study_ui.createStudy(files, shell, folder=folder)
+            self.pump(10)
+            session.waitForMetrics(30)
+            self.pump(5)
+            # Every case is untraced, so that Done opens the next one (a traced row would end the series at once)
+            for sid in session.study.subject_ids:
+                session.study.set(sid, status="untraced")
+            session.open(session.study.subject_ids[0], switchToDraw=True)
+            self.pump(5)
+            times, used, switched = [], 0, 0
+            for number in range(count - 2):
+                session.waitForPrefetch(10)
+                self.idleWait(50)
+                segmentation = session.segmentationNode()
+                segmentId = segmentation.GetSegmentation().GetNthSegmentID(0)
+                volume = session.volumeNode()
+                array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, segmentId, volume)
+                array[10:13, 12 + number:15 + number, 10:13] = 1
+                slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentation, segmentId, volume)
+                self.pump(2)
+                before = getattr(session, "_current", None)
+                startTime = time.perf_counter()
+                draw.doneNext(shell)
+                times.append(self.elapsedMs(startTime))
+                switched += int(getattr(session, "_current", None) != before)
+                used += int(bool(getattr(session, "lastSwitchPrefetched", False)))
+                self.idleWait(100)
+            study_ui.closeStudy()
+            self.pump(4)
+        self.details["lnm_done_next"] = {"switched": switched, "prefetched": used, "of": len(times), "runs_ms": [round(t, 1) for t in times]}
+        # A metric that does not open the next case (or does not use the prefetch) would pass without testing Done to next
+        if switched < len(times) or used < 0.8 * len(times):
+            raise RuntimeError(f"Done to next switched {switched} and prefetched {used} of {len(times)} cases")
+        self.record("lnm_done_next_ms", statistics.median(times))
 
     # -- driver
 
