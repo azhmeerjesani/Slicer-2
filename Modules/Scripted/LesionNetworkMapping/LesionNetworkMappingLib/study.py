@@ -100,6 +100,7 @@ LOCK_TIMEOUT_S = 40
 EXCLUDED_INCLUDE = "include=0"
 EXCLUDED_REVIEW = "review_status != approved"
 EXCLUDED_NORM_QC = "norm_qc != pass"
+EXCLUDED_AUTO = "automatic segmentation not approved"
 DEFAULT_RULES = {"lesion": "lesion|mask|seg|label|roi", "id": "sub-[A-Za-z0-9]+"}
 NIFTI_EXTENSIONS = (".nii.gz", ".nii")
 # Word boundaries in file names (case-sensitive): "_", "-", ".", "+" or spaces, letters next to digits,
@@ -910,11 +911,12 @@ class Study:
         :param columns: columns that must have a value in every row used (numeric columns must hold numbers).
         :param include_only: exclude rows with include = 0.
         :param require_review: exclude rows whose review_status is not "approved"; None uses
-          :attr:`review_required`.
+          :attr:`review_required`. Unless False (a recorded override), an automatic segmentation (an
+          ``auto:<tool>`` token in trace_method) that no human approved is excluded whatever the setting.
         :param require_norm_qc: exclude normalized rows (with a norm_method) whose norm_qc is not "pass".
         :return: (copies of the rows used, {reason: [participant ids]}); each excluded row is counted once,
-          under the first reason: :data:`EXCLUDED_INCLUDE`, :data:`EXCLUDED_REVIEW`, :data:`EXCLUDED_NORM_QC`,
-          "missing <column>" or "not a number: <column>".
+          under the first reason: :data:`EXCLUDED_INCLUDE`, :data:`EXCLUDED_REVIEW`, :data:`EXCLUDED_AUTO`,
+          :data:`EXCLUDED_NORM_QC`, "missing <column>" or "not a number: <column>".
         """
         if isinstance(columns, str):
             columns = (columns,)
@@ -927,6 +929,9 @@ class Study:
                 reason = EXCLUDED_INCLUDE
             elif review and row.get("review_status") != "approved":
                 reason = EXCLUDED_REVIEW
+            elif require_review is not False and row.get("review_status") != "approved" and any(
+                    token.startswith("auto:") for token in str(row.get("trace_method") or "").split("+")):
+                reason = EXCLUDED_AUTO
             elif require_norm_qc and not is_missing(row.get("norm_method")) and row.get("norm_qc") != "pass":
                 reason = EXCLUDED_NORM_QC
             else:
