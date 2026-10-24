@@ -305,7 +305,7 @@ def read_sleuth(path):
         lines = f.read().splitlines()
     space = None
     foci, used = [], {}
-    name, subjects, in_coordinates = None, None, False
+    name, subjects, in_coordinates, pending = None, None, False, False
 
     def open_block(label):
         count = used.get(label, 0) + 1
@@ -323,11 +323,14 @@ def read_sleuth(path):
         match = _SLEUTH_SUBJECTS.match(line)
         if match:
             subjects = int(match.group("n"))
+            # Before the next block's name line (some files put it first): it belongs to that block
+            pending = in_coordinates or name is None
             continue
         if line.startswith("//"):
             if in_coordinates or name is None:
                 name = open_block(line.lstrip("/").strip() or f"experiment{len(used) + 1}")
-                subjects = None
+                subjects = subjects if pending else None
+                pending = False
                 in_coordinates = False
             continue
         values = [value for value in _SLEUTH_NUMBERS.split(line) if value]
@@ -547,10 +550,20 @@ def study_union_seeds(foci_by_study, grid, radius_mm=None, diameter_mm=None, mas
     n_columns = grid.n_voxels if mask_indices is None else len(mask_indices)
     weights = np.zeros((len(names), n_columns), dtype=np.float32)
     record = sphere_radius(radius_mm, diameter_mm)[1]
+    own = set()
     for row, name in enumerate(names):
-        volume, record = spheres(foci_by_study[name], grid, radius_mm, diameter_mm, supersample)
+        volume, study_record = spheres(foci_by_study[name], grid, radius_mm, diameter_mm, supersample)
+        own.update(study_record.get("per_focus_radii_mm", ()))
         weights[row] = volume.reshape(-1) if mask_indices is None else masked(volume, mask_indices)
+    if own:
+        record = dict(record, per_focus_radii_mm=sorted(own))
     return names, weights, record
+
+
+def focus_radii(foci, radius_mm=None, diameter_mm=None):
+    """(F,) sphere radius of each focus, as :func:`spheres` uses it: its own radius when it has one, else the given one."""
+    radius = sphere_radius(radius_mm, diameter_mm)[0]
+    return np.array([sphere_radius(focus.radius_mm)[0] if getattr(focus, "radius_mm", None) else radius for focus in foci], dtype=np.float64)
 
 
 #
@@ -661,8 +674,10 @@ def random_coordinate_null(foci_by_study, gm_mask, k=DEFAULT_K, seed=0, grid=Non
     names = list(foci_by_study)
     if not names:
         raise ValueError("No study to compare")
-    radius, sphere = sphere_radius(radius_mm, diameter_mm)
-    _names, observed_w, _record = study_union_seeds(foci_by_study, grid, radius_mm, diameter_mm, mask_indices, supersample)
+    _names, observed_w, sphere = study_union_seeds(foci_by_study, grid, radius_mm, diameter_mm, mask_indices, supersample)
+    # Null foci keep the sphere of the observed focus they replace (same study, same position in the study), so a
+    # radius column in the file applies to the null spheres as it does to the observed ones: like with like.
+    radii = np.concatenate([focus_radii(foci_by_study[name], radius_mm, diameter_mm) for name in names])
     observed = 100.0 * np.asarray(network_fn(observed_w), dtype=bool).mean(axis=0)
     observed_peak = float(observed.max()) if observed.size else 0.0
     sets, study_index, _ = random_coordinate_sets(foci_by_study, gm_mask, grid, k, seed)
@@ -681,8 +696,9 @@ def random_coordinate_null(foci_by_study, gm_mask, k=DEFAULT_K, seed=0, grid=Non
         for draw in draws:
             for study in range(n_studies):
                 volume = np.zeros(grid.shape, dtype=np.float32)
-                for xyz in sets[draw][study_index == study]:
-                    sphere_occupancy(xyz, radius, grid, supersample, False, volume)
+                in_study = study_index == study
+                for xyz, r in zip(sets[draw][in_study], radii[in_study]):
+                    sphere_occupancy(xyz, r, grid, supersample, False, volume)
                 rows.append(volume.reshape(-1) if mask_indices is None else masked(volume, mask_indices))
         binary = np.asarray(network_fn(np.stack(rows)), dtype=bool).reshape(len(draws), n_studies, -1)
         for offset, draw in enumerate(draws):
@@ -799,6 +815,12 @@ def stimulation_seed(kind, grid, points=None, image=None, radius_mm=None, diamet
     else:
         data, affine = image
     data = np.nan_to_num(np.asarray(data, dtype=np.float64))
+    if data.ndim > 3 and data.shape[-1] == 3 and int(np.prod(data.shape[3:])) == 3:
+        if kind != "efield":
+            raise ValueError("A VTA image must be one 3D volume, not a vector image")
+        data = np.linalg.norm(data, axis=-1)  # a vector E-field (SimNIBS *_E.nii.gz): its magnitude, as magnE
+    if data.ndim > 3 and int(np.prod(data.shape[3:])) != 1:
+        raise ValueError(f"The {kind} image must be one 3D volume (or a 3-component vector E-field), not shape {tuple(data.shape)}")
     data = data.reshape(data.shape[:3])
     on_grid = data if grid.matches(Grid(data.shape, affine)) else resample_to_grid(data, affine, grid, mode="fraction")
     on_grid = np.asarray(on_grid, dtype=np.float64)

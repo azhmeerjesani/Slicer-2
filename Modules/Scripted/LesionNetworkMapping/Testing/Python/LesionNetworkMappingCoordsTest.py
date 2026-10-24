@@ -101,6 +101,9 @@ class ParserTest(CoordsTestCase):
         self.assertEqual(coords.read_foci(os.path.join(self.tmp, "sleuth.txt")), foci)  # detected by content
         with self.assertRaisesRegex(ValueError, "Reference"):
             coords.read_sleuth(self.write("noref.txt", "// a study\n1 2 3\n"))
+        # "// Subjects=N" before the experiment's name line belongs to that experiment
+        first = coords.read_sleuth(self.write("first.txt", "// Reference=MNI\n// Subjects=12\n// A\n1 2 3\n\n// Subjects=20\n// B\n4 5 6\n\n// C\n7 8 9\n"))
+        self.assertEqual([(f.study, f.subjects) for f in first], [("A", 12), ("B", 20), ("C", None)])
 
     def test_nimare_json(self):
         dataset = {"pain": {"contrasts": {"1": {"coords": {"space": "MNI", "x": [1, 2], "y": [3, 4], "z": [5, 6]}, "metadata": {"sample_sizes": [20]}}}},
@@ -238,6 +241,26 @@ class NullTest(unittest.TestCase):
         self.assertTrue(all(n % 3 == 0 for n in calls[1:]))
         self.assertEqual(sum(calls[1:]), 15)
 
+    def test_null_spheres_keep_focus_radius(self):
+        # A focus radius from the file (8 mm) applies to the null spheres too, not only to the observed ones
+        gm = np.zeros(GRID_2MM.shape, dtype=bool)
+        gm[9:11, 11:13, 9:11] = True  # central voxels: every null sphere lies inside the grid
+        groups = {"A": [coords.Focus(1, 1, 1, "A", radius_mm=8)], "B": [coords.Focus(-1, -1, -1, "B")]}
+        rows = []
+
+        def network_fn(weights):
+            rows.append(np.asarray(weights).copy())
+            return coords.seed_overlap_fn(weights)
+
+        result = coords.random_coordinate_null(groups, gm, k=6, seed=2, grid=GRID_2MM, network_fn=network_fn, radius_mm=4, columns_per_call=4)
+        observed, null = rows[0], np.concatenate(rows[1:]).reshape(6, 2, -1)
+        for study in range(2):
+            np.testing.assert_allclose(null[:, study].sum(axis=1), observed[study].sum(), rtol=0.05)
+        self.assertGreater(observed[0].sum(), 4 * observed[1].sum())  # 8 mm against 4 mm
+        self.assertEqual(result["sphere"]["radius_mm"], 4.0)
+        self.assertEqual(result["sphere"]["per_focus_radii_mm"], [8.0])
+        np.testing.assert_array_equal(coords.focus_radii(groups["A"] + groups["B"], radius_mm=4), [8.0, 4.0])
+
     def test_same_family_enforced(self):
         probseg = np.where(self.gm, 0.9, 0.2).astype(np.float32)
         path = os.path.join(tempfile.mkdtemp(prefix="lnm-coords-gm-"), "tpl-MNI152NLin2009cAsym_res-02_label-GM_probseg.nii.gz")
@@ -302,6 +325,12 @@ class StimulationTest(CoordsTestCase):
         normalized, record = coords.stimulation_seed("efield", GRID_2MM, image=path)
         self.assertAlmostEqual(float(normalized.max()), 1.0, places=5)
         self.assertEqual(record["source"]["file"], "sub-01_efield.nii.gz")
+        # A vector E-field (SimNIBS *_E.nii.gz, X x Y x Z x 3) uses its magnitude
+        vector = np.stack([field * 0.6, field * 0.8, np.zeros_like(field)], axis=-1)
+        magnitude, _ = coords.stimulation_seed("efield", GRID_2MM, image=(vector, fine.affine))
+        np.testing.assert_allclose(magnitude, normalized, atol=1e-5)
+        with self.assertRaisesRegex(ValueError, "one 3D volume"):
+            coords.stimulation_seed("efield", GRID_2MM, image=(np.stack([field, field], axis=-1), fine.affine))
         thresholded, record = coords.stimulation_seed("efield", GRID_2MM, image=path, weighting="threshold", threshold=60.0)
         self.assertTrue(set(np.unique(thresholded)) <= {0.0, 1.0})
         self.assertLess(thresholded.sum(), (normalized > 0.01).sum())

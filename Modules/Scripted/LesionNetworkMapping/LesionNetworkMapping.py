@@ -1140,6 +1140,19 @@ def updateProgressQuietly(progressRow, force=False):
     return True
 
 
+def _focusKey(focus):
+    """Identity of a reported focus (study, position, space), to skip a focus imported twice."""
+    return (focus.study, round(float(focus.x), 3), round(float(focus.y), 3), round(float(focus.z), 3), focus.space)
+
+
+def _ownRadiusText(foci):
+    """" · 2 foci use the radius from the file" when foci carry their own sphere radius (it overrides the Sphere row)."""
+    own = sum(1 for focus in foci if getattr(focus, "radius_mm", None))
+    if not own:
+        return ""
+    return " · " + (_("1 focus uses the radius from the file") if own == 1 else _("{n} foci use the radius from the file").format(n=own))
+
+
 def _formatBytes(count):
     for unit, size in (("TB", 1e12), ("GB", 1e9), ("MB", 1e6), ("kB", 1e3)):
         if count >= size:
@@ -1797,6 +1810,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.coordinateMapsPath = None
         self.stimulationMapsPath = None
         self.coordinateNullJob = None
+        self._coordNullReasonShown = False
         self.stimulationRmapJob = None
         #: A map shown from a file or found in the scene, not from a run of this session ({path, statistic, n, name, ...})
         self.loadedMap = None
@@ -2189,7 +2203,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.coordGmPathEdit.filters = ctk.ctkPathLineEdit.Files
         self.coordGmPathEdit.nameFilters = ["Gray-matter probability (*_label-GM_probseg.nii.gz *.nii.gz *.nii)"]
         self.coordGmPathEdit.setToolTip(_("A TemplateFlow gray-matter probability map of the connectome's template family (probability > 0.5 is gray matter)"))
-        self.coordGmPathEdit.connect("currentPathChanged(QString)", lambda path: self._onCoordinateNullSettings())
+        # The edit text, not currentPathChanged: ctkPathLineEdit does not report a path that its "*.nii.gz" name filter
+        # rejects as invalid, so the run button and the template-family check would not follow a typed or set path
+        self.coordGmPathEdit.comboBox().connect("editTextChanged(QString)", lambda path: self._onCoordinateNullSettings())
         nullLayout.addRow(_("Gray matter"), self.coordGmPathEdit)
         layout.addWidget(self.coordNullPanel)
         self.coordNullCostLabel = self._label("", role="secondaryText", objectName="LNMCoordNullCost")
@@ -2370,8 +2386,19 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         except (OSError, ValueError) as exc:
             slicer.util.errorDisplay(_("The coordinates cannot be read: {error}").format(error=exc), windowTitle=_("Import coordinates"))
             return None
-        self.setCoordinates(self.coordinateFoci + foci, path if not self.coordinateFoci else None)
-        return foci
+        # Importing the same foci again (the same file twice) would add foci to the null sets of their study
+        known = {_focusKey(focus) for focus in self.coordinateFoci}
+        new = []
+        for focus in foci:
+            if _focusKey(focus) not in known:
+                known.add(_focusKey(focus))
+                new.append(focus)
+        self.setCoordinates(self.coordinateFoci + new, path if not self.coordinateFoci else None)
+        skipped = len(foci) - len(new)
+        if skipped:
+            self.coordSummaryLabel.setText(self.coordSummaryLabel.text + " · " + (_("1 focus already in the list was skipped") if skipped == 1 else
+                                                                                  _("{n} foci already in the list were skipped").format(n=skipped)))
+        return new
 
     def onAddMarkupsCoordinates(self):
         node = self.coordMarkupsSelector.currentNode()
@@ -2415,7 +2442,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             talairach = sum(1 for focus in foci if focus.space == "TAL")
             text = _("{studies} studies · {foci} foci").format(studies=len(studies), foci=len(foci))
             if talairach:
-                text += " · " + _("{n} Talairach foci will be converted to MNI (Lancaster et al. 2007)").format(n=talairach)
+                text += " · " + (_("1 Talairach focus will be converted to MNI (Lancaster et al. 2007)") if talairach == 1 else
+                                 _("{n} Talairach foci will be converted to MNI (Lancaster et al. 2007)").format(n=talairach))
+            text += _ownRadiusText(foci)
             self.coordSummaryLabel.setText(text)
         checked = self._parameterNode is not None and self._parameterNode.coordinateNull
         self.coordNullPanel.setVisible(checked)
@@ -2430,6 +2459,14 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             enabled, reason = self.coordinateNullState()
             self.coordNullRunButton.setEnabled(enabled)
             self.coordNullRunButton.setToolTip(reason)
+            # A template-family mismatch is shown inline (not only as a tooltip); other reasons are self-evident
+            familyReason = reason if not enabled and "family" in reason and os.path.isfile(self.coordGmPathEdit.currentPath or "") else ""
+            if familyReason:
+                self.coordNullResultLabel.setText(familyReason)
+                self.coordNullResultLabel.show()
+            elif self._coordNullReasonShown:
+                self.coordNullResultLabel.hide()
+            self._coordNullReasonShown = bool(familyReason)
 
     def _nullColumnsPerPass(self):
         from LesionNetworkMappingLib import cohortmaps
@@ -2444,7 +2481,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
     def _onCoordinateNullSettings(self):
         if self._parameterNode is not None and not self._updatingGui:
             self._parameterNode.coordinateNullK = int(self.coordNullKSpin.value)
-        self._showCoordinates()
+        # Deferred: ctkPathLineEdit reports a new path before currentPath returns it
+        qt.QTimer.singleShot(0, self._showCoordinates)
 
     def coordinateNullState(self):
         """(enabled, reason) of the random-coordinate control."""
@@ -2456,8 +2494,16 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             return False, _("The control compares the overlap of at least 2 studies.")
         if self.bundle is None or not self.acceptTermsCheckBox.checked:
             return False, _("Choose a connectome and accept its data use terms.")
-        if not os.path.isfile(self.coordGmPathEdit.currentPath or ""):
+        gmPath = self.coordGmPathEdit.currentPath or ""
+        if not os.path.isfile(gmPath):
             return False, _("Choose a gray-matter probability map of the connectome's template family.")
+        # The template family is checked before running (the job would refuse it): the reason shows next to the button
+        from LesionNetworkMappingLib import circuits
+
+        try:
+            circuits.check_families(coords.grid_space(self.bundle), circuits.space_of_file(gmPath))
+        except circuits.FamilyError as exc:
+            return False, str(exc).replace("circuit", "connectome grid")
         return True, ""
 
     # Stimulation
@@ -2465,7 +2511,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
     def _fillStimulationWeightings(self, kind):
         from LesionNetworkMappingLib import coords
 
-        labels = {"binary": _("Binary"), "graded": _("Graded (1 at the centre to 0 at the edge)"), "normalized": _("Normalized (E / max E)"),
+        labels = {"binary": _("Binary"), "graded": _("Graded (centre 1, edge 0)"), "normalized": _("Normalized (E / max E)"),
                   "threshold": _("Threshold"), "probabilistic": _("Probabilistic")}
         wasUpdating, self._updatingGui = self._updatingGui, True
         try:
@@ -2573,7 +2619,10 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         if not self.stimulationItems:
             self.stimSummaryLabel.setText(_("Import a table of stimulation sites: one seed per patient, mapped like lesions."))
         else:
-            self.stimSummaryLabel.setText(_("{n} patients · {rows} rows").format(n=patients, rows=len(self.stimulationItems)))
+            text = _("{n} patients · {rows} rows").format(n=patients, rows=len(self.stimulationItems))
+            if points:
+                text += _ownRadiusText([p for item in self.stimulationItems for p in item.get("points") or ()])
+            self.stimSummaryLabel.setText(text)
         enabled, reason = self.stimulationRmapState()
         self.stimRmapButton.setEnabled(enabled)
         self.stimRmapReasonLabel.setText(reason)
@@ -4995,6 +5044,9 @@ class LesionNetworkMappingTest(ScriptedLoadableModuleTest):
         self.setUp()
         try:
             self.test_LesionNetworkMapping_v1()
+            self.tearDown()
+            self.setUp()
+            self.test_LesionNetworkMapping_seedSets()
         finally:
             self.tearDown()
 
@@ -5028,6 +5080,40 @@ class LesionNetworkMappingTest(ScriptedLoadableModuleTest):
                 tick()
             time.sleep(0.005)
         return True
+
+    def test_LesionNetworkMapping_seedSets(self):
+        """Coordinates and Stimulation seed modes (L-49): panels, import, explicit sphere size and the seeds of a run folder."""
+        from LesionNetworkMappingLib import coords
+
+        self.delayDisplay("Coordinates and Stimulation seeds")
+        widget = slicer.modules.lesionnetworkmapping.widgetRepresentation().self()
+        widget.initializeParameterNode()
+        logic = widget.logic
+        meta = logic.createDemoConnectome(os.path.join(self.tempDir, "seedsets.lnmc"), nSubjects=10, register=False, shape=(20, 24, 20), runs=(20,), seed=1, affine=None)
+        widget.refreshConnectomes(select=os.path.abspath(meta["path"]))
+        self.assertEqual(widget.seedModes[-2:], ["coordinates", "stimulation"])
+        widget.seedModeGroup.button(widget.seedModes.index("coordinates")).click()
+        self.assertEqual(widget._parameterNode.seedMode, "coordinates")
+        self.assertFalse(widget.computeButton.enabled)
+        a = meta["blobs"]["A"]["center_world"]
+        csv = os.path.join(self.tempDir, "foci.csv")
+        with open(csv, "w", encoding="utf-8") as f:
+            f.write(f"study,x,y,z,space\nS1,{a[0]},{a[1]},{a[2]},MNI\nS2,{a[0]},{a[1]},{a[2]},Talairach\n")
+        self.assertEqual(len(widget.importCoordinates(csv)), 2)
+        widget.coordSphereKindCombo.setCurrentIndex(widget.coordSphereKindCombo.findData("diameter"))
+        widget.coordSphereSizeSpin.setValue(6.0)
+        self.assertEqual(widget.sphereSettings(), (None, 6.0))
+        self.assertIn("3 mm radius (6 mm diameter", widget.coordSphereLabel.text)
+        self.assertEqual(widget.computeButton.text, "Map 2 study seeds")
+        lesionsTsv = widget.prepareSeedSet(os.path.join(self.tempDir, "coords run"))
+        record = coords.read_seed_record(os.path.dirname(lesionsTsv))
+        self.assertEqual(record["sphere"]["diameter_mm"], 6.0)
+        self.assertEqual(record["conversion"]["converted"], 1)
+        widget.seedModeGroup.button(widget.seedModes.index("stimulation")).click()
+        self.assertTrue(widget.stimulationSeedPanel.isVisibleTo(widget.parent))
+        self.assertFalse(widget.coordinateSeedPanel.isVisibleTo(widget.parent))
+        widget.seedModeGroup.button(0).click()
+        widget.setCoordinates([])
 
     def test_LesionNetworkMapping_v1(self):
         import numpy as np
