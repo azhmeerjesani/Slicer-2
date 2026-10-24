@@ -14,7 +14,8 @@ Folder layout::
 
 ``participants.tsv`` is the single source of truth about subjects. Its standard columns are
 :data:`STANDARD_COLUMNS`; any other columns (e.g. clinical scores) are kept with their order. Paths
-in the table are relative to the study folder (with "/" separators). Every column has a typed role
+in the table are relative to the study folder (with "/" separators), or "controlset:<name>/<rel>" for lesions
+linked from a registered control set (:meth:`Study.link_control_set`, never copied). Every column has a typed role
 (:mod:`.schema`): pickers and design matrices use :meth:`Study.score_columns`,
 :meth:`Study.covariate_columns` and :meth:`Study.analysis_rows`, never "all numeric columns".
 Optional registry columns (``schema.OPTIONAL_COLUMNS``) are added only when first written, so old
@@ -103,6 +104,8 @@ EXCLUDED_NORM_QC = "norm_qc != pass"
 EXCLUDED_AUTO = "automatic segmentation not approved"
 DEFAULT_RULES = {"lesion": "lesion|mask|seg|label|roi", "id": "sub-[A-Za-z0-9]+"}
 NIFTI_EXTENSIONS = (".nii.gz", ".nii")
+#: Table paths of lesions linked from a control set (resolved through the registry, see controlsets.py)
+CONTROLSET_PREFIX = "controlset:"
 # Word boundaries in file names (case-sensitive): "_", "-", ".", "+" or spaces, letters next to digits,
 # and CamelCase ("LesionSmooth", "MNILesion")
 _WORD_START = r"(?-i:^|(?<=[-_.+\s])|(?<=[0-9])(?=[A-Za-z])|(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z]))"
@@ -353,6 +356,10 @@ class Study:
     were kept although unknown (for example ``sex`` = "unknown"). ``inbox_errors`` lists
     (file, participant_id, message) for inbox values that :meth:`apply_inbox` rejected.
     """
+
+    #: Registry folder of the control sets (<Studio/LNM/DataDirectory>/ControlSets) that ``controlset:`` paths resolve
+    #: through; None: the environment variable SLICER_STUDIO_CONTROLSETS, else the default data directory
+    controlset_root = None
 
     def __init__(self, path, metadata, columns, rows, dictionary=None):
         self.path = os.path.abspath(os.fspath(path))
@@ -655,10 +662,18 @@ class Study:
     # Paths
 
     def abspath(self, path):
-        """Absolute path of a table path (relative to the study, "/" separators)."""
+        """Absolute path of a table path (relative to the study, "/" separators).
+
+        "controlset:<name>/<rel>" (a lesion linked from a control set) is resolved through the control-set registry
+        (:attr:`controlset_root`); the file is never copied into the study.
+        """
         if is_missing(path):
             return None
         path = os.fspath(path)
+        if path.startswith(CONTROLSET_PREFIX):
+            from .controlsets import resolve_path
+
+            return resolve_path(path, self.controlset_root)
         return path if os.path.isabs(path) else os.path.normpath(os.path.join(self.path, *path.split("/")))
 
     def relpath(self, path):
@@ -1030,6 +1045,89 @@ class Study:
     @grid_answers.setter
     def grid_answers(self, answers):
         self.metadata["grid_answers"] = dict(answers)
+
+    @property
+    def control_sets(self):
+        """study.json ``control_sets`` ([{"name", "sha256"}] of the linked control sets; default [])."""
+        stored = self.metadata.get("control_sets")
+        return [dict(item) for item in stored if isinstance(item, dict) and item.get("name")] if isinstance(stored, list) else []
+
+    def link_control_set(self, name, sha256=None, ids=None, root=None):
+        """Link a registered control set: one row per control lesion, files never copied (see controlsets.py).
+
+        Rows get group = control, source_type = control_db, source_dataset = <name>, source_id = <lesion id>, lesion =
+        "controlset:<name>/<rel>", status = traced and the set's space, volume_ml, dimensionality and hemisphere. Rows
+        already linked from the set are updated, not duplicated. The link is the selection: rows linked earlier whose
+        lesion is no longer in the set (a set registered again) or not among ``ids`` are removed. study.json
+        ``control_sets`` records {name, sha256} while at least one row is linked from the set.
+
+        :param sha256: expected ``content_sha256`` of the set (ValueError when the registered set differs).
+        :param ids: link only these lesion ids of the set (e.g. a matched subsample); default all.
+        :param root: registry folder (default :attr:`controlset_root`).
+        :return: {"added": [participant ids], "updated": [...], "removed": [...], "skipped": [{"id", "reason"}], "sha256"}.
+        """
+        from . import controlsets
+
+        entry = controlsets.load(name, root or self.controlset_root)
+        digest = entry.get("content_sha256") or controlsets.content_sha256(entry)
+        if sha256 and sha256 != digest:
+            raise ValueError(f"The control set {entry['name']!r} changed since it was linked (sha256 {digest[:12]}, expected {sha256[:12]})")
+        wanted = None if ids is None else set(ids)
+        linked = {row.get("source_id"): row["participant_id"] for row in controlsets.linked_rows(self, entry["name"])}
+        report = {"added": [], "updated": [], "removed": [], "skipped": [], "sha256": digest}
+        for lesion in entry["lesions"]:
+            if wanted is not None and lesion["id"] not in wanted:
+                continue
+            values = {
+                "group": controlsets.GROUP,
+                "lesion": controlsets.controlset_path(entry["name"], lesion["rel"]),
+                "space": lesion.get("space") or entry.get("space"),
+                "status": "traced",
+                "source_type": controlsets.SOURCE_TYPE,
+                "source_dataset": entry["name"],
+                "source_id": lesion["id"],
+                "volume_ml": lesion.get("volume_ml"),
+                "dimensionality": lesion.get("dimensionality"),
+                "hemisphere": lesion.get("hemisphere"),
+            }
+            sid = linked.get(lesion["id"])
+            if sid is not None:
+                self.set(sid, values)
+                report["updated"].append(sid)
+                continue
+            sid = controlsets.study_participant_id(entry["name"], lesion["id"])
+            if sid in self._index:
+                report["skipped"].append({"id": lesion["id"], "reason": f"{sid} is already a subject of the study"})
+                continue
+            self.add_subject(sid, values)
+            report["added"].append(sid)
+        keep = {lesion["id"] for lesion in entry["lesions"] if wanted is None or lesion["id"] in wanted}
+        for row in controlsets.linked_rows(self, entry["name"]):
+            if row.get("source_id") not in keep:
+                self.remove_subject(row["participant_id"])
+                report["removed"].append(row["participant_id"])
+        sets = [item for item in self.control_sets if item["name"] != entry["name"]]
+        if controlsets.linked_rows(self, entry["name"]):
+            sets.append({"name": entry["name"], "sha256": digest})
+        if sets:
+            self.metadata["control_sets"] = sets
+        else:
+            self.metadata.pop("control_sets", None)
+        return report
+
+    def unlink_control_set(self, name):
+        """Remove the rows linked from a control set and its study.json record (the set itself is kept); return the removed ids."""
+        from . import controlsets
+
+        removed = [row["participant_id"] for row in controlsets.linked_rows(self, name)]
+        for sid in removed:
+            self.remove_subject(sid)
+        sets = [item for item in self.control_sets if item["name"] != name]
+        if sets:
+            self.metadata["control_sets"] = sets
+        else:
+            self.metadata.pop("control_sets", None)
+        return removed
 
     # Inbox (single-writer rule: jobs post results, the session applies them)
 
