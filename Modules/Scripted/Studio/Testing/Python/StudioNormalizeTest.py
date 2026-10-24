@@ -282,7 +282,8 @@ class StudioNormalizeTest(unittest.TestCase):
         self.assertEqual(self.chips(["sub-03"]), {"sub-03": "No lesion"})
         study.set("sub-03", lesion=study.subject("sub-01")["lesion"])
         # Filters and queue
-        self.assertEqual([entry["key"] for entry in library.libcardFilters()], ["needs_norm", "norm_review"])
+        # The normalization filters, after the lesion QC filters of L-28 (libcard_flags: 2D, Has flags)
+        self.assertEqual([entry["key"] for entry in library.libcardFilters()], ["two_d", "has_flags", "needs_norm", "norm_review"])
         review = next(entry for entry in library.libcardFilters() if entry["key"] == "norm_review")
         self.assertEqual(review["qcColumn"], "norm_qc")
         listWidget.setFilter("needs_norm")

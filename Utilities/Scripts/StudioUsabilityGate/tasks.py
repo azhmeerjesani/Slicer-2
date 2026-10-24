@@ -2272,10 +2272,18 @@ def _lnmRunEverything(g, widget, start):
     """
     card = widget.ctx.card("pipeline")
     # The card's own button: it is on screen below the Preflight card (the primary button of the Compute card, which runs the
-    # same, is further down the panel)
-    button = g.widget("LNMPipelineRunButton", "QPushButton")
-    ready = yield from g.until(lambda: button is not None and button.isVisible() and button.isEnabled(), 30000, what="Run everything")
-    if not ready:
+    # same, is further down the panel). It is looked up again at each check of the wait: the card may build or rebuild it
+    # while the wait runs.
+    found = []
+
+    def runButtonReady():
+        button = g.widget("LNMPipelineRunButton", "QPushButton")
+        found[:] = [button]
+        return button is not None and button.isVisible() and button.isEnabled()
+
+    ready = yield from g.until(runButtonReady, 30000, what="Run everything")
+    button = found[0] if found else None
+    if not ready or button is None:
         return _studyPathEnd(g, start, f"Run everything is not available ({str(widget.computeReasonLabel.text)!r}, card: {str(card.stateLabel.text)!r})")
     yield from g.click(button, "Click 'Run everything'")
     yield from g.until(lambda: card.job is not None, 5000, what="the cohort analysis job")

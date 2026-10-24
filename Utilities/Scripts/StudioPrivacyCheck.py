@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Privacy check for files meant to be shared: absolute local paths in scenes, .mrb, sidecars, tables, study files, reports and logs.
 
-usage: StudioPrivacyCheck.py [--strict] <root> [<root> ...]    exit status 0 when no shared file holds an absolute local path
+usage: StudioPrivacyCheck.py [--strict] <root> [<root> ...]    exit status 0 when no shared file holds an absolute local path,
+       1 when one does (or a file cannot be read: "PRIVACY ERROR <file>"), 2 for a missing root or a root without any file
 
 Each file with hits is printed with its class and the first hits. Classes (CLAUDE.md: shared files hold paths relative to
 the file; provenance and reproduce files are the exception, by design):
@@ -13,12 +14,16 @@ the file; provenance and reproduce files are the exception, by design):
                  written with paths relative to the run folder)  shared: a hit fails
   other          anything else that is text                      shared: a hit fails
   report         .html / .md / .txt                              reported, not a failure
-  run-record     argv / inputs of a run: runs.jsonl, normalization.json, provenance.json, reproduce*.sh (for example the
-                 pipeline's reproduce_pipeline.sh), job and design records
+  run-record     argv / inputs of a run: runs.jsonl, normalization.json, provenance.json, reproduce.sh and reproduce_<name>.sh
+                 (for example the pipeline's reproduce_pipeline.sh), job and design records
                                                                  provenance by design: reported, not a failure
   app-state      .studio, cache, work folders                    never shared: reported, not a failure
 
 --strict also counts cohortmaps.json and glm.json as shared outputs (their paths are relative since W3-I1).
+
+Absolute local paths are the folders of Linux and macOS homes, mounts and volumes (/home, /root, /Users, /tmp, /opt, /Volumes,
+/mnt, /media, /data, /private) and Windows drive paths (C:\\..., C:/...). The number of files checked (the .mrb and text
+files above) is printed per root.
 """
 
 import os
@@ -27,8 +32,12 @@ import sys
 import zipfile
 
 # Not preceded by a word character or ".": "../../opt/x" is a relative path, not an absolute one
-PAT = re.compile(r"(?<![\w.])(/tmp/[^\"'\t\n<>]*|/home/[^\"'\t\n<>]*|/root/[^\"'\t\n<>]*|/Users/[^\"'\t\n<>]*|/opt/[^\"'\t\n<>]*|[A-Za-z]:\\Users\\[^\"'\t\n<>]*)")
-RUN_RECORDS = {"runs.jsonl", "normalization.json", "provenance.json", "reproduce.sh", "slnm.json", "design.json", "entry.json", "job.json", "cohort.json"}
+# Windows: a drive letter followed by a back or forward slash ("C:\\data", "D:/study"), not preceded by a word character
+# ("http://" is not a drive)
+PAT = re.compile(r"(?<![\w.])((?:/tmp|/home|/root|/Users|/opt|/Volumes|/mnt|/media|/data|/private)/[^\"'\t\n<>]*|[A-Za-z]:[\\/][^\"'\t\n<>]*)")
+RUN_RECORDS = {"runs.jsonl", "normalization.json", "provenance.json", "slnm.json", "design.json", "entry.json", "job.json", "cohort.json"}
+#: Reproduce scripts are run records: reproduce.sh and reproduce_<name>.sh (the pipeline's reproduce_pipeline.sh), nothing else
+REPRODUCE_SCRIPT = re.compile(r"^reproduce(_\w+)?\.sh$")
 RUN_RECORDS_LOOSE = {"cohortmaps.json", "glm.json"}
 TEXT_SUFFIXES = (".mrml", ".json", ".jsonl", ".tsv", ".csv", ".html", ".md", ".txt", ".sh", ".log")
 SHARED = ("scene", "table", "sidecar/study", "log", "other")
@@ -42,7 +51,7 @@ def classify(rel, name, strict=False):
         return "scene"
     if name.endswith((".tsv", ".csv")):
         return "table"
-    if name in RUN_RECORDS or (name in RUN_RECORDS_LOOSE and not strict) or (name.startswith("reproduce") and name.endswith(".sh")):
+    if name in RUN_RECORDS or (name in RUN_RECORDS_LOOSE and not strict) or REPRODUCE_SCRIPT.match(name):
         return "run-record"
     if name.endswith(".log"):
         return "log"
@@ -53,21 +62,39 @@ def classify(rel, name, strict=False):
     return "other"
 
 
-def scan(roots, strict=False, out=print):
-    """Return the number of shared files with absolute local paths."""
+def _texts(path, rel, name, strict):
+    """``[(label, class, text)]`` of a file: the scenes, sidecars and tables inside a .mrb, the file itself if it is text."""
+    if name.endswith(".mrb"):
+        with zipfile.ZipFile(path) as z:
+            return [(f"{rel}!{n}", "scene", z.read(n).decode("utf-8", "replace")) for n in z.namelist() if n.endswith((".mrml", ".json", ".tsv"))]
+    if name.endswith(TEXT_SUFFIXES):
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return [(rel, classify(rel, name, strict), f.read())]
+    return []
+
+
+def scan(roots, strict=False, out=print, counts=None):
+    """Return the number of shared files with absolute local paths, plus the files that could not be read.
+
+    ``counts`` (a dict), if given, receives the number of files checked per root (.mrb and text files).
+    """
     failures = 0
     for root in roots:
+        scanned = 0
         for dirpath, _dirs, files in os.walk(root):
             for name in sorted(files):
                 path = os.path.join(dirpath, name)
                 rel = os.path.relpath(path, root)
-                texts = []
-                if name.endswith(".mrb"):
-                    with zipfile.ZipFile(path) as z:
-                        texts = [(f"{rel}!{n}", "scene", z.read(n).decode("utf-8", "replace")) for n in z.namelist() if n.endswith((".mrml", ".json", ".tsv"))]
-                elif name.endswith(TEXT_SUFFIXES):
-                    with open(path, encoding="utf-8", errors="replace") as f:
-                        texts = [(rel, classify(rel, name, strict), f.read())]
+                if not name.endswith((".mrb", *TEXT_SUFFIXES)):
+                    continue
+                scanned += 1
+                try:
+                    texts = _texts(path, rel, name, strict)
+                except (OSError, zipfile.BadZipFile, ValueError, RuntimeError, EOFError) as error:
+                    # A corrupt or unreadable file cannot be shown to be free of local paths
+                    failures += 1
+                    out(f"PRIVACY ERROR {os.path.basename(os.path.abspath(root))}/{rel}: {type(error).__name__}: {error}")
+                    continue
                 for label, cls, text in texts:
                     hits = sorted({m.group(1)[:110] for m in PAT.finditer(text)})
                     if not hits:
@@ -75,7 +102,10 @@ def scan(roots, strict=False, out=print):
                     bad = cls in SHARED
                     failures += bad
                     out(f"{'FAIL' if bad else 'ok  '} [{cls}] {os.path.basename(os.path.abspath(root))}/{label}: {len(hits)} distinct, e.g. {hits[:2]}")
-    out(f"PRIVACY {'FAIL' if failures else 'PASS'} ({failures} shared files with absolute local paths)")
+        out(f"PRIVACY checked {scanned} files in {root}")
+        if counts is not None:
+            counts[root] = scanned
+    out(f"PRIVACY {'FAIL' if failures else 'PASS'} ({failures} shared files with absolute local paths or unreadable)")
     return failures
 
 
@@ -90,7 +120,14 @@ def main(argv):
     if missing:
         print(f"PRIVACY ERROR: not a folder: {', '.join(missing)}")
         return 2
-    return 1 if scan(roots, strict) else 0
+    counts = {}
+    failures = scan(roots, strict, counts=counts)
+    # A root without any file to check proves nothing (a wrong folder): refuse it rather than pass
+    empty = [root for root in roots if not counts.get(root)]
+    if empty:
+        print(f"PRIVACY ERROR: no file to check in: {', '.join(empty)}")
+        return 2
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

@@ -257,3 +257,64 @@ class StudioWidget(ScriptedLoadableModuleWidget):
                 shell.switchTo("draw")
             else:
                 slicer.util.selectModule("SegmentEditor")
+
+
+#
+# StudioTest
+#
+
+
+class StudioTest(ScriptedLoadableModuleTest):
+    """Self-test of the Studio module (``slicer.selfTests["Studio"]``): a quick smoke check of the shell.
+
+    The full tests are the ``Studio*Test.py`` suites of ``Testing/Python``. Studio never applies itself under ``--testing``:
+    the smoke test applies it with ``Shell(force=True)``, visits each workspace and restores the Classic interface.
+    """
+
+    def setUp(self):
+        slicer.mrmlScene.Clear(0)
+
+    def runTest(self):
+        self.setUp()
+        self.test_StudioSmoke()
+
+    def _pump(self, count=4):
+        for _index in range(count):
+            slicer.app.processEvents()
+
+    def test_StudioSmoke(self):
+        self.delayDisplay("Starting the Studio smoke test")
+        from StudioLib import shell, ui, workspaces
+
+        self.assertTrue(ui.token("text").isValid())
+        mainWindow = slicer.util.mainWindow()
+        if mainWindow is None:
+            # Without the main window there is no shell: the library imports, nothing is applied
+            self.assertIsNone(shell.instance())
+            self.delayDisplay("Studio smoke test passed (no main window)")
+            return
+        if slicer.app.testingEnabled():
+            self.assertIsNone(shell.instance(), "Studio must not apply itself under --testing")
+        studioShell = shell.instance() or shell.Shell(force=True)
+        createdHere = shell.instance() is None
+        try:
+            if createdHere:
+                studioShell.apply()
+                self._pump()
+            self.assertIs(shell.instance(), studioShell)
+            self.assertIsNotNone(mainWindow.findChild("QToolBar", "StudioTopBar"))
+            for workspace in workspaces.WORKSPACES:
+                studioShell.switchTo(workspace.key)
+                self._pump()
+                self.assertEqual(studioShell.currentWorkspace(), workspace.key)
+            studioShell.switchTo("library")
+            self._pump()
+        finally:
+            if createdHere:
+                studioShell.dispose()
+                self._pump()
+                slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+        if createdHere:
+            self.assertIsNone(shell.instance())
+            self.assertIsNone(mainWindow.findChild("QToolBar", "StudioTopBar"))
+        self.delayDisplay("Studio smoke test passed")
