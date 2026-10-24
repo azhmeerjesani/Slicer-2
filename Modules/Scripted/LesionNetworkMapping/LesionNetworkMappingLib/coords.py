@@ -697,7 +697,7 @@ def random_coordinate_null(foci_by_study, gm_mask, k=DEFAULT_K, seed=0, grid=Non
             for study in range(n_studies):
                 volume = np.zeros(grid.shape, dtype=np.float32)
                 in_study = study_index == study
-                for xyz, r in zip(sets[draw][in_study], radii[in_study]):
+                for xyz, r in zip(sets[draw][in_study], radii[in_study], strict=True):
                     sphere_occupancy(xyz, r, grid, supersample, False, volume)
                 rows.append(volume.reshape(-1) if mask_indices is None else masked(volume, mask_indices))
         binary = np.asarray(network_fn(np.stack(rows)), dtype=bool).reshape(len(draws), n_studies, -1)
