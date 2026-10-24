@@ -8,8 +8,11 @@ human actions is derived from the input events that the driver sends (USABILITY 
 - hovers, waits and reading count 0.
 
 Before every click or drag the driver checks that the target can be found by a user: it must be visible, enabled and
-not covered (the widget under the pointer at the centre of the target is the target or one of its children). A
-control that fails the check is NOT driven; the step records the failed assertion ``not discoverable: <reason>``.
+not covered (the widget under the pointer at the centre of the target is the target or one of its children), and not
+clipped by the viewport of its scroll area (for example scrolled under the inspector's sticky footer: it is scrolled into
+view first, 1 action). The driver also waits until the target stays still (a control that moves just before the click is
+a layout shift, recorded as a warning). A control that fails the check is NOT driven; the step records the failed
+assertion ``not discoverable: <reason>``.
 Controls inside a hover popup (``ctkPopupWidget``, the popup of a view bar) are driven only after a ``gate.hover(opener)``
 and are reported as hover-revealed (warning and the assertion ``hover-only-control``).
 
@@ -693,7 +696,38 @@ class Gate:
             return None, "outside the screen"
         if not isAncestorOrSelf(widget, hit):
             return None, f"covered by {widgetText(hit)} at ({x}, {y}) of {width}x{height}"
+        clipped = self.clippedBy(widget, x, y)
+        if clipped is not None:
+            # Below (or above) the visible part of its scroll area, for example under the sticky footer of the inspector
+            return None, f"clipped by {clipped} at ({x}, {y}) of {width}x{height}"
         return globalPoint, None
+
+    @staticmethod
+    def clippedBy(widget, x, y):
+        """The scroll area (as text) whose viewport does not show the point ``(x, y)`` of ``widget``, None when it is shown.
+
+        A control scrolled out of the inspector's viewport is not drawn there: what is drawn at its place is what lies
+        outside the viewport, such as the inspector's sticky footer.
+
+        Only scroll areas whose viewport holds ``widget`` clip it: a header, scroll bar or corner widget of a scroll area
+        is its child but lies outside its viewport (and ``QWidget::mapTo`` to a widget that is not an ancestor crashes
+        Qt 5 release builds).
+        """
+        area = widget.parentWidget()
+        guard = 0
+        while area is not None and guard < 64:
+            if area.inherits("QAbstractScrollArea"):
+                viewport = area.viewport()
+                if viewport is None or not isAncestorOrSelf(viewport, widget):
+                    area = area.parentWidget()
+                    guard += 1
+                    continue
+                local = widget.mapTo(viewport, qt.QPoint(x, y))
+                if not viewport.rect.contains(local):
+                    return widgetText(area)
+            area = area.parentWidget()
+            guard += 1
+        return None
 
     @staticmethod
     def isHoverOnly(widget):
@@ -755,7 +789,7 @@ class Gate:
         point = widget.mapTo(viewport, qt.QPoint(0, y))
         _globalPoint, reason = self.clickability(widget, localPoint)
         outside = point.y() < 8 or point.y() > viewport.height - 8
-        if not outside and not (reason or "").startswith("covered"):
+        if not outside and not (reason or "").startswith(("covered", "clipped")):
             return False
         bar = area.verticalScrollBar()
         before = bar.value
@@ -774,6 +808,7 @@ class Gate:
         """
         description = description or "click " + widgetText(widget)
         yield from self.scrollIntoView(widget, description, setup=setup, localPoint=localPoint)
+        yield from self.waitStill(widget, description)
         point, reason = self.clickability(widget, localPoint)
         if reason is not None:
             return self.refuse("click", description, reason, widgetText(widget))
@@ -790,6 +825,31 @@ class Gate:
             extra["setup"] = True
         self.addStep(kind, description, 0 if setup else 1, widgetText(widget), **extra)
         yield settle
+        return True
+
+    def waitStill(self, widget, description="", timeoutMs=1000, stepMs=100):
+        """Wait (no action) until ``widget`` stays at the same place for ``stepMs``: a control that moves just before the
+        click (a card above it grew) would take the click somewhere else. A move is recorded as a warning (USABILITY P5).
+        """
+        def place():
+            try:
+                point = widget.mapToGlobal(qt.QPoint(0, 0))
+                return (point.x(), point.y(), widget.width, widget.height)
+            except Exception:
+                return None
+
+        first = previous = place()
+        waited = 0
+        while previous is not None and waited < timeoutMs:
+            yield stepMs
+            waited += stepMs
+            current = place()
+            if current == previous:
+                break
+            previous = current
+        if first is not None and previous is not None and first != previous:
+            self.warn(f"layout shift before '{description}': {widgetText(widget)} moved from {first[:2]} to {previous[:2]}")
+            yield from self.scrollIntoView(widget, description, setup=True)
         return True
 
     def key(self, sequence, description="", settle=SETTLE_MS):

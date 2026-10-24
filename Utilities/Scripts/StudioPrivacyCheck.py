@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Privacy check for files meant to be shared: absolute local paths in scenes, .mrb, sidecars, tables, study files, reports and logs.
+r"""Privacy check for files meant to be shared: absolute local paths in scenes, .mrb, sidecars, tables, study files, reports and logs.
 
 usage: StudioPrivacyCheck.py [--strict] <root> [<root> ...]    exit status 0 when no shared file holds an absolute local path,
        1 when one does (or a file cannot be read: "PRIVACY ERROR <file>"), 2 for a missing root or a root without any file
@@ -22,8 +22,8 @@ the file; provenance and reproduce files are the exception, by design):
 --strict also counts cohortmaps.json and glm.json as shared outputs (their paths are relative since W3-I1).
 
 Absolute local paths are the folders of Linux and macOS homes, mounts and volumes (/home, /root, /Users, /tmp, /opt, /Volumes,
-/mnt, /media, /data, /private) and Windows drive paths (C:\\..., C:/...). The number of files checked (the .mrb and text
-files above) is printed per root.
+/mnt, /media, /data, /private, the macOS temporary folders /var/folders), Windows drive paths (C:/..., also with backslashes)
+and Windows UNC paths (\\server\share). The number of files checked (the .mrb and text files above) is printed per root.
 """
 
 import os
@@ -33,8 +33,13 @@ import zipfile
 
 # Not preceded by a word character or ".": "../../opt/x" is a relative path, not an absolute one
 # Windows: a drive letter followed by a back or forward slash ("C:\\data", "D:/study"), not preceded by a word character
-# ("http://" is not a drive)
-PAT = re.compile(r"(?<![\w.])((?:/tmp|/home|/root|/Users|/opt|/Volumes|/mnt|/media|/data|/private)/[^\"'\t\n<>]*|[A-Za-z]:[\\/][^\"'\t\n<>]*)")
+# ("http://" is not a drive). Windows UNC paths: two backslashes, a server, a backslash and a share ("\\\\server\\share"; in
+# JSON each backslash is doubled)
+PAT = re.compile(
+    r"(?<![\w.])((?:/tmp|/home|/root|/Users|/opt|/Volumes|/mnt|/media|/data|/private|/var/folders)/[^\"'\t\n<>]*"
+    r"|[A-Za-z]:[\\/][^\"'\t\n<>]*"
+    r"|(?<![\\\w])\\{2,}[\w.$-]+\\+[\w.$-][^\"'\t\n<>]*)",
+)
 RUN_RECORDS = {"runs.jsonl", "normalization.json", "provenance.json", "slnm.json", "design.json", "entry.json", "job.json", "cohort.json"}
 #: Reproduce scripts are run records: reproduce.sh and reproduce_<name>.sh (the pipeline's reproduce_pipeline.sh), nothing else
 REPRODUCE_SCRIPT = re.compile(r"^reproduce(_\w+)?\.sh$")
@@ -90,8 +95,9 @@ def scan(roots, strict=False, out=print, counts=None):
                 scanned += 1
                 try:
                     texts = _texts(path, rel, name, strict)
-                except (OSError, zipfile.BadZipFile, ValueError, RuntimeError, EOFError) as error:
-                    # A corrupt or unreadable file cannot be shown to be free of local paths
+                except Exception as error:
+                    # A corrupt or unreadable file (a bad zip directory, damaged deflate data: zlib.error, an unsupported
+                    # compression method: NotImplementedError, ...) cannot be shown to be free of local paths
                     failures += 1
                     out(f"PRIVACY ERROR {os.path.basename(os.path.abspath(root))}/{rel}: {type(error).__name__}: {error}")
                     continue

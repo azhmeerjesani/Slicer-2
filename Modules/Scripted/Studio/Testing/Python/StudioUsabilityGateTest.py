@@ -62,6 +62,7 @@ class StudioUsabilityGateTest(ScriptedLoadableModule.ScriptedLoadableModuleTest)
         self.setUp()
         try:
             self.test_targets_reachable()
+            self.test_clipped_by_outside_viewport()
             self.test_state_assertions()
         finally:
             self.tearDown()
@@ -101,6 +102,32 @@ class StudioUsabilityGateTest(ScriptedLoadableModule.ScriptedLoadableModuleTest)
             total = targets["find-tools.total"][f"target_w{wave}"]
             scored = targets["find-tools"][f"target_w{wave}"]
             self.assertLessEqual(scored + cheapestExploration, total, f"wave {wave}: scored {scored} + the cheapest T7 and T10 {cheapestExploration} exceeds the total target {total}")
+
+    def test_clipped_by_outside_viewport(self):
+        """Gate.clippedBy on children of a scroll area outside its viewport (header, scroll bar) and inside it.
+
+        ``QWidget::mapTo`` to a widget that is not an ancestor crashes Qt 5 release builds: a header or scroll bar of a table must
+        not be mapped to the table's viewport.
+        """
+        from StudioUsabilityGate import harness
+
+        table = qt.QTableWidget(40, 3)
+        try:
+            table.resize(300, 200)
+            table.show()
+            slicer.app.processEvents()
+            self.assertIsNone(harness.Gate.clippedBy(table.horizontalHeader(), 5, 5))
+            self.assertIsNone(harness.Gate.clippedBy(table.verticalScrollBar(), 2, 2))
+            # A widget inside the viewport: its visible point is shown, a point far below the viewport is clipped
+            label = qt.QLabel("cell", table.viewport())
+            label.setGeometry(0, 0, 40, 20)
+            label.show()
+            self.assertIsNone(harness.Gate.clippedBy(label, 2, 2))
+            self.assertIsNotNone(harness.Gate.clippedBy(label, 2, 2000))
+        finally:
+            table.hide()
+            table.deleteLater()
+            slicer.app.processEvents()
 
     def test_state_assertions(self):
         """Novice and find-tools: no exception, and no state assertion that must pass from wave 1 fails."""

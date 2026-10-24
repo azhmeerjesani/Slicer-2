@@ -342,6 +342,14 @@ def leave(shell):
             widget.restoreLesionDisplay()
         except Exception:
             logging.error(f"Studio Map: cannot restore the lesion display:\n{traceback.format_exc()}")
+        # Classic keeps Map shown without leaving the module: the primary button goes back to the Compute card and the
+        # disclaimer below the cards (the sticky footer is removed with the shell)
+        releaseFooter = getattr(widget, "releaseShellFooter", None)
+        if releaseFooter is not None:
+            try:
+                releaseFooter(shell)
+            except Exception:
+                logging.error(f"Studio Map: cannot give the inspector footer back:\n{traceback.format_exc()}")
     restoreLayers()
     if getattr(shell, "_primaryAction", None) is not None and widget is not None and shell._primaryAction == widget.onPrimary:
         shell.setPrimaryAction(None, "")

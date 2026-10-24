@@ -1422,7 +1422,7 @@ def figureOwnsPlanes(row, planeNormal=None):
     if planeNormal is not None:
         return True
     row = row or {}
-    return "figure" in str(row.get("trace_method") or "") or not _missing(row.get("fig_convention"))
+    return "figure" in str(row.get("trace_method") or "").split("+") or not _missing(row.get("fig_convention"))
 
 
 def _extrusionColumns(row, planeNormal=None):

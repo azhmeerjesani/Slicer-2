@@ -376,8 +376,9 @@ _MAP_STEPS = (
            "use terms must be accepted first."),
          rows=("connectome",), workspace="map", inspector=True, placement="left"),
     Step("compute", "LNMComputeButton", _("Map network"),
-         _("Computes the network map of the lesion with the chosen connectome, in the background. Specificity QA maps relocated copies of "
-           "the lesion in the same pass, to compare with what any lesion of this shape gives."),
+         _("Computes the network map of the lesion with the chosen connectome, in the background (with Seed = Cohort: Run everything). "
+           "The button stays at the bottom of the inspector, above the research-use line, wherever the panel is scrolled. Specificity QA "
+           "(in the Compute card) maps relocated copies of the lesion in the same pass, to compare with what any lesion of this shape gives."),
          rows=("lesion-network-mapping",), keys=((("Ctrl+Enter",), _("the blue button")),), workspace="map", inspector=True, placement="left"),
     Step("result", "LNMResultCard", _("Result: statistic, rule and threshold"),
          _("The map opens in the views. Its threshold is a rule (FWE, the |T| ≥ 7 convention, an Fz effect size, a custom T or the top x%), "

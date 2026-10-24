@@ -1818,6 +1818,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.layout.addStretch(1)
         self.layout.addWidget(self.footer)
         self.shellFooter = None
+        self._pinnedPrimarySlot = None
+        #: (index of the primary button, index of its reason line) in the Compute card while they are pinned in the footer
+        self._pinnedIndexes = None
         self._fitFilter = _FitHeightFilter(self.parent)
 
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneStartClose)
@@ -2680,6 +2683,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.computeButton.setMinimumHeight(36)
         self.computeButton.connect("clicked()", self.onPrimary)
         layout.addWidget(self.computeButton)
+        #: The layout that holds the primary button and its reason line in the Compute card (Studio pins them in the sticky footer)
+        self._computeCardLayout = layout
         # Seed = Cohort with a "Run everything" card (A-04c): the cohort maps alone are the secondary "Maps only"
         self.mapsOnlyButton = qt.QPushButton(_("Maps only"))
         self.mapsOnlyButton.setObjectName("LNMMapsOnlyButton")
@@ -3913,11 +3918,11 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             self.refreshCohort()
         shell = self._shell()
         if shell is not None:
-            # The disclaimer stays visible below the inspector (the sticky footer slot) while Map is shown
+            # The primary button and the disclaimer stay visible below the inspector (the sticky footer slot) while Map is shown
             if self.shellFooter is None:
-                self.shellFooter = self.widgets.disclaimerLabel()
-                self.shellFooter.setContentsMargins(12, 4, 12, 6)
+                self.shellFooter = self._buildShellFooter()
             try:
+                self._pinPrimary(True)
                 shell.setInspectorFooter(self.shellFooter)
                 self._footerInShell = True
                 self.footer.hide()
@@ -3981,13 +3986,72 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             self.ctx.setStudy(study)
             self._notifyControllers("onStudyChanged")
 
+    def _buildShellFooter(self):
+        """The sticky footer of the Studio inspector while Map is shown: the primary button with its reason line, and the
+        disclaimer.
+
+        The primary button is pinned there (USABILITY P5, stable layout): in a long panel (Seed = Cohort) it would otherwise be
+        below the visible part of the inspector, and move when a card above it changes height (the Preflight card after the
+        data use terms are accepted). ``LNMComputeButton`` keeps its object name; it goes back to the Compute card on exit.
+        """
+        from StudioLib import ui
+
+        footer = qt.QWidget()
+        footer.setObjectName("LNMStudioFooter")
+        footer.setAttribute(qt.Qt.WA_StyledBackground, True)
+        ui.bindStyleSheet(footer, lambda: (
+            f"QWidget#LNMStudioFooter {{ background-color: {ui.token('window').name()}; border-top: 1px solid {ui.token('hairline').name()}; }}"))
+        layout = qt.QVBoxLayout(footer)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self._pinnedPrimarySlot = qt.QWidget()
+        self._pinnedPrimarySlot.setObjectName("LNMPinnedPrimary")
+        slotLayout = qt.QVBoxLayout(self._pinnedPrimarySlot)
+        slotLayout.setContentsMargins(12, 8, 12, 0)
+        slotLayout.setSpacing(2)
+        layout.addWidget(self._pinnedPrimarySlot)
+        self.shellDisclaimer = self.widgets.disclaimerLabel()
+        self.shellDisclaimer.setContentsMargins(12, 4, 12, 6)
+        layout.addWidget(self.shellDisclaimer)
+        return footer
+
+    def releaseShellFooter(self, shell=None):
+        """Give the sticky footer back (Map left in Studio, or Studio switched to Classic while Map is shown): the primary
+        button returns to the Compute card and the disclaimer below the cards is shown again.
+        """
+        if shell is not None and self._footerInShell and shell.inspectorFooter() is self.shellFooter:
+            shell.setInspectorFooter(None)
+        self._pinPrimary(False)
+        self._footerInShell = False
+        self.footer.show()
+
+    def _pinPrimary(self, pinned):
+        """Move the primary button and its reason line to the sticky footer (``pinned``) or back to the Compute card."""
+        slot = self._pinnedPrimarySlot
+        cardLayout = getattr(self, "_computeCardLayout", None)
+        if slot is None or cardLayout is None or pinned == (self._pinnedIndexes is not None):
+            return
+        widgets = (self.computeButton, self.computeReasonLabel)
+        if pinned:
+            self._pinnedIndexes = tuple(cardLayout.indexOf(widget) for widget in widgets)
+            for widget in widgets:
+                cardLayout.removeWidget(widget)
+                slot.layout().addWidget(widget)
+        else:
+            for widget, index in zip(widgets, self._pinnedIndexes, strict=True):
+                slot.layout().removeWidget(widget)
+                cardLayout.insertWidget(index, widget)
+            self._pinnedIndexes = None
+        # Hidden by the reparenting: shown again as updateComputeState() shows them (the reason line only with a reason)
+        self.computeButton.show()
+        self.computeReasonLabel.setVisible(bool(str(self.computeReasonLabel.text)))
+
     def exit(self):
         self._entered = False
         shell = self._shell()
         if shell is not None:
             try:
-                if self._footerInShell and shell.inspectorFooter() is self.shellFooter:
-                    shell.setInspectorFooter(None)
+                self.releaseShellFooter(shell)
                 if getattr(shell, "_primaryAction", None) == self.onPrimary:
                     shell.setPrimaryAction(None, "")
                 chip = getattr(getattr(shell, "topBar", None), "statusChip", None)
@@ -3997,9 +4061,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
                     shell.setStatusChip(None)
             except Exception:
                 logging.exception("Lesion network mapping: leaving Map failed")
-        self._footerInShell = False
+        self.releaseShellFooter(None)
         self._statusChipText = None
-        self.footer.show()
         self.restoreLesionDisplay()
 
     def cleanup(self):

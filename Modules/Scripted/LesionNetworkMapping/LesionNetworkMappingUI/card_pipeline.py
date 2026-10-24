@@ -1735,9 +1735,11 @@ class PipelineCard:
         if self.job is not None and self.job.isFinished() and not _samePath(getattr(self.job.spec, "lnmOut", None), out):
             self.job, self.note = None, ""  # a run of another study, connectome or option set
         if out != self.recordOut and not _samePath(out, self.recordOut):
-            # Another output folder: forget the last one's record until the re-check reads this one
+            # Another output folder: forget the last one's record until the re-check reads this one. A re-check already
+            # pending reads it too: restarting its timer here (every apply) would postpone it while applies follow each other
             self.record, self.recordStatus, self.external, self.recordOut = None, None, None, out
-            self.scheduleRecheck()
+            if not self.recheckTimer.isActive():
+                self.scheduleRecheck()
         if self.job is not None and self.job.isFinished() is False:
             return
         jobs = pipelineJobs(out) if out else []

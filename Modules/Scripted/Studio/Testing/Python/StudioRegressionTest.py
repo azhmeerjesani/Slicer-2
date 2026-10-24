@@ -1,9 +1,8 @@
-"""Tests of the lesion QC chips and the 2D extrusion hooks of Studio (``StudioLib.lesionqc``, L-28) with the figure tracing
-(L-29), and of a clean quit while the chips are being evaluated (W4-I1).
+"""Regression tests of the problems found by the release gates (G4 -> W4-I1): features of different work packages that meet.
 
 Run with the main window and testing enabled::
 
-    python3 Utilities/Scripts/StudioTestRunner.py --home $(mktemp -d) unittest Studio StudioLesionQcTest
+    python3 Utilities/Scripts/StudioTestRunner.py --home $(mktemp -d) unittest Studio StudioRegressionTest
 
 - ``test_1_figure_planes_kept``: a lesion traced from a figure keeps the ``planes`` column of the Figure card (the planes of the
   figure panels) when the extrusion hook sees a 3D lesion; another row loses the planes of an earlier 2D extrusion.
@@ -11,6 +10,9 @@ Run with the main window and testing enabled::
   (300 ms debounce), replaces a notice of the inspector slot and keeps a notice line without a parent, then quits. It must exit
   with code 0, without a Python traceback or an abnormal exit (the G4 crash: Python event filters called while the interpreter
   was finalized).
+- ``test_3_map_primary_pinned``: in Studio, the primary button of Map is in the inspector's sticky footer (above the
+  disclaimer), so that it never scrolls out of view or moves when a card above it grows; it is back in the Compute card in
+  Classic and in the other workspaces.
 """
 
 import json
@@ -21,7 +23,7 @@ import tempfile
 import unittest
 
 try:
-    import qt  # noqa: F401
+    import qt
     import slicer
 except ImportError as exc:
     raise unittest.SkipTest("needs the Slicer application") from exc
@@ -33,7 +35,7 @@ import numpy as np
 #: Seconds for the child process of the quit test (startup, Start on template, trace, quit)
 QUIT_TIMEOUT_S = 300
 
-QUIT_SCRIPT = r'''
+QUIT_SCRIPT = r"""
 import sys
 import time
 
@@ -74,7 +76,7 @@ def main():
     for _ in range(4):
         slicer.app.processEvents()
     pending = bool(qc is not None and qc._timer.isActive())
-    rows = bool(qc is not None and qc.panel.alive())
+    rows = bool(qc is not None and ui._isAlive(qc.panel.widget))
     print(f"QUITTEST READY qc={qc is not None} pending={pending} row={rows}", flush=True)
     slicer.app.exit(0)
 
@@ -87,12 +89,12 @@ except Exception:
     traceback.print_exc()
     sys.stdout.flush()
     slicer.app.exit(3)
-'''
+"""
 
 
-class StudioLesionQcTest(unittest.TestCase):
+class StudioRegressionTest(unittest.TestCase):
     def setUp(self):
-        self.directory = tempfile.mkdtemp(prefix="StudioLesionQcTest", dir=slicer.app.temporaryPath)
+        self.directory = tempfile.mkdtemp(prefix="StudioRegressionTest", dir=slicer.app.temporaryPath)
         self.addCleanup(shutil.rmtree, self.directory, True)
 
     # Figure planes (L-28 + L-29)
@@ -104,7 +106,7 @@ class StudioLesionQcTest(unittest.TestCase):
 
         from StudioLib import lesionqc
 
-        study = Study.create(os.path.join(self.directory, "study"), template="MNI152NLin2009cAsym")
+        study = Study.create(os.path.join(self.directory, "study"))
         affine = np.diag([2.0, 2.0, 2.0, 1.0])
         affine[:3, 3] = [-20.0, -20.0, -20.0]
         cube = np.zeros((20, 20, 20), np.uint8)
@@ -171,7 +173,7 @@ class StudioLesionQcTest(unittest.TestCase):
         process = subprocess.run([launcher, "--no-splash", "--testing", "--python-script", script], env=environment, stdout=subprocess.PIPE,
                                  stderr=subprocess.STDOUT, timeout=QUIT_TIMEOUT_S, check=False)
         output = process.stdout.decode("utf-8", "replace")
-        with open(os.path.join(slicer.app.temporaryPath, "StudioLesionQcTest_quit.log"), "w") as stream:
+        with open(os.path.join(slicer.app.temporaryPath, "StudioRegressionTest_quit.log"), "w") as stream:
             stream.write(output)
         ready = [line for line in output.splitlines() if line.startswith("QUITTEST READY")]
         self.assertTrue(ready, output[-3000:])
@@ -180,3 +182,64 @@ class StudioLesionQcTest(unittest.TestCase):
         self.assertNotIn("Traceback", output, output[-3000:])
         self.assertNotIn("exit abnormally", output, output[-3000:])
         self.assertEqual(process.returncode, 0, json.dumps(output[-3000:]))
+
+    # Map (W4-I1, USABILITY P5)
+
+    def test_3_map_primary_pinned(self):
+        from StudioLib import shell
+
+        mainWindow = slicer.util.mainWindow()
+        if mainWindow is None or not hasattr(slicer.modules, "lesionnetworkmapping"):
+            self.skipTest("needs the main window and the Map module")
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        try:
+            studioShell.switchTo("map")
+            for _ in range(10):
+                slicer.app.processEvents()
+            widget = slicer.modules.LesionNetworkMappingWidget
+            button = mainWindow.findChild("QPushButton", "LNMComputeButton")
+            self.assertIs(button, widget.computeButton)
+            footer = mainWindow.findChild("QWidget", "StudioInspectorFooter")
+            self.assertIsNotNone(footer)
+            self.assertTrue(self._isAncestor(footer, button), "the primary button is in the sticky footer")
+            self.assertTrue(button.isVisible())
+            disclaimer = widget.shellFooter.findChild("QLabel", "LNMDisclaimer")
+            self.assertIsNotNone(disclaimer)
+            self.assertLess(button.mapToGlobal(qt.QPoint(0, 0)).y(), disclaimer.mapToGlobal(qt.QPoint(0, 0)).y())
+            # Not inside the scrolled panel: it does not move when the panel scrolls
+            self.assertIsNone(self._scrollArea(button))
+            studioShell.switchTo("library")
+            for _ in range(4):
+                slicer.app.processEvents()
+            computeCard = widget.parent.findChild("QWidget", "LNMComputeCard")
+            self.assertTrue(self._isAncestor(computeCard, button), "back in the Compute card outside Map")
+            studioShell.switchTo("map")
+            for _ in range(4):
+                slicer.app.processEvents()
+            self.assertTrue(self._isAncestor(footer, button))
+        finally:
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+        widget = slicer.modules.LesionNetworkMappingWidget
+        self.assertTrue(self._isAncestor(widget.parent.findChild("QWidget", "LNMComputeCard"), widget.computeButton), "Classic: in the Compute card")
+
+    @staticmethod
+    def _isAncestor(ancestor, widget):
+        current = widget
+        while current is not None:
+            if current == ancestor:
+                return True
+            current = current.parentWidget()
+        return False
+
+    @staticmethod
+    def _scrollArea(widget):
+        current = widget.parentWidget()
+        while current is not None:
+            if current.inherits("QScrollArea"):
+                return current
+            current = current.parentWidget()
+        return None
