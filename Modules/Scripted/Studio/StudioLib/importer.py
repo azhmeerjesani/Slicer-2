@@ -676,9 +676,21 @@ def _widgetAlive(widget):
 
 
 def _postNotice(key, widget, shell=None):
-    """Show ``widget`` in the inspector notice slot (Draw) when no notice of a higher priority is waiting."""
+    """Show ``widget`` in the inspector notice slot (Draw) when no notice of a higher priority is waiting.
+
+    A notice line built here that ``widget`` replaces (the same key) is released: nothing else holds it, and a widget without a
+    parent that is left to the interpreter's exit can call Python event filters while Python is finalized (a crash on quit). The
+    widgets of ``_OWNED_NOTICE_KEYS`` belong to their owner (the download banner, the map overlay) and are never released here.
+    """
+    previous = _pendingNotices.get(key)
     _pendingNotices[key] = widget
     _refreshNotices(shell)
+    if previous is not None and previous is not widget and key not in _OWNED_NOTICE_KEYS:
+        releaseWidget(previous)
+
+
+#: Notice keys whose widgets have another owner (``DownloadBanner.widget``, ``_StatMapOverlay.widget``)
+_OWNED_NOTICE_KEYS = ("template1mm", "statmap")
 
 
 #: Signals of notice controls that hold Python callbacks
@@ -718,7 +730,11 @@ def _deleteNow(widget):
         for child in widget.findChildren(className):
             child.disconnect(signal)
     if widget.parent() is None:
-        # Python owns a widget without a parent: delete it while the application exists (not at interpreter exit)
+        # Python owns a widget without a parent: delete it while the application exists (not at interpreter exit), without the
+        # Python event filters that its destruction would call
+        from . import ui
+
+        ui.removeStudioEventFilters(widget)
         widget.delete()
 
 

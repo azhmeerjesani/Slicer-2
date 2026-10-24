@@ -174,6 +174,48 @@ def _ensureWatcher():
     if _watcher is None:
         _watcher = _PaletteWatcher()
         _lastApplicationFontPx = applicationFontPx()
+        import atexit
+
+        atexit.register(_deleteOrphansAtExit)
+
+
+def _deleteOrphansAtExit():
+    """At Python exit (after the application quit, before the modules are cleared): delete the bound widgets without a parent.
+
+    Python owns a widget without a parent. Left to the clearing of this module, its deletion can call Python event filters (of
+    the widget or of its buttons) while the interpreter is being finalized, and the application crashes on quit. The Python
+    callbacks of its buttons are disconnected first (see ``importer.releaseWidget``).
+    """
+    import contextlib
+
+    entries = list(_boundStyleSheets)
+    _boundStyleSheets.clear()
+    for widget, _function in entries:
+        if not _isAlive(widget) or widget.parent() is not None:
+            continue
+        for button in widget.findChildren("QAbstractButton"):
+            with contextlib.suppress(Exception):
+                button.disconnect("clicked()")
+        removeStudioEventFilters(widget)
+        with contextlib.suppress(Exception):
+            widget.delete()
+
+
+def removeStudioEventFilters(widget):
+    """Remove the shared Python event filters of this module (``wrapRow()``/``noticeLine()`` wrapping, ``installButtonKeys()``)
+    from ``widget`` and its children.
+
+    Call it before deleting a widget from Python (``widget.delete()``): the destruction of its layout sends events to the widget,
+    and a Python event filter called for a widget that Python is deleting crashes PythonQt.
+    """
+    if not _isAlive(widget):
+        return
+    filters = [instance for instance in (_wrapFilter, _buttonKeys) if instance is not None]
+    if not filters:
+        return
+    for target in (widget, *widget.findChildren("QWidget")):
+        for instance in filters:
+            target.removeEventFilter(instance)
 
 
 def addPaletteListener(callback):

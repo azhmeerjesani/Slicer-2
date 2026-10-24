@@ -1413,16 +1413,33 @@ def core():
 #
 
 
-def dimensionColumns(info, planeNormal=None):
+def figureOwnsPlanes(row, planeNormal=None):
+    """True when the ``planes`` column of ``row`` is the Figure card's (L-29): the lesion was traced from a figure.
+
+    The column is shared: for a figure tracing it holds the planes of the figure panels, for another 2D tracing the plane found
+    by ``detect_dimensionality``. The checks and the extrusion never write or clear the figure's planes.
+    """
+    if planeNormal is not None:
+        return True
+    row = row or {}
+    return "figure" in str(row.get("trace_method") or "") or not _missing(row.get("fig_convention"))
+
+
+def _extrusionColumns(row, planeNormal=None):
+    """``EXTRUSION_COLUMNS`` that belong to the extrusion for this row (``planes`` is left out for a figure tracing)."""
+    return tuple(key for key in EXTRUSION_COLUMNS if key != "planes" or not figureOwnsPlanes(row, planeNormal))
+
+
+def dimensionColumns(info, planeNormal=None, figure=False):
     """Row values of a ``detect_dimensionality`` result: ``dimensionality``, and for 2D and multi2D ``planes`` and ``n_slices``.
 
-    ``planes`` is left to the Figure card when a plane normal is given (its planes are the figure's).
+    ``planes`` is left to the Figure card when a plane normal is given or ``figure`` is true (its planes are the figure's).
     """
     dim = info.get("dimensionality")
     values = {"dimensionality": dim}
     if dim in ("2D", "multi2D"):
         planes = [plane for plane in info.get("planes") or [] if plane]
-        if planeNormal is None and planes:
+        if planeNormal is None and not figure and planes:
             values["planes"] = ";".join(planes)
         if dim == "2D":
             plane = planes[0] if planes else None
@@ -1438,7 +1455,7 @@ EXTRUSION_COLUMNS = ("planes", "n_slices", "extrude_mm", "fractional_sum")
 def hasExtrusion(study, sid):
     """True when the row or the files next to the lesion still hold the result of an earlier 2D extrusion."""
     row = study.subject(sid)
-    if any(not _missing(row.get(key)) for key in EXTRUSION_COLUMNS):
+    if any(not _missing(row.get(key)) for key in _extrusionColumns(row)):
         return True
     if _missing(row.get("lesion")):
         return False
@@ -1446,15 +1463,15 @@ def hasExtrusion(study, sid):
     return os.path.exists(descPath(lesionPath, "traced")) or os.path.exists(descPath(lesionPath, "lesionProb"))
 
 
-def _dropExtrusion(study, session, sid, row, values, tracedPath, probPath, result):
+def _dropExtrusion(study, session, sid, row, values, tracedPath, probPath, result, normal=None):
     """A lesion that is no longer a 2D tracing (it was edited into a 3D one): remove what an earlier extrusion left.
 
-    The row's extrusion columns are cleared, ``desc-lesionProb`` and ``desc-traced`` next to the lesion (in ``lesions/``) are
-    removed and the ``extrude`` record of the sidecar is dropped, with one audit line. Nothing is written when there is no trace of
-    an earlier extrusion.
+    The row's extrusion columns are cleared (not the planes of a figure tracing), ``desc-lesionProb`` and ``desc-traced`` next to
+    the lesion (in ``lesions/``) are removed and the ``extrude`` record of the sidecar is dropped, with one audit line. Nothing is
+    written when there is no trace of an earlier extrusion.
     """
     schema = _lnm("schema")
-    for key in EXTRUSION_COLUMNS:
+    for key in _extrusionColumns(row, normal):
         if not _missing(row.get(key)):
             values[key] = None
     removed = []
@@ -1521,11 +1538,11 @@ def regenerate(study, sid, session=None, source="lesion", normal=None):
     dim = info["dimensionality"]
     if dim is None:
         return None
-    values = dimensionColumns(info, normal)
+    values = dimensionColumns(info, normal, figure=figureOwnsPlanes(row))
     result = {"sid": sid, "dimensionality": dim, "mode": None, "files": [], "values": values, "info": info}
     policy = storedPolicy(study)
     if dim not in ("2D", "multi2D") and source == "lesion":
-        _dropExtrusion(study, session, sid, row, values, tracedPath, probPath, result)
+        _dropExtrusion(study, session, sid, row, values, tracedPath, probPath, result, normal)
         return result
     if dim not in ("2D", "multi2D") or policy is None:
         if values != {key: row.get(key) for key in values}:
@@ -1992,9 +2009,13 @@ class _QcPanel:
     def clear(self):
         self.setChips([])
 
+    def alive(self):
+        """False once the row was destroyed (the Lesion card or the main window is gone, for example while the application quits)."""
+        return ui._isAlive(self.widget) and ui._isAlive(self.layout)
+
     def setChips(self, specs):
         signature = json.dumps(specs, sort_keys=True, default=str)
-        if signature == self.signature:
+        if signature == self.signature or not self.alive():
             return
         self.signature = signature
         for widget in self.chips.values():
@@ -2075,6 +2096,7 @@ class LesionQc:
         self.lastTimings = {}
         self.runs = 0
         self._token = 0
+        self._stopped = False
         self._version = -1
         self._sceneTags = []
         self._key = None
@@ -2093,13 +2115,26 @@ class LesionQc:
         scene = slicer.mrmlScene
         self._sceneTags = [scene.AddObserver(slicer.vtkMRMLScene.StartCloseEvent, self._onSceneClosing),
                            scene.AddObserver(slicer.vtkMRMLScene.EndCloseEvent, self._onSceneClosed)]
+        slicer.app.connect("aboutToQuit()", self._onAboutToQuit)
 
-    def dispose(self):
+    def _stop(self):
+        """No evaluation, render or core callback from now on: the timers, the core listener and the scene observers are released."""
+        self._stopped = True
         self._timer.stop()
+        self._token += 1
         core().removeListener(self._onCoreChanged)
         for tag in self._sceneTags:
             slicer.mrmlScene.RemoveObserver(tag)
         self._sceneTags = []
+
+    def _onAboutToQuit(self):
+        """The application quits: an evaluation pending (300 ms after the last edit) must not run once the card is destroyed."""
+        self._stop()
+
+    def dispose(self):
+        self._stop()
+        with contextlib.suppress(Exception):
+            slicer.app.disconnect("aboutToQuit()", self._onAboutToQuit)
         self.card.removeChipRow(ROW_KEY)
         self.card.removeMenuAction(self._menuLabel)
 
@@ -2125,6 +2160,8 @@ class LesionQc:
 
     def notify(self, state):
         """Called by the card on every refresh: restart the debounce when the lesion, its row or the resources changed."""
+        if self._stopped:
+            return
         lesionId = state.get("lesionId")
         if not lesionId or not state.get("enabled", True):
             self._lesionId = None
@@ -2189,6 +2226,8 @@ class LesionQc:
     def run(self):
         """Evaluate the chips now (the debounce timer calls it): the first stage here, the CSF share and the atlas labels in the next event."""
         self._timer.stop()
+        if self._stopped or not self.panel.alive():
+            return
         started = time.perf_counter()
         self._key = self._pendingKey
         self._token += 1
@@ -2253,6 +2292,8 @@ class LesionQc:
             core().syncFlags(session, sid, self.result["flags"])
 
     def _render(self):
+        if self._stopped or not self.panel.alive():
+            return
         c = core()
         context = self._context or {}
         session, sid, row = context.get("session"), context.get("sid"), context.get("row")
