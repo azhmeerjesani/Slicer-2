@@ -1,0 +1,53 @@
+# slicer-lnm: Slicer Studio's lesion network mapping library (LesionNetworkMappingLib) as a Python wheel,
+# with the BIDS-App command line "slicer-lnm" (LesionNetworkMappingLib/app.py). Only the library package
+# is in the wheel: the Slicer module (LesionNetworkMapping.py) and its user interface are not.
+#
+# Build locally (never published; see Utilities/SlicerStudioLNM/README.md):
+#
+#   cd Modules/Scripted/LesionNetworkMapping
+#   SLICER_FORK_REV=$(git rev-parse --short=12 HEAD) PythonSlicer -m pip wheel . --no-deps -w dist
+#
+# Without a network connection add --no-build-isolation (PythonSlicer bundles setuptools). The version is
+# export.LIBRARY_VERSION + "+fork.<rev>" (app.build_version: $SLICER_FORK_REV, else the git revision).
+# setuptools leaves build/ and slicer_lnm.egg-info/ in this folder: delete them after a build.
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slicer-lnm"
+dynamic = ["version"]
+description = "Lesion network mapping (Slicer Studio's LesionNetworkMappingLib) with a BIDS-App command line. Research use only."
+requires-python = ">=3.11"
+license = "LicenseRef-3D-Slicer"
+authors = [{ name = "Slicer Studio contributors" }]
+keywords = ["lesion network mapping", "connectome", "BIDS-App", "neuroimaging"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Intended Audience :: Science/Research",
+  "Topic :: Scientific/Engineering :: Medical Science Apps.",
+  "Operating System :: OS Independent",
+]
+# numpy and scipy are the only requirements; the container recipes pin the versions that Slicer bundles.
+dependencies = ["numpy>=1.26", "scipy>=1.11"]
+
+[project.optional-dependencies]
+# figures and report images (figures.py, reportfigs.py)
+pillow = ["pillow>=10"]
+# image registration helpers (transforms.py, normalize.py outside Slicer)
+simpleitk = ["SimpleITK>=2.3"]
+all = ["pillow>=10", "SimpleITK>=2.3"]
+
+[project.scripts]
+slicer-lnm = "LesionNetworkMappingLib.app:main"
+
+[tool.setuptools]
+packages = ["LesionNetworkMappingLib"]
+include-package-data = false
+
+[tool.setuptools.package-data]
+LesionNetworkMappingLib = ["catalog/*.json", "recipes/*.json"]
+
+[tool.setuptools.dynamic]
+version = { attr = "LesionNetworkMappingLib.app.__version__" }
