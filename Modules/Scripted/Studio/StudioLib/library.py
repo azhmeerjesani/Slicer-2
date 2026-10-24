@@ -4429,7 +4429,7 @@ class FolderCard:
         self.iconLabel = qt.QLabel()
         self.iconLabel.setFixedSize(18, 18)
         headerRow.addWidget(self.iconLabel)
-        title = qt.QLabel((_("1 NIfTI file found") if len(self.files) == 1 else _("{count} NIfTI files found").format(count=len(self.files))))
+        title = qt.QLabel(_("1 NIfTI file found") if len(self.files) == 1 else _("{count} NIfTI files found").format(count=len(self.files)))
         title.setObjectName("StudioFolderCardTitle")
         _setFont(title, 13, qt.QFont.DemiBold)
         headerRow.addWidget(title, 1)

@@ -441,7 +441,7 @@ class CohortCard:
             self.statusLabel.setText(_("Lesion maps: {n} lesions · conn-{label} · N={subjects} ({hits} from the cache)").format(
                 n=lesions.get("mapped", "?"), label=(record.get("bundle") or {}).get("label", "?"), subjects=record.get("n", "?"), hits=lesions.get("cache_hits", 0)))
         elif info and info.get("n"):
-            self.statusLabel.setText(_("The {n} lesions of the study are not mapped with this connectome yet.").format(n=info["n"]))
+            self.statusLabel.setText((_("The lesion of the study is not mapped with this connectome yet.") if info["n"] == 1 else _("The {n} lesions of the study are not mapped with this connectome yet.")).format(n=info["n"]))
         else:
             self.statusLabel.setText(_("Open a study with traced lesions in the Seed card."))
         running = widget is not None and widget.cohortJob is not None and not widget.cohortJob.isFinished()

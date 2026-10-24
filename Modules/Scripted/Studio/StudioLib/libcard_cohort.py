@@ -1115,8 +1115,14 @@ class CohortCard:
             age = formatAge(result.get("created") or summary.get("created")) if result.get("source") == "file" else ""
             if not keepStatus:
                 seconds = result.get("seconds")
-                self.statusLabel.setText(_("{n} lesions · checked {age}").format(n=summary["n"], age=age) if age else
-                                         (_("{n} lesions · checked in {seconds} s").format(n=summary["n"], seconds=f"{seconds:.1f}") if seconds is not None else _("{n} lesions").format(n=summary["n"])))
+                one = summary["n"] == 1
+                if age:
+                    status = (_("1 lesion · checked {age}") if one else _("{n} lesions · checked {age}")).format(n=summary["n"], age=age)
+                elif seconds is not None:
+                    status = (_("1 lesion · checked in {seconds} s") if one else _("{n} lesions · checked in {seconds} s")).format(n=summary["n"], seconds=f"{seconds:.1f}")
+                else:
+                    status = _("1 lesion") if one else _("{n} lesions").format(n=summary["n"])
+                self.statusLabel.setText(status)
             self.results.setVisible(True)
             self._renderResults(result)
         gallery = (result or {}).get("gallery") if result else None

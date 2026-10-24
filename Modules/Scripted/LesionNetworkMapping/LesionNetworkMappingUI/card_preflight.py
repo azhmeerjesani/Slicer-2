@@ -868,7 +868,7 @@ class PreflightCard:
             state["done"] = True
 
         self._measure = state
-        self.progressLabel.setText((_("Measuring 1 lesion again…") if len(subjects) == 1 else _("Measuring {n} lesions again…").format(n=len(subjects))))
+        self.progressLabel.setText(_("Measuring 1 lesion again…") if len(subjects) == 1 else _("Measuring {n} lesions again…").format(n=len(subjects)))
         self.progressLabel.show()
         thread = threading.Thread(target=work, name="lnm-remeasure", daemon=True)
         thread.start()
@@ -884,7 +884,7 @@ class PreflightCard:
                 self.progressLabel.setText(_("The lesions could not be measured: {reason}").format(reason=state["error"]))
             else:
                 self._applyInbox()
-                self.progressLabel.setText((_("Measured 1 lesion.") if state["count"] == 1 else _("Measured {n} lesions.").format(n=state["count"])))
+                self.progressLabel.setText(_("Measured 1 lesion.") if state["count"] == 1 else _("Measured {n} lesions.").format(n=state["count"]))
                 self.recheck(force=True)
 
         timer.connect("timeout()", poll)
@@ -913,7 +913,11 @@ class PreflightCard:
         source, target = params.get("source"), params.get("target")
         source = ", ".join(source) if isinstance(source, (list, tuple)) else source
         subjects = list(check.get("subjects") or [])
-        text = _("Transform {n} lesions from the {source} template family to {target}? The transform file is chosen once and remembered; the original lesions are kept.").format(
+        if len(subjects) == 1:
+            template = _("Transform 1 lesion from the {source} template family to {target}? The transform file is chosen once and remembered; the original lesion is kept.")
+        else:
+            template = _("Transform {n} lesions from the {source} template family to {target}? The transform file is chosen once and remembered; the original lesions are kept.")
+        text = template.format(
             n=len(subjects), source=source, target=target)
         try:
             from StudioLib import study_ui
