@@ -218,6 +218,10 @@ LOADED_MAP_ATTRIBUTE = "LNM.LoadedMap"
 DESC_STATISTICS = {"T": "T", "AvgRFz": "Fz", "AvgR": "r"}
 #: Subfolder of a study's derivatives/lnm/conn-<label>[_n-<N>] that holds the cohort maps and group maps
 COHORT_FOLDER = "cohort"
+#: Seed modes whose seeds are made here (coords.py) and mapped by cohortmaps like a cohort's lesions (L-49)
+SEED_SET_MODES = ("coordinates", "stimulation")
+#: Coordinate and stimulation files offered by the import dialogs
+COORDINATE_FILTER = "Coordinates (*.csv *.tsv *.txt *.json);;All files (*)"
 
 #: Where GSP1000 is obtained (SPEC 7.9 empty state); the app never downloads it here
 GSP_DATAVERSE_URL = "https://doi.org/10.7910/DVN/ILXIKS"
@@ -426,7 +430,7 @@ def _existingWidget():
 class LesionNetworkMappingParameterNode:
     """The parameters of the Map module (SPEC 7.2), saved with the scene in a vtkMRMLScriptedModuleNode.
 
-    seedMode - "lesion", "cohort" or "coordinates".
+    seedMode - "lesion", "cohort", "coordinates" or "stimulation".
     seedSegmentation, seedSegmentId - the lesion seed (A-03b sets them too).
     studyPath - scenes of earlier versions: a study folder (read, never written: a study chosen with "Open study…" is kept
       in the fork-only setting Studio/LNM/CohortStudy, so scenes never hold its local path; SPEC 9.7 rule 10).
@@ -439,6 +443,11 @@ class LesionNetworkMappingParameterNode:
     statistic - the map shown: "T", "Fz" or "r"; sign - "both", "pos" or "neg".
     opacity - foreground opacity of the map; nullRelocations - relocated lesions of the specificity QA (0: off).
     resultVolume - the map shown.
+    sphereSize, sphereSizeKind - the sphere of coordinate and stimulation-point seeds: sphereSize mm given as a "radius" or a
+      "diameter" (explicit, both are shown; coords.sphere_radius).
+    coordinateNull, coordinateNullK - the random-coordinate control of the Coordinates seed (off; k null sets).
+    stimulationKind - "points", "efield" or "vta"; stimulationWeighting - its weighting (coords.STIMULATION_WEIGHTINGS);
+    stimulationFlip - multiply the outcome by -1 for the R-map (TMS).
     """
 
     seedMode: str = "lesion"
@@ -456,6 +465,13 @@ class LesionNetworkMappingParameterNode:
     opacity: float = 0.8
     nullRelocations: int = 50
     resultVolume: vtkMRMLScalarVolumeNode
+    sphereSize: float = 4.0
+    sphereSizeKind: str = "radius"
+    coordinateNull: bool = False
+    coordinateNullK: int = 1000
+    stimulationKind: str = "points"
+    stimulationWeighting: str = ""
+    stimulationFlip: bool = False
 
 
 #
@@ -1777,6 +1793,11 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.cohortInfo = None
         self.cohortJob = None
         self.cohortMapsPath = None
+        #: Coordinates and Stimulation seeds: their finished seed maps (maps.tsv) and the null and R-map jobs
+        self.coordinateMapsPath = None
+        self.stimulationMapsPath = None
+        self.coordinateNullJob = None
+        self.stimulationRmapJob = None
         #: A map shown from a file or found in the scene, not from a run of this session ({path, statistic, n, name, ...})
         self.loadedMap = None
         self.managerDialog = None
@@ -1892,8 +1913,10 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         from LesionNetworkMappingUI import visibleSpecs
 
         visible = {spec["id"] for spec in visibleSpecs([spec for spec, _widget in self._cardWidgets.values()], self.seedMode(), self._classic())}
-        if self.seedMode() == "cohort" and self.loadedMap is None:
+        if self.seedMode() in ("cohort", *SEED_SET_MODES) and self.loadedMap is None:
             visible.discard("result")  # the cohort's maps are in the Cohort card; Result shows a browsed lesion map
+        if self.seedMode() in SEED_SET_MODES and getattr(self.ctx, "cohortMaps", None) and "cohort" in self._cardWidgets:
+            visible.add("cohort")  # the seed maps go through the Cohort card (overlap, browsing) like a cohort's lesion maps
         for cardId, (spec, widget) in self._cardWidgets.items():
             widget.setVisible(cardId in visible)
 
@@ -1956,8 +1979,10 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
 
         card = self.widgets.card(_("Seed"), objectName="LNMSeedCard")
         layout = qt.QVBoxLayout(card)
-        # Seed modes offered by this build: Lesion, plus the modes that plug-ins implement (Cohort: W3-08/A-04c, Coordinates: L-49)
-        modes = ["lesion"] + [mode for mode in plugins.SEED_MODES[1:] if any(mode in spec.get("modes", ()) and tuple(spec.get("modes", ())) != plugins.SEED_MODES for spec in self.pluginSpecs)]
+        # Seed modes offered by this build: Lesion, the modes that plug-ins implement (Cohort: W3-08/A-04c), and Coordinates
+        # and Stimulation, whose seeds this card makes (coords.py, L-49) and the cohort maps job maps
+        pluginModes = [mode for mode in plugins.SEED_MODES[1:] if any(mode in spec.get("modes", ()) and tuple(spec.get("modes", ())) != plugins.SEED_MODES for spec in self.pluginSpecs)]
+        modes = ["lesion"] + [mode for mode in plugins.SEED_MODES[1:] if mode in pluginModes or mode in SEED_SET_MODES]
         self.seedModeLabels = {"lesion": _("Lesion"), "cohort": _("Cohort"), "coordinates": _("Coordinates"), "stimulation": _("Stimulation")}
         self.seedModes = modes
         self.seedModeFrame, self.seedModeGroup = self.widgets.segmented([self.seedModeLabels[mode] for mode in modes])
@@ -1974,6 +1999,12 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.cohortSeedPanel = self._buildCohortSeedPanel()
         self.cohortSeedPanel.hide()
         layout.addWidget(self.cohortSeedPanel)
+        self.coordinateSeedPanel = self._buildCoordinateSeedPanel()
+        self.coordinateSeedPanel.hide()
+        layout.addWidget(self.coordinateSeedPanel)
+        self.stimulationSeedPanel = self._buildStimulationSeedPanel()
+        self.stimulationSeedPanel.hide()
+        layout.addWidget(self.stimulationSeedPanel)
         layout = lesionLayout
 
         form = qt.QFormLayout()
@@ -2055,14 +2086,775 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self._showSeedMode()
         self.updateCardVisibility()
         self.updateComputeState()
+        self._notifyControllers("onCohortMapsChanged", getattr(self.ctx, "cohortMaps", None))
+
+    #
+    # Seed: coordinates and stimulation (coords.py; mapped by the cohort maps job, shown by the Cohort card)
+    #
+
+    def _buildSphereRow(self, objectNamePrefix):
+        """A sphere size row: [Radius | Diameter] + mm, and a line that states both (the sizes are never ambiguous)."""
+        row = qt.QHBoxLayout()
+        kindCombo = qt.QComboBox()
+        kindCombo.setObjectName(f"{objectNamePrefix}SphereKind")
+        kindCombo.addItem(_("Radius"), "radius")
+        kindCombo.addItem(_("Diameter"), "diameter")
+        kindCombo.setToolTip(_("Is the size a radius or a diameter? Studies differ (Darby 2019: 4 mm radius; Ji 2025: 6 mm diameter)."))
+        row.addWidget(kindCombo)
+        sizeSpin = qt.QDoubleSpinBox()
+        sizeSpin.setObjectName(f"{objectNamePrefix}SphereSize")
+        sizeSpin.setRange(0.5, 60.0)
+        sizeSpin.setDecimals(1)
+        sizeSpin.setSingleStep(0.5)
+        sizeSpin.setSuffix(" mm")
+        sizeSpin.setValue(4.0)
+        row.addWidget(sizeSpin)
+        row.addStretch(1)
+        textLabel = self._label("", role="secondaryText", objectName=f"{objectNamePrefix}SphereText")
+        kindCombo.connect("currentIndexChanged(int)", lambda index: self.onSphereChanged())
+        sizeSpin.connect("valueChanged(double)", lambda value: self.onSphereChanged())
+        return row, kindCombo, sizeSpin, textLabel
+
+    def _buildCoordinateSeedPanel(self):
+        """Seed = Coordinates: a table of reported foci (study, x, y, z, space) mapped as study-level union spheres."""
+        panel = qt.QWidget()
+        panel.setObjectName("LNMCoordinateSeedPanel")
+        layout = qt.QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        row = qt.QHBoxLayout()
+        self.coordImportButton = qt.QPushButton(_("Import coordinates…"))
+        self.coordImportButton.setObjectName("LNMCoordImportButton")
+        self.coordImportButton.setProperty("slicerRole", "secondary")
+        self.coordImportButton.setToolTip(_("A table (x, y, z and optionally radius, study, space), a BrainMap Sleuth text file or a NiMARE dataset JSON"))
+        self.coordImportButton.connect("clicked()", self.onImportCoordinates)
+        row.addWidget(self.coordImportButton)
+        self.coordMarkupsSelector = slicer.qMRMLNodeComboBox()
+        self.coordMarkupsSelector.setObjectName("LNMCoordMarkupsSelector")
+        self.coordMarkupsSelector.nodeTypes = ["vtkMRMLMarkupsFiducialNode"]
+        self.coordMarkupsSelector.addEnabled = False
+        self.coordMarkupsSelector.removeEnabled = False
+        self.coordMarkupsSelector.noneEnabled = True
+        self.coordMarkupsSelector.noneDisplay = _("Points…")
+        self.coordMarkupsSelector.setMRMLScene(slicer.mrmlScene)
+        self.coordMarkupsSelector.setToolTip(_("A point list whose points (RAS = MNI mm) become one study"))
+        row.addWidget(self.coordMarkupsSelector, 1)
+        self.coordAddMarkupsButton = qt.QPushButton(_("Add points"))
+        self.coordAddMarkupsButton.setObjectName("LNMCoordAddMarkupsButton")
+        self.coordAddMarkupsButton.setProperty("slicerRole", "ghost")
+        self.coordAddMarkupsButton.connect("clicked()", self.onAddMarkupsCoordinates)
+        row.addWidget(self.coordAddMarkupsButton)
+        layout.addLayout(row)
+        self.coordTable = self.widgets.tableView([_("Study"), "x", "y", "z", _("Space")])
+        self.coordTable.setObjectName("LNMCoordTable")
+        self.coordTable.setMaximumHeight(150)
+        self.coordTable.setToolTip(_("The foci; the foci of one study make one seed (the union of their spheres)"))
+        layout.addWidget(self.coordTable)
+        self.coordSummaryLabel = self._label("", role="secondaryText", objectName="LNMCoordSummary")
+        layout.addWidget(self.coordSummaryLabel)
+        form = qt.QFormLayout()
+        sphereRow, self.coordSphereKindCombo, self.coordSphereSizeSpin, self.coordSphereLabel = self._buildSphereRow("LNMCoord")
+        form.addRow(_("Sphere"), sphereRow)
+        layout.addLayout(form)
+        layout.addWidget(self.coordSphereLabel)
+        row = qt.QHBoxLayout()
+        self.coordClearButton = qt.QPushButton(_("Clear"))
+        self.coordClearButton.setObjectName("LNMCoordClearButton")
+        self.coordClearButton.setProperty("slicerRole", "ghost")
+        self.coordClearButton.connect("clicked()", lambda: self.setCoordinates([]))
+        row.addStretch(1)
+        row.addWidget(self.coordClearButton)
+        layout.addLayout(row)
+        # Random-coordinate control (Ji 2025; Wall 2025)
+        self.coordNullCheckBox = qt.QCheckBox(_("Random-coordinate control"))
+        self.coordNullCheckBox.setObjectName("LNMCoordNullCheckBox")
+        self.coordNullCheckBox.setToolTip(_("Compare with networks of random coordinates: the same number of foci per study, in gray matter"))
+        self.coordNullCheckBox.connect("toggled(bool)", self.onCoordinateNullToggled)
+        layout.addWidget(self.coordNullCheckBox)
+        self.coordNullPanel = qt.QWidget()
+        self.coordNullPanel.setObjectName("LNMCoordNullPanel")
+        nullLayout = qt.QFormLayout(self.coordNullPanel)
+        nullLayout.setContentsMargins(0, 0, 0, 0)
+        self.coordNullKSpin = qt.QSpinBox()
+        self.coordNullKSpin.setObjectName("LNMCoordNullK")
+        self.coordNullKSpin.setRange(10, 10000)
+        self.coordNullKSpin.setSingleStep(100)
+        self.coordNullKSpin.setValue(1000)
+        self.coordNullKSpin.setToolTip(_("Null sets of studies (each maps as many seeds as there are studies)"))
+        self.coordNullKSpin.connect("valueChanged(int)", lambda value: self._onCoordinateNullSettings())
+        nullLayout.addRow(_("Null sets"), self.coordNullKSpin)
+        import ctk
+
+        self.coordGmPathEdit = ctk.ctkPathLineEdit()
+        self.coordGmPathEdit.setObjectName("LNMCoordGmMask")
+        self.coordGmPathEdit.filters = ctk.ctkPathLineEdit.Files
+        self.coordGmPathEdit.nameFilters = ["Gray-matter probability (*_label-GM_probseg.nii.gz *.nii.gz *.nii)"]
+        self.coordGmPathEdit.setToolTip(_("A TemplateFlow gray-matter probability map of the connectome's template family (probability > 0.5 is gray matter)"))
+        self.coordGmPathEdit.connect("currentPathChanged(QString)", lambda path: self._onCoordinateNullSettings())
+        nullLayout.addRow(_("Gray matter"), self.coordGmPathEdit)
+        layout.addWidget(self.coordNullPanel)
+        self.coordNullCostLabel = self._label("", role="secondaryText", objectName="LNMCoordNullCost")
+        layout.addWidget(self.coordNullCostLabel)
+        row = qt.QHBoxLayout()
+        self.coordNullRunButton = qt.QPushButton(_("Run random-coordinate control"))
+        self.coordNullRunButton.setObjectName("LNMCoordNullRunButton")
+        self.coordNullRunButton.setProperty("slicerRole", "secondary")
+        self.coordNullRunButton.connect("clicked()", self.runCoordinateNull)
+        row.addWidget(self.coordNullRunButton)
+        row.addStretch(1)
+        layout.addLayout(row)
+        self.coordNullProgress = self.widgets.progressRow(objectNamePrefix="LNMCoordNull")
+        self.coordNullProgress.widget.hide()
+        layout.addWidget(self.coordNullProgress.widget)
+        self.coordNullResultLabel = self._label("", objectName="LNMCoordNullResult")
+        self.coordNullResultLabel.hide()
+        layout.addWidget(self.coordNullResultLabel)
+        from LesionNetworkMappingLib import coords
+
+        self.coordNullCaption = self._label(coords.NULL_CAPTION, role="caption", objectName="LNMCoordNullCaption")
+        layout.addWidget(self.coordNullCaption)
+        self.coordinateFoci = []
+        self.coordinateSource = None
+        self._showCoordinates()
+        return panel
+
+    def _buildStimulationSeedPanel(self):
+        """Seed = Stimulation: per-patient stimulation sites (points with a sphere, E-field or VTA NIfTIs) and an outcome."""
+        from LesionNetworkMappingLib import coords
+
+        panel = qt.QWidget()
+        panel.setObjectName("LNMStimulationSeedPanel")
+        layout = qt.QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        form = qt.QFormLayout()
+        self.stimKindCombo = qt.QComboBox()
+        self.stimKindCombo.setObjectName("LNMStimKind")
+        for kind, label in (("points", _("Points + sphere (TMS sites)")), ("efield", _("E-field NIfTI (SimNIBS)")), ("vta", _("VTA NIfTI (Lead-DBS)"))):
+            self.stimKindCombo.addItem(label, kind)
+        self.stimKindCombo.connect("currentIndexChanged(int)", self.onStimulationKindChanged)
+        form.addRow(_("Sites"), self.stimKindCombo)
+        self.stimWeightingCombo = qt.QComboBox()
+        self.stimWeightingCombo.setObjectName("LNMStimWeighting")
+        self.stimWeightingCombo.connect("currentIndexChanged(int)", lambda index: self.onStimulationWeightingChanged())
+        form.addRow(_("Weighting"), self.stimWeightingCombo)
+        sphereRow, self.stimSphereKindCombo, self.stimSphereSizeSpin, self.stimSphereLabel = self._buildSphereRow("LNMStim")
+        self.stimSphereRowLabel = qt.QLabel(_("Sphere"))
+        form.addRow(self.stimSphereRowLabel, sphereRow)
+        self.stimThresholdSpin = qt.QDoubleSpinBox()
+        self.stimThresholdSpin.setObjectName("LNMStimThreshold")
+        self.stimThresholdSpin.setRange(0.0, 1000.0)
+        self.stimThresholdSpin.setDecimals(2)
+        self.stimThresholdSpin.setSuffix(" V/m")
+        self.stimThresholdSpin.setSpecialValueText(_("Half the maximum"))
+        self.stimThresholdSpin.setToolTip(_("E-field strength of the seed (0: half the maximum of each field)"))
+        self.stimThresholdRowLabel = qt.QLabel(_("Threshold"))
+        form.addRow(self.stimThresholdRowLabel, self.stimThresholdSpin)
+        layout.addLayout(form)
+        layout.addWidget(self.stimSphereLabel)
+        row = qt.QHBoxLayout()
+        self.stimImportButton = qt.QPushButton(_("Import sites…"))
+        self.stimImportButton.setObjectName("LNMStimImportButton")
+        self.stimImportButton.setProperty("slicerRole", "secondary")
+        self.stimImportButton.setToolTip(_("A table with participant_id and x, y, z (points) or file (an E-field or VTA NIfTI, relative to the table), "
+                                           "and optionally an outcome column"))
+        self.stimImportButton.connect("clicked()", self.onImportStimulation)
+        row.addWidget(self.stimImportButton)
+        row.addStretch(1)
+        layout.addLayout(row)
+        self.stimTable = self.widgets.tableView([_("Patient"), _("Site"), _("Outcome")])
+        self.stimTable.setObjectName("LNMStimTable")
+        self.stimTable.setMaximumHeight(150)
+        layout.addWidget(self.stimTable)
+        self.stimSummaryLabel = self._label("", role="secondaryText", objectName="LNMStimSummary")
+        layout.addWidget(self.stimSummaryLabel)
+        form = qt.QFormLayout()
+        self.stimOutcomeCombo = qt.QComboBox()
+        self.stimOutcomeCombo.setObjectName("LNMStimOutcome")
+        self.stimOutcomeCombo.setToolTip(_("The per-patient outcome (for example % improvement) of the R-map"))
+        self.stimOutcomeCombo.connect("currentIndexChanged(int)", lambda index: self._showStimulation())
+        form.addRow(_("Outcome"), self.stimOutcomeCombo)
+        layout.addLayout(form)
+        self.stimFlipCheckBox = qt.QCheckBox(_("Flip the sign (TMS: anticorrelation predicts response)"))
+        self.stimFlipCheckBox.setObjectName("LNMStimFlip")
+        self.stimFlipCheckBox.connect("toggled(bool)", self.onStimulationFlipToggled)
+        layout.addWidget(self.stimFlipCheckBox)
+        row = qt.QHBoxLayout()
+        self.stimRmapButton = qt.QPushButton(_("Compute R-map"))
+        self.stimRmapButton.setObjectName("LNMStimRmapButton")
+        self.stimRmapButton.setProperty("slicerRole", "secondary")
+        self.stimRmapButton.setToolTip(_("Correlation of each voxel's connectivity (Fz) with the outcome over the patients, with permutation inference (sLNM)"))
+        self.stimRmapButton.connect("clicked()", self.runStimulationRmap)
+        row.addWidget(self.stimRmapButton)
+        row.addStretch(1)
+        layout.addLayout(row)
+        self.stimRmapProgress = self.widgets.progressRow(objectNamePrefix="LNMStimRmap")
+        self.stimRmapProgress.widget.hide()
+        layout.addWidget(self.stimRmapProgress.widget)
+        self.stimRmapReasonLabel = self._label("", role="secondaryText", objectName="LNMStimRmapReason")
+        layout.addWidget(self.stimRmapReasonLabel)
+        self.stimCaption = self._label(_("Research use only: stimulation-site maps describe connectivity; they do not choose treatment targets."),
+                                       role="caption", objectName="LNMStimCaption")
+        layout.addWidget(self.stimCaption)
+        self.stimulationItems = []
+        self.stimulationSource = None
+        self.stimulationColumns = []
+        self._fillStimulationWeightings(coords.STIMULATION_KINDS[0])
+        self._showStimulation()
+        return panel
+
+    # Sphere size (shared by both panels and the parameter node)
+
+    def sphereSettings(self):
+        """(radius_mm, diameter_mm) of the sphere settings: exactly one is set (coords.sphere_radius)."""
+        node = self._parameterNode
+        size = float(node.sphereSize) if node is not None else float(self.coordSphereSizeSpin.value)
+        kind = node.sphereSizeKind if node is not None else "radius"
+        return (None, size) if kind == "diameter" else (size, None)
+
+    def onSphereChanged(self):
+        if self._updatingGui or self._parameterNode is None:
+            return
+        sender = "stim" if self.seedMode() == "stimulation" else "coord"
+        kindCombo = self.stimSphereKindCombo if sender == "stim" else self.coordSphereKindCombo
+        sizeSpin = self.stimSphereSizeSpin if sender == "stim" else self.coordSphereSizeSpin
+        self._parameterNode.sphereSizeKind = kindCombo.currentData or "radius"
+        self._parameterNode.sphereSize = float(sizeSpin.value)
+        self._showSphere()
+        self._showCoordinates()
+
+    def _showSphere(self):
+        """Both sphere rows show the parameter node's size, and a line that states the radius and the diameter."""
+        from LesionNetworkMappingLib import coords
+
+        node = self._parameterNode
+        if node is None or not hasattr(self, "coordSphereKindCombo"):
+            return
+        wasUpdating, self._updatingGui = self._updatingGui, True
+        try:
+            for kindCombo, sizeSpin in ((self.coordSphereKindCombo, self.coordSphereSizeSpin), (self.stimSphereKindCombo, self.stimSphereSizeSpin)):
+                index = kindCombo.findData(node.sphereSizeKind or "radius")
+                kindCombo.setCurrentIndex(max(index, 0))
+                sizeSpin.setValue(float(node.sphereSize))
+        finally:
+            self._updatingGui = wasUpdating
+        try:
+            text = coords.sphere_text(coords.sphere_radius(*self.sphereSettings())[1])
+        except ValueError as exc:
+            text = str(exc)
+        for label in (self.coordSphereLabel, self.stimSphereLabel):
+            label.setText(_("Sphere: {text}").format(text=text))
+
+    # Coordinates
+
+    def setCoordinates(self, foci, source=None):
+        """Use these foci (``coords.Focus``) for the Coordinates seed; ``source`` is the file they came from (or None)."""
+        self.coordinateFoci = list(foci)
+        self.coordinateSource = source
+        self.coordinateMapsPath = None
+        self._publishCohortMaps()
+        self._showCoordinates()
+        self.updateCardVisibility()
+        self.updateComputeState()
+        self._notifyControllers("onCohortMapsChanged", getattr(self.ctx, "cohortMaps", None))
+
+    def onImportCoordinates(self):
+        path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Import coordinates"), "", COORDINATE_FILTER)
+        if path:
+            self.importCoordinates(path)
+
+    def importCoordinates(self, path):
+        """Read a coordinate file (CSV/TSV, Sleuth text or NiMARE JSON) and append its foci; return them, or None on an error."""
+        from LesionNetworkMappingLib import coords
+
+        try:
+            foci = coords.read_foci(path)
+        except (OSError, ValueError) as exc:
+            slicer.util.errorDisplay(_("The coordinates cannot be read: {error}").format(error=exc), windowTitle=_("Import coordinates"))
+            return None
+        self.setCoordinates(self.coordinateFoci + foci, path if not self.coordinateFoci else None)
+        return foci
+
+    def onAddMarkupsCoordinates(self):
+        node = self.coordMarkupsSelector.currentNode()
+        if node is None:
+            return
+        self.addMarkupsCoordinates(node)
+
+    def addMarkupsCoordinates(self, node, study=None):
+        """Append the control points of a point list (RAS = MNI mm) as one study (named after the list)."""
+        from LesionNetworkMappingLib import coords
+
+        points = []
+        for index in range(node.GetNumberOfControlPoints()):
+            position = [0.0, 0.0, 0.0]
+            node.GetNthControlPointPositionWorld(index, position)
+            points.append(position)
+        if not points:
+            return []
+        foci = coords.foci_from_points(points, study=study or node.GetName())
+        self.setCoordinates(self.coordinateFoci + foci, None)
+        return foci
+
+    def _showCoordinates(self):
+        from LesionNetworkMappingLib import coords
+
+        if not hasattr(self, "coordTable"):
+            return
+        foci = self.coordinateFoci
+        self.coordTable.setRowCount(len(foci))
+        for row, focus in enumerate(foci):
+            for column, value in enumerate((focus.study, f"{focus.x:g}", f"{focus.y:g}", f"{focus.z:g}", "Talairach" if focus.space == "TAL" else "MNI")):
+                item = qt.QTableWidgetItem(value)
+                item.setFlags(qt.Qt.ItemIsSelectable | qt.Qt.ItemIsEnabled)
+                self.coordTable.setItem(row, column, item)
+        self.coordTable.setVisible(bool(foci))
+        self.coordClearButton.setVisible(bool(foci))
+        studies = coords.group_by_study(foci)
+        if not foci:
+            self.coordSummaryLabel.setText(_("Import reported coordinates (or add a point list): the foci of each study make one seed."))
+        else:
+            talairach = sum(1 for focus in foci if focus.space == "TAL")
+            text = _("{studies} studies · {foci} foci").format(studies=len(studies), foci=len(foci))
+            if talairach:
+                text += " · " + _("{n} Talairach foci will be converted to MNI (Lancaster et al. 2007)").format(n=talairach)
+            self.coordSummaryLabel.setText(text)
+        checked = self._parameterNode is not None and self._parameterNode.coordinateNull
+        self.coordNullPanel.setVisible(checked)
+        self.coordNullRunButton.setVisible(checked)
+        self.coordNullCaption.setVisible(checked)
+        self.coordNullCostLabel.setVisible(checked)
+        if checked:
+            k = int(self.coordNullKSpin.value)
+            passes = coords.null_cost(max(len(studies), 1), k, self.bundle.n_voxels if self.bundle is not None else 0, self._nullColumnsPerPass())
+            self.coordNullCostLabel.setText(_("{k} null sets × {studies} studies = {seeds:,} seeds, about {passes:,} connectome passes").format(  # noqa: RUF001
+                k=k, studies=len(studies), seeds=k * len(studies), passes=passes))
+            enabled, reason = self.coordinateNullState()
+            self.coordNullRunButton.setEnabled(enabled)
+            self.coordNullRunButton.setToolTip(reason)
+
+    def _nullColumnsPerPass(self):
+        from LesionNetworkMappingLib import cohortmaps
+
+        return cohortmaps.batch_size(self.bundle.n_voxels) if self.bundle is not None else 100
+
+    def onCoordinateNullToggled(self, checked):
+        if self._parameterNode is not None and not self._updatingGui:
+            self._parameterNode.coordinateNull = bool(checked)
+        self._showCoordinates()
+
+    def _onCoordinateNullSettings(self):
+        if self._parameterNode is not None and not self._updatingGui:
+            self._parameterNode.coordinateNullK = int(self.coordNullKSpin.value)
+        self._showCoordinates()
+
+    def coordinateNullState(self):
+        """(enabled, reason) of the random-coordinate control."""
+        from LesionNetworkMappingLib import coords
+
+        if self.coordinateNullJob is not None and not self.coordinateNullJob.isFinished():
+            return False, _("The random-coordinate control is running…")
+        if len(coords.group_by_study(self.coordinateFoci)) < 2:
+            return False, _("The control compares the overlap of at least 2 studies.")
+        if self.bundle is None or not self.acceptTermsCheckBox.checked:
+            return False, _("Choose a connectome and accept its data use terms.")
+        if not os.path.isfile(self.coordGmPathEdit.currentPath or ""):
+            return False, _("Choose a gray-matter probability map of the connectome's template family.")
+        return True, ""
+
+    # Stimulation
+
+    def _fillStimulationWeightings(self, kind):
+        from LesionNetworkMappingLib import coords
+
+        labels = {"binary": _("Binary"), "graded": _("Graded (1 at the centre to 0 at the edge)"), "normalized": _("Normalized (E / max E)"),
+                  "threshold": _("Threshold"), "probabilistic": _("Probabilistic")}
+        wasUpdating, self._updatingGui = self._updatingGui, True
+        try:
+            self.stimWeightingCombo.clear()
+            for weighting in coords.STIMULATION_WEIGHTINGS[kind]:
+                self.stimWeightingCombo.addItem(labels[weighting], weighting)
+            node = self._parameterNode
+            current = node.stimulationWeighting if node is not None else ""
+            index = self.stimWeightingCombo.findData(current)
+            self.stimWeightingCombo.setCurrentIndex(max(index, 0))
+        finally:
+            self._updatingGui = wasUpdating
+
+    def stimulationKind(self):
+        return self.stimKindCombo.currentData or "points"
+
+    def onStimulationKindChanged(self, index):
+        kind = self.stimulationKind()
+        if self._parameterNode is not None and not self._updatingGui:
+            self._parameterNode.stimulationKind = kind
+            self._parameterNode.stimulationWeighting = ""
+            self.stimulationItems, self.stimulationSource, self.stimulationColumns = [], None, []
+            self.stimulationMapsPath = None
+            self._publishCohortMaps()
+        self._fillStimulationWeightings(kind)
+        self._showStimulation()
+        self.updateCardVisibility()
+        self.updateComputeState()
+
+    def onStimulationWeightingChanged(self):
+        if self._parameterNode is not None and not self._updatingGui:
+            self._parameterNode.stimulationWeighting = self.stimWeightingCombo.currentData or ""
+        self._showStimulation()
+
+    def onStimulationFlipToggled(self, checked):
+        if self._parameterNode is not None and not self._updatingGui:
+            self._parameterNode.stimulationFlip = bool(checked)
+
+    def onImportStimulation(self):
+        path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Import stimulation sites"), "", "Tables (*.csv *.tsv *.txt);;All files (*)")
+        if path:
+            self.importStimulation(path)
+
+    def importStimulation(self, path):
+        """Read a stimulation table for the current kind; return its rows, or None on an error."""
+        from LesionNetworkMappingLib import coords
+
+        try:
+            items = coords.read_stimulation_table(path, self.stimulationKind())
+            columns = coords.numeric_columns(path)
+        except (OSError, ValueError) as exc:
+            slicer.util.errorDisplay(_("The stimulation sites cannot be read: {error}").format(error=exc), windowTitle=_("Import stimulation sites"))
+            return None
+        self.stimulationItems, self.stimulationSource, self.stimulationColumns = items, path, columns
+        self.stimulationMapsPath = None
+        wasUpdating, self._updatingGui = self._updatingGui, True
+        try:
+            self.stimOutcomeCombo.clear()
+            self.stimOutcomeCombo.addItem(_("None"), "")
+            for column in columns:
+                self.stimOutcomeCombo.addItem(column, column)
+            self.stimOutcomeCombo.setCurrentIndex(1 if columns else 0)
+        finally:
+            self._updatingGui = wasUpdating
+        self._publishCohortMaps()
+        self._showStimulation()
+        self.updateCardVisibility()
+        self.updateComputeState()
+        self._notifyControllers("onCohortMapsChanged", getattr(self.ctx, "cohortMaps", None))
+        return items
+
+    def stimulationOutcomes(self):
+        """{participant_id: outcome text} of the chosen outcome column ({} without one)."""
+        from LesionNetworkMappingLib import coords
+
+        column = self.stimOutcomeCombo.currentData if self.stimOutcomeCombo.count else ""
+        if not column or not self.stimulationSource:
+            return {}
+        _columns, rows = coords.read_table(self.stimulationSource)
+        return {row["participant_id"]: row.get(column) for row in rows if row.get("participant_id")}
+
+    def _showStimulation(self):
+        if not hasattr(self, "stimTable"):
+            return
+        kind = self.stimulationKind()
+        points = kind == "points"
+        for widget in (self.stimSphereRowLabel, self.stimSphereKindCombo, self.stimSphereSizeSpin, self.stimSphereLabel):
+            widget.setVisible(points)
+        threshold = kind == "efield" and (self.stimWeightingCombo.currentData or "") == "threshold"
+        self.stimThresholdRowLabel.setVisible(threshold)
+        self.stimThresholdSpin.setVisible(threshold)
+        outcomes = self.stimulationOutcomes() if self.stimulationItems else {}
+        self.stimTable.setRowCount(len(self.stimulationItems))
+        for row, item in enumerate(self.stimulationItems):
+            if item.get("points"):
+                site = ", ".join(f"({p.x:g}, {p.y:g}, {p.z:g})" for p in item["points"])
+            else:
+                site = os.path.basename(item.get("image") or "")
+            for column, value in enumerate((item["participant_id"], site, str(outcomes.get(item["participant_id"], "") or ""))):
+                cell = qt.QTableWidgetItem(value)
+                cell.setFlags(qt.Qt.ItemIsSelectable | qt.Qt.ItemIsEnabled)
+                self.stimTable.setItem(row, column, cell)
+        self.stimTable.setVisible(bool(self.stimulationItems))
+        patients = len({item["participant_id"] for item in self.stimulationItems})
+        if not self.stimulationItems:
+            self.stimSummaryLabel.setText(_("Import a table of stimulation sites: one seed per patient, mapped like lesions."))
+        else:
+            self.stimSummaryLabel.setText(_("{n} patients · {rows} rows").format(n=patients, rows=len(self.stimulationItems)))
+        enabled, reason = self.stimulationRmapState()
+        self.stimRmapButton.setEnabled(enabled)
+        self.stimRmapReasonLabel.setText(reason)
+        self.stimRmapReasonLabel.setVisible(bool(reason))
+        node = self._parameterNode
+        if node is not None:
+            wasUpdating, self._updatingGui = self._updatingGui, True
+            try:
+                self.stimFlipCheckBox.setChecked(bool(node.stimulationFlip))
+            finally:
+                self._updatingGui = wasUpdating
+
+    def stimulationRmapState(self):
+        """(enabled, reason) of Compute R-map: seed maps, an outcome column and no R-map job running."""
+        if self.stimulationRmapJob is not None and not self.stimulationRmapJob.isFinished():
+            return False, _("Computing the R-map…")
+        if not self.stimulationItems:
+            return False, ""
+        if not (self.stimOutcomeCombo.currentData if self.stimOutcomeCombo.count else ""):
+            return False, _("Choose the outcome column for an R-map.")
+        if not self._seedSetMaps("stimulation"):
+            return False, _("Map the stimulation seeds first.")
+        return True, ""
+
+    # Compute: seed sets
+
+    def _seedSetMaps(self, mode):
+        """maps.tsv of the finished seed maps of a seed-set mode, or None."""
+        path = self.coordinateMapsPath if mode == "coordinates" else self.stimulationMapsPath if mode == "stimulation" else None
+        if path and os.path.isfile(path):
+            try:
+                with open(os.path.join(os.path.dirname(path), "cohortmaps.json"), encoding="utf-8") as f:
+                    if json.load(f).get("status") == "done":
+                        return path
+            except (OSError, ValueError):
+                return None
+        return None
+
+    def _publishCohortMaps(self):
+        """The maps the Cohort card shows: the study's cohort maps (Cohort), or the seed maps (Coordinates, Stimulation)."""
+        if self.ctx is None:
+            return
+        mode = self.seedMode()
+        self.ctx.cohortMaps = self._seedSetMaps(mode) if mode in SEED_SET_MODES else self.cohortMapsPath
+
+    def seedSetCount(self, mode=None):
+        """Number of seeds the current seed-set mode would map (studies, or patients)."""
+        from LesionNetworkMappingLib import coords
+
+        mode = mode or self.seedMode()
+        if mode == "coordinates":
+            return len(coords.group_by_study(self.coordinateFoci))
+        if mode == "stimulation":
+            return len({item["participant_id"] for item in self.stimulationItems})
+        return 0
+
+    def seedSetComputeState(self):
+        """(enabled, reason) of mapping the seeds of the Coordinates or Stimulation mode."""
+        from LesionNetworkMappingUI import jobrunner
+
+        if self.cohortJob is not None and (self.cohortJob.isRunning() or self.cohortJob.isQueued()):
+            return False, _("Mapping the seeds…")
+        if self.seedSetCount() == 0:
+            return False, _("Import coordinates first.") if self.seedMode() == "coordinates" else _("Import stimulation sites first.")
+        try:
+            from LesionNetworkMappingLib import coords
+
+            coords.sphere_radius(*self.sphereSettings())
+        except ValueError as exc:
+            return False, str(exc)
+        if self.bundle is None:
+            return False, _("Add a connectome, or use the demo, to map.")
+        if not self.acceptTermsCheckBox.checked:
+            return False, _("Accept the data use terms of {name} to map.").format(name=self.bundle.name)
+        if not self.ctx.computeEnabled():
+            return False, " ".join(self.ctx.computeDisabledReasons()) or _("Not ready")
+        if jobrunner.instance().isBusy():
+            return True, _("Another computation is running: this one will wait for it.")
+        return True, ""
+
+    def _seedSetButtonText(self):
+        n = self.seedSetCount()
+        if self.seedMode() == "coordinates":
+            return _("Map the study seed") if n == 1 else _("Map {n} study seeds").format(n=n) if n else _("Map study seeds")
+        return _("Map the stimulation seed") if n == 1 else _("Map {n} stimulation seeds").format(n=n) if n else _("Map stimulation seeds")
+
+    def prepareSeedSet(self, runDir):
+        """Write the seeds of the current seed-set mode in ``runDir`` (coords.py); return lesions.tsv."""
+        from LesionNetworkMappingLib import coords
+
+        mode = self.seedMode()
+        radius, diameter = self.sphereSettings()
+        os.makedirs(runDir, exist_ok=True)
+        if mode == "coordinates":
+            # The foci as a plain table in the run folder: the seeds' source and the null's input (no local path is kept)
+            fociPath = os.path.join(runDir, "foci.tsv")
+            with open(fociPath, "w", encoding="utf-8", newline="\n") as f:
+                f.write("study\tx\ty\tz\tspace\tradius\n")
+                for focus in self.coordinateFoci:
+                    f.write(f"{focus.study}\t{focus.x!r}\t{focus.y!r}\t{focus.z!r}\t{focus.space}\t{'' if focus.radius_mm is None else repr(focus.radius_mm)}\n")
+            return coords.prepare_coordinates(runDir, self.coordinateFoci, self.bundle.grid, radius, diameter, source=fociPath, grid_space=coords.grid_space(self.bundle))
+        outcomes = self.stimulationOutcomes()
+        column = self.stimOutcomeCombo.currentData if self.stimOutcomeCombo.count else ""
+        safeColumn = column if column and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", column) else "outcome"
+        items = [dict(item, outcome=outcomes.get(item["participant_id"]) if column else None) for item in self.stimulationItems]
+        kind = self.stimulationKind()
+        threshold = float(self.stimThresholdSpin.value) or None
+        return coords.prepare_stimulation(runDir, items, self.bundle.grid, kind, radius if kind == "points" else None, diameter if kind == "points" else None,
+                                          self.stimWeightingCombo.currentData or None, threshold, safeColumn)
+
+    def computeSeedSet(self):
+        """Make the seeds of the Coordinates or Stimulation mode and map them with ``cohortmaps``; return the job or None."""
+        from LesionNetworkMappingLib import coords
+        from LesionNetworkMappingUI import jobrunner
+
+        mode = self.seedMode()
+        enabled, reason = self.seedSetComputeState()
+        if not enabled:
+            self.computeReasonLabel.setText(reason)
+            self.computeReasonLabel.setVisible(bool(reason))
+            return None
+        if not self._preflight():
+            return None
+        node = self._parameterNode
+        runDir = self.logic.runDirectory(self.ctx, mode)
+        try:
+            lesionsTsv = self.prepareSeedSet(runDir)
+        except (OSError, ValueError) as exc:
+            self.widgets.setBannerText(self.computeBanner, _("The seeds cannot be made: {error}").format(error=exc))
+            self.computeBanner.show()
+            return None
+        previewN = self.plannedN() if node.subjectsMode == "preview" and self.plannedN() < self.bundle.n_subjects else None
+        args = coords.cohortmaps_arguments(lesionsTsv, self.bundle.path, runDir, previewN, node.previewSeed)
+        title = _("Mapping the study seeds") if mode == "coordinates" else _("Mapping the stimulation seeds")
+        spec = jobrunner.JobSpec("LesionNetworkMappingLib.cohortmaps", args, title=title, heavy=True, kind="cohortmaps", runRoot=os.path.dirname(runDir),
+                                 onEvent=self.onCohortEvent, onDone=lambda job, mode=mode, runDir=runDir: self.onSeedSetDone(job, mode, runDir),
+                                 name="cohortmaps", statusText=_mappingStatusText, nice=ENGINE_NICE)
+        self.widgets.setBannerText(self.computeBanner, "")
+        self.computeBanner.hide()
+        self.cohortJob = self.ctx.submit(spec)
+        self.progress.setJob(self.cohortJob)
+        self.progress.widget.show()
+        self.updateComputeState()
+        self._notifyControllers("onCohortJobStarted", self.cohortJob)
+        return self.cohortJob
+
+    def onSeedSetDone(self, job, mode, runDir):
+        from LesionNetworkMappingUI import jobrunner
+
+        updateProgressQuietly(self.progress, force=True)
+        if job.state == "failed":
+            self._showRunFailure(job)
+        mapsTsv = os.path.join(runDir, "maps.tsv")
+        if job.state == "done" and os.path.isfile(mapsTsv):
+            if mode == "coordinates":
+                self.coordinateMapsPath = mapsTsv
+            else:
+                self.stimulationMapsPath = mapsTsv
+        self._publishCohortMaps()
+        qt.QTimer.singleShot(jobrunner.FINISHED_CHIP_MS + 200, self._refreshStatusChip)
+        self.updateCardVisibility()
+        self.updateComputeState()
+        self._showStimulation()
+        self._showCoordinates()
+        self._notifyControllers("onCohortMapsChanged", getattr(self.ctx, "cohortMaps", None))
+        shell = self._shell()
+        if shell is not None and job.state == "done":
+            done = job.doneEvent or {}
+            shell.toast(_("{n} seed maps ready · see the Cohort card").format(n=done.get("n", "?")), 3000)
+
+    def runCoordinateNull(self):
+        """Run the random-coordinate control (``coords null``) in the job runner; return the job or None."""
+        from LesionNetworkMappingLib import thresholds
+        from LesionNetworkMappingUI import jobrunner
+
+        enabled, reason = self.coordinateNullState()
+        if not enabled:
+            self.coordNullResultLabel.setText(reason)
+            self.coordNullResultLabel.show()
+            return None
+        node = self._parameterNode
+        runDir = os.path.dirname(self.coordinateMapsPath) if self.coordinateMapsPath else self.logic.runDirectory(self.ctx, "coordinates")
+        fociPath = os.path.join(runDir, "foci.tsv")
+        if not os.path.isfile(fociPath):
+            try:
+                self.prepareSeedSet(runDir)
+            except (OSError, ValueError) as exc:
+                self.coordNullResultLabel.setText(_("The seeds cannot be made: {error}").format(error=exc))
+                self.coordNullResultLabel.show()
+                return None
+        outDir = os.path.join(runDir, "null")
+        radius, diameter = self.sphereSettings()
+        args = ["null", "--foci", fociPath, "--bundle", self.bundle.path, "--gm-mask", self.coordGmPathEdit.currentPath, "--out", outDir,
+                "--k", str(int(self.coordNullKSpin.value)), "--seed", "0", "--rule", thresholds.rule_to_json(self.currentRule()), "--sign", self._sign()]
+        args += ["--diameter", f"{diameter:g}"] if diameter is not None else ["--radius", f"{radius:g}"]
+        previewN = self.plannedN() if node.subjectsMode == "preview" and self.plannedN() < self.bundle.n_subjects else None
+        if previewN:
+            args += ["--subjects", str(int(previewN)), "--random", "--subject-seed", str(int(node.previewSeed))]
+        spec = jobrunner.JobSpec("LesionNetworkMappingLib.coords", args, title=_("Random-coordinate control"), heavy=True, kind="coords-null", runRoot=os.path.dirname(runDir),
+                                 onEvent=lambda event: updateProgressQuietly(self.coordNullProgress, force=event.get("event") != "progress"),
+                                 onDone=lambda job, outDir=outDir: self.onCoordinateNullDone(job, outDir), name="coords-null", nice=ENGINE_NICE)
+        self.coordinateNullJob = self.ctx.submit(spec)
+        self.coordNullProgress.setJob(self.coordinateNullJob)
+        self.coordNullProgress.widget.show()
+        self.coordNullResultLabel.hide()
+        self._showCoordinates()
+        return self.coordinateNullJob
+
+    def onCoordinateNullDone(self, job, outDir):
+        from LesionNetworkMappingLib import coords
+
+        updateProgressQuietly(self.coordNullProgress, force=True)
+        if job.state == "done":
+            try:
+                with open(os.path.join(outDir, coords.NULL_JSON), encoding="utf-8") as f:
+                    record = json.load(f)
+                text = _("Random-coordinate control (k={k}): peak overlap {peak:.0f}% of studies, percentile {pct:.1f} of the null peaks, p = {p:.3g}").format(
+                    k=record["k"], peak=record["observed_peak_pct"], pct=record["percentile"], p=record["p_peak"])
+            except (OSError, ValueError, KeyError) as exc:
+                text = _("The random-coordinate control has no result: {error}").format(error=exc)
+        elif job.state == "failed":
+            text = _("The random-coordinate control failed: {reason}").format(reason=job.failureReason or _("unknown error"))
+        else:
+            text = _("The random-coordinate control was stopped.")
+        self.coordNullResultLabel.setText(text)
+        self.coordNullResultLabel.show()
+        self._showCoordinates()
+
+    def runStimulationRmap(self):
+        """Run the R-map of the stimulation seeds (sLNM on Fz with the outcome; ``--flip`` for TMS); return the job or None."""
+        from LesionNetworkMappingLib import coords
+        from LesionNetworkMappingUI import jobrunner
+
+        if not self.stimulationRmapState()[0]:
+            return None
+        mapsTsv = self._seedSetMaps("stimulation")
+        runDir = os.path.dirname(mapsTsv)
+        record = coords.read_seed_record(runDir) or {}
+        column = record.get("outcome_column") or "outcome"
+        outcomes = os.path.join(runDir, coords.OUTCOMES_TSV)
+        if not os.path.isfile(outcomes):
+            self.stimRmapReasonLabel.setText(_("The seeds were mapped without an outcome: map them again with an outcome column."))
+            self.stimRmapReasonLabel.show()
+            return None
+        flip = bool(self._parameterNode.stimulationFlip) if self._parameterNode is not None else False
+        outDir = os.path.join(runDir, "rmap-" + column + ("-flip" if flip else ""))
+        args = coords.slnm_arguments(mapsTsv, outcomes, column, os.path.join(self.bundle.path, "mask.nii.gz"), outDir, flip=flip, bundle=self.bundle.path)
+        spec = jobrunner.JobSpec("LesionNetworkMappingLib.slnm", args, title=_("R-map"), heavy=True, kind="slnm", runRoot=os.path.dirname(runDir),
+                                 onEvent=lambda event: updateProgressQuietly(self.stimRmapProgress, force=event.get("event") != "progress"),
+                                 onDone=lambda job, outDir=outDir: self.onStimulationRmapDone(job, outDir), name="rmap", nice=ENGINE_NICE)
+        self.stimulationRmapJob = self.ctx.submit(spec)
+        self.stimRmapProgress.setJob(self.stimulationRmapJob)
+        self.stimRmapProgress.widget.show()
+        self._showStimulation()
+        return self.stimulationRmapJob
+
+    def onStimulationRmapDone(self, job, outDir):
+        updateProgressQuietly(self.stimRmapProgress, force=True)
+        self._showStimulation()
+        if job.state != "done":
+            self.stimRmapReasonLabel.setText(_("The R-map failed: {reason}").format(reason=job.failureReason or _("unknown error")))
+            self.stimRmapReasonLabel.show()
+            return
+        maps = sorted(name for name in os.listdir(outDir) if re.search(r"_desc-slnm[A-Za-z0-9]*R_map\.nii\.gz$", name)) if os.path.isdir(outDir) else []
+        if maps:
+            try:
+                self.showMapFile(os.path.join(outDir, maps[0]), label=_("R-map"))
+            except Exception:
+                logging.exception("Lesion network mapping: the R-map could not be shown")
 
     def _showSeedMode(self):
-        cohort = self.seedMode() == "cohort"
-        self.lesionSeedPanel.setVisible(not cohort)
+        mode = self.seedMode()
+        cohort = mode == "cohort"
+        self.lesionSeedPanel.setVisible(mode == "lesion")
         self.cohortSeedPanel.setVisible(cohort)
-        self.nullCheckBox.setVisible(not cohort)
+        self.coordinateSeedPanel.setVisible(mode == "coordinates")
+        self.stimulationSeedPanel.setVisible(mode == "stimulation")
+        self.nullCheckBox.setVisible(mode == "lesion")
         if cohort and self.cohortInfo is None:
             self.refreshCohort()
+        self._publishCohortMaps()
 
     #
     # Seed: cohort
@@ -2179,7 +2971,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             candidate = os.path.join(self.cohortOutputDir(), "maps.tsv")
             if os.path.isfile(candidate) and os.path.isfile(os.path.join(os.path.dirname(candidate), "cohortmaps.json")):
                 self.cohortMapsPath = candidate
-        self.ctx.cohortMaps = self.cohortMapsPath
+        self._publishCohortMaps()
         return self.cohortMapsPath
 
     def onSegmentationChanged(self, node):
@@ -2756,6 +3548,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             return False, _("Mapping…")
         if mode == "cohort":
             return self.cohortComputeState()
+        if mode in SEED_SET_MODES:
+            return self.seedSetComputeState()
         if mode != "lesion":
             return False, _("This seed mode is not available yet.")
         if self.bundle is None:
@@ -2775,9 +3569,11 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         return True, ""
 
     def cohortComputeState(self):
-        """(enabled, reason) of mapping the cohort's lesions (the cohort maps job)."""
+        """(enabled, reason) of mapping the cohort's lesions (the cohort maps job); the seeds in Coordinates and Stimulation."""
         from LesionNetworkMappingUI import jobrunner
 
+        if self.seedMode() in SEED_SET_MODES:
+            return self.seedSetComputeState()
         if self.cohortJob is not None and (self.cohortJob.isRunning() or self.cohortJob.isQueued()):
             return False, _("Mapping the cohort…")
         if self.cohortStudy is None:
@@ -2806,7 +3602,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         if override is not None:
             self.computeButton.setText(override[0])
         else:
-            self.computeButton.setText(self._cohortButtonText() if mode == "cohort" else _("Map network"))
+            self.computeButton.setText(self._cohortButtonText() if mode == "cohort" else self._seedSetButtonText() if mode in SEED_SET_MODES else _("Map network"))
         enabled, reason = self.computeState()
         self.computeButton.setEnabled(enabled)
         self.computeReasonLabel.setText(reason)
@@ -2826,6 +3622,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             return
         if mode == "cohort":
             self.computeCohort()
+            return
+        if mode in SEED_SET_MODES:
+            self.computeSeedSet()
             return
         if self._seedDirty or self.seedTimer.isActive() or self.seedCheck is None:
             self.updateSeed()
@@ -2903,7 +3702,12 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         return self.logic.cohortOutputDir(self.cohortStudy.path, self.bundle.name, previewN)
 
     def computeCohort(self):
-        """Map every analysable lesion of the cohort's study with ``cohortmaps`` (batched, cached); return the job or None."""
+        """Map every analysable lesion of the cohort's study with ``cohortmaps`` (batched, cached); return the job or None.
+
+        In Coordinates and Stimulation (the Cohort card's Map button), the seeds of that mode are mapped instead.
+        """
+        if self.seedMode() in SEED_SET_MODES:
+            return self.computeSeedSet()
         if self.seedMode() != "cohort":
             self._parameterNode.seedMode = "cohort"
             self.updateGUIFromParameterNode()
@@ -3884,6 +4688,12 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
                 text, level = _("No connectome"), "neutral"
             else:
                 text, level = _("Ready"), "neutral"
+        elif self.seedMode() in SEED_SET_MODES and self.loadedMap is None:
+            n = self.seedSetCount()
+            if self._seedSetMaps(self.seedMode()):
+                text, level = _("Done · {n} seed maps").format(n=n), "ok"
+            else:
+                text, level = (_("Ready") if n and self.bundle is not None else _("No seeds") if not n else _("No connectome")), "neutral"
         elif self.loadedMap is not None:
             n = self.loadedMap.get("n")
             text, level = (_("Map · N={n:,}").format(n=n) if n else _("Map")), "neutral"
@@ -4143,8 +4953,16 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             self.statisticGroup.button(STATISTICS.index(self.currentStatistic())).setChecked(True)
             self.signGroup.button(SIGNS.index(self._sign())).setChecked(True)
             self.opacitySlider.value = node.opacity
+            self.coordNullCheckBox.setChecked(bool(node.coordinateNull))
+            self.coordNullKSpin.setValue(int(node.coordinateNullK))
+            kindIndex = self.stimKindCombo.findData(node.stimulationKind or "points")
+            self.stimKindCombo.setCurrentIndex(max(kindIndex, 0))
         finally:
             self._updatingGui = False
+        self._fillStimulationWeightings(self.stimulationKind())
+        self._showSphere()
+        self._showCoordinates()
+        self._showStimulation()
         self._observeSeed(node.seedSegmentation)
         self._showRuleControls(self.currentRule())
         self._showSubjectsText()
