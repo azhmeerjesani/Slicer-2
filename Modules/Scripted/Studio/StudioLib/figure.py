@@ -2195,7 +2195,7 @@ class FigureCard:
             logging.error(f"Studio: the figure fit could not be saved:\n{traceback.format_exc()}")
             _toast(current.shell, _("The figure fit could not be saved: {error}").format(error=error), ms=6000, level="warning")
             return
-        _toast(current.shell, _("Saved {n} figure files").format(n=len(written)), ms=2500)
+        _toast(current.shell, (_("Saved 1 figure file") if len(written) == 1 else _("Saved {n} figure files").format(n=len(written))), ms=2500)
 
     def _addPanel(self):
         if isWebBuild() or not clipboardHasImage():

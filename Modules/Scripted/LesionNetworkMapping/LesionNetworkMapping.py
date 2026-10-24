@@ -2121,7 +2121,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         groupText = ""
         if groups.get("case") or groups.get("control"):
             groupText = " · " + _("{cases} cases / {controls} controls").format(cases=groups.get("case", 0), controls=groups.get("control", 0))
-        self.cohortStudyLabel.setText(_("Study “{name}” · {n} lesions to map").format(name=study.name, n=info["n"] if info else 0) + groupText)
+        self.cohortStudyLabel.setText((_("Study “{name}” · 1 lesion to map") if info and info["n"] == 1 else _("Study “{name}” · {n} lesions to map")).format(name=study.name, n=info["n"] if info else 0) + groupText)
         excluded = (info or {}).get("excluded") or {}
         if excluded or (info or {}).get("error"):
             parts = [f"{len(sids)} {reason}" for reason, sids in excluded.items() if sids]
@@ -2796,7 +2796,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
 
     def _cohortButtonText(self):
         n = (self.cohortInfo or {}).get("n") or 0
-        return _("Map all {n} lesions").format(n=n) if n else _("Map all lesions")
+        return (_("Map the lesion") if n == 1 else _("Map all {n} lesions").format(n=n)) if n else _("Map all lesions")
 
     def updateComputeState(self):
         if not hasattr(self, "computeButton"):
@@ -2949,7 +2949,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         shell = self._shell()
         if shell is not None and job.state == "done" and self.cohortMapsPath:
             done = job.doneEvent or {}
-            shell.toast(_("{n} lesion maps ready · {hits} from the cache").format(n=done.get("n", "?"), hits=done.get("cache_hits", 0)), 3000)
+            shell.toast((_("{n} lesion map ready · {hits} from the cache") if done.get("n") == 1 else _("{n} lesion maps ready · {hits} from the cache")).format(n=done.get("n", "?"), hits=done.get("cache_hits", 0)), 3000)
 
     def _prepareResultVolume(self):
         """Set up the result volume on the connectome grid before the run (empty, with the colour table and the
@@ -3879,7 +3879,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             text, level = _("No connectome"), "neutral"
         elif self.seedMode() == "cohort":
             if cohortDone:
-                text, level = _("Done · {n} lesion maps").format(n=self.cohortInfo.get("n", 0)), "ok"
+                text, level = (_("Done · 1 lesion map") if self.cohortInfo.get("n", 0) == 1 else _("Done · {n} lesion maps").format(n=self.cohortInfo.get("n", 0))), "ok"
             elif self.bundle is None:
                 text, level = _("No connectome"), "neutral"
             else:
@@ -4045,6 +4045,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         # Hidden by the reparenting: shown again as updateComputeState() shows them (the reason line only with a reason)
         self.computeButton.show()
         self.computeReasonLabel.setVisible(bool(str(self.computeReasonLabel.text)))
+        self.ctx.primaryPinned = bool(pinned)
+        self.ctx._notify("primaryPinnedChanged")
 
     def exit(self):
         self._entered = False

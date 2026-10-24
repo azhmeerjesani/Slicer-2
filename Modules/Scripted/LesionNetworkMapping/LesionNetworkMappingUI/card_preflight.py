@@ -529,7 +529,7 @@ class PreflightCard:
             level, chipText = "warn", _("{n} to review").format(n=nWarn)
             text = _("{included} of {subjects} subjects will be analysed").format(included=included, subjects=subjects)
         else:
-            level, chipText = "ok", _("All {n} checks passed").format(n=self.checkedCount())
+            level, chipText = "ok", (_("The check passed") if self.checkedCount() == 1 else _("All {n} checks passed").format(n=self.checkedCount()))
             text = _("{included} of {subjects} subjects will be analysed").format(included=included, subjects=subjects)
         if self.runFailure is None:  # the chip keeps saying "Run failed" until the next run
             widgets.setChipLevel(self.chip, level, chipText)
@@ -541,7 +541,7 @@ class PreflightCard:
         self._renderRows(shown + (notes if self.showNotes else []))
         self.notesButton.setVisible(bool(notes))
         if notes:
-            self.notesButton.setText(_("Hide {n} notes").format(n=len(notes)) if self.showNotes else _("Show {n} notes").format(n=len(notes)))
+            self.notesButton.setText((_("Hide 1 note") if len(notes) == 1 else _("Hide {n} notes").format(n=len(notes))) if self.showNotes else (_("Show 1 note") if len(notes) == 1 else _("Show {n} notes").format(n=len(notes))))
         if blocking:
             self.ctx.setComputeEnabled(False, _("Preflight: {message}").format(message=blocking[0]["message"]), key="preflight")
         else:
@@ -868,7 +868,7 @@ class PreflightCard:
             state["done"] = True
 
         self._measure = state
-        self.progressLabel.setText(_("Measuring {n} lesions again…").format(n=len(subjects)))
+        self.progressLabel.setText((_("Measuring 1 lesion again…") if len(subjects) == 1 else _("Measuring {n} lesions again…").format(n=len(subjects))))
         self.progressLabel.show()
         thread = threading.Thread(target=work, name="lnm-remeasure", daemon=True)
         thread.start()
@@ -884,7 +884,7 @@ class PreflightCard:
                 self.progressLabel.setText(_("The lesions could not be measured: {reason}").format(reason=state["error"]))
             else:
                 self._applyInbox()
-                self.progressLabel.setText(_("Measured {n} lesions.").format(n=state["count"]))
+                self.progressLabel.setText((_("Measured 1 lesion.") if state["count"] == 1 else _("Measured {n} lesions.").format(n=state["count"])))
                 self.recheck(force=True)
 
         timer.connect("timeout()", poll)

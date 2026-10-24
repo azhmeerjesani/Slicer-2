@@ -441,7 +441,7 @@ class ColumnsDialog:
             self.table.setRowHidden(row, hide)
             shown += 0 if hide else 1
         unset = sum(1 for values in self.original.values() if values["role"] == NOT_SET)
-        self.countLabel.setText(_("{n} columns · {unset} without a role").format(n=len(self.original), unset=unset))
+        self.countLabel.setText((_("1 column · {unset} without a role") if len(self.original) == 1 else _("{n} columns · {unset} without a role")).format(n=len(self.original), unset=unset))
 
     def _setNote(self, text):
         self.noteLabel.setText(text)
@@ -576,8 +576,8 @@ class ColumnsCard:
         self.session = session
         numbers = columnsSummary(session.study)
         unset = numbers["unset"]
-        self.line.setText(_("{n} columns · {unset} without a confirmed role").format(n=numbers["columns"], unset=len(unset)) if unset else
-                          _("{n} columns · every role is set").format(n=numbers["columns"]))
+        self.line.setText((_("1 column · {unset} without a confirmed role") if numbers["columns"] == 1 else _("{n} columns · {unset} without a confirmed role")).format(n=numbers["columns"], unset=len(unset)) if unset else
+                          (_("1 column · its role is set") if numbers["columns"] == 1 else _("{n} columns · every role is set")).format(n=numbers["columns"]))
         guessed = numbers["guessed"]
         if guessed:
             shown = ", ".join(guessed[:3]) + (f" +{len(guessed) - 3}" if len(guessed) > 3 else "")

@@ -350,7 +350,7 @@ def _checkAllTraced(session):
         return
     _toastedSessions.add(id(session))
     shell = library._shell()
-    text = _("All {n} lesions traced · run the cohort analysis in Map").format(n=n)
+    text = (_("The lesion is traced · run the cohort analysis in Map") if n == 1 else _("All {n} lesions traced · run the cohort analysis in Map").format(n=n))
     if shell is None:
         logging.info(f"Studio: {text}")
         return

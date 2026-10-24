@@ -1315,7 +1315,7 @@ class QcCore:
         text = _("2D tracings: {semantics}").format(semantics=stored["semantics"])
         done = [item for item in applied if item.get("mode")]
         if done:
-            text += " · " + _("applied to {count} lesions already in the study").format(count=len(done))
+            text += " · " + (_("applied to 1 lesion already in the study") if len(done) == 1 else _("applied to {count} lesions already in the study").format(count=len(done)))
         _toast(text, ms=4000, level="consequence")
         self._changed()
         if resume:
@@ -2127,6 +2127,18 @@ class LesionQc:
             slicer.mrmlScene.RemoveObserver(tag)
         self._sceneTags = []
 
+    def pause(self):
+        """Studio was removed (Classic): the evaluation pending is dropped; the next refresh of the card starts it again."""
+        self._timer.stop()
+        self._token += 1
+        self._key = None
+        self._pendingKey = None
+
+    @staticmethod
+    def _studioActive():
+        shell = _shell()
+        return shell is not None and bool(getattr(shell, "_active", True))
+
     def _onAboutToQuit(self):
         """The application quits: an evaluation pending (300 ms after the last edit) must not run once the card is destroyed."""
         self._stop()
@@ -2161,6 +2173,9 @@ class LesionQc:
     def notify(self, state):
         """Called by the card on every refresh: restart the debounce when the lesion, its row or the resources changed."""
         if self._stopped:
+            return
+        if not self._studioActive():
+            self.pause()
             return
         lesionId = state.get("lesionId")
         if not lesionId or not state.get("enabled", True):
@@ -2226,7 +2241,7 @@ class LesionQc:
     def run(self):
         """Evaluate the chips now (the debounce timer calls it): the first stage here, the CSF share and the atlas labels in the next event."""
         self._timer.stop()
-        if self._stopped or not self.panel.alive():
+        if self._stopped or not self.panel.alive() or not self._studioActive():
             return
         started = time.perf_counter()
         self._key = self._pendingKey
@@ -2535,7 +2550,7 @@ def _reapplyWithToast():
     results = reapplyExtrusionPolicy()
     done = [item for item in results if item.get("mode")]
     skipped = [item for item in results if item.get("skipped")]
-    text = _("Extrusion policy re-applied to {count} lesions").format(count=len(done))
+    text = (_("Extrusion policy re-applied to 1 lesion") if len(done) == 1 else _("Extrusion policy re-applied to {count} lesions").format(count=len(done)))
     if skipped:
         text += " · " + _("{count} skipped").format(count=len(skipped))
     _toast(text, ms=4000)

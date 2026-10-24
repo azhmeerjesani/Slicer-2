@@ -548,7 +548,7 @@ def createStudy(files, shell=None, folder=None, groupColumn=None, groupMapping=N
         "opened": _("Study {name}: {n} subjects"),
     }[how].format(name=studyObject.name, n=len(studyObject))
     if report.get("skipped"):
-        message += " · " + _("{n} files skipped").format(n=len(report["skipped"]))
+        message += " · " + (_("1 file skipped") if len(report["skipped"]) == 1 else _("{n} files skipped").format(n=len(report["skipped"])))
     _toast(shell, message, ms=5000, action=lambda: qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(folder)), actionText=_("Show folder"),
            level="consequence")
     return session

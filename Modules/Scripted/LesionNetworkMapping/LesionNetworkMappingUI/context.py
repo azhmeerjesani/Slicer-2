@@ -55,7 +55,7 @@ class MapContext:
       ``doneEvent``, ``results``, ``spec.kind``, ``runRoot``...). Any failure makes the job fail.
     """
 
-    OBSERVER_LISTS = ("studyChanged", "bundleChanged", "runChanged", "resultChanged", "ruleChanged", "seedChanged", "primaryOverrideChanged", "computeEnabledChanged")
+    OBSERVER_LISTS = ("studyChanged", "bundleChanged", "runChanged", "resultChanged", "ruleChanged", "seedChanged", "primaryOverrideChanged", "computeEnabledChanged", "primaryPinnedChanged")
 
     def __init__(self, parameterNode=None, logic=None, runner=None):
         self.parameterNode = parameterNode
@@ -75,6 +75,8 @@ class MapContext:
         self._focusHandler = None
         self._primaryOverrides = {}
         self._computeDisabled = {}
+        #: True while the primary button is pinned in the Studio inspector footer (a card then keeps no second Run button)
+        self.primaryPinned = False
 
     #
     # Notification

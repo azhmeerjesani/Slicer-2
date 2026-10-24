@@ -358,7 +358,7 @@ def groupsText(summary):
     others = sum(count for key, count in groups.items() if key not in ("case", "control"))
     if others:
         parts.append(_("{n} without a group").format(n=others))
-    return " · ".join(parts) or _("{n} lesions").format(n=summary.get("n", 0))
+    return " · ".join(parts) or (_("1 lesion") if summary.get("n", 0) == 1 else _("{n} lesions").format(n=summary.get("n", 0)))
 
 
 def excludedText(excluded):

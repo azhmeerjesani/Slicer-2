@@ -1079,6 +1079,8 @@ class PipelineCard:
         for name in ("studyChanged", "bundleChanged", "ruleChanged"):
             getattr(ctx, name).append(self.scheduleRecheck)
         ctx.computeEnabledChanged.append(self.scheduleApply)
+        if hasattr(ctx, "primaryPinnedChanged"):
+            ctx.primaryPinnedChanged.append(self.scheduleApply)
         _hookRunner()
         _cards.append(self)
         self._connectQuit()
@@ -1389,7 +1391,7 @@ class PipelineCard:
 
     def primaryLabel(self):
         n = self.eligibleCount()
-        return _("Run everything · {n} lesions").format(n=n) if n else _("Run everything")
+        return (_("Run everything · 1 lesion") if n == 1 else _("Run everything · {n} lesions").format(n=n)) if n else _("Run everything")
 
     def stateLine(self):
         """``(text, level)`` of the state line (see the module docstring for the texts)."""
@@ -1589,7 +1591,9 @@ class PipelineCard:
         _setText(self.estimateLabel, estimate)
         _setVisible(self.estimateLabel, bool(estimate))
         enabled, reason = self.runState()
-        _setVisible(self.runButton, not (running or external))
+        # One primary action: while Studio shows it in the inspector footer, the card keeps no second Run button
+        pinned = bool(getattr(self.ctx, "primaryPinned", False)) and self.ctx.primaryOverride("cohort") is not None
+        _setVisible(self.runButton, not (running or external or pinned))
         _setVisible(self.stopButton, running or external)
         self.stopButton.setEnabled(not (running and model.job is not None and model.job.stopRequested))
         _setText(self.runButton, _("Run everything"))

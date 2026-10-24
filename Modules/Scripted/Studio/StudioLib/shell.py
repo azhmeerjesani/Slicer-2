@@ -1289,6 +1289,7 @@ class Shell:
         self._uninstallPlugins()
         self._setSegmentEditorPresentation("classic")
         self._active = False
+        self._pauseLesionQc()
         self._disconnectAll()
         self._removeEventFilters()
         self._escapeHandled = False
@@ -2088,6 +2089,18 @@ class Shell:
                 self._plugins.append(module)
             except Exception:
                 logging.error(f"Studio: {name}.install() failed:\n{traceback.format_exc()}")
+
+    @staticmethod
+    def _pauseLesionQc():
+        """The Lesion card (Draw) outlives Studio: its QC evaluation pending (debounce timer) must not run in Classic."""
+        draw = sys.modules.get("StudioLib.draw")
+        card = draw.lesionCard() if draw is not None else None
+        qc = getattr(card, "qc", None)
+        if qc is not None:
+            try:
+                qc.pause()
+            except Exception:
+                logging.error(f"Studio: the lesion QC could not be paused:\n{traceback.format_exc()}")
 
     def _uninstallPlugins(self):
         for module in reversed(self._plugins):

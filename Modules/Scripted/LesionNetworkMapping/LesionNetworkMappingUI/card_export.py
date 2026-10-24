@@ -178,7 +178,8 @@ class ExportCard:
         self.lastResult = result
         self.lastDestination = destination
         files = len(result["maps"]) + len(result["sidecars"]) + 3
-        self.resultLabel.setText(_("Exported {count} files (maps, sidecars, provenance.json, methods.md, reproduce.sh) to {path}").format(count=files, path=destination))
+        self.resultLabel.setText((_("Exported 1 file (maps, sidecars, provenance.json, methods.md, reproduce.sh) to {path}") if files == 1
+                                 else _("Exported {count} files (maps, sidecars, provenance.json, methods.md, reproduce.sh) to {path}")).format(count=files, path=destination))
         self.resultLabel.show()
         self.showFolderButton.show()
         shell = self.ctx.shell()
