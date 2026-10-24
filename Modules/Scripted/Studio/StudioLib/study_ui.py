@@ -24,10 +24,24 @@ A study is a plain folder (``LesionNetworkMappingLib.study``): ``study.json``, `
   a toast says so) and edits that cancel out (paint, then undo) leave the file and the row untouched.
 - A subject switch pauses the rendering of the views (one render when it ends) instead of showing a wait cursor that
   processes events.
+- **Trace queues** (L-45): ``setQueue(key)`` makes Untraced, Needs review, Changes requested, Flagged, This paper (the
+  cases of the current case's ``record_id``, else DOI), Second tracing or a Library extension queue the active queue.
+  Done → next opens ``next_subject(after, queue)`` (the next case the queue still has to do, wrapping) and Alt+←/→ step
+  through the queue's cases; the queue and the position are kept in ``.studio/session.json`` for the next session. Without
+  a queue, W3-07's order applies. The case strip of Draw (``StudioLib.casestrip``) shows and chooses the queue.
+- **Case series** (L-45): ``newCaseFromPaper()`` ("New case from this paper") adds ``sub-<record><nn>`` with the paper's
+  columns (``PAPER_COLUMNS``) after the paper's last case and opens it on the study template;
+  ``newCaseFromClipboardFigure()`` then opens the clipboard's image in the Figure card (L-29).
+- **Next-case prefetch** (L-45): after a case is opened, the shared background writer (``autosave_io.backgroundWriter``)
+  reads the lesion array and the figure crop of the case that Done → next and Alt+→ would open (numpy, Pillow and the
+  NIfTI reader only; ``setPrefetchGuard`` checks that it calls no Qt, VTK or MRML). Opening that case then builds its
+  segmentation from the array instead of reading the file, and the case strip shows the crop without reading it.
+- The STUDY card of Library shows the throughput line "212/300 traced · median 4.1 min/case · ~6 h left"
+  (``throughputText``, from ``trace_seconds``).
 - Nothing is written outside the study folder; ``participants.tsv`` is written only on the main thread, through
   ``Study.save()`` (lock and merge). Jobs post to ``.studio/inbox``; the session merges the inbox when a study is
   opened, when Library is shown and on request. ``.studio/session.json`` holds a heartbeat (every 15 s) while the
-  study is open.
+  study is open, and the trace queue; it is kept with ``heartbeat_epoch`` 0 when the study is closed.
 
 The session works in Studio and in Classic (the Studio module panel lists the subjects there). Settings: only
 ``Studio/RecentStudies`` (a JSON list of the recently opened studies).
@@ -41,6 +55,8 @@ import os
 import re
 import shutil
 import socket
+import sys
+import threading
 import time
 import traceback
 
@@ -83,6 +99,26 @@ BRAIN_MASK_SAMPLE = "MNI152NLin2009cAsym 2mm brain mask"
 GSP_SPACE = "MNI152NLin6Asym"
 #: Prefix of the template-only cases (case reports): sub-case001, sub-case002...
 CASE_PREFIX = "case"
+
+#: Trace queues (L-45). The active queue drives Done → next and Alt+←/→ in Draw; without one, Done → next opens the next
+#: untraced subject and Alt+←/→ step in table order (W3-07)
+QUEUE_UNTRACED = "untraced"
+QUEUE_NEEDS_REVIEW = "needs_review"
+QUEUE_CHANGES = "changes_requested"
+QUEUE_FLAGGED = "flagged"
+QUEUE_PAPER = "this_paper"
+QUEUE_SECOND = "second_tracing"
+BUILTIN_QUEUES = (QUEUE_UNTRACED, QUEUE_NEEDS_REVIEW, QUEUE_CHANGES, QUEUE_FLAGGED, QUEUE_PAPER, QUEUE_SECOND)
+#: Statuses of a case that still has to be traced
+TODO_STATUSES = ("untraced", "inprogress")
+#: Second tracings (L-44 registers ``rater2_status``) that are not finished
+SECOND_TRACING_TODO = ("assigned", "pending", "untraced", "inprogress")
+#: Record-level columns that "New case from this paper" copies (the paper, not the case)
+PAPER_COLUMNS = ("record_id", "doi", "pmid", "citation", "image_modality", "source_type", "source_dataset")
+#: Prefetched cases kept in memory (the next case of Done → next and of Alt+→)
+PREFETCH_KEEP = 3
+#: Longest side (px) of the figure crop thumbnail that the prefetch prepares for the case strip
+CROP_THUMBNAIL_PX = 96
 
 #: Words of group values (lowercase) and the study group they map to (L-01: patient/HC/1/0 → case/control)
 GROUP_WORDS = {
@@ -192,6 +228,21 @@ def _commitDrawCardEdits():
             commit()
         except Exception:
             logging.error(f"Studio: the Lesion card edits could not be committed:\n{traceback.format_exc()}")
+
+
+def _commitCaseStripEdit(studySession):
+    """A case strip field still being edited (L-45) is saved before its case is left, as Enter would save it (a warning
+    does not hold it back). Return ``(True, "")``, or ``(False, reason)`` when a value is invalid (the editor stays open).
+    """
+    try:
+        from . import casestrip
+    except ImportError:
+        return True, ""
+    try:
+        return casestrip.commitPendingEdit(studySession)
+    except Exception:
+        logging.error(f"Studio: the case strip edit could not be saved:\n{traceback.format_exc()}")
+        return True, ""
 
 
 def _toast(shell, text, **kwargs):
@@ -678,7 +729,7 @@ def _connectQuit():
 
 
 def _onAboutToQuit():
-    """The application quits: the current subject's edits are written and the study is closed (its heartbeat removed)."""
+    """The application quits: the current subject's edits are written and the study is closed (its heartbeat stopped)."""
     if _session is None:
         return
     try:
@@ -956,6 +1007,412 @@ def _loadBrainMask():
 
 
 #
+# Papers, trace queues and throughput (L-45)
+#
+
+
+def _missing(value):
+    return value is None or str(value).strip() in ("", "n/a")
+
+
+def isIncluded(row):
+    return str((row or {}).get("include", "1")).strip().lower() not in ("0", "false", "no")
+
+
+def normalizeDoi(text):
+    """A DOI without its resolver prefix ("https://doi.org/", "doi:"), or "" when missing."""
+    if _missing(text):
+        return ""
+    doi = str(text).strip()
+    doi = re.sub(r"(?i)^(https?://)?(dx\.)?doi\.org/", "", doi)
+    doi = re.sub(r"(?i)^doi:\s*", "", doi)
+    return doi.strip()
+
+
+def isDoi(text):
+    """True for a DOI of the form 10.<registrant>/<suffix>."""
+    return re.fullmatch(r"10\.\d{4,9}/\S+", normalizeDoi(text)) is not None
+
+
+def recordOf(row):
+    """The paper of a row: its ``record_id``, else its DOI (lower case, prefixed "doi:"), else None."""
+    row = row or {}
+    if not _missing(row.get("record_id")):
+        return str(row["record_id"]).strip()
+    doi = normalizeDoi(row.get("doi"))
+    return "doi:" + doi.lower() if doi else None
+
+
+def paperLabel(row):
+    """How a paper is named on screen: the citation, else the record, else the DOI."""
+    row = row or {}
+    for column in ("citation", "record_id", "doi"):
+        if not _missing(row.get(column)):
+            return str(row[column]).strip()
+    return ""
+
+
+def _libcardEntry(kind, key):
+    """A Library extension queue (``kind`` "queue") or filter chip ("filter") by key, or None."""
+    try:
+        from . import library
+    except ImportError:
+        return None
+    try:
+        entries = library.libcardQueues() if kind == "queue" else library.libcardFilters()
+    except Exception:
+        logging.error(f"Studio: the Library extensions could not be read:\n{traceback.format_exc()}")
+        return None
+    for entry in entries:
+        if entry.get("key") == key:
+            return entry
+    return None
+
+
+def _reviewRules():
+    try:
+        return _lnm("review")
+    except ImportError:
+        return None
+
+
+def _secondTracingPredicate():
+    """L-44's "Second tracing" queue when it is installed, else the rows whose ``rater2_status`` is not finished."""
+    try:
+        from . import library
+
+        for entry in library.libcardQueues():
+            if "second" in str(entry.get("key", "")).lower() or str(entry.get("label", "")).lower() == "second tracing":
+                return entry["predicate"]
+    except Exception:
+        logging.error(f"Studio: the Library extensions could not be read:\n{traceback.format_exc()}")
+    return lambda row: str(row.get("rater2_status", "")).strip().lower() in SECOND_TRACING_TODO
+
+
+def queueSpec(key, record=None):
+    """A trace queue: ``{"key", "label", "record", "predicate": fn(row), "todo": fn(row)}``, or None for an unknown key.
+
+    ``predicate`` says which subjects the queue holds (Alt+←/→, the position "3 of 12"); ``todo`` which of them Done → next
+    opens (for "This paper": its cases that are not traced yet). ``record`` is the paper of "This paper" (``recordOf()``).
+    Other Library extension queues (``libcard_*.QUEUES``, for example "Normalization review") are accepted by key.
+    """
+    if key is None:
+        return None
+    rules = _reviewRules()
+
+    def libcardOr(kind, entryKey, fallback):
+        entry = _libcardEntry(kind, entryKey)
+        return entry["predicate"] if entry is not None else fallback
+
+    if key == QUEUE_UNTRACED:
+        def predicate(row):
+            return row.get("status") in TODO_STATUSES
+
+        return {"key": key, "label": _("Untraced"), "record": None, "predicate": predicate,
+                "todo": lambda row: predicate(row) and isIncluded(row)}
+    if key == QUEUE_NEEDS_REVIEW:
+        predicate = libcardOr("queue", key, rules.needs_review if rules is not None else (lambda row: row.get("review_status") == "pending"))
+        return {"key": key, "label": _("Needs review"), "record": None, "predicate": predicate, "todo": predicate}
+    if key == QUEUE_CHANGES:
+        predicate = libcardOr("queue", key, rules.changes_requested if rules is not None else (lambda row: row.get("review_status") == "changes"))
+        return {"key": key, "label": _("Changes requested"), "record": None, "predicate": predicate, "todo": predicate}
+    if key == QUEUE_FLAGGED:
+        predicate = libcardOr("filter", "has_flags", lambda row: not _missing(row.get("qc_flags")))
+        return {"key": key, "label": _("Flagged"), "record": None, "predicate": predicate, "todo": predicate}
+    if key == QUEUE_PAPER:
+        if not record:
+            return None
+
+        def samePaper(row):
+            return recordOf(row) == record
+
+        return {"key": key, "label": _("This paper"), "record": record, "predicate": samePaper,
+                "todo": lambda row: samePaper(row) and row.get("status") in TODO_STATUSES and isIncluded(row)}
+    if key == QUEUE_SECOND:
+        predicate = _secondTracingPredicate()
+        return {"key": key, "label": _("Second tracing"), "record": None, "predicate": predicate, "todo": predicate}
+    entry = _libcardEntry("queue", key)
+    if entry is None:
+        return None
+    return {"key": key, "label": _(str(entry.get("label", key))), "record": None, "predicate": entry["predicate"], "todo": entry["predicate"]}
+
+
+def availableQueues(row=None):
+    """The queues offered for a case ``row`` (the current one): the built-in queues ("This paper" only when the case names
+    a paper), then the other Library extension queues.
+    """
+    specs = []
+    for key in BUILTIN_QUEUES:
+        spec = queueSpec(key, recordOf(row) if key == QUEUE_PAPER else None)
+        if spec is not None:
+            specs.append(spec)
+    try:
+        from . import library
+
+        extra = [entry for entry in library.libcardQueues() if entry.get("key") not in BUILTIN_QUEUES and "second" not in str(entry.get("key", "")).lower()]
+    except Exception:
+        extra = []
+    for entry in extra:
+        spec = queueSpec(entry.get("key"))
+        if spec is not None:
+            specs.append(spec)
+    return specs
+
+
+def _safe(predicate, row):
+    try:
+        return bool(predicate(row))
+    except Exception:
+        logging.error(f"Studio: a study queue predicate failed:\n{traceback.format_exc()}")
+        return False
+
+
+def throughput(studyObject):
+    """Tracing progress of the included subjects: ``{"traced", "total", "median_s", "left_s"}``.
+
+    Traced counts the traced and mapped subjects; the median is over their ``trace_seconds`` (rows without a time are
+    left out) and the time left is the median times the subjects still to trace (None without a time).
+    """
+    rows = [row for row in studyObject.subjects if isIncluded(row)]
+    traced = [row for row in rows if row.get("status") in ("traced", "mapped")]
+    seconds = []
+    for row in traced:
+        try:
+            value = float(row.get("trace_seconds"))
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            seconds.append(value)
+    median = float(np.median(seconds)) if seconds else None
+    left = len(rows) - len(traced)
+    return {"traced": len(traced), "total": len(rows), "median_s": median, "left_s": None if median is None else median * left}
+
+
+def _durationText(seconds):
+    minutes = seconds / 60.0
+    if minutes < 90:
+        return _("~{n} min").format(n=max(1, round(minutes)))
+    hours = minutes / 60.0
+    text = f"{hours:.1f}".rstrip("0").rstrip(".") if hours < 10 else f"{round(hours)}"
+    return _("~{n} h").format(n=text)
+
+
+def throughputText(studyObject):
+    """"212/300 traced · median 4.1 min/case · ~6 h left" (the parts that are known)."""
+    values = throughput(studyObject)
+    parts = [_("{traced}/{total} traced").format(traced=values["traced"], total=values["total"])]
+    if values["median_s"] is not None:
+        parts.append(_("median {minutes} min/case").format(minutes=f"{values['median_s'] / 60.0:.1f}"))
+        if values["left_s"]:
+            parts.append(_("{duration} left").format(duration=_durationText(values["left_s"])))
+    return " · ".join(parts)
+
+
+def caseLabel(text):
+    """The letters and digits of a text (participant labels allow nothing else)."""
+    return re.sub(r"[^A-Za-z0-9]", "", str(text or ""))
+
+
+#
+# Next-case prefetch (worker side: numpy, Pillow and the NIfTI reader only; no Qt, VTK or MRML)
+#
+
+#: Module prefixes that the prefetch worker must never call (``setPrefetchGuard``)
+_GUARDED_PREFIXES = ("qt", "PythonQt", "slicer", "vtk", "ctk", "MRML", "mrml", "qSlicer", "qMRML", "SegmentEditor")
+_guard = {"enabled": False, "violations": [], "threads": set(), "jobs": 0}
+_guardLock = threading.Lock()
+
+
+def setPrefetchGuard(enabled):
+    """Verification: record every call that the prefetch worker makes into Qt, VTK, MRML or ``slicer`` (and a job that runs
+    on the main thread). ``prefetchGuardReport()`` returns them. Off by default (it profiles the worker).
+    """
+    with _guardLock:
+        _guard.update({"enabled": bool(enabled), "violations": [], "threads": set(), "jobs": 0})
+
+
+def prefetchGuardReport():
+    """``{"jobs", "threads", "violations"}`` recorded since ``setPrefetchGuard(True)``."""
+    with _guardLock:
+        return {"jobs": _guard["jobs"], "threads": sorted(_guard["threads"]), "violations": list(_guard["violations"])}
+
+
+class _WorkerGuard:
+    """Profiles the calling (worker) thread while a prefetch job runs and records guarded calls (``setPrefetchGuard``)."""
+
+    def __enter__(self):
+        thread = threading.current_thread()
+        with _guardLock:
+            _guard["jobs"] += 1
+            _guard["threads"].add(thread.name)
+            if thread is threading.main_thread():
+                _guard["violations"].append("job ran on the main thread")
+        sys.setprofile(self._profile)
+        return self
+
+    def __exit__(self, *exc):
+        sys.setprofile(None)
+        return False
+
+    @staticmethod
+    def _profile(frame, event, arg):
+        if event == "call":
+            name = str(frame.f_globals.get("__name__", ""))
+            what = f"{name}.{frame.f_code.co_name}"
+            if frame.f_code.co_name == "find_spec":
+                what += f"({frame.f_locals.get('fullname')})"  # an import run in the worker
+        elif event == "c_call":
+            owner = getattr(arg, "__self__", None)
+            name = str(getattr(arg, "__module__", None) or (type(owner).__module__ if owner is not None else ""))
+            what = f"{name}.{getattr(arg, '__name__', '?')}"
+        else:
+            return
+        if name.split(".", 1)[0].startswith(_GUARDED_PREFIXES):
+            with _guardLock:
+                if len(_guard["violations"]) < 50:
+                    _guard["violations"].append(what)
+
+
+def _readPrefetchLesion(path):
+    """The lesion of a case for ``StudySession._load`` (worker): ``{"array" (uint8, k j i), "affine"}`` or ``{"fallback": reason}``.
+
+    Only plain, non-empty binary masks whose voxel-to-RAS matrix Slicer's reader certainly gives the same way are taken
+    (``_itkGeometry``): anything else is loaded by the segmentation reader, which places a file the way Slicer always does.
+    """
+    nifti = _lnm("nifti")
+    header = nifti.read_nifti_header(path)
+    if header["sform_code"] <= 0 and header["qform_code"] <= 0:
+        return {"fallback": "no sform or qform"}
+    affine = _itkGeometry(header)
+    if affine is None:
+        return {"fallback": "the reader may place it otherwise (oblique sform and qform, shear, units)"}
+    data, _affine, _header = nifti.read_nifti(path, apply_scaling=False)
+    if data.ndim != 3 or data.dtype.kind not in "iub":
+        return {"fallback": f"{data.ndim}D {data.dtype} image"}
+    values = set(np.unique(data).tolist())
+    if not values <= {0, 1}:
+        return {"fallback": "not a 0/1 mask"}
+    if 1 not in values:
+        # The reader makes an empty "Lesion" segment of its own (AddEmptySegment): the same structure as any empty file
+        return {"fallback": "empty mask"}
+    return {"array": np.ascontiguousarray(np.transpose(data, (2, 1, 0)), dtype=np.uint8), "affine": affine,
+            "spacing": tuple(float(value) for value in header["pixdim"][1:4])}
+
+
+def _itkGeometry(header):
+    """The voxel-to-RAS matrix that Slicer's NIfTI reader (ITK ``NiftiImageIO``) gives a file, or None when it is not
+    certain to be this one.
+
+    ITK reads the float32 sform or qform, takes the directions from its normalized columns, the spacing from pixdim and
+    the origin from its translation. It takes the sform when only the sform is set (it must be orthonormal: a sheared
+    sform is not read at all), the qform when only the qform is set; with both, its choice is certain only when the two
+    are the same matrix (axis-aligned images, MNI-space lesions) or the sform is scanner-based.
+    """
+    pixdim = np.asarray(header["pixdim"][1:4], float)
+    if np.any(pixdim <= 0) or (header["xyzt_units"] & 0x07) not in (0, 2):
+        return None  # mirrored or zero spacing, or units other than mm (ITK scales them)
+    sform = np.asarray(header["sform"], np.float32).astype(float)
+    qform = np.asarray(header["qform"], np.float32).astype(float)
+
+    def orthonormal(matrix):
+        columns = matrix[:3, :3] / np.linalg.norm(matrix[:3, :3], axis=0)
+        return np.abs(columns @ columns.T - np.eye(3)).max() <= 1e-5  # ITK: 1e-4 (a margin keeps clear of its edge)
+
+    sformCode, qformCode = header["sform_code"], header["qform_code"]
+    if sformCode > 0 and not orthonormal(sform):
+        return None
+    if sformCode > 0 and (qformCode <= 0 or sformCode == 1):  # NIFTI_XFORM_SCANNER_ANAT
+        chosen = sform
+    elif sformCode <= 0:
+        chosen = qform
+    elif np.array_equal(sform, qform):
+        chosen = sform  # ITK may take either: it is the same matrix
+    else:
+        return None
+    affine = np.eye(4)
+    affine[:3, :3] = chosen[:3, :3] / np.linalg.norm(chosen[:3, :3], axis=0) * pixdim[np.newaxis, :]
+    affine[:3, 3] = chosen[:3, 3]
+    return affine
+
+
+def _readPrefetchCrop(sid, folders):
+    """The first figure crop of a case (``sources/<record or sid>/fig-<k>.png`` whose fit names the case or nobody), as a
+    PNG thumbnail (worker): ``{"path", "png": bytes, "size": (w, h)}`` or None.
+    """
+    import io
+
+    from PIL import Image
+
+    for folder in folders:
+        if not os.path.isdir(folder):
+            continue
+        for name in sorted(os.listdir(folder)):
+            if not (name.startswith("fig-") and name.endswith("_fit.json")):
+                continue
+            fitPath = os.path.join(folder, name)
+            try:
+                with open(fitPath, encoding="utf-8") as f:
+                    owner = json.load(f).get("participant_id")
+            except (OSError, ValueError, AttributeError):
+                continue
+            pngPath = fitPath[:-len("_fit.json")] + ".png"
+            if owner not in (None, sid) or not os.path.isfile(pngPath):
+                continue
+            with Image.open(pngPath) as image:
+                size = image.size
+                thumbnail = image.convert("RGBA")
+                thumbnail.thumbnail((CROP_THUMBNAIL_PX, CROP_THUMBNAIL_PX))
+                buffer = io.BytesIO()
+                thumbnail.save(buffer, format="PNG")
+            return {"path": pngPath, "fit": fitPath, "png": buffer.getvalue(), "size": size}
+    return None
+
+
+_pillowWarm = [False]
+
+
+def _warmPillow():
+    """Run Pillow's lazy imports (its plug-ins) on the main thread once: an import in the worker would run the import
+    machinery there (``sys.meta_path`` holds the finder of vtkmodules).
+    """
+    if _pillowWarm[0]:
+        return
+    _pillowWarm[0] = True
+    import io
+
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (4, 4)).save(buffer, format="PNG")
+    buffer.seek(0)
+    with Image.open(buffer) as image:
+        thumbnail = image.convert("RGBA")
+        thumbnail.thumbnail((2, 2))
+        thumbnail.save(io.BytesIO(), format="PNG")
+
+
+def _prefetchCase(request):
+    """Worker job of ``StudySession._schedulePrefetch``: read the next case's lesion array and figure crop."""
+    guard = _WorkerGuard() if _guard["enabled"] else contextlib.nullcontext()
+    with guard:
+        result = {"sid": request["sid"], "lesion": None, "crop": None, "thread": threading.current_thread().name}
+        path = request.get("lesion")
+        if path:
+            try:
+                stat = os.stat(path)
+                lesion = _readPrefetchLesion(path)
+                lesion.update({"path": path, "stat": (stat.st_mtime_ns, stat.st_size)})
+                result["lesion"] = lesion
+            except Exception as error:
+                result["lesion"] = {"path": path, "fallback": f"unreadable: {error}"}
+        try:
+            result["crop"] = _readPrefetchCrop(request["sid"], request.get("figureFolders") or [])
+        except Exception as error:
+            result["cropError"] = str(error)
+        return result
+
+
+#
 # StudySession
 #
 
@@ -1015,6 +1472,14 @@ class StudySession:
         self._metricsWriter = None
         self._metricsPending = set()
         self._closed = False
+        self._queue = None  # the active trace queue: {"key", "record"} (L-45)
+        self._queuePosition = None  # the last subject opened while the queue was active
+        self._prefetched = {}  # sid -> result of _prefetchCase (main thread only)
+        self._prefetchPending = set()
+        self._cropCache = {}  # sid -> figure crop thumbnail of the current case ({} when it has none)
+        self.prefetchEnabled = True
+        self.lastSwitchSeconds = None
+        self.lastSwitchPrefetched = False
         self._observer = _SegmentObserver(self._onSegmentModified)
         self._journal = None
         self._sceneCloseTag = None
@@ -1052,7 +1517,11 @@ class StudySession:
     # Lifecycle
 
     def start(self):
-        """Start the heartbeat, merge the inbox, ask the pending grid questions and compute the missing lesion metrics."""
+        """Start the heartbeat, merge the inbox, ask the pending grid questions and compute the missing lesion metrics.
+
+        The trace queue and the position of the last session (``.studio/session.json``) are restored first.
+        """
+        self._restoreQueue()
         self._writeHeartbeat()
         self._heartbeatTimer.start()
         self._sceneCloseTag = slicer.mrmlScene.AddObserver(slicer.mrmlScene.EndCloseEvent, self._onSceneClosed)
@@ -1072,7 +1541,9 @@ class StudySession:
         self.computeMissingMetrics()
 
     def close(self):
-        """Write the current subject's edits, save participants.tsv, remove the session's nodes and the heartbeat."""
+        """Write the current subject's edits, save participants.tsv, remove the session's nodes and stop the heartbeat
+        (``.studio/session.json`` is kept with ``heartbeat_epoch`` 0 and the trace queue).
+        """
         if self._closed:
             return
         try:
@@ -1101,8 +1572,10 @@ class StudySession:
         if self._metricsWriter is not None:
             self._metricsWriter.shutdown(0.5)
             self._metricsWriter = None
-        with contextlib.suppress(OSError):
-            os.remove(self._sessionFile())
+        self._prefetched.clear()
+        # The heartbeat stops (epoch 0: no program takes the study for open); the trace queue and its position stay for the
+        # next session
+        self._writeSessionRecord(closed=True)
         shell = _currentShell(self._shell)
         if shell is not None:
             shell.setBreadcrumb(None)
@@ -1139,14 +1612,39 @@ class StudySession:
     def _writeHeartbeat(self):
         if self._closed:
             return
+        self._writeSessionRecord()
+
+    def _writeSessionRecord(self, closed=False):
+        """``.studio/session.json``: the heartbeat while the study is open (``heartbeat_epoch`` 0 once closed), the
+        current subject and the trace queue with its position (L-45).
+        """
         content = {"format": "slicer-studio-session", "pid": os.getpid(), "host": socket.gethostname(), "app": "Slicer Studio",
-                   "started": self._startedAt, "heartbeat": _now(), "heartbeat_epoch": time.time(), "subject": self._current}
+                   "started": self._startedAt, "heartbeat": _now(), "heartbeat_epoch": 0 if closed else time.time(), "subject": self._current}
+        if closed:
+            content["closed"] = _now()
+        if self._queue is not None:
+            content["queue"] = {"key": self._queue["key"], "record": self._queue.get("record"), "position": self._queuePosition}
         try:
             path = self._sessionFile()
             os.makedirs(os.path.dirname(path), exist_ok=True)
             _lnm("schema").write_text_atomic(path, json.dumps(content) + "\n")
         except OSError:
             logging.warning(f"Studio: cannot write the study heartbeat:\n{traceback.format_exc()}")
+
+    def _restoreQueue(self):
+        """The trace queue and position recorded by the last session of this study (``.studio/session.json``)."""
+        try:
+            with open(self._sessionFile(), encoding="utf-8") as f:
+                record = json.load(f).get("queue")
+        except (OSError, ValueError, AttributeError):
+            return
+        if not isinstance(record, dict) or queueSpec(record.get("key"), record.get("record")) is None:
+            return
+        if record["key"] == QUEUE_PAPER and not any(recordOf(row) == record.get("record") for row in self.study.subjects):
+            return  # the paper has no case any more (its rows were removed or its DOI changed)
+        self._queue = {"key": record["key"], "record": record.get("record")}
+        position = record.get("position")
+        self._queuePosition = position if position in self.study else None
 
     # Saving participants.tsv (main thread only)
 
@@ -1214,6 +1712,8 @@ class StudySession:
         """Set cells of several subjects (validated, see ``Study.set``) and save soon."""
         for sid in sids:
             self.study.set(sid, values)
+            # A figure saved for the case (L-29 writes its columns) shows in the case strip
+            self._cropCache.pop(sid, None)
         self.scheduleSave()
         _notify(self)
 
@@ -1483,6 +1983,268 @@ class StudySession:
         extra = min(time.monotonic() - self._lastActivity, IDLE_PAUSE_S) if self._lastActivity is not None else 0.0
         return self._activeSeconds + extra
 
+    # Trace queues (L-45)
+
+    def queue(self):
+        """The active trace queue (``queueSpec()`` dict), or None (W3-07's order)."""
+        if self._queue is None:
+            return None
+        return queueSpec(self._queue["key"], self._queue.get("record"))
+
+    def setQueue(self, key, record=None):
+        """Make ``key`` (a ``QUEUE_*`` key or a Library extension queue key; None: no queue) the active trace queue.
+
+        "This paper" takes the paper of ``record`` (a ``recordOf()`` value), else of the current case. The queue and its
+        position are kept in ``.studio/session.json``. Return the queue spec (None when cleared).
+        :raises ValueError: an unknown queue, or "This paper" without a paper.
+        """
+        if key is None:
+            self._queue = None
+            self._queuePosition = None
+        else:
+            if key == QUEUE_PAPER and record is None and self._current is not None:
+                record = recordOf(self.study.subject(self._current))
+            spec = queueSpec(key, record)
+            if spec is None:
+                raise ValueError(_("This case names no paper (DOI or record)") if key == QUEUE_PAPER else f"Unknown queue {key!r}")
+            self._queue = {"key": key, "record": spec.get("record")}
+            self._queuePosition = self._current if self._current is not None and _safe(spec["predicate"], self.study.subject(self._current)) else None
+        self._writeHeartbeat()
+        self._schedulePrefetch()
+        _notify(self)
+        return self.queue()
+
+    def queueLabel(self, queue=None):
+        """The name of a queue on screen (default: the active one): "Untraced", "This paper · Smith et al. 2019"; "All
+        subjects" without one.
+        """
+        spec = self._resolveQueue(queue)
+        if spec is None:
+            return _("All subjects")
+        if spec.get("key") == QUEUE_PAPER:
+            for row in self.study.subjects:
+                if recordOf(row) == spec.get("record"):
+                    return f"{spec['label']} · {paperLabel(row)}"
+        return spec["label"]
+
+    def queueMembers(self, queue=None):
+        """participant_ids of a queue (default: the active one; None without one: every subject), in table order."""
+        spec = self._resolveQueue(queue)
+        rows = self.study.subjects
+        if spec is None:
+            return [row["participant_id"] for row in rows]
+        return [row["participant_id"] for row in rows if _safe(spec["predicate"], row)]
+
+    def queuePosition(self, queue=None):
+        """``(position, count)`` of the current subject in a queue (default: the active one): position is 1-based, None when
+        the subject is not in the queue.
+        """
+        members = self.queueMembers(queue)
+        position = members.index(self._current) + 1 if self._current in members else None
+        return position, len(members)
+
+    def _resolveQueue(self, queue):
+        if queue is None:
+            return self.queue()
+        if isinstance(queue, dict):
+            return queue
+        if callable(queue):
+            return {"key": None, "label": "", "record": None, "predicate": queue, "todo": queue}
+        record = recordOf(self.study.subject(self._current)) if queue == QUEUE_PAPER and self._current in self.study else None
+        spec = queueSpec(queue, record)
+        if spec is None:
+            raise KeyError(f"Unknown queue {queue!r}")
+        return spec
+
+    def next_subject(self, after=None, queue=None):
+        """The subject that Done → next opens after ``after`` (default: the current subject, else the queue position).
+
+        Generalizes ``Study.next_subject(after, status)`` (W3-07): with a queue (a key, a spec, a predicate ``fn(row)``, or
+        by default the active queue) the first subject after ``after`` in table order, wrapping around, that the queue still
+        has to do; without one, the next untraced subject (W3-07). Return its participant_id, or None.
+        """
+        after = after if after is not None else (self._current or self._queuePosition)
+        spec = self._resolveQueue(queue)
+        if spec is None:
+            return self.study.next_subject(after, status="untraced")
+        ids = self.study.subject_ids
+        start = ids.index(after) + 1 if after in ids else 0
+        for sid in ids[start:] + ids[:start]:
+            if sid != after and _safe(spec["todo"], self.study.subject(sid)):
+                return sid
+        return None
+
+    def _stepTarget(self, delta, queue=None):
+        """The subject Alt+→ (``delta`` 1) or Alt+← (-1) opens in a queue (default: the active one), without wrapping."""
+        spec = self._resolveQueue(queue)
+        ids = self.study.subject_ids
+        current = self._current or self._queuePosition
+        start = ids.index(current) if current in ids else (-1 if delta > 0 else len(ids))
+        index = start + delta
+        while 0 <= index < len(ids):
+            if spec is None or _safe(spec["predicate"], self.study.subject(ids[index])):
+                return ids[index]
+            index += delta
+        return None
+
+    # Next-case prefetch (L-45): the worker reads files only; the nodes are made on the main thread when the case is opened
+
+    def _schedulePrefetch(self):
+        """Read the lesion and the figure crop of the cases that Done → next and Alt+→ would open, in the background."""
+        if self._closed or not self.prefetchEnabled or self._current is None:
+            return
+        try:
+            targets = [self.next_subject(self._current), self._stepTarget(1)]
+        except Exception:
+            logging.error(f"Studio: the next case could not be found:\n{traceback.format_exc()}")
+            return
+        targets = [sid for sid in dict.fromkeys(targets) if sid is not None and sid != self._current]
+        for sid in list(self._prefetched):
+            if sid not in targets:
+                del self._prefetched[sid]
+        studyModule = _lnm("study")
+        for sid in targets:
+            if sid in self._prefetched or sid in self._prefetchPending:
+                continue
+            row = self.study.subject(sid)
+            lesion = self.study.abspath(row.get("lesion"))
+            folders = [os.path.join(self.study.path, "sources", str(name)) for name in dict.fromkeys(
+                value for value in (row.get("record_id"), sid) if not studyModule.is_missing(value))]
+            request = {"sid": sid, "lesion": lesion if lesion and _isNifti(lesion) else None, "figureFolders": folders}
+            _warmPillow()
+
+            self._prefetchPending.add(sid)
+            try:
+                from . import autosave_io
+
+                writer = autosave_io.backgroundWriter()
+            except ImportError:
+                self._prefetchPending.discard(sid)
+                return
+            writer.submit(_prefetchCase, request, onDone=self._onPrefetched,
+                          onError=lambda error, sid=sid: self._onPrefetchError(sid, error))
+
+    def _onPrefetched(self, result):
+        sid = result["sid"]
+        self._prefetchPending.discard(sid)
+        if self._closed or sid == self._current or sid not in self.study:
+            return
+        self._prefetched[sid] = result
+        while len(self._prefetched) > PREFETCH_KEEP:
+            del self._prefetched[next(iter(self._prefetched))]
+
+    def _onPrefetchError(self, sid, error):
+        self._prefetchPending.discard(sid)
+        logging.warning(f"Studio: the next case {sid} could not be read ahead: {error}")
+
+    def waitForPrefetch(self, timeoutS=10.0):
+        """Wait until the scheduled prefetch jobs are done (tests and measurements). Return True if they are."""
+        deadline = time.monotonic() + timeoutS
+        try:
+            from . import autosave_io
+
+            writer = autosave_io.backgroundWriter()
+        except ImportError:
+            return True
+        while self._prefetchPending and time.monotonic() < deadline:
+            writer.drain(0.05)
+        return not self._prefetchPending
+
+    def prefetched(self, sid):
+        """The prefetch result of ``sid`` (``{"lesion", "crop"}``), or None."""
+        return self._prefetched.get(sid)
+
+    def figureThumbnail(self, sid=None):
+        """``(png bytes, crop path, fit path)`` of the case's first figure crop, from the prefetch when it is there, else read
+        now (main thread). None when the case has no saved figure.
+        """
+        sid = sid or self._current
+        if sid is None or sid not in self.study:
+            return None
+        cached = self._cropCache.get(sid)
+        if cached is None:
+            entry = self._prefetched.get(sid)
+            crop = entry.get("crop") if entry is not None else None
+            if crop is None and (entry is None or "cropError" in entry):
+                row = self.study.subject(sid)
+                folders = [os.path.join(self.study.path, "sources", str(name)) for name in dict.fromkeys(
+                    value for value in (row.get("record_id"), sid) if not _missing(value))]
+                try:
+                    crop = _readPrefetchCrop(sid, folders)
+                except Exception:
+                    logging.warning(f"Studio: the figure crop of {sid} could not be read:\n{traceback.format_exc()}")
+                    crop = None
+            cached = crop or {}
+            self._cropCache = {sid: cached}
+        if not cached:
+            return None
+        return cached["png"], cached["path"], cached["fit"]
+
+    def _takePrefetchedLesion(self, sid, lesionPath):
+        """The prefetched lesion of ``sid`` when it is still the file of the row, unchanged since it was read; else None."""
+        entry = self._prefetched.pop(sid, None)
+        if entry is not None and "cropError" not in entry:
+            # The case strip shows the crop without reading it ({}: the case has no saved figure)
+            self._cropCache = {sid: entry.get("crop") or {}}
+        lesion = (entry or {}).get("lesion")
+        if not lesion or "array" not in lesion or not lesionPath or os.path.normcase(lesion["path"]) != os.path.normcase(lesionPath):
+            return None
+        try:
+            stat = os.stat(lesionPath)
+        except OSError:
+            return None
+        return lesion if (stat.st_mtime_ns, stat.st_size) == tuple(lesion["stat"]) else None
+
+    def _segmentationFromPrefetch(self, sid, lesion):
+        """A lesion segmentation made from a prefetched array, as ``importer.loadLesion`` makes it from the file: one
+        "Lesion" segment (Segment_1, label 1) whose binary labelmap and reference geometry are the file's grid.
+        """
+        import vtk.util.numpy_support
+
+        importer = _importer()
+        array = lesion["array"]
+        fileMatrix = vtk.vtkMatrix4x4()
+        for row in range(4):
+            for column in range(4):
+                fileMatrix.SetElement(row, column, float(lesion["affine"][row, column]))
+        # As the segmentation reader computes it, to the last bit (the reference geometry is compared as text): vtkITK's
+        # RAS-to-IJK matrix is the inverse of the file's matrix, and the reader inverts it back
+        rasToIjk = vtk.vtkMatrix4x4()
+        vtk.vtkMatrix4x4.Invert(fileMatrix, rasToIjk)
+        matrix = vtk.vtkMatrix4x4()
+        vtk.vtkMatrix4x4.Invert(rasToIjk, matrix)
+        labelmap = slicer.vtkOrientedImageData()
+        labelmap.SetExtent(0, array.shape[2] - 1, 0, array.shape[1] - 1, 0, array.shape[0] - 1)
+        # The reader's image arrives with the file's spacing and origin, which SetImageToWorldMatrix keeps when they are
+        # within machine epsilon of the matrix's
+        if "spacing" in lesion:
+            labelmap.SetSpacing(*lesion["spacing"])
+            labelmap.SetOrigin(*(float(value) for value in lesion["affine"][:3, 3]))
+        labelmap.SetImageToWorldMatrix(matrix)
+        scalars = vtk.util.numpy_support.numpy_to_vtk(array.ravel(), deep=True, array_type=vtk.VTK_UNSIGNED_CHAR)
+        scalars.SetName("ImageScalars")
+        labelmap.GetPointData().SetScalars(scalars)
+        segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", sid)
+        segmentationNode.CreateDefaultDisplayNodes()
+        segmentation = segmentationNode.GetSegmentation()
+        segmentation.SetConversionParameter(slicer.vtkSegmentationConverter.GetReferenceImageGeometryParameterName(),
+                                            slicer.vtkSegmentationConverter.SerializeImageGeometry(labelmap))
+        segment = slicer.vtkSegment()
+        segment.SetName(importer.LESION_SEGMENT_NAME)
+        segment.SetColor(*importer.LESION_COLOR)
+        segment.SetLabelValue(1)
+        segment.AddRepresentation(slicer.vtkSegmentationConverter.GetBinaryLabelmapRepresentationName(), labelmap)
+        segmentation.AddSegment(segment, "Segment_1")
+        importer.styleLesionSegment(segmentationNode, "Segment_1")
+        # Draw shows "Saved · <file>" for a lesion read from its file and not changed (``draw.lesionSaveState``)
+        draw = _draw()
+        records = getattr(draw, "_savedRecords", None) if draw is not None else None
+        if isinstance(records, dict):
+            reference = vtk.vtkWeakReference()
+            reference.Set(segmentationNode)
+            records[segmentationNode.GetID()] = (reference, lesion["path"], _contentStamp(segmentationNode), None)
+        return segmentationNode
+
     # Opening subjects
 
     def open(self, sid, switchToDraw=True):
@@ -1515,6 +2277,10 @@ class StudySession:
                 _toast(shell, _("{sid} could not be opened: {error}").format(sid=sid, error=e), ms=6000, level="warning")
                 return False
         self.lastSwitchSeconds = time.perf_counter() - startTime
+        if self._queue is not None:
+            spec = self.queue()
+            if spec is not None and _safe(spec["predicate"], self.study.subject(sid)):
+                self._queuePosition = sid
         self._writeHeartbeat()
         self._showBreadcrumb(shell)
         if self._journal is not None:
@@ -1528,6 +2294,8 @@ class StudySession:
         _notify(self)
         if switchToDraw:
             self._showDraw(shell)
+        # The next case of the queue is read while this one is traced
+        self._schedulePrefetch()
         return True
 
     def _showDraw(self, shell):
@@ -1552,6 +2320,9 @@ class StudySession:
             lesionPath = None
         previous = dict(self._nodeIds)
         previousVolume = self.volumeNode()
+        self._cropCache = {}
+        prefetched = self._takePrefetchedLesion(sid, lesionPath)
+        self.lastSwitchPrefetched = prefetched is not None
         with importer._ownLoad():
             if scanPath:
                 volumeNode = slicer.util.loadVolume(scanPath, {"singleFile": True, "show": False})
@@ -1560,7 +2331,10 @@ class StudySession:
                 volumeNode.SetAttribute(SUBJECT_ATTRIBUTE, sid)
             else:
                 volumeNode = self.templateNode()
-            if lesionPath:
+            if prefetched is not None:
+                segmentationNode = self._segmentationFromPrefetch(sid, prefetched)
+                gridReference = lesionPath
+            elif lesionPath:
                 segmentationNode = importer.loadLesion(lesionPath)
                 gridReference = lesionPath
             else:
@@ -1599,9 +2373,15 @@ class StudySession:
         """Leave the current subject: write its edits (Lightroom: no Save), stop the journal. Return False to stay."""
         if self._current is None:
             return True
+        stripSaved = True
         if write:
             self._applyPendingSmartFill()
             _commitDrawCardEdits()
+            # A case strip field being edited is saved too; an invalid value keeps the case open (after the lesion is
+            # written: a closing study still writes it)
+            stripSaved, reason = _commitCaseStripEdit(self)
+            if not stripSaved:
+                _toast(self._shell, _("{sid} stays open: {reason}").format(sid=self._current, reason=reason), ms=6000, level="warning")
             if self.isDirty():
                 mask = lesionMask(self.segmentationNode())
                 if mask is None:
@@ -1622,6 +2402,8 @@ class StudySession:
                         _toast(self._shell, _("The lesion of {sid} could not be written: {error}").format(sid=self._current, error=e), ms=6000,
                                level="warning")
                         return False
+        if not stripSaved:
+            return False
         if self._journal is not None:
             self._journal.detach()
         return True
@@ -1742,6 +2524,7 @@ class StudySession:
         finally:
             with contextlib.suppress(OSError):
                 os.remove(temporary)
+        self._prefetched.pop(sid, None)
         # Row values
         method = row.get("trace_method")
         tokens = [] if studyModule.is_missing(method) else str(method).split("+")
@@ -1810,7 +2593,9 @@ class StudySession:
             logging.warning(f"Studio: the sidecar of {sid} could not be written:\n{traceback.format_exc()}")
 
     def done(self, writeLesion=True):
-        """Done → next: write the lesion (status traced, metrics), then open the next untraced subject.
+        """Done → next: write the lesion (status traced, metrics), then open ``next_subject()``: the next case of the active
+        trace queue (L-45), else the next untraced subject. At the end of "This paper" a toast offers "New case from this
+        paper".
 
         A Done hook may block it (``Blocking``): the message is shown inline (a toast), nothing is written and the
         subject stays open. Draw calls ``next()`` right after ``done()``: a plain ``next()`` (no status, no queue) in
@@ -1830,6 +2615,11 @@ class StudySession:
             _toast(shell, _("Open a subject first"))
             return None
         self._applyPendingSmartFill()
+        # A case strip field being edited (Ctrl+Enter from its editor) is saved first; an invalid value stops Done
+        stripSaved, reason = _commitCaseStripEdit(self)
+        if not stripSaved:
+            _toast(shell, _("{sid} is not done: {reason}").format(sid=sid, reason=reason), ms=6000, level="warning")
+            return None
         try:
             if writeLesion:
                 result = self._write(status="traced", runHooks=True)
@@ -1846,12 +2636,38 @@ class StudySession:
             return None
         if result.get("path"):
             _toast(shell, _("Saved {name}").format(name=os.path.basename(result["path"])), ms=2500, toolTip=result["path"])
-        nextSid = self.study.next_subject(sid, status="untraced")
-        if nextSid is None:
+        # The active trace queue decides the next case (L-45); without one, the next untraced subject (W3-07)
+        spec = self.queue()
+        nextSid = self.next_subject(sid)
+        if nextSid is None and spec is None:
             _toast(shell, _("All subjects of {study} are traced").format(study=self.study.name), ms=4000, level="consequence")
+        elif nextSid is None:
+            self._queueFinished(spec, sid)
         else:
             self.open(nextSid, switchToDraw=False)
+        self._autosaveAfterDone()
         return result
+
+    def _queueFinished(self, spec, sid):
+        """Done on the last case of a queue: say so; for "This paper", offer the next case of the paper."""
+        shell = _currentShell(self._shell)
+        # The queue's paper (the case just done may be of another paper, opened while the queue was active)
+        record = spec.get("record") if spec.get("key") == QUEUE_PAPER else None
+        rows = [row for row in self.study.subjects if record is not None and recordOf(row) == record]
+        if rows:
+            source = sid if sid in self.study and recordOf(self.study.subject(sid)) == record else rows[-1]["participant_id"]
+            _toast(shell, _("No more cases of {paper} to trace").format(paper=paperLabel(rows[0]) or _("this paper")), sticky=True,
+                   action=lambda: self.newCaseFromPaper(source), actionText=_("New case from this paper"), level="consequence")
+        else:
+            _toast(shell, _("No more cases in {queue}").format(queue=self.queueLabel(spec)), ms=4000, level="consequence")
+
+    def _autosaveAfterDone(self):
+        """A case is done: autosave the session once the next case is shown (A-01; never during the switch)."""
+        try:
+            from . import autosave
+        except ImportError:
+            return
+        qt.QTimer.singleShot(0, lambda: autosave.autosaveNow("case done"))
 
     def _absorbNext(self):
         """The plain ``next()`` that Draw calls right after ``done()`` (in the same event) does nothing."""
@@ -1866,6 +2682,8 @@ class StudySession:
             return None
         if callable(queue):
             return queue
+        if queue in BUILTIN_QUEUES:
+            return self._resolveQueue(queue)["predicate"]
         from . import library
 
         for entry in library.libcardQueues():
@@ -1879,6 +2697,15 @@ class StudySession:
             self._swallowNext = False
             return self._current
         self._swallowNext = False
+        if status is None and queue is None and self._queue is not None:
+            # Alt+←/→ follow the active trace queue (L-45)
+            spec = self.queue()
+            if spec is not None:
+                sid = self._stepTarget(delta, spec)
+                if sid is None:
+                    _toast(self._shell, (_("Last case in {queue}") if delta > 0 else _("First case in {queue}")).format(queue=self.queueLabel()))
+                    return None
+                return sid if self.open(sid, switchToDraw=False) else None
         predicate = self._queuePredicate(queue)
         rows = self.study.subjects
         ids = [row["participant_id"] for row in rows]
@@ -1931,6 +2758,89 @@ class StudySession:
         self.open(sid, switchToDraw=switchToDraw)
         _notify(self)
         return sid
+
+    # Case series (L-45): the next case of the same paper
+
+    def paperCaseId(self, row):
+        """The id of the next case of a paper: ``sub-<record><nn>`` (the record's letters and digits, else the citation's,
+        else the case id without its trailing number), the first free ``nn`` from 01.
+        """
+        label = caseLabel(row.get("record_id")) if not _missing(row.get("record_id")) else ""
+        if not label and not _missing(row.get("citation")):
+            label = caseLabel(str(row["citation"]).split(",")[0])[:24]
+        if not label:
+            label = re.sub(r"\d+$", "", caseLabel(str(row.get("participant_id", ""))[4:])) or CASE_PREFIX
+        number = 1
+        while f"sub-{label}{number:02d}" in self.study:
+            number += 1
+        return f"sub-{label}{number:02d}"
+
+    def newCaseFromPaper(self, sid=None, switchToDraw=True):
+        """"New case from this paper": a new subject ``sub-<record><nn>`` with the paper's columns (``PAPER_COLUMNS``:
+        record_id, doi, pmid, citation, image_modality...) and group of ``sid`` (default: the current case), placed after
+        the paper's last case and opened on the study template. Return the new id.
+
+        :raises ValueError: no case open, or a case that names no paper (record, DOI, PMID or citation).
+        """
+        source = sid or self._current
+        if source is None or source not in self.study:
+            raise ValueError(_("Open a case of the paper first"))
+        row = self.study.subject(source)
+        values = {column: row[column] for column in PAPER_COLUMNS if not _missing(row.get(column))}
+        if not any(column in values for column in ("record_id", "doi", "pmid", "citation")):
+            raise ValueError(_("{sid} names no paper yet: enter its DOI or record first").format(sid=source))
+        newSid = self.paperCaseId(row)
+        record = self.templateRecord()
+        studyModule = _lnm("study")
+        values.update({"group": row.get("group") if row.get("group") in ("case", "control") else "case", "status": "untraced",
+                       "space": record.get("id") or studyModule.NA, "trace_template": record.get("id") or studyModule.NA})
+        self.study.add_subject(newSid, values)
+        # After the paper's last case: the cases of a paper stay together in table order (Alt+←/→, This paper)
+        rows = self.study._rows
+        moved = rows.pop()
+        paper = recordOf(row)
+        last = max((index for index, other in enumerate(rows) if recordOf(other) == paper), default=len(rows) - 1)
+        rows.insert(last + 1, moved)
+        self.flush()
+        previous = self._current
+        if not self.open(newSid, switchToDraw=switchToDraw):
+            return newSid
+        shell = _currentShell(self._shell)
+        _toast(shell, _("New case {sid} from {paper}").format(sid=newSid, paper=paperLabel(row) or _("this paper")), ms=6000,
+               action=lambda: self._undoNewCase(newSid, previous), actionText=_("Undo"), level="consequence")
+        _notify(self)
+        return newSid
+
+    def _undoNewCase(self, sid, previous):
+        """Undo "New case from this paper" while the new case is untouched: remove it and go back to the case it came from."""
+        if sid not in self.study:
+            return False
+        row = self.study.subject(sid)
+        if (sid == self._current and self.isDirty()) or not _missing(row.get("lesion")):
+            _toast(self._shell, _("{sid} has a lesion now: remove it from the study in Library").format(sid=sid), level="warning")
+            return False
+        if previous in self.study:
+            self.open(previous, switchToDraw=False)
+        self.removeSubjects([sid])
+        self._removed.pop()  # not offered by "Undo remove"
+        return True
+
+    def newCaseFromClipboardFigure(self, sid=None, shell=None):
+        """"New case from clipboard figure": ``newCaseFromPaper()``, then the clipboard's image as the figure to trace from
+        (the Figure card, L-29). Return the new id.
+
+        :raises ValueError: the clipboard holds no image (nothing is created), or the case names no paper.
+        """
+        from . import figure
+
+        if not figure.clipboardHasImage():
+            raise ValueError(_("The clipboard holds no image: copy the figure first"))
+        newSid = self.newCaseFromPaper(sid, switchToDraw=True)
+        if self._current != newSid:
+            # The new case could not be opened (a Done hook kept the previous one): the figure is not pasted into another case
+            return newSid
+        figure.pasteFigure(_currentShell(shell or self._shell))
+        return newSid
 
 
 #
@@ -2196,8 +3106,109 @@ def _paletteEntries(shell=None):
              "synonyms": ["new case", "case report", "template case"], "callback": lambda: _session.newCase() if _session is not None else None},
             {"id": "study.mergeInbox", "title": _("Merge job results into the study"), "category": _("Action"), "synonyms": ["inbox", "refresh study"],
              "callback": lambda: _session.applyInbox() if _session is not None else None},
+            {"id": "study.newCaseFromPaper", "title": _("New case from this paper"), "category": _("Action"),
+             "synonyms": ["case series", "next case", "same paper", "another case", "save and next case"],
+             "callback": lambda: newCaseFromPaperAction(shell), "enabled": _currentCaseNamesPaper,
+             "description": _("A new case with the paper's DOI, citation and modality, on the study template")},
+            {"id": "study.newCaseFromClipboard", "title": _("New case from clipboard figure"), "category": _("Action"),
+             "synonyms": ["paste figure", "case series", "next case figure"],
+             "callback": lambda: newCaseFromClipboardFigureAction(shell),
+             "enabled": lambda: _currentCaseNamesPaper() and _clipboardHasImage(),
+             "description": _("A new case of the same paper, traced from the figure in the clipboard")},
+            {"id": "study.queue.all", "title": _("Trace queue: All subjects"), "category": _("Action"), "synonyms": ["queue", "table order"],
+             "callback": lambda: _setQueueAction(None, shell), "description": _("Done → next opens the next untraced subject")},
         ]
+        row = _session.study.subject(_session.current()) if _session.current() in _session.study else None
+        for spec in availableQueues(row):
+            entries.append({"id": f"study.queue.{spec['key']}", "title": _("Trace queue: {queue}").format(queue=spec["label"]), "category": _("Action"),
+                            "synonyms": ["queue", "next case", "worklist"], "callback": lambda key=spec["key"]: _setQueueAction(key, shell),
+                            "description": _("Done → next and Alt+←/→ follow this queue")})
     return entries
+
+
+def _currentCaseNamesPaper():
+    if _session is None or _session.current() not in _session.study:
+        return False
+    row = _session.study.subject(_session.current())
+    return any(not _missing(row.get(column)) for column in ("record_id", "doi", "pmid", "citation"))
+
+
+def _clipboardHasImage():
+    try:
+        from . import figure
+    except ImportError:
+        return False
+    return figure.clipboardHasImage()
+
+
+def _runCaseAction(action, shell=None):
+    """Run a case series action; its refusal (ValueError) is a toast, never a dialog."""
+    try:
+        return action()
+    except ValueError as e:
+        _toast(shell, str(e), ms=5000, level="warning")
+        return None
+
+
+def newCaseFromPaperAction(shell=None):
+    """"New case from this paper" (Lesion card ⋯, Search): a refusal is a toast. Return the new id or None."""
+    if _session is None:
+        return None
+    return _runCaseAction(_session.newCaseFromPaper, shell)
+
+
+def newCaseFromClipboardFigureAction(shell=None):
+    """"New case from clipboard figure" (Lesion card ⋯, Search): a refusal is a toast. Return the new id or None."""
+    if _session is None:
+        return None
+    return _runCaseAction(lambda: _session.newCaseFromClipboardFigure(shell=shell), shell)
+
+
+def _setQueueAction(key, shell=None):
+    if _session is None:
+        return None
+    result = _runCaseAction(lambda: _session.setQueue(key), shell)
+    if _session.queue() is None:
+        _toast(shell, _("Done → next opens the next untraced subject"), ms=3000)
+    else:
+        _toast(shell, _("Done → next follows {queue}").format(queue=_session.queueLabel()), ms=3000)
+    return result
+
+
+#
+# The throughput line of the STUDY card (a Library extension registered at run time: StudioLib.libcard_throughput)
+#
+
+THROUGHPUT_LIBCARD = "StudioLib.libcard_throughput"
+
+
+def _createThroughputCard(studySession):
+    label = qt.QLabel()
+    label.setObjectName("StudioStudyThroughput")
+    label.setWordWrap(True)
+    label.setToolTip(_("Traced subjects, the median tracing time per case (trace_seconds) and the time left at that pace"))
+    return label
+
+
+def _refreshThroughputCard(widget, studySession, selectedIds=None):
+    widget.setText(throughputText(studySession.study))
+
+
+def _registerThroughputCard():
+    """Add the throughput line to the STUDY card through the Library extension registry (``library.libcardModules``
+    also lists the ``StudioLib.libcard_*`` modules that are in ``sys.modules``).
+    """
+    if THROUGHPUT_LIBCARD in sys.modules:
+        return
+    import types
+
+    module = types.ModuleType(THROUGHPUT_LIBCARD, "Throughput line of the STUDY card (L-45; defined in StudioLib.study_ui).")
+    module.CARD = {"section": "study", "order": 5, "create": _createThroughputCard, "refresh": _refreshThroughputCard}
+    sys.modules[THROUGHPUT_LIBCARD] = module
+    # Only a registry that was read already is read again: the extension modules are imported when Library first needs them
+    library = sys.modules.get(f"{__package__}.library")
+    if library is not None and getattr(library, "_libcards", None) is not None:
+        library.libcardModules(reload=True)
 
 
 _installedShell = None
@@ -2236,10 +3247,20 @@ def install(shell):
         pass
     _registerWithAutosave()
     qt.QTimer.singleShot(0, _registerWithAutosave)
+    try:
+        _registerThroughputCard()
+    except Exception:
+        logging.error(f"Studio: the study throughput line could not be added:\n{traceback.format_exc()}")
+    try:
+        from . import casestrip
+
+        casestrip.install(shell)
+    except Exception:
+        logging.error(f"Studio: the case strip could not be installed:\n{traceback.format_exc()}")
 
 
 def uninstall(shell):
-    """Classic: the study stays open (the Studio module panel lists its subjects)."""
+    """Classic: the study stays open (the Studio module panel lists its subjects); the case strip leaves Draw."""
     global _installedShell
     _installedShell = None
     try:
@@ -2248,3 +3269,9 @@ def uninstall(shell):
         palette.unregisterProvider(_paletteEntries)
     except ImportError:
         pass
+    try:
+        from . import casestrip
+
+        casestrip.uninstall(shell)
+    except Exception:
+        logging.error(f"Studio: the case strip could not be removed:\n{traceback.format_exc()}")
