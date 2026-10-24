@@ -11,10 +11,10 @@ seed a network (VLSM-seeded LNM: Boes 2021, Brain 144:e5; Bowren 2022).
   the minimum number of lesions (:func:`min_lesion_count`: the larger of 5 lesions and 10% of the lesions by default,
   the usual VLSM minimum-overlap mask) and not in every lesion (no variance). The coverage map (lesions per voxel) of
   the analysed lesions is kept.
-- :func:`run_vlsm` fits the design of ``design.py`` (two groups or ANOVA: ``group_column``; a score: ``continuous``)
+- :func:`vlsm` fits the design of ``design.py`` (two groups or ANOVA: ``group_column``; a score: ``continuous``)
   voxel by voxel through ``glm.run`` on the binary lesion values: Freedman-Lane permutations, voxel max-statistic FWE
   (primary) and BH-FDR (secondary), optional TFCE. Total lesion volume is a covariate by default (direct total-lesion-
-  volume control, Moore et al. 2026, HBM e70619); turning it off needs a reason, recorded like the GLM's. With lesion
+  volume control, Moore et al. 2026, Hum Brain Mapp, doi:10.1002/hbm.70619); turning it off needs a reason, recorded like the GLM's. With lesion
   presence as the outcome and the score (or group) as the regressor, the t of the score equals the t of the classic
   VLSM regression "score ~ lesion + volume" (the partial correlation of the two given the covariates is symmetric, and
   both models have n - p degrees of freedom), so the maps are the usual VLSM t maps, with permutation inference.
@@ -341,18 +341,6 @@ def write_lesions_tsv(path, rows):
 #
 
 
-def run_vlsm(prepared, n_perm=None, seed=None, tfce=None, batch=None, dtype=None, cancel=None, on_batch=None, fdr_alpha=glm.FDR_ALPHA):
-    """The permutation GLM of a :class:`Prepared` VLSM (``glm.run`` on the binary lesion matrix); returns ``glm.GlmResult``.
-
-    :raises ValueError: a blocked design.
-    """
-    design = prepared.design
-    use_tfce = bool(design.spec.inference.get("tfce")) if tfce is None else bool(tfce)
-    grid = tfcelib.TfceGrid(prepared.matrix.tested_mask()) if use_tfce else None
-    return glm.run(design, prepared.matrix.Y, n_perm=prepared.n_perm if n_perm is None else n_perm, seed=seed, mask=grid, tfce=use_tfce, batch=batch, dtype=dtype, cancel=cancel,
-                   on_batch=on_batch, fdr_alpha=fdr_alpha)
-
-
 def _reference_header(prepared, out_dir, space):
     """Write the coverage map and the tested mask on the template's exact header (else the grid's); return their paths."""
     occ, matrix = prepared.occ, prepared.matrix
@@ -450,7 +438,7 @@ def _remove_previous_outputs(out_dir):
 
 
 def vlsm(study, spec=None, grid=None, space=None, min_lesions=DEFAULT_MIN_LESIONS, min_percent=DEFAULT_MIN_PERCENT, n_perm=None, seed=None, out_dir=None, tfce=None,
-         batch=None, dtype=None, run_root=None, parent_runs=(), register=True, template_dirs=(), cancel=None, emit=None, argv=None, design_path=None, keep_matrix=False):
+         batch=None, dtype=None, run_root=None, parent_runs=(), register=True, template_dirs=(), cancel=None, emit=None, argv=None, design_path=None, threads=None, keep_matrix=False):
     """Run a VLSM on a study's lesions and write its outputs (see the module docstring).
 
     :param study: ``study.Study`` or its folder.
@@ -483,7 +471,8 @@ def vlsm(study, spec=None, grid=None, space=None, min_lesions=DEFAULT_MIN_LESION
     spec = dataclasses.replace(spec, inference=inference)
     n_perm = int(spec.n_perm if n_perm is None else n_perm)
 
-    emit("stage", name="lesions", index=1, total=4)
+    emit("start", job="vlsm", argv=list(argv or []), threads=threads, test=spec.test, contrast=spec.contrast)
+    emit("stage", name="lesions", index=1, total=3)
     tic = time.monotonic()
 
     def progress(done, total):
@@ -529,12 +518,10 @@ def vlsm(study, spec=None, grid=None, space=None, min_lesions=DEFAULT_MIN_LESION
         record = {"format": FORMAT_NAME, "version": FORMAT_VERSION, "run_id": run_id, "status": "running", "argv": list(argv or []), "start": now_iso(), "end": None}
         two_sided = design.tails == 2 and design.stat != "F"
         tfce_grid = tfcelib.TfceGrid(matrix.tested_mask()) if spec.inference.get("tfce") else None
-        emit("start", job="vlsm", argv=list(argv or []), run_id=run_id, n=design.n, p=design.p, n_voxels=matrix.n_voxels, min_count=matrix.min_count, stat=design.stat,
+        _remove_previous_outputs(out_dir)
+        emit("stage", name="permutations", index=2, total=3, total_permutations=prepared.count - 1, run_id=run_id, n=design.n, p=design.p, n_voxels=matrix.n_voxels, min_count=matrix.min_count, stat=design.stat,
              tails=design.tails, design_type=design.design_type, permute=design.permute, permute_reason=design.permute_reason, n_perm=prepared.count, exhaustive=prepared.exhaustive,
              tfce=tfce_grid is not None, tfce_eta_s=tfcelib.tfce_eta(tfce_grid, prepared.count, two_sided) if tfce_grid is not None else None)
-        _remove_previous_outputs(out_dir)
-
-        emit("stage", name="permutations", index=2, total=4, total_permutations=prepared.count - 1)
         session = {"started": time.monotonic()}
 
         def on_batch(state, done, total, elapsed):
@@ -549,7 +536,7 @@ def vlsm(study, spec=None, grid=None, space=None, min_lesions=DEFAULT_MIN_LESION
         timings["permutations_s"] = result.timings.get("permutations_s")
         timings["per_permutation_ms"] = result.timings.get("per_permutation_ms")
 
-        emit("stage", name="write", index=3, total=4)
+        emit("stage", name="write", index=3, total=3)
         tic = time.monotonic()
         paths = write_maps(glm_result, prepared, out_dir, space_label, fwe=bool(spec.inference.get("fwe", True)), fdr=bool(spec.inference.get("fdr", True)))
         design_json, design_tsv = designlib.save_design(design, out_dir)
@@ -882,10 +869,9 @@ def main(argv=None):
             except (OSError, ValueError) as exc:
                 raise jobs.JobError(f"The design {args.design} cannot be read: {exc}", code="usage", exit_code=jobs.EXIT_USAGE) from None
             dtype = None if args.precision == "auto" else np.dtype(args.precision)
-            jobs.emit("start", job="vlsm", argv=argv, threads=args.threads, stage="lesions")
             record = vlsm(args.study, spec, grid=args.grid, space=args.space, min_lesions=args.min_lesions, min_percent=args.min_percent, n_perm=args.perm, seed=args.seed,
                           out_dir=args.out, tfce=True if args.tfce else None, batch=args.batch, dtype=dtype, run_root=args.run_root, parent_runs=args.parent_run,
-                          template_dirs=tuple(args.template_dir), cancel=cancel, emit=jobs.emit, argv=argv, design_path=args.design)
+                          template_dirs=tuple(args.template_dir), cancel=cancel, emit=jobs.emit, argv=argv, design_path=args.design, threads=args.threads)
             return jobs.EXIT_OK if record.get("status") == "done" else jobs.EXIT_ERROR
         seed_cluster(args.vlsm, args.bundle, args.out, name=args.name, cluster=args.cluster, alpha=args.alpha, inference=args.inference, sign=args.sign,
                      subjects=args.subjects, subject_list=args.subject_list, run_root=args.run_root, parent_runs=args.parent_run, cancel=cancel, emit=jobs.emit, argv=argv)

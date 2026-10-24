@@ -74,6 +74,7 @@ class VlsmTab(CohortTab):
         self.seedJob = None
         self.seedFolder = None
         self.seedNotice = ""
+        self.clusterTable = []
         super().__init__(ctx)
 
     def runText(self):
@@ -235,6 +236,7 @@ class VlsmTab(CohortTab):
         self.clusterCombo.setSizeAdjustPolicy(qt.QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.clusterCombo.setMinimumContentsLength(12)
         self.clusterCombo.connect("currentIndexChanged(int)", lambda index: self.showSeedState())
+        self.clusterCombo.connect("activated(int)", lambda index: self.jumpToCluster())
         row.addWidget(self.clusterCombo, 1)
         self.seedButton = qt.QPushButton(_("Seed from VLSM cluster"))
         self.seedButton.setObjectName("LNMVlsmSeedButton")
@@ -659,6 +661,7 @@ class VlsmTab(CohortTab):
 
     def fillClusters(self, clusters, stat="t"):
         """The cluster choices of the shown result: each cluster (largest first), then every significant voxel of each sign."""
+        self.clusterTable = list(clusters)
         statName = "F" if stat == "F" else "T"
         items = []
         for item in clusters:
@@ -683,6 +686,30 @@ class VlsmTab(CohortTab):
         finally:
             self.clusterCombo.blockSignals(False)
         self.showSeedState()
+
+    def jumpToCluster(self):
+        """Centre the views on the peak of the chosen cluster (the first one for "all significant voxels"); return the peak or None."""
+        choice = str(self.clusterCombo.currentData or "")
+        if not choice or not self.clusterTable:
+            return None
+        sign = choice.split(":", 1)[1] if choice.startswith("all:") else None
+        item = next((row for row in self.clusterTable if (str(row.get("id")) == choice) or (sign and row.get("sign") == sign)), None)
+        if item is None or not item.get("peak_xyz"):
+            return None
+        x, y, z = (float(value) for value in item["peak_xyz"])
+        try:
+            import slicer
+
+            slicer.modules.markups.logic().JumpSlicesToLocation(x, y, z, True)
+        except Exception:
+            logging.exception("Lesion network mapping: the views could not jump to the VLSM cluster")
+            return None
+        return (x, y, z)
+
+    def _showFirstMap(self):
+        super()._showFirstMap()
+        if not self._cleanedUp:
+            self.jumpToCluster()
 
     def seedState(self):
         """(enabled, reason) of Seed from VLSM cluster."""
