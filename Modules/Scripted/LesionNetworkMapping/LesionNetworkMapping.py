@@ -1487,6 +1487,8 @@ class ConnectomeManagerDialog(qt.QDialog):
 
             for spec in discoverManagerActions():
                 button = self._button(rowB, str(spec["label"]), f"LNMManagerAction_{spec['id']}", lambda spec=spec: self.runPluginAction(spec), "")
+                # "always": the action needs no selected connectome (Get a connectome… is how a first one is obtained)
+                button.setProperty("lnmAlways", bool(spec.get("always")))
                 self.pluginButtons.append(button)
         except Exception:
             logging.exception("Lesion network mapping: the connectome actions could not be discovered")
@@ -1566,14 +1568,14 @@ class ConnectomeManagerDialog(qt.QDialog):
         row = self.selectedRow()
         busy = self.job is not None and not self.job.isFinished()
         ok = row is not None and not row.get("error")
-        self.provenanceLabel.setText(managerLib.provenance_line(row) if row is not None else _("No connectome registered: Add bundle…, Convert… or Create synthetic demo."))
+        self.provenanceLabel.setText(managerLib.provenance_line(row) if row is not None else _("No connectome registered: Get a connectome…, Add bundle…, Convert… or Create synthetic demo."))
         self.referenceButton.setEnabled(ok and not busy)
         self.hubnessButton.setEnabled(ok and not busy and not row.get("has_degree"))
         self.hubnessButton.setToolTip(_("This connectome has a hubness (degree) map") if ok and row.get("has_degree") else _("The degree map (mean |Fz| to 1000 seeds)"))
         self.removeButton.setEnabled(row is not None)
         self.convertButton.setEnabled(not busy)
         for button in self.pluginButtons:
-            button.setEnabled(ok)
+            button.setEnabled(ok or bool(button.property("lnmAlways")))
 
     #
     # Jobs
@@ -3211,6 +3213,15 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.connectomeEmptyLabel = self._label(_("Map needs a connectome. ") + GSP_EMPTY_TEXT, objectName="LNMConnectomeEmptyText")
         emptyLayout.addWidget(self.connectomeEmptyLabel)
         buttons = qt.QHBoxLayout()
+        # The way a first-time user obtains one: the catalog (manager_catalog, D-L1), which downloads only after an explicit click and the
+        # acceptance of the provider's live terms text; without the plug-in the button is hidden
+        self.getConnectomeButton = qt.QPushButton(_("Get a connectome…"))
+        self.getConnectomeButton.setObjectName("LNMGetConnectomeButton")
+        self.getConnectomeButton.setProperty("slicerRole", "primary")
+        self.getConnectomeButton.setToolTip(_("The connectomes that can be obtained from their providers, with their terms and size; nothing is downloaded until you ask"))
+        self.getConnectomeButton.connect("clicked()", self.onGetConnectome)
+        self.getConnectomeButton.setVisible(self._hasManagerAction("getConnectome"))
+        buttons.addWidget(self.getConnectomeButton)
         self.addBundleButton = qt.QPushButton(_("Add connectome…"))
         self.addBundleButton.setObjectName("LNMAddConnectomeButton")
         self.addBundleButton.setProperty("slicerRole", "secondary")
@@ -3261,7 +3272,27 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         for spec in actions:
             action = menu.addAction(str(spec["label"]))
             action.connect("triggered()", lambda spec=spec: self._runManagerAction(spec))
-            action.setEnabled(bool(path))
+            # "always": the action needs no connectome (Get a connectome… is how a first one is obtained)
+            action.setEnabled(bool(path) or bool(spec.get("always")))
+
+    def _hasManagerAction(self, actionId):
+        from LesionNetworkMappingUI import discoverManagerActions
+
+        try:
+            return any(spec["id"] == actionId for spec in discoverManagerActions())
+        except Exception:
+            logging.exception("Lesion network mapping: the connectome actions could not be discovered")
+            return False
+
+    def onGetConnectome(self):
+        """Open the catalog of connectomes that can be obtained (manager_catalog, D-L1): nothing is downloaded until the user asks there."""
+        try:
+            from LesionNetworkMappingUI import manager_catalog
+
+            manager_catalog.openCatalog(self.ctx)
+        except Exception as exc:
+            logging.exception("Lesion network mapping: the connectome catalog could not be opened")
+            slicer.util.errorDisplay(str(exc), windowTitle=_("Get a connectome"))
 
     def _runManagerAction(self, spec):
         path = self._connectomePath

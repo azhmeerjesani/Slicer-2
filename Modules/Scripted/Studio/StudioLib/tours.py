@@ -371,9 +371,9 @@ _MAP_STEPS = (
          inSlicer=_("Not part of official 3D Slicer."), workspace="map", inspector=True, placement="left",
          when=lambda shell: _cohortSeedAvailable()),
     Step("connectome", "LNMConnectomeCard", _("Connectome"),
-         _("A connectome is a folder on this computer (a .lnmc bundle): add one with Add connectome…, convert data you have with Manage… > "
-           "Convert…, or try Map with the demo, a small synthetic connectome (not real data). Nothing is downloaded unless you ask, and its data "
-           "use terms must be accepted first."),
+         _("A connectome is a folder on this computer (a .lnmc bundle): Get a connectome… lists the ones you can obtain from their providers "
+           "(it downloads only after you read and accept the provider's terms), Add connectome… registers one you have, Manage… > Convert… "
+           "converts your own data, and the demo is a small synthetic connectome (not real data). Nothing is downloaded unless you ask."),
          rows=("connectome",), workspace="map", inspector=True, placement="left"),
     Step("compute", "LNMComputeButton", _("Map network"),
          _("Computes the network map of the lesion with the chosen connectome, in the background (with Seed = Cohort: Run everything). "

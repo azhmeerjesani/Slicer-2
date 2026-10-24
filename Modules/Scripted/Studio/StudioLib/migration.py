@@ -245,9 +245,9 @@ ROWS = (
         note=_("Official 3D Slicer has no lesion network mapping; the maps that Map writes are standard NIfTI files that official 3D Slicer opens."),
         category="module"),
     Row("connectome", _("Connectome (not part of official 3D Slicer)"),
-        _("Map > Connectome: add a connectome folder on this computer (a .lnmc bundle) or try the synthetic demo; nothing is downloaded "
-          "unless you ask, and the data use terms are accepted first"),
-        target="LNMConnectomeCard", workspace="map", keywords="connectome gsp1000 normative functional connectivity bundle lnmc demo terms",
+        _("Map > Connectome: Get a connectome… downloads one from its provider after you accept its terms, Add connectome… registers a "
+          "folder on this computer (a .lnmc bundle), or try the synthetic demo; nothing is downloaded unless you ask"),
+        target="LNMConnectomeCard", workspace="map", keywords="connectome gsp1000 normative functional connectivity bundle lnmc demo terms get download catalog",
         category="panel"),
 )
 

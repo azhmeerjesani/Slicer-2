@@ -83,7 +83,7 @@ Windows and Linux; on macOS, Ctrl is ⌘.
 | Slice view controller bars | Above each view. In the flat bars the sliders button opens the layers, opacity and interpolation on click, the orientation button (Axial ▾) has Reformat… and Reset, and the position shows the slice number; the classic bars keep the pin |
 | Data Probe (bottom of the module panel) | The probe at the bottom right of the view under the mouse: position (MNI or scanner), value and lesion; ⋯ in the inspector header > Show Data Probe shows the classic panel |
 | Lesion network mapping (not part of official 3D Slicer) | Map (Ctrl+Alt+3): choose the lesion and a connectome, then Map network (Ctrl+Enter); the map opens in the views with its threshold rule, quality checks and export |
-| Connectome (not part of official 3D Slicer) | Map > Connectome: add a connectome folder on this computer (a .lnmc bundle) or try the synthetic demo; nothing is downloaded unless you ask, and the data use terms are accepted first |
+| Connectome (not part of official 3D Slicer) | Map > Connectome: Get a connectome… downloads one from its provider after you accept its terms, Add connectome… registers a folder on this computer (a .lnmc bundle), or try the synthetic demo; nothing is downloaded unless you ask |
 <!-- END where-did-it-go -->
 
 ## Keyboard differences
