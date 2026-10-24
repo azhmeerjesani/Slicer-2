@@ -288,7 +288,7 @@ def prepare(study, spec=None, grid=None, space=None, min_lesions=DEFAULT_MIN_LES
     checks = list(design.checks)
     dropped = sum(len(sids) for sids in not_loaded.values())
     if dropped:
-        checks.append(_check("info", "lesions_not_loaded", f"{dropped} subject(s) have no usable lesion and are excluded", {reason: len(sids) for reason, sids in not_loaded.items()}))
+        checks.append(_check("info", "lesions_not_loaded", f"{dropped} subject(s) are not analysed: no usable lesion, or excluded by the study (reasons listed)", {reason: len(sids) for reason, sids in not_loaded.items()}))
     count_min = min_lesion_count(design.n, min_lesions, min_percent)
     matrix = lesion_matrix(occ, design.sids, count_min, binarize_at=binarize_at, memmap_path=memmap_path)
     rule = min_lesion_rule(min_lesions, min_percent)
@@ -556,6 +556,8 @@ def vlsm(study, spec=None, grid=None, space=None, min_lesions=DEFAULT_MIN_LESION
                 "study": study.path,
                 "design": os.path.abspath(os.fspath(design_path)) if design_path else None,
                 "lesions": "lesion column of participants.tsv (binarized at occupancy %g)" % BINARIZE_AT,
+                # design.json's "input" names a connectome map type (Fz or T) of the other cohort tests: VLSM does not use it
+                "outcome": "binary lesion masks (the design's map input is not used)",
             },
             "space": space_label,
             "grid": {"label": prepared.occ.label, "shape": [int(v) for v in prepared.occ.grid.shape], "voxel_mm3": float(prepared.occ.grid.voxel_volume)},

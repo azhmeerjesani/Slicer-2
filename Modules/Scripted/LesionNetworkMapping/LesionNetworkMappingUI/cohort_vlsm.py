@@ -74,6 +74,7 @@ class VlsmTab(CohortTab):
         self.seedJob = None
         self.seedFolder = None
         self.seedNotice = ""
+        self._seedResultKey = None  # (folder, run id) of the result the seed notice belongs to
         self.clusterTable = []
         super().__init__(ctx)
 
@@ -522,6 +523,8 @@ class VlsmTab(CohortTab):
             return False, settings[0]
         if self.design.blocking:
             return False, _("Blocked by the design checks (in red above).")
+        if not self.ctx.computeEnabled():
+            return False, " ".join(self.ctx.computeDisabledReasons()) or _("Not ready")
         if self.ctx.runner.isBusy():
             return True, _("Another computation is running: this one will wait for it.")
         return True, ""
@@ -590,6 +593,12 @@ class VlsmTab(CohortTab):
     #
 
     def showResult(self, folder, record):
+        key = (folder, record.get("run_id"))
+        if key != self._seedResultKey:  # another result: the notice of a seed from the previous one is stale
+            self._seedResultKey = key
+            self._setSeedNotice("")
+            if self.seedJob is None or self.seedJob.isFinished():
+                self.seedProgress.widget.hide()
         files = record.get("outputs") or {}
         desc = (record.get("contrast") or {}).get("desc") or "vlsm"
         effect = (record.get("effect_size") or {}).get("name") or "HedgesG"
@@ -719,6 +728,8 @@ class VlsmTab(CohortTab):
             return False, _("No cluster: no voxel passes FWE p ≤ 0.05.")
         if self.seedJob is not None and not self.seedJob.isFinished():
             return False, _("Mapping the cluster…")
+        if not self.ctx.computeEnabled():
+            return False, " ".join(self.ctx.computeDisabledReasons()) or _("Not ready")
         bundle = self.ctx.bundle
         if bundle is None:
             return False, _("Choose a connectome in the Connectome card: the cluster is mapped with it.")
@@ -765,9 +776,10 @@ class VlsmTab(CohortTab):
         name, counter = self._circuitName(choice), 2
         base = name
         while os.path.exists(os.path.join(root, f"circuit-{name}")):
-            name, counter = f"{base}{counter}", counter + 1
+            # "Run<k>" keeps the cluster number readable ("...C1Run2", not "...C12" that reads as cluster 12)
+            name, counter = f"{base}Run{counter}", counter + 1
         out = os.path.join(root, f"circuit-{name}")
-        os.makedirs(out, exist_ok=True)
+        os.makedirs(root, exist_ok=True)  # the job makes the circuit folder: a failed seed leaves no empty one
         study = self.ctx.study
         args = ["seed", "--vlsm", folder, "--bundle", self.ctx.bundle.path, "--out", out, "--name", name, "--run-root", getattr(study, "path", None) or self.ctx.runRoot()]
         if choice.startswith("all:"):
@@ -802,6 +814,8 @@ class VlsmTab(CohortTab):
             return
         self.seedProgress.update()
         name = os.path.basename(out)
+        if job.state in ("failed", "cancelled"):
+            _removeUnfinished(out)
         if job.state == "failed":
             self._setSeedNotice(_("The circuit could not be made: {reason}").format(reason=job.failureReason))
         elif job.state == "cancelled":
@@ -825,6 +839,21 @@ class VlsmTab(CohortTab):
             self.seedJob.spec.onDone = None
             self.seedJob.spec.onEvent = None
         super().cleanup()
+
+
+def _removeUnfinished(folder):
+    """Remove the circuit folder of a seed that did not finish (no circuit.json): seedFromCluster chose a new folder name,
+    so it holds only that seed's partial files, and the next seed gets the same name again. The job log stays in logs/.
+    """
+    import shutil
+
+    from LesionNetworkMappingLib import circuits
+
+    try:
+        if os.path.isdir(folder) and not os.path.exists(os.path.join(folder, circuits.CIRCUIT_JSON)):
+            shutil.rmtree(folder)
+    except OSError:
+        logging.exception("Lesion network mapping: the unfinished circuit folder could not be removed")
 
 
 def _whereText(x, y, z):

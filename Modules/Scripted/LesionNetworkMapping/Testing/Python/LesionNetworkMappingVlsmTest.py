@@ -248,6 +248,7 @@ class VlsmRunTest(unittest.TestCase):
         with open(os.path.join(out, vlsm.VLSM_JSON), encoding="utf-8") as handle:
             stored = json.load(handle)
         self.assertEqual(stored["inputs"]["design"], "../design.json")
+        self.assertIn("binary lesion masks", stored["inputs"]["outcome"])  # design.json's "input" (Fz/T) is not the outcome
         self.assertEqual(_absolute_strings(stored["argv"]), [])
         bad = designlib.DesignSpec(test="one_sample", group_column=None).save(os.path.join(self.tmp, "one.json"))
         code, events, _stderr = _run_cli("run", "--study", self.study.path, "--design", bad, "--grid", grid, "--space", SPACE, "--out", os.path.join(self.tmp, "bad"))
