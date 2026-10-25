@@ -71,7 +71,7 @@ Finder/Files** or **Move to Trash**.
   saved. Only what changed is written again. The top bar says **Saved**,
   **Saving…**, or **Not saved · Retry** if something went wrong (for example a
   full disk).
-- **At once** when you press **Ctrl+S** (⌘S on macOS), switch workspaces or
+- **At once** when you press **Ctrl+S** (⌘S on macOS), go to **Library**, switch
   projects, start a **New project** (Ctrl+N), close the scene (Ctrl+W), or quit.
 - **When you quit**, nothing is asked about unsaved changes: Slicer Studio saves
   first and only asks "All changes are saved in Projects/<name>. Quit?". If

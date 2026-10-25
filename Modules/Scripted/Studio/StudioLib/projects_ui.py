@@ -61,12 +61,17 @@ def _service():
     return autosave.instance()
 
 
-#: A workspace switch saves the open project this long after the switch (the switch itself stays fast)
+#: Going to Library saves the open project this long after the switch (the switch itself stays fast)
 WORKSPACE_SAVE_DELAY_MS = 300
+#: The workspaces whose entry saves the open project now: Library, where work is reviewed, opened and closed. Not Draw or
+#: Map: the user starts editing there at once, and a save then would compete with the first strokes.
+SAVE_ON_ENTER_WORKSPACES = ("library",)
 
 
-def onWorkspaceEntered():
-    """A workspace switch saves the open project now (not after IdleSeconds), shortly after the switch (shell.py)."""
+def onWorkspaceEntered(key=None):
+    """Going to Library saves the open project now (not after IdleSeconds), shortly after the switch (shell.py)."""
+    if key is not None and key not in SAVE_ON_ENTER_WORKSPACES:
+        return
     service = _service()
     if service is None or service.currentProject() is None:
         return
