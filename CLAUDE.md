@@ -10,6 +10,12 @@
   `Slicer Studio packages`) are also disabled on the repository; keep them that way.
 - Do not use any other GitHub feature: no API calls (`api.github.com`, `gh`, GitHub MCP tools), pull
   requests, issues, releases, packages (`ghcr.io`), Git LFS, Codespaces or artifacts.
+- Exception (user request, 2026-10-25): when the features are finished and gate G5 has passed, open ONE
+  pull request from `claude/hopeful-hawking-kibs73` to `main` (GitHub MCP tools for that PR only; it
+  triggers no workflow because every workflow is `workflow_dispatch` only). After that the PR branch
+  stays stable for the user's testing: the bug bash runs on its own branch,
+  `claude/hopeful-hawking-kibs73-bugbash`, created from the PR head, and pushes only there. Do not merge
+  the PR, and do not open another PR unless the user asks.
 - In-app updates (decision D-U1): the app reads the public "latest release" download of this repository
   at run time. The user creates and uploads releases by hand with the files that
   `Utilities/Scripts/SlicerStudioRelease/make_release.py` prepares; never create, edit or upload a
