@@ -453,6 +453,10 @@ class MapOverlay:
         self._placeTimer.setInterval(0)
         self._placeTimer.connect("timeout()", self.place)
         ui.addPaletteListener(self.refresh)
+        # A new layout can show, hide or recreate the main view
+        self._layoutManager = slicer.app.layoutManager()
+        if self._layoutManager is not None:
+            self._layoutManager.connect("layoutChanged(int)", self._onLayoutChanged)
 
     def _styleSheet(self):
         ui = self.ui
@@ -464,9 +468,10 @@ class MapOverlay:
                 f" border: 1px solid {border.name()}; border-radius: 6px; padding: 2px 8px; }}")
 
     def _sliceWidget(self):
+        """The main slice view widget, shown or not: it stays watched while a layout hides it, so that its Show event
+        puts the overlays back."""
         layoutManager = slicer.app.layoutManager()
-        widget = layoutManager.sliceWidget(OVERLAY_VIEW) if layoutManager is not None else None
-        return widget if widget is not None and widget.isVisible() else None
+        return layoutManager.sliceWidget(OVERLAY_VIEW) if layoutManager is not None else None
 
     def _watch(self, sliceWidget):
         if sliceWidget is self._view:
@@ -492,7 +497,8 @@ class MapOverlay:
         self.statisticLabel.setText(statistic)
         self.thresholdLabel.setText(str(state["thresholdText"]))
         window = float(state["window"] or 0.0)
-        for tick, value in zip(self.tickLabels, (-window, 0.0, window), strict=True):
+        level = float(state.get("level") or 0.0)
+        for tick, value in zip(self.tickLabels, (level - window, level, level + window), strict=True):
             tick.setText(_tickText(value))
         self._paintBar()
         opacity = round(100 * float(state["opacity"]))
@@ -528,6 +534,9 @@ class MapOverlay:
         pixmap.setDevicePixelRatio(ratio)
         self.bar.setPixmap(pixmap)
 
+    def _onLayoutChanged(self, layout=None):
+        self.schedulePlace()
+
     def schedulePlace(self):
         if not self._placeTimer.isActive():
             self._placeTimer.start()
@@ -538,7 +547,7 @@ class MapOverlay:
             return
         sliceWidget = self._sliceWidget()
         self._watch(sliceWidget)
-        if self._state is None or sliceWidget is None:
+        if self._state is None or sliceWidget is None or not sliceWidget.isVisible():
             self.legend.hide()
             self.chips.hide()
             return
@@ -563,6 +572,12 @@ class MapOverlay:
     def dispose(self):
         self.ui.removePaletteListener(self.refresh)
         self._placeTimer.stop()
+        if self._layoutManager is not None and self.ui._isAlive(self._layoutManager):
+            try:
+                self._layoutManager.disconnect("layoutChanged(int)", self._onLayoutChanged)
+            except Exception:
+                pass
+        self._layoutManager = None
         self._watch(None)
         for widget in (self.legend, self.chips):
             if self.ui._isAlive(widget):

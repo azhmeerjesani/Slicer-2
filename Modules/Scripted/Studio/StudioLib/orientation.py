@@ -114,17 +114,19 @@ _controller = None
 _quitConnected = False
 
 
-def displayStatement(sliceToRAS):
+def displayStatement(sliceToRAS, short=False):
     """Plain-words display statement of a view: "Radiological · L on right" or "Neurological · L on left".
 
     ``sliceToRAS`` is the ``vtkMatrix4x4`` SliceToRAS of the slice node. The statement exists only when the
     screen-right direction (column 0) is along x (|x| > 0.9): axial and coronal views, flipped or not. An empty
-    string is returned for sagittal and oblique views.
+    string is returned for sagittal and oblique views. ``short``: the side alone ("L on right"), for narrow views.
     """
     x = sliceToRAS.GetElement(0, 0)
     length = math.sqrt(sum(sliceToRAS.GetElement(row, 0) ** 2 for row in range(3)))
     if length < 1e-9 or abs(x) / length <= STATEMENT_AXIS_THRESHOLD:
         return ""
+    if short:
+        return _("L on right") if x < 0 else _("L on left")
     return _("Radiological · L on right") if x < 0 else _("Neurological · L on left")
 
 
@@ -229,6 +231,12 @@ class _ViewLetters:
         #: The patient directions of a figure whose convention was answered: ("R", "L"), else ("", "")
         self.figureLetters = ("", "")
         self.statement = ""
+        #: The short form of the statement ("L on right") and the text shown: a narrow view shows the short form, or
+        #: raises the statement above the bottom letter when even that would touch it
+        self.shortStatement = ""
+        self.shownStatement = ""
+        #: {(text, font size, bold): (width, height)} of measured texts, in display pixels
+        self.textSizes = {}
         self.tag = ""
         self.isFigure = False
         self.convention = None
@@ -408,19 +416,59 @@ class _ViewLetters:
         self.cornerTexts[position] = (text, height)
         return height
 
-    def _placeStatement(self):
-        """Put the statement above the lower-right lines of the corner annotation and the tag above its lower-left lines.
+    def _textSize(self, actor, text):
+        """(width, height) in display pixels of ``text`` in the font of ``actor`` (measured once per text and font)."""
+        textProperty = actor.GetTextProperty()
+        key = (text, textProperty.GetFontSize(), bool(textProperty.GetBold()))
+        size = self.textSizes.get(key)
+        if size is None:
+            probe = vtk.vtkTextActor()
+            probe.GetTextProperty().ShallowCopy(textProperty)
+            probe.SetInput(text)
+            box = [0.0] * 4
+            probe.GetBoundingBox(self.renderer, box)
+            size = (math.ceil(box[1] - box[0]), math.ceil(box[3] - box[2]))
+            self.textSizes[key] = size
+        return size
 
-        Return True if they moved.
+    def _fitStatement(self, statementY):
+        """The statement text and its height above the bottom for the view width: the full statement when it clears the
+        bottom letter, else the short form, else the short form raised above the letter.
         """
-        previous = (self.statementOffset, self.tagOffset)
+        bottomLetter = self.letters[3]
+        if not self.statement or not bottomLetter:
+            return self.statement, statementY
+        width, height = self.renderer.GetSize()
+        letterWidth, letterHeight = self._textSize(self.actors[3], bottomLetter)
+        letterBottom = bottomReference(self.rulerType)[1] * height + EDGE_MARGIN
+        letterTop = letterBottom + letterHeight
+        # Room right of the bottom letter (centred in the view) for the right-aligned statement
+        room = width / 2.0 - letterWidth / 2.0 - STATEMENT_GAP - CORNER_ANNOTATION_MARGIN
+        for text in (self.statement, self.shortStatement):
+            textWidth, textHeight = self._textSize(self.statementActor, text)
+            if textWidth <= room or statementY >= letterTop or statementY + textHeight <= letterBottom:
+                return text, statementY
+        return self.shortStatement, math.ceil(letterTop) + STATEMENT_GAP
+
+    def _placeStatement(self):
+        """Put the statement above the lower-right lines of the corner annotation and the tag above its lower-left lines;
+        in a narrow view the statement is shortened or raised so that it never runs into the bottom letter.
+
+        Return True if they moved or the statement text changed.
+        """
+        previous = (self.statementOffset, self.tagOffset, self.shownStatement, tuple(self.statementActor.GetPositionCoordinate().GetValue()[:2]))
         self.statementOffset = self._cornerTextHeight(1) if self.statement else self.statementOffset
         self.tagOffset = self._cornerTextHeight(0) if self.tag else self.tagOffset
         statementY = CORNER_ANNOTATION_MARGIN + (self.statementOffset + STATEMENT_GAP if self.statementOffset else 0)
         tagY = CORNER_ANNOTATION_MARGIN + (self.tagOffset + STATEMENT_GAP if self.tagOffset else 0)
+        shown, statementY = self._fitStatement(statementY)
+        if shown != self.shownStatement:
+            self.shownStatement = shown
+            self.statementActor.SetInput(shown)
         self.statementActor.GetPositionCoordinate().SetValue(-CORNER_ANNOTATION_MARGIN, statementY)
         self.tagActor.GetPositionCoordinate().SetValue(CORNER_ANNOTATION_MARGIN, tagY)
-        return (self.statementOffset, self.tagOffset) != previous
+        current = (self.statementOffset, self.tagOffset, self.shownStatement, tuple(self.statementActor.GetPositionCoordinate().GetValue()[:2]))
+        return current != previous
 
     def _updateFigureState(self):
         """Re-evaluate whether the view shows a figure (and its convention). Return True if the figure state changed."""
@@ -469,6 +517,7 @@ class _ViewLetters:
                 letters = edgeLetters(sliceToRAS)
                 figureLetters = ("", "")
                 statement = displayStatement(sliceToRAS)
+                self.shortStatement = displayStatement(sliceToRAS, short=True)
                 tag = ""
             if letters != self.letters:
                 self.letters = letters
@@ -482,7 +531,9 @@ class _ViewLetters:
                 changed = True
             if statement != self.statement:
                 self.statement = statement
-                self.statementActor.SetInput(statement)
+                if not statement:
+                    self.shownStatement = ""
+                    self.statementActor.SetInput("")
                 changed = True
             if tag != self.tag:
                 self.tag = tag
@@ -645,6 +696,14 @@ def viewStatement(sliceViewName):
         return None
     view = _controller.views.get(sliceViewName)
     return view.statement if view is not None else None
+
+
+def viewShownStatement(sliceViewName):
+    """The statement text a slice view shows now (the short form in a narrow view), "" if none, None without letters."""
+    if _controller is None:
+        return None
+    view = _controller.views.get(sliceViewName)
+    return view.shownStatement if view is not None else None
 
 
 def viewTag(sliceViewName):

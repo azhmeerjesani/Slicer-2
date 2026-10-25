@@ -597,42 +597,65 @@ PEAK_REGION_ATLASES = (
 )
 #: The region of a peak that no usable atlas labels
 OUTSIDE_ATLAS = "Outside atlas"
-#: Labels that say nothing about where a peak is: the next atlas names it
-_GENERIC_REGION = re.compile(r"(?i)^(left |right )?(cerebral (white matter|cortex)|lateral ventric(le|al)|brain-?stem)$")
+#: Broad labels (cerebral white matter or cortex, a lateral ventricle): the next atlas may name the region more precisely,
+#: else the broad label is shown (it still says where the peak is)
+_GENERIC_REGION = re.compile(r"(?i)^(left |right )?(cerebral (white matter|cortex)|lateral ventric(le|al))$")
+#: Midline structures: no side is taken from x
+_MIDLINE_REGION = re.compile(r"(?i)brain-?stem|vermis|corpus callosum|(3rd|4th|third|fourth) ventricle")
 _SIDE_PREFIX = re.compile(r"(?i)^(left|right|lh|rh|l|r)[ _-]+")
 _SIDE_SUFFIX = re.compile(r"(?i)[ _-]+(left|right|lh|rh|l|r)$")
-#: {(cache folder, atlas id): Atlas} of the atlases loaded for peak regions (an atlas file is read once)
+#: {(cache folder, atlas id): Atlas} of the atlases loaded for peak regions (an atlas file is read once, when needed)
 _region_atlases = {}
 
 
-def region_atlases(cache=None):
-    """The cached atlases of :data:`PEAK_REGION_ATLASES`, in that order (read once per cache folder; never downloads)."""
-    folder = fetch.cache_dir(cache)
+def _sameFamily(family, atlasFamily):
+    """Whether an atlas of ``atlasFamily`` may name the regions of a map of ``family`` (unknown families are not refused)."""
+    unknown = ("unknown", "native", None, "")
+    return family in unknown or atlasFamily in unknown or atlasFamily == family
+
+
+def _region_resources(folder, family=None):
+    """The cached catalog entries of :data:`PEAK_REGION_ATLASES`, in that order, without those of another family."""
     found = []
     for atlas_id in PEAK_REGION_ATLASES:
-        key = (folder, atlas_id)
-        atlas = _region_atlases.get(key)
-        if atlas is None:
-            try:
-                resource = fetch.find_resource(atlas_id, ("atlases",))
-            except Exception:
-                continue
-            if not fetch.is_cached(resource, folder):
-                continue
-            try:
-                atlas = Atlas.load(resource, folder)
-            except Exception:
-                continue
-            _region_atlases[key] = atlas
-        found.append(atlas)
+        try:
+            resource = fetch.find_resource(atlas_id, ("atlases",))
+        except Exception:
+            continue
+        if not _sameFamily(family, resource.get("family")) or not fetch.is_cached(resource, folder):
+            continue
+        found.append(resource)
     return found
+
+
+def _region_atlas(resource, folder):
+    """The atlas of a catalog entry, read once per cache folder (None if it cannot be read)."""
+    key = (folder, resource.id)
+    atlas = _region_atlases.get(key)
+    if atlas is None:
+        try:
+            atlas = Atlas.load(resource, folder)
+        except Exception:
+            return None
+        _region_atlases[key] = atlas
+    return atlas
+
+
+def region_atlases(cache=None, family=None):
+    """The cached atlases of :data:`PEAK_REGION_ATLASES`, in that order (read once per cache folder; never downloads).
+
+    ``family`` (a space family) leaves out the atlases of another family before they are read.
+    """
+    folder = fetch.cache_dir(cache)
+    atlases = (_region_atlas(resource, folder) for resource in _region_resources(folder, family))
+    return [atlas for atlas in atlases if atlas is not None and _sameFamily(family, atlas.family)]
 
 
 def region_text(label, x=None):
     """A short region name for a table: "Left Caudate" -> "L caudate", "Angular Gyrus" at x < 0 -> "L angular gyrus".
 
-    The side comes from the label when it has one, else from ``x`` (the RAS x of the point: negative is left). Words in
-    title case are lowered ("Crus I" keeps its numeral).
+    The side comes from the label when it has one, else from ``x`` (the RAS x of the point: negative is left; not for
+    midline structures such as the brainstem). Words in title case are lowered ("Crus I" keeps its numeral).
     """
     raw = str(label or "").strip()
     schaefer = re.match(r"^(?:\d+Networks_)?(LH|RH)_(.+)$", raw)
@@ -645,7 +668,7 @@ def region_text(label, x=None):
     if match:
         side = "L" if match.group(1).lower() in ("left", "lh", "l") else "R"
         text = (text[match.end():] if match.start() == 0 else text[:match.start()]).strip()
-    elif x is not None and abs(float(x)) >= 1.0:
+    elif x is not None and abs(float(x)) >= 1.0 and not _MIDLINE_REGION.search(text):
         side = "L" if float(x) < 0 else "R"
     words = [word.lower() if len(word) > 1 and word[0].isupper() and word[1:].islower() else word for word in text.split()]
     text = " ".join(words)
@@ -658,26 +681,43 @@ def peak_regions(points, space=None, cache=None, atlases=None):
     """Region names of peaks (world RAS mm, (N, 3)) for the Peak region column.
 
     Each point gets the label of the first usable atlas (in :data:`PEAK_REGION_ATLASES` order) that names a region there
-    other than a generic one (cerebral cortex or white matter), as :func:`region_text`; :data:`OUTSIDE_ATLAS` when the
-    usable atlases name nothing there. ``space`` (the template space of the map) skips the atlases of another space family.
+    other than a broad one (cerebral cortex or white matter, a lateral ventricle), as :func:`region_text`. When the atlases
+    give only broad labels, the first broad label is shown; :data:`OUTSIDE_ATLAS` only when no usable atlas labels the
+    point. ``space`` (the template space of the map) skips the atlases of another space family. The cached atlases are
+    read only while some point has no specific name yet.
 
     :return: a list of texts, one per point, or None when no usable atlas is cached (nothing can be said).
     """
     points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
-    candidates = region_atlases(cache) if atlases is None else _as_atlases(atlases)
-    if space:
-        family = space_family(space)
-        candidates = [atlas for atlas in candidates if family in ("unknown", "native") or atlas.family in ("unknown", "native") or atlas.family == family]
-    if not candidates:
-        return None
+    family = space_family(space) if space else None
+    if atlases is None:
+        folder = fetch.cache_dir(cache)
+        sources = [(resource, folder) for resource in _region_resources(folder, family)]
+    else:
+        sources = [(atlas, None) for atlas in _as_atlases(atlases)]
     names = [None] * len(points)
-    for atlas in candidates:
+    fallback = [None] * len(points)
+    usable = False
+    for source, folder in sources:
         missing = [index for index, name in enumerate(names) if name is None]
+        if usable and not missing:
+            break
+        atlas = source if isinstance(source, Atlas) else _region_atlas(source, folder)
+        if atlas is None or not _sameFamily(family, atlas.family):
+            continue
+        usable = True
         if not missing:
             break
         values = atlas.values_at(points[missing])
         for index, value in zip(missing, values, strict=True):
             label = atlas.label_name(value)
-            if label and not _GENERIC_REGION.match(str(label).replace("_", " ").strip()):
+            if not label:
+                continue
+            if _GENERIC_REGION.match(str(label).replace("_", " ").strip()):
+                if fallback[index] is None:
+                    fallback[index] = region_text(label, points[index][0])
+            else:
                 names[index] = region_text(label, points[index][0])
-    return [name or OUTSIDE_ATLAS for name in names]
+    if not usable:
+        return None
+    return [name or broad or OUTSIDE_ATLAS for name, broad in zip(names, fallback, strict=True)]

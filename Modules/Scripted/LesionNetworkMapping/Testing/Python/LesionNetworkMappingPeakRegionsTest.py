@@ -17,7 +17,7 @@ if MODULE_DIR not in sys.path:
 
 import numpy as np
 
-from LesionNetworkMappingLib import atlases
+from LesionNetworkMappingLib import atlases, fetch
 
 SHAPE = (20, 22, 18)
 # 2 mm voxels; x = 2 i - 19 is never 0, so every voxel is left (i <= 9) or right (i >= 10)
@@ -54,6 +54,8 @@ class PeakRegionsTest(unittest.TestCase):
         self.assertEqual(atlases.region_text("Angular Gyrus", 40.0), "R angular gyrus")
         # On the midline the side is not stated
         self.assertEqual(atlases.region_text("Brain-Stem", 0.4), "Brain-Stem")
+        # Midline structures take no side from x
+        self.assertEqual(atlases.region_text("Brain-Stem", 6.0), "Brain-Stem")
         self.assertEqual(atlases.region_text("7Networks_LH_Vis_1"), "L Vis 1")
         self.assertEqual(atlases.region_text("Precentral_R"), "R precentral")
         self.assertEqual(atlases.region_text("THA-lh"), "L THA")
@@ -63,9 +65,40 @@ class PeakRegionsTest(unittest.TestCase):
     def test_first_specific_label_wins(self):
         points = [world((4, 4, 4)), world((15, 15, 9)), world((15, 4, 9))]
         names = atlases.peak_regions(points, atlases=[subcortical(), cortical()])
-        # In the caudate box: the subcortical name. In white matter (generic): the cortical atlas names it, with the side
-        # from x. In white matter and outside the cortical label: outside atlas
-        self.assertEqual(names, ["L caudate", "R angular gyrus", atlases.OUTSIDE_ATLAS])
+        # In the caudate box: the subcortical name. In white matter (broad): the cortical atlas names it, with the side
+        # from x. In white matter and outside the cortical label: the broad label (the peak is inside the atlas)
+        self.assertEqual(names, ["L caudate", "R angular gyrus", "R cerebral white matter"])
+
+    def test_broad_labels_are_kept(self):
+        # With the subcortical atlas alone, a white matter peak shows its broad label and a brainstem peak its own
+        data = subcortical().data.copy()
+        data[8:12, 15:18, 3:6] = 4
+        atlas = atlases.Atlas("subcortical", data, AFFINE, {1: "Left Cerebral White Matter", 2: "Right Cerebral White Matter",
+                                                            3: "Left Caudate", 4: "Brain-Stem"}, family="fsl6")
+        names = atlases.peak_regions([world((15, 15, 9)), world((10, 16, 4)), world((4, 4, 4))], atlases=[atlas])
+        self.assertEqual(names, ["R cerebral white matter", "Brain-Stem", "L caudate"])
+        # Outside atlas only where no atlas has a label
+        empty = atlases.Atlas("empty", np.zeros(SHAPE, np.int16), AFFINE, {}, family="fsl6")
+        self.assertEqual(atlases.peak_regions([world((15, 15, 9))], atlases=[empty]), [atlases.OUTSIDE_ATLAS])
+
+    def test_later_atlases_are_not_read_when_every_peak_is_named(self):
+        loaded = []
+        original = atlases._region_atlas
+
+        def regionAtlas(resource, folder):
+            loaded.append(resource)
+            return [subcortical(), cortical()][len(loaded) - 1]
+
+        resources = [fetch.Resource.coerce({"id": f"a{index}", "title": "A", "url": "https://example.org/a.nii.gz"}) for index in range(2)]
+        originalResources = atlases._region_resources
+        atlases._region_atlas = regionAtlas
+        atlases._region_resources = lambda folder, family=None: resources
+        try:
+            self.assertEqual(atlases.peak_regions([world((4, 4, 4))]), ["L caudate"])
+        finally:
+            atlases._region_atlas = original
+            atlases._region_resources = originalResources
+        self.assertEqual(len(loaded), 1)
 
     def test_outside_the_atlas_grid(self):
         names = atlases.peak_regions([[500.0, 0.0, 0.0]], atlases=[subcortical()])

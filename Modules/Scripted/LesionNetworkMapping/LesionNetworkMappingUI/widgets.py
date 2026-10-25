@@ -11,6 +11,7 @@ import html
 import ctk
 import qt
 import slicer
+from slicer.i18n import tr as _
 
 CHIP_LEVELS = ("neutral", "busy", "ok", "warn", "danger")
 
@@ -257,7 +258,7 @@ def noticeLine(objectName="LNMNoticeLine"):
     label.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
     _font(label, 12)
     layout.addWidget(label, 1)
-    details = qt.QPushButton("Details")
+    details = qt.QPushButton(_("Details"))
     details.setObjectName("LNMNoticeLineDetails")
     details.setFlat(True)
     details.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))

@@ -1280,14 +1280,22 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertIsNotNone(self.mainWindow.findChild("QFrame", "StudioLesionCard"))
         self.assertIsNotNone(self.mainWindow.findChild("QWidget", "StudioDisplayCard"))
         # More tools: every effect, in the studio order, and the masking section (its overwrite options, V-03)
+        editor.setActiveEffectByName("Paint")
+        self._pump()
+        masking = editor.findChild("QWidget", "MaskingGroupBox")
+        hasEffect = editor.activeEffect() is not None
         widget.setMoreToolsShown(True)
         self._pump()
         self.assertTrue(editor.findChild("QToolButton", "Level tracing").isVisibleTo(editor))
         self.assertTrue(editor.maskingSectionVisible)
+        if hasEffect:
+            # Shown at once, without choosing another tool
+            self.assertTrue(masking.isVisibleTo(editor))
         widget.setMoreToolsShown(False)
         self._pump()
         self.assertFalse(editor.findChild("QToolButton", "Level tracing").isVisibleTo(editor))
         self.assertFalse(editor.maskingSectionVisible)
+        self.assertFalse(masking.isVisibleTo(editor))
         # A masking that restricts editing stays in sight
         editorNode = editor.mrmlSegmentEditorNode()
         editorNode.SetOverwriteMode(slicer.vtkMRMLSegmentEditorNode.OverwriteNone)
@@ -1296,6 +1304,8 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         editorNode.SetOverwriteMode(slicer.vtkMRMLSegmentEditorNode.OverwriteAllSegments)
         self._pump()
         self.assertFalse(editor.maskingSectionVisible)
+        editor.setActiveEffectByName("")
+        self._pump()
         # The inline rename never writes the classic settings key that official Slicer reads
         tableView = editor.findChild("qMRMLSegmentsTableView", "SegmentsTableView")
         self.assertEqual(tableView.useTerminologySelectorSettingsKey, SegmentEditor.STUDIO_TERMINOLOGY_SETTINGS_KEY)

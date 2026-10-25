@@ -2131,10 +2131,17 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         the module panel): the seed modes row, the opacity percentage, the compact header rows of the cards. The steps
         collapse only in Studio (``_applyStepCollapse``).
         """
+        lookChanged = bool(studio) != self._studioLook
         self._studioLook = bool(studio)
         self._placeSeedModes(studio)
         self._applyResultPresentation(studio)
         self._notifyControllers("onPresentationChanged", studio)
+        if lookChanged:
+            # The steps take their Studio state again: those already done (a connectome remembered from an earlier
+            # session, a lesion checked before Map was shown) collapse now, not at their next change
+            self._stepStates = {}
+            if studio:
+                self._updateSteps()
         if refresh and hasattr(self, "resultNotice"):
             self.refreshResult(reloadMaps=False)
 
@@ -2145,7 +2152,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
 
     def legendState(self):
         """What the Studio map legend and layer chips show (``StudioLib.mappage``), or None without a map in the views:
-        ``{statistic, window, threshold (None: unthresholded), thresholdText, sign, opacity, outline}``.
+        ``{statistic, window (half-width), level, threshold (None: unthresholded), thresholdText, sign, opacity, outline}``.
         """
         from LesionNetworkMappingLib import display, thresholds
 
@@ -2159,6 +2166,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             window = displayNode.GetWindow() / 2.0 if displayNode is not None else float(volume.GetAttribute(display.WINDOW_ATTRIBUTE) or 0.0)
         except ValueError:
             window = 0.0
+        # The centre of the colours (0 for the maps Map shows)
+        level = displayNode.GetLevel() if displayNode is not None else 0.0
         statistic = self.currentStatistic()
         rule = self.currentRule()
         resolved = self.resolved
@@ -2170,7 +2179,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             quantity = {"both": f"|{statistic}|", "pos": statistic, "neg": f"−{statistic}"}.get(self._sign(), statistic)  # noqa: RUF001
             label = thresholds.RULE_LABELS.get(rule["kind"], rule["kind"])
             thresholdText = f"{label} · {quantity} ≥ {threshold:.1f}"
-        return {"statistic": statistic, "window": window, "threshold": threshold, "thresholdText": thresholdText, "sign": self._sign(),
+        return {"statistic": statistic, "window": window, "level": level, "threshold": threshold, "thresholdText": thresholdText, "sign": self._sign(),
                 "opacity": float(node.opacity) if node is not None else 0.8, "outline": self._outlineState is not None}
 
     def studioMenuActions(self):
@@ -5115,15 +5124,19 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="LNMPeakRegions")
             LesionNetworkMappingWidget._regionExecutor = executor
         future = executor.submit(atlases.peak_regions, points, space, cache)
+        previous = getattr(self, "_peakRegionJob", None)
+        if previous is not None:
+            self._endPeakRegionPoll(previous)
         job = {"future": future, "peaks": peaks}
         self._peakRegionJob = job
-        timer = qt.QTimer()
+        # Parented to the panel and deleted when the poll ends: no timer (and its Python slot) is left behind
+        timer = qt.QTimer(self.parent) if self.parent is not None else qt.QTimer()
         timer.setInterval(30)
 
         def poll():
             if not future.done():
                 return
-            timer.stop()
+            self._endPeakRegionPoll(job)
             if self._peakRegionJob is not job:
                 return
             self._peakRegionJob = None
@@ -5137,6 +5150,19 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         timer.connect("timeout()", poll)
         job["timer"] = timer
         timer.start()
+
+    @staticmethod
+    def _endPeakRegionPoll(job):
+        """Stop and delete the poll timer of a peak region lookup (the lookup itself ends on its own)."""
+        timer = job.pop("timer", None)
+        if timer is None:
+            return
+        try:
+            timer.stop()
+            # Deleting the timer also drops its connection to the Python slot
+            timer.deleteLater()
+        except Exception:
+            pass
 
     def _showPeakRegions(self, peaks, regions):
         """The Peak region column: the region names, or "—" when no atlas is downloaded (the tooltip says how to get one)."""

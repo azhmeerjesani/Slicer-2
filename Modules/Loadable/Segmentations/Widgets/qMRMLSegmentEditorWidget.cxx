@@ -314,6 +314,15 @@ public:
   /// Show or enable the tool options: the options group box, or the options frame alone in the Studio look
   void setOptionsSectionVisible(bool visible);
   void setOptionsSectionEnabled(bool enabled);
+  /// Enable the options frame itself (it needs a segmentation)
+  void setOptionsFrameEnabled(bool enabled);
+  /// Apply both enabled states: in the classic presentation to the group box and to the frame in it, in the Studio look
+  /// (no group box around the frame) both to the frame
+  void updateOptionsEnabled();
+  /// Tool options enabled (a source volume is selected and the editor is not locked)
+  bool OptionsSectionEnabled{ false };
+  /// Options frame enabled (a segmentation is selected)
+  bool OptionsFrameEnabled{ true };
   /// Updates the masking title when the masking section is resized or its layout changes
   qMRMLSegmentEditorMaskingTitleFilter* MaskingTitleFilter{ nullptr };
 
@@ -513,7 +522,7 @@ void qMRMLSegmentEditorWidgetPrivate::init()
   this->RemoveSegmentButton->setEnabled(false);
   this->SwitchToSegmentationsButton->setEnabled(false);
   this->EffectsGroupBox->setEnabled(false);
-  this->OptionsGroupBox->setEnabled(false);
+  this->setOptionsSectionEnabled(false);
 
   this->EffectsGroupBox->setLayout(new QGridLayout(this->EffectsGroupBox));
 
@@ -841,6 +850,10 @@ void qMRMLSegmentEditorWidgetPrivate::updateMaskingTitle()
 //-----------------------------------------------------------------------------
 void qMRMLSegmentEditorWidgetPrivate::updateSectionFrames()
 {
+  if (qEnvironmentVariableIsSet("STUDIO_AB_NO_SECTION_FRAMES")) // TEMPORARY A/B (V-03 review), removed before the report
+  {
+    return;
+  }
   // Studio look: the options frame is shown without the group box around it (Fusion keeps a frame and a title
   // row in a group box even without a title); the classic presentation puts it back
   QVBoxLayout* groupBoxLayout = qobject_cast<QVBoxLayout*>(this->OptionsGroupBox->layout());
@@ -848,23 +861,20 @@ void qMRMLSegmentEditorWidgetPrivate::updateSectionFrames()
   if (this->StudioPresentation && inGroupBox && groupBoxLayout)
   {
     bool visible = !this->OptionsGroupBox->isHidden();
-    bool enabled = this->OptionsGroupBox->isEnabled();
     groupBoxLayout->removeWidget(this->EffectsOptionsFrame);
     this->verticalLayout->insertWidget(this->verticalLayout->indexOf(this->OptionsGroupBox) + 1, this->EffectsOptionsFrame);
     this->OptionsGroupBox->hide();
-    this->EffectsOptionsFrame->setEnabled(enabled);
     this->EffectsOptionsFrame->setVisible(visible);
+    this->updateOptionsEnabled();
   }
   else if (!this->StudioPresentation && !inGroupBox && groupBoxLayout)
   {
     bool visible = !this->EffectsOptionsFrame->isHidden();
-    bool enabled = this->EffectsOptionsFrame->isEnabled();
     this->verticalLayout->removeWidget(this->EffectsOptionsFrame);
     groupBoxLayout->addWidget(this->EffectsOptionsFrame);
-    this->EffectsOptionsFrame->setEnabled(true);
     this->EffectsOptionsFrame->show();
-    this->OptionsGroupBox->setEnabled(enabled);
     this->OptionsGroupBox->setVisible(visible);
+    this->updateOptionsEnabled();
   }
   int collapsedHeight = this->StudioPresentation ? 2 : this->DefaultMaskingCollapsedHeight;
   if (this->MaskingGroupBox->collapsedHeight() != collapsedHeight)
@@ -895,13 +905,28 @@ void qMRMLSegmentEditorWidgetPrivate::setOptionsSectionVisible(bool visible)
 //-----------------------------------------------------------------------------
 void qMRMLSegmentEditorWidgetPrivate::setOptionsSectionEnabled(bool enabled)
 {
+  this->OptionsSectionEnabled = enabled;
+  this->updateOptionsEnabled();
+}
+
+//-----------------------------------------------------------------------------
+void qMRMLSegmentEditorWidgetPrivate::setOptionsFrameEnabled(bool enabled)
+{
+  this->OptionsFrameEnabled = enabled;
+  this->updateOptionsEnabled();
+}
+
+//-----------------------------------------------------------------------------
+void qMRMLSegmentEditorWidgetPrivate::updateOptionsEnabled()
+{
+  this->OptionsGroupBox->setEnabled(this->OptionsSectionEnabled);
   if (this->EffectsOptionsFrame->parentWidget() == this->OptionsGroupBox)
   {
-    this->OptionsGroupBox->setEnabled(enabled);
+    this->EffectsOptionsFrame->setEnabled(this->OptionsFrameEnabled);
   }
   else
   {
-    this->EffectsOptionsFrame->setEnabled(enabled);
+    this->EffectsOptionsFrame->setEnabled(this->OptionsSectionEnabled && this->OptionsFrameEnabled);
   }
 }
 
@@ -1115,7 +1140,7 @@ void qMRMLSegmentEditorWidget::updateWidgetFromMRML()
     d->SegmentationNodeComboBox->setEnabled(false);
     d->EffectsGroupBox->setEnabled(false);
     d->MaskingGroupBox->setEnabled(false);
-    d->EffectsOptionsFrame->setEnabled(false);
+    d->setOptionsFrameEnabled(false);
     d->SourceVolumeNodeComboBox->setEnabled(false);
     d->Show3DButton->setLocked(true);
     return;
@@ -1140,7 +1165,7 @@ void qMRMLSegmentEditorWidget::updateWidgetFromMRML()
 
   d->EffectsGroupBox->setEnabled(d->SegmentationNode != nullptr);
   d->MaskingGroupBox->setEnabled(d->SegmentationNode != nullptr);
-  d->EffectsOptionsFrame->setEnabled(d->SegmentationNode != nullptr);
+  d->setOptionsFrameEnabled(d->SegmentationNode != nullptr);
   d->SourceVolumeNodeComboBox->setEnabled(d->SegmentationNode != nullptr);
 
   QString selectedSegmentID;
@@ -3574,6 +3599,8 @@ void qMRMLSegmentEditorWidget::setMaskingSectionVisible(bool visible)
 {
   Q_D(qMRMLSegmentEditorWidget);
   d->MaskingSectionVisible = visible;
+  // updateEffectsSectionFromMRML() shows or hides the section only when the active effect changes: apply it now
+  d->MaskingGroupBox->setVisible(visible && d->ActiveEffect != nullptr);
   this->updateEffectsSectionFromMRML();
 }
 
