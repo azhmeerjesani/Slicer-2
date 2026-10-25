@@ -151,6 +151,34 @@ def _spaceFamily(bundle):
         return None
 
 
+def _nodeFamily(node):
+    """The space family of a template volume's ``Studio.Space`` attribute, or None."""
+    value = node.GetAttribute("Studio.Space") or ""
+    if not value:
+        return None
+    try:
+        from LesionNetworkMappingLib import geometry
+
+        return geometry.space_family(value.split(" ")[0])
+    except Exception:
+        return None
+
+
+def _defaultUserTemplate(family):
+    """The user's own default template (A-10) when it is of ``family``, else None."""
+    try:
+        from LesionNetworkMappingLib import geometry
+
+        from . import templates
+
+        template = templates.defaultTemplate()
+    except Exception:
+        return None
+    if template is None or not template.isUser or not template.isAvailable():
+        return None
+    return template if geometry.space_family(template.space) == family else None
+
+
 def _cachedSample(fileName):
     cache = slicer.mrmlScene.GetCacheManager().GetRemoteCacheDirectory() if slicer.mrmlScene.GetCacheManager() else ""
     try:
@@ -178,8 +206,17 @@ def templateVolume(bundle=None, load=True):
                  if node.GetAttribute(space.ROLE_ATTRIBUTE) == space.ROLE_TEMPLATE and not node.IsA("vtkMRMLLabelMapVolumeNode")]
     if family:
         for node in templates:
-            if family.lower() in (node.GetAttribute(space.SPACE_ATTRIBUTE) or "").lower():
+            if family.lower() in (node.GetAttribute(space.SPACE_ATTRIBUTE) or "").lower() or _nodeFamily(node) == family:
                 return node
+        userTemplate = _defaultUserTemplate(family) if load else None
+        if userTemplate is not None:
+            # The user's own default template (A-10) of the connectome's family
+            try:
+                from . import importer
+
+                return importer.loadTemplateVolume(userTemplate)
+            except Exception:
+                logging.error(f"Studio Map: cannot load the template {userTemplate.name}:\n{traceback.format_exc()}")
     if family and "nlin6" in family.lower() and load:
         path = _cachedSample(NLIN6_TEMPLATE_FILE)
         if path is not None:

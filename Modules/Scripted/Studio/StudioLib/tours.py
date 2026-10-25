@@ -216,8 +216,9 @@ _STUDIO_STEPS = (
            "They open with the same readers as in 3D Slicer."),
          rows=("add-data", "add-dicom"), keys=((("Ctrl+O",), _("open files")),), workspace="library"),
     Step("template", "StudioLibraryStartOnTemplateButton", _("Start on the MNI template"),
-         _("Opens the bundled MNI152NLin2009cAsym template in Draw, ready for a lesion. It works offline."),
-         inSlicer=_("No single step: File > Add Data to load a template, then Add segment in the Segment Editor module."),
+         _("Opens your default MNI template in Draw, ready for a lesion: the bundled MNI152NLin2009cAsym works offline. The ▾ next to it "
+           "lists your templates and adds your own MNI brain."),
+         inSlicer=_("No single step: File > Add Data to load a template, then Add segment in the Segment Editor module."), rows=("own-template",),
          workspace="library"),
     Step("workspaces", "StudioWorkspaceSwitcher", _("Three workspaces"), _workspacesBody,
          rows=("modules", "favorite-modules"), keys=((("Ctrl+Alt+1", "Ctrl+Alt+2", "Ctrl+Alt+3"), _("Library, Draw, Map")),),
@@ -305,8 +306,14 @@ _LIBRARY_STEPS = (
          _("Open… picks files; Open folder… reads a DICOM folder or a folder of NIfTI files."),
          rows=("add-data", "add-dicom"), keys=((("Ctrl+O",), _("open files")),), workspace="library"),
     Step("template", "StudioLibraryStartOnTemplateButton", _("Start on the MNI template"),
-         _("Opens the bundled 2 mm MNI152NLin2009cAsym template in Draw with an empty lesion. It works offline."),
-         inSlicer=_("No single step: File > Add Data to load a template, then Add segment in the Segment Editor module."), workspace="library"),
+         _("Opens your default template in Draw with an empty lesion (the bundled 2 mm MNI152NLin2009cAsym works offline)."),
+         inSlicer=_("No single step: File > Add Data to load a template, then Add segment in the Segment Editor module."), rows=("own-template",),
+         workspace="library"),
+    Step("own-template", "StudioLibraryTemplateMenuButton", _("Your own MNI templates"),
+         _("The ▾ lists every template, adds your own MNI brain (FSL MNI152, ICBM 2009b, a 0.5 mm or study template, with an optional "
+           "brain mask and 3D surfaces) and opens Settings › Templates, where you choose the default. A file that is not in MNI space "  # noqa: RUF001
+           "is refused."),
+         rows=("own-template",), workspace="library"),
     Step("current-work", "StudioCurrentWorkCard", _("Current work"),
          _("When something is open, this card says what: each scan with its lesions, their side (only in MNI space), volume and "
            "whether they are saved. Continue in Draw → goes on where you were; Close closes the scene and asks first if a lesion "

@@ -5,7 +5,8 @@ This module is the single source of truth for two questions that several Studio 
 - **Is this image on an MNI grid?** ``spaceOf(node)`` answers with ``(spaceName, resolutionMm)`` or None:
   the node attribute ``Studio.Space`` first (written by normalization), else an exact table of the known template
   grids (``KNOWN_GRIDS``, ±0.01 mm), else ``LesionNetworkMappingLib.geometry.detect_space`` with the same tolerance
-  when that library is importable. A grid is compared through the RAS positions of its voxel
+  when that library is importable, which also knows the grids of the user's own templates (A-10: ``templates`` registers
+  them; an anisotropic one is matched by its exact grid). A grid is compared through the RAS positions of its voxel
   centres, so a template stored LAS (FSL) or RAS (TemplateFlow) is recognized either way. ``hemisphereWord()``
   returns "Left", "Right" or "Both hemispheres" only on an MNI grid: in scanner space x = 0 is not the midline.
 - **Is this slice view a figure?** ``isFigureView(view)`` is True when the background of the view is a figure
@@ -158,6 +159,9 @@ def _detectSpace(source):
         from LesionNetworkMappingLib import geometry
     except ImportError:
         return False
+    templates = _templatesModule()
+    if templates is not None:
+        templates.ensureGridsRegistered()
     detect = getattr(geometry, "detect_space", None)
     if detect is None:
         return False
@@ -170,6 +174,26 @@ def _detectSpace(source):
     if isinstance(result, (tuple, list)) and len(result) == 2 and result[0] and result[0] != "native":
         return str(result[0]), result[1]
     return None
+
+
+def _templatesModule():
+    """``StudioLib.templates`` (the user's own templates), or None."""
+    try:
+        from . import templates
+
+        return templates
+    except Exception:
+        return None
+
+
+def _userTemplateGridSpace(dims, ijkToRas):
+    templates = _templatesModule()
+    if templates is None:
+        return None
+    try:
+        return templates.gridSpace(dims, ijkToRas)
+    except Exception:
+        return None
 
 
 #
@@ -214,6 +238,8 @@ def spaceOf(nodeOrGeometry):
     detected = tableSpace(dims, ijkToRas)
     if detected is None:
         detected = _detectSpace((dims, ijkToRas)) or None
+    if detected is None:
+        detected = _userTemplateGridSpace(dims, ijkToRas)
     if detected is None and node is not None and node.GetAttribute(ROLE_ATTRIBUTE) == ROLE_TEMPLATE:
         # A template volume is in its template's space, whatever grid it was resampled on
         spacing = worldBox(dims, ijkToRas)
@@ -228,11 +254,20 @@ def isMni(node):
 
 
 def spaceLabel(space):
-    """Display text of a ``spaceOf()`` result: "MNI152NLin6Asym 2 mm" ("" for None)."""
+    """Display text of a ``spaceOf()`` result: "MNI152NLin6Asym 2 mm" ("" for None); the space "MNI" of the user's own
+    templates is "MNI (other)".
+    """
     if not space:
         return ""
     name, resolution = space
-    return f"{name} {resolution} mm" if resolution is not None else str(name)
+    if name == "MNI":
+        name = "MNI (other)"
+    if resolution is None:
+        return str(name)
+    try:
+        return f"{name} {float(resolution):g} mm"
+    except (TypeError, ValueError):
+        return f"{name} {resolution} mm"
 
 
 def hemisphereWord(rasX, node, partsSpanBoth=False):

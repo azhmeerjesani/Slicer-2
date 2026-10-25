@@ -165,7 +165,7 @@ STATMAP_THRESHOLD_FRACTION = 0.25
 STATMAP_WINDOW_PERCENTILE = 99.5
 
 #: Inspector notices of the importer, by priority: a notice of higher priority is never replaced by a lower one
-NOTICE_PRIORITIES = {"figure-convention": 50, "statmap": 40, "native-lesion": 30, "lesion-space": 20, "template1mm": 10}
+NOTICE_PRIORITIES = {"figure-convention": 50, "statmap": 40, "native-lesion": 30, "lesion-space": 20, "template-missing": 15, "template1mm": 10}
 
 #: Modules that load data by themselves (a scan loaded there opens in Draw)
 TRANSIENT_LOADER_MODULES = ("SampleData", "DICOM")
@@ -1557,7 +1557,10 @@ def lesionSpaceLine(segmentationNode, sourceVolumeNode=None):
         return _("Shown on the MNI template; the lesion is in scan space")
     templateSpace = space.spaceOf(sourceVolumeNode) or (space.TEMPLATE_SPACE, None)
     if lesionSpace[0] != templateSpace[0]:
-        return _("Lesion grid {lesion}, shown on {template} (a few mm apart)").format(lesion=space.spaceLabel(lesionSpace), template=templateSpace[0])
+        templates = _templatesModule() if sourceVolumeNode.GetAttribute(_TEMPLATE_ID_ATTRIBUTE) else None
+        userTemplate = templates.userTemplateOfNode(sourceVolumeNode) if templates is not None else None
+        templateText = f"{userTemplate.name} ({space.spaceLabel(templateSpace)})" if userTemplate is not None else templateSpace[0]
+        return _("Lesion grid {lesion}, shown on {template} (a few mm apart)").format(lesion=space.spaceLabel(lesionSpace), template=templateText)
     return None
 
 
@@ -2103,7 +2106,10 @@ def _templateNodes():
     volumeId = _templateNodeIds.get("volume")
     volumeNode = scene.GetNodeByID(volumeId) if volumeId else None
     templateNames = (_templateNodeName(TEMPLATE_SAMPLE_2MM), _templateNodeName(TEMPLATE_SAMPLE_1MM))
-    if volumeNode is None or not _isScan(volumeNode) or volumeNode.GetName() not in templateNames:
+    if volumeNode is None or not _isScan(volumeNode):
+        return None, None
+    if volumeNode.GetName() not in templateNames and not volumeNode.GetAttribute(_TEMPLATE_ID_ATTRIBUTE):
+        # A template of the registry (yours, A-10) is tracked by its id attribute, whatever its name
         return None, None
     segmentationId = _templateNodeIds.get("segmentation")
     segmentationNode = scene.GetNodeByID(segmentationId) if segmentationId else None
@@ -2155,8 +2161,166 @@ def _templateLesionFor(volumeNode, shell=None):
     newSegmentationNode = newLesionSegmentation(volumeNode, shell=shell)
     return newSegmentationNode if newSegmentationNode is not None else segmentationNode
 
-def startOnTemplate(res=2, shell=None, volumeNode=None):
+#: ``Studio.TemplateId`` of template volumes (``templates.TEMPLATE_ID_ATTRIBUTE``; a portable id, never a path)
+_TEMPLATE_ID_ATTRIBUTE = "Studio.TemplateId"
+
+
+def _templatesModule():
+    try:
+        from . import templates
+
+        return templates
+    except Exception:
+        logging.error(f"Studio: the template registry is not available:\n{traceback.format_exc()}")
+        return None
+
+
+def _chosenTemplate(templateId):
+    """The registry template of "Start on template": ``templateId``, else the default; None for the plain built-in path
+    (the bundled 2 mm brain, or the 1 mm T1w when it was downloaded, as before A-10).
+    """
+    templates = _templatesModule()
+    if templates is None:
+        return None
+    if templateId is None:
+        templateId = templates.defaultTemplateId()
+        if templateId == templates.BUILTIN_DEFAULT:
+            return None
+    template = templates.templateById(templateId)
+    if template is None or (template.id != templates.BUILTIN_DEFAULT and not template.isAvailable()):
+        # Never the SampleData download of a built-in whose cached file is gone: templates are downloaded only on request
+        raise RuntimeError(_("The template {id} is not on this computer").format(id=templateId))
+    return template
+
+
+def _tagRegistryTemplate(volumeNode, template):
+    for attribute, value in ((space.ROLE_ATTRIBUTE, space.ROLE_TEMPLATE), (space.SPACE_ATTRIBUTE, template.studioSpaceValue()),
+                             (_TEMPLATE_ID_ATTRIBUTE, template.id)):
+        if volumeNode.GetAttribute(attribute) != value:
+            volumeNode.SetAttribute(attribute, value)
+    return volumeNode
+
+
+def loadTemplateVolume(template):
+    """The volume of a registry template (yours or built-in), loaded once and tagged ``Studio.Role`` = template, its
+    ``Studio.Space`` and ``Studio.TemplateId``; the 3D brain surfaces of your template are loaded with it.
+    """
+    templates = _templatesModule()
+    for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
+        if node.GetAttribute(_TEMPLATE_ID_ATTRIBUTE) == template.id and not node.IsA("vtkMRMLLabelMapVolumeNode"):
+            _loadTemplateSurfaces(template)
+            return node
+    sampleName = templates.sampleNameOf(template) if templates is not None else None
+    if sampleName in (TEMPLATE_SAMPLE_2MM, TEMPLATE_SAMPLE_1MM):
+        volumeNode = _templateVolume(sampleName, (cachedTemplatePath(sampleName) or template.imagePath) if sampleName == TEMPLATE_SAMPLE_1MM else None)
+        volumeNode.SetAttribute(_TEMPLATE_ID_ATTRIBUTE, template.id)
+        return volumeNode
+    path = template.imagePath
+    if not path or not os.path.isfile(path):
+        raise RuntimeError(_("The image of the template {name} is missing").format(name=template.name))
+    with _ownLoad():
+        # Tagged before it enters the scene (the Draw cards and space checks that react to the new node see a template), and
+        # read by its storage node: a template is not a recently loaded file of the user (no RecentlyLoadedFiles entry)
+        volumeNode = slicer.vtkMRMLScalarVolumeNode()
+        volumeNode.SetName(template.name)
+        _tagRegistryTemplate(volumeNode, template)
+        storageNode = slicer.vtkMRMLVolumeArchetypeStorageNode()
+        storageNode.SetFileName(path)
+        storageNode.SetSingleFile(True)
+        if not storageNode.ReadData(volumeNode):
+            raise RuntimeError(_("Failed to load the template {name}").format(name=template.name))
+        slicer.mrmlScene.AddNode(storageNode)
+        volumeNode.SetAndObserveStorageNodeID(storageNode.GetID())
+        slicer.mrmlScene.AddNode(volumeNode)
+        volumeNode.CreateDefaultDisplayNodes()
+        displayNode = volumeNode.GetDisplayNode()
+        if displayNode is not None and displayNode.GetColorNodeID() is None:
+            displayNode.SetAndObserveColorNodeID("vtkMRMLColorTableNodeGrey")
+    _loadTemplateSurfaces(template)
+    return volumeNode
+
+
+def _loadTemplateSurfaces(template):
+    """The 3D brain surfaces of your template as models: light gray, 30% opacity, in the 3D view only."""
+    templates = _templatesModule()
+    if templates is None or template.builtin:
+        return []
+    loaded = {node.GetAttribute("Studio.TemplateSurface") for node in slicer.util.getNodesByClass("vtkMRMLModelNode")
+              if node.GetAttribute(_TEMPLATE_ID_ATTRIBUTE) == template.id}
+    models = []
+    for path in template.surfacePaths:
+        name = os.path.basename(path)
+        if name in loaded or not os.path.isfile(path):
+            continue
+        try:
+            with _ownLoad():
+                modelNode = slicer.modules.models.logic().AddModel(path)
+            if modelNode is None:
+                raise RuntimeError(name)
+        except Exception:
+            logging.warning(f"Studio: the surface {name} of the template {template.name} could not be loaded")
+            continue
+        modelNode.SetName(f"{template.name} {templates.stemOf(name)}")
+        modelNode.SetAttribute(space.ROLE_ATTRIBUTE, templates.ROLE_SURFACE)
+        modelNode.SetAttribute(_TEMPLATE_ID_ATTRIBUTE, template.id)
+        modelNode.SetAttribute("Studio.TemplateSurface", name)
+        displayNode = modelNode.GetDisplayNode()
+        if displayNode is not None:
+            displayNode.SetColor(*templates.SURFACE_COLOR)
+            displayNode.SetOpacity(templates.SURFACE_OPACITY)
+            displayNode.SetVisibility2D(False)
+            displayNode.SetVisibility3D(True)
+        models.append(modelNode)
+    return models
+
+
+def _startOnRegistryTemplate(template, shell):
+    """Start on a template of the registry that is not the plain built-in path (yours, the 1 mm or NLin6 built-in)."""
+    with slicer.util.WaitCursor():
+        volumeNode = loadTemplateVolume(template)
+        setViewLayers(background=volumeNode, fit=True)
+        segmentationNode = _templateLesionFor(volumeNode, shell)
+        _trackTemplate(volumeNode, segmentationNode)
+        selectInSegmentEditor(segmentationNode, volumeNode)
+        if shell is not None:
+            for key in ("native-lesion", "lesion-space", "template1mm", "template-missing"):
+                _withdrawNotice(key, shell)
+            shell.switchTo("draw", keepLayout=_figureController is not None and _figureController.isShown())
+        elif hasattr(slicer.modules, "segmenteditor") and slicer.util.mainWindow() is not None:
+            slicer.util.selectModule("SegmentEditor")
+    _closeTemplateBanner()
+    return volumeNode, segmentationNode
+
+
+def _isStudyTemplateChoice(studySession, templateId):
+    """True when ``templateId`` (a "Start on template ▾" menu entry) is the default template or the open study's template:
+    it then adds a case to the study, like the main button. Another template starts a case outside the study.
+    """
+    templates = _templatesModule()
+    if templates is None:
+        return False
+    template = templates.templateById(templateId)
+    if template is None or template.id == templates.defaultTemplateId():
+        return template is not None
+    try:
+        record = studySession.templateRecord() or {}
+    except Exception:
+        return False
+    source = str(record.get("source") or "")
+    if templates.isUserStudyRecord(record):
+        studyTemplate = templates.templateForStudyRecord(record)
+        return studyTemplate is not None and studyTemplate.id == template.id
+    sampleName = source[len("sampledata:"):] if source.startswith("sampledata:") else None
+    return bool(sampleName) and template.builtin and templates.sampleNameOf(template) == sampleName
+
+
+def startOnTemplate(res=2, shell=None, volumeNode=None, templateId=None):
     """Load the MNI152NLin2009cAsym template and open Draw on a "Lesions" segmentation of its geometry.
+
+    ``templateId`` (A-10): a template of the registry (``templates``: "user:<slug>" for your own, "builtin:<name>");
+    without it, the default template (``Studio/Templates/Default``) when it is not the bundled one. Your template draws on
+    its own grid with its space and name; the 1 mm offer below is only for the built-in 2009c template. With a study open,
+    no ``templateId``, the default one or the study's own adds a case to the study (``_isStudyTemplateChoice``).
 
     The 2 mm brain is bundled, so this works offline. The 1 mm T1w is used instead when it was downloaded
     before. Otherwise the 1 mm template is offered in the inspector notice slot after the first stroke on the 2 mm
@@ -2167,14 +2331,24 @@ def startOnTemplate(res=2, shell=None, volumeNode=None):
     """
     shell = _currentShell(shell)
     studySession = _studySession()
-    if studySession is not None and volumeNode is None:
+    if studySession is not None and volumeNode is None and (templateId is None or _isStudyTemplateChoice(studySession, templateId)):
         # With a study: a new case on the study template (one template node per session; W3-07). A saved lesion is never
         # re-targeted: the case is a new subject whose lesion is written by Done -> next.
         studySession.newCase()
         return studySession.volumeNode(), studySession.segmentationNode()
+    forced2mm = False
+    if volumeNode is None:
+        template = _chosenTemplate(templateId)
+        templates = _templatesModule()
+        if template is not None and templates is not None and template.id != templates.BUILTIN_DEFAULT:
+            return _startOnRegistryTemplate(template, shell)
+        forced2mm = template is not None
     cached1mm = cachedTemplatePath(TEMPLATE_SAMPLE_1MM)
     with slicer.util.WaitCursor():
-        if volumeNode is not None:
+        if forced2mm:
+            # "MNI152 2009c" chosen in the menu: the bundled 2 mm brain, even when the 1 mm T1w was downloaded
+            volumeNode = _templateVolume(TEMPLATE_SAMPLE_2MM)
+        elif volumeNode is not None:
             is1mm = volumeNode.GetName() == _templateNodeName(TEMPLATE_SAMPLE_1MM)
             _tagTemplate(volumeNode, TEMPLATE_SAMPLE_1MM if is1mm else TEMPLATE_SAMPLE_2MM)
             if is1mm and cached1mm is None:

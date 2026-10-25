@@ -326,7 +326,12 @@ def isMapNode(node):
 
 
 def isTemplateNode(node):
-    if node is None or not node.IsA("vtkMRMLScalarVolumeNode"):
+    """A template volume (built-in or the user's own, A-10) or a 3D brain surface of a template: not user data by itself."""
+    if node is None:
+        return False
+    if node.IsA("vtkMRMLModelNode"):
+        return _role(node) == "template-surface"
+    if not node.IsA("vtkMRMLScalarVolumeNode"):
         return False
     if _role(node) == "template":
         return True

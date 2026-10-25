@@ -35,8 +35,13 @@ Slicer Studio/
 │       └── .studio/             Slicer Studio's own notes (thumbnail, lock): safe to ignore
 ├── Studies/
 │   └── Stroke cohort/           lesion network mapping studies
+├── Templates/
+│   └── ICBM 2009b 0.5 mm/       your own MNI templates (see "Your own MNI templates")
 └── LNM/                         normalization outputs, control sets and recipes
 ```
+
+Templates/ appears when you add your own MNI template. How to add one and use it to draw, map and normalize is
+explained in [Your own MNI templates](studio_templates.md).
 
 A folder appears only when something is saved into it, so a new project with
 one scan has just `Images/` and its `.mrml` file.

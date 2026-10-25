@@ -29,8 +29,9 @@ storage) proposes its space; otherwise the image is accepted as MNI only when it
 (the MNI brain box inside the image, the centre within ``CENTER_TOLERANCE_MM`` of (0, -18, 18)); anything else is
 refused with ``REFUSAL``. Masks and heads must share the image's grid; surfaces must lie in the MNI box.
 
-Settings (fork-only, SPEC 9.7 rule 5): ``Studio/Templates/Default`` (a template id). No path is ever stored in
-settings, template.json or study files.
+Settings (fork-only, SPEC 9.7 rule 5): ``Studio/Templates/Default`` (a template id), and the add dialog's
+``Studio/Templates/LastDirectory`` (the folder its file dialogs open in, a local convenience of this computer, like
+Slicer's own last-directory settings). No path is ever stored in template.json or study files.
 
 Threads: ``identify``, ``copyFiles`` and ``thumbnailArray`` use only files and numpy (worker-safe); everything else
 runs on the main thread.
@@ -337,7 +338,7 @@ class Detection:
     :ivar ok: the file can be added as an MNI template.
     :ivar status: "known" (a known template grid), "mni" (looks like MNI space), "refused" or "error".
     :ivar message: the detection line ("Looks like MNI space", or the refusal).
-    :ivar facts: "394 × 466 × 378 · 0.5 mm isotropic · RAS · header says MNI (sform 4)".
+    :ivar facts: "394 x 466 x 378 · 0.5 mm isotropic · RAS · header says MNI (sform 4)".
     :ivar spaceGuess: a space id (``SPACES``) or None; ``candidates``: the spaces a known grid may hold.
     :ivar warnings: lines shown under the facts (anisotropic voxels, a 4D file, an unusual field of view).
     :ivar privacyNote: shown when the image may be a person's scan rather than a template (not blocking).
@@ -407,13 +408,13 @@ def identify(path):
     detection.orientation = orientationCode(affine)
     spacing = detection.spacing
     isotropic = float(spacing.max()) <= float(spacing.min()) * 1.001
-    sizeText = " × ".join(str(n) for n in shape)
-    spacingText = _("{size:g} mm isotropic").format(size=float(spacing.mean())) if isotropic else " × ".join(f"{value:g}" for value in spacing) + " mm"
+    sizeText = " × ".join(str(n) for n in shape)  # noqa: RUF001
+    spacingText = _("{size:g} mm isotropic").format(size=float(spacing.mean())) if isotropic else " × ".join(f"{value:g}" for value in spacing) + " mm"  # noqa: RUF001
     detection.resolution = round(float(spacing.mean()), 3) if isotropic else round(float(spacing.min()), 3)
     facts = [sizeText, spacingText, detection.orientation, _codeText(detection.codes)]
     if float(spacing.max()) > ANISOTROPY_WARNING * float(spacing.min()):
         detection.warnings.append(_("The voxels are not cubic ({spacing} mm): drawing and maps work best on near-isotropic templates.").format(
-            spacing=" × ".join(f"{value:g}" for value in spacing)))
+            spacing=" × ".join(f"{value:g}" for value in spacing)))  # noqa: RUF001
     if detection.frames > 1:
         detection.warnings.append(_("The file holds {count} volumes: only the first is used.").format(count=detection.frames))
         if header["format"] != "NIfTI":
@@ -463,7 +464,7 @@ def checkCompanion(detection, path):
         return False, _("Choose the template image first.")
     if not sameGrid(header["shape"], header["affine"], detection.shape, detection.affine):
         return False, _("{name} is not on the grid of the template image ({size}).").format(
-            name=os.path.basename(path), size=" × ".join(str(n) for n in detection.shape))
+            name=os.path.basename(path), size=" × ".join(str(n) for n in detection.shape))  # noqa: RUF001
     return True, ""
 
 
@@ -744,9 +745,12 @@ def userTemplateOfNode(node):
 
 
 def defaultTemplateId():
-    """The id of the default template: ``Studio/Templates/Default`` when that template exists, else the bundled 2 mm brain."""
+    """The id of the default template: ``Studio/Templates/Default`` when that template's image is on this computer, else
+    the bundled 2 mm brain (a downloaded built-in whose cache was cleared is never downloaded again without a click).
+    """
     value = qt.QSettings().value(DEFAULT_KEY)
-    if value and templateById(str(value)) is not None:
+    template = templateById(str(value)) if value else None
+    if template is not None and template.isAvailable():
         return str(value)
     return BUILTIN_DEFAULT
 
@@ -840,6 +844,7 @@ class AddPlan:
         self.totalBytes = 0
         self.progress = 0  # bytes copied (read by the main thread)
         self.cancelled = False
+        self.requiredSha256 = None  # the image must have this checksum (re-adding the template of a study)
 
 
 class TemplateError(Exception):
@@ -882,9 +887,8 @@ def prepareAdd(imagePath, mask=None, head=None, surfaces=(), name=None, space=No
     detection = identify(imagePath)
     if not detection.ok:
         raise TemplateError(detection.message or _(REFUSAL))
-    if requiredSha256 and fileSha256(imagePath) != requiredSha256:
-        raise TemplateError(_("This is not the template of the study: its checksum differs."))
     plan.detection = detection
+    plan.requiredSha256 = requiredSha256 or None
     plan.firstVolume = detection.is4d
     name = (name or proposedName(imagePath)).strip()
     if not name:
@@ -993,6 +997,8 @@ def copyFiles(plan):
             else:
                 digest = _copyHashed(source, target, plan)
             record["sha256"][name if role == "surface" else role] = digest
+            if role == "image" and plan.requiredSha256 and digest != plan.requiredSha256:
+                raise TemplateError(_("This is not the template of the study: its checksum differs."))
         with open(os.path.join(staging, TEMPLATE_JSON), "w", encoding="utf-8", newline="\n") as f:
             json.dump(record, f, indent=2, ensure_ascii=False)
             f.write("\n")
@@ -1139,6 +1145,14 @@ def thumbnailArray(path, size=96):
     return (scaled[::step, ::step] * 255).astype(np.uint8)
 
 
+def rememberThumbnail(template, size, pixmap):
+    """Keep a thumbnail computed elsewhere (in the background writer) for ``thumbnailPixmap``; built-in templates have no
+    folder to cache it in.
+    """
+    if template is not None and pixmap is not None and not pixmap.isNull():
+        _thumbnails[(template.id, size)] = pixmap
+
+
 def thumbnailPixmap(template, size=48, compute=True):
     """A QPixmap of the template's mid-axial slice (cached in memory and in the template folder), or None."""
     if template is None:
@@ -1170,16 +1184,28 @@ def thumbnailPixmap(template, size=48, compute=True):
     return pixmap
 
 
-def arrayToImage(array):
-    """A grayscale QImage of a 2D uint8 array (copied)."""
+def grayPng(array):
+    """PNG bytes of a 2D uint8 array (grayscale, zlib only). Worker-safe."""
+    import struct
+    import zlib
+
     np = _np()
     array = np.ascontiguousarray(array, dtype=np.uint8)
     height, width = array.shape
-    image = qt.QImage(width, height, qt.QImage.Format_RGB32)
-    for row in range(height):
-        for column in range(width):
-            value = int(array[row, column])
-            image.setPixel(column, row, qt.qRgb(value, value, value))
+    raw = np.zeros((height, 1 + width), dtype=np.uint8)  # filter byte 0 (None) per row
+    raw[:, 1:] = array
+
+    def chunk(tag, data):
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(raw.tobytes(), 6)) + chunk(b"IEND", b"")
+
+
+def arrayToImage(array):
+    """A grayscale QImage of a 2D uint8 array (main thread)."""
+    image = qt.QImage()
+    image.loadFromData(qt.QByteArray(grayPng(array)), "PNG")
     return image
 
 

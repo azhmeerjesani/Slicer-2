@@ -141,6 +141,12 @@ ROWS = (
     Row("sample-data", _("File > Download Sample Data"), _("Library > Load sample data, or Search ({key:Ctrl+K}) for a sample by name"),
         target="StudioLibrarySampleDataLink", workspace="library",
         keywords="sample data download example mrhead"),
+    Row("own-template", _("Where do I add my own MNI template?"), _("Library > Start on template ▾ > Add your own template…, or Search ({key:Ctrl+K}) "
+                                                                     "for Add MNI template; Settings › Templates lists them and sets the default"),  # noqa: RUF001
+        target="StudioLibraryTemplateMenuButton", workspace="library",
+        keywords="template templates own mni brain model add template icbm fsl mni152 2009b colin custom atlas space default template",
+        note=_("Official 3D Slicer has no template list: you load a template with File > Add Data. In Studio a template you add is "
+               "copied into the Slicer Studio folder (Templates) and used by Start on template, Map and Normalize to MNI.")),
     Row("recent", _("File > Recent"), _("Library > Recent"), target="StudioRecentList", workspace="library", keywords="recent files history reopen"),
     Row("save-data", _("File > Save Data"), _("Saved automatically to Projects/<name> in the Slicer Studio folder ({key:Ctrl+S} saves now)"),
         officialKey="Ctrl+S", key="Ctrl+S", target=("StudioSaveStatus", "StudioAppMenuButton"), keywords="save scene mrb mrml save data write save project autosave",

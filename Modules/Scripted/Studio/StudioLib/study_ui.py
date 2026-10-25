@@ -396,8 +396,26 @@ def registeredConnectomeSpace():
     return None
 
 
+def _userDefaultTemplate():
+    """The user's own default template (A-10), or None (the default is a built-in one)."""
+    try:
+        from . import templates
+
+        template = templates.defaultTemplate()
+    except Exception:
+        return None
+    return template if template is not None and template.isUser and template.isAvailable() else None
+
+
 def defaultTemplate():
-    """study.json ``template`` of a new study: the 2009c 1 mm T1w when it was downloaded before, else the bundled 2 mm brain."""
+    """study.json ``template`` of a new study: the user's own default template (A-10: its id, name, space and sha256, never a
+    path), else the 2009c 1 mm T1w when it was downloaded before, else the bundled 2 mm brain.
+    """
+    userTemplate = _userDefaultTemplate()
+    if userTemplate is not None:
+        from . import templates
+
+        return templates.studyRecord(userTemplate)
     importer = _importer()
     if importer.cachedTemplatePath(TEMPLATE_1MM_SAMPLE) is not None:
         return {"id": "MNI152NLin2009cAsym", "res": 1, "source": "sampledata:" + TEMPLATE_1MM_SAMPLE}
@@ -1939,6 +1957,11 @@ class StudySession:
         if node is not None:
             return node
         importer = _importer()
+        if source.startswith("user:"):
+            # The user's own template (A-10), found by id and checksum; else the built-in template of its family
+            node = self._userTemplateNode(record)
+            self._templateCache[source] = node.GetID()
+            return node
         if source.startswith("sampledata:"):
             sampleName = source[len("sampledata:"):]
             if sampleName == TEMPLATE_1MM_SAMPLE and importer.cachedTemplatePath(TEMPLATE_1MM_SAMPLE) is None:
@@ -1957,6 +1980,52 @@ class StudySession:
             self._templateFiles[node.GetID()] = path
         self._templateCache[source] = node.GetID()
         return node
+
+    def _userTemplateNode(self, record):
+        """The volume of the study's own template (``templates.templateForStudyRecord``). When it is not on this computer, the
+        notice "This study uses the template … Add it…" is shown and the built-in template of its family is used meanwhile.
+        """
+        from . import templates
+
+        importer = _importer()
+        template = templates.templateForStudyRecord(record)
+        if template is not None:
+            with importer._ownLoad():
+                node = importer.loadTemplateVolume(template)
+            node.SetAttribute(SUBJECT_ATTRIBUTE, "template")
+            self._templateFiles[node.GetID()] = template.imagePath
+            return node
+        self._offerMissingTemplate(record)
+        try:
+            from LesionNetworkMappingLib import geometry
+
+            family = geometry.space_family(record.get("space") or record.get("id"))
+        except Exception:
+            family = None
+        sampleName = DEFAULT_TEMPLATE_SAMPLE
+        if family == "fsl6" and importer.cachedTemplatePath(NLIN6_2MM_SAMPLE) is not None:
+            sampleName = NLIN6_2MM_SAMPLE
+        node = importer.studyTemplateVolume(sampleName)
+        self._templateFiles[node.GetID()] = _storagePath(node) or sampleFile(sampleName)
+        return node
+
+    def _offerMissingTemplate(self, record):
+        """The notice of a study template that is not on this computer (once per session); Add it… reopens the case on it."""
+        if getattr(self, "_missingTemplateOffered", False):
+            return
+        self._missingTemplateOffered = True
+        logging.warning(f"Slicer Studio: the study template {record.get('name') or record.get('source')} is not on this computer")
+        try:
+            from . import templates_ui
+
+            def added(template):
+                # The cached fallback is forgotten: the next case (or this one, reopened) uses the added template
+                self._templateCache.pop(str(record.get("source")), None)
+                self._missingTemplateOffered = False
+
+            templates_ui.offerMissingStudyTemplate(record, _currentShell(), onAdded=added)
+        except Exception:
+            logging.error(f"Slicer Studio: the missing template notice failed:\n{traceback.format_exc()}")
 
     def _isTemplate(self, node):
         return node is not None and node.GetID() in self._templateCache.values()

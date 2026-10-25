@@ -2344,10 +2344,40 @@ def _check_user_template(template_id, template_dirs):
 # Batch over a study
 
 
+def _study_user_template(study, template_dirs, template_image=None, template_mask=None, template_head=None):
+    """The "user:<id>" of the study's own template (Slicer Studio A-10) when its image and brain mask are in
+    ``template_dirs``, else None. Found by the image sha256 that study.json records (ids are chosen on each computer;
+    the same id is preferred), else by id.
+    """
+    user = study.user_template() if hasattr(study, "user_template") else None
+    if not user or not user.get("id"):
+        return None
+    records = [record for record in (read_user_template(folder) for folder in user_template_folders(template_dirs)) if record]
+    if user.get("sha256"):
+        matches = [record for record in records if (record.get("sha256") or {}).get("image") == user["sha256"]]
+        matches.sort(key=lambda record: f"{USER_TEMPLATE_PREFIX}{record['id']}" != user["id"])
+    else:
+        matches = [record for record in records if f"{USER_TEMPLATE_PREFIX}{record['id']}" == user["id"]]
+    for record in matches:
+        template_id = f"{USER_TEMPLATE_PREFIX}{record['id']}"
+        try:
+            found = find_template(template_id, template_image, template_mask, template_head, template_dirs)
+        except jobs.JobError:
+            continue
+        if not any(role in found["missing"] for role in REQUIRED_TEMPLATE_FILES):
+            return template_id
+    return None
+
+
 def _study_template(study, explicit, template_dirs, template_image=None, template_mask=None, template_head=None):
-    """Template of a batch: explicit, else the study's trace_policy space or connectome family when usable, else 2009c."""
+    """Template of a batch: explicit, else the study's own template ("user:<id>", A-10) when its image and mask are in
+    ``template_dirs``, else the study's trace_policy space or connectome family when usable, else 2009c.
+    """
     if explicit not in (None, "", "auto"):
         return explicit, None
+    user_id = _study_user_template(study, template_dirs, template_image, template_mask, template_head)
+    if user_id:
+        return user_id, None
     candidates = []
     policy_space = (study.trace_policy or {}).get("space")
     if policy_space:
@@ -2591,7 +2621,7 @@ def _common_options(parser, with_run_options=True):
     if not with_run_options:
         return
     parser.add_argument("--template", type=_template_argument, default="auto",
-                        help=f"target template: auto (the study's space in a batch, else MNI152NLin2009cAsym), {', '.join(TEMPLATE_IDS)}, or user:<id> "
+                        help=f"target template: auto (in a batch the study's own template when it is in --template-dir, else the study's space; else MNI152NLin2009cAsym), {', '.join(TEMPLATE_IDS)}, or user:<id> "
                              "(your own template; with --template-dir <Slicer Studio folder>/Templates)")
     parser.add_argument("--template-image", default=None, help="2 mm registration target of the template")
     parser.add_argument("--template-mask", default=None, help="2 mm brain mask of the template")

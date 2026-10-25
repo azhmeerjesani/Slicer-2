@@ -297,7 +297,7 @@ class NormalizeCard:
     def templateId(self):
         """The chosen template, else the connectome's family when its files are present, else MNI152NLin2009cAsym."""
         chosen = self.options.get("templateId")
-        if chosen in nc.TEMPLATE_IDS:
+        if chosen in nc.TEMPLATE_IDS or (nc.isUserTemplate(chosen) and nc.templateAvailable(chosen)):
             return chosen
         wanted = _bundleSpace(self.ctx.bundle)
         if wanted == nc.NLIN6_TEMPLATE and nc.templateAvailable(nc.NLIN6_TEMPLATE):
@@ -307,6 +307,10 @@ class NormalizeCard:
     def _templateNoteText(self):
         wanted = _bundleSpace(self.ctx.bundle)
         templateId = self.templateId()
+        if nc.isUserTemplate(templateId):
+            # Your own template (A-10): the registration quality depends on it (experimental, D-A12)
+            return _("Registered to your template {name}: the registration quality depends on the template (experimental).").format(
+                name=nc.templateName(templateId))
         if wanted and wanted != templateId:
             return _("Registered to {template}; the connectome uses {wanted}: a few mm difference (QA shows the coverage)").format(template=templateId, wanted=wanted)
         return ""
@@ -321,6 +325,8 @@ class NormalizeCard:
             return _("This scan is already a normalization result.")
         templateId = self.templateId()
         if not nc.templateAvailable(templateId):
+            if nc.isUserTemplate(templateId):
+                return _("Your template {name} needs an image and a brain mask (Settings › Templates).").format(name=nc.templateName(templateId))  # noqa: RUF001
             return _("The {template} template is not on this computer (Options → download it).").format(template=templateId)
         available = nc.normalizationAvailable()
         if not available:
@@ -391,6 +397,9 @@ class NormalizeCard:
         self.templateCombo.addItem(_("Automatic (the connectome's family)"), "")
         for templateId in nc.TEMPLATE_IDS:
             self.templateCombo.addItem(templateId, templateId)
+        # The user's own templates with a brain mask (A-10)
+        for templateId, name in nc.userTemplates():
+            self.templateCombo.addItem(_("{name} (yours)").format(name=name), templateId)
         self.templateCombo.connect("currentIndexChanged(int)", self._onOptionsChanged)
         form.addRow(_("Template"), self.templateCombo)
 

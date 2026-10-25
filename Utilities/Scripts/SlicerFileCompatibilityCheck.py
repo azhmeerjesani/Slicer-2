@@ -20,7 +20,11 @@ checker loads that scene file as a further scene; then, in the other direction, 
 of that project, changes it (a point added, a table cell, a new point list) and saves it as its Save dialog would
 (changed files in place, new files next to the scene file); the fork opens the project again in place (``openProject``),
 must find the official changes, saves it (new files move into their kind folders) and must find them again after
-reloading; finally the official installation loads the project the fork saved. With ``--autosave``, a fork writer first writes the scene with the Slicer Studio scene autosave
+reloading; finally the official installation loads the project the fork saved. Also with ``--projects`` (A-10), a fork
+writes a project drawn on the user's own MNI template (a 1.5 mm template added with ``StudioLib.templates``: the project's
+Images/ holds a copy of it); every installation loads it and must find the template and the lesion aligned (same
+voxels, same lesion voxel count and world centroid), and each official installation adds a point list and saves it,
+after which the fork loads it again and must still recognize the template (its ``Studio.Space``). With ``--autosave``, a fork writer first writes the scene with the Slicer Studio scene autosave
 (``StudioLib.autosave_io.writeSnapshot``, before the regular saves, so that every node is written by the autosave)
 into ``autosave/``; checkers load that ``Scene.mrml`` as a third scene, with the same checks. A fork writer also
 runs the lesion network mapping command-line interface
@@ -138,6 +142,10 @@ SCENE_FORMATS = ("dir", "mrb", "autosave", "project")
 PROJECT_NAME = "Compat project é"
 #: Point list that an official installation adds to a fork project (the reverse direction of --projects)
 OFFICIAL_POINT_LIST_NAME = "OfficialPoints"
+#: The project drawn on the user's own MNI template (--projects, A-10)
+TEMPLATE_PROJECT_NAME = "Own template project"
+TEMPLATE_NAME = "Compat template 1.5 mm"
+TEMPLATE_SPACE = "MNI152NLin2009bAsym"
 # Folder name of the writer case with non-ASCII characters and spaces in the path
 UNICODE_FOLDER_NAME = "\u00c9tude with spaces"
 
@@ -183,6 +191,12 @@ def runInSlicer(configPath):
             result.update(_runProjectReopen(config))
         elif config["role"] == "projectCheck":
             result.update(_runProjectCheck(config))
+        elif config["role"] == "templateWrite":
+            result.update(_runTemplateWrite(config))
+        elif config["role"] == "templateCheck":
+            result.update(_runTemplateCheck(config))
+        elif config["role"] == "templateEdit":
+            result.update(_runTemplateEdit(config))
         else:
             result.update(_runChecker(config))
     except Exception:
@@ -964,6 +978,203 @@ def _runProjectCheck(config):
     return record
 
 
+def _templateLesionState():
+    """The template volume (``Studio.TemplateId``) and the lesion of a user-template project: voxels, grid, lesion voxel
+    count and world (RAS) centroid of the lesion; ``spaceOf`` of the template volume in the fork.
+    """
+    import numpy as np
+    import vtk
+
+    import slicer
+
+    volumes = [node for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode") if node.GetAttribute("Studio.TemplateId")]
+    segmentations = slicer.util.getNodesByClass("vtkMRMLSegmentationNode")
+    state = {"templateVolumes": len(volumes), "segmentations": len(segmentations)}
+    if len(volumes) != 1 or len(segmentations) != 1:
+        return state
+    volume, segmentation = volumes[0], segmentations[0]
+    voxels = slicer.util.arrayFromVolume(volume)
+    matrix = vtk.vtkMatrix4x4()
+    volume.GetIJKToRASMatrix(matrix)
+    state.update(templateId=volume.GetAttribute("Studio.TemplateId"), space=volume.GetAttribute("Studio.Space"), templateMd5=_md5(voxels),
+                 shape=list(voxels.shape), ijkToRas=_matrixToList(matrix))
+    segmentId = segmentation.GetSegmentation().GetNthSegmentID(0)
+    lesion = slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, segmentId, volume)
+    kji = np.argwhere(lesion > 0)
+    state["lesionVoxels"] = len(kji)
+    if len(kji):
+        ijk = np.hstack([kji[:, ::-1].astype(float), np.ones((len(kji), 1))])
+        ras = (np.array(_matrixToList(matrix)).reshape(4, 4) @ ijk.T).T[:, :3]
+        state["lesionCentroid"] = [round(float(value), 4) for value in ras.mean(axis=0)]
+    try:
+        import importlib
+
+        space = importlib.import_module("StudioLib.space")
+        found = space.spaceOf(volume)
+        state["spaceOf"] = list(found) if found else None
+    except ImportError:
+        state["spaceOf"] = "n/a"
+    return state
+
+
+def _runTemplateWrite(config):
+    """Fork: add a user template (the bundled 2 mm brain resampled to 1.5 mm), draw a left-hemisphere lesion on it and save
+    the scene as a project of a Slicer Studio folder (the template is copied into Images/).
+    """
+    import importlib
+
+    import numpy as np
+
+    import slicer
+
+    try:
+        templates = importlib.import_module("StudioLib.templates")
+        importer = importlib.import_module("StudioLib.importer")
+        projects = importlib.import_module("StudioLib.projects")
+        autosaveIo = importlib.import_module("StudioLib.autosave_io")
+        from LesionNetworkMappingLib import geometry, nifti
+    except ImportError:
+        return {"status": "skipped", "reason": "StudioLib.templates is not available in this Slicer"}
+    root = config["root"]
+    shutil.rmtree(root, ignore_errors=True)
+    os.environ[projects.ROOT_ENVIRONMENT] = root
+    builtin = templates.builtinTemplates()[0]
+    data, affine, _header = nifti.read_nifti(builtin.imagePath)
+    spacing = 1.5
+    shape = tuple(int(np.floor((data.shape[axis] - 1) * 2.0 / spacing)) + 1 for axis in range(3))
+    target = np.diag([spacing, spacing, spacing, 1.0])
+    target[:3, 3] = affine[:3, 3]
+    source = os.path.join(config["outDir"], "my_template_1.5mm.nii.gz")
+    os.makedirs(config["outDir"], exist_ok=True)
+    nifti.write_nifti(source, geometry.resample_to_grid(data, affine, geometry.Grid(shape, target), mode="linear").astype(np.float32), target)
+    template = templates.addTemplate(source, name=TEMPLATE_NAME, space=TEMPLATE_SPACE)
+    slicer.mrmlScene.Clear(0)
+    volume = importer.loadTemplateVolume(template)
+    segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesions")
+    segmentation.CreateDefaultDisplayNodes()
+    segmentation.SetReferenceImageGeometryParameterFromVolumeNode(volume)
+    segmentId = segmentation.GetSegmentation().AddEmptySegment("Lesion")
+    lesion = np.zeros(slicer.util.arrayFromVolume(volume).shape, np.uint8)
+    lesion[60:70, 70:80, 30:40] = 1  # k, j, i: x < 0 (the left hemisphere)
+    slicer.util.updateSegmentBinaryLabelmapFromArray(lesion, segmentation, segmentId, volume)
+    state = _templateLesionState()
+    project = projects.createProject(TEMPLATE_PROJECT_NAME, root)
+    plan = autosaveIo.ProjectWriter(project, autosaveIo.InlineExecutor()).writeAll(slicer.mrmlScene)
+    files = []
+    for directory, _folders, names in os.walk(project.path):
+        files += [os.path.relpath(os.path.join(directory, name), project.path).replace(os.sep, "/") for name in names]
+    with open(project.scenePath, encoding="utf-8") as f:
+        sceneText = f.read()
+    with open(os.path.join(template.folder, templates.TEMPLATE_JSON), encoding="utf-8") as f:
+        templateText = f.read()
+    return {"status": "ok", "scene": project.scenePath, "path": project.path, "files": sorted(files), "incomplete": plan.incomplete, "state": state,
+            "templateSha256": template.imageSha256,
+            "absolutePath": root in sceneText or os.path.expanduser("~") in sceneText or root in templateText or config["outDir"] in templateText}
+
+
+def _runTemplateCheck(config):
+    """Load a user-template project and record the template and the lesion (and, in the fork, the template's space)."""
+    import importlib
+
+    capture = _LogCapture()
+    if config.get("root"):
+        os.environ["SLICER_STUDIO_PROJECTS_ROOT"] = config["root"]
+        try:
+            importlib.import_module("StudioLib.templates").registerGrids(force=True)
+        except ImportError:
+            pass
+    record = _loadAndInspect(config["scene"], os.path.join(config["shotsDir"], f"template_project_{config['name']}.png"), capture)
+    record["templateState"] = _templateLesionState()
+    return record
+
+
+def _runTemplateEdit(config):
+    """Official Slicer opens a user-template project, adds a point list and saves the scene (new data next to the scene file)."""
+    import slicer
+
+    capture = _LogCapture()
+    capture.start()
+    scenePath = config["scene"]
+    slicer.mrmlScene.Clear(0)
+    slicer.util.loadScene(scenePath)
+    _processEvents(5)
+    points = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", OFFICIAL_POINT_LIST_NAME)
+    points.AddControlPoint([-30.0, -18.0, 18.0], "left")
+    saved = bool(slicer.util.saveNode(points, os.path.join(os.path.dirname(scenePath), f"{OFFICIAL_POINT_LIST_NAME}.mrk.json")))
+    saved = bool(slicer.util.saveScene(scenePath)) and saved
+    return {"saved": saved, "templateState": _templateLesionState(), "messages": capture.stop()}
+
+
+def _compareTemplateStates(expected, actual, fork):
+    problems = []
+    if actual.get("templateVolumes") != 1 or actual.get("segmentations") != 1:
+        return [f"expected one template volume and one segmentation, found {actual.get('templateVolumes')} and {actual.get('segmentations')}"]
+    for key in ("templateId", "space", "templateMd5", "shape", "lesionVoxels"):
+        if expected.get(key) != actual.get(key):
+            problems.append(f"{key}: {actual.get(key)!r} (expected {expected.get(key)!r})")
+    if not _closeLists(expected.get("ijkToRas"), actual.get("ijkToRas"), GEOMETRY_TOLERANCE * 10):
+        problems.append("the template grid differs")
+    if not _closeLists(expected.get("lesionCentroid") or [], actual.get("lesionCentroid") or [0], 1e-3):
+        problems.append(f"the lesion moved: centroid {actual.get('lesionCentroid')} (expected {expected.get('lesionCentroid')})")
+    if fork and actual.get("spaceOf") != [TEMPLATE_SPACE, 1.5]:
+        problems.append(f"the fork does not recognize the template's space: {actual.get('spaceOf')}")
+    return problems
+
+
+def _checkTemplateProjects(args, slicers, isFork, involved):
+    """--projects (A-10): a project drawn on the user's own MNI template, fork -> every installation, and official -> fork."""
+    forkName = next((name for name in involved if isFork[name]), None)
+    if forkName is None:
+        return {"(none)": {"problems": ["no fork installation"]}}
+    root = os.path.join(args.out, "template-projects", "Slicer Studio")
+    write = _runSlicer(slicers[forkName], "templateWrite", forkName, {"isFork": True, "root": root, "outDir": os.path.join(args.out, "template-projects", "inputs")}, args)
+    if "exception" in write or write.get("status") != "ok":
+        return {forkName: {"problems": [f"the fork could not write the project: {(write.get('exception') or write.get('reason') or '').strip()[-300:]}"]}}
+    results = {}
+    problems = []
+    if write.get("incomplete"):
+        problems.append(f"incomplete project: {write['incomplete']}")
+    if write.get("absolutePath"):
+        problems.append("an absolute local path in the scene file or template.json")
+    images = [name for name in write["files"] if name.startswith("Images/")]
+    if len(images) != 1:
+        problems.append(f"Images/ should hold the copy of the template: {images}")
+    if write["state"].get("lesionVoxels", 0) <= 0 or (write["state"].get("lesionCentroid") or [1])[0] >= 0:
+        problems.append(f"the lesion is not in the left hemisphere: {write['state']}")
+    results[f"{forkName} (write)"] = {"problems": problems, "files": write["files"]}
+    for name in involved:
+        check = _runSlicer(slicers[name], "templateCheck", f"{name}-template", {"isFork": isFork[name], "scene": write["scene"], "root": root if isFork[name] else None}, args)
+        if "exception" in check:
+            results[name] = {"problems": [f"check failed: {check['exception'].strip().splitlines()[-1]}"]}
+            continue
+        problems = [] if check.get("loaded") else ["the project could not be loaded"]
+        problems += _compareTemplateStates(write["state"], check.get("templateState", {}), isFork[name])
+        if not any((check.get("views") or {}).get("sliceViews", {}).values()):
+            problems.append("no slice view is shown")
+        problems += [f"log: {m['text'].strip()[:200]}" for m in check.get("messages", []) if m["level"] in ERROR_LEVELS and not _isNoise(m)]
+        results[name] = {"problems": problems}
+    for officialName in [name for name in involved if not isFork[name]]:
+        copyRoot = os.path.join(args.out, "template-projects", f"reverse-{officialName}")
+        shutil.rmtree(copyRoot, ignore_errors=True)
+        projectDir = os.path.join(copyRoot, os.path.basename(write["path"]))
+        shutil.copytree(write["path"], projectDir, ignore=shutil.ignore_patterns("lock"))
+        scene = os.path.join(projectDir, os.path.basename(write["scene"]))
+        edit = _runSlicer(slicers[officialName], "templateEdit", f"{officialName}-template-edit", {"isFork": False, "scene": scene}, args)
+        problems = []
+        if "exception" in edit or not edit.get("saved"):
+            results[f"{officialName} -> {forkName}"] = {"problems": [f"official edit failed: {(edit.get('exception') or 'not saved').strip()[-300:]}"]}
+            continue
+        problems += [f"in {officialName}: {p}" for p in _compareTemplateStates(write["state"], edit.get("templateState", {}), False)]
+        check = _runSlicer(slicers[forkName], "templateCheck", f"{forkName}-template-after-{officialName}", {"isFork": True, "scene": scene, "root": root}, args)
+        if "exception" in check:
+            problems.append(f"fork check failed: {check['exception'].strip().splitlines()[-1]}")
+        else:
+            problems += [f"in the fork: {p}" for p in _compareTemplateStates(write["state"], check.get("templateState", {}), True)]
+            problems += [f"log: {m['text'].strip()[:200]}" for m in check.get("messages", []) if m["level"] in ERROR_LEVELS and not _isNoise(m)]
+        results[f"{officialName} -> {forkName}"] = {"problems": problems}
+    return results
+
+
 def _importLnm(config):
     """Import LesionNetworkMappingLib from the writer, or else from the source tree. Return (module dir, how)."""
     import importlib
@@ -1718,6 +1929,11 @@ def _formatReport(report):
         for name, item in report["projectsReverse"].items():
             lines.append(f"  {name}: {'ok' if not item['problems'] else 'FAIL'}  files {item.get('files')}")
             lines += [f"    - {p}" for p in item["problems"]]
+    if report.get("templateProjects"):
+        lines += ["", "Projects drawn on your own MNI template (--projects, A-10):"]
+        for name, item in report["templateProjects"].items():
+            lines.append(f"  {name}: {'ok' if not item['problems'] else 'FAIL'}" + (f"  files {item.get('files')}" if item.get("files") else ""))
+            lines += [f"    - {p}" for p in item["problems"]]
     lines += ["", f"Result: {'PASS' if report['passed'] else 'FAIL'}", ""]
     return "\n".join(lines)
 
@@ -1830,8 +2046,10 @@ def main(argv=None):
 
     if args.projects:
         report["projectsReverse"] = _checkProjectsReverse(args, slicers, isFork, involved, writers)
+        report["templateProjects"] = _checkTemplateProjects(args, slicers, isFork, involved)
     report["passed"] = (not any(w["problems"] for w in report["writers"].values()) and not any(part["problems"] for pair in report["pairs"].values() for part in pair.values())
-                        and not any(item["problems"] for item in report.get("projectsReverse", {}).values()))
+                        and not any(item["problems"] for item in report.get("projectsReverse", {}).values())
+                        and not any(item["problems"] for item in report.get("templateProjects", {}).values()))
     with open(os.path.join(args.out, "report.json"), "w", encoding="utf-8") as f:
         json.dump(report, f, indent=1, sort_keys=True)
     text = _formatReport(report)

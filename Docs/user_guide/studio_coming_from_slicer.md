@@ -58,6 +58,7 @@ Windows and Linux; on macOS, Ctrl is ⌘.
 | File > Add Data (Ctrl+O) | Library > Open… (Ctrl+O), or drop files anywhere on the window |
 | File > Add DICOM Data | Library > Open folder… (a DICOM folder); the DICOM module is one search away |
 | File > Download Sample Data | Library > Load sample data, or Search (Ctrl+K) for a sample by name |
+| Where do I add my own MNI template? | Library > Start on template ▾ > Add your own template…, or Search (Ctrl+K) for Add MNI template; Settings › Templates lists them and sets the default |
 | File > Recent | Library > Recent |
 | File > Save Data (Ctrl+S) | Saved automatically to Projects/<name> in the Slicer Studio folder (Ctrl+S saves now) |
 | File > Save Data (to another folder or a .mrb) | ≡ > File > Save a copy as…: the whole scene as one .mrb file, anywhere |

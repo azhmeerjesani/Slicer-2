@@ -141,6 +141,9 @@ recovered at the next start or with File &gt; Recover Autosaved Work.</p>
 offers it in the Updates panel of the application settings (also ≡ &gt; Check for updates…, or Help &gt; Check for
 Updates… in Classic). An update is downloaded, checked against its published SHA-256 checksum and installed when
 Slicer Studio restarts. Automatic checks can be turned off in the Updates panel.</p>
+<p>Your own MNI templates: Library &gt; Start on template ▾ &gt; Add your own template… (or Search: Add MNI template)
+adds an MNI-space brain image, with an optional brain mask and 3D surfaces. It is copied into the Templates folder of
+the Slicer Studio folder and can be drawn on, mapped from and normalized to; Settings &gt; Templates sets the default.</p>
 """)
         self.parent.acknowledgementText = _("""
 <p>Icons: <a href="https://lucide.dev">Lucide</a> 0.468.0, ISC License,

@@ -58,7 +58,8 @@ from . import hud, layouts, topbar, ui, workspaces
 #: Plug-ins installed when Studio is applied (``install(shell)``) and removed in Classic
 #: (``uninstall(shell)``). Missing modules are skipped.
 OPTIONAL_PLUGINS = ["StudioLib.importer", "StudioLib.probe", "StudioLib.journal", "StudioLib.study_ui", "StudioLib.orientation", "StudioLib.finder",
-                    "StudioLib.modes", "StudioLib.a11y", "StudioLib.firstrun", "StudioLib.tour", "StudioLib.autosave_ui", "StudioLib.projects_ui"]
+                    "StudioLib.modes", "StudioLib.a11y", "StudioLib.firstrun", "StudioLib.tour", "StudioLib.autosave_ui", "StudioLib.projects_ui",
+                    "StudioLib.templates_ui"]
 
 DEFAULT_PANEL_WIDTH = 340
 MIN_PANEL_WIDTH = 300

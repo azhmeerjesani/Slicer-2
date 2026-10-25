@@ -757,18 +757,47 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
             pass
         from LesionNetworkMappingLib import geometry
 
-        return geometry.detect_space((tuple(int(n) for n in data_shape), affine))
+        grid = (tuple(int(n) for n in data_shape), affine)
+        detected = geometry.detect_space(grid)
+        if detected is None:
+            # The grid of one of the user's own Slicer Studio templates (also the anisotropic ones that geometry does not
+            # register): a lesion file drawn on it and opened later has no Studio.Space attribute
+            try:
+                from StudioLib import space as studioSpace
+
+                detected = studioSpace.spaceOf(grid)
+            except Exception:
+                detected = None
+        return detected
+
+    @staticmethod
+    def familyNotice(seedSpace, connectomeSpace):
+        """The note for a lesion on a template of another MNI family than the connectome ("" when the families match or
+        the connectome's family is not known). "MNI (other)" templates (space "MNI") are an unknown MNI family.
+        """
+        if not seedSpace or not connectomeSpace:
+            return ""
+        from LesionNetworkMappingLib import geometry
+
+        seedName = seedSpace[0] if isinstance(seedSpace, (tuple, list)) else seedSpace
+        connectomeFamily = geometry.space_family(connectomeSpace)
+        if connectomeFamily in ("native", "unknown") or geometry.space_family(seedName) == connectomeFamily:
+            return ""
+        shown = _("MNI (other)") if seedName == "MNI" else seedName
+        return _("The lesion is on {seed}, the connectome on {connectome}: the template families are a few millimetres apart, "
+                 "so the map is approximate near subcortical structures.").format(seed=shown, connectome=connectomeSpace)
 
     def checkSeed(self, segNode, segmentId, bundle=None):
         """Check a seed against a connectome; return a dict.
 
         Keys: ``ok`` (bool), ``reason`` (why it cannot be mapped, or ""), ``kind`` ("", "empty", "native",
-        "outside", "small"), ``space`` ((name, resolution) or None), ``volumeMl``, and with a bundle
-        ``qc`` (``engine.prepare_lesion``'s voxels_in_mask, weight_total, ...).
+        "outside", "small"), ``space`` ((name, resolution) or None), ``volumeMl``, ``notice`` (a lesion on a template
+        of another MNI family than the connectome, e.g. one of the user's own templates: it maps, with this note), and
+        with a bundle ``qc`` (``engine.prepare_lesion``'s voxels_in_mask, weight_total, ...).
         """
         import numpy as np
 
-        result = {"ok": False, "reason": "", "kind": "", "space": None, "volumeMl": 0.0, "qc": None}
+        result = {"ok": False, "reason": "", "kind": "", "space": None, "volumeMl": 0.0, "qc": None, "notice": ""}
         if segNode is None or not segmentId or segNode.GetSegmentation().GetSegment(segmentId) is None:
             result.update(reason=_("Choose the lesion segment."), kind="none")
             return result
@@ -801,6 +830,7 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
             if not np.all((world >= low) & (world <= high)):
                 result.update(reason=_("The lesion lies outside the connectome's grid: it is not in the connectome's space."), kind="outside")
                 return result
+        result["notice"] = self.familyNotice(result["space"], connectomeSpace[0] if connectomeSpace else declaredSpace)
         qc = engine.prepare_lesion((data, affine), bundle)[1]
         result["qc"] = qc
         if qc.get("weight_total", 0.0) < 1.0:
@@ -2065,6 +2095,11 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         layout.addLayout(row)
         self.seedGeometryLabel = self._label("", role="secondaryText", objectName="LNMSeedGeometry")
         layout.addWidget(self.seedGeometryLabel)
+        # A lesion drawn on a template of another MNI family than the connectome (A-10): it maps, with this note
+        self.seedFamilyLabel = self._label("", role="secondaryText", objectName="LNMSeedFamilyNotice")
+        self.seedFamilyLabel.setWordWrap(True)
+        self.seedFamilyLabel.hide()
+        layout.addWidget(self.seedFamilyLabel)
         self.seedErrorBanner = self.widgets.banner("", (), level="warn")
         self.seedErrorBanner.hide()
         layout.addWidget(self.seedErrorBanner)
@@ -3145,6 +3180,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         else:
             self.seedGeometryLabel.setText("")
             self.seedGeometryLabel.setVisible(False)
+        notice = check.get("notice") or ""
+        self.seedFamilyLabel.setText(notice)
+        self.seedFamilyLabel.setVisible(bool(notice))
         reason = check.get("reason") if not check.get("ok") and check.get("kind") not in ("none",) else ""
         self.widgets.setBannerText(self.seedErrorBanner, reason or "")
         self.seedErrorBanner.setVisible(bool(reason))

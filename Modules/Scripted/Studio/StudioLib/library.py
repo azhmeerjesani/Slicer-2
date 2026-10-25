@@ -4818,9 +4818,30 @@ class LibraryCanvas(qt.QObject):
                                        _("Open scans, lesion masks or scenes ({shortcut})").format(shortcut=openShortcut))
         self.openFolderButton = self._button(_("Open folder…"), "StudioLibraryOpenFolderButton", openFolder,
                                              _("Open a DICOM folder or a folder of NIfTI files"))
-        self.templateButton = self._button(_("Start on MNI template"), "StudioLibraryStartOnTemplateButton", startOnTemplate,
-                                           _("Draw a lesion on the MNI152NLin2009cAsym template (works offline)"))
-        for button in (self.openButton, self.openFolderButton, self.templateButton):
+        self.templateButton = self._button(_("Start on template"), "StudioLibraryStartOnTemplateButton", startOnTemplate,
+                                           _("Draw a lesion on your default MNI template (the bundled MNI152NLin2009cAsym works offline)"))
+        # "Start on template ▾" (A-10): the arrow lists every template, Add your own template… and Manage templates…
+        self.templateMenuButton = qt.QToolButton()
+        self.templateMenuButton.setObjectName("StudioLibraryTemplateMenuButton")
+        self.templateMenuButton.setText("▾")
+        self.templateMenuButton.setToolButtonStyle(qt.Qt.ToolButtonTextOnly)
+        self.templateMenuButton.setToolTip(_("Choose a template, or add your own MNI template"))
+        self.templateMenuButton.setAccessibleName(_("Templates"))
+        self.templateMenuButton.setPopupMode(qt.QToolButton.InstantPopup)
+        self.templateMenuButton.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
+        ui.setRole(self.templateMenuButton, "secondary")
+        self.templateMenu = qt.QMenu(self.templateMenuButton)
+        self.templateMenu.setObjectName("studioTemplateMenu")
+        self.templateMenu.connect("aboutToShow()", self._fillTemplateMenu)
+        self.templateMenuButton.setMenu(self.templateMenu)
+        templateSplit = qt.QWidget()
+        templateSplit.setObjectName("StudioLibraryTemplateSplit")
+        splitLayout = qt.QHBoxLayout(templateSplit)
+        splitLayout.setContentsMargins(0, 0, 0, 0)
+        splitLayout.setSpacing(2)
+        splitLayout.addWidget(self.templateButton)
+        splitLayout.addWidget(self.templateMenuButton)
+        for button in (self.openButton, self.openFolderButton, templateSplit):
             buttonRow.layout().addWidget(button)
         columnLayout.addWidget(buttonRow)
 
@@ -4906,6 +4927,15 @@ class LibraryCanvas(qt.QObject):
         ui.bindStyleSheet(self.widget, self._styleSheet)
         ui.addPaletteListener(self._refreshIcons)
         self._refreshIcons()
+
+    def _fillTemplateMenu(self):
+        """The "Start on template ▾" menu (``templates_ui.populateTemplateMenu``)."""
+        try:
+            from . import templates_ui
+
+            templates_ui.populateTemplateMenu(self.templateMenu)
+        except Exception:
+            logging.error(f"Studio Library: the template menu failed:\n{traceback.format_exc()}")
 
     @staticmethod
     def _button(text, objectName, callback, toolTip):

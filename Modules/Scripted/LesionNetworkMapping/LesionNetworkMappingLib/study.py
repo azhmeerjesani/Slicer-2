@@ -383,7 +383,9 @@ class Study:
     def create(cls, path, name=None, template=None, space=None, rules=None, connectomes=None, software=None):
         """Create a new study folder (it may exist but must not contain a study) and save it.
 
-        :param template: optional {"id", "res", "source", "sha256"} of the template that lesions are drawn on.
+        :param template: optional {"id", "res", "source", "sha256"} of the template that lesions are drawn on ("id" is its
+          space). The user's own template (Slicer Studio A-10) has "source" "user:<slug>" and also "name" and "space":
+          a study names it by id, name, space and checksum, never by path (:meth:`user_template`).
         :param space: study space; default: the template id, else None (decided per subject).
         :param rules: optional {"lesion": regex, "id": regex} for :meth:`add_files`.
         """
@@ -631,6 +633,16 @@ class Study:
     @property
     def template(self):
         return self.metadata.get("template")
+
+    def user_template(self):
+        """{"id": "user:<slug>", "name", "space", "sha256"} when the study's template is one the user added (Slicer Studio
+        A-10; the files are on the user's computer, found by checksum), else None.
+        """
+        template = self.template
+        if not isinstance(template, dict) or not str(template.get("source") or "").startswith("user:"):
+            return None
+        return {"id": template["source"], "name": template.get("name"), "space": template.get("space") or template.get("id"),
+                "sha256": template.get("sha256")}
 
     @property
     def rules(self):

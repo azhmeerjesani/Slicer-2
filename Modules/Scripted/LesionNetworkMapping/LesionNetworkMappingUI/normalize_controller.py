@@ -216,17 +216,76 @@ def cacheDirectory():
     return app.cachePath if app is not None and app.cachePath else os.path.join(os.path.expanduser("~"), ".cache", "SlicerStudio")
 
 
+def userTemplatesDirectory():
+    """<Slicer Studio folder>/Templates: the user's own templates (A-10), or None without Studio or when it does not exist."""
+    try:
+        from StudioLib import templates
+    except ImportError:
+        return None
+    try:
+        folder = templates.templatesFolder()
+    except Exception:
+        return None
+    return folder if os.path.isdir(folder) else None
+
+
 def templateDirectories():
-    """Folders passed with --template-dir: SampleData's data folder, the cache, and Studio's template cache when it exists."""
+    """Folders passed with --template-dir: SampleData's data folder, the cache, Studio's template cache when it exists,
+    and the Templates folder of the user's own templates (resolves "user:<id>").
+    """
     folders = [sampleDataDirectory(), cacheDirectory()]
     studioCache = os.path.join(cacheDirectory(), "StudioTemplates")
     if os.path.isdir(studioCache):
         folders.append(studioCache)
+    folders.append(userTemplatesDirectory())
     return [folder for folder in dict.fromkeys(folders) if folder]
+
+
+def isUserTemplate(templateId):
+    return str(templateId or "").startswith("user:")
+
+
+def userTemplates():
+    """The user's own templates that can be a normalization target (an image and a brain mask): ``[(id, name)]``."""
+    try:
+        from StudioLib import templates
+    except ImportError:
+        return []
+    try:
+        return [(template.id, template.name) for template in templates.userTemplates() if template.canNormalize()]
+    except Exception:
+        return []
+
+
+def templateName(templateId):
+    """The name shown for a template id: the user's name of one of their templates, else the id."""
+    if isUserTemplate(templateId):
+        record = _normalizeLib().resolve_user_template(templateId, templateDirectories())
+        if record is not None:
+            return record.get("name") or templateId
+    return templateId
+
+
+def spaceAttributeValue(templateId, record=None):
+    """The ``Studio.Space`` value of a normalization result: the template id, or the space of the user's own template
+    (its normalization.json record, else its template.json), so that Map and Draw see its MNI family.
+    """
+    if not isUserTemplate(templateId):
+        return templateId
+    space = ((record or {}).get("template") or {}).get("space")
+    if not space:
+        found = _normalizeLib().resolve_user_template(templateId, templateDirectories())
+        space = (found or {}).get("space")
+    return space or "MNI"
 
 
 def templateFile(templateId, role):
     """The path of a template file found by name in the template folders (not checksummed here: the job checks), or None."""
+    if isUserTemplate(templateId):
+        record = _normalizeLib().resolve_user_template(templateId, templateDirectories())
+        name = ((record or {}).get("files") or {}).get({"fixed": "image", "reference": "image", "mask": "mask", "head": "head"}.get(role, role))
+        path = os.path.join(record["folder"], *str(name).split("/")) if record and name else None
+        return path if path and os.path.isfile(path) else None
     info = _normalizeLib().TEMPLATES[templateId]["files"][role]
     for folder in templateDirectories():
         for candidate in (os.path.join(folder, info["name"]), os.path.join(folder, f"tpl-{templateId}", info["name"])):
@@ -777,6 +836,8 @@ def describeFailure(info):
             return _("The scan could not be aligned to the template. The whole-head template (not bundled) allows a tilt recovery; or {hint}.").format(hint=hint[:1].lower() + hint[1:]), "head"
         return _("The scan could not be aligned to the template. {hint}.").format(hint=hint.rstrip(".")), None
     if code == "template_missing":
+        if isUserTemplate(event.get("template")):
+            return _("Your template {name} is missing its image or brain mask (Settings › Templates).").format(name=templateName(event.get("template"))), None  # noqa: RUF001
         return _("The template files are not available on this computer."), f"template:{event.get('template') or DEFAULT_TEMPLATE}"
     if code == "already_template_space":
         return _("This scan is already on a template grid: nothing to normalize."), None
@@ -1398,7 +1459,7 @@ class NormalizeController(VTKObservationMixin):
             display.AutoWindowLevelOff()
             display.SetWindowLevelMinMax(*scan["window"])
             display.SetAndObserveColorNodeID("vtkMRMLColorTableNodeGrey")
-            volume = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", slicer.mrmlScene.GenerateUniqueName(f"{scanName} ({templateId})"))
+            volume = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", slicer.mrmlScene.GenerateUniqueName(f"{scanName} ({templateName(templateId)})"))
             self._tag(volume, result)
             volume.SetAndObserveDisplayNodeID(display.GetID())
             image = vtk.vtkImageData()
@@ -1408,7 +1469,7 @@ class NormalizeController(VTKObservationMixin):
             volume.SetIJKToRASMatrix(_arrayToMatrix(scan["affine"]))
             volume.SetAndObserveImageData(image)
         if segmentation is None:
-            segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", slicer.mrmlScene.GenerateUniqueName(f"Lesion ({templateId})"))
+            segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", slicer.mrmlScene.GenerateUniqueName(f"Lesion ({templateName(templateId)})"))
             segmentation.CreateDefaultDisplayNodes()
             # Hidden until it is shown over a template-space image (showInViews): over the native scan it would mislead
             segmentation.GetDisplayNode().SetVisibility(False)
@@ -1430,7 +1491,7 @@ class NormalizeController(VTKObservationMixin):
     @staticmethod
     def _tag(node, result):
         node.SetAttribute(NORMALIZATION_ATTRIBUTE, result.provenancePath)
-        node.SetAttribute(SPACE_ATTRIBUTE, result.templateId)
+        node.SetAttribute(SPACE_ATTRIBUTE, spaceAttributeValue(result.templateId, result.record))
         node.SetAttribute(SUGGESTION_ATTRIBUTE, result.suggestion or "")
         node.SetAttribute(FINGERPRINT_ATTRIBUTE, result.fingerprint or "")
 
@@ -1520,7 +1581,7 @@ class NormalizeController(VTKObservationMixin):
         if node is None:
             return None, False
         node.SetAttribute(REVIEW_TEMPLATE_ATTRIBUTE, templateId)
-        node.SetAttribute(SPACE_ATTRIBUTE, templateId)
+        node.SetAttribute(SPACE_ATTRIBUTE, spaceAttributeValue(templateId))
         return node, True
 
     @staticmethod
@@ -1704,7 +1765,7 @@ class NormalizeController(VTKObservationMixin):
         tmpDir = os.path.join(slicer.app.temporaryPath, "LNMNormalize", uuid.uuid4().hex)
         stamp = time.strftime("%Y%m%d%H%M%S")
         lesionPath = os.path.join(tmpDir, f"lesion-edit{stamp}.nii")
-        out = os.path.join(result.outDir, "warps", f"{result.record.get('subject') or 'sub-lesion'}_edit-{stamp}_space-{result.templateId}_res-1_desc-lesion_mask.nii.gz")
+        out = os.path.join(result.outDir, "warps", f"{result.record.get('subject') or 'sub-lesion'}_edit-{stamp}_space-{_normalizeLib().template_label(result.templateId)}{_normalizeLib()._res_entity(result.templateId)}_desc-lesion_mask.nii.gz")
         args = ["warp", "--run", result.outDir, "--image", lesionPath, "--kind", "lesion", "--out", out, "--events", "json", "--parent-pid", str(os.getpid())]
         for folder in templateDirectories():
             args += ["--template-dir", folder]

@@ -2058,10 +2058,27 @@ def _sidecarSource(sidecar, sourceVolumeNode):
     return relative.replace(os.sep, "/")
 
 
+def _userTemplateOf(volumeNode):
+    """The user's own template (A-10) that ``volumeNode`` shows, or None."""
+    if volumeNode is None or not volumeNode.GetAttribute("Studio.TemplateId"):
+        return None
+    try:
+        from . import templates
+
+        return templates.userTemplateOfNode(volumeNode)
+    except Exception:
+        return None
+
+
 def writeSidecar(path, segmentationNode, sourceVolumeNode=None):
-    """Write the BIDS-style sidecar of a saved lesion (D-U3; official Slicer and FSL ignore it). Return its path."""
+    """Write the BIDS-style sidecar of a saved lesion (D-U3; official Slicer and FSL ignore it). Return its path.
+
+    A lesion drawn on the user's own template (A-10) also names the template ("Template": id, name, space, sha256; never
+    a path), so that a colleague can add the same template by its checksum.
+    """
     sidecar = sidecarPath(path)
     lesionSpace = space.spaceOf(segmentationNode)
+    userTemplate = _userTemplateOf(sourceVolumeNode)
     content = {
         "Source": _sidecarSource(sidecar, sourceVolumeNode) if sourceVolumeNode is not None else None,
         "Space": lesionSpace[0] if lesionSpace else "scanner",
@@ -2071,6 +2088,8 @@ def writeSidecar(path, segmentationNode, sourceVolumeNode=None):
     }
     if content["Source"] is None:
         del content["Source"]
+    if userTemplate is not None:
+        content["Template"] = {"id": userTemplate.id, "name": userTemplate.name, "space": userTemplate.space, "sha256": userTemplate.imageSha256}
     with open(sidecar, "w", encoding="utf-8") as f:
         json.dump(content, f, indent=2, ensure_ascii=False)
         f.write("\n")
@@ -2789,6 +2808,10 @@ class DrawExtension:
             return line, "warn"
         if sourceVolumeNode is not None and not _isTemplateVolume(sourceVolumeNode) and not _isMniLesion(segmentationNode):
             return _("Scan space"), "neutral"
+        userTemplate = _userTemplateOf(sourceVolumeNode)
+        if userTemplate is not None:
+            # Your own template (A-10): its name and space, so the sides and coordinates are read in the right space
+            return _("On {template} · {space}").format(template=userTemplate.name, space=space.spaceLabel(space.spaceOf(sourceVolumeNode))), "neutral"
         return None, "neutral"
 
     def _hint(self, drawSession, editor, activeName):

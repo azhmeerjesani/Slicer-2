@@ -166,6 +166,9 @@ class DrawNormalizeCard:
         self._addMenuAction()
         self.widget.hide()
         _active = weakref.ref(self)
+        # Draw shows the card when it adds it to the inspector: the first refresh decides (a template, yours or built-in, is not
+        # native space, so the card hides again)
+        self._refreshTimer.start()
 
     #
     # Draw card protocol
@@ -234,6 +237,14 @@ class DrawNormalizeCard:
         # Scan only: no native lesion was normalized; the editor still holds the segmentation and scan of the run
         return self._origin is not None and self._origin == (segmentationNode, sourceVolumeNode) and sourceVolumeNode is result.scanNode
 
+    def _templateName(self, templateId):
+        """The name of the target template: the user's name of their own template (A-10), else its id."""
+        nameOf = getattr(self.nc, "templateName", None) if self.nc is not None else None
+        try:
+            return nameOf(templateId) if nameOf is not None else templateId
+        except Exception:
+            return templateId
+
     @staticmethod
     def _isScanOnly(result):
         request = result.request if result is not None else None
@@ -252,7 +263,7 @@ class DrawNormalizeCard:
         self.tip.setVisible(self._lesionEmpty and not busy and not showingResult)
         self.button.setEnabled(not busy)
         self.scanOnlyAction.setEnabled(not busy)
-        self.label.setText(_("Normalized · {template}").format(template=result.templateId) if showingResult else _("Native space · Map needs MNI"))
+        self.label.setText(_("Normalized · {template}").format(template=self._templateName(result.templateId)) if showingResult else _("Native space · Map needs MNI"))
         if self.progress is not None:
             self.progress.widget.setVisible(busy)
         self.doneRow.setVisible(showingResult)
@@ -468,9 +479,9 @@ class DrawNormalizeCard:
         if self.shell is not None:
             try:
                 if self._isScanOnly(result):
-                    text = _("Scan normalized ({template}) · trace the lesion on it").format(template=result.templateId)
+                    text = _("Scan normalized ({template}) · trace the lesion on it").format(template=self._templateName(result.templateId))
                 else:
-                    text = _("Lesion normalized ({template}) · review the alignment").format(template=result.templateId)
+                    text = _("Lesion normalized ({template}) · review the alignment").format(template=self._templateName(result.templateId))
                 self.shell.toast(text, 3000)
             except Exception:
                 pass
