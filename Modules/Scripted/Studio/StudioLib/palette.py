@@ -423,6 +423,16 @@ def _saveNow():
     projects_ui.saveNow()
 
 
+def _closeScene():
+    """Close scene: the open project is saved first (projects_ui), else the official action."""
+    try:
+        from . import projects_ui
+    except ImportError:
+        _triggerAction("FileCloseSceneAction")
+        return
+    projects_ui.closeScene()
+
+
 def _triggerAction(objectName):
     action = _mainWindowAction(objectName)
     if action is not None:
@@ -916,7 +926,7 @@ class Index:
                   synonyms=("save", "save data", "save scene", "mrb", "mrml", "save all", "save project"),
                   description=_("Save the project now (it is also saved automatically); without a project, the Save dialog of 3D Slicer"),
                   iconName="download"),
-            Entry("action.closeScene", _("Close scene"), action, lambda: _triggerAction("FileCloseSceneAction"), key="Ctrl+W",
+            Entry("action.closeScene", _("Close scene"), action, _closeScene, key="Ctrl+W",
                   synonyms=("close", "close all", "clear scene", "new scene", "reset scene"), description=_("Close everything that is open"), iconName="x"),
             Entry("action.placePoint", _("Place point"), action, lambda: placePoint(shell),
                   synonyms=("fiducial", "fiducials", "point", "points", "landmark", "landmarks", "markup point", "place fiducial", "add point"),

@@ -1733,13 +1733,14 @@ def saveStateText(segmentationNode):
     inProject = _projectLesionsFolder() is not None
     if state == "unsaved":
         if inProject:
-            return _("Saved in the project · {name} is older (Save lesion updates it)").format(name=name), path
+            return _("Saved in the project · {name} is older").format(name=name), _("{path}\nSave lesion updates it.").format(path=path)
         return _("Unsaved changes · {name}").format(name=name), path
     if state == "previous":
         when = _relativeTime(savedTime) if savedTime else ""
         return (_("Last saved as {name}").format(name=name) + (f" · {when}" if when else "")), None
     if inProject:
-        return _("Saved in the project · Save lesion writes the NIfTI mask"), None
+        # One line, as "Not saved yet": the card does not grow when the project starts
+        return _("Saved in the project"), _("The lesion is saved with the project. Save lesion writes it as a NIfTI mask (.nii.gz).")
     return _("Not saved yet"), None
 
 

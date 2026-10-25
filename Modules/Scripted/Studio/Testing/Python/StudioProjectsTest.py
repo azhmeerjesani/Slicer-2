@@ -20,7 +20,10 @@ folder "Slicer Studio tést" (spaces and non-ASCII characters). The tests cover:
   duplicate, trash, moving the folder with the open project;
 - the crash offer (a project left "open" with a stale lock), study suppression and Classic (no project is created);
 - a large volume written by the background writer (marked stored without a second write on the main thread);
-- a file that official Slicer saved next to the scene file is moved into its kind folder.
+- a file that official Slicer saved next to the scene file is moved into its kind folder;
+- a closed-surface segmentation (a file plus a folder) saved again in place; temporary folders left by a crash go;
+- a detached-header volume (.nhdr) from outside is written into the project as one file;
+- a project loaded in Classic continues in place in Studio (no copy); the Library order follows official saves.
 """
 
 import hashlib
@@ -584,10 +587,124 @@ class StudioProjectsTest(unittest.TestCase):
         items = {item["id"] for item in projects_ui.paletteItems()}
         self.assertTrue({"projects.new", "projects.open", "projects.rename", "projects.showFolder", "projects.changeFolder"} <= items)
 
+    def test_14_closed_surface_segmentation(self):
+        """A segmentation written as "<name>.seg.vtm" plus a "<name>.seg/" folder is saved again in place (the folder is
+        replaced) and the project reloads with every segment; nothing refers to a temporary folder.
+        """
+        service = self._service()
+        _volume, _path = self._userVolume()
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Surfaces")
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.GetSegmentation().SetSourceRepresentationName("Closed surface")
+        logic = slicer.modules.segmentations.logic()
+        for center in ((0, 0, 0), (20, 0, 0)):
+            model = slicer.modules.models.logic().AddModel(_sphere(center))
+            self.assertTrue(logic.ImportModelToSegmentationNode(model, segmentation))
+            slicer.mrmlScene.RemoveNode(model)
+            project = self._projectFor(service)
+            self._save(service)
+            self.assertFalse(segmentation.GetModifiedSinceRead())
+            self.assertEqual(segmentation.GetStorageNode().GetFileName(), os.path.join(project.path, "Segmentations", "Surfaces.seg.vtm"))
+        files = _relativeFiles(project.path)
+        self.assertFalse([path for path in files if "studio-tmp" in path], files)
+        self.assertFalse([path for path in files if path.startswith(".studio/removed/")], files)
+        self.assertEqual(len([path for path in files if path.startswith("Segmentations/Surfaces.seg/")]), 2, files)
+        self.assertNotIn("studio-tmp", open(project.scenePath, encoding="utf-8").read())
+        projectPath = project.path
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertTrue(service.openProject(projectPath))
+        reloaded = slicer.mrmlScene.GetFirstNodeByName("Surfaces")
+        self.assertIsNotNone(reloaded)
+        self.assertEqual(reloaded.GetSegmentation().GetNumberOfSegments(), 2)
+        # A temporary folder left by a save that was interrupted is deleted when the project is opened again
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        leftover = os.path.join(projectPath, "Segmentations", self.io.PROJECT_TEMPORARY_PREFIX + "deadbeef")
+        os.makedirs(leftover)
+        open(os.path.join(leftover, "Surfaces.seg.vtm"), "w").close()
+        self.assertTrue(service.openProject(projectPath))
+        self.io.backgroundWriter().drain(10.0)
+        self.assertFalse(os.path.exists(leftover))
 
-def _sphere():
+    def test_15_detached_header_from_outside(self):
+        """A volume read from a detached header (.nhdr + data file) outside the folder is written into the project as a
+        self-contained file (copying the header alone would break it).
+        """
+        service = self._service()
+        volume, _path = self._userVolume("Head", extension=".nhdr")
+        self.assertTrue([name for name in os.listdir(self.userDir) if name.startswith("Head") and not name.endswith(".nhdr")])
+        expected = slicer.util.arrayFromVolume(volume).copy()
+        project = self._projectFor(service)
+        self._save(service)
+        files = self._projectFiles(project)
+        self.assertFalse([name for name in files if name.endswith(".nhdr")], files)
+        self.assertIn("Images/Head.nrrd", files)
+        self.assertEqual(volume.GetStorageNode().GetFileName(), os.path.join(project.path, "Images", "Head.nrrd"))
+        self.assertFalse(volume.GetModifiedSinceRead())
+        projectPath = project.path
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertTrue(service.openProject(projectPath))
+        reloaded = slicer.mrmlScene.GetFirstNodeByName("Head")
+        self.assertIsNotNone(reloaded)
+        self.assertTrue(np.array_equal(slicer.util.arrayFromVolume(reloaded), expected))
+
+    def test_16_project_loaded_in_classic_continues_in_place(self):
+        """A project of the folder loaded in Classic (official Load Scene) continues in place when Studio is shown: no copy."""
+        projects = self.projects
+        service = self._service()
+        self._userVolume()
+        project = self._projectFor(service)
+        self._save(service)
+        projectPath, scenePath = project.path, project.scenePath
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertIsNone(service.project)
+        classic = self._service(studio=False)
+        service.dispose()
+        self.services.remove(service)
+        slicer.util.loadScene(scenePath)
+        classic.poll()
+        self.assertIsNone(classic.project, "Classic loads a project like any scene")
+        classic.studioActiveOverride = True
+        classic._lastProjectCheck = None
+        classic.poll()
+        self.assertIsNotNone(classic.project)
+        self.assertEqual(os.path.normpath(classic.project.path), os.path.normpath(projectPath))
+        self.assertEqual(sorted(os.listdir(projects.projectsFolder())), [os.path.basename(projectPath)], "no duplicate project")
+        # vtkMRMLScene::Clear keeps the scene URL: new data after it starts a new project, never goes into the old one
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertIsNone(classic.project)
+        self._userVolume("Other scan")
+        classic._lastProjectCheck = None
+        classic.poll()
+        self.assertIsNotNone(classic.project)
+        self.assertEqual(classic.project.name, "Other scan")
+
+    def test_17_library_order_after_official_save(self):
+        """A project that official 3D Slicer saved last (project.json not updated) is listed first."""
+        projects = self.projects
+        older = projects.createProject("Older")
+        newer = projects.createProject("Newer")
+        now = time.time()
+        for project, modified in ((older, now - 60), (newer, now - 30)):
+            with open(project.scenePath, "w", encoding="utf-8") as f:
+                f.write("<MRML></MRML>\n")
+            os.utime(project.scenePath, (modified, modified))
+            self.io.atomicWriteJson(projects.projectFile(project.path), {"name": project.name, "modified": projects._isoTime(modified)})
+        self.assertEqual([info.name for info in projects.listProjects()], ["Newer", "Older"])
+        # Official 3D Slicer saves the older project now: it comes first
+        os.utime(older.scenePath, (now, now))
+        self.assertEqual([info.name for info in projects.listProjects()], ["Older", "Newer"])
+
+
+def _sphere(center=(0, 0, 0)):
     import vtk
 
     source = vtk.vtkSphereSource()
+    source.SetCenter(center)
+    source.SetRadius(5)
     source.Update()
     return source.GetOutput()

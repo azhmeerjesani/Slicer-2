@@ -1675,6 +1675,9 @@ def summarizeScene(scene, entries=None):
 PROJECT_TEMPORARY_PREFIX = ".studio-tmp-"
 #: Suffix of the name of the file Studio writes when another program changed the file of a node since Studio wrote it
 CONFLICT_SUFFIX = " (Slicer Studio)"
+#: Files that refer to data files next to them (NRRD and MetaImage detached headers, Analyze headers, multi-block
+#: surfaces): a node read from one of these outside the project is written into the project, never copied file by file
+DETACHED_EXTENSIONS = (".nhdr", ".seg.nhdr", ".seq.nhdr", ".mhd", ".hdr", ".vtm", ".seg.vtm")
 #: Files that official Slicer saved next to the scene file and that a generation moves into their kind folder (single
 #: files only: a .nhdr, a table and its schema or a DICOM series stay where they are)
 MOVABLE_EXTENSIONS = (".nrrd", ".nii", ".nii.gz", ".mha", ".seg.nrrd", ".mrk.json", ".vtk", ".vtp", ".stl", ".obj", ".ply", ".h5", ".tfm",
@@ -1849,6 +1852,11 @@ class ProjectWriter(SlotWriter):
         first = relative.split(os.sep)[0]
         return first == ".studio" or first.endswith("_Private")
 
+    def _isTemporaryFile(self, path):
+        """A file in a temporary folder of a generation (never a node's own file: written again in its kind folder)."""
+        relative = os.path.relpath(_canonical(path), _canonical(self.project.path))
+        return any(part.startswith(PROJECT_TEMPORARY_PREFIX) for part in relative.split(os.sep))
+
     def recordSceneFiles(self, scene):
         """Remember the files of the project that the scene references (a project opened in place): another program that
         changes one of them later is detected, and a file that leaves the scene is moved to .studio/removed.
@@ -1925,6 +1933,8 @@ class ProjectWriter(SlotWriter):
             modified = bool(node.GetModifiedSinceRead())
             exists = bool(files) and os.path.isfile(files[0]) and (len(files) == 1 or all(os.path.exists(path) for path in files[1:2]))
             inside = bool(files) and all(_isUnder(_canonical(path), projectCanonical) for path in files)
+            if inside and any(self._isTemporaryFile(path) for path in files):
+                modified = True  # left in a temporary folder by an interrupted generation: written into its kind folder
             if not modified and exists and inside:
                 entry.update(kind="stored", files=files)
                 if _canonical(files[0]) not in self.records:
@@ -1932,7 +1942,7 @@ class ProjectWriter(SlotWriter):
                 if len(files) == 1 and os.path.dirname(_canonical(files[0])) == projectCanonical and self._movable(files[0], node):
                     plan.jobs.append(_ProjectMoveJob(self, plan, nodeId, entry, files[0]))
                 continue
-            if not modified and exists and len(files) == 1:
+            if not modified and exists and len(files) == 1 and not self._hasDataFiles(files[0]):
                 entry.update(kind="import", files=files)
                 self._planImport(plan, node, nodeId, entry, files[0])
                 continue
@@ -1953,6 +1963,14 @@ class ProjectWriter(SlotWriter):
         plan.jobs.append(_ProjectCommitJob(self, plan))
         plan.metrics["planMs"] = (time.perf_counter() - startTime) * 1000.0
         return plan
+
+    @staticmethod
+    def _hasDataFiles(path):
+        """True for a file that refers to other files (a detached header, a multi-block surface file): copying it alone
+        would break it, so its node is written into the project by its storage node instead.
+        """
+        _base, extension = _projects().splitExtension(os.path.basename(path))
+        return extension.lower() in DETACHED_EXTENSIONS
 
     @staticmethod
     def _movable(path, node):
@@ -1982,11 +2000,16 @@ class ProjectWriter(SlotWriter):
         if current and not os.path.isabs(current):
             current = os.path.normpath(os.path.join(slicer.mrmlScene.GetRootDirectory() or projectDir, current))
         if current and _isUnder(_canonical(current), _canonical(projectDir)) and not self._isPrivateFile(current) \
-                and os.path.dirname(_canonical(current)) != _canonical(projectDir):
+                and os.path.dirname(_canonical(current)) != _canonical(projectDir) and not self._isTemporaryFile(current):
             base, currentExtension = projects.splitExtension(os.path.basename(current))
             if currentExtension.lower() == extension.lower():
                 record = self.records.get(_canonical(current))
                 stat = _statOrNone(current)
+                if record is None and stat is not None:
+                    # A file of the project that code of this session gave the node (Save lesion...) and that the node
+                    # was changed after: it is the node's own file
+                    self._record(current, ours=False)
+                    record = self.records.get(_canonical(current))
                 if stat is None or (record is not None and record["stat"] == stat):
                     self._reserve(plan, os.path.dirname(current), os.path.basename(current))
                     return current
@@ -2288,29 +2311,31 @@ class _ProjectWriteJob:
             written = False
         elapsed = (time.perf_counter() - start) * 1000.0
         produced = os.listdir(temporary) if os.path.isdir(temporary) else []
-        if not written or os.path.basename(destination) not in produced:
+        error = None
+        if written and os.path.basename(destination) in produced:
+            try:
+                size = self._moveIntoPlace(temporary, folder, produced, os.path.basename(destination))
+            except OSError as moveError:
+                error = moveError
+        else:
+            error = "write failed"
+        if error is not None:
+            # The node keeps its previous file and stays modified (WriteData marked it stored): the next generation
+            # writes it again
             storageNode.SetFileName(originalNames[0])
             storageNode.ResetFileNameList()
             for name in originalNames[1:]:
                 if name:
                     storageNode.AddFileName(name)
+            node.StorableModified()
             removeTree(temporary)
             plan.incomplete = True
             entry.update(kind="error", reason="write failed")
             if self.nodeId not in writer._reportedFailures:
                 writer._reportedFailures.add(self.nodeId)
-                logging.warning(f"Slicer Studio: {entry.get('name') or self.nodeId} could not be saved in the project")
+                logging.warning(f"Slicer Studio: {entry.get('name') or self.nodeId} could not be saved in the project: {error}")
             return True
-        size = 0
-        for name in produced:
-            target = os.path.join(folder, name)
-            replaceWithRetry(os.path.join(temporary, name), target)
-            writer._record(target, ours=True)
-            size += os.path.getsize(target)
-        try:
-            os.rmdir(temporary)
-        except OSError:
-            pass
+        removeTree(temporary)
         _setSingleFile(storageNode, destination)
         entry.update(kind="stored", files=[destination], lastWriteMs=round(elapsed, 2), writtenAt=time.time(), bytes=size)
         if elapsed > HEAVY_WRITE_MS:
@@ -2319,6 +2344,36 @@ class _ProjectWriteJob:
         plan.metrics["nodesWritten"] += 1
         plan.wroteData = True
         return True
+
+    def _moveIntoPlace(self, temporary, folder, produced, mainName):
+        """Move what the storage node wrote into ``folder``; return the number of bytes. Raise OSError.
+
+        Folders first (a closed-surface segmentation writes "<name>.seg/" next to "<name>.seg.vtm"): a folder that is
+        already there is moved aside into the temporary folder (deleted with it), as ``os.replace`` cannot replace a
+        folder that is not empty. The main file is moved last, so it never refers to files that are not in place yet.
+        """
+        size = 0
+        order = sorted(produced, key=lambda name: (not os.path.isdir(os.path.join(temporary, name)), name == mainName))
+        for name in order:
+            source, target = os.path.join(temporary, name), os.path.join(folder, name)
+            if os.path.isdir(source):
+                aside = None
+                if os.path.lexists(target):
+                    aside = os.path.join(temporary, f"{PROJECT_TEMPORARY_PREFIX}previous-{uuid.uuid4().hex[:8]}")
+                    replaceWithRetry(target, aside)
+                try:
+                    replaceWithRetry(source, target)
+                except OSError:
+                    if aside is not None:
+                        replaceWithRetry(aside, target)
+                    raise
+                self.writer._record(target, ours=True)  # moved to .studio/removed with its file
+                size += treeSize(target)
+                continue
+            replaceWithRetry(source, target)
+            self.writer._record(target, ours=True)
+            size += os.path.getsize(target)
+        return size
 
 
 class _ProjectMoveJob:
@@ -2364,12 +2419,18 @@ class _ProjectSnapshotJob(_SnapshotJob):
         self.inFlight = 0
         plan.workerPending += 1
 
+        isNewFile = not os.path.exists(destination)
+
         def write():
             if plan.cancelled:
                 return None
             os.makedirs(os.path.dirname(destination), exist_ok=True)
             start = time.perf_counter()
             written = writeScalarNrrd(destination, snapshot, rows, level=1)
+            if plan.cancelled and isNewFile:
+                # The generation was cancelled while this was written: nothing refers to the new file
+                _removeQuietly(destination)
+                return None
             return written, (time.perf_counter() - start) * 1000.0
 
         def done(result):

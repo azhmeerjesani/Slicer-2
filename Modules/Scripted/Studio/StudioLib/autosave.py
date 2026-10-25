@@ -1267,8 +1267,41 @@ class AutosaveService:
             return
         self._lastProjectCheck = fingerprint
         projects = self._projects()
-        if projects.sceneHasUserData(scene):
-            self.createProject(projects.defaultProjectName(scene))
+        if not projects.sceneHasUserData(scene):
+            return
+        url = scene.GetURL()
+        projectPath = projects.projectOfPath(url) if url and os.path.isfile(url) else None
+        if projectPath is not None and self._sceneReadFrom(scene, projectPath):
+            # A project of the folder that was loaded in Classic (official Load Scene): it continues in place, never as
+            # a copy
+            project = projects.Project(projectPath)
+            if not self.attachProject(project, inPlace=True):
+                self._announce("locked", project)
+                return
+            self._announce("opened", project)
+            if self.dirty:
+                qt.QTimer.singleShot(0, lambda: self.autosaveNow("open"))
+            return
+        self.createProject(projects.defaultProjectName(scene))
+
+    @staticmethod
+    def _sceneReadFrom(scene, projectPath):
+        """True if data of the scene was read from files of the project (its scene was loaded), not only that the scene
+        URL still names it (``vtkMRMLScene::Clear`` keeps the URL).
+        """
+        io = _io()
+        projectDir = os.path.normcase(os.path.realpath(projectPath))
+        rootDirectory = scene.GetRootDirectory()
+        nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+        for index in range(nodes.GetNumberOfItems()):
+            node = nodes.GetItemAsObject(index)
+            storageNode = node.GetStorageNode()
+            if node.GetHideFromEditors() or storageNode is None or not storageNode.GetFileName():
+                continue
+            for path in io.storageFiles(storageNode, rootDirectory)[:1]:
+                if os.path.normcase(os.path.realpath(path)).startswith(projectDir + os.sep) and os.path.exists(path):
+                    return True
+        return False
 
     def createProject(self, name=None, announce="created"):
         """Create a project in the Slicer Studio folder and save the scene there from now on. Return it, or None."""
@@ -1335,6 +1368,9 @@ class AutosaveService:
         self.projectWriter.recordSceneFiles(scene)
         project.writeJson(state="open", executor=io.backgroundWriter())
         io.backgroundWriter().submit(projects.pruneRemoved, project.path)
+        leftovers = projects.temporaryLeftovers(project.path)
+        if leftovers:
+            io.backgroundWriter().submit(projects.removePaths, leftovers)
         fingerprint = io.sceneFingerprint(scene, io.sentinelIds())
         clean = inPlace and os.path.isfile(project.scenePath) and self._projectFilesInPlace(scene)
         self._savedFingerprint = fingerprint if clean else None
@@ -1723,15 +1759,26 @@ class AutosaveService:
         newRoot = os.path.normpath(os.path.abspath(newRoot))
         moved = []
         if moveContent and os.path.normcase(os.path.realpath(oldRoot)) != os.path.normcase(os.path.realpath(newRoot)):
+            if self._studyOpen():
+                # The open study writes its journal and participants into Studies/ while it is open
+                raise OSError(_("Close the open study first."))
             project = self.project
             if project is not None:
                 self.saveNow("move", progress=True)
                 _io().backgroundWriter().drain(10.0)
                 project.unlock()
+            # Nothing is written into the old folder while it moves (poll, heartbeat of project.json)
+            timers = [timer for timer in (self._pollTimer, self._heartbeatTimer) if timer.isActive()]
+            for timer in timers:
+                timer.stop()
+            self._suspendCount += 1
             try:
                 function = lambda: projects.moveContent(oldRoot, newRoot)  # noqa: E731
                 moved = run(function) if run is not None else function()
             finally:
+                self._suspendCount -= 1
+                for timer in timers:
+                    timer.start()
                 if project is not None:
                     newPath = projects.pathAfterMove(project.path, oldRoot, newRoot)
                     if os.path.isdir(newPath) and os.path.normpath(newPath) != os.path.normpath(project.path):

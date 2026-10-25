@@ -545,13 +545,14 @@ class ProjectInfo:
         data = readJson(projectFile(self.path)) or {}
         self.data = data
         self.scene = sceneFile(self.path)
+        # The later of Studio's last save and the scene file's time (official 3D Slicer does not update project.json)
         modified = parseTime(data.get("modified"))
-        if modified is None:
-            try:
-                modified = os.path.getmtime(self.scene or self.path)
-            except OSError:
-                modified = 0.0
-        self.modified = modified
+        try:
+            sceneTime = os.path.getmtime(self.scene or self.path)
+        except OSError:
+            sceneTime = None
+        candidates = [value for value in (modified, sceneTime) if value is not None]
+        self.modified = max(candidates) if candidates else 0.0
         self.created = parseTime(data.get("created"))
         self.counts = data.get("counts") or {}
         thumbnail = thumbnailFile(self.path)
@@ -738,6 +739,51 @@ def pruneRemoved(projectPath, keepDays=REMOVED_KEEP_DAYS):
         try:
             if os.path.getmtime(path) < limit:
                 shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            pass
+
+
+#: Name part of the temporary folders and files of a save (``autosave_io.PROJECT_TEMPORARY_PREFIX``, copies in progress)
+TEMPORARY_MARKERS = (".studio-tmp-", ".studio-part")
+
+
+def temporaryLeftovers(projectPath):
+    """What a save that was interrupted (a crash) left in the project: temporary folders of the kind folders, temporary
+    scene files, partial copies. Listed when the project is opened, before its first save (main thread; a few folder
+    listings). A temporary folder that the scene file refers to is kept (the next save writes its node into its kind
+    folder, then moves it to .studio/removed).
+    """
+    try:
+        top = os.listdir(projectPath)
+    except OSError:
+        return []
+    candidates = [os.path.join(projectPath, name) for name in top]
+    for name in top:
+        folder = os.path.join(projectPath, name)
+        if name != PRIVATE_DIR and not name.startswith(".") and os.path.isdir(folder):
+            try:
+                candidates.extend(os.path.join(folder, entry) for entry in os.listdir(folder))
+            except OSError:
+                pass
+    candidates = [path for path in candidates if any(marker in os.path.basename(path) for marker in TEMPORARY_MARKERS)]
+    if not candidates:
+        return []
+    try:
+        with open(sceneFile(projectPath), encoding="utf-8", errors="replace") as f:
+            sceneText = f.read()
+    except (OSError, TypeError):
+        sceneText = ""
+    return [path for path in candidates if os.path.basename(path) not in sceneText]
+
+
+def removePaths(paths):
+    """Delete files and folders (no error if one is gone). Worker-safe."""
+    for path in paths:
+        try:
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
         except OSError:
             pass
 

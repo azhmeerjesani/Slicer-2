@@ -1946,6 +1946,10 @@ class Shell:
         self._showInspectorForModule()
         self._schedulePanelWidthUpdate(shrink=shrinkPanel)
         self._updateInspectorNotice()
+        # The open project is saved on a workspace switch (A-09)
+        projectsUi = sys.modules.get("StudioLib.projects_ui")
+        if projectsUi is not None:
+            projectsUi.onWorkspaceEntered()
 
     def _onCurrentWorkspaceReselected(self, ws):
         """The tab or the shortcut of the current workspace was used: bring the workspace back into view.

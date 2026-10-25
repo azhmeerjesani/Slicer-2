@@ -694,6 +694,19 @@ def sceneNodeCount():
     return slicer.mrmlScene.GetNumberOfNodes()
 
 
+def sceneDataNodeClasses():
+    """Class names of the scene's nodes other than storage nodes (saving the project in the background adds a storage
+    node to data that had none: that is not a node the user sees, A-09).
+    """
+    nodes = slicer.mrmlScene.GetNodes()
+    names = []
+    for index in range(nodes.GetNumberOfItems()):
+        node = nodes.GetItemAsObject(index)
+        if not node.IsA("vtkMRMLStorageNode"):
+            names.append(node.GetClassName())
+    return sorted(names)
+
+
 def windowLevel():
     node = slicer.app.layoutManager().sliceWidget("Red").sliceLogic().GetBackgroundLayer().GetVolumeDisplayNode()
     return (round(node.GetWindow(), 2), round(node.GetLevel(), 2)) if node is not None else None
@@ -979,7 +992,7 @@ def nav(g):
     # Back to Library and continue: the tool, the lesion and the slice survive the round trip
     offset = sliceOffset(g)
     voxels = g.voxelCount()
-    nodesBefore = sceneNodeCount()
+    nodesBefore = sceneDataNodeClasses()
     yield from g.click(g.widget("StudioLibraryWorkspaceButton", "QToolButton"), "Go back to Library")
     yield 500
     g.shot("library-with-data")
@@ -991,7 +1004,10 @@ def nav(g):
         yield from g.click(g.widget("StudioRecentRow", "QWidget"), "Click the scan in Recent")
     yield from waitForDraw(g)
     g.check("effect-after-return", g.effectName() == lastTool, f"effect after returning to Draw: {g.effectName()}, last tool: {lastTool}")
-    g.check("recent-reopen-no-node", sceneNodeCount() == nodesBefore and g.voxelCount() == voxels, f"nodes {nodesBefore} -> {sceneNodeCount()}, lesion voxels {voxels} -> {g.voxelCount()}")
+    nodesAfter = sceneDataNodeClasses()
+    added = sorted(set(nodesAfter) - set(nodesBefore)) or [name for name in nodesAfter if nodesAfter.count(name) > nodesBefore.count(name)]
+    g.check("recent-reopen-no-node", nodesAfter == nodesBefore and g.voxelCount() == voxels,
+            f"data nodes {len(nodesBefore)} -> {len(nodesAfter)} (added: {', '.join(added[:5]) or 'none'}), lesion voxels {voxels} -> {g.voxelCount()}")
     g.note("sliceOffsetKept", abs(sliceOffset(g) - offset) < 1e-6)
     g.shot("back-in-draw")
 

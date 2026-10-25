@@ -24,6 +24,7 @@ A Studio plug-in (``shell.OPTIONAL_PLUGINS``): ``install(shell)`` when Studio is
 
 import logging
 import os
+import sys
 import threading
 import time
 import traceback
@@ -60,8 +61,24 @@ def _service():
     return autosave.instance()
 
 
+#: A workspace switch saves the open project this long after the switch (the switch itself stays fast)
+WORKSPACE_SAVE_DELAY_MS = 300
+
+
+def onWorkspaceEntered():
+    """A workspace switch saves the open project now (not after IdleSeconds), shortly after the switch (shell.py)."""
+    service = _service()
+    if service is None or service.currentProject() is None:
+        return
+
+    def save():
+        if service.currentProject() is not None:
+            service.autosaveNow("workspace")
+
+    qt.QTimer.singleShot(WORKSPACE_SAVE_DELAY_MS, save)
+
+
 def _shell():
-    import sys
 
     module = sys.modules.get("StudioLib.shell")
     shell = module.instance() if module is not None else None
@@ -368,6 +385,47 @@ def newProject():
     return True
 
 
+def closeScene():
+    """Close scene in Studio (Ctrl+W, File > Close Scene, Search): with a project open, it is saved first and closed (as New
+    project), so 3D Slicer does not ask "Save before closing scene?" about saved work; else the official action.
+    """
+    service = _service()
+    if service is not None and service.currentProject() is not None:
+        service.newProject()
+        return True
+    mainWindow = slicer.util.mainWindow()
+    action = mainWindow.findChild(qt.QAction, "FileCloseSceneAction") if mainWindow is not None else None
+    if action is None:
+        return False
+    action.trigger()
+    return True
+
+
+class _CloseSceneMenuFilter(qt.QObject):
+    """File > Close Scene in Studio while a project is open: runs ``closeScene()`` instead of the official handler."""
+
+    def eventFilter(self, menu, event):
+        eventType = event.type()
+        if eventType == qt.QEvent.MouseButtonRelease and event.button() == qt.Qt.LeftButton:
+            action = menu.actionAt(event.pos())
+        elif eventType == qt.QEvent.KeyPress and event.key() in (qt.Qt.Key_Return, qt.Qt.Key_Enter):
+            action = menu.activeAction()
+        else:
+            return False
+        if action is None or action.property("objectName") != "FileCloseSceneAction" or not action.isEnabled():
+            return False
+        service = _service()
+        if service is None or service.currentProject() is None:
+            return False
+        for _attempt in range(5):
+            popup = qt.QApplication.activePopupWidget()
+            if popup is None:
+                break
+            popup.close()
+        qt.QTimer.singleShot(0, closeScene)
+        return True
+
+
 def openProject(path, shell=None):
     """Open a project folder: the open project is saved first; in Studio the project is shown in Library (Continue in Draw
     goes on), and opening the open project again goes to Draw.
@@ -496,6 +554,14 @@ def _runWithProgress(function, text, parent=None):
     return result.get("value")
 
 
+def _studyOpen():
+    module = sys.modules.get("StudioLib.study_ui")
+    try:
+        return module is not None and module.session() is not None
+    except Exception:
+        return False
+
+
 def changeRootDialog(parent=None):
     """Change… of Settings › Saving: choose another folder; offer to move the projects and studies there."""  # noqa: RUF002
     if projects.isRootFromEnvironment():
@@ -514,6 +580,10 @@ def changeRootDialog(parent=None):
         return None
     move = False
     if projects.hasContent(oldRoot):
+        if _studyOpen():
+            slicer.util.infoDisplay(_("Close the open study first: its files are in the Slicer Studio folder."),
+                                    windowTitle=_("Change the Slicer Studio folder"))
+            return None
         answer = _question(parent, _("Change the Slicer Studio folder"),
                            _("Move your projects and studies to the new folder?\n\n{old}\n→ {new}").format(old=oldRoot, new=newRoot),
                            [_("Move"), _("Keep them where they are"), _("Cancel")])
@@ -1071,6 +1141,8 @@ class ProjectsUi:
         self.crashNotice = None
         self._shortcuts = []
         self._saveShortcuts = None
+        self._closeShortcuts = None
+        self._closeMenuFilter = None
         self._service = None
 
     def install(self):
@@ -1080,9 +1152,18 @@ class ProjectsUi:
             # A second Ctrl+S shortcut would be ambiguous: Qt would trigger neither
             self._saveShortcuts = list(saveAction.shortcuts())
             saveAction.setShortcuts([])
+        closeAction = mainWindow.findChild(qt.QAction, "FileCloseSceneAction")
+        if closeAction is not None:
+            self._closeShortcuts = list(closeAction.shortcuts())
+            closeAction.setShortcuts([])
+        fileMenu = mainWindow.findChild(qt.QMenu, "FileMenu")
+        if fileMenu is not None:
+            self._closeMenuFilter = _CloseSceneMenuFilter()
+            fileMenu.installEventFilter(self._closeMenuFilter)
         self._shortcuts = [
             self.shell._createShortcut("Ctrl+S", lambda: saveNow(self.shell), _("Save now (the project; the Save dialog without one)")),
             self.shell._createShortcut("Ctrl+N", newProject, _("New project")),
+            self.shell._createShortcut("Ctrl+W", closeScene, _("Close scene (the project is saved first)")),
         ]
         self.attach()
         if _fileActions is not None:
@@ -1110,6 +1191,14 @@ class ProjectsUi:
         if saveAction is not None and self._saveShortcuts is not None:
             saveAction.setShortcuts(self._saveShortcuts)
         self._saveShortcuts = None
+        closeAction = mainWindow.findChild(qt.QAction, "FileCloseSceneAction")
+        if closeAction is not None and self._closeShortcuts is not None:
+            closeAction.setShortcuts(self._closeShortcuts)
+        self._closeShortcuts = None
+        fileMenu = mainWindow.findChild(qt.QMenu, "FileMenu")
+        if fileMenu is not None and self._closeMenuFilter is not None:
+            fileMenu.removeEventFilter(self._closeMenuFilter)
+        self._closeMenuFilter = None
         if self._service is not None and getattr(self._service, "_projectPresenter", None) == self.presentCrash:
             self._service.setProjectPresenter(None)
         self.closeCrashOffer()
