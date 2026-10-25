@@ -4,7 +4,7 @@ A 44 px toolbar ``StudioTopBar`` whose contents are a 3-column grid, so that the
 on the window whatever the other columns hold (no fixed widths, the window can still shrink):
 
 - left: the app menu (``≡``), the title (the name of the open project or study, V-02; a click opens Library), the
-  chevron of the project menu (Rename…, Show in Finder/Files, New project, Recent projects ›, Close project) and the
+  chevron of the project menu (Rename…, Show in Finder/Files, New project, Recent projects, Close project) and the
   save status (``setSaveStatus()``, A-01b, A-09: "Saved" with a check, "Saving…", "Not saved");
 - centre: the workspace switcher [Library | Draw | Map] (``Ctrl+Alt+1/2/3``), one segmented control (VISUAL 4.1);
 - right: the status chip, Undo/Redo (Draw only), the layout picker (``Alt+1..5``), the search field (``Ctrl+K``)

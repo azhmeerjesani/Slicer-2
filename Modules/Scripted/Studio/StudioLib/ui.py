@@ -1267,3 +1267,271 @@ def noticeActions(notNow=None, details=None):
     if details is not None:
         actions.append((_("Details"), details))
     return actions
+
+
+#
+# Dialog chrome, the backdrop and settings pages (VISUAL 4.6 and 4.7, V-02)
+#
+
+#: Padding of a dialog
+DIALOG_PADDING = 24
+#: Backdrop behind a dialog and behind Search and the cheat sheet (the black wash over the main window)
+DIALOG_BACKDROP_ALPHA = 0.6
+PALETTE_BACKDROP_ALPHA = 0.5
+#: Width of the numeric fields of a settings page
+SETTINGS_NUMBER_WIDTH = 88
+
+
+class Backdrop(qt.QWidget):
+    """A black wash over a window (``parent``): shown behind a dialog, Search or the cheat sheet. It follows the size of
+    its parent and is transparent for the mouse (the popup or dialog above it takes the clicks).
+    """
+
+    def __init__(self, parent, alpha=DIALOG_BACKDROP_ALPHA):
+        qt.QWidget.__init__(self, parent)
+        self.setObjectName("StudioBackdrop")
+        self.alpha = float(alpha)
+        self.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
+        self.setAttribute(qt.Qt.WA_NoSystemBackground)
+        self.setFocusPolicy(qt.Qt.NoFocus)
+        self.hide()
+
+    def paintEvent(self, event):
+        painter = qt.QPainter(self)
+        try:
+            painter.fillRect(self.rect, qt.QColor(0, 0, 0, round(255 * self.alpha)))
+        finally:
+            painter.end()
+
+    def cover(self):
+        """Show over the whole parent window, above its other children."""
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        self.setGeometry(0, 0, parent.width, parent.height)
+        self.show()
+        self.raise_()
+
+
+class _BackdropFilter(qt.QObject):
+    """Keeps a backdrop the size of its window."""
+
+    def __init__(self, backdrop):
+        qt.QObject.__init__(self)
+        self.backdrop = backdrop
+
+    def eventFilter(self, obj, event):
+        if event.type() == qt.QEvent.Resize and _isAlive(self.backdrop) and self.backdrop.isVisible():
+            self.backdrop.setGeometry(0, 0, obj.width, obj.height)
+        return False
+
+
+#: window -> (Backdrop, filter, number of owners shown)
+_backdrops = {}
+
+
+def showBackdrop(window, alpha=DIALOG_BACKDROP_ALPHA):
+    """Show the backdrop of ``window`` (the main window) with ``alpha``. Each call needs one ``hideBackdrop(window)``."""
+    if window is None or not _isAlive(window):
+        return None
+    key = id(window)
+    entry = _backdrops.get(key)
+    if entry is None or not _isAlive(entry[0]):
+        backdrop = Backdrop(window, alpha)
+        watcher = _BackdropFilter(backdrop)
+        window.installEventFilter(watcher)
+        entry = [backdrop, watcher, 0]
+        _backdrops[key] = entry
+    entry[0].alpha = float(alpha)
+    entry[2] += 1
+    entry[0].cover()
+    entry[0].update()
+    return entry[0]
+
+
+def hideBackdrop(window):
+    """Hide the backdrop of ``window`` when its last owner is gone."""
+    if window is None:
+        return
+    entry = _backdrops.get(id(window))
+    if entry is None:
+        return
+    entry[2] = max(0, entry[2] - 1)
+    if entry[2] == 0 and _isAlive(entry[0]):
+        entry[0].hide()
+
+
+def isBackdropShown(window):
+    entry = _backdrops.get(id(window)) if window is not None else None
+    return entry is not None and _isAlive(entry[0]) and entry[0].isVisible()
+
+
+class _DialogChromeFilter(qt.QObject):
+    """The rounded mask of a dialog after each resize, the backdrop while it is shown, and moving it by its background (a
+    frameless dialog has no title bar).
+    """
+
+    def __init__(self, backdrop):
+        qt.QObject.__init__(self)
+        self.backdrop = backdrop
+        self._dragOffset = None
+        self._shownOver = None
+
+    def eventFilter(self, obj, event):
+        eventType = event.type()
+        if eventType == qt.QEvent.Resize:
+            setRoundedMask(obj, RADIUS["dialog"])
+        elif eventType == qt.QEvent.Show:
+            setRoundedMask(obj, RADIUS["dialog"])
+            if self.backdrop and self._shownOver is None:
+                window = obj.parentWidget().window() if obj.parentWidget() is not None else None
+                if window is not None and window is not obj:
+                    self._shownOver = window
+                    showBackdrop(window, DIALOG_BACKDROP_ALPHA)
+                    obj.raise_()
+        elif eventType == qt.QEvent.Hide:
+            if self._shownOver is not None:
+                hideBackdrop(self._shownOver)
+                self._shownOver = None
+        elif eventType == qt.QEvent.MouseButtonPress and event.button() == qt.Qt.LeftButton:
+            position = event.globalPos() if hasattr(event, "globalPos") else event.globalPosition().toPoint()
+            self._dragOffset = position - obj.frameGeometry.topLeft()
+        elif eventType == qt.QEvent.MouseMove and self._dragOffset is not None and (event.buttons() & qt.Qt.LeftButton):
+            position = event.globalPos() if hasattr(event, "globalPos") else event.globalPosition().toPoint()
+            obj.move(position - self._dragOffset)
+        elif eventType == qt.QEvent.MouseButtonRelease:
+            self._dragOffset = None
+        return False
+
+
+#: id(dialog) -> its _DialogChromeFilter
+_chromeFilters = {}
+
+
+def dialogChrome(dialog, backdrop=True, styleSheet=None):
+    """Give a Studio dialog the dialog chrome (VISUAL 4.7): frameless, the ``card`` fill, a 1 px border, 14 px corners and a
+    60% black backdrop over the main window while it is shown. Call it before the dialog is shown. The dialog keeps
+    Esc and Enter, and can be moved by its background. ``styleSheet``: a function returning the dialog's own rules (one
+    stylesheet is bound per widget, see ``bindStyleSheet()``).
+    """
+    dialog.setWindowFlag(qt.Qt.FramelessWindowHint, True)
+    dialog.setProperty("studioDialogChrome", True)
+    chromeFilter = _DialogChromeFilter(backdrop)
+    dialog.installEventFilter(chromeFilter)
+    # The filter lives as long as the dialog
+    key = id(dialog)
+    _chromeFilters[key] = chromeFilter
+
+    def forget(*args, key=key):
+        chromeFilter = _chromeFilters.pop(key, None)
+        if chromeFilter is not None and chromeFilter._shownOver is not None:
+            hideBackdrop(chromeFilter._shownOver)
+
+    dialog.connect("destroyed()", forget)
+    bindStyleSheet(dialog, lambda: (
+        f'QDialog[studioDialogChrome="true"] {{ background-color: {token("card").name()}; border: 1px solid {token("border").name()};'
+        f' border-radius: {RADIUS["dialog"]}px; }}') + (styleSheet() if styleSheet is not None else ""))
+    return dialog
+
+
+def dialogHeader(iconName, title, body=None, objectPrefix="StudioDialog"):
+    """The header of a dialog (VISUAL 4.7): a 40 px icon tile beside the title (18/600) and the body text (text2).
+    Return ``(layout, titleLabel, bodyLabel)``.
+    """
+    header = qt.QHBoxLayout()
+    header.setSpacing(14)
+    header.addWidget(iconTile(iconName, 40, 20, f"{objectPrefix}Icon"), 0, qt.Qt.AlignTop)
+    column = qt.QVBoxLayout()
+    column.setSpacing(6)
+    titleLabel = label(title, "title", "text", f"{objectPrefix}Title", wrap=True)
+    column.addWidget(titleLabel)
+    bodyLabel = None
+    if body:
+        bodyLabel = label(body, "body", "text2", f"{objectPrefix}Body", wrap=True)
+        column.addWidget(bodyLabel)
+    header.addLayout(column, 1)
+    return header, titleLabel, bodyLabel
+
+
+def settingsPageHeader(layout, title, description=None, objectPrefix="StudioSettings"):
+    """The top of a Studio settings page (VISUAL 4.7): the page title (18/600) and one line of description (text2)."""
+    layout.addWidget(label(title, "title", "text", f"{objectPrefix}Title"))
+    if description:
+        layout.addWidget(label(description, "body", "text2", f"{objectPrefix}Description", wrap=True))
+    layout.addSpacing(14)
+
+
+def settingsRow(title, control=None, subtitle=None, last=False, objectName=None):
+    """A 44 px row of a settings page: the title (and an optional text3 subtitle) on the left, ``control`` on the right,
+    a hairline under it unless ``last``. Return the row frame; its title label is the ``StudioSettingsRowTitle`` child.
+    """
+    frame = qt.QFrame()
+    frame.setObjectName(objectName or "StudioSettingsRow")
+    frame.setProperty("studioSettingsRow", "last" if last else "row")
+    frame.setMinimumHeight(SETTINGS_ROW_HEIGHT)
+    rowLayout = qt.QHBoxLayout(frame)
+    rowLayout.setContentsMargins(0, 6, 0, 6)
+    rowLayout.setSpacing(12)
+    column = qt.QVBoxLayout()
+    column.setSpacing(1)
+    titleLabel = label(title, "body", "text", "StudioSettingsRowTitle", wrap=True)
+    column.addWidget(titleLabel)
+    if subtitle:
+        column.addWidget(label(subtitle, "caption", "text3", "StudioSettingsRowSubtitle", wrap=True))
+    rowLayout.addLayout(column, 1)
+    if control is not None:
+        rowLayout.addWidget(control, 0, qt.Qt.AlignVCenter)
+    return frame
+
+
+def settingsStyleSheet():
+    """The rules of the settings rows (``settingsRow()``) and fields (``numberField()``) of a page."""
+    return (
+        f'QFrame[studioSettingsRow="row"] {{ border: none; border-bottom: 1px solid {token("hairline").name()}; background: transparent; }}'
+        'QFrame[studioSettingsRow="last"] { border: none; background: transparent; }'
+        'QFrame[studioSettingsRow] QLabel { border: none; background: transparent; }'
+        f'QFrame[studioFolderCard="true"] {{ background-color: {token("card-low").name()}; border: 1px solid {token("hairline").name()}; border-radius: 10px; }}'
+        'QLabel[studioCardText="true"] { border: none; background: transparent; }')
+
+
+def numberField(minimum, maximum, value, suffix="", objectName=None):
+    """An 88 px right-aligned numeric field with its unit (``suffix``), for a settings row."""
+    spinBox = qt.QSpinBox()
+    if objectName:
+        spinBox.setObjectName(objectName)
+    spinBox.setRange(int(minimum), int(maximum))
+    spinBox.setValue(int(value))
+    spinBox.setSuffix(suffix)
+    spinBox.setAlignment(qt.Qt.AlignRight | qt.Qt.AlignVCenter)
+    spinBox.setFixedWidth(SETTINGS_NUMBER_WIDTH)
+    spinBox.setMinimumHeight(COMPACT_HEIGHT + 2)
+    return spinBox
+
+
+def folderCard(iconName="folder", objectName="StudioFolderCard"):
+    """A folder card (VISUAL 4.7): an icon tile, the path (``pathLabel``) and a meta line (``metaLabel``), and a button
+    row on the right (``buttonLayout``). Return ``(frame, pathLabel, metaLabel, buttonLayout)``.
+    """
+    frame = qt.QFrame()
+    frame.setObjectName(objectName)
+    frame.setProperty("studioFolderCard", True)
+    layout = qt.QHBoxLayout(frame)
+    layout.setContentsMargins(14, 12, 14, 12)
+    layout.setSpacing(12)
+    layout.addWidget(iconTile(iconName, 36, 18, f"{objectName}Icon"), 0, qt.Qt.AlignVCenter)
+    column = qt.QVBoxLayout()
+    column.setSpacing(2)
+    pathLabel = label("", "name", "text", f"{objectName}Path")
+    pathLabel.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
+    pathLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+    column.addWidget(pathLabel)
+    metaLabel = label("", "caption", "text3", f"{objectName}Meta", wrap=True)
+    metaLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+    column.addWidget(metaLabel)
+    for textLabel in (pathLabel, metaLabel):
+        textLabel.setProperty("studioCardText", True)
+    layout.addLayout(column, 1)
+    buttonLayout = qt.QHBoxLayout()
+    buttonLayout.setSpacing(8)
+    layout.addLayout(buttonLayout)
+    return frame, pathLabel, metaLabel, buttonLayout

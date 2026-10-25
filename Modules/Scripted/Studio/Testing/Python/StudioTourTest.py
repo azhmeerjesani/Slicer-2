@@ -518,10 +518,15 @@ class StudioTourTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertTrue(card.isVisible())
         self.assertIsNone(slicer.app.activeModalWidget())
         self.assertEqual(slicer.app.focusWidget(), focusBefore)
-        # Not over the page column of Library
-        column = self.mainWindow.findChild("QWidget", "StudioLibraryColumn")
-        if column is not None and column.isVisible():
-            self.assertFalse(tour._rectIn(card, self.mainWindow).intersects(tour._rectIn(column, self.mainWindow)))
+        # The Library page is full width (V-02): the offer covers none of its buttons (in the drop zone or the header) and
+        # no project card
+        offerRect = tour._rectIn(card, self.mainWindow)
+        covered = []
+        for objectName in ("StudioLibraryButtons", "StudioDropZoneTitle", "studioProjectCard", "studioStudyCard"):
+            for widget in self.mainWindow.findChildren("QWidget", objectName):
+                if widget.isVisible() and offerRect.intersects(tour._rectIn(widget, self.mainWindow)):
+                    covered.append(objectName)
+        self.assertEqual(covered, [])
         # Shown once
         self.assertFalse(tour.offerTour())
         notNow = card.findChild("QPushButton", "StudioTourOfferNotNowButton")

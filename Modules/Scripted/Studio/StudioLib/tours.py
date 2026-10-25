@@ -189,7 +189,7 @@ def _viewsBody(shell):
                     "a pill at the top of the views names a mode such as Place, with a ✕ to leave it.")
     if _flatViewBars(shell):
         text += " " + _("The bar above each view starts with the view color, then the orientation (Axial ▾, with Rotate to volume plane, "
-                        "Reformat… and Reset), the slider, the position with the slice number (\"S 96.0 mm   97 / 193\"), link, fit, "
+                        "Reformat… and Reset), the slider, the readout (the position \"S 17.5 mm\" and the slice number \"49 / 97\"), link, fit, "
                         "the sliders button for layers, opacity and interpolation (on click), and maximize.")
     else:
         text += " " + _("The bar above each view is the one of 3D Slicer: hover the pin for layers, opacity and interpolation.")
@@ -207,7 +207,9 @@ def _escapeBody(shell):
 
 _STUDIO_STEPS = (
     Step("top-bar", "StudioTopBar", _("One bar instead of menus and toolbars"),
-         _("Slicer Studio is 3D Slicer with a calmer face: the same application, modules and files. This bar is how you get around."),
+         _("Slicer Studio is 3D Slicer with a calmer face: the same application, modules and files. This bar is how you get around. "
+           "On the left, the name of the open project: a click shows it in Library, and its ▾ renames it, shows it in your file manager, "
+           "starts a new project or opens a recent one."),
          inSlicer=_("The menu bar (File, Edit, View, Help) and seven toolbars: Load/Save, Module Selection, Favorite Modules, Layout Selection, "
                     "Mouse Interaction, Crosshair Selection and Extensions."),
          placement="below"),
@@ -297,10 +299,10 @@ _FROM_SLICER_STEPS = (
 )
 
 _LIBRARY_STEPS = (
-    Step("drop", "StudioDropZone", _("Drop anything here"),
+    Step("drop", ("StudioDropZone", "StudioLibraryDropHint"), _("Drop anything here"),
          _("Scans, lesion masks, scenes (.mrml, .mrb) and DICOM folders: drop them anywhere on the window. A case-report figure "
            "(PNG, JPEG, TIFF) is shown next to the template, a statistical map as an overlay. Once something is open, this "
-           "zone becomes a strip: Drop more files."),
+           "zone makes room for your projects: drop more files anywhere on the window, as the line under Projects says."),
          rows=("add-data",), workspace="library"),
     Step("open", "StudioLibraryOpenButton", _("Open and Open folder"),
          _("Open… picks files; Open folder… reads a DICOM folder or a folder of NIfTI files."),
@@ -325,10 +327,15 @@ _LIBRARY_STEPS = (
          rows=("data-module",), workspace="library"),
     Step("projects", "studioProjectsSection", _("Projects"),
          _("Everything you open or draw is saved automatically as a project in the Slicer Studio folder (Projects/<name>), with "
-           "Images, Segmentations, Lesions, Maps and Exports folders inside. Click a project to continue it; right-click to rename, "
-           "duplicate, show it in your file manager or move it to the Trash."),
+           "Images, Segmentations, Lesions, Maps and Exports folders inside. Each card shows the lesion on its scan. Click a project to "
+           "continue it; right-click to rename, duplicate, show it in your file manager or move it to the Trash. Last edited ▾ sorts them "
+           "by name or creation date, and the two buttons next to it switch between cards and a list."),
          rows=("save-data", "where-files"), keys=((("Ctrl+S",), _("save now")), (("Ctrl+N",), _("new project"))), workspace="library"),
-    Step("recent", "StudioRecentList", _("Recent"),
+    Step("studies", "studioStudiesSection", _("Studies"),
+         _("Your lesion network mapping studies, with how many subjects are traced and how many need review. Click one to open it; "
+           "New study… and Open study… are below."),
+         inSlicer=_("No studies: 3D Slicer opens one scene at a time; a cohort is a folder you go through file by file."), workspace="library"),
+    Step("recent", "StudioRecentList", _("Opened from elsewhere"),
          _("The folders and files you opened last from outside the Slicer Studio folder, newest first, with when you opened them. "
            "A file that is already open is not opened twice. The template and the sample data that Studio keeps in its cache are not listed."),
          rows=("recent",), workspace="library"),

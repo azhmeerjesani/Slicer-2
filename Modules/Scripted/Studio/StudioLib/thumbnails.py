@@ -873,7 +873,7 @@ def renderProjectView(source, view, size, centre):
         origin = origin + shiftRight * right + shiftDown * down
         spacing = max((columnHigh - columnLow) * step / width, (rowHigh - rowLow) * step / height)
     spacing *= 1.0 + 2 * PROJECT_MARGIN
-    grey, points, inside = _greyPlane(source, origin, right, down, spacing, width, height)
+    grey, points, _inside = _greyPlane(source, origin, right, down, spacing, width, height)
     grey = (grey * 255.0).reshape(height, width)
     rgb = np.repeat(grey[:, :, None], 3, axis=2)
     mask = np.zeros(height * width, dtype=bool)
@@ -912,4 +912,3 @@ def renderProjectViews(source, privateFolder):
         _writeAtomic(path, encodePng(rgba))
         written.append(path)
     return written
-

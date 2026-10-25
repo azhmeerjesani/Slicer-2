@@ -283,7 +283,9 @@ class StudioNormalizeTest(unittest.TestCase):
         study.set("sub-03", lesion=study.subject("sub-01")["lesion"])
         # Filters and queue
         # The normalization filters, after the lesion QC filters of L-28 (libcard_flags: 2D, Has flags)
-        self.assertEqual([entry["key"] for entry in library.libcardFilters()], ["two_d", "has_flags", "needs_norm", "norm_review"])
+        # Other cards add filters of their own (second tracing, adjudication...): these four come in this order
+        keys = [entry["key"] for entry in library.libcardFilters()]
+        self.assertEqual([key for key in keys if key in ("two_d", "has_flags", "needs_norm", "norm_review")], ["two_d", "has_flags", "needs_norm", "norm_review"])
         review = next(entry for entry in library.libcardFilters() if entry["key"] == "norm_review")
         self.assertEqual(review["qcColumn"], "norm_qc")
         listWidget.setFilter("needs_norm")
@@ -293,7 +295,7 @@ class StudioNormalizeTest(unittest.TestCase):
         self.assertEqual(listWidget.qcColumn(), "norm_qc")
         listWidget.setFilter("all")
         self.assertEqual(listWidget.qcColumn(), "qc")
-        self.assertEqual([entry["key"] for entry in library.libcardQueues()], ["norm_review"])
+        self.assertIn("norm_review", [entry["key"] for entry in library.libcardQueues()])
         # The card
         card = self.card()
         card.refresh()

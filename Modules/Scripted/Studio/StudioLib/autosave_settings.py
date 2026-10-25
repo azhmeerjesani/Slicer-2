@@ -18,6 +18,7 @@ import slicer
 from slicer.i18n import tr as _
 
 from . import autosave_io as io
+from . import ui
 
 PANEL_OBJECT_NAME = "StudioAutosaveSettingsPanel"
 #: Name of the panel in the settings dialog (A-09: it was "Autosave")
@@ -47,61 +48,70 @@ class AutosaveSettingsPanel(ctk.ctkSettingsPanel):
         self.setObjectName(PANEL_OBJECT_NAME)
         self.service = service
         self._updatingDirectory = False
-        layout = qt.QVBoxLayout(self)
+        # A Studio settings page (VISUAL 4.7, V-02): the title and one line, section labels, the folder card, 44 px rows with
+        # hairlines, a switch and 88 px numeric fields. The page scrolls in a short window (1366 x 768).
+        outer = qt.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scrollArea = qt.QScrollArea()
+        scrollArea.setObjectName("StudioSavingScrollArea")
+        scrollArea.setWidgetResizable(True)
+        scrollArea.setFrameShape(qt.QFrame.NoFrame)
+        scrollArea.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+        outer.addWidget(scrollArea)
+        page = qt.QWidget()
+        page.setObjectName("StudioSavingPageContent")
+        scrollArea.setWidget(page)
+        scrollArea.viewport().setAutoFillBackground(False)
+        layout = qt.QVBoxLayout(page)
+        layout.setContentsMargins(24, 20, 24, 16)
+        layout.setSpacing(6)
+        ui.settingsPageHeader(layout, _("Saving"), _("Your work is saved as you go. There is no Save to remember."), "StudioSavingPage")
 
         # The Slicer Studio folder (A-09)
-        folderForm = qt.QFormLayout()
-        folderForm.setFieldGrowthPolicy(qt.QFormLayout.ExpandingFieldsGrow)
-        layout.addLayout(folderForm)
-        folderRow = qt.QHBoxLayout()
-        self.rootLabel = qt.QLabel()
+        layout.addWidget(ui.sectionLabel(_("Slicer Studio folder")))
+        layout.addSpacing(4)
+        folderCard, self.rootLabel, self.rootNote, folderButtons = ui.folderCard("folder", "StudioProjectsFolderCard")
         self.rootLabel.setObjectName("StudioProjectsRootLabel")
-        self.rootLabel.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
-        self.rootLabel.setWordWrap(True)
-        folderRow.addWidget(self.rootLabel, 1)
+        self.rootNote.setObjectName("StudioProjectsRootNote")
+        self.showRootButton = qt.QPushButton(_("Show in {manager}").format(manager=self._fileManagerName()))
+        self.showRootButton.setObjectName("StudioProjectsShowRootButton")
+        self.showRootButton.connect("clicked()", self.onShowRoot)
         self.changeRootButton = qt.QPushButton(_("Change…"))
         self.changeRootButton.setObjectName("StudioProjectsChangeRootButton")
         self.changeRootButton.connect("clicked()", self.onChangeRoot)
-        folderRow.addWidget(self.changeRootButton)
-        self.showRootButton = qt.QPushButton(_("Show"))
-        self.showRootButton.setObjectName("StudioProjectsShowRootButton")
-        self.showRootButton.connect("clicked()", self.onShowRoot)
-        folderRow.addWidget(self.showRootButton)
-        folderForm.addRow(_("Slicer Studio folder:"), folderRow)
-        self.rootNote = qt.QLabel()
-        self.rootNote.setObjectName("StudioProjectsRootNote")
-        self.rootNote.setWordWrap(True)
-        folderForm.addRow("", self.rootNote)
+        for button in (self.showRootButton, self.changeRootButton):
+            ui.setRole(button, "secondary")
+            folderButtons.addWidget(button)
+        layout.addWidget(folderCard)
+        layout.addSpacing(16)
 
-        form = qt.QFormLayout()
-        form.setFieldGrowthPolicy(qt.QFormLayout.FieldsStayAtSizeHint)
-        layout.addLayout(form)
-        self.enabledCheckBox = qt.QCheckBox(_("Save continuously"))
+        # When to save
+        layout.addWidget(ui.sectionLabel(_("When to save")))
+        self.enabledCheckBox = ui.switch("", "StudioAutosaveEnabledSwitch")
+        self.enabledCheckBox.setSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Fixed)
+        self.enabledCheckBox.setAccessibleName(_("Save automatically"))
         self.enabledCheckBox.checked = io.DEFAULT_SETTINGS["Enabled"]
         self.enabledCheckBox.toolTip = _(
             "Projects are saved in the Slicer Studio folder as you work. Other scenes (Classic, studies) are copied to a "
             "private recovery folder, so that unsaved work can be recovered after a crash; there, use File › Save to keep your work.")  # noqa: RUF001
-        form.addRow(self.enabledCheckBox)
+        layout.addWidget(ui.settingsRow(_("Save automatically"), self.enabledCheckBox, _("Turning this off keeps crash recovery only")))
         self.registerProperty(_key("Enabled"), self.enabledCheckBox, "checked", str(qt.SIGNAL("toggled(bool)")))
-
-        self.intervalSpinBox = self._spinBox(1, 60, "IntervalMinutes", _(" min"))
         self.idleSpinBox = self._spinBox(3, 300, "IdleSeconds", _(" s"))
-        cadence = qt.QHBoxLayout()
-        cadence.addWidget(self.intervalSpinBox)
-        cadence.addWidget(qt.QLabel(_("or after a pause of")))
-        cadence.addWidget(self.idleSpinBox)
-        cadence.addStretch(1)
-        form.addRow(_("At most every:"), cadence)
-        recoveryTitle = qt.QLabel(_("Recovery of scenes that are not projects (Classic, studies)"))
-        recoveryTitle.setObjectName("StudioAutosaveRecoveryTitle")
-        font = recoveryTitle.font
-        font.setBold(True)
-        recoveryTitle.setFont(font)
-        form.addRow(recoveryTitle)
+        layout.addWidget(ui.settingsRow(_("After a pause of"), self.idleSpinBox))
+        self.intervalSpinBox = self._spinBox(1, 60, "IntervalMinutes", _(" min"))
+        layout.addWidget(ui.settingsRow(_("And at least every"), self.intervalSpinBox, last=True))
+        layout.addWidget(ui.label(_("Large scans (over 100 MB to write) are saved every 10 minutes, and always when you switch projects, "
+                                    "press Ctrl+S or quit."), "caption", "text3", "StudioSavingLargeNote", wrap=True))
+        layout.addSpacing(16)
 
+        # Recovery of the scenes that are not projects
+        layout.addWidget(ui.sectionLabel(_("Recovery")))
+        layout.addWidget(ui.label(_("Scenes that are not projects (Classic, studies) are autosaved to a private folder, so that your work "
+                                    "can be recovered after a crash."), "caption", "text3", "StudioAutosaveRecoveryTitle", wrap=True))
         # Location: not registered with registerProperty, so that only an explicit choice writes the key
         self.directoryButton = ctk.ctkDirectoryButton()
-        self.directoryButton.setMinimumWidth(360)
+        self.directoryButton.setMinimumWidth(260)
+        self.directoryButton.setMaximumWidth(420)
         self.directoryButton.toolTip = _("Folder of new autosaves. It should be a private folder, not a synchronized or shared one.")
         self.directoryButton.connect("directoryChanged(QString)", self.onDirectoryChanged)
         self.resetDirectoryButton = qt.QPushButton(_("Reset"))
@@ -109,40 +119,49 @@ class AutosaveSettingsPanel(ctk.ctkSettingsPanel):
         self.resetDirectoryButton.connect("clicked()", self.onResetDirectory)
         self.openDirectoryButton = qt.QPushButton(_("Open"))
         self.openDirectoryButton.connect("clicked()", self.onOpenDirectory)
-        location = qt.QHBoxLayout()
-        location.addWidget(self.directoryButton, 1)
-        location.addWidget(self.resetDirectoryButton)
-        location.addWidget(self.openDirectoryButton)
-        form.addRow(_("Location:"), location)
-        self.locationNote = qt.QLabel(_("A new location applies to new autosaves."))
-        form.addRow("", self.locationNote)
-
-        self.keepSpinBox = self._spinBox(1, 50, "KeepSessions", _(" sessions"))
-        form.addRow(_("Keep:"), self.keepSpinBox)
+        for button in (self.resetDirectoryButton, self.openDirectoryButton):
+            ui.setRole(button, "ghost")
+        location = qt.QWidget()
+        locationLayout = qt.QHBoxLayout(location)
+        locationLayout.setContentsMargins(0, 0, 0, 0)
+        locationLayout.setSpacing(6)
+        locationLayout.addWidget(self.directoryButton, 1)
+        locationLayout.addWidget(self.resetDirectoryButton)
+        locationLayout.addWidget(self.openDirectoryButton)
+        locationRow = ui.settingsRow(_("Location"), location)
+        self.locationNote = ui.label(_("A new location applies to new autosaves."), "caption", "text3", "StudioAutosaveLocationNote", wrap=True)
+        layout.addWidget(locationRow)
+        layout.addWidget(self.locationNote)
+        self.keepSpinBox = self._spinBox(1, 50, "KeepSessions", "")
+        layout.addWidget(ui.settingsRow(_("Sessions to keep"), self.keepSpinBox))
         self.maxDiskSpinBox = self._spinBox(256, 102400, "MaxDiskMB", _(" MB"))
-        form.addRow(_("Max size:"), self.maxDiskSpinBox)
+        layout.addWidget(ui.settingsRow(_("At most"), self.maxDiskSpinBox))
         self.maxAgeSpinBox = self._spinBox(1, 365, "MaxAgeDays", _(" days"))
-        form.addRow(_("Delete after:"), self.maxAgeSpinBox)
+        layout.addWidget(ui.settingsRow(_("Delete after"), self.maxAgeSpinBox))
         self.maxNodeSpinBox = self._spinBox(16, 102400, "MaxNodeMB", _(" MB"))
         self.maxNodeSpinBox.toolTip = _("Data larger than this is not autosaved (it is listed as not autosaved when you recover)")
-        form.addRow(_("Skip data larger than:"), self.maxNodeSpinBox)
+        layout.addWidget(ui.settingsRow(_("Skip data larger than"), self.maxNodeSpinBox, last=True))
 
         buttons = qt.QHBoxLayout()
-        self.recoverButton = qt.QPushButton(_("Recover autosaved work…"))
+        buttons.setSpacing(8)
+        self.recoverButton = qt.QPushButton(_("Recover older work…"))
         self.recoverButton.connect("clicked()", self.onRecover)
+        ui.setRole(self.recoverButton, "secondary")
         buttons.addWidget(self.recoverButton)
         self.deleteAllButton = qt.QPushButton(_("Delete all autosaves…"))
         self.deleteAllButton.connect("clicked()", self.onDeleteAll)
-        buttons.addWidget(self.deleteAllButton)
         self.autosaveNowButton = qt.QPushButton(_("Autosave now"))
         self.autosaveNowButton.connect("clicked()", self.onAutosaveNow)
-        buttons.addWidget(self.autosaveNowButton)
+        for button in (self.deleteAllButton, self.autosaveNowButton):
+            ui.setRole(button, "ghost")
+            buttons.addWidget(button)
         buttons.addStretch(1)
+        layout.addSpacing(8)
         layout.addLayout(buttons)
-        self.statusLabel = qt.QLabel()
-        self.statusLabel.wordWrap = True
+        self.statusLabel = ui.label("", "caption", "text3", "StudioAutosaveStatusLabel", wrap=True)
         layout.addWidget(self.statusLabel)
         layout.addStretch(1)
+        ui.bindStyleSheet(self, lambda: ui.settingsStyleSheet() + "QScrollArea#StudioSavingScrollArea, QWidget#StudioSavingPageContent { background: transparent; }")
 
         self.connect("settingChanged(QString,QVariant)", self.onSettingChanged)
         self.updateDirectory()
@@ -154,6 +173,12 @@ class AutosaveSettingsPanel(ctk.ctkSettingsPanel):
         if service is not None:
             service.addStatusListener(lambda status: self.updateStatus() if self.isVisible() else None)
 
+    @staticmethod
+    def _fileManagerName():
+        from . import projects
+
+        return projects.fileManagerName()
+
     def _onShown(self):
         self.updateDirectory()
         self.updateRoot()
@@ -163,7 +188,8 @@ class AutosaveSettingsPanel(ctk.ctkSettingsPanel):
         from . import projects
 
         root = projects.root()
-        self.rootLabel.setText(root)
+        # The home folder is written "~" (the full path is the tooltip)
+        self.rootLabel.setText(projects.shortPath(root))
         self.rootLabel.setToolTip(root)
         fromEnvironment = projects.isRootFromEnvironment()
         self.changeRootButton.enabled = not fromEnvironment and projects.isEnabled()
@@ -173,13 +199,13 @@ class AutosaveSettingsPanel(ctk.ctkSettingsPanel):
             note = _("Projects are turned off ({variable}=0).").format(variable=projects.ENABLED_ENVIRONMENT)
         else:
             projectCount, studyCount = projects.folderSummary(root) if os.path.isdir(root) else (0, 0)
-            counts = [_("1 project") if projectCount == 1 else _("{n} projects").format(n=projectCount),
-                      _("1 study") if studyCount == 1 else _("{n} studies").format(n=studyCount)]
-            note = " · ".join(counts) + ". " + _("Every project is a 3D Slicer scene (Projects/<name>), saved as you work.")
+            note = " · ".join([_("1 project") if projectCount == 1 else _("{n} projects").format(n=projectCount),
+                               _("1 study") if studyCount == 1 else _("{n} studies").format(n=studyCount)])
             synced = projects.syncedService(root)
             if synced:
-                note += " " + _("This folder is synced to {service}. Scans can contain patient data.").format(service=synced)
+                note += " · " + _("synced to {service}: scans can contain patient data").format(service=synced)
         self.rootNote.setText(note)
+        self.rootNote.setToolTip(_("Every project is a 3D Slicer scene (Projects/<name>), saved as you work."))
 
     def onChangeRoot(self):
         from . import projects_ui
@@ -193,11 +219,7 @@ class AutosaveSettingsPanel(ctk.ctkSettingsPanel):
         projects_ui.showRootFolder()
 
     def _spinBox(self, minimum, maximum, name, suffix):
-        spinBox = qt.QSpinBox()
-        spinBox.minimum = minimum
-        spinBox.maximum = maximum
-        spinBox.value = io.DEFAULT_SETTINGS[name]
-        spinBox.suffix = suffix
+        spinBox = ui.numberField(minimum, maximum, io.DEFAULT_SETTINGS[name], suffix)
         self.registerProperty(_key(name), spinBox, "value", str(qt.SIGNAL("valueChanged(int)")))
         return spinBox
 

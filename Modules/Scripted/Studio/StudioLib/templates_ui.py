@@ -387,8 +387,9 @@ class AddTemplateDialog(qt.QDialog):
 
         footer = qt.QHBoxLayout()
         footer.setSpacing(8)
-        self.defaultCheck = qt.QCheckBox(_("Use as my default template"))
-        self.defaultCheck.setObjectName("studioAddTemplateDefault")
+        # A switch (VISUAL 4.7b), not a check box
+        self.defaultCheck = ui.switch(_("Use as my default template"), "studioAddTemplateDefault")
+        self.defaultCheck.setSizePolicy(qt.QSizePolicy.Preferred, qt.QSizePolicy.Fixed)
         self.defaultCheck.setToolTip(_("Start on template then opens this template"))
         footer.addWidget(self.defaultCheck)
         footer.addStretch(1)
@@ -404,7 +405,8 @@ class AddTemplateDialog(qt.QDialog):
         self._progressTimer = qt.QTimer(self)
         self._progressTimer.setInterval(100)
         self._progressTimer.connect("timeout()", self._showProgress)
-        ui.bindStyleSheet(self, lambda: f"QDialog#{DIALOG_OBJECT_NAME} {{ background-color: {ui.token('card').name()}; }}")
+        # Dialog chrome (VISUAL 4.7, V-02): frameless, rounded, bordered, over a backdrop
+        ui.dialogChrome(self)
         if imagePath:
             self.setImage(imagePath)
         self._update()
@@ -677,7 +679,8 @@ class TemplatesSettingsPanel(ctk.ctkSettingsPanel):
         self.setObjectName(PANEL_OBJECT_NAME)
         self.rows = []
         layout = qt.QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        # The margins of the other Studio settings pages (VISUAL 4.7)
+        layout.setContentsMargins(24, 20, 24, 16)
         layout.setSpacing(14)
         header = qt.QHBoxLayout()
         titles = qt.QVBoxLayout()

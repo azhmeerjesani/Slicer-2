@@ -209,8 +209,6 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         """Start on the MNI template: Library shows Current work with the template and its lesion, no empty drop zone and
         no Open buttons in the inspector; Continue in Draw returns to Draw with the same lesion and segment selected.
         """
-        from StudioLib import library
-
         studioShell = self._applyStudio()
         volumeNode, segmentationNode = self._template(studioShell)
         editor = self._editor()
@@ -220,12 +218,12 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(studioShell.currentWorkspace(), "library")
         self.assertTrue(canvas.currentWork.widget.isVisible())
         self.assertTrue(canvas.hasData())
-        # The 480x220 drop zone is a strip, the page starts at the top
+        # The 480x220 drop zone is gone (V-02): files are dropped anywhere, as the header caption says; the page starts at the top
         self.assertTrue(canvas.isStrip())
-        self.assertEqual(canvas.dropZone.height, library.DROP_STRIP_HEIGHT)
-        self.assertTrue(canvas.dropStripText.isVisible())
+        self.assertFalse(canvas.dropFrame.isVisible())
         self.assertFalse(canvas.dropFull.isVisible())
-        self.assertIn("Drop more files", canvas.dropStripText.text)
+        self.assertTrue(canvas.captionDropHint.isVisible())
+        self.assertIn("anywhere on the window", canvas.captionDropHint.text)
         scanNames = self._labels(canvas, "StudioCurrentWorkScanName")
         self.assertEqual([self._plain(label) for label in scanNames], [volumeNode.GetName()])
         self.assertIn("MNI template", self._plain(self._labels(canvas, "StudioCurrentWorkScanFolder")[0]))

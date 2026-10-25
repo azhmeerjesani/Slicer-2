@@ -28,7 +28,8 @@ throwaway settings directory (it answers the first-start folder question and wri
 It writes ``DIR/<W>x<H>-<theme>/<NN>-<name>.png`` (screen grabs, so popups and overlays are included): the
 first-start folder chooser, Library (empty, with a project, with projects, with a study), the tour card, Draw (empty,
 painting with the lesion card, in a study), a toast, Map (cards, a result), Search, the cheat sheet, the settings
-panels (Saving, Appearance, Updates, Templates) and the add-template dialog. The theme is applied with the Studio
+panels (Saving, Appearance, Updates, Templates) and the add-template dialog; V-02 adds All projects as a list, the project menu of
+the top bar and Library with a study listed in Studies. The theme is applied with the Studio
 theme setting (``Appearance/Theme``) of that throwaway settings directory.
 """
 
@@ -537,6 +538,30 @@ class StudioScreens:
         idleWait(1000)
         self.grab("draw-template-lesion")
 
+    def libraryList(self):
+        """All projects as a list (V-02), then back to the grid."""
+        from StudioLib import library
+
+        self.shell().switchTo("library")
+        section = library.canvas().projectsSection
+        section.setViewMode("list")
+        self.grab("library-projects-list", 1000)
+        section.setViewMode("grid")
+        pump(10)
+
+    def projectMenu(self):
+        """The project menu of the top bar (V-02): Rename…, Show in Files, New project, Recent projects, Close project."""
+        topBar = self.shell().topBar
+        button = topBar.projectMenuButton
+        if button.isHidden():
+            print("SCREEN project-menu skipped: no project menu button", flush=True)
+            return
+        topBar._fillProjectMenu()
+        topBar.projectMenu.popup(button.mapToGlobal(qt.QPoint(0, button.height)))
+        self.grab("project-menu", 600)
+        topBar.projectMenu.close()
+        pump(10)
+
     def mapScreens(self):
         shell = self.shell()
         shell.switchTo("map")
@@ -627,6 +652,11 @@ class StudioScreens:
         study_ui.createStudy(files, shell=self.shell(), folder=folder, name="Stroke aphasia LNM")
         self.shell().switchTo("library")
         self.grab("library-study", 2000)
+        # The study listed in Studies (V-02) once it is closed
+        study_ui.closeStudy()
+        pump(20)
+        self.shell().switchTo("library")
+        self.grab("library-studies", 2000)
 
     def run(self):
         self.step("firstrun", self.firstRun)
@@ -636,6 +666,7 @@ class StudioScreens:
             for name, function in (("library-empty", self.libraryEmpty), ("tour-card", self.tourCard), ("draw-empty", self.drawEmpty),
                                    ("draw-painting", self.drawPainting), ("library-project", lambda: self.libraryProject("library-project")),
                                    ("second-project", self.secondProject), ("library-projects", lambda: self.libraryProject("library-projects")),
+                                   ("library-list", self.libraryList), ("project-menu", self.projectMenu),
                                    ("map", self.mapScreens), ("palette", self.palette), ("cheatsheet", self.cheatSheet),
                                    ("settings", self.settings), ("add-template", self.addTemplate), ("study", self.study)):
                 if self.args.only and name not in self.args.only.split(",") and name not in ("draw-painting", "second-project"):

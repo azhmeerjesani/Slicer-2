@@ -740,6 +740,258 @@ class PanelHeader:
 #
 
 
+#: Lucide icons of the application settings panels in Studio (V-02), by panel title; other panels get SETTINGS_PANEL_ICON
+SETTINGS_PANEL_ICONS = {
+    "General": "settings", "Modules": "box", "Appearance": "moon", "Views": "layout-grid", "User": "users", "Extensions": "download",
+    "Cache": "archive-restore", "Internationalization": "globe", "Python": "terminal", "Developer": "sliders-horizontal",
+    "Extension Wizard": "wand-sparkles", "Subject hierarchy": "list", "Units": "scaling", "Segmentations": "brush",
+    "Volume rendering": "box", "DICOM": "image", "Updates": "refresh-cw", "Templates": "brain", "Saving": "folder",
+    "Drawing": "pencil", "Keyboard": "keyboard", "Navigation": "mouse-pointer-2",
+}
+SETTINGS_PANEL_ICON = "sliders-horizontal"
+#: Role of the original text of a panel item (the Studio look writes sentence case)
+_SETTINGS_TEXT_ROLE = qt.Qt.UserRole + 1101
+
+
+def _propertyValue(obj, name):
+    """A Qt property read the same way whether PythonQt exposes it as a property or as a getter method."""
+    value = getattr(obj, name)
+    return value() if callable(value) else value
+
+
+def sentenceCase(text):
+    """``text`` in sentence case: the first word as it is, the other words lower case unless they are acronyms ("DICOM")."""
+    words = str(text).split(" ")
+    return " ".join([words[0]] + [word if len(word) > 1 and word.isupper() else word.lower() for word in words[1:]])
+
+
+class _SettingsDialogFilter(qt.QObject):
+    def __init__(self, look):
+        qt.QObject.__init__(self)
+        self.look = look
+
+    def eventFilter(self, obj, event):
+        if event.type() == qt.QEvent.Show:
+            try:
+                self.look.apply()
+            except Exception:
+                logging.error(f"Studio: the settings dialog look failed:\n{traceback.format_exc()}")
+        return False
+
+
+class SettingsDialogLook:
+    """The Studio look of the application settings dialog (``ctkSettingsDialog``, VISUAL 4.7, V-02), applied each time it is
+    shown while Studio is applied and undone in Classic (``restore()``), which keeps the official look:
+
+    - the panel list: Lucide icons instead of the application icon, sentence-case names (only the shown text: panels are
+      looked up by their title), 32 px rows with the ``selected`` fill;
+    - the footer: flat buttons without icons, "Restore defaults" and "Reset" as ghost buttons on the left, Cancel secondary
+      and OK primary;
+    - 16 px margins around the dialog.
+    """
+
+    def __init__(self, dialog):
+        self.dialog = dialog
+        self.applied = False
+        self._saved = {}
+        self._filter = _SettingsDialogFilter(self)
+        dialog.installEventFilter(self._filter)
+        if dialog.isVisible():
+            self.apply()
+
+    def _tree(self):
+        return self.dialog.findChild("QTreeWidget", "SettingsTreeWidget")
+
+    def _buttonBox(self):
+        return self.dialog.findChild("QDialogButtonBox", "SettingsButtonBox")
+
+    @staticmethod
+    def _items(tree):
+        items = []
+
+        def visit(item):
+            for index in range(item.childCount()):
+                child = item.child(index)
+                items.append(child)
+                visit(child)
+
+        visit(tree.invisibleRootItem())
+        return items
+
+    def _treeStyleSheet(self):
+        t = {name: ui.token(name).name() for name in ("text", "text2", "selected", "control-hover", "accent-fg")}
+        if not ui.isDark():
+            t["selected"] = ui.token("control-pressed").name()
+        return (
+            "QTreeWidget#SettingsTreeWidget { background: transparent; border: none; outline: 0; padding: 4px 0px; }"
+            f"QTreeWidget#SettingsTreeWidget::item {{ height: 32px; border-radius: 8px; padding-left: 6px; color: {t['text2']}; }}"
+            f"QTreeWidget#SettingsTreeWidget::item:hover {{ background-color: {t['control-hover']}; color: {t['text']}; }}"
+            f"QTreeWidget#SettingsTreeWidget::item:selected {{ background-color: {t['selected']}; color: {t['text']}; }}"
+            "QTreeWidget#SettingsTreeWidget::branch { image: none; border: none; background: transparent; }")
+
+    def apply(self):
+        dialog = self.dialog
+        if not ui._isAlive(dialog):
+            return
+        tree = self._tree()
+        if tree is not None:
+            if not self.applied:
+                self._saved["tree"] = (tree.styleSheet, tree.indentation, tree.iconSize, tree.minimumWidth)
+            for item in self._items(tree):
+                original = item.data(0, _SETTINGS_TEXT_ROLE)
+                if original is None or original == "":
+                    original = item.text(0)
+                    item.setData(0, _SETTINGS_TEXT_ROLE, original)
+                    self._saved.setdefault("icons", {})[original] = item.icon(0)
+                item.setText(0, sentenceCase(original))
+                item.setIcon(0, ui.icon(SETTINGS_PANEL_ICONS.get(str(original), SETTINGS_PANEL_ICON), 16))
+            tree.setIndentation(0)
+            tree.setIconSize(qt.QSize(16, 16))
+            tree.setMinimumWidth(200)
+            ui.bindStyleSheet(tree, self._treeStyleSheet)
+        box = self._buttonBox()
+        if box is not None:
+            roles = ((qt.QDialogButtonBox.Ok, "primary", None), (qt.QDialogButtonBox.Cancel, "secondary", None),
+                     (qt.QDialogButtonBox.RestoreDefaults, "ghost", _("Restore defaults")), (qt.QDialogButtonBox.Reset, "ghost", None))
+            for standard, role, text in roles:
+                button = box.button(standard)
+                if button is None:
+                    continue
+                key = f"button{int(standard)}"
+                if key not in self._saved:
+                    self._saved[key] = (button.icon, button.text, button.property("slicerRole"))
+                button.setIcon(qt.QIcon())
+                if text:
+                    button.setText(text)
+                button.setMinimumHeight(ui.BUTTON_HEIGHT)
+                ui.setRole(button, role)
+        self._applyAppearance()
+        layout = dialog.layout()
+        if layout is not None:
+            if "margins" not in self._saved:
+                margins = layout.contentsMargins()
+                self._saved["margins"] = (margins.left(), margins.top(), margins.right(), margins.bottom(), _propertyValue(layout, "horizontalSpacing"),
+                                          _propertyValue(layout, "verticalSpacing"))
+            layout.setContentsMargins(16, 16, 16, 16)
+            layout.setHorizontalSpacing(20)
+            layout.setVerticalSpacing(12)
+        self.applied = True
+
+    #: Labels of the Appearance panel (``qSlicerSettingsStylesPanel``) and its check boxes, drawn as switches in Studio
+    APPEARANCE_LABELS = ("ThemeLabel", "AccentColorLabel", "DensityLabel", "FontLabel", "ShowToolTipsLabel", "ShowToolButtonTextLabel", "RestoreUILabel")
+    APPEARANCE_CHECKBOXES = ("ShowToolTipsCheckBox", "ShowToolButtonTextCheckBox", "RestoreUICheckBox")
+
+    def _appearancePanel(self):
+        return self.dialog.findChild("QWidget", "qSlicerSettingsStylesPanel")
+
+    def _applyAppearance(self):
+        """The Appearance panel as a Studio page (VISUAL 4.7): the page title and one line, labels without colons on 44 px
+        rows, switches for the check boxes. Undone by ``_restoreAppearance()``.
+        """
+        panel = self._appearancePanel()
+        form = panel.layout() if panel is not None else None
+        if form is None or "appearance" in self._saved:
+            return
+        saved = {"labels": {}, "margins": None, "spacing": _propertyValue(form, "verticalSpacing"), "header": None}
+        margins = form.contentsMargins()
+        saved["margins"] = (margins.left(), margins.top(), margins.right(), margins.bottom())
+        for name in self.APPEARANCE_LABELS:
+            label = panel.findChild("QLabel", name)
+            if label is None:
+                continue
+            saved["labels"][name] = (label.text, label.minimumHeight)
+            label.setText(str(label.text).rstrip(" :"))
+            label.setMinimumHeight(ui.SETTINGS_ROW_HEIGHT)
+        for name in self.APPEARANCE_CHECKBOXES:
+            box = panel.findChild("QCheckBox", name)
+            if box is not None:
+                box.setProperty("slicerRole", "switch")
+                box.style().unpolish(box)
+                box.style().polish(box)
+        header = qt.QWidget()
+        header.setObjectName("StudioAppearancePageHeader")
+        headerLayout = qt.QVBoxLayout(header)
+        headerLayout.setContentsMargins(0, 0, 0, 8)
+        headerLayout.setSpacing(6)
+        ui.settingsPageHeader(headerLayout, _("Appearance"), _("Theme, accent color, density and font of Slicer Studio."), "StudioAppearancePage")
+        form.insertRow(0, header)
+        saved["header"] = header
+        form.setContentsMargins(24, 20, 24, 16)
+        form.setVerticalSpacing(0)
+        self._saved["appearance"] = saved
+
+    def _restoreAppearance(self):
+        saved = self._saved.pop("appearance", None)
+        panel = self._appearancePanel()
+        form = panel.layout() if panel is not None else None
+        if saved is None or form is None:
+            return
+        for name, (text, minimumHeight) in saved["labels"].items():
+            label = panel.findChild("QLabel", name)
+            if label is not None:
+                label.setText(text)
+                label.setMinimumHeight(minimumHeight)
+        for name in self.APPEARANCE_CHECKBOXES:
+            box = panel.findChild("QCheckBox", name)
+            if box is not None:
+                box.setProperty("slicerRole", "")
+                box.style().unpolish(box)
+                box.style().polish(box)
+        if saved["header"] is not None and ui._isAlive(saved["header"]):
+            form.removeRow(saved["header"])
+        form.setContentsMargins(*saved["margins"])
+        form.setVerticalSpacing(saved["spacing"])
+
+    def restore(self):
+        """The official look again (Classic)."""
+        dialog = self.dialog
+        if not ui._isAlive(dialog):
+            return
+        dialog.removeEventFilter(self._filter)
+        if not self.applied:
+            return
+        tree = self._tree()
+        if tree is not None:
+            icons = self._saved.get("icons", {})
+            for item in self._items(tree):
+                original = item.data(0, _SETTINGS_TEXT_ROLE)
+                if original:
+                    item.setText(0, original)
+                    if original in icons:
+                        item.setIcon(0, icons[original])
+                    item.setData(0, _SETTINGS_TEXT_ROLE, "")
+            ui.bindStyleSheet(tree, None)
+            styleSheet, indentation, iconSize, minimumWidth = self._saved.get("tree", ("", 20, qt.QSize(16, 16), 0))
+            tree.setStyleSheet(styleSheet)
+            tree.setIndentation(indentation)
+            tree.setIconSize(iconSize)
+            tree.setMinimumWidth(minimumWidth)
+        box = self._buttonBox()
+        if box is not None:
+            for standard in (qt.QDialogButtonBox.Ok, qt.QDialogButtonBox.Cancel, qt.QDialogButtonBox.RestoreDefaults, qt.QDialogButtonBox.Reset):
+                button = box.button(standard)
+                saved = self._saved.get(f"button{int(standard)}")
+                if button is None or saved is None:
+                    continue
+                icon, text, role = saved
+                button.setIcon(icon)
+                button.setText(text)
+                button.setMinimumHeight(0)
+                ui.bindStyleSheet(button, None)
+                button.setProperty("slicerRole", role if role else "")
+                button.style().unpolish(button)
+                button.style().polish(button)
+        self._restoreAppearance()
+        layout = dialog.layout()
+        margins = self._saved.get("margins")
+        if layout is not None and margins is not None:
+            layout.setContentsMargins(*margins[:4])
+            layout.setHorizontalSpacing(margins[4])
+            layout.setVerticalSpacing(margins[5])
+        self._saved = {}
+        self.applied = False
+
+
 class StickyToast:
     """The toast of consequences of automatic actions (USABILITY 6.3): it stays until the next input in the
     application (a mouse button or a key, at least ``STICKY_TOAST_MINIMUM_MS``) and may carry one action button
@@ -1092,6 +1344,8 @@ class Shell:
         self._toolBarScanTimer = None
         self._plugins = []
         self._connections = []
+        #: The Studio look of the settings dialog (``SettingsDialogLook``), while Studio is applied
+        self._settingsLook = None
         self._focusModeHidden = None
         self._focusModePill = None
         self._panelWidthTimer = None
@@ -1290,6 +1544,12 @@ class Shell:
         """Undo apply(). Also used to recover from a failed apply(), so each part may be missing."""
         mainWindow = self.mainWindow
         self._applyNavigationBehaviours(False)
+        if self._settingsLook is not None:
+            try:
+                self._settingsLook.restore()
+            except Exception:
+                logging.error(f"Studio: restoring the settings dialog failed:\n{traceback.format_exc()}")
+            self._settingsLook = None
         if self.workspaces is not None:
             self.workspaces.leaveCurrent()
         self.setCanvas(None)
@@ -1601,6 +1861,9 @@ class Shell:
         if settingsDialog is not None:
             # The navigation settings (Studio/*) may have changed
             self._connect(settingsDialog, "finished(int)", self._onSettingsDialogFinished)
+            # The Studio look of the dialog (V-02), undone in Classic
+            if self._settingsLook is None:
+                self._settingsLook = SettingsDialogLook(settingsDialog)
         mainWindow.installEventFilter(self._eventFilter)
         mainWindow.centralWidget().installEventFilter(self._eventFilter)
         dock.installEventFilter(self._eventFilter)

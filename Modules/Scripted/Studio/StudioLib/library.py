@@ -2642,8 +2642,17 @@ class StudyList(qt.QObject):
         rowLayout.addWidget(self.search, 1 if compact else 0)
         self.chipGroup = qt.QButtonGroup(self.widget)
         self.chipGroup.setExclusive(True)
+        # The chips wrap onto more lines rather than being elided (V-02): ``chipLines`` holds one row layout per line, the
+        # first of which is ``chipLayout``
         self.chipLayout = qt.QHBoxLayout()
         self.chipLayout.setSpacing(4)
+        # Each line ends with a stretch: the chips stay at its start
+        self.chipLayout.addStretch(1)
+        self.chipLines = qt.QVBoxLayout()
+        self.chipLines.setContentsMargins(0, 0, 0, 0)
+        self.chipLines.setSpacing(4)
+        self.chipLines.addLayout(self.chipLayout)
+        self._chipLineLayouts = [self.chipLayout]
         self.chips = {}
         self._filterKey = "all"
         if compact:
@@ -2651,17 +2660,18 @@ class StudyList(qt.QObject):
             layout.addWidget(self.filterRow)
             chipRow = qt.QWidget()
             chipRow.setObjectName("StudioStudyChipRow")
-            chipRow.setLayout(self.chipLayout)
+            chipRow.setLayout(self.chipLines)
             self.chipLayout.setContentsMargins(0, 0, 0, 0)
             layout.addWidget(chipRow)
             self.chipRow = None
+            self._compactChipRow = chipRow
         else:
             # The chips stay in the filter row while they fit, else they go to a row of their own below it (_placeChips)
             self.chipRow = qt.QWidget()
             self.chipRow.setObjectName("StudioStudyChipRow")
             chipRowLayout = qt.QHBoxLayout(self.chipRow)
             chipRowLayout.setContentsMargins(0, 0, 0, 0)
-            chipRowLayout.addLayout(self.chipLayout)
+            chipRowLayout.addLayout(self.chipLines)
             chipRowLayout.addStretch(1)
             # Ignored: the chips never make the page wider than the canvas (they move below instead)
             self.chipRow.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
@@ -2741,9 +2751,9 @@ class StudyList(qt.QObject):
         _studyViews.append(self)
         if not compact and _savedStudyView() == "grid":
             self.setViewMode("grid")
-        if not compact:
-            self._resizeWatcher = _ResizeWatcher(self._placeChips)
-            _installEventFilter(self.widget, self._resizeWatcher)
+        # The chips are placed again when the list is resized (also in the narrow inspector, where they wrap)
+        self._resizeWatcher = _ResizeWatcher(self._placeChips)
+        _installEventFilter(self.widget, self._resizeWatcher)
 
     def _addShortcut(self, key, callback, name, description, parent=None):
         shortcut = qt.QShortcut(qt.QKeySequence(key), parent or self.views)
@@ -2799,15 +2809,53 @@ class StudyList(qt.QObject):
             button.setChecked(entry["key"] == self._filterKey)
             button.connect("clicked()", lambda key=entry["key"]: self.setFilter(key))
             self.chipGroup.addButton(button)
-            self.chipLayout.addWidget(button)
+            self.chipLayout.insertWidget(max(0, self.chipLayout.count() - 1), button)
             self.chips[entry["key"]] = button
         if self._filterKey not in self.chips:
             self.setFilter("all")
+        self._chipFlowWidth = None
         self._placeChips()
 
+    def _flowChips(self, available):
+        """Lay the chips out on as many lines as ``available`` px need: a chip is never elided (V-02)."""
+        available = int(available)
+        if available <= 0 or getattr(self, "_chipFlowWidth", None) == available:
+            return
+        self._chipFlowWidth = available
+        buttons = [button for button in self.chips.values() if _isAlive(button)]
+        for line in self._chipLineLayouts:
+            for button in buttons:
+                line.removeWidget(button)
+        spacing = self.chipLayout.spacing
+        lines = [[]]
+        width = 0
+        for button in buttons:
+            buttonWidth = button.sizeHint.width()
+            if lines[-1] and width + spacing + buttonWidth > available:
+                lines.append([])
+                width = 0
+            width += (spacing if lines[-1] else 0) + buttonWidth
+            lines[-1].append(button)
+        while len(self._chipLineLayouts) < len(lines):
+            line = qt.QHBoxLayout()
+            line.setSpacing(spacing)
+            line.setContentsMargins(0, 0, 0, 0)
+            line.addStretch(1)
+            self.chipLines.addLayout(line)
+            self._chipLineLayouts.append(line)
+        for index, line in enumerate(lines):
+            lineLayout = self._chipLineLayouts[index]
+            for button in line:
+                # Before the line's stretch
+                lineLayout.insertWidget(max(0, lineLayout.count() - 1), button)
+                button.show()
+
     def _placeChips(self):
-        """Chips in the filter row when the row is wide enough for all of them, else on a row of their own below it."""
-        if self.compact or self.chipRow is None or not _isAlive(self.widget):
+        """Chips in the filter row when the row is wide enough for all of them, else on rows of their own below it."""
+        if not _isAlive(self.widget):
+            return
+        if self.compact or self.chipRow is None:
+            self._flowChips(self.widget.width if self.widget.width > 0 else 320)
             return
         rowLayout = self.filterRow.layout()
         others = [self.search, self.sortLabel, self.sortCombo, *self.viewButtons.values()]
@@ -2818,6 +2866,7 @@ class StudyList(qt.QObject):
         buttons = list(self.chips.values())
         chips = sum(button.sizeHint.width() for button in buttons) + self.chipLayout.spacing * max(0, len(buttons) - 1)
         inRow = fixed + chips <= self.widget.width
+        self._flowChips(chips + 1 if inRow else self.widget.width)
         if inRow == self._chipsInRow:
             return
         self._chipsInRow = inRow
@@ -4986,12 +5035,14 @@ class LibraryCanvas(qt.QObject):
         captionRow.addWidget(self.captionSeparator)
         self.captionLink = self._link(_("Show in {manager}").format(manager=_fileManagerName()), "StudioLibraryCaptionLink", _showRootFolder)
         captionRow.addWidget(self.captionLink)
-        # Once data is loaded the page has no drop zone: the caption says that files can be dropped anywhere
-        self.captionDropHint = ui.label(_("· Drop files anywhere to add them"), "caption", "text3", "StudioLibraryDropHint")
-        self.captionDropHint.hide()
-        captionRow.addWidget(self.captionDropHint)
         captionRow.addStretch(1)
         titleColumn.addLayout(captionRow)
+        # Once data is loaded the page has no drop zone: a second caption line says that files can be dropped anywhere
+        self.captionDropHint = ui.label(_("Drop scans, lesion masks or folders anywhere on the window to add them"), "caption", "text3",
+                                        "StudioLibraryDropHint")
+        self.captionDropHint.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+        self.captionDropHint.hide()
+        titleColumn.addWidget(self.captionDropHint)
         headerLayout.addLayout(titleColumn, 1)
         self.headerButtons = qt.QWidget()
         self.headerButtons.setObjectName("StudioLibraryHeaderButtons")
@@ -5405,8 +5456,9 @@ class LibraryCanvas(qt.QObject):
         return shown
 
     def _setStrip(self, strip):
-        """The drop zone is a 44 px strip under Recent while the current work is shown, else the 480 x 220 zone of the empty
-        state in its 620 x 340 dashed frame under the header, with the Library buttons in it (VISUAL 4.2).
+        """While the current work is shown the page has no drop zone (V-02: the header caption says that files can be
+        dropped anywhere) and the Library buttons are in the header; else the 480 x 220 zone of the empty state in its
+        620 x 340 dashed frame under the header, with the Library buttons in it (VISUAL 4.2).
         """
         if self._dataShown == strip:
             return
@@ -5426,8 +5478,6 @@ class LibraryCanvas(qt.QObject):
             self.dropFrame.layout().addWidget(self.dropZone)
             self.dropBottomSlot.addWidget(self.dropFrame)
             self.headerButtons.layout().addWidget(self.buttonRow)
-        self.dropFrame.setVisible(not strip)
-        self.captionDropHint.setVisible(bool(strip))
         else:
             self.dropZone.setFixedSize(COLUMN_WIDTH, DROP_ZONE_HEIGHT)
             self.dropZone.setSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Fixed)
@@ -5440,6 +5490,8 @@ class LibraryCanvas(qt.QObject):
             self.dropButtonsSlot.addWidget(self.buttonRow, 0, qt.Qt.AlignHCenter)
         self.dropTopSpacing.setVisible(not strip)
         self.headerButtons.setVisible(strip)
+        self.dropFrame.setVisible(not strip)
+        self.captionDropHint.setVisible(bool(strip))
         style = self.dropFrame.style()
         style.unpolish(self.dropFrame)
         style.polish(self.dropFrame)

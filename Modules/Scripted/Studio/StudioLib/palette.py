@@ -1352,6 +1352,45 @@ def rank(entries, query, category=None):
 _ROLE_ROW = qt.Qt.UserRole + 1
 
 
+#: Groups of the results of a query (V-02, VISUAL 4.6): (key, header). A group is listed where its best entry ranks, so
+#: the best match stays first.
+RESULT_GROUPS = (("where", "Where did it go?"), ("actions", "Actions"), ("tools", "Tools"), ("files", "Files"), ("modules", "Modules and help"))
+
+
+def resultGroup(entry):
+    """The result group of an entry: "where", "tools", "files", "modules" (modules, the tours) or "actions"."""
+    kind = entry.kind
+    if kind == KIND_WHERE:
+        return "where"
+    if kind == KIND_TOOL:
+        return "tools"
+    if kind in (KIND_RECENT, KIND_SAMPLE):
+        return "files"
+    if kind in (KIND_MODULE, KIND_TOUR):
+        return "modules"
+    return "actions"
+
+
+def groupedRows(entries):
+    """``[("header", text) | ("entry", entry)]``: the ranked ``entries`` under their group headers, the groups in the order
+    of their best entry and the entries of a group in rank order.
+    """
+    groups = {}
+    order = []
+    for entry in entries:
+        key = resultGroup(entry)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(entry)
+    headers = dict(RESULT_GROUPS)
+    rows = []
+    for key in order:
+        rows.append(("header", _(headers[key])))
+        rows += [("entry", entry) for entry in groups[key]]
+    return rows
+
+
 class _RowDelegate(qt.QStyledItemDelegate):
     """Paints a row: icon, title with the matched characters highlighted, category and key chip; or a section header."""
 
@@ -1541,6 +1580,7 @@ class Palette:
         self._iconCache = {}
         self._paletteKey = None
         self.colors = {}
+        self._backdropShown = False
 
         widget = qt.QFrame(self.mainWindow, qt.Qt.Popup | qt.Qt.FramelessWindowHint)
         widget.setObjectName("StudioPalette")
@@ -1676,6 +1716,9 @@ class Palette:
         self.field.blockSignals(False)
         self._place()
         self._update("")
+        # The black wash behind Search (VISUAL 4.6)
+        if not self._backdropShown:
+            self._backdropShown = ui.showBackdrop(self.mainWindow, ui.PALETTE_BACKDROP_ALPHA) is not None
         self.widget.show()
         self.widget.raise_()
         self.widget.activateWindow()
@@ -1700,6 +1743,9 @@ class Palette:
 
     def _onHidden(self):
         self.hoverRow = -1
+        if self._backdropShown:
+            self._backdropShown = False
+            ui.hideBackdrop(self.mainWindow)
 
     #
     # Results
@@ -1716,6 +1762,7 @@ class Palette:
         startTime = time.perf_counter()
         self.normalizedQuery = finder.normalizedQuery(text)
         rows = []
+        matches = []
         if not self.normalizedQuery:
             rows = self._emptyQueryRows()
         else:
@@ -1723,9 +1770,13 @@ class Palette:
             if matches and matches[0][1] == finder.TIER_FULL_TEXT:
                 # Nothing is named like the query: say so, and list where the help mentions it
                 rows = [("header", _("Mentioned in the help"))]
-            rows += [("entry", entry) for entry, tier in matches]
+                rows += [("entry", entry) for entry, tier in matches]
+            else:
+                rows = groupedRows([entry for entry, tier in matches])
         self._setRows(rows)
-        named = any(kind == "entry" for kind, payload in rows) and rows[0][0] == "entry" if self.normalizedQuery else True
+        # Named: some entry is named like the query (a full-text match only is listed under "Mentioned in the help")
+        mentionedOnly = bool(matches) and matches[0][1] == finder.TIER_FULL_TEXT if self.normalizedQuery else False
+        named = any(kind == "entry" for kind, payload in rows) and not mentionedOnly if self.normalizedQuery else True
         noMatch = bool(self.normalizedQuery) and not named
         if noMatch:
             self.emptyLabel.setText(_("No match for “{query}”. Try “save”, “export”, “figure”, “crosshair”.").format(query=text.strip()))

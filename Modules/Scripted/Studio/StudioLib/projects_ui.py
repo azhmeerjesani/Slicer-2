@@ -229,7 +229,8 @@ class FolderChooserDialog(qt.QDialog):
         for iconName, name, what in (
                 ("folder", _("Projects"), _("one folder per project: scans, lesions, maps, exports")),
                 ("folder", _("Studies"), _("lesion network mapping cohorts")),
-                ("folder", _("LNM"), _("analysis outputs not tied to a study"))):
+                ("folder", _("LNM"), _("analysis outputs not tied to a study")),
+                ("file-text", _("About this folder"), _("a short guide to what is where"))):
             row = qt.QHBoxLayout()
             row.setSpacing(10)
             icon = qt.QLabel()
@@ -238,18 +239,19 @@ class FolderChooserDialog(qt.QDialog):
             self._insideIcons.append(icon)
             row.addWidget(icon)
             nameLabel = ui.label(name, "name", "text")
-            nameLabel.setFixedWidth(110)
+            nameLabel.setFixedWidth(128)
             row.addWidget(nameLabel)
             row.addWidget(ui.label(what, "caption", "text3"), 1)
             insideLayout.addLayout(row)
         layout.addWidget(inside)
+        # The footer (VISUAL 4.7): a line on the left, the single primary button on the right
+        buttons = qt.QHBoxLayout()
+        buttons.setSpacing(16)
         self.insideLabel = qt.QLabel(_("Each project is a 3D Slicer scene that official 3D Slicer opens as well."))
         self.insideLabel.setObjectName("StudioProjectsFolderInside")
         self.insideLabel.setWordWrap(True)
         ui.setText(self.insideLabel, "caption")
-        layout.addWidget(self.insideLabel)
-        buttons = qt.QHBoxLayout()
-        buttons.addStretch(1)
+        buttons.addWidget(self.insideLabel, 1)
         self.continueButton = qt.QPushButton(_("Continue"))
         self.continueButton.setObjectName("StudioProjectsFolderContinueButton")
         self.continueButton.setDefault(True)
@@ -260,7 +262,8 @@ class FolderChooserDialog(qt.QDialog):
         self.continueButton.connect("clicked()", self.accept)
         buttons.addWidget(self.continueButton)
         layout.addLayout(buttons)
-        ui.bindStyleSheet(self, self._styleSheet)
+        # Dialog chrome (VISUAL 4.7, V-02): frameless, rounded, bordered, over a backdrop
+        ui.dialogChrome(self, styleSheet=self._styleSheet)
         self._update()
 
     def _styleSheet(self):
@@ -268,8 +271,7 @@ class FolderChooserDialog(qt.QDialog):
             icon.setPixmap(ui.pixmap(str(icon.property("studioIconName")), 16, "accent-fg"))
         if hasattr(self, "pathIcon"):
             self.pathIcon.setPixmap(ui.pixmap("folder", 16, "text3"))
-        return (f"QDialog#StudioProjectsFolderDialog {{ background-color: {ui.token('card').name()}; }}"
-                f"QLabel#StudioProjectsFolderBody {{ color: {ui.token('text2').name()}; }}"
+        return (f"QLabel#StudioProjectsFolderBody {{ color: {ui.token('text2').name()}; }}"
                 f"QLabel#StudioProjectsFolderInside {{ color: {ui.token('text3').name()}; }}"
                 f"QFrame#StudioProjectsFolderField {{ background-color: {ui.token('canvas').name()}; border: 1px solid {ui.token('border').name()};"
                 " border-radius: 8px; }"
@@ -279,7 +281,8 @@ class FolderChooserDialog(qt.QDialog):
                 "QFrame#StudioProjectsFolderInsideCard QLabel { background: transparent; border: none; }")
 
     def _update(self):
-        self.pathLabel.setText(self.path)
+        # The home folder is written "~" (the full path is the tooltip)
+        self.pathLabel.setText(projects.shortPath(self.path))
         self.pathLabel.setToolTip(self.path)
         service = projects.syncedService(self.path)
         if service:
@@ -721,6 +724,7 @@ CARD_ROWS = 2
 #: The list view of the projects (V-02): 44 px rows with a 40 x 30 thumbnail
 LIST_ROW_HEIGHT = 44
 LIST_THUMBNAIL_SIZE = (40, 30)
+LIST_CHIP_WIDTH = 56
 #: Rows of the list view shown before "Show all"
 LIST_ROWS = 8
 #: Sort and view of All projects, remembered (fork-only keys)
@@ -801,10 +805,8 @@ class ProjectsSection(qt.QObject):
         self.sortOrder = _settingText(SORT_KEY, "modified", [key for key, _text in SORT_ORDERS])
         self.sortButton = qt.QToolButton()
         self.sortButton.setObjectName("studioProjectsSortButton")
-        self.sortButton.setPopupMode(qt.QToolButton.InstantPopup)
-        self.sortButton.setToolButtonStyle(qt.Qt.ToolButtonTextBesideIcon)
-        # The chevron after the text
-        self.sortButton.setLayoutDirection(qt.Qt.RightToLeft)
+        # "Last edited ▾" (VISUAL 4.2): the text and its arrow
+        self.sortButton.setToolButtonStyle(qt.Qt.ToolButtonTextOnly)
         self.sortButton.setFixedHeight(ui.COMPACT_HEIGHT)
         self.sortButton.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
         self.sortButton.setToolTip(_("Sort the projects"))
@@ -823,7 +825,8 @@ class ProjectsSection(qt.QObject):
             self.sortGroup.addAction(action)
             action.connect("triggered()", lambda key=key: self.setSortOrder(key))
             self.sortActions[key] = action
-        self.sortButton.setMenu(self.sortMenu)
+        # The menu opens on click (no setMenu(): the style would reserve room for a second arrow)
+        self.sortButton.connect("clicked()", self._showSortMenu)
         header.addWidget(self.sortButton)
         # Grid or list
         self.viewMode = _settingText(VIEW_KEY, "grid", VIEWS)
@@ -921,13 +924,16 @@ class ProjectsSection(qt.QObject):
         if not _isAlive(self.widget):
             ui.removePaletteListener(self._refreshIcons)
             return
-        self.sortButton.setIcon(ui.icon("chevron-down", 14))
         for button in self.viewGroup.buttons():
             button.setIcon(ui.icon(str(button.property("studioIcon")), 16))
 
+    def _showSortMenu(self):
+        run = getattr(self.sortMenu, "exec", None) or self.sortMenu.exec_
+        run(self.sortButton.mapToGlobal(qt.QPoint(0, self.sortButton.height)))
+
     def _updateSortText(self):
         text = dict(SORT_ORDERS).get(self.sortOrder, "Last edited")
-        self.sortButton.setText(_(text))
+        self.sortButton.setText(_(text) + " \u25be")
         self.sortButton.setAccessibleName(_("Sort by {order}").format(order=_(text)))
 
     def setSortOrder(self, order):
@@ -1127,11 +1133,19 @@ class ProjectsSection(qt.QObject):
         layout.setStretch(1, 2)
         layout.setStretch(2, 3)
         widgets = [thumbnail, name, metaLabel]
+        # The "Open" chip of the open project, in a slot of the same width on every row (the columns stay aligned)
+        slot = qt.QWidget()
+        slot.setFixedWidth(LIST_CHIP_WIDTH)
+        slotLayout = qt.QHBoxLayout(slot)
+        slotLayout.setContentsMargins(0, 0, 0, 0)
+        slotLayout.addStretch(1)
         if info.isCurrent():
             chip = ui.chip(_("Open"), "busy")
             chip.setObjectName("studioProjectRowChip")
-            layout.addWidget(chip)
+            slotLayout.addWidget(chip)
             widgets.append(chip)
+        layout.addWidget(slot)
+        widgets.append(slot)
         for widget in widgets:
             widget.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
         return card
@@ -1344,7 +1358,7 @@ class StudiesSection(qt.QObject):
             f"QFrame#studioStudyCard {{ background-color: {t['card-low']}; border: 1px solid {t['hairline']}; border-radius: 12px; }}"
             f"QFrame#studioStudyCard:hover {{ border-color: {t['text3']}; }}"
             f"QFrame#studioStudyCard:focus {{ border: 2px solid {t['accent-fg']}; }}"
-            "QFrame#studioStudyCard QLabel { background: transparent; border: none; }"
+            "QLabel#studioStudyName, QLabel#studioStudyProgressText, QLabel#studioStudyMeta { background: transparent; border: none; }"
             f"QFrame#studioStudyProgress {{ background-color: {t['control-hover']}; border: none; border-radius: 2px; }}"
             f"QFrame#studioStudyProgressFill {{ background-color: {t['accent']}; border: none; border-radius: 2px; }}"
             f'QFrame#studioStudyProgressFill[studioComplete="true"] {{ background-color: {t["success"]}; }}')
@@ -1413,8 +1427,8 @@ class StudiesSection(qt.QObject):
         fill.setObjectName("studioStudyProgressFill")
         fill.setProperty("studioComplete", bool(subjects) and traced >= subjects)
         fraction = traced / subjects if subjects else 0.0
-        barLayout.addWidget(fill, int(round(1000 * fraction)))
-        barLayout.addStretch(max(0, 1000 - int(round(1000 * fraction))))
+        barLayout.addWidget(fill, round(1000 * fraction))
+        barLayout.addStretch(max(0, 1000 - round(1000 * fraction)))
         fill.setVisible(fraction > 0)
         column.addWidget(bar)
         when = _relativeTime(summary["modified"]) if summary["modified"] else ""

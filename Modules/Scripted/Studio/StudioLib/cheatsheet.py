@@ -33,10 +33,15 @@ COLUMN_MIN_WIDTH = 330
 COLUMN_SPACING = 32
 KEYS_COLUMN_WIDTH = 150
 KEY_SPACING = 3
-#: Opacity of the overlay background (the views stay faintly visible)
-BACKGROUND_ALPHA = 0.94
-#: Margins of the overlay content
+#: Opacity of the black wash behind the card (the chrome of Search, VISUAL 4.6)
+BACKGROUND_ALPHA = 0.5
+#: Padding inside the card
 MARGIN = 24
+#: The card over the view area: its distance to the top and bottom, to the sides, and its widest
+CARD_INSET_Y = 24
+CARD_INSET_X = 32
+CARD_MAX_WIDTH = 1120
+CARD_RADIUS = 14
 
 #: Sections, in the order of the columns
 SECTION_DRAW = "Draw"
@@ -348,8 +353,16 @@ def columnCount(width):
     return max(1, min(3, (available + COLUMN_SPACING) // (COLUMN_MIN_WIDTH + COLUMN_SPACING)))
 
 
+def cardRect(width, height):
+    """The rectangle of the card in an overlay ``width`` x ``height`` px: centred, at most CARD_MAX_WIDTH wide."""
+    cardWidth = max(0, min(CARD_MAX_WIDTH, width - 2 * CARD_INSET_X))
+    return qt.QRect((width - cardWidth) // 2, CARD_INSET_Y, cardWidth, max(0, height - 2 * CARD_INSET_Y))
+
+
 class _Background(qt.QWidget):
-    """The overlay: a translucent card colour over the view area."""
+    """The overlay over the view area: a black wash and the card (the chrome of Search: ``card`` fill, a 1 px border and
+    14 px corners) that holds the list.
+    """
 
     def __init__(self, parent):
         qt.QWidget.__init__(self, parent)
@@ -360,9 +373,12 @@ class _Background(qt.QWidget):
     def paintEvent(self, event):
         painter = qt.QPainter(self)
         try:
-            color = qt.QColor(ui.token("canvas"))
-            color.setAlphaF(BACKGROUND_ALPHA)
-            painter.fillRect(self.rect, color)
+            painter.fillRect(self.rect, qt.QColor(0, 0, 0, round(255 * BACKGROUND_ALPHA)))
+            painter.setRenderHint(qt.QPainter.Antialiasing, True)
+            painter.setPen(qt.QPen(ui.token("border"), 1))
+            painter.setBrush(qt.QBrush(ui.token("card")))
+            card = qt.QRectF(cardRect(self.width, self.height)).adjusted(0.5, 0.5, -0.5, -0.5)
+            painter.drawRoundedRect(card, CARD_RADIUS, CARD_RADIUS)
         finally:
             painter.end()
 
@@ -413,6 +429,7 @@ class CheatSheet:
         outer = qt.QVBoxLayout(self.widget)
         outer.setContentsMargins(MARGIN, MARGIN - 8, MARGIN, MARGIN - 8)
         outer.setSpacing(12)
+        self.outerLayout = outer
 
         header = qt.QHBoxLayout()
         header.setSpacing(12)
@@ -574,8 +591,17 @@ class CheatSheet:
         return row
 
     def _overlayWidth(self):
+        """Width of the card (the columns are laid out in it)."""
         centralWidget = self.mainWindow.centralWidget()
-        return centralWidget.width if centralWidget is not None else self.mainWindow.width
+        width = centralWidget.width if centralWidget is not None else self.mainWindow.width
+        height = centralWidget.height if centralWidget is not None else self.mainWindow.height
+        return cardRect(width, height).width()
+
+    def _placeContent(self, width, height):
+        """The content inside the card: its padding added to the card's inset."""
+        card = cardRect(width, height)
+        self.outerLayout.setContentsMargins(card.left() + MARGIN, card.top() + MARGIN - 8, width - card.right() - 1 + MARGIN,
+                                            height - card.bottom() - 1 + MARGIN - 8)
 
     def updateGeometry(self):
         if not _isAlive(self.widget):
@@ -588,9 +614,11 @@ class CheatSheet:
         centralWidget = self.mainWindow.centralWidget()
         if centralWidget is None:
             self.widget.setGeometry(self.mainWindow.rect)
+            self._placeContent(self.mainWindow.width, self.mainWindow.height)
             return
         topLeft = centralWidget.mapTo(self.mainWindow, qt.QPoint(0, 0))
         self.widget.setGeometry(topLeft.x(), topLeft.y(), centralWidget.width, centralWidget.height)
+        self._placeContent(centralWidget.width, centralWidget.height)
 
     def isVisible(self):
         return _isAlive(self.widget) and self.widget.isVisible()

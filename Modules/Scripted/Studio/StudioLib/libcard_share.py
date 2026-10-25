@@ -357,9 +357,9 @@ class ShareDialog:
 
     @staticmethod
     def _header(text):
-        label = qt.QLabel(text.upper())
+        label = qt.QLabel(text)
         label.setProperty("slicerRole", "sectionHeader")
-        library._setFont(label, 11, qt.QFont.DemiBold, 0.6)
+        library._setFont(label, 12, qt.QFont.DemiBold)
         return label
 
     # Options
@@ -613,10 +613,10 @@ class ShareCard:
         layout = qt.QVBoxLayout(self.widget)
         layout.setContentsMargins(0, 4, 0, 0)
         layout.setSpacing(6)
-        title = qt.QLabel(_("Share").upper())
+        title = qt.QLabel(_("Share"))
         title.setObjectName("StudioShareTitle")
         title.setProperty("slicerRole", "sectionHeader")
-        library._setFont(title, 11, qt.QFont.DemiBold, 0.6)
+        library._setFont(title, 12, qt.QFont.DemiBold)
         layout.addWidget(title)
         self.statusLabel = library._cardLabel("StudioShareStatus", 12, "text2")
         layout.addWidget(self.statusLabel)

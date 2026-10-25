@@ -1242,6 +1242,21 @@ def _apply(session, sid, values, source, audit, reload=False):
     _checker().schedule()
 
 
+def templateDisplayName(templateId):
+    """The name of a template to show (V-02): a user template "user:<id>" by its name ("ICBM 2009b 0.5 mm"), else the id."""
+    if templateId and ":" in str(templateId):
+        try:
+            from . import templates
+
+            template = templates.templateById(templateId)
+            if template is not None and getattr(template, "name", None):
+                return str(template.name)
+        except Exception:
+            pass
+        return str(templateId).split(":", 1)[1]
+    return str(templateId)
+
+
 def rewarpSubject(sid, onDone=None):
     """Re-warp the native lesion of a normalized subject with its transform (``normalize warp``, a light job): the row's
     lesion then points to the new warped file (in the run's ``warps/``), norm_qc is kept.
@@ -1265,7 +1280,11 @@ def rewarpSubject(sid, onDone=None):
         return None
     template = (record.get("template") or {}).get("id") or DEFAULT_TEMPLATE
     stamp = time.strftime("%Y%m%d%H%M%S")
-    target = os.path.join(out, "warps", f"{sid}_edit-{stamp}_space-{template}_res-1_desc-lesion_mask.nii.gz")
+    # The BIDS space label of the template: a user template "user:<id>" is "user<Id>" (no ':' in a file name) on its own grid
+    normalizeLib = _lnm("normalize")
+    label = normalizeLib.template_label(template) if hasattr(normalizeLib, "template_label") else template.replace(":", "")
+    res = "" if ":" in template else "_res-1"
+    target = os.path.join(out, "warps", f"{sid}_edit-{stamp}_space-{label}{res}_desc-lesion_mask.nii.gz")
     lesion = studyObject.abspath(row["lesion_native"])
     args = ["warp", "--run", out, "--image", lesion, "--kind", "lesion", "--out", target, "--events", "json", "--parent-pid", str(os.getpid())]
     for folder in nc.templateDirectories():
@@ -1425,10 +1444,10 @@ _cards = {}
 
 
 def _sectionLabel(text, objectName):
-    label = qt.QLabel(text.upper())
+    label = qt.QLabel(text)
     label.setObjectName(objectName)
     label.setProperty("slicerRole", "sectionHeader")
-    library._setFont(label, 11, qt.QFont.DemiBold, 0.6)
+    library._setFont(label, 12, qt.QFont.DemiBold)
     return label
 
 
@@ -1543,6 +1562,7 @@ class NormalizationCard:
         self.summary.setText(" · ".join(parts))
         options = readOptions(studyObject)
         template, note = resolveTemplate(studyObject, options)
+        templateName = templateDisplayName(template)
         nc = _nc()
         available = nc is not None and nc.templateAvailable(template)
         busy = current is not None and current.isBusy()
@@ -1557,15 +1577,15 @@ class NormalizationCard:
         elif not eligible:
             reason = _("No native subject with a scan and a lesion is waiting")
         elif not available:
-            reason = _("The {template} template is not on this computer (Options → download it)").format(template=template)
+            reason = _("The {template} template is not on this computer (Options → download it)").format(template=templateName)
         else:
             availability = nc.normalizationAvailable()
             if not availability:
                 reason = availability[1]
         self.primary.setEnabled(not reason and not busy)
         self.primary.setToolTip(reason or (_("Normalize every native lesion in the background, one at a time ({template}, {quality}); "
-                                              "stale ones are normalized again").format(template=template, quality=options["quality"])))
-        self.note.setText(note if note else (_("The {template} template is not on this computer (Options → download it)").format(template=template)
+                                              "stale ones are normalized again").format(template=templateName, quality=options["quality"])))
+        self.note.setText(note if note else (_("The {template} template is not on this computer (Options → download it)").format(template=templateName)
                                               if nc is not None and not available else ""))
         self.note.setVisible(bool(self.note.text))
         self._settingChecks = True
@@ -1746,7 +1766,7 @@ class _OptionsPopover:
         nc = _nc()
         template, note = resolveTemplate(self.card.session.study)
         missing = nc is not None and not nc.templateAvailable(template)
-        self.noteLabel.setText(note or (_("{template} is not on this computer").format(template=template) if missing else ""))
+        self.noteLabel.setText(note or (_("{template} is not on this computer").format(template=templateDisplayName(template)) if missing else ""))
         self.noteLabel.setVisible(bool(self.noteLabel.text))
         self.downloadButton.setVisible(missing and template == TEMPLATE_IDS[1])
 
@@ -1915,7 +1935,7 @@ class SubjectSection:
             self.status.setText(text)
             self.normalizeRow.setVisible(True)
             template, _note = resolveTemplate(session.study)
-            self.normalizeButton.setToolTip(_("Normalize this lesion to {template} in the background").format(template=template))
+            self.normalizeButton.setToolTip(_("Normalize this lesion to {template} in the background").format(template=templateDisplayName(template)))
 
     @staticmethod
     def _normalizedText(row, failure=None):
