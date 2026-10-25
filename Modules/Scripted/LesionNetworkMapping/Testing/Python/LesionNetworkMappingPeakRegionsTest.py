@@ -53,7 +53,7 @@ class PeakRegionsTest(unittest.TestCase):
         self.assertEqual(atlases.region_text("Angular Gyrus", -40.0), "L angular gyrus")
         self.assertEqual(atlases.region_text("Angular Gyrus", 40.0), "R angular gyrus")
         # On the midline the side is not stated
-        self.assertEqual(atlases.region_text("Brain-Stem", 0.4), "Brain-stem")
+        self.assertEqual(atlases.region_text("Brain-Stem", 0.4), "Brain-Stem")
         self.assertEqual(atlases.region_text("7Networks_LH_Vis_1"), "L Vis 1")
         self.assertEqual(atlases.region_text("Precentral_R"), "R precentral")
         self.assertEqual(atlases.region_text("THA-lh"), "L THA")

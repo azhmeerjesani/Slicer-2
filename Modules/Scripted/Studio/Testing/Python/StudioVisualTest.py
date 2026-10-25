@@ -455,6 +455,39 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
     # (e) view bars
     #
 
+    def test_map_panel(self):
+        """Map in Studio (V-03): the seed modes are a row of short labels above the steps, still shown after the Seed step
+        collapsed and Map was left and entered again; the peaks table names the region; the Classic look restores them.
+        """
+        studioShell = self._applyStudio()
+        studioShell.switchTo("map")
+        self._pump(10)
+        widget = getattr(slicer.modules, "LesionNetworkMappingWidget", None)
+        if widget is None:
+            self.skipTest("the Map module is not available")
+        frame = widget.seedModeFrame
+        row = widget._seedModeRow
+        self.assertIsNotNone(row)
+        self.assertIs(frame.parentWidget(), row)
+        self.assertTrue(frame.isVisible())
+        labels = [str(button.text).split(" (")[0] for button in widget.seedModeGroup.buttons()]
+        self.assertTrue(set(labels) <= {"Lesion", "Cohort", "Coords", "Stim"}, labels)
+        seedCard = widget._cardWidgets["seed"][1]
+        # Collapsed while the frame is in it (Classic), then Studio again: the frame is shown in the row
+        studioShell.switchTo("library")
+        self._pump(6)
+        self.assertIs(frame.parentWidget(), seedCard)
+        seedCard.collapsed = True
+        self._pump(4)
+        seedCard.collapsed = False
+        seedCard.collapsed = True
+        studioShell.switchTo("map")
+        self._pump(10)
+        self.assertIs(frame.parentWidget(), row)
+        self.assertTrue(frame.isVisible())
+        self.assertEqual(str(widget.peaksTable.horizontalHeaderItem(0).text()), "Peak region")
+        seedCard.collapsed = False
+
     def test_flat_view_bar(self):
         studioShell = self._applyStudio()
         volume = self._addVolume()

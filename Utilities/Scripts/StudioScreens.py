@@ -656,9 +656,9 @@ class StudioScreens:
         if widget is None or "cohort" not in modes:
             print("SCREEN map-cohort skipped: no cohort seed mode", flush=True)
             return
-        widget.onSeedModeClicked(modes.index("cohort"))
+        widget.seedModeGroup.button(modes.index("cohort")).click()
         self.grab("map-cohort", 1500)
-        widget.onSeedModeClicked(modes.index("lesion"))
+        widget.seedModeGroup.button(modes.index("lesion")).click()
         pump(10)
 
     def study(self):

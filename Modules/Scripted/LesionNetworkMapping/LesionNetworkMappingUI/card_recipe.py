@@ -303,7 +303,8 @@ class RecipeHeader:
         self.combo = qt.QComboBox()
         self.combo.setObjectName("LNMRecipeCombo")
         self.combo.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
-        self.combo.setToolTip(_("Recipe · a named, cited analysis pipeline; picking one sets the threshold rule and the Run everything steps"))
+        self._comboToolTip = _("Recipe · a named, cited analysis pipeline; picking one sets the threshold rule and the Run everything steps")
+        self.combo.setToolTip(self._comboToolTip)
         self.combo.connect("activated(int)", self.onRecipeActivated)
         row.addWidget(self.combo, 1)
         self.menuButton = qt.QToolButton()
@@ -596,6 +597,8 @@ class RecipeHeader:
         self.combo.setEnabled(not locked)
         if locked:
             self.combo.setToolTip(_("The plan is locked with {recipe}; change settings in Map (each change asks for a reason)").format(recipe=(status.get("recipe") or {}).get("title") or _("its recipe")))
+        else:
+            self.combo.setToolTip(self._comboToolTip)
         self.saveLabAction.setEnabled(self.recipe is not None)
         self.detailsAction.setEnabled(self.recipe is not None)
         self._showPrompt()
@@ -604,6 +607,12 @@ class RecipeHeader:
         self.comboRow.setVisible(not idle)
         if idle:
             self.statusLabel.hide()
+        elif self._studio and path and self.recipe is None and not locked and not self.pending:
+            # A study with no recipe and an open plan: one row, the combo; what the line said is its tooltip (there is no
+            # plan to lock before a recipe is chosen)
+            self.statusLabel.hide()
+            self.planRow.hide()
+            self.combo.setToolTip(" · ".join([*parts, self._comboToolTip]))
         self._layout.setContentsMargins(*((0, 0, 0, 0) if idle else (6, 4, 6, 4)))
         if locked and self.widget.isVisible():
             self.pollTimer.start()

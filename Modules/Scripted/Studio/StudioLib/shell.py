@@ -2734,10 +2734,6 @@ class Shell:
     def _onPanelUpdateTimeout(self):
         shrink = self._pendingPanelShrink
         self._pendingPanelShrink = False
-        # The layouts that changed (a module widget just shown, a card that changed its look) are laid out first: the
-        # width is measured on what is shown, never on a pending layout (a measured width is kept, so a transient one
-        # would widen the inspector for good)
-        qt.QCoreApplication.sendPostedEvents(None, qt.QEvent.LayoutRequest)
         self._updatePanelWidth(shrink)
 
     def _updatePanelWidth(self, shrink=False):
@@ -2764,8 +2760,16 @@ class Shell:
         contents = dock.widget()
         target = self.panelWidth
         needed = self._modulePanelNeededWidth()
+        workspace = self.currentWorkspace()
+        known = self._workspacePanelWidths.get(self.currentModuleName()) if workspace is not None else dock.width
+        if known is None or needed > known:
+            # A wider measurement is kept (a workspace's for good): measure again once the pending layouts (a module
+            # widget just shown, a card that changed its look) are done, so that a transient layout never widens the
+            # inspector. Only then: laying out every pending widget at each module switch would slow it down
+            qt.QCoreApplication.sendPostedEvents(None, qt.QEvent.LayoutRequest)
+            needed = self._modulePanelNeededWidth()
         contentsMinimumWidth = _MODULE_PANEL_MINIMUM_WIDTH
-        if self.currentWorkspace() is None:
+        if workspace is None:
             target = max(target, needed)
         else:
             self._workspacePanelWidth(self.currentModuleName(), min(needed, MAX_WORKSPACE_PANEL_WIDTH))

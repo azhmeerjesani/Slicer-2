@@ -2214,12 +2214,17 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             if frame.parentWidget() is not self._seedModeRow:
                 seedCard.layout().removeWidget(frame)
                 self._seedModeRow.layout().addWidget(frame, 1)
+            # The Seed card (ctkCollapsibleButton) filters the events of the widgets added to it and hides them while it is
+            # collapsed; it keeps that filter on the frame after the move, so the frame would vanish with the collapsed card
+            frame.removeEventFilter(seedCard)
             if self.layout.indexOf(self._seedModeRow) < 0:
                 self.layout.insertWidget(self.layout.indexOf(seedCard), self._seedModeRow)
             frame.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
             for button in self.seedModeGroup.buttons():
                 button.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
             self._seedModeRow.setVisible(len(self.seedModes) > 1)
+            # The frame may come from a collapsed Seed card, which hid it with its other contents
+            self._showSeedModeFrame()
         elif frame.parentWidget() is not seedCard:
             if self._seedModeRow is not None:
                 self._seedModeRow.layout().removeWidget(frame)
@@ -2228,7 +2233,15 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             for button in self.seedModeGroup.buttons():
                 button.setSizePolicy(qt.QSizePolicy.Preferred, qt.QSizePolicy.Fixed)
             seedCard.layout().insertWidget(0, frame)
-            frame.setVisible(len(self.seedModes) > 1)
+            frame.setVisible(len(self.seedModes) > 1 and not bool(getattr(seedCard, "collapsed", False)))
+
+    def _showSeedModeFrame(self):
+        """Studio: the seed modes row shows its segmented control (a collapsed Seed card may have hidden it)."""
+        frame = getattr(self, "seedModeFrame", None)
+        if frame is None or not getattr(self, "_seedModesStudio", False) or frame.parentWidget() is not self._seedModeRow:
+            return
+        if frame.isHidden() and len(self.seedModes) > 1:
+            frame.show()
 
     def _buildCohortSeedPanel(self):
         """Seed = Cohort: the study and what it maps (its analysable lesions, the excluded and native ones)."""
@@ -3933,6 +3946,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
                                                          ("compute", computeState, computeSummary), ("result", resultState, resultSummary)), start=1):
             self.widgets.setStep(steps[key], number, state, summary.split("\n")[0])
             self._applyStepCollapse(key, steps[key], state, summary)
+        self._showSeedModeFrame()
 
     def _applyStepCollapse(self, key, card, state, summary):
         """Studio: a step whose state changed collapses when it is done (or neutral, a map opened from a file) and opens when

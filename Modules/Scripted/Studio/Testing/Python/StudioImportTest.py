@@ -640,7 +640,9 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self._pump(4)
         self.assertEqual(overlay.statisticLabel.text, "T")
         self.assertTrue(overlay.chipLabels["network"].text.startswith("Network T · "))
-        self.assertIsNotNone(overlay.bar.pixmap())
+        pixmap = overlay.bar.pixmap
+        pixmap = pixmap() if callable(pixmap) else pixmap  # a property in PythonQt
+        self.assertFalse(pixmap.isNull())
         self.assertIs(overlay.legend.parent(), self.mainWindow.centralWidget())
         studioShell.switchTo("library")
         self._pump(4)

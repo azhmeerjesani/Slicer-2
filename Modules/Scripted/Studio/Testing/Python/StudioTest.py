@@ -1633,7 +1633,7 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         # The display items of the Draw ⋯ menu (V-03: Show lesion in 3D, Voxel view, Window/level), then Show all controls
         self.assertEqual([item[0] for item in items], ["Show lesion in 3D", "Voxel view", "Window/level", "Show all controls"])
         self.assertEqual([title for title, _callback, _checked in items[2][1]], ["Auto", "Brain", "Narrow"])
-        text, toggle, checked = items[-1]
+        _text, toggle, checked = items[-1]
         self.assertFalse(checked)
         try:
             toggle()
