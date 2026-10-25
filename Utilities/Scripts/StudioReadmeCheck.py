@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-r"""Check README.md of Slicer Studio against the source tree and the state of the work packages (A-05, A-05b, A-06).
+r"""Check README.md of Slicer Studio against the source tree and the state of the work packages (A-05, A-05b, A-06, A-07).
 
 The README makes many small claims (settings keys, shortcuts, command line options, file paths, what is
 implemented). This script rejects the ones that are no longer true. It uses only the Python standard library
@@ -7,8 +7,13 @@ and never starts Slicer.
 
 Usage::
 
-  StudioReadmeCheck.py --readme README.md --source . --state wave_state.json [--run-examples] [--json]
+  StudioReadmeCheck.py --readme README.md --source . --state wave_state.json [--wave 5] [--run-examples] [--json]
+  StudioReadmeCheck.py --wave 5 --state wave_state.json
   StudioReadmeCheck.py --self-test
+
+``--readme`` and ``--source`` default to this repository's ``README.md`` and root. ``--wave N`` (A-07) also requires that
+every work package of waves up to N in ``WAVE_WPS`` passed in the state file [``wave-state``], because the README then
+describes that wave as done.
 
 ``--state`` is the JSON file written by the orchestrator: ``{"<work package id>": "passed" | "failed" |
 "deferred" | "pending"}``. The exit code is 1 if anything fails, and 0 otherwise.
@@ -48,6 +53,8 @@ Checks (the kind of each failure is in brackets)
   [``stale-claim``] (write the date of the last run instead), and a statement of what the bracket keys do in the
   Classic interface that does not match the default in ``qSlicerSegmentEditorPaintEffect.cxx``
   [``bracket-keys``].
+- Nothing offers a GitHub Actions run or artifact, a package or container registry image (``ghcr.io``, ``docker pull``) or
+  a release made by a workflow as a way to install Slicer Studio: packages are built on your own computer [``banned``].
 """
 
 import argparse
@@ -126,7 +133,38 @@ FEATURE_WPS = [
     (r"tar stream|connectome catalog|streamed tar", ["L-33"]),
     (r"lead-dbs import|import lead-dbs|verify against lead-dbs|lead-dbs maps", ["L-34"]),
     (r"web build|browser build|web container", ["P-03"]),
+    # Wave 5 (A-07)
+    (r"get a connectome|connectome download|connectome fetch|fetch job", ["L-35"]),
+    (r"validate card|frozen circuit", ["L-36"]),
+    (r"robust card|conclusion flips|hemisphere consolidation", ["L-37"]),
+    (r"nulls card|fast index builder|build fast index|parity gate", ["L-38"]),
+    (r"analysis recipes?|plan lock|lock plan|deviations log|roi analysis|a-priori roi", ["L-39"]),
+    (r"report card|battery strip|publication bundle", ["L-40"]),
+    (r"circuits card|re-seed|damage scores?|target scoring", ["L-41"]),
+    (r"control[- ]lesion sets?|control sets?", ["L-42"]),
+    (r"review workflow|review state|approval gate|require review", ["L-43"]),
+    (r"double tracing|second tracing|adjudicat|agreement card|blind tracing", ["L-44"]),
+    (r"case strip|trace queues?|case series|prefetch", ["L-45"]),
+    (r"share-safe|share card|bids[- ]derivatives|neurovault-ready", ["L-46"]),
+    (r"slicer-lnm|headless twin|bids app", ["L-47"]),
+    (r"calibrate this analysis|calibration card|pipeline calibration|planted network", ["L-48"]),
+    (r"coordinate seeds?|atrophy seeds?|stimulation seeds?|stimulation sites?|seed modes?", ["L-49"]),
+    (r"vlsm|lesion-symptom mapping|voxelwise lesion", ["L-50"]),
+    (r"sources card|prisma|literature sources", ["L-51"]),
+    (r"compare card|reference-map library|reference map library", ["L-52"]),
+    (r"tutorial cohorts?", ["L-53"]),
+    (r"lnm guides|lnm_statistics|lnm_intake|lnm_data|bench scenarios?", ["L-54"]),
+    (r"slicer studio folder|project folder|projects/|saved continuously|saves your work|continuous saving", ["A-09"]),
+    (r"own mni templates?|your own templates?|add your own template", ["A-10"]),
+    (r"visual redesign|design tokens|redesigned visuals", ["V-01"]),
+    (r"project thumbnails|project menu|grouped search|opened from elsewhere", ["V-02"]),
+    (r"orientation cue|map legend|layer chips|peaks? table|region names|collapsed steps|overlay slider", ["V-03"]),
 ]
+
+#: Work packages of wave 5 (A-07): the README of that wave may be written only when all of them passed
+WAVE_WPS = {
+    5: ["A-09", "A-10", "V-01", "V-02", "V-03"] + [f"L-{number}" for number in range(35, 55)],
+}
 
 #: Words that make a line about a work package that did not pass acceptable
 PLANNED_WORDS = re.compile(r"\bplanned\b|\bplan\b|\bpending\b|\bdeferred\b|\bnot (?:yet )?(?:available|implemented|done)\b|\(wave \d\)|\bwave \d\b", re.IGNORECASE)
@@ -139,6 +177,8 @@ BANNED = [
     (re.compile(r"autosav\w*[^.\n]{0,40}\bSaved\b|\bSaved\b[^.\n]{0,40}autosav", re.DOTALL), "'Saved' next to autosave (say 'Autosaved')"),
     (re.compile(r"smart fill[^.\n]{0,60}\b(?:validated|automatic segmentation)\b", re.IGNORECASE), "Smart fill is assisted tracing"),
     (re.compile(r"\b(?:validated|automatic segmentation)\b[^.\n]{0,60}smart fill", re.IGNORECASE), "Smart fill is assisted tracing"),
+    (re.compile(r"\bghcr\.io\b|\bdocker\s+pull\b|\bGitHub\s+(?:Actions|Packages|Container Registry)\b|\bActions\s+artifacts?\b|\bregistry\s+images?\b", re.IGNORECASE),
+     "GitHub Actions, packages or a registry image as an install route (packages are built on your own computer)"),
 ]
 
 SETTING_FAMILIES = ("Studio", "Appearance", "LNM", "SegmentEditor", "Views")
@@ -830,7 +870,18 @@ def runExamples(fences, source, pythonSlicer, failures, fixtureBuilder=buildExam
                     failures.append(Failure("example", line, f"{flag} is not in the help text of {' '.join(run[-3:-1])}"))
 
 
-def checkReadme(readmePath, sourceRoot, statePath, examples=False, pythonSlicer="PythonSlicer", fixtureBuilder=buildExampleFixture):
+def checkWave(wave, state, failures):
+    """With ``--wave N``, every work package of the waves up to N must have passed: the README describes them as done."""
+    for number in sorted(WAVE_WPS):
+        if number > wave:
+            continue
+        for identifier in WAVE_WPS[number]:
+            status = wpState(identifier, state)
+            if status != "passed":
+                failures.append(Failure("wave-state", 0, f"wave {number} is checked, but {identifier} is '{status}'"))
+
+
+def checkReadme(readmePath, sourceRoot, statePath, examples=False, pythonSlicer="PythonSlicer", fixtureBuilder=buildExampleFixture, wave=None):
     """Run every check. Return the list of ``Failure``."""
     with open(readmePath, encoding="utf-8") as stream:
         text = stream.read()
@@ -848,6 +899,11 @@ def checkReadme(readmePath, sourceRoot, statePath, examples=False, pythonSlicer=
     checkDisclaimer(text, source, failures)
     if statePath:
         checkClaims(text, masked, state, failures)
+    if wave is not None:
+        if not statePath:
+            failures.append(Failure("wave-state", 0, "--wave needs --state"))
+        else:
+            checkWave(wave, state, failures)
     if examples:
         runExamples(fences, source, pythonSlicer, failures, fixtureBuilder)
     failures.sort(key=lambda failure: (failure.line, failure.kind))
@@ -943,6 +999,32 @@ def selfTestFeatureTable():
         "The figure card is Available.": "L-29",
         "Lead-DBS import is Available.": "L-34",
         "Faster undo is Implemented.": "W4-01",
+        # Wave 5
+        "Get a connectome… is Available.": "L-35",
+        "The Validate card is Available.": "L-36",
+        "The Robust card is Available.": "L-37",
+        "The Nulls card is Available.": "L-38",
+        "Analysis recipes are Implemented.": "L-39",
+        "The Report card is Available.": "L-40",
+        "The Circuits card is Available.": "L-41",
+        "Control sets are Available.": "L-42",
+        "The review workflow is Implemented.": "L-43",
+        "Blind double tracing is Available.": "L-44",
+        "The case strip is Available.": "L-45",
+        "The share-safe export is Available.": "L-46",
+        "slicer-lnm is Available.": "L-47",
+        "Calibrate this analysis is Available.": "L-48",
+        "Coordinate seeds are Available.": "L-49",
+        "VLSM is Available.": "L-50",
+        "The Sources card is Available.": "L-51",
+        "The Compare card is Available.": "L-52",
+        "Tutorial cohorts are Available.": "L-53",
+        "The LNM guides are Available.": "L-54",
+        "The Slicer Studio folder is Implemented.": "A-09",
+        "Your own MNI templates are Available.": "A-10",
+        "The visual redesign is Implemented.": "V-01",
+        "Project thumbnails are Implemented.": "V-02",
+        "The orientation cue is Implemented.": "V-03",
     }
     # A sentence may name several work packages (Autosave: A-01 and A-01b): the others have passed
     allPassed = {identifier: "passed" for _pattern, identifiers in FEATURE_WPS for identifier in identifiers}
@@ -955,6 +1037,21 @@ def selfTestFeatureTable():
         checkClaims(sentence, sentence, allPassed, failures)
         if any(failure.kind == "claim-state" for failure in failures):
             problems.append(f"a passed work package is rejected in: {sentence}")
+    # Wave check (A-07): a work package of the wave that did not pass is reported, and nothing when all passed
+    failures = []
+    checkWave(5, {"A-09": "passed", "L-35": "failed"}, failures)
+    if not any(failure.kind == "wave-state" and "L-35" in failure.message for failure in failures):
+        problems.append("--wave does not report a work package of the wave that failed")
+    failures = []
+    checkWave(5, dict.fromkeys(WAVE_WPS[5], "passed"), failures)
+    if failures:
+        problems.append("--wave rejects a wave in which every work package passed")
+    # An install route through GitHub Actions or a registry image is rejected
+    for sentence in ("Pull the image with docker pull from ghcr.io.", "Download the build from the GitHub Actions artifacts.", "Use the registry image."):
+        failures = []
+        checkBanned(sentence, failures)
+        if not failures:
+            problems.append(f"not rejected as an install route: {sentence}")
     return problems
 
 
@@ -1030,8 +1127,10 @@ def selfTest():
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Check README.md against the source tree and the work package state.")
-    parser.add_argument("--readme", help="path of README.md")
-    parser.add_argument("--source", help="root of the source tree")
+    repositoryRoot = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+    parser.add_argument("--readme", default=os.path.join(repositoryRoot, "README.md"), help="path of README.md (default: the one of this repository)")
+    parser.add_argument("--source", default=repositoryRoot, help="root of the source tree (default: this repository)")
+    parser.add_argument("--wave", type=int, default=None, help="also require that every work package of the waves up to this one passed (A-07: 5)")
     parser.add_argument("--state", help="wave_state.json: work package id -> passed|failed|deferred|pending")
     parser.add_argument("--run-examples", action="store_true", help="run the 'console example' fences with --help")
     parser.add_argument("--pythonslicer", default=None, help="PythonSlicer for the LNM examples (default: PythonSlicer in PATH, or the build tree default)")
@@ -1047,13 +1146,11 @@ def main(argv=None):
             print("self-test passed")
         return 1 if problems else 0
 
-    if not arguments.readme or not arguments.source:
-        parser.error("--readme and --source are required (or use --self-test)")
     pythonSlicer = arguments.pythonslicer
     if pythonSlicer is None:
         default = "/opt/S-r/python-install/bin/PythonSlicer"
         pythonSlicer = default if os.path.exists(default) else "PythonSlicer"
-    failures = checkReadme(arguments.readme, arguments.source, arguments.state, arguments.run_examples, pythonSlicer)
+    failures = checkReadme(arguments.readme, arguments.source, arguments.state, arguments.run_examples, pythonSlicer, wave=arguments.wave)
     if arguments.json:
         print(json.dumps([failure.asDict() for failure in failures], indent=1))
     else:
