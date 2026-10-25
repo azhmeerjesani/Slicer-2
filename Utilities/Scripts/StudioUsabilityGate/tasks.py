@@ -234,6 +234,13 @@ def revealMaskingOptions(g):
     """
     checkBox = g.widget("SourceVolumeIntensityMaskCheckBox", "QCheckBox")
     masking = g.widget("MaskingGroupBox")
+    moreTools = g.widget("SegmentEditorMoreToolsButton", "QAbstractButton")
+    if checkBox is None and masking is None and moreTools is not None and not moreTools.checked:
+        # V-03: Studio shows the masking section (overwrite options) with the tools under "More tools ▾" (1 action)
+        yield from g.click(moreTools, "Show more tools (overwrite options)")
+        yield 300
+        checkBox = g.widget("SourceVolumeIntensityMaskCheckBox", "QCheckBox")
+        masking = g.widget("MaskingGroupBox")
     if checkBox is None and masking is not None and bool(masking.property("collapsed")):
         yield from g.click(masking, "Expand the masking options", localPoint=(24, 10))
         yield 300
@@ -2290,17 +2297,31 @@ def _lnmRunEverything(g, widget, start):
     # The card's own button: it is on screen below the Preflight card (the primary button of the Compute card, which runs the
     # same, is further down the panel). It is looked up again at each check of the wait: the card may build or rebuild it
     # while the wait runs.
+    # Wave 5: while Map pins its primary button to the sticky inspector footer ("Run everything · N lesions"), the card
+    # keeps no second Run button (one primary action), so the pinned primary is the button to click (same 1 action).
     found = []
 
     def runButtonReady():
         button = g.widget("LNMPipelineRunButton", "QPushButton")
+        if (button is None or not button.isVisible()) and bool(getattr(widget.ctx, "primaryPinned", False)):
+            pinned = g.widget("LNMComputeButton", "QPushButton")
+            if pinned is not None and re.search(r"run everything", str(pinned.text), re.I):
+                button = pinned
         found[:] = [button]
         return button is not None and button.isVisible() and button.isEnabled()
 
     ready = yield from g.until(runButtonReady, 30000, what="Run everything")
     button = found[0] if found else None
     if not ready or button is None:
-        return _studyPathEnd(g, start, f"Run everything is not available ({str(widget.computeReasonLabel.text)!r}, card: {str(card.stateLabel.text)!r})")
+        compute = g.widget("LNMComputeButton", "QPushButton", visibleOnly=False)
+        hidden = compute
+        while hidden is not None and not hidden.isHidden() and hidden.parentWidget() is not None:
+            hidden = hidden.parentWidget()
+        state = (f"hidden at {widgetText(hidden) if compute is not None and not compute.isVisible() else None}, "
+                 f"pinned primary {bool(getattr(widget.ctx, 'primaryPinned', False))}, LNMComputeButton "
+                 f"{(str(compute.text), compute.isVisible(), compute.isEnabled()) if compute is not None else None}, card button "
+                 f"{(button.isVisible(), button.isEnabled()) if button is not None else None}")
+        return _studyPathEnd(g, start, f"Run everything is not available ({str(widget.computeReasonLabel.text)!r}, card: {str(card.stateLabel.text)!r}; {state})")
     yield from g.click(button, "Click 'Run everything'")
     yield from g.until(lambda: card.job is not None, 5000, what="the cohort analysis job")
     yield from g.until(lambda: card.job is not None and str(card.job.state) in ("done", "failed", "cancelled", "error"), 360000, what="the cohort analysis")

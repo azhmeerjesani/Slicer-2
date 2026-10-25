@@ -42,7 +42,7 @@
   },
   "case": {
     "title": "case-report-tracing, 2 cases",
-    "official": 156, "wave1": 149, "afterQW": 126, "target_w2": 75, "target_w3": 70, "target_w4": 45
+    "official": 156, "wave1": 149, "afterQW": 126, "target_w2": 75, "target_w3": 70, "target_w4": 45, "target_w5": 35
   },
   "lnm": {
     "title": "lnm-cohort (A): Load all, Review in Draw, one-subject QC, next subject, thresholded T map",

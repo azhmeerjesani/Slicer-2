@@ -1103,14 +1103,20 @@ def loadTargets():
 
 
 def targetFor(targets, key, wave):
-    """The limit of a metric after ``wave`` (None: no limit). Wave 1 allows the estimate of the post-QW build + 15%."""
+    """The limit of a metric after ``wave`` (None: no limit). Wave 1 allows the estimate of the post-QW build + 15%.
+
+    A wave without its own ``target_wN`` keeps the limit of the latest earlier wave that has one (wave 5 sets only the case target).
+    """
     entry = targets.get(key)
     if entry is None:
         return None
     if wave <= 1:
         estimate = entry.get("afterQW")
         return int(estimate * (1 + ESTIMATE_TOLERANCE) + 0.5) if estimate is not None else None
-    return entry.get(f"target_w{min(wave, 4)}")
+    for earlier in range(wave, 1, -1):
+        if f"target_w{earlier}" in entry:
+            return entry[f"target_w{earlier}"]
+    return None
 
 
 def classify(record, wave, assertions):

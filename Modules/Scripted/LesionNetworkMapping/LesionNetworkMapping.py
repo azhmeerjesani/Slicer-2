@@ -5369,11 +5369,18 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         layout = qt.QVBoxLayout(footer)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+        # The stretches above the button (here and in the slot) take the space that the reason line leaves while the
+        # layouts settle: the footer is anchored to the bottom, so the button does not move, not even for one frame. The
+        # footer never grows past its size hint (a layout with a stretch would make it take room from the inspector).
+        footer.setSizePolicy(qt.QSizePolicy.Preferred, qt.QSizePolicy.Maximum)
+        layout.addStretch(1)
         self._pinnedPrimarySlot = qt.QWidget()
         self._pinnedPrimarySlot.setObjectName("LNMPinnedPrimary")
+        self._pinnedPrimarySlot.setSizePolicy(qt.QSizePolicy.Preferred, qt.QSizePolicy.Maximum)
         slotLayout = qt.QVBoxLayout(self._pinnedPrimarySlot)
         slotLayout.setContentsMargins(16, 8, 16, 0)
         slotLayout.setSpacing(4)
+        slotLayout.addStretch(1)
         layout.addWidget(self._pinnedPrimarySlot)
         # One line (VISUAL 4.5): "Research use only. Lesion network mapping specificity is debated. Read more"; the whole
         # disclaimer with its references is behind "Read more" (and in Classic, under the cards)
@@ -5403,7 +5410,16 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             self._pinnedIndexes = tuple(cardLayout.indexOf(widget) for widget in widgets)
             for widget in widgets:
                 cardLayout.removeWidget(widget)
-                slot.layout().addWidget(widget)
+                # The Compute card (ctkCollapsibleButton) filters the show events of its children and keeps the event filter
+                # after a reparenting: while the card is collapsed (a map opened from a file), it would hide the pinned button
+                parent = widget.parentWidget()
+                if parent is not None:
+                    widget.removeEventFilter(parent)
+            # The reason line above the button: the footer is anchored to the bottom, so the line going away (preflight
+            # finished, just before a click) changes the footer above the button and the button does not move under the
+            # cursor (USABILITY 6, stable layout)
+            slot.layout().addWidget(self.computeReasonLabel)
+            slot.layout().addWidget(self.computeButton)
         else:
             for widget, index in zip(widgets, self._pinnedIndexes, strict=True):
                 slot.layout().removeWidget(widget)

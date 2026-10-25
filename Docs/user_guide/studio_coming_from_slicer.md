@@ -80,6 +80,8 @@ Windows and Linux; on macOS, Ctrl is ⌘.
 | Volumes module | Search > Volumes (Ctrl+K); window/level: drag with the left mouse button in a view when no tool is active |
 | Segment Editor module | Draw (Ctrl+Alt+2): the Segment Editor in the inspector, with the same effects |
 | Segment Editor effects (Paint, Draw, Erase, Threshold...) | Draw: the same effects as labelled tools (Paint is Brush, Draw is Outline, Fill between slices is Fill gaps; More tools shows the others); P, D, M, E, L or 1 to 0 pick one, Esc deselects it and Space pauses it |
+| Segment Editor > Masking (Editable area, Editable intensity range, Modify other segments) | Draw > More tools ▾: the overwrite options appear under the tool options; they also stay shown while they limit where you paint |
+| Segmentations > Display (opacity, outline, Show 3D) and Volumes > window/level | Draw > Overlay: the slider sets the fill opacity and the Outline switch the outline; ⋯ in the inspector header > Show lesion in 3D, Voxel view and Window/level presets |
 | Segment Editor: Segmentation and Source volume selectors, segments table, Add / Remove | Draw: the Lesion card names the lesion (⋯ > New lesion), the source chip ('on T1 ▾') picks the source volume; ⋯ of the panel > Show all controls shows the classic controls |
 | Segment Editor > Segmentations > Export to files... | Draw > Save lesion (Ctrl+Shift+S): a NIfTI mask (.nii.gz) that official 3D Slicer, FSL and other tools read |
 | Segment Editor Undo / Redo (Ctrl+Z / Ctrl+Shift+Z) | Undo and Redo in the top bar while you draw (Ctrl+Z, Ctrl+Y) |
@@ -91,6 +93,7 @@ Windows and Linux; on macOS, Ctrl is ⌘.
 | Data Probe (bottom of the module panel) | The probe at the bottom right of the view under the mouse: position (MNI or scanner), value and lesion; ⋯ in the inspector header > Show Data Probe shows the classic panel |
 | Lesion network mapping (not part of official 3D Slicer) | Map (Ctrl+Alt+3): choose the lesion and a connectome, then Map network (Ctrl+Enter); the map opens in the views with its threshold rule, quality checks and export |
 | Connectome (not part of official 3D Slicer) | Map > Connectome: Get a connectome… downloads one from its provider after you accept its terms, Add connectome… registers a folder on this computer (a .lnmc bundle), or try the synthetic demo; nothing is downloaded unless you ask |
+| Map recipes and reporting checks (not part of official 3D Slicer) | Map: ⋯ in the inspector header > Recipe applies a saved set of settings, and Reporting checks… lists what a paper about the map should report; in a study a compact row under the result shows both |
 <!-- END where-did-it-go -->
 
 ## Keyboard differences

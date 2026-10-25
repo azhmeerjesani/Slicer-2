@@ -103,6 +103,17 @@ class StudioUsabilityGateTest(ScriptedLoadableModule.ScriptedLoadableModuleTest)
             scored = targets["find-tools"][f"target_w{wave}"]
             self.assertLessEqual(scored + cheapestExploration, total, f"wave {wave}: scored {scored} + the cheapest T7 and T10 {cheapestExploration} exceeds the total target {total}")
 
+    def test_targets_later_wave(self):
+        """A wave without its own target keeps the latest earlier one; wave 5 lowers only the case target (L-45: <= 35)."""
+        from StudioUsabilityGate import harness
+
+        targets = harness.loadTargets()
+        self.assertEqual(harness.targetFor(targets, "case", 5), 35)
+        self.assertEqual(harness.targetFor(targets, "case", 4), 45)
+        for key in ("novice", "nav", "find-tools", "lnm", "lnm.B"):
+            self.assertEqual(harness.targetFor(targets, key, 5), targets[key]["target_w4"], key)
+        self.assertIsNone(harness.targetFor(targets, "lnm.B", 2))
+
     def test_clipped_by_outside_viewport(self):
         """Gate.clippedBy on children of a scroll area outside its viewport (header, scroll bar) and inside it.
 

@@ -1670,6 +1670,11 @@ def _runSlicer(slicerPath, role, name, config, args):
         command = ["xvfb-run", "-a", "-s", "-screen 0 1920x1080x24", *command]
     # Isolated settings: never use or modify the settings that the user's installations share
     environment = dict(os.environ, HOME=home, XDG_CONFIG_HOME=os.path.join(home, ".config"), XDG_CACHE_HOME=os.path.join(home, ".cache"), XDG_DATA_HOME=os.path.join(home, ".local", "share"))
+    if role in ("writer", "checker"):
+        # The fork's Slicer Studio folder (A-09) lives in the isolated home too: with it set, the first-start folder question of
+        # a fresh profile (a window-modal dialog over the views) is not asked, as for the usability gate and the settings check.
+        # The project roles set their own folder and run their own project service (the app's own one stays idle without it).
+        environment["SLICER_STUDIO_PROJECTS_ROOT"] = os.path.join(home, "Slicer Studio")
     if not config.get("isFork"):
         # Official 5.12.4 fails on non-ASCII paths under the POSIX locale; it loads them correctly under C.UTF-8 (A-04 E9)
         environment.update(LANG="C.UTF-8", LC_ALL="C.UTF-8")

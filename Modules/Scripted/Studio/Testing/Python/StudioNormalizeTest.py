@@ -37,7 +37,8 @@ TEMPLATE = "MNI152NLin2009cAsym"
 #: Largest gap of the 10 ms probe timer during a batch on an idle host (ms); a busy host gets a looser bound
 MAX_GAP_IDLE_MS = 100.0
 MAX_GAP_BUSY_MS = 400.0
-#: The Done hook returns at once (ms)
+#: The Done hook of the normalization returns at once (ms); the other cards' Done hooks (lesion QC crops the labelmap, about
+#: 5-7 ms) are not timed here
 MAX_HOOK_MS = 5.0
 BATCH_TIMEOUT_S = 150
 
@@ -276,11 +277,15 @@ class StudioNormalizeTest(unittest.TestCase):
         self.assertEqual(self.chips(), {"sub-01": "Native", "sub-02": "Native", "sub-03": "Native", "sub-04": "—"})
         # Needs scan, No lesion
         study = session.study
+        # sub-03's own files are put back afterwards: the batch of test_02 records them as scan_native/lesion_native
+        # (another subject's files here made test_02 fail whenever the study was saved before the batch read it)
+        ownScan, ownLesion = study.subject("sub-03")["scan"], study.subject("sub-03")["lesion"]
         study.set("sub-03", scan=None)
         self.assertEqual(self.chips(["sub-03"]), {"sub-03": "Needs scan"})
-        study.set("sub-03", scan=study.subject("sub-01")["scan"], lesion=None)
+        study.set("sub-03", scan=ownScan, lesion=None)
         self.assertEqual(self.chips(["sub-03"]), {"sub-03": "No lesion"})
-        study.set("sub-03", lesion=study.subject("sub-01")["lesion"])
+        study.set("sub-03", lesion=ownLesion)
+        self.assertEqual((study.subject("sub-03")["scan"], study.subject("sub-03")["lesion"]), (ownScan, ownLesion))
         # Filters and queue
         # The normalization filters, after the lesion QC filters of L-28 (libcard_flags: 2D, Has flags)
         # Other cards add filters of their own (second tracing, adjudication...): these four come in this order
@@ -646,13 +651,14 @@ class StudioNormalizeTest(unittest.TestCase):
             session.flush()
             self.assertTrue(json.load(open(os.path.join(path, "study.json")))["normalization"]["auto_after_done"])
             self.assertTrue(session.open("sub-03", switchToDraw=False))
-            durations = []
+            # Only the normalization's own hook has the budget (the session also runs the hooks of figure, lesion QC, review...)
+            durations = {}
             hooks = []
             for order, sequence, fn in session._doneHooks:
                 def timed(sid, array, ijkToRas, ctx, fn=fn):
                     started = time.perf_counter()
                     result = fn(sid, array, ijkToRas, ctx)
-                    durations.append((time.perf_counter() - started) * 1000.0)
+                    durations[fn] = (time.perf_counter() - started) * 1000.0
                     return result
 
                 hooks.append((order, sequence, timed))
@@ -661,8 +667,9 @@ class StudioNormalizeTest(unittest.TestCase):
             result = session.done()
             doneMs = (time.perf_counter() - started) * 1000.0
             self.assertIsNotNone(result)
-            self.assertTrue(durations, "the Done hook of the normalization did not run")
-            self.assertLessEqual(max(durations), MAX_HOOK_MS, durations)
+            normalizeMs = durations.get(ln._doneHook)
+            self.assertIsNotNone(normalizeMs, "the Done hook of the normalization did not run")
+            self.assertLessEqual(normalizeMs, MAX_HOOK_MS, {getattr(fn, "__module__", "?"): ms for fn, ms in durations.items()})
             self.assertLess(doneMs, 3000.0)
             self.assertEqual([spec for spec in submitted if spec.kind == "normalization"], [])  # not at once
             self.assertTrue(_wait(lambda: any(spec.kind == "normalization" for spec in submitted), 5))

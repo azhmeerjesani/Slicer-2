@@ -92,6 +92,20 @@ except Exception:
 """
 
 
+class _MoveRecorder(qt.QObject):
+    """Event filter that appends the global y of ``widget`` to ``positions`` at each of its moves."""
+
+    def __init__(self, widget, positions):
+        super().__init__()
+        self._widget = widget
+        self._positions = positions
+
+    def eventFilter(self, obj, event):
+        if event.type() == qt.QEvent.Move:
+            self._positions.append(self._widget.mapToGlobal(qt.QPoint(0, 0)).y())
+        return False
+
+
 class StudioRegressionTest(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.mkdtemp(prefix="StudioRegressionTest", dir=slicer.app.temporaryPath)
@@ -209,6 +223,33 @@ class StudioRegressionTest(unittest.TestCase):
             self.assertLess(button.mapToGlobal(qt.QPoint(0, 0)).y(), disclaimer.mapToGlobal(qt.QPoint(0, 0)).y())
             # Not inside the scrolled panel: it does not move when the panel scrolls
             self.assertIsNone(self._scrollArea(button))
+            # The footer takes only the room it needs from the inspector (its disclaimer line wraps: height for width)
+            footerWidget = widget.shellFooter
+            needed = footerWidget.heightForWidth(footerWidget.width)
+            self.assertLessEqual(footerWidget.height, needed if needed > 0 else footerWidget.sizeHint.height(), "the sticky footer takes room from the inspector")
+            # The button does not move when its reason line is shown or hidden either. When the line goes away (the preflight finishing clears it just
+            # before a click), not even while the layouts settle: every place it takes then is recorded
+            reason = widget.computeReasonLabel
+            reasonText, reasonVisible = str(reason.text), reason.isVisible()
+            settled = [button.mapToGlobal(qt.QPoint(0, 0)).y()]
+            whileHiding = []
+            watcher = _MoveRecorder(button, whileHiding)
+            try:
+                for visible in (True, False, True, False):
+                    reason.setText("Accept the data use terms to compute the map" if visible else "")
+                    if not visible:
+                        button.installEventFilter(watcher)
+                    reason.setVisible(visible)
+                    for _ in range(6):
+                        slicer.app.processEvents()
+                    button.removeEventFilter(watcher)
+                    settled.append(button.mapToGlobal(qt.QPoint(0, 0)).y())
+            finally:
+                button.removeEventFilter(watcher)
+                reason.setText(reasonText)
+                reason.setVisible(reasonVisible)
+            self.assertEqual(len(set(settled)), 1, f"the pinned primary button moves when its reason line changes: {settled}")
+            self.assertTrue(all(y == settled[0] for y in whileHiding), f"the pinned primary button moves while its reason line goes away: {whileHiding}")
             studioShell.switchTo("library")
             for _ in range(4):
                 slicer.app.processEvents()
@@ -218,11 +259,30 @@ class StudioRegressionTest(unittest.TestCase):
             for _ in range(4):
                 slicer.app.processEvents()
             self.assertTrue(self._isAncestor(footer, button))
+            # G5: the Compute card collapsed (a map opened from a file) while the button went back into it and out again: the
+            # card's event filter (ctkCollapsibleButton keeps it after the reparenting) must not hide the pinned button
+            computeCard.collapsed = True
+            studioShell.switchTo("library")
+            for _ in range(4):
+                slicer.app.processEvents()
+            self.assertTrue(self._isAncestor(computeCard, button))
+            studioShell.switchTo("map")
+            for _ in range(4):
+                slicer.app.processEvents()
+            self.assertTrue(self._isAncestor(footer, button))
+            self.assertTrue(button.isVisible(), "the pinned primary button is hidden after a round trip through a collapsed Compute card")
+            computeCard.collapsed = True
+            for _ in range(4):
+                slicer.app.processEvents()
+            self.assertTrue(button.isVisible(), "collapsing the Compute card hides the pinned primary button")
         finally:
             studioShell.dispose()
             for _ in range(4):
                 slicer.app.processEvents()
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            card = slicer.modules.LesionNetworkMappingWidget.parent.findChild("QWidget", "LNMComputeCard")
+            if card is not None:
+                card.collapsed = False  # no state left for later tests
         widget = slicer.modules.LesionNetworkMappingWidget
         self.assertTrue(self._isAncestor(widget.parent.findChild("QWidget", "LNMComputeCard"), widget.computeButton), "Classic: in the Compute card")
 
