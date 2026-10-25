@@ -176,6 +176,21 @@ def _markOffered():
 #
 
 
+def _scrollIntoView(widget):
+    """Scroll the nearest scroll area that holds ``widget`` so that the widget is shown (its top, when it is taller)."""
+    if widget is None or not _isAlive(widget):
+        return
+    ancestor = widget.parentWidget()
+    while ancestor is not None:
+        if ancestor.inherits("QScrollArea") and ancestor.widget() is not None and ancestor.widget().isAncestorOf(widget):
+            try:
+                ancestor.ensureWidgetVisible(widget, 0, 16)
+            except Exception:
+                logging.error(f"Studio tour: scrolling to the control failed:\n{traceback.format_exc()}")
+            return
+        ancestor = ancestor.parentWidget()
+
+
 def resolveTarget(target, shell):
     """The visible widget of a step target (objectName path, function, or a tuple of alternatives), or None."""
     alternatives = target if isinstance(target, (tuple, list)) else (target,)
@@ -209,6 +224,49 @@ def _isShown(widget, mainWindow):
 def _rectIn(widget, mainWindow):
     topLeft = widget.mapTo(mainWindow, qt.QPoint(0, 0))
     return qt.QRect(topLeft.x(), topLeft.y(), widget.width, widget.height)
+
+
+def _pageContentItems(column, canvas):
+    """``[(rect, interactive)]`` of what the visible part of the Library page ``column`` paints, in ``canvas``
+    coordinates: its labels (the extent of their text), buttons, fields and other leaf widgets, and its cards and dashed
+    drop zone. ``interactive`` is True for buttons and fields. Containers and spacers, which span the column, are not
+    content.
+    """
+    visible = column.visibleRegion().boundingRect()
+    if visible.isEmpty():
+        return []
+    visible = qt.QRect(column.mapTo(canvas, visible.topLeft()), visible.size())
+    items = []
+    for widget in column.findChildren("QWidget"):
+        if not widget.isVisible() or widget.isWindow() or widget.width <= 0 or widget.height <= 0:
+            continue
+        rect = _rectIn(widget, canvas)
+        if widget.inherits("QLabel"):
+            # The text, not the label box: a caption is as wide as the column
+            textWidth = min(widget.width, widget.sizeHint.width())
+            try:
+                alignment = int(widget.property("alignment"))
+            except (TypeError, ValueError):
+                alignment = int(qt.Qt.AlignLeft)
+            if alignment & int(qt.Qt.AlignRight):
+                rect.setLeft(rect.right() - textWidth + 1)
+            elif alignment & int(qt.Qt.AlignHCenter):
+                rect.setLeft(rect.left() + (widget.width - textWidth) // 2)
+            rect.setWidth(textWidth)
+        elif not (widget.property("slicerRole") or widget.objectName == "StudioDropZoneFrame" or str(widget.objectName).endswith("Card")):
+            container = any(child.isWidgetType() and child.isVisible() for child in widget.children())
+            if container or widget.className() == "QWidget":
+                continue
+        rect = rect.intersected(visible)
+        if not rect.isEmpty():
+            interactive = any(widget.inherits(className) for className in ("QAbstractButton", "QLineEdit", "QComboBox", "QAbstractSpinBox"))
+            items.append((rect, interactive))
+    return items
+
+
+def _pageContentRects(column, canvas):
+    """The rectangles of ``_pageContentItems()``."""
+    return [rect for rect, _interactive in _pageContentItems(column, canvas)]
 
 
 def _existsAnywhere(target, shell):
@@ -1118,6 +1176,7 @@ class TourPlayer:
         self.target = target
         if target is not None and self._eventFilter is not None:
             target.installEventFilter(self._eventFilter)
+        _scrollIntoView(target)
 
     def _showStep(self):
         step = self.currentStep()
@@ -1564,6 +1623,8 @@ class _OfferCard:
         ui.addPaletteListener(self.refreshIcons)
         self._watcher = _OfferWatcher(self)
         canvas.installEventFilter(self._watcher)
+        #: Library page widgets watched for content changes (see _watchPage())
+        self._watchedPage = []
         self.frame.setFixedWidth(ui.fontPx(OFFER_CARD_WIDTH))
         self._fitHeight()
         self.updatePosition()
@@ -1596,28 +1657,66 @@ class _OfferCard:
         self.frame.setFixedHeight(height)
 
     def updatePosition(self):
+        """Bottom right of the canvas, away from what the Library page shows; always inside the canvas.
+
+        The page column is up to 1100 px wide (VISUAL 4.2) and mostly empty on its right side, so the card is kept off
+        what the column paints (``_pageContentItems()``), not off the column box. When the bottom right corner covers
+        it (a folder card, projects), the card goes below the content, to the top right or to the bottom left corner,
+        whichever covers the least (a button or a field counts ten times its area); it never leaves the canvas.
+        """
         if not _isAlive(self.canvas) or not _isAlive(self.frame):
             return
         width, height = self.frame.width, self.frame.height
         rect = self.canvas.rect
         margin = 24
-        x = rect.width() - width - margin
-        y = rect.height() - height - margin
-        # Not over the page column (drop zone, buttons, Recent): below it, centered, when the corner would cover it
+        right = rect.width() - width - margin
+        bottom = rect.height() - height - margin
+        candidates = [(right, bottom)]
         column = self.canvas.findChild("QWidget", "StudioLibraryColumn")
+        content = []
         if column is not None and column.isVisible():
+            self._watchPage(column)
+            content = _pageContentItems(column, self.canvas)
+        if content:
+            below = max(contentRect.bottom() for contentRect, _interactive in content) + margin
             columnRect = _rectIn(column, self.canvas)
-            if qt.QRect(x, y, width, height).intersects(columnRect):
-                x = max(margin, columnRect.center().x() - width // 2)
-                y = max(columnRect.bottom() + margin, y)
-        self.frame.move(int(max(0, x)), int(max(0, y)))
+            candidates += [(max(margin, columnRect.center().x() - width // 2), below), (right, margin), (margin, bottom)]
+
+        def covered(position):
+            cardRect = qt.QRect(position[0], position[1], width, height)
+            if not rect.contains(cardRect):
+                return float("inf")
+            area = 0
+            for contentRect, interactive in content:
+                overlap = cardRect.intersected(contentRect)
+                if not overlap.isEmpty():
+                    area += overlap.width() * overlap.height() * (10 if interactive else 1)
+            return area
+
+        x, y = min(candidates, key=covered)
+        x = min(max(0, x), max(0, rect.width() - width))
+        y = min(max(0, y), max(0, rect.height() - height))
+        position = self.frame.pos
+        if (position.x(), position.y()) != (int(x), int(y)):
+            self.frame.move(int(x), int(y))
         self.frame.raise_()
+
+    def _watchPage(self, column):
+        """Place the card again when the page content changes (a folder card, projects) or scrolls."""
+        for widget in (column, column.parentWidget()):
+            if widget is not None and not any(widget == watched for watched in self._watchedPage):
+                widget.installEventFilter(self._watcher)
+                self._watchedPage.append(widget)
 
     def dispose(self):
         ui.removePaletteListener(self.refreshIcons)
         ui.bindStyleSheet(self.frame, None)
         if _isAlive(self.canvas):
             self.canvas.removeEventFilter(self._watcher)
+        for widget in self._watchedPage:
+            if _isAlive(widget):
+                widget.removeEventFilter(self._watcher)
+        self._watchedPage = []
         if _isAlive(self.frame):
             self.frame.hide()
             self.frame.setObjectName("")
@@ -1630,7 +1729,7 @@ class _OfferWatcher(qt.QObject):
         self.card = card
 
     def eventFilter(self, obj, event):
-        if event.type() in (qt.QEvent.Resize, qt.QEvent.Show, qt.QEvent.LayoutRequest):
+        if event.type() in (qt.QEvent.Resize, qt.QEvent.Show, qt.QEvent.LayoutRequest, qt.QEvent.Move):
             # The layout of the canvas is applied before its event filters run: place the card now, so that it is
             # painted in the same frame as the canvas (a move after it costs one more repaint of the window), and
             # again when the events queued by the change are processed (no repaint if it does not move then)

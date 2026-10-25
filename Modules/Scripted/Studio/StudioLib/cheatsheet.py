@@ -473,12 +473,17 @@ class CheatSheet:
         text2 = ui.token("text2").name()
         text3 = ui.token("text3").name()
         border = ui.token("border").name()
+        # The chrome of Search (VISUAL 4.6): title 18/600, overline group headers, key chips, a canvas search field
         self.widget.setStyleSheet(
-            f"QLabel#StudioCheatSheetTitle {{ color: {text}; font-size: {ui.fontPx(17)}px; font-weight: 600; }}"
+            f"QLabel#StudioCheatSheetTitle {{ color: {text}; font-size: {ui.fontPx(18)}px; font-weight: 600; }}"
             f"QLabel#StudioCheatSheetHint, QLabel#StudioCheatSheetEmpty {{ color: {text3}; font-size: {ui.fontPx(12)}px; }}"
-            f"QLabel#StudioCheatSheetSection {{ color: {text3}; font-size: {ui.fontPx(11)}px; font-weight: 600; letter-spacing: 0.6px; }}"
+            f"QLabel#StudioCheatSheetSection {{ color: {text3}; font-size: {ui.fontPx(11)}px; font-weight: 600; letter-spacing: 0.4px; }}"
             f"QLabel#StudioCheatSheetDescription {{ color: {text2}; font-size: {ui.fontPx(13)}px; }}"
-            f"QLabel#StudioCheatSheetKey {{ color: {text}; border: 1px solid {border}; border-radius: 4px; padding: 0px 5px; font-size: {ui.fontPx(11)}px; }}"
+            f"QLabel#StudioCheatSheetKey {{ color: {text2}; background-color: {ui.token('card').name()}; border: 1px solid {border}; border-radius: 5px;"
+            f" padding: 0px 5px; font-size: {ui.fontPx(11)}px; }}"
+            f"QLineEdit#StudioCheatSheetSearch {{ background-color: {ui.token('canvas').name()}; color: {text}; border: 1px solid {border};"
+            f" border-radius: 8px; padding: 4px 10px; font-size: {ui.fontPx(13)}px; }}"
+            f"QLineEdit#StudioCheatSheetSearch:focus {{ border-color: {ui.token('accent-fg').name()}; }}"
             "QScrollArea#StudioCheatSheetScrollArea, QWidget#StudioCheatSheetBody { background: transparent; }")
         self.closeButton.setIcon(ui.icon("x", 16))
 

@@ -328,7 +328,9 @@ def _escapeCell(text):
 def resolveTarget(path, root=None):
     """The visible widget named by ``path`` (an objectName, or "Parent/Child" objectNames) under ``root``, or None.
 
-    ``root`` defaults to the main window. Hidden widgets with the same name are skipped.
+    ``root`` defaults to the main window. Hidden widgets with the same name are skipped, and a widget that is on screen
+    is preferred to one scrolled out of view or covered (the Map inspector line and the Report card both have an
+    ``LNMDisclaimer``).
     """
     if not path:
         return None
@@ -345,4 +347,5 @@ def resolveTarget(path, root=None):
         if not found:
             return None
         candidates = found
-    return candidates[0]
+    unobscured = [widget for widget in candidates if not widget.visibleRegion().isEmpty()]
+    return (unobscured or candidates)[0]

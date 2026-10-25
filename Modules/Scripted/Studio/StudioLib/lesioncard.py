@@ -9,9 +9,10 @@ Two parts:
   (``refresh(state)``) and calls the controller back; it never changes the scene by itself.
 
     Row 1   [swatch] [name or lesion switcher ▾] [eye] [center] [follow] [⋯]
-    Row 2   Left · 2.27 mL · 1 part · 0 gaps       (amber parts / gaps / outside with their links)
-    Row 3   Saved · sub-01_lesion.nii.gz · 2 min ago       [New lesion] once the lesion is saved
-    Row 4   space line (amber or neutral), when there is one
+    Row 2   three stat cells: 2.27 mL / Volume · 1 / Part · 0 gaps · Left / Side (VISUAL 4.4), and a line with the
+            fixes when there is something to fix (Keep largest, Fill, Clip); "Empty lesion" without a stroke yet
+    Row 3   [✓] Saved · sub-01_lesion.nii.gz · 2 min ago       [New lesion] once the lesion is saved
+    Row 4   space line: a warning notice (one sentence) or a neutral caption, when there is one
     Row 5   hint line (the suggested tool, the active tool), when there is one
     Row 6   [Fill gaps and specks] ...... [Notes ▸]   and the Notes fields when open
             chip rows added with ``addChipRow()``; the QC chips (side against the report, location, CSF, mask checks,
@@ -24,6 +25,7 @@ strip, policy card) add their rows and ⋯ items without editing this file.
 
 import html
 import logging
+import re
 import traceback
 
 from StudioLib import lazyNumpy as np
@@ -58,8 +60,8 @@ LINK_CLIP = "clip"
 
 #: Height of the first row (swatch, name, buttons)
 ROW_HEIGHT = 28
-BUTTON_SIZE = 24
-SWATCH_SIZE = 16
+BUTTON_SIZE = 26
+SWATCH_SIZE = 12
 #: The card gets narrower than its contents rather than making the inspector wider
 MINIMUM_WIDTH = 200
 
@@ -197,6 +199,33 @@ def readoutHtml(metrics, sideWord=None, sideLevel="neutral", outsideKnown=False)
     return " · ".join(parts)
 
 
+def fixesHtml(stats, outsideKnown=False):
+    """Rich text of the fixes that the stat cells call for ("2 parts · Keep largest", "1 gap · Fill"), "" when there is
+    nothing to fix. ``stats`` is the ``stats`` entry of the card state (``{ml, parts, gaps, side, sideLevel, outside}``).
+    """
+    warning = ui.token("warning").name()
+    link = ui.token("accent-fg").name()
+
+    def anchor(target, text):
+        return f'<a href="{target}" style="color: {link}; text-decoration: none;">{html.escape(text)}</a>'
+
+    def amber(text):
+        return f'<span style="color: {warning};">{html.escape(text)}</span>'
+
+    items = []
+    count = int(stats.get("parts") or 0)
+    if count > 1:
+        items.append(amber(_("{count} parts").format(count=count)) + " " + anchor(LINK_KEEP_LARGEST, _("Keep largest")))
+    gapCount = int(stats.get("gaps") or 0)
+    if gapCount > 0:
+        gapsText = _("1 gap") if gapCount == 1 else _("{count} gaps").format(count=gapCount)
+        items.append(amber(gapsText) + " " + anchor(LINK_FILL, _("Fill")))
+    outside = stats.get("outside")
+    if outsideKnown and outside is not None and outside > 1.0:
+        items.append(amber(_("{pct:.0f}% outside brain").format(pct=outside)) + " " + anchor(LINK_CLIP, _("Clip")))
+    return " · ".join(items)
+
+
 #
 # Widget
 #
@@ -270,16 +299,17 @@ class LesionCard:
         self.widget.setMinimumWidth(MINIMUM_WIDTH)
         self.widget.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Maximum)
         layout = qt.QVBoxLayout(self.widget)
-        layout.setContentsMargins(10, 8, 8, 8)
-        layout.setSpacing(3)
+        # VISUAL 4.4: card padding 14 (the name row is 28 px tall, so the top padding is a little smaller)
+        layout.setContentsMargins(ui.CARD_PADDING, ui.CARD_PADDING - 4, ui.CARD_PADDING - 4, ui.CARD_PADDING)
+        layout.setSpacing(6)
         self.layout = layout
 
         # Row 1
         row = qt.QHBoxLayout()
-        row.setSpacing(4)
+        row.setSpacing(2)
         self.swatch = qt.QToolButton()
         self.swatch.setObjectName("StudioLesionSwatch")
-        self.swatch.setFixedSize(SWATCH_SIZE + 4, SWATCH_SIZE + 4)
+        self.swatch.setFixedSize(SWATCH_SIZE + 8, SWATCH_SIZE + 8)
         self.swatch.setAutoRaise(True)
         self.swatch.setToolTip(ui.tooltip(_("Colour"), None, _("Choose the colour of the lesion")))
         self.swatch.setAccessibleName(_("Lesion colour"))
@@ -295,7 +325,12 @@ class LesionCard:
         self.nameEdit.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
         self.nameEdit.setToolTip(ui.tooltip(_("Lesion name"), "Enter", _("Rename the lesion (the file name follows)")))
         self.nameEdit.setAccessibleName(_("Lesion name"))
-        _setPixelFont(self.nameEdit, 13, qt.QFont.DemiBold)
+        ui.setText(self.nameEdit, "section")
+        # The name reads as a title on the card; the field shows only while it is edited (focus)
+        ui.bindStyleSheet(self.nameEdit, lambda: (
+            "QLineEdit#StudioLesionNameEdit { background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 0px 3px; }"
+            f"QLineEdit#StudioLesionNameEdit:hover {{ border: 1px solid {ui.token('border').name()}; }}"
+            f"QLineEdit#StudioLesionNameEdit:focus {{ background: {ui.token('base').name()}; border: 1px solid {ui.token('accent-fg').name()}; }}"))
         row.addWidget(self.nameEdit, 1)
 
         # Lesion switcher: shown instead of the name edit when there is more than one lesion
@@ -307,7 +342,7 @@ class LesionCard:
         self.switcher.setMinimumWidth(60)
         self.switcher.setToolTip(ui.tooltip(_("Lesions"), None, _("Choose the lesion to edit; the others keep their files")))
         self.switcher.setFocusPolicy(qt.Qt.TabFocus)
-        _setPixelFont(self.switcher, 13, qt.QFont.DemiBold)
+        ui.setText(self.switcher, "section")
         self.switcherMenu = qt.QMenu(self.switcher)
         self.switcherMenu.setObjectName("StudioLesionSwitcherMenu")
         self.switcherMenu.connect("aboutToShow()", self._fillSwitcherMenu)
@@ -334,8 +369,43 @@ class LesionCard:
         row.addWidget(self.moreButton)
         layout.addLayout(row)
 
+        # Row 2: the stat cells (Volume, Parts and gaps, Side), then the fixes or "Empty lesion"
+        self.statsFrame = qt.QFrame()
+        self.statsFrame.setObjectName("StudioLesionStats")
+        self.statsFrame.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
+        statsLayout = qt.QHBoxLayout(self.statsFrame)
+        statsLayout.setContentsMargins(0, 0, 0, 0)
+        statsLayout.setSpacing(0)
+        self.statValues = {}
+        for index, (key, caption) in enumerate((("volume", _("Volume")), ("parts", _("Part · 0 gaps")), ("side", _("Side")))):
+            cell = qt.QFrame()
+            cell.setObjectName("StudioLesionStatCell")
+            cell.setProperty("studioFirstCell", index == 0)
+            cellLayout = qt.QVBoxLayout(cell)
+            cellLayout.setContentsMargins(10, 6, 8, 6)
+            cellLayout.setSpacing(0)
+            value = ui.label("", "number", "text", "StudioLesionStatValue")
+            caption = ui.label(caption, "small", "text3", "StudioLesionStatCaption")
+            cellLayout.addWidget(value)
+            cellLayout.addWidget(caption)
+            statsLayout.addWidget(cell, 1)
+            self.statValues[key] = (value, caption)
+        ui.bindStyleSheet(self.statsFrame, lambda: (
+            f"QFrame#StudioLesionStats {{ background-color: {ui.token('card-low').name()}; border: 1px solid {ui.token('hairline').name()}; border-radius: 8px; }}"
+            f"QFrame#StudioLesionStatCell {{ background: transparent; border: none; border-left: 1px solid {ui.token('hairline').name()}; border-radius: 0px; }}"
+            'QFrame#StudioLesionStatCell[studioFirstCell="true"] { border-left: none; }'
+            "QFrame#StudioLesionStatCell QLabel { background: transparent; border: none; }"))
+        self.statsFrame.hide()
+
         # Rows 2 to 5
+        # The readout line ("Left · 2.06 mL · 1 part · 0 gaps"): with a drawn lesion the stat cells are shown inside it,
+        # over its text, which then stays for screen readers (the label is the readout); an empty lesion shows the text
         self.readoutLabel = self._label("StudioLesionReadout", 12, links=True)
+        readoutLayout = qt.QVBoxLayout(self.readoutLabel)
+        readoutLayout.setContentsMargins(0, 0, 0, 0)
+        readoutLayout.addWidget(self.statsFrame)
+        # The fixes that the stat cells call for ("2 parts · Keep largest")
+        self.fixesLabel = self._label("StudioLesionFixes", 12, links=True)
         self.saveStateLabel = self._label("StudioLesionSaveState", 12)
         self.spaceLabel = self._label("StudioLesionSpaceLine", 12)
         self.hintLabel = self._label("StudioLesionHint", 12)
@@ -346,7 +416,12 @@ class LesionCard:
         self.saveRow.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
         saveRowLayout = qt.QHBoxLayout(self.saveRow)
         saveRowLayout.setContentsMargins(0, 0, 0, 0)
-        saveRowLayout.setSpacing(4)
+        saveRowLayout.setSpacing(6)
+        # The saved state as an icon: a success check, or a warning dot while there are unsaved changes
+        self.saveStateIcon = qt.QLabel()
+        self.saveStateIcon.setObjectName("StudioLesionSaveStateIcon")
+        self.saveStateIcon.setFixedSize(14, 16)
+        saveRowLayout.addWidget(self.saveStateIcon, 0, qt.Qt.AlignTop)
         saveRowLayout.addWidget(self.saveStateLabel, 1)
         self.newLesionButton = qt.QPushButton(_("New lesion"))
         self.newLesionButton.setObjectName("StudioNewLesionButton")
@@ -363,7 +438,9 @@ class LesionCard:
         self.saveStateLabel.show()
         self.saveRow.hide()
         layout.addWidget(self.readoutLabel)
+        layout.addWidget(self.fixesLabel)
         layout.addWidget(self.saveRow)
+        # Row 4: a grid or space message is a warning notice (one sentence); a neutral one is a caption
         for label in (self.spaceLabel, self.hintLabel):
             layout.addWidget(label)
 
@@ -486,13 +563,27 @@ class LesionCard:
         self.followButton.setChecked(bool(state.get("follow", True)))
         self.followButton.setIcon(ui.icon("link" if self.followButton.checked else "unlink", 16))
         self.followButton.blockSignals(False)
-        self._setText(self.readoutLabel, state.get("readoutHtml"))
+        stats = state.get("stats")
+        self._setStats(stats)
+        self._setReadout(state.get("readoutHtml"), stats)
+        self._setText(self.fixesLabel, fixesHtml(stats) if stats else None, "text2")
         self._setText(self.saveStateLabel, state.get("saveState"), "text3")
         self.saveStateLabel.setToolTip(state.get("saveStateToolTip") or "")
         self.saveRow.setVisible(bool(state.get("saveState")))
+        self._setSaveStateIcon(state.get("saveState"))
         self.newLesionButton.setVisible(bool(state.get("offerNewLesion")) and enabled)
-        self._setText(self.spaceLabel, state.get("spaceLine"), "warning" if state.get("spaceLevel") == "warn" else "text2")
-        self._setText(self.hintLabel, state.get("hint"), "text2")
+        spaceLine = state.get("spaceLine")
+        warn = bool(spaceLine) and state.get("spaceLevel") == "warn"
+        # A warning reads as a notice (VISUAL 4.8): an 8% tint of the warning color with a 22% border; one stylesheet
+        # per refresh (a label is polished again for each new stylesheet)
+        self._setText(self.spaceLabel, spaceLine, None if warn else "text3")
+        if warn:
+            warning = ui.token("warning")
+            styleSheet = (f"QLabel {{ color: {ui.token('text').name()}; background-color: {ui._rgba(warning, 0.08)};"
+                          f" border: 1px solid {ui._rgba(warning, 0.22)}; border-radius: 8px; padding: 6px 10px; }}")
+            if self.spaceLabel.styleSheet != styleSheet:
+                self.spaceLabel.setStyleSheet(styleSheet)
+        self._setText(self.hintLabel, state.get("hint"), "text3")
         # Text being typed (focused, or not yet committed) is not replaced by the lesion's value, unless another
         # lesion is shown
         notesTyped = self.notesEdit.hasFocus() or self._notesTimer.isActive()
@@ -520,14 +611,75 @@ class LesionCard:
         if not label.isVisibleTo(self.widget):
             label.show()
 
+    def _setReadout(self, readoutHtml, stats):
+        """The readout line: its text alone (an empty lesion), or the stat cells over its text (kept, not drawn)."""
+        if not stats:
+            self.readoutLabel.setMinimumHeight(0)
+            self.readoutLabel.setMaximumHeight(16777215)
+            self.readoutLabel.setTextInteractionFlags(qt.Qt.LinksAccessibleByMouse | qt.Qt.LinksAccessibleByKeyboard)
+            # The text is shown: screen readers read it (not the readout of the stats shown before)
+            if self.readoutLabel.accessibleName:
+                self.readoutLabel.setAccessibleName("")
+            self._setText(self.readoutLabel, readoutHtml, "text2")
+            return
+        text = readoutHtml or ""
+        if str(self.readoutLabel.text) != text:
+            self.readoutLabel.setText(text)
+        self.readoutLabel.setAccessibleName(re.sub(r"<[^>]+>", "", text))
+        # The links of the line are in the fixes line below the cells
+        self.readoutLabel.setTextInteractionFlags(qt.Qt.NoTextInteraction)
+        height = self.statsFrame.minimumHeight
+        if self.readoutLabel.minimumHeight != height or self.readoutLabel.maximumHeight != height:
+            self.readoutLabel.setFixedHeight(height)
+        styleSheet = "QLabel#StudioLesionReadout { color: transparent; background: transparent; border: none; }"
+        if self.readoutLabel.styleSheet != styleSheet:
+            self.readoutLabel.setStyleSheet(styleSheet)
+        if not self.readoutLabel.isVisibleTo(self.widget):
+            self.readoutLabel.show()
+
+    def _setStats(self, stats):
+        """The three stat cells: volume, parts and gaps, side (hidden for an empty lesion)."""
+        if not stats:
+            self.statsFrame.hide()
+            return
+        parts = int(stats.get("parts") or 0)
+        gaps = int(stats.get("gaps") or 0)
+        values = {
+            "volume": (formatMl(float(stats.get("ml") or 0.0)), _("Volume"), False),
+            "parts": (str(parts), (_("Part · {gaps}") if parts == 1 else _("Parts · {gaps}")).format(
+                gaps=_("1 gap") if gaps == 1 else _("{count} gaps").format(count=gaps)), parts > 1 or gaps > 0),
+            "side": (stats.get("side") or "\u2013", _("Side"), stats.get("sideLevel") == "warn"),
+        }
+        for key, (valueText, captionText, warn) in values.items():
+            value, caption = self.statValues[key]
+            if str(value.text) != valueText:
+                value.setText(valueText)
+            if str(caption.text) != captionText:
+                caption.setText(captionText)
+            styleSheet = f"QLabel {{ color: {ui.token('warning').name()}; }}" if warn else ""
+            if value.styleSheet != styleSheet:
+                value.setStyleSheet(styleSheet)
+        # A fixed height from the fonts: in a short inspector (1366 x 768) the scroll area lays the panel out at its
+        # minimum size, which would squeeze the value onto the caption
+        value, caption = self.statValues["volume"]
+        height = value.fontMetrics().height() + caption.fontMetrics().height() + 12 + 2
+        if self.statsFrame.minimumHeight != height or self.statsFrame.maximumHeight != height:
+            self.statsFrame.setFixedHeight(height)
+        self.statsFrame.show()
+
+    def _setSaveStateIcon(self, text):
+        saved = bool(text) and str(text).startswith(_("Saved"))
+        self.saveStateIcon.setPixmap(ui.pixmap("circle-check" if saved else "circle-dashed", 14, "success" if saved else "warning"))
+        self.saveStateIcon.setVisible(bool(text))
+
     def _setSwatchColor(self, color):
         if color is None:
             styleSheet = (f"QToolButton#StudioLesionSwatch {{ background-color: transparent; border: 1px dashed {ui.token('text3').name()}; "
-                          f"border-radius: 4px; margin: 2px; }}")
+                          f"border-radius: 3px; margin: 4px; }}")
         else:
             qcolor = qt.QColor.fromRgbF(*color[:3])
-            styleSheet = (f"QToolButton#StudioLesionSwatch {{ background-color: {qcolor.name()}; border: 1px solid {ui.token('border').name()}; "
-                          f"border-radius: 4px; margin: 2px; }}")
+            styleSheet = (f"QToolButton#StudioLesionSwatch {{ background-color: {qcolor.name()}; border: none; "
+                          f"border-radius: 3px; margin: 4px; }}")
         if self.swatch.styleSheet != styleSheet:
             self.swatch.setStyleSheet(styleSheet)
 
@@ -708,7 +860,7 @@ class LesionCard:
         if self.qc is not None:
             self.qc.dispose()
             self.qc = None
-        for label in (self.readoutLabel,):
+        for label in (self.readoutLabel, self.fixesLabel):
             try:
                 label.disconnect("linkActivated(QString)", self._onLinkActivated)
             except Exception:

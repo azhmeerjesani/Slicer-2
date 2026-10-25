@@ -3257,9 +3257,15 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.connectomeEmpty.setObjectName("LNMConnectomeEmptyState")
         emptyLayout = qt.QVBoxLayout(self.connectomeEmpty)
         emptyLayout.setContentsMargins(0, 0, 0, 0)
-        self.connectomeEmptyLabel = self._label(_("Map needs a connectome. ") + GSP_EMPTY_TEXT, objectName="LNMConnectomeEmptyText")
+        # One sentence (VISUAL 2.5); where GSP1000 comes from and its terms are the tooltip and the Dataverse link below
+        self.connectomeEmptyLabel = self._label(_("Map needs a connectome: get one, add a bundle, convert GSP1000 or use the demo."),
+                                                objectName="LNMConnectomeEmptyText")
+        self.connectomeEmptyLabel.setToolTip(GSP_EMPTY_TEXT)
         emptyLayout.addWidget(self.connectomeEmptyLabel)
-        buttons = qt.QHBoxLayout()
+        # Two rows of two buttons: the inspector keeps its width (a row of four set its minimum width)
+        buttons = qt.QGridLayout()
+        buttons.setHorizontalSpacing(6)
+        buttons.setVerticalSpacing(6)
         # The way a first-time user obtains one: the catalog (manager_catalog, D-L1), which downloads only after an explicit click and the
         # acceptance of the provider's live terms text; without the plug-in the button is hidden
         self.getConnectomeButton = qt.QPushButton(_("Get a connectome…"))
@@ -3268,26 +3274,27 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.getConnectomeButton.setToolTip(_("The connectomes that can be obtained from their providers, with their terms and size; nothing is downloaded until you ask"))
         self.getConnectomeButton.connect("clicked()", self.onGetConnectome)
         self.getConnectomeButton.setVisible(self._hasManagerAction("getConnectome"))
-        buttons.addWidget(self.getConnectomeButton)
+        buttons.addWidget(self.getConnectomeButton, 0, 0)
         self.addBundleButton = qt.QPushButton(_("Add connectome…"))
         self.addBundleButton.setObjectName("LNMAddConnectomeButton")
         self.addBundleButton.setProperty("slicerRole", "secondary")
         self.addBundleButton.setToolTip(_("Choose a connectome bundle folder (.lnmc) on this computer"))
         self.addBundleButton.connect("clicked()", self.onAddBundle)
-        buttons.addWidget(self.addBundleButton)
+        buttons.addWidget(self.addBundleButton, 0, 1)
         self.demoButton = qt.QPushButton(_("Use the demo"))
         self.demoButton.setObjectName("LNMUseDemoButton")
         self.demoButton.setProperty("slicerRole", "secondary")
         self.demoButton.setToolTip(_("Create a small synthetic connectome (SYNTHETIC — not real data) to try Map"))
         self.demoButton.connect("clicked()", self.onCreateDemo)
-        buttons.addWidget(self.demoButton)
+        buttons.addWidget(self.demoButton, 1, 0)
         self.convertEmptyButton = qt.QPushButton(_("Convert…"))
         self.convertEmptyButton.setObjectName("LNMConvertConnectomeButton")
         self.convertEmptyButton.setProperty("slicerRole", "secondary")
         self.convertEmptyButton.setToolTip(_("Convert NIfTI time series or a Lead-DBS connectome that is on this computer into a bundle"))
         self.convertEmptyButton.connect("clicked()", lambda: self.openManager().openConvert())
-        buttons.addWidget(self.convertEmptyButton)
-        buttons.addStretch(1)
+        buttons.addWidget(self.convertEmptyButton, 1, 1)
+        buttons.setColumnStretch(0, 1)
+        buttons.setColumnStretch(1, 1)
         emptyLayout.addLayout(buttons)
         emptyLayout.addWidget(self.widgets.helpLink(_("GSP1000 on the Harvard Dataverse"), GSP_DATAVERSE_URL))
         layout.addWidget(self.connectomeEmpty)
@@ -3739,6 +3746,48 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             self.mapsOnlyButton.setEnabled(self.cohortComputeState()[0])
         self._updatePrimaryAction()
         self._updateStatusChip()
+        self._updateSteps(enabled, reason)
+
+    def _updateSteps(self, computeEnabled=None, computeReason=""):
+        """The title rows of Seed, Connectome, Compute and Result as steps (VISUAL 4.5): a status circle (done, needs
+        action, current) and a one-line summary of each.
+        """
+        steps = {key: self._cardWidgets.get(key, (None, None))[1] for key in ("seed", "connectome", "compute", "result")}
+        if any(card is None or card.property("collapsed") is None for card in steps.values()):
+            return
+        check = self.seedCheck or {}
+        seedText = str(self.seedNameLabel.text) if hasattr(self, "seedNameLabel") else ""
+        seedSpace = str(self.seedSpaceChip.text) if hasattr(self, "seedSpaceChip") and not self.seedSpaceChip.isHidden() else ""
+        seedSelected = bool(seedText) and seedText != _("No lesion selected")
+        if self.seedMode() == "lesion":
+            seedState = "done" if check.get("ok") else ("action" if seedSelected else "current")
+            seedSummary = " · ".join(part for part in (seedText, seedSpace) if part)
+        else:
+            seedState = "done" if computeEnabled else "current"
+            seedSummary = {"cohort": _("Cohort"), "coordinates": _("Coordinates"), "stimulation": _("Stimulation")}.get(self.seedMode(), "")
+        bundle = self.bundle
+        connectomeSummary = str(self.connectomeCombo.currentText) if bundle is not None and hasattr(self, "connectomeCombo") else _("Needs a connectome")
+        if bundle is not None and getattr(bundle, "n_subjects", None):
+            connectomeSummary = _("{name} · {n} subjects").format(name=connectomeSummary, n=bundle.n_subjects)
+        connectomeState = "done" if bundle is not None else "action"
+        hasResult = self.loadedMap is not None or bool(getattr(self, "runOutputs", None)) or (
+            self._parameterNode is not None and self._parameterNode.resultVolume is not None)
+        if self.loadedMap is not None and not getattr(self, "runOutputs", None):
+            # A map opened from a file was not computed here: Compute is not "Done"
+            computeState, computeSummary = "", _("Opened from a file")
+        elif hasResult:
+            computeState, computeSummary = "done", _("Done")
+        elif computeEnabled:
+            computeState, computeSummary = "current", _("Ready")
+        else:
+            computeState, computeSummary = "", computeReason or ""
+        resultState = "current" if hasResult else ""
+        resultSummary = ""
+        if self.loadedMap is not None:
+            resultSummary = str(self.loadedMap.get("label") or self.loadedMap.get("name") or "")
+        for number, (key, state, summary) in enumerate((("seed", seedState, seedSummary), ("connectome", connectomeState, connectomeSummary),
+                                                         ("compute", computeState, computeSummary), ("result", resultState, resultSummary)), start=1):
+            self.widgets.setStep(steps[key], number, state, summary.split("\n")[0])
 
     def onPrimary(self):
         """The primary action (the button and Ctrl+Enter in Studio): preflight checks, then Map network."""
@@ -4124,7 +4173,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.ruleNotesLabel = self._label("", role="caption", objectName="LNMRuleNotes")
         self.ruleNotesLabel.hide()
         layout.addWidget(self.ruleNotesLabel)
-        self.emptyResultLabel = self._label("", objectName="LNMEmptyResult")
+        self.emptyResultLabel = self._label("", role="secondaryText", objectName="LNMEmptyResult")
         self.emptyResultLabel.hide()
         layout.addWidget(self.emptyResultLabel)
 
@@ -4747,6 +4796,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         for row, peak in enumerate(self._peaks):
             for column, value in enumerate((*peak["world"], peak["value"])):
                 item = qt.QTableWidgetItem(f"{value:.1f}" if column < 3 else f"{value:.2f}")
+                if column == 3:
+                    # Hot and cold values (VISUAL 4.5)
+                    item.setForeground(qt.QBrush(self.widgets.valueColor(value)))
                 alignment = qt.Qt.AlignRight | qt.Qt.AlignVCenter
                 try:
                     item.setTextAlignment(alignment)
@@ -4944,11 +4996,13 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self._pinnedPrimarySlot = qt.QWidget()
         self._pinnedPrimarySlot.setObjectName("LNMPinnedPrimary")
         slotLayout = qt.QVBoxLayout(self._pinnedPrimarySlot)
-        slotLayout.setContentsMargins(12, 8, 12, 0)
-        slotLayout.setSpacing(2)
+        slotLayout.setContentsMargins(16, 8, 16, 0)
+        slotLayout.setSpacing(4)
         layout.addWidget(self._pinnedPrimarySlot)
-        self.shellDisclaimer = self.widgets.disclaimerLabel()
-        self.shellDisclaimer.setContentsMargins(12, 4, 12, 6)
+        # One line (VISUAL 4.5): "Research use only. Lesion network mapping specificity is debated. Read more"; the whole
+        # disclaimer with its references is behind "Read more" (and in Classic, under the cards)
+        self.shellDisclaimer = self.widgets.disclaimerLine()
+        self.shellDisclaimer.setContentsMargins(16, 6, 16, 6)
         layout.addWidget(self.shellDisclaimer)
         return footer
 

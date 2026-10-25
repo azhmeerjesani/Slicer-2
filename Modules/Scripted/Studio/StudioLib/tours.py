@@ -189,7 +189,7 @@ def _viewsBody(shell):
                     "a pill at the top of the views names a mode such as Place, with a ✕ to leave it.")
     if _flatViewBars(shell):
         text += " " + _("The bar above each view starts with the view color, then the orientation (Axial ▾, with Rotate to volume plane, "
-                        "Reformat… and Reset), the slider, the position with the slice number (\"S 96.0 mm · 97/193\"), link, fit, "
+                        "Reformat… and Reset), the slider, the position with the slice number (\"S 96.0 mm   97 / 193\"), link, fit, "
                         "the sliders button for layers, opacity and interpolation (on click), and maximize.")
     else:
         text += " " + _("The bar above each view is the one of 3D Slicer: hover the pin for layers, opacity and interpolation.")

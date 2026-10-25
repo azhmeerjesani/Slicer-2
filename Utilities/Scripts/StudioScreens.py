@@ -18,6 +18,18 @@ For each window size and theme it writes ``DIR/<W>x<H>-<theme>/``:
 Themes are applied at runtime through the "Dark Slicer" / "Light Slicer" styles; no setting is
 written. Use a throwaway settings directory (``HOME=$(mktemp -d)``) for first-run screenshots.
 All paths are printed and listed in ``DIR/manifest.json``. Exits with 1 if any screenshot failed.
+
+``--set studio`` takes the Slicer Studio surfaces instead (V-01), one size and one theme per process, with a
+throwaway settings directory (it answers the first-start folder question and writes projects under ``$HOME``)::
+
+  HOME=$(mktemp -d) xvfb-run -a -s "-screen 0 1366x768x24" ./Slicer --no-splash --python-script \
+    Utilities/Scripts/StudioScreens.py -- --set studio --out DIR --sizes 1366x768 --themes light
+
+It writes ``DIR/<W>x<H>-<theme>/<NN>-<name>.png`` (screen grabs, so popups and overlays are included): the
+first-start folder chooser, Library (empty, with a project, with projects, with a study), the tour card, Draw (empty,
+painting with the lesion card, in a study), a toast, Map (cards, a result), Search, the cheat sheet, the settings
+panels (Saving, Appearance, Updates, Templates) and the add-template dialog. The theme is applied with the Studio
+theme setting (``Appearance/Theme``) of that throwaway settings directory.
 """
 
 import argparse
@@ -319,9 +331,328 @@ class Screens:
         return 1 if self.errors else 0
 
 
+def waitFor(condition, timeoutMs=30000, stepMs=50):
+    """Run the event loop until ``condition()`` is true (exceptions count as false). Return the last value."""
+    import time
+
+    end = time.monotonic() + timeoutMs / 1000.0
+    while True:
+        try:
+            value = condition()
+        except Exception:
+            value = None
+        if value or time.monotonic() > end:
+            return value
+        idleWait(stepMs)
+
+
+def visibleTopLevel(objectName):
+    for widget in slicer.app.topLevelWidgets():
+        if widget.objectName == objectName and widget.isVisible():
+            return widget
+    return None
+
+
+def syntheticBlobVolume(path, reference, centers, sign=None, scale=1.0):
+    """Write a NIfTI file on the grid of ``reference`` (a volume node): gaussian blobs at RAS ``centers`` [(x, y, z, sigma, peak)]."""
+    import numpy as np
+
+    array = slicer.util.arrayFromVolume(reference)
+    ijkToRas = vtkMatrix(reference)
+    k, j, i = np.indices(array.shape)
+    ras = [ijkToRas[row][0] * i + ijkToRas[row][1] * j + ijkToRas[row][2] * k + ijkToRas[row][3] for row in range(3)]
+    values = np.zeros(array.shape, np.float32)
+    for x, y, z, sigma, peak in centers:
+        values += peak * np.exp(-((ras[0] - x) ** 2 + (ras[1] - y) ** 2 + (ras[2] - z) ** 2) / (2.0 * sigma * sigma))
+    node = slicer.util.addVolumeFromArray(values * scale, name="StudioScreensBlob")
+    node.CopyOrientation(reference)
+    slicer.util.saveNode(node, path)
+    slicer.mrmlScene.RemoveNode(node)
+    return path
+
+
+def vtkMatrix(volumeNode):
+    import vtk
+
+    matrix = vtk.vtkMatrix4x4()
+    volumeNode.GetIJKToRASMatrix(matrix)
+    return [[matrix.GetElement(row, column) for column in range(4)] for row in range(4)]
+
+
+class StudioScreens:
+    """``--set studio``: the Slicer Studio surfaces of the visual design pass (V-01), one size and theme per process."""
+
+    def __init__(self, args):
+        self.args = args
+        self.size = tuple(int(value) for value in args.sizes.split(",")[0].lower().split("x"))
+        self.theme = args.themes.split(",")[0].strip().lower()
+        self.folder = os.path.join(args.out, f"{self.size[0]}x{self.size[1]}-{self.theme}")
+        os.makedirs(self.folder, exist_ok=True)
+        self.paths = []
+        self.errors = {}
+        self.count = 0
+        self.mainWindow = slicer.util.mainWindow()
+        self.home = os.path.expanduser("~")
+        self.data = os.path.join(self.home, "StudioScreensData")
+        os.makedirs(self.data, exist_ok=True)
+
+    def shell(self):
+        return studioShell()
+
+    def grab(self, name, settle=500):
+        pump()
+        idleWait(settle)
+        from StudioLib import ui
+
+        self.count += 1
+        path = os.path.join(self.folder, f"{self.count:02d}-{name}.png")
+        screen = ui.screenOf(self.mainWindow) or ui.primaryScreen()
+        if not screen.grabWindow(0).copy(0, 0, *self.size).save(path):
+            raise RuntimeError(f"failed to write {path}")
+        self.paths.append(path)
+        print(f"SCREEN {path}", flush=True)
+
+    def step(self, name, function):
+        try:
+            function()
+        except Exception:
+            self.errors[name] = traceback.format_exc()[-3000:]
+            print(f"SCREEN {name} FAILED:\n{self.errors[name]}", flush=True)
+
+    def setTheme(self):
+        from StudioLib import appmenu
+
+        if not appmenu.setTheme(self.theme.capitalize()):
+            applyTheme(self.theme)
+        pump(20)
+
+    def placeWindow(self):
+        self.mainWindow.showNormal()
+        self.mainWindow.setGeometry(0, 0, *self.size)
+        pump()
+        idleWait(500)
+
+    def firstRun(self):
+        chooser = waitFor(lambda: visibleTopLevel("StudioProjectsFolderDialog"), 40000)
+        self.setTheme()
+        self.placeWindow()
+        if chooser is None:
+            print("SCREEN firstrun skipped: no folder chooser", flush=True)
+            return
+        chooser = visibleTopLevel("StudioProjectsFolderDialog")
+        self.grab("firstrun-chooser", 800)
+        chooser.setPath(os.path.join(self.home, "Documents", "Slicer Studio"))
+        chooser.continueButton.click()
+        pump(20)
+
+    def libraryEmpty(self):
+        self.shell().switchTo("library")
+        self.grab("library-empty", 800)
+
+    def tourCard(self):
+        from StudioLib import tour
+
+        if tour.startTour("studio"):
+            idleWait(800)
+            self.grab("tour-card")
+            live = tour.plugin()
+            if live is not None:
+                live.stopTour()
+            pump(10)
+
+    def drawEmpty(self):
+        self.shell().switchTo("draw")
+        self.grab("draw-empty", 800)
+
+    def paintLesion(self, center, radius):
+        import numpy as np
+
+        from StudioLib import draw
+
+        segmentation, source = draw.lesionNodes()
+        segmentId = segmentation.GetSegmentation().GetNthSegmentID(0)
+        array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, segmentId, source)
+        import vtk
+
+        matrix = vtk.vtkMatrix4x4()
+        source.GetRASToIJKMatrix(matrix)
+        ijk = [sum(matrix.GetElement(row, column) * (list(center) + [1.0])[column] for column in range(4)) for row in range(3)]
+        k, j, i = np.indices(array.shape)
+        spacing = source.GetSpacing()
+        distance = ((i - ijk[0]) * spacing[0]) ** 2 + ((j - ijk[1]) * spacing[1]) ** 2 + ((k - ijk[2]) * spacing[2]) ** 2
+        array[distance <= radius * radius] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentation, segmentId, source)
+        return segmentation, source
+
+    def drawPainting(self):
+        from StudioLib import importer
+
+        shell = self.shell()
+        volume = slicer.util.loadVolume(self.args.mrhead, {"name": "sub-012 T1w"}) if os.path.exists(self.args.mrhead) else None
+        if volume is not None:
+            slicer.mrmlScene.RemoveNode(volume)
+            importer.loadFiles([self.args.mrhead], shell)
+        else:
+            importer.startOnTemplate(shell=shell)
+        waitFor(lambda: shell.currentWorkspace() == "draw", 15000)
+        pump(20)
+        idleWait(1500)
+        self.paintLesion((-20.0, 20.0, 30.0), 12.0)
+        editor = getattr(slicer.modules, "SegmentEditorWidget", None)
+        if editor is not None:
+            editor.editor.setActiveEffectByName("Paint")
+        idleWait(1500)
+        self.grab("draw-painting")
+        shell.toast("Lesion saved to Lesions \u203a lesion.nii.gz", ms=8000, level="success")
+        self.grab("toast", 300)
+
+    def waitSaved(self):
+        try:
+            from StudioLib import autosave
+        except ImportError:
+            return
+        service = autosave.instance()
+        if service is None:
+            return
+        service.saveNow("screens", progress=False)
+        waitFor(lambda: service.project is not None and not service.dirty and service.plan is None, 30000)
+        idleWait(1500)
+
+    def libraryProject(self, name):
+        self.waitSaved()
+        self.shell().switchTo("library")
+        self.grab(name, 1500)
+
+    def secondProject(self):
+        from StudioLib import importer, projects_ui
+
+        projects_ui.closeScene()
+        pump(20)
+        idleWait(1000)
+        shell = self.shell()
+        importer.startOnTemplate(shell=shell)
+        waitFor(lambda: shell.currentWorkspace() == "draw", 15000)
+        idleWait(1500)
+        self.paintLesion((-30.0, -10.0, 20.0), 10.0)
+        idleWait(1000)
+        self.grab("draw-template-lesion")
+
+    def mapScreens(self):
+        shell = self.shell()
+        shell.switchTo("map")
+        waitFor(lambda: shell.currentWorkspace() == "map", 15000)
+        self.grab("map-cards", 1500)
+        from StudioLib import mappage
+
+        template = next((node for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode") if "MNI" in node.GetName()), None)
+        if template is None:
+            return
+        path = os.path.join(self.data, "sub-05_desc-T_funcmap.nii.gz")
+        if not os.path.exists(path):
+            syntheticBlobVolume(path, template, [(-30, 20, 30, 10, 11.8), (40, -20, 20, 12, -7.4), (-40, -60, 30, 9, 9.6), (20, -70, -30, 8, 8.1)])
+        mappage.loadMap(path, shell)
+        idleWait(2000)
+        self.grab("map-result")
+
+    def palette(self):
+        shell = self.shell()
+        shell.switchTo("draw")
+        idleWait(500)
+        shell.openPalette()
+        idleWait(500)
+        from StudioLib import palette
+
+        live = palette.instance()
+        edit = getattr(live, "field", None)
+        if edit is None and live is not None:
+            edit = next(iter(live.widget.findChildren("QLineEdit")), None)
+        if edit is not None:
+            edit.setText("segment editor")
+        self.grab("palette", 800)
+        palette.close()
+        pump(10)
+
+    def cheatSheet(self):
+        from StudioLib import cheatsheet
+
+        cheatsheet.show(self.shell())
+        self.grab("cheatsheet", 800)
+        cheatsheet.hide()
+        pump(10)
+
+    def settings(self):
+        dialog = slicer.app.settingsDialog()
+        width, height = min(1100, self.size[0] - 80), min(760, self.size[1] - 80)
+        for panel in ("Saving", "Appearance", "Updates", "Templates"):
+            def show(panel=panel):
+                dialog.setCurrentPanel(panel)
+                dialog.show()
+                dialog.resize(width, height)
+                dialog.move((self.size[0] - width) // 2, (self.size[1] - height) // 2)
+                self.grab(f"settings-{panel.lower()}", 1500)
+            self.step(f"settings-{panel.lower()}", show)
+        dialog.hide()
+        pump(10)
+
+    def addTemplate(self):
+        from StudioLib import templates, templates_ui
+
+        dialog = templates_ui.AddTemplateDialog(self.mainWindow)
+        builtin = templates.builtinTemplates()[0]
+        dialog.setImage(builtin.imagePath)
+        dialog.show()
+        dialog.move(max(0, (self.size[0] - dialog.width) // 2), max(0, (self.size[1] - dialog.height) // 2))
+        idleWait(2500)
+        self.grab("add-template")
+        dialog.hide()
+        dialog.deleteLater()
+        pump(10)
+
+    def study(self):
+        import shutil
+
+        from StudioLib import projects_ui, study_ui, templates
+
+        projects_ui.closeScene()
+        pump(20)
+        folder = os.path.join(self.home, "Documents", "Stroke aphasia LNM")
+        os.makedirs(folder, exist_ok=True)
+        builtin = templates.builtinTemplates()[0]
+        files = []
+        for index in range(1, 4):
+            path = os.path.join(folder, f"sub-{index:02d}_T1w.nii.gz")
+            if not os.path.exists(path):
+                shutil.copyfile(builtin.imagePath, path)
+            files.append(path)
+        study_ui.createStudy(files, shell=self.shell(), folder=folder, name="Stroke aphasia LNM")
+        self.shell().switchTo("library")
+        self.grab("library-study", 2000)
+
+    def run(self):
+        self.step("firstrun", self.firstRun)
+        if self.shell() is None:
+            self.errors["studio"] = "the Studio shell is not active"
+        else:
+            for name, function in (("library-empty", self.libraryEmpty), ("tour-card", self.tourCard), ("draw-empty", self.drawEmpty),
+                                   ("draw-painting", self.drawPainting), ("library-project", lambda: self.libraryProject("library-project")),
+                                   ("second-project", self.secondProject), ("library-projects", lambda: self.libraryProject("library-projects")),
+                                   ("map", self.mapScreens), ("palette", self.palette), ("cheatsheet", self.cheatSheet),
+                                   ("settings", self.settings), ("add-template", self.addTemplate), ("study", self.study)):
+                if self.args.only and name not in self.args.only.split(",") and name not in ("draw-painting", "second-project"):
+                    continue
+                self.step(name, function)
+        manifest = {"screenshots": self.paths, "errors": self.errors, "size": f"{self.size[0]}x{self.size[1]}", "theme": self.theme}
+        with open(os.path.join(self.folder, "manifest.json"), "w") as f:
+            json.dump(manifest, f, indent=1)
+        print(f"{len(self.paths)} screenshots in {self.folder}, {len(self.errors)} errors", flush=True)
+        return 1 if self.errors else 0
+
+
 def main(argv):
     parser = argparse.ArgumentParser(prog="StudioScreens.py", description=__doc__.split("\n\n")[0])
+    parser.add_argument("--set", default="classic", choices=("classic", "studio"), help="classic: workspaces and gallery; studio: the Studio surfaces (V-01)")
     parser.add_argument("--out", required=True, help="output directory")
+    parser.add_argument("--only", default="", help="--set studio: comma-separated steps to take (data steps always run)")
     parser.add_argument("--sizes", default="1920x1080,1366x768", help="comma-separated window sizes (default: 1920x1080,1366x768)")
     parser.add_argument("--themes", default="dark,light", help="comma-separated themes: dark, light (default: dark,light)")
     parser.add_argument("--mrhead", default=DEFAULT_MRHEAD_PATH, help="MRHead volume file; SampleData MRHead is used if it does not exist")
@@ -329,6 +660,8 @@ def main(argv):
     if slicer.util.mainWindow() is None:
         raise RuntimeError("StudioScreens needs the main window (do not use --no-main-window)")
     os.makedirs(args.out, exist_ok=True)
+    if args.set == "studio":
+        return StudioScreens(args).run()
     return Screens(args).run()
 
 

@@ -600,6 +600,8 @@ class _DrawSession(VTKObservationMixin):
         editor = segmentEditor()
         if editor is not None:
             self._record(editor)
+            # The classic look of the tool options (Draw gives them back on enter, see DrawExtension.refresh())
+            setOptionsStudioLook(editor, False)
         self.removeObservers()
         self._observedNode = None
         self._observedSegmentation = None
@@ -2296,6 +2298,47 @@ def _unregisterAssistObserver():
 #
 
 
+def setOptionsStudioLook(editor, studio, hideDiameter=False):
+    """The tool options of the Segment Editor in Draw: check boxes drawn as switches (their text on the left, the switch on
+    the right) and, with ``hideDiameter``, the classic "Diameter:" row of Paint and Erase hidden (the Draw size row replaces
+    it). ``studio=False`` restores the classic look. Nothing else of the options changes.
+    """
+    optionsGroupBox = editor.findChild("QGroupBox", "OptionsGroupBox") if editor is not None else None
+    if optionsGroupBox is None:
+        return
+    for checkBox in optionsGroupBox.findChildren("QCheckBox"):
+        role = "switch" if studio else None
+        if checkBox.property("slicerRole") == role:
+            continue
+        if role is None and checkBox.property("slicerRole") != "switch":
+            continue
+        checkBox.setProperty("slicerRole", role)
+        if studio:
+            checkBox.setProperty("studioClassicSizePolicy", int(checkBox.sizePolicy.horizontalPolicy()))
+            checkBox.setSizePolicy(qt.QSizePolicy.Expanding, checkBox.sizePolicy.verticalPolicy())
+        elif checkBox.property("studioClassicSizePolicy") is not None:
+            policy = checkBox.sizePolicy
+            policy.setHorizontalPolicy(int(checkBox.property("studioClassicSizePolicy")))
+            checkBox.setSizePolicy(policy)
+        style = checkBox.style()
+        style.unpolish(checkBox)
+        style.polish(checkBox)
+        checkBox.updateGeometry()
+        checkBox.update()
+    for label in optionsGroupBox.findChildren("QLabel"):
+        if str(label.text) != "Diameter:" and label.property("studioDiameterLabel") is None:
+            continue
+        label.setProperty("studioDiameterLabel", True)
+        frame = label.parentWidget()
+        if frame is None or frame == optionsGroupBox:
+            continue
+        hidden = bool(hideDiameter)
+        if bool(frame.property("studioHiddenByDraw")) == hidden:
+            continue
+        frame.setProperty("studioHiddenByDraw", hidden)
+        frame.setVisible(not hidden)
+
+
 class DrawExtension:
     """Widgets and behaviour that Draw adds to the studio presentation of the Segment Editor."""
 
@@ -2316,6 +2359,7 @@ class DrawExtension:
         self._nativeOffer = None
         self._lastReadout = None
         self._lastReadoutKey = None
+        self._lastStats = None
 
     #
     # Session
@@ -2497,31 +2541,47 @@ class DrawExtension:
         self._cardsBefore.setSpacing(6)
         layout.addLayout(self._cardsBefore)
 
-        # Brush size chips (Paint and Erase) and the source chip
+        # Brush size (Paint and Erase): a segmented 1 / 3 / 6 / 12 mm and the diameter field (VISUAL 4.4), and the source chip
         self.chipsRow = qt.QWidget()
         self.chipsRow.setObjectName("StudioDrawChipsRow")
         self.chipsRow.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
         chipsLayout = qt.QHBoxLayout(self.chipsRow)
-        chipsLayout.setContentsMargins(2, 0, 2, 0)
-        chipsLayout.setSpacing(4)
+        # Aligned with the cards and the tool tiles
+        chipsLayout.setContentsMargins(8, 2, 10, 2)
+        chipsLayout.setSpacing(8)
         self.brushChips = {}
-        self.brushLabel = qt.QLabel(_("Size"))
-        self.brushLabel.setObjectName("StudioBrushSizeLabel")
+        self.brushLabel = ui.label(_("Size"), "body", "text", "StudioBrushSizeLabel")
         chipsLayout.addWidget(self.brushLabel)
-        for diameter in BRUSH_CHIPS_MM:
-            chip = qt.QToolButton()
+        chipsLayout.addStretch(1)
+        self.brushSizes, brushGroup = ui.segmented([f"{diameter:g}" for diameter in BRUSH_CHIPS_MM])
+        self.brushSizes.setObjectName("StudioBrushSizes")
+        # The chips show the current diameter: none is checked when the diameter is another value
+        brushGroup.setExclusive(False)
+        for diameter, chip in zip(BRUSH_CHIPS_MM, brushGroup.buttons(), strict=False):
             chip.setObjectName("StudioBrushSizeChip")
-            chip.setText(_("{size} mm").format(size=f"{diameter:g}"))
-            chip.setCheckable(True)
-            chip.setToolButtonStyle(qt.Qt.ToolButtonTextOnly)
+            chip.setFixedHeight(ui.COMPACT_HEIGHT - 6)
+            chip.setMinimumWidth(34)
             chip.setToolTip(ui.tooltip(_("Brush {size} mm").format(size=f"{diameter:g}"), None, _("Brush and Erase diameter")))
+            chip.setAccessibleName(_("Brush {size} mm").format(size=f"{diameter:g}"))
             chip.setFocusPolicy(qt.Qt.TabFocus)
             chip.connect("clicked()", lambda diameter=diameter: self._onBrushChip(diameter))
-            ui.setRole(chip, "ghost")
             ui.installButtonKeys(chip)
-            chipsLayout.addWidget(chip)
             self.brushChips[diameter] = chip
-        chipsLayout.addStretch(1)
+        chipsLayout.addWidget(self.brushSizes)
+        self.brushField = qt.QDoubleSpinBox()
+        self.brushField.setObjectName("StudioBrushSizeField")
+        self.brushField.setRange(0.1, 200.0)
+        self.brushField.setDecimals(1)
+        self.brushField.setSingleStep(0.5)
+        self.brushField.setSuffix(" mm")
+        self.brushField.setButtonSymbols(qt.QAbstractSpinBox.NoButtons)
+        self.brushField.setAlignment(qt.Qt.AlignRight | qt.Qt.AlignVCenter)
+        self.brushField.setKeyboardTracking(False)
+        self.brushField.setFixedSize(68, ui.COMPACT_HEIGHT)
+        self.brushField.setToolTip(ui.tooltip(_("Brush diameter"), "[ ]", _("Brush and Erase diameter in mm")))
+        self.brushField.setAccessibleName(_("Brush diameter"))
+        self.brushField.connect("valueChanged(double)", self._onBrushField)
+        chipsLayout.addWidget(self.brushField)
         self.sourceChip = qt.QToolButton()
         self.sourceChip.setObjectName("StudioSourceChip")
         self.sourceChip.setPopupMode(qt.QToolButton.InstantPopup)
@@ -2535,10 +2595,12 @@ class DrawExtension:
         ui.setRole(self.sourceChip, "ghost")
         chipsLayout.addWidget(self.sourceChip)
         layout.addWidget(self.chipsRow)
-        for widget in (self.brushLabel, *self.brushChips.values(), self.sourceChip):
-            font = qt.QFont(widget.font)
-            font.setPixelSize(ui.fontPx(12))
-            widget.setFont(font)
+        for widget in (self.sourceChip, *self.brushChips.values()):
+            ui.setText(widget, "caption")
+        # The section label of the tool tiles, which follow the header
+        self.toolsLabel = ui.sectionLabel(_("Tools"), "StudioDrawToolsLabel")
+        self.toolsLabel.setContentsMargins(10, 8, 0, 0)
+        layout.addWidget(self.toolsLabel)
         self._discoverDrawCards()
 
     def _buildTrailing(self):
@@ -2562,6 +2624,11 @@ class DrawExtension:
             drawSession.setBrushDiameter(diameter)
         else:
             qt.QSettings().setValue(BRUSH_DIAMETER_KEY, float(diameter))
+
+    def _onBrushField(self, diameter):
+        """The diameter field: a typed diameter (Enter or focus out), like a size chip."""
+        if diameter > 0:
+            self._onBrushChip(round(float(diameter), 1))
 
     def _fillSourceMenu(self):
         self.sourceMenu.clear()
@@ -2719,7 +2786,12 @@ class DrawExtension:
             pass
         for size, chip in self.brushChips.items():
             chip.setChecked(diameter is not None and abs(size - diameter) < 1e-3)
-            chip.setVisible(brushActive)
+        self.brushSizes.setVisible(brushActive)
+        self.brushField.setVisible(brushActive and diameter is not None)
+        if diameter is not None and not self.brushField.hasFocus() and abs(self.brushField.value - diameter) >= 0.05:
+            self.brushField.blockSignals(True)
+            self.brushField.setValue(diameter)
+            self.brushField.blockSignals(False)
         self.brushLabel.setVisible(brushActive)
         volumes = _editableVolumes()
         showSource = len(volumes) > 1 and sourceVolumeNode is not None
@@ -2742,6 +2814,24 @@ class DrawExtension:
                     widget.setTileOutline(effectName, None)
         if self.displayCard is not None:
             self.displayCard.refresh(segmentationNode, sourceVolumeNode)
+        self._styleToolsAndOptions(editor, studio, brushActive)
+
+    def _styleToolsAndOptions(self, editor, studio, brushActive):
+        """Studio look of the Segment Editor parts that Draw shows (VISUAL 4.4): the key of each tool in the corner of its
+        tile, switches for the check boxes of the tool options, and no classic diameter row while the size row is shown.
+        The classic presentation gets the check boxes and the diameter row back.
+        """
+        effectsGroupBox = editor.findChild("QFrame", "EffectsGroupBox")
+        for button in effectsGroupBox.findChildren("QToolButton") if effectsGroupBox is not None else ():
+            if button.property("slicerRole") != "toolTile":
+                continue
+            # Single-letter keys only: a longer key ("Shift+F") stays in the tooltip
+            key = EFFECT_MNEMONICS.get(str(button.objectName), "") if studio else ""
+            key = key if len(key) == 1 else ""
+            if (button.property("studioKey") or "") != key:
+                button.setProperty("studioKey", key)
+                button.update()
+        setOptionsStudioLook(editor, studio, hideDiameter=studio and brushActive)
 
     @staticmethod
     def _setTileOutline(widget, effectName, color, dashed):
@@ -2763,7 +2853,7 @@ class DrawExtension:
 
     def _cardState(self, drawSession, editor, segmentationNode, sourceVolumeNode, activeName, computeMetrics):
         if segmentationNode is None:
-            return {"name": _("No lesion"), "lesionId": None, "lesions": [], "readoutHtml": None, "saveState": None, "offerNewLesion": False,
+            return {"name": _("No lesion"), "lesionId": None, "lesions": [], "readoutHtml": None, "stats": None, "saveState": None, "offerNewLesion": False,
                     "spaceLine": None, "hint": _("Open a scan or start on the MNI template"), "enabled": False}
         segmentId = _selectedSegmentId(segmentationNode, editor)
         segment = segmentationNode.GetSegmentation().GetSegment(segmentId) if segmentId else None
@@ -2774,6 +2864,10 @@ class DrawExtension:
             self._lastReadoutKey = readoutKey
             sideWord = metrics.get("sides") if _isMniLesion(segmentationNode) else None
             self._lastReadout = lesioncard.readoutHtml(metrics, sideWord, "warn" if sideWord == "Both hemispheres" else "neutral")
+            # The stat cells of the card (VISUAL 4.4); none for an empty lesion
+            self._lastStats = {"ml": metrics["ml"], "parts": metrics["parts"], "gaps": len(metrics["gaps"]),
+                               "side": sideWord, "sideLevel": "warn" if sideWord == "Both hemispheres" else "neutral",
+                               "outside": metrics.get("outside_pct")} if metrics.get("voxels") else None
         saveText, saveToolTip = saveStateText(segmentationNode)
         importer = _importer()
         shell = self._shell()
@@ -2789,6 +2883,7 @@ class DrawExtension:
             "visible": bool(displayNode.GetVisibility()) if displayNode is not None else True,
             "lesions": lesions,
             "readoutHtml": self._lastReadout,
+            "stats": self._lastStats if self._lastReadoutKey == readoutKey else None,
             "saveState": saveText,
             "saveStateToolTip": saveToolTip or "",
             "offerNewLesion": offerNewLesion,
@@ -2997,13 +3092,13 @@ class _EmptyState:
         self.widget, layout = ui.card(None)
         self.widget.setObjectName("StudioDrawEmptyState")
         self.widget.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Maximum)
+        layout.setSpacing(10)
+        layout.addWidget(ui.iconTile("pencil", 36, 18, "StudioDrawEmptyStateIcon"))
         self.label = qt.QLabel()
         self.label.setObjectName("StudioDrawEmptyStateText")
         self.label.setWordWrap(True)
         self.label.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
-        font = qt.QFont(self.label.font)
-        font.setPixelSize(ui.fontPx(15))
-        self.label.setFont(font)
+        ui.setText(self.label, "section")
         layout.addWidget(self.label)
         self.buttons = qt.QVBoxLayout()
         self.buttons.setSpacing(6)
@@ -3216,13 +3311,20 @@ class _CtaFooter:
         self.widget.setObjectName("StudioDrawFooter")
         ui.bindStyleSheet(self.widget, lambda: (
             f"QWidget#StudioDrawFooter {{ background-color: {ui.token('window').name()}; "
-            f"border-top: 1px solid {ui.token('hairline').name()}; }}"))
+            f"border-top: 1px solid {ui.token('hairline').name()}; }}"
+            # The secondary action is a link under the primary button
+            f"QPushButton#StudioDrawSecondaryButton {{ background: transparent; border: none; color: {ui.token('accent-fg').name()};"
+            f" padding: 2px 6px; font-size: {ui.fontPx(12)}px; }}"
+            "QPushButton#StudioDrawSecondaryButton:hover { text-decoration: underline; }"
+            f"QPushButton#StudioDrawSecondaryButton:focus {{ border: 1px solid {ui.token('accent-fg').name()}; border-radius: 4px; }}"))
         self.widget.setAttribute(qt.Qt.WA_StyledBackground, True)
         layout = qt.QVBoxLayout(self.widget)
-        layout.setContentsMargins(12, 8, 12, 10)
-        layout.setSpacing(4)
+        layout.setContentsMargins(ui.INSPECTOR_PADDING, 12, ui.INSPECTOR_PADDING, 10)
+        layout.setSpacing(6)
         self.saveButton = ui.primaryButton(_("Save lesion"))
         self.saveButton.setObjectName("StudioSaveLesionButton")
+        # The pinned panel action (VISUAL 4.4): 38 px
+        self.saveButton.setMinimumHeight(ui.PANEL_ACTION_HEIGHT)
         self.saveButton.connect("clicked()", self._onPrimary)
         ui.installButtonKeys(self.saveButton)
         layout.addWidget(self.saveButton)

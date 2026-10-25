@@ -164,50 +164,98 @@ class FolderChooserDialog(qt.QDialog):
         self.setWindowTitle(_("Slicer Studio folder"))
         self.setModal(True)
         self.path = os.path.normpath(proposal or projects.root())
+        self.setMinimumWidth(560)
         layout = qt.QVBoxLayout(self)
-        layout.setContentsMargins(24, 22, 24, 20)
-        layout.setSpacing(12)
+        # Dialog chrome (VISUAL 4.7): 24 px padding, the icon tile beside the title and the body text
+        layout.setContentsMargins(24, 24, 24, 22)
+        layout.setSpacing(16)
+        header = qt.QHBoxLayout()
+        header.setSpacing(14)
+        header.addWidget(ui.iconTile("folder", 40, 20, "StudioProjectsFolderIcon"), 0, qt.Qt.AlignTop)
+        headerText = qt.QVBoxLayout()
+        headerText.setSpacing(6)
         title = qt.QLabel(_("Where should Slicer Studio keep your work?"))
         title.setObjectName("StudioProjectsFolderTitle")
         title.setWordWrap(True)
-        ui._font(title, ui.fontPx(17), qt.QFont.DemiBold)
-        layout.addWidget(title)
-        body = qt.QLabel(_("Everything you do is saved here automatically, as you work. You never need to press Save."))
+        ui.setText(title, "title")
+        headerText.addWidget(title)
+        body = qt.QLabel(_("Everything you open, draw and compute is saved here automatically, so there is no Save to remember. "
+                           "You can change this later in Settings › Saving."))  # noqa: RUF001
         body.setObjectName("StudioProjectsFolderBody")
         body.setWordWrap(True)
-        layout.addWidget(body)
+        headerText.addWidget(body)
+        header.addLayout(headerText, 1)
+        layout.addLayout(header)
         pathRow = qt.QHBoxLayout()
         pathRow.setSpacing(8)
+        pathField = qt.QFrame()
+        pathField.setObjectName("StudioProjectsFolderField")
+        pathField.setMinimumHeight(36)
+        fieldLayout = qt.QHBoxLayout(pathField)
+        fieldLayout.setContentsMargins(10, 0, 10, 0)
+        fieldLayout.setSpacing(8)
+        self.pathIcon = qt.QLabel()
+        self.pathIcon.setObjectName("StudioProjectsFolderPathIcon")
+        self.pathIcon.setFixedSize(16, 16)
+        fieldLayout.addWidget(self.pathIcon)
         self.pathLabel = qt.QLabel()
         self.pathLabel.setObjectName("StudioProjectsFolderPath")
         self.pathLabel.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
-        self.pathLabel.setWordWrap(True)
-        self.pathLabel.setMinimumWidth(360)
-        ui.setRole(self.pathLabel, "card")
-        self.pathLabel.setContentsMargins(10, 8, 10, 8)
-        pathRow.addWidget(self.pathLabel, 1)
-        self.chooseButton = qt.QPushButton(_("Choose folder…"))
+        self.pathLabel.setMinimumWidth(320)
+        self.pathLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+        fieldLayout.addWidget(self.pathLabel, 1)
+        pathRow.addWidget(pathField, 1)
+        self.chooseButton = qt.QPushButton(_("Choose…"))
         self.chooseButton.setObjectName("StudioProjectsFolderChooseButton")
+        self.chooseButton.setToolTip(_("Choose another folder"))
+        self.chooseButton.setMinimumHeight(36)
         ui.setRole(self.chooseButton, "secondary")
         self.chooseButton.connect("clicked()", self.choose)
         pathRow.addWidget(self.chooseButton, 0, qt.Qt.AlignVCenter)
         layout.addLayout(pathRow)
-        self.insideLabel = qt.QLabel(_("Inside: Projects (one folder per project, each one a 3D Slicer scene) and Studies. "
-                                       "You can change the folder later in Settings › Saving."))  # noqa: RUF001
+        # A synced folder: a warning notice (one sentence)
+        self.syncedNotice = ui.notice("", "warning", objectName="StudioProjectsFolderSyncedNotice")
+        self.syncedLabel = self.syncedNotice.findChild("QLabel", "StudioNoticeBoxText")
+        self.syncedLabel.setObjectName("StudioProjectsFolderSynced")
+        layout.addWidget(self.syncedNotice)
+        # What the folder holds
+        inside = qt.QFrame()
+        inside.setObjectName("StudioProjectsFolderInsideCard")
+        insideLayout = qt.QVBoxLayout(inside)
+        insideLayout.setContentsMargins(16, 12, 16, 12)
+        insideLayout.setSpacing(8)
+        insideLayout.addWidget(ui.overline(_("Inside this folder"), "StudioProjectsFolderInsideTitle"))
+        self._insideIcons = []
+        for iconName, name, what in (
+                ("folder", _("Projects"), _("one folder per project: scans, lesions, maps, exports")),
+                ("folder", _("Studies"), _("lesion network mapping cohorts")),
+                ("folder", _("LNM"), _("analysis outputs not tied to a study"))):
+            row = qt.QHBoxLayout()
+            row.setSpacing(10)
+            icon = qt.QLabel()
+            icon.setFixedSize(16, 16)
+            icon.setProperty("studioIconName", iconName)
+            self._insideIcons.append(icon)
+            row.addWidget(icon)
+            nameLabel = ui.label(name, "name", "text")
+            nameLabel.setFixedWidth(110)
+            row.addWidget(nameLabel)
+            row.addWidget(ui.label(what, "caption", "text3"), 1)
+            insideLayout.addLayout(row)
+        layout.addWidget(inside)
+        self.insideLabel = qt.QLabel(_("Each project is a 3D Slicer scene that official 3D Slicer opens as well."))
         self.insideLabel.setObjectName("StudioProjectsFolderInside")
         self.insideLabel.setWordWrap(True)
+        ui.setText(self.insideLabel, "caption")
         layout.addWidget(self.insideLabel)
-        self.syncedLabel = qt.QLabel()
-        self.syncedLabel.setObjectName("StudioProjectsFolderSynced")
-        self.syncedLabel.setWordWrap(True)
-        layout.addWidget(self.syncedLabel)
         buttons = qt.QHBoxLayout()
         buttons.addStretch(1)
         self.continueButton = qt.QPushButton(_("Continue"))
         self.continueButton.setObjectName("StudioProjectsFolderContinueButton")
         self.continueButton.setDefault(True)
         self.continueButton.setAutoDefault(True)
-        self.continueButton.setMinimumHeight(32)
+        self.continueButton.setMinimumHeight(36)
+        self.continueButton.setMinimumWidth(96)
         ui.setRole(self.continueButton, "primary")
         self.continueButton.connect("clicked()", self.accept)
         buttons.addWidget(self.continueButton)
@@ -215,21 +263,34 @@ class FolderChooserDialog(qt.QDialog):
         ui.bindStyleSheet(self, self._styleSheet)
         self._update()
 
-    @staticmethod
-    def _styleSheet():
-        return (f"QLabel#StudioProjectsFolderBody, QLabel#StudioProjectsFolderInside {{ color: {ui.token('text2').name()}; }}"
-                f"QLabel#StudioProjectsFolderSynced {{ color: {ui.token('warning').name()}; }}")
+    def _styleSheet(self):
+        for icon in getattr(self, "_insideIcons", []):
+            icon.setPixmap(ui.pixmap(str(icon.property("studioIconName")), 16, "accent-fg"))
+        if hasattr(self, "pathIcon"):
+            self.pathIcon.setPixmap(ui.pixmap("folder", 16, "text3"))
+        return (f"QDialog#StudioProjectsFolderDialog {{ background-color: {ui.token('card').name()}; }}"
+                f"QLabel#StudioProjectsFolderBody {{ color: {ui.token('text2').name()}; }}"
+                f"QLabel#StudioProjectsFolderInside {{ color: {ui.token('text3').name()}; }}"
+                f"QFrame#StudioProjectsFolderField {{ background-color: {ui.token('canvas').name()}; border: 1px solid {ui.token('border').name()};"
+                " border-radius: 8px; }"
+                "QFrame#StudioProjectsFolderField QLabel { background: transparent; border: none; }"
+                f"QFrame#StudioProjectsFolderInsideCard {{ background-color: {ui.token('card-low').name()}; border: 1px solid {ui.token('hairline').name()};"
+                " border-radius: 10px; }"
+                "QFrame#StudioProjectsFolderInsideCard QLabel { background: transparent; border: none; }")
 
     def _update(self):
         self.pathLabel.setText(self.path)
         self.pathLabel.setToolTip(self.path)
         service = projects.syncedService(self.path)
         if service:
-            self.syncedLabel.setText(_("This folder is synced to {service}. Scans can contain patient data.").format(service=service))
+            self.syncedLabel.setText(_("This folder is synced to {service}. Scans can contain patient data: if they do, choose a folder that "
+                                       "is not synced.").format(service=service))
             self.syncedLabel.show()
+            self.syncedNotice.show()
         else:
             self.syncedLabel.setText("")
             self.syncedLabel.hide()
+            self.syncedNotice.hide()
 
     def setPath(self, path):
         self.path = os.path.normpath(str(path))
@@ -621,19 +682,28 @@ def changeRootDialog(parent=None):
 
 
 class _ClickFilter(qt.QObject):
-    """Left click opens a project card; the context menu shows its actions."""
+    """Left click opens a project card; the context menu shows its actions. A resized card elides its texts, and a
+    resized section lays its cards out again (the number of columns follows the width).
+    """
 
     def __init__(self, section):
         qt.QObject.__init__(self)
         self.section = section
 
     def eventFilter(self, obj, event):
-        if event.type() == qt.QEvent.MouseButtonRelease and event.button() == qt.Qt.LeftButton:
+        eventType = event.type()
+        if eventType == qt.QEvent.Resize:
+            if obj == self.section.widget:
+                self.section.updateColumns()
+            else:
+                self.section.elideCard(obj)
+            return False
+        if eventType == qt.QEvent.MouseButtonRelease and event.button() == qt.Qt.LeftButton:
             path = obj.property("studioProjectPath")
             if path:
                 qt.QTimer.singleShot(0, lambda path=path: self.section.open(path))
                 return True
-        if event.type() == qt.QEvent.KeyPress and event.key() in (qt.Qt.Key_Return, qt.Qt.Key_Enter, qt.Qt.Key_Space):
+        if eventType == qt.QEvent.KeyPress and event.key() in (qt.Qt.Key_Return, qt.Qt.Key_Enter, qt.Qt.Key_Space):
             path = obj.property("studioProjectPath")
             if path:
                 qt.QTimer.singleShot(0, lambda path=path: self.section.open(path))
@@ -641,50 +711,78 @@ class _ClickFilter(qt.QObject):
         return False
 
 
+#: Project cards (VISUAL 4.2): a 128 px black thumbnail and a 52 px body; 4 columns from 1000 px, else 3 (2 when narrow)
+CARD_THUMBNAIL_HEIGHT = 128
+CARD_BODY_HEIGHT = 54
+CARD_SPACING = 16
+CARD_MIN_WIDTH = 180
+#: Rows of cards shown before "Show all"
+CARD_ROWS = 2
+
+
+def projectColumns(width):
+    """Columns of the project grid for a section ``width`` px wide."""
+    if width >= 1000:
+        return 4
+    if width >= 3 * CARD_MIN_WIDTH + 2 * CARD_SPACING:
+        return 3
+    return 2
+
+
 class ProjectsSection(qt.QObject):
-    """The projects of the Slicer Studio folder in the Library page (``studioProjectsSection``)."""
+    """The projects of the Slicer Studio folder in the Library page (``studioProjectsSection``): "All projects" and its
+    count, then a grid of cards (``studioProjectCard``) with the thumbnail, the name and "2 h ago · 1 scan · 1 lesion";
+    the project that is open is marked (``studioCurrent``) and has an "Open" badge.
+    """
 
     def __init__(self):
         qt.QObject.__init__(self)
         self.widget = qt.QFrame()
         self.widget.setObjectName("studioProjectsSection")
         layout = qt.QVBoxLayout(self.widget)
-        layout.setContentsMargins(0, 0, 0, 20)
-        layout.setSpacing(6)
+        layout.setContentsMargins(0, 0, 0, 28)
+        layout.setSpacing(10)
         header = qt.QHBoxLayout()
-        header.setContentsMargins(10, 0, 10, 0)
-        self.title = qt.QLabel(_("Projects").upper())
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(8)
+        self.title = qt.QLabel(_("All projects"))
         self.title.setObjectName("StudioLibrarySectionTitle")
-        ui._font(self.title, ui.fontPx(11), qt.QFont.DemiBold, 0.6)
+        ui.setText(self.title, "section")
         header.addWidget(self.title)
+        self.countLabel = ui.label("", "caption", "text3", "studioProjectsCount")
+        header.addWidget(self.countLabel, 0, qt.Qt.AlignBaseline if hasattr(qt.Qt, "AlignBaseline") else qt.Qt.AlignVCenter)
         header.addStretch(1)
         self.showAllButton = self._link(_("Show all"), "studioProjectsShowAll", self.toggleAll)
         header.addWidget(self.showAllButton)
         layout.addLayout(header)
-        captionRow = qt.QHBoxLayout()
-        captionRow.setContentsMargins(10, 0, 10, 2)
-        captionRow.setSpacing(4)
+        # Where the projects are is said by the page header (``library.LibraryCanvas``); these stay for other callers
         self.caption = qt.QLabel()
         self.caption.setObjectName("studioProjectsCaption")
         self.caption.setTextFormat(qt.Qt.PlainText)
-        ui._font(self.caption, ui.fontPx(12))
-        captionRow.addWidget(self.caption, 1)
+        self.caption.hide()
         self.showFolderButton = self._link(_("Show in {manager}").format(manager=projects.fileManagerName()), "studioProjectsShowFolder", showRootFolder)
-        captionRow.addWidget(self.showFolderButton)
-        layout.addLayout(captionRow)
-        self.listLayout = qt.QVBoxLayout()
-        self.listLayout.setSpacing(4)
-        layout.addLayout(self.listLayout)
+        self.showFolderButton.hide()
+        self.grid = qt.QGridLayout()
+        self.grid.setContentsMargins(0, 0, 0, 0)
+        self.grid.setHorizontalSpacing(CARD_SPACING)
+        self.grid.setVerticalSpacing(CARD_SPACING)
+        layout.addLayout(self.grid)
+        self.listLayout = self.grid
         self.emptyLabel = qt.QLabel(_("Open a scan or start on the template: your work is saved here as a project."))
         self.emptyLabel.setObjectName("studioProjectsEmpty")
         self.emptyLabel.setWordWrap(True)
-        self.emptyLabel.setContentsMargins(10, 2, 10, 2)
-        ui._font(self.emptyLabel, ui.fontPx(12))
+        ui.setText(self.emptyLabel, "caption")
         layout.addWidget(self.emptyLabel)
         self._showAll = False
         self._signature = None
         self._cards = []
+        self._columns = 0
+        self._infos = []
         self._clickFilter = _ClickFilter(self)
+        self.widget.installEventFilter(self._clickFilter)
+        # The Python event filter must be gone before the interpreter is finalized (the section may outlive the shell, a
+        # Library canvas made without it): the widgets deleted then would send it events
+        slicer.app.connect("aboutToQuit()", self._removeEventFilters)
         self._pixmaps = {}
         self._timer = qt.QTimer()
         self._timer.setSingleShot(True)
@@ -707,17 +805,19 @@ class ProjectsSection(qt.QObject):
 
     @staticmethod
     def _styleSheet():
-        t = {name: ui.token(name).name() for name in ("text", "text2", "text3", "accent-fg", "card", "border", "hairline")}
+        t = {name: ui.token(name).name() for name in ("text", "text2", "text3", "accent", "accent-fg", "card-low", "hairline")}
         return (
             "QFrame#studioProjectsSection { background: transparent; border: none; }"
-            f"QLabel#StudioLibrarySectionTitle {{ color: {t['text2']}; }}"
+            f"QLabel#StudioLibrarySectionTitle {{ color: {t['text']}; }}"
             f"QLabel#studioProjectsCaption, QLabel#studioProjectsEmpty {{ color: {t['text3']}; }}"
-            f"QFrame#studioProjectCard {{ background-color: {t['card']}; border: 1px solid {t['hairline']}; border-radius: 8px; }}"
-            f"QFrame#studioProjectCard:hover, QFrame#studioProjectCard:focus {{ border-color: {t['text3']}; }}"
-            f"QFrame#studioProjectCard[studioCurrent=\"true\"] {{ border-color: {t['accent-fg']}; }}"
+            f"QFrame#studioProjectCard {{ background-color: {t['card-low']}; border: 1px solid {t['hairline']}; border-radius: 12px; }}"
+            f"QFrame#studioProjectCard:hover {{ border-color: {t['text3']}; }}"
+            f"QFrame#studioProjectCard:focus {{ border: 2px solid {t['accent-fg']}; }}"
+            f"QFrame#studioProjectCard[studioCurrent=\"true\"] {{ border: 2px solid {t['accent']}; }}"
             f"QLabel#studioProjectCardName {{ color: {t['text']}; background: transparent; border: none; }}"
-            f"QLabel#studioProjectCardMeta {{ color: {t['text2']}; background: transparent; border: none; }}"
-            "QLabel#studioProjectCardThumbnail { background-color: #0e0e10; border: none; border-radius: 4px; }"
+            f"QLabel#studioProjectCardMeta {{ color: {t['text3']}; background: transparent; border: none; }}"
+            "QLabel#studioProjectCardThumbnail { background-color: #000000; border: none; border-top-left-radius: 11px; border-top-right-radius: 11px; }"
+            "QLabel#studioProjectCardBadge { background-color: rgba(22, 22, 24, 199); color: #ececef; border: none; border-radius: 5px; padding: 0px; }"
             f"QPushButton[studioLibraryLink=\"true\"] {{ background: transparent; border: none; color: {t['accent-fg']}; padding: 2px 4px; }}")
 
     def scheduleRefresh(self):
@@ -733,6 +833,14 @@ class ProjectsSection(qt.QObject):
         root = projects.root()
         return _("Saved automatically in {folder}").format(folder=projects.shortPath(root))
 
+    def currentInfo(self):
+        """The ``projects.ProjectInfo`` of the open project among the listed ones, or None."""
+        return next((info for info in self._infos if info.isCurrent()), None)
+
+    def _shownCount(self, total):
+        columns = max(self._columns, projectColumns(self.widget.width if self.widget.width > 0 else 1000))
+        return total if self._showAll else min(total, CARD_ROWS * columns)
+
     def refresh(self):
         """List the projects again (only what changed is rebuilt)."""
         if not _isAlive(self.widget):
@@ -744,23 +852,43 @@ class ProjectsSection(qt.QObject):
         self.caption.setText(self.captionText())
         self.caption.setToolTip(projects.root())
         infos = projects.listProjects()
-        shown = infos if self._showAll else infos[:MAX_PROJECT_ROWS]
+        self._infos = infos
+        shown = infos[:self._shownCount(len(infos))]
         signature = tuple((info.path, info.modified, info.isCurrent(), info.thumbnail, tuple(sorted(info.counts.items()))) for info in shown)
-        self.showAllButton.setVisible(len(infos) > MAX_PROJECT_ROWS)
+        self.countLabel.setText(str(len(infos)) if infos else "")
+        self.showAllButton.setVisible(len(infos) > len(shown) or self._showAll)
         self.showAllButton.setText(_("Show fewer") if self._showAll else _("Show all ({count})").format(count=len(infos)))
         self.emptyLabel.setVisible(not infos)
         if signature == self._signature:
             return
         self._signature = signature
         for card in self._cards:
+            self.grid.removeWidget(card)
             card.hide()
             card.setObjectName("")
             card.deleteLater()
         self._cards = []
         for info in shown:
-            card = self._card(info)
-            self.listLayout.addWidget(card)
-            self._cards.append(card)
+            self._cards.append(self._card(info))
+        self._placeCards(force=True)
+
+    def updateColumns(self):
+        """Lay the cards out again when the width calls for another number of columns."""
+        if projectColumns(self.widget.width) != self._columns:
+            self._signature = None
+            self.refresh()
+
+    def _placeCards(self, force=False):
+        columns = projectColumns(self.widget.width if self.widget.width > 0 else 1000)
+        if columns == self._columns and not force:
+            return
+        self._columns = columns
+        for card in self._cards:
+            self.grid.removeWidget(card)
+        for index, card in enumerate(self._cards):
+            self.grid.addWidget(card, index // columns, index % columns)
+        for column in range(4):
+            self.grid.setColumnStretch(column, 1 if column < columns else 0)
 
     def _thumbnail(self, info):
         if not info.thumbnail:
@@ -774,7 +902,8 @@ class ProjectsSection(qt.QObject):
             pixmap = qt.QPixmap(info.thumbnail)
             if pixmap.isNull():
                 return None
-            pixmap = pixmap.scaled(THUMBNAIL_SIZE, THUMBNAIL_SIZE, qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation)
+            size = CARD_THUMBNAIL_HEIGHT - 8
+            pixmap = pixmap.scaled(size, size, qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation)
             self._pixmaps[key] = pixmap
         return pixmap
 
@@ -785,44 +914,72 @@ class ProjectsSection(qt.QObject):
         card.setProperty("studioCurrent", info.isCurrent())
         card.setFocusPolicy(qt.Qt.TabFocus)
         card.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
-        card.setMinimumHeight(PROJECT_ROW_HEIGHT)
+        card.setFixedHeight(CARD_THUMBNAIL_HEIGHT + CARD_BODY_HEIGHT)
+        card.setMinimumWidth(CARD_MIN_WIDTH)
+        card.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
         card.setContextMenuPolicy(qt.Qt.CustomContextMenu)
         card.connect("customContextMenuRequested(QPoint)", lambda point, card=card, path=info.path: self.showMenu(card, path, point))
         card.installEventFilter(self._clickFilter)
-        layout = qt.QHBoxLayout(card)
-        layout.setContentsMargins(8, 6, 10, 6)
-        layout.setSpacing(10)
+        layout = qt.QVBoxLayout(card)
+        # Inside the 1 px border (2 px for the open project)
+        inset = 2 if info.isCurrent() else 1
+        layout.setContentsMargins(inset, inset, inset, inset)
+        layout.setSpacing(0)
         thumbnail = qt.QLabel()
         thumbnail.setObjectName("studioProjectCardThumbnail")
-        thumbnail.setFixedSize(THUMBNAIL_SIZE, THUMBNAIL_SIZE)
+        thumbnail.setFixedHeight(CARD_THUMBNAIL_HEIGHT - inset)
         thumbnail.setAlignment(qt.Qt.AlignCenter)
         pixmap = self._thumbnail(info)
-        thumbnail.setPixmap(pixmap if pixmap is not None else ui.pixmap("brain", 22, "text3"))
+        thumbnail.setPixmap(pixmap if pixmap is not None else ui.pixmap("brain", 32, "#55555c"))
         layout.addWidget(thumbnail)
-        lines = qt.QVBoxLayout()
-        lines.setSpacing(1)
+        badgeText = _("Open") if info.isCurrent() else (_("Map ready") if info.counts.get("maps") else "")
+        if badgeText:
+            badge = qt.QLabel(badgeText, thumbnail)
+            badge.setObjectName("studioProjectCardBadge")
+            badge.setAlignment(qt.Qt.AlignCenter)
+            ui.setText(badge, "small")
+            # The size of the text and the stylesheet padding (6 px on each side)
+            badge.setFixedSize(qt.QFontMetrics(badge.font).horizontalAdvance(badgeText) + 14, qt.QFontMetrics(badge.font).height() + 4)
+            badge.move(8, 8)
+            badge.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
+        body = qt.QWidget()
+        body.setObjectName("studioProjectCardBody")
+        bodyLayout = qt.QVBoxLayout(body)
+        bodyLayout.setContentsMargins(12, 8, 12, 9)
+        bodyLayout.setSpacing(2)
         name = qt.QLabel(info.name)
         name.setObjectName("studioProjectCardName")
         name.setTextFormat(qt.Qt.PlainText)
-        ui._font(name, ui.fontPx(13), qt.QFont.Medium)
-        lines.addWidget(name)
+        name.setProperty("fullText", info.name)
+        name.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+        ui.setText(name, "name")
+        bodyLayout.addWidget(name)
         when = _relativeTime(info.modified) if info.modified else ""
         meta = " · ".join(part for part in (when, info.contentLine()) if part)
         metaLabel = qt.QLabel(meta)
         metaLabel.setObjectName("studioProjectCardMeta")
         metaLabel.setTextFormat(qt.Qt.PlainText)
-        ui._font(metaLabel, ui.fontPx(12))
-        lines.addWidget(metaLabel)
-        layout.addLayout(lines, 1)
-        if info.isCurrent():
-            badge = ui.chip(_("Open"), "accent" if "accent" in getattr(ui, "CHIP_LEVELS", ()) else "neutral")
-            badge.setObjectName("studioProjectCardBadge")
-            layout.addWidget(badge, 0, qt.Qt.AlignVCenter)
-        for label in (thumbnail, name, metaLabel):
-            label.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
+        metaLabel.setProperty("fullText", meta)
+        metaLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+        ui.setText(metaLabel, "caption")
+        bodyLayout.addWidget(metaLabel)
+        layout.addWidget(body)
+        for widget in (thumbnail, body, name, metaLabel):
+            widget.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
         card.setToolTip(info.path)
         card.setAccessibleName(_("Project {name}").format(name=info.name))
         return card
+
+    def elideCard(self, card):
+        """Elide the name and the meta line of a card to its width (the full texts are the ``fullText`` properties)."""
+        for label in card.findChildren("QLabel"):
+            text = label.property("fullText")
+            if text is None:
+                continue
+            width = max(0, card.width - 26)
+            elided = qt.QFontMetrics(label.font).elidedText(str(text), qt.Qt.ElideRight, width)
+            if label.text != elided:
+                label.setText(elided)
 
     def cards(self):
         return [card for card in self._cards if _isAlive(card)]
@@ -859,9 +1016,19 @@ class ProjectsSection(qt.QObject):
             return True
         return False
 
+    def _removeEventFilters(self):
+        for watched in [self.widget, *self._cards]:
+            if _isAlive(watched):
+                watched.removeEventFilter(self._clickFilter)
+
     def dispose(self):
         projects.removeListener(self.scheduleRefresh)
         self._timer.stop()
+        try:
+            slicer.app.disconnect("aboutToQuit()", self._removeEventFilters)
+        except Exception:
+            pass
+        self._removeEventFilters()
         if _isAlive(self.widget):
             ui.bindStyleSheet(self.widget, None)
 

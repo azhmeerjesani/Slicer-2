@@ -3,10 +3,11 @@
 A 44 px toolbar ``StudioTopBar`` whose contents are a 3-column grid, so that the workspace switcher is centred
 on the window whatever the other columns hold (no fixed widths, the window can still shrink):
 
-- left: the app menu (``≡``) and the breadcrumb;
-- centre: the workspace switcher [Library | Draw | Map] (``Ctrl+Alt+1/2/3``);
-- right: the status chip, the autosave status (``setSaveStatus()``, A-01b), Undo/Redo (Draw only), the layout picker
-  (``Alt+1..5``), the search pill (``Ctrl+K``) and the error badge.
+- left: the app menu (``≡``), the breadcrumb (the project or scan name) and the save status (``setSaveStatus()``,
+  A-01b, A-09: "Saved" with a check, "Saving…", "Not saved");
+- centre: the workspace switcher [Library | Draw | Map] (``Ctrl+Alt+1/2/3``), one segmented control (VISUAL 4.1);
+- right: the status chip, Undo/Redo (Draw only), the layout picker (``Alt+1..5``), the search field (``Ctrl+K``)
+  and the error badge.
 
 Every button takes the keyboard focus (Tab; the arrow keys move inside the switcher), is pressed by Space and
 Enter also in Draw, and has a "Name · key · description" tooltip. ``setCompact(bool)`` collapses the bar for a
@@ -28,7 +29,7 @@ from . import appmenu, layouts, space, ui, workspaces
 
 TOP_BAR_HEIGHT = 44
 #: Widest the search pill grows; it shrinks with the window
-SEARCH_PILL_WIDTH = 240
+SEARCH_PILL_WIDTH = 280
 SEARCH_PILL_COMPACT_WIDTH = 30
 #: Narrowest the search pill gets before the bar goes compact: the icon, "Search" and the key chip
 SEARCH_PILL_MIN_WIDTH = 132
@@ -51,11 +52,13 @@ SAVE_STATUS_COMPACT_WIDTH = 1500
 SAVE_STATUS_CHIP_COMPACT_WIDTH = 1700
 #: Level of the autosave status -> (icon, colour token). The busy icon is static: no spinner (SPEC 10)
 SAVE_STATUS_LEVELS = {
-    "neutral": ("history", "text2"),
-    "busy": ("loader-circle", "text2"),
-    "ok": ("check", "success"),
+    "neutral": ("history", "text3"),
+    "busy": ("loader-circle", "text3"),
+    "ok": ("circle-check", "success"),
     "warn": ("triangle-alert", "warning"),
 }
+#: Text color of the save status per level: a calm text3, except when something needs attention
+SAVE_STATUS_TEXT = {"neutral": "text3", "busy": "text3", "ok": "text3", "warn": "warning"}
 #: Where the README explains the Map workspace (the section "Lesion network mapping")
 README_MAP_URL = "https://github.com/azhmeerjesani/Slicer-2#lesion-network-mapping"
 
@@ -219,13 +222,17 @@ class TopBar:
         ui.bindStyleSheet(self.breadcrumbButton, self._breadcrumbStyleSheet)
         self.breadcrumbButton.connect("clicked()", self._onBreadcrumbClicked)
         leftLayout.addWidget(self.breadcrumbButton)
-        leftLayout.addStretch(1)
+        # The save status of the project follows its name (A-01b, A-09; added below)
+        self._leftLayout = leftLayout
         self._leftResizeFilter = _ResizeFilter(self._elideBreadcrumb)
         self.leftContainer.installEventFilter(self._leftResizeFilter)
 
         # Centre: workspace switcher
         self.switcherFrame, self.switcherGroup = ui.segmented([ws.title for ws in workspaces.WORKSPACES])
         self.switcherFrame.setObjectName("StudioWorkspaceSwitcher")
+        # One segmented control (VISUAL 4.1): a 3 px padded canvas track, 28 px items
+        self.switcherFrame.layout().setContentsMargins(3, 3, 3, 3)
+        self.switcherFrame.layout().setSpacing(2)
         self.workspaceButtons = {}
         self._switcherKeys = _SwitcherKeys(self)
         for index, ws in enumerate(workspaces.WORKSPACES):
@@ -237,6 +244,7 @@ class TopBar:
             button.setIconSize(qt.QSize(16, 16))
             button.setFocusPolicy(qt.Qt.TabFocus)
             button.setFixedHeight(28)
+            ui.setText(button, "name")
             ui.installButtonKeys(button)
             button.installEventFilter(self._switcherKeys)
             button.connect("clicked()", lambda key=ws.key: self._onWorkspaceClicked(key))
@@ -267,7 +275,8 @@ class TopBar:
         self._saveStatus = None
         self._saveStatusTitle = None
         ui.bindStyleSheet(self.saveStatusButton, self._saveStatusStyleSheet)
-        rightLayout.addWidget(self.saveStatusButton)
+        self._leftLayout.addWidget(self.saveStatusButton)
+        self._leftLayout.addStretch(1)
         rightLayout.addStretch(1)
 
         self.undoButton = _toolButton("StudioUndoButton", "undo-2", ui.tooltip(_("Undo"), "Ctrl+Z", _("Undo the last lesion edit")))
@@ -333,8 +342,10 @@ class TopBar:
     def _breadcrumbStyleSheet(self):
         size = ui.fontPx(13)
         accent = ui.token("accent-fg").name()
+        # The project (or scan) name: 13 px Medium in the text color (VISUAL 4.1)
         return (
-            f"QToolButton#StudioBreadcrumb {{ background-color: transparent; color: {ui.token('text2').name()}; border: none; border-radius: 6px; padding: 3px 6px; font-size: {size}px; }}"
+            f"QToolButton#StudioBreadcrumb {{ background-color: transparent; color: {ui.token('text').name()}; border: none; border-radius: 6px; padding: 3px 6px;"
+            f" font-size: {size}px; font-weight: 500; }}"
             f"QToolButton#StudioBreadcrumb[studioClickable=\"true\"]:hover {{ background-color: {ui.token('control-hover').name()}; color: {ui.token('text').name()}; }}"
             f"QToolButton#StudioBreadcrumb:focus {{ border: 2px solid {accent}; padding: 1px 4px; }}")
 
@@ -356,11 +367,17 @@ class TopBar:
         self.pillLayout.addWidget(self.searchIcon)
         # The pill opens the command palette (StudioLib/palette.py); until it exists it opens the module finder
         hasPalette = self.shell._importOptional("StudioLib.palette") is not None
-        self.searchPlaceholder = qt.QLabel(_("Search") if hasPalette else _("Search modules"))
+        self._searchPlaceholderTexts = (_("Search actions, tools and data"), _("Search")) if hasPalette else (_("Search modules"), _("Search"))
+        self.searchPlaceholder = qt.QLabel(self._searchPlaceholderTexts[1])
         self.searchPlaceholder.setObjectName("StudioSearchPlaceholder")
+        # The long placeholder when it fits, else "Search" (``_fitSearchPlaceholder()``)
+        self.searchPlaceholder.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+        self.searchPlaceholder.setMinimumWidth(qt.QFontMetrics(self.searchPlaceholder.font).horizontalAdvance(self._searchPlaceholderTexts[1]))
+        self._placeholderResizeFilter = _ResizeFilter(self._fitSearchPlaceholder)
+        self.searchPlaceholder.installEventFilter(self._placeholderResizeFilter)
         self.pillLayout.addWidget(self.searchPlaceholder, 1)
         self.searchKey = ui.kbd(ui.keyText("Ctrl+K"))
-        self.searchKey.setFixedHeight(20)
+        self.searchKey.setFixedHeight(18)
         self.pillLayout.addWidget(self.searchKey)
         for child in (self.searchIcon, self.searchPlaceholder, self.searchKey):
             child.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
@@ -369,17 +386,25 @@ class TopBar:
         pill.connect("clicked()", self.shell.openPalette)
         return pill
 
+    def _fitSearchPlaceholder(self):
+        """The long placeholder ("Search actions, tools and data") when the pill has room for it, else "Search"."""
+        label = self.searchPlaceholder
+        longText, shortText = self._searchPlaceholderTexts
+        text = longText if qt.QFontMetrics(label.font).horizontalAdvance(longText) <= label.width else shortText
+        if label.text != text:
+            label.setText(text)
+
     def _searchPillStyleSheet(self):
         size = ui.fontPx(13)
         keySize = ui.fontPx(11)
-        # The key chip is inset: a darker well with a light edge, like a pressed key cap
+        # VISUAL 4.1: a 30 px field on the canvas color with an 8 px radius, and the key chip
         return (
-            f"QPushButton#StudioSearchPill {{ background-color: {ui.token('base').name()}; border: 1px solid {ui.token('control-border').name()}; border-radius: 15px; }}"
-            f"QPushButton#StudioSearchPill:hover {{ border-color: {ui.token('text3').name()}; }}"
+            f"QPushButton#StudioSearchPill {{ background-color: {ui.token('canvas').name()}; border: 1px solid {ui.token('border').name()}; border-radius: 8px; }}"
+            f"QPushButton#StudioSearchPill:hover {{ border-color: {ui.token('control-border').name()}; }}"
             f"QPushButton#StudioSearchPill:focus {{ border: 2px solid {ui.token('accent-fg').name()}; }}"
             f"QLabel#StudioSearchPlaceholder {{ color: {ui.token('text3').name()}; font-size: {size}px; background: transparent; }}"
-            f"QPushButton#StudioSearchPill QLabel#StudioKbd {{ background-color: {ui.token('control-pressed').name()}; color: {ui.token('text2').name()};"
-            f" border: 1px solid {ui.token('border').name()}; border-top-color: {ui.token('hairline').name()}; border-radius: 5px; padding: 1px 6px; font-size: {keySize}px; }}")
+            f"QPushButton#StudioSearchPill QLabel#StudioKbd {{ background-color: transparent; color: {ui.token('text2').name()};"
+            f" border: 1px solid {ui.token('border').name()}; border-radius: 5px; padding: 0px 5px; font-size: {keySize}px; }}")
 
     def _buildLayoutPicker(self):
         container = qt.QWidget()
@@ -442,7 +467,7 @@ class TopBar:
         for action in self.viewActions.values():
             action.setIcon(ui.icon(action.property("studioIcon"), 16))
         self.errorBadge.setIcon(ui.icon("circle-alert", ICON_SIZE, role="danger"))
-        self.searchIcon.setPixmap(ui.pixmap("search", 14, "text3"))
+        self.searchIcon.setPixmap(ui.pixmap("search", 16, "text3"))
         self._updateSaveStatusIcon()
 
     #
@@ -701,6 +726,8 @@ class TopBar:
                 button.setText("")
             return
         room = self.leftContainer.width - self.menuButton.width - self.leftContainer.layout().spacing
+        if not self.saveStatusButton.isHidden():
+            room -= self.saveStatusButton.sizeHint.width() + self.leftContainer.layout().spacing
         room = min(room, button.maximumWidth)
         room = max(room, BREADCRUMB_MIN_WIDTH)
         elided = qt.QFontMetrics(button.font).elidedText(text, qt.Qt.ElideMiddle, room - _BREADCRUMB_PADDING)
@@ -809,6 +836,7 @@ class TopBar:
         if not text:
             self._saveStatus = None
             self.saveStatusButton.hide()
+            self._elideBreadcrumb()
             self.updateColumnMinimums()
             return
         if level not in SAVE_STATUS_LEVELS:
@@ -824,6 +852,7 @@ class TopBar:
             ui.bindStyleSheet(self.saveStatusButton, self._saveStatusStyleSheet)
         self.saveStatusButton.show()
         self.updateSaveStatusCompact()
+        self._elideBreadcrumb()
         self.updateColumnMinimums()
 
     def saveStatus(self):
@@ -845,6 +874,7 @@ class TopBar:
         style = qt.Qt.ToolButtonIconOnly if compact else qt.Qt.ToolButtonTextBesideIcon
         if self.saveStatusButton.toolButtonStyle != style:
             self.saveStatusButton.setToolButtonStyle(style)
+            self._elideBreadcrumb()
             self.updateColumnMinimums()
         if self._saveStatus is not None:
             # "Autosave · <status, when only the icon is shown> <description>" (USABILITY 10)
@@ -862,8 +892,8 @@ class TopBar:
 
     def _saveStatusStyleSheet(self):
         level = self._saveStatus[1] if self._saveStatus is not None else "neutral"
-        color = ui.token(SAVE_STATUS_LEVELS[level][1]).name()
-        return (f"QToolButton#StudioSaveStatus {{ color: {color}; padding: 0px 6px; margin-left: 10px; }}"
+        color = ui.token(SAVE_STATUS_TEXT[level]).name()
+        return (f"QToolButton#StudioSaveStatus {{ color: {color}; padding: 0px 6px; margin-left: 2px; }}"
                 "QToolButton#StudioSaveStatus::menu-indicator { image: none; width: 0px; }")
 
     #

@@ -68,15 +68,19 @@ MRU_SIZE = 20
 #: The classic favorite modules (an official key: read, never written)
 FAVORITES_KEY = "Modules/FavoriteModules"
 
-POPUP_WIDTH = 560
-POPUP_HEIGHT = 420
-POPUP_TOP = 64
+# Geometry of the popup (VISUAL 4.6): 640 wide, 110 px from the top of the window, 14 px corners
+POPUP_WIDTH = 640
+POPUP_HEIGHT = 470
+POPUP_TOP = 110
 POPUP_MARGIN = 16
-FIELD_HEIGHT = 40
-ROW_HEIGHT = 32
-HEADER_HEIGHT = 24
-FOOTER_HEIGHT = 24
+POPUP_RADIUS = 14
+FIELD_HEIGHT = 54
+ROW_HEIGHT = 48
+HEADER_HEIGHT = 30
+FOOTER_HEIGHT = 36
 ICON_SIZE = 16
+#: The icon tile of a row
+ICON_TILE_SIZE = 28
 #: Rows shown for a query
 MAX_RESULTS = 60
 #: 'Where did it go?' answers shown for a query
@@ -1372,76 +1376,85 @@ class _RowDelegate(qt.QStyledItemDelegate):
         painter.setRenderHint(qt.QPainter.Antialiasing, True)
         colors = palette.colors
         if rowKind == "header":
+            # A group header: an 11 px SemiBold overline
             font = qt.QFont(palette.list.font)
             font.setPixelSize(ui.fontPx(11))
             font.setWeight(qt.QFont.DemiBold)
-            font.setLetterSpacing(qt.QFont.AbsoluteSpacing, 0.6)
+            font.setLetterSpacing(qt.QFont.PercentageSpacing, 104.0)
             painter.setFont(font)
             painter.setPen(colors["text3"])
-            painter.drawText(qt.QRect(rect.x() + 12, rect.y(), rect.width() - 24, rect.height() - 4),
+            painter.drawText(qt.QRect(rect.x() + 18, rect.y(), rect.width() - 36, rect.height() - 6),
                              int(qt.Qt.AlignLeft | qt.Qt.AlignBottom), str(payload).upper())
             painter.restore()
             return
         entry = payload
         enabled = palette.enabledState.get(entry.id, True)
+        rowRect = qt.QRectF(rect).adjusted(8, 1, -8, -1)
         if row == palette.list.currentRow:
-            painter.fillRect(rect, colors["selected"])
+            painter.setPen(qt.Qt.NoPen)
+            painter.setBrush(colors["selected"])
+            painter.drawRoundedRect(rowRect, 8, 8)
         elif row == palette.hoverRow:
-            painter.fillRect(rect, colors["hover"])
-        x = rect.x() + 12
+            painter.setPen(qt.Qt.NoPen)
+            painter.setBrush(colors["hover"])
+            painter.drawRoundedRect(rowRect, 8, 8)
+        # The icon tile
+        x = rect.x() + 18
+        tile = qt.QRectF(x, rect.y() + (rect.height() - ICON_TILE_SIZE) / 2.0, ICON_TILE_SIZE, ICON_TILE_SIZE)
+        painter.setPen(qt.Qt.NoPen)
+        painter.setBrush(colors["tile"])
+        painter.drawRoundedRect(tile, 7, 7)
         iconName = entry.iconName or "circle-dashed"
         try:
             pixmap = palette.iconPixmap(iconName, enabled)
-            painter.drawPixmap(x, rect.y() + (rect.height() - ICON_SIZE) // 2, pixmap)
+            painter.drawPixmap(int(tile.x() + (ICON_TILE_SIZE - ICON_SIZE) / 2), int(tile.y() + (ICON_TILE_SIZE - ICON_SIZE) / 2), pixmap)
         except Exception:
             pass
-        x += ICON_SIZE + 12
-        right = rect.right() - 12
-        # Key chip
+        x += ICON_TILE_SIZE + 12
+        right = rect.right() - 18
+        # Key chip, only when there is a key
         smallFont = qt.QFont(palette.list.font)
         smallFont.setPixelSize(ui.fontPx(11))
         painter.setFont(smallFont)
         smallMetrics = painter.fontMetrics()
         if entry.key:
             keyText = _keyText(entry.key)
-            chipWidth = _advance(smallMetrics, keyText) + 12
+            chipWidth = max(_advance(smallMetrics, keyText) + 12, 22)
             chipRect = qt.QRect(right - chipWidth, rect.y() + (rect.height() - 20) // 2, chipWidth, 20)
             painter.setPen(colors["border"])
             painter.setBrush(qt.QBrush(qt.Qt.NoBrush))
-            painter.drawRoundedRect(qt.QRectF(chipRect).adjusted(0.5, 0.5, -0.5, -0.5), 4, 4)
+            painter.drawRoundedRect(qt.QRectF(chipRect).adjusted(0.5, 0.5, -0.5, -0.5), 5, 5)
             painter.setFont(smallFont)
             painter.setPen(colors["text2"])
             painter.drawText(chipRect, int(qt.Qt.AlignCenter), keyText)
-            right = chipRect.left() - 8
-        # Category
-        categoryFont = qt.QFont(palette.list.font)
-        categoryFont.setPixelSize(ui.fontPx(12))
-        painter.setFont(categoryFont)
-        categoryMetrics = painter.fontMetrics()
-        if entry.category:
-            # +2: the advance is rounded down, and elidedText() elides a text exactly as wide as the width
-            categoryWidth = min(_advance(categoryMetrics, entry.category) + 2, 140)
-            categoryRect = qt.QRect(right - categoryWidth, rect.y(), categoryWidth, rect.height())
-            painter.setFont(categoryFont)
-            painter.setPen(colors["text3"])
-            painter.drawText(categoryRect, int(qt.Qt.AlignRight | qt.Qt.AlignVCenter),
-                             categoryMetrics.elidedText(entry.category, qt.Qt.ElideRight, categoryWidth))
-            right = categoryRect.left() - 12
-        # Title, with the matched characters in the accent colour
+            right = chipRect.left() - 12
+        available = max(0, right - x)
+        # Second line: what it does (the description), else what kind of thing it is
+        detail = entry.description or entry.category
+        detailFont = qt.QFont(palette.list.font)
+        detailFont.setPixelSize(ui.fontPx(12))
+        detailMetrics = qt.QFontMetrics(detailFont)
+        # Title (13 px Medium), with the matched characters in the accent colour
         titleFont = qt.QFont(palette.list.font)
         titleFont.setPixelSize(ui.fontPx(13))
+        titleFont.setWeight(qt.QFont.Medium)
         boldFont = qt.QFont(titleFont)
-        boldFont.setWeight(qt.QFont.DemiBold)
+        boldFont.setWeight(qt.QFont.Bold)
         painter.setFont(boldFont)
         boldMetrics = painter.fontMetrics()
         painter.setFont(titleFont)
         metrics = painter.fontMetrics()
-        available = max(0, right - x)
         textColor = colors["text"] if enabled else colors["disabled"]
-        baseline = rect.y() + (rect.height() + metrics.ascent() - metrics.descent()) // 2
+        if detail:
+            lineHeight = metrics.height() + detailMetrics.height()
+            top = rect.y() + (rect.height() - lineHeight) // 2
+            baseline = top + metrics.ascent()
+        else:
+            baseline = rect.y() + (rect.height() + metrics.ascent() - metrics.descent()) // 2
         ranges = finder.matchedRanges(entry.title, palette.normalizedQuery) if enabled else []
         segments = _segments(entry.title, ranges)
         width = sum(_advance(boldMetrics if highlighted else metrics, text) for text, highlighted in segments)
+        startX = x
         if width > available:
             painter.setFont(titleFont)
             painter.setPen(textColor)
@@ -1452,6 +1465,13 @@ class _RowDelegate(qt.QStyledItemDelegate):
                 painter.setPen(colors["accent"] if highlighted else textColor)
                 painter.drawText(x, baseline, text)
                 x += _advance(boldMetrics if highlighted else metrics, text)
+        if detail:
+            painter.setFont(detailFont)
+            # text2 on the selected row: text3 on the "selected" fill is below 4.5:1 in the dark theme
+            detailColor = colors["text2"] if row == palette.list.currentRow else colors["text3"]
+            painter.setPen(detailColor if enabled else colors["disabled"])
+            painter.drawText(startX, baseline + metrics.descent() + detailMetrics.ascent() + 1,
+                             detailMetrics.elidedText(detail, qt.Qt.ElideRight, available))
         painter.restore()
 
 
@@ -1531,12 +1551,27 @@ class Palette:
         layout.setSpacing(0)
         self.widget = widget
 
+        # The input row (54 px): the search icon, the field (16 px text) and the Esc key
+        fieldRow = qt.QFrame()
+        fieldRow.setObjectName("StudioPaletteFieldRow")
+        fieldRow.setFixedHeight(FIELD_HEIGHT)
+        fieldLayout = qt.QHBoxLayout(fieldRow)
+        fieldLayout.setContentsMargins(18, 0, 16, 0)
+        fieldLayout.setSpacing(12)
+        self.searchIcon = qt.QLabel()
+        self.searchIcon.setObjectName("StudioPaletteSearchIcon")
+        self.searchIcon.setFixedSize(18, 18)
+        fieldLayout.addWidget(self.searchIcon)
         field = qt.QLineEdit()
         field.setObjectName("StudioPaletteSearch")
-        field.setFixedHeight(FIELD_HEIGHT)
+        field.setFixedHeight(FIELD_HEIGHT - 2)
         field.setClearButtonEnabled(True)
         field.setAccessibleName(_("Search"))
-        layout.addWidget(field)
+        fieldLayout.addWidget(field, 1)
+        self.escKey = ui.kbd(_("Esc"))
+        self.escKey.setFixedHeight(20)
+        fieldLayout.addWidget(self.escKey)
+        layout.addWidget(fieldRow)
         self.field = field
 
         listWidget = qt.QListWidget()
@@ -1561,11 +1596,18 @@ class Palette:
         layout.addWidget(emptyLabel, 1)
         self.emptyLabel = emptyLabel
 
-        footer = qt.QLabel(_("↑ ↓ move · Enter run · Esc close · Ctrl+/ all keys"))
+        footerRow = qt.QFrame()
+        footerRow.setObjectName("StudioPaletteFooterRow")
+        footerRow.setFixedHeight(FOOTER_HEIGHT)
+        footerLayout = qt.QHBoxLayout(footerRow)
+        footerLayout.setContentsMargins(18, 0, 18, 0)
+        footer = qt.QLabel(_("↑ ↓ move · ↵ open · Esc close"))
         footer.setObjectName("StudioPaletteFooter")
-        footer.setFixedHeight(FOOTER_HEIGHT)
-        footer.setContentsMargins(12, 0, 12, 0)
-        layout.addWidget(footer)
+        footerLayout.addWidget(footer, 1)
+        footerKeys = qt.QLabel(_("All shortcuts · {key}").format(key=ui.keyText("Ctrl+/")))
+        footerKeys.setObjectName("StudioPaletteFooterKeys")
+        footerLayout.addWidget(footerKeys)
+        layout.addWidget(footerRow)
         self.footer = footer
 
         self._keyFilter = _KeyFilter(self)
@@ -1586,21 +1628,24 @@ class Palette:
             return
         self._paletteKey = key
         self._iconCache = {}
-        accentSubtle = ui.token("accent-subtle")
         self.colors = {
             "text": ui.token("text"), "text2": ui.token("text2"), "text3": ui.token("text3"), "disabled": ui.token("text-disabled"),
-            "accent": ui.token("accent-fg"), "border": ui.token("border"), "selected": accentSubtle, "hover": ui.token("control-hover"),
+            "accent": ui.token("accent-fg"), "border": ui.token("border"), "selected": ui.token("selected") if ui.isDark() else ui.token("control-hover"),
+            "hover": ui.token("control-hover"), "tile": ui.token("control-hover") if ui.isDark() else ui.token("canvas"),
         }
         card = ui.token("card").name()
         border = ui.token("border").name()
         hairline = ui.token("hairline").name()
         self.widget.setStyleSheet(
-            f"QFrame#StudioPalette {{ background-color: {card}; border: 1px solid {border}; }}"
-            f"QLineEdit#StudioPaletteSearch {{ background-color: {card}; color: {ui.token('text').name()}; border: none; "
-            f"border-bottom: 1px solid {hairline}; padding: 0px 12px; font-size: {ui.fontPx(15)}px; }}"
+            f"QFrame#StudioPalette {{ background-color: {card}; border: 1px solid {border}; border-radius: {POPUP_RADIUS}px; }}"
+            f"QFrame#StudioPaletteFieldRow {{ background: transparent; border: none; border-bottom: 1px solid {hairline}; }}"
+            f"QLineEdit#StudioPaletteSearch {{ background: transparent; color: {ui.token('text').name()}; border: none; "
+            f"padding: 0px; font-size: {ui.fontPx(16)}px; }}"
             f"QListWidget#StudioPaletteList {{ background-color: {card}; border: none; outline: none; }}"
             f"QLabel#StudioPaletteEmpty {{ color: {ui.token('text2').name()}; font-size: {ui.fontPx(13)}px; }}"
-            f"QLabel#StudioPaletteFooter {{ color: {ui.token('text3').name()}; border-top: 1px solid {hairline}; font-size: {ui.fontPx(11)}px; }}")
+            f"QFrame#StudioPaletteFooterRow {{ background: transparent; border: none; border-top: 1px solid {hairline}; }}"
+            f"QLabel#StudioPaletteFooter, QLabel#StudioPaletteFooterKeys {{ color: {ui.token('text3').name()}; font-size: {ui.fontPx(12)}px; }}")
+        self.searchIcon.setPixmap(ui.pixmap("search", 18, "text3"))
 
     def iconPixmap(self, name, enabled=True):
         key = (name, enabled)
@@ -1643,9 +1688,11 @@ class Palette:
     def _place(self):
         mainWindow = self.mainWindow
         width = min(POPUP_WIDTH, max(320, mainWindow.width - 2 * POPUP_MARGIN))
-        height = min(POPUP_HEIGHT, max(200, mainWindow.height - POPUP_TOP - POPUP_MARGIN))
-        topLeft = mainWindow.mapToGlobal(qt.QPoint((mainWindow.width - width) // 2, POPUP_TOP))
+        top = min(POPUP_TOP, max(POPUP_MARGIN, mainWindow.height // 8))
+        height = min(POPUP_HEIGHT, max(200, mainWindow.height - top - POPUP_MARGIN))
+        topLeft = mainWindow.mapToGlobal(qt.QPoint((mainWindow.width - width) // 2, top))
         self.widget.setGeometry(topLeft.x(), topLeft.y(), width, height)
+        ui.setRoundedMask(self.widget, POPUP_RADIUS)
 
     def close(self):
         if _isAlive(self.widget) and self.widget.isVisible():

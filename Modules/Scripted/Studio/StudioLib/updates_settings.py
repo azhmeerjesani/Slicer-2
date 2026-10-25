@@ -12,7 +12,7 @@ import qt
 import slicer
 from slicer.i18n import tr as _
 
-from . import updates
+from . import ui, updates
 
 PANEL_OBJECT_NAME = "StudioUpdatesSettingsPanel"
 
@@ -36,24 +36,43 @@ class UpdatesSettingsPanel(ctk.ctkSettingsPanel):
         self.setObjectName(PANEL_OBJECT_NAME)
         self.service = service
         layout = qt.QVBoxLayout(self)
+        # A Studio settings page (VISUAL 4.7): the title and one line, section labels, 44 px rows with hairlines, a switch
+        layout.setContentsMargins(24, 20, 24, 16)
+        layout.setSpacing(6)
+        title = ui.label(_("Updates"), "title", "text", "StudioUpdatesTitle")
+        layout.addWidget(title)
+        layout.addWidget(ui.label(_("New versions of Slicer Studio, from its public releases."), "body", "text2", "StudioUpdatesDescription"))
+        layout.addSpacing(14)
+        layout.addWidget(ui.sectionLabel(_("Version")))
 
-        form = qt.QFormLayout()
-        form.setFieldGrowthPolicy(qt.QFormLayout.ExpandingFieldsGrow)
-        layout.addLayout(form)
+        def row(text, valueWidget, last=False):
+            frame = qt.QFrame()
+            frame.setObjectName("StudioSettingsRow" if not last else "StudioSettingsRowLast")
+            frame.setMinimumHeight(ui.SETTINGS_ROW_HEIGHT)
+            rowLayout = qt.QHBoxLayout(frame)
+            rowLayout.setContentsMargins(0, 0, 0, 0)
+            rowLayout.setSpacing(12)
+            rowLayout.addWidget(ui.label(text, "body", "text"))
+            rowLayout.addStretch(1)
+            rowLayout.addWidget(valueWidget)
+            layout.addWidget(frame)
+            return frame
+
         self.versionLabel = qt.QLabel()
         self.versionLabel.setObjectName("StudioUpdatesVersionLabel")
         self.versionLabel.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
-        form.addRow(_("This version:"), self.versionLabel)
+        row(_("This version"), self.versionLabel)
         self.latestLabel = qt.QLabel()
         self.latestLabel.setObjectName("StudioUpdatesLatestLabel")
         self.latestLabel.setOpenExternalLinks(True)
         self.latestLabel.setTextFormat(qt.Qt.RichText)
-        form.addRow(_("Latest release:"), self.latestLabel)
-        # Word-wrapped text outside the form layout: a form row does not grow for a wrapped label
+        row(_("Latest release"), self.latestLabel, last=True)
+        # Word-wrapped text outside the rows: a row does not grow for a wrapped label
         self.statusLabel = qt.QLabel()
         self.statusLabel.setObjectName("StudioUpdatesStatusLabel")
         self.statusLabel.setWordWrap(True)
         self.statusLabel.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
+        ui.setText(self.statusLabel, "caption")
         layout.addWidget(self.statusLabel)
 
         self.notesBrowser = qt.QTextBrowser()
@@ -63,19 +82,25 @@ class UpdatesSettingsPanel(ctk.ctkSettingsPanel):
         layout.addWidget(self.notesBrowser)
 
         buttons = qt.QHBoxLayout()
+        buttons.setSpacing(8)
         self.checkButton = qt.QPushButton(_("Check now"))
         self.checkButton.setObjectName("StudioUpdatesCheckButton")
         self.checkButton.connect("clicked()", self.onCheckNow)
+        ui.setRole(self.checkButton, "secondary")
         buttons.addWidget(self.checkButton)
         self.updateButton = qt.QPushButton(_("Update now"))
         self.updateButton.setObjectName("StudioUpdatesUpdateButton")
         self.updateButton.connect("clicked()", self.onUpdateNow)
+        ui.setRole(self.updateButton, "primary")
         buttons.addWidget(self.updateButton)
         buttons.addStretch(1)
+        layout.addSpacing(6)
         layout.addLayout(buttons)
+        layout.addSpacing(14)
+        layout.addWidget(ui.sectionLabel(_("When to check")))
 
-        self.autoCheckBox = qt.QCheckBox(_("Check for updates automatically when Slicer Studio starts"))
-        self.autoCheckBox.setObjectName("StudioUpdatesAutoCheck")
+        self.autoCheckBox = ui.switch(_("Check for updates automatically when Slicer Studio starts"), "StudioUpdatesAutoCheck")
+        self.autoCheckBox.setMinimumHeight(ui.SETTINGS_ROW_HEIGHT)
         self.autoCheckBox.checked = updates.DEFAULT_SETTINGS["AutoCheck"]
         self.autoCheckBox.toolTip = _("One anonymous request to github.com at startup (and once a day while Slicer Studio runs). "
                                       "Required updates are found only by a check.")
@@ -85,8 +110,15 @@ class UpdatesSettingsPanel(ctk.ctkSettingsPanel):
                                         "from github.com. Nothing about you, this computer or your data is sent."))
         self.privacyLabel.setObjectName("StudioUpdatesPrivacyLabel")
         self.privacyLabel.setWordWrap(True)
+        ui.setText(self.privacyLabel, "caption")
         layout.addWidget(self.privacyLabel)
         layout.addStretch(1)
+        ui.bindStyleSheet(self, lambda: (
+            f"QFrame#StudioSettingsRow {{ border: none; border-bottom: 1px solid {ui.token('hairline').name()}; background: transparent; }}"
+            "QFrame#StudioSettingsRowLast { border: none; background: transparent; }"
+            f"QLabel#StudioUpdatesStatusLabel, QLabel#StudioUpdatesPrivacyLabel {{ color: {ui.token('text3').name()}; }}"
+            f"QLabel#StudioUpdatesVersionLabel, QLabel#StudioUpdatesLatestLabel {{ color: {ui.token('text2').name()}; }}"
+            f"QTextBrowser#StudioUpdatesNotes {{ background-color: {ui.token('canvas').name()}; border: 1px solid {ui.token('hairline').name()}; border-radius: 8px; }}"))
 
         self._showFilter = _ShowEventFilter(self.refresh)
         self.installEventFilter(self._showFilter)

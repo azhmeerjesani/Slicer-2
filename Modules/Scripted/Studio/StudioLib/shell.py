@@ -755,8 +755,13 @@ class StickyToast:
         self.frame.setObjectName("StudioStickyToast")
         self.frame.setFixedHeight(hud.TOAST_HEIGHT)
         layout = qt.QHBoxLayout(self.frame)
-        layout.setContentsMargins(16, 0, 6, 0)
-        layout.setSpacing(8)
+        layout.setContentsMargins(hud.TOAST_ICON_LEFT, 0, 6, 0)
+        layout.setSpacing(hud.TOAST_ICON_GAP)
+        self.level = "info"
+        self.iconLabel = qt.QLabel()
+        self.iconLabel.setObjectName("StudioStickyToastIcon")
+        self.iconLabel.setFixedSize(hud.TOAST_ICON_SIZE, hud.TOAST_ICON_SIZE)
+        layout.addWidget(self.iconLabel)
         self.label = qt.QLabel()
         self.label.setObjectName("StudioStickyToastText")
         layout.addWidget(self.label)
@@ -784,19 +789,21 @@ class StickyToast:
         # The application event filter must be gone before Python is finalized
         slicer.app.connect("aboutToQuit()", self.hide)
 
-    @staticmethod
-    def _styleSheet():
-        tooltip = ui.token("tooltip")
-        text = ui.token("tooltip-text")
+    def _styleSheet(self):
+        self.iconLabel.setPixmap(hud.toastIconPixmap(self.level))
+        _background, text, _border = hud.toastColors()
         return (
-            f"QFrame#StudioStickyToast {{ background-color: {ui._rgba(tooltip, 0.95)}; border: 1px solid {ui._rgba(text, 0.12)};"
-            f" border-radius: {hud.TOAST_HEIGHT // 2}px; }}"
+            hud.toastStyleSheet("QFrame#StudioStickyToast")
+            + "QLabel#StudioStickyToastIcon { background: transparent; border: none; }"
             f"QLabel#StudioStickyToastText {{ color: {text.name()}; background: transparent; font-size: 13px; }}"
-            f"QToolButton#StudioStickyToastAction {{ color: {text.name()}; background: transparent; border: none; border-radius: 10px;"
-            f" padding: 2px 8px; font-size: 13px; font-weight: 600; text-decoration: underline; }}"
+            f"QToolButton#StudioStickyToastAction {{ color: #7aa7ff; background: transparent; border: none; border-radius: 10px;"
+            f" padding: 2px 8px; font-size: 13px; font-weight: 600; }}"
             f"QToolButton#StudioStickyToastAction:hover {{ background-color: {ui._rgba(text, 0.12)}; }}")
 
-    def show(self, text, sticky=True, ms=None, action=None, actionText=None):
+    def show(self, text, sticky=True, ms=None, action=None, actionText=None, level="info"):
+        if level != self.level:
+            self.level = level
+            self.iconLabel.setPixmap(hud.toastIconPixmap(level))
         self._action = action
         self._sticky = sticky
         self.fullText = text
@@ -1101,6 +1108,9 @@ class Shell:
         self._workspacePanelWidths = {}
         #: Contents of the module panel scroll area, watched for layout changes (a tool was chosen)
         self._watchedPanelContents = None
+        #: [(module widget, Classic minimum height)]: module widgets whose minimum height Studio holds at their height for
+        #: their width (see _holdModuleWidgetHeight())
+        self._heldModuleWidgets = []
         #: True while the inspector is hidden by the user (shortcut, Ctrl+5, menu), not by a workspace page
         self._inspectorHiddenByUser = False
         #: (toggle view action, slot) of the toolbars that Studio hides
@@ -1813,7 +1823,8 @@ class Shell:
         policy.setHeightForWidth(True)
         self._noticeSlot.setSizePolicy(policy)
         noticeLayout = qt.QVBoxLayout(self._noticeSlot)
-        noticeLayout.setContentsMargins(0, 0, 0, 0)
+        # A rounded notice (VISUAL 4.8) inset like the inspector cards
+        noticeLayout.setContentsMargins(12, 8, 12, 4)
         noticeLayout.setSpacing(0)
         self._noticeSlot.hide()
         layout.insertWidget(layout.indexOf(self._modulePanel()), self._noticeSlot)
@@ -2531,6 +2542,7 @@ class Shell:
                 if self._eventFilter is not None and scrollArea.widget() is not None and self._watchedPanelContents is None:
                     self._watchedPanelContents = scrollArea.widget()
                     self._watchedPanelContents.installEventFilter(self._eventFilter)
+                self._holdModuleWidgetHeights()
             self._fitTextBrowsers()
             return
         self._unfitTextBrowsers()
@@ -2921,11 +2933,11 @@ class Shell:
             return
         if sticky or action is not None:
             self._hidePlainToast()
-            self._stickyToast.show(text, sticky=sticky, ms=ms, action=action, actionText=actionText)
+            self._stickyToast.show(text, sticky=sticky, ms=ms, action=action, actionText=actionText, level=level)
             self._stickyToast.frame.setToolTip(toolTip or "")
             return
         self._stickyToast.hide()
-        self._toast.show(text, ms)
+        self._toast.show(text, ms, level=level)
         self._toast.label.setAccessibleName(str(text))
 
     def _hidePlainToast(self):
@@ -3352,6 +3364,9 @@ class Shell:
             # Alt+click and Alt+wheel are not a bare Alt press
             self._cancelAltKey()
             return False
+        if eventType in (qt.QEvent.Resize, qt.QEvent.LayoutRequest) and self._heldModuleWidgets and self._isHeldModuleWidget(obj):
+            self._holdModuleWidgetHeight(obj, event.size().width() if eventType == qt.QEvent.Resize else obj.width)
+            return False
         if eventType == qt.QEvent.Resize:
             if obj == self.mainWindow.centralWidget():
                 if self._canvas is not None:
@@ -3394,6 +3409,8 @@ class Shell:
         elif eventType == qt.QEvent.LayoutRequest and obj == self._watchedPanelContents:
             # The module widget changed (a tool was chosen): the inspector may need to widen once
             self._schedulePanelWidthUpdate(shrink=False)
+            # Another module widget may have been put in the panel
+            self._holdModuleWidgetHeights()
         elif eventType == qt.QEvent.Show and obj == self.mainWindow:
             if self._canvas is not None:
                 # The canvas was set while the main window was hidden (no view widget was visible): cover now
@@ -3463,7 +3480,58 @@ class Shell:
                 # Deleted with the module panel
                 pass
             self._watchedPanelContents = None
+        self._releaseModuleWidgetHeights()
         self._eventFilter = None
+
+    #
+    # Height of the module widgets in the inspector
+    #
+
+    def _holdModuleWidgetHeights(self):
+        """Hold the minimum height of the module widgets in the inspector at their height for their width.
+
+        The module panel takes the layout item of a module widget out of its scroll area when another module is
+        selected, without deleting it (``qSlicerModulePanel::removeModule()``). That item stays registered with the
+        widget, so the item of the widget put back later never has its height-for-width cache cleared (Qt clears only
+        the registered item). The scroll area then sizes its contents with the height that the module widget had for
+        its width when it was first shown again: when the widget grew (a drawn lesion, a notice), its word-wrapped rows
+        were laid out below their height and drawn over each other (the stat cells of the lesion card over its save
+        state, at 1366 x 768). Minimum sizes are not cached that way, so a minimum height equal to the height for the
+        width lets the inspector scroll instead. Classic keeps its behaviour (released in ``_removeEventFilters()``).
+        """
+        contents = self._watchedPanelContents
+        if contents is None or self._eventFilter is None or contents.layout() is None:
+            return
+        # A module widget deleted since (a reloaded scripted module) is forgotten
+        self._heldModuleWidgets = [(widget, height) for widget, height in self._heldModuleWidgets if self._isAlive(widget)]
+        layout = contents.layout()
+        for index in range(layout.count()):
+            widget = layout.itemAt(index).widget()
+            if widget is None or not widget.inherits("qSlicerAbstractModuleWidget") or self._isHeldModuleWidget(widget):
+                continue
+            self._heldModuleWidgets.append((widget, widget.minimumHeight))
+            widget.installEventFilter(self._eventFilter)
+            self._holdModuleWidgetHeight(widget, widget.width)
+
+    def _isHeldModuleWidget(self, obj):
+        return any(obj == widget for widget, _minimumHeight in self._heldModuleWidgets)
+
+    def _holdModuleWidgetHeight(self, widget, width):
+        classicMinimumHeight = next((height for held, height in self._heldModuleWidgets if held == widget), 0)
+        height = max(widget.heightForWidth(width), classicMinimumHeight) if width > 0 else classicMinimumHeight
+        if widget.minimumHeight != height:
+            widget.setMinimumHeight(height)
+
+    def _releaseModuleWidgetHeights(self):
+        held, self._heldModuleWidgets = self._heldModuleWidgets, []
+        for widget, minimumHeight in held:
+            try:
+                if self._eventFilter is not None:
+                    widget.removeEventFilter(self._eventFilter)
+                widget.setMinimumHeight(minimumHeight)
+            except Exception:
+                # Deleted with its module
+                pass
 
     #
     # Studio-only behaviours of the views, the save folder and the classic menus

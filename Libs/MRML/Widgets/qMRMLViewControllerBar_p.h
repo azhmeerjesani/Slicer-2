@@ -87,6 +87,12 @@ public:
   /// Fill color of the flat bar: the "view-bar" token of the application style, or the window
   /// color of the palette, darkened.
   QColor viewBarColor() const;
+  /// Color of the design token \a name of the application style (invalid if the style has no tokens).
+  QColor styleToken(const QString& name) const;
+  /// Color of the strip around the pill of the flat bar: the "canvas" token, or the window color, darkened.
+  QColor flatStripColor() const;
+  /// Paint the pill of the flat bar on the bar widget (called on its paint event).
+  void paintFlatPill();
 
   /// Return the flat bar tooltip "Name · key · description" (empty parts are skipped).
   static QString flatToolTip(const QString& name, const QString& key, const QString& description);

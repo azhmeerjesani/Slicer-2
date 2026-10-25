@@ -1,4 +1,5 @@
 import os
+import re
 
 import qt
 import vtk
@@ -8,6 +9,20 @@ from slicer.util import settingsValue
 from slicer.util import VTKObservationMixin
 
 from . import DataProbeUtil
+
+
+#: Corner text of views with the flat view controller bar (Slicer Studio look): a small, quiet text without shadow
+FLAT_FONT_SIZE = 11
+FLAT_TEXT_COLOR = (0x8B / 255.0, 0x8B / 255.0, 0x94 / 255.0)
+CLASSIC_TEXT_COLOR = (1.0, 1.0, 1.0)
+
+
+def flatDisplayName(name):
+    """A readable name of a volume for the corner text of a flat view: "MNI152NLin2009cAsym_2mm_brain" becomes
+    "MNI152NLin2009cAsym · 2 mm brain" (the node is not renamed).
+    """
+    text = re.sub(r"_(\d+(?:\.\d+)?)\s?mm(?=_|$)", r" · \1 mm", name or "")
+    return re.sub(r"\s+", " ", text.replace("_", " ")).strip()
 
 
 class SliceAnnotations(VTKObservationMixin):
@@ -431,10 +446,14 @@ class SliceAnnotations(VTKObservationMixin):
 
         if enabled:
             # Font
-            cornerAnnotation.SetMaximumFontSize(self.fontSize)
-            cornerAnnotation.SetMinimumFontSize(self.fontSize)
+            flat = self.isFlatView(sliceViewName)
+            fontSize = FLAT_FONT_SIZE if flat else self.fontSize
+            cornerAnnotation.SetMaximumFontSize(fontSize)
+            cornerAnnotation.SetMinimumFontSize(fontSize)
             cornerAnnotation.SetNonlinearFontScaleFactor(1)
             textProperty = cornerAnnotation.GetTextProperty()
+            textProperty.SetColor(FLAT_TEXT_COLOR if flat else CLASSIC_TEXT_COLOR)
+            textProperty.SetShadow(0 if flat else 1)
             if self.fontFamily == "Times":
                 textProperty.SetFontFamilyToTimes()
             else:
@@ -448,6 +467,25 @@ class SliceAnnotations(VTKObservationMixin):
                 cornerAnnotation.SetText(position, "")
 
         self.sliceViews[sliceViewName].scheduleRender()
+
+    def isFlatView(self, sliceViewName):
+        """True if the view has the flat view controller bar (the Slicer Studio look of the corner text)."""
+        sliceWidget = self.sliceWidgets.get(sliceViewName) if hasattr(self, "sliceWidgets") else None
+        if sliceWidget is None:
+            return False
+        try:
+            controller = sliceWidget.sliceController()
+            return bool(controller is not None and getattr(controller, "flatStyle", False))
+        except (AttributeError, ValueError):
+            return False
+
+    def _layerText(self, prefix, volumeName, opacity, flat):
+        """Corner text of a layer: "B: name" (classic), the readable name alone on a flat view."""
+        if flat:
+            text = flatDisplayName(volumeName)
+            return text if opacity is None else text + " · %d%%" % (opacity * 100)
+        text = prefix + volumeName
+        return text if opacity is None else text + " (" + str("%d" % (opacity * 100)) + "%)"
 
     def makeAnnotationText(self, sliceLogic):
         self.resetTexts()
@@ -470,6 +508,7 @@ class SliceAnnotations(VTKObservationMixin):
         if not sliceNode:
             return
         sliceViewName = sliceNode.GetLayoutName()
+        flat = self.isFlatView(sliceViewName)
 
         if self.sliceViews[sliceViewName]:
             #
@@ -481,9 +520,8 @@ class SliceAnnotations(VTKObservationMixin):
                     foregroundOpacity = sliceCompositeNode.GetForegroundOpacity()
                     backgroundVolumeName = backgroundVolume.GetName()
                     foregroundVolumeName = foregroundVolume.GetName()
-                    self.cornerTexts[0]["3-Background"]["text"] = "B: " + backgroundVolumeName
-                    self.cornerTexts[0]["2-Foreground"]["text"] = "F: " + foregroundVolumeName + " (" + str(
-                        "%d" % (foregroundOpacity * 100)) + "%)"
+                    self.cornerTexts[0]["3-Background"]["text"] = self._layerText("B: ", backgroundVolumeName, None, flat)
+                    self.cornerTexts[0]["2-Foreground"]["text"] = self._layerText("F: ", foregroundVolumeName, foregroundOpacity, flat)
 
                 bgUids = backgroundVolume.GetAttribute("DICOM.instanceUIDs")
                 fgUids = foregroundVolume.GetAttribute("DICOM.instanceUIDs")
@@ -505,7 +543,7 @@ class SliceAnnotations(VTKObservationMixin):
             elif backgroundVolume is not None:
                 backgroundVolumeName = backgroundVolume.GetName()
                 if self.bottomLeft:
-                    self.cornerTexts[0]["3-Background"]["text"] = "B: " + backgroundVolumeName
+                    self.cornerTexts[0]["3-Background"]["text"] = self._layerText("B: ", backgroundVolumeName, None, flat)
 
                 uids = backgroundVolume.GetAttribute("DICOM.instanceUIDs")
                 if uids:
@@ -519,7 +557,7 @@ class SliceAnnotations(VTKObservationMixin):
             elif foregroundVolume is not None:
                 if self.bottomLeft:
                     foregroundVolumeName = foregroundVolume.GetName()
-                    self.cornerTexts[0]["2-Foreground"]["text"] = "F: " + foregroundVolumeName
+                    self.cornerTexts[0]["2-Foreground"]["text"] = self._layerText("F: ", foregroundVolumeName, None, flat)
 
                 uids = foregroundVolume.GetAttribute("DICOM.instanceUIDs")
                 if uids:
@@ -557,8 +595,7 @@ class SliceAnnotations(VTKObservationMixin):
             if (labelVolume is not None) and self.bottomLeft:
                 labelOpacity = sliceCompositeNode.GetLabelOpacity()
                 labelVolumeName = labelVolume.GetName()
-                self.cornerTexts[0]["1-Label"]["text"] = "L: " + labelVolumeName + " (" + str(
-                    "%d" % (labelOpacity * 100)) + "%)"
+                self.cornerTexts[0]["1-Label"]["text"] = self._layerText("L: ", labelVolumeName, labelOpacity, flat)
 
             self.drawCornerAnnotations(sliceViewName)
 
@@ -689,7 +726,8 @@ class SliceAnnotations(VTKObservationMixin):
         # Auto-Adjust
         # adjust maximum text length based on fontsize and view width
         viewWidth = self.sliceViews[sliceViewName].width
-        self.maximumTextLength = int((viewWidth - 40) / self.fontSize)
+        flat = self.isFlatView(sliceViewName)
+        self.maximumTextLength = int((viewWidth - 40) / (FLAT_FONT_SIZE if flat else self.fontSize))
 
         renderRequired = False
         for i, cornerText in enumerate(self.cornerTexts):
@@ -715,8 +753,8 @@ class SliceAnnotations(VTKObservationMixin):
                 sliceCornerAnnotation.SetText(i, cornerAnnotation)
                 renderRequired = True
             textProperty = sliceCornerAnnotation.GetTextProperty()
-            if not textProperty.GetShadow():
-                textProperty.SetShadow(1)
+            if bool(textProperty.GetShadow()) == flat:
+                textProperty.SetShadow(0 if flat else 1)
                 renderRequired = True
 
         # Annotations are updated whenever the slice view changes (e.g., for each slice offset change)

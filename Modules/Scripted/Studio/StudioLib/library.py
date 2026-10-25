@@ -1289,21 +1289,35 @@ class _LesionBlock:
         self.nodeId = segmentationNode.GetID()
         self.widget = qt.QWidget()
         self.widget.setObjectName("StudioCurrentWorkLesion")
-        layout = qt.QVBoxLayout(self.widget)
+        # One line (VISUAL 4.2): swatch, name, metrics, save state chip
+        layout = qt.QHBoxLayout(self.widget)
         layout.setContentsMargins(indent, 0, 0, 0)
-        layout.setSpacing(1)
+        layout.setSpacing(8)
+        self.swatch = qt.QLabel()
+        self.swatch.setObjectName("StudioCurrentWorkLesionSwatch")
+        self.swatch.setFixedSize(10, 10)
+        layout.addWidget(self.swatch, 0, qt.Qt.AlignVCenter)
         self.nameLabel = _elidedLabel("", 13, "StudioCurrentWorkLesionName")
+        font = qt.QFont(self.nameLabel.font)
+        font.setWeight(qt.QFont.Medium)
+        self.nameLabel.setFont(font)
+        self.nameLabel.setSizePolicy(qt.QSizePolicy.Preferred, qt.QSizePolicy.Preferred)
+        self.nameLabel.setMinimumWidth(40)
+        self.nameLabel.setMaximumWidth(220)
         self.metricsLabel = qt.QLabel()
         self.metricsLabel.setObjectName("StudioCurrentWorkLesionMetrics")
         self.stateLabel = qt.QLabel()
         self.stateLabel.setObjectName("StudioCurrentWorkLesionState")
         for label in (self.metricsLabel, self.stateLabel):
             label.setTextFormat(qt.Qt.RichText)
-            label.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
             label.setWordWrap(False)
             _setFont(label, 12)
-        for label in (self.nameLabel, self.metricsLabel, self.stateLabel):
-            layout.addWidget(label)
+        self.metricsLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+        self.stateLabel.setSizePolicy(qt.QSizePolicy.Maximum, qt.QSizePolicy.Fixed)
+        self.stateLabel.setFixedHeight(20)
+        layout.addWidget(self.nameLabel)
+        layout.addWidget(self.metricsLabel, 1)
+        layout.addWidget(self.stateLabel)
 
     def node(self):
         node = slicer.mrmlScene.GetNodeByID(self.nodeId)
@@ -1311,47 +1325,79 @@ class _LesionBlock:
 
 
 class CurrentWorkCard(qt.QObject):
-    """"Current work": what is open and what to do next (USABILITY 2). One row per scan (at most 4), its lesions with their
-    metrics and save state, the primary "Continue in Draw →", "Close", "New lesion on template" and "Show in Data module".
+    """"Continue" (VISUAL 4.2, USABILITY 2): what is open and what to do next. A card on the canvas with the project's
+    thumbnail, the project name and when it was saved, one row per scan (at most 4) with its lesions (metrics and save
+    state), and the actions: the primary "Continue in Draw →", "Close", "New lesion on template" and "Show in Data module".
 
     Lesions of a loaded set are listed by the ``LoadedSetCard``. ``refresh()`` creates the rows when the scene changed and
     updates their texts; metrics that are not cached yet read "…" and are computed once the switch is done.
     """
 
+    THUMBNAIL_SIZE = (196, 148)
+    ACTIONS_WIDTH = 200
+
     def __init__(self):
         qt.QObject.__init__(self)
-        self.widget, layout = ui.card(_("Current work"))
+        self.widget = qt.QFrame()
         self.widget.setObjectName("StudioCurrentWorkCard")
+        ui.setRole(self.widget, "cardLow")
+        outerLayout = qt.QVBoxLayout(self.widget)
+        outerLayout.setContentsMargins(ui.CARD_PADDING, ui.CARD_PADDING, ui.CARD_PADDING + 2, ui.CARD_PADDING)
+        outerLayout.setSpacing(10)
+        cardLayout = qt.QHBoxLayout()
+        cardLayout.setSpacing(20)
+        outerLayout.addLayout(cardLayout)
+        # The project's thumbnail, on black (the image is the hero)
+        self.thumbnail = qt.QLabel()
+        self.thumbnail.setObjectName("StudioCurrentWorkThumbnail")
+        self.thumbnail.setFixedSize(*self.THUMBNAIL_SIZE)
+        self.thumbnail.setAlignment(qt.Qt.AlignCenter)
+        cardLayout.addWidget(self.thumbnail, 0, qt.Qt.AlignTop)
+        middle = qt.QVBoxLayout()
+        middle.setSpacing(4)
+        self.overline = ui.overline(_("Continue"), "StudioCurrentWorkOverline")
+        middle.addWidget(self.overline)
+        self.titleLabel = _elidedLabel("", 18, "StudioCurrentWorkTitle")
+        ui.setText(self.titleLabel, "title")
+        middle.addWidget(self.titleLabel)
+        self.metaLabel = _elidedLabel("", 12, "StudioCurrentWorkMeta")
+        middle.addWidget(self.metaLabel)
+        middle.addSpacing(8)
         self.rowsLayout = qt.QVBoxLayout()
-        self.rowsLayout.setSpacing(10)
-        layout.addLayout(self.rowsLayout)
+        self.rowsLayout.setSpacing(8)
+        middle.addLayout(self.rowsLayout)
+        middle.addStretch(1)
+        cardLayout.addLayout(middle, 1)
 
-        buttonRow = _buttonRow()
+        actions = qt.QWidget()
+        actions.setObjectName("StudioCurrentWorkActions")
+        actions.setFixedWidth(self.ACTIONS_WIDTH)
+        actionsLayout = qt.QVBoxLayout(actions)
+        actionsLayout.setContentsMargins(0, 0, 0, 0)
+        actionsLayout.setSpacing(8)
+        actionsLayout.addStretch(1)
         self.continueButton = _roleButton(_("Continue in Draw →"), "StudioCurrentWorkContinueButton", lambda: continueInDraw(_shell()), "primary")
         self.continueButton.setToolTip(_("Edit the lesion in Draw (Ctrl+Alt+2)"))
+        self.continueButton.setFixedHeight(36)
         self.closeButton = _roleButton(_("Close"), "StudioCurrentWorkCloseButton", lambda: closeScene(), "secondary")  # noqa: PLW0108 (looked up when clicked)
         self.closeButton.setToolTip(_("Close the scene"))
-        buttonRow.layout().addWidget(self.continueButton, 3)
-        buttonRow.layout().addWidget(self.closeButton, 2)
-        layout.addWidget(buttonRow)
-
-        self.newLesionRow = _buttonRow()
+        self.closeButton.setFixedHeight(ui.BUTTON_HEIGHT)
         self.newLesionButton = _roleButton(_("New lesion on template"), "StudioCurrentWorkNewLesionButton", lambda: newLesionOnTemplate(_shell()), "secondary")
         self.newLesionButton.setToolTip(_("Start another lesion on the MNI template; the one you drew stays (hidden)"))
-        self.newLesionRow.layout().addWidget(self.newLesionButton)
-        layout.addWidget(self.newLesionRow)
+        self.newLesionButton.setFixedHeight(ui.BUTTON_HEIGHT)
+        self.newLesionRow = self.newLesionButton
         self.newLesionRow.hide()
-
-        linkRow = qt.QHBoxLayout()
-        linkRow.setContentsMargins(0, 0, 0, 0)
+        for button in (self.continueButton, self.closeButton, self.newLesionButton):
+            actionsLayout.addWidget(button)
         self.dataLink = _linkButton(_("Show in Data module"), "StudioCurrentWorkDataLink", lambda: showInDataModule())  # noqa: PLW0108
-        linkRow.addWidget(self.dataLink)
-        linkRow.addStretch(1)
-        layout.addLayout(linkRow)
-
+        actionsLayout.addWidget(self.dataLink, 0, qt.Qt.AlignHCenter)
+        actionsLayout.addStretch(1)
+        cardLayout.addWidget(actions)
+        # The 1 mm template offer: the last line of the card, across its width
         self.offerLayout = qt.QVBoxLayout()
         self.offerLayout.setContentsMargins(0, 0, 0, 0)
-        layout.addLayout(self.offerLayout)
+        outerLayout.addLayout(self.offerLayout)
+
         self.offer = _OfferLine(self.offerLayout)
         self.offerTimer = qt.QTimer()
         self.offerTimer.setInterval(500)
@@ -1366,19 +1412,62 @@ class CurrentWorkCard(qt.QObject):
         self._metricsTimer.setInterval(0)
         self._metricsTimer.connect("timeout()", self._computeNext)
         self._model = None
+        self._project = None
+        self._thumbnailKey = None
         ui.bindStyleSheet(self.widget, self._styleSheet)
         ui.addPaletteListener(self._onPalette)
+        self._showProject()
 
     @staticmethod
     def _styleSheet():
+        t = {name: ui.token(name).name() for name in ("text", "text2", "text3", "success", "warning", "control-hover")}
+        tint = {name: ui._rgba(ui.token(name), 0.14) for name in ("success", "warning")}
         return (
-            f"QLabel#StudioCurrentWorkScanFolder, QLabel#StudioCurrentWorkLesionMetrics, QLabel#StudioCurrentWorkLesionState, "
-            f"QLabel#StudioCurrentWorkMore {{ color: {ui.token('text2').name()}; }}")
+            "QLabel#StudioCurrentWorkThumbnail { background-color: #000000; border: none; border-radius: 8px; }"
+            f"QLabel#StudioCurrentWorkScanFolder, QLabel#StudioCurrentWorkMeta, QLabel#StudioCurrentWorkMore {{ color: {t['text3']}; }}"
+            f"QLabel#StudioCurrentWorkLesionMetrics {{ color: {t['text2']}; }}"
+            f"QLabel#StudioCurrentWorkLesionState {{ color: {t['text2']}; background-color: {t['control-hover']}; border-radius: 10px; padding: 0px 8px; }}"
+            f'QLabel#StudioCurrentWorkLesionState[saveState="saved"] {{ color: {t["success"]}; background-color: {tint["success"]}; }}'
+            f'QLabel#StudioCurrentWorkLesionState[saveState="unsaved"] {{ color: {t["warning"]}; background-color: {tint["warning"]}; }}'
+            "QFrame#StudioCurrentWorkCard QLabel { border: none; }")
+
+    def setProject(self, info):
+        """The current project (``projects.ProjectInfo``) of the Slicer Studio folder, or None: its name, when it was saved
+        and its thumbnail.
+        """
+        self._project = info
+        if _isAlive(self.widget):
+            self._showProject()
+
+    def _showProject(self):
+        info = self._project
+        if info is not None:
+            setElidedText(self.titleLabel, info.name)
+            when = relativeTime(info.modified) if info.modified else ""
+            meta = " · ".join(part for part in ((_("Edited {when}").format(when=when) if when else ""),
+                                                 _("Projects \u203a {name}").format(name=info.name)) if part)
+            setElidedText(self.metaLabel, meta)
+        else:
+            setElidedText(self.titleLabel, _("Open now"))
+            setElidedText(self.metaLabel, _("Not in a project yet"))
+        path = info.thumbnail if info is not None else None
+        key = (path, os.path.getmtime(path) if path and os.path.isfile(path) else None, ui.isDark())
+        if key == self._thumbnailKey:
+            return
+        self._thumbnailKey = key
+        pixmap = qt.QPixmap(path) if path else qt.QPixmap()
+        if pixmap.isNull():
+            self.thumbnail.setPixmap(ui.pixmap("brain", 40, "#55555c"))
+        else:
+            width, height = self.THUMBNAIL_SIZE
+            self.thumbnail.setPixmap(pixmap.scaled(width - 8, height - 8, qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation))
 
     def _onPalette(self):
         if not _isAlive(self.widget):
             ui.removePaletteListener(self._onPalette)
             return
+        self._thumbnailKey = None
+        self._showProject()
         self._updateTexts()
 
     #
@@ -1398,7 +1487,7 @@ class CurrentWorkCard(qt.QObject):
             rowLayout.setSpacing(1)
             name = _elidedLabel(scan.GetName(), 13, "StudioCurrentWorkScanName")
             font = qt.QFont(name.font)
-            font.setWeight(qt.QFont.DemiBold)
+            font.setWeight(qt.QFont.Medium)
             name.setFont(font)
             folder = _elidedLabel("", 12, "StudioCurrentWorkScanFolder")
             rowLayout.addWidget(name)
@@ -1406,7 +1495,7 @@ class CurrentWorkCard(qt.QObject):
             self.rowsLayout.addWidget(row)
             self._scanRows.append((scan.GetID(), folder))
             for lesion in model.lesionsOf.get(scan.GetID(), []):
-                self._addBlock(lesion, 14)
+                self._addBlock(lesion, 0)
 
         for scan in model.scans:
             addScan(scan)
@@ -1458,6 +1547,12 @@ class CurrentWorkCard(qt.QObject):
             if displayNode is not None and not (displayNode.GetVisibility() and displayNode.GetVisibility2D()):
                 title += " · " + _("hidden")
             setElidedText(block.nameLabel, title, lesion.GetName())
+            segmentation = lesion.GetSegmentation()
+            segment = segmentation.GetNthSegment(0) if segmentation.GetNumberOfSegments() else None
+            color = qt.QColor.fromRgbF(*segment.GetColor()[:3]).name() if segment is not None else ui.token("lesion").name()
+            swatchStyle = f"QLabel {{ background-color: {color}; border: none; border-radius: 2px; }}"
+            if block.swatch.styleSheet != swatchStyle:
+                block.swatch.setStyleSheet(swatchStyle)
             summary = lesionSummary(lesion)
             plain = summary["text"]
             block.metricsLabel.setProperty("plainText", plain)
@@ -1470,12 +1565,15 @@ class CurrentWorkCard(qt.QObject):
                 self._pendingMetrics.append(lesionId)
             state, text = lesionSaveInfo(lesion)
             block.stateLabel.setProperty("plainText", text)
-            block.stateLabel.setProperty("saveState", state)
-            block.stateLabel.setToolTip(_draw().saveStateText(lesion)[1] or "")
-            if state == "unsaved":
-                block.stateLabel.setText(f'<span style="color:{warning}">{html.escape(text)}</span>')
-            else:
-                block.stateLabel.setText(html.escape(text))
+            if block.stateLabel.property("saveState") != state:
+                # The chip color follows the state (the card's stylesheet)
+                block.stateLabel.setProperty("saveState", state)
+                block.stateLabel.style().unpolish(block.stateLabel)
+                block.stateLabel.style().polish(block.stateLabel)
+            block.stateLabel.setToolTip(" · ".join(part for part in (text, _draw().saveStateText(lesion)[1] or "") if part))
+            # The chip says the state; the full text (file, time) is its tooltip
+            chipText = text.split(" · ")[0] if text else ""
+            block.stateLabel.setText(html.escape(chipText))
         if queue and self._pendingMetrics:
             self._metricsTimer.start()
 
@@ -1771,7 +1869,7 @@ class LoadedSetCard(qt.QObject):
 # Open now card (the inspector of Library with data: what is open)
 #
 
-OPEN_NOW_ROW_HEIGHT = 28
+OPEN_NOW_ROW_HEIGHT = 32
 
 
 def openNowItems():
@@ -1824,10 +1922,17 @@ class OpenNowCard(qt.QObject):
 
     def __init__(self):
         qt.QObject.__init__(self)
-        self.widget, layout = ui.card(_("Open now"))
+        # A section of the inspector (VISUAL 4.2): the label, then 32 px rows on the panel
+        self.widget = qt.QFrame()
         self.widget.setObjectName("StudioOpenNowCard")
+        layout = qt.QVBoxLayout(self.widget)
+        layout.setContentsMargins(ui.INSPECTOR_PADDING - 4, 4, ui.INSPECTOR_PADDING - 4, 4)
+        layout.setSpacing(6)
+        title = ui.sectionLabel(_("Open now"), "StudioCardTitle")
+        title.setContentsMargins(4, 0, 0, 0)
+        layout.addWidget(title)
         self.rowsLayout = qt.QVBoxLayout()
-        self.rowsLayout.setSpacing(0)
+        self.rowsLayout.setSpacing(2)
         layout.addLayout(self.rowsLayout)
         self.emptyLabel = qt.QLabel(_("Nothing is open yet. Drop files on the window, or use Open…"))
         self.emptyLabel.setObjectName("StudioOpenNowEmpty")
@@ -1847,8 +1952,11 @@ class OpenNowCard(qt.QObject):
     @staticmethod
     def _styleSheet():
         return (
-            f"QLabel#StudioOpenNowKind, QLabel#StudioOpenNowEmpty {{ color: {ui.token('text2').name()}; }}"
-            f"QLabel#StudioOpenNowName {{ color: {ui.token('text').name()}; }}")
+            "QFrame#StudioOpenNowCard { background: transparent; border: none; }"
+            f"QLabel#StudioOpenNowKind, QLabel#StudioOpenNowEmpty {{ color: {ui.token('text3').name()}; }}"
+            f"QLabel#StudioOpenNowName {{ color: {ui.token('text').name()}; }}"
+            "QWidget#StudioOpenNowRow { background: transparent; border-radius: 7px; }"
+            f"QWidget#StudioOpenNowRow:hover {{ background-color: {ui.token('card').name()}; }}")
 
     def _refreshIcons(self):
         if not _isAlive(self.widget):
@@ -1899,10 +2007,34 @@ class OpenNowCard(qt.QObject):
     def _addRow(self, item):
         row = qt.QWidget()
         row.setObjectName("StudioOpenNowRow")
+        row.setAttribute(qt.Qt.WA_StyledBackground, True)
+        row.setAttribute(qt.Qt.WA_Hover, True)
         row.setFixedHeight(OPEN_NOW_ROW_HEIGHT)
         layout = qt.QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
+        layout.setContentsMargins(8, 0, 2, 0)
+        layout.setSpacing(8)
+        # What it is: the lesion's color, or the scan icon
+        marker = qt.QLabel()
+        marker.setObjectName("StudioOpenNowMarker")
+        marker.setFixedSize(16, 16)
+        marker.setAlignment(qt.Qt.AlignCenter)
+        node = item["node"]
+        if item["kind"] in ("lesion", "set") and node is not None and node.IsA("vtkMRMLSegmentationNode"):
+            segmentation = node.GetSegmentation()
+            segment = segmentation.GetNthSegment(0) if segmentation.GetNumberOfSegments() else None
+            color = qt.QColor.fromRgbF(*segment.GetColor()[:3]) if segment is not None else ui.token("lesion")
+            swatch = qt.QPixmap(10, 10)
+            swatch.fill(color)
+            marker.setPixmap(swatch)
+        else:
+            marker.setPixmap(ui.pixmap("scan", 16, "text3"))
+        layout.addWidget(marker)
+        name = _elidedLabel(item["name"], 13, "StudioOpenNowName")
+        layout.addWidget(name, 1)
+        kind = qt.QLabel(item["kindText"])
+        kind.setObjectName("StudioOpenNowKind")
+        _setFont(kind, 12)
+        layout.addWidget(kind)
         eye = None
         if item["kind"] == "lesion":
             eye = qt.QToolButton()
@@ -1917,12 +2049,6 @@ class OpenNowCard(qt.QObject):
             spacer = qt.QWidget()
             spacer.setFixedSize(24, 24)
             layout.addWidget(spacer)
-        name = _elidedLabel(item["name"], 13, "StudioOpenNowName")
-        layout.addWidget(name, 1)
-        kind = qt.QLabel(item["kindText"])
-        kind.setObjectName("StudioOpenNowKind")
-        _setFont(kind, 12)
-        layout.addWidget(kind)
         more = qt.QToolButton()
         more.setObjectName("StudioOpenNowMenuButton")
         more.setAutoRaise(True)
@@ -4675,10 +4801,38 @@ class _FolderCardSlot:
 #: Height of the compact drop strip that replaces the drop zone once data is loaded
 DROP_STRIP_HEIGHT = 44
 FOOTER_LINE_HEIGHT = 32
+#: The page (VISUAL 4.2): at most 1100 px of content, 40 px on the sides and 28 px at the top
+PAGE_MAX_WIDTH = 1100
+PAGE_SIDE_PADDING = 40
+PAGE_TOP_PADDING = 28
+#: The dashed frame of the empty state around the drop zone
+DROP_FRAME_SIZE = (620, 340)
+
+
+def _fileManagerName():
+    try:
+        from . import projects
+
+        return projects.fileManagerName()
+    except Exception:
+        return _("Files")
+
+
+def _showRootFolder():
+    try:
+        from . import projects_ui
+
+        projects_ui.showRootFolder()
+    except Exception:
+        logging.error(f"Studio Library: the folder could not be shown:\n{traceback.format_exc()}")
 
 
 class LibraryCanvas(qt.QObject):
-    """The Library page shown over the views (SPEC 3.1): the empty state, or the current work once data is loaded."""
+    """The Library page shown over the views (SPEC 3.1, VISUAL 4.2): a full-width page (at most ``PAGE_MAX_WIDTH`` px of
+    content) with the "Projects" header and its buttons, the Continue card of what is open, the projects of the Slicer
+    Studio folder as a grid of cards, the recent files and the links. Nothing loaded: a large drop zone under the header,
+    with the buttons in it; once data is loaded the drop zone is a 44 px strip under Recent.
+    """
 
     def __init__(self):
         qt.QObject.__init__(self)
@@ -4696,10 +4850,10 @@ class LibraryCanvas(qt.QObject):
         content = qt.QWidget()
         content.setObjectName("StudioLibraryContent")
         self.contentLayout = qt.QVBoxLayout(content)
-        self.contentLayout.setContentsMargins(24, 24, 24, 24)
+        self.contentLayout.setContentsMargins(PAGE_SIDE_PADDING, PAGE_TOP_PADDING, PAGE_SIDE_PADDING, PAGE_TOP_PADDING)
         self.contentLayout.setSpacing(0)
-        # The empty state is centred; the current work starts at the top
-        self.contentLayout.addStretch(2)
+        # The page starts at the top (stretch 0); the stretch at the end takes the rest
+        self.contentLayout.addStretch(0)
         # Keyed notices (A-01b, ``showNotice()``), above everything else of the page; the 16 px below them is part
         # of the container, which is hidden while there is no notice
         self.noticeContainer = qt.QWidget()
@@ -4708,11 +4862,12 @@ class LibraryCanvas(qt.QObject):
         noticeRow.setContentsMargins(0, 0, 0, NOTICE_SPACING_BELOW)
         noticeRow.addStretch(1)
         noticeColumn = qt.QWidget()
-        noticeColumn.setFixedWidth(COLUMN_WIDTH)
+        noticeColumn.setMaximumWidth(PAGE_MAX_WIDTH)
+        noticeColumn.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Preferred)
         self.noticeLayout = qt.QVBoxLayout(noticeColumn)
         self.noticeLayout.setContentsMargins(0, 0, 0, 0)
         self.noticeLayout.setSpacing(8)
-        noticeRow.addWidget(noticeColumn)
+        noticeRow.addWidget(noticeColumn, 100)
         noticeRow.addStretch(1)
         self.noticeContainer.hide()
         self.contentLayout.addWidget(self.noticeContainer)
@@ -4730,92 +4885,60 @@ class LibraryCanvas(qt.QObject):
         columnRow.addStretch(1)
         column = qt.QWidget()
         column.setObjectName("StudioLibraryColumn")
-        column.setFixedWidth(COLUMN_WIDTH)
+        column.setMaximumWidth(PAGE_MAX_WIDTH)
+        column.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Maximum)
         self.column = column
-        columnRow.addWidget(column)
+        columnRow.addWidget(column, 100)
         columnRow.addStretch(1)
         self.contentLayout.addLayout(columnRow)
-        self.contentLayout.addStretch(3)
+        self.contentLayout.addStretch(1)
         self.scrollArea.setWidget(content)
 
         columnLayout = qt.QVBoxLayout(column)
         columnLayout.setContentsMargins(0, 0, 0, 0)
         columnLayout.setSpacing(0)
-
-        # What is open (shown once data is loaded): the current work and the loaded set
-        self.dataSection = qt.QWidget()
-        self.dataSection.setObjectName("StudioLibraryDataSection")
-        dataLayout = qt.QVBoxLayout(self.dataSection)
-        dataLayout.setContentsMargins(0, 0, 0, 16)
-        dataLayout.setSpacing(16)
-        # The cards are created when data is loaded for the first time (Library is created at startup)
-        self._dataLayout = dataLayout
-        self._currentWork = None
-        self._loadedSet = None
-        self.dataSection.hide()
-        columnLayout.addWidget(self.dataSection)
-
-        # Drop zone (the files are dropped on the main window, see StudioLib.importer). Once data is loaded it is a strip.
-        self.dropZone = qt.QFrame()
-        self.dropZone.setObjectName("StudioDropZone")
-        self.dropZone.setFixedSize(COLUMN_WIDTH, DROP_ZONE_HEIGHT)
-        self.dropZone.setProperty("dragActive", False)
-        self.dropZone.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
-        self.dropZone.setToolTip(_("Drop files here, or click to open files"))
-        _installEventFilter(self.dropZone, self)
-        dropZoneOuter = qt.QVBoxLayout(self.dropZone)
-        dropZoneOuter.setContentsMargins(0, 0, 0, 0)
-        dropZoneOuter.setSpacing(0)
-        self.dropFull = qt.QWidget()
-        self.dropFull.setObjectName("StudioDropZoneFull")
-        dropZoneLayout = qt.QVBoxLayout(self.dropFull)
-        dropZoneLayout.setContentsMargins(24, 24, 24, 24)
-        dropZoneLayout.setSpacing(10)
-        dropZoneLayout.addStretch(1)
-        self.dropZoneIcon = qt.QLabel()
-        self.dropZoneIcon.setObjectName("StudioDropZoneIcon")
-        self.dropZoneIcon.setAlignment(qt.Qt.AlignCenter)
-        dropZoneLayout.addWidget(self.dropZoneIcon)
-        dropZoneTitle = qt.QLabel(_("Drop scans, lesion masks or a folder"))
-        dropZoneTitle.setObjectName("StudioDropZoneTitle")
-        dropZoneTitle.setAlignment(qt.Qt.AlignCenter)
-        _setFont(dropZoneTitle, 15, qt.QFont.Medium)
-        dropZoneLayout.addWidget(dropZoneTitle)
         openShortcut = qt.QKeySequence("Ctrl+O").toString(qt.QKeySequence.NativeText)
-        dropZoneHint = qt.QLabel(_("NIfTI, NRRD or DICOM folders · or press {shortcut}").format(shortcut=openShortcut))
-        dropZoneHint.setObjectName("StudioDropZoneHint")
-        dropZoneHint.setAlignment(qt.Qt.AlignCenter)
-        _setFont(dropZoneHint, 12)
-        dropZoneLayout.addWidget(dropZoneHint)
-        dropZoneLayout.addStretch(1)
-        for label in (self.dropZoneIcon, dropZoneTitle, dropZoneHint):
-            label.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
-        dropZoneOuter.addWidget(self.dropFull)
-        self.dropCompact = qt.QWidget()
-        self.dropCompact.setObjectName("StudioDropZoneCompact")
-        compactLayout = qt.QHBoxLayout(self.dropCompact)
-        compactLayout.setContentsMargins(16, 0, 16, 0)
-        compactLayout.setSpacing(8)
-        compactLayout.addStretch(1)
-        self.dropStripIcon = qt.QLabel()
-        self.dropStripIcon.setObjectName("StudioDropStripIcon")
-        compactLayout.addWidget(self.dropStripIcon)
-        self.dropStripText = qt.QLabel(_("Drop more files · {shortcut}").format(shortcut=openShortcut))
-        self.dropStripText.setObjectName("StudioDropStripText")
-        _setFont(self.dropStripText, 13)
-        compactLayout.addWidget(self.dropStripText)
-        compactLayout.addStretch(1)
-        for label in (self.dropStripIcon, self.dropStripText):
-            label.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
-        dropZoneOuter.addWidget(self.dropCompact)
-        self.dropCompact.hide()
-        columnLayout.addWidget(self.dropZone)
-        columnLayout.addSpacing(16)
 
-        # Open buttons
-        buttonRow = _buttonRow()
+        # Header: "Projects", where they are saved, and the buttons (never wrapped)
+        self.header = qt.QWidget()
+        self.header.setObjectName("StudioLibraryHeader")
+        headerLayout = qt.QHBoxLayout(self.header)
+        headerLayout.setContentsMargins(0, 0, 0, 0)
+        headerLayout.setSpacing(16)
+        titleColumn = qt.QVBoxLayout()
+        titleColumn.setSpacing(4)
+        self.pageTitle = ui.label(_("Projects"), "display", "text", "StudioLibraryTitle")
+        titleColumn.addWidget(self.pageTitle)
+        captionRow = qt.QHBoxLayout()
+        captionRow.setSpacing(6)
+        self.captionIcon = qt.QLabel()
+        self.captionIcon.setObjectName("StudioLibraryCaptionIcon")
+        self.captionIcon.setFixedSize(14, 14)
+        captionRow.addWidget(self.captionIcon)
+        self.captionLabel = ui.label("", "caption", "text3", "StudioLibraryCaption")
+        captionRow.addWidget(self.captionLabel)
+        self.captionSeparator = ui.label("·", "caption", "text3", "StudioLibraryLinkSeparator")
+        captionRow.addWidget(self.captionSeparator)
+        self.captionLink = self._link(_("Show in {manager}").format(manager=_fileManagerName()), "StudioLibraryCaptionLink", _showRootFolder)
+        captionRow.addWidget(self.captionLink)
+        captionRow.addStretch(1)
+        titleColumn.addLayout(captionRow)
+        headerLayout.addLayout(titleColumn, 1)
+        self.headerButtons = qt.QWidget()
+        self.headerButtons.setObjectName("StudioLibraryHeaderButtons")
+        headerButtonsLayout = qt.QHBoxLayout(self.headerButtons)
+        headerButtonsLayout.setContentsMargins(0, 0, 0, 0)
+        headerButtonsLayout.setSpacing(8)
+        headerLayout.addWidget(self.headerButtons, 0, qt.Qt.AlignBottom)
+        columnLayout.addWidget(self.header)
+        columnLayout.addSpacing(24)
+
+        # The buttons: in the header, or in the drop zone of the empty state (``_setStrip()``)
+        self.buttonRow = _buttonRow()
+        self.buttonRow.setObjectName("StudioLibraryButtons")
+        self.buttonRow.setSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Fixed)
         self.openButton = self._button(_("Open…"), "StudioLibraryOpenButton", openFiles,
-                                       _("Open scans, lesion masks or scenes ({shortcut})").format(shortcut=openShortcut))
+                                       _("Open scans, lesion masks or scenes ({shortcut})").format(shortcut=openShortcut), "primary")
         self.openFolderButton = self._button(_("Open folder…"), "StudioLibraryOpenFolderButton", openFolder,
                                              _("Open a DICOM folder or a folder of NIfTI files"))
         self.templateButton = self._button(_("Start on template"), "StudioLibraryStartOnTemplateButton", startOnTemplate,
@@ -4823,12 +4946,14 @@ class LibraryCanvas(qt.QObject):
         # "Start on template ▾" (A-10): the arrow lists every template, Add your own template… and Manage templates…
         self.templateMenuButton = qt.QToolButton()
         self.templateMenuButton.setObjectName("StudioLibraryTemplateMenuButton")
-        self.templateMenuButton.setText("▾")
-        self.templateMenuButton.setToolButtonStyle(qt.Qt.ToolButtonTextOnly)
+        self.templateMenuButton.setText("")
+        self.templateMenuButton.setToolButtonStyle(qt.Qt.ToolButtonIconOnly)
         self.templateMenuButton.setToolTip(_("Choose a template, or add your own MNI template"))
         self.templateMenuButton.setAccessibleName(_("Templates"))
         self.templateMenuButton.setPopupMode(qt.QToolButton.InstantPopup)
         self.templateMenuButton.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
+        self.templateMenuButton.setSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Expanding)
+        self.templateMenuButton.setFixedWidth(ui.BUTTON_HEIGHT)
         ui.setRole(self.templateMenuButton, "secondary")
         self.templateMenu = qt.QMenu(self.templateMenuButton)
         self.templateMenu.setObjectName("studioTemplateMenu")
@@ -4841,18 +4966,102 @@ class LibraryCanvas(qt.QObject):
         splitLayout.setSpacing(2)
         splitLayout.addWidget(self.templateButton)
         splitLayout.addWidget(self.templateMenuButton)
-        for button in (self.openButton, self.openFolderButton, templateSplit):
-            buttonRow.layout().addWidget(button)
-        columnLayout.addWidget(buttonRow)
+        for button in (templateSplit, self.openFolderButton, self.openButton):
+            self.buttonRow.layout().addWidget(button)
+        headerButtonsLayout.addWidget(self.buttonRow)
+
+        # What is open (shown once data is loaded): the Continue card and the loaded set
+        self.dataSection = qt.QWidget()
+        self.dataSection.setObjectName("StudioLibraryDataSection")
+        dataLayout = qt.QVBoxLayout(self.dataSection)
+        dataLayout.setContentsMargins(0, 0, 0, 24)
+        dataLayout.setSpacing(16)
+        # The cards are created when data is loaded for the first time (Library is created at startup)
+        self._dataLayout = dataLayout
+        self._currentWork = None
+        self._loadedSet = None
+        self.dataSection.hide()
+        columnLayout.addWidget(self.dataSection)
+
+        # Drop zone (the files are dropped on the main window, see StudioLib.importer): the dashed frame of the empty state
+        # (``StudioDropZoneFrame``, VISUAL 4.2) around the 480 x 220 zone, or the 44 px strip once data is loaded
+        self.dropFrame = qt.QFrame()
+        self.dropFrame.setObjectName("StudioDropZoneFrame")
+        self.dropFrame.setProperty("dragActive", False)
+        self.dropFrame.setProperty("studioStrip", False)
+        self.dropFrame.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
+        dropFrameLayout = qt.QVBoxLayout(self.dropFrame)
+        dropFrameLayout.setContentsMargins(0, 0, 0, 0)
+        dropFrameLayout.setSpacing(0)
+        self.dropZone = qt.QFrame()
+        self.dropZone.setObjectName("StudioDropZone")
+        self.dropZone.setFixedSize(COLUMN_WIDTH, DROP_ZONE_HEIGHT)
+        self.dropZone.setProperty("dragActive", False)
+        self.dropZone.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
+        self.dropZone.setToolTip(_("Drop files here, or click to open files"))
+        _installEventFilter(self.dropZone, self)
+        _installEventFilter(self.dropFrame, self)
+        dropFrameLayout.addWidget(self.dropZone, 0, qt.Qt.AlignCenter)
+        dropZoneOuter = qt.QVBoxLayout(self.dropZone)
+        dropZoneOuter.setContentsMargins(0, 0, 0, 0)
+        dropZoneOuter.setSpacing(0)
+        self.dropFull = qt.QWidget()
+        self.dropFull.setObjectName("StudioDropZoneFull")
+        dropZoneLayout = qt.QVBoxLayout(self.dropFull)
+        dropZoneLayout.setContentsMargins(0, 0, 0, 0)
+        dropZoneLayout.setSpacing(8)
+        dropZoneLayout.addStretch(1)
+        self.dropZoneIcon = ui.iconTile("import", 48, 24, "StudioDropZoneIcon")
+        dropZoneLayout.addWidget(self.dropZoneIcon, 0, qt.Qt.AlignHCenter)
+        dropZoneLayout.addSpacing(6)
+        dropZoneTitle = ui.label(_("Drop scans, DICOM folders or Slicer scenes"), "title", "text", "StudioDropZoneTitle")
+        dropZoneTitle.setAlignment(qt.Qt.AlignCenter)
+        dropZoneLayout.addWidget(dropZoneTitle)
+        dropZoneHint = ui.label(_("NIfTI, NRRD, DICOM folders, lesion masks and .mrb scenes · or press {shortcut}").format(shortcut=openShortcut),
+                                "caption", "text3", "StudioDropZoneHint")
+        dropZoneHint.setAlignment(qt.Qt.AlignCenter)
+        dropZoneLayout.addWidget(dropZoneHint)
+        dropZoneLayout.addSpacing(10)
+        self.dropButtonsSlot = qt.QHBoxLayout()
+        self.dropButtonsSlot.setContentsMargins(0, 0, 0, 0)
+        dropZoneLayout.addLayout(self.dropButtonsSlot)
+        dropZoneLayout.addStretch(1)
+        for label in (dropZoneTitle, dropZoneHint):
+            label.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
+        self.dropZoneIcon.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
+        dropZoneOuter.addWidget(self.dropFull)
+        self.dropCompact = qt.QWidget()
+        self.dropCompact.setObjectName("StudioDropZoneCompact")
+        compactLayout = qt.QHBoxLayout(self.dropCompact)
+        compactLayout.setContentsMargins(16, 0, 16, 0)
+        compactLayout.setSpacing(8)
+        compactLayout.addStretch(1)
+        self.dropStripIcon = qt.QLabel()
+        self.dropStripIcon.setObjectName("StudioDropStripIcon")
+        compactLayout.addWidget(self.dropStripIcon)
+        self.dropStripText = ui.label(_("Drop more files · {shortcut}").format(shortcut=openShortcut), "caption", "text3", "StudioDropStripText")
+        compactLayout.addWidget(self.dropStripText)
+        compactLayout.addStretch(1)
+        for label in (self.dropStripIcon, self.dropStripText):
+            label.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
+        dropZoneOuter.addWidget(self.dropCompact)
+        self.dropCompact.hide()
+        # Where the drop zone goes: under the header (empty state) or under Recent (strip)
+        self.dropTopSlot = qt.QVBoxLayout()
+        self.dropTopSlot.setContentsMargins(0, 0, 0, 0)
+        columnLayout.addLayout(self.dropTopSlot)
+        self.dropTopSlot.addWidget(self.dropFrame)
+        self.dropTopSpacing = qt.QWidget()
+        self.dropTopSpacing.setFixedHeight(32)
+        columnLayout.addWidget(self.dropTopSpacing)
 
         # Folder card (several NIfTI files dropped)
         self.folderCardSlot = _FolderCardSlot()
         self.folderCardSpacing = qt.QWidget()
         self.folderCardSpacing.setFixedHeight(16)
         self.folderCardSpacing.hide()
-        columnLayout.addWidget(self.folderCardSpacing)
         columnLayout.addLayout(self.folderCardSlot.layout)
-        columnLayout.addSpacing(28)
+        columnLayout.addWidget(self.folderCardSpacing)
 
         # Projects of the Slicer Studio folder (A-09)
         self.projectsSection = None
@@ -4864,21 +5073,22 @@ class LibraryCanvas(qt.QObject):
         except Exception:
             logging.error(f"Studio Library: the Projects section failed:\n{traceback.format_exc()}")
 
-        # Recent
-        recentTitle = qt.QLabel(_("Recent").upper())
-        recentTitle.setObjectName("StudioLibrarySectionTitle")
-        recentTitle.setContentsMargins(10, 0, 10, 0)
-        _setFont(recentTitle, 11, qt.QFont.DemiBold, 0.6)
+        # Recent: the studies, folders and files opened before (from anywhere)
+        recentTitle = ui.sectionLabel(_("Recent"), "StudioLibrarySectionTitle")
+        recentTitle.setContentsMargins(0, 0, 0, 0)
         columnLayout.addWidget(recentTitle)
-        columnLayout.addSpacing(6)
+        columnLayout.addSpacing(8)
         self.recentList = RecentList()
         columnLayout.addWidget(self.recentList.widget)
-        columnLayout.addSpacing(20)
+        columnLayout.addSpacing(16)
+        self.dropBottomSlot = qt.QVBoxLayout()
+        self.dropBottomSlot.setContentsMargins(0, 0, 0, 0)
+        columnLayout.addLayout(self.dropBottomSlot)
+        columnLayout.addSpacing(16)
 
         # Footer links
         linkRow = qt.QHBoxLayout()
         linkRow.setSpacing(4)
-        linkRow.addStretch(1)
         self.newStudyLink = None
         self.openStudyLink = None
         if _studyUi() is not None:
@@ -4906,7 +5116,7 @@ class LibraryCanvas(qt.QObject):
         self.footerFrame.setObjectName("StudioLibraryFooterLine")
         self.footerFrame.setMinimumHeight(FOOTER_LINE_HEIGHT + 8)
         self.footerLayout = qt.QHBoxLayout(self.footerFrame)
-        self.footerLayout.setContentsMargins(10, 12, 10, 4)
+        self.footerLayout.setContentsMargins(0, 12, 0, 4)
         self.footerLayout.setSpacing(4)
         self.footerText = qt.QLabel()
         self.footerText.setObjectName("StudioLibraryFooterText")
@@ -4924,9 +5134,11 @@ class LibraryCanvas(qt.QObject):
         self._footerLines = {}
 
         self._dataShown = None
+        self._setStrip(False)
         ui.bindStyleSheet(self.widget, self._styleSheet)
         ui.addPaletteListener(self._refreshIcons)
         self._refreshIcons()
+        self._refreshCaption()
 
     def _fillTemplateMenu(self):
         """The "Start on template ▾" menu (``templates_ui.populateTemplateMenu``)."""
@@ -4938,10 +5150,12 @@ class LibraryCanvas(qt.QObject):
             logging.error(f"Studio Library: the template menu failed:\n{traceback.format_exc()}")
 
     @staticmethod
-    def _button(text, objectName, callback, toolTip):
-        button = _secondaryButton(text, objectName, callback)
+    def _button(text, objectName, callback, toolTip, role="secondary"):
+        button = _roleButton(text, objectName, callback, role) if role != "secondary" else _secondaryButton(text, objectName, callback)
         button.setAutoDefault(True)
         button.setToolTip(toolTip)
+        # Buttons never wrap or shrink below their text
+        button.setSizePolicy(qt.QSizePolicy.Minimum, qt.QSizePolicy.Expanding)
         return button
 
     @staticmethod
@@ -4950,42 +5164,63 @@ class LibraryCanvas(qt.QObject):
 
     @staticmethod
     def _styleSheet():
-        t = {name: ui.token(name).name() for name in ("canvas", "text", "text2", "text3", "border", "accent-fg", "accent-subtle")}
+        t = {name: ui.token(name).name() for name in ("canvas", "text", "text2", "text3", "border", "hairline", "accent-fg", "accent-subtle")}
         t["control-border"] = _controlBorder()
         return (
             f"QFrame#StudioLibraryCanvas {{ background-color: {t['canvas']}; border: none; }}"
             "QScrollArea#StudioLibraryScroll, QWidget#StudioLibraryContent, QWidget#StudioLibraryColumn { background: transparent; border: none; }"
             "QScrollArea#StudioLibraryScroll > QWidget#qt_scrollarea_viewport { background: transparent; }"
             "QWidget#StudioLibraryDataSection, QWidget#StudioDropZoneFull, QWidget#StudioDropZoneCompact { background: transparent; border: none; }"
-            f"QFrame#StudioDropZone {{ background-color: transparent; border: 1.5px dashed {t['control-border']}; border-radius: 12px; }}"
-            f"QFrame#StudioDropZone:hover {{ border-color: {t['text3']}; }}"
-            f'QFrame#StudioDropZone[dragActive="true"] {{ background-color: {t["accent-subtle"]}; border-color: {t["accent-fg"]}; }}'
-            f"QLabel#StudioDropZoneTitle {{ color: {t['text']}; background: transparent; border: none; }}"
-            f"QLabel#StudioDropZoneHint {{ color: {t['text2']}; background: transparent; border: none; }}"
-            f"QLabel#StudioDropStripText {{ color: {t['text2']}; background: transparent; border: none; }}"
-            "QLabel#StudioDropZoneIcon, QLabel#StudioDropStripIcon { background: transparent; border: none; }"
-            f"QLabel#StudioLibrarySectionTitle {{ color: {t['text2']}; }}"
+            # The dashed drop zone (1.5 px, border color, radius 16); the inner zone has no frame of its own
+            f"QFrame#StudioDropZoneFrame {{ background-color: transparent; border: 1.5px dashed {t['control-border']}; border-radius: 16px; }}"
+            f'QFrame#StudioDropZoneFrame[studioStrip="true"] {{ border: 1px dashed {t["border"]}; border-radius: 10px; }}'
+            f"QFrame#StudioDropZoneFrame:hover {{ border-color: {t['text3']}; }}"
+            f'QFrame#StudioDropZoneFrame[dragActive="true"] {{ background-color: {t["accent-subtle"]}; border-color: {t["accent-fg"]}; }}'
+            "QFrame#StudioDropZone { background-color: transparent; border: none; }"
+            "QLabel#StudioDropStripIcon { background: transparent; border: none; }"
             f"QLabel#StudioLibraryLinkSeparator {{ color: {t['text3']}; }}"
-            f"QLabel#StudioLibraryFooterText {{ color: {t['text2']}; }}"
+            f"QLabel#StudioLibraryFooterText {{ color: {t['text3']}; }}"
             f"QPushButton[studioLibraryLink=\"true\"] {{ background: transparent; border: none; color: {t['accent-fg']}; padding: 2px 4px; }}"
             "QPushButton[studioLibraryLink=\"true\"]:hover { text-decoration: underline; }")
 
     def _refreshIcons(self):
         if not _isAlive(self.widget):
             return
-        dragActive = bool(self.dropZone.property("dragActive"))
-        color = "accent-fg" if dragActive else "text2"
-        self.dropZoneIcon.setPixmap(ui.pixmap("import", 32, color))
+        dragActive = bool(self.dropFrame.property("dragActive"))
+        color = "accent-fg" if dragActive else "text3"
         self.dropStripIcon.setPixmap(ui.pixmap("import", 16, color))
-        for button, iconName in ((self.openButton, "import"), (self.openFolderButton, "folder-open"), (self.templateButton, "brain")):
-            button.setIcon(ui.icon(iconName, 16))
+        self.captionIcon.setPixmap(ui.pixmap("folder", 14, "text3"))
+        for button, iconName in ((self.openButton, "import"), (self.openFolderButton, "folder-open"), (self.templateButton, "globe")):
+            button.setIcon(ui.icon(iconName, 16, "onAccent" if button is self.openButton else "normal"))
+        self.templateMenuButton.setIcon(ui.icon("chevron-down", 16))
+
+    def _refreshCaption(self):
+        """The caption under the title: where the projects are saved (A-09), else what Library is for."""
+        try:
+            from . import projects
+
+            enabled = projects.isEnabled()
+            folder = projects.shortPath(projects.root())
+            folder = folder[2:] if folder.startswith("~/") else folder
+            text = _("Saved automatically in {folder}").format(folder=folder.replace("/", " \u203a ")) if enabled else ""
+            toolTip = projects.root() if enabled else ""
+        except Exception:
+            enabled, text, toolTip = False, "", ""
+        self.pageTitle.setText(_("Projects") if enabled else _("Library"))
+        if not enabled:
+            text = _("Open scans and lesion masks, or start on the MNI template")
+        self.captionLabel.setText(text)
+        self.captionLabel.setToolTip(toolTip)
+        self.captionLink.setVisible(enabled)
+        self.captionSeparator.setVisible(enabled)
+        self.captionIcon.setVisible(enabled)
 
     def eventFilter(self, obj, event):
-        # A click on the drop zone opens files
-        if obj == self.dropZone and event.type() in (qt.QEvent.MouseButtonPress, qt.QEvent.MouseButtonRelease):
+        # A click on the drop zone (or on its frame) opens files
+        if obj in (self.dropZone, self.dropFrame) and event.type() in (qt.QEvent.MouseButtonPress, qt.QEvent.MouseButtonRelease):
             if event.button() != qt.Qt.LeftButton:
                 return False
-            if event.type() == qt.QEvent.MouseButtonRelease and self.dropZone.rect.contains(_eventPosition(event)):
+            if event.type() == qt.QEvent.MouseButtonRelease and obj.rect.contains(_eventPosition(event)):
                 openFiles()
             return True
         return False
@@ -5035,11 +5270,7 @@ class LibraryCanvas(qt.QObject):
         self.column.setVisible(not shown)
         # Content stretches: top, notices, study page, column row, bottom
         self.contentLayout.setStretch(2, 1 if shown else 0)
-        self.contentLayout.setStretch(4, 0 if shown else 3)
-        if shown:
-            self.contentLayout.setStretch(0, 0)
-        else:
-            self._dataShown = None  # _setStrip() sets the top stretch again
+        self.contentLayout.setStretch(4, 0 if shown else 1)
 
     def refreshData(self):
         """Show the open study, else the current work (and the loaded set) when data is loaded, else the empty state."""
@@ -5076,16 +5307,42 @@ class LibraryCanvas(qt.QObject):
         return shown
 
     def _setStrip(self, strip):
-        """The drop zone is a 44 px strip while the current work is shown, else the 480x220 zone of the empty state."""
+        """The drop zone is a 44 px strip under Recent while the current work is shown, else the 480 x 220 zone of the empty
+        state in its 620 x 340 dashed frame under the header, with the Library buttons in it (VISUAL 4.2).
+        """
         if self._dataShown == strip:
             return
         self._dataShown = strip
         self.dropFull.setVisible(not strip)
         self.dropCompact.setVisible(strip)
-        self.dropZone.setFixedSize(COLUMN_WIDTH, DROP_STRIP_HEIGHT if strip else DROP_ZONE_HEIGHT)
+        self.dropFrame.setProperty("studioStrip", bool(strip))
+        if strip:
+            self.dropZone.setMinimumWidth(0)
+            self.dropZone.setMaximumWidth(16777215)
+            self.dropZone.setFixedHeight(DROP_STRIP_HEIGHT)
+            self.dropZone.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
+            self.dropFrame.setMinimumSize(0, 0)
+            self.dropFrame.setMaximumSize(16777215, DROP_STRIP_HEIGHT)
+            self.dropFrame.layout().removeWidget(self.dropZone)
+            self.dropFrame.layout().addWidget(self.dropZone)
+            self.dropBottomSlot.addWidget(self.dropFrame)
+            self.headerButtons.layout().addWidget(self.buttonRow)
+        else:
+            self.dropZone.setFixedSize(COLUMN_WIDTH, DROP_ZONE_HEIGHT)
+            self.dropZone.setSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Fixed)
+            self.dropFrame.setFixedHeight(DROP_FRAME_SIZE[1])
+            self.dropFrame.setMinimumWidth(min(DROP_FRAME_SIZE[0], COLUMN_WIDTH + 40))
+            self.dropFrame.setMaximumWidth(DROP_FRAME_SIZE[0])
+            self.dropFrame.layout().removeWidget(self.dropZone)
+            self.dropFrame.layout().addWidget(self.dropZone, 0, qt.Qt.AlignCenter)
+            self.dropTopSlot.addWidget(self.dropFrame, 0, qt.Qt.AlignHCenter)
+            self.dropButtonsSlot.addWidget(self.buttonRow, 0, qt.Qt.AlignHCenter)
+        self.dropTopSpacing.setVisible(not strip)
+        self.headerButtons.setVisible(strip)
+        style = self.dropFrame.style()
+        style.unpolish(self.dropFrame)
+        style.polish(self.dropFrame)
         self.dropZone.setToolTip(_("Drop more files here, or click to open files") if strip else _("Drop files here, or click to open files"))
-        # The empty state is centred, the current work starts at the top of the page
-        self.contentLayout.setStretch(0, 0 if strip else 2)
 
     def isStrip(self):
         return bool(self._dataShown)
@@ -5094,6 +5351,9 @@ class LibraryCanvas(qt.QObject):
         self.refreshData()
         if self.projectsSection is not None:
             self.projectsSection.refresh()
+            if self._currentWork is not None and hasattr(self.projectsSection, "currentInfo"):
+                self._currentWork.setProject(self.projectsSection.currentInfo())
+        self._refreshCaption()
         self.recentList.refresh(force=False)
 
     def focusFirst(self):
@@ -5112,11 +5372,12 @@ class LibraryCanvas(qt.QObject):
     def setDropHighlight(self, active):
         if bool(self.dropZone.property("dragActive")) == bool(active):
             return
-        self.dropZone.setProperty("dragActive", bool(active))
-        style = self.dropZone.style()
-        style.unpolish(self.dropZone)
-        style.polish(self.dropZone)
-        self.dropZone.update()
+        for widget in (self.dropZone, self.dropFrame):
+            widget.setProperty("dragActive", bool(active))
+            style = widget.style()
+            style.unpolish(widget)
+            style.polish(widget)
+            widget.update()
         self._refreshIcons()
 
     def showFolderCard(self, folder, files):
@@ -5214,6 +5475,134 @@ class LibraryCanvas(qt.QObject):
 _panels = []
 
 
+class ProjectOverviewCard(qt.QObject):
+    """The open project in the Library inspector (VISUAL 4.2): its thumbnail on black, "In this project" (images, lesions,
+    maps and exports as 2 x 2 tiles), where it is and when it was created, and "Show in Files" and "Rename…".
+    Hidden without a project (A-09).
+    """
+
+    THUMBNAIL_HEIGHT = 168
+    STATS = (("scans", "Images"), ("lesions", "Lesions"), ("maps", "Maps"), ("exports", "Exports"))
+
+    def __init__(self):
+        qt.QObject.__init__(self)
+        self.widget = qt.QFrame()
+        self.widget.setObjectName("StudioProjectOverview")
+        layout = qt.QVBoxLayout(self.widget)
+        layout.setContentsMargins(ui.INSPECTOR_PADDING, 4, ui.INSPECTOR_PADDING, 8)
+        layout.setSpacing(8)
+        self.thumbnail = qt.QLabel()
+        self.thumbnail.setObjectName("StudioProjectOverviewThumbnail")
+        self.thumbnail.setFixedHeight(self.THUMBNAIL_HEIGHT)
+        self.thumbnail.setAlignment(qt.Qt.AlignCenter)
+        self.thumbnail.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
+        layout.addWidget(self.thumbnail)
+        layout.addSpacing(6)
+        layout.addWidget(ui.sectionLabel(_("In this project"), "StudioProjectOverviewTitle"))
+        grid = qt.QGridLayout()
+        grid.setSpacing(8)
+        self.statValues = {}
+        for index, (key, caption) in enumerate(self.STATS):
+            tile = qt.QFrame()
+            tile.setObjectName("StudioProjectOverviewTile")
+            tileLayout = qt.QVBoxLayout(tile)
+            tileLayout.setContentsMargins(12, 8, 12, 8)
+            tileLayout.setSpacing(0)
+            value = ui.label("0", "number", "text", "StudioProjectOverviewValue")
+            ui.setText(value, "title")
+            tileLayout.addWidget(value)
+            tileLayout.addWidget(ui.label(_(caption), "caption", "text3", "StudioProjectOverviewCaption"))
+            grid.addWidget(tile, index // 2, index % 2)
+            self.statValues[key] = value
+        layout.addLayout(grid)
+        layout.addSpacing(4)
+        self.pathLabel = _elidedLabel("", 12, "StudioProjectOverviewPath")
+        self.createdLabel = _elidedLabel("", 12, "StudioProjectOverviewCreated")
+        layout.addWidget(self.pathLabel)
+        layout.addWidget(self.createdLabel)
+        buttons = qt.QHBoxLayout()
+        buttons.setSpacing(8)
+        self.showButton = _secondaryButton(_("Show in {manager}").format(manager=_fileManagerName()), "StudioProjectOverviewShowButton", self._show)
+        self.renameButton = _secondaryButton(_("Rename…"), "StudioProjectOverviewRenameButton", self._rename)
+        for button in (self.showButton, self.renameButton):
+            button.setFixedHeight(ui.BUTTON_HEIGHT)
+            buttons.addWidget(button)
+        layout.addLayout(buttons)
+        self._key = None
+        ui.bindStyleSheet(self.widget, lambda: (
+            "QFrame#StudioProjectOverview { background: transparent; border: none; }"
+            "QLabel#StudioProjectOverviewThumbnail { background-color: #000000; border: none; border-radius: 10px; }"
+            f"QFrame#StudioProjectOverviewTile {{ background-color: {ui.token('card').name()}; border: none; border-radius: 10px; }}"
+            "QFrame#StudioProjectOverviewTile QLabel { background: transparent; border: none; }"
+            f"QLabel#StudioProjectOverviewPath, QLabel#StudioProjectOverviewCreated {{ color: {ui.token('text3').name()}; }}"))
+        self.widget.hide()
+
+    @staticmethod
+    def _projects():
+        try:
+            from . import projects
+
+            return projects
+        except Exception:
+            return None
+
+    def _show(self):
+        try:
+            from . import projects_ui
+
+            projects_ui.showProjectFolder()
+        except Exception:
+            logging.error(f"Studio Library: the project folder could not be shown:\n{traceback.format_exc()}")
+
+    def _rename(self):
+        try:
+            from . import projects_ui
+
+            projects_ui.renameDialog()
+        except Exception:
+            logging.error(f"Studio Library: the project could not be renamed:\n{traceback.format_exc()}")
+        self._key = None
+        self.refresh()
+
+    def refresh(self):
+        """Show the open project (hidden without one). Return True when it is shown."""
+        projects = self._projects()
+        project = projects.currentProject() if projects is not None else None
+        if project is None or not os.path.isdir(project.path):
+            self.widget.hide()
+            self._key = None
+            return False
+        info = projects.ProjectInfo(project.path)
+        exportsFolder = os.path.join(project.path, "Exports")
+        try:
+            exports = len([name for name in os.listdir(exportsFolder) if not name.startswith(".")])
+        except OSError:
+            exports = 0
+        counts = dict(projects.counts())
+        counts["exports"] = exports
+        key = (info.path, info.thumbnail, tuple(sorted(counts.items())), info.created, ui.isDark())
+        if key != self._key:
+            self._key = key
+            for name, value in self.statValues.items():
+                value.setText(str(int(counts.get(name) or 0)))
+            pixmap = qt.QPixmap(info.thumbnail) if info.thumbnail else qt.QPixmap()
+            if pixmap.isNull():
+                self.thumbnail.setPixmap(ui.pixmap("brain", 40, "#55555c"))
+            else:
+                self.thumbnail.setPixmap(pixmap.scaled(300, self.THUMBNAIL_HEIGHT - 8, qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation))
+            setElidedText(self.pathLabel, _("Projects \u203a {name}").format(name=info.name), info.path)
+            created = time.strftime("%d %b %Y", time.localtime(info.created)) if info.created else ""
+            setElidedText(self.createdLabel, _("Created {date}").format(date=created) if created else "")
+            self.createdLabel.setVisible(bool(created))
+        self.widget.show()
+        return True
+
+    def dispose(self):
+        if _isAlive(self.widget):
+            ui.bindStyleSheet(self.widget, None)
+            _discard(self.widget)
+
+
 class LibraryPanel(qt.QObject):
     """Content of the Studio module panel: what is open, or the Open buttons and the recently loaded files.
 
@@ -5233,6 +5622,7 @@ class LibraryPanel(qt.QObject):
         self.openFolderButton = None
         self.templateButton = None
         self.openNowCard = None
+        self.overviewCard = None
         self.folderCardSlot = None
         self.recentCard = None
         self.recentList = None
@@ -5269,6 +5659,8 @@ class LibraryPanel(qt.QObject):
             openLayout.addWidget(row)
         layout.addWidget(self.openCard)
 
+        self.overviewCard = ProjectOverviewCard()
+        layout.addWidget(self.overviewCard.widget)
         self.openNowCard = OpenNowCard()
         layout.addWidget(self.openNowCard.widget)
 
@@ -5301,7 +5693,7 @@ class LibraryPanel(qt.QObject):
         studySession = _studySession()
         if studySession is not None:
             self._ensureStudyCards(withList=not withCanvas)
-            for card in (self.openCard, self.recentCard, self.openNowCard.widget):
+            for card in (self.openCard, self.recentCard, self.openNowCard.widget, self.overviewCard.widget):
                 card.hide()
             self.studyCards.refresh()
             return
@@ -5313,6 +5705,10 @@ class LibraryPanel(qt.QObject):
         self.openNowCard.widget.setVisible(withCanvas or data)
         if self.openNowCard.widget.isVisible():
             self.openNowCard.refresh()
+        if withCanvas and data:
+            self.overviewCard.refresh()
+        else:
+            self.overviewCard.widget.hide()
 
     def _ensureStudyCards(self, withList):
         """The study cards (created when a study is first shown; created again when Studio and Classic swap the list)."""

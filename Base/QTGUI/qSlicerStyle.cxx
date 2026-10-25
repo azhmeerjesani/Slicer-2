@@ -24,11 +24,13 @@
 #include <QAbstractSpinBox>
 #include <QApplication>
 #include <QBitmap>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDateTime>
 #include <QStyleFactory>
 #include <QDebug>
 #include <QEvent>
+#include <QFontInfo>
 #include <QGroupBox>
 #include <QLabel>
 #include <QMenu>
@@ -84,26 +86,28 @@ struct StyleToken
 // Tokens that are not palette roles, used by the style and by widgets that need them
 // (e.g. Python scripted modules through qSlicerStyle::token()).
 const StyleToken StyleTokens[] = {
-  { "canvas", "#141416", "#e4e4e8" },          //
-  { "card", "#232327", "#ffffff" },            //
-  { "control-hover", "#35353b", "#eeeef2" },   //
-  { "control-pressed", "#26262a", "#e4e4e9" }, //
-  { "hairline", "#2e2e34", "#e1e1e6" },        //
-  { "border", "#3a3a41", "#cacad1" },          //
-  { "control-border", "#71717a", "#7a7a84" },  // non-text outlines (fields, check boxes): 3:1 on the window
-  { "text2", "#a1a1aa", "#5c5c66" },           //
-  { "text3", "#94949c", "#63636c" },           // informative secondary text: 4.5:1 on the window
+  { "canvas", "#0f0f11", "#f1f1f4" },          // Library page, field backgrounds, segmented tracks
+  { "card", "#1d1d20", "#f6f6f8" },            // inspector cards, secondary buttons
+  { "card-low", "#18181b", "#ffffff" },        // cards on the canvas (Library project and study cards)
+  { "selected", "#2a2a2f", "#ffffff" },        // selected segment, list row and palette row
+  { "control-hover", "#26262a", "#eeeef2" },   //
+  { "control-pressed", "#202024", "#e4e4e9" }, //
+  { "hairline", "#26262a", "#e4e4e8" },        // separators, card borders
+  { "border", "#34343a", "#d4d4da" },          // button and dialog borders
+  { "control-border", "#6b6b74", "#8a8a94" },  // non-text outlines (fields, check boxes): 3:1 on the window
+  { "text2", "#a1a1aa", "#52525b" },           //
+  { "text3", "#8b8b94", "#6b6b74" },           // informative secondary text: 4.5:1 on the window and on cards
   { "text-disabled", "#71717a", "#8e8e98" },   // disabled glyphs
-  { "accent", "#3568d4", "#2f6fde" },          //
-  { "accent-hover", "#3f74e3", nullptr },      //
-  { "accent-pressed", "#2c5bbf", nullptr },    //
-  { "accent-fg", "#6ea3ff", "#2158bd" },       // icons, slider fill, focus ring, links
-  { "accent-subtle", "#22324f", "#e3ecfc" },   // checked tiles
+  { "accent", "#2f6fe0", "#2f6fe0" },          // primary buttons (white text 4.7:1), progress, selected tiles
+  { "accent-hover", nullptr, nullptr },        // derived from the accent color (+8% lightness)
+  { "accent-pressed", nullptr, nullptr },      // derived from the accent color (-8% lightness)
+  { "accent-fg", "#7aa7ff", "#2158bd" },       // icons, slider fill, focus ring, links
+  { "accent-subtle", "#22324f", "#e3ecfc" },   // checked tiles, icon tiles
   { "success", "#3fb950", "#1a7f37" },         //
   { "warning", "#e3b341", "#9a6700" },         //
   { "danger", "#f85149", "#cf222e" },          //
-  { "view-bar", "#161618", "#e9e9ed" },        //
-  { "lesion", "#f2545b", "#f2545b" },          //
+  { "view-bar", "#161618", "#ffffff" },        // view bars and the top bar (the window color)
+  { "lesion", "#ff5a5f", "#ff5a5f" },          //
 };
 
 //------------------------------------------------------------------------------
@@ -209,11 +213,11 @@ QColor derivedAccentToken(const QString& name, const QColor& accent, bool dark)
     QColor hsl = accent.toHsl();
     qreal lightness = dark ? qMax<qreal>(hsl.lightnessF(), 0.70) : qMin<qreal>(hsl.lightnessF(), 0.53);
     QColor foreground = QColor::fromHslF(hsl.hslHueF(), hsl.hslSaturationF(), lightness).toRgb();
-    return readableColor(foreground, QColor(dark ? "#1c1c1f" : "#f4f4f6"), 4.5);
+    return readableColor(foreground, QColor(dark ? "#161618" : "#ffffff"), 4.5);
   }
   if (name == QLatin1String("accent-subtle"))
   {
-    return dark ? mixColors(QColor("#1c1c1f"), accent, 0.26) : mixColors(Qt::white, accent, 0.13);
+    return dark ? mixColors(QColor("#161618"), accent, 0.26) : mixColors(Qt::white, accent, 0.13);
   }
   return QColor();
 }
@@ -429,7 +433,8 @@ void drawButtonPanel(const QStyleOption* option, QPainter* painter, const QWidge
 
   QColor fill;
   QColor border;
-  qreal radius = 6.;
+  // Radii of the visual design: controls 7, tool tiles 9 (see qSlicerStyle.h)
+  qreal radius = 7.;
   switch (kind)
   {
     case PrimaryButton: fill = !enabled ? token("border") : pressed ? token("accent-pressed") : hover ? token("accent-hover") : token("accent"); break;
@@ -439,15 +444,20 @@ void drawButtonPanel(const QStyleOption* option, QPainter* painter, const QWidge
     case SegmentButton:
       // Transparent until hovered
       fill = pressed ? token("control-pressed") : hover ? token("control-hover") : QColor(Qt::transparent);
-      radius = (kind == CompactButton) ? 4. : (kind == SegmentButton) ? 5. : 6.;
+      radius = (kind == CompactButton) ? 5. : 6.;
+      break;
+    case ToolTileButton:
+      // Flat tiles: the card fill, a hairline border
+      fill = !enabled ? token("card") : pressed ? token("control-pressed") : hover ? token("control-hover") : token("card");
+      border = token("hairline");
+      radius = 9.;
       break;
     case ToolButton:
-    case ToolTileButton:
       fill = !enabled  ? option->palette.color(QPalette::Disabled, QPalette::Button)
              : pressed ? token("control-pressed")
              : hover   ? token("control-hover")
                        : option->palette.color(QPalette::Button);
-      border = (hover && kind == ToolButton) ? token("control-border") : token("border");
+      border = hover ? token("control-border") : token("border");
       break;
     case CommandButton:
     default:
@@ -467,15 +477,21 @@ void drawButtonPanel(const QStyleOption* option, QPainter* painter, const QWidge
       }
       break;
   }
-  if (checked && kind != PrimaryButton)
+  if (checked && kind == SegmentButton)
+  {
+    // The selected segment is a raised "selected" fill on its track (a hairline stands for the shadow of the light theme)
+    fill = token("selected");
+    border = dark ? QColor() : QColor(0, 0, 0, 26);
+  }
+  else if (checked && kind != PrimaryButton)
   {
     fill = token("accent-subtle");
     if (enabled && (hover || pressed))
     {
       fill = shiftLightness(fill, (dark ? 0.04 : -0.03) * (pressed ? -1. : 1.));
     }
-    // Segments are checked on their track without border
-    border = (kind == SegmentButton) ? QColor() : enabled ? token("accent-fg") : token("border");
+    // Selected tool tiles have an accent border, other checked buttons an accent-fg border
+    border = !enabled ? token("border") : (kind == ToolTileButton) ? token("accent") : token("accent-fg");
   }
   const QRectF rect(option->rect);
   radius = qMin(radius, rect.height() / 2.);
@@ -492,12 +508,12 @@ void drawButtonPanel(const QStyleOption* option, QPainter* painter, const QWidge
 
 //------------------------------------------------------------------------------
 /// Radius of the frame of input fields (line edits, spin boxes and combo boxes)
-const qreal FieldRadius = 6.;
+const qreal FieldRadius = 7.;
 
 //------------------------------------------------------------------------------
 /// Draw an input field (line edit, spin box, combo box): a 1 px "control-border" frame
 /// ("accent-fg" when focused or open, "text2" when \a hoverable and hovered, "border" when
-/// disabled), which has a contrast of at least 3:1 with the window color, rounded by 6 px.
+/// disabled), which has a contrast of at least 3:1 with the window color, rounded by 7 px.
 /// The field is filled with \a fill if it is valid.
 /// The base style (Fusion) frames fields with a color derived from the window color, which is
 /// almost invisible on dark palettes.
@@ -659,8 +675,73 @@ void drawComboBox(const QStyleOptionComboBox* comboBox, QPainter* painter, const
 /// The groove is drawn on the rows of the range drawn by ctkRangeSlider (center - 2 to center + 1
 /// of the groove rectangle), which draws its groove with a position out of the range: the groove
 /// is then not filled.
+/// Return true if \a widget is in the flat bar of a view (an ancestor has the "slicerFlatViewBar" property).
+bool isInFlatViewBar(const QWidget* widget)
+{
+  for (int depth = 0; widget && depth < 4; ++depth, widget = widget->parentWidget())
+  {
+    if (widget->property("slicerFlatViewBar").toBool())
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
+//------------------------------------------------------------------------------
+/// Draw the neutral slider of a flat view bar: a 2 px track (#3f3f46 on dark, "border" on light) filled with "text2"
+/// up to a 10 px round thumb.
+void drawViewBarSlider(const QStyleOptionSlider* slider, QPainter* painter, const QWidget* widget, const QStyle* style)
+{
+  const bool dark = hasDarkPalette(slider);
+  auto token = [dark](const char* name) { return qSlicerStyle::tokenColor(QLatin1String(name), dark); };
+  const bool enabled = slider->state & QStyle::State_Enabled;
+  const bool horizontal = slider->orientation == Qt::Horizontal;
+  const QRect groove = style->subControlRect(QStyle::CC_Slider, slider, QStyle::SC_SliderGroove, widget);
+  const QRect handle = style->subControlRect(QStyle::CC_Slider, slider, QStyle::SC_SliderHandle, widget);
+  if ((slider->subControls & QStyle::SC_SliderGroove) && groove.isValid())
+  {
+    const QPointF center = QRectF(groove).center();
+    const QRectF band = horizontal ? QRectF(groove.left(), center.y() - 1., groove.width(), 2.) //
+                                   : QRectF(center.x() - 1., groove.top(), 2., groove.height());
+    drawRoundedBox(painter, band, 1., dark ? QColor("#3f3f46") : token("border"), QColor());
+    if (handle.isValid() && slider->maximum > slider->minimum)
+    {
+      QRectF filled(band);
+      const QPointF handleCenter = QRectF(handle).center();
+      if (horizontal)
+      {
+        slider->upsideDown ? filled.setLeft(handleCenter.x()) : filled.setRight(handleCenter.x());
+      }
+      else
+      {
+        slider->upsideDown ? filled.setTop(handleCenter.y()) : filled.setBottom(handleCenter.y());
+      }
+      drawRoundedBox(painter, filled, 1., enabled ? token("text2") : token("text-disabled"), QColor());
+    }
+  }
+  if ((slider->subControls & QStyle::SC_SliderHandle) && handle.isValid())
+  {
+    const bool active = enabled && (slider->activeSubControls & QStyle::SC_SliderHandle);
+    const bool ring = active && (slider->state & (QStyle::State_Sunken | QStyle::State_MouseOver));
+    const bool focus = enabled && (slider->state & QStyle::State_HasFocus) && (slider->state & QStyle::State_KeyboardFocusChange);
+    const qreal side = qMin<qreal>(10., qMin(handle.width(), handle.height()));
+    QRectF circle(0., 0., side, side);
+    circle.moveCenter(QRectF(handle).center());
+    const QColor fill = enabled ? (dark ? QColor("#ececef") : QColor("#ffffff")) : token("text-disabled");
+    const QColor border = (ring || focus) ? token("accent-fg") : (dark ? QColor() : token("control-border"));
+    drawRoundedBox(painter, circle, side / 2., fill, border, (ring || focus) ? 2. : 1.);
+  }
+}
+
+//------------------------------------------------------------------------------
 void drawSlider(const QStyleOptionSlider* slider, QPainter* painter, const QWidget* widget, const QStyle* style)
 {
+  if (isInFlatViewBar(widget))
+  {
+    drawViewBarSlider(slider, painter, widget, style);
+    return;
+  }
   const bool dark = hasDarkPalette(slider);
   auto token = [dark](const char* name) { return qSlicerStyle::tokenColor(QLatin1String(name), dark); };
   const QStyle::State state = slider->state;
@@ -1081,6 +1162,51 @@ void drawIndicator(QStyle::PrimitiveElement element, const QStyleOption* option,
 }
 
 //------------------------------------------------------------------------------
+/// Size of the track of a check box with the "switch" slicerRole
+const int SwitchWidth = 30;
+const int SwitchHeight = 18;
+/// Space between the text of a switch and its track
+const int SwitchSpacing = 12;
+
+//------------------------------------------------------------------------------
+/// Return true if \a widget is a check box drawn as a switch (the "switch" slicerRole)
+bool isSwitch(const QWidget* widget)
+{
+  return widget && qobject_cast<const QCheckBox*>(widget) && widgetRole(widget) == "switch";
+}
+
+//------------------------------------------------------------------------------
+/// Draw the indicator of a check box with the "switch" slicerRole: a pill track ("accent" when
+/// on, "control-border" when off, which has a 3:1 contrast with the window) and a round knob.
+void drawSwitch(const QStyleOption* option, QPainter* painter)
+{
+  const QStyle::State state = option->state;
+  const bool dark = hasDarkPalette(option);
+  const bool enabled = state & QStyle::State_Enabled;
+  const bool on = state & (QStyle::State_On | QStyle::State_NoChange);
+  const bool hover = enabled && (state & QStyle::State_MouseOver);
+  auto token = [dark](const char* name) { return qSlicerStyle::tokenColor(QLatin1String(name), dark); };
+  QRectF track(0., 0., qMin<qreal>(SwitchWidth, option->rect.width()), qMin<qreal>(SwitchHeight, option->rect.height()));
+  track.moveCenter(QRectF(option->rect).center());
+  QColor fill = on ? token("accent") : token("control-border");
+  if (hover)
+  {
+    fill = on ? token("accent-hover") : shiftLightness(fill, dark ? 0.06 : -0.06);
+  }
+  painter->save();
+  if (!enabled)
+  {
+    painter->setOpacity(0.4);
+  }
+  drawRoundedBox(painter, track, track.height() / 2., fill, QColor());
+  const qreal knobSide = track.height() - 4.;
+  QRectF knob(0., 0., knobSide, knobSide);
+  knob.moveCenter(QPointF(on ? track.right() - 2. - knobSide / 2. : track.left() + 2. + knobSide / 2., track.center().y()));
+  drawRoundedBox(painter, knob, knobSide / 2., dark ? QColor("#ececef") : QColor(Qt::white), QColor());
+  painter->restore();
+}
+
+//------------------------------------------------------------------------------
 /// Draw a thin chevron (1.5 px line) pointing in the direction of \a element, centered in \a rect
 void drawChevron(QStyle::PrimitiveElement element, const QRectF& rect, const QColor& color, QPainter* painter)
 {
@@ -1141,7 +1267,7 @@ void drawMenuSurface(QStyle::PrimitiveElement element, const QStyleOption* optio
   const bool dark = hasDarkPalette(option);
   const QColor borderColor = qSlicerStyle::tokenColor("control-border", dark);
   const QColor fill = (element == QStyle::PE_PanelMenu) ? qSlicerStyle::tokenColor("card", dark) : QColor();
-  const qreal radius = qobject_cast<const QMenu*>(widget) ? 6. : 0.;
+  const qreal radius = qobject_cast<const QMenu*>(widget) ? 8. : 0.;
   if (radius > 0.)
   {
     if (fill.isValid())
@@ -1307,8 +1433,133 @@ void drawMenuItem(const QStyleOptionMenuItem* menuItem, QPainter* painter, const
 }
 
 //------------------------------------------------------------------------------
+/// Height of the header of a ctkCollapsibleButton with the "card" slicerRole (a card title row, or a step row)
+const int CardHeaderHeight = 44;
+/// Side of the status circle of a step row
+const int StepCircleSize = 20;
+
+//------------------------------------------------------------------------------
+/// Return true if \a widget is a ctkCollapsibleButton with the "card" slicerRole (the cards of the Map workspace)
+bool isCardCollapsible(const QWidget* widget)
+{
+  return widget && widget->inherits("ctkCollapsibleButton") && widgetRole(widget) == "card";
+}
+
+//------------------------------------------------------------------------------
+/// Draw the header of a card collapsible (see drawCollapsibleHeader()): an optional status circle ("studioStep" number
+/// and "studioStepState": "done" check, "action" "!", "current" number in the accent color), the title in 14 px
+/// SemiBold, an optional one-line summary in "text3" ("studioStepSummary") and a chevron on the right.
+void drawCardHeader(QPainter* painter, const QRect& headerRect, const QPalette& palette, bool enabled, const QString& text, const QWidget* widget)
+{
+  const bool dark = isDark(palette);
+  auto token = [dark](const char* name) { return qSlicerStyle::tokenColor(QLatin1String(name), dark); };
+  painter->save();
+  painter->setRenderHint(QPainter::Antialiasing, true);
+  const int padding = 14;
+  int left = headerRect.left() + padding;
+  const int step = widget->property("studioStep").toInt();
+  const QString stepState = widget->property("studioStepState").toString();
+  const QFont baseFont = widget->font();
+  if (step > 0)
+  {
+    QRectF circle(0., 0., StepCircleSize, StepCircleSize);
+    circle.moveCenter(QPointF(left + StepCircleSize / 2., headerRect.center().y() + 0.5));
+    QColor fill;
+    QColor mark;
+    QString glyph = QString::number(step);
+    if (stepState == QLatin1String("done"))
+    {
+      mark = token("success");
+      fill = mark;
+      fill.setAlphaF(0.16);
+      glyph.clear();
+    }
+    else if (stepState == QLatin1String("action"))
+    {
+      mark = token("warning");
+      fill = mark;
+      fill.setAlphaF(0.16);
+      glyph = QStringLiteral("!");
+    }
+    else if (stepState == QLatin1String("current"))
+    {
+      fill = token("accent");
+      mark = Qt::white;
+    }
+    else
+    {
+      fill = token("control-hover");
+      mark = token("text2");
+    }
+    drawRoundedBox(painter, circle, StepCircleSize / 2., fill, QColor());
+    if (glyph.isEmpty())
+    {
+      // A check mark
+      painter->setPen(QPen(mark, 1.75, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+      painter->setBrush(Qt::NoBrush);
+      QPainterPath check;
+      const qreal x = circle.left();
+      const qreal y = circle.top();
+      const qreal w = circle.width();
+      check.moveTo(x + w * 0.30, y + w * 0.52);
+      check.lineTo(x + w * 0.45, y + w * 0.66);
+      check.lineTo(x + w * 0.71, y + w * 0.37);
+      painter->drawPath(check);
+    }
+    else
+    {
+      QFont font = baseFont;
+      font.setWeight(QFont::DemiBold);
+      font.setPixelSize(qMax(8, qRound(QFontInfo(baseFont).pixelSize() * 0.85)));
+      painter->setFont(font);
+      painter->setPen(mark);
+      painter->drawText(circle, Qt::AlignCenter, glyph);
+    }
+    left += StepCircleSize + 10;
+  }
+  // Chevron on the right: right when collapsed, down when expanded
+  const qreal chevronSide = 12.;
+  const QRectF chevronRect(headerRect.right() - padding - chevronSide + 1, headerRect.center().y() - chevronSide / 2. + 0.5, chevronSide, chevronSide);
+  const bool collapsed = widget->property("collapsed").toBool();
+  drawChevron(collapsed ? QStyle::PE_IndicatorArrowRight : QStyle::PE_IndicatorArrowDown, chevronRect, enabled ? token("text3") : token("text-disabled"), painter);
+  const int right = int(chevronRect.left()) - 8;
+  const QString summary = widget->property("studioStepSummary").toString();
+  QFont titleFont = baseFont;
+  titleFont.setWeight(QFont::DemiBold);
+  titleFont.setPixelSize(qMax(8, qRound(QFontInfo(baseFont).pixelSize() * (step > 0 ? 1.0 : 14. / 13.))));
+  const QFontMetrics titleMetrics(titleFont);
+  QColor titleColor = palette.color(enabled ? QPalette::Normal : QPalette::Disabled, QPalette::WindowText);
+  if (!summary.isEmpty())
+  {
+    QFont summaryFont = baseFont;
+    summaryFont.setPixelSize(qMax(8, qRound(QFontInfo(baseFont).pixelSize() * 12. / 13.)));
+    const QFontMetrics summaryMetrics(summaryFont);
+    const int total = titleMetrics.height() + summaryMetrics.height();
+    const int top = headerRect.top() + (headerRect.height() - total) / 2;
+    painter->setFont(titleFont);
+    painter->setPen(titleColor);
+    painter->drawText(QRect(left, top, right - left, titleMetrics.height()), Qt::AlignLeft | Qt::AlignVCenter, titleMetrics.elidedText(text, Qt::ElideRight, right - left));
+    painter->setFont(summaryFont);
+    painter->setPen(enabled ? token("text3") : token("text-disabled"));
+    painter->drawText(QRect(left, top + titleMetrics.height(), right - left, summaryMetrics.height()),
+                      Qt::AlignLeft | Qt::AlignVCenter,
+                      summaryMetrics.elidedText(summary, Qt::ElideRight, right - left));
+  }
+  else
+  {
+    painter->setFont(titleFont);
+    painter->setPen(titleColor);
+    painter->drawText(
+      QRect(left, headerRect.top(), right - left, headerRect.height()), Qt::AlignLeft | Qt::AlignVCenter, titleMetrics.elidedText(text, Qt::ElideRight, right - left));
+  }
+  painter->restore();
+}
+
+//------------------------------------------------------------------------------
 /// Draw the flat header of a ctkCollapsibleButton: a hover or pressed fill and a hairline below
 /// the header when the section is expanded. The chevron and the text are drawn by the button.
+/// With the "card" slicerRole the whole button is a rounded card ("card" fill, hairline, 10 px)
+/// and the header a 44 px title row (see drawCardHeader()).
 void drawCollapsibleHeader(const QStyleOption* option, QPainter* painter, const QWidget* widget)
 {
   const QStyle::State state = option->state;
@@ -1322,6 +1573,24 @@ void drawCollapsibleHeader(const QStyleOption* option, QPainter* painter, const 
   else if (enabled && (state & QStyle::State_MouseOver))
   {
     fill = optionToken(option, "control-hover");
+  }
+  if (isCardCollapsible(widget))
+  {
+    const QRectF cardRect(widget->rect());
+    drawRoundedBox(painter, cardRect, 10., optionToken(option, "card"), optionToken(option, "hairline"));
+    if (fill.isValid())
+    {
+      // The hover fill of the title row, inside the card's border and rounded like its top corners
+      QPainterPath header;
+      header.addRoundedRect(cardRect.adjusted(1., 1., -1., -1.), 9., 9.);
+      QPainterPath row;
+      row.addRect(QRectF(rect.left(), rect.top(), rect.width(), rect.height()));
+      painter->save();
+      painter->setRenderHint(QPainter::Antialiasing, true);
+      painter->fillPath(header.intersected(row), fill);
+      painter->restore();
+    }
+    return;
   }
   if (fill.isValid())
   {
@@ -1374,8 +1643,10 @@ void chipColors(const QWidget* widget, bool dark, QColor& background, QColor& fo
 }
 
 //------------------------------------------------------------------------------
-/// Draw the background of a frame or label with a slicerRole: rounded card, chip pill, kbd key
-/// and segmented control track. Return false if the widget has no such role.
+/// Draw the background of a frame or label with a slicerRole: rounded card (10 px, "card" fill),
+/// card on the canvas ("cardLow": 12 px, "card-low" fill), icon tile ("iconTile": "accent-subtle"),
+/// chip pill, kbd key and segmented control track ("canvas" fill). Return false if the widget has
+/// no such role.
 bool drawRoleFrame(const QStyleOption* option, QPainter* painter, const QWidget* widget)
 {
   const QByteArray role = widgetRole(widget);
@@ -1391,12 +1662,23 @@ bool drawRoleFrame(const QStyleOption* option, QPainter* painter, const QWidget*
   const QRectF rect(padded ? QRectF(widget->rect()) : QRectF(option->rect));
   if (role == "card")
   {
-    drawRoundedBox(painter, rect, 8., token("card"), token("hairline"));
+    drawRoundedBox(painter, rect, 10., token("card"), token("hairline"));
+    return true;
+  }
+  if (role == "cardLow")
+  {
+    drawRoundedBox(painter, rect, 12., token("card-low"), token("hairline"));
+    return true;
+  }
+  if (role == "iconTile")
+  {
+    drawRoundedBox(painter, rect, qMin<qreal>(9., qRound(rect.height() * 0.24)), token("accent-subtle"), QColor());
     return true;
   }
   if (role == "segmented")
   {
-    drawRoundedBox(painter, rect, 7., token("control-pressed"), token("hairline"));
+    // Tall tracks (the workspace switcher) have a 9 px radius, compact ones 8 px
+    drawRoundedBox(painter, rect, rect.height() >= 34. ? 9. : 8., token("canvas"), token("hairline"));
     return true;
   }
   if (role == "chip")
@@ -1417,7 +1699,7 @@ bool drawRoleFrame(const QStyleOption* option, QPainter* painter, const QWidget*
       keyRect.setTop(rect.top() + qRound((rect.height() - keyHeight) / 2.));
       keyRect.setHeight(keyHeight);
     }
-    drawRoundedBox(painter, keyRect, 4., QColor(), token("border"));
+    drawRoundedBox(painter, keyRect, 5., QColor(), token("border"));
     return true;
   }
   return false;
@@ -1436,7 +1718,7 @@ void updateRoundedMask(QWidget* widget)
   QPainter painter(&mask);
   painter.setPen(Qt::NoPen);
   painter.setBrush(Qt::color1);
-  painter.drawRoundedRect(QRect(QPoint(0, 0), widget->size()), 6, 6);
+  painter.drawRoundedRect(QRect(QPoint(0, 0), widget->size()), 8, 8);
   painter.end();
   widget->setMask(mask);
 }
@@ -1620,6 +1902,26 @@ QRect qSlicerStyle::subElementRect(SubElement element, const QStyleOption* optio
 {
   switch (element)
   {
+    case QStyle::SE_CheckBoxIndicator:
+    case QStyle::SE_CheckBoxContents:
+    case QStyle::SE_CheckBoxFocusRect:
+    case QStyle::SE_CheckBoxClickRect:
+      if (option && isSwitch(widget))
+      {
+        // Switches: the text on the left, the track on the right edge of the check box
+        const QRect rect = option->rect;
+        const QRect track(rect.right() - SwitchWidth + 1, rect.top() + (rect.height() - SwitchHeight) / 2, SwitchWidth, SwitchHeight);
+        QRect result;
+        switch (element)
+        {
+          case QStyle::SE_CheckBoxIndicator: result = track; break;
+          case QStyle::SE_CheckBoxContents: result = QRect(rect.left(), rect.top(), qMax(0, rect.width() - SwitchWidth - SwitchSpacing), rect.height()); break;
+          case QStyle::SE_CheckBoxFocusRect: result = track.adjusted(-2, -2, 2, 2).intersected(rect); break;
+          default: result = rect; break;
+        }
+        return QStyle::visualRect(option->direction, rect, result);
+      }
+      break;
     case QStyle::SE_ProgressBarGroove:
     case QStyle::SE_ProgressBarContents:
     case QStyle::SE_ProgressBarLabel:
@@ -1652,6 +1954,11 @@ int qSlicerStyle::pixelMetric(PixelMetric metric, const QStyleOption* option, co
     case QStyle::PM_LayoutBottomMargin:
     {
       const bool comfortable = (qSlicerStyle::density() == qSlicerStyle::Comfortable);
+      if (isCardCollapsible(widget))
+      {
+        // Card padding (VISUAL 4.5): 14 px, 2 px under the title row
+        return metric == QStyle::PM_LayoutTopMargin ? 2 : 14;
+      }
       if (widget && widget->inherits("ctkCollapsibleButton"))
       {
         return comfortable ? 6 : 4; // 9 by default
@@ -1697,6 +2004,10 @@ int qSlicerStyle::pixelMetric(PixelMetric metric, const QStyleOption* option, co
     case QStyle::PM_IndicatorHeight:
     case QStyle::PM_ExclusiveIndicatorWidth:
     case QStyle::PM_ExclusiveIndicatorHeight:
+      if (isSwitch(widget) && (metric == QStyle::PM_IndicatorWidth || metric == QStyle::PM_IndicatorHeight))
+      {
+        return metric == QStyle::PM_IndicatorWidth ? SwitchWidth : SwitchHeight;
+      }
       if (qSlicerStyle::density() == qSlicerStyle::Comfortable)
       {
         return 16; // 14 by default
@@ -1754,30 +2065,30 @@ QPalette qSlicerStyle::standardLightPalette() const
   // See https://doc.qt.io/qt-5/qpalette.html#ColorRole-enum
   // Colors set without color group apply to the Active, Inactive and Disabled groups.
   // Central color roles
-  palette.setColor(QPalette::Window, "#f4f4f6");
-  palette.setColor(QPalette::WindowText, "#1c1c1f");
+  palette.setColor(QPalette::Window, Qt::white);
+  palette.setColor(QPalette::WindowText, "#18181b");
   palette.setColor(QPalette::Disabled, QPalette::WindowText, "#a3a3ab");
   palette.setColor(QPalette::Base, Qt::white);
-  palette.setColor(QPalette::AlternateBase, "#f7f7f9");
-  palette.setColor(QPalette::ToolTipBase, "#1c1c1f");
-  palette.setColor(QPalette::ToolTipText, "#f4f4f6");
-  palette.setColor(QPalette::Text, "#1c1c1f");
+  palette.setColor(QPalette::AlternateBase, "#f6f6f8");
+  palette.setColor(QPalette::ToolTipBase, "#18181b");
+  palette.setColor(QPalette::ToolTipText, "#f6f6f8");
+  palette.setColor(QPalette::Text, "#18181b");
   palette.setColor(QPalette::Disabled, QPalette::Text, "#a3a3ab");
-  palette.setColor(QPalette::PlaceholderText, "#63636c"); // text3
+  palette.setColor(QPalette::PlaceholderText, "#6b6b74"); // text3
   palette.setColor(QPalette::Disabled, QPalette::PlaceholderText, "#a3a3ab");
   palette.setColor(QPalette::Button, Qt::white);
-  palette.setColor(QPalette::Disabled, QPalette::Button, "#f0f0f3");
-  palette.setColor(QPalette::ButtonText, "#1c1c1f");
+  palette.setColor(QPalette::Disabled, QPalette::Button, "#f1f1f4");
+  palette.setColor(QPalette::ButtonText, "#18181b");
   palette.setColor(QPalette::Disabled, QPalette::ButtonText, "#a3a3ab");
   palette.setColor(QPalette::BrightText, "#cf222e");
   // Color roles used mostly for 3D bevel and shadow effects.
   palette.setColor(QPalette::Light, Qt::white);    // Lighter than Button color.
-  palette.setColor(QPalette::Midlight, "#ededf1"); // Between Button and Light.
+  palette.setColor(QPalette::Midlight, "#eeeef2"); // Between Button and Light.
   palette.setColor(QPalette::Mid, "#d4d4da");      // Between Button and Dark.
   palette.setColor(QPalette::Dark, "#a1a1aa");     // Darker than Button.
-  palette.setColor(QPalette::Shadow, "#5c5c66");   // A very dark color.
+  palette.setColor(QPalette::Shadow, "#52525b");   // A very dark color.
   // Color roles relate to selected (marked) items
-  palette.setColor(QPalette::Highlight, "#2f6fde");
+  palette.setColor(QPalette::Highlight, "#2f6fe0");
   palette.setColor(QPalette::Disabled, QPalette::Highlight, "#d4d4da");
   palette.setColor(QPalette::HighlightedText, Qt::white);
   // Color roles related to hyperlinks
@@ -1795,37 +2106,37 @@ QPalette qSlicerStyle::standardDarkPalette() const
   QPalette palette = this->Superclass::standardPalette();
   // See https://doc.qt.io/qt-5/qpalette.html#ColorRole-enum
   // Colors set without color group apply to the Active, Inactive and Disabled groups.
-  // Central color roles
-  palette.setColor(QPalette::Window, "#1c1c1f");
-  palette.setColor(QPalette::WindowText, "#e8e8ec");
+  // Central color roles: graphite surfaces (window #161618), fields on the canvas color
+  palette.setColor(QPalette::Window, "#161618");
+  palette.setColor(QPalette::WindowText, "#ececef");
   palette.setColor(QPalette::Disabled, QPalette::WindowText, "#6b6b73");
-  palette.setColor(QPalette::Base, "#18181b");
-  palette.setColor(QPalette::Disabled, QPalette::Base, "#1d1d20");
-  palette.setColor(QPalette::AlternateBase, "#1e1e22");
+  palette.setColor(QPalette::Base, "#0f0f11");
+  palette.setColor(QPalette::Disabled, QPalette::Base, "#18181b");
+  palette.setColor(QPalette::AlternateBase, "#141416");
   palette.setColor(QPalette::ToolTipBase, "#0b0b0d");
-  palette.setColor(QPalette::ToolTipText, "#e8e8ec");
-  palette.setColor(QPalette::Text, "#e8e8ec");
+  palette.setColor(QPalette::ToolTipText, "#ececef");
+  palette.setColor(QPalette::Text, "#ececef");
   palette.setColor(QPalette::Disabled, QPalette::Text, "#6b6b73");
-  palette.setColor(QPalette::PlaceholderText, "#94949c"); // text3
+  palette.setColor(QPalette::PlaceholderText, "#8b8b94"); // text3
   palette.setColor(QPalette::Disabled, QPalette::PlaceholderText, "#55555c");
-  palette.setColor(QPalette::Button, "#2c2c31");
-  palette.setColor(QPalette::Disabled, QPalette::Button, "#26262a");
-  palette.setColor(QPalette::ButtonText, "#e8e8ec");
+  palette.setColor(QPalette::Button, "#1d1d20");
+  palette.setColor(QPalette::Disabled, QPalette::Button, "#1a1a1d");
+  palette.setColor(QPalette::ButtonText, "#ececef");
   palette.setColor(QPalette::Disabled, QPalette::ButtonText, "#6b6b73");
   palette.setColor(QPalette::BrightText, "#ff6b6b"); // Lighter than Qt::red
   // Color roles used mostly for 3D bevel and shadow effects.
-  palette.setColor(QPalette::Light, "#4a4a52");    // Lighter than Button color.
-  palette.setColor(QPalette::Midlight, "#3a3a41"); // Between Button and Light.
-  palette.setColor(QPalette::Mid, "#2a2a2f");      // Between Button and Dark.
-  palette.setColor(QPalette::Dark, "#121214");     // Darker than Button.
+  palette.setColor(QPalette::Light, "#45454c");    // Lighter than Button color.
+  palette.setColor(QPalette::Midlight, "#34343a"); // Between Button and Light.
+  palette.setColor(QPalette::Mid, "#26262a");      // Between Button and Dark.
+  palette.setColor(QPalette::Dark, "#0b0b0d");     // Darker than Button.
   palette.setColor(QPalette::Shadow, Qt::black);   // A very dark color.
   // Color roles relate to selected (marked) items
-  palette.setColor(QPalette::Highlight, "#3568d4");
-  palette.setColor(QPalette::Disabled, QPalette::Highlight, "#3a3a41");
+  palette.setColor(QPalette::Highlight, "#2f6fe0");
+  palette.setColor(QPalette::Disabled, QPalette::Highlight, "#34343a");
   palette.setColor(QPalette::HighlightedText, Qt::white);
   palette.setColor(QPalette::Disabled, QPalette::HighlightedText, "#a1a1aa");
   // Color roles related to hyperlinks
-  palette.setColor(QPalette::Link, "#6ea3ff");
+  palette.setColor(QPalette::Link, "#7aa7ff");
   palette.setColor(QPalette::LinkVisited, "#a78bfa");
 
   applyAccentColor(palette, true);
@@ -1924,6 +2235,11 @@ void qSlicerStyle::drawPrimitive(PrimitiveElement element, const QStyleOption* o
         }
         radius = 3.;
       }
+      else if (isSwitch(widget))
+      {
+        // Around the track of a switch (SE_CheckBoxFocusRect)
+        radius = ringRect.height() / 2.;
+      }
       else if (const QToolButton* toolButton = qobject_cast<const QToolButton*>(widget))
       {
         // The base style insets the focus rectangle of tool buttons by 3 pixels: ring the button
@@ -1942,9 +2258,21 @@ void qSlicerStyle::drawPrimitive(PrimitiveElement element, const QStyleOption* o
     case QStyle::PE_IndicatorArrowUp:
     case QStyle::PE_IndicatorArrowDown:
     case QStyle::PE_IndicatorArrowLeft:
-    case QStyle::PE_IndicatorArrowRight: drawChevron(element, QRectF(option->rect), arrowColor(option), painter); return;
+    case QStyle::PE_IndicatorArrowRight:
+      if (isCardCollapsible(widget) && option->rect.height() <= CardHeaderHeight && option->rect.top() < CardHeaderHeight)
+      {
+        // The chevron of a card is drawn on the right of its title row (drawCardHeader())
+        return;
+      }
+      drawChevron(element, QRectF(option->rect), arrowColor(option), painter);
+      return;
     case QStyle::PE_IndicatorCheckBox:
     case QStyle::PE_IndicatorRadioButton:
+      if (element == QStyle::PE_IndicatorCheckBox && isSwitch(widget))
+      {
+        drawSwitch(option, painter);
+        return;
+      }
       // Item view checks and menu check boxes are drawn by the base style as PE_IndicatorCheckBox.
       drawIndicator(element, option, painter);
       return;
@@ -1955,7 +2283,7 @@ void qSlicerStyle::drawPrimitive(PrimitiveElement element, const QStyleOption* o
       // Tool tips are dark in both themes: the border is the one of the dark theme
       const QColor background = option->palette.color(QPalette::ToolTipBase);
       painter->fillRect(option->rect, background);
-      drawRoundedBox(painter, QRectF(option->rect), 6., background, qSlicerStyle::tokenColor("border", true));
+      drawRoundedBox(painter, QRectF(option->rect), 8., background, qSlicerStyle::tokenColor("border", true));
       return;
     }
     case QStyle::PE_PanelLineEdit:
@@ -2042,7 +2370,7 @@ void qSlicerStyle::drawPrimitive(PrimitiveElement element, const QStyleOption* o
     }
     case QStyle::PE_Frame:
     case QStyle::PE_Widget:
-      if (widgetRole(widget) == "card")
+      if (widgetRole(widget) == "card" || widgetRole(widget) == "cardLow")
       {
         drawRoleFrame(option, painter, widget);
         return;
@@ -2060,6 +2388,28 @@ void qSlicerStyle::drawControl(ControlElement element, const QStyleOption* optio
   {
     switch (element)
     {
+      case QStyle::CE_CheckBox:
+        if (isSwitch(widget))
+        {
+          // Switches: the parts at the places of subElementRect() (the base style asks its own geometry)
+          if (const QStyleOptionButton* button = qstyleoption_cast<const QStyleOptionButton*>(option))
+          {
+            QStyleOptionButton part(*button);
+            part.rect = this->subElementRect(QStyle::SE_CheckBoxIndicator, button, widget);
+            this->proxy()->drawPrimitive(QStyle::PE_IndicatorCheckBox, &part, painter, widget);
+            part.rect = this->subElementRect(QStyle::SE_CheckBoxContents, button, widget);
+            this->proxy()->drawControl(QStyle::CE_CheckBoxLabel, &part, painter, widget);
+            if (button->state & QStyle::State_HasFocus)
+            {
+              QStyleOptionFocusRect focus;
+              focus.QStyleOption::operator=(*button);
+              focus.rect = this->subElementRect(QStyle::SE_CheckBoxFocusRect, button, widget);
+              this->proxy()->drawPrimitive(QStyle::PE_FrameFocusRect, &focus, painter, widget);
+            }
+            return;
+          }
+        }
+        break;
       case QStyle::CE_PushButtonBevel:
         if (widget && widget->inherits("ctkCollapsibleButton"))
         {
@@ -2231,12 +2581,26 @@ void qSlicerStyle::drawComplexControl(ComplexControl control, const QStyleOption
     const QByteArray role = widgetRole(widget);
     const QStyleOptionToolButton* toolButton = qstyleoption_cast<const QStyleOptionToolButton*>(option);
     if (toolButton && (toolButton->features & QStyleOptionToolButton::HasMenu) //
-        && (role == "ghost" || role == "toolTile" || isSegment(widget)))
+        && (role == "ghost" || role == "toolTile" || role == "secondary" || isSegment(widget)))
     {
       // These buttons show their menu without menu indicator
       QStyleOptionToolButton withoutIndicator(*toolButton);
       withoutIndicator.features &= ~QStyleOptionToolButton::HasMenu;
       this->Superclass::drawComplexControl(control, &withoutIndicator, painter, widget);
+      return;
+    }
+    const QString key = (role == "toolTile" && widget && painter) ? widget->property("studioKey").toString() : QString();
+    if (!key.isEmpty())
+    {
+      // Tool tiles: the key of the tool in the top-right corner (10 px, "text3")
+      this->Superclass::drawComplexControl(control, option, painter, widget);
+      painter->save();
+      QFont font = painter->font();
+      font.setPixelSize(qMax(8, qRound(QFontInfo(widget->font()).pixelSize() * 0.9)));
+      painter->setFont(font);
+      painter->setPen(optionToken(option, (option->state & QStyle::State_Enabled) ? "text3" : "text-disabled"));
+      painter->drawText(QRectF(option->rect).adjusted(4., 3., -5., -3.), Qt::AlignRight | Qt::AlignTop, key);
+      painter->restore();
       return;
     }
   }
@@ -2291,6 +2655,12 @@ void qSlicerStyle::drawItemText(QPainter* painter, const QRect& rect, int flags,
     this->Superclass::drawItemText(painter, rect, flags, pal, enabled, text, textRole);
     return;
   }
+  if (isCardCollapsible(widget) && rect.top() < CardHeaderHeight)
+  {
+    // The title row of a card: the whole header is laid out here
+    drawCardHeader(painter, QRect(0, 0, widget->width(), qMin(widget->height(), CardHeaderHeight)), pal, enabled, text, widget);
+    return;
+  }
   if (widget->inherits("ctkCollapsibleButton"))
   {
     // SemiBold section titles
@@ -2323,7 +2693,7 @@ void qSlicerStyle::drawItemText(QPainter* painter, const QRect& rect, int flags,
   {
     color = active ? pal.color(textRole) : token("text2");
   }
-  else if (role == "sectionHeader" || role == "secondaryText" || role == "kbd")
+  else if (role == "sectionHeader" || role == "secondaryText" || role == "kbd" || role == "overline")
   {
     color = token("text2");
   }
@@ -2357,7 +2727,11 @@ QSize qSlicerStyle::sizeFromContents(ContentsType type, const QStyleOption* opti
     case QStyle::CT_PushButton:
       if (widget && widget->inherits("ctkCollapsibleButton"))
       {
-        if (comfortable)
+        if (isCardCollapsible(widget))
+        {
+          size.setHeight(CardHeaderHeight);
+        }
+        else if (comfortable)
         {
           size.setHeight(qMax(size.height(), 28));
         }
@@ -2370,7 +2744,7 @@ QSize qSlicerStyle::sizeFromContents(ContentsType type, const QStyleOption* opti
       }
       else if (role == "secondary")
       {
-        size.setHeight(qMax(size.height(), 28));
+        size.setHeight(qMax(size.height(), 32));
       }
       if (comfortable)
       {
@@ -2399,7 +2773,8 @@ QSize qSlicerStyle::sizeFromContents(ContentsType type, const QStyleOption* opti
       }
       else if (role == "toolTile")
       {
-        size = size.expandedTo(QSize(70, 60));
+        // 60 px tall tiles, five in a row of the 340 px inspector
+        size = size.expandedTo(QSize(56, 60));
       }
       else if (isSegment(widget))
       {
@@ -2487,10 +2862,18 @@ void qSlicerStyle::polish(QWidget* widget)
   {
     if (role == "sectionHeader")
     {
+      // Section labels: 12 px (at a 13 px body), SemiBold, sentence case
+      QFont font = scaledFont(widget->font(), 0.92);
+      font.setWeight(QFont::DemiBold);
+      widget->setFont(font);
+    }
+    else if (role == "overline")
+    {
+      // The rare all-caps labels ("CONTINUE", the group headers of Search): 11 px, SemiBold, +4% letter spacing
       QFont font = scaledFont(widget->font(), 0.85);
       font.setWeight(QFont::DemiBold);
       font.setCapitalization(QFont::AllUppercase);
-      font.setLetterSpacing(QFont::AbsoluteSpacing, 0.6);
+      font.setLetterSpacing(QFont::PercentageSpacing, 104.);
       widget->setFont(font);
     }
     else if (role == "secondaryText" || role == "caption" || role == "chip")
@@ -2618,7 +3001,7 @@ QColor qSlicerStyle::tokenColor(const QString& name, bool dark)
       return QColor(value);
     }
     // Derived from the default accent color of the theme
-    return derivedAccentToken(name, QColor(dark ? "#3568d4" : "#2f6fde"), dark);
+    return derivedAccentToken(name, QColor("#2f6fe0"), dark);
   }
   return QColor();
 }

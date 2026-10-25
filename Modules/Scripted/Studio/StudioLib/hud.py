@@ -10,8 +10,25 @@ import slicer
 
 from . import ui
 
-TOAST_HEIGHT = 32
-TOAST_BOTTOM_MARGIN = 28
+TOAST_HEIGHT = 34
+#: Gap between the bottom of the views and the toast (VISUAL 4.8)
+TOAST_BOTTOM_MARGIN = 40
+#: Status icon of a toast, its left margin and the gap to the text
+TOAST_ICON_SIZE = 15
+TOAST_ICON_LEFT = 14
+TOAST_ICON_GAP = 8
+#: Status icon (Lucide name, color) of a toast level: the dark-theme status colors, since the pill is dark in both
+#: themes
+TOAST_ICONS = {
+    "success": ("circle-check", "#3fb950"),
+    "warning": ("triangle-alert", "#e3b341"),
+    "warn": ("triangle-alert", "#e3b341"),
+    "error": ("circle-alert", "#f85149"),
+    # The level names of ``ui.notice()``
+    "danger": ("circle-alert", "#f85149"),
+    "busy": ("loader-circle", "#a1a1aa"),
+}
+TOAST_DEFAULT_ICON = ("info", "#7aa7ff")
 FADE_DURATION_MS = 250
 PILL_HEIGHT = 28
 PILL_MARGIN = 12
@@ -117,8 +134,31 @@ def elidedText(label, text, overflow):
     return metrics.elidedText(text, qt.Qt.ElideRight, max(20, textWidth - overflow))
 
 
+def toastColors():
+    """(background, text, border) colors of a toast: an elevated dark pill (#232327) in both themes, which reads
+    well over images and over the canvas (VISUAL 4.8).
+    """
+    dark = ui.isDark()
+    background = qt.QColor("#232327") if dark else ui.token("tooltip")
+    return background, qt.QColor("#ececef"), qt.QColor(255, 255, 255, 20 if dark else 28)
+
+
+def toastStyleSheet(selector):
+    """The stylesheet of a toast pill matched by ``selector``."""
+    background, text, border = toastColors()
+    return (
+        f"{selector} {{ background-color: {background.name()}; color: {text.name()};"
+        f" border: 1px solid {ui._rgba(border, border.alphaF())}; border-radius: {TOAST_HEIGHT // 2}px; }}")
+
+
+def toastIconPixmap(level):
+    """The 15 px status icon of a toast ``level`` ("info", "success", "warning", "busy"...)."""
+    name, color = TOAST_ICONS.get(level or "info", TOAST_DEFAULT_ICON)
+    return ui.pixmap(name, TOAST_ICON_SIZE, color)
+
+
 class Toast:
-    """A 32 px pill near the bottom of a widget (the main window central widget) that fades out.
+    """A 34 px pill near the bottom of a widget (the main window central widget) that fades out.
 
     It is centred on the widget, or beside the figure view while a figure is shown (``toastSpan()``).
 
@@ -134,6 +174,13 @@ class Toast:
         self.label.setFixedHeight(TOAST_HEIGHT)
         self.label.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
         self.label.hide()
+        # The status icon, a child at the left of the pill (the label padding keeps the text clear of it)
+        self.level = "info"
+        self.iconLabel = qt.QLabel(self.label)
+        self.iconLabel.setObjectName("StudioToastIcon")
+        self.iconLabel.setFixedSize(TOAST_ICON_SIZE, TOAST_ICON_SIZE)
+        self.iconLabel.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
+        self.iconLabel.move(TOAST_ICON_LEFT, (TOAST_HEIGHT - TOAST_ICON_SIZE) // 2)
         ui.bindStyleSheet(self.label, self._styleSheet)
 
         self.opacityEffect = qt.QGraphicsOpacityEffect(self.label)
@@ -150,18 +197,25 @@ class Toast:
         self.hideTimer.setSingleShot(True)
         self.hideTimer.connect("timeout()", self.fadeAnimation.start)
 
-    @staticmethod
-    def _styleSheet():
-        # Tooltip colors: an inverted pill that reads well over images and over the canvas
+    def _styleSheet(self):
+        self.iconLabel.setPixmap(toastIconPixmap(self.level))
+        padding = TOAST_ICON_LEFT + TOAST_ICON_SIZE + TOAST_ICON_GAP
         return (
-            f"QLabel#StudioToast {{ background-color: {ui._rgba(ui.token('tooltip'), 0.92)}; color: {ui.token('tooltip-text').name()};"
-            f" border: 1px solid {ui._rgba(ui.token('tooltip-text'), 0.12)}; border-radius: {TOAST_HEIGHT // 2}px; padding: 0px 16px; font-size: {ui.fontPx(13)}px; }}")
+            toastStyleSheet("QLabel#StudioToast")
+            + f"QLabel#StudioToast {{ padding: 0px 16px 0px {padding}px; font-size: {ui.fontPx(13)}px; }}"
+            + "QLabel#StudioToastIcon { background: transparent; border: none; padding: 0px; }")
 
-    def show(self, text, ms=1600):
-        """Show ``text`` for ``ms`` milliseconds, then fade out. A new message replaces the current one."""
+    def show(self, text, ms=1600, level="info"):
+        """Show ``text`` for ``ms`` milliseconds, then fade out. A new message replaces the current one.
+
+        ``level`` picks the status icon ("info", "success", "warning", "busy").
+        """
         self.fadeAnimation.stop()
         self.opacityEffect.setOpacity(1.0)
         self.fullText = text
+        if level != self.level:
+            self.level = level
+            self.iconLabel.setPixmap(toastIconPixmap(level))
         self.label.setAccessibleName(text)
         self.label.setText(text)
         self.label.adjustSize()

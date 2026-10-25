@@ -88,6 +88,10 @@ def _font(widget, pixelSize, bold=False):
 def card(title, objectName=None, collapsed=False):
     """Return a collapsible inspector card: a ``ctk.ctkCollapsibleButton`` with ``slicerRole`` "card".
 
+    The application style (``qSlicerStyle``) draws it as a rounded card (``card`` fill, 10 px radius, 14 px padding) with
+    a 44 px title row: the title in 14 px SemiBold and a chevron on the right (VISUAL 4.5). ``setStep()`` turns the title
+    row into a step row (status circle, title and a one-line summary).
+
     Add a layout to it (``qt.QFormLayout(card)``). ``objectName`` should be stable (SPEC 9.2), for example "LNMQACard".
     """
     button = ctk.ctkCollapsibleButton()
@@ -95,8 +99,31 @@ def card(title, objectName=None, collapsed=False):
     if objectName:
         button.setObjectName(objectName)
     button.setProperty("slicerRole", "card")
+    # The button measures its title row when its style changes: measure it again for the card role
+    qt.QApplication.sendEvent(button, qt.QEvent(qt.QEvent.StyleChange))
     button.collapsed = bool(collapsed)
     return button
+
+
+#: States of a step row (``setStep()``): done (a check), action (needs the user: "!"), current (its number in the
+#: accent color), or "" (a later step)
+STEP_STATES = ("done", "action", "current", "")
+
+
+def setStep(cardButton, number, state="", summary=""):
+    """Show the title row of ``cardButton`` (a ``card()``) as a step: a 20 px status circle with ``number``, the title and a
+    one-line ``summary`` in the caption color. ``number=0`` shows a plain title row again.
+    """
+    if state not in STEP_STATES:
+        raise ValueError(f"Unknown step state: {state}")
+    values = {"studioStep": int(number), "studioStepState": state, "studioStepSummary": str(summary or "")}
+    changed = False
+    for name, value in values.items():
+        if cardButton.property(name) != value:
+            cardButton.setProperty(name, value)
+            changed = True
+    if changed:
+        cardButton.update()
 
 
 #
@@ -335,6 +362,25 @@ def segmented(labels):
     return frame, group
 
 
+#: Height of the rows of a ``tableView()`` (VISUAL 4.5: 28 px)
+TABLE_ROW_HEIGHT = 28
+
+
+def _tableStyleSheet():
+    """Rows separated by hairlines on the card, a caption-colored header (VISUAL 4.5)."""
+    ui = _studioUi()
+    if ui is None:
+        return ""
+    hairline = ui.token("hairline").name()
+    table = 'QTableWidget[lnmTable="true"]'
+    return (
+        f"{table} {{ background: transparent; border: none; gridline-color: {hairline}; }}"
+        f"{table}::item {{ border: none; border-bottom: 1px solid {hairline}; padding: 0px 6px; }}"
+        f"{table}::item:selected {{ background-color: {ui.token('selected').name()}; color: {ui.token('text').name()}; }}"
+        f"{table} QHeaderView::section {{ background: transparent; color: {ui.token('text3').name()}; border: none;"
+        f" border-bottom: 1px solid {hairline}; padding: 2px 6px; font-size: {ui.fontPx(11)}px; }}")
+
+
 def tableView(columns):
     """Return a read-only ``qt.QTableWidget`` with the header ``columns``, row selection and no vertical header."""
     table = qt.QTableWidget(0, len(columns))
@@ -343,11 +389,30 @@ def tableView(columns):
     table.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
     table.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
     table.setSelectionMode(qt.QAbstractItemView.SingleSelection)
-    table.setAlternatingRowColors(True)
+    table.setAlternatingRowColors(False)
+    table.setShowGrid(False)
+    table.setFrameShape(qt.QFrame.NoFrame)
     table.verticalHeader().setVisible(False)
+    table.verticalHeader().setDefaultSectionSize(TABLE_ROW_HEIGHT)
     table.horizontalHeader().setSectionResizeMode(qt.QHeaderView.Stretch)  # fits the inspector: no horizontal scroll
+    table.horizontalHeader().setHighlightSections(False)
     table.setWordWrap(False)
+    # The rules match the property, not the object name (callers rename their tables)
+    table.setProperty("lnmTable", True)
+    ui = _studioUi()
+    if ui is not None:
+        ui.bindStyleSheet(table, _tableStyleSheet)
     return table
+
+
+#: Text colors of positive (hot) and negative (cold) values in tables: (dark, light)
+VALUE_COLORS = {"hot": ("#ffb02e", "#a35200"), "cold": ("#7ab8ff", "#1f5fbf")}
+
+
+def valueColor(value):
+    """``qt.QColor`` of a signed value in a table: hot for positive, cold for negative values (VISUAL 4.5)."""
+    kind = "hot" if value >= 0 else "cold"
+    return qt.QColor(VALUE_COLORS[kind][0 if _isDark() else 1])
 
 
 #
@@ -366,15 +431,85 @@ def disclaimerLabel():
     label.setProperty("slicerRole", "caption")
     label.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
     _font(label, 11)
+    return _bindDisclaimerColor(label)
+
+
+def _bindDisclaimerColor(label):
     # A word-wrapped label is not painted through the style: set the caption colour (text3) on the label itself
     ui = _studioUi()
     if ui is not None:
-        ui.bindStyleSheet(label, lambda: f"QLabel#LNMDisclaimer {{ color: {ui.token('text3').name()}; }}")
+        ui.bindStyleSheet(label, lambda: f"QLabel#{label.objectName} {{ color: {ui.token('text3').name()}; }}")
     else:
         palette = qt.QPalette(label.palette)
         palette.setColor(qt.QPalette.WindowText, slicer.app.palette().color(qt.QPalette.Disabled, qt.QPalette.WindowText))
         label.setPalette(palette)
     return label
+
+
+#: The one line of the disclaimer in the Studio inspector (VISUAL 4.5); "Read more" shows ``export.DISCLAIMER``
+DISCLAIMER_LINE = "Research use only. Lesion network mapping specificity is debated."
+
+
+def disclaimerLine(parent=None):
+    """Return the one-line disclaimer of the Studio inspector (``LNMDisclaimerLine``): an info icon, "Research use only.
+    Lesion network mapping specificity is debated." and "Read more", which shows the whole ``export.DISCLAIMER`` (with
+    its references) in a popover. The full text is also the tooltip.
+    """
+    from LesionNetworkMappingLib import export
+
+    frame = qt.QWidget(parent)
+    frame.setObjectName("LNMDisclaimerLine")
+    layout = qt.QHBoxLayout(frame)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(6)
+    icon = qt.QLabel()
+    icon.setObjectName("LNMDisclaimerIcon")
+    icon.setFixedSize(14, 16)
+    icon.setAlignment(qt.Qt.AlignHCenter | qt.Qt.AlignTop)
+    ui = _studioUi()
+    if ui is not None:
+        icon.setPixmap(ui.pixmap("info", 13, "text3"))
+    layout.addWidget(icon, 0, qt.Qt.AlignTop)
+    link = ui.token("accent-fg").name() if ui is not None else slicer.app.palette().color(qt.QPalette.Link).name()
+    label = qt.QLabel(f'{html.escape(DISCLAIMER_LINE)} <a href="#more" style="color: {link}; text-decoration: none;">Read more</a>')
+    # The objectName of the disclaimer label that the Map tour and the tests point at
+    label.setObjectName("LNMDisclaimer")
+    label.setTextFormat(qt.Qt.RichText)
+    label.setWordWrap(True)
+    label.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+    label.setToolTip(export.DISCLAIMER)
+    label.setTextInteractionFlags(qt.Qt.LinksAccessibleByMouse | qt.Qt.LinksAccessibleByKeyboard)
+    _font(label, 11)
+    _bindDisclaimerColor(label)
+
+    def readMore(_link=None, label=label):
+        showDisclaimer(label)
+
+    label.connect("linkActivated(QString)", readMore)
+    layout.addWidget(label, 1)
+    return frame
+
+
+def showDisclaimer(anchor=None):
+    """The whole disclaimer, with its references, in a popover under ``anchor`` (a message box without an anchor)."""
+    from LesionNetworkMappingLib import export
+
+    if anchor is None:
+        slicer.util.infoDisplay(export.DISCLAIMER, windowTitle="Research use only")
+        return
+    menu = qt.QMenu(anchor)
+    menu.setObjectName("LNMDisclaimerPopover")
+    text = qt.QLabel(export.DISCLAIMER)
+    text.setWordWrap(True)
+    text.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
+    text.setFixedWidth(320)
+    text.setContentsMargins(12, 10, 12, 10)
+    action = qt.QWidgetAction(menu)
+    action.setDefaultWidget(text)
+    menu.addAction(action)
+    run = getattr(menu, "exec", None) or menu.exec_
+    run(anchor.mapToGlobal(qt.QPoint(0, anchor.height)))
+    menu.deleteLater()
 
 
 def helpLink(text, url):

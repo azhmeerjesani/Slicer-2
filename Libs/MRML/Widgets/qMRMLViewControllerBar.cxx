@@ -27,6 +27,8 @@
 #include <QLineEdit>
 #include <QLinearGradient>
 #include <QMetaObject>
+#include <QPainter>
+#include <QPainterPath>
 #include <QStyle>
 #include <QVBoxLayout>
 #include <QLabel>
@@ -51,10 +53,16 @@ namespace
 {
 /// Presentation of the bars created from now on (qMRMLViewControllerBar::setDefaultFlatStyle)
 bool DefaultFlatStyle = false;
-/// Height of the flat bar, and size of its tool buttons and icons
-const int FlatBarHeight = 24;
+/// Height of the flat bar strip, and size of its tool buttons and icons
+const int FlatBarHeight = 34;
 const int FlatButtonSize = 22;
-const int FlatIconSize = 16;
+const int FlatIconSize = 14;
+/// The flat bar is drawn as a pill (radius FlatPillRadius) inset in its strip by these margins
+const int FlatPillHorizontalInset = 6;
+const int FlatPillVerticalInset = 2;
+const qreal FlatPillRadius = 8.;
+/// Size of the view color dot of the flat bar
+const int FlatViewDotSize = 8;
 
 //---------------------------------------------------------------------------
 /// Application event filter of an open flat popup: Esc closes the popup (qMRMLViewControllerBarPrivate::closePopupOnEscape)
@@ -375,22 +383,59 @@ void qMRMLViewControllerBarPrivate::restoreClassicSize(QWidget* widget)
 }
 
 //---------------------------------------------------------------------------
-QColor qMRMLViewControllerBarPrivate::viewBarColor() const
+QColor qMRMLViewControllerBarPrivate::styleToken(const QString& name) const
 {
   Q_Q(const qMRMLViewControllerBar);
   QStyle* style = q->style();
+  QColor color;
   if (style && style->metaObject()->indexOfMethod("token(QString)") >= 0)
   {
-    QColor color;
-    QMetaObject::invokeMethod(style, "token", Qt::DirectConnection, Q_RETURN_ARG(QColor, color), Q_ARG(QString, QString("view-bar")));
-    if (color.isValid())
-    {
-      return color;
-    }
+    QMetaObject::invokeMethod(style, "token", Qt::DirectConnection, Q_RETURN_ARG(QColor, color), Q_ARG(QString, name));
+  }
+  return color;
+}
+
+//---------------------------------------------------------------------------
+QColor qMRMLViewControllerBarPrivate::viewBarColor() const
+{
+  Q_Q(const qMRMLViewControllerBar);
+  QColor color = this->styleToken("view-bar");
+  if (color.isValid())
+  {
+    return color;
   }
   // Styles without tokens: a slightly darker window color
   QColor window = q->palette().color(QPalette::Window);
   return window.lightness() < 128 ? window.darker(118) : window.darker(105);
+}
+
+//---------------------------------------------------------------------------
+QColor qMRMLViewControllerBarPrivate::flatStripColor() const
+{
+  Q_Q(const qMRMLViewControllerBar);
+  QColor color = this->styleToken("canvas");
+  if (color.isValid())
+  {
+    return color;
+  }
+  QColor window = q->palette().color(QPalette::Window);
+  return window.lightness() < 128 ? window.darker(140) : window.darker(108);
+}
+
+//---------------------------------------------------------------------------
+void qMRMLViewControllerBarPrivate::paintFlatPill()
+{
+  // The pill: the "view-bar" fill with a 1 px border (white 6% on dark, black 8% on light), inset in the strip
+  QPainter painter(this->BarWidget);
+  painter.setRenderHint(QPainter::Antialiasing, true);
+  const bool dark = this->FlatBarFillColor.lightness() < 128;
+  QColor border = dark ? QColor(255, 255, 255, 18) : QColor(0, 0, 0, 22);
+  QRectF pill = QRectF(this->BarWidget->rect()).adjusted(FlatPillHorizontalInset + 0.5, FlatPillVerticalInset + 0.5, -FlatPillHorizontalInset - 0.5, -FlatPillVerticalInset - 0.5);
+  QPainterPath path;
+  path.addRoundedRect(pill, FlatPillRadius, FlatPillRadius);
+  painter.fillPath(path, this->FlatBarFillColor);
+  painter.setPen(QPen(border, 1.));
+  painter.drawPath(path);
 }
 
 //---------------------------------------------------------------------------
@@ -421,9 +466,10 @@ void qMRMLViewControllerBarPrivate::updateFlatStyle()
   if (flat)
   {
     this->BarWidget->setFixedHeight(FlatBarHeight);
-    this->BarLayout->setContentsMargins(8, 0, 4, 0);
+    // The content is inside the pill: 10 px after its left edge, 4 px before its right edge
+    this->BarLayout->setContentsMargins(FlatPillHorizontalInset + 10, 0, FlatPillHorizontalInset + 4, 0);
     this->BarLayout->setSpacing(4);
-    this->setFlatFixedSize(this->ViewLabel, QSize(10, 10));
+    this->setFlatFixedSize(this->ViewLabel, QSize(FlatViewDotSize, FlatViewDotSize));
     this->setFlatFixedSize(this->MaximizeViewButton, QSize(FlatButtonSize, FlatButtonSize));
     this->MaximizeViewButton->setIconSize(QSize(FlatIconSize, FlatIconSize));
     this->PinButton->setToolTip(
@@ -441,6 +487,8 @@ void qMRMLViewControllerBarPrivate::updateFlatStyle()
     this->ViewLabel->setStyleSheet(this->ClassicViewLabelStyleSheet);
     this->PinButton->setToolTip(this->ClassicPinButtonToolTip);
   }
+  // Read by the application style: neutral slider of the flat bar (2 px track, small thumb)
+  this->BarWidget->setProperty("slicerFlatViewBar", flat ? QVariant(true) : QVariant());
   for (QWidget* widget : this->FlatOnlyWidgets)
   {
     if (widget && widget != this->OptionsButton)
@@ -603,6 +651,12 @@ bool qMRMLViewControllerBarPrivate::eventFilter(QObject* object, QEvent* event)
     // Subclasses that do not apply the presentation at the end of their initialization
     this->ensureFlatStyleApplied();
   }
+  else if (object == this->BarWidget && event->type() == QEvent::Paint && this->AppliedFlatStyle)
+  {
+    // The strip is filled (auto fill background) before the paint event: draw the pill over it, the children
+    // are painted after
+    this->paintFlatPill();
+  }
   else if (object == this->BarWidget && event->type() == QEvent::PaletteChange && this->AppliedFlatStyle)
   {
     // The flat bar color follows the palette (theme changes)
@@ -629,20 +683,15 @@ void qMRMLViewControllerBarPrivate::setColor(QColor barColor)
 
   if (this->AppliedFlatStyle)
   {
-    // Flat bar: the "view-bar" fill with a 3 px stripe of the view color on the left. The other colors
-    // follow the application palette (no forced black text).
+    // Flat bar: a pill with the "view-bar" fill (paintFlatPill) on a strip of the canvas color, and an 8 px dot of
+    // the view color. The other colors follow the application palette (no forced black text).
     this->FlatBarFillColor = this->viewBarColor();
     QColor viewColor = barColor.isValid() ? barColor : this->FlatBarFillColor;
-    QLinearGradient stripe(QPointF(0., 0.), QPointF(3., 0.));
-    stripe.setSpread(QGradient::PadSpread);
-    stripe.setColorAt(0., viewColor);
-    stripe.setColorAt(0.999, viewColor);
-    stripe.setColorAt(1., this->FlatBarFillColor);
     QPalette flatPalette;
-    flatPalette.setBrush(QPalette::Window, stripe);
+    flatPalette.setColor(QPalette::Window, this->flatStripColor());
     this->BarWidget->setPalette(flatPalette);
-    // View label: a swatch of the view color, without the letter (it would read as a direction)
-    this->ViewLabel->setStyleSheet(QString("QLabel { background-color: %1; color: transparent; border-radius: 3px; }").arg(viewColor.name()));
+    // View label: a dot of the view color, without the letter (it would read as a direction)
+    this->ViewLabel->setStyleSheet(QString("QLabel { background-color: %1; color: transparent; border-radius: %2px; }").arg(viewColor.name()).arg(FlatViewDotSize / 2));
     return;
   }
 

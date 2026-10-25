@@ -100,24 +100,27 @@ public:
 
   /// Draw flat controls with the style tokens, on dark and light palettes:
   /// - push buttons and tool buttons (PE_PanelButtonCommand, PE_PanelButtonTool, PE_FrameButtonTool):
-  ///   flat, rounded, with hover and pressed fills; checked buttons have the "accent-subtle" fill
-  ///   and a 1 px "accent-fg" border, so that the active tool or mode is obvious. Combo boxes keep
-  ///   the base style;
+  ///   flat, rounded (7 px; 9 px tool tiles), with hover and pressed fills; checked buttons have the
+  ///   "accent-subtle" fill and a 1 px "accent-fg" border ("accent" for tool tiles), so that the
+  ///   active tool or mode is obvious; the checked segment of a segmented control has the "selected"
+  ///   fill. Combo boxes keep the base style;
   /// - keyboard focus (PE_FrameFocusRect): a 2 px "accent-fg" ring, only for keyboard focus changes;
   /// - input fields (PE_PanelLineEdit, PE_FrameLineEdit): the base color and a 1 px "control-border"
-  ///   frame rounded by 6 px, "accent-fg" when focused;
+  ///   frame rounded by 7 px, "accent-fg" when focused;
   /// - arrows (PE_IndicatorArrow*): thin chevrons;
   /// - check boxes and radio buttons: a 1.5 px "control-border" outline and an accent fill when checked;
+  ///   check boxes with the "switch" slicerRole are drawn as a switch on the right of their text;
   /// - tool tips (PE_PanelTipLabel) and menus (PE_PanelMenu, PE_FrameMenu): rounded surfaces with a border;
   /// - tool bar handles and separators: two dots and a hairline;
-  /// - frames with the "card" slicerRole (PE_Frame, PE_Widget): rounded cards;
+  /// - frames with the "card" or "cardLow" slicerRole (PE_Frame, PE_Widget): rounded cards;
   /// - tab widget pages and tab bar bases (PE_FrameTabWidget, PE_FrameTabBarBase): hairlines.
   void drawPrimitive(PrimitiveElement element, const QStyleOption* option, QPainter* painter, const QWidget* widget = nullptr) const override;
 
   /// Draw flat controls:
   /// - collapsible button headers (CE_PushButtonBevel of ctkCollapsibleButton);
   /// - menu items (CE_MenuItem: rounded selection, check marks, right-aligned shortcuts in "text3");
-  /// - the frames of labels and frames with a slicerRole (CE_ShapedFrame: card, chip, kbd, segmented);
+  /// - the frames of labels and frames with a slicerRole (CE_ShapedFrame: card, cardLow, iconTile, chip,
+  ///   kbd, segmented);
   /// - tool bars (CE_ToolBar): a flat window fill, the "view-bar" color with the "topBar" slicerRole;
   /// - header sections (CE_HeaderSection, CE_HeaderEmptyArea): flat, separated by hairlines;
   /// - tabs (CE_TabBarTabShape): no bevel, a 2 px "accent-fg" line on the side of the selected tab
@@ -134,10 +137,11 @@ public:
   /// - scroll bars (CC_ScrollBar), in the Comfortable density: a transparent track and a rounded
   ///   "text3" handle, without step buttons;
   /// - spin boxes and combo boxes (CC_SpinBox, CC_ComboBox): a field with the base color and a 1 px
-  ///   "control-border" outline ("accent-fg" when focused), rounded by 6 px. The arrows are drawn as
+  ///   "control-border" outline ("accent-fg" when focused), rounded by 7 px. The arrows are drawn as
   ///   PE_IndicatorArrow* primitives in the sub-control rectangles of the base style, so the hit
   ///   areas of the arrows are unchanged (e.g. ctkDoubleSpinBox).
-  /// Tool buttons with the "ghost", "toolTile" or segmented slicerRole have no menu indicator.
+  /// Tool buttons with the "ghost", "toolTile", "secondary" or segmented slicerRole have no menu indicator;
+  /// a "toolTile" with a "studioKey" property shows that key in its top-right corner.
   /// Other complex controls are drawn by the base style.
   void drawComplexControl(ComplexControl control, const QStyleOptionComplex* option, QPainter* painter, const QWidget* widget = nullptr) const override;
 
@@ -162,16 +166,18 @@ public:
   /// - in the Comfortable density, ctkCollapsibleButton widgets whose collapsedHeight is still
   ///   the CTK default (14) get a collapsedHeight of 2;
   /// - widgets with the "slicerRole" property get the font of their role (unless a font was set
-  ///   explicitly): "sectionHeader" (SemiBold, uppercase), "secondaryText", "caption", "chip",
-  ///   "kbd" and "toolTile" are smaller than the application font. "chip" and "kbd" labels get
-  ///   a horizontal padding;
+  ///   explicitly): "sectionHeader" (SemiBold, sentence case), "overline" (SemiBold, uppercase),
+  ///   "secondaryText", "caption", "chip", "kbd" and "toolTile" are smaller than the application
+  ///   font. "chip" and "kbd" labels get a horizontal padding;
   /// - menus and tool tips get rounded corners (widget mask).
   ///
   /// Roles (set with widget->setProperty("slicerRole", role), then unpolish() and polish()) change
-  /// only paint and size: "card", "primary", "secondary", "ghost", "segmented" (a frame whose
-  /// child tool buttons are segments), "toolTile", "sectionHeader", "secondaryText", "caption",
-  /// "chip" (its "chipLevel" property is one of neutral, busy, ok, warn, danger), "kbd", "topBar"
-  /// and "compact" (tool button without padding).
+  /// only paint and size: "card", "cardLow" (a card on the canvas), "primary", "secondary",
+  /// "ghost", "segmented" (a frame whose child tool buttons are segments), "toolTile",
+  /// "sectionHeader", "overline", "secondaryText", "caption", "chip" (its "chipLevel" property is
+  /// one of neutral, busy, ok, warn, danger), "kbd", "topBar", "compact" (tool button without
+  /// padding), "iconTile" (a label on an "accent-subtle" rounded square) and "switch" (a check box
+  /// drawn as a switch).
   void polish(QWidget* widget) override;
   void unpolish(QWidget* widget) override;
   /// Follow the color scheme of the operating system while the "System" theme is selected
@@ -179,7 +185,7 @@ public:
   void polish(QApplication* application) override;
 
   /// Return the color of a named style token of the dark or light theme.
-  /// Supported names: canvas, card, control-hover, control-pressed, hairline, border,
+  /// Supported names: canvas, card, card-low, selected, control-hover, control-pressed, hairline, border,
   /// control-border (non-text outlines with a 3:1 contrast against the window),
   /// text2, text3, text-disabled, accent, accent-hover, accent-pressed, accent-fg,
   /// accent-subtle, success, warning, danger, view-bar and lesion.

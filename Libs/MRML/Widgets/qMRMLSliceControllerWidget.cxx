@@ -731,8 +731,8 @@ void qMRMLSliceControllerWidgetPrivate::updateFlatStyle()
       this->BarLinkButton->setChecked(this->MRMLSliceCompositeNode->GetLinkedControl());
     }
     QFontMetrics fontMetrics(this->SliceIndexLabel->font());
-    this->FullReadoutWidth = std::max(this->FullReadoutWidth, fontMetrics.horizontalAdvance(QString::fromUtf8("S 000.0 mm \u00B7 000/000")) + 4);
-    this->CompactReadoutWidth = std::max(this->CompactReadoutWidth, fontMetrics.horizontalAdvance(QString("000/000")) + 4);
+    this->FullReadoutWidth = std::max(this->FullReadoutWidth, fontMetrics.horizontalAdvance(QString("S 000.0 mm   000 / 000")) + 4);
+    this->CompactReadoutWidth = std::max(this->CompactReadoutWidth, fontMetrics.horizontalAdvance(QString("000 / 000")) + 4);
     this->updateReadoutLabel();
     this->updateFlatBarFromMRMLSliceNode();
     this->updateFlatBarWidgetsVisibility();
@@ -844,9 +844,25 @@ void qMRMLSliceControllerWidgetPrivate::updateReadoutLabel()
   {
     this->SliceIndexHolder->setMaximumWidth(width);
   }
-  if (this->SliceIndexLabel->text() != text)
+  // The full readout shows the slice index in the tertiary text color: "S 17.5 mm   49 / 97"
+  QString shownText = text;
+  if (!this->CompactReadout && !this->ReadoutIndexText.isEmpty() && text.endsWith(this->ReadoutIndexText))
   {
-    this->SliceIndexLabel->setText(text);
+    QColor indexColor = this->styleToken("text3");
+    if (!indexColor.isValid())
+    {
+      indexColor = this->SliceIndexLabel->palette().color(QPalette::WindowText);
+      indexColor.setAlphaF(0.6);
+    }
+    const QString position = text.left(text.size() - this->ReadoutIndexText.size()).trimmed();
+    shownText = QString("<span style=\"white-space: pre\">%1   <span style=\"color: %2\">%3</span></span>")
+                  .arg(position.toHtmlEscaped())
+                  .arg(indexColor.name(QColor::HexArgb))
+                  .arg(this->ReadoutIndexText.toHtmlEscaped());
+  }
+  if (this->SliceIndexLabel->text() != shownText)
+  {
+    this->SliceIndexLabel->setText(shownText);
   }
 }
 
@@ -955,7 +971,7 @@ void qMRMLSliceControllerWidgetPrivate::updateFlatBarFromMRMLSliceNode()
     int sliceCount = sliceCountAlongNormal(volumeNode, sliceNode);
     if (sliceIndex > 0 && sliceCount > 0)
     {
-      indexText = QString("%1/%2").arg(sliceIndex).arg(sliceCount);
+      indexText = QString("%1 / %2").arg(sliceIndex).arg(sliceCount);
       indexDescription = qMRMLSliceControllerWidget::tr("slice %1 of %2").arg(sliceIndex).arg(sliceCount);
     }
     else if (sliceIndex == vtkMRMLSliceLogic::SLICE_INDEX_ROTATED || (sliceIndex > 0 && sliceCount == 0))
@@ -969,7 +985,8 @@ void qMRMLSliceControllerWidgetPrivate::updateFlatBarFromMRMLSliceNode()
       indexDescription = qMRMLSliceControllerWidget::tr("the slice is outside the image");
     }
   }
-  QString text = indexText.isEmpty() ? position : position + QString::fromUtf8(" \u00B7 ") + indexText;
+  QString text = indexText.isEmpty() ? position : position + QString("   ") + indexText;
+  this->ReadoutIndexText = indexText;
   QString compactText = indexText.isEmpty() ? position : indexText;
   QString description = position;
   if (!indexDescription.isEmpty())
@@ -1586,6 +1603,11 @@ bool qMRMLSliceControllerWidgetPrivate::eventFilter(QObject* object, QEvent* eve
   else if (object == this->BarWidget && event->type() == QEvent::Resize && this->AppliedFlatStyle)
   {
     this->updateFlatBarWidgetsVisibility();
+  }
+  else if (object == this->BarWidget && (event->type() == QEvent::PaletteChange || event->type() == QEvent::StyleChange) && this->AppliedFlatStyle)
+  {
+    // The slice index of the readout is drawn in the tertiary text color of the theme: build the text again
+    this->updateReadoutLabel();
   }
   return this->Superclass::eventFilter(object, event);
 }

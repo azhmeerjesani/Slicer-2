@@ -89,7 +89,7 @@ public:
 
   /// Create the widgets of the flat bar (orientation button, slice readout, link button).
   void setupFlatBar();
-  /// Update the readout "S 96.0 mm · 97/193", the orientation button and the view label tooltip
+  /// Update the readout "S 96.0 mm   97 / 193", the orientation button and the view label tooltip
   /// of the flat bar (no-op in the classic presentation).
   void updateFlatBarFromMRMLSliceNode();
   /// Update the flat bar when the event loop runs (with the offset slider): the slice node and the slice logic
@@ -266,9 +266,11 @@ public:
   /// of the bar (the readout is shortened, then hidden, when the bar is narrow); the label keeps a fixed width
   /// so that a new text does not lay out the bar again
   QWidget* SliceIndexHolder{ nullptr };
-  /// Readout texts: "S 96.0 mm · 97/193" and the short form "97/193" (or "S 96.0 mm" without an image)
+  /// Readout texts: "S 96.0 mm   97 / 193" and the short form "97 / 193" (or "S 96.0 mm" without an image)
   QString FullReadoutText;
   QString CompactReadoutText;
+  /// Slice index part of the full readout ("49 / 97"), shown in the tertiary text color
+  QString ReadoutIndexText;
   /// The bar shows the short readout (updateFlatBarWidgetsVisibility)
   bool CompactReadout{ false };
   /// Width reserved for each readout form: it only grows, so the label does not change size at every slice

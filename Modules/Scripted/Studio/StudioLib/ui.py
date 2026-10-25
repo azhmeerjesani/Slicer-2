@@ -30,56 +30,95 @@ from slicer.i18n import tr as _
 #: Directory of the vendored Lucide icons (ISC license, see LICENSE in that directory)
 ICON_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Resources", "Icons", "Lucide")
 
-ROLES = ("card", "primary", "secondary", "ghost", "segmented", "toolTile", "sectionHeader", "secondaryText", "caption", "chip", "kbd", "topBar", "compact")
+ROLES = ("card", "cardLow", "primary", "secondary", "ghost", "segmented", "toolTile", "sectionHeader", "overline", "secondaryText", "caption", "chip", "kbd",
+         "topBar", "compact", "iconTile", "switch")
 
 CHIP_LEVELS = ("neutral", "busy", "ok", "warn", "danger")
+
+#: Type scale of the visual design (VISUAL.md 3): style -> (pixel size for a 13 px body, weight). Sizes go through
+#: ``fontPx()``, so that the application font size scales them.
+TYPE = {
+    "display": (22, qt.QFont.DemiBold),  # Library page title
+    "title": (18, qt.QFont.DemiBold),  # dialog titles, the project name of the Continue card
+    "section": (14, qt.QFont.DemiBold),  # panel header titles, card titles
+    "body": (13, qt.QFont.Normal),
+    "name": (13, qt.QFont.Medium),  # names in rows and cards
+    "label": (12, qt.QFont.DemiBold),  # section labels (text2)
+    "caption": (12, qt.QFont.Normal),  # meta lines (text3)
+    "small": (11, qt.QFont.Normal),  # chips, stat labels
+    "overline": (11, qt.QFont.DemiBold),  # the rare all-caps labels
+    "number": (15, qt.QFont.DemiBold),  # stat values
+}
+
+#: Corner radii of the visual design (px)
+RADIUS = {"key": 5, "control": 7, "tile": 9, "card": 10, "cardLow": 12, "dialog": 14}
+
+#: Spacing of the 4 px grid (VISUAL.md 2.7)
+INSPECTOR_PADDING = 16
+CARD_PADDING = 14
+GROUP_SPACING = 20
+ROW_HEIGHT = 32
+LIST_ROW_HEIGHT = 34
+SETTINGS_ROW_HEIGHT = 44
+COMPACT_HEIGHT = 28
+BUTTON_HEIGHT = 32
+PANEL_ACTION_HEIGHT = 38
+
+#: Text colors of ``label()``: token -> slicerRole that qSlicerStyle paints in that color
+_TEXT_ROLES = {"text": None, "text2": "secondaryText", "text3": "caption"}
 
 # Token values of the dark and light themes, used when the application style does not provide
 # them. Keep in sync with qSlicerStyle::tokenColor() (Base/QTGUI/qSlicerStyle.cxx).
 _DARK_TOKENS = {
-    "canvas": "#141416",
-    "card": "#232327",
-    "control-hover": "#35353b",
-    "control-pressed": "#26262a",
-    "hairline": "#2e2e34",
-    "border": "#3a3a41",
-    "control-border": "#71717a",
+    "canvas": "#0f0f11",
+    "card": "#1d1d20",
+    "card-low": "#18181b",
+    "selected": "#2a2a2f",
+    "control-hover": "#26262a",
+    "control-pressed": "#202024",
+    "hairline": "#26262a",
+    "border": "#34343a",
+    "control-border": "#6b6b74",
     "text2": "#a1a1aa",
-    "text3": "#94949c",
+    "text3": "#8b8b94",
     "text-disabled": "#71717a",
-    "accent": "#3568d4",
-    "accent-hover": "#3f74e3",
-    "accent-pressed": "#2c5bbf",
-    "accent-fg": "#6ea3ff",
+    "accent": "#2f6fe0",
+    # accent-hover and accent-pressed are derived from accent (lightness +/- 8%)
+    "accent-fg": "#7aa7ff",
     "accent-subtle": "#22324f",
     "success": "#3fb950",
     "warning": "#e3b341",
     "danger": "#f85149",
     "view-bar": "#161618",
-    "lesion": "#f2545b",
+    "lesion": "#ff5a5f",
 }
 
 _LIGHT_TOKENS = {
-    "canvas": "#e4e4e8",
-    "card": "#ffffff",
+    "canvas": "#f1f1f4",
+    "card": "#f6f6f8",
+    "card-low": "#ffffff",
+    "selected": "#ffffff",
     "control-hover": "#eeeef2",
     "control-pressed": "#e4e4e9",
-    "hairline": "#e1e1e6",
-    "border": "#cacad1",
-    "control-border": "#7a7a84",
-    "text2": "#5c5c66",
-    "text3": "#63636c",
+    "hairline": "#e4e4e8",
+    "border": "#d4d4da",
+    "control-border": "#8a8a94",
+    "text2": "#52525b",
+    "text3": "#6b6b74",
     "text-disabled": "#8e8e98",
-    "accent": "#2f6fde",
+    "accent": "#2f6fe0",
     # accent-hover and accent-pressed are derived from accent (lightness +/- 8%)
     "accent-fg": "#2158bd",
     "accent-subtle": "#e3ecfc",
     "success": "#1a7f37",
     "warning": "#9a6700",
     "danger": "#cf222e",
-    "view-bar": "#e9e9ed",
-    "lesion": "#f2545b",
+    "view-bar": "#ffffff",
+    "lesion": "#ff5a5f",
 }
+
+#: Colors of the slice views (the 8 px dot of the view bars), the same in both themes
+VIEW_COLORS = {"Red": "#e5484d", "Green": "#30a46c", "Yellow": "#f5d90a"}
 
 # Palette roles that can also be read with token()
 _PALETTE_TOKENS = {
@@ -108,10 +147,10 @@ def _shiftLightness(color, delta):
 def token(name):
     """Return the ``qt.QColor`` of a style token for the current application palette.
 
-    Style tokens are listed in SPEC 4.2 and 4.3 (``canvas``, ``card``, ``hairline``, ``border``,
-    ``control-border``, ``text2``, ``text3``, ``text-disabled``, ``accent``, ``accent-fg``,
-    ``accent-subtle``, ``success``, ``warning``, ``danger``, ``view-bar``...). Palette roles are also available as ``window``, ``text``,
-    ``base``, ``button``, ``highlight``, ``tooltip`` and ``tooltip-text``.
+    Style tokens are listed in SPEC 4.2 and 4.3 and VISUAL.md 3 (``canvas``, ``card``, ``card-low``, ``selected``,
+    ``hairline``, ``border``, ``control-border``, ``text2``, ``text3``, ``text-disabled``, ``accent``, ``accent-fg``,
+    ``accent-subtle``, ``success``, ``warning``, ``danger``, ``view-bar``...). Palette roles are also available as
+    ``window``, ``text``, ``base``, ``button``, ``highlight``, ``tooltip`` and ``tooltip-text``.
     """
     role = _PALETTE_TOKENS.get(name)
     if role is not None:
@@ -121,12 +160,10 @@ def token(name):
         color = styleToken(name)
         if color.isValid():
             return color
-    if isDark():
-        value = _DARK_TOKENS.get(name)
-    else:
-        value = _LIGHT_TOKENS.get(name)
-        if value is None and name in ("accent-hover", "accent-pressed"):
-            return _shiftLightness(qt.QColor(_LIGHT_TOKENS["accent"]), 0.08 if name == "accent-hover" else -0.08)
+    tokens = _DARK_TOKENS if isDark() else _LIGHT_TOKENS
+    value = tokens.get(name)
+    if value is None and name in ("accent-hover", "accent-pressed"):
+        return _shiftLightness(qt.QColor(tokens["accent"]), 0.08 if name == "accent-hover" else -0.08)
     if value is None:
         raise ValueError(f"Unknown Studio style token: {name}")
     return qt.QColor(value)
@@ -246,6 +283,7 @@ def _refresh():
         _refreshStudioWidgetFonts(_lastApplicationFontPx)
     _lastApplicationFontPx = fontPixelSize
     _refreshFonts()
+    _refreshIconTiles()
     for entry in list(_boundStyleSheets):
         widget, function = entry
         if not _isAlive(widget):
@@ -409,16 +447,21 @@ def supportsRoles():
 def _roleStyleSheet(role):
     """Scoped fallback stylesheet of a role. Selectors only match widgets that have the role."""
     t = {name: token(name).name() for name in (
-        "window", "text", "button", "card", "hairline", "border", "control-border", "text2", "text3", "text-disabled", "control-hover", "control-pressed",
-        "accent", "accent-hover", "accent-pressed", "accent-fg", "accent-subtle", "success", "warning", "danger", "view-bar")}
-    if role == "card":
+        "window", "text", "button", "canvas", "card", "card-low", "selected", "hairline", "border", "control-border", "text2", "text3", "text-disabled",
+        "control-hover", "control-pressed", "accent", "accent-hover", "accent-pressed", "accent-fg", "accent-subtle", "success", "warning", "danger", "view-bar")}
+    if role in ("card", "cardLow"):
+        fill, radius = (t["card"], RADIUS["card"]) if role == "card" else (t["card-low"], RADIUS["cardLow"])
         return (
-            f'QFrame[slicerRole="card"] {{ background-color: {t["card"]}; border: 1px solid {t["hairline"]}; border-radius: 8px; }}'
-            f'QFrame[slicerRole="card"] QLabel[slicerRole="sectionHeader"] {{ color: {t["text2"]}; font-size: {fontPx(11)}px; font-weight: 600; border: none; background: transparent; }}'
-            f'QFrame[slicerRole="card"] QLabel {{ border: none; background: transparent; }}')
+            f'QFrame[slicerRole="{role}"] {{ background-color: {fill}; border: 1px solid {t["hairline"]}; border-radius: {radius}px; }}'
+            f'QFrame[slicerRole="{role}"] QLabel[slicerRole="sectionHeader"] {{ color: {t["text2"]}; font-size: {fontPx(12)}px; font-weight: 600; border: none; background: transparent; }}'
+            f'QFrame[slicerRole="{role}"] QLabel {{ border: none; background: transparent; }}')
+    if role == "iconTile":
+        return f'QLabel[slicerRole="iconTile"] {{ background-color: {t["accent-subtle"]}; border: none; border-radius: 8px; }}'
+    if role == "overline":
+        return f'QLabel[slicerRole="overline"] {{ color: {t["text2"]}; font-size: {fontPx(11)}px; font-weight: 600; }}'
     if role == "primary":
         return (
-            f'*[slicerRole="primary"] {{ background-color: {t["accent"]}; color: #ffffff; border: none; border-radius: 6px; padding: 0px 14px; min-height: 32px; font-weight: 600; }}'
+            f'*[slicerRole="primary"] {{ background-color: {t["accent"]}; color: #ffffff; border: none; border-radius: 7px; padding: 0px 14px; min-height: 32px; font-weight: 600; }}'
             f'*[slicerRole="primary"]:hover {{ background-color: {t["accent-hover"]}; }}'
             f'*[slicerRole="primary"]:pressed {{ background-color: {t["accent-pressed"]}; }}'
             f'*[slicerRole="primary"]:disabled {{ background-color: {t["border"]}; color: {t["text-disabled"]}; }}'
@@ -428,11 +471,11 @@ def _roleStyleSheet(role):
             f'*[slicerRole="primary"]:focus {{ border: 3px solid {t["text"]}; padding: 0px 11px; min-height: 26px; }}')
     if role == "secondary":
         return (
-            f'*[slicerRole="secondary"] {{ background-color: {t["button"]}; color: {t["text"]}; border: 1px solid {t["control-border"]}; border-radius: 6px; padding: 0px 12px; min-height: 28px; }}'
+            f'*[slicerRole="secondary"] {{ background-color: {t["button"]}; color: {t["text"]}; border: 1px solid {t["control-border"]}; border-radius: 7px; padding: 0px 12px; min-height: 32px; }}'
             f'*[slicerRole="secondary"]:hover {{ background-color: {t["control-hover"]}; }}'
             f'*[slicerRole="secondary"]:pressed {{ background-color: {t["control-pressed"]}; }}'
             f'*[slicerRole="secondary"]:disabled {{ color: {t["text-disabled"]}; }}'
-            f'*[slicerRole="secondary"]:focus {{ border: 2px solid {t["accent-fg"]}; padding: 0px 11px; min-height: 26px; }}')
+            f'*[slicerRole="secondary"]:focus {{ border: 2px solid {t["accent-fg"]}; padding: 0px 11px; min-height: 30px; }}')
     if role == "ghost":
         return (
             f'*[slicerRole="ghost"] {{ background-color: transparent; color: {t["text2"]}; border: 1px solid transparent; border-radius: 6px; padding: 3px; }}'
@@ -444,10 +487,10 @@ def _roleStyleSheet(role):
             f'QToolButton[slicerRole="ghost"]::menu-indicator {{ image: none; width: 0px; }}')
     if role == "segmented":
         return (
-            f'QFrame[slicerRole="segmented"] {{ background-color: {t["control-pressed"]}; border: 1px solid {t["hairline"]}; border-radius: 8px; }}'
+            f'QFrame[slicerRole="segmented"] {{ background-color: {t["canvas"]}; border: 1px solid {t["hairline"]}; border-radius: 8px; }}'
             f'QFrame[slicerRole="segmented"] QToolButton {{ background-color: transparent; color: {t["text2"]}; border: none; border-radius: 6px; padding: 3px 12px; font-size: {fontPx(13)}px; }}'
             f'QFrame[slicerRole="segmented"] QToolButton:hover {{ background-color: {t["control-hover"]}; color: {t["text"]}; }}'
-            f'QFrame[slicerRole="segmented"] QToolButton:checked {{ background-color: {t["accent-subtle"]}; color: {t["text"]}; }}'
+            f'QFrame[slicerRole="segmented"] QToolButton:checked {{ background-color: {t["selected"]}; color: {t["text"]}; }}'
             f'QFrame[slicerRole="segmented"] QToolButton:disabled {{ color: {t["text-disabled"]}; }}'
             f'QFrame[slicerRole="segmented"] QToolButton:focus {{ border: 2px solid {t["accent-fg"]}; padding: 1px 10px; }}')
     if role == "chip":
@@ -465,7 +508,7 @@ def _roleStyleSheet(role):
         return styleSheet
     if role == "kbd":
         return (
-            f'QLabel[slicerRole="kbd"] {{ background-color: transparent; color: {t["text2"]}; border: 1px solid {t["border"]}; border-radius: 4px; padding: 0px 5px; font-size: {fontPx(11)}px; }}')
+            f'QLabel[slicerRole="kbd"] {{ background-color: transparent; color: {t["text2"]}; border: 1px solid {t["border"]}; border-radius: 5px; padding: 0px 5px; font-size: {fontPx(11)}px; }}')
     if role == "topBar":
         return (
             f'QToolBar[slicerRole="topBar"] {{ background-color: {t["view-bar"]}; border: none; border-bottom: 1px solid {t["hairline"]}; padding: 0px; spacing: 0px; }}')
@@ -473,7 +516,7 @@ def _roleStyleSheet(role):
 
 
 # Roles that get a fallback stylesheet until the application style supports roles (SPEC 4.7)
-_FALLBACK_ROLES = ("card", "primary", "secondary", "ghost", "segmented", "chip", "kbd", "topBar")
+_FALLBACK_ROLES = ("card", "cardLow", "iconTile", "overline", "primary", "secondary", "ghost", "segmented", "chip", "kbd", "topBar")
 
 
 def setRole(widget, role):
@@ -607,20 +650,264 @@ def _refreshFonts():
 
 
 def card(title=None):
-    """Return ``(frame, layout)``: a rounded card with an optional 11 px uppercase title."""
+    """Return ``(frame, layout)``: a rounded card (``card`` fill, 10 px radius, 14 px padding) with an optional section
+    label (12 px SemiBold, text2, sentence case).
+    """
     frame = qt.QFrame()
     frame.setObjectName("StudioCard")
     setRole(frame, "card")
     layout = qt.QVBoxLayout(frame)
-    layout.setContentsMargins(12, 12, 12, 12)
+    layout.setContentsMargins(CARD_PADDING, CARD_PADDING - 2, CARD_PADDING, CARD_PADDING)
     layout.setSpacing(8)
     if title:
-        label = qt.QLabel(title.upper())
+        label = qt.QLabel(title)
         label.setObjectName("StudioCardTitle")
         label.setProperty("slicerRole", "sectionHeader")
-        _font(label, fontPx(11), qt.QFont.DemiBold, 0.6)
+        setText(label, "label")
         layout.addWidget(label)
     return frame, layout
+
+
+def setText(widget, style, letterSpacing=None):
+    """Give ``widget`` the font of a ``TYPE`` style ("display", "title", "section", "body", "name", "label", "caption",
+    "small", "overline" or "number"), kept in proportion to the application font.
+    """
+    pixelSize, weight = TYPE[style]
+    if letterSpacing is None and style == "display":
+        # -1% at 22 px
+        letterSpacing = -0.2
+    _font(widget, fontPx(pixelSize), weight, letterSpacing)
+    if style == "number":
+        tabular(widget)
+    return widget
+
+
+def tabular(widget):
+    """Use tabular figures in ``widget`` (Inter "tnum") where Qt supports font features (Qt 6.7 and later)."""
+    font = qt.QFont(widget.font)
+    setFeature = getattr(font, "setFeature", None)
+    if setFeature is None:
+        return widget
+    try:
+        setFeature("tnum", 1)
+    except Exception:
+        return widget
+    widget.setFont(font)
+    return widget
+
+
+def label(text="", style="body", color="text", objectName=None, wrap=False):
+    """Return a plain-text ``qt.QLabel`` in a ``TYPE`` style and a text color ("text", "text2" or "text3")."""
+    widget = qt.QLabel(text)
+    if objectName:
+        widget.setObjectName(objectName)
+    widget.setTextFormat(qt.Qt.PlainText)
+    widget.setWordWrap(wrap)
+    role = _TEXT_ROLES[color]
+    if role is not None:
+        widget.setProperty("slicerRole", role)
+    setText(widget, style)
+    return widget
+
+
+def sectionLabel(text, objectName=None):
+    """Return a section label: 12 px SemiBold, text2, sentence case ("Tools", "Open now")."""
+    widget = label(text, "label", "text2", objectName)
+    widget.setProperty("slicerRole", "sectionHeader")
+    return widget
+
+
+def overline(text, objectName=None):
+    """Return an all-caps overline label (11 px SemiBold, text2): only for "CONTINUE" and the group headers of Search."""
+    widget = qt.QLabel(text)
+    if objectName:
+        widget.setObjectName(objectName)
+    widget.setTextFormat(qt.Qt.PlainText)
+    setRole(widget, "overline")
+    font = qt.QFont(widget.font)
+    font.setPixelSize(fontPx(TYPE["overline"][0]))
+    font.setWeight(TYPE["overline"][1])
+    font.setCapitalization(qt.QFont.AllUppercase)
+    font.setLetterSpacing(qt.QFont.PercentageSpacing, 104.0)
+    widget.setFont(font)
+    _register(widget, TYPE["overline"][0], TYPE["overline"][1], None)
+    return widget
+
+
+def iconTile(iconName, size=36, iconSize=18, objectName="StudioIconTile"):
+    """Return a ``size`` px square label with the Lucide icon ``iconName`` (accent-fg) on an accent-subtle rounded square."""
+    widget = qt.QLabel()
+    widget.setObjectName(objectName)
+    widget.setFixedSize(size, size)
+    widget.setAlignment(qt.Qt.AlignCenter)
+    setRole(widget, "iconTile")
+    widget.setProperty("studioIconName", iconName)
+    widget.setProperty("studioIconSize", iconSize)
+    widget.setPixmap(pixmap(iconName, iconSize, "accent-fg"))
+    _ensureWatcher()
+    _iconTiles.append(widget)
+    return widget
+
+
+#: Icon tiles whose pixmap follows the palette (``iconTile()``)
+_iconTiles = []
+
+
+def _refreshIconTiles():
+    alive = []
+    for widget in _iconTiles:
+        if not _isAlive(widget):
+            continue
+        alive.append(widget)
+        widget.setPixmap(pixmap(str(widget.property("studioIconName")), int(widget.property("studioIconSize")), "accent-fg"))
+    _iconTiles[:] = alive
+
+
+def switch(text="", objectName=None):
+    """Return a ``qt.QCheckBox`` drawn as a switch: its text on the left, the switch on its right edge."""
+    widget = qt.QCheckBox(text)
+    if objectName:
+        widget.setObjectName(objectName)
+    widget.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
+    widget.setMinimumHeight(ROW_HEIGHT)
+    setRole(widget, "switch")
+    return widget
+
+
+#: Notice levels: level -> (token of the tint, icon)
+NOTICE_LEVELS = {"info": ("accent-fg", "info"), "warning": ("warning", "triangle-alert"), "danger": ("danger", "circle-alert"), "success": ("success", "circle-check")}
+
+
+def notice(text, level="info", linkText=None, callback=None, objectName="StudioNotice"):
+    """Return a notice (VISUAL.md 4.8): one sentence on an 8% tint of the level color with a 22% border (radius 8),
+    a 14 px icon, and an optional link ("Details", "Read more") that calls ``callback``.
+
+    The text is the ``StudioNoticeBoxText`` label, the link the ``StudioNoticeBoxLink`` button. Change the text and the
+    level later with ``setNotice()``.
+    """
+    frame = qt.QFrame()
+    frame.setObjectName(objectName)
+    frame.setProperty("studioNoticeBox", True)
+    layout = qt.QHBoxLayout(frame)
+    layout.setContentsMargins(10, 8, 10, 8)
+    layout.setSpacing(8)
+    iconLabel = qt.QLabel()
+    iconLabel.setObjectName("StudioNoticeBoxIcon")
+    iconLabel.setFixedSize(16, 17)
+    iconLabel.setAlignment(qt.Qt.AlignHCenter | qt.Qt.AlignTop)
+    layout.addWidget(iconLabel, 0, qt.Qt.AlignTop)
+    column = qt.QVBoxLayout()
+    column.setSpacing(2)
+    textLabel = qt.QLabel(text)
+    textLabel.setObjectName("StudioNoticeBoxText")
+    textLabel.setWordWrap(True)
+    textLabel.setTextFormat(qt.Qt.PlainText)
+    textLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+    setText(textLabel, "caption")
+    column.addWidget(textLabel)
+    linkButton = None
+    if linkText:
+        linkButton = linkButtonWidget(linkText, callback, "StudioNoticeBoxLink")
+        column.addWidget(linkButton, 0, qt.Qt.AlignLeft)
+    layout.addLayout(column, 1)
+    frame.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+    setNotice(frame, text, level)
+    return frame
+
+
+def setNotice(frame, text=None, level=None):
+    """Change the text and the level ("info", "warning", "danger", "success") of a ``notice()``."""
+    if text is not None:
+        frame.findChild("QLabel", "StudioNoticeBoxText").setText(text)
+    if level is not None:
+        if level not in NOTICE_LEVELS:
+            raise ValueError(f"Unknown notice level: {level}")
+        frame.setProperty("studioNoticeLevel", level)
+
+        def styleSheet(frame=frame):
+            colorName, iconName = NOTICE_LEVELS[str(frame.property("studioNoticeLevel"))]
+            color = token(colorName)
+            iconLabel = frame.findChild("QLabel", "StudioNoticeBoxIcon")
+            if iconLabel is not None:
+                iconLabel.setPixmap(pixmap(iconName, 14, colorName))
+            return (
+                f'QFrame[studioNoticeBox="true"] {{ background-color: {_rgba(color, 0.08)}; border: 1px solid {_rgba(color, 0.22)}; border-radius: 8px; }}'
+                f'QFrame[studioNoticeBox="true"] QLabel {{ background: transparent; border: none; color: {token("text").name()}; }}')
+
+        bindStyleSheet(frame, styleSheet)
+    return frame
+
+
+def linkButtonWidget(text, callback=None, objectName="StudioLink"):
+    """Return a flat push button that looks like a link (accent-fg text, underlined when hovered)."""
+    button = qt.QPushButton(text)
+    button.setObjectName(objectName)
+    button.setFlat(True)
+    button.setProperty("studioLink", True)
+    button.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
+    button.setSizePolicy(qt.QSizePolicy.Maximum, qt.QSizePolicy.Fixed)
+    setText(button, "caption")
+    if callback is not None:
+        button.connect("clicked()", callback)
+    installButtonKeys(button)
+    bindStyleSheet(button, lambda: (
+        f'QPushButton[studioLink="true"] {{ background: transparent; border: none; color: {token("accent-fg").name()}; padding: 0px; text-align: left; }}'
+        'QPushButton[studioLink="true"]:hover { text-decoration: underline; }'
+        f'QPushButton[studioLink="true"]:focus {{ border: 1px solid {token("accent-fg").name()}; border-radius: 3px; }}'))
+    return button
+
+
+def listRow(iconName, text, value=None, callback=None, objectName="StudioListRow"):
+    """Return a 34 px row button: a 16 px icon, the text, an optional text3 value and a chevron (Draw: "Normalize to MNI",
+    "Trace from a figure", "Notes"). The value label is the ``StudioListRowValue`` child.
+    """
+    button = qt.QPushButton()
+    button.setObjectName(objectName)
+    button.setFixedHeight(LIST_ROW_HEIGHT)
+    button.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
+    button.setAccessibleName(text)
+    setRole(button, "ghost")
+    layout = qt.QHBoxLayout(button)
+    layout.setContentsMargins(8, 0, 6, 0)
+    layout.setSpacing(10)
+    iconLabel = qt.QLabel()
+    iconLabel.setObjectName("StudioListRowIcon")
+    iconLabel.setProperty("studioIconName", iconName)
+    iconLabel.setFixedSize(16, 16)
+    layout.addWidget(iconLabel)
+    textLabel = label(text, "body", "text", "StudioListRowText")
+    layout.addWidget(textLabel, 1)
+    valueLabel = label(value or "", "caption", "text3", "StudioListRowValue")
+    valueLabel.setVisible(bool(value))
+    layout.addWidget(valueLabel)
+    chevron = qt.QLabel()
+    chevron.setObjectName("StudioListRowChevron")
+    chevron.setFixedSize(14, 14)
+    layout.addWidget(chevron)
+    for child in (iconLabel, textLabel, valueLabel, chevron):
+        child.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
+
+    def refreshIcons(button=button):
+        if not _isAlive(button):
+            removePaletteListener(refreshIcons)
+            return
+        rowIcon = button.findChild("QLabel", "StudioListRowIcon")
+        rowIcon.setPixmap(pixmap(str(rowIcon.property("studioIconName")), 16, "text2"))
+        button.findChild("QLabel", "StudioListRowChevron").setPixmap(pixmap("chevron-right", 14, "text3"))
+
+    refreshIcons()
+    addPaletteListener(refreshIcons)
+    if callback is not None:
+        button.connect("clicked()", callback)
+    installButtonKeys(button)
+    return button
+
+
+def setListRowValue(row, value):
+    """Change the value text of a ``listRow()`` (hidden when empty)."""
+    valueLabel = row.findChild("QLabel", "StudioListRowValue")
+    valueLabel.setText(value or "")
+    valueLabel.setVisible(bool(value))
 
 
 def setChipLevel(chipLabel, level):
@@ -690,6 +977,23 @@ def segmented(labels):
         layout.addWidget(button)
     setRole(frame, "segmented")
     return frame, group
+
+
+def setRoundedMask(widget, radius):
+    """Round the corners of a top-level ``widget`` (a popup, an overlay card) with a mask of its current size: popups
+    have no translucent background without a compositor. Call it again after a resize.
+    """
+    width, height = int(widget.width), int(widget.height)
+    if width <= 0 or height <= 0:
+        return
+    mask = qt.QBitmap(width, height)
+    mask.fill(qt.Qt.color0)
+    painter = qt.QPainter(mask)
+    painter.setPen(qt.Qt.NoPen)
+    painter.setBrush(qt.QBrush(qt.Qt.color1))
+    painter.drawRoundedRect(0, 0, width, height, radius, radius)
+    painter.end()
+    widget.setMask(mask)
 
 
 #
@@ -946,9 +1250,12 @@ def noticeLine(text, actions=()):
         # Three buttons ("Take the tour · What moved · Not now") leave the text no room in a 340 px inspector
         wrapWidth = max(wrapWidth, NOTICE_MARGIN_LEFT + NOTICE_MARGIN_RIGHT + NOTICE_SPACING + NOTICE_TEXT_MIN_WIDTH + buttonsWidth)
     _installWrap(frame, wrapWidth)
+    # VISUAL 4.8: an 8% tint of the accent with a 22% border, rounded by 8 px
     bindStyleSheet(frame, lambda: (
-        f"QFrame[studioNoticeLine=\"true\"] {{ background-color: {token('accent-subtle').name()}; border: none; border-bottom: 1px solid {token('hairline').name()}; }}"
-        f"QLabel#StudioNoticeText {{ color: {token('text').name()}; background: transparent; }}"))
+        f"QFrame[studioNoticeLine=\"true\"] {{ background-color: {_rgba(token('accent-fg'), 0.08)}; border: 1px solid {_rgba(token('accent-fg'), 0.22)};"
+        " border-radius: 8px; }"
+        f"QLabel#StudioNoticeText {{ color: {token('text').name()}; background: transparent; border: none; }}"
+        f"QToolButton#StudioNoticeButton {{ color: {token('accent-fg').name()}; }}"))
     return frame
 
 
