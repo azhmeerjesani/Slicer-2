@@ -278,10 +278,64 @@ def detect_grid_candidates(shape, affine, origin_tolerance=1.0, spacing_toleranc
     box = _world_box(shape, affine, spacing_tolerance)
     if box is None:
         return None
-    for spec in GRID_REGISTRY:
+    for spec in GRID_REGISTRY + tuple(_RUNTIME_GRIDS):
         if _box_matches(box, spec.shape, spec.spacing, spec.lowest_center, origin_tolerance, spacing_tolerance):
             return GridMatch(spec.grid_id, spec.candidates, spec.family, spec.resolution, spec.ambiguous)
     return None
+
+
+# Runtime grids: the grids of the user's own MNI templates (Slicer Studio, A-10). They are matched after the
+# built-in registry grids (a built-in grid always wins) by detect_grid_candidates and detect_space(path_or_geometry),
+# and GRID_BY_ID resolves their ids ("user:<id>"); detect_grid (connectome grids only) is unchanged.
+_RUNTIME_GRIDS = []
+
+
+def register_grid(spec):
+    """Add a runtime grid (a :class:`GridSpec`, e.g. from :func:`grid_spec_from_affine`); a grid with the same id is
+    replaced. Built-in registry ids cannot be replaced.
+
+    :raises ValueError: for the id of a built-in registry grid.
+    """
+    if spec.grid_id in {built_in.grid_id for built_in in GRID_REGISTRY}:
+        raise ValueError(f"{spec.grid_id!r} is a built-in grid")
+    unregister_grid(spec.grid_id)
+    _RUNTIME_GRIDS.append(spec)
+    GRID_BY_ID[spec.grid_id] = spec
+    return spec
+
+
+def unregister_grid(grid_id):
+    """Remove a runtime grid added with :func:`register_grid`; return whether it was registered."""
+    found = [spec for spec in _RUNTIME_GRIDS if spec.grid_id == grid_id]
+    for spec in found:
+        _RUNTIME_GRIDS.remove(spec)
+    if found and grid_id not in {built_in.grid_id for built_in in GRID_REGISTRY}:
+        GRID_BY_ID.pop(grid_id, None)
+    return bool(found)
+
+
+def registered_grids():
+    """The runtime grids, in registration order."""
+    return tuple(_RUNTIME_GRIDS)
+
+
+def grid_spec_from_affine(grid_id, shape, affine, space, family=None, spacing_tolerance=1e-3):
+    """A :class:`GridSpec` of an axis-aligned grid with isotropic voxels (any storage order, e.g. LAS), or None when
+    the voxel axes are not aligned with the world axes or the voxels are not cubic (such a grid cannot be registered).
+
+    :param space: the space the grid holds (its single candidate).
+    :param family: its family (default :func:`space_family` of ``space``).
+    """
+    box = _world_box(shape, affine, spacing_tolerance)
+    if box is None:
+        return None
+    world_shape, world_spacing, lowest = box
+    spacing = float(world_spacing.mean())
+    if np.abs(world_spacing - spacing).max() > spacing_tolerance * spacing:
+        return None
+    x_flipped = bool(np.asarray(affine, dtype=np.float64)[0, :3][int(np.argmax(np.abs(np.asarray(affine)[0, :3])))] < 0)
+    return GridSpec(str(grid_id), world_shape, spacing, tuple(round(float(v), 6) for v in lowest), (str(space),),
+                    family or space_family(space), x_flipped=x_flipped)
 
 
 def _shape_and_affine(source):

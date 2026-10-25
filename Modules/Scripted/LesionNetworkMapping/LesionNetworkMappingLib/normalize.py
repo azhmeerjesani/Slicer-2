@@ -22,6 +22,11 @@ Command line (one JSON event per line on standard output, see :mod:`.jobs`)::
     python -m LesionNetworkMappingLib.normalize warp --run DIR --image PATH [--kind lesion|image] [--out PATH]
     python -m LesionNetworkMappingLib.normalize check [--template ID] [--template-dir DIR ...]
 
+Your own templates (Slicer Studio, A-10): ``--template user:<id> --template-dir "<Slicer Studio folder>/Templates"``
+registers to a template that the user added (its ``<name>/template.json``: the image, its brain mask and an optional
+whole-head image). The outputs are written on the grid of that image (named ``space-user<Id>``, without a res entity)
+and normalization.json records the template's id, name, space and sha256.
+
 Registration (``run``):
 
 - costmask: the lesion on the scan grid (through the affines, never by index), dilated by
@@ -145,6 +150,11 @@ TEMPLATES = {
 }
 TEMPLATE_IDS = tuple(TEMPLATES)
 REQUIRED_TEMPLATE_FILES = ("fixed", "mask")
+# Your own templates (A-10): "user:<id>" names the folder <Templates>/<name>/ whose template.json has that id
+USER_TEMPLATE_PREFIX = "user:"
+USER_TEMPLATE_JSON = "template.json"
+USER_TEMPLATE_FORMAT = "slicer-studio-template"
+_USER_TEMPLATES = {}  # "user:<id>" -> its template.json record (with "folder"), filled by find_template
 
 # Progress model: stage weights (renormalized for the stages that run) and expected seconds at 3 threads
 STAGE_WEIGHTS = {"costmask": 0.03, "anat": 0.07, "affine": 0.20, "bspline": 0.40, "warp": 0.20, "qc": 0.10}
@@ -233,10 +243,93 @@ def _warn(message, code, **fields):
 
 
 def template_grid(template_id):
-    """The 1 mm output grid of a template (a :class:`.geometry.GridSpec` from GRID_REGISTRY)."""
+    """The output grid of a template: the 1 mm grid of a built-in template (a :class:`.geometry.GridSpec` from
+    GRID_REGISTRY), the grid of the image of a user template (registered by :func:`find_template`).
+    """
     from .geometry import GRID_BY_ID
 
+    if is_user_template(template_id):
+        if template_id not in GRID_BY_ID:
+            raise jobs.JobError(f"The grid of {template_id} is not known: locate the template first (find_template)", code="template_missing", template=template_id)
+        return GRID_BY_ID[template_id]
     return GRID_BY_ID[TEMPLATES[template_id]["grid1"]]
+
+
+def is_user_template(template_id):
+    """True for the id of a template that the user added ("user:<id>")."""
+    return str(template_id or "").startswith(USER_TEMPLATE_PREFIX)
+
+
+def user_template_folders(dirs=()):
+    """Folders that hold a template.json: each folder of ``dirs`` that has one, else its subfolders that have one."""
+    folders = []
+    for folder in dirs:
+        if not folder or not os.path.isdir(folder):
+            continue
+        if os.path.isfile(os.path.join(folder, USER_TEMPLATE_JSON)):
+            folders.append(os.path.abspath(folder))
+            continue
+        try:
+            names = sorted(os.listdir(folder))
+        except OSError:
+            continue
+        folders += [os.path.abspath(os.path.join(folder, name)) for name in names if os.path.isfile(os.path.join(folder, name, USER_TEMPLATE_JSON))]
+    return folders
+
+
+def read_user_template(folder):
+    """The template.json of a user template folder (with "folder" added), or None when it is missing or not one."""
+    try:
+        with open(os.path.join(folder, USER_TEMPLATE_JSON), encoding="utf-8") as f:
+            record = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict) or record.get("schema") != USER_TEMPLATE_FORMAT or not record.get("id"):
+        return None
+    record["folder"] = os.path.abspath(folder)
+    return record
+
+
+def resolve_user_template(template_id, dirs=()):
+    """The template.json record of "user:<id>" found in ``dirs`` (Templates folders or template folders), or None."""
+    wanted = str(template_id)[len(USER_TEMPLATE_PREFIX):] if is_user_template(template_id) else str(template_id)
+    for folder in user_template_folders(dirs):
+        record = read_user_template(folder)
+        if record is not None and record["id"] == wanted:
+            return record
+    return None
+
+
+def template_space(template_id):
+    """The space label of a template: the id of a built-in template, the space of a user template (e.g.
+    MNI152NLin2009bAsym, or "MNI" for "MNI (other)") once :func:`find_template` located it.
+    """
+    if is_user_template(template_id):
+        return (_USER_TEMPLATES.get(template_id) or {}).get("space") or "MNI"
+    return template_id
+
+
+def template_label(template_id):
+    """The BIDS ``space`` label of the outputs: the id of a built-in template, "user<Id>" for "user:<id>" (letters and
+    digits only, e.g. "user:icbm-2009b" -> "userIcbm2009b").
+    """
+    if not is_user_template(template_id):
+        return template_id
+    words = re.split(r"[^A-Za-z0-9]+", str(template_id)[len(USER_TEMPLATE_PREFIX):])
+    return "user" + "".join(word[:1].upper() + word[1:] for word in words if word)
+
+
+def _res_entity(template_id):
+    """The ``_res-1`` entity of the outputs of a built-in template ("" for a user template: its own grid)."""
+    return "" if is_user_template(template_id) else "_res-1"
+
+
+def template_record(template_id):
+    """{"id", "name", "space", "sha256"} of a user template located by :func:`find_template` (None otherwise)."""
+    record = _USER_TEMPLATES.get(template_id)
+    if record is None:
+        return None
+    return {"id": template_id, "name": record.get("name"), "space": record.get("space"), "sha256": (record.get("sha256") or {}).get("image")}
 
 
 def template_url(template_id, role):
@@ -290,8 +383,10 @@ def find_template(template_id, image=None, mask=None, head=None, dirs=()):
       "warnings": [text], "head_available": bool, "reference_available": bool}.
     :raises jobs.JobError: code "unknown_template" for an unsupported id.
     """
+    if is_user_template(template_id):
+        return _find_user_template(template_id, image, mask, head, dirs)
     if template_id not in TEMPLATES:
-        raise jobs.JobError(f"Unknown template {template_id!r}; supported: {', '.join(TEMPLATE_IDS)}", code="unknown_template")
+        raise jobs.JobError(f"Unknown template {template_id!r}; supported: {', '.join(TEMPLATE_IDS)} or user:<id>", code="unknown_template")
     spec = TEMPLATES[template_id]
     explicit = {"fixed": image, "mask": mask, "head": head}
     folders = template_search_dirs(dirs)
@@ -328,8 +423,69 @@ def find_template(template_id, image=None, mask=None, head=None, dirs=()):
     }
 
 
+def _find_user_template(template_id, image=None, mask=None, head=None, dirs=()):
+    """:func:`find_template` for "user:<id>": the files of its template.json (explicit files win), their sha256 (a
+    warning when a file changed since it was added) and its image grid, registered in :data:`.geometry.GRID_BY_ID`.
+    """
+    from .geometry import grid_spec_from_affine, register_grid
+    from .nifti import read_nifti_header
+
+    record = resolve_user_template(template_id, dirs)
+    if record is None:
+        raise jobs.JobError(
+            f"Template {template_id} is not in the template folders; pass the Templates folder of your Slicer Studio folder with --template-dir",
+            code="template_missing",
+            template=template_id,
+            files=[],
+        )
+    folder = record["folder"]
+    listed = record.get("files") or {}
+    stored = record.get("sha256") or {}
+    files, sha, warnings = {}, {}, []
+    for role, key, given in (("fixed", "image", image), ("mask", "mask", mask), ("head", "head", head)):
+        name = listed.get(key)
+        path = os.path.abspath(given) if given else (os.path.join(folder, *str(name).split("/")) if name else None)
+        if given and not os.path.isfile(path):
+            raise jobs.JobError(f"Template {role} file not found: {given}", code="template_missing", role=role)
+        if path and os.path.isfile(path):
+            files[role] = path
+            sha[role] = _sha256(path)
+            if not given and stored.get(key) and stored[key] != sha[role]:
+                warnings.append(f"The {key} file {os.path.basename(path)} of template {record.get('name')} changed since it was added (sha256 {stored[key][:12]})")
+        else:
+            files[role] = None
+    files["reference"] = files["fixed"]
+    if files["fixed"]:
+        sha["reference"] = sha["fixed"]
+        header = read_nifti_header(files["fixed"]) if _is_nifti(files["fixed"]) else None
+        if header is None:
+            raise jobs.JobError(f"The image of template {record.get('name')} must be a NIfTI file", code="template_grid", template=template_id)
+        spec = grid_spec_from_affine(template_id, header["shape"][:3], header["affine"], record.get("space") or "MNI")
+        if spec is None:
+            raise jobs.JobError(f"The image of template {record.get('name')} has no grid with cubic voxels aligned with the axes: it cannot be a normalization target",
+                                code="template_grid", template=template_id)
+        register_grid(spec)
+    _USER_TEMPLATES[template_id] = record
+    missing = [role for role in ("fixed", "mask", "head") if not files[role]]
+    return {
+        "id": template_id,
+        "files": files,
+        "sha256": sha,
+        "missing": missing,
+        "warnings": warnings,
+        "head_available": bool(files.get("head")),
+        "reference_available": bool(files.get("reference")),
+        "user": {"id": template_id, "name": record.get("name"), "space": record.get("space"), "sha256": stored.get("image") or sha.get("fixed")},
+    }
+
+
 def _require_template(found):
     missing = [role for role in REQUIRED_TEMPLATE_FILES if role in found["missing"]]
+    if missing and is_user_template(found["id"]):
+        name = (found.get("user") or {}).get("name") or found["id"]
+        what = " and ".join({"fixed": "image", "mask": "brain mask"}[role] for role in missing)
+        raise jobs.JobError(f"Template {name} has no {what}: add one in Settings > Templates to normalize to it", code="template_missing",
+                            template=found["id"], files=[])
     if missing:
         template_id = found["id"]
         details = [{"role": role, "url": template_url(template_id, role), "bytes": TEMPLATES[template_id]["files"][role]["bytes"]} for role in missing]
@@ -619,14 +775,15 @@ def plan(scan, lesion=None, anat=None, modality="auto", subject=None, force=Fals
 def output_names(sid, modality, template_id, two_step=False):
     """File names of a run's outputs in its --out folder (see the module documentation)."""
     source = "T1w" if two_step else modality
+    label, res = template_label(template_id), _res_entity(template_id)
     names = {
-        "transform": f"{sid}_from-{modality}_to-{template_id}_mode-image_xfm.h5",
-        "affine": f"{sid}_from-{source}_to-{template_id}_desc-affine_mode-image_xfm.h5",
-        "affine_inverse": f"{sid}_from-{template_id}_to-{source}_desc-affine_mode-image_xfm.h5",
-        "lesion": f"{sid}_space-{template_id}_res-1_desc-lesion_mask.nii.gz",
-        "lesion_sidecar": f"{sid}_space-{template_id}_res-1_desc-lesion_mask.json",
-        "lesion_prob": f"{sid}_space-{template_id}_res-1_desc-lesionProb_mask.nii.gz",
-        "scan": f"{sid}_space-{template_id}_res-1_desc-preproc_{modality}.nii.gz",
+        "transform": f"{sid}_from-{modality}_to-{label}_mode-image_xfm.h5",
+        "affine": f"{sid}_from-{source}_to-{label}_desc-affine_mode-image_xfm.h5",
+        "affine_inverse": f"{sid}_from-{label}_to-{source}_desc-affine_mode-image_xfm.h5",
+        "lesion": f"{sid}_space-{label}{res}_desc-lesion_mask.nii.gz",
+        "lesion_sidecar": f"{sid}_space-{label}{res}_desc-lesion_mask.json",
+        "lesion_prob": f"{sid}_space-{label}{res}_desc-lesionProb_mask.nii.gz",
+        "scan": f"{sid}_space-{label}{res}_desc-preproc_{modality}.nii.gz",
         "costmask": f"{sid}_desc-costfunction_mask.nii.gz",
         "qc_png": f"{sid}_desc-normqc.png",
         "qc_json": f"{sid}_desc-normqc.json",
@@ -1576,7 +1733,8 @@ def _stage_affine(ctx):
         codes = ["alignment_failed"] + ([] if head else ["head_template_missing"])
         message = "The scan could not be aligned to the template (" + ", ".join(f"{item['name']} ncc_xl {item['ncc_xl']}" for item in attempts) + f"). {ALIGN_HINT}"
         if not head and ctx.tilt_search != "off":
-            message += f"; the whole-head template ({TEMPLATES[ctx.template_id]['files']['head']['name']}) enables the automatic tilt recovery"
+            head_name = TEMPLATES[ctx.template_id]["files"]["head"]["name"] if ctx.template_id in TEMPLATES else "a head image added to the template"
+            message += f"; the whole-head template ({head_name}) enables the automatic tilt recovery"
         raise jobs.JobError(message, code="alignment_failed", codes=codes, attempts=attempts, head_template_missing=not head, hint=ALIGN_HINT)
     ctx.final_transform = ctx.affine
     ctx.final_warped = ctx.affine_warped
@@ -1858,7 +2016,7 @@ def _stage_qc(ctx):
     write_json_atomic(os.path.join(ctx.final, ctx.names["qc_json"]), content)
     ctx.cancel.raise_if_cancelled(done=len(ctx.progress.completed))
     lesion_for_png = lesion2 if lesion2 is not None else np.zeros(fixed.shape, dtype=np.float32)
-    title = f"{ctx.template_id} | {ctx.sid} | research use only"
+    title = f"{(ctx.template.get('user') or {}).get('name') or ctx.template_id} | {ctx.sid} | research use only"
     ctx.mosaic = normqc.qc_mosaic_png(fixed, warped2, mask, lesion_for_png, os.path.join(ctx.final, ctx.names["qc_png"]), checkerboard=True, affine=affine2, title=title)
     if not ctx.scan_only:
         _write_sidecar(ctx)
@@ -1903,11 +2061,11 @@ def _write_sidecar(ctx):
         "Type": "Lesion",
         "Source": sources[0],
         "Sources": sources,
-        "SpatialReference": ctx.template_id,
-        "Resolution": "1 mm",
+        "SpatialReference": ctx.template_id if not is_user_template(ctx.template_id) else template_space(ctx.template_id),
+        "Resolution": "1 mm" if not is_user_template(ctx.template_id) else f"{float(ctx.grid1.spacing):g} mm",
         "SlicerStudio": {
             "participant_id": ctx.sid,
-            "space": ctx.template_id,
+            "space": template_space(ctx.template_id),
             "modified": _now(),
             "norm_method": ctx.method_record["label"],
             "norm_qc": "unreviewed",
@@ -1978,6 +2136,8 @@ def _commit(ctx, started):
             "sha256": ctx.template["sha256"],
             "grid": {"id": ctx.grid1.grid_id, "shape": list(ctx.grid1.shape), "affine": ctx.grid1.affine.tolist()},
             "header_reference": os.path.basename(ctx.reference) if ctx.reference and ctx.template["files"].get("reference") == ctx.reference else None,
+            **({"name": ctx.template["user"]["name"], "space": ctx.template["user"]["space"], "image_sha256": ctx.template["user"]["sha256"]}
+               if ctx.template.get("user") else {}),
         },
         "method": ctx.method_record,
         "outputs": outputs,
@@ -2041,11 +2201,11 @@ def warp(run_dir, image, kind="lesion", out=None, template_dirs=(), brainsresamp
     stem = _nifti_stem(image)
     if out is None:
         suffix = "desc-lesion_mask" if kind == "lesion" else "desc-warped"
-        out = os.path.join(run_dir, "warps", f"{stem}_space-{template_id}_res-1_{suffix}.nii.gz")
+        out = os.path.join(run_dir, "warps", f"{stem}_space-{template_label(template_id)}{_res_entity(template_id)}_{suffix}.nii.gz")
     out = os.path.abspath(out)
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    grid1 = template_grid(template_id)
     found = find_template(template_id, dirs=template_dirs)
+    grid1 = template_grid(template_id)
     lock = jobs.OutputLock(os.path.join(run_dir, LOCK_NAME))
     lock.acquire()
     if lock.reclaimed is not None:
@@ -2138,6 +2298,9 @@ def check(template=None, template_dirs=(), brainsfit=None, brainsresample=None, 
     report["executables"] = executables
     templates = {}
     for template_id in TEMPLATE_IDS if template in (None, "", "auto") else (template,):
+        if is_user_template(template_id):
+            templates[template_id] = _check_user_template(template_id, template_dirs)
+            continue
         found = find_template(template_id, dirs=template_dirs)
         grid = template_grid(template_id)
         templates[template_id] = {
@@ -2157,6 +2320,25 @@ def check(template=None, template_dirs=(), brainsfit=None, brainsresample=None, 
     ok = executables["BRAINSFit"]["found"] and executables["BRAINSResample"]["found"] and templates[wanted]["usable"]
     report["ok"] = bool(ok)
     return report, bool(ok)
+
+
+def _check_user_template(template_id, template_dirs):
+    """The ``check`` report of a user template."""
+    try:
+        found = find_template(template_id, dirs=template_dirs)
+        grid = template_grid(template_id)
+    except jobs.JobError as exc:
+        return {"usable": False, "message": exc.message, "files": {}}
+    return {
+        "usable": not any(role in found["missing"] for role in REQUIRED_TEMPLATE_FILES),
+        "name": found["user"]["name"],
+        "space": found["user"]["space"],
+        "head_template": found["head_available"],
+        "header_reference": True,
+        "grid1": {"id": grid.grid_id, "shape": list(grid.shape), "affine": grid.affine.tolist()},
+        "terms": "your own template (its licence is yours to check)",
+        "files": {role: {"path": path, "found": bool(path), "sha256": found["sha256"].get(role)} for role, path in found["files"].items() if role != "reference"},
+    }
 
 
 # Batch over a study
@@ -2305,7 +2487,7 @@ def _inbox_values(study, row, result):
         "lesion_native": native_lesion,
         "scan": study.relpath(outputs["scan"]),
         "lesion": study.relpath(outputs["lesion"]),
-        "space": result["template"],
+        "space": template_space(result["template"]),
         "norm_method": result["method_label"],
         "norm_qc": "unreviewed",
         "norm_suggestion": result["qc"].get("suggestion"),
@@ -2385,6 +2567,15 @@ def _utf16(character):
     return [int.from_bytes(data[i:i + 2], "big") for i in range(0, len(data), 2)]
 
 
+def _template_argument(text):
+    """argparse type of --template: "auto", a built-in id or "user:<id>"."""
+    import argparse
+
+    if text in ("auto", *TEMPLATE_IDS) or (is_user_template(text) and len(text) > len(USER_TEMPLATE_PREFIX)):
+        return text
+    raise argparse.ArgumentTypeError(f"invalid choice: {text!r} (choose from auto, {', '.join(TEMPLATE_IDS)} or user:<id>)")
+
+
 def _common_options(parser, with_run_options=True):
     jobs.add_common_arguments(parser, threads_default=None)
     for action in parser._actions:
@@ -2399,7 +2590,9 @@ def _common_options(parser, with_run_options=True):
     parser.add_argument("--brainsroiauto", default=None, help="BRAINSROIAuto executable (default: on PATH)")
     if not with_run_options:
         return
-    parser.add_argument("--template", choices=("auto", *TEMPLATE_IDS), default="auto", help="target template (auto: the study's space in a batch, else MNI152NLin2009cAsym)")
+    parser.add_argument("--template", type=_template_argument, default="auto",
+                        help=f"target template: auto (the study's space in a batch, else MNI152NLin2009cAsym), {', '.join(TEMPLATE_IDS)}, or user:<id> "
+                             "(your own template; with --template-dir <Slicer Studio folder>/Templates)")
     parser.add_argument("--template-image", default=None, help="2 mm registration target of the template")
     parser.add_argument("--template-mask", default=None, help="2 mm brain mask of the template")
     parser.add_argument("--template-head", default=None, help="2 mm whole-head image of the template (tilt recovery)")
@@ -2437,7 +2630,7 @@ def _parser(command):
         parser.add_argument("--out", default=None, help="output NIfTI (default: <run>/warps/<name>_space-<tpl>_res-1_desc-...)")
         _common_options(parser, with_run_options=False)
     else:
-        parser.add_argument("--template", choices=("auto", *TEMPLATE_IDS), default="auto")
+        parser.add_argument("--template", type=_template_argument, default="auto")
         _common_options(parser, with_run_options=False)
     return parser
 
