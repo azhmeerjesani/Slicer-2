@@ -1,5 +1,6 @@
 import qt
 import slicer
+import vtk
 from slicer.i18n import tr as _
 from slicer.i18n import translate
 from slicer.ScriptedLoadableModule import *
@@ -56,7 +57,8 @@ STUDIO_PROPERTIES = {
     "addRemoveSegmentButtonsVisible": False,
     "show3DButtonVisible": False,
     "switchToSegmentationsButtonVisible": False,
-    "maskingSectionVisible": True,
+    # Shown with "More tools", or while it restricts editing (_updateMaskingVisibility)
+    "maskingSectionVisible": False,
     "effectButtonStyle": qt.Qt.ToolButtonTextUnderIcon,
     "unorderedEffectsVisible": False,
     "maximumNumberOfUndoStates": UNDO_STATES,
@@ -210,6 +212,10 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._footerWidget = None
         self._presentationShortcuts = []
         self._moreToolsButton = None
+        #: Widget of the extension shown after the tool tiles (``toolOptionsWidget()``)
+        self._toolOptionsWidget = None
+        #: Observation of the segment editor node: the masking section stays shown while it restricts editing
+        self._maskingObservation = None
         self._tileFilter = None
         self._tileOutlines = {}
         self._previousEffectName = None
@@ -296,7 +302,9 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         - ``effectToolTip(effectName, positionalKey)`` -> tooltip text of a tile (else the editor's tooltip);
         - ``onEnter()`` and ``onExit()``: the module was entered or left (in the studio presentation);
         - ``ensureSegmentation(editor)``: called on entry instead of creating a segmentation, which the studio
-          presentation never does by itself while there is no scalar volume.
+          presentation never does by itself while there is no scalar volume;
+        - ``moreToolsHost()`` -> a box layout that holds "More tools ▾" (else it follows the tool tiles);
+        - ``toolOptionsWidget()`` -> a widget shown right after the tool tiles (Draw: the brush size row).
         """
         if name not in PRESENTATIONS:
             raise ValueError(f"Unknown Segment Editor presentation: {name}")
@@ -369,6 +377,7 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def _applyClassic(self):
         self._removeTileFilter()
+        self._observeMasking(False)
         self._setModuleWidthPolicy(qt.QSizePolicy.Minimum)
         self._setProperties(classicProperties())
         self.editor.setEffectNameOrder(self._classicEffectNameOrder)
@@ -380,9 +389,9 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             widget = self._child("QWidget", objectName)
             if widget is not None:
                 widget.setVisible(True)
-        optionsGroupBox = self._child("QGroupBox", "OptionsGroupBox")
-        if optionsGroupBox is not None:
-            optionsGroupBox.setMinimumWidth(0)
+        for optionsWidget in (self._child("QGroupBox", "OptionsGroupBox"), self._child("QFrame", "EffectsOptionsFrame")):
+            if optionsWidget is not None:
+                optionsWidget.setMinimumWidth(0)
         effectsGroupBox = self._child("QFrame", "EffectsGroupBox")
         if effectsGroupBox is not None:
             effectsGroupBox.layout().setContentsMargins(-1, -1, -1, -1)
@@ -426,15 +435,18 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._moreToolsButton.blockSignals(False)
         self.editor.setEffectNameOrder(self._studioEffectOrder(self._moreToolsShown()))
         self.editor.unorderedEffectsVisible = self._moreToolsShown()
+        self._observeMasking(True)
+        self._updateMaskingVisibility()
         self._setEffectParameters(STUDIO_EFFECT_PARAMETERS)
         for objectName in STUDIO_HIDDEN_WIDGETS:
             widget = self._child("QWidget", objectName)
             if widget is not None:
                 widget.setVisible(showAll)
-        optionsGroupBox = self._child("QGroupBox", "OptionsGroupBox")
-        if optionsGroupBox is not None:
-            # Wide tool options (Paint, Margin) do not widen the inspector: they are laid out in its width
-            optionsGroupBox.setMinimumWidth(1)
+        # Wide tool options (Paint, Margin) do not widen the inspector: they are laid out in its width (the studio look
+        # shows the options frame without its group box, qMRMLSegmentEditorWidget)
+        for optionsWidget in (self._child("QGroupBox", "OptionsGroupBox"), self._child("QFrame", "EffectsOptionsFrame")):
+            if optionsWidget is not None:
+                optionsWidget.setMinimumWidth(1)
         effectsGroupBox = self._child("QFrame", "EffectsGroupBox")
         if effectsGroupBox is not None:
             effectsGroupBox.layout().setContentsMargins(0, 0, 0, 0)
@@ -482,11 +494,12 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         """Studio presentation: rows of check boxes in the tool options (Brush: Sphere brush, Edit in 3D views, Color smudge)
         are stacked, so that the narrow inspector does not clip their labels; the classic presentation puts them back in rows.
         """
-        optionsGroupBox = self._child("QGroupBox", "OptionsGroupBox")
-        if optionsGroupBox is None:
+        # The options frame: in the options group box (classic), or shown without it (studio look)
+        optionsFrame = self._child("QFrame", "EffectsOptionsFrame")
+        if optionsFrame is None:
             return
         direction = qt.QBoxLayout.TopToBottom if stacked else qt.QBoxLayout.LeftToRight
-        for layout in optionsGroupBox.findChildren("QHBoxLayout"):
+        for layout in optionsFrame.findChildren("QHBoxLayout"):
             widgets = [layout.itemAt(index).widget() for index in range(layout.count())]
             widgets = [widget for widget in widgets if widget is not None]
             if len(widgets) < 2 or not all(widget.inherits("QCheckBox") for widget in widgets):
@@ -526,7 +539,40 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
         self.editor.setEffectNameOrder(self._studioEffectOrder(shown))
         self.editor.unorderedEffectsVisible = bool(shown)
+        self._updateMaskingVisibility()
         self._applyStudioEffects()
+
+    @staticmethod
+    def maskingRestrictsEditing(segmentEditorNode):
+        """True if the masking settings of ``segmentEditorNode`` are not the defaults (paint everywhere, overwrite other
+        segments, no intensity range): the studio presentation then keeps them in sight.
+        """
+        if segmentEditorNode is None:
+            return False
+        return (segmentEditorNode.GetMaskMode() != slicer.vtkMRMLSegmentationNode.EditAllowedEverywhere
+                or segmentEditorNode.GetOverwriteMode() != slicer.vtkMRMLSegmentEditorNode.OverwriteAllSegments
+                or bool(segmentEditorNode.GetSourceVolumeIntensityMask()))
+
+    def _updateMaskingVisibility(self):
+        """Studio presentation: the masking section (its title says "Paint everywhere · overwrite other segments") is with
+        the tools under "More tools ▾"; it stays shown while the settings restrict editing, so that a stroke that paints
+        nothing always has its reason in sight. "Show all controls" shows it too.
+        """
+        if self._presentation != "studio":
+            return
+        visible = self._moreToolsShown() or self._showAllControls() or self.maskingRestrictsEditing(self.editor.mrmlSegmentEditorNode())
+        if hasattr(self.editor, "maskingSectionVisible") and bool(self.editor.maskingSectionVisible) != visible:
+            self.editor.maskingSectionVisible = visible
+
+    def _observeMasking(self, observe):
+        if self._maskingObservation is not None:
+            node, tag = self._maskingObservation
+            node.RemoveObserver(tag)
+            self._maskingObservation = None
+        node = self.editor.mrmlSegmentEditorNode() if observe else None
+        if node is not None:
+            tag = node.AddObserver(vtk.vtkCommand.ModifiedEvent, lambda caller, event: self._updateMaskingVisibility())
+            self._maskingObservation = (node, tag)
 
     def _installMoreToolsButton(self):
         effectsGroupBox = self._child("QFrame", "EffectsGroupBox")
@@ -535,6 +581,7 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if self._moreToolsButton is None:
             button = qt.QToolButton()
             button.setObjectName("SegmentEditorMoreToolsButton")
+            button.setProperty("studioMoreTools", True)
             button.setCheckable(True)
             button.setAutoRaise(True)
             button.setToolButtonStyle(qt.Qt.ToolButtonTextOnly)
@@ -546,9 +593,18 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             button.setParent(self.editor)
             button.hide()
             self._moreToolsButton = button
-        layout = self._parentLayoutOf(self.editor.layout(), effectsGroupBox)
-        if layout is not None and layout.indexOf(self._moreToolsButton) < 0:
-            layout.insertWidget(layout.indexOf(effectsGroupBox) + 1, self._moreToolsButton, 0, qt.Qt.AlignLeft)
+        host = self._callExtension(self._extension, "moreToolsHost")
+        if host is not None:
+            # On the right of the section label of the tools (VISUAL 4.4)
+            if host.indexOf(self._moreToolsButton) < 0:
+                editorLayout = self._parentLayoutOf(self.editor.layout(), self._moreToolsButton)
+                if editorLayout is not None:
+                    editorLayout.removeWidget(self._moreToolsButton)
+                host.addWidget(self._moreToolsButton, 0, qt.Qt.AlignRight | qt.Qt.AlignVCenter)
+        else:
+            layout = self._parentLayoutOf(self.editor.layout(), effectsGroupBox)
+            if layout is not None and layout.indexOf(self._moreToolsButton) < 0:
+                layout.insertWidget(layout.indexOf(effectsGroupBox) + 1, self._moreToolsButton, 0, qt.Qt.AlignLeft)
         self._moreToolsButton.show()
 
     def _removeMoreToolsButton(self):
@@ -563,6 +619,13 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         layout = self._parentLayoutOf(self.editor.layout(), button)
         if layout is not None:
             layout.removeWidget(button)
+        else:
+            parentLayout = button.parentWidget().layout() if button.parentWidget() is not None else None
+            hostLayout = self._parentLayoutOf(parentLayout, button) if parentLayout is not None else None
+            if hostLayout is not None:
+                hostLayout.removeWidget(button)
+        # Owned by the editor again (the host belongs to the extension)
+        button.setParent(self.editor)
         button.hide()
 
     @classmethod
@@ -805,6 +868,12 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.layout.insertWidget(0, header)
             header.show()
             self._extensionWidgets.append(header)
+        options = self._callExtension(extension, "toolOptionsWidget")
+        effectsGroupBox = self._child("QFrame", "EffectsGroupBox")
+        editorLayout = self._parentLayoutOf(self.editor.layout(), effectsGroupBox) if effectsGroupBox is not None else None
+        if options is not None and editorLayout is not None:
+            editorLayout.insertWidget(editorLayout.indexOf(effectsGroupBox) + 1, options)
+            self._toolOptionsWidget = options
         trailing = self._callExtension(extension, "trailingWidget")
         if trailing is not None:
             self.layout.insertWidget(self.layout.indexOf(self.editor) + 1, trailing)
@@ -830,6 +899,17 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._extensionWidgets = []
         self._installedExtension = None
         self._removeMoreToolsButton()
+        options = self._toolOptionsWidget
+        self._toolOptionsWidget = None
+        if options is not None:
+            try:
+                layout = self._parentLayoutOf(self.editor.layout(), options)
+                if layout is not None:
+                    layout.removeWidget(options)
+                options.hide()
+            except Exception:
+                # Deleted by the extension
+                pass
 
     #
     # Segments table (studio: only shown with more than one segment)

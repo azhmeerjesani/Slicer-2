@@ -185,7 +185,7 @@ def _viewsBody(shell):
     text = _("Scroll changes the slice, Ctrl + wheel zooms and Shift + move jumps the crosshair, as in 3D Slicer.")
     if _leftDragWindowLevel():
         text += " " + _("New: drag with the left button to adjust window/level when no tool is active.")
-    text += " " + _("Letters at the edges of each view name the patient's directions and \"Left is on screen right\" says where the patient's left is; "
+    text += " " + _("Letters at the edges of each view name the patient's directions and \"Radiological · L on right\" (bottom right) says where the patient's left is; "
                     "a pill at the top of the views names a mode such as Place, with a ✕ to leave it.")
     if _flatViewBars(shell):
         text += " " + _("The bar above each view starts with the view color, then the orientation (Axial ▾, with Rotate to volume plane, "
@@ -353,7 +353,7 @@ _DRAW_STEPS = (
          inSlicer=_("The segments table of the Segment Editor module, and Segment Statistics for the volume."),
          keys=((("C",), _("center on the lesion")), (("N", "Shift+N"), _("next / previous gap slice"))), workspace="draw", inspector=True,
          placement="left"),
-    Step("tools", _DRAW_TOOLS_TARGET, _("The tools"), _drawToolsBody, rows=("segment-editor-tools",),
+    Step("tools", _DRAW_TOOLS_TARGET, _("The tools"), _drawToolsBody, rows=("segment-editor-tools", "segment-editor-masking"),
          keys=((("P", "D", "M", "E"), _("Brush, Outline, Smart fill, Erase")), (("Esc",), _("deselect")), (("Space",), _("pause"))),
          workspace="draw", inspector=True, placement="left"),
     Step("paint", "EffectsGroupBox/Paint", _("Brush and its size"),
@@ -366,8 +366,8 @@ _DRAW_STEPS = (
          inSlicer=_("No such effect; the closest are Grow from seeds and Level tracing."), keys=((("M",), _("Smart fill")),),
          workspace="draw", inspector=True, placement="left"),
     Step("display", "StudioDisplayCard", _("Display"),
-         _("Fill, outline or both, the fill opacity, Show in 3D, one-click window/level presets and Voxel view (crisp voxels, on by default "
-           "on the MNI template)."),
+         _("The Overlay slider sets the opacity of the lesion fill and the Outline switch draws its outline. ⋯ in the inspector header has "
+           "Show lesion in 3D, Voxel view (crisp voxels, on by default on the MNI template) and the Window/level presets."),
          inSlicer=_("The Segmentations module (display) and the Volumes module (window/level, interpolation)."), keys=((("O",), _("fill or outline")),),
          workspace="draw", inspector=True, placement="left"),
     Step("undo", "StudioUndoButton", _("Undo and Redo"), _("Undo and redo your lesion edits, also from the keyboard."),
@@ -393,8 +393,9 @@ _MAP_STEPS = (
          when=lambda shell: _cohortSeedAvailable()),
     Step("connectome", "LNMConnectomeCard", _("Connectome"),
          _("A connectome is a folder on this computer (a .lnmc bundle): Get a connectome… lists the ones you can obtain from their providers "
-           "(it downloads only after you read and accept the provider's terms), Add connectome… registers one you have, Manage… > Convert… "
-           "converts your own data, and the demo is a small synthetic connectome (not real data). Nothing is downloaded unless you ask."),
+           "(it downloads only after you read and accept the provider's terms); ⋯ next to it has Add connectome… for one you have, Use the "
+           "demo (a small synthetic connectome, not real data) and Convert… for your own data. Nothing is downloaded unless you ask. "
+           "Once chosen, the step folds to one line; click it to change the connectome."),
          rows=("connectome",), workspace="map", inspector=True, placement="left"),
     Step("compute", "LNMComputeButton", _("Map network"),
          _("Computes the network map of the lesion with the chosen connectome, in the background (with Seed = Cohort: Run everything). "
@@ -404,8 +405,9 @@ _MAP_STEPS = (
     Step("result", "LNMResultCard", _("Result: statistic, rule and threshold"),
          _("The map opens in the views. Its threshold is a rule (FWE, the |T| ≥ 7 convention, an Fz effect size, a custom T or the top x%), "
            "worked out again from the number of subjects, so a T threshold is never silently reused on another N. "
-           "The statistic, the sign (±, +, −) and the opacity change only what is shown. A map opened from Library is shown here too; "  # noqa: RUF001
-           "Alt+← / Alt+→ show the maps next to it, one at a time."),
+           "The statistic, the sign (±, +, −) and the opacity change only what is shown. Notes about the map are one line with Details, "  # noqa: RUF001
+           "the peaks name their region from an atlas you have downloaded, and ⋯ in the inspector header has the recipes and the "
+           "reporting checks. A map opened from Library is shown here too; Alt+← / Alt+→ show the maps next to it, one at a time."),
          inSlicer=_("Not part of official 3D Slicer. The map is an ordinary volume: the Volumes and Data modules work on it as usual."),
          workspace="map", inspector=True, placement="left"),
     Step("disclaimer", "LNMDisclaimer", _("Research use only"),

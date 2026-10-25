@@ -292,8 +292,14 @@ class RecipeHeader:
         layout.setContentsMargins(6, 4, 6, 4)  # aligned with the content of the cards below
         layout.setSpacing(4)
 
-        row = qt.QHBoxLayout()
+        self.comboRow = qt.QWidget()
+        self.comboRow.setObjectName("LNMRecipeComboRow")
+        row = qt.QHBoxLayout(self.comboRow)
+        row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(4)
+        self._layout = layout
+        #: Studio presentation (``onPresentationChanged``): no row while nothing is chosen and no study is open
+        self._studio = False
         self.combo = qt.QComboBox()
         self.combo.setObjectName("LNMRecipeCombo")
         self.combo.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
@@ -319,7 +325,7 @@ class RecipeHeader:
         self.reloadAction.connect("triggered()", self.reload)
         self.menuButton.setMenu(self.menu)
         row.addWidget(self.menuButton)
-        layout.addLayout(row)
+        layout.addWidget(self.comboRow)
 
         self.statusLabel = _label("", "LNMRecipeStatus", "secondaryText")
         layout.addWidget(self.statusLabel)
@@ -593,10 +599,34 @@ class RecipeHeader:
         self.saveLabAction.setEnabled(self.recipe is not None)
         self.detailsAction.setEnabled(self.recipe is not None)
         self._showPrompt()
+        # Studio: nothing to say without a study, a recipe or a plan (VISUAL 4.5); the recipes are in the Map ⋯ menu
+        idle = self._studio and not path and self.recipe is None and not locked and not self.pending
+        self.comboRow.setVisible(not idle)
+        if idle:
+            self.statusLabel.hide()
+        self._layout.setContentsMargins(*((0, 0, 0, 0) if idle else (6, 4, 6, 4)))
         if locked and self.widget.isVisible():
             self.pollTimer.start()
         else:
             self.pollTimer.stop()
+
+    def onPresentationChanged(self, studio):
+        """Map entered in Studio (True) or in Classic (False)."""
+        self._studio = bool(studio)
+        if not self._cleanedUp:
+            self.refresh()
+
+    def menuItems(self):
+        """The recipes for the Map ⋯ menu (Studio): ``[(title, callback, checked)]``; empty while a plan is locked."""
+        recipes = _recipes()
+        path = self.studyPath()
+        status = recipes.plan_status(path) if path else {"state": "open"}
+        if status["state"] != "open":
+            return []
+        items = []
+        for recipe in self.recipes:
+            items.append((recipe.title, lambda recipe=recipe: self.applyRecipe(recipe), self.recipe is not None and recipe.id == self.recipe.id))
+        return items
 
     def _onShown(self):
         if not self._cleanedUp:

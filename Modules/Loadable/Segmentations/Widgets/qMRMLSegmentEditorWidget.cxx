@@ -305,6 +305,15 @@ public:
   QString DefaultMaskingTitle;
   QString DefaultMaskingToolTip;
   int DefaultMaskingMinimumWidth{ 0 };
+  /// Height below the title of the collapsed masking section in the classic presentation (the Studio look shows the
+  /// title row only: no empty frame under it)
+  int DefaultMaskingCollapsedHeight{ 14 };
+  /// Studio look of the option and masking sections: the options frame leaves the options group box (no frame, no
+  /// title row: the tiles name the active tool), the collapsed masking section shows its title row only
+  void updateSectionFrames();
+  /// Show or enable the tool options: the options group box, or the options frame alone in the Studio look
+  void setOptionsSectionVisible(bool visible);
+  void setOptionsSectionEnabled(bool enabled);
   /// Updates the masking title when the masking section is resized or its layout changes
   qMRMLSegmentEditorMaskingTitleFilter* MaskingTitleFilter{ nullptr };
 
@@ -530,6 +539,7 @@ void qMRMLSegmentEditorWidgetPrivate::init()
   this->DefaultMaskingTitle = this->MaskingGroupBox->title();
   this->DefaultMaskingToolTip = this->MaskingGroupBox->toolTip();
   this->DefaultMaskingMinimumWidth = this->MaskingGroupBox->minimumWidth();
+  this->DefaultMaskingCollapsedHeight = this->MaskingGroupBox->collapsedHeight();
   this->MaskingTitleFilter = new qMRMLSegmentEditorMaskingTitleFilter(this, q);
   this->EffectsSpacerSize = this->verticalSpacer_2->sizeHint();
   this->EffectsSpacerSizePolicy = this->verticalSpacer_2->sizePolicy();
@@ -826,6 +836,73 @@ void qMRMLSegmentEditorWidgetPrivate::updateMaskingTitle()
     groupBox->setTitle(title);
   }
   groupBox->setToolTip(title == QString(summary).replace(QLatin1Char('&'), QLatin1String("&&")) ? QString() : literalToolTip(summary));
+}
+
+//-----------------------------------------------------------------------------
+void qMRMLSegmentEditorWidgetPrivate::updateSectionFrames()
+{
+  // Studio look: the options frame is shown without the group box around it (Fusion keeps a frame and a title
+  // row in a group box even without a title); the classic presentation puts it back
+  QVBoxLayout* groupBoxLayout = qobject_cast<QVBoxLayout*>(this->OptionsGroupBox->layout());
+  bool inGroupBox = (this->EffectsOptionsFrame->parentWidget() == this->OptionsGroupBox);
+  if (this->StudioPresentation && inGroupBox && groupBoxLayout)
+  {
+    bool visible = !this->OptionsGroupBox->isHidden();
+    bool enabled = this->OptionsGroupBox->isEnabled();
+    groupBoxLayout->removeWidget(this->EffectsOptionsFrame);
+    this->verticalLayout->insertWidget(this->verticalLayout->indexOf(this->OptionsGroupBox) + 1, this->EffectsOptionsFrame);
+    this->OptionsGroupBox->hide();
+    this->EffectsOptionsFrame->setEnabled(enabled);
+    this->EffectsOptionsFrame->setVisible(visible);
+  }
+  else if (!this->StudioPresentation && !inGroupBox && groupBoxLayout)
+  {
+    bool visible = !this->EffectsOptionsFrame->isHidden();
+    bool enabled = this->EffectsOptionsFrame->isEnabled();
+    this->verticalLayout->removeWidget(this->EffectsOptionsFrame);
+    groupBoxLayout->addWidget(this->EffectsOptionsFrame);
+    this->EffectsOptionsFrame->setEnabled(true);
+    this->EffectsOptionsFrame->show();
+    this->OptionsGroupBox->setEnabled(enabled);
+    this->OptionsGroupBox->setVisible(visible);
+  }
+  int collapsedHeight = this->StudioPresentation ? 2 : this->DefaultMaskingCollapsedHeight;
+  if (this->MaskingGroupBox->collapsedHeight() != collapsedHeight)
+  {
+    this->MaskingGroupBox->setCollapsedHeight(collapsedHeight);
+    if (this->MaskingGroupBox->collapsed())
+    {
+      // The collapsed height is applied when the section collapses
+      this->MaskingGroupBox->setCollapsed(false);
+      this->MaskingGroupBox->setCollapsed(true);
+    }
+  }
+}
+
+//-----------------------------------------------------------------------------
+void qMRMLSegmentEditorWidgetPrivate::setOptionsSectionVisible(bool visible)
+{
+  if (this->EffectsOptionsFrame->parentWidget() == this->OptionsGroupBox)
+  {
+    this->OptionsGroupBox->setVisible(visible);
+  }
+  else
+  {
+    this->EffectsOptionsFrame->setVisible(visible);
+  }
+}
+
+//-----------------------------------------------------------------------------
+void qMRMLSegmentEditorWidgetPrivate::setOptionsSectionEnabled(bool enabled)
+{
+  if (this->EffectsOptionsFrame->parentWidget() == this->OptionsGroupBox)
+  {
+    this->OptionsGroupBox->setEnabled(enabled);
+  }
+  else
+  {
+    this->EffectsOptionsFrame->setEnabled(enabled);
+  }
 }
 
 //-----------------------------------------------------------------------------
@@ -1454,7 +1531,7 @@ void qMRMLSegmentEditorWidget::updateEffectsSectionFromMRML()
   // Disable effect selection and options altogether if no source volume is selected
   bool effectsOverallEnabled = (d->ParameterSetNode->GetSourceVolumeNode() != nullptr) && (!d->Locked);
   d->EffectsGroupBox->setEnabled(effectsOverallEnabled);
-  d->OptionsGroupBox->setEnabled(effectsOverallEnabled);
+  d->setOptionsSectionEnabled(effectsOverallEnabled);
 
   // Enable only non-per-segment effects if no segment is selected, otherwise enable all effects
   if (effectsOverallEnabled)
@@ -1513,14 +1590,14 @@ void qMRMLSegmentEditorWidget::updateEffectsSectionFromMRML()
 
     // Activate newly selected effect
     activeEffect->activate();
-    d->OptionsGroupBox->show();
+    d->setOptionsSectionVisible(true);
     d->OptionsGroupBox->setTitle(activeEffect->title());
     d->EffectHelpBrowser->setCollapsibleText(activeEffect->helpText());
     d->MaskingGroupBox->setVisible(d->MaskingSectionVisible);
   }
   else
   {
-    d->OptionsGroupBox->hide();
+    d->setOptionsSectionVisible(false);
     d->OptionsGroupBox->setTitle("");
     d->EffectHelpBrowser->setText("");
     d->MaskingGroupBox->hide();
@@ -3484,6 +3561,7 @@ void qMRMLSegmentEditorWidget::setStudioPresentation(bool studio)
   {
     d->MaskingGroupBox->removeEventFilter(d->MaskingTitleFilter);
   }
+  d->updateSectionFrames();
   d->updateMaskingTitle();
   if (d->ActiveEffect)
   {

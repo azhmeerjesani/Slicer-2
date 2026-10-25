@@ -10,7 +10,7 @@ always restore the Classic interface. They cover:
 - the letters of the screen edges of the axial, coronal and sagittal views (radiological display),
   their update after an in-plane rotation and for oblique directions, and after layout changes;
 - the removal of every letter actor when Studio is left (Classic shows nothing new);
-- the display statement in plain words ("Left is on screen right" / "Left is on screen left"), only on axial and
+- the display statement in plain words ("Radiological · L on right" / "Neurological · L on left"), only on axial and
   coronal views, and none in Classic (U-04);
 - figure views: no A/P/S/I letters and no statement, the tag "Figure · side unknown" until the convention is
   answered, then "Figure · patient right on the left" with R and L only (U-04);
@@ -360,11 +360,11 @@ class StudioOrientationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self._ensureLetters(studioShell)
         self._setFourUp()
         orientation.update()
-        self.assertEqual(orientation.viewStatement("Red"), "Left is on screen right")
-        self.assertEqual(orientation.viewStatement("Green"), "Left is on screen right")
+        self.assertEqual(orientation.viewStatement("Red"), "Radiological · L on right")
+        self.assertEqual(orientation.viewStatement("Green"), "Radiological · L on right")
         self.assertEqual(orientation.viewStatement("Yellow"), "")
         view = orientation.instance().views["Red"]
-        self.assertEqual(view.statementActor.GetInput(), "Left is on screen right")
+        self.assertEqual(view.statementActor.GetInput(), "Radiological · L on right")
         self.assertTrue(view.renderer.HasViewProp(view.statementActor))
         self.assertEqual(view.statementActor.GetObjectName(), "StudioOrientationStatement")
         self.assertEqual(view.statementActor.GetTextProperty().GetFontSize(), orientation.STATEMENT_FONT_SIZE)
@@ -374,8 +374,8 @@ class StudioOrientationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         redNode = self.layoutManager.sliceWidget("Red").mrmlSliceNode()
         self._flipScreenX(redNode)
         self._pump()
-        self.assertEqual(orientation.viewStatement("Red"), "Left is on screen left")
-        self.assertEqual(view.statementActor.GetInput(), "Left is on screen left")
+        self.assertEqual(orientation.viewStatement("Red"), "Neurological · L on left")
+        self.assertEqual(view.statementActor.GetInput(), "Neurological · L on left")
         self.assertEqual(orientation.viewLetters("Red"), ("L", "R", "A", "P"))
 
         # Oblique (45 degrees in the plane): none; back to axial: the default statement
@@ -385,7 +385,7 @@ class StudioOrientationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(orientation.viewStatement("Red"), "")
         redNode.SetOrientationToAxial()
         self._pump()
-        self.assertEqual(orientation.viewStatement("Red"), "Left is on screen right")
+        self.assertEqual(orientation.viewStatement("Red"), "Radiological · L on right")
 
         # The pure function: sagittal has no statement
         yellowNode = self.layoutManager.sliceWidget("Yellow").mrmlSliceNode()
@@ -396,7 +396,7 @@ class StudioOrientationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                          orientation.CORNER_ANNOTATION_MARGIN + (orientation.STATEMENT_GAP + view.statementOffset if view.statementOffset else 0))
 
     def test_statement_above_corner_annotation(self):
-        """With a background volume, the corner annotation has a line and the statement moves above it."""
+        """The statement is in the bottom-right corner, above the lower-right lines of the corner annotation if there are any."""
         from StudioLib import orientation
 
         studioShell = self._applyStudio()
@@ -406,11 +406,19 @@ class StudioOrientationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self._setBackground("Red", volumeNode)
         orientation.update()
         view = orientation.instance().views["Red"]
-        cornerText = self.layoutManager.sliceWidget("Red").sliceView().cornerAnnotation().GetText(0)
-        if cornerText.strip():
-            self.assertGreater(view.statementOffset, 0)
-            y = view.statementActor.GetPositionCoordinate().GetValue()[1]
-            self.assertGreater(y, orientation.CORNER_ANNOTATION_MARGIN + orientation.STATEMENT_GAP)
+        textProperty = view.statementActor.GetTextProperty()
+        self.assertEqual(textProperty.GetJustificationAsString(), "Right")
+        self.assertEqual(tuple(view.statementActor.GetPositionCoordinate().GetReferenceCoordinate().GetValue())[:2], (1.0, 0.0))
+        cornerAnnotation = self.layoutManager.sliceWidget("Red").sliceView().cornerAnnotation()
+        if not cornerAnnotation.GetText(1).strip():
+            self.assertEqual(int(view.statementActor.GetPositionCoordinate().GetValue()[1]), orientation.CORNER_ANNOTATION_MARGIN)
+        # A line in the lower-right corner: the statement moves above it (the lower-left name does not move it)
+        cornerAnnotation.SetText(1, "W 400 L 40")
+        orientation.update()
+        self.assertGreater(view.statementOffset, 0)
+        y = view.statementActor.GetPositionCoordinate().GetValue()[1]
+        self.assertGreater(y, orientation.CORNER_ANNOTATION_MARGIN + orientation.STATEMENT_GAP)
+        cornerAnnotation.SetText(1, "")
 
     def test_letters_absent_in_classic(self):
         """Classic shows no statement and no figure tag, and under --testing without Studio nothing exists."""
@@ -426,7 +434,7 @@ class StudioOrientationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self._setFourUp()
         orientation.update()
         views = list(controller.views.values())
-        self.assertEqual(orientation.viewStatement("Red"), "Left is on screen right")
+        self.assertEqual(orientation.viewStatement("Red"), "Radiological · L on right")
         studioShell.classic(persist=False)
         self._pump()
         if orientation.instance() is not None:
@@ -461,7 +469,7 @@ class StudioOrientationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         yellowNode = self.layoutManager.sliceWidget("Yellow").mrmlSliceNode()
         yellowNode.SetOrientationToAxial()
         self._pump()
-        self.assertEqual(orientation.viewStatement("Yellow"), "Left is on screen right")
+        self.assertEqual(orientation.viewStatement("Yellow"), "Radiological · L on right")
 
         figureNode = self._addFigure()
         self._setBackground("Yellow", figureNode)
@@ -500,7 +508,7 @@ class StudioOrientationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         # The scan comes back: letters and statement come back, the tag goes
         self._setBackground("Yellow", scanNode)
         self.assertEqual(orientation.viewLetters("Yellow"), ("R", "L", "A", "P"))
-        self.assertEqual(orientation.viewStatement("Yellow"), "Left is on screen right")
+        self.assertEqual(orientation.viewStatement("Yellow"), "Radiological · L on right")
         self.assertEqual(orientation.viewTag("Yellow"), "")
         self.assertEqual(set(self._actorTexts(view, "StudioFigureLetter_").values()), {""})
 

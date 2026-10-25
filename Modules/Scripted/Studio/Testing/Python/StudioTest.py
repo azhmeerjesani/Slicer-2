@@ -1279,13 +1279,23 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertIn("Brush · P · 1", editor.findChild("QToolButton", "Paint").toolTip)
         self.assertIsNotNone(self.mainWindow.findChild("QFrame", "StudioLesionCard"))
         self.assertIsNotNone(self.mainWindow.findChild("QWidget", "StudioDisplayCard"))
-        # More tools: every effect, in the studio order
+        # More tools: every effect, in the studio order, and the masking section (its overwrite options, V-03)
         widget.setMoreToolsShown(True)
         self._pump()
         self.assertTrue(editor.findChild("QToolButton", "Level tracing").isVisibleTo(editor))
+        self.assertTrue(editor.maskingSectionVisible)
         widget.setMoreToolsShown(False)
         self._pump()
         self.assertFalse(editor.findChild("QToolButton", "Level tracing").isVisibleTo(editor))
+        self.assertFalse(editor.maskingSectionVisible)
+        # A masking that restricts editing stays in sight
+        editorNode = editor.mrmlSegmentEditorNode()
+        editorNode.SetOverwriteMode(slicer.vtkMRMLSegmentEditorNode.OverwriteNone)
+        self._pump()
+        self.assertTrue(editor.maskingSectionVisible)
+        editorNode.SetOverwriteMode(slicer.vtkMRMLSegmentEditorNode.OverwriteAllSegments)
+        self._pump()
+        self.assertFalse(editor.maskingSectionVisible)
         # The inline rename never writes the classic settings key that official Slicer reads
         tableView = editor.findChild("qMRMLSegmentsTableView", "SegmentsTableView")
         self.assertEqual(tableView.useTerminologySelectorSettingsKey, SegmentEditor.STUDIO_TERMINOLOGY_SETTINGS_KEY)
@@ -1619,8 +1629,11 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         title, body = draw.helpHtml(studioShell)
         self.assertEqual(title, "Draw · Brush")
         self.assertIn("Draw keys", body)
-        (text, toggle, checked), = draw.moreMenuActions(studioShell)
-        self.assertEqual(text, "Show all controls")
+        items = [item for item in draw.moreMenuActions(studioShell) if item is not None]
+        # The display items of the Draw ⋯ menu (V-03: Show lesion in 3D, Voxel view, Window/level), then Show all controls
+        self.assertEqual([item[0] for item in items], ["Show lesion in 3D", "Voxel view", "Window/level", "Show all controls"])
+        self.assertEqual([title for title, _callback, _checked in items[2][1]], ["Auto", "Brain", "Narrow"])
+        text, toggle, checked = items[-1]
         self.assertFalse(checked)
         try:
             toggle()
@@ -1629,7 +1642,7 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertTrue(editor.findChild("QWidget", "UndoRedoGroupBox").isVisible())
             self.assertTrue(editor.findChild("QWidget", "SegmentsTableResizableFrame").isVisible())
             self.assertTrue(editor.segmentationNodeSelectorVisible)
-            draw.moreMenuActions(studioShell)[0][1]()
+            draw.moreMenuActions(studioShell)[-1][1]()
             self._pump()
             self.assertFalse(editor.findChild("QWidget", "UndoRedoGroupBox").isVisible())
             self.assertFalse(editor.findChild("QWidget", "SegmentsTableResizableFrame").isVisible())
@@ -1747,7 +1760,8 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         # Display: the Brain preset changes window/level in one click
         displayNode = editor.sourceVolumeNode().GetDisplayNode()
         before = (displayNode.GetWindow(), displayNode.GetLevel())
-        draw.extension().displayCard.presetButtons["brain"].click()
+        # (the presets are items of the Draw ⋯ menu, V-03)
+        draw.extension().displayCard.applyPreset("brain")
         self._pump()
         self.assertNotEqual((displayNode.GetWindow(), displayNode.GetLevel()), before)
         # On a scan in scanner space: no side word

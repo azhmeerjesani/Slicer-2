@@ -27,7 +27,7 @@ throwaway settings directory (it answers the first-start folder question and wri
 
 It writes ``DIR/<W>x<H>-<theme>/<NN>-<name>.png`` (screen grabs, so popups and overlays are included): the
 first-start folder chooser, Library (empty, with a project, with projects, with a study), the tour card, Draw (empty,
-painting with the lesion card, in a study), a toast, Map (cards, a result), Search, the cheat sheet, the settings
+painting with the lesion card, in a study, a case of a study), a toast, Map (cards, a result, a cohort), Search, the cheat sheet, the settings
 panels (Saving, Appearance, Updates, Templates) and the add-template dialog; V-02 adds All projects as a list, the project menu of
 the top bar and Library with a study listed in Studies. The theme is applied with the Studio
 theme setting (``Appearance/Theme``) of that throwaway settings directory.
@@ -633,6 +633,34 @@ class StudioScreens:
         dialog.deleteLater()
         pump(10)
 
+    def drawStudyCase(self):
+        """Draw with the first case of the open study (the case strip above the lesion card)."""
+        from StudioLib import study_ui
+
+        studySession = study_ui.session()
+        if studySession is None or not studySession.study.subject_ids:
+            print("SCREEN draw-study-case skipped: no open study", flush=True)
+            return
+        shell = self.shell()
+        studySession.open(studySession.study.subject_ids[0])
+        waitFor(lambda: shell.currentWorkspace() == "draw", 15000)
+        self.grab("draw-study-case", 2000)
+
+    def mapCohort(self):
+        """Map with Seed = Cohort in the open study (the cohort cards instead of a single result)."""
+        shell = self.shell()
+        shell.switchTo("map")
+        waitFor(lambda: shell.currentWorkspace() == "map", 15000)
+        widget = getattr(slicer.modules, "LesionNetworkMappingWidget", None)
+        modes = list(getattr(widget, "seedModes", []) or [])
+        if widget is None or "cohort" not in modes:
+            print("SCREEN map-cohort skipped: no cohort seed mode", flush=True)
+            return
+        widget.onSeedModeClicked(modes.index("cohort"))
+        self.grab("map-cohort", 1500)
+        widget.onSeedModeClicked(modes.index("lesion"))
+        pump(10)
+
     def study(self):
         import shutil
 
@@ -652,6 +680,8 @@ class StudioScreens:
         study_ui.createStudy(files, shell=self.shell(), folder=folder, name="Stroke aphasia LNM")
         self.shell().switchTo("library")
         self.grab("library-study", 2000)
+        self.step("draw-study-case", self.drawStudyCase)
+        self.step("map-cohort", self.mapCohort)
         # The study listed in Studies (V-02) once it is closed
         study_ui.closeStudy()
         pump(20)

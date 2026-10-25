@@ -3,9 +3,9 @@
 Draw discovers this module (``drawcard_*``, ``DRAW_CARD``) and puts the card after Display. It is shown
 when the source volume is a native scan (not on an MNI grid, not a normalization result):
 
-- Idle (one compact row): "Native space · Map needs MNI" with Normalize to MNI and ⋯. With an empty lesion
-  the button is "Normalize scan only" (then trace on the warped scan), with the tip that a rough outline
-  first makes the registration lesion-aware.
+- Idle: a 34 px list row "Normalize to MNI · Native space" with a chevron (VISUAL 4.4) that starts the normalization. With an
+  empty lesion it is "Normalize scan only" (then trace on the warped scan), with the tip that a rough outline first
+  makes the registration lesion-aware in its tooltip.
 - Running: the progress row and Stop (the job runs in the background through the LNM JobRunner, which
   shows it in the status chip).
 - Done: the QC panel, Use for Map → (the lesion becomes the Map seed) and Trace on the MNI scan (the warped
@@ -79,8 +79,16 @@ class DrawNormalizeCard:
         layout = qt.QVBoxLayout(self.widget)
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(6)
+        self._layout = layout
 
-        row = qt.QHBoxLayout()
+        # Idle: one list row (VISUAL 4.4); running and done: the card
+        self.listRow = ui.listRow("globe", _("Normalize to MNI"), _("Native space"), self.start, "StudioNormalizeDrawRow")
+        layout.addWidget(self.listRow)
+
+        self.cardRow = qt.QWidget()
+        self.cardRow.setObjectName("StudioNormalizeDrawCardRow")
+        row = qt.QHBoxLayout(self.cardRow)
+        row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(6)
         self.label = qt.QLabel(_("Native space · Map needs MNI"))
         self.label.setObjectName("StudioNormalizeDrawLabel")
@@ -108,7 +116,7 @@ class DrawNormalizeCard:
         menu.addAction(_("Options in Map…")).connect("triggered()", self.openInMap)
         self.moreButton.setMenu(menu)
         row.addWidget(self.moreButton)
-        layout.addLayout(row)
+        layout.addWidget(self.cardRow)
 
         self.tip = qt.QLabel(_("A rough lesion outline first makes the registration lesion-aware"))
         self.tip.setObjectName("StudioNormalizeDrawTip")
@@ -270,6 +278,35 @@ class DrawNormalizeCard:
         self.useForMapButton.setEnabled(showingResult and result.segmentationNode is not None and bool(result.segmentId) and not self.nc.lesionIsEmpty(result.segmentationNode, result.segmentId))
         if self._qcPanel is not None:
             self._qcPanel.setVisible(showingResult)
+        # Nothing running, no result and no message: the list row alone
+        rowMode = not busy and not showingResult and self.message is None
+        self._setRowMode(rowMode)
+        if rowMode:
+            ui.setListRowValue(self.listRow, _("Native space"))
+            self.listRow.findChild("QLabel", "StudioListRowText").setText(str(self.button.text))
+            self.listRow.setAccessibleName(str(self.button.text))
+            tip = str(self.button.toolTip)
+            if self._lesionEmpty:
+                tip += "\n" + str(self.tip.text)
+            self.listRow.setToolTip(tip)
+
+    def _setRowMode(self, rowMode):
+        """The list row alone (no card fill) or the card with its rows."""
+        self.listRow.setVisible(rowMode)
+        self.cardRow.setVisible(not rowMode)
+        if rowMode:
+            self.tip.hide()
+        role = None if rowMode else "card"
+        if self.widget.property("slicerRole") != role:
+            self.widget.setProperty("slicerRole", role)
+            style = self.widget.style()
+            style.unpolish(self.widget)
+            style.polish(self.widget)
+            self.widget.update()
+            if rowMode:
+                self._layout.setContentsMargins(0, 0, 0, 0)
+            else:
+                self._layout.setContentsMargins(10, 8, 10, 8)
 
     def _observe(self, ctx):
         """Refresh after the editor's segmentation, segment or source changes, and after strokes (empty / not empty)."""
@@ -346,7 +383,7 @@ class DrawNormalizeCard:
                 parent.ensureWidgetVisible(self.widget)
                 break
             parent = parent.parentWidget()
-        self.button.setFocus()
+        (self.listRow if not self.listRow.isHidden() else self.button).setFocus()
         return True
 
     #

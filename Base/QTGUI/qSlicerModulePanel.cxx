@@ -222,9 +222,11 @@ void qSlicerModulePanel::removeModule(qSlicerAbstractCoreModule* module)
 
   // emit moduleAboutToBeRemoved(moduleWidget->module());
 
-  // Remove widget from layout
+  // Remove widget from layout. The layout item is deleted: it stays registered with the widget otherwise, and the
+  // item that addModule() creates when the module is selected again would never have its cached height-for-width
+  // cleared by the widget, so the scroll area would lay the module out with a stale height.
   // d->Layout->removeWidget(module);
-  scrollAreaLayout->takeAt(index);
+  delete scrollAreaLayout->takeAt(index);
 
   moduleWidget->setVisible(false);
   moduleWidget->setParent(nullptr);

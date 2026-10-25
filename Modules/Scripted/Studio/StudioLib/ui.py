@@ -239,7 +239,8 @@ def _deleteOrphansAtExit():
 
 
 def removeStudioEventFilters(widget):
-    """Remove the shared Python event filters of this module (``wrapRow()``/``noticeLine()`` wrapping, ``installButtonKeys()``)
+    """Remove the shared Python event filters of this module (``wrapRow()``/``noticeLine()`` wrapping, ``installButtonKeys()``,
+    ``elideLabel()``)
     from ``widget`` and its children.
 
     Call it before deleting a widget from Python (``widget.delete()``): the destruction of its layout sends events to the widget,
@@ -247,7 +248,7 @@ def removeStudioEventFilters(widget):
     """
     if not _isAlive(widget):
         return
-    filters = [instance for instance in (_wrapFilter, _buttonKeys) if instance is not None]
+    filters = [instance for instance in (_wrapFilter, _buttonKeys, _elideFilter) if instance is not None]
     if not filters:
         return
     for target in (widget, *widget.findChildren("QWidget")):
@@ -901,6 +902,49 @@ def listRow(iconName, text, value=None, callback=None, objectName="StudioListRow
         button.connect("clicked()", callback)
     installButtonKeys(button)
     return button
+
+
+class _ElideFilter(qt.QObject):
+    """Elides the text of a one-line label to its width when it is resized (``elideLabel()``)."""
+
+    def eventFilter(self, obj, event):
+        if event.type() == qt.QEvent.Resize:
+            _showElided(obj)
+        return False
+
+
+_elideFilter = None
+
+
+def _showElided(label):
+    text = str(label.property("studioFullText") or "")
+    width = int(label.width) - int(label.contentsMargins().left()) - int(label.contentsMargins().right())
+    # Before the label is laid out its width says nothing: the whole text is shown
+    shown = label.fontMetrics().elidedText(text, qt.Qt.ElideRight, width) if width > 40 else text
+    if str(label.text) != shown:
+        label.setText(shown)
+    label.setToolTip(text if shown != text else "")
+
+
+def elideLabel(label):
+    """Make ``label`` a one-line label whose text is elided ("…") to its width; set its text with ``setElidedText()``.
+    The whole text is the tooltip while it is elided. The label never widens its container (Ignored width).
+    """
+    global _elideFilter
+    if _elideFilter is None:
+        _elideFilter = _ElideFilter()
+    label.setWordWrap(False)
+    label.setTextFormat(qt.Qt.PlainText)
+    label.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
+    label.setProperty("studioElided", True)
+    label.installEventFilter(_elideFilter)
+    return label
+
+
+def setElidedText(label, text):
+    """Set the text of an ``elideLabel()``."""
+    label.setProperty("studioFullText", text or "")
+    _showElided(label)
 
 
 def setListRowValue(row, value):

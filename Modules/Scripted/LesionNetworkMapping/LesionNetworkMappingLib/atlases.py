@@ -575,3 +575,109 @@ def cache_status(cache=None, catalog="atlases"):
         labels = resource.label_resource()
         status.append((resource, fetch.is_cached(resource, cache) and (labels is None or fetch.is_cached(labels, cache))))
     return status
+
+
+# Region names of peaks (the Peak region column of Map's Result card)
+
+#: Atlases that name the region of a peak, in order of preference: anatomical names first (Harvard-Oxford subcortical,
+#: then cortical), then the finer and the network atlases. Only cached atlases are used (nothing is downloaded).
+PEAK_REGION_ATLASES = (
+    "harvard-oxford-subcortical-th25-2mm",
+    "harvard-oxford-cortical-th25-2mm",
+    "mial67-thalamic-nuclei-1mm",
+    "massp20-1mm",
+    "aal3v1",
+    "harvard-aan-v2",
+    "hcp-mmp1-volumetric",
+    "tian-s1-2mm",
+    "tian-s1-2mm-2009c",
+    "schaefer2018-400-7n-2mm",
+    "schaefer2018-400-7n-2mm-2009c",
+    "yeo2011-7n",
+)
+#: The region of a peak that no usable atlas labels
+OUTSIDE_ATLAS = "Outside atlas"
+#: Labels that say nothing about where a peak is: the next atlas names it
+_GENERIC_REGION = re.compile(r"(?i)^(left |right )?(cerebral (white matter|cortex)|lateral ventric(le|al)|brain-?stem)$")
+_SIDE_PREFIX = re.compile(r"(?i)^(left|right|lh|rh|l|r)[ _-]+")
+_SIDE_SUFFIX = re.compile(r"(?i)[ _-]+(left|right|lh|rh|l|r)$")
+#: {(cache folder, atlas id): Atlas} of the atlases loaded for peak regions (an atlas file is read once)
+_region_atlases = {}
+
+
+def region_atlases(cache=None):
+    """The cached atlases of :data:`PEAK_REGION_ATLASES`, in that order (read once per cache folder; never downloads)."""
+    folder = fetch.cache_dir(cache)
+    found = []
+    for atlas_id in PEAK_REGION_ATLASES:
+        key = (folder, atlas_id)
+        atlas = _region_atlases.get(key)
+        if atlas is None:
+            try:
+                resource = fetch.find_resource(atlas_id, ("atlases",))
+            except Exception:
+                continue
+            if not fetch.is_cached(resource, folder):
+                continue
+            try:
+                atlas = Atlas.load(resource, folder)
+            except Exception:
+                continue
+            _region_atlases[key] = atlas
+        found.append(atlas)
+    return found
+
+
+def region_text(label, x=None):
+    """A short region name for a table: "Left Caudate" -> "L caudate", "Angular Gyrus" at x < 0 -> "L angular gyrus".
+
+    The side comes from the label when it has one, else from ``x`` (the RAS x of the point: negative is left). Words in
+    title case are lowered ("Crus I" keeps its numeral).
+    """
+    raw = str(label or "").strip()
+    schaefer = re.match(r"^(?:\d+Networks_)?(LH|RH)_(.+)$", raw)
+    if schaefer:
+        # "7Networks_LH_Vis_1" -> "L Vis 1": the network and the parcel
+        return f"{'L' if schaefer.group(1) == 'LH' else 'R'} {schaefer.group(2).replace('_', ' ')}"
+    text = raw.replace("_", " ").strip()
+    side = None
+    match = _SIDE_PREFIX.match(text) or _SIDE_SUFFIX.search(text)
+    if match:
+        side = "L" if match.group(1).lower() in ("left", "lh", "l") else "R"
+        text = (text[match.end():] if match.start() == 0 else text[:match.start()]).strip()
+    elif x is not None and abs(float(x)) >= 1.0:
+        side = "L" if float(x) < 0 else "R"
+    words = [word.lower() if len(word) > 1 and word[0].isupper() and word[1:].islower() else word for word in text.split()]
+    text = " ".join(words)
+    if side and text:
+        return f"{side} {text}"
+    return text[:1].upper() + text[1:]
+
+
+def peak_regions(points, space=None, cache=None, atlases=None):
+    """Region names of peaks (world RAS mm, (N, 3)) for the Peak region column.
+
+    Each point gets the label of the first usable atlas (in :data:`PEAK_REGION_ATLASES` order) that names a region there
+    other than a generic one (cerebral cortex or white matter), as :func:`region_text`; :data:`OUTSIDE_ATLAS` when the
+    usable atlases name nothing there. ``space`` (the template space of the map) skips the atlases of another space family.
+
+    :return: a list of texts, one per point, or None when no usable atlas is cached (nothing can be said).
+    """
+    points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    candidates = region_atlases(cache) if atlases is None else _as_atlases(atlases)
+    if space:
+        family = space_family(space)
+        candidates = [atlas for atlas in candidates if family in ("unknown", "native") or atlas.family in ("unknown", "native") or atlas.family == family]
+    if not candidates:
+        return None
+    names = [None] * len(points)
+    for atlas in candidates:
+        missing = [index for index, name in enumerate(names) if name is None]
+        if not missing:
+            break
+        values = atlas.values_at(points[missing])
+        for index, value in zip(missing, values, strict=True):
+            label = atlas.label_name(value)
+            if label and not _GENERIC_REGION.match(str(label).replace("_", " ").strip()):
+                names[index] = region_text(label, points[index][0])
+    return [name or OUTSIDE_ATLAS for name in names]

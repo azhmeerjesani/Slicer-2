@@ -85,8 +85,10 @@ FIGURE_VIEW_GROUP = 1
 DEFAULT_OPACITY = 0.5
 #: Draw key (SPEC_LNM_ADDENDUM 7.4)
 PASTE_SHORTCUT = "Ctrl+V"
-#: Order of the Figure card in the Draw inspector (between the Lesion card and the tools)
+#: Order of the Figure card in the Draw inspector while a figure is traced (between the Lesion card and the tools)
 CARD_ORDER = 30
+#: Order of the "Trace from a figure" row without a figure (VISUAL 4.4: a list row after Normalize to MNI, order 120)
+ROW_ORDER = 130
 CARD_KEY = "figure"
 #: Order of the Done hook (before L-28's dimensionality hook, which reads the plane normal)
 DONE_HOOK_ORDER = 20
@@ -1809,15 +1811,34 @@ class FigureCard:
 
         from . import ui
 
+        # Draw shows the slot: without a figure, the 34 px row "Trace from a figure · Ctrl+V" (VISUAL 4.4), which opens the
+        # card with its entry points; with a figure, the card. The Classic window shows the card itself.
+        self.slot = qt.QWidget()
+        self.slot.setObjectName("StudioFigureSlot")
+        self.slot.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Maximum)
+        slotLayout = qt.QVBoxLayout(self.slot)
+        slotLayout.setContentsMargins(0, 0, 0, 0)
+        slotLayout.setSpacing(4)
+        self.row = ui.listRow("image", _("Trace from a figure"), ui.keyText(PASTE_SHORTCUT), self._onRowClicked, "StudioFigureRow")
+        self.row.setToolTip(ui.tooltip(_("Trace from a figure"), PASTE_SHORTCUT,
+                                       _("trace a lesion from a published figure: open the picture, drop it on the window or paste it")))
+        slotLayout.addWidget(self.row)
+        #: The card is shown without a figure (its entry points) after a click on the row
+        self.expanded = False
+
         self.widget = qt.QFrame()
         self.widget.setObjectName("StudioFigureCard")
         ui.setRole(self.widget, "card")
         self.widget.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Maximum)
+        slotLayout.addWidget(self.widget)
         layout = qt.QVBoxLayout(self.widget)
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(6)
 
-        header = qt.QHBoxLayout()
+        self.headerRow = qt.QWidget()
+        self.headerRow.setObjectName("StudioFigureHeaderRow")
+        header = qt.QHBoxLayout(self.headerRow)
+        header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(6)
         title = qt.QLabel(_("Figure"))
         title.setObjectName("StudioFigureTitle")
@@ -1848,7 +1869,7 @@ class FigureCard:
         self.closeAction.connect("triggered()", lambda: closeFigure(removeNodes=False))
         self.moreButton.setMenu(self.menu)
         header.addWidget(self.moreButton)
-        layout.addLayout(header)
+        layout.addWidget(self.headerRow)
 
         # Empty state: the entry points
         self.emptyFrame = qt.QWidget()
@@ -2054,6 +2075,14 @@ class FigureCard:
         current = session()
         panel = current.panel() if current is not None else None
         hasPanel = panel is not None and panel.figure() is not None
+        # Draw without a figure: the row, and the card only once the row was clicked (the Classic window: the card)
+        inSlot = self.widget.parentWidget() is self.slot
+        rowMode = inSlot and not hasPanel
+        self.row.setVisible(rowMode)
+        self.widget.setVisible(not rowMode or self.expanded)
+        chevron = self.row.findChild("QLabel", "StudioListRowChevron")
+        if chevron is not None:
+            chevron.setPixmap(ui.pixmap("chevron-down" if rowMode and self.expanded else "chevron-right", 14, "text3"))
         self.emptyFrame.setVisible(not hasPanel)
         self.stepsFrame.setVisible(hasPanel)
         self.panelCombo.setVisible(hasPanel)
@@ -2141,6 +2170,13 @@ class FigureCard:
 
     # Events
 
+    def _onRowClicked(self):
+        """The row opens (or closes) the card with the entry points: the explanation and "Open figure…"."""
+        self.expanded = not self.expanded
+        self.refresh()
+        if self.expanded and self.openButton.isVisible():
+            self.openButton.setFocus(qt.Qt.OtherFocusReason)
+
     def _onPanelActivated(self, index):
         if session() is not None:
             session().selectPanel(index)
@@ -2217,7 +2253,9 @@ class FigureCard:
     def dispose(self):
         from . import importer
 
-        importer.releaseWidget(self.widget)
+        if self.widget.parentWidget() is not self.slot:
+            importer.releaseWidget(self.widget)
+        importer.releaseWidget(self.slot)
 
 
 _PLANES = ("axial", "coronal", "sagittal")
@@ -2245,9 +2283,12 @@ def _ensureCard():
             return False
         global _cardInClassicWindow
         figureCard = card()
-        if _cardInClassicWindow or extension._cards.get(CARD_KEY, (None,))[0] is not figureCard.widget:
+        if _cardInClassicWindow:
+            # Back from the Classic window: the card goes back into its slot
+            figureCard.slot.layout().addWidget(figureCard.widget)
+        if _cardInClassicWindow or extension._cards.get(CARD_KEY, (None,))[0] is not figureCard.slot:
             # (Re)added: the card may come back from the Classic window
-            extension.addInspectorCard(CARD_KEY, figureCard.widget, CARD_ORDER)
+            extension.addInspectorCard(CARD_KEY, figureCard.slot, _cardOrder())
             _cardInClassicWindow = False
         lesionCard = draw.lesionCard()
         if lesionCard is not None:
@@ -2269,10 +2310,30 @@ def _updateCardVisibility():
     if _card is None or not _card.isAlive():
         return
     current = session()
-    visible = (current is not None and bool(current.panels)) or canTrace()
-    _card.widget.setVisible(bool(visible))
+    tracing = current is not None and bool(current.panels)
+    visible = tracing or canTrace()
+    if _cardInClassicWindow:
+        _card.widget.setVisible(bool(visible))
+    else:
+        if not tracing:
+            _card.expanded = False if not visible else _card.expanded
+        try:
+            extension = _draw().extension()
+            entry = extension._cards.get(CARD_KEY)
+            if entry is not None and entry[0] is _card.slot and entry[1] != _cardOrder():
+                # A traced figure is worked on next to the lesion card; the row waits after Normalize to MNI
+                extension.addInspectorCard(CARD_KEY, _card.slot, _cardOrder())
+        except Exception:
+            logging.error(f"Studio: the Figure card could not be moved:\n{traceback.format_exc()}")
+        _card.slot.setVisible(bool(visible))
     if visible:
         _card.refresh()
+
+
+def _cardOrder():
+    """Order of the figure slot in Draw: next to the lesion card while a figure is traced, else the row's place."""
+    current = session()
+    return CARD_ORDER if current is not None and bool(current.panels) else ROW_ORDER
 
 
 def showClassicCard():

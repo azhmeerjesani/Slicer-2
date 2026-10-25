@@ -404,6 +404,10 @@ class BatteryStrip:
         self.summaryLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
         self.summaryLabel.setProperty("slicerRole", "secondaryText")
         layout.addWidget(self.summaryLabel)
+        self._layout = layout
+        self._title = title
+        #: Studio presentation (``onPresentationChanged``): a compact row, nothing without a study (VISUAL 4.5)
+        self._studio = False
         self._debounce = _Debounce(self.refresh)
         for name in ("runChanged", "studyChanged"):
             getattr(ctx, name).append(self._debounce.trigger)
@@ -448,6 +452,26 @@ class BatteryStrip:
         if self.state.root is None:
             text = _("Open a study to track the reporting checks")
         self.summaryLabel.setText(text)
+        self._applyPresentation(text)
+
+    def _applyPresentation(self, summary):
+        """Studio: without a study the strip is empty (zero height; the Map ⋯ menu has "Reporting checks"); with a study it is
+        one row, the summary in its tooltip. Classic: the title, the dots and the summary line.
+        """
+        idle = self._studio and self.state.root is None
+        compact = self._studio and not idle
+        self._title.setVisible(not idle)
+        for button in self.dotButtons.values():
+            button.setVisible(not idle)
+        self.summaryLabel.setVisible(not idle and not compact)
+        self._title.setToolTip(summary if compact else "")
+        self._layout.setContentsMargins(*((0, 0, 0, 0) if idle else (6, 2, 6, 2) if compact else (6, 4, 6, 4)))
+
+    def onPresentationChanged(self, studio):
+        """Map entered in Studio (True) or in Classic (False)."""
+        self._studio = bool(studio)
+        if not self._cleanedUp:
+            self._paint()
 
     def onDotClicked(self, dotId):
         """Scroll to and expand the card of a dot (the Report card when that card is not offered here)."""

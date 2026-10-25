@@ -408,7 +408,7 @@ class LesionCard:
         self.fixesLabel = self._label("StudioLesionFixes", 12, links=True)
         self.saveStateLabel = self._label("StudioLesionSaveState", 12)
         self.spaceLabel = self._label("StudioLesionSpaceLine", 12)
-        self.hintLabel = self._label("StudioLesionHint", 12)
+        self.hintLabel = ui.elideLabel(self._label("StudioLesionHint", 12))
         # Row 3: the save state, and "New lesion" once the lesion is saved (the next case starts on a new lesion and
         # never overwrites the saved file)
         self.saveRow = qt.QWidget()
@@ -472,6 +472,11 @@ class LesionCard:
         _setPixelFont(self.notesButton, 12)
         actionRow.addWidget(self.notesButton)
         layout.addLayout(actionRow)
+        # VISUAL 4.4: Notes is a list row of Draw (``takeNotesFrame()``) and "Fill gaps and specks" an item of the ⋯ menu
+        self.cleanupButton.hide()
+        self.notesButton.hide()
+        #: Called with the visibility of the notes fields (the Notes row of Draw follows it)
+        self.notesVisibilityChanged = None
 
         self.notesFrame = qt.QFrame()
         self.notesFrame.setObjectName("StudioLesionNotesFrame")
@@ -511,8 +516,23 @@ class LesionCard:
             from . import lesionqc
 
             self.qc = lesionqc.attach(self)
+            self._filterScannerSideChip()
         except Exception:
             logging.error(f"Studio: the lesion QC chips could not be added:\n{traceback.format_exc()}")
+
+    def _filterScannerSideChip(self):
+        """The Side cell says "Unknown · scanner space": the QC chip that only says so (no reported side to compare) is
+        left out of the chip row.
+        """
+        panel = getattr(self.qc, "panel", None)
+        setChips = getattr(panel, "setChips", None)
+        if setChips is None:
+            return
+
+        def filtered(specs, setChips=setChips):
+            setChips([spec for spec in specs if not isScannerSideChip(spec)])
+
+        panel.setChips = filtered
 
     def _label(self, objectName, basePx, links=False):
         label = qt.QLabel()
@@ -583,7 +603,7 @@ class LesionCard:
                           f" border: 1px solid {ui._rgba(warning, 0.22)}; border-radius: 8px; padding: 6px 10px; }}")
             if self.spaceLabel.styleSheet != styleSheet:
                 self.spaceLabel.setStyleSheet(styleSheet)
-        self._setText(self.hintLabel, state.get("hint"), "text3")
+        self._setHint(state.get("hint"))
         # Text being typed (focused, or not yet committed) is not replaced by the lesion's value, unless another
         # lesion is shown
         notesTyped = self.notesEdit.hasFocus() or self._notesTimer.isActive()
@@ -610,6 +630,29 @@ class LesionCard:
                 label.setStyleSheet(styleSheet)
         if not label.isVisibleTo(self.widget):
             label.show()
+
+    def _setHint(self, text):
+        """The hint of the tool: one caption line, elided to its width (the whole text is the tooltip)."""
+        if not text:
+            if not self.hintLabel.isHidden():
+                self.hintLabel.hide()
+            return
+        styleSheet = f"QLabel {{ color: {ui.token('text3').name()}; background: transparent; border: none; }}"
+        if self.hintLabel.styleSheet != styleSheet:
+            self.hintLabel.setStyleSheet(styleSheet)
+        ui.setElidedText(self.hintLabel, text)
+        if self.hintLabel.isHidden():
+            self.hintLabel.show()
+
+    def takeHintLabel(self):
+        """Take the hint line out of the card (Draw shows it under the tool options); the card still sets its text."""
+        self.layout.removeWidget(self.hintLabel)
+        return self.hintLabel
+
+    def takeNotesFrame(self):
+        """Take the notes fields out of the card (Draw shows them under its Notes row); ``setNotesVisible()`` still shows them."""
+        self.layout.removeWidget(self.notesFrame)
+        return self.notesFrame
 
     def _setReadout(self, readoutHtml, stats):
         """The readout line: its text alone (an empty lesion), or the stat cells over its text (kept, not drawn)."""
@@ -648,7 +691,10 @@ class LesionCard:
             "volume": (formatMl(float(stats.get("ml") or 0.0)), _("Volume"), False),
             "parts": (str(parts), (_("Part · {gaps}") if parts == 1 else _("Parts · {gaps}")).format(
                 gaps=_("1 gap") if gaps == 1 else _("{count} gaps").format(count=gaps)), parts > 1 or gaps > 0),
-            "side": (stats.get("side") or "\u2013", _("Side"), stats.get("sideLevel") == "warn"),
+            # In scanner space: "Unknown" with the reason under it, compactly (VISUAL 4.4)
+            "side": ((stats.get("side") or (_("Unknown") if stats.get("sideNote") else "\u2013")),
+                     _("Side · {note}").format(note=stats["sideNote"]) if stats.get("sideNote") and not stats.get("side") else _("Side"),
+                     stats.get("sideLevel") == "warn"),
         }
         for key, (valueText, captionText, warn) in values.items():
             value, caption = self.statValues[key]
@@ -702,6 +748,8 @@ class LesionCard:
             return
         self.notesButton.setText(_("Notes ▾") if visible else _("Notes"))
         self.notesFrame.setVisible(visible)
+        if callable(self.notesVisibilityChanged):
+            self.notesVisibilityChanged(visible)
 
     def focusNotes(self, field="notes"):
         """Open the Notes and focus the notes field ("notes") or the source field ("source")."""
@@ -882,6 +930,12 @@ class _NullController:
 
     def __getattr__(self, name):
         return lambda *args, **kwargs: None
+
+
+def isScannerSideChip(spec):
+    """True for the QC chip that only says that the side is unknown in scanner space (no reported side to compare)."""
+    return (spec.get("key") == "side" and spec.get("level") == "neutral" and not spec.get("actions")
+            and str(spec.get("text") or "") == _("Side unknown in scanner space"))
 
 
 def isAvailable():

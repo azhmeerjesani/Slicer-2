@@ -206,6 +206,17 @@ ROWS = (
         target=("EffectsGroupBox", "StudioDrawEmptyState"), workspace="draw",
         keywords="effects tools paint brush draw outline erase threshold islands smoothing scissors keys more tools",
         category="editor"),
+    Row("segment-editor-masking", _("Segment Editor > Masking (Editable area, Editable intensity range, Modify other segments)"),
+        _("Draw > More tools ▾: the overwrite options appear under the tool options; they also stay shown while they limit where you paint"),
+        target=("MaskingGroupBox", "SegmentEditorMoreToolsButton", "EffectsGroupBox"), workspace="draw",
+        keywords="masking mask editable area intensity range overwrite modify other segments paint everywhere overlap",
+        category="editor"),
+    Row("segment-editor-display", _("Segmentations > Display (opacity, outline, Show 3D) and Volumes > window/level"),
+        _("Draw > Overlay: the slider sets the fill opacity and the Outline switch the outline; ⋯ in the inspector header > Show "
+          "lesion in 3D, Voxel view and Window/level presets"),
+        key="O", target=("StudioDisplayCard", "StudioPanelMoreButton"), workspace="draw",
+        keywords="display opacity fill outline show 3d surface voxel view interpolation window level preset brain narrow auto",
+        category="editor"),
     Row("segment-editor-controls", _("Segment Editor: Segmentation and Source volume selectors, segments table, Add / Remove"),
         _("Draw: the Lesion card names the lesion (⋯ > New lesion), the source chip ('on T1 ▾') picks the source volume; "
           "⋯ of the panel > Show all controls shows the classic controls"),
@@ -262,6 +273,11 @@ ROWS = (
         _("Map > Connectome: Get a connectome… downloads one from its provider after you accept its terms, Add connectome… registers a "
           "folder on this computer (a .lnmc bundle), or try the synthetic demo; nothing is downloaded unless you ask"),
         target="LNMConnectomeCard", workspace="map", keywords="connectome gsp1000 normative functional connectivity bundle lnmc demo terms get download catalog",
+        note=_("⋯ next to Get a connectome… has Add connectome…, Use the demo and Convert…."), category="panel"),
+    Row("lnm-recipe", _("Map recipes and reporting checks (not part of official 3D Slicer)"),
+        _("Map: ⋯ in the inspector header > Recipe applies a saved set of settings, and Reporting checks… lists what a paper about the "
+          "map should report; in a study a compact row under the result shows both"),
+        target="StudioPanelMoreButton", workspace="map", keywords="recipe preset settings reporting checklist battery dots report checks lnm",
         category="panel"),
 )
 

@@ -1832,6 +1832,12 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self._updatingGui = False
         self._controllers = []
         self._cardWidgets = {}
+        #: {step key: (state, summary)} last shown by _updateSteps(): Studio collapses a step when it becomes done
+        self._stepStates = {}
+        #: Studio: the row above the steps that holds the seed modes (they stay at hand when Seed collapses)
+        self._seedModeRow = None
+        #: The panel has the Studio look (``setStudioPresentation``): set when Map is entered in Studio, cleared when left
+        self._studioLook = False
         self._statusChipText = None
         self._footerInShell = False
         self._ruleOverride = False
@@ -1904,6 +1910,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.NodeAddedEvent, self.onNodeAdded)
         self.initializeParameterNode()
         self.refreshConnectomes()
+        if self._shell() is not None:
+            # Created while Studio is shown: the Studio look from the start (the inspector width is measured on it)
+            self.setStudioPresentation(True, refresh=False)
 
     def _buildCards(self):
         """Main cards and discovered plug-in cards, in order (SPEC 7.9 card order)."""
@@ -2113,6 +2122,113 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.seedActions.addStretch(1)
         layout.addLayout(self.seedActions)
         return card
+
+    #: Short labels of the seed modes in Studio: the four fit the 340 px inspector (the full names are the tooltips)
+    SEED_MODE_SHORT_LABELS = {"lesion": "Lesion", "cohort": "Cohort", "coordinates": "Coords", "stimulation": "Stim"}
+
+    def setStudioPresentation(self, studio, refresh=True):
+        """The Studio look of the panel (``True``: Map entered in Studio) or the Classic one (Studio left while Map stays in
+        the module panel): the seed modes row, the opacity percentage, the compact header rows of the cards. The steps
+        collapse only in Studio (``_applyStepCollapse``).
+        """
+        self._studioLook = bool(studio)
+        self._placeSeedModes(studio)
+        self._applyResultPresentation(studio)
+        self._notifyControllers("onPresentationChanged", studio)
+        if refresh and hasattr(self, "resultNotice"):
+            self.refreshResult(reloadMaps=False)
+
+    def _seedModeLabel(self, mode):
+        """The label of a seed mode button: short in Studio, the full name in Classic."""
+        full = self.seedModeLabels.get(mode, mode)
+        return _(self.SEED_MODE_SHORT_LABELS.get(mode, full)) if getattr(self, "_seedModesStudio", False) else full
+
+    def legendState(self):
+        """What the Studio map legend and layer chips show (``StudioLib.mappage``), or None without a map in the views:
+        ``{statistic, window, threshold (None: unthresholded), thresholdText, sign, opacity, outline}``.
+        """
+        from LesionNetworkMappingLib import display, thresholds
+
+        node = self._parameterNode
+        volume = node.resultVolume if node is not None else None
+        if volume is None or volume.GetScene() is None or not self._hasResult():
+            return None
+        displayNode = volume.GetDisplayNode()
+        try:
+            # The half-width of the window the colours are shown in (it may be wider than the map's own, LNM.Window)
+            window = displayNode.GetWindow() / 2.0 if displayNode is not None else float(volume.GetAttribute(display.WINDOW_ATTRIBUTE) or 0.0)
+        except ValueError:
+            window = 0.0
+        statistic = self.currentStatistic()
+        rule = self.currentRule()
+        resolved = self.resolved
+        threshold = None
+        thresholdText = _("Unthresholded")
+        applied = resolved is not None and (resolved.allowed or rule.get("override")) and math.isfinite(resolved.value)
+        if applied and statistic == self._ruleStatistic(rule):
+            threshold = float(resolved.value)
+            quantity = {"both": f"|{statistic}|", "pos": statistic, "neg": f"−{statistic}"}.get(self._sign(), statistic)  # noqa: RUF001
+            label = thresholds.RULE_LABELS.get(rule["kind"], rule["kind"])
+            thresholdText = f"{label} · {quantity} ≥ {threshold:.1f}"
+        return {"statistic": statistic, "window": window, "threshold": threshold, "thresholdText": thresholdText, "sign": self._sign(),
+                "opacity": float(node.opacity) if node is not None else 0.8, "outline": self._outlineState is not None}
+
+    def studioMenuActions(self):
+        """Items of the Map ⋯ menu in Studio (``StudioLib.mappage.moreMenuActions``): the recipes and the reporting checks,
+        whose header rows Studio shows only with a study (VISUAL 4.5).
+        """
+        items = []
+        recipe = self.ctx.card("recipe") if self.ctx is not None else None
+        recipeItems = recipe.menuItems() if recipe is not None and hasattr(recipe, "menuItems") else []
+        if recipeItems:
+            items.append((_("Recipe"), recipeItems))
+        if self.ctx is not None and self.ctx.card("report") is not None:
+            items.append((_("Reporting checks…"), lambda: self.ctx.focusCard("report"), None))
+        return items
+
+    def _placeSeedModes(self, studio):
+        """Studio: the seed modes are a row above the steps (Seed collapses to its row once done; the modes stay at hand)
+        with short labels; Classic: the first row of the Seed card with the full labels.
+        """
+        frame = getattr(self, "seedModeFrame", None)
+        seedCard = self._cardWidgets.get("seed", (None, None))[1]
+        if frame is None or seedCard is None:
+            return
+        self._seedModesStudio = bool(studio)
+        for mode, button in zip(self.seedModes, self.seedModeGroup.buttons(), strict=False):
+            full = self.seedModeLabels.get(mode, mode)
+            text = self._seedModeLabel(mode)
+            if mode == "cohort" and self.cohortInfo:
+                text += f" ({self.cohortInfo['n']})"
+            if str(button.text) != text:
+                button.setText(text)
+            button.setToolTip(full if not str(text).startswith(full) else "")
+            button.setAccessibleName(full)
+        if studio:
+            if self._seedModeRow is None:
+                self._seedModeRow = qt.QWidget()
+                self._seedModeRow.setObjectName("LNMSeedModeRow")
+                rowLayout = qt.QHBoxLayout(self._seedModeRow)
+                rowLayout.setContentsMargins(6, 0, 6, 2)
+                rowLayout.setSpacing(0)
+            if frame.parentWidget() is not self._seedModeRow:
+                seedCard.layout().removeWidget(frame)
+                self._seedModeRow.layout().addWidget(frame, 1)
+            if self.layout.indexOf(self._seedModeRow) < 0:
+                self.layout.insertWidget(self.layout.indexOf(seedCard), self._seedModeRow)
+            frame.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
+            for button in self.seedModeGroup.buttons():
+                button.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
+            self._seedModeRow.setVisible(len(self.seedModes) > 1)
+        elif frame.parentWidget() is not seedCard:
+            if self._seedModeRow is not None:
+                self._seedModeRow.layout().removeWidget(frame)
+                self._seedModeRow.hide()
+            frame.setSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Fixed)
+            for button in self.seedModeGroup.buttons():
+                button.setSizePolicy(qt.QSizePolicy.Preferred, qt.QSizePolicy.Fixed)
+            seedCard.layout().insertWidget(0, frame)
+            frame.setVisible(len(self.seedModes) > 1)
 
     def _buildCohortSeedPanel(self):
         """Seed = Cohort: the study and what it maps (its analysable lesions, the excluded and native ones)."""
@@ -2995,7 +3111,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
     def _showCohort(self):
         info, study = self.cohortInfo, self.cohortStudy
         if "cohort" in self.seedModes:
-            label = self.seedModeLabels["cohort"] + (f" ({info['n']})" if info else "")
+            label = self._seedModeLabel("cohort") + (f" ({info['n']})" if info else "")
             self.seedModeGroup.button(self.seedModes.index("cohort")).setText(label)
         self.cohortOpenStudyButton.setVisible(self._sessionStudy() is None)
         self.cohortOpenStudyButton.setText(_("Open study…") if study is None else _("Other study…"))
@@ -3257,15 +3373,13 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.connectomeEmpty.setObjectName("LNMConnectomeEmptyState")
         emptyLayout = qt.QVBoxLayout(self.connectomeEmpty)
         emptyLayout.setContentsMargins(0, 0, 0, 0)
-        # One sentence (VISUAL 2.5); where GSP1000 comes from and its terms are the tooltip and the Dataverse link below
-        self.connectomeEmptyLabel = self._label(_("Map needs a connectome: get one, add a bundle, convert GSP1000 or use the demo."),
-                                                objectName="LNMConnectomeEmptyText")
+        # One line (VISUAL 4.5); where GSP1000 comes from and its terms are the tooltip and an item of the ⋯ menu
+        self.connectomeEmptyLabel = self._label(_("Map needs a connectome."), objectName="LNMConnectomeEmptyText")
         self.connectomeEmptyLabel.setToolTip(GSP_EMPTY_TEXT)
         emptyLayout.addWidget(self.connectomeEmptyLabel)
-        # Two rows of two buttons: the inspector keeps its width (a row of four set its minimum width)
-        buttons = qt.QGridLayout()
-        buttons.setHorizontalSpacing(6)
-        buttons.setVerticalSpacing(6)
+        # One row: Get a connectome… (primary), Use the demo, and ⋯ for the other ways (add a bundle, convert)
+        buttons = qt.QHBoxLayout()
+        buttons.setSpacing(6)
         # The way a first-time user obtains one: the catalog (manager_catalog, D-L1), which downloads only after an explicit click and the
         # acceptance of the provider's live terms text; without the plug-in the button is hidden
         self.getConnectomeButton = qt.QPushButton(_("Get a connectome…"))
@@ -3274,29 +3388,44 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.getConnectomeButton.setToolTip(_("The connectomes that can be obtained from their providers, with their terms and size; nothing is downloaded until you ask"))
         self.getConnectomeButton.connect("clicked()", self.onGetConnectome)
         self.getConnectomeButton.setVisible(self._hasManagerAction("getConnectome"))
-        buttons.addWidget(self.getConnectomeButton, 0, 0)
-        self.addBundleButton = qt.QPushButton(_("Add connectome…"))
-        self.addBundleButton.setObjectName("LNMAddConnectomeButton")
-        self.addBundleButton.setProperty("slicerRole", "secondary")
-        self.addBundleButton.setToolTip(_("Choose a connectome bundle folder (.lnmc) on this computer"))
-        self.addBundleButton.connect("clicked()", self.onAddBundle)
-        buttons.addWidget(self.addBundleButton, 0, 1)
+        buttons.addWidget(self.getConnectomeButton, 1)
+        self.connectomeMoreButton = qt.QToolButton()
+        self.connectomeMoreButton.setObjectName("LNMConnectomeMoreButton")
+        self.connectomeMoreButton.setText("⋯")
+        self.connectomeMoreButton.setToolTip(_("Other ways to add a connectome"))
+        self.connectomeMoreButton.setAccessibleName(_("More connectome actions"))
+        self.connectomeMoreButton.setPopupMode(qt.QToolButton.InstantPopup)
+        self.connectomeMoreButton.setStyleSheet("QToolButton::menu-indicator { image: none; width: 0px; }")
+        self.connectomeMoreButton.setProperty("slicerRole", "ghost")
+        moreMenu = qt.QMenu(self.connectomeMoreButton)
+        moreMenu.setObjectName("LNMConnectomeMoreMenu")
+        moreMenu.addAction(_("Add connectome…")).connect("triggered()", self.onAddBundle)
+        moreMenu.addAction(_("Use the demo")).connect("triggered()", self.onCreateDemo)
+        moreMenu.addAction(_("Convert…")).connect("triggered()", lambda: self.openManager().openConvert())
+        moreMenu.addSeparator()
+        moreMenu.addAction(_("GSP1000 on the Harvard Dataverse")).connect("triggered()", lambda: qt.QDesktopServices.openUrl(qt.QUrl(GSP_DATAVERSE_URL)))
+        self.connectomeMoreButton.setMenu(moreMenu)
+        buttons.addWidget(self.connectomeMoreButton)
+        emptyLayout.addLayout(buttons)
+        # The demo, for a first try, as a quiet button under the row (the inspector keeps its width)
         self.demoButton = qt.QPushButton(_("Use the demo"))
         self.demoButton.setObjectName("LNMUseDemoButton")
-        self.demoButton.setProperty("slicerRole", "secondary")
+        self.demoButton.setProperty("slicerRole", "ghost")
         self.demoButton.setToolTip(_("Create a small synthetic connectome (SYNTHETIC — not real data) to try Map"))
         self.demoButton.connect("clicked()", self.onCreateDemo)
-        buttons.addWidget(self.demoButton, 1, 0)
+        emptyLayout.addWidget(self.demoButton, 0, qt.Qt.AlignLeft)
+        # The buttons of the other ways (Classic scripts and tests use them): in the ⋯ menu, never shown
+        self.addBundleButton = qt.QPushButton(_("Add connectome…"))
+        self.addBundleButton.setObjectName("LNMAddConnectomeButton")
+        self.addBundleButton.setToolTip(_("Choose a connectome bundle folder (.lnmc) on this computer"))
+        self.addBundleButton.connect("clicked()", self.onAddBundle)
         self.convertEmptyButton = qt.QPushButton(_("Convert…"))
         self.convertEmptyButton.setObjectName("LNMConvertConnectomeButton")
-        self.convertEmptyButton.setProperty("slicerRole", "secondary")
         self.convertEmptyButton.setToolTip(_("Convert NIfTI time series or a Lead-DBS connectome that is on this computer into a bundle"))
         self.convertEmptyButton.connect("clicked()", lambda: self.openManager().openConvert())
-        buttons.addWidget(self.convertEmptyButton, 1, 1)
-        buttons.setColumnStretch(0, 1)
-        buttons.setColumnStretch(1, 1)
-        emptyLayout.addLayout(buttons)
-        emptyLayout.addWidget(self.widgets.helpLink(_("GSP1000 on the Harvard Dataverse"), GSP_DATAVERSE_URL))
+        for hidden in (self.addBundleButton, self.convertEmptyButton):
+            hidden.setParent(self.connectomeEmpty)
+            hidden.hide()
         layout.addWidget(self.connectomeEmpty)
         self.connectomeErrorBanner = self.widgets.banner("", (), level="warn")
         self.connectomeErrorBanner.hide()
@@ -3751,10 +3880,15 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
     def _updateSteps(self, computeEnabled=None, computeReason=""):
         """The title rows of Seed, Connectome, Compute and Result as steps (VISUAL 4.5): a status circle (done, needs
         action, current) and a one-line summary of each.
+
+        In Studio a step collapses to its 44 px row when it becomes done (or, for Compute, when the map was opened from a
+        file) and opens again when it needs the user; a click on the row opens it in between (``_applyStepCollapse()``).
         """
         steps = {key: self._cardWidgets.get(key, (None, None))[1] for key in ("seed", "connectome", "compute", "result")}
         if any(card is None or card.property("collapsed") is None for card in steps.values()):
             return
+        if computeEnabled is None:
+            computeEnabled, computeReason = self.computeState()
         check = self.seedCheck or {}
         seedText = str(self.seedNameLabel.text) if hasattr(self, "seedNameLabel") else ""
         seedSpace = str(self.seedSpaceChip.text) if hasattr(self, "seedSpaceChip") and not self.seedSpaceChip.isHidden() else ""
@@ -3770,6 +3904,10 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         if bundle is not None and getattr(bundle, "n_subjects", None):
             connectomeSummary = _("{name} · {n} subjects").format(name=connectomeSummary, n=bundle.n_subjects)
         connectomeState = "done" if bundle is not None else "action"
+        if bundle is not None and hasattr(self, "acceptTermsCheckBox") and not self.acceptTermsCheckBox.checked:
+            # The data use terms are part of the step: it is done once they are accepted
+            connectomeState = "action"
+            connectomeSummary = _("{name} · accept the data use terms").format(name=str(self.connectomeCombo.currentText))
         hasResult = self.loadedMap is not None or bool(getattr(self, "runOutputs", None)) or (
             self._parameterNode is not None and self._parameterNode.resultVolume is not None)
         if self.loadedMap is not None and not getattr(self, "runOutputs", None):
@@ -3777,6 +3915,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             computeState, computeSummary = "", _("Opened from a file")
         elif hasResult:
             computeState, computeSummary = "done", _("Done")
+            if getattr(self, "nullCheckBox", None) is not None and self.nullCheckBox.checked and self.seedMode() == "lesion":
+                computeSummary = _("Done · specificity check: 50 relocated lesions")
         elif computeEnabled:
             computeState, computeSummary = "current", _("Ready")
         else:
@@ -3785,9 +3925,31 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         resultSummary = ""
         if self.loadedMap is not None:
             resultSummary = str(self.loadedMap.get("label") or self.loadedMap.get("name") or "")
+        if hasResult:
+            n = self._resultN() if hasattr(self, "_resultN") else None
+            nText = _("N = {n:,}").format(n=n) if n else _("N unknown")
+            resultSummary = " · ".join(part for part in (nText, self.currentStatistic(), resultSummary) if part)
         for number, (key, state, summary) in enumerate((("seed", seedState, seedSummary), ("connectome", connectomeState, connectomeSummary),
                                                          ("compute", computeState, computeSummary), ("result", resultState, resultSummary)), start=1):
             self.widgets.setStep(steps[key], number, state, summary.split("\n")[0])
+            self._applyStepCollapse(key, steps[key], state, summary)
+
+    def _applyStepCollapse(self, key, card, state, summary):
+        """Studio: a step whose state changed collapses when it is done (or neutral, a map opened from a file) and opens when
+        it needs the user (current or action). Result stays open. Classic keeps the cards as the user left them.
+        """
+        previous = self._stepStates.get(key)
+        self._stepStates[key] = (state, summary if key == "compute" else None)
+        if not self._studioLook or key == "result" or previous == self._stepStates[key]:
+            return
+        if state in ("current", "action"):
+            collapse = False
+        elif state == "done" or (key == "compute" and summary == _("Opened from a file")):
+            collapse = True
+        else:
+            return
+        if bool(card.collapsed) != collapse:
+            card.collapsed = collapse
 
     def onPrimary(self):
         """The primary action (the button and Ctrl+Enter in Studio): preflight checks, then Map network."""
@@ -4140,6 +4302,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         ruleRow = qt.QHBoxLayout()
         self.ruleCombo = qt.QComboBox()
         self.ruleCombo.setObjectName("LNMRuleCombo")
+        # The longest rule names do not set the width of the inspector (340 px): the combo shows them elided
+        self.ruleCombo.setSizeAdjustPolicy(qt.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.ruleCombo.setMinimumContentsLength(10)
         from LesionNetworkMappingLib import thresholds
 
         for kind in RULE_KINDS:
@@ -4161,11 +4326,26 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.opacitySlider.singleStep = 0.05
         self.opacitySlider.decimals = 2
         self.opacitySlider.connect("valueChanged(double)", self.onOpacityChanged)
-        form.addRow(_("Opacity"), self.opacitySlider)
+        # Studio shows the opacity as a percentage after the slider (VISUAL 4.5); Classic keeps the spin box
+        opacityRow = qt.QHBoxLayout()
+        opacityRow.setSpacing(8)
+        opacityRow.addWidget(self.opacitySlider, 1)
+        self.opacityPercentLabel = self._label("", wrap=False, objectName="LNMOpacityPercent")
+        self.opacityPercentLabel.setSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Preferred)
+        self.opacityPercentLabel.setAlignment(qt.Qt.AlignRight | qt.Qt.AlignVCenter)
+        self.opacityPercentLabel.setMinimumWidth(self.opacityPercentLabel.fontMetrics().horizontalAdvance("100%") + 4)
+        self.opacityPercentLabel.hide()
+        self.opacitySlider.connect("valueChanged(double)", self._showOpacityPercent)
+        opacityRow.addWidget(self.opacityPercentLabel)
+        form.addRow(_("Opacity"), opacityRow)
         layout.addLayout(form)
         self.derivedLabel = self._label("", role="secondaryText", objectName="LNMDerivedLine")
         self.derivedLabel.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
         layout.addWidget(self.derivedLabel)
+        # Studio: the explanations of the rule and the display (N unknown, shown unthresholded, notes) are one warning line
+        # with "Details" (VISUAL 4.5); Classic shows them as paragraphs
+        self.resultNotice = self.widgets.noticeLine("LNMResultNotice")
+        layout.addWidget(self.resultNotice)
         self.ruleBanner = self.widgets.banner("", ((_("Switch to FWE"), self.onSwitchToFwe), (_("Keep"), self.onKeepRule)), level="warn")
         self.ruleBanner.setObjectName("LNMRuleBanner")
         self.ruleBanner.hide()
@@ -4177,9 +4357,23 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.emptyResultLabel.hide()
         layout.addWidget(self.emptyResultLabel)
 
-        self.peaksTable = self.widgets.tableView([_("x"), _("y"), _("z"), _("value")])
+        # Peak region (the cached atlases, looked up in the background), x, y, z (RAS mm) and the value, hot or cold (VISUAL 4.5)
+        self.peaksTable = self.widgets.tableView([_("Peak region"), _("x, y, z"), _("value")])
         self.peaksTable.setObjectName("LNMPeaksTable")
         self.peaksTable.setToolTip(_("Top 5 peaks, at least 10 mm apart (RAS mm). Click a peak to go there."))
+        header = self.peaksTable.horizontalHeader()
+        header.setSectionResizeMode(0, qt.QHeaderView.Stretch)
+        header.setSectionResizeMode(1, qt.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, qt.QHeaderView.ResizeToContents)
+        for column in range(3):
+            headerItem = self.peaksTable.horizontalHeaderItem(column)
+            if headerItem is not None:
+                headerAlignment = (qt.Qt.AlignLeft if column == 0 else qt.Qt.AlignRight) | qt.Qt.AlignVCenter
+                try:
+                    headerItem.setTextAlignment(headerAlignment)
+                except (TypeError, ValueError):
+                    headerItem.setTextAlignment(int(headerAlignment))  # Qt 5 takes an int, Qt 6 the flags
+        self._peakRegionJob = None
         self.peaksTable.setMaximumHeight(170)
         self.peaksTable.connect("cellClicked(int,int)", self.onPeakClicked)
         self.peaksTable.hide()
@@ -4326,6 +4520,18 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self._parameterNode.statistic = STATISTICS[index]
         self.refreshResult(reloadMaps=True)
 
+    def _showOpacityPercent(self, value=None):
+        value = self.opacitySlider.value if value is None else value
+        self.opacityPercentLabel.setText(f"{round(100 * float(value))}%")
+
+    def _applyResultPresentation(self, studio):
+        """Studio: the opacity as a percentage (no spin box); Classic: the slider with its spin box."""
+        if not hasattr(self, "opacitySlider"):
+            return
+        self.opacitySlider.spinBoxVisible = not studio
+        self.opacityPercentLabel.setVisible(bool(studio))
+        self._showOpacityPercent()
+
     def onOpacityChanged(self, value):
         if self._updatingGui or self._parameterNode is None:
             return
@@ -4334,6 +4540,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
 
         if self._parameterNode.resultVolume is not None:
             display.setForegroundOpacity(value)
+        self._refreshMapOverlay()
 
     def _ruleStatistic(self, rule):
         if rule["kind"] == "top_pct":
@@ -4521,12 +4728,15 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             self.resultTitleLabel.setText(_("Mapping: the map appears with the first partial result."))
         else:
             self.resultTitleLabel.setText(_("No map yet: Map network computes it."))
+        # Studio: with a map the step row of Result names it (N, statistic, name); the line says what to do without one
+        self.resultTitleLabel.setVisible(not self._studioLook or not hasMap)
 
         if not hasMap and self.bundle is not None and self._preloading and "scipy.stats" not in sys.modules and rule["kind"] in ("fwe_bonferroni", "t_convention", "custom_t"):
             # The planned threshold waits for the background import of scipy (never a long freeze on entering Map)
             self.derivedLabel.setText(_("Resolving the threshold rule…"))
             self.emptyResultLabel.hide()
             self.peaksTable.hide()
+            self._showResultNotice()
             return
 
         # Rule: re-resolved for the current N on every update
@@ -4600,6 +4810,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             empty = _("The map is shown unthresholded: choose Custom T and type the threshold, or an Fz or Top x% rule.")
         self.emptyResultLabel.setText(empty)
         self.emptyResultLabel.setVisible(bool(empty))
+        self._showResultNotice()
         if hasMap and (mapChanged or peaks):
             if deferred:
                 generation = self._refreshGeneration
@@ -4609,6 +4820,45 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         elif not hasMap:
             self.peaksTable.hide()
         self._updateStatusChip()
+        # A map opened or computed changes the steps (Compute "Opened from a file", the N of Result)
+        self._updateSteps()
+        self._refreshMapOverlay()
+
+    def _showResultNotice(self):
+        """Studio (VISUAL 4.5): the explanations of the Result card (an unknown N, a map shown unthresholded, the rule's notes)
+        are one warning line with "Details"; the derived threshold line stays when it is one line. Classic keeps the
+        paragraphs. The labels keep their texts either way (scripts and tests read them).
+        """
+        notice = getattr(self, "resultNotice", None)
+        if notice is None:
+            return
+        if not self._studioLook:
+            self.widgets.setNoticeLine(notice, "")
+            self.derivedLabel.show()
+            return
+        derived = str(self.derivedLabel.text)
+        explanations = []
+        derivedIsLine = derived.startswith(("⇒", _("Planned:"))) or len(derived) <= 80
+        if derived and not derivedIsLine:
+            explanations.append(derived)
+            self.derivedLabel.hide()
+        else:
+            self.derivedLabel.setVisible(bool(derived))
+        for label in (self.emptyResultLabel, self.ruleNotesLabel):
+            if not label.isHidden() and str(label.text):
+                explanations.append(str(label.text))
+            label.hide()
+        if not explanations:
+            self.widgets.setNoticeLine(notice, "")
+            return
+        first = explanations[0]
+        if first.startswith(_("The N of this map is unknown")):
+            unthresholded = any(_("unthresholded") in text for text in explanations)
+            headline = _("N unknown: the map is shown unthresholded") if unthresholded else _("N unknown: this rule needs N")
+        else:
+            cut = min((index for index in (first.find(": "), first.find(". "), first.find("; ")) if index > 0), default=len(first))
+            headline = first[:cut].rstrip(".")
+        self.widgets.setNoticeLine(notice, headline, "\n\n".join(explanations))
 
     def _resolveRule(self, rule, n, values, note):
         """The rule for a map with ``n`` subjects: V and the GSR flag of the connectome, or for a loaded map that is
@@ -4641,6 +4891,15 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         window = display.symmetricWindow(volume)
         volume.SetAttribute(display.WINDOW_ATTRIBUTE, f"{window:.6g}")
         return window
+
+    def _refreshMapOverlay(self):
+        """Studio: the map legend and the layer chips over the main view follow the map, its threshold and opacity."""
+        mappage = self._mappage()
+        if mappage is not None and hasattr(mappage, "refreshOverlay"):
+            try:
+                mappage.refreshOverlay()
+            except Exception:
+                logging.exception("Lesion network mapping: the map legend could not be updated")
 
     def _mappage(self):
         """``StudioLib.mappage`` while Studio is active (it saves and restores the layers of Map), else None."""
@@ -4792,20 +5051,93 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             except Exception:
                 logging.exception("Lesion network mapping: the peak table could not be computed")
         table = self.peaksTable
+        valueHeader = table.horizontalHeaderItem(2)
+        if valueHeader is not None and str(valueHeader.text()) != statistic:
+            valueHeader.setText(statistic)
         table.setRowCount(len(self._peaks))
         for row, peak in enumerate(self._peaks):
-            for column, value in enumerate((*peak["world"], peak["value"])):
-                item = qt.QTableWidgetItem(f"{value:.1f}" if column < 3 else f"{value:.2f}")
-                if column == 3:
+            x, y, z = peak["world"]
+            cells = ("…", f"{x:.0f}, {y:.0f}, {z:.0f}", f"{peak['value']:.2f}")
+            for column, text in enumerate(cells):
+                item = qt.QTableWidgetItem(text)
+                if column == 2:
                     # Hot and cold values (VISUAL 4.5)
-                    item.setForeground(qt.QBrush(self.widgets.valueColor(value)))
-                alignment = qt.Qt.AlignRight | qt.Qt.AlignVCenter
+                    item.setForeground(qt.QBrush(self.widgets.valueColor(peak["value"])))
+                if column == 0:
+                    item.setToolTip(_("Looking up the region…"))
+                alignment = (qt.Qt.AlignLeft if column == 0 else qt.Qt.AlignRight) | qt.Qt.AlignVCenter
                 try:
                     item.setTextAlignment(alignment)
                 except (TypeError, ValueError):
                     item.setTextAlignment(int(alignment))  # Qt 5 takes an int, Qt 6 the flags
                 table.setItem(row, column, item)
         table.setVisible(bool(self._peaks))
+        if self._peaks:
+            self._lookupPeakRegions(self._peaks, grid)
+
+    def _peakSpace(self, grid):
+        """The template space of the peaks' grid (to keep the atlases of its family), or None when it cannot be told."""
+        try:
+            from LesionNetworkMappingLib import geometry
+
+            return geometry.detect_space((tuple(grid.shape), grid.affine)) if grid is not None else None
+        except Exception:
+            return None
+
+    def _lookupPeakRegions(self, peaks, grid):
+        """Fill the Peak region column from the cached atlases in a background thread (numpy and files only, D19): the
+        Result card is never held up by reading an atlas. Only the latest lookup fills the table.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        from LesionNetworkMappingLib import atlases, fetch
+
+        explicit = os.environ.get(fetch.CACHE_ENV)
+        cache = explicit or (os.path.join(slicer.app.cachePath, "LNM") if slicer.app.cachePath else None)
+        points = [peak["world"] for peak in peaks]
+        space = self._peakSpace(grid)
+        executor = getattr(LesionNetworkMappingWidget, "_regionExecutor", None)
+        if executor is None:
+            executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="LNMPeakRegions")
+            LesionNetworkMappingWidget._regionExecutor = executor
+        future = executor.submit(atlases.peak_regions, points, space, cache)
+        job = {"future": future, "peaks": peaks}
+        self._peakRegionJob = job
+        timer = qt.QTimer()
+        timer.setInterval(30)
+
+        def poll():
+            if not future.done():
+                return
+            timer.stop()
+            if self._peakRegionJob is not job:
+                return
+            self._peakRegionJob = None
+            try:
+                regions = future.result()
+            except Exception:
+                logging.exception("Lesion network mapping: the peak regions could not be looked up")
+                regions = None
+            self._showPeakRegions(peaks, regions)
+
+        timer.connect("timeout()", poll)
+        job["timer"] = timer
+        timer.start()
+
+    def _showPeakRegions(self, peaks, regions):
+        """The Peak region column: the region names, or "—" when no atlas is downloaded (the tooltip says how to get one)."""
+        if peaks is not self._peaks or not hasattr(self, "peaksTable"):
+            return
+        noAtlas = _("No atlas downloaded: Get atlases (the Lesion card of Draw, or the Clusters card) names the peak regions")
+        for row in range(min(len(peaks), self.peaksTable.rowCount)):
+            item = self.peaksTable.item(row, 0)
+            if item is None:
+                continue
+            item.setText(regions[row] if regions is not None else "—")
+            item.setToolTip(noAtlas if regions is None else regions[row])
+        header = self.peaksTable.horizontalHeaderItem(0)
+        if header is not None:
+            header.setToolTip(noAtlas if regions is None else _("The region at the peak in the downloaded atlases (Harvard-Oxford first)"))
 
     def onPeakClicked(self, row, column):
         if 0 <= row < len(self._peaks):
@@ -4906,6 +5238,10 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         if self.seedMode() == "cohort":
             self.refreshCohort()
         shell = self._shell()
+        if shell is not None:
+            # The result is refreshed at the end of enter(); StudioLib.mappage sets the look too (with the shell that shows
+            # Map) and gives the Classic look back when Studio is left
+            self.setStudioPresentation(True, refresh=False)
         if shell is not None:
             # The primary button and the disclaimer stay visible below the inspector (the sticky footer slot) while Map is shown
             if self.shellFooter is None:

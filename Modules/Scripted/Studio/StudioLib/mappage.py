@@ -34,6 +34,7 @@ import re
 import traceback
 import weakref
 
+import qt
 import slicer
 from slicer.i18n import tr as _
 
@@ -54,7 +55,7 @@ NLIN6_TEMPLATE_FILE = "tpl-MNI152NLin6Asym_res-02_T1w.nii.gz"
 _MAP_NAME = re.compile(r"^(?P<name>.+?)_conn-(?P<label>[A-Za-z0-9]+)_desc-(?P<desc>AvgRFz|AvgR|T)(?P<suffix>[A-Za-z0-9]*)_funcmap\.nii(?:\.gz)?$")
 _SUBJECT = re.compile(r"(sub-[A-Za-z0-9]+)")
 
-_state = {"layers": None, "shell": None, "shortcutsShell": None, "takenActions": {},
+_state = {"layers": None, "shell": None, "shortcutsShell": None, "takenActions": {}, "overlay": None,
           # Draw's lesion (segmentation node id, segment id) when the Map seed was last chosen or adopted, and the
           # contexts whose seed changes are watched (an explicit seed choice wins over the Draw adoption)
           "drawLesionAtSeedChoice": None, "adopting": False, "seedWatched": []}
@@ -351,6 +352,300 @@ def _restoreActionShortcuts():
     _state["takenActions"] = {}
 
 
+#
+# Viewer extras (VISUAL 4.5): the map legend (bottom-right of the main view) and the layer chips (bottom-left)
+#
+
+#: Size of the legend card and the margin from the edges of the view
+LEGEND_WIDTH = 220
+OVERLAY_MARGIN = 10
+#: Height of the colour bar of the legend
+LEGEND_BAR_HEIGHT = 8
+#: The view under the overlays: the large view of the Studio layouts
+OVERLAY_VIEW = "Red"
+#: Height reserved at the bottom of the view for its corner text (the image name) under the layer chips
+CORNER_TEXT_HEIGHT = 22
+
+
+class _OverlayFilter(qt.QObject):
+    """Follows the main view (moved, resized, shown or hidden) to keep the overlays on it."""
+
+    def __init__(self, overlay):
+        qt.QObject.__init__(self)
+        self.overlay = overlay
+
+    def eventFilter(self, obj, event):
+        if event.type() in (qt.QEvent.Resize, qt.QEvent.Move, qt.QEvent.Show, qt.QEvent.Hide):
+            self.overlay.schedulePlace()
+        return False
+
+
+class MapOverlay:
+    """The Studio viewer extras of Map: a floating colour legend card (bottom-right of the main slice view: the statistic,
+    the threshold, an 8 px bar of the LNM colour table with ticks) and layer chips (bottom-left: "Network T · 80%", the
+    template, "Lesion outline").
+
+    They are Qt widgets over the view (children of the main window's central widget, like the toasts): no VTK actor
+    changes. They are shown only while Studio shows Map with a map in the views, follow the theme, the threshold and the
+    opacity (``refresh()``), and are deleted when Map is left.
+    """
+
+    def __init__(self, shell):
+        from . import ui
+
+        self.ui = ui
+        self.shell = shell
+        parent = shell.mainWindow.centralWidget()
+        self.parent = parent
+        self.legend = qt.QFrame(parent)
+        self.legend.setObjectName("StudioMapLegend")
+        self.legend.setAttribute(qt.Qt.WA_StyledBackground, True)
+        self.legend.setFixedWidth(LEGEND_WIDTH)
+        layout = qt.QVBoxLayout(self.legend)
+        layout.setContentsMargins(12, 9, 12, 8)
+        layout.setSpacing(6)
+        top = qt.QHBoxLayout()
+        top.setSpacing(8)
+        self.statisticLabel = ui.label("T", "caption", "text", "StudioMapLegendStatistic")
+        ui.setText(self.statisticLabel, "label")
+        top.addWidget(self.statisticLabel)
+        top.addStretch(1)
+        self.thresholdLabel = ui.label("", "caption", "text2", "StudioMapLegendThreshold")
+        ui.tabular(self.thresholdLabel)
+        top.addWidget(self.thresholdLabel)
+        layout.addLayout(top)
+        self.bar = qt.QLabel()
+        self.bar.setObjectName("StudioMapLegendBar")
+        self.bar.setFixedHeight(LEGEND_BAR_HEIGHT)
+        layout.addWidget(self.bar)
+        ticks = qt.QHBoxLayout()
+        self.tickLabels = []
+        for index, alignment in enumerate((qt.Qt.AlignLeft, qt.Qt.AlignHCenter, qt.Qt.AlignRight)):
+            tick = ui.label("", "caption", "text3", f"StudioMapLegendTick{index}")
+            ui.tabular(tick)
+            tick.setAlignment(alignment | qt.Qt.AlignVCenter)
+            ticks.addWidget(tick, 1)
+            self.tickLabels.append(tick)
+        layout.addLayout(ticks)
+
+        self.chips = qt.QWidget(parent)
+        self.chips.setObjectName("StudioMapLayerChips")
+        chipsLayout = qt.QHBoxLayout(self.chips)
+        chipsLayout.setContentsMargins(0, 0, 0, 0)
+        chipsLayout.setSpacing(6)
+        self.chipLabels = {}
+        for key in ("network", "template", "lesion"):
+            chip = qt.QLabel()
+            chip.setObjectName(f"StudioMapLayerChip_{key}")
+            chip.setAttribute(qt.Qt.WA_StyledBackground, True)
+            ui.setText(chip, "caption")
+            chipsLayout.addWidget(chip)
+            self.chipLabels[key] = chip
+        for widget in (self.legend, self.chips):
+            widget.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
+            ui.bindStyleSheet(widget, self._styleSheet)
+            widget.hide()
+        self._state = None
+        self._view = None
+        self._filter = _OverlayFilter(self)
+        self._placeTimer = qt.QTimer()
+        self._placeTimer.setSingleShot(True)
+        self._placeTimer.setInterval(0)
+        self._placeTimer.connect("timeout()", self.place)
+        ui.addPaletteListener(self.refresh)
+
+    def _styleSheet(self):
+        ui = self.ui
+        window = qt.QColor(ui.token("window"))
+        border = ui.token("hairline")
+        return (f"QFrame#StudioMapLegend {{ background-color: {ui._rgba(window, 0.86)}; border: 1px solid {border.name()}; border-radius: 10px; }}"
+                "QFrame#StudioMapLegend QLabel { background: transparent; border: none; }"
+                f"QLabel[objectName^=\"StudioMapLayerChip_\"] {{ background-color: {ui._rgba(window, 0.78)}; color: {ui.token('text2').name()};"
+                f" border: 1px solid {border.name()}; border-radius: 6px; padding: 2px 8px; }}")
+
+    def _sliceWidget(self):
+        layoutManager = slicer.app.layoutManager()
+        widget = layoutManager.sliceWidget(OVERLAY_VIEW) if layoutManager is not None else None
+        return widget if widget is not None and widget.isVisible() else None
+
+    def _watch(self, sliceWidget):
+        if sliceWidget is self._view:
+            return
+        if self._view is not None and self.ui._isAlive(self._view):
+            self._view.removeEventFilter(self._filter)
+        self._view = sliceWidget
+        if sliceWidget is not None:
+            sliceWidget.installEventFilter(self._filter)
+
+    def refresh(self):
+        """Show what the Map module shows now (``LesionNetworkMappingWidget.legendState()``), or hide."""
+        if not self.ui._isAlive(self.legend):
+            return
+        widget = moduleWidget(create=False)
+        state = widget.legendState() if widget is not None and hasattr(widget, "legendState") else None
+        self._state = state
+        if state is None:
+            self.legend.hide()
+            self.chips.hide()
+            return
+        statistic = str(state["statistic"])
+        self.statisticLabel.setText(statistic)
+        self.thresholdLabel.setText(str(state["thresholdText"]))
+        window = float(state["window"] or 0.0)
+        for tick, value in zip(self.tickLabels, (-window, 0.0, window), strict=True):
+            tick.setText(_tickText(value))
+        self._paintBar()
+        opacity = round(100 * float(state["opacity"]))
+        self.chipLabels["network"].setText(_("Network {statistic} · {pct}%").format(statistic=statistic, pct=opacity))
+        templateName = _templateChipText()
+        self.chipLabels["template"].setText(templateName)
+        self.chipLabels["template"].setVisible(bool(templateName))
+        lesion = self.chipLabels["lesion"]
+        lesion.setText("\u25a1 " + _("Lesion outline"))
+        lesion.setVisible(bool(state["outline"]))
+        self.place()
+
+    def _paintBar(self):
+        """The colour bar: the LNM diverging colours from -window to +window."""
+        from LesionNetworkMappingLib import colormaps
+
+        width = max(1, LEGEND_WIDTH - 24)
+        ratio = self.bar.devicePixelRatioF() if hasattr(self.bar, "devicePixelRatioF") else 1.0
+        image = qt.QImage(int(width * ratio), int(LEGEND_BAR_HEIGHT * ratio), qt.QImage.Format_ARGB32_Premultiplied)
+        image.fill(qt.Qt.transparent)
+        colors = colormaps.lnm_diverging(64)
+        painter = qt.QPainter(image)
+        painter.setRenderHint(qt.QPainter.Antialiasing)
+        gradient = qt.QLinearGradient(0, 0, image.width(), 0)
+        for index, (r, g, b) in enumerate(colors):
+            gradient.setColorAt(index / (len(colors) - 1), qt.QColor.fromRgbF(r, g, b))
+        painter.setPen(qt.Qt.NoPen)
+        painter.setBrush(qt.QBrush(gradient))
+        radius = image.height() / 2.0
+        painter.drawRoundedRect(qt.QRectF(0, 0, image.width(), image.height()), radius, radius)
+        painter.end()
+        pixmap = qt.QPixmap.fromImage(image)
+        pixmap.setDevicePixelRatio(ratio)
+        self.bar.setPixmap(pixmap)
+
+    def schedulePlace(self):
+        if not self._placeTimer.isActive():
+            self._placeTimer.start()
+
+    def place(self):
+        """Put the legend at the bottom-right and the chips at the bottom-left of the main view (hidden without it)."""
+        if not self.ui._isAlive(self.legend):
+            return
+        sliceWidget = self._sliceWidget()
+        self._watch(sliceWidget)
+        if self._state is None or sliceWidget is None:
+            self.legend.hide()
+            self.chips.hide()
+            return
+        view = sliceWidget.sliceView()
+        topLeft = self.parent.mapFromGlobal(view.mapToGlobal(qt.QPoint(0, 0)))
+        rect = qt.QRect(topLeft.x(), topLeft.y(), view.width, view.height)
+        self.legend.adjustSize()
+        legendSize = self.legend.sizeHint
+        fits = rect.width() >= LEGEND_WIDTH + 2 * OVERLAY_MARGIN + 120 and rect.height() >= legendSize.height() + 80
+        # Above the corner text of the view (the image name, the radiological statement)
+        self.legend.move(rect.right() - OVERLAY_MARGIN - LEGEND_WIDTH, rect.bottom() - OVERLAY_MARGIN - CORNER_TEXT_HEIGHT - legendSize.height())
+        self.legend.setVisible(fits)
+        self.chips.adjustSize()
+        chipsSize = self.chips.sizeHint
+        roomForChips = rect.width() - (LEGEND_WIDTH + 3 * OVERLAY_MARGIN if fits else 2 * OVERLAY_MARGIN)
+        self.chips.move(rect.left() + OVERLAY_MARGIN, rect.bottom() - OVERLAY_MARGIN - CORNER_TEXT_HEIGHT - chipsSize.height())
+        self.chips.setVisible(chipsSize.width() <= roomForChips)
+        for widget in (self.legend, self.chips):
+            if widget.isVisible():
+                widget.raise_()
+
+    def dispose(self):
+        self.ui.removePaletteListener(self.refresh)
+        self._placeTimer.stop()
+        self._watch(None)
+        for widget in (self.legend, self.chips):
+            if self.ui._isAlive(widget):
+                self.ui.bindStyleSheet(widget, None)
+                widget.hide()
+                widget.deleteLater()
+
+
+def _tickText(value):
+    """A tick of the legend: "-12", "0", "12" (one decimal below 10)."""
+    if abs(value) < 1e-9:
+        return "0"
+    text = f"{value:.0f}" if abs(value) >= 10 else f"{value:.1f}"
+    return text.replace("-", "\u2212")
+
+
+def _templateChipText():
+    """The short name of the image under the map in the main view ("MNI152NLin2009cAsym"), or ""."""
+    layoutManager = slicer.app.layoutManager()
+    sliceWidget = layoutManager.sliceWidget(OVERLAY_VIEW) if layoutManager is not None else None
+    compositeNode = sliceWidget.mrmlSliceCompositeNode() if sliceWidget is not None else None
+    node = slicer.mrmlScene.GetNodeByID(compositeNode.GetBackgroundVolumeID()) if compositeNode is not None and compositeNode.GetBackgroundVolumeID() else None
+    if node is None:
+        return ""
+    name = node.GetName() or ""
+    try:
+        from DataProbeLib.SliceViewAnnotations import flatDisplayName
+
+        name = flatDisplayName(name, node.GetAttribute("Studio.Role") == "template")
+    except Exception:
+        name = name.replace("_", " ")
+    return name.split(" \u00b7 ")[0]
+
+
+def overlay():
+    """The map legend and layer chips while Studio shows Map (None otherwise)."""
+    return _state.get("overlay")
+
+
+def refreshOverlay():
+    """Update the legend and the chips (the Map module calls it after a change of the map, its threshold or opacity)."""
+    current = _state.get("overlay")
+    if current is not None:
+        current.refresh()
+
+
+def _installOverlay(shell):
+    _removeOverlay()
+    if shell is None or not hasattr(shell, "mainWindow") or shell.mainWindow is None or shell.mainWindow.centralWidget() is None:
+        return
+    if not _state.get("quitConnected"):
+        # The overlay's Python event filter must not outlive the interpreter
+        slicer.app.connect("aboutToQuit()", _removeOverlay)
+        _state["quitConnected"] = True
+    try:
+        _state["overlay"] = MapOverlay(shell)
+        _state["overlay"].refresh()
+    except Exception:
+        logging.error(f"Studio Map: the map legend could not be shown:\n{traceback.format_exc()}")
+        _state["overlay"] = None
+
+
+def _removeOverlay():
+    current = _state.pop("overlay", None)
+    if current is not None:
+        try:
+            current.dispose()
+        except Exception:
+            logging.error(f"Studio Map: the map legend could not be removed:\n{traceback.format_exc()}")
+
+
+def moreMenuActions(shell):
+    """⋯ of the Map panel header: the recipes and the reporting checks (their header rows show only with a study)."""
+    widget = moduleWidget(create=False)
+    if widget is None or not hasattr(widget, "studioMenuActions"):
+        return []
+    try:
+        return widget.studioMenuActions()
+    except Exception:
+        logging.error(f"Studio Map: the menu items could not be listed:\n{traceback.format_exc()}")
+        return []
+
+
 def enter(shell):
     _state["shell"] = shell
     captureLayers()
@@ -361,6 +656,12 @@ def enter(shell):
     _installShortcuts(shell)
     _watchSeed(widget)
     _adoptDrawSeed(widget)
+    setPresentation = getattr(widget, "setStudioPresentation", None)
+    if setPresentation is not None:
+        try:
+            setPresentation(True)
+        except Exception:
+            logging.error(f"Studio Map: cannot give the panel its Studio look:\n{traceback.format_exc()}")
     try:
         widget.showMapLayers()
     except Exception:
@@ -368,9 +669,11 @@ def enter(shell):
     _browser.showLesion()
     shell.setPrimaryAction(widget.onPrimary, widget.computeButton.text)
     widget._refreshStatusChip()
+    _installOverlay(shell)
 
 
 def leave(shell):
+    _removeOverlay()
     _restoreActionShortcuts()
     _browser.removeLesion()
     widget = moduleWidget(create=False)
@@ -379,6 +682,13 @@ def leave(shell):
             widget.restoreLesionDisplay()
         except Exception:
             logging.error(f"Studio Map: cannot restore the lesion display:\n{traceback.format_exc()}")
+        # Classic keeps Map shown without leaving the module: the Classic look of the panel comes back
+        setPresentation = getattr(widget, "setStudioPresentation", None)
+        if setPresentation is not None:
+            try:
+                setPresentation(False)
+            except Exception:
+                logging.error(f"Studio Map: cannot give the panel its Classic look back:\n{traceback.format_exc()}")
         # Classic keeps Map shown without leaving the module: the primary button goes back to the Compute card and the
         # disclaimer below the cards (the sticky footer is removed with the shell)
         releaseFooter = getattr(widget, "releaseShellFooter", None)

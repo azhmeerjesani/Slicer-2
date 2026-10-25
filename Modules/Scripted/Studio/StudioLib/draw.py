@@ -156,10 +156,10 @@ def _effectDescriptions():
 def _toolHints():
     control = _effectDescriptions()["Smart fill"].split("Shift+click adds, ")[1].split("+click")[0]
     return {
-        "Paint": _("Shift+wheel or [ ]: size · Space pauses · drag adjusts contrast while paused"),
-        "Erase": _("Shift+wheel or [ ]: size · E: back to the previous tool · Space pauses"),
-        "Draw": _("Drag = lasso · click = points · Enter/right-click closes · X removes last"),
-        "Smart fill": _("Click inside the lesion · drag ↔ or Shift+wheel: tolerance · Shift+click: add · {control}+click: remove · Enter: apply").format(control=control),
+        "Paint": _("Shift + wheel or [ ] to resize · Space pauses"),
+        "Erase": _("Shift + wheel or [ ] to resize · E: previous tool"),
+        "Draw": _("Drag: lasso · click: points · Enter closes · X removes last"),
+        "Smart fill": _("Click inside · Shift+click adds · {control}+click removes · Enter applies").format(control=control),
         "Fill between slices": _("Trace a few slices, then Fill · selected lesion only"),
         "Smoothing": _("Smooth the lesion; Closing fills small holes"),
     }
@@ -2303,7 +2303,8 @@ def setOptionsStudioLook(editor, studio, hideDiameter=False):
     the right) and, with ``hideDiameter``, the classic "Diameter:" row of Paint and Erase hidden (the Draw size row replaces
     it). ``studio=False`` restores the classic look. Nothing else of the options changes.
     """
-    optionsGroupBox = editor.findChild("QGroupBox", "OptionsGroupBox") if editor is not None else None
+    # The options frame of the tools (in the options group box in Classic, shown without it in Studio)
+    optionsGroupBox = editor.findChild("QFrame", "EffectsOptionsFrame") if editor is not None else None
     if optionsGroupBox is None:
         return
     for checkBox in optionsGroupBox.findChildren("QCheckBox"):
@@ -2594,29 +2595,98 @@ class DrawExtension:
         self.sourceChip.setMenu(self.sourceMenu)
         ui.setRole(self.sourceChip, "ghost")
         chipsLayout.addWidget(self.sourceChip)
-        layout.addWidget(self.chipsRow)
+        # The size row follows the tool tiles (VISUAL 4.4): the Segment Editor puts it there (toolOptionsWidget()); the
+        # header owns it until then
+        self.chipsRow.setParent(header)
+        self.chipsRow.hide()
         for widget in (self.sourceChip, *self.brushChips.values()):
             ui.setText(widget, "caption")
-        # The section label of the tool tiles, which follow the header
+        # The section label of the tool tiles, which follow the header, with "More tools ▾" on its right (moreToolsHost())
+        self.toolsRow = qt.QWidget()
+        self.toolsRow.setObjectName("StudioDrawToolsRow")
+        self.toolsRow.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
+        self.toolsRowLayout = qt.QHBoxLayout(self.toolsRow)
+        # Aligned with the inspector padding (VISUAL 4.4: 16)
+        self.toolsRowLayout.setContentsMargins(ui.INSPECTOR_PADDING, 8, 0, 0)
+        self.toolsRowLayout.setSpacing(6)
         self.toolsLabel = ui.sectionLabel(_("Tools"), "StudioDrawToolsLabel")
-        self.toolsLabel.setContentsMargins(10, 8, 0, 0)
-        layout.addWidget(self.toolsLabel)
+        self.toolsRowLayout.addWidget(self.toolsLabel)
+        self.toolsRowLayout.addStretch(1)
+        layout.addWidget(self.toolsRow)
         self._discoverDrawCards()
 
     def _buildTrailing(self):
+        """After the tool options (VISUAL 4.4): the Overlay row and the Outline switch, the hint line, then the list rows
+        (Normalize to MNI and Trace from a figure, which are Draw cards, and Notes).
+        """
+        self.headerWidget()
         trailing = qt.QWidget()
         trailing.setObjectName("StudioDrawTrailing")
         trailing.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Maximum)
         layout = qt.QVBoxLayout(trailing)
-        layout.setContentsMargins(0, 2, 0, 4)
-        layout.setSpacing(6)
+        layout.setContentsMargins(0, 0, 0, 4)
+        layout.setSpacing(4)
         self.displayCard = _DisplayCard(self)
         layout.addWidget(self.displayCard.widget)
+        # The hint of the tool: one caption line (the card refreshes its text)
+        hint = self.card.takeHintLabel()
+        hint.setContentsMargins(ui.INSPECTOR_PADDING, 0, 8, 0)
+        layout.addWidget(hint)
+        layout.addSpacing(10)
+        # The list rows: their icons on the inspector padding (the row has an 8 px inner margin)
+        rows = qt.QVBoxLayout()
+        rows.setContentsMargins(ui.INSPECTOR_PADDING - 10, 0, 2, 0)
+        rows.setSpacing(2)
+        layout.addLayout(rows)
         self._cardsAfter = qt.QVBoxLayout()
-        self._cardsAfter.setSpacing(6)
-        layout.addLayout(self._cardsAfter)
+        self._cardsAfter.setSpacing(2)
+        rows.addLayout(self._cardsAfter)
+        # Notes: a list row that opens the notes fields under it
+        self.notesRow = ui.listRow("pencil", _("Notes"), None, self._onNotesRow, "StudioDrawNotesRow")
+        self.notesRow.setToolTip(ui.tooltip(_("Notes"), None, _("notes and the source (DOI, figure), saved next to the lesion file")))
+        rows.addWidget(self.notesRow)
+        notesFrame = self.card.takeNotesFrame()
+        notesFrame.setContentsMargins(8, 2, 4, 4)
+        rows.addWidget(notesFrame)
+        self.card.notesVisibilityChanged = self._onNotesVisibilityChanged
         self._trailing = trailing
         self._discoverDrawCards()
+
+    def moreToolsHost(self):
+        """The layout that holds "More tools ▾" in the studio presentation: the right of the Tools label."""
+        self.headerWidget()
+        return self.toolsRowLayout
+
+    def toolOptionsWidget(self):
+        """The size row (Brush and Erase), shown by the Segment Editor right after the tool tiles."""
+        self.headerWidget()
+        return self.chipsRow
+
+    def _onNotesRow(self):
+        if self.card is not None:
+            self.card.setNotesVisible(self.card.notesFrame.isHidden())
+
+    def _onNotesVisibilityChanged(self, visible):
+        row = getattr(self, "notesRow", None)
+        if row is None or not ui._isAlive(row):
+            return
+        chevron = row.findChild("QLabel", "StudioListRowChevron")
+        if chevron is not None:
+            chevron.setPixmap(ui.pixmap("chevron-down" if visible else "chevron-right", 14, "text3"))
+        if visible:
+            row.setAccessibleDescription(_("open"))
+        else:
+            row.setAccessibleDescription("")
+
+    def _refreshNotesRow(self, notes, sourceReference):
+        """The value of the Notes row: the first words of the notes, else the source reference."""
+        row = getattr(self, "notesRow", None)
+        if row is None or not ui._isAlive(row):
+            return
+        text = " ".join(str(notes or sourceReference or "").split())
+        if len(text) > 18:
+            text = text[:17].rstrip() + "…"
+        ui.setListRowValue(row, text)
 
     def _onBrushChip(self, diameter):
         drawSession = self._session
@@ -2800,7 +2870,9 @@ class DrawExtension:
         self.sourceChip.setVisible(showSource)
         self.chipsRow.setVisible(brushActive or showSource)
         # Lesion card
-        self.card.refresh(self._cardState(drawSession, editor, segmentationNode, sourceVolumeNode, activeName, computeMetrics))
+        cardState = self._cardState(drawSession, editor, segmentationNode, sourceVolumeNode, activeName, computeMetrics)
+        self.card.refresh(cardState)
+        self._refreshNotesRow(cardState.get("notes"), cardState.get("sourceReference"))
         # Tile outlines: the suggested tool (nothing armed) and the paused tool (Space resumes it)
         if widget is not None and hasattr(widget, "setTileOutline"):
             suggested = drawSession.suggestedEffect() if drawSession is not None else None
@@ -2865,8 +2937,10 @@ class DrawExtension:
             sideWord = metrics.get("sides") if _isMniLesion(segmentationNode) else None
             self._lastReadout = lesioncard.readoutHtml(metrics, sideWord, "warn" if sideWord == "Both hemispheres" else "neutral")
             # The stat cells of the card (VISUAL 4.4); none for an empty lesion
+            # In scanner space the side is unknown (x = 0 is not the midline): the Side cell says so, no extra row
             self._lastStats = {"ml": metrics["ml"], "parts": metrics["parts"], "gaps": len(metrics["gaps"]),
                                "side": sideWord, "sideLevel": "warn" if sideWord == "Both hemispheres" else "neutral",
+                               "sideNote": None if _isMniLesion(segmentationNode) else _("scanner space"),
                                "outside": metrics.get("outside_pct")} if metrics.get("voxels") else None
         saveText, saveToolTip = saveStateText(segmentationNode)
         importer = _importer()
@@ -2874,6 +2948,9 @@ class DrawExtension:
         offerNewLesion = (lesionSaveState(segmentationNode)[0] == "saved" and getattr(shell, "studySession", None) is None
                           and importer is not None and hasattr(importer, "newLesionSegmentation"))
         spaceLine, spaceLevel = self._spaceLine(segmentationNode, sourceVolumeNode)
+        if spaceLevel == "neutral" and spaceLine == _("Scan space") and self._lastStats is not None and self._lastReadoutKey == readoutKey:
+            # The Side cell already says "scanner space"
+            spaceLine = None
         lesions = [(node.GetID(), node.GetName(), bool(node.GetDisplayNode().GetVisibility()) if node.GetDisplayNode() is not None else True)
                    for node in slicer.util.getNodesByClass("vtkMRMLSegmentationNode")]
         return {
@@ -3151,73 +3228,55 @@ class _EmptyState:
 
 
 class _DisplayCard:
-    """Display (collapsed): Fill | Outline | Both, fill opacity, Show in 3D, window/level presets, voxel view."""
+    """The lesion overlay in the views (VISUAL 4.4): an "Overlay" row (the fill opacity, with its percentage) and an
+    "Outline" switch. Show in 3D, voxel view and the window/level presets are items of the Draw ⋯ menu
+    (``displayMenuActions()``). The widget keeps the objectName of the former Display card (``StudioDisplayCard``).
+    """
+
+    #: Window/level presets of the ⋯ menu: (preset, title)
+    PRESETS = (("auto", _("Auto")), ("brain", _("Brain")), ("narrow", _("Narrow")))
 
     def __init__(self, ext):
-        import ctk
-
         self.ext = ext
-        self.widget = ctk.ctkCollapsibleButton()
+        self.widget = qt.QWidget()
         self.widget.setObjectName("StudioDisplayCard")
-        self.widget.text = _("Display")
-        self.widget.collapsed = True
         self.widget.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Maximum)
         self.widget.setToolTip(_("Drag in a view also adjusts window/level when no tool is active (Space pauses a tool)"))
         layout = qt.QVBoxLayout(self.widget)
-        layout.setContentsMargins(8, 4, 8, 4)
-        layout.setSpacing(6)
+        # Aligned with the inspector padding and the right edge of the size field
+        layout.setContentsMargins(ui.INSPECTOR_PADDING, 0, 18, 0)
+        layout.setSpacing(0)
         self._updating = False
-
-        frame, self.modeGroup = ui.segmented([_("Fill"), _("Outline"), _("Both")])
-        frame.setObjectName("StudioDisplayModeSegmented")
-        self.modeGroup.connect("buttonClicked(int)", self._onMode)
-        layout.addWidget(frame)
+        self._fillShown = True
 
         opacityRow = qt.QHBoxLayout()
-        opacityLabel = qt.QLabel(_("Opacity"))
-        opacityRow.addWidget(opacityLabel)
+        opacityRow.setSpacing(10)
+        self.opacityLabel = ui.label(_("Overlay"), "body", "text", "StudioDisplayOpacityLabel")
+        opacityRow.addWidget(self.opacityLabel)
         self.opacitySlider = qt.QSlider(qt.Qt.Horizontal)
         self.opacitySlider.setObjectName("StudioDisplayOpacitySlider")
         self.opacitySlider.setRange(0, 100)
-        self.opacitySlider.setToolTip(ui.tooltip(_("Fill opacity"), None, _("opacity of the lesion fill in the slice views")))
+        self.opacitySlider.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
+        self.opacitySlider.setToolTip(ui.tooltip(_("Overlay"), "O", _("opacity of the lesion fill in the slice views; O shows the outline only")))
+        self.opacitySlider.setAccessibleName(_("Lesion overlay opacity"))
         self.opacitySlider.connect("valueChanged(int)", self._onOpacity)
         opacityRow.addWidget(self.opacitySlider, 1)
-        layout.addLayout(opacityRow)
+        self.opacityValue = ui.label("", "body", "text2", "StudioDisplayOpacityValue")
+        ui.tabular(self.opacityValue)
+        self.opacityValue.setAlignment(qt.Qt.AlignRight | qt.Qt.AlignVCenter)
+        self.opacityValue.setMinimumWidth(self.opacityValue.fontMetrics().horizontalAdvance("100%") + 2)
+        opacityRow.addWidget(self.opacityValue)
+        rowWidget = qt.QWidget()
+        rowWidget.setObjectName("StudioDisplayOpacityRow")
+        rowWidget.setLayout(opacityRow)
+        opacityRow.setContentsMargins(0, 0, 0, 0)
+        rowWidget.setMinimumHeight(ui.ROW_HEIGHT)
+        layout.addWidget(rowWidget)
 
-        self.show3DCheckBox = qt.QCheckBox(_("Show in 3D"))
-        self.show3DCheckBox.setObjectName("StudioDisplayShow3DCheckBox")
-        self.show3DCheckBox.setToolTip(ui.tooltip(_("Show in 3D"), None, _("the lesion voxels in the 3D view (GPU, no surface to compute)")))
-        self.show3DCheckBox.connect("toggled(bool)", self._onShow3D)
-        layout.addWidget(self.show3DCheckBox)
-
-        presetRow = qt.QHBoxLayout()
-        presetRow.setSpacing(4)
-        presetLabel = qt.QLabel(_("Window/level"))
-        presetRow.addWidget(presetLabel)
-        self.presetButtons = {}
-        for preset, title in (("auto", _("Auto")), ("brain", _("Brain")), ("narrow", _("Narrow"))):
-            button = qt.QToolButton()
-            button.setObjectName(f"StudioWindowLevel{preset.capitalize()}Button")
-            button.setText(title)
-            button.setToolTip(ui.tooltip(_("Window/level: {preset}").format(preset=title), None,
-                                         _("drag in a view also adjusts window/level when no tool is active")))
-            button.connect("clicked()", lambda preset=preset: self._onPreset(preset))
-            ui.setRole(button, "ghost")
-            ui.installButtonKeys(button)
-            presetRow.addWidget(button)
-            self.presetButtons[preset] = button
-        presetRow.addStretch(1)
-        layout.addLayout(presetRow)
-
-        self.voxelViewCheckBox = qt.QCheckBox(_("Voxel view"))
-        self.voxelViewCheckBox.setObjectName("StudioDisplayVoxelViewCheckBox")
-        self.voxelViewCheckBox.setToolTip(ui.tooltip(_("Voxel view"), None, _("crisp voxels (no interpolation); on by default on the MNI template")))
-        self.voxelViewCheckBox.connect("toggled(bool)", self._onVoxelView)
-        layout.addWidget(self.voxelViewCheckBox)
-        for label in (opacityLabel, presetLabel):
-            font = qt.QFont(label.font)
-            font.setPixelSize(ui.fontPx(12))
-            label.setFont(font)
+        self.outlineSwitch = ui.switch(_("Outline"), "StudioDisplayOutlineSwitch")
+        self.outlineSwitch.setToolTip(ui.tooltip(_("Outline"), None, _("draw the outline of the lesion over the fill")))
+        self.outlineSwitch.connect("toggled(bool)", self._onOutline)
+        layout.addWidget(self.outlineSwitch)
 
     def _displayNode(self):
         segmentationNode, _source = lesionNodes()
@@ -3233,52 +3292,73 @@ class _DisplayCard:
                 fill, outline = bool(displayNode.GetVisibility2DFill()), bool(displayNode.GetVisibility2DOutline())
                 segmentId = _selectedSegmentId(segmentationNode)
                 opacity = displayNode.GetSegmentOpacity2DFill(segmentId) if segmentId else displayNode.GetOpacity2DFill()
-                self.show3DCheckBox.setChecked(bool(displayNode.GetVisibility3D()) and displayNode.GetPreferredDisplayRepresentationName3D()
-                                               == slicer.vtkSegmentationConverter.GetBinaryLabelmapRepresentationName())
-            mode = 2 if fill and outline else (0 if fill else 1)
-            button = self.modeGroup.button(mode)
-            if button is not None and not button.checked:
-                button.setChecked(True)
-            if self.opacitySlider.value != round(opacity * 100):
-                self.opacitySlider.setValue(round(opacity * 100))
-            sourceDisplay = sourceVolumeNode.GetDisplayNode() if sourceVolumeNode is not None else None
-            self.voxelViewCheckBox.setEnabled(sourceDisplay is not None and hasattr(sourceDisplay, "GetInterpolate"))
-            if sourceDisplay is not None and hasattr(sourceDisplay, "GetInterpolate"):
-                self.voxelViewCheckBox.setChecked(not sourceDisplay.GetInterpolate())
-            modeText = (_("Fill"), _("Outline"), _("Fill and outline"))[mode]
-            summary = _("Display · {mode}").format(mode=modeText) if mode == 1 else _("Display · {mode} {pct}%").format(mode=modeText, pct=round(opacity * 100))
-            if self.widget.text != summary:
-                self.widget.text = summary
+            self._fillShown = fill
+            # A hidden fill shows as 0%: moving the slider shows the fill again
+            percent = round(opacity * 100) if fill else 0
+            if self.opacitySlider.value != percent:
+                self.opacitySlider.setValue(percent)
+            self._showPercent(percent)
+            if self.outlineSwitch.checked != outline:
+                self.outlineSwitch.setChecked(outline)
         finally:
             self._updating = False
 
-    def _onMode(self, mode):
-        displayNode = self._displayNode()
-        if self._updating or displayNode is None:
-            return
-        displayNode.SetVisibility2DFill(mode in (0, 2))
-        displayNode.SetVisibility2DOutline(mode in (1, 2))
+    def _showPercent(self, percent):
+        text = f"{percent}%"
+        if str(self.opacityValue.text) != text:
+            self.opacityValue.setText(text)
 
     def _onOpacity(self, value):
+        self._showPercent(value)
         displayNode = self._displayNode()
         if self._updating or displayNode is None:
             return
         segmentationNode, _source = lesionNodes()
         segmentId = _selectedSegmentId(segmentationNode)
+        if value > 0 and not displayNode.GetVisibility2DFill():
+            displayNode.SetVisibility2DFill(True)
         if segmentId:
             displayNode.SetSegmentOpacity2DFill(segmentId, value / 100.0)
         else:
             displayNode.SetOpacity2DFill(value / 100.0)
 
-    def _onShow3D(self, checked):
+    def _onOutline(self, checked):
         displayNode = self._displayNode()
         if self._updating or displayNode is None:
+            return
+        displayNode.SetVisibility2DOutline(bool(checked))
+        if not checked and not displayNode.GetVisibility2DFill():
+            # Never nothing: without the outline the fill comes back
+            displayNode.SetVisibility2DFill(True)
+
+    def isShownIn3D(self):
+        displayNode = self._displayNode()
+        return bool(displayNode is not None and displayNode.GetVisibility3D() and displayNode.GetPreferredDisplayRepresentationName3D()
+                    == slicer.vtkSegmentationConverter.GetBinaryLabelmapRepresentationName())
+
+    def setShownIn3D(self, checked):
+        """Show the lesion voxels in the 3D view (GPU, no surface to compute)."""
+        displayNode = self._displayNode()
+        if displayNode is None:
             return
         if checked:
             displayNode.SetPreferredDisplayRepresentationName3D(slicer.vtkSegmentationConverter.GetBinaryLabelmapRepresentationName())
         displayNode.SetVisibility3D(bool(checked))
 
-    def _onPreset(self, preset):
+    def isVoxelView(self):
+        _segmentation, sourceVolumeNode = lesionNodes()
+        displayNode = sourceVolumeNode.GetDisplayNode() if sourceVolumeNode is not None else None
+        return bool(displayNode is not None and hasattr(displayNode, "GetInterpolate") and not displayNode.GetInterpolate())
+
+    def setVoxelView(self, checked):
+        """Crisp voxels (no interpolation) of the scan; on by default on the MNI template."""
+        _segmentation, sourceVolumeNode = lesionNodes()
+        displayNode = sourceVolumeNode.GetDisplayNode() if sourceVolumeNode is not None else None
+        if displayNode is not None and hasattr(displayNode, "SetInterpolate"):
+            displayNode.SetInterpolate(0 if checked else 1)
+
+    def applyPreset(self, preset):
+        """Window/level preset of the scan: "auto", "brain" or "narrow"."""
         _segmentation, sourceVolumeNode = lesionNodes()
         palette = _optionalModule("StudioLib.palette")
         if palette is not None and hasattr(palette, "applyWindowLevel"):
@@ -3288,21 +3368,13 @@ class _DisplayCard:
         if displayNode is not None and preset == "auto":
             displayNode.AutoWindowLevelOn()
 
-    def _onVoxelView(self, checked):
-        if self._updating:
-            return
-        _segmentation, sourceVolumeNode = lesionNodes()
-        displayNode = sourceVolumeNode.GetDisplayNode() if sourceVolumeNode is not None else None
-        if displayNode is not None and hasattr(displayNode, "SetInterpolate"):
-            displayNode.SetInterpolate(0 if checked else 1)
-
 
 class _CtaFooter:
     """Sticky inspector footer of Draw: the primary button (Ctrl+Enter) and a secondary text button.
 
-    No study: "Save lesion · Ctrl+Enter" and "Map network →" (a lesion in MNI space, Map available) or
-    "Normalize to MNI…" (a lesion in scan space, when normalization is available). With a study: "Done → next ·
-    Ctrl+Enter" and "Map network →". objectNames of QW-A kept: StudioDrawFooter, StudioSaveLesionButton.
+    No study: "Save lesion · Ctrl+Enter" and the link "Map this lesion's network →" (VISUAL 4.4; a lesion in scan space is
+    normalized from the panel's "Normalize to MNI" row). With a study: "Done → next · Ctrl+Enter" and the same link.
+    objectNames of QW-A kept: StudioDrawFooter, StudioSaveLesionButton.
     """
 
     def __init__(self, drawSession):
@@ -3375,6 +3447,9 @@ class _CtaFooter:
         return label, self._onPrimary
 
     def _secondaryAction(self, segmentationNode, study):
+        """The link under the primary button (VISUAL 4.4): "Map this lesion's network →" while Map is available. A lesion in
+        scan space is normalized from the "Normalize to MNI" row of the panel (Map offers it too).
+        """
         shell = self._shell()
         mapAvailable = False
         try:
@@ -3384,25 +3459,12 @@ class _CtaFooter:
             mapAvailable = mapWorkspace is not None and workspaces.isAvailable(mapWorkspace)
         except Exception:
             mapAvailable = False
-        if segmentationNode is None:
+        if segmentationNode is None or not mapAvailable:
             return None
-        if _isMniLesion(segmentationNode) or study is not None:
-            if mapAvailable:
-                return (_("Map network →"), lambda: (_applyPendingSmartFill(shell), shell.switchTo("map")),
-                        ui.tooltip(_("Map network"), "Ctrl+Alt+3", _("compute the network map of this lesion")))
-            return None
-        controller = _optionalModule("LesionNetworkMappingUI.normalize_controller")
-        if controller is not None and hasattr(controller, "offerNormalize"):
-            canNormalize = getattr(controller, "canNormalize", lambda *args: True)
-            try:
-                available = canNormalize()
-            except TypeError:
-                available = canNormalize(segmentationNode)
-            if available:
-                segmentId = _selectedSegmentId(segmentationNode)
-                return (_("Normalize to MNI…"), lambda: controller.offerNormalize(segmentationNode, segmentId, shell),
-                        ui.tooltip(_("Normalize to MNI"), None, _("the lesion is in scan space; Map needs it in MNI space")))
-        return None
+        description = (_("compute the network map of this lesion") if _isMniLesion(segmentationNode) or study is not None
+                       else _("the lesion is in scan space: Map offers to normalize it to MNI first"))
+        return (_("Map this lesion's network →"), lambda: (_applyPendingSmartFill(shell), shell.switchTo("map")),
+                ui.tooltip(_("Map network"), "Ctrl+Alt+3", description))
 
     def _onPrimary(self):
         if self._primary is not None:
@@ -3583,10 +3645,33 @@ def helpHtml(shell):
     return _("Draw · {tool}").format(tool=title), body
 
 
+def displayMenuActions(shell=None):
+    """The display items of the Draw ⋯ menu: Show lesion in 3D, Voxel view and the window/level presets (VISUAL 4.4: the
+    panel keeps only the Overlay row and the Outline switch).
+    """
+    displayCard = extension().displayCard
+    segmentationNode, sourceVolumeNode = lesionNodes()
+    if displayCard is None or segmentationNode is None:
+        return []
+    actions = [(_("Show lesion in 3D"), lambda: displayCard.setShownIn3D(not displayCard.isShownIn3D()), displayCard.isShownIn3D())]
+    sourceDisplay = sourceVolumeNode.GetDisplayNode() if sourceVolumeNode is not None else None
+    if sourceDisplay is not None and hasattr(sourceDisplay, "GetInterpolate"):
+        actions.append((_("Voxel view"), lambda: displayCard.setVoxelView(not displayCard.isVoxelView()), displayCard.isVoxelView()))
+    if sourceVolumeNode is not None:
+        actions.append((_("Window/level"), [(title, lambda preset=preset: displayCard.applyPreset(preset), None) for preset, title in _DisplayCard.PRESETS]))
+    return actions
+
+
 def moreMenuActions(shell):
-    """⋯ of the panel header: "Show all controls" (the classic Segment Editor controls inside Draw)."""
-    return [(_("Show all controls"), lambda: setShowAllControls(not _settingsBool(SHOW_ALL_CONTROLS_KEY, False), shell),
-             _settingsBool(SHOW_ALL_CONTROLS_KEY, False))]
+    """⋯ of the panel header: the display items (``displayMenuActions()``) and "Show all controls" (the classic Segment
+    Editor controls inside Draw).
+    """
+    actions = displayMenuActions(shell)
+    if actions:
+        actions.append(None)
+    actions.append((_("Show all controls"), lambda: setShowAllControls(not _settingsBool(SHOW_ALL_CONTROLS_KEY, False), shell),
+                    _settingsBool(SHOW_ALL_CONTROLS_KEY, False)))
+    return actions
 
 
 def setShowAllControls(show, shell=None):

@@ -35,6 +35,11 @@ with or without ``--check`` / ``--compare``. So does a metric that the ``--compa
 for but that this run skipped. Metrics that are merely absent (not selected with ``--only``) are not
 failures.
 
+``--ab VARIANTS`` (with the ``paint_256`` group) adds a run-time A/B of the paint costs: in the same process and on the
+same data, it times the paint hover and the stroke release with each Studio look switch of ``AB_VARIANTS`` turned off,
+interleaved with the unchanged look ("on") for ``--ab-rounds`` rounds, and writes every sample, the medians and the
+size of the painted view to ``details["ab"]``. Each stroke is undone after it is timed, so all strokes do the same work.
+
 ``--only`` takes metric names or measurement group names (see ``--list``). A group always measures
 all of its metrics, but only the requested metrics are written.
 
@@ -120,6 +125,15 @@ GROUPS = (
     ("effect_gui", ("effect_gui_refresh_ms",), "measureEffectGuiRefresh"),
     ("lnm", LNM_METRICS, "measureLesionNetworkMapping"),
 )
+
+# Studio look switches that the --ab option turns off at run time, one at a time
+AB_VARIANTS = {
+    "flatbars": "flat view controller bars (qMRMLViewControllerBar.flatStyle), the Appearance/FlatViewBars look",
+    "annotations": "slice view corner annotations (DataProbe SliceViewAnnotations)",
+    "orientation": "Studio orientation letters and display statement (StudioLib.orientation)",
+    "probe": "Studio in-view readout of the hovered voxel (StudioLib.probe)",
+    "classic": "the whole Studio interface (Classic, then Studio again)",
+}
 
 # View layout of each measurement group (a vtkMRMLLayoutNode constant name). Studio enters Draw in layout 7001 (Studio
 # Focus) since W2-I5, while earlier waves measured in four-up: each group sets its layout itself, so that the results of
@@ -347,6 +361,9 @@ def parseArguments(argv, inSlicer):
     parser.add_argument("--compare", help="previous JSON; exit 1 if a metric regressed by more than --tolerance")
     parser.add_argument("--tolerance", type=float, default=0.15, help="allowed relative regression for --compare (default: 0.15)")
     parser.add_argument("--min-delta-ms", type=float, default=0.25, help="increases below this many ms are noise for --compare (default: 0.25)")
+    parser.add_argument("--ab", help="paint_256 group: comma-separated Studio look switches to A/B at run time "
+                        f"({', '.join(AB_VARIANTS)}, or 'all')")
+    parser.add_argument("--ab-rounds", type=int, default=5, help="rounds of the --ab comparison (default: 5)")
     parser.add_argument("--mrhead", default=DEFAULT_MRHEAD_PATH, help="MRHead volume file; SampleData MRHead is used if it does not exist")
     if not inSlicer:
         parser.add_argument("--input", help="evaluate an existing JSON (--check / --compare) without measuring")
@@ -962,7 +979,132 @@ class InSlicerBench:
         def undo():
             self.record("undo_surfaces_ms", statistics.median([self.timeUntilVisible(redView, editor.undo) for _ in range(3)]))
         self.attempt(["undo_surfaces_ms"], undo)
+        if getattr(self.args, "ab", None):
+            try:
+                self.paintAB(editor, redNode, sliceZ, strokePoints)
+            except Exception:
+                self.details["ab_error"] = traceback.format_exc()[-3000:]
+                traceback.print_exc()
         editor.setActiveEffectByName("")
+
+    def abVariants(self):
+        names = [name.strip() for name in self.args.ab.split(",") if name.strip()]
+        if names == ["all"]:
+            names = list(AB_VARIANTS)
+        unknown = [name for name in names if name not in AB_VARIANTS]
+        if unknown:
+            raise ValueError(f"unknown --ab variant(s) {', '.join(unknown)} (known: {', '.join(AB_VARIANTS)})")
+        return names
+
+    def turnOff(self, variant):
+        """Turn one Studio look switch off; returns a function that turns it on again (None if it is not on)."""
+        import slicer
+        layoutManager = slicer.app.layoutManager()
+        shell = self.studioShell()
+        if variant == "flatbars":
+            controllers = [layoutManager.sliceWidget(name).sliceController() for name in layoutManager.sliceViewNames()]
+            controllers += [layoutManager.threeDWidget(index).threeDController() for index in range(layoutManager.threeDViewCount)]
+            flat = [controller for controller in controllers if getattr(controller, "flatStyle", False)]
+            if not flat:
+                return None
+            for controller in flat:
+                controller.flatStyle = False
+
+            def restore():
+                for controller in flat:
+                    controller.flatStyle = True
+            return restore
+        if variant == "annotations":
+            annotations = slicer.modules.DataProbeInstance.infoWidget.sliceAnnotations
+            if not annotations.sliceViewAnnotationsEnabled:
+                return None
+            annotations.sliceViewAnnotationsEnabled = 0
+            annotations.updateSliceViewFromGUI()
+
+            def restore():
+                annotations.sliceViewAnnotationsEnabled = 1
+                annotations.updateSliceViewFromGUI()
+            return restore
+        if variant in ("orientation", "probe"):
+            module = __import__(f"StudioLib.{variant}", fromlist=[variant])
+            if module.instance() is None:
+                return None
+            module.uninstall(shell)
+            return lambda: module.install(shell)
+        if variant == "classic":
+            if shell is None or not shell.isActive():
+                return None
+            shell.classic(persist=False)
+
+            def restore():
+                shell.studio()
+            return restore
+        raise ValueError(variant)
+
+    def paintAB(self, editor, redNode, sliceZ, strokePoints):
+        """Run-time A/B of the paint costs with each Studio look switch of --ab off ("on" is the unchanged look)."""
+        import slicer
+        variants = self.abVariants()
+        layoutManager = slicer.app.layoutManager()
+        samples = {"on": {"hover": [], "stroke": [], "view": []}}
+        for variant in variants:
+            samples[variant] = {"hover": [], "stroke": [], "view": []}
+        skipped = {}
+
+        def ready():
+            # Classic and Studio may change the layout and the effect: set them again before every sample
+            if layoutManager.layout != slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView:
+                layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
+            if slicer.util.selectedModule() != "SegmentEditor":
+                slicer.util.selectModule("SegmentEditor")
+            self.pump(4)
+            if editor.activeEffect() is None or editor.activeEffect().name != "Paint":
+                editor.setActiveEffectByName("Paint")
+            self.pump(4)
+            self.idleWait(200)
+            redWidget = layoutManager.sliceWidget("Red")
+            redView = redWidget.sliceView()
+            return redView, redView.interactorStyle().GetInteractor()
+
+        def sample(name):
+            redView, interactor = ready()
+            center = self.rasToXY(redNode, (128.0, 128.0, sliceZ))
+            with self.uncappedRendering():
+                self.hover(interactor, center, 10)
+                samples[name]["hover"].append(round(statistics.median([self.hover(interactor, center, 30) for _ in range(3)]), 2))
+            times = []
+            for repetition in (1, 3, 5):
+                times.append(self.stroke(interactor, strokePoints(repetition), redView))
+                self.pump(2)
+                editor.undo()
+                self.pump(4)
+            samples[name]["stroke"].append(round(statistics.median(times), 1))
+            samples[name]["view"].append([redView.width, redView.height])
+
+        for _round in range(max(1, self.args.ab_rounds)):
+            for variant in variants:
+                if variant in skipped:
+                    continue
+                sample("on")
+                restore = self.turnOff(variant)
+                if restore is None:
+                    skipped[variant] = "not on in this run"
+                    continue
+                try:
+                    sample(variant)
+                finally:
+                    restore()
+                    self.pump(4)
+        self.details["ab"] = {
+            "rounds": self.args.ab_rounds,
+            "samples": samples,
+            "skipped": skipped,
+            "medians": {name: {"paint_hover_surfaces_ms": statistics.median(values["hover"]) if values["hover"] else None,
+                               "stroke_release_256_3d_ms": statistics.median(values["stroke"]) if values["stroke"] else None}
+                        for name, values in samples.items()},
+        }
+        for name, values in self.details["ab"]["medians"].items():
+            print(f"BENCH ab {name}: hover {values['paint_hover_surfaces_ms']} ms, stroke {values['stroke_release_256_3d_ms']} ms", flush=True)
 
     def measurePaintMNI(self):
         import numpy as np
@@ -1489,6 +1631,10 @@ class InSlicerBench:
             self.details["widget_metrics"] = traceback.format_exc()[-1000:]
         shell = self.studioShell()
         self.details["studio_active"] = shell is not None
+        layoutManager = slicer.app.layoutManager()
+        redWidget = layoutManager.sliceWidget("Red") if layoutManager is not None else None
+        # The view bar look of this run (Appearance/FlatViewBars), for A/B comparisons between runs
+        self.details["flat_view_bars"] = bool(getattr(redWidget.sliceController(), "flatStyle", False)) if redWidget is not None else None
         for group, metricNames, methodName in GROUPS:
             if group not in selectedGroups:
                 continue

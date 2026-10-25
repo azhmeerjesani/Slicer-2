@@ -589,28 +589,63 @@ class PanelHeader:
         # Items of the workspace hooks, above the panel items
         for action in self._hookActions:
             self.moreMenu.removeAction(action)
-            action.deleteLater()
+            submenu = action.menu()
+            (submenu if submenu is not None else action).deleteLater()
         self._hookActions = []
         items = workspaces.callHook(self._currentHooksWorkspace(), "moreMenuActions", self.shell) or []
         for item in items:
+            if item is None:
+                # A separator between groups of hook items
+                if self._hookActions and not self._hookActions[-1].isSeparator():
+                    separator = qt.QAction(self.moreMenu)
+                    separator.setSeparator(True)
+                    self.moreMenu.insertAction(self.dataProbeAction, separator)
+                    self._hookActions.append(separator)
+                continue
             try:
                 text, callback, checked = (tuple(item) + (None, None))[:3]
             except TypeError:
                 continue
-            action = qt.QAction(text, self.moreMenu)
+            if isinstance(callback, (list, tuple)):
+                # A submenu: callback is a list of (text, callback, checked) items
+                action = self._hookSubmenu(text, callback).menuAction()
+            else:
+                action = qt.QAction(text, self.moreMenu)
+                if checked is not None:
+                    action.setCheckable(True)
+                    action.setChecked(bool(checked))
+                if callback is not None:
+                    action.connect("triggered()", callback)
             action.setObjectName("StudioPanelHookAction")
-            if checked is not None:
-                action.setCheckable(True)
-                action.setChecked(bool(checked))
-            if callback is not None:
-                action.connect("triggered()", callback)
             self.moreMenu.insertAction(self.dataProbeAction, action)
             self._hookActions.append(action)
+        while self._hookActions and self._hookActions[-1].isSeparator():
+            self.moreMenu.removeAction(self._hookActions[-1])
+            self._hookActions.pop().deleteLater()
         if self._hookActions:
             separator = qt.QAction(self.moreMenu)
             separator.setSeparator(True)
             self.moreMenu.insertAction(self.dataProbeAction, separator)
             self._hookActions.append(separator)
+
+    def _hookSubmenu(self, text, items):
+        """A submenu of the ⋯ menu for a hook item whose callback is a list of ``(text, callback, checked)`` items."""
+        menu = qt.QMenu(text, self.moreMenu)
+        menu.setObjectName("StudioPanelHookMenu")
+        for item in items:
+            if item is None:
+                menu.addSeparator()
+                continue
+            itemText, callback, checked = (tuple(item) + (None, None))[:3]
+            action = menu.addAction(itemText)
+            if checked is not None:
+                action.setCheckable(True)
+                action.setChecked(bool(checked))
+            if callback is not None:
+                action.connect("triggered()", callback)
+            else:
+                action.setEnabled(False)
+        return menu
 
     def _moduleHelpHtml(self):
         """Help and acknowledgment of the module shown in the inspector, or None."""
@@ -1362,9 +1397,6 @@ class Shell:
         self._workspacePanelWidths = {}
         #: Contents of the module panel scroll area, watched for layout changes (a tool was chosen)
         self._watchedPanelContents = None
-        #: [(module widget, Classic minimum height)]: module widgets whose minimum height Studio holds at their height for
-        #: their width (see _holdModuleWidgetHeight())
-        self._heldModuleWidgets = []
         #: True while the inspector is hidden by the user (shortcut, Ctrl+5, menu), not by a workspace page
         self._inspectorHiddenByUser = False
         #: (toggle view action, slot) of the toolbars that Studio hides
@@ -1559,6 +1591,7 @@ class Shell:
         self._viewTabStops = None
         self._uninstallPlugins()
         self._setSegmentEditorPresentation("classic")
+        self._setMapPresentation(False)
         self._active = False
         self._pauseLesionQc()
         self._disconnectAll()
@@ -1872,8 +1905,10 @@ class Shell:
         if self._panelScrollArea is not None:
             self._panelScrollArea.installEventFilter(self._eventFilter)
 
-        # 7. Draw presentation of the Segment Editor, if it exists already. The folder of the Save dialog (Ctrl+S).
+        # 7. Draw presentation of the Segment Editor and the Studio look of Map, if they exist already. The folder of the
+        # Save dialog (Ctrl+S).
         self._setSegmentEditorPresentation("studio")
+        self._setMapPresentation(True)
         self._fixSceneRootDirectory()
         self._sceneCloseObservation = slicer.mrmlScene.AddObserver(slicer.vtkMRMLScene.EndCloseEvent, self._onSceneEndClose)
         self._sceneImportObservation = slicer.mrmlScene.AddObserver(slicer.vtkMRMLScene.EndImportEvent, self._onSceneEndImport)
@@ -2323,6 +2358,8 @@ class Shell:
     def _onModuleAdded(self, moduleName):
         if moduleName == "SegmentEditor":
             self._setSegmentEditorPresentation("studio")
+        elif moduleName == "LesionNetworkMapping":
+            self._setMapPresentation(True)
         self._fitTextBrowsers()
         # A transient module may need a wider panel than the stored width
         self._schedulePanelWidthUpdate(shrink=False)
@@ -2337,6 +2374,20 @@ class Shell:
             logging.error(f"Studio: cannot create the {moduleName} module widget:\n{traceback.format_exc()}")
         if moduleName == "SegmentEditor":
             self._setSegmentEditorPresentation("studio")
+        elif moduleName == "LesionNetworkMapping":
+            self._setMapPresentation(True)
+
+    @staticmethod
+    def _setMapPresentation(studio):
+        """The Studio look of the Map panel (seed modes above the steps, compact headers), set before the inspector width
+        is measured for Map; ``False`` gives the Classic look back.
+        """
+        widget = getattr(slicer.modules, "LesionNetworkMappingWidget", None)
+        if widget is not None and hasattr(widget, "setStudioPresentation"):
+            try:
+                widget.setStudioPresentation(bool(studio), refresh=False)
+            except Exception:
+                logging.error(f"Studio: cannot set the look of Map:\n{traceback.format_exc()}")
 
     @staticmethod
     def _setSegmentEditorPresentation(name):
@@ -2683,6 +2734,10 @@ class Shell:
     def _onPanelUpdateTimeout(self):
         shrink = self._pendingPanelShrink
         self._pendingPanelShrink = False
+        # The layouts that changed (a module widget just shown, a card that changed its look) are laid out first: the
+        # width is measured on what is shown, never on a pending layout (a measured width is kept, so a transient one
+        # would widen the inspector for good)
+        qt.QCoreApplication.sendPostedEvents(None, qt.QEvent.LayoutRequest)
         self._updatePanelWidth(shrink)
 
     def _updatePanelWidth(self, shrink=False):
@@ -2805,7 +2860,6 @@ class Shell:
                 if self._eventFilter is not None and scrollArea.widget() is not None and self._watchedPanelContents is None:
                     self._watchedPanelContents = scrollArea.widget()
                     self._watchedPanelContents.installEventFilter(self._eventFilter)
-                self._holdModuleWidgetHeights()
             self._fitTextBrowsers()
             return
         self._unfitTextBrowsers()
@@ -3627,9 +3681,6 @@ class Shell:
             # Alt+click and Alt+wheel are not a bare Alt press
             self._cancelAltKey()
             return False
-        if eventType in (qt.QEvent.Resize, qt.QEvent.LayoutRequest) and self._heldModuleWidgets and self._isHeldModuleWidget(obj):
-            self._holdModuleWidgetHeight(obj, event.size().width() if eventType == qt.QEvent.Resize else obj.width)
-            return False
         if eventType == qt.QEvent.Resize:
             if obj == self.mainWindow.centralWidget():
                 if self._canvas is not None:
@@ -3672,8 +3723,6 @@ class Shell:
         elif eventType == qt.QEvent.LayoutRequest and obj == self._watchedPanelContents:
             # The module widget changed (a tool was chosen): the inspector may need to widen once
             self._schedulePanelWidthUpdate(shrink=False)
-            # Another module widget may have been put in the panel
-            self._holdModuleWidgetHeights()
         elif eventType == qt.QEvent.Show and obj == self.mainWindow:
             if self._canvas is not None:
                 # The canvas was set while the main window was hidden (no view widget was visible): cover now
@@ -3743,58 +3792,7 @@ class Shell:
                 # Deleted with the module panel
                 pass
             self._watchedPanelContents = None
-        self._releaseModuleWidgetHeights()
         self._eventFilter = None
-
-    #
-    # Height of the module widgets in the inspector
-    #
-
-    def _holdModuleWidgetHeights(self):
-        """Hold the minimum height of the module widgets in the inspector at their height for their width.
-
-        The module panel takes the layout item of a module widget out of its scroll area when another module is
-        selected, without deleting it (``qSlicerModulePanel::removeModule()``). That item stays registered with the
-        widget, so the item of the widget put back later never has its height-for-width cache cleared (Qt clears only
-        the registered item). The scroll area then sizes its contents with the height that the module widget had for
-        its width when it was first shown again: when the widget grew (a drawn lesion, a notice), its word-wrapped rows
-        were laid out below their height and drawn over each other (the stat cells of the lesion card over its save
-        state, at 1366 x 768). Minimum sizes are not cached that way, so a minimum height equal to the height for the
-        width lets the inspector scroll instead. Classic keeps its behaviour (released in ``_removeEventFilters()``).
-        """
-        contents = self._watchedPanelContents
-        if contents is None or self._eventFilter is None or contents.layout() is None:
-            return
-        # A module widget deleted since (a reloaded scripted module) is forgotten
-        self._heldModuleWidgets = [(widget, height) for widget, height in self._heldModuleWidgets if self._isAlive(widget)]
-        layout = contents.layout()
-        for index in range(layout.count()):
-            widget = layout.itemAt(index).widget()
-            if widget is None or not widget.inherits("qSlicerAbstractModuleWidget") or self._isHeldModuleWidget(widget):
-                continue
-            self._heldModuleWidgets.append((widget, widget.minimumHeight))
-            widget.installEventFilter(self._eventFilter)
-            self._holdModuleWidgetHeight(widget, widget.width)
-
-    def _isHeldModuleWidget(self, obj):
-        return any(obj == widget for widget, _minimumHeight in self._heldModuleWidgets)
-
-    def _holdModuleWidgetHeight(self, widget, width):
-        classicMinimumHeight = next((height for held, height in self._heldModuleWidgets if held == widget), 0)
-        height = max(widget.heightForWidth(width), classicMinimumHeight) if width > 0 else classicMinimumHeight
-        if widget.minimumHeight != height:
-            widget.setMinimumHeight(height)
-
-    def _releaseModuleWidgetHeights(self):
-        held, self._heldModuleWidgets = self._heldModuleWidgets, []
-        for widget, minimumHeight in held:
-            try:
-                if self._eventFilter is not None:
-                    widget.removeEventFilter(self._eventFilter)
-                widget.setMinimumHeight(minimumHeight)
-            except Exception:
-                # Deleted with its module
-                pass
 
     #
     # Studio-only behaviours of the views, the save folder and the classic menus

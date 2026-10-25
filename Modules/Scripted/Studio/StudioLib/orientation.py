@@ -32,10 +32,11 @@ part of the key compared by the timer, the ruler geometry is a fraction of the v
 position follows resizes without any update).
 
 Display statement (plain words): axial and coronal views, whose screen-right direction (column 0 of
-SliceToRAS) is axis-aligned to x (|x| > 0.9), say in the bottom-left corner "Left is on screen right"
-(radiological, the default) or "Left is on screen left" (neurological, a flipped view). The statement is a
-12 px ``vtkTextActor`` above the lines of the corner annotation, updated with the letters. Sagittal and oblique
-views have none.
+SliceToRAS) is axis-aligned to x (|x| > 0.9), say in the bottom-right corner "Radiological · L on right"
+(the default) or "Neurological · L on left" (a flipped view), VISUAL 4.3. The statement is an 11 px
+``vtkTextActor`` in the caption color, above the lines of the lower-right corner annotation if there are any, updated
+with the letters. Sagittal and oblique views have none. The bottom-left corner keeps the name of the image
+(SliceViewAnnotations).
 
 Figure views (``space.isFigureView()``): a 2D figure has no patient directions of its own, so a figure view
 shows no A/P/S/I letters and no statement. It shows a tag "Figure · side unknown" until the figure's
@@ -71,14 +72,14 @@ _NEGATIVE_LETTERS = ("L", "P", "I")
 SINGLE_LETTER_ANGLE_DEGREES = 25.0
 _SECOND_LETTER_COMPONENT = math.sin(math.radians(SINGLE_LETTER_ANGLE_DEGREES))
 
-#: Size of the letters in points: the size of the corner annotations of SliceViewAnnotations (14)
-FONT_SIZE = 14
+#: Size of the letters in points: 11, weight 600 (bold), like the corner text of the flat views (VISUAL 4.3)
+FONT_SIZE = 11
 #: Distance of the letters from the view edge, in pixels
 EDGE_MARGIN = 6
-#: Slice views have a dark background in the dark and the light theme, so the letters are always light
-#: (the text color of the dark theme), with a shadow for bright images
-LETTER_COLOR = (0.957, 0.957, 0.961)  # #f4f4f5
-LETTER_OPACITY = 0.9
+#: Slice views have a dark background in the dark and the light theme, so the letters always have the caption color of
+#: the dark theme (text3, #8b8b94: 6:1 on black), with a shadow for bright images
+LETTER_COLOR = (0x8B / 255.0, 0x8B / 255.0, 0x94 / 255.0)
+LETTER_OPACITY = 1.0
 
 #: Edges, in the order of ``edgeLetters()``: (name, reference point in normalized viewport coordinates,
 #: offset in pixels, horizontal justification, vertical justification)
@@ -94,10 +95,13 @@ EDGES = (
 _RULER_LINE_MARGIN = 0.015
 _RULER_TICK_LENGTHS = {1: 0.015, 2: 0.03}  # vtkMRMLAbstractViewNode.RulerTypeThin, RulerTypeThick
 
-#: Display statement and figure tag: bottom-left of the view, above the lines of the corner annotation
-STATEMENT_FONT_SIZE = 12
-STATEMENT_COLOR = (0.78, 0.78, 0.82)
-STATEMENT_OPACITY = 0.9
+#: Display statement (bottom-right) and figure tag (bottom-left), above the lines of the corner annotation in their corner
+STATEMENT_FONT_SIZE = 11
+STATEMENT_COLOR = LETTER_COLOR
+STATEMENT_OPACITY = 1.0
+#: The figure tag keeps its size: it is the only cue of a figure view
+TAG_FONT_SIZE = 12
+TAG_COLOR = (0.78, 0.78, 0.82)
 #: Opacity of the dark box behind the figure tag and the figure side letters (a figure is mostly white)
 FIGURE_BACKGROUND_OPACITY = 0.6
 #: Position of the lower-left text of a vtkCornerAnnotation (SetTextActorsPosition) and the gap above it
@@ -111,7 +115,7 @@ _quitConnected = False
 
 
 def displayStatement(sliceToRAS):
-    """Plain-words display statement of a view: "Left is on screen right" or "Left is on screen left".
+    """Plain-words display statement of a view: "Radiological · L on right" or "Neurological · L on left".
 
     ``sliceToRAS`` is the ``vtkMatrix4x4`` SliceToRAS of the slice node. The statement exists only when the
     screen-right direction (column 0) is along x (|x| > 0.9): axial and coronal views, flipped or not. An empty
@@ -121,7 +125,7 @@ def displayStatement(sliceToRAS):
     length = math.sqrt(sum(sliceToRAS.GetElement(row, 0) ** 2 for row in range(3)))
     if length < 1e-9 or abs(x) / length <= STATEMENT_AXIS_THRESHOLD:
         return ""
-    return _("Left is on screen right") if x < 0 else _("Left is on screen left")
+    return _("Radiological · L on right") if x < 0 else _("Neurological · L on left")
 
 
 def figureTag(convention):
@@ -228,18 +232,21 @@ class _ViewLetters:
         self.tag = ""
         self.isFigure = False
         self.convention = None
-        self.cornerText = None
+        #: {corner position: (text, height in pixels)} of the lower corners of the corner annotation
+        self.cornerTexts = {}
+        #: Heights of the corner text under the statement (lower right) and under the figure tag (lower left)
         self.statementOffset = 0
+        self.tagOffset = 0
         self.actors = []
         for edgeName, reference, offset, horizontal, vertical in EDGES:
             self.actors.append(self._createActor(edgeName, reference, offset, horizontal, vertical))
         #: Side letters of a figure whose convention is known (left edge: R, right edge: L)
         self.figureActors = [self._createActor(edgeName, reference, offset, horizontal, vertical, "StudioFigureLetter_")
                              for edgeName, reference, offset, horizontal, vertical in EDGES[:2]]
-        self.statementActor = self._createTextActor("StudioOrientationStatement", (0.0, 0.0), (CORNER_ANNOTATION_MARGIN, 0),
-                                                    "left", "bottom", STATEMENT_FONT_SIZE, False, STATEMENT_COLOR, STATEMENT_OPACITY)
+        self.statementActor = self._createTextActor("StudioOrientationStatement", (1.0, 0.0), (-CORNER_ANNOTATION_MARGIN, CORNER_ANNOTATION_MARGIN),
+                                                    "right", "bottom", STATEMENT_FONT_SIZE, False, STATEMENT_COLOR, STATEMENT_OPACITY)
         self.tagActor = self._createTextActor("StudioFigureTag", (0.0, 0.0), (CORNER_ANNOTATION_MARGIN, 0),
-                                              "left", "bottom", STATEMENT_FONT_SIZE, False, STATEMENT_COLOR, 1.0, True)
+                                              "left", "bottom", TAG_FONT_SIZE, False, TAG_COLOR, 1.0, True)
         self.otherActors = [*self.figureActors, self.statementActor, self.tagActor]
         for actor in (*self.actors, *self.otherActors):
             self.renderer.AddViewProp(actor)
@@ -380,13 +387,15 @@ class _ViewLetters:
         sliceLogic.SetSliceOffset(low + half if offset < low else high - half)
         return True
 
-    def _cornerTextHeight(self):
-        """Height in pixels of the lower-left text of the corner annotation (0 if it has none)."""
+    def _cornerTextHeight(self, position=0):
+        """Height in pixels of the text of a lower corner of the corner annotation (0: lower left, 1: lower right; 0 if it
+        has none). The last measure of each corner is kept until its text changes.
+        """
         cornerAnnotation = self.sliceView.cornerAnnotation()
-        text = cornerAnnotation.GetText(0) if cornerAnnotation is not None else ""
-        if text == self.cornerText:
-            return self.statementOffset
-        self.cornerText = text
+        text = cornerAnnotation.GetText(position) if cornerAnnotation is not None else ""
+        cached = self.cornerTexts.get(position)
+        if cached is not None and cached[0] == text:
+            return cached[1]
         height = 0
         if text.strip():
             probe = vtk.vtkTextActor()
@@ -396,17 +405,22 @@ class _ViewLetters:
             box = [0.0] * 4
             probe.GetBoundingBox(self.renderer, box)
             height = math.ceil(box[3] - box[2])
-        self.statementOffset = height
+        self.cornerTexts[position] = (text, height)
         return height
 
     def _placeStatement(self):
-        """Put the statement and the tag above the lower-left lines of the corner annotation. Return True if they moved."""
-        previous = self.statementOffset
-        height = self._cornerTextHeight()
-        y = CORNER_ANNOTATION_MARGIN + (height + STATEMENT_GAP if height else 0)
-        for actor in (self.statementActor, self.tagActor):
-            actor.GetPositionCoordinate().SetValue(CORNER_ANNOTATION_MARGIN, y)
-        return height != previous
+        """Put the statement above the lower-right lines of the corner annotation and the tag above its lower-left lines.
+
+        Return True if they moved.
+        """
+        previous = (self.statementOffset, self.tagOffset)
+        self.statementOffset = self._cornerTextHeight(1) if self.statement else self.statementOffset
+        self.tagOffset = self._cornerTextHeight(0) if self.tag else self.tagOffset
+        statementY = CORNER_ANNOTATION_MARGIN + (self.statementOffset + STATEMENT_GAP if self.statementOffset else 0)
+        tagY = CORNER_ANNOTATION_MARGIN + (self.tagOffset + STATEMENT_GAP if self.tagOffset else 0)
+        self.statementActor.GetPositionCoordinate().SetValue(-CORNER_ANNOTATION_MARGIN, statementY)
+        self.tagActor.GetPositionCoordinate().SetValue(CORNER_ANNOTATION_MARGIN, tagY)
+        return (self.statementOffset, self.tagOffset) != previous
 
     def _updateFigureState(self):
         """Re-evaluate whether the view shows a figure (and its convention). Return True if the figure state changed."""

@@ -230,6 +230,96 @@ def setBannerText(bannerFrame, text):
 
 
 #
+# Notice line (Studio): one sentence and "Details"
+#
+
+
+def noticeLine(objectName="LNMNoticeLine"):
+    """Return a one-line notice (VISUAL 4.8, Map Result card): a 14 px warning icon, one sentence elided to the width and
+    a "Details" link that shows the whole explanation in a popover. Set its contents with ``setNoticeLine()``.
+
+    Its children: ``LNMNoticeLineText`` (the sentence) and ``LNMNoticeLineDetails`` (the link).
+    """
+    frame = qt.QFrame()
+    frame.setObjectName(objectName)
+    frame.setProperty("lnmNoticeLine", True)
+    frame.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
+    layout = qt.QHBoxLayout(frame)
+    layout.setContentsMargins(10, 6, 8, 6)
+    layout.setSpacing(8)
+    icon = qt.QLabel()
+    icon.setObjectName("LNMNoticeLineIcon")
+    icon.setFixedSize(14, 16)
+    layout.addWidget(icon)
+    label = qt.QLabel()
+    label.setObjectName("LNMNoticeLineText")
+    label.setTextFormat(qt.Qt.PlainText)
+    label.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
+    _font(label, 12)
+    layout.addWidget(label, 1)
+    details = qt.QPushButton("Details")
+    details.setObjectName("LNMNoticeLineDetails")
+    details.setFlat(True)
+    details.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
+    details.setSizePolicy(qt.QSizePolicy.Maximum, qt.QSizePolicy.Fixed)
+    _font(details, 12)
+    details.connect("clicked()", lambda frame=frame, details=details: showPopover(details, str(frame.property("lnmNoticeDetails") or ""), "LNMNoticeLinePopover"))
+    layout.addWidget(details)
+    ui = _studioUi()
+    if ui is not None:
+        if hasattr(ui, "elideLabel"):
+            ui.elideLabel(label)
+
+        def styleSheet(frame=frame, icon=icon):
+            color = ui.token("warning")
+            icon.setPixmap(ui.pixmap("triangle-alert", 14, "warning"))
+            return (f'QFrame[lnmNoticeLine="true"] {{ background-color: {ui._rgba(color, 0.08)}; border: 1px solid {ui._rgba(color, 0.22)};'
+                    " border-radius: 8px; }"
+                    f'QFrame[lnmNoticeLine="true"] QLabel {{ background: transparent; border: none; color: {ui.token("text").name()}; }}'
+                    f'QPushButton#LNMNoticeLineDetails {{ background: transparent; border: none; padding: 0px; color: {ui.token("accent-fg").name()}; }}'
+                    "QPushButton#LNMNoticeLineDetails:hover { text-decoration: underline; }")
+
+        ui.bindStyleSheet(frame, styleSheet)
+    else:
+        frame.setStyleSheet(_bannerStyleSheet("warn").replace("LNMBanner", objectName))
+    frame.hide()
+    return frame
+
+
+def setNoticeLine(frame, sentence, details=""):
+    """Show ``sentence`` (one line) in a ``noticeLine()``; ``details`` (the whole explanation) is behind "Details", which is
+    hidden when there are none. An empty sentence hides the notice.
+    """
+    label = frame.findChild(qt.QLabel, "LNMNoticeLineText")
+    ui = _studioUi()
+    if ui is not None and hasattr(ui, "setElidedText") and label.property("studioElided"):
+        ui.setElidedText(label, sentence or "")
+    else:
+        label.setText(sentence or "")
+    frame.setProperty("lnmNoticeDetails", details or "")
+    frame.findChild(qt.QPushButton, "LNMNoticeLineDetails").setVisible(bool(details) and details != sentence)
+    frame.setToolTip(details or sentence or "")
+    frame.setVisible(bool(sentence))
+
+
+def showPopover(anchor, text, objectName="LNMPopover"):
+    """Show ``text`` (plain, word-wrapped, selectable) in a popover under ``anchor``."""
+    menu = qt.QMenu(anchor)
+    menu.setObjectName(objectName)
+    label = qt.QLabel(text)
+    label.setWordWrap(True)
+    label.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
+    label.setFixedWidth(320)
+    label.setContentsMargins(12, 10, 12, 10)
+    action = qt.QWidgetAction(menu)
+    action.setDefaultWidget(label)
+    menu.addAction(action)
+    run = getattr(menu, "exec", None) or menu.exec_
+    run(anchor.mapToGlobal(qt.QPoint(0, anchor.height)))
+    menu.deleteLater()
+
+
+#
 # Progress row
 #
 

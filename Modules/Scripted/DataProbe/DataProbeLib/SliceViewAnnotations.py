@@ -17,12 +17,22 @@ FLAT_TEXT_COLOR = (0x8B / 255.0, 0x8B / 255.0, 0x94 / 255.0)
 CLASSIC_TEXT_COLOR = (1.0, 1.0, 1.0)
 
 
-def flatDisplayName(name):
-    """A readable name of a volume for the corner text of a flat view: "MNI152NLin2009cAsym_2mm_brain" becomes
-    "MNI152NLin2009cAsym · 2 mm brain" (the node is not renamed).
+def flatDisplayName(name, template=False):
+    """A readable name of a volume for the corner text of a flat view: "MRHead" stays, "sub_01_T1w" becomes "sub 01 T1w"
+    and the name of a template (``template``: the Slicer Studio attribute ``Studio.Role`` is "template")
+    "MNI152NLin2009cAsym_2mm_brain" becomes "MNI152NLin2009cAsym · 2 mm" (VISUAL 4.3). The node is not renamed.
     """
     text = re.sub(r"_(\d+(?:\.\d+)?)\s?mm(?=_|$)", r" · \1 mm", name or "")
-    return re.sub(r"\s+", " ", text.replace("_", " ")).strip()
+    text = re.sub(r"\s+", " ", text.replace("_", " ")).strip()
+    if template:
+        # The brain-extracted template is the template: its suffix says nothing in the view
+        text = re.sub(r"\s+brain$", "", text, flags=re.IGNORECASE)
+    return text
+
+
+def isTemplateVolume(volumeNode):
+    """True if Slicer Studio marked the volume as a template (attribute ``Studio.Role`` = "template")."""
+    return volumeNode is not None and volumeNode.GetAttribute("Studio.Role") == "template"
 
 
 class SliceAnnotations(VTKObservationMixin):
@@ -479,11 +489,10 @@ class SliceAnnotations(VTKObservationMixin):
         except (AttributeError, ValueError):
             return False
 
-    def _layerText(self, prefix, volumeName, opacity, flat):
-        """Corner text of a layer: "B: name" (classic), the readable name alone on a flat view."""
+    def _layerText(self, prefix, volumeName, opacity, flat, volumeNode=None):
+        """Corner text of a layer: "B: name (40%)" (classic), the readable name alone on a flat view."""
         if flat:
-            text = flatDisplayName(volumeName)
-            return text if opacity is None else text + " · %d%%" % (opacity * 100)
+            return flatDisplayName(volumeName, isTemplateVolume(volumeNode))
         text = prefix + volumeName
         return text if opacity is None else text + " (" + str("%d" % (opacity * 100)) + "%)"
 
@@ -520,8 +529,9 @@ class SliceAnnotations(VTKObservationMixin):
                     foregroundOpacity = sliceCompositeNode.GetForegroundOpacity()
                     backgroundVolumeName = backgroundVolume.GetName()
                     foregroundVolumeName = foregroundVolume.GetName()
-                    self.cornerTexts[0]["3-Background"]["text"] = self._layerText("B: ", backgroundVolumeName, None, flat)
-                    self.cornerTexts[0]["2-Foreground"]["text"] = self._layerText("F: ", foregroundVolumeName, foregroundOpacity, flat)
+                    self.cornerTexts[0]["3-Background"]["text"] = self._layerText("B: ", backgroundVolumeName, None, flat, backgroundVolume)
+                    # A flat view names only the image under the layers (VISUAL 4.3): Studio shows its overlays elsewhere
+                    self.cornerTexts[0]["2-Foreground"]["text"] = "" if flat else self._layerText("F: ", foregroundVolumeName, foregroundOpacity, flat)
 
                 bgUids = backgroundVolume.GetAttribute("DICOM.instanceUIDs")
                 fgUids = foregroundVolume.GetAttribute("DICOM.instanceUIDs")
@@ -543,7 +553,7 @@ class SliceAnnotations(VTKObservationMixin):
             elif backgroundVolume is not None:
                 backgroundVolumeName = backgroundVolume.GetName()
                 if self.bottomLeft:
-                    self.cornerTexts[0]["3-Background"]["text"] = self._layerText("B: ", backgroundVolumeName, None, flat)
+                    self.cornerTexts[0]["3-Background"]["text"] = self._layerText("B: ", backgroundVolumeName, None, flat, backgroundVolume)
 
                 uids = backgroundVolume.GetAttribute("DICOM.instanceUIDs")
                 if uids:
@@ -557,7 +567,7 @@ class SliceAnnotations(VTKObservationMixin):
             elif foregroundVolume is not None:
                 if self.bottomLeft:
                     foregroundVolumeName = foregroundVolume.GetName()
-                    self.cornerTexts[0]["2-Foreground"]["text"] = self._layerText("F: ", foregroundVolumeName, None, flat)
+                    self.cornerTexts[0]["2-Foreground"]["text"] = self._layerText("F: ", foregroundVolumeName, None, flat, foregroundVolume)
 
                 uids = foregroundVolume.GetAttribute("DICOM.instanceUIDs")
                 if uids:
@@ -592,7 +602,7 @@ class SliceAnnotations(VTKObservationMixin):
                 self.cornerTexts[3]["8-SlabReconstructionThickness"]["text"] = ""
                 self.cornerTexts[3]["9-SlabReconstructionType"]["text"] = ""
 
-            if (labelVolume is not None) and self.bottomLeft:
+            if (labelVolume is not None) and self.bottomLeft and not flat:
                 labelOpacity = sliceCompositeNode.GetLabelOpacity()
                 labelVolumeName = labelVolume.GetName()
                 self.cornerTexts[0]["1-Label"]["text"] = self._layerText("L: ", labelVolumeName, labelOpacity, flat)
