@@ -1729,11 +1729,17 @@ def saveStateText(segmentationNode):
     if state == "saved":
         parts = [_("Saved"), name] + ([_relativeTime(savedTime)] if savedTime else [])
         return " · ".join(part for part in parts if part), path
+    # In a project (A-09) the lesion itself is saved with the project; the line then speaks of the NIfTI mask
+    inProject = _projectLesionsFolder() is not None
     if state == "unsaved":
+        if inProject:
+            return _("Saved in the project · {name} is older (Save lesion updates it)").format(name=name), path
         return _("Unsaved changes · {name}").format(name=name), path
     if state == "previous":
         when = _relativeTime(savedTime) if savedTime else ""
         return (_("Last saved as {name}").format(name=name) + (f" · {when}" if when else "")), None
+    if inProject:
+        return _("Saved in the project · Save lesion writes the NIfTI mask"), None
     return _("Not saved yet"), None
 
 
@@ -1788,10 +1794,58 @@ def isUserFile(path):
     return not any(_isInside(path, directory) for directory in _applicationDirectories())
 
 
-def defaultSaveDirectory(sourceVolumeNode=None):
-    """Folder proposed by "Save lesion…": the last one used, else the folder of the scan (if it is a file of
-    the user), else Documents, else the home folder. Never the application folder.
+def _projectLesionsFolder(create=False):
+    """Lesions/ of the open project (A-09), or None without a project."""
+    try:
+        from . import projects
+    except ImportError:
+        return None
+    return projects.lesionsFolder(create=create)
+
+
+_projectWatched = False
+_projectShown = None  # path of the project the Lesion card last spoke of
+
+
+def _watchProject():
+    """Update the save line of the Lesion card when a project starts or ends (A-09): "Not saved yet" becomes "Saved in the
+    project" without waiting for the next edit.
     """
+    global _projectWatched
+    if _projectWatched:
+        return
+    try:
+        from . import projects
+    except ImportError:
+        return
+    projects.addListener(_onProjectChanged)
+    _projectWatched = True
+
+
+def _onProjectChanged():
+    global _projectShown
+    try:
+        from . import projects
+
+        project = projects.currentProject()
+    except Exception:
+        return
+    path = project.path if project is not None else None
+    if path == _projectShown:
+        return
+    _projectShown = path
+    session = extension().session
+    if session is not None:
+        session.refreshPanel()
+
+
+def defaultSaveDirectory(sourceVolumeNode=None):
+    """Folder proposed by "Save lesion…": Lesions/ of the open project (A-09), else the last one used, else the folder of
+    the scan (if it is a file of the user), else Documents, else the home folder. Never the application folder.
+    """
+    lesions = _projectLesionsFolder(create=True)
+    if lesions is not None:
+        return lesions
     lastFolder = str(slicer.util.settingsValue(LAST_SAVE_FOLDER_KEY, "") or "")
     if lastFolder and os.path.isdir(lastFolder):
         return lastFolder
@@ -2066,7 +2120,10 @@ def _writeLesion(shell, segmentationNode, sourceVolumeNode, path):
     segmentationNode.SetAttribute(SAVED_TIME_ATTRIBUTE, savedTime)
     _savedRecords[segmentationNode.GetID()] = (reference, path, _contentStamp(segmentationNode), savedTime)
     folder = os.path.dirname(path)
-    if folder != slicer.util.settingsValue(LAST_SAVE_FOLDER_KEY, ""):
+    projectLesions = _projectLesionsFolder()
+    inProject = projectLesions is not None and os.path.normcase(os.path.realpath(folder)) == os.path.normcase(os.path.realpath(projectLesions))
+    if not inProject and folder != slicer.util.settingsValue(LAST_SAVE_FOLDER_KEY, ""):
+        # The folders of projects are proposed by the project itself (A-09): only other folders are remembered
         qt.QSettings().setValue(LAST_SAVE_FOLDER_KEY, folder)
     segmentCount = segmentationNode.GetSegmentation().GetNumberOfSegments()
     if segmentCount > 1:
@@ -2105,13 +2162,19 @@ def saveLesionDialog(shell=None, path=None):
             caption = _("Save lesion: {count} segments → values 1 to {count}").format(count=segmentCount)
         path = qt.QFileDialog.getSaveFileName(slicer.util.mainWindow(), caption, os.path.join(directory, name), NIFTI_FILTER)
         if not path:
+            projectLesions = _projectLesionsFolder()
+            if projectLesions is not None:
+                try:
+                    os.rmdir(projectLesions)  # created for the dialog: never leave an empty folder in a project
+                except OSError:
+                    pass
             return None
     return _writeLesion(shell, segmentationNode, sourceVolumeNode, path)
 
 
 def saveLesionNow(shell=None):
-    """Save lesion (the CTA and Ctrl+Shift+S): silently to the same file after the first save of the session,
-    else with the dialog. Return the written path, or None.
+    """Save lesion (the CTA and Ctrl+Shift+S): silently to the same file after the first save of the session, else with
+    the dialog (in a project, A-09, it proposes Lesions/<name>.nii.gz of the project). Return the written path, or None.
     """
     shell = _currentShell(shell)
     _applyPendingSmartFill(shell)
@@ -2244,6 +2307,7 @@ class DrawExtension:
 
     def attach(self, drawSession):
         self._session = drawSession
+        _watchProject()
 
     def detach(self, drawSession):
         if self._session is drawSession:

@@ -7,6 +7,7 @@
 #    control: fresh HOME official 5.13 session -> official-first.ini.
 # usage: run_settings.sh <output dir>     (needs FORK_SLICER, OFFICIAL_SLICER_513 and OFFICIAL_SLICER_5124: the Slicer executables)
 # Writes <output dir>/out/... and, at the end, runs analyse.py on <output dir> (foreign_keys.txt, s1_diff.json, s2_diff.txt).
+# Fork-only keys (Studio/*, Appearance/*; Studio/Projects/* since A-09) are listed apart by analyse.py.
 # Official reference binaries must be unpacked official releases; the session scripts live next to this file.
 HERE=$(cd "$(dirname "$0")" && pwd)
 OUT=${1:?usage: run_settings.sh <output dir>}
@@ -21,7 +22,8 @@ TMPBASE=${TMPDIR:-/tmp}
 INI=.config/slicer.org
 sess() { # home bin session tag [args]
   local H=$1 bin=$2 s=$3 tag=$4 args=$5
-  SESSION=$s SESSION_TAG=$tag G2_SET_OUT=$D/out HOME=$H LANG=C.UTF-8 LC_ALL=C.UTF-8 timeout 600 xvfb-run -a -s "-screen 0 1920x1080x24" $bin --no-splash $args --python-script $HERE/session.py > $D/out/$tag.log 2>&1
+  # Projects (A-09) go to a throwaway Slicer Studio folder of this HOME: the first-start folder question never blocks
+  SLICER_STUDIO_PROJECTS_ROOT="$H/Slicer Studio" SESSION=$s SESSION_TAG=$tag G2_SET_OUT=$D/out HOME=$H LANG=C.UTF-8 LC_ALL=C.UTF-8 timeout 600 xvfb-run -a -s "-screen 0 1920x1080x24" $bin --no-splash $args --python-script $HERE/session.py > $D/out/$tag.log 2>&1
   echo "$tag exit=$?"
   mkdir -p $D/out/ini/$tag; cp $H/$INI/*.ini $D/out/ini/$tag/ 2>/dev/null
 }

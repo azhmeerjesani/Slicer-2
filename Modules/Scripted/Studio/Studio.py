@@ -57,16 +57,33 @@ def _onStartupCompleted():
 
 
 def _startAutosave():
-    """Scene autosave and crash recovery, in Classic and in Studio (after the Studio apply time measurement)."""
-    try:
-        from StudioLib import autosave
+    """Scene autosave, projects and crash recovery, in Classic and in Studio (after the Studio apply time measurement).
 
-        autosave.onStartupCompleted()
+    At the first start of Studio, the Slicer Studio folder chooser comes first (A-09); the autosave service, whose
+    recovery offers follow, starts when it was answered.
+    """
+
+    def start():
+        try:
+            from StudioLib import autosave
+
+            autosave.onStartupCompleted()
+        except Exception:
+            import logging
+            import traceback
+
+            logging.error("Autosave could not be started:\n" + traceback.format_exc())
+
+    try:
+        from StudioLib import projects_ui
+
+        projects_ui.onStartupCompleted(start)
     except Exception:
         import logging
         import traceback
 
-        logging.error("Autosave could not be started:\n" + traceback.format_exc())
+        logging.error("The Slicer Studio folder chooser could not be shown:\n" + traceback.format_exc())
+        start()
 
 
 def _studioWillApplyAtStartup():
@@ -111,14 +128,15 @@ keep the characters typed with AltGr (for example @) and in a view AltGr+digit a
 <p>The Classic interface is never removed. Studio is not used when testing,
 without main window, with the SLICER_CLASSIC_UI=1 environment variable,
 or when the Studio/Enabled setting is false.</p>
-<p>Autosave and recovery (Classic and Studio): while you work, the scene is autosaved every few minutes
-to a private folder of your user account (the StudioAutosave folder in the application data folder,
-for example ~/.local/share/slicer.org/Slicer/StudioAutosave on Linux and
-~/Library/Application Support/slicer.org/Slicer/StudioAutosave on macOS), never to your own folders.
-Autosave is not Save: use File &gt; Save to keep your work. If Slicer closes unexpectedly, or you close
-without saving, the work can be recovered at the next start or with File &gt; Recover Autosaved Work.
-The location, the frequency and how long autosaves are kept are set in the Autosave panel of the
-application settings.</p>
+<p>Projects (Studio): at the first start you choose the Slicer Studio folder (Documents/Slicer Studio by
+default). From then on your work is saved there automatically as you work, one folder per project
+(Projects/&lt;name&gt;, a 3D Slicer scene with Images, Segmentations, Lesions, Maps and other folders), and
+studies go to Studies. Ctrl+S saves at once, Ctrl+N starts a new project, and File &gt; Save a copy as… writes
+a .mrb file anywhere. The folder can be changed in the Saving panel of the application settings.</p>
+<p>Recovery (Classic, and scenes that are not a project): while you work, the scene is autosaved every few
+minutes to a private folder of your user account (the StudioAutosave folder in the application data folder),
+never to your own folders. If Slicer closes unexpectedly, or you close without saving, the work can be
+recovered at the next start or with File &gt; Recover Autosaved Work.</p>
 <p>Updates: Slicer Studio checks for a new version when it starts (one anonymous request to github.com) and
 offers it in the Updates panel of the application settings (also ≡ &gt; Check for updates…, or Help &gt; Check for
 Updates… in Classic). An update is downloaded, checked against its published SHA-256 checksum and installed when

@@ -58,7 +58,7 @@ from . import hud, layouts, topbar, ui, workspaces
 #: Plug-ins installed when Studio is applied (``install(shell)``) and removed in Classic
 #: (``uninstall(shell)``). Missing modules are skipped.
 OPTIONAL_PLUGINS = ["StudioLib.importer", "StudioLib.probe", "StudioLib.journal", "StudioLib.study_ui", "StudioLib.orientation", "StudioLib.finder",
-                    "StudioLib.modes", "StudioLib.a11y", "StudioLib.firstrun", "StudioLib.tour", "StudioLib.autosave_ui"]
+                    "StudioLib.modes", "StudioLib.a11y", "StudioLib.firstrun", "StudioLib.tour", "StudioLib.autosave_ui", "StudioLib.projects_ui"]
 
 DEFAULT_PANEL_WIDTH = 340
 MIN_PANEL_WIDTH = 300
@@ -3094,13 +3094,15 @@ class Shell:
         if self.topBar is not None:
             self.topBar.setStatusChip(text, level)
 
-    def setSaveStatus(self, text=None, level="neutral", toolTip="", iconName=None):
-        """Show the autosave status in the top bar ("Autosaved · 2 min ago"; level: neutral, busy, ok, warn). None hides it.
+    def setSaveStatus(self, text=None, level="neutral", toolTip="", iconName=None, title=None):
+        """Show the save status in the top bar; level: neutral, busy, ok, warn. None hides it.
 
-        It says "Autosaved", never "Saved": autosave is not Save (SPEC 9.9). No-op without a top bar.
+        Without a project it is the recovery autosave ("Autosaved · 2 min ago": autosave is not Save, SPEC 9.9); in a
+        project it is the save state ("Saved", A-09). ``title`` names the status in its tooltip ("Autosave" by default).
+        No-op without a top bar.
         """
         if self.topBar is not None and hasattr(self.topBar, "setSaveStatus"):
-            self.topBar.setSaveStatus(text, level, toolTip, iconName)
+            self.topBar.setSaveStatus(text, level, toolTip, iconName, title=title)
 
     def setSaveStatusMenu(self, menu=None):
         """Set the menu that the autosave status opens (None: no menu). No-op without a top bar."""

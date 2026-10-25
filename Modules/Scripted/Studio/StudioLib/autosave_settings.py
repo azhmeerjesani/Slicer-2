@@ -1,8 +1,13 @@
-"""The "Autosave" panel of the application settings (A-01, SPEC 9.9).
+"""The "Saving" panel of the application settings (A-01, SPEC 9.9; A-09).
 
-It writes only the fork-only keys ``Studio/Autosave/*`` (SPEC 9.7 rule 5: official Slicer does not read them).
-Their defaults live in code (``autosave_io.DEFAULT_SETTINGS``), not in SlicerDefaultSettings.ini. The panel is not
-added under ``--testing``.
+- **Slicer Studio folder** (A-09): where projects and studies are saved, with Change… (which offers to move the projects
+  and studies there) and Show. Key ``Studio/Projects/Root`` (``projects``).
+- **Cadence**: projects are saved, and other scenes autosaved, at most every N minutes, after a pause of N seconds.
+- **Recovery** (scenes that are not projects: Classic, studies): the private recovery folder and its retention.
+
+It writes only fork-only keys ``Studio/Autosave/*`` and ``Studio/Projects/*`` (SPEC 9.7 rule 5: official Slicer does not
+read them). Their defaults live in code (``autosave_io.DEFAULT_SETTINGS``), not in SlicerDefaultSettings.ini. The panel
+is not added under ``--testing``.
 """
 
 import os
@@ -15,6 +20,8 @@ from slicer.i18n import tr as _
 from . import autosave_io as io
 
 PANEL_OBJECT_NAME = "StudioAutosaveSettingsPanel"
+#: Name of the panel in the settings dialog (A-09: it was "Autosave")
+PANEL_NAME = "Saving"
 
 
 def _key(name):
@@ -42,14 +49,38 @@ class AutosaveSettingsPanel(ctk.ctkSettingsPanel):
         self._updatingDirectory = False
         layout = qt.QVBoxLayout(self)
 
+        # The Slicer Studio folder (A-09)
+        folderForm = qt.QFormLayout()
+        folderForm.setFieldGrowthPolicy(qt.QFormLayout.ExpandingFieldsGrow)
+        layout.addLayout(folderForm)
+        folderRow = qt.QHBoxLayout()
+        self.rootLabel = qt.QLabel()
+        self.rootLabel.setObjectName("StudioProjectsRootLabel")
+        self.rootLabel.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
+        self.rootLabel.setWordWrap(True)
+        folderRow.addWidget(self.rootLabel, 1)
+        self.changeRootButton = qt.QPushButton(_("Change…"))
+        self.changeRootButton.setObjectName("StudioProjectsChangeRootButton")
+        self.changeRootButton.connect("clicked()", self.onChangeRoot)
+        folderRow.addWidget(self.changeRootButton)
+        self.showRootButton = qt.QPushButton(_("Show"))
+        self.showRootButton.setObjectName("StudioProjectsShowRootButton")
+        self.showRootButton.connect("clicked()", self.onShowRoot)
+        folderRow.addWidget(self.showRootButton)
+        folderForm.addRow(_("Slicer Studio folder:"), folderRow)
+        self.rootNote = qt.QLabel()
+        self.rootNote.setObjectName("StudioProjectsRootNote")
+        self.rootNote.setWordWrap(True)
+        folderForm.addRow("", self.rootNote)
+
         form = qt.QFormLayout()
         form.setFieldGrowthPolicy(qt.QFormLayout.FieldsStayAtSizeHint)
         layout.addLayout(form)
-        self.enabledCheckBox = qt.QCheckBox(_("Autosave the scene"))
+        self.enabledCheckBox = qt.QCheckBox(_("Save continuously"))
         self.enabledCheckBox.checked = io.DEFAULT_SETTINGS["Enabled"]
         self.enabledCheckBox.toolTip = _(
-            "Keep a copy of the scene in a private folder while you work, so that unsaved work can be recovered "
-            "after a crash or after closing without saving. Autosave is not Save: use File › Save to keep your work.")  # noqa: RUF001
+            "Projects are saved in the Slicer Studio folder as you work. Other scenes (Classic, studies) are copied to a "
+            "private recovery folder, so that unsaved work can be recovered after a crash; there, use File › Save to keep your work.")  # noqa: RUF001
         form.addRow(self.enabledCheckBox)
         self.registerProperty(_key("Enabled"), self.enabledCheckBox, "checked", str(qt.SIGNAL("toggled(bool)")))
 
@@ -61,6 +92,12 @@ class AutosaveSettingsPanel(ctk.ctkSettingsPanel):
         cadence.addWidget(self.idleSpinBox)
         cadence.addStretch(1)
         form.addRow(_("At most every:"), cadence)
+        recoveryTitle = qt.QLabel(_("Recovery of scenes that are not projects (Classic, studies)"))
+        recoveryTitle.setObjectName("StudioAutosaveRecoveryTitle")
+        font = recoveryTitle.font
+        font.setBold(True)
+        recoveryTitle.setFont(font)
+        form.addRow(recoveryTitle)
 
         # Location: not registered with registerProperty, so that only an explicit choice writes the key
         self.directoryButton = ctk.ctkDirectoryButton()
@@ -109,6 +146,7 @@ class AutosaveSettingsPanel(ctk.ctkSettingsPanel):
 
         self.connect("settingChanged(QString,QVariant)", self.onSettingChanged)
         self.updateDirectory()
+        self.updateRoot()
         self.updateStatus()
         # Refresh when the panel is shown, and on autosave status changes while it is visible
         self._showFilter = _ShowEventFilter(self._onShown)
@@ -118,7 +156,41 @@ class AutosaveSettingsPanel(ctk.ctkSettingsPanel):
 
     def _onShown(self):
         self.updateDirectory()
+        self.updateRoot()
         self.updateStatus()
+
+    def updateRoot(self):
+        from . import projects
+
+        root = projects.root()
+        self.rootLabel.setText(root)
+        self.rootLabel.setToolTip(root)
+        fromEnvironment = projects.isRootFromEnvironment()
+        self.changeRootButton.enabled = not fromEnvironment and projects.isEnabled()
+        if fromEnvironment:
+            note = _("Set by the {variable} environment variable.").format(variable=projects.ROOT_ENVIRONMENT)
+        elif not projects.isEnabled():
+            note = _("Projects are turned off ({variable}=0).").format(variable=projects.ENABLED_ENVIRONMENT)
+        else:
+            projectCount, studyCount = projects.folderSummary(root) if os.path.isdir(root) else (0, 0)
+            counts = [_("1 project") if projectCount == 1 else _("{n} projects").format(n=projectCount),
+                      _("1 study") if studyCount == 1 else _("{n} studies").format(n=studyCount)]
+            note = " · ".join(counts) + ". " + _("Every project is a 3D Slicer scene (Projects/<name>), saved as you work.")
+            synced = projects.syncedService(root)
+            if synced:
+                note += " " + _("This folder is synced to {service}. Scans can contain patient data.").format(service=synced)
+        self.rootNote.setText(note)
+
+    def onChangeRoot(self):
+        from . import projects_ui
+
+        projects_ui.changeRootDialog(self)
+        self.updateRoot()
+
+    def onShowRoot(self):
+        from . import projects_ui
+
+        projects_ui.showRootFolder()
 
     def _spinBox(self, minimum, maximum, name, suffix):
         spinBox = qt.QSpinBox()
@@ -220,7 +292,7 @@ def install(service=None):
     if existing is not None:
         return existing
     _panel = AutosaveSettingsPanel(service)
-    dialog.addPanel(_("Autosave"), _panel)
+    dialog.addPanel(_(PANEL_NAME), _panel)
     return _panel
 
 

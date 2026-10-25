@@ -1521,16 +1521,24 @@ class _SnapshotJob:
         if (self.imageData.GetMTime(), self.scalars.GetMTime(), node.GetMTime()) != self.mtimes or node.GetImageData() is not self.imageData:
             self.plan.snapshotBytesInFlight -= self.inFlight
             self.release()
-            old = self.plan.oldEntries.get(self.nodeId)
-            self.plan.incomplete = True
-            if old and old.get("kind") == "write" and self.writer._dirExists(old):
-                self.plan.entries[self.nodeId] = dict(old, stale=True)
-            else:
-                self.entry.update(kind="deferred", reason="changed while autosaving")
+            self._changedWhileCopied()
             return True
         matrix = vtk.vtkMatrix4x4()
         node.GetIJKToRASMatrix(matrix)
         rows = [[matrix.GetElement(r, c) for c in range(4)] for r in range(4)]
+        return self._submit(node, rows)
+
+    def _changedWhileCopied(self):
+        """The volume changed while it was copied: the snapshot was discarded."""
+        old = self.plan.oldEntries.get(self.nodeId)
+        self.plan.incomplete = True
+        if old and old.get("kind") == "write" and self.writer._dirExists(old):
+            self.plan.entries[self.nodeId] = dict(old, stale=True)
+        else:
+            self.entry.update(kind="deferred", reason="changed while autosaving")
+
+    def _submit(self, node, rows):
+        """Write the complete snapshot in the background writer (main thread: plans the file, the worker writes it)."""
         relative, absolute = self.writer._newDir(self.plan, self.nodeId)
         path = os.path.join(absolute, f"{sanitizeFileName(node.GetName())}.nrrd")
         storageNode = node.CreateDefaultStorageNode()
@@ -1657,3 +1665,757 @@ def summarizeScene(scene, entries=None):
     elif summary["segmentations"]:
         summary["title"] = summary["segmentations"][0]["name"]
     return summary
+
+
+#
+# Projects (A-09, D-A16): the scene saved in place in a project folder of the Slicer Studio folder
+#
+
+#: Prefix of the temporary folders and scene files of a project generation (removed when the generation ends)
+PROJECT_TEMPORARY_PREFIX = ".studio-tmp-"
+#: Suffix of the name of the file Studio writes when another program changed the file of a node since Studio wrote it
+CONFLICT_SUFFIX = " (Slicer Studio)"
+#: Files that official Slicer saved next to the scene file and that a generation moves into their kind folder (single
+#: files only: a .nhdr, a table and its schema or a DICOM series stay where they are)
+MOVABLE_EXTENSIONS = (".nrrd", ".nii", ".nii.gz", ".mha", ".seg.nrrd", ".mrk.json", ".vtk", ".vtp", ".stl", ".obj", ".ply", ".h5", ".tfm",
+                      ".ctbl", ".txt")
+
+
+def _projects():
+    from StudioLib import projects
+
+    return projects
+
+
+def _statOrNone(path):
+    try:
+        return _fileStat(path)
+    except OSError:
+        return None
+
+
+def _storagePaths(storageNode, rootDirectory):
+    if storageNode is None or not storageNode.GetFileName() or storageNode.GetURI():
+        return []
+    return storageFiles(storageNode, rootDirectory)
+
+
+def _setSingleFile(storageNode, path):
+    storageNode.SetFileName(path)
+    storageNode.ResetFileNameList()
+
+
+def markStoredWithFile(scene, node, path):
+    """Make ``node`` "not modified since read" with ``path`` as its file, without writing its data again (main thread).
+
+    Used after the background writer wrote a snapshot of a large volume: a new storage node of the node's default class
+    is marked as written by writing a 1-voxel volume of the same class to a temporary file, then it takes ``path`` as
+    its file and replaces the node's storage node. The content of ``path`` is not changed.
+    """
+    import vtk
+
+    newStorage = node.CreateDefaultStorageNode()
+    if newStorage is None:
+        return False
+    try:
+        marker = node.NewInstance()
+    except Exception:
+        marker = slicer.vtkMRMLScalarVolumeNode()
+    imageData = vtk.vtkImageData()
+    imageData.SetDimensions(1, 1, 1)
+    imageData.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 1)
+    marker.SetAndObserveImageData(imageData)
+    extension = newStorage.GetDefaultWriteFileExtension() or "nrrd"
+    temporary = os.path.join(tempfile.gettempdir(), f"studio-marker-{uuid.uuid4().hex[:8]}.{extension}")
+    newStorage.SetFileName(temporary)
+    try:
+        written = newStorage.WriteData(marker)
+    finally:
+        _removeQuietly(temporary)
+    if not written:
+        return False
+    _setSingleFile(newStorage, path)
+    old = node.GetStorageNode()
+    scene.AddNode(newStorage)
+    node.SetAndObserveStorageNodeID(newStorage.GetID())
+    if old is not None and old.GetScene() is scene:
+        scene.RemoveNode(old)
+    return not node.GetModifiedSinceRead()
+
+
+def _writeExtension(node, storageNode):
+    """The file extension (".seg.nrrd", ".nrrd", ".mrk.json"...) a node is written with, or None."""
+    if storageNode.IsA("vtkMRMLSegmentationStorageNode"):
+        segmentation = node.GetSegmentation()
+        return ".seg.nrrd" if segmentation is None or segmentation.IsSourceRepresentationImageData() else ".seg.vtm"
+    try:
+        extension = storageNode.GetDefaultWriteFileExtension()
+    except Exception:
+        extension = None
+    return f".{extension}" if extension else None
+
+
+class ProjectPlan(GenerationPlan):
+    """One generation of a project: what to copy and write, and the scene file to replace last."""
+
+    def __init__(self, projectDir, generation):
+        GenerationPlan.__init__(self, projectDir, generation)
+        #: write every changed node now, also the heavy ones (Save now, closing, quitting)
+        self.force = False
+        #: copies and snapshot writes of the background writer that did not call back yet
+        self.workerPending = 0
+        self.workerSubmitted = False
+        #: [(node ID, source, source stat, destination)]: unchanged files copied into the project
+        self.imports = []
+        self.copyJobs = []
+        self.copied = set()
+        #: node ID -> (destination, check): snapshots of large volumes written by the background writer
+        self.snapshots = {}
+        #: folder -> names planned in this generation (lower case)
+        self.reserved = {}
+        self.temporary = []
+        #: [(path, stat)]: files of nodes that left the scene (moved to .studio/removed after the scene file is replaced)
+        self.orphans = []
+        #: [(name of the file another program changed, name of the file Studio wrote)]
+        self.conflicts = []
+        self.projectJson = None
+        self.thumbnailPath = os.path.join(projectDir, ".studio", "thumbnail.png")
+
+
+class ProjectWriter(SlotWriter):
+    """Writes the scene in place into a project folder (A-09): a standard scene that is valid at every moment.
+
+    - Unchanged data read from a file outside the project is copied byte for byte (background writer), then its storage
+      node points at the copy. The original is never changed.
+    - New or changed data is written by its own storage node into its kind folder (``projects.kindFolder()``), into a
+      temporary folder first and then moved into place, so a file is replaced atomically. Large scalar volumes are copied
+      into a numpy snapshot by slabs and written by the background writer (as A-01 does). Written nodes are then
+      "not modified since read", so the exit prompt does not ask about saved work.
+    - The scene file is written last (``vtkMRMLScene::Commit`` to a temporary file, then replaced), with paths relative
+      to the project folder; files of nodes that left the scene are moved to ``.studio/removed``.
+    - A file another program changed since Studio wrote it (size or time differ) is never overwritten: Studio writes
+      "<name> (Slicer Studio).<ext>" and reports it in ``conflicts``.
+
+    The scheduling is the autosave service's (``autosave.AutosaveService``): ``plan()``, ``runMainThreadStep()`` from a
+    timer, then ``submitFinalize()``.
+    """
+
+    def __init__(self, project, executor=None, options=None):
+        # Not SlotWriter.__init__: a project has no manifest and no generation folders
+        self.project = project
+        self.slotDir = project.path
+        self.executor = executor if executor is not None else backgroundWriter()
+        self.options = {"snapshotBudgetBytes": snapshotBudgetBytes(), "idleSeconds": None, "maxNodeBytes": 1 << 62}
+        self.options.update(options or {})
+        self.entries = {}
+        #: canonical path -> {"stat": [size, mtime_ns], "ours": bool}: the files of the project that Studio knows
+        self.records = {}
+        #: node ID -> (canonical source, source stat, destination): copies that finished (reused by a later generation)
+        self.importsDone = {}
+        self.generation = 0
+        self.plannedGeneration = 0
+        self.finalizing = None
+        self.snapshotFailures = set()
+        self._reportedFailures = set()
+        self.lastResult = None
+        #: [(other program's file name, Studio's file name)] not reported yet (``takeConflicts()``)
+        self.conflicts = []
+
+    def manifestPath(self):
+        return None
+
+    def hasContent(self):
+        return os.path.isfile(self.project.scenePath)
+
+    def deleteSlot(self):
+        """A project is never deleted by the autosave."""
+
+    def _canonical(self, path):
+        return _canonical(path)
+
+    def _record(self, path, ours):
+        stat = _statOrNone(path)
+        if stat is not None:
+            previous = self.records.get(_canonical(path)) or {}
+            self.records[_canonical(path)] = {"stat": stat, "ours": bool(ours or previous.get("ours"))}
+
+    def takeConflicts(self):
+        conflicts, self.conflicts = self.conflicts, []
+        return conflicts
+
+    def _isPrivateFile(self, path):
+        """Files of the hidden nodes (vtkMRMLScene keeps them in "<scene>_Private") and of .studio are not tracked."""
+        relative = os.path.relpath(_canonical(path), _canonical(self.project.path))
+        first = relative.split(os.sep)[0]
+        return first == ".studio" or first.endswith("_Private")
+
+    def recordSceneFiles(self, scene):
+        """Remember the files of the project that the scene references (a project opened in place): another program that
+        changes one of them later is detected, and a file that leaves the scene is moved to .studio/removed.
+        """
+        rootDirectory = scene.GetRootDirectory()
+        nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+        for index in range(nodes.GetNumberOfItems()):
+            node = nodes.GetItemAsObject(index)
+            if node.GetHideFromEditors():
+                continue
+            for path in _storagePaths(node.GetStorageNode(), rootDirectory):
+                if _projects().isInside(path, self.project.path) and not self._isPrivateFile(path):
+                    self._record(path, ours=False)
+
+    def relocate(self, oldPath, newPath):
+        """The project folder moved (renamed, or the Slicer Studio folder moved): follow it."""
+
+        def moved(path, oldPrefix, newPrefix):
+            if path == oldPrefix or path.startswith(oldPrefix.rstrip(os.sep) + os.sep):
+                return newPrefix + path[len(oldPrefix):]
+            return path
+
+        oldCanonical, newCanonical = _canonical(oldPath), _canonical(newPath)
+        oldPath, newPath = os.path.normpath(oldPath), os.path.normpath(newPath)
+        self.records = {moved(path, oldCanonical, newCanonical): record for path, record in self.records.items()}
+        self.importsDone = {nodeId: (source, stat, moved(os.path.normpath(destination), oldPath, newPath))
+                            for nodeId, (source, stat, destination) in self.importsDone.items()}
+        for entry in self.entries.values():
+            if entry.get("files"):
+                entry["files"] = [moved(os.path.normpath(path), oldPath, newPath) for path in entry["files"]]
+        self.slotDir = newPath
+
+    #
+    # Plan (main thread)
+    #
+
+    def plan(self, scene, fingerprint=None, idleSeconds=None, now=None, ignoreBusy=False, force=False):
+        """Plan a generation of ``scene``; raise GenerationAborted if the scene cannot be saved now."""
+        startTime = time.perf_counter()
+        if not ignoreBusy and sceneIsBusy(scene):
+            raise GenerationAborted("the scene is busy")
+        if self.finalizing is not None:
+            raise GenerationAborted("the previous generation is still being written")
+        projects = _projects()
+        now = time.time() if now is None else now
+        self.plannedGeneration = max(self.generation, self.plannedGeneration) + 1
+        projectDir = self.project.path
+        plan = ProjectPlan(projectDir, self.plannedGeneration)
+        plan.force = force
+        plan.fingerprint = fingerprint
+        plan.rootDirectory = scene.GetRootDirectory()
+        plan.oldEntries = self.entries
+        plan.unsaved = bool(scene.GetStorableNodesModifiedSinceRead())
+        projectCanonical = _canonical(projectDir)
+        storableNodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+        snapshotJobs = []
+        for index in range(storableNodes.GetNumberOfItems()):
+            node = storableNodes.GetItemAsObject(index)
+            if not node.GetSaveWithScene() or node.GetHideFromEditors():
+                # Hidden nodes are written by vtkMRMLScene::Commit itself, into "<scene>_Private"
+                continue
+            storageNode = node.GetStorageNode()
+            if storageNode is None and not defaultStorageNodeClassName(node):
+                continue  # stored in the scene file only
+            if storageNode is not None and not storageNode.GetSaveWithScene():
+                continue
+            nodeId = node.GetID()
+            plan.nodeIds.add(nodeId)
+            old = self.entries.get(nodeId) or {}
+            entry = {"name": node.GetName() or "", "class": node.GetClassName(), "contentMTime": contentMTime(node),
+                     "heavy": bool(old.get("heavy")), "lastWriteMs": old.get("lastWriteMs"), "writtenAt": old.get("writtenAt")}
+            plan.entries[nodeId] = entry
+            files = _storagePaths(storageNode, plan.rootDirectory)
+            modified = bool(node.GetModifiedSinceRead())
+            exists = bool(files) and os.path.isfile(files[0]) and (len(files) == 1 or all(os.path.exists(path) for path in files[1:2]))
+            inside = bool(files) and all(_isUnder(_canonical(path), projectCanonical) for path in files)
+            if not modified and exists and inside:
+                entry.update(kind="stored", files=files)
+                if _canonical(files[0]) not in self.records:
+                    self._record(files[0], ours=False)
+                if len(files) == 1 and os.path.dirname(_canonical(files[0])) == projectCanonical and self._movable(files[0], node):
+                    plan.jobs.append(_ProjectMoveJob(self, plan, nodeId, entry, files[0]))
+                continue
+            if not modified and exists and len(files) == 1:
+                entry.update(kind="import", files=files)
+                self._planImport(plan, node, nodeId, entry, files[0])
+                continue
+            # New or changed data (or data whose file is missing, or a series of files outside the project): written
+            if entry["heavy"] and not force:
+                idle = idleSeconds if idleSeconds is not None else HEAVY_IDLE_S
+                if now - float(entry.get("writtenAt") or 0) < HEAVY_INTERVAL_S or idle < HEAVY_IDLE_S:
+                    plan.incomplete = True
+                    entry.update(kind="deferred", reason="heavy")
+                    continue
+            entry.update(kind="write", bytes=estimateBytes(node))
+            if self._snapshotEligible(node, entry["bytes"]):
+                snapshotJobs.append(_ProjectSnapshotJob(self, plan, nodeId, entry))
+            else:
+                plan.jobs.append(_ProjectWriteJob(self, plan, nodeId, entry))
+        # Small writes first, then the snapshots of large volumes, then the scene file
+        plan.jobs.extend(snapshotJobs)
+        plan.jobs.append(_ProjectCommitJob(self, plan))
+        plan.metrics["planMs"] = (time.perf_counter() - startTime) * 1000.0
+        return plan
+
+    @staticmethod
+    def _movable(path, node):
+        if node.IsA("vtkMRMLTableNode") or path.lower().endswith(".mrml"):
+            return False
+        _base, extension = _projects().splitExtension(os.path.basename(path))
+        return extension.lower() in MOVABLE_EXTENSIONS
+
+    def _reserve(self, plan, folder, name):
+        plan.reserved.setdefault(_canonical(folder), set()).add(name.lower())
+
+    def _newPath(self, plan, folder, fileName):
+        """A file name in ``folder`` that replaces nothing (on disk or planned in this generation)."""
+        name = _projects().uniqueName(folder, fileName, plan.reserved.get(_canonical(folder), ()))
+        self._reserve(plan, folder, name)
+        return os.path.join(folder, name)
+
+    def target(self, plan, node, extension):
+        """Where ``node`` is written: its own file again when it is a file of the project with this extension, else a new
+        file "<node name><extension>" in its kind folder. A file another program changed is kept: Studio writes
+        "<name> (Slicer Studio)<extension>" next to it.
+        """
+        projects = _projects()
+        projectDir = self.project.path
+        storageNode = node.GetStorageNode()
+        current = storageNode.GetFileName() if storageNode is not None else None
+        if current and not os.path.isabs(current):
+            current = os.path.normpath(os.path.join(slicer.mrmlScene.GetRootDirectory() or projectDir, current))
+        if current and _isUnder(_canonical(current), _canonical(projectDir)) and not self._isPrivateFile(current) \
+                and os.path.dirname(_canonical(current)) != _canonical(projectDir):
+            base, currentExtension = projects.splitExtension(os.path.basename(current))
+            if currentExtension.lower() == extension.lower():
+                record = self.records.get(_canonical(current))
+                stat = _statOrNone(current)
+                if stat is None or (record is not None and record["stat"] == stat):
+                    self._reserve(plan, os.path.dirname(current), os.path.basename(current))
+                    return current
+                # Changed by another program since it was read or written: keep it
+                destination = self._newPath(plan, os.path.dirname(current), f"{base}{CONFLICT_SUFFIX}{extension}")
+                plan.conflicts.append((os.path.basename(current), os.path.basename(destination)))
+                return destination
+        folder = os.path.join(projectDir, projects.kindFolder(node))
+        base = projects.sanitizeName(node.GetName() or projects.kindFolder(node), fallback="data")
+        return self._newPath(plan, folder, base + extension)
+
+    def _planImport(self, plan, node, nodeId, entry, source):
+        projects = _projects()
+        stat = _statOrNone(source)
+        done = self.importsDone.get(nodeId)
+        if done is not None and done[0] == _canonical(source) and done[1] == stat and os.path.isfile(done[2]):
+            plan.imports.append((nodeId, source, stat, done[2]))
+            plan.copied.add(done[2])
+            self._reserve(plan, os.path.dirname(done[2]), os.path.basename(done[2]))
+            return
+        folder = os.path.join(self.project.path, projects.kindFolder(node))
+        destination = self._newPath(plan, folder, projects.sanitizeName(os.path.basename(source), fallback="data"))
+        plan.imports.append((nodeId, source, stat, destination))
+        plan.copyJobs.append((nodeId, source, stat, destination))
+        entry["bytes"] = stat[0] if stat else 0
+
+    def submitCopies(self, plan):
+        """Queue the copies of unchanged files (background writer). Main thread."""
+        jobs, plan.copyJobs = plan.copyJobs, []
+        for nodeId, source, stat, destination in jobs:
+            plan.workerPending += 1
+
+            def copy(source=source, destination=destination):
+                if plan.cancelled:
+                    return None
+                os.makedirs(os.path.dirname(destination), exist_ok=True)
+                temporary = destination + ".studio-part"
+                start = time.perf_counter()
+                try:
+                    shutil.copy2(source, temporary)
+                    fsyncFile(temporary)
+                    replaceWithRetry(temporary, destination)
+                except BaseException:
+                    _removeQuietly(temporary)
+                    raise
+                return os.path.getsize(destination), (time.perf_counter() - start) * 1000.0
+
+            def done(result, nodeId=nodeId, source=source, stat=stat, destination=destination):
+                plan.workerPending -= 1
+                if result:
+                    plan.copied.add(destination)
+                    self.importsDone[nodeId] = (_canonical(source), stat, destination)
+                    plan.metrics["bytesWritten"] += result[0]
+                    plan.metrics["workerMs"] += result[1]
+
+            def failed(error, source=source):
+                plan.workerPending -= 1
+                plan.incomplete = True
+                logging.warning(f"Slicer Studio: copying {os.path.basename(source)} into the project failed: {error}")
+
+            self.executor.submit(copy, onDone=done, onError=failed)
+
+    def _jobFailed(self, plan, job, error):
+        """A main-thread job raised: the node keeps its file and stays modified (written by the next generation)."""
+        nodeId, entry = job.nodeId, job.entry
+        if getattr(job, "inFlight", 0):
+            plan.snapshotBytesInFlight -= job.inFlight
+            job.inFlight = 0
+        release = getattr(job, "release", None)
+        if release:
+            release()
+        if isinstance(job, _SnapshotJob):
+            self.snapshotFailures.add(nodeId)
+        plan.incomplete = True
+        if nodeId not in self._reportedFailures:
+            self._reportedFailures.add(nodeId)
+            logging.warning(f"Slicer Studio: {entry.get('name') or nodeId} could not be saved:\n" + traceback.format_exc())
+        entry.update(kind="error", reason=f"saving failed: {type(error).__name__}")
+
+    #
+    # Commit (main thread, last job)
+    #
+
+    def commit(self, plan, scene):
+        """Point the copied and snapshot nodes at their files, then replace the scene file (relative paths)."""
+        projects = _projects()
+        projectDir = self.project.path
+        for nodeId, source, _stat, destination in plan.imports:
+            node = scene.GetNodeByID(nodeId)
+            if node is None or destination not in plan.copied:
+                if node is not None:
+                    plan.incomplete = True
+                continue
+            storageNode = node.GetStorageNode()
+            files = _storagePaths(storageNode, plan.rootDirectory)
+            if node.GetModifiedSinceRead() or not files or _canonical(files[0]) != _canonical(source):
+                plan.incomplete = True  # changed during the copy: written by the next generation
+                continue
+            _setSingleFile(storageNode, destination)
+            self._record(destination, ours=True)
+            self.importsDone.pop(nodeId, None)
+            plan.entries[nodeId].update(kind="stored", files=[destination])
+        for nodeId, (destination, check) in plan.snapshots.items():
+            node = scene.GetNodeByID(nodeId)
+            if node is None:
+                continue
+            self._record(destination, ours=True)
+            imageData, imageMTime, scalarsMTime, rows = check
+            current = node.GetImageData()
+            unchanged = current is imageData and current is not None and current.GetMTime() == imageMTime
+            if unchanged:
+                scalars = current.GetPointData().GetScalars() if current.GetPointData() is not None else None
+                unchanged = scalars is not None and scalars.GetMTime() == scalarsMTime and _ijkToRasRows(node) == rows
+            if unchanged and markStoredWithFile(scene, node, destination):
+                plan.entries[nodeId].update(kind="stored", files=[destination])
+                continue
+            # Changed while it was written: the file holds the snapshot, the node stays modified
+            storageNode = node.GetStorageNode()
+            if storageNode is None and node.AddDefaultStorageNode():
+                storageNode = node.GetStorageNode()
+            if storageNode is not None:
+                _setSingleFile(storageNode, destination)
+            plan.incomplete = True
+        scenePath = self.project.scenePath
+        if scene.GetURL() != scenePath:
+            scene.SetURL(scenePath)
+        if os.path.normpath(scene.GetRootDirectory() or "") != os.path.normpath(projectDir):
+            scene.SetRootDirectory(projectDir)
+        # vtkMRMLScene names the folder of hidden nodes after the scene file up to its first dot: the temporary scene
+        # file keeps that part of the name
+        stem = os.path.basename(scenePath)[: -len(projects.SCENE_EXTENSION)]
+        temporary = os.path.join(projectDir, f"{stem}.{PROJECT_TEMPORARY_PREFIX.strip('.')}{uuid.uuid4().hex[:8]}{projects.SCENE_EXTENSION}")
+        start = time.perf_counter()
+        try:
+            written = scene.Commit(temporary)
+            if not written or not os.path.isfile(temporary):
+                raise OSError(_tr("The scene file could not be written."))
+            fsyncFile(temporary)
+            replaceWithRetry(temporary, scenePath)
+        finally:
+            _removeQuietly(temporary)
+        plan.committed = True
+        plan.metrics["sceneMs"] = round((time.perf_counter() - start) * 1000.0, 2)
+        # After the commit: writing the scene may modify a node once (the subject hierarchy)
+        plan.fingerprint = sceneFingerprint(scene, sentinelIds())
+        self._record(scenePath, ours=True)
+        for nodeId in plan.nodeIds:
+            node = scene.GetNodeByID(nodeId)
+            entry = plan.entries.get(nodeId) or {}
+            if node is not None and node.GetModifiedSinceRead() and entry.get("kind") not in ("skip",):
+                plan.incomplete = True
+        # Files of nodes that left the scene
+        referenced = {_canonical(scenePath)}
+        rootDirectory = scene.GetRootDirectory()
+        nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+        for index in range(nodes.GetNumberOfItems()):
+            for path in _storagePaths(nodes.GetItemAsObject(index).GetStorageNode(), rootDirectory):
+                referenced.add(_canonical(path))
+        # Files that a storage node writes next to its file are referenced too (a table's "<name>.schema.tsv", the data
+        # file of a .nhdr): a file whose name starts with "<base name of a referenced file>." in the same folder
+        companions = {(os.path.dirname(path), _projects().splitExtension(os.path.basename(path))[0] + ".") for path in referenced}
+        for path, record in list(self.records.items()):
+            if path in referenced or not _isUnder(path, _canonical(projectDir)) or self._isPrivateFile(path):
+                continue
+            folder, name = os.path.dirname(path), os.path.basename(path)
+            if any(folder == companionFolder and name.startswith(prefix) for companionFolder, prefix in companions):
+                continue
+            plan.orphans.append((path, record["stat"]))
+            del self.records[path]
+        self.conflicts.extend(plan.conflicts)
+        plan.projectJson = self.project.jsonData("open", scene, savedAt=time.time())
+        plan.summary = projects.counts(scene)
+
+    #
+    # Finalize (worker)
+    #
+
+    def finalize(self, plan):
+        """Move the files of removed nodes to .studio/removed, delete temporary files, write project.json. Worker-safe."""
+        start = time.perf_counter()
+        if not plan.committed:
+            raise GenerationAborted(plan.abortReason or "not committed")
+        projectDir = self.project.path
+        removedDir = None
+        for path, stat in plan.orphans:
+            current = _statOrNone(path)
+            if current is None or (stat is not None and current != stat):
+                continue  # gone, or changed by another program: left where it is
+            if removedDir is None:
+                removedDir = os.path.join(projectDir, ".studio", "removed", time.strftime("%Y%m%d-%H%M%S"))
+                os.makedirs(removedDir, exist_ok=True)
+            target = os.path.join(removedDir, _projects().uniqueName(removedDir, os.path.basename(path)))
+            try:
+                shutil.move(path, target)
+            except OSError:
+                continue
+            folder = os.path.dirname(path)
+            if _canonical(folder) != _canonical(projectDir):
+                try:
+                    os.rmdir(folder)  # never leave an empty kind folder
+                except OSError:
+                    pass
+        for path in plan.temporary:
+            removeTree(path)
+        if plan.projectJson is not None:
+            os.makedirs(os.path.join(projectDir, ".studio"), exist_ok=True)
+            atomicWriteJson(os.path.join(projectDir, ".studio", "project.json"), plan.projectJson)
+        return {"bytes": 0, "workerMs": (time.perf_counter() - start) * 1000.0, "generation": plan.generation}
+
+    def abort(self, plan, reason):
+        """Cancel a generation. Files already in place stay (the live scene references them); temporary files go."""
+        if plan.aborted or plan.finished:
+            return
+        plan.aborted = True
+        if not plan.cancelled:
+            plan.abortReason = reason
+            plan.cancelled = True
+        for job in plan.jobs:
+            release = getattr(job, "release", None)
+            if release:
+                release()
+        plan.jobs.clear()
+        temporary = list(plan.temporary)
+
+        def cleanup():
+            for path in temporary:
+                removeTree(path)
+
+        self.executor.submit(cleanup)
+
+    def writeAll(self, scene, force=True):
+        """Write a whole generation synchronously (tests, harness). Return the plan."""
+        executor = self.executor
+        self.executor = InlineExecutor()
+        try:
+            plan = self.plan(scene, force=force)
+            while not self.runMainThreadStep(plan, scene, budgetMs=1e9):
+                pass
+            result = self.finalize(plan)
+            self._finished(plan, result)
+            return plan
+        finally:
+            self.executor = executor
+
+    def writeSnapshot(self, scene):
+        return self.writeAll(scene)
+
+
+def _tr(text):
+    from slicer.i18n import tr
+
+    return tr(text)
+
+
+def _ijkToRasRows(node):
+    import vtk
+
+    matrix = vtk.vtkMatrix4x4()
+    node.GetIJKToRASMatrix(matrix)
+    return [[matrix.GetElement(r, c) for c in range(4)] for r in range(4)]
+
+
+class _ProjectWriteJob:
+    """Write one node through its own storage node into the project (main thread): temporary folder, then moved in place."""
+
+    def __init__(self, writer, plan, nodeId, entry):
+        self.writer, self.plan, self.nodeId, self.entry = writer, plan, nodeId, entry
+
+    def run(self, scene, sliceStart, budgetMs):
+        writer, plan, entry = self.writer, self.plan, self.entry
+        node = scene.GetNodeByID(self.nodeId)
+        if node is None:
+            raise GenerationAborted(f"{self.nodeId} was removed")
+        storageNode = node.GetStorageNode()
+        if storageNode is None:
+            if not node.AddDefaultStorageNode() or node.GetStorageNode() is None:
+                entry.update(kind="skip", reason="no file format")
+                return True
+            storageNode = node.GetStorageNode()
+            if storageNode.IsA("vtkMRMLSegmentationStorageNode"):
+                # Official Slicer reads cropped segmentations; on a 1 mm grid this is several times faster
+                storageNode.SetCropToMinimumExtent(1)
+        extension = _writeExtension(node, storageNode)
+        if not extension:
+            entry.update(kind="skip", reason="no file format")
+            return True
+        destination = writer.target(plan, node, extension)
+        folder = os.path.dirname(destination)
+        os.makedirs(folder, exist_ok=True)
+        temporary = os.path.join(folder, f"{PROJECT_TEMPORARY_PREFIX}{uuid.uuid4().hex[:8]}")
+        os.makedirs(temporary)
+        plan.temporary.append(temporary)
+        originalNames = [storageNode.GetFileName()] + [storageNode.GetNthFileName(i) for i in range(storageNode.GetNumberOfFileNames())]
+        _setSingleFile(storageNode, os.path.join(temporary, os.path.basename(destination)))
+        start = time.perf_counter()
+        try:
+            written = bool(storageNode.WriteData(node))
+        except Exception:
+            written = False
+        elapsed = (time.perf_counter() - start) * 1000.0
+        produced = os.listdir(temporary) if os.path.isdir(temporary) else []
+        if not written or os.path.basename(destination) not in produced:
+            storageNode.SetFileName(originalNames[0])
+            storageNode.ResetFileNameList()
+            for name in originalNames[1:]:
+                if name:
+                    storageNode.AddFileName(name)
+            removeTree(temporary)
+            plan.incomplete = True
+            entry.update(kind="error", reason="write failed")
+            if self.nodeId not in writer._reportedFailures:
+                writer._reportedFailures.add(self.nodeId)
+                logging.warning(f"Slicer Studio: {entry.get('name') or self.nodeId} could not be saved in the project")
+            return True
+        size = 0
+        for name in produced:
+            target = os.path.join(folder, name)
+            replaceWithRetry(os.path.join(temporary, name), target)
+            writer._record(target, ours=True)
+            size += os.path.getsize(target)
+        try:
+            os.rmdir(temporary)
+        except OSError:
+            pass
+        _setSingleFile(storageNode, destination)
+        entry.update(kind="stored", files=[destination], lastWriteMs=round(elapsed, 2), writtenAt=time.time(), bytes=size)
+        if elapsed > HEAVY_WRITE_MS:
+            entry["heavy"] = True
+        plan.metrics["bytesWritten"] += size
+        plan.metrics["nodesWritten"] += 1
+        plan.wroteData = True
+        return True
+
+
+class _ProjectMoveJob:
+    """A file that official Slicer saved next to the scene file goes into its kind folder (a rename; main thread)."""
+
+    def __init__(self, writer, plan, nodeId, entry, path):
+        self.writer, self.plan, self.nodeId, self.entry, self.path = writer, plan, nodeId, entry, path
+
+    def run(self, scene, sliceStart, budgetMs):
+        node = scene.GetNodeByID(self.nodeId)
+        if node is None or node.GetStorageNode() is None or not os.path.isfile(self.path):
+            return True
+        projects = _projects()
+        folder = os.path.join(self.writer.project.path, projects.kindFolder(node))
+        os.makedirs(folder, exist_ok=True)
+        destination = self.writer._newPath(self.plan, folder, os.path.basename(self.path))
+        record = self.writer.records.pop(_canonical(self.path), None)
+        try:
+            os.replace(self.path, destination)
+        except OSError:
+            if record is not None:
+                self.writer.records[_canonical(self.path)] = record
+            return True
+        _setSingleFile(node.GetStorageNode(), destination)
+        self.writer._record(destination, ours=bool(record and record.get("ours")))
+        self.entry["files"] = [destination]
+        return True
+
+
+class _ProjectSnapshotJob(_SnapshotJob):
+    """A large scalar volume of a project: copied by slabs (main thread), written into its kind folder in the background."""
+
+    def _changedWhileCopied(self):
+        self.plan.incomplete = True
+        self.entry.update(kind="deferred", reason="changed while saving")
+
+    def _submit(self, node, rows):
+        writer, plan, entry, nodeId = self.writer, self.plan, self.entry, self.nodeId
+        destination = writer.target(plan, node, ".nrrd")
+        check = (self.imageData, self.imageData.GetMTime(), self.scalars.GetMTime(), rows)
+        snapshot, inFlight = self.snapshot, self.inFlight
+        self.release()
+        self.inFlight = 0
+        plan.workerPending += 1
+
+        def write():
+            if plan.cancelled:
+                return None
+            os.makedirs(os.path.dirname(destination), exist_ok=True)
+            start = time.perf_counter()
+            written = writeScalarNrrd(destination, snapshot, rows, level=1)
+            return written, (time.perf_counter() - start) * 1000.0
+
+        def done(result):
+            plan.workerPending -= 1
+            plan.snapshotBytesInFlight -= inFlight
+            if result:
+                plan.snapshots[nodeId] = (destination, check)
+                entry.update(bytes=result[0], files=[destination])
+                plan.metrics["bytesWritten"] += result[0]
+                plan.metrics["workerMs"] += result[1]
+            else:
+                plan.incomplete = True
+
+        def failed(error):
+            plan.workerPending -= 1
+            plan.snapshotBytesInFlight -= inFlight
+            plan.incomplete = True
+            entry.update(kind="error", reason=f"saving failed: {type(error).__name__}")
+            if not isinstance(error, OSError):
+                writer.snapshotFailures.add(nodeId)  # the next generation writes it through its storage node
+            logging.warning(f"Slicer Studio: {entry.get('name') or nodeId} could not be saved in the project: {error}")
+
+        entry.update(writtenAt=time.time(), lastWriteMs=0.0)
+        plan.metrics["nodesWritten"] += 1
+        plan.wroteData = True
+        writer.executor.submit(write, onDone=done, onError=failed)
+        return True
+
+
+class _ProjectCommitJob:
+    """Last main-thread job: waits for the copies and snapshot writes, then replaces the scene file."""
+
+    def __init__(self, writer, plan):
+        self.writer, self.plan = writer, plan
+        self.waiting = False
+
+    def run(self, scene, sliceStart, budgetMs):
+        plan = self.plan
+        if not plan.workerSubmitted:
+            plan.workerSubmitted = True
+            self.writer.submitCopies(plan)
+        if plan.workerPending > 0:
+            self.waiting = True
+            return False
+        self.waiting = False
+        if plan.cancelled:
+            raise GenerationAborted(plan.abortReason or "cancelled")
+        self.writer.commit(plan, scene)
+        return True

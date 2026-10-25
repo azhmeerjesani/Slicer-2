@@ -464,7 +464,8 @@ def recentEntries(limit=RECENT_ROW_COUNT):
     They come from the "RecentlyLoadedMenu" actions of the main window (property ``fileParameters``),
     or from the settings that the main window writes when there is no main window. Files are examined
     (``os.stat``) only until ``limit`` existing files are found. Files in the cache or temporary folders (the templates and
-    the sample data that Studio downloaded) are not the user's files and never listed (``isInternalPath()``).
+    the sample data that Studio downloaded) are not the user's files and never listed (``isInternalPath()``). Files of the
+    projects of the Slicer Studio folder are listed in Projects instead (A-09): Recent keeps the files opened from elsewhere.
     """
     candidates = []  # [(properties, action)], most recent first
     menu = recentlyLoadedMenu()
@@ -489,6 +490,7 @@ def recentEntries(limit=RECENT_ROW_COUNT):
         candidates.reverse()
     openedTimes = _importer().recentOpenTimes()
     internal = _internalFolders()
+    projectsFolder = _projectsFolder()
     entries = []
     for properties, action in candidates:
         if len(entries) >= limit:
@@ -496,10 +498,23 @@ def recentEntries(limit=RECENT_ROW_COUNT):
         path = str(properties.get("fileName", ""))
         if not path or isInternalPath(path, internal):
             continue
+        if projectsFolder and isInternalPath(path, [projectsFolder]):
+            continue
         entry = RecentEntry(properties, action, openedTimes)
         if entry.exists():
             entries.append(entry)
     return entries
+
+
+def _projectsFolder():
+    """<Slicer Studio folder>/Projects (real path), or None when projects are off (A-09)."""
+    try:
+        from . import projects
+    except ImportError:
+        return None
+    if not projects.isEnabled():
+        return None
+    return os.path.normcase(os.path.realpath(projects.projectsFolder()))
 
 
 class _RecentMenuWatcher(qt.QObject):
@@ -1053,8 +1068,26 @@ def newLesionOnTemplate(shell=None):
     return lesion
 
 
+def _projectService():
+    """The autosave service while the scene is a project (A-09), else None."""
+    try:
+        from . import autosave
+    except ImportError:
+        return None
+    service = autosave.instance() if hasattr(autosave, "instance") else None
+    if service is None or not hasattr(service, "currentProject") or service.currentProject() is None:
+        return None
+    return service
+
+
 def closeScene():
-    """Close the scene (File > Close scene, which asks first when something is unsaved)."""
+    """Close the scene (File > Close scene, which asks first when something is unsaved). In a project (A-09) the project is
+    saved first, so nothing is lost and nothing is asked (as New project).
+    """
+    service = _projectService()
+    if service is not None:
+        service.newProject()
+        return
     mainWindow = slicer.util.mainWindow()
     action = mainWindow.findChild("QAction", "FileCloseSceneAction") if mainWindow is not None else None
     if action is not None:
@@ -1477,7 +1510,8 @@ class CurrentWorkCard(qt.QObject):
     #
 
     def _updateButtons(self, model):
-        unsaved = [lesion for lesion in model.lesions if isLesionUnsaved(lesion)]
+        # In a project (A-09) closing saves the project first: nothing is unsaved
+        unsaved = [] if _projectService() is not None else [lesion for lesion in model.lesions if isLesionUnsaved(lesion)]
         self.closeButton.setText(_("Close… (unsaved)") if unsaved else _("Close"))
         self.closeButton.setToolTip(
             _("Close the scene; you are asked first, because {count} lesion(s) are not saved").format(count=len(unsaved)) if unsaved
@@ -4799,6 +4833,16 @@ class LibraryCanvas(qt.QObject):
         columnLayout.addLayout(self.folderCardSlot.layout)
         columnLayout.addSpacing(28)
 
+        # Projects of the Slicer Studio folder (A-09)
+        self.projectsSection = None
+        try:
+            from . import projects_ui
+
+            self.projectsSection = projects_ui.ProjectsSection()
+            columnLayout.addWidget(self.projectsSection.widget)
+        except Exception:
+            logging.error(f"Studio Library: the Projects section failed:\n{traceback.format_exc()}")
+
         # Recent
         recentTitle = qt.QLabel(_("Recent").upper())
         recentTitle.setObjectName("StudioLibrarySectionTitle")
@@ -5018,6 +5062,8 @@ class LibraryCanvas(qt.QObject):
 
     def refresh(self):
         self.refreshData()
+        if self.projectsSection is not None:
+            self.projectsSection.refresh()
         self.recentList.refresh(force=False)
 
     def focusFirst(self):
@@ -5118,6 +5164,8 @@ class LibraryCanvas(qt.QObject):
         for widget in list(_notices.values()):
             self.removeNotice(widget)
         self.folderCardSlot.close()
+        if self.projectsSection is not None:
+            self.projectsSection.dispose()
         self.recentList.dispose()
         for card in (self._currentWork, self._loadedSet, self._studyPage):
             if card is not None:

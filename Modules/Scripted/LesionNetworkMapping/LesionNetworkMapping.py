@@ -1207,7 +1207,9 @@ class _FitHeightFilter(qt.QObject):
 
 
 def _dataDirectory():
-    """``Studio/LNM/DataDirectory`` (only read): A-03b's ``normalize_controller.dataDirectory`` (one default for both)."""
+    """``Studio/LNM/DataDirectory`` (only read): A-03b's ``normalize_controller.dataDirectory`` (one default for both:
+    ``<Slicer Studio folder>/LNM`` when unset, A-09).
+    """
     try:
         from LesionNetworkMappingUI import normalize_controller
 
@@ -1217,6 +1219,13 @@ def _dataDirectory():
     value = str(qt.QSettings().value(DATA_DIRECTORY_SETTING) or "").strip()
     if value:
         return value
+    try:
+        from StudioLib import projects
+
+        if projects.isEnabled():
+            return projects.lnmFolder()
+    except ImportError:
+        pass
     if os.environ.get("SLICER_STUDIO_WEB") or os.path.exists("/.dockerenv"):
         return "/data/SlicerStudio"
     documents = qt.QStandardPaths.writableLocation(qt.QStandardPaths.DocumentsLocation) or os.path.expanduser("~")

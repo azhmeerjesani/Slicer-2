@@ -67,6 +67,9 @@ DEFAULT_PORT = 8080
 DEFAULT_LISTEN = "127.0.0.1"
 DEFAULT_GEOMETRY = "1600x1000"
 DEFAULT_DATA_DIR_NAME = "SlicerStudioData"
+# The Slicer Studio folder inside the container (A-09): projects and studies are saved there, in the data folder
+CONTAINER_PROJECTS_ROOT = "/data/Slicer Studio"
+PROJECTS_FOLDER_NAME = "Slicer Studio"
 DEFAULT_HOME_VOLUME = "slicer-studio-web-home"
 CONTAINER_WEB_PORT = 8080
 # User and group ids of the "slicer" user of the image.
@@ -919,6 +922,8 @@ def command_run(args):
     command = ["run", "--detach", "--name", args.name]
     command += ["--publish", f"{args.listen}:{args.port}:{CONTAINER_WEB_PORT}"]
     command += ["--mount", mount_option("bind", data_dir, "/data")]
+    # Projects are saved in the data folder, without the first-start folder question
+    command += ["--env", f"SLICER_STUDIO_PROJECTS_ROOT={CONTAINER_PROJECTS_ROOT}"]
     if home_volume:
         command += ["--mount", mount_option("volume", home_volume, "/home/slicer")]
     command += ["--shm-size", "2g"]
@@ -957,6 +962,7 @@ def command_run(args):
     info(f"Slicer Studio is running at {url}")
     info("  Slicer appears in the browser a few seconds after the page opens" + (" (longer with emulation)." if emulated else "."))
     info(f"  Data folder: {data_dir} (the Documents folder in Slicer, also /data)")
+    info(f"  Your work is saved automatically in {data_dir / PROJECTS_FOLDER_NAME} (Projects and Studies).")
     info(f"  Stop it with: {script_command('stop', args)}")
     open_browser(url, not args.no_browser)
 

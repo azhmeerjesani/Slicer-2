@@ -142,9 +142,17 @@ ROWS = (
         target="StudioLibrarySampleDataLink", workspace="library",
         keywords="sample data download example mrhead"),
     Row("recent", _("File > Recent"), _("Library > Recent"), target="StudioRecentList", workspace="library", keywords="recent files history reopen"),
-    Row("save-data", _("File > Save Data"), _("{key:Ctrl+S}, or ≡ > File > Save Data: saves the scene (.mrml, .mrb) as in 3D Slicer"),
-        officialKey="Ctrl+S", key="Ctrl+S", target="StudioAppMenuButton", same=True, keywords="save scene mrb mrml save data write",
-        note=_("To save only the lesion as a NIfTI mask, use Save lesion in Draw ({key:Ctrl+Shift+S}).")),
+    Row("save-data", _("File > Save Data"), _("Saved automatically to Projects/<name> in the Slicer Studio folder ({key:Ctrl+S} saves now)"),
+        officialKey="Ctrl+S", key="Ctrl+S", target=("StudioSaveStatus", "StudioAppMenuButton"), keywords="save scene mrb mrml save data write save project autosave",
+        note=_("Each project is a 3D Slicer scene (.mrml) with its data in folders. To save only the lesion as a NIfTI mask, use Save "
+               "lesion in Draw ({key:Ctrl+Shift+S}); without a project (a study, Classic), {key:Ctrl+S} opens the Save dialog of 3D Slicer.")),
+    Row("save-as", _("File > Save Data (to another folder or a .mrb)"), _("≡ > File > Save a copy as…: the whole scene as one .mrb file, anywhere"),
+        target="StudioAppMenuButton", keywords="save as save copy export mrb bundle share send",
+        note=_("The project itself stays in the Slicer Studio folder and keeps saving there.")),
+    Row("where-files", _("Where are my files?"), _("Show project folder (the save status menu in the top bar, ≡ > File, or Search): Finder, "
+                                                  "Explorer or Files opens on Projects/<name>"),
+        target=("StudioSaveStatus", "StudioAppMenuButton"), keywords="where are my files folder finder explorer location documents slicer studio folder reveal",
+        note=_("Settings › Saving shows and changes the Slicer Studio folder.")),  # noqa: RUF001
     Row("close-scene", _("File > Close Scene"), _("≡ > File > Close Scene ({key:Ctrl+W})"), officialKey="Ctrl+W", key="Ctrl+W",
         target="StudioAppMenuButton", same=True, keywords="close scene clear new"),
     Row("settings", _("Edit > Application Settings"), _("≡ > Settings… ({key:Ctrl+2})"), officialKey="Ctrl+2", key="Ctrl+2",

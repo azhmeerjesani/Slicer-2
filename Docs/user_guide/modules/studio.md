@@ -352,8 +352,10 @@ browser, edited in a spreadsheet and backed up by copying it.
 
 ## Autosave and recovery
 
-Slicer Studio autosaves your work so that a crash or an accidental close does not lose it. It runs in Studio and in
-Classic.
+In Studio, your work is saved as a project in the Slicer Studio folder, continuously and in place: see
+[Where Slicer Studio saves your work](../studio_projects.md). This section is about the recovery copies that Slicer
+Studio keeps of scenes that are not projects (in Classic, and while a study is open), so that a crash or an accidental
+close does not lose them. It runs in Studio and in Classic.
 
 - **What.** The whole scene is saved as an ordinary 3D Slicer scene (`Scene.mrml` and data files). It is incremental:
   files you loaded and did not change are referenced by their path, and only changed data is written. Data larger than
@@ -382,7 +384,7 @@ Classic.
   `Studio/Autosave/Enabled` to false, or start with the environment variable `SLICER_STUDIO_AUTOSAVE=0`. Autosave
   never runs with `--testing` or `--no-main-window`.
 
-The keys are listed in [Settings](../settings.md#autosave).
+The keys are listed in [Settings](../settings.md#saving).
 
 ## Switching to the classic interface, and disabling Studio
 

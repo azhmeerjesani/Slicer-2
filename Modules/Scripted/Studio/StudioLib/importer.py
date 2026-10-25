@@ -963,6 +963,7 @@ def loadFiles(paths, shell=None, pairedLesion=None):
                     continue
                 try:
                     if kind == "scene":
+                        _announceSceneSource(path)
                         slicer.util.loadScene(path, {})
                         result.scenes.append(path)
                     elif kind == "volume":
@@ -1201,6 +1202,8 @@ def loadRecentFile(properties, action=None, shell=None):
     scene = slicer.mrmlScene
     nodeIdsBefore = {scene.GetNthNode(index).GetID() for index in range(scene.GetNumberOfNodes())}
     loaded = True
+    if isScene:
+        _announceSceneSource(fileName)
     if action is not None:
         action.trigger()
     else:
@@ -1244,6 +1247,11 @@ def loadFolder(path, shell=None):
     if studyUi is not None and os.path.isfile(os.path.join(path, "study.json")):
         studyUi.openStudy(path, shell)
         return "study"
+    sceneFile = _folderScene(path)
+    if sceneFile is not None:
+        # A scene folder (a Slicer Studio project, or a scene that 3D Slicer saved with its data): open its scene
+        loadFiles([sceneFile], shell)
+        return "scene"
     niftiFiles, isDicom = scanFolder(path)
     if isDicom:
         if importDicomFolder(path, shell):
@@ -1257,6 +1265,33 @@ def loadFolder(path, shell=None):
             return "nifti"
     openAddDataDialog([path])
     return "addData"
+
+
+def _announceSceneSource(path):
+    """Tell the autosave service which file a scene comes from (a .mrb is unpacked first): it names the project of a copy."""
+    try:
+        from . import autosave
+
+        service = autosave.instance()
+        if service is not None and hasattr(service, "setPendingSceneSource"):
+            service.setPendingSceneSource(path)
+    except Exception:
+        logging.debug(f"Studio: {traceback.format_exc()}")
+
+
+def _folderScene(path):
+    """The scene file of a scene folder: a Slicer Studio project, or a folder with exactly one .mrml (3D Slicer's "Save" with
+    data); None otherwise.
+    """
+    try:
+        from . import projects
+
+        if projects.isProjectFolder(path):
+            return projects.sceneFile(path)
+        scenes = [name for name in os.listdir(path) if name.lower().endswith(".mrml") and not name.startswith(".")]
+    except (ImportError, OSError):
+        return None
+    return os.path.join(path, scenes[0]) if len(scenes) == 1 else None
 
 
 def scanFolder(path):

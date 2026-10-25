@@ -17,12 +17,19 @@ Phases (each one a Slicer process, headless, with a fresh temporary HOME shared 
   directly and compare its content; new errors in the application log fail the check. Official installations
   run under ``LANG=LC_ALL=C.UTF-8``.
 
+With ``--projects`` (A-09) the same scene is a *project* of the Slicer Studio folder (Studio, ``SLICER_STUDIO_PROJECTS_ROOT``
+= ``<HOME>/Slicer Studio``): phase A waits for the project, saves it, measures the lesion-only saves, makes one more
+edit that is not saved yet and crashes; phase B must show ``StudioProjectCrashCard``, open the project from it and find
+every saved edit (the last, unsaved one is lost), every file inside the project and nothing "modified since read"; phase
+C loads the project's scene file in each checker. Without ``--projects`` the private recovery autosave of A-01 is
+checked (``SLICER_STUDIO_PROJECTS=0``).
+
 A report is written as ``report.json`` and ``report.txt`` in the output directory; the exit code is non-zero if
 any check fails. Only the Python standard library is used outside Slicer.
 
 Usage::
 
-  StudioAutosaveCrashCheck.py --slicer PATH --out DIR [--checker NAME=PATH ...] [--studio] [--timeout S]
+  StudioAutosaveCrashCheck.py --slicer PATH --out DIR [--checker NAME=PATH ...] [--studio | --projects] [--timeout S]
       [--no-xvfb] [--mrhead FILE]
 
 Example::
@@ -198,6 +205,57 @@ class _PhaseA(_Phase):
 
         self.wait(serviceReady, 60, self.build)
 
+    def projectReady(self):
+        return self.service.project is not None
+
+    def projectBuilt(self):
+        """--projects: the project exists; save it, then measure lesion-only saves."""
+        self.result["projectPath"] = self.service.project.path
+        self.result["firstSave"] = self.service.saveNow("crash check", progress=False)
+        self.result["firstSaveMetrics"] = self.service.metrics["last"]
+        self.generations = []
+        self.projectIncremental()
+
+    def projectIncremental(self):
+        """One lesion-only edit saved by the project engine; GENERATION_RUNS of them, then the crash."""
+        import slicer
+
+        if len(self.generations) >= GENERATION_RUNS:
+            self.projectCrash()
+            return
+        offset = len(self.generations) + 1
+        self.lesion[self.center[0], self.center[1], self.center[2] + 12 + offset] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(self.lesion, self.segmentation, self.segmentId, self.volume)
+        if not self.service.autosaveNow("lesion edit"):
+            self.result.setdefault("failures", []).append("autosaveNow did not start a project save after a lesion edit")
+            self.projectCrash()
+            return
+        self.wait(self.generationFinished, 120, self.projectSaved)
+
+    def projectSaved(self):
+        self.generations.append(self.service.metrics["last"])
+        self.projectIncremental()
+
+    def projectCrash(self):
+        import slicer
+
+        service = self.service
+        self.result["generations"] = self.generations
+        self.result["expected"] = _sceneContent()
+        self.result["modifiedAfterSave"] = bool(slicer.mrmlScene.GetStorableNodesModifiedSinceRead())
+        # One more edit that is not saved yet (lost by the crash)
+        self.lesion[self.center[0] - 8, self.center[1], self.center[2]] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(self.lesion, self.segmentation, self.segmentId, self.volume)
+        self.result["unsavedVoxel"] = [int(self.center[0] - 8), int(self.center[1]), int(self.center[2])]
+        self.result["pollMs"] = [service.poll() or service.metrics["pollMs"] for _ in range(5)]
+        self.result["nodeCount"] = slicer.mrmlScene.GetNumberOfNodes()
+        self.result["crashed"] = True
+        self.write()
+        sys.stdout.flush()
+        if hasattr(signal, "SIGKILL"):
+            os.kill(os.getpid(), signal.SIGKILL)
+        os._exit(137)
+
     def build(self):
         import numpy as np
         import vtk
@@ -281,6 +339,9 @@ class _PhaseA(_Phase):
         layoutManager.setLayout(7001)
         self.volume, self.segmentation = volume, segmentation
         self.result["layout"] = layoutManager.layout
+        if self.config.get("projects"):
+            self.wait(self.projectReady, 60, self.projectBuilt)
+            return
         self.measureFullGenerations()
 
     def measureFullGenerations(self):
@@ -377,6 +438,9 @@ class _PhaseB(_Phase):
         import slicer
 
         self.capture = _LogCapture()
+        if self.config.get("projects"):
+            self.wait(lambda: slicer.util.mainWindow().findChild(qt.QWidget, "StudioProjectCrashCard") is not None, 60, self.openProject)
+            return
 
         def offered():
             if self.config.get("studio"):
@@ -439,6 +503,44 @@ class _PhaseB(_Phase):
         self.result["storableModified"] = bool(scene.GetStorableNodesModifiedSinceRead())
         autosave_io.backgroundWriter().drain(10.0)
         self.result["sessionState"] = (autosave_io.readJson(os.path.join(self.config["sessionDir"], autosave_io.SESSION_FILE)) or {}).get("state")
+        self.result["messages"] = self.capture.entries()
+        self.finish()
+
+
+    def openProject(self):
+        import qt
+
+        import slicer
+        from StudioLib import autosave
+
+        card = slicer.util.mainWindow().findChild(qt.QWidget, "StudioProjectCrashCard")
+        self.result["crashCard"] = card is not None
+        self.result["crashCardText"] = [label.text for label in card.findChildren(qt.QLabel)] if card is not None else []
+        buttons = [button for button in card.findChildren(qt.QPushButton) if button.objectName == "StudioProjectCrashCardOpenButton"] if card else []
+        if not buttons:
+            self.result.setdefault("failures", []).append("the crash card has no Open project button")
+            self.finish()
+            return
+        start = time.perf_counter()
+        buttons[0].click()
+        for _ in range(20):
+            slicer.app.processEvents()
+        self.result["openSeconds"] = time.perf_counter() - start
+        service = autosave.instance()
+        scene = slicer.mrmlScene
+        self.result["projectOpen"] = service.project.path if service.project is not None else None
+        self.result["content"] = _sceneContent()
+        outside = []
+        for node in slicer.util.getNodesByClass("vtkMRMLStorableNode"):
+            if not node.GetSaveWithScene() or node.GetHideFromEditors():
+                continue
+            storageNode = node.GetStorageNode()
+            fileName = storageNode.GetFileName() if storageNode is not None else None
+            if fileName and service.project is not None and not os.path.realpath(fileName).startswith(os.path.realpath(service.project.path) + os.sep):
+                outside.append(fileName)
+        self.result["storageOutsideProject"] = outside
+        self.result["sceneUrl"] = scene.GetURL()
+        self.result["storableModified"] = bool(scene.GetStorableNodesModifiedSinceRead())
         self.result["messages"] = self.capture.entries()
         self.finish()
 
@@ -506,6 +608,13 @@ def _runSlicer(slicerPath, name, config, home, args, official=False):
                        XDG_DATA_HOME=os.path.join(home, ".local", "share"))
     environment.pop("SLICER_STUDIO_AUTOSAVE", None)
     environment.pop("SLICER_STUDIO_AUTOSAVE_DIR", None)
+    # Projects (A-09): a throwaway Slicer Studio folder in this HOME (no folder chooser); without --projects, projects are
+    # off and the private recovery autosave of A-01 is checked
+    environment["SLICER_STUDIO_PROJECTS_ROOT"] = os.path.join(home, "Slicer Studio")
+    if config.get("projects"):
+        environment.pop("SLICER_STUDIO_PROJECTS", None)
+    else:
+        environment["SLICER_STUDIO_PROJECTS"] = "0"
     if official:
         # Official 5.12.4 fails on non-ASCII paths under the POSIX locale (A-04 E9)
         environment.update(LANG="C.UTF-8", LC_ALL="C.UTF-8")
@@ -555,6 +664,7 @@ def main(argv=None):
     parser.add_argument("--out", required=True, help="output directory (replaced)")
     parser.add_argument("--timeout", type=int, default=900, help="time limit of each Slicer process in seconds")
     parser.add_argument("--studio", action="store_true", help="expect the Studio recovery card (A-01b) instead of the dialog")
+    parser.add_argument("--projects", action="store_true", help="check a project of the Slicer Studio folder (A-09) instead of the private autosave")
     parser.add_argument("--no-xvfb", action="store_true", help="do not run Slicer in xvfb-run")
     parser.add_argument("--mrhead", help="volume file used as 'MR Head' (default: a synthetic volume)")
     args = parser.parse_args(argv)
@@ -580,6 +690,8 @@ def main(argv=None):
         if probe.returncode != 0:
             problems.append("A-01b not present (StudioLib.autosave_ui cannot be imported): --studio cannot be checked")
 
+    if args.projects:
+        return _mainProjects(args, checkers, report, problems, home)
     phaseA = _runSlicer(args.slicer, "A-autosave-and-crash", {"phase": "A", "mrhead": args.mrhead}, home, args)
     report["phases"]["A"] = phaseA
     if "exception" in phaseA or not phaseA.get("crashed"):
@@ -685,6 +797,87 @@ def main(argv=None):
     with open(os.path.join(args.out, "report.json"), "w", encoding="utf-8") as f:
         json.dump(report, f, indent=1, sort_keys=True, default=str)
     text = _formatReport(report)
+    with open(os.path.join(args.out, "report.txt"), "w", encoding="utf-8") as f:
+        f.write(text)
+    print(text)
+    return 0 if report["passed"] else 1
+
+
+def _mainProjects(args, checkers, report, problems, home):
+    """--projects: a project saved continuously, a crash, the crash offer, and the project in official Slicer."""
+    phaseA = _runSlicer(args.slicer, "A-project-and-crash", {"phase": "A", "mrhead": args.mrhead, "projects": True}, home, args)
+    report["phases"]["A"] = phaseA
+    if "exception" in phaseA or not phaseA.get("crashed"):
+        problems.append("phase A failed: " + (phaseA.get("exception") or "no crash").strip().splitlines()[-1])
+    problems += [f"phase A: {failure}" for failure in phaseA.get("failures", [])]
+    expected = phaseA.get("expected") or {}
+    generations = [g for g in (phaseA.get("generations") or []) if g]
+    report["metrics"] = {
+        "firstSaveMainThreadTotalMs": (phaseA.get("firstSaveMetrics") or {}).get("mainThreadTotalMs"),
+        "lesionOnlyMainThreadTotalMsMedian": _median([g.get("mainThreadTotalMs") for g in generations]),
+        "lesionOnlyMaxSliceMs": max([g.get("maxSliceMs", 0) for g in generations] or [None]),
+        "sceneFileMsMedian": _median([g.get("sceneMs") for g in generations]),
+        "pollMsMedian": _median(phaseA.get("pollMs") or []),
+        "nodeCount": phaseA.get("nodeCount"),
+    }
+    metrics = report["metrics"]
+    if phaseA.get("crashed"):
+        if not phaseA.get("firstSave"):
+            problems.append("phase A: the first save of the project failed")
+        if phaseA.get("modifiedAfterSave"):
+            problems.append("phase A: nodes are still 'modified since read' after saving the project")
+        if metrics["lesionOnlyMaxSliceMs"] is not None and metrics["lesionOnlyMaxSliceMs"] > 100:
+            problems.append(f"lesion-only save: a main-thread slice took {metrics['lesionOnlyMaxSliceMs']} ms > 100 ms")
+        if metrics["pollMsMedian"] is not None and metrics["pollMsMedian"] > 2:
+            problems.append(f"poll {metrics['pollMsMedian']} ms > 2 ms")
+        projectPath = phaseA.get("projectPath")
+        phaseB = _runSlicer(args.slicer, "B-crash-offer", {"phase": "B", "projects": True}, home, args)
+        report["phases"]["B"] = phaseB
+        if "exception" in phaseB:
+            problems.append("phase B failed: " + phaseB["exception"].strip().splitlines()[-1])
+        problems += [f"phase B: {failure}" for failure in phaseB.get("failures", [])]
+        if not phaseB.get("crashCard"):
+            problems.append("phase B: StudioProjectCrashCard is not shown")
+        if os.path.normpath(phaseB.get("projectOpen") or "") != os.path.normpath(projectPath or "-"):
+            problems.append(f"phase B: the project was not opened ({phaseB.get('projectOpen')})")
+        if phaseB.get("content"):
+            problems += _compareContent(expected, phaseB["content"], "reopened project")
+        if phaseB.get("storageOutsideProject"):
+            problems.append(f"phase B: files outside the project: {phaseB['storageOutsideProject'][:3]}")
+        if phaseB.get("storableModified"):
+            problems.append("phase B: the reopened project has unsaved changes")
+        errors = [m for m in phaseB.get("messages", []) if m["level"] in ERROR_LEVELS and not _isNoise(m)]
+        problems += [f"phase B: log {m['level']}: {m['text'][:200]}" for m in errors]
+        scenePath = os.path.join(projectPath or "", os.path.basename(projectPath or "") + ".mrml")
+        report["phases"]["C"] = {}
+        for name, path in [("fork", args.slicer)] + checkers:
+            checkerHome = os.path.join(args.out, f"home-{name}")
+            os.makedirs(checkerHome, exist_ok=True)
+            result = _runSlicer(path, f"C-{name}", {"phase": "C", "scenePath": scenePath}, checkerHome, args, official=(name != "fork"))
+            report["phases"]["C"][name] = result
+            if "exception" in result:
+                problems.append(f"phase C {name}: " + result["exception"].strip().splitlines()[-1])
+                continue
+            if not result.get("loaded"):
+                problems.append(f"phase C {name}: loading failed")
+            problems += _compareContent(expected, result.get("content") or {}, f"phase C {name}")
+            if sorted(result.get("sliceViewsShown") or []) != ["Green", "Red", "Yellow"]:
+                problems.append(f"phase C {name}: slice views shown: {result.get('sliceViewsShown')}")
+            errors = [m for m in result.get("messages", []) if m["level"] in ERROR_LEVELS and not _isNoise(m)]
+            problems += [f"phase C {name}: log {m['level']}: {m['text'][:200]}" for m in errors]
+    report["passed"] = not problems
+    with open(os.path.join(args.out, "report.json"), "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=1, sort_keys=True, default=str)
+    lines = ["Slicer Studio project crash check (A-09)", "=" * 40, ""]
+    lines.append(f"Phase A (project saved, then SIGKILL): {'ok' if phaseA.get('crashed') else 'FAILED'}  project {phaseA.get('projectPath')}")
+    lines += [f"  {key}: {value}" for key, value in metrics.items()]
+    phaseB = report["phases"].get("B") or {}
+    lines.append(f"Phase B: crash card {phaseB.get('crashCard')} {phaseB.get('crashCardText')}, opened {phaseB.get('projectOpen')}")
+    for name, result in (report["phases"].get("C") or {}).items():
+        lines.append(f"Phase C {name}: version {result.get('version')}, loaded {result.get('loaded')}, slice views {result.get('sliceViewsShown')}")
+    lines += ["", "Problems:"] + [f"  - {p}" for p in problems] + ["  (none)" if not problems else ""]
+    lines += [f"Result: {'PASS' if report['passed'] else 'FAIL'}", ""]
+    text = "\n".join(lines)
     with open(os.path.join(args.out, "report.txt"), "w", encoding="utf-8") as f:
         f.write(text)
     print(text)

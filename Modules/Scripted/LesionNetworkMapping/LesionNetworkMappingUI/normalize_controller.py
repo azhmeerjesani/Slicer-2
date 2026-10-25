@@ -150,15 +150,34 @@ def participantLabel(text):
     return f"sub-{label or 'scan'}"
 
 
-def dataDirectory():
-    """``Studio/LNM/DataDirectory`` (only read): default Documents/SlicerStudio, or /data/SlicerStudio in the web or Docker build."""
-    value = str(qt.QSettings().value(DATA_DIRECTORY_SETTING) or "").strip()
-    if value:
-        return value
+def legacyDataDirectory():
+    """The default before A-09: Documents/SlicerStudio, or /data/SlicerStudio in the web or Docker build."""
     if os.environ.get("SLICER_STUDIO_WEB") or os.path.exists("/.dockerenv"):
         return "/data/SlicerStudio"
     documents = qt.QStandardPaths.writableLocation(qt.QStandardPaths.DocumentsLocation) or os.path.expanduser("~")
     return os.path.join(documents, "SlicerStudio")
+
+
+def dataDirectory():
+    """``Studio/LNM/DataDirectory`` (only read; an explicit value is kept as is).
+
+    Unset: ``<Slicer Studio folder>/LNM`` (A-09, D-A16), except when the former default folder (Documents/SlicerStudio)
+    already holds data, which then stays in use so that nothing seems lost. Without Studio: the former default.
+    """
+    value = str(qt.QSettings().value(DATA_DIRECTORY_SETTING) or "").strip()
+    if value:
+        return value
+    legacy = legacyDataDirectory()
+    try:
+        if os.path.isdir(legacy) and os.listdir(legacy):
+            return legacy
+    except OSError:
+        pass
+    try:
+        from StudioLib import projects
+    except ImportError:
+        return legacy
+    return projects.lnmFolder() if projects.isEnabled() else legacy
 
 
 def defaultOutputDirectory(scanNode=None, scanPath=None, subject=None, studyPath=None, sid=None):

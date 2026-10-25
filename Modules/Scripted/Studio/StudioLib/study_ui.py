@@ -770,12 +770,38 @@ def openStudyDialog(shell=None):
     return openStudy(folder, shell)
 
 
+def _studiesFolder():
+    """``(folder, created)``: Studies/ of the Slicer Studio folder (A-09), where "New study" starts; ``created`` is the folder
+    when it was created for the dialog (removed again if it stays empty), else None. ``(None, None)`` without projects.
+    """
+    try:
+        from . import projects
+    except ImportError:
+        return None, None
+    if not projects.isEnabled():
+        return None, None
+    folder = projects.studiesFolder()
+    if os.path.isdir(folder):
+        return folder, None
+    try:
+        projects.ensureRoot()
+        os.makedirs(folder)
+    except OSError:
+        return None, None
+    return folder, folder
+
+
 def newStudyDialog(shell=None):
-    """New study…: choose a folder; its NIfTI files (if any) become the subjects, its participants.tsv is adopted."""
+    """New study…: choose a folder (the dialog starts in Studies/ of the Slicer Studio folder); its NIfTI files (if any)
+    become the subjects, its participants.tsv is adopted.
+    """
     if not isAvailable():
         _toast(shell, _("Studies are not available in this build"))
         return None
-    folder = qt.QFileDialog.getExistingDirectory(slicer.util.mainWindow(), _("New study: choose the study folder"), _importer()._lastDirectory())
+    start, created = _studiesFolder()
+    folder = qt.QFileDialog.getExistingDirectory(slicer.util.mainWindow(), _("New study: choose the study folder"), start or _importer()._lastDirectory())
+    if created and os.path.isdir(created) and not os.listdir(created):
+        os.rmdir(created)  # created for the dialog only: never leave an empty folder
     if not folder:
         return None
     niftiFiles, _isDicom = _importer().scanFolder(folder)

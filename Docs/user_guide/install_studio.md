@@ -16,6 +16,9 @@ Slicer Studio works side by side with official 3D Slicer:
   and 5.13, and files saved by official 3D Slicer open in Slicer Studio.
 - Both applications can be installed at the same time.
 - Coming from 3D Slicer? [Coming from 3D Slicer](studio_coming_from_slicer.md) shows where everything went.
+- Your work is saved automatically, as ordinary 3D Slicer files, in a folder you
+  choose the first time Slicer Studio starts: see
+  [Where Slicer Studio saves your work](studio_projects.md).
 
 ## Build the packages
 
@@ -166,6 +169,12 @@ The second command starts Slicer Studio and opens the browser. Stop it with
 
 On Linux, the launcher can also run without Docker, on a local Slicer
 installation or build tree (`slicer_studio_web.py local`).
+
+Your work is saved automatically in the `Slicer Studio` folder of the data
+folder (`SlicerStudioData` in your home folder unless you pass `--data`), in
+`Projects` and `Studies`; the Docker version does not ask where to save (`local`
+asks as the desktop application does). See
+[Where Slicer Studio saves your work](studio_projects.md).
 
 ## Updates
 

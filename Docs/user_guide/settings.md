@@ -115,15 +115,17 @@ The **Views** panel has the usual defaults for new slice and 3D views, and these
   **Page Up / Page Down step** (`Studio/PageStepSlices`, 10 slices). The Classic interface, `--testing` and
   scripts keep the official behaviour whatever these say.
 
-### Autosave
+### Saving
 
-The **Autosave** panel (in the Application Settings of Slicer Studio and of its classic interface; the autosave status in
-the top bar of Studio also leads to it) controls the automatic safety copy of your scene. See
-[Autosave and recovery](modules/studio.md#autosave-and-recovery) for what it does. The panel has:
+The **Saving** panel (in the Application Settings of Slicer Studio and of its classic interface; the save status in
+the top bar of Studio also leads to it) controls where and how often your work is saved. See
+[Where Slicer Studio saves your work](studio_projects.md) for projects and
+[Autosave and recovery](modules/studio.md#autosave-and-recovery) for the recovery copies. The panel has:
 
 | Setting | Key | Default | Range |
 | ------- | --- | ------- | ----- |
-| **Autosave the scene** | `Studio/Autosave/Enabled` | on | |
+| **Slicer Studio folder** (**Change…**, **Show**) | `Studio/Projects/Root` (`Studio/Projects/RootChosen` once you chose it) | `Slicer Studio` in Documents | a folder |
+| **Save continuously** | `Studio/Autosave/Enabled` | on | |
 | **At most every** (minutes) | `Studio/Autosave/IntervalMinutes` | 2 | 1-60 |
 | **or after a pause of** (seconds) | `Studio/Autosave/IdleSeconds` | 10 | 3-300 |
 | **Location** | `Studio/Autosave/Directory` | empty, meaning the private folder `StudioAutosave` in the application data folder | a folder |
@@ -132,8 +134,12 @@ the top bar of Studio also leads to it) controls the automatic safety copy of yo
 | **Delete after** (days) | `Studio/Autosave/MaxAgeDays` | 14 | 1-365 |
 | **Skip data larger than** (MB) | `Studio/Autosave/MaxNodeMB` | 2048 | 16-102400 |
 
-The buttons **Recover autosaved work…**, **Autosave now** and **Delete all autosaves…** (permanent, for closed
-sessions) are in the panel too. The environment variable `SLICER_STUDIO_AUTOSAVE_DIR` overrides the location and
+The pause and the interval apply to projects and to recovery copies; **Location**, **Keep**, **Max size** and **Delete
+after** apply to the recovery copies of scenes that are not projects (Classic, studies). **Change…** offers to move the
+projects and studies to the new folder. The buttons **Recover autosaved work…**, **Autosave now** and **Delete all
+autosaves…** (permanent, for closed sessions) are in the panel too. The environment variable
+`SLICER_STUDIO_PROJECTS_ROOT` sets the Slicer Studio folder (the first-start question is then not asked),
+`SLICER_STUDIO_PROJECTS=0` turns projects off, `SLICER_STUDIO_AUTOSAVE_DIR` overrides the recovery location and
 `SLICER_STUDIO_AUTOSAVE=0` turns autosave off. The panel is not present and autosave does not run with `--testing`
 or `--no-main-window`. Choose a private folder: autosaves can contain patient data, and a folder that is synchronized
 to the cloud or shared is not private.

@@ -13,7 +13,7 @@ The index is built on the first open and refreshed incrementally on later opens:
 - every other module that is not hidden (``slicer.app.moduleManager()``), opened as a transient module;
 - the Segment Editor tools by their Studio name ("Brush" for Paint), with their live positional key;
 - built-in actions (Open…, Open folder…, Start on MNI template, New lesion, Save lesion as NIfTI…, Close
-  scene, Save scene, Place point, Python console, Error log, Settings…, Keyboard shortcuts, Recent
+  scene, Save now (the project, else the Save dialog), Place point, Python console, Error log, Settings…, Keyboard shortcuts, Recent
   messages, theme, density, Hide panels, Show inspector, Reset panel width, Show Data Probe);
 - view commands (Show crosshair, Slice intersections, Link views, Reset views, Maximize view,
   Window/level: Auto, Brain, Narrow and Reset, and the CT display presets of the Volumes module, applied in place);
@@ -411,6 +411,16 @@ def _segmentEditor():
 def _mainWindowAction(objectName):
     mainWindow = slicer.util.mainWindow()
     return mainWindow.findChild("QAction", objectName) if mainWindow is not None else None
+
+
+def _saveNow():
+    """Save now: the open project (A-09), else the Save dialog of 3D Slicer (File > Save Data)."""
+    try:
+        from . import projects_ui
+    except ImportError:
+        _triggerAction("FileSaveSceneAction")
+        return
+    projects_ui.saveNow()
 
 
 def _triggerAction(objectName):
@@ -902,8 +912,9 @@ class Index:
             Entry("action.open", _("Open…"), action, shell.openFiles, key="Ctrl+O",
                   synonyms=("open", "add data", "data", "load", "import", "open file", "load data", "figure", "picture", "png"),
                   description=_("Open scans, lesion masks, figures, statistical maps or scenes"), iconName="folder-open"),
-            Entry("action.save", _("Save scene"), action, lambda: _triggerAction("FileSaveSceneAction"), key="Ctrl+S",
-                  synonyms=("save", "save data", "save scene", "mrb", "mrml", "save all"), description=_("Save the scene and its data, as in 3D Slicer"),
+            Entry("action.save", _("Save now"), action, _saveNow, key="Ctrl+S",
+                  synonyms=("save", "save data", "save scene", "mrb", "mrml", "save all", "save project"),
+                  description=_("Save the project now (it is also saved automatically); without a project, the Save dialog of 3D Slicer"),
                   iconName="download"),
             Entry("action.closeScene", _("Close scene"), action, lambda: _triggerAction("FileCloseSceneAction"), key="Ctrl+W",
                   synonyms=("close", "close all", "clear scene", "new scene", "reset scene"), description=_("Close everything that is open"), iconName="x"),

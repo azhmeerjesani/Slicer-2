@@ -7,6 +7,9 @@ Run inside Slicer, with a throwaway settings folder (arguments after ``--``)::
   HOME=$(mktemp -d) xvfb-run -a -s "-screen 0 1920x1080x24" ./Slicer --no-splash --python-script Utilities/Scripts/StudioUsabilityGate.py -- \
     --task all --wave 2 --out DIR [--size WxH] [--input auto|xdotool|synthetic] [--baseline] [--compare DIR/baseline.json]
 
+Every task process saves its projects in a throwaway Slicer Studio folder (``SLICER_STUDIO_PROJECTS_ROOT`` = ``<its HOME>/Slicer
+Studio``), so the first-start folder question (A-09) never blocks a run.
+
 ``--task`` takes ``all`` or task names (novice, nav, find-tools, find-tools-warm, classic, case, lnm, wrong-side, reopen,
 dicom, esc-matrix, keyboard-layouts). Every task runs in its own Slicer process with a fresh settings folder (under a
 nested xvfb of the requested size when xvfb-run exists), so that a task starts like the first launch and the counts do
@@ -163,8 +166,10 @@ def runOneProcess(args, spec, size, dataDirectory, outDirectory, homeDirectory, 
     environment = dict(os.environ)
     environment["HOME"] = homeDirectory
     environment["XDG_CONFIG_HOME"] = os.path.join(homeDirectory, ".config")
-    for key in ("SLICER_STUDIO_WEB", "SLICERRC"):
+    for key in ("SLICER_STUDIO_WEB", "SLICERRC", "SLICER_STUDIO_PROJECTS"):
         environment.pop(key, None)
+    # Projects (A-09) go to a throwaway folder of the task's home, and the folder chooser is never shown
+    environment["SLICER_STUDIO_PROJECTS_ROOT"] = os.path.join(homeDirectory, "Slicer Studio")
     command = [launcherPath(), "--no-splash"]
     if spec.viaRc:
         os.makedirs(os.path.join(outDirectory, "rc"), exist_ok=True)

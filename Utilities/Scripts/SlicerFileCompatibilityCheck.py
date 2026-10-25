@@ -14,7 +14,13 @@ writer script runs headless in A and builds a small test scene:
 - the current layout: 7001 "Studio Focus" for a fork writer, Conventional for an official writer
 
 The scene is saved twice: as a scene file with its data files in a directory, and as a ``.mrb``
-bundle. With ``--autosave``, a fork writer first writes the scene with the Slicer Studio scene autosave
+bundle. With ``--projects`` (A-09), a fork writer first saves the scene as a *project* of the Slicer Studio folder
+(``StudioLib.autosave_io.ProjectWriter``: ``Projects/<name>/<name>.mrml`` with Images/, Segmentations/, ...) and every
+checker loads that scene file as a further scene; then, in the other direction, each official installation opens a copy
+of that project, changes it (a point added, a table cell, a new point list) and saves it as its Save dialog would
+(changed files in place, new files next to the scene file); the fork opens the project again in place (``openProject``),
+must find the official changes, saves it (new files move into their kind folders) and must find them again after
+reloading; finally the official installation loads the project the fork saved. With ``--autosave``, a fork writer first writes the scene with the Slicer Studio scene autosave
 (``StudioLib.autosave_io.writeSnapshot``, before the regular saves, so that every node is written by the autosave)
 into ``autosave/``; checkers load that ``Scene.mrml`` as a third scene, with the same checks. A fork writer also
 runs the lesion network mapping command-line interface
@@ -44,7 +50,7 @@ into the output directory, with screenshots in ``shots/``. The exit code is non-
 Usage::
 
   SlicerFileCompatibilityCheck.py --slicer NAME=PATH [--slicer NAME=PATH ...] --out DIR
-      [--pairs all|cross|WRITER:CHECKER[,WRITER:CHECKER...]] [--fork NAME ...] [--testing] [--autosave]
+      [--pairs all|cross|WRITER:CHECKER[,WRITER:CHECKER...]] [--fork NAME ...] [--testing] [--autosave] [--projects]
       [--timeout SECONDS] [--no-xvfb] [--lnm-lib-dir DIR]
 
   --slicer NAME=PATH  a Slicer launcher to test (repeatable). NAMEs starting with "fork" are treated as
@@ -55,6 +61,7 @@ Usage::
   --fork NAME         name of a fork installation (repeatable)
   --testing           start Slicer with --testing (by default the normal user interface is used)
   --autosave          also check the scene autosave of fork writers (skipped when StudioLib is missing)
+  --projects          also check projects of the Slicer Studio folder (A-09), in both directions
   --timeout SECONDS   time limit for each Slicer process (default: 900)
   --no-xvfb           do not wrap the Slicer processes in xvfb-run
   --lnm-lib-dir DIR   directory that contains the LesionNetworkMappingLib package, used when a fork
@@ -126,7 +133,11 @@ STUDIO_LAYOUTS = {
 
 # A writer saves the scene as a scene file with data files in a directory ("dir") and as a bundle ("mrb");
 # with --autosave, a fork writer also writes the Slicer Studio scene autosave ("autosave")
-SCENE_FORMATS = ("dir", "mrb", "autosave")
+SCENE_FORMATS = ("dir", "mrb", "autosave", "project")
+#: Name of the project written by a fork writer with --projects (A-09)
+PROJECT_NAME = "Compat project é"
+#: Point list that an official installation adds to a fork project (the reverse direction of --projects)
+OFFICIAL_POINT_LIST_NAME = "OfficialPoints"
 # Folder name of the writer case with non-ASCII characters and spaces in the path
 UNICODE_FOLDER_NAME = "\u00c9tude with spaces"
 
@@ -166,6 +177,12 @@ def runInSlicer(configPath):
         result["info"] = _slicerInfo()
         if config["role"] == "writer":
             result.update(_runWriter(config))
+        elif config["role"] == "projectEdit":
+            result.update(_runProjectEdit(config))
+        elif config["role"] == "projectReopen":
+            result.update(_runProjectReopen(config))
+        elif config["role"] == "projectCheck":
+            result.update(_runProjectCheck(config))
         else:
             result.update(_runChecker(config))
     except Exception:
@@ -743,6 +760,9 @@ def _runWriter(config):
     if config.get("autosave"):
         # Before the regular saves: every node is new, so the autosave writes all the data itself
         result["autosave"] = _writeAutosave(config) if config["isFork"] else {"status": "skipped", "reason": "official writer (autosave is a fork feature)"}
+    if config.get("projects"):
+        # Before the regular saves too: every node is new, so the project engine writes all the data itself
+        result["project"] = _writeProject(config) if config["isFork"] else {"status": "skipped", "reason": "official writer (projects are a fork feature)"}
 
     # Scene file with its data files in a directory (what the Save data dialog does)
     sceneDir = os.path.join(outDir, "scene")
@@ -769,6 +789,8 @@ def _runWriter(config):
     result["files"] = {"dir": sceneFile, "mrb": mrbFile}
     if result.get("autosave", {}).get("status") == "ok":
         result["files"]["autosave"] = result["autosave"]["scene"]
+    if result.get("project", {}).get("status") == "ok":
+        result["files"]["project"] = result["project"]["scene"]
     result["classCounts"] = _addedNodeClassCounts(baselineIds, savedOnly=True)
 
     shot = os.path.join(config["shotsDir"], f"writer_{config['name']}.png")
@@ -813,6 +835,133 @@ def _writeAutosave(config):
         # The autosave must leave the scene "modified since read" (D-A4)
         "sceneModifiedAfter": bool(slicer.mrmlScene.GetModifiedSinceRead()),
     }
+
+
+def _writeProject(config):
+    """Save the scene as a project of a Slicer Studio folder in <outDir>/projects (StudioLib.autosave_io.ProjectWriter)."""
+    import importlib
+
+    import slicer
+
+    try:
+        autosaveIo = importlib.import_module("StudioLib.autosave_io")
+        projects = importlib.import_module("StudioLib.projects")
+    except ImportError:
+        return {"status": "skipped", "reason": "StudioLib.projects is not available in this Slicer"}
+    root = os.path.join(config["outDir"], "projects")
+    shutil.rmtree(root, ignore_errors=True)
+    os.environ[projects.ROOT_ENVIRONMENT] = root
+    start = time.perf_counter()
+    try:
+        project = projects.createProject(PROJECT_NAME, root)
+        writer = autosaveIo.ProjectWriter(project, autosaveIo.InlineExecutor())
+        plan = writer.writeAll(slicer.mrmlScene)
+    except Exception:
+        return {"status": "error", "stderr": traceback.format_exc()}
+    files = []
+    for directory, _folders, names in os.walk(project.path):
+        files += [os.path.relpath(os.path.join(directory, name), project.path).replace(os.sep, "/") for name in names]
+    return {
+        "status": "ok",
+        "scene": project.scenePath,
+        "path": project.path,
+        "seconds": round(time.perf_counter() - start, 3),
+        "incomplete": plan.incomplete,
+        "files": sorted(files),
+        # In a project, saving IS saving: nothing is left "modified since read"
+        "storableModifiedAfter": bool(slicer.mrmlScene.GetStorableNodesModifiedSinceRead()),
+    }
+
+
+def _runProjectEdit(config):
+    """Official Slicer opens a fork project, changes it and saves it as its Save dialog would (reverse direction)."""
+    import slicer
+
+    capture = _LogCapture()
+    capture.start()
+    scenePath = config["scene"]
+    projectDir = os.path.dirname(scenePath)
+    slicer.mrmlScene.Clear(0)
+    slicer.util.loadScene(scenePath)
+    _processEvents(5)
+    points = _nodeByName(POINT_LIST_NAME, "vtkMRMLMarkupsFiducialNode")
+    points.AddControlPoint([7.5, -3.25, 11.0], "official")
+    table = _nodeByName(TABLE_NAME, "vtkMRMLTableNode")
+    table.SetCellText(0, 0, "changed in official Slicer")
+    newPoints = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", OFFICIAL_POINT_LIST_NAME)
+    newPoints.AddControlPoint([1.0, 2.0, 3.0], "o1")
+    newPoints.AddControlPoint([-4.0, 5.5, -6.0], "o2")
+    saved = {}
+    # What the Save dialog does: changed data in place (its current file), new data next to the scene file
+    for node in slicer.util.getNodesByClass("vtkMRMLStorableNode"):
+        if node.GetHideFromEditors() or not node.GetSaveWithScene() or not node.GetModifiedSinceRead():
+            continue
+        storageNode = node.GetStorageNode()
+        fileName = storageNode.GetFileName() if storageNode is not None else None
+        if not fileName:
+            if storageNode is None and not node.AddDefaultStorageNode():
+                continue
+            fileName = os.path.join(projectDir, f"{node.GetName()}.{node.GetStorageNode().GetDefaultWriteFileExtension()}")
+        saved[os.path.relpath(fileName, projectDir).replace(os.sep, "/")] = bool(slicer.util.saveNode(node, fileName))
+    saved[os.path.basename(scenePath)] = bool(slicer.util.saveScene(scenePath))
+    state = _collectState()
+    state["officialPoints"] = _pointListState(newPoints)
+    return {"saved": saved, "state": state, "messages": capture.stop()}
+
+
+def _runProjectReopen(config):
+    """The fork opens the project that official Slicer changed (in place), finds the changes, saves it and reloads it."""
+    import importlib
+
+    import slicer
+
+    capture = _LogCapture()
+    capture.start()
+    autosave = importlib.import_module("StudioLib.autosave")
+    projects = importlib.import_module("StudioLib.projects")
+    autosaveIo = importlib.import_module("StudioLib.autosave_io")
+    os.environ[projects.ROOT_ENVIRONMENT] = config["root"]
+    projectDir = os.path.dirname(config["scene"])
+    service = autosave.AutosaveService(force=True, root=os.path.join(config["root"], ".private-autosave"))
+    service.studioActiveOverride = True
+    service.reloadSettings()
+    result = {}
+    try:
+        slicer.mrmlScene.Clear(0)
+        result["opened"] = service.openProject(projectDir)
+        result["inPlace"] = service.project is not None and os.path.normpath(service.project.path) == os.path.normpath(projectDir)
+        state = _collectState()
+        state["officialPoints"] = _pointListState(_nodeByName(OFFICIAL_POINT_LIST_NAME, "vtkMRMLMarkupsFiducialNode"))
+        result["stateOpened"] = state
+        result["savedNow"] = service.saveNow("compatibility check", progress=False)
+        autosaveIo.backgroundWriter().drain(30.0)
+        result["storableModifiedAfterSave"] = bool(slicer.mrmlScene.GetStorableNodesModifiedSinceRead())
+        files = []
+        for directory, _folders, names in os.walk(projectDir):
+            files += [os.path.relpath(os.path.join(directory, name), projectDir).replace(os.sep, "/") for name in names]
+        result["files"] = sorted(files)
+        with open(service.project.scenePath, encoding="utf-8") as f:
+            text = f.read()
+        result["absolutePathInScene"] = projectDir in text or os.path.expanduser("~") in text
+        service.releaseProject()
+        slicer.mrmlScene.Clear(0)
+        slicer.util.loadScene(os.path.join(projectDir, os.path.basename(projectDir) + ".mrml"))
+        _processEvents(5)
+        state = _collectState()
+        state["officialPoints"] = _pointListState(_nodeByName(OFFICIAL_POINT_LIST_NAME, "vtkMRMLMarkupsFiducialNode"))
+        result["stateReloaded"] = state
+    finally:
+        service.dispose()
+    result["messages"] = capture.stop()
+    return result
+
+
+def _runProjectCheck(config):
+    """Official Slicer loads the project that the fork saved after the official changes."""
+    capture = _LogCapture()
+    record = _loadAndInspect(config["scene"], os.path.join(config["shotsDir"], f"project_{config['name']}.png"), capture)
+    record["state"]["officialPoints"] = _pointListState(_nodeByName(OFFICIAL_POINT_LIST_NAME, "vtkMRMLMarkupsFiducialNode"))
+    return record
 
 
 def _importLnm(config):
@@ -1370,6 +1519,17 @@ def _evaluateWriter(name, writer):
             problems.append(f"autosave failed: {autosave.get('stderr', '').strip()[-300:]}")
         elif autosave.get("status") == "ok" and not autosave.get("sceneModifiedAfter"):
             problems.append("the autosave marked the scene as saved (vtkMRMLScene::Commit string mode)")
+        project = writer.get("project", {})
+        if project.get("status") == "error":
+            problems.append(f"saving the project failed: {project.get('stderr', '').strip()[-300:]}")
+        elif project.get("status") == "ok":
+            if project.get("storableModifiedAfter") or project.get("incomplete"):
+                problems.append("data is still 'modified since read' after saving the project")
+            for kind in ("Images/", "Segmentations/", "Markups/", "Tables/"):
+                if not any(path.startswith(kind) for path in project.get("files", [])):
+                    problems.append(f"the project has no {kind} folder ({project.get('files')})")
+            if any("/" not in path and not path.endswith(".mrml") for path in project.get("files", [])):
+                problems.append(f"files at the top of the project folder: {project.get('files')}")
     errors = [m for m in writer.get("messages", []) if m["level"] in ERROR_LEVELS and not _isNoise(m)]
     for message in errors:
         problems.append(f"{message['level']} while writing: {message['text'].strip()[:300]}")
@@ -1390,11 +1550,11 @@ def _evaluatePair(writerName, checkerName, writer, checker, isFork):
     expectedLayoutId = expectedLayout(writer["layout"], isFork[checkerName])
     for sceneFormat in SCENE_FORMATS:
         record = records.get(sceneFormat)
-        if sceneFormat == "autosave":
-            if "autosave" not in writer:
-                continue  # --autosave was not given
-            if writer["autosave"].get("status") != "ok":
-                evaluation[sceneFormat] = {"problems": [], "skipped": writer["autosave"].get("reason") or writer["autosave"].get("status")}
+        if sceneFormat in ("autosave", "project"):
+            if sceneFormat not in writer:
+                continue  # --autosave or --projects was not given
+            if writer[sceneFormat].get("status") != "ok":
+                evaluation[sceneFormat] = {"problems": [], "skipped": writer[sceneFormat].get("reason") or writer[sceneFormat].get("status")}
                 continue
         if record is None:
             evaluation[sceneFormat] = {"problems": ["not checked"]}
@@ -1430,6 +1590,64 @@ def _evaluatePair(writerName, checkerName, writer, checker, isFork):
     else:
         evaluation["lnm"] = {"problems": [], "skipped": lnm.get("reason") or lnm.get("status")}
     return evaluation
+
+
+def _checkProjectsReverse(args, slicers, isFork, involved, writers):
+    """--projects, official -> fork: each official installation changes a copy of the fork's project and saves it; the
+    fork opens it in place, keeps the changes and saves it (new files into their kind folders); the official installation
+    loads the result. Return {official name: {"problems": [...], ...}}.
+    """
+    results = {}
+    forkName = next((name for name in involved if isFork[name] and writers[name].get("project", {}).get("status") == "ok"), None)
+    if forkName is None:
+        return {"(none)": {"problems": ["no fork writer saved a project"]}}
+    source = writers[forkName]["project"]["path"]
+    for officialName in [name for name in involved if not isFork[name]]:
+        problems = []
+        root = os.path.join(args.out, "reverse", officialName)
+        shutil.rmtree(root, ignore_errors=True)
+        projectDir = os.path.join(root, "Projects", os.path.basename(source))
+        shutil.copytree(source, projectDir, ignore=shutil.ignore_patterns("lock"))
+        scene = os.path.join(projectDir, os.path.basename(projectDir) + ".mrml")
+        edit = _runSlicer(slicers[officialName], "projectEdit", f"{officialName}-edit", {"isFork": False, "scene": scene}, args)
+        if "exception" in edit:
+            results[officialName] = {"problems": [f"official edit failed: {edit['exception'].strip().splitlines()[-1]}"]}
+            continue
+        problems += [f"official save of {name} failed" for name, ok in edit.get("saved", {}).items() if not ok]
+        reopen = _runSlicer(slicers[forkName], "projectReopen", f"{forkName}-reopen-{officialName}", {"isFork": True, "scene": scene, "root": root}, args)
+        if "exception" in reopen:
+            results[officialName] = {"problems": problems + [f"fork reopen failed: {reopen['exception'].strip().splitlines()[-1]}"]}
+            continue
+        if not reopen.get("opened") or not reopen.get("inPlace"):
+            problems.append("the fork did not continue the project in place")
+        problems += [f"opened in the fork: {p}" for p in compareStates(edit["state"], reopen["stateOpened"])]
+        if edit["state"].get("officialPoints") != reopen["stateOpened"].get("officialPoints"):
+            problems.append("opened in the fork: the point list added in official Slicer differs")
+        if not reopen.get("savedNow") or reopen.get("storableModifiedAfterSave"):
+            problems.append("the fork did not save the project completely")
+        files = reopen.get("files", [])
+        if f"Markups/{OFFICIAL_POINT_LIST_NAME}.mrk.json" not in files:
+            problems.append(f"the new point list was not moved into Markups/ ({files})")
+        if any("/" not in path and not path.endswith(".mrml") for path in files):
+            problems.append(f"files left at the top of the project: {[path for path in files if '/' not in path]}")
+        if reopen.get("absolutePathInScene"):
+            problems.append("the scene file saved by the fork holds an absolute local path")
+        problems += [f"reloaded in the fork: {p}" for p in compareStates(edit["state"], reopen["stateReloaded"])]
+        if edit["state"].get("officialPoints") != reopen["stateReloaded"].get("officialPoints"):
+            problems.append("reloaded in the fork: the point list added in official Slicer differs")
+        check = _runSlicer(slicers[officialName], "projectCheck", f"{officialName}-check", {"isFork": False, "scene": scene}, args)
+        if "exception" in check:
+            problems.append(f"official check failed: {check['exception'].strip().splitlines()[-1]}")
+        else:
+            if not check.get("loaded"):
+                problems.append("official Slicer could not load the project the fork saved")
+            problems += [f"loaded again in {officialName}: {p}" for p in compareStates(edit["state"], check["state"])]
+            if edit["state"].get("officialPoints") != check["state"].get("officialPoints"):
+                problems.append(f"loaded again in {officialName}: the point list added in official Slicer differs")
+            errors = [m for m in check.get("messages", []) if m["level"] in ERROR_LEVELS and not _isNoise(m)]
+            problems += [f"log in {officialName}: {m['text'].strip()[:200]}" for m in errors]
+        results[officialName] = {"problems": problems, "files": files, "project": projectDir}
+    return results
 
 
 def _formatReport(report):
@@ -1495,6 +1713,11 @@ def _formatReport(report):
         for comparison, differences in report["formatDifferences"].items():
             lines.append(f"  {comparison}:")
             lines += [f"    - {d}" for d in differences] or ["    (none)"]
+    if report.get("projectsReverse"):
+        lines += ["", "Projects, official -> fork -> official (--projects):"]
+        for name, item in report["projectsReverse"].items():
+            lines.append(f"  {name}: {'ok' if not item['problems'] else 'FAIL'}  files {item.get('files')}")
+            lines += [f"    - {p}" for p in item["problems"]]
     lines += ["", f"Result: {'PASS' if report['passed'] else 'FAIL'}", ""]
     return "\n".join(lines)
 
@@ -1507,6 +1730,7 @@ def main(argv=None):
     parser.add_argument("--fork", action="append", default=None, metavar="NAME", help="name of a fork installation (default: names starting with 'fork')")
     parser.add_argument("--testing", action="store_true", help="start Slicer with --testing")
     parser.add_argument("--autosave", action="store_true", help="also check the scene autosave of fork writers (Slicer Studio)")
+    parser.add_argument("--projects", action="store_true", help="also check projects of the Slicer Studio folder (A-09), in both directions")
     parser.add_argument("--timeout", type=int, default=900, help="time limit for each Slicer process in seconds")
     parser.add_argument("--no-xvfb", action="store_true", help="do not run Slicer in xvfb-run")
     parser.add_argument("--lnm-lib-dir", default=os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "Modules", "Scripted", "LesionNetworkMapping")))
@@ -1535,7 +1759,8 @@ def main(argv=None):
     for name in involved:
         outDir = os.path.join(args.out, "write", name)
         os.makedirs(outDir)
-        writers[name] = _runSlicer(slicers[name], "writer", name, {"outDir": outDir, "isFork": isFork[name], "lnmLibDir": args.lnm_lib_dir, "autosave": args.autosave}, args)
+        writers[name] = _runSlicer(slicers[name], "writer", name, {"outDir": outDir, "isFork": isFork[name], "lnmLibDir": args.lnm_lib_dir, "autosave": args.autosave,
+                                                                  "projects": args.projects}, args)
         with open(os.path.join(outDir, "manifest.json"), "w", encoding="utf-8") as f:
             json.dump(writers[name], f, indent=1, sort_keys=True)
 
@@ -1545,7 +1770,8 @@ def main(argv=None):
         unicodeName = f"{unicodeBase}-unicode-path"
         outDir = os.path.join(args.out, "write", unicodeName, UNICODE_FOLDER_NAME)
         os.makedirs(outDir)
-        config = {"outDir": outDir, "isFork": isFork[unicodeBase], "lnmLibDir": args.lnm_lib_dir, "autosave": args.autosave, "skipLnm": True}
+        config = {"outDir": outDir, "isFork": isFork[unicodeBase], "lnmLibDir": args.lnm_lib_dir, "autosave": args.autosave, "projects": args.projects,
+                  "skipLnm": True}
         writers[unicodeName] = _runSlicer(slicers[unicodeBase], "writer", unicodeName, config, args)
         with open(os.path.join(args.out, "write", unicodeName, "manifest.json"), "w", encoding="utf-8") as f:
             json.dump(writers[unicodeName], f, indent=1, sort_keys=True)
@@ -1602,7 +1828,10 @@ def main(argv=None):
         for officialName in [n for n in involved if not isFork[n] and n in structures]:
             report["formatDifferences"][f"{forkName} vs {officialName}"] = compareStructures(structures[officialName], structures[forkName])
 
-    report["passed"] = not any(w["problems"] for w in report["writers"].values()) and not any(part["problems"] for pair in report["pairs"].values() for part in pair.values())
+    if args.projects:
+        report["projectsReverse"] = _checkProjectsReverse(args, slicers, isFork, involved, writers)
+    report["passed"] = (not any(w["problems"] for w in report["writers"].values()) and not any(part["problems"] for pair in report["pairs"].values() for part in pair.values())
+                        and not any(item["problems"] for item in report.get("projectsReverse", {}).values()))
     with open(os.path.join(args.out, "report.json"), "w", encoding="utf-8") as f:
         json.dump(report, f, indent=1, sort_keys=True)
     text = _formatReport(report)

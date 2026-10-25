@@ -17,8 +17,12 @@ and says how the same thing is done in 3D Slicer.
   markups, tables) saved by Slicer Studio open in official 3D Slicer 5.12 and
   5.13, and files saved by official 3D Slicer open in Slicer Studio. Studio
   opens files with the same readers.
-- **Saving.** Ctrl+S saves the scene with the same Save Data dialog. The lesion
-  alone is saved with **Save lesion** in Draw (Ctrl+Shift+S) as a NIfTI mask.
+- **Saving.** In Studio your work is saved automatically as a project, an
+  ordinary 3D Slicer scene in the Slicer Studio folder you choose at the first
+  start; Ctrl+S saves it at once and **File › Save a copy as…** writes a `.mrb`
+  anywhere (see [Where Slicer Studio saves your work](studio_projects.md)). In
+  Classic, Ctrl+S opens the same Save Data dialog as 3D Slicer. The lesion alone
+  is saved with **Save lesion** in Draw (Ctrl+Shift+S) as a NIfTI mask.
 - **Modules and extensions.** Every module is still there; Search (Ctrl+K)
   opens any of them. The Extensions Manager (Ctrl+4) and extensions work as
   usual.
@@ -55,7 +59,9 @@ Windows and Linux; on macOS, Ctrl is ⌘.
 | File > Add DICOM Data | Library > Open folder… (a DICOM folder); the DICOM module is one search away |
 | File > Download Sample Data | Library > Load sample data, or Search (Ctrl+K) for a sample by name |
 | File > Recent | Library > Recent |
-| File > Save Data (Ctrl+S) | Ctrl+S, or ≡ > File > Save Data: saves the scene (.mrml, .mrb) as in 3D Slicer (same as 3D Slicer) |
+| File > Save Data (Ctrl+S) | Saved automatically to Projects/<name> in the Slicer Studio folder (Ctrl+S saves now) |
+| File > Save Data (to another folder or a .mrb) | ≡ > File > Save a copy as…: the whole scene as one .mrb file, anywhere |
+| Where are my files? | Show project folder (the save status menu in the top bar, ≡ > File, or Search): Finder, Explorer or Files opens on Projects/<name> |
 | File > Close Scene (Ctrl+W) | ≡ > File > Close Scene (Ctrl+W) (same as 3D Slicer) |
 | Edit > Application Settings (Ctrl+2) | ≡ > Settings… (Ctrl+2) |
 | View > Layout | The layout button in the top bar: Focus, Single (enlarges one view; Esc restores), Four-up, Row (Alt+1 to Alt+4) and Focus + 3D (Alt+5); More layouts… lists every 3D Slicer layout, and Search finds any layout by name |

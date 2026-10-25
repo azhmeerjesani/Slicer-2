@@ -29,12 +29,14 @@ Studio surfaces (StudioLib/autosave_ui.py, A-01b), with ``Shell(force=True).appl
 ``autosave.instance()``:
 
 - (t) the top-bar status: hidden, "Autosaving…", then "Autosaved · just now"; the tooltip says autosave is not
-  saving; the 4-action menu; icon only at 1366 px and in compact mode; the switcher stays centred; the slot records
+  saving; the menu (recovery actions, Open project… and Saving settings… without a project, A-09); icon only at 1366 px and in compact mode; the switcher stays centred; the slot records
   the workspace; no new shortcuts and no key collision;
 - (u) the recovery card in the Library notice slot (above the drop zone and the study page) and not the dialog; the
   inspector notice in Draw and its Show; Recover closes the card and returns to the recorded workspace; Later;
 - (v) Classic removes the status, the card and the notice and gives back the default presenter; Studio again shows
   them; no visible string says "Saved".
+- (x) A-09: while the scene is a project it is saved there and no private session is written; when the project is
+  released (a study opens) the private recovery autosave runs again.
 """
 
 import hashlib
@@ -933,12 +935,12 @@ class StudioAutosaveTest(unittest.TestCase):
         self.assertTrue(autosave_ui.instance()._timer.isActive(), "refreshed every 30 s while shown")
         self.assertEqual(autosave_ui.instance()._timer.interval, 30000)
 
-        # The 4-action menu (and its disabled header)
+        # The menu without a project (and its disabled header): the recovery actions, Open project… (A-09) and the settings
         menu = button.menu()
         self.assertIsNotNone(menu)
         self.assertEqual(menu.objectName, "StudioSaveStatusMenu")
-        texts = [action.text for action in menu.actions() if not action.isSeparator()]
-        self.assertEqual(texts[1:], ["Autosave now", "Recover autosaved work…", "Open autosave folder", "Autosave settings…"])
+        texts = [action.text for action in menu.actions() if not action.isSeparator() and action.visible]
+        self.assertEqual(texts[1:], ["Autosave now", "Recover autosaved work…", "Open autosave folder", "Open project…", "Saving settings…"])
         self.assertTrue(texts[0].startswith("Last autosave "))
         self.assertFalse(menu.actions()[0].enabled)
         self.assertEqual(button.popupMode, qt.QToolButton.InstantPopup)
@@ -1132,3 +1134,37 @@ class StudioAutosaveTest(unittest.TestCase):
         self.assertIsNone(autosave_ui.instance())
         self.assertIsNone(service._presenter)
         self.assertFalse(studioShell.topBar is not None and studioShell.topBar.saveStatusButton.visible)
+
+    def test_x_projectReplacesPrivateAutosave(self):
+        """A-09: in a project, the scene is saved in the project and nothing is written to the private recovery folder;
+        once the project is released (a study opens), the private recovery autosave runs again.
+        """
+        from StudioLib import projects
+
+        environment = os.environ.get(projects.ROOT_ENVIRONMENT)
+        os.environ[projects.ROOT_ENVIRONMENT] = os.path.join(self.tempDir, "Slicer Studio")
+        try:
+            service = self._service()
+            # Without studioActiveOverride a service under --testing never creates a project
+            self._userVolume()
+            service.poll()
+            self.assertIsNone(service.project)
+            service.studioActiveOverride = True
+            service.poll()
+            self.assertIsNotNone(service.project)
+            self.assertTrue(service.saveNow("test", progress=False))
+            self.assertIsNone(service.sessionDirectory(), "no private session while the scene is a project")
+            self.assertEqual(service.unsavedSummary(), "")
+            # A study opens: the project stops; the next change is autosaved privately (A-01)
+            service._studyOpen = lambda: True
+            service.poll()
+            self.assertIsNone(service.project)
+            slicer.util.addVolumeFromArray(np.zeros((8, 8, 8), np.int16), name="New")
+            self._generate(service)
+            self.assertIsNotNone(service.sessionDirectory())
+            self.assertTrue(os.path.isfile(os.path.join(service.slotDirectory(), self.io.SCENE_FILE)))
+        finally:
+            if environment is None:
+                os.environ.pop(projects.ROOT_ENVIRONMENT, None)
+            else:
+                os.environ[projects.ROOT_ENVIRONMENT] = environment

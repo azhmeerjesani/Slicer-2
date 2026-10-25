@@ -16,7 +16,10 @@ in Classic, which then behaves exactly as official Slicer.
   properties set by ``computeCloseSummary()``: "lesionSaved" (the only unsaved items are saved lesions and the
   template: one "Quit?" question with Quit as the default), "unsavedLesion" (the lesion of Draw has unsaved edits:
   "Save lesion…" is the default; a cancelled file dialog keeps the application open) or nothing (the classic
-  prompt). The autosave line (``autosave.unsavedSummary()``) is appended when the autosave service runs.
+  prompt). The autosave line (``autosave.unsavedSummary()``) is appended when the autosave service runs. While the
+  scene is a project (A-09), the project is saved first and, when that succeeded, the question is only "All changes are
+  saved in Projects/<name>. Quit?" (Quit is the default); when saving failed, the classic prompt asks, and a message
+  gives the reason.
 """
 
 import logging
@@ -234,12 +237,48 @@ def _autosaveLine():
         return ""
 
 
+def projectCloseSummary():
+    """``(mode, summary)`` of the close prompt while the scene is a project (A-09): the project is saved now; ``("", "")``
+    if there is no project or saving failed (the classic prompt then asks), else "All changes are saved…".
+    """
+    try:
+        from . import autosave
+    except ImportError:
+        return None
+    service = autosave.instance() if hasattr(autosave, "instance") else None
+    project = service.currentProject() if service is not None and hasattr(service, "currentProject") else None
+    if project is None:
+        return None
+    ok = service.flushForClose()
+    if not ok:
+        reason = getattr(service, "_projectPausedReason", "") or _("see the error log")
+        try:
+            from . import projects_ui
+
+            projects_ui.message(_("Not saved: {reason}").format(reason=reason), level="warning", ms=8000)
+        except Exception:
+            logging.warning(f"Slicer Studio: the project could not be saved: {reason}")
+        return "", ""
+    return CLOSE_MODE_LESION_SAVED, _("All changes are saved in {project}. Quit?").format(project=project.relativeName())
+
+
 def computeCloseSummary():
     """Set the close prompt properties of the main window (``closeSummaryRequested()``). Never raises: on an error the
     classic prompt runs.
     """
     mainWindow = slicer.util.mainWindow()
     if mainWindow is None:
+        return
+    try:
+        projectSummary = projectCloseSummary()
+    except Exception:
+        logging.error(f"Studio: saving the project before quitting failed:\n{traceback.format_exc()}")
+        projectSummary = ("", "")
+    if projectSummary is not None:
+        mode, summary = projectSummary
+        if mode:
+            mainWindow.setProperty(CLOSE_SUMMARY_PROPERTY, summary)
+            mainWindow.setProperty(CLOSE_MODE_PROPERTY, mode)
         return
     try:
         mode, summary = closeSummary()

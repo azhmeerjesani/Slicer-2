@@ -3,7 +3,9 @@
 - The top-bar status ``StudioSaveStatus`` (``Shell.setSaveStatus()``): "Autosaving…", "Autosaved · 2 min ago" or
   "Autosave paused", hidden while nothing was autosaved in this scene. Its tooltip says that autosave is not Save;
   its menu ``StudioSaveStatusMenu`` offers Autosave now, Recover autosaved work…, Open autosave folder and
-  Autosave settings….
+  Autosave settings…. While the scene is a project (A-09) the status is the save state instead ("Saved", "Saving…",
+  "Not saved · Retry", ``projects_ui.projectStatus()``) and the menu offers the project actions (Save now, Rename
+  project…, Show project folder, Save a copy as…, New project, Open project…).
 - The recovery card ``StudioRecoveryCard`` at the top of the Library canvas (``library.showNotice()``) replaces
   A-01's dialog at startup. In another workspace a one-line inspector notice (key ``autosave-recovery``) points to
   it. Nothing is ever shown over a view.
@@ -231,9 +233,17 @@ class AutosaveUi:
             logging.error("Autosave: the status of the top bar failed:\n" + traceback.format_exc())
 
     def _showStatus(self, status):
-        autosaved = self._sceneAutosave(status)
         if self.menu is not None:
             self._updateMenu(status)
+        if getattr(status, "projectName", None):
+            from . import projects_ui
+
+            text, level, toolTip, iconName = projects_ui.projectStatus(status)
+            self.shell.setSaveStatus(text, level, toolTip, iconName, title=_("Saving"))
+            if not self._timer.isActive():
+                self._timer.start()
+            return
+        autosaved = self._sceneAutosave(status)
         toolTip = self.toolTip(autosaved)
         text = level = None
         if status.state == "saving":
@@ -280,7 +290,12 @@ class AutosaveUi:
         self.folderAction.setObjectName("StudioSaveStatusOpenFolderAction")
         self.folderAction.connect("triggered()", self.openFolder)
         menu.addSeparator()
-        self.settingsAction = menu.addAction(_("Autosave settings…"))
+        from . import projects_ui
+
+        self.projectSeparator = menu.addSeparator()
+        self.projectActions = projects_ui.addStatusMenuActions(menu)
+        menu.addSeparator()
+        self.settingsAction = menu.addAction(_("Saving settings…"))
         self.settingsAction.setObjectName("StudioSaveStatusSettingsAction")
         self.settingsAction.connect("triggered()", autosave.showAutosaveSettings)
         menu.connect("aboutToShow()", self._updateMenu)
@@ -291,6 +306,19 @@ class AutosaveUi:
         service = self.service
         if status is None and service is not None:
             status = service.status()
+        project = getattr(status, "projectName", None) if status is not None else None
+        # In a project the menu is the project's; the recovery items are for scenes that are not projects
+        for action in (self.nowAction, self.recoverAction, self.folderAction):
+            action.setVisible(not project)
+        self.projectSeparator.setVisible(not project)
+        for name, action in getattr(self, "projectActions", {}).items():
+            action.setVisible(bool(project) or name == "open")
+        if project:
+            when = time.strftime("%H:%M", time.localtime(status.lastSaveTime)) if status.lastSaveTime else ""
+            header = _("Projects/{name}").format(name=project)
+            self.headerAction.setText(_("{project} · saved {time}").format(project=header, time=when) if when else header)
+            self.projectActions["save"].setEnabled(status.state != "saving")
+            return
         autosaved = self._sceneAutosave(status) if status is not None else None
         if autosaved is not None:
             when, size = autosaved

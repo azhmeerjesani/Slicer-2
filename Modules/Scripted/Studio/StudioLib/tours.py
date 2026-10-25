@@ -226,8 +226,9 @@ _STUDIO_STEPS = (
          rows=("segment-editor",), keys=((("P", "D", "E"), _("Brush, Outline, Erase")), (("Esc",), _("deselect")), (("Space",), _("pause"))),
          workspace="draw", inspector=True, placement="left"),
     Step("save-lesion", "StudioSaveLesionButton", _("Save lesion"),
-         _("Writes the lesion as a NIfTI mask (.nii.gz) on its own grid, which official 3D Slicer, FSL and other tools read. "
-           "After the first save it saves again to the same file. Ctrl+S still saves the whole scene, as in 3D Slicer."),
+         _("Writes the lesion as a NIfTI mask (.nii.gz) on its own grid, which official 3D Slicer, FSL and other tools read; in a "
+           "project the dialog proposes its Lesions folder. After the first save it saves again to the same file. The whole project is saved "
+           "automatically; Ctrl+S saves it at once."),
          rows=("export-segmentation",), keys=((("Ctrl+Shift+S",), _("save lesion")), (("Ctrl+Enter",), _("the blue button"))),
          workspace="draw", inspector=True, placement="left"),
     Step("inspector", "StudioPanelHeader", _("The inspector"),
@@ -248,11 +249,12 @@ _STUDIO_STEPS = (
          _("File, Edit, View and Help are all here, with Settings, the Python console and the error log, and Help > Take a tour to see this again."),
          inSlicer=_("The menu bar: File, Edit, View and Help; Edit > Application Settings ({key:Ctrl+2}); View > Python Console ({key:Ctrl+3})."),
          keys=((("F10",), _("open the menu")),), placement="below"),
-    # The status appears with the first autosave: until then (or with autosave off) the step shows the ≡ menu, where recovery is
-    Step("autosave", ("StudioSaveStatus", "StudioAppMenuButton"), _("Autosave"),
-         _("Studio autosaves your work to a private folder and offers to recover it after a crash: the top bar shows "
-           "\"Autosaved\" once it has, and File > Recover Autosaved Work… in the ≡ menu brings it back. "
-           "Autosave is not Save: your files change only when you save."),
+    # The status appears with the first save: until then (or with saving off) the step shows the ≡ menu, where the File items are
+    Step("autosave", ("StudioSaveStatus", "StudioAppMenuButton"), _("Saved automatically"),
+         _("Your work is saved as you go, in the Slicer Studio folder you chose: one folder per project, under Projects, that "
+           "official 3D Slicer opens too. The top bar shows \"Saved\"; Ctrl+S saves at once, Ctrl+N starts a new project, and "
+           "File > Save a copy as… writes a .mrb file anywhere. Without a project (Classic, a study) Studio keeps a recovery copy instead."),
+         rows=("save-data", "save-as", "where-files"),
          inSlicer=_("No autosave: you save with File > Save Data ({key:Ctrl+S})."), placement="below"),
     Step("classic", "StudioLibraryClassicLink", _("Classic interface, one switch away"),
          _("Everything you know from 3D Slicer is one switch away: menus, toolbars and the module panel, exactly as in 3D Slicer. "
@@ -314,9 +316,14 @@ _LIBRARY_STEPS = (
          _("Lesion masks loaded together (up to 60) are reviewed one at a time: Review in Draw shows the first, Alt+← and Alt+→ "
            "step through them. Close set removes exactly these masks from the scene; your files are never deleted."),
          rows=("data-module",), workspace="library"),
+    Step("projects", "studioProjectsSection", _("Projects"),
+         _("Everything you open or draw is saved automatically as a project in the Slicer Studio folder (Projects/<name>), with "
+           "Images, Segmentations, Lesions, Maps and Exports folders inside. Click a project to continue it; right-click to rename, "
+           "duplicate, show it in your file manager or move it to the Trash."),
+         rows=("save-data", "where-files"), keys=((("Ctrl+S",), _("save now")), (("Ctrl+N",), _("new project"))), workspace="library"),
     Step("recent", "StudioRecentList", _("Recent"),
-         _("The folders and files you opened last, newest first, with when you opened them. A file that is already open is not "
-           "opened twice. The template and the sample data that Studio keeps in its cache are not listed."),
+         _("The folders and files you opened last from outside the Slicer Studio folder, newest first, with when you opened them. "
+           "A file that is already open is not opened twice. The template and the sample data that Studio keeps in its cache are not listed."),
          rows=("recent",), workspace="library"),
     Step("sample", "StudioLibrarySampleDataLink", _("Sample data"), _("The 3D Slicer sample data sets, downloaded when you choose one. A scan opens in Draw."),
          rows=("sample-data",), workspace="library"),

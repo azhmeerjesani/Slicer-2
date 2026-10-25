@@ -265,6 +265,7 @@ class TopBar:
         self.saveStatusButton.setToolTip(ui.tooltip(_("Autosave"), None, _("Your work is copied to a private recovery folder. This is not saving.")))
         self.saveStatusButton.hide()
         self._saveStatus = None
+        self._saveStatusTitle = None
         ui.bindStyleSheet(self.saveStatusButton, self._saveStatusStyleSheet)
         rightLayout.addWidget(self.saveStatusButton)
         rightLayout.addStretch(1)
@@ -797,12 +798,14 @@ class TopBar:
     # Autosave status (A-01b)
     #
 
-    def setSaveStatus(self, text=None, level="neutral", toolTip="", iconName=None):
-        """Show the autosave status ("Autosaved · 2 min ago"); level: neutral, busy, ok or warn. None hides it.
+    def setSaveStatus(self, text=None, level="neutral", toolTip="", iconName=None, title=None):
+        """Show the save status ("Autosaved · 2 min ago", or "Saved" in a project); level: neutral, busy, ok or warn. None
+        hides it.
 
-        ``iconName`` replaces the icon of the level. The text is kept in the tooltip when the button shows its icon only
-        (``updateSaveStatusCompact()``).
+        ``iconName`` replaces the icon of the level; ``title`` names the status in the tooltip ("Autosave" by default). The
+        text is kept in the tooltip when the button shows its icon only (``updateSaveStatusCompact()``).
         """
+        self._saveStatusTitle = title
         if not text:
             self._saveStatus = None
             self.saveStatusButton.hide()
@@ -847,7 +850,7 @@ class TopBar:
             # "Autosave · <status, when only the icon is shown> <description>" (USABILITY 10)
             text, _level, toolTip, _iconName = self._saveStatus
             description = "\n".join(part for part in ((f"{text}." if compact else ""), toolTip) if part)
-            self.saveStatusButton.setToolTip(ui.tooltip(_("Autosave"), None, description or None))
+            self.saveStatusButton.setToolTip(ui.tooltip(getattr(self, "_saveStatusTitle", None) or _("Autosave"), None, description or None))
         return compact
 
     def _updateSaveStatusIcon(self):
