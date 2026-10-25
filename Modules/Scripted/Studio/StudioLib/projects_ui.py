@@ -718,6 +718,16 @@ CARD_SPACING = 16
 CARD_MIN_WIDTH = 180
 #: Rows of cards shown before "Show all"
 CARD_ROWS = 2
+#: The list view of the projects (V-02): 44 px rows with a 40 x 30 thumbnail
+LIST_ROW_HEIGHT = 44
+LIST_THUMBNAIL_SIZE = (40, 30)
+#: Rows of the list view shown before "Show all"
+LIST_ROWS = 8
+#: Sort and view of All projects, remembered (fork-only keys)
+SORT_KEY = "Studio/Library/ProjectSort"
+VIEW_KEY = "Studio/Library/ProjectView"
+SORT_ORDERS = (("modified", "Last edited"), ("name", "Name"), ("created", "Created"))
+VIEWS = ("grid", "list")
 
 
 def projectColumns(width):
@@ -729,10 +739,43 @@ def projectColumns(width):
     return 2
 
 
+def _settingText(key, default, allowed):
+    value = str(qt.QSettings().value(key) or default)
+    return value if value in allowed else default
+
+
+def sortProjects(infos, order):
+    """The project infos in the order of ``order``: "modified" (newest first), "name" or "created" (newest first)."""
+    if order == "name":
+        return sorted(infos, key=lambda info: (info.name.casefold(), info.name))
+    if order == "created":
+        return sorted(infos, key=lambda info: info.created or 0.0, reverse=True)
+    return sorted(infos, key=lambda info: info.modified or 0.0, reverse=True)
+
+
+def _scaledThumbnail(path, width, height, cache):
+    """The thumbnail at ``path`` scaled into ``width`` x ``height`` (aspect kept, on the black of its label), or None."""
+    if not path:
+        return None
+    try:
+        key = (path, os.path.getmtime(path), width, height)
+    except OSError:
+        return None
+    pixmap = cache.get(key)
+    if pixmap is None:
+        pixmap = qt.QPixmap(path)
+        if pixmap.isNull():
+            return None
+        pixmap = pixmap.scaled(width, height, qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation)
+        cache[key] = pixmap
+    return pixmap
+
+
 class ProjectsSection(qt.QObject):
     """The projects of the Slicer Studio folder in the Library page (``studioProjectsSection``): "All projects" and its
-    count, then a grid of cards (``studioProjectCard``) with the thumbnail, the name and "2 h ago · 1 scan · 1 lesion";
-    the project that is open is marked (``studioCurrent``) and has an "Open" badge.
+    count, the sort menu ("Last edited ▾": Last edited, Name, Created) and the grid/list toggle (both remembered under
+    ``Studio/Library/*``), then a grid of cards (``studioProjectCard``) with the thumbnail, the name and "2 h ago · 1 scan
+    · 1 lesion", or a list of 44 px rows; the project that is open is marked (``studioCurrent``) and has an "Open" badge.
     """
 
     def __init__(self):
@@ -754,6 +797,50 @@ class ProjectsSection(qt.QObject):
         header.addStretch(1)
         self.showAllButton = self._link(_("Show all"), "studioProjectsShowAll", self.toggleAll)
         header.addWidget(self.showAllButton)
+        # "Last edited ▾": the sort order
+        self.sortOrder = _settingText(SORT_KEY, "modified", [key for key, _text in SORT_ORDERS])
+        self.sortButton = qt.QToolButton()
+        self.sortButton.setObjectName("studioProjectsSortButton")
+        self.sortButton.setPopupMode(qt.QToolButton.InstantPopup)
+        self.sortButton.setToolButtonStyle(qt.Qt.ToolButtonTextBesideIcon)
+        # The chevron after the text
+        self.sortButton.setLayoutDirection(qt.Qt.RightToLeft)
+        self.sortButton.setFixedHeight(ui.COMPACT_HEIGHT)
+        self.sortButton.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
+        self.sortButton.setToolTip(_("Sort the projects"))
+        ui.setText(self.sortButton, "caption")
+        ui.setRole(self.sortButton, "ghost")
+        self.sortMenu = qt.QMenu(self.sortButton)
+        self.sortMenu.setObjectName("studioProjectsSortMenu")
+        self.sortGroup = qt.QActionGroup(self.sortMenu)
+        self.sortGroup.setExclusive(True)
+        self.sortActions = {}
+        for key, text in SORT_ORDERS:
+            action = self.sortMenu.addAction(_(text))
+            action.setCheckable(True)
+            action.setChecked(key == self.sortOrder)
+            action.setObjectName(f"studioProjectsSort_{key}")
+            self.sortGroup.addAction(action)
+            action.connect("triggered()", lambda key=key: self.setSortOrder(key))
+            self.sortActions[key] = action
+        self.sortButton.setMenu(self.sortMenu)
+        header.addWidget(self.sortButton)
+        # Grid or list
+        self.viewMode = _settingText(VIEW_KEY, "grid", VIEWS)
+        self.viewToggle, self.viewGroup = ui.segmented(["", ""])
+        self.viewToggle.setObjectName("studioProjectsViewToggle")
+        self.viewToggle.layout().setContentsMargins(2, 2, 2, 2)
+        for index, (mode, iconName, text) in enumerate((("grid", "layout-grid", _("Grid")), ("list", "list", _("List")))):
+            button = self.viewGroup.button(index)
+            button.setObjectName(f"studioProjectsView_{mode}")
+            button.setProperty("studioIcon", iconName)
+            button.setToolTip(text)
+            button.setAccessibleName(text)
+            button.setFixedSize(30, 24)
+            button.setIconSize(qt.QSize(16, 16))
+            button.setChecked(mode == self.viewMode)
+            button.connect("clicked()", lambda mode=mode: self.setViewMode(mode))
+        header.addWidget(self.viewToggle)
         layout.addLayout(header)
         # Where the projects are is said by the page header (``library.LibraryCanvas``); these stay for other callers
         self.caption = qt.QLabel()
@@ -790,6 +877,9 @@ class ProjectsSection(qt.QObject):
         self._timer.connect("timeout()", self.refresh)
         projects.addListener(self.scheduleRefresh)
         ui.bindStyleSheet(self.widget, self._styleSheet)
+        ui.addPaletteListener(self._refreshIcons)
+        self._refreshIcons()
+        self._updateSortText()
         self.refresh()
 
     @staticmethod
@@ -805,7 +895,7 @@ class ProjectsSection(qt.QObject):
 
     @staticmethod
     def _styleSheet():
-        t = {name: ui.token(name).name() for name in ("text", "text2", "text3", "accent", "accent-fg", "card-low", "hairline")}
+        t = {name: ui.token(name).name() for name in ("text", "text2", "text3", "accent", "accent-fg", "card-low", "hairline", "control-hover")}
         return (
             "QFrame#studioProjectsSection { background: transparent; border: none; }"
             f"QLabel#StudioLibrarySectionTitle {{ color: {t['text']}; }}"
@@ -814,11 +904,52 @@ class ProjectsSection(qt.QObject):
             f"QFrame#studioProjectCard:hover {{ border-color: {t['text3']}; }}"
             f"QFrame#studioProjectCard:focus {{ border: 2px solid {t['accent-fg']}; }}"
             f"QFrame#studioProjectCard[studioCurrent=\"true\"] {{ border: 2px solid {t['accent']}; }}"
+            # List rows: 44 px, a hairline between them, the hover fill; the open project in the accent
+            f'QFrame#studioProjectCard[studioProjectView="list"] {{ border: none; border-radius: 8px; background-color: transparent; }}'
+            f'QFrame#studioProjectCard[studioProjectView="list"]:hover {{ background-color: {t["control-hover"]}; }}'
+            f'QFrame#studioProjectCard[studioProjectView="list"]:focus {{ border: 2px solid {t["accent-fg"]}; }}'
+            f'QFrame#studioProjectCard[studioProjectView="list"][studioCurrent="true"] {{ border: 1px solid {t["accent"]}; }}'
             f"QLabel#studioProjectCardName {{ color: {t['text']}; background: transparent; border: none; }}"
             f"QLabel#studioProjectCardMeta {{ color: {t['text3']}; background: transparent; border: none; }}"
             "QLabel#studioProjectCardThumbnail { background-color: #000000; border: none; border-top-left-radius: 11px; border-top-right-radius: 11px; }"
+            'QLabel#studioProjectCardThumbnail[studioProjectView="list"] { border-radius: 4px; }'
             "QLabel#studioProjectCardBadge { background-color: rgba(22, 22, 24, 199); color: #ececef; border: none; border-radius: 5px; padding: 0px; }"
+            f"QToolButton#studioProjectsSortButton {{ color: {t['text2']}; }}"
             f"QPushButton[studioLibraryLink=\"true\"] {{ background: transparent; border: none; color: {t['accent-fg']}; padding: 2px 4px; }}")
+
+    def _refreshIcons(self):
+        if not _isAlive(self.widget):
+            ui.removePaletteListener(self._refreshIcons)
+            return
+        self.sortButton.setIcon(ui.icon("chevron-down", 14))
+        for button in self.viewGroup.buttons():
+            button.setIcon(ui.icon(str(button.property("studioIcon")), 16))
+
+    def _updateSortText(self):
+        text = dict(SORT_ORDERS).get(self.sortOrder, "Last edited")
+        self.sortButton.setText(_(text))
+        self.sortButton.setAccessibleName(_("Sort by {order}").format(order=_(text)))
+
+    def setSortOrder(self, order):
+        """Sort the projects by "modified" (Last edited), "name" or "created" (remembered)."""
+        if order not in dict(SORT_ORDERS):
+            raise ValueError(f"Unknown sort order: {order}")
+        self.sortOrder = order
+        qt.QSettings().setValue(SORT_KEY, order)
+        self.sortActions[order].setChecked(True)
+        self._updateSortText()
+        self._signature = None
+        self.refresh()
+
+    def setViewMode(self, mode):
+        """Show the projects as a "grid" of cards or a "list" of 44 px rows (remembered)."""
+        if mode not in VIEWS:
+            raise ValueError(f"Unknown view: {mode}")
+        self.viewMode = mode
+        qt.QSettings().setValue(VIEW_KEY, mode)
+        self.viewGroup.button(VIEWS.index(mode)).setChecked(True)
+        self._signature = None
+        self.refresh()
 
     def scheduleRefresh(self):
         if _isAlive(self.widget):
@@ -838,8 +969,12 @@ class ProjectsSection(qt.QObject):
         return next((info for info in self._infos if info.isCurrent()), None)
 
     def _shownCount(self, total):
+        if self._showAll:
+            return total
+        if self.viewMode == "list":
+            return min(total, LIST_ROWS)
         columns = max(self._columns, projectColumns(self.widget.width if self.widget.width > 0 else 1000))
-        return total if self._showAll else min(total, CARD_ROWS * columns)
+        return min(total, CARD_ROWS * columns)
 
     def refresh(self):
         """List the projects again (only what changed is rebuilt)."""
@@ -851,14 +986,17 @@ class ProjectsSection(qt.QObject):
             return
         self.caption.setText(self.captionText())
         self.caption.setToolTip(projects.root())
-        infos = projects.listProjects()
+        infos = sortProjects(projects.listProjects(), self.sortOrder)
         self._infos = infos
         shown = infos[:self._shownCount(len(infos))]
-        signature = tuple((info.path, info.modified, info.isCurrent(), info.thumbnail, tuple(sorted(info.counts.items()))) for info in shown)
+        signature = (self.viewMode, tuple((info.path, info.modified, info.isCurrent(), tuple(sorted(info.views.items())),
+                                           tuple(sorted(info.counts.items()))) for info in shown))
         self.countLabel.setText(str(len(infos)) if infos else "")
         self.showAllButton.setVisible(len(infos) > len(shown) or self._showAll)
         self.showAllButton.setText(_("Show fewer") if self._showAll else _("Show all ({count})").format(count=len(infos)))
         self.emptyLabel.setVisible(not infos)
+        self.sortButton.setVisible(len(infos) > 1)
+        self.viewToggle.setVisible(bool(infos))
         if signature == self._signature:
             return
         self._signature = signature
@@ -869,17 +1007,17 @@ class ProjectsSection(qt.QObject):
             card.deleteLater()
         self._cards = []
         for info in shown:
-            self._cards.append(self._card(info))
+            self._cards.append(self._row(info) if self.viewMode == "list" else self._card(info))
         self._placeCards(force=True)
 
     def updateColumns(self):
         """Lay the cards out again when the width calls for another number of columns."""
-        if projectColumns(self.widget.width) != self._columns:
+        if self.viewMode == "grid" and projectColumns(self.widget.width) != self._columns:
             self._signature = None
             self.refresh()
 
     def _placeCards(self, force=False):
-        columns = projectColumns(self.widget.width if self.widget.width > 0 else 1000)
+        columns = 1 if self.viewMode == "list" else projectColumns(self.widget.width if self.widget.width > 0 else 1000)
         if columns == self._columns and not force:
             return
         self._columns = columns
@@ -889,37 +1027,53 @@ class ProjectsSection(qt.QObject):
             self.grid.addWidget(card, index // columns, index % columns)
         for column in range(4):
             self.grid.setColumnStretch(column, 1 if column < columns else 0)
+        self.grid.setVerticalSpacing(2 if self.viewMode == "list" else CARD_SPACING)
 
     def _thumbnail(self, info):
-        if not info.thumbnail:
-            return None
-        try:
-            key = (info.thumbnail, os.path.getmtime(info.thumbnail))
-        except OSError:
-            return None
-        pixmap = self._pixmaps.get(key)
-        if pixmap is None:
-            pixmap = qt.QPixmap(info.thumbnail)
-            if pixmap.isNull():
-                return None
-            size = CARD_THUMBNAIL_HEIGHT - 8
-            pixmap = pixmap.scaled(size, size, qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation)
-            self._pixmaps[key] = pixmap
-        return pixmap
+        return _scaledThumbnail(info.thumbnail, 4 * CARD_THUMBNAIL_HEIGHT // 3, CARD_THUMBNAIL_HEIGHT - 2, self._pixmaps)
 
-    def _card(self, info):
+    def _metaText(self, info):
+        when = _relativeTime(info.modified) if info.modified else ""
+        return " · ".join(part for part in (when, info.contentLine()) if part)
+
+    def _newCard(self, info, view):
         card = qt.QFrame()
         card.setObjectName("studioProjectCard")
         card.setProperty("studioProjectPath", info.path)
         card.setProperty("studioCurrent", info.isCurrent())
+        card.setProperty("studioProjectView", view)
         card.setFocusPolicy(qt.Qt.TabFocus)
         card.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
-        card.setFixedHeight(CARD_THUMBNAIL_HEIGHT + CARD_BODY_HEIGHT)
-        card.setMinimumWidth(CARD_MIN_WIDTH)
-        card.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
         card.setContextMenuPolicy(qt.Qt.CustomContextMenu)
         card.connect("customContextMenuRequested(QPoint)", lambda point, card=card, path=info.path: self.showMenu(card, path, point))
         card.installEventFilter(self._clickFilter)
+        card.setToolTip(info.path)
+        card.setAccessibleName(_("Project {name}").format(name=info.name))
+        return card
+
+    def _texts(self, info, layout):
+        name = qt.QLabel(info.name)
+        name.setObjectName("studioProjectCardName")
+        name.setTextFormat(qt.Qt.PlainText)
+        name.setProperty("fullText", info.name)
+        name.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+        ui.setText(name, "name")
+        layout.addWidget(name)
+        meta = self._metaText(info)
+        metaLabel = qt.QLabel(meta)
+        metaLabel.setObjectName("studioProjectCardMeta")
+        metaLabel.setTextFormat(qt.Qt.PlainText)
+        metaLabel.setProperty("fullText", meta)
+        metaLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+        ui.setText(metaLabel, "caption")
+        layout.addWidget(metaLabel)
+        return name, metaLabel
+
+    def _card(self, info):
+        card = self._newCard(info, "grid")
+        card.setFixedHeight(CARD_THUMBNAIL_HEIGHT + CARD_BODY_HEIGHT)
+        card.setMinimumWidth(CARD_MIN_WIDTH)
+        card.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
         layout = qt.QVBoxLayout(card)
         # Inside the 1 px border (2 px for the open project)
         inset = 2 if info.isCurrent() else 1
@@ -947,27 +1101,39 @@ class ProjectsSection(qt.QObject):
         bodyLayout = qt.QVBoxLayout(body)
         bodyLayout.setContentsMargins(12, 8, 12, 9)
         bodyLayout.setSpacing(2)
-        name = qt.QLabel(info.name)
-        name.setObjectName("studioProjectCardName")
-        name.setTextFormat(qt.Qt.PlainText)
-        name.setProperty("fullText", info.name)
-        name.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
-        ui.setText(name, "name")
-        bodyLayout.addWidget(name)
-        when = _relativeTime(info.modified) if info.modified else ""
-        meta = " · ".join(part for part in (when, info.contentLine()) if part)
-        metaLabel = qt.QLabel(meta)
-        metaLabel.setObjectName("studioProjectCardMeta")
-        metaLabel.setTextFormat(qt.Qt.PlainText)
-        metaLabel.setProperty("fullText", meta)
-        metaLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
-        ui.setText(metaLabel, "caption")
-        bodyLayout.addWidget(metaLabel)
+        name, metaLabel = self._texts(info, bodyLayout)
         layout.addWidget(body)
         for widget in (thumbnail, body, name, metaLabel):
             widget.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
-        card.setToolTip(info.path)
-        card.setAccessibleName(_("Project {name}").format(name=info.name))
+        return card
+
+    def _row(self, info):
+        """A 44 px row of the list view: a 40 x 30 thumbnail, the name, the meta line and an "Open" chip."""
+        card = self._newCard(info, "list")
+        card.setFixedHeight(LIST_ROW_HEIGHT)
+        card.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
+        layout = qt.QHBoxLayout(card)
+        layout.setContentsMargins(8, 0, 12, 0)
+        layout.setSpacing(12)
+        thumbnail = qt.QLabel()
+        thumbnail.setObjectName("studioProjectCardThumbnail")
+        thumbnail.setProperty("studioProjectView", "list")
+        thumbnail.setFixedSize(*LIST_THUMBNAIL_SIZE)
+        thumbnail.setAlignment(qt.Qt.AlignCenter)
+        pixmap = _scaledThumbnail(info.thumbnail, LIST_THUMBNAIL_SIZE[0], LIST_THUMBNAIL_SIZE[1], self._pixmaps)
+        thumbnail.setPixmap(pixmap if pixmap is not None else ui.pixmap("brain", 16, "#55555c"))
+        layout.addWidget(thumbnail)
+        name, metaLabel = self._texts(info, layout)
+        layout.setStretch(1, 2)
+        layout.setStretch(2, 3)
+        widgets = [thumbnail, name, metaLabel]
+        if info.isCurrent():
+            chip = ui.chip(_("Open"), "busy")
+            chip.setObjectName("studioProjectRowChip")
+            layout.addWidget(chip)
+            widgets.append(chip)
+        for widget in widgets:
+            widget.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
         return card
 
     def elideCard(self, card):
@@ -976,7 +1142,7 @@ class ProjectsSection(qt.QObject):
             text = label.property("fullText")
             if text is None:
                 continue
-            width = max(0, card.width - 26)
+            width = max(0, (label.width if card.property("studioProjectView") == "list" else card.width - 26))
             elided = qt.QFontMetrics(label.font).elidedText(str(text), qt.Qt.ElideRight, width)
             if label.text != elided:
                 label.setText(elided)
@@ -1023,6 +1189,7 @@ class ProjectsSection(qt.QObject):
 
     def dispose(self):
         projects.removeListener(self.scheduleRefresh)
+        ui.removePaletteListener(self._refreshIcons)
         self._timer.stop()
         try:
             slicer.app.disconnect("aboutToQuit()", self._removeEventFilters)
@@ -1031,6 +1198,277 @@ class ProjectsSection(qt.QObject):
         self._removeEventFilters()
         if _isAlive(self.widget):
             ui.bindStyleSheet(self.widget, None)
+
+
+#: Studies in the Library page (VISUAL 4.2): 2 columns of 76 px row cards, at most STUDY_CARDS
+STUDY_CARDS = 4
+STUDY_CARD_HEIGHT = 76
+STUDY_ICON_SIZE = 36
+#: Study summaries read from disk: path -> ((study.json mtime, participants.tsv mtime), summary)
+_studySummaries = {}
+
+
+def _fileTime(path):
+    try:
+        return os.stat(path).st_mtime_ns
+    except OSError:
+        return None
+
+
+def studySummary(path):
+    """What the Library shows of a study folder, read from its ``study.json`` and ``participants.tsv`` (the study is not
+    opened): ``{"name", "subjects", "traced", "review", "modified"}``. "traced" counts the traced or mapped subjects, "review"
+    the traced ones whose QC is not reviewed yet. Cached until one of the two files changes.
+    """
+    studyJson = os.path.join(path, "study.json")
+    participants = os.path.join(path, "participants.tsv")
+    key = (_fileTime(studyJson), _fileTime(participants))
+    cached = _studySummaries.get(path)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    data = projects.readJson(studyJson) or {}
+    name = str(data.get("name") or os.path.basename(os.path.normpath(path)))
+    subjects = traced = review = 0
+    try:
+        with open(participants, encoding="utf-8") as f:
+            header = f.readline().rstrip("\n").split("\t")
+            statusColumn = header.index("status") if "status" in header else None
+            qcColumn = header.index("qc") if "qc" in header else None
+            for line in f:
+                if not line.strip():
+                    continue
+                values = line.rstrip("\n").split("\t")
+                subjects += 1
+                status = values[statusColumn] if statusColumn is not None and statusColumn < len(values) else ""
+                if status in ("traced", "mapped"):
+                    traced += 1
+                    qc = values[qcColumn] if qcColumn is not None and qcColumn < len(values) else ""
+                    if qc in ("", "unreviewed", "n/a"):
+                        review += 1
+    except (OSError, UnicodeDecodeError):
+        pass
+    modified = max((time for time in (_fileTime(studyJson), _fileTime(participants)) if time is not None), default=0) / 1e9
+    summary = {"name": name, "subjects": subjects, "traced": traced, "review": review, "modified": modified}
+    _studySummaries[path] = (key, summary)
+    return summary
+
+
+def studyFolders(limit=STUDY_CARDS):
+    """The studies the Library lists: the studies of <root>/Studies and the studies opened from elsewhere
+    (``Studio/RecentStudies``), the most recently edited first, without duplicates.
+    """
+    paths = []
+    if projects.isEnabled():
+        try:
+            paths += projects.listStudies()
+        except OSError:
+            pass
+    studyUi = sys.modules.get("StudioLib.study_ui")
+    if studyUi is None:
+        try:
+            from . import study_ui as studyUi
+        except Exception:
+            studyUi = None
+    if studyUi is not None and hasattr(studyUi, "recentStudies"):
+        try:
+            paths += [str(record.get("path", "")) for record in studyUi.recentStudies()]
+        except Exception:
+            logging.debug(f"Studio Library: recent studies failed:\n{traceback.format_exc()}")
+    seen = set()
+    folders = []
+    for path in paths:
+        if not path or not os.path.isfile(os.path.join(path, "study.json")):
+            continue
+        canonical = os.path.normcase(os.path.realpath(path))
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        folders.append(os.path.normpath(path))
+    folders.sort(key=lambda folder: studySummary(folder)["modified"], reverse=True)
+    return folders[:limit]
+
+
+def openStudyFolder(path, shell=None):
+    """Open the study at ``path`` (``study_ui.openStudy``)."""
+    try:
+        from . import study_ui
+
+        return study_ui.openStudy(path, shell or _shell())
+    except Exception:
+        logging.error(f"Studio Library: the study could not be opened:\n{traceback.format_exc()}")
+        slicer.util.errorDisplay(_("The study could not be opened."), detailedText=traceback.format_exc())
+        return None
+
+
+class StudiesSection(qt.QObject):
+    """The studies in the Library page (``studioStudiesSection``, VISUAL 4.2): "Studies" with "lesion network mapping
+    cohorts", then 2 columns of row cards (``studioStudyCard``): a 36 px icon tile, the name, "212 / 300 traced" on the
+    right, a 4 px progress bar (accent; success when every subject is traced) and "Edited yesterday · 12 need review".
+    A click (or Enter) opens the study. Hidden while there is no study.
+    """
+
+    def __init__(self):
+        qt.QObject.__init__(self)
+        self.widget = qt.QFrame()
+        self.widget.setObjectName("studioStudiesSection")
+        layout = qt.QVBoxLayout(self.widget)
+        layout.setContentsMargins(0, 0, 0, 20)
+        layout.setSpacing(10)
+        header = qt.QHBoxLayout()
+        header.setSpacing(8)
+        self.title = ui.label(_("Studies"), "section", "text", "studioStudiesTitle")
+        header.addWidget(self.title)
+        self.caption = ui.label(_("lesion network mapping cohorts"), "caption", "text3", "studioStudiesCaption")
+        header.addWidget(self.caption, 0, qt.Qt.AlignBaseline if hasattr(qt.Qt, "AlignBaseline") else qt.Qt.AlignVCenter)
+        header.addStretch(1)
+        layout.addLayout(header)
+        self.grid = qt.QGridLayout()
+        self.grid.setContentsMargins(0, 0, 0, 0)
+        self.grid.setHorizontalSpacing(CARD_SPACING)
+        self.grid.setVerticalSpacing(12)
+        self.grid.setColumnStretch(0, 1)
+        self.grid.setColumnStretch(1, 1)
+        layout.addLayout(self.grid)
+        self._cards = []
+        self._signature = None
+        self._clickFilter = _StudyClickFilter(self)
+        slicer.app.connect("aboutToQuit()", self._removeEventFilters)
+        ui.bindStyleSheet(self.widget, self._styleSheet)
+        self.refresh()
+
+    @staticmethod
+    def _styleSheet():
+        t = {name: ui.token(name).name() for name in ("text", "text3", "accent", "accent-fg", "success", "card-low", "hairline", "control-hover")}
+        return (
+            "QFrame#studioStudiesSection { background: transparent; border: none; }"
+            f"QFrame#studioStudyCard {{ background-color: {t['card-low']}; border: 1px solid {t['hairline']}; border-radius: 12px; }}"
+            f"QFrame#studioStudyCard:hover {{ border-color: {t['text3']}; }}"
+            f"QFrame#studioStudyCard:focus {{ border: 2px solid {t['accent-fg']}; }}"
+            "QFrame#studioStudyCard QLabel { background: transparent; border: none; }"
+            f"QFrame#studioStudyProgress {{ background-color: {t['control-hover']}; border: none; border-radius: 2px; }}"
+            f"QFrame#studioStudyProgressFill {{ background-color: {t['accent']}; border: none; border-radius: 2px; }}"
+            f'QFrame#studioStudyProgressFill[studioComplete="true"] {{ background-color: {t["success"]}; }}')
+
+    def cards(self):
+        return [card for card in self._cards if _isAlive(card)]
+
+    def refresh(self):
+        if not _isAlive(self.widget):
+            return
+        folders = studyFolders()
+        summaries = [(folder, studySummary(folder)) for folder in folders]
+        signature = tuple((folder, tuple(sorted(summary.items()))) for folder, summary in summaries)
+        self.widget.setVisible(bool(summaries))
+        if signature == self._signature:
+            return
+        self._signature = signature
+        for card in self._cards:
+            self.grid.removeWidget(card)
+            card.hide()
+            card.setObjectName("")
+            card.deleteLater()
+        self._cards = []
+        for index, (folder, summary) in enumerate(summaries):
+            card = self._card(folder, summary)
+            self.grid.addWidget(card, index // 2, index % 2)
+            self._cards.append(card)
+
+    def _card(self, folder, summary):
+        card = qt.QFrame()
+        card.setObjectName("studioStudyCard")
+        card.setProperty("studioStudyPath", folder)
+        card.setFixedHeight(STUDY_CARD_HEIGHT)
+        card.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
+        card.setFocusPolicy(qt.Qt.TabFocus)
+        card.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
+        card.setToolTip(projects.shortPath(folder))
+        card.setAccessibleName(_("Study {name}").format(name=summary["name"]))
+        card.installEventFilter(self._clickFilter)
+        layout = qt.QHBoxLayout(card)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(14)
+        tile = ui.iconTile("users", STUDY_ICON_SIZE, 18, "studioStudyIcon")
+        layout.addWidget(tile, 0, qt.Qt.AlignVCenter)
+        column = qt.QVBoxLayout()
+        column.setSpacing(6)
+        top = qt.QHBoxLayout()
+        top.setSpacing(8)
+        name = ui.label(summary["name"], "name", "text", "studioStudyName")
+        name.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+        name.setProperty("fullText", summary["name"])
+        top.addWidget(name, 1)
+        subjects, traced = summary["subjects"], summary["traced"]
+        progressText = _("{traced} / {total} traced").format(traced=traced, total=subjects) if subjects else _("No subjects yet")
+        progress = ui.label(progressText, "caption", "text3", "studioStudyProgressText")
+        ui.tabular(progress)
+        top.addWidget(progress)
+        column.addLayout(top)
+        bar = qt.QFrame()
+        bar.setObjectName("studioStudyProgress")
+        bar.setFixedHeight(4)
+        barLayout = qt.QHBoxLayout(bar)
+        barLayout.setContentsMargins(0, 0, 0, 0)
+        barLayout.setSpacing(0)
+        fill = qt.QFrame()
+        fill.setObjectName("studioStudyProgressFill")
+        fill.setProperty("studioComplete", bool(subjects) and traced >= subjects)
+        fraction = traced / subjects if subjects else 0.0
+        barLayout.addWidget(fill, int(round(1000 * fraction)))
+        barLayout.addStretch(max(0, 1000 - int(round(1000 * fraction))))
+        fill.setVisible(fraction > 0)
+        column.addWidget(bar)
+        when = _relativeTime(summary["modified"]) if summary["modified"] else ""
+        parts = [_("Edited {when}").format(when=when) if when else ""]
+        if summary["review"]:
+            parts.append(_("{count} need review").format(count=summary["review"]))
+        elif subjects and traced >= subjects:
+            parts.append(_("All traced"))
+        meta = ui.label(" · ".join(part for part in parts if part), "caption", "text3", "studioStudyMeta")
+        meta.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+        column.addWidget(meta)
+        layout.addLayout(column, 1)
+        for widget in (tile, name, progress, bar, fill, meta):
+            widget.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
+        return card
+
+    def open(self, path):
+        openStudyFolder(path)
+
+    def _removeEventFilters(self):
+        for card in self._cards:
+            if _isAlive(card):
+                card.removeEventFilter(self._clickFilter)
+
+    def dispose(self):
+        try:
+            slicer.app.disconnect("aboutToQuit()", self._removeEventFilters)
+        except Exception:
+            pass
+        self._removeEventFilters()
+        if _isAlive(self.widget):
+            ui.bindStyleSheet(self.widget, None)
+
+
+class _StudyClickFilter(qt.QObject):
+    """A click, Enter or Space on a study card opens the study; a resized card elides its name."""
+
+    def __init__(self, section):
+        qt.QObject.__init__(self)
+        self.section = section
+
+    def eventFilter(self, obj, event):
+        eventType = event.type()
+        path = obj.property("studioStudyPath")
+        if eventType == qt.QEvent.Resize:
+            for label in obj.findChildren("QLabel", "studioStudyName"):
+                text = str(label.property("fullText") or "")
+                label.setText(qt.QFontMetrics(label.font).elidedText(text, qt.Qt.ElideRight, max(0, label.width)))
+            return False
+        if path and ((eventType == qt.QEvent.MouseButtonRelease and event.button() == qt.Qt.LeftButton)
+                     or (eventType == qt.QEvent.KeyPress and event.key() in (qt.Qt.Key_Return, qt.Qt.Key_Enter, qt.Qt.Key_Space))):
+            qt.QTimer.singleShot(0, lambda path=path: self.section.open(path))
+            return True
+        return False
 
 
 #

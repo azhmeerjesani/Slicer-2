@@ -55,6 +55,9 @@ ABOUT_FILE = "About this folder.txt"
 PRIVATE_DIR = ".studio"
 PROJECT_FILE = "project.json"
 THUMBNAIL_FILE = "thumbnail.png"
+#: The thumbnails of a project (V-02, rendered by ``thumbnails.renderProjectViews()``): the axial view (Library cards, the
+#: inspector) and the coronal and sagittal views (the 3-view strip of the Continue card)
+THUMBNAIL_VIEW_FILES = (("axial", THUMBNAIL_FILE), ("coronal", "thumbnail-coronal.png"), ("sagittal", "thumbnail-sagittal.png"))
 LOCK_FILE = "lock"
 #: Files of nodes that left the project are moved here (kept REMOVED_KEEP_DAYS days), never deleted at once
 REMOVED_DIR = "removed"
@@ -481,6 +484,16 @@ def thumbnailFile(projectPath):
     return os.path.join(projectPath, PRIVATE_DIR, THUMBNAIL_FILE)
 
 
+def thumbnailViews(projectPath):
+    """``{view: path}`` of the thumbnails of a project that exist ("axial", "coronal", "sagittal")."""
+    views = {}
+    for view, fileName in THUMBNAIL_VIEW_FILES:
+        path = os.path.join(projectPath, PRIVATE_DIR, fileName)
+        if os.path.isfile(path):
+            views[view] = path
+    return views
+
+
 def readJson(path):
     """Read a JSON file; None if it does not exist or cannot be read. Worker-safe."""
     try:
@@ -560,8 +573,9 @@ class ProjectInfo:
         self.modified = max(candidates) if candidates else 0.0
         self.created = parseTime(data.get("created"))
         self.counts = data.get("counts") or {}
-        thumbnail = thumbnailFile(self.path)
-        self.thumbnail = thumbnail if os.path.isfile(thumbnail) else None
+        #: {view: path} of the thumbnails ("axial" is ``thumbnail``)
+        self.views = thumbnailViews(self.path)
+        self.thumbnail = self.views.get("axial")
         self.state = data.get("state") or "closed"
 
     def contentLine(self):

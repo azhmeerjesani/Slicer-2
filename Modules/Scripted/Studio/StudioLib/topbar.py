@@ -3,8 +3,9 @@
 A 44 px toolbar ``StudioTopBar`` whose contents are a 3-column grid, so that the workspace switcher is centred
 on the window whatever the other columns hold (no fixed widths, the window can still shrink):
 
-- left: the app menu (``≡``), the breadcrumb (the project or scan name) and the save status (``setSaveStatus()``,
-  A-01b, A-09: "Saved" with a check, "Saving…", "Not saved");
+- left: the app menu (``≡``), the title (the name of the open project or study, V-02; a click opens Library), the
+  chevron of the project menu (Rename…, Show in Finder/Files, New project, Recent projects ›, Close project) and the
+  save status (``setSaveStatus()``, A-01b, A-09: "Saved" with a check, "Saving…", "Not saved");
 - centre: the workspace switcher [Library | Draw | Map] (``Ctrl+Alt+1/2/3``), one segmented control (VISUAL 4.1);
 - right: the status chip, Undo/Redo (Draw only), the layout picker (``Alt+1..5``), the search field (``Ctrl+K``)
   and the error badge.
@@ -222,6 +223,19 @@ class TopBar:
         ui.bindStyleSheet(self.breadcrumbButton, self._breadcrumbStyleSheet)
         self.breadcrumbButton.connect("clicked()", self._onBreadcrumbClicked)
         leftLayout.addWidget(self.breadcrumbButton)
+        # The project menu (V-02): a chevron after the title
+        self.projectMenuButton = _toolButton("StudioProjectMenuButton", "chevron-down", ui.tooltip(
+            _("Project"), None, _("Rename, show in {manager}, new project, recent projects").format(manager=self._fileManagerName())))
+        self.projectMenuButton.setFixedSize(qt.QSize(22, 28))
+        self.projectMenuButton.setIconSize(qt.QSize(14, 14))
+        self.projectMenuButton.setPopupMode(qt.QToolButton.InstantPopup)
+        self.projectMenuButton.setAccessibleName(_("Project menu"))
+        self.projectMenu = qt.QMenu(self.projectMenuButton)
+        self.projectMenu.setObjectName("StudioProjectMenu")
+        self.projectMenu.connect("aboutToShow()", self._fillProjectMenu)
+        self.projectMenuButton.setMenu(self.projectMenu)
+        self.projectMenuButton.hide()
+        leftLayout.addWidget(self.projectMenuButton)
         # The save status of the project follows its name (A-01b, A-09; added below)
         self._leftLayout = leftLayout
         self._leftResizeFilter = _ResizeFilter(self._elideBreadcrumb)
@@ -458,9 +472,19 @@ class TopBar:
             viewAction.connect("triggered(bool)", lambda checked, key=key: self._onViewAction(key, checked))
             self.viewActions[key] = viewAction
 
+    @staticmethod
+    def _fileManagerName():
+        try:
+            from . import projects
+
+            return projects.fileManagerName()
+        except Exception:
+            return _("Files")
+
     def refreshIcons(self):
         """Re-tint the icons for the current palette."""
-        buttons = [self.menuButton, self.undoButton, self.redoButton, self.layoutButton, *self.workspaceButtons.values(), *self.layoutTiles.values()]
+        buttons = [self.menuButton, self.projectMenuButton, self.undoButton, self.redoButton, self.layoutButton, *self.workspaceButtons.values(),
+                   *self.layoutTiles.values()]
         for button in buttons:
             size = button.iconSize.width()
             button.setIcon(ui.icon(button.property("studioIcon"), size))
@@ -726,6 +750,8 @@ class TopBar:
                 button.setText("")
             return
         room = self.leftContainer.width - self.menuButton.width - self.leftContainer.layout().spacing
+        if not self.projectMenuButton.isHidden():
+            room -= self.projectMenuButton.width + self.leftContainer.layout().spacing
         if not self.saveStatusButton.isHidden():
             room -= self.saveStatusButton.sizeHint.width() + self.leftContainer.layout().spacing
         room = min(room, button.maximumWidth)
@@ -750,8 +776,36 @@ class TopBar:
                 return node
         return None
 
+    @staticmethod
+    def _projects():
+        """``StudioLib.projects`` when projects are on (A-09), else None."""
+        try:
+            from . import projects
+        except ImportError:
+            return None
+        return projects if projects.isEnabled() else None
+
+    def _currentProject(self):
+        projects = self._projects()
+        return projects.currentProject() if projects is not None else None
+
+    def _updateProjectMenuButton(self):
+        """The project menu is shown while projects are on and the title is shown (or a project is open)."""
+        shown = self._projects() is not None and (bool(self._breadcrumbText) or self._currentProject() is not None)
+        if self.projectMenuButton.isHidden() == shown:
+            self.projectMenuButton.setVisible(shown)
+            self._elideBreadcrumb()
+
     def _updateDefaultBreadcrumb(self, *args):
         if self._explicitBreadcrumb is not None:
+            self._updateProjectMenuButton()
+            return
+        # The title is the open project (V-02), never a node name; without a project (projects off, or before the first
+        # save) the scan that Draw edits and its lesion
+        project = self._currentProject()
+        if project is not None:
+            self._showBreadcrumb(os.path.basename(os.path.normpath(project.path)), None, BREADCRUMB_SEPARATOR, clickable=True)
+            self._updateProjectMenuButton()
             return
         volume = self._sourceVolume()
         secondary = None
@@ -760,6 +814,67 @@ class TopBar:
             segmentation = editor.segmentationNode() if editor is not None else None
             secondary = segmentation.GetName() if segmentation is not None else None
         self._showBreadcrumb(volume.GetName() if volume is not None else "", secondary, BREADCRUMB_SEPARATOR, clickable=volume is not None)
+        self._updateProjectMenuButton()
+
+    def _onProjectsChanged(self):
+        """The open project or its name changed (``projects.addListener``)."""
+        timer = getattr(self, "_breadcrumbTimer", None)
+        if timer is not None:
+            timer.start()
+
+    def projectMenuActions(self):
+        """``[(text, callback or submenu list, enabled)]`` of the project menu (V-02); a ``None`` text is a separator."""
+        from . import projects, projects_ui
+
+        project = projects.currentProject()
+        manager = projects.fileManagerName()
+        recent = []
+        current = os.path.normcase(os.path.realpath(project.path)) if project is not None else None
+        for info in projects.listProjects()[:8]:
+            isCurrent = current is not None and os.path.normcase(os.path.realpath(info.path)) == current
+            recent.append((info.name, lambda path=info.path: projects_ui.openProject(path), not isCurrent))
+        return [
+            (_("Rename…"), projects_ui.renameDialog, project is not None),
+            (_("Show in {manager}").format(manager=manager), projects_ui.showProjectFolder, project is not None),
+            (None, None, True),
+            (_("New project"), projects_ui.newProject, True),
+            (_("Recent projects"), recent, bool(recent)),
+            (None, None, True),
+            (_("Close project"), projects_ui.closeScene, project is not None),
+        ]
+
+    def _fillProjectMenu(self):
+        menu = self.projectMenu
+        menu.clear()
+        try:
+            entries = self.projectMenuActions()
+        except Exception:
+            logging.error(f"Studio: the project menu failed:\n{traceback.format_exc()}")
+            return
+
+        def add(target, text, callback, enabled):
+            if text is None:
+                target.addSeparator()
+            elif isinstance(callback, list):
+                submenu = target.addMenu(text)
+                submenu.setObjectName("StudioRecentProjectsMenu")
+                submenu.setEnabled(enabled)
+                for itemText, itemCallback, itemEnabled in callback:
+                    add(submenu, itemText, itemCallback, itemEnabled)
+            else:
+                action = target.addAction(text)
+                action.setEnabled(enabled)
+                action.connect("triggered()", lambda callback=callback: self._runProjectAction(callback))
+
+        for text, callback, enabled in entries:
+            add(menu, text, callback, enabled)
+
+    def _runProjectAction(self, callback):
+        try:
+            callback()
+        except Exception:
+            logging.error(f"Studio: a project action failed:\n{traceback.format_exc()}")
+        self._breadcrumbTimer.start()
 
     def _onBreadcrumbClicked(self):
         if self._explicitBreadcrumb is None:
@@ -803,6 +918,9 @@ class TopBar:
         for event in (slicer.vtkMRMLScene.NodeAddedEvent, slicer.vtkMRMLScene.NodeRemovedEvent, slicer.vtkMRMLScene.EndCloseEvent, slicer.vtkMRMLScene.EndImportEvent):
             tag = slicer.mrmlScene.AddObserver(event, self._onSceneChanged)
             self._sceneObservations.append(tag)
+        projects = self._projects()
+        if projects is not None:
+            projects.addListener(self._onProjectsChanged)
 
     def _onBreadcrumbTimer(self):
         self._connectEditor()
@@ -1218,6 +1336,9 @@ class TopBar:
         ui.bindStyleSheet(self.saveStatusButton, None)
         self.undoRedoTimer.stop()
         self._breadcrumbTimer.stop()
+        projects = self._projects()
+        if projects is not None:
+            projects.removeListener(self._onProjectsChanged)
         self._errorCountTimer.stop()
         if self._mapPopover is not None:
             self._mapPopover.close()

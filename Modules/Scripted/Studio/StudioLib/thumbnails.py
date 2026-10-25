@@ -616,3 +616,300 @@ class ThumbnailService:
         self.stats["tickMs"].append((time.perf_counter() - start) * 1000.0)
         if self._stopped or self.isIdle():
             self._timer.stop()
+
+
+#
+# Project thumbnails (V-02): the axial, coronal and sagittal slices through the lesion of a project
+#
+
+#: Files of a project's thumbnails in its hidden ``.studio`` folder: the axial view (Library cards, the inspector) and
+#: the coronal and sagittal views (the 3-view strip of the Continue card)
+PROJECT_VIEW_FILES = (("axial", "thumbnail.png"), ("coronal", "thumbnail-coronal.png"), ("sagittal", "thumbnail-sagittal.png"))
+#: Pixel size of the axial thumbnail and of the two side views
+PROJECT_THUMB_SIZE = (480, 360)
+PROJECT_SIDE_SIZE = (240, 180)
+#: The lesion overlay: the lesion colour at 45 % with a full-colour outline (VISUAL 3)
+PROJECT_LESION_RGB = (0xFF, 0x5A, 0x5F)
+PROJECT_LESION_ALPHA = 0.45
+#: Margin around the image in a thumbnail (fraction of the field of view)
+PROJECT_MARGIN = 0.06
+#: Grey level (0..1 of the window) above which a pixel is content when a view is fitted to what its slice shows
+PROJECT_CONTENT_LEVEL = 0.08
+#: Slices of the lesion label map read per step of the centroid pass (keeps each numpy call short, see WORKER_SLAB_POINTS)
+_CENTROID_SLAB = 8
+#: Screen axes of the views in RAS, as in Slicer's slice views (radiological: patient right on screen left, anterior or
+#: superior at the top, anterior on the left of the sagittal view): (rightward, downward, normal)
+_VIEW_AXES = {
+    "axial": ((-1.0, 0.0, 0.0), (0.0, -1.0, 0.0), 2),
+    "coronal": ((-1.0, 0.0, 0.0), (0.0, 0.0, -1.0), 1),
+    "sagittal": ((0.0, -1.0, 0.0), (0.0, 0.0, -1.0), 0),
+}
+
+
+class ProjectThumbnailSource:
+    """What a project thumbnail is made of, taken on the main thread (``projectThumbnailSource()``) and rendered by the
+    background writer (``renderProjectViews()``): numpy views of the background volume and of the lesion label maps, their
+    voxel-to-RAS matrices and the window/level of the background. The VTK objects that own the arrays are shallow copies
+    kept alive in ``_keep`` until ``release()`` (on the main thread): the worker only reads numpy memory.
+    """
+
+    def __init__(self):
+        self.key = None
+        #: numpy [k, j, i] and the 4 x 4 matrix of array indices (i, j, k, 1) -> RAS
+        self.background = None
+        self.backgroundMatrix = None
+        self.window = None
+        self.level = None
+        #: [(numpy [k, j, i], 4 x 4 matrix, label value)]
+        self.lesions = []
+        self._keep = []
+
+    def release(self):
+        """Drop the arrays and the VTK objects (main thread)."""
+        self.background = None
+        self.lesions = []
+        self._keep = []
+
+
+def _matrixArray(vtkMatrix):
+    return np.array([[vtkMatrix.GetElement(row, column) for column in range(4)] for row in range(4)], dtype=float)
+
+
+def _imageArray(imageData, keep):
+    """numpy [k, j, i] view of the first component of a shallow copy of ``imageData`` (main thread), or None."""
+    import vtk
+    from vtk.util import numpy_support
+
+    if imageData is None:
+        return None, None
+    dimensions = imageData.GetDimensions()
+    if min(dimensions) < 1 or imageData.GetPointData() is None or imageData.GetPointData().GetScalars() is None:
+        return None, None
+    copy = imageData.NewInstance()
+    copy.ShallowCopy(imageData)
+    scalars = copy.GetPointData().GetScalars()
+    keep.extend((copy, scalars))
+    array = numpy_support.vtk_to_numpy(scalars)
+    if array.ndim > 1:
+        array = array[:, 0]
+    extent = copy.GetExtent()
+    offset = vtk.vtkMatrix4x4()
+    for axis in range(3):
+        offset.SetElement(axis, 3, float(extent[2 * axis]))
+    return array.reshape(dimensions[2], dimensions[1], dimensions[0]), offset
+
+
+def _isBackgroundCandidate(node):
+    if node is None or not node.IsA("vtkMRMLScalarVolumeNode") or node.IsA("vtkMRMLLabelMapVolumeNode") or node.GetImageData() is None:
+        return False
+    try:
+        from . import space
+
+        if node.GetAttribute(space.ROLE_ATTRIBUTE) in (space.ROLE_FIGURE, space.ROLE_STATMAP):
+            return False
+    except ImportError:
+        pass
+    # Never a network map (LNM blinding, as the autosave thumbnails: ``autosave_io.isNetworkMapNode``)
+    if node.GetAttribute("LNM.Result") == "1":
+        return False
+    dimensions = node.GetImageData().GetDimensions()
+    return min(dimensions) > 1
+
+
+def _segmentationLayers(segmentationNode):
+    """[(vtkOrientedImageData, label value)] of the segments of ``segmentationNode`` that have a binary label map."""
+    import slicer
+
+    segmentation = segmentationNode.GetSegmentation() if segmentationNode is not None else None
+    if segmentation is None:
+        return []
+    name = slicer.vtkSegmentationConverter.GetBinaryLabelmapRepresentationName()
+    layers = []
+    for index in range(min(segmentation.GetNumberOfSegments(), 8)):
+        segment = segmentation.GetNthSegment(index)
+        representation = segment.GetRepresentation(name) if segment is not None else None
+        if representation is not None and representation.GetPointData() is not None and representation.GetPointData().GetScalars() is not None:
+            layers.append((representation, segment.GetLabelValue()))
+    return layers
+
+
+def projectThumbnailSource(scene=None):
+    """The images of a project thumbnail (main thread, well under a millisecond), or None when the scene has no image.
+
+    The background is the reference image of the lesion, else the image shown in the Red view, else the first image;
+    never a figure, a statistic map or a network map. The lesion is the first segmentation with a label map (its
+    segments, at most 8). ``source.key`` changes when the images, the lesion or the window/level change, so that a save
+    that changed nothing visible makes no new thumbnail.
+    """
+    import vtk
+
+    import slicer
+
+    scene = scene or slicer.mrmlScene
+    segmentations = [node for node in slicer.util.getNodesByClass("vtkMRMLSegmentationNode", scene) if _segmentationLayers(node)]
+    segmentationNode = segmentations[0] if segmentations else None
+    background = None
+    if segmentationNode is not None:
+        reference = segmentationNode.GetNodeReference(slicer.vtkMRMLSegmentationNode.GetReferenceImageGeometryReferenceRole())
+        background = reference if _isBackgroundCandidate(reference) else None
+    if background is None:
+        composite = next((node for node in slicer.util.getNodesByClass("vtkMRMLSliceCompositeNode", scene) if node.GetLayoutName() == "Red"), None)
+        volumeId = composite.GetBackgroundVolumeID() if composite is not None else None
+        candidate = scene.GetNodeByID(volumeId) if volumeId else None
+        background = candidate if _isBackgroundCandidate(candidate) else None
+    if background is None:
+        background = next((node for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode", scene) if _isBackgroundCandidate(node)), None)
+    if background is None:
+        return None
+    source = ProjectThumbnailSource()
+    array, offset = _imageArray(background.GetImageData(), source._keep)
+    if array is None:
+        return None
+    ijkToRas = vtk.vtkMatrix4x4()
+    background.GetIJKToRASMatrix(ijkToRas)
+    source.background = array
+    source.backgroundMatrix = _matrixArray(ijkToRas) @ _matrixArray(offset)
+    displayNode = background.GetDisplayNode()
+    if displayNode is not None and hasattr(displayNode, "GetWindow") and displayNode.GetWindow() > 0:
+        source.window, source.level = float(displayNode.GetWindow()), float(displayNode.GetLevel())
+    imageData = background.GetImageData()
+    scalars = imageData.GetPointData().GetScalars()
+    keyParts = [background.GetID(), imageData.GetMTime(), scalars.GetMTime() if scalars is not None else 0, source.window, source.level]
+    for representation, labelValue in _segmentationLayers(segmentationNode):
+        layerArray, layerOffset = _imageArray(representation, source._keep)
+        if layerArray is None:
+            continue
+        imageToWorld = vtk.vtkMatrix4x4()
+        representation.GetImageToWorldMatrix(imageToWorld)
+        source.lesions.append((layerArray, _matrixArray(imageToWorld) @ _matrixArray(layerOffset), int(labelValue)))
+        layerScalars = representation.GetPointData().GetScalars()
+        keyParts += [segmentationNode.GetID(), representation.GetMTime(), layerScalars.GetMTime(), int(labelValue)]
+    source.key = tuple(keyParts)
+    return source
+
+
+def _lesionCentroid(lesions):
+    """RAS centroid of the lesion voxels (pure numpy, in slabs), or None when the lesion is empty."""
+    total = 0
+    weighted = np.zeros(3)
+    for array, matrix, labelValue in lesions:
+        slices = array.shape[0]
+        sums = np.zeros(3)
+        count = 0
+        for k0 in range(0, slices, _CENTROID_SLAB):
+            mask = array[k0:k0 + _CENTROID_SLAB] == labelValue
+            n = int(np.count_nonzero(mask))
+            if not n:
+                continue
+            kk, jj, ii = np.nonzero(mask)
+            sums += (ii.sum(), jj.sum(), (kk + k0).sum())
+            count += n
+        if count:
+            ras = matrix @ np.append(sums / count, 1.0)
+            weighted += ras[:3] * count
+            total += count
+    return weighted / total if total else None
+
+
+def _volumeBox(shape, matrix):
+    """RAS bounding box (min, max) of an array [k, j, i] with its index-to-RAS ``matrix`` (voxel edges included)."""
+    nk, nj, ni = shape
+    corners = np.array([[i, j, k, 1.0] for i in (-0.5, ni - 0.5) for j in (-0.5, nj - 0.5) for k in (-0.5, nk - 0.5)])
+    world = (matrix @ corners.T).T[:, :3]
+    return world.min(axis=0), world.max(axis=0)
+
+
+def _sample(array, matrix, points):
+    """Nearest-neighbour values of ``array`` at RAS ``points`` [n, 3], and the mask of the points inside it."""
+    rasToIndex = np.linalg.inv(matrix)
+    index = points @ rasToIndex[:3, :3].T + rasToIndex[:3, 3]
+    index = np.rint(index).astype(np.int64)
+    nk, nj, ni = array.shape
+    inside = (index[:, 0] >= 0) & (index[:, 0] < ni) & (index[:, 1] >= 0) & (index[:, 1] < nj) & (index[:, 2] >= 0) & (index[:, 2] < nk)
+    values = np.zeros(len(points), dtype=float)
+    if inside.any():
+        values[inside] = array[index[inside, 2], index[inside, 1], index[inside, 0]]
+    return values, inside
+
+
+def _greyPlane(source, origin, right, down, spacing, width, height):
+    """Grey levels 0..1 [height * width] of the background on a plane, the RAS points and the mask of points in the image."""
+    columns = (np.arange(width) - (width - 1) / 2.0) * spacing
+    rows = (np.arange(height) - (height - 1) / 2.0) * spacing
+    points = (origin + rows[:, None, None] * down + columns[None, :, None] * right).reshape(-1, 3)
+    values, inside = _sample(source.background, source.backgroundMatrix, points)
+    if source.window:
+        grey = np.clip((values - (source.level - source.window / 2.0)) / source.window, 0.0, 1.0)
+    else:
+        positive = values[inside]
+        top = float(np.percentile(positive, 99.5)) if positive.size else 0.0
+        bottom = float(np.percentile(positive, 1.0)) if positive.size else 0.0
+        grey = np.clip((values - bottom) / (top - bottom), 0.0, 1.0) if top > bottom else np.zeros_like(values)
+    return np.where(inside, grey, 0.0), points, inside
+
+
+def renderProjectView(source, view, size, centre):
+    """RGB uint8 image [row, column, 3] of one view (``"axial"``, ``"coronal"`` or ``"sagittal"``) through ``centre`` (RAS),
+    zoomed to what the slice shows (the head, not the air around it). Worker-safe: numpy only.
+    """
+    width, height = size
+    right, down, normal = _VIEW_AXES[view]
+    right, down = np.array(right), np.array(down)
+    low, high = _volumeBox(source.background.shape, source.backgroundMatrix)
+    origin = (low + high) / 2.0
+    origin[normal] = centre[normal]
+    spacing = max(float(np.abs(right) @ (high - low)) / width, float(np.abs(down) @ (high - low)) / height)
+    # A coarse pass finds the content of the slice (grey above CONTENT_LEVEL), then the view is fitted to it
+    coarse = 4
+    grey, _points, _inside = _greyPlane(source, origin, right, down, spacing * coarse, width // coarse, height // coarse)
+    content = grey.reshape(height // coarse, width // coarse) > PROJECT_CONTENT_LEVEL
+    if content.any():
+        rows, columns = np.nonzero(content)
+        rowLow, rowHigh = rows.min() - 0.5, rows.max() + 0.5
+        columnLow, columnHigh = columns.min() - 0.5, columns.max() + 0.5
+        step = spacing * coarse
+        shiftRight = ((columnLow + columnHigh) / 2.0 - (width // coarse - 1) / 2.0) * step
+        shiftDown = ((rowLow + rowHigh) / 2.0 - (height // coarse - 1) / 2.0) * step
+        origin = origin + shiftRight * right + shiftDown * down
+        spacing = max((columnHigh - columnLow) * step / width, (rowHigh - rowLow) * step / height)
+    spacing *= 1.0 + 2 * PROJECT_MARGIN
+    grey, points, inside = _greyPlane(source, origin, right, down, spacing, width, height)
+    grey = (grey * 255.0).reshape(height, width)
+    rgb = np.repeat(grey[:, :, None], 3, axis=2)
+    mask = np.zeros(height * width, dtype=bool)
+    for array, matrix, labelValue in source.lesions:
+        labels, labelInside = _sample(array, matrix, points)
+        mask |= labelInside & (labels == labelValue)
+    if mask.any():
+        mask = mask.reshape(height, width)
+        colour = np.array(PROJECT_LESION_RGB, dtype=float)
+        rgb[mask] = rgb[mask] * (1.0 - PROJECT_LESION_ALPHA) + colour * PROJECT_LESION_ALPHA
+        # The outline: lesion pixels with a 4-neighbour outside the lesion
+        padded = np.pad(mask, 1)
+        interior = padded[:-2, 1:-1] & padded[2:, 1:-1] & padded[1:-1, :-2] & padded[1:-1, 2:]
+        rgb[mask & ~interior] = colour
+    return np.clip(rgb, 0, 255).astype(np.uint8)
+
+
+def renderProjectViews(source, privateFolder):
+    """Render the three views of a project into ``privateFolder`` (``<project>/.studio``), atomically. Worker-safe: numpy,
+    zlib and files only. Nothing is written when the project folder is gone (renamed or moved meanwhile).
+    Return the paths written.
+    """
+    projectFolder = os.path.dirname(os.path.abspath(privateFolder))
+    if not os.path.isdir(projectFolder):
+        return []
+    centre = _lesionCentroid(source.lesions)
+    if centre is None:
+        low, high = _volumeBox(source.background.shape, source.backgroundMatrix)
+        centre = (low + high) / 2.0
+    written = []
+    for view, fileName in PROJECT_VIEW_FILES:
+        size = PROJECT_THUMB_SIZE if view == "axial" else PROJECT_SIDE_SIZE
+        rgb = renderProjectView(source, view, size, centre)
+        rgba = np.concatenate([rgb, np.full(rgb.shape[:2] + (1,), 255, dtype=np.uint8)], axis=2)
+        path = os.path.join(privateFolder, fileName)
+        _writeAtomic(path, encodePng(rgba))
+        written.append(path)
+    return written
+

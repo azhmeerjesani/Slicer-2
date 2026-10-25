@@ -252,6 +252,8 @@ class AutosaveService:
         self._pendingSceneSource = None
         self._forceProjectOpen = False
         self._lastProjectPlan = None
+        #: (project folder, ``thumbnails.ProjectThumbnailSource.key``) of the last project thumbnail (V-02)
+        self._projectThumbnailKey = None
         #: (saved, reason) of the save made when the application was closed (``flushForClose()``), None without a project
         self.closeFlushResult = None
         self.metrics = {"last": None, "history": [], "pollMs": None}
@@ -850,6 +852,9 @@ class AutosaveService:
 
     def _thumbnailDue(self, plan):
         if getattr(plan, "thumbnailChecked", False):
+            return False
+        if isinstance(plan, _io().ProjectPlan):
+            # Projects render their thumbnails from the image arrays in the background (``_queueProjectThumbnail()``)
             return False
         path = getattr(plan, "thumbnailPath", None) or os.path.join(plan.slotDir, _io().THUMBNAIL_FILE)
         return time.time() - self._lastThumbnailTime >= THUMBNAIL_INTERVAL_S or not os.path.exists(path)
@@ -1557,9 +1562,47 @@ class AutosaveService:
         conflicts = self.projectWriter.takeConflicts() if self.projectWriter is not None else []
         if conflicts:
             self._announce("conflict", conflicts=conflicts)
+        self._queueProjectThumbnail(plan)
         self._projects().notifyChanged()
         if plan.wroteData:
             self._showClassicStatusMessage()
+
+    def _queueProjectThumbnail(self, plan):
+        """Render the thumbnails of the project in the background writer after a save that changed what they show (V-02):
+        the axial, coronal and sagittal slices through the lesion, from the image arrays (not a view grab, so no
+        main-thread render and it works with Library shown). Skipped when nothing visible changed, and when quitting.
+        """
+        project = self.project
+        if project is None or getattr(plan, "reason", "") == "quit":
+            return
+        try:
+            from StudioLib import thumbnails
+
+            privateFolder = os.path.join(project.path, ".studio")
+            source = thumbnails.projectThumbnailSource(slicer.mrmlScene)
+            if source is None:
+                return
+            key = (project.path, source.key)
+            if key == self._projectThumbnailKey and os.path.isfile(os.path.join(privateFolder, thumbnails.PROJECT_VIEW_FILES[0][1])):
+                source.release()
+                return
+            self._projectThumbnailKey = key
+        except Exception:
+            logging.debug("Slicer Studio: project thumbnail source failed:\n" + traceback.format_exc())
+            return
+
+        def done(paths, source=source):
+            source.release()
+            if paths:
+                self._projects().notifyChanged()
+
+        def failed(error, details=None, source=source, key=key):
+            source.release()
+            if self._projectThumbnailKey == key:
+                self._projectThumbnailKey = None
+            logging.debug(f"Slicer Studio: project thumbnail failed: {error}")
+
+        _io().backgroundWriter().submit(thumbnails.renderProjectViews, source, privateFolder, onDone=done, onError=failed)
 
     def lastSaveComplete(self):
         """True if the last project generation saved everything (no heavy node deferred, nothing changed meanwhile)."""

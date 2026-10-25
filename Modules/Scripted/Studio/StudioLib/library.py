@@ -458,7 +458,7 @@ def recentFolderEntries(limit=RECENT_FOLDER_ROW_COUNT):
     return entries
 
 
-def recentEntries(limit=RECENT_ROW_COUNT):
+def recentEntries(limit=RECENT_ROW_COUNT, outsideRootOnly=False):
     """The most recently loaded files that still exist, most recent first.
 
     They come from the "RecentlyLoadedMenu" actions of the main window (property ``fileParameters``),
@@ -466,6 +466,7 @@ def recentEntries(limit=RECENT_ROW_COUNT):
     (``os.stat``) only until ``limit`` existing files are found. Files in the cache or temporary folders (the templates and
     the sample data that Studio downloaded) are not the user's files and never listed (``isInternalPath()``). Files of the
     projects of the Slicer Studio folder are listed in Projects instead (A-09): Recent keeps the files opened from elsewhere.
+    ``outsideRootOnly`` also leaves out every file of the Slicer Studio folder (its studies and LNM folder; the Library page).
     """
     candidates = []  # [(properties, action)], most recent first
     menu = recentlyLoadedMenu()
@@ -490,7 +491,7 @@ def recentEntries(limit=RECENT_ROW_COUNT):
         candidates.reverse()
     openedTimes = _importer().recentOpenTimes()
     internal = _internalFolders()
-    projectsFolder = _projectsFolder()
+    projectsFolder = _rootFolder() if outsideRootOnly else _projectsFolder()
     entries = []
     for properties, action in candidates:
         if len(entries) >= limit:
@@ -515,6 +516,27 @@ def _projectsFolder():
     if not projects.isEnabled():
         return None
     return os.path.normcase(os.path.realpath(projects.projectsFolder()))
+
+
+def _rootFolder():
+    """The Slicer Studio folder (real path), or None when projects are off (V-02: the page lists only files from elsewhere)."""
+    try:
+        from . import projects
+    except ImportError:
+        return None
+    if not projects.isEnabled():
+        return None
+    return os.path.normcase(os.path.realpath(projects.root()))
+
+
+def _shortFolder(path):
+    """A folder for display: the home folder written "~" (``projects.shortPath``)."""
+    try:
+        from . import projects
+
+        return projects.shortPath(path)
+    except ImportError:
+        return path
 
 
 class _RecentMenuWatcher(qt.QObject):
@@ -569,9 +591,12 @@ class RecentList(qt.QObject):
     The list follows the "RecentlyLoadedMenu" of the main window while it is visible.
     """
 
-    def __init__(self, rowCount=RECENT_ROW_COUNT):
+    def __init__(self, rowCount=RECENT_ROW_COUNT, includeStudies=True, outsideRootOnly=False):
         qt.QObject.__init__(self)
         self.rowCount = rowCount
+        #: The Library page lists the studies in Studies, and only what was opened from outside the Slicer Studio folder
+        self.includeStudies = includeStudies
+        self.outsideRootOnly = outsideRootOnly
         self.entries = []
         #: (button, name label, folder label, time label) of the rows created so far (created when needed)
         self.rows = []
@@ -665,9 +690,12 @@ class RecentList(qt.QObject):
             return
         self._shownKey = key
         self._dirty = False
-        studies = recentStudyEntries(min(RECENT_STUDY_ROW_COUNT, self.rowCount))
+        studies = recentStudyEntries(min(RECENT_STUDY_ROW_COUNT, self.rowCount)) if self.includeStudies else []
         folders = recentFolderEntries(min(RECENT_FOLDER_ROW_COUNT, self.rowCount - len(studies)))
-        self.entries = studies + folders + recentEntries(self.rowCount - len(studies) - len(folders))
+        if self.outsideRootOnly:
+            root = _rootFolder()
+            folders = [entry for entry in folders if not root or not isInternalPath(entry.path, [root])]
+        self.entries = studies + folders + recentEntries(self.rowCount - len(studies) - len(folders), outsideRootOnly=self.outsideRootOnly)
         while len(self.rows) < len(self.entries):
             self._createRow()
         now = time.time()
@@ -677,7 +705,7 @@ class RecentList(qt.QObject):
                 continue
             entry = self.entries[index]
             nameLabel.setProperty("fullText", entry.name)
-            folderLabel.setProperty("fullText", entry.folder)
+            folderLabel.setProperty("fullText", _shortFolder(entry.folder) if entry.kind == "file" else entry.folder)
             timeLabel.setText(entry.timeText(now))
             row.setToolTip(entry.path)
             row.setAccessibleName(entry.name)
@@ -1334,6 +1362,8 @@ class CurrentWorkCard(qt.QObject):
     """
 
     THUMBNAIL_SIZE = (196, 148)
+    #: The coronal and sagittal tiles of the 3-view strip (V-02)
+    SIDE_THUMBNAIL_SIZE = (96, 72)
     ACTIONS_WIDTH = 200
 
     def __init__(self):
@@ -1347,12 +1377,33 @@ class CurrentWorkCard(qt.QObject):
         cardLayout = qt.QHBoxLayout()
         cardLayout.setSpacing(20)
         outerLayout.addLayout(cardLayout)
-        # The project's thumbnail, on black (the image is the hero)
+        # The project's thumbnails, on black (the image is the hero): the axial view, and the coronal and sagittal views
+        # beside it (V-02)
+        strip = qt.QWidget()
+        strip.setObjectName("StudioCurrentWorkThumbnails")
+        stripLayout = qt.QHBoxLayout(strip)
+        stripLayout.setContentsMargins(0, 0, 0, 0)
+        stripLayout.setSpacing(4)
         self.thumbnail = qt.QLabel()
         self.thumbnail.setObjectName("StudioCurrentWorkThumbnail")
         self.thumbnail.setFixedSize(*self.THUMBNAIL_SIZE)
         self.thumbnail.setAlignment(qt.Qt.AlignCenter)
-        cardLayout.addWidget(self.thumbnail, 0, qt.Qt.AlignTop)
+        stripLayout.addWidget(self.thumbnail)
+        sideColumn = qt.QVBoxLayout()
+        sideColumn.setSpacing(4)
+        self.sideThumbnails = {}
+        for view in ("coronal", "sagittal"):
+            label = qt.QLabel()
+            label.setObjectName("StudioCurrentWorkThumbnailSide")
+            label.setProperty("studioView", view)
+            label.setFixedSize(*self.SIDE_THUMBNAIL_SIZE)
+            label.setAlignment(qt.Qt.AlignCenter)
+            label.hide()
+            sideColumn.addWidget(label)
+            self.sideThumbnails[view] = label
+        sideColumn.addStretch(1)
+        stripLayout.addLayout(sideColumn)
+        cardLayout.addWidget(strip, 0, qt.Qt.AlignTop)
         middle = qt.QVBoxLayout()
         middle.setSpacing(4)
         self.overline = ui.overline(_("Continue"), "StudioCurrentWorkOverline")
@@ -1423,7 +1474,7 @@ class CurrentWorkCard(qt.QObject):
         t = {name: ui.token(name).name() for name in ("text", "text2", "text3", "success", "warning", "control-hover")}
         tint = {name: ui._rgba(ui.token(name), 0.14) for name in ("success", "warning")}
         return (
-            "QLabel#StudioCurrentWorkThumbnail { background-color: #000000; border: none; border-radius: 8px; }"
+            "QLabel#StudioCurrentWorkThumbnail, QLabel#StudioCurrentWorkThumbnailSide { background-color: #000000; border: none; border-radius: 8px; }"
             f"QLabel#StudioCurrentWorkScanFolder, QLabel#StudioCurrentWorkMeta, QLabel#StudioCurrentWorkMore {{ color: {t['text3']}; }}"
             f"QLabel#StudioCurrentWorkLesionMetrics {{ color: {t['text2']}; }}"
             f"QLabel#StudioCurrentWorkLesionState {{ color: {t['text2']}; background-color: {t['control-hover']}; border-radius: 10px; padding: 0px 8px; }}"
@@ -1450,17 +1501,31 @@ class CurrentWorkCard(qt.QObject):
         else:
             setElidedText(self.titleLabel, _("Open now"))
             setElidedText(self.metaLabel, _("Not in a project yet"))
-        path = info.thumbnail if info is not None else None
-        key = (path, os.path.getmtime(path) if path and os.path.isfile(path) else None, ui.isDark())
+        views = dict(getattr(info, "views", None) or ({"axial": info.thumbnail} if info is not None and info.thumbnail else {}))
+
+        def mtime(path):
+            try:
+                return os.path.getmtime(path)
+            except (OSError, TypeError):
+                return None
+
+        key = (tuple(sorted((view, path, mtime(path)) for view, path in views.items())), ui.isDark())
         if key == self._thumbnailKey:
             return
         self._thumbnailKey = key
+        path = views.get("axial")
         pixmap = qt.QPixmap(path) if path else qt.QPixmap()
         if pixmap.isNull():
             self.thumbnail.setPixmap(ui.pixmap("brain", 40, "#55555c"))
         else:
             width, height = self.THUMBNAIL_SIZE
-            self.thumbnail.setPixmap(pixmap.scaled(width - 8, height - 8, qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation))
+            self.thumbnail.setPixmap(pixmap.scaled(width, height, qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation))
+        for view, label in self.sideThumbnails.items():
+            sidePixmap = qt.QPixmap(views[view]) if views.get(view) else qt.QPixmap()
+            label.setVisible(not sidePixmap.isNull())
+            if not sidePixmap.isNull():
+                width, height = self.SIDE_THUMBNAIL_SIZE
+                label.setPixmap(sidePixmap.scaled(width, height, qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation))
 
     def _onPalette(self):
         if not _isAlive(self.widget):
@@ -4921,6 +4986,10 @@ class LibraryCanvas(qt.QObject):
         captionRow.addWidget(self.captionSeparator)
         self.captionLink = self._link(_("Show in {manager}").format(manager=_fileManagerName()), "StudioLibraryCaptionLink", _showRootFolder)
         captionRow.addWidget(self.captionLink)
+        # Once data is loaded the page has no drop zone: the caption says that files can be dropped anywhere
+        self.captionDropHint = ui.label(_("· Drop files anywhere to add them"), "caption", "text3", "StudioLibraryDropHint")
+        self.captionDropHint.hide()
+        captionRow.addWidget(self.captionDropHint)
         captionRow.addStretch(1)
         titleColumn.addLayout(captionRow)
         headerLayout.addLayout(titleColumn, 1)
@@ -5073,43 +5142,53 @@ class LibraryCanvas(qt.QObject):
         except Exception:
             logging.error(f"Studio Library: the Projects section failed:\n{traceback.format_exc()}")
 
-        # Recent: the studies, folders and files opened before (from anywhere)
-        recentTitle = ui.sectionLabel(_("Recent"), "StudioLibrarySectionTitle")
-        recentTitle.setContentsMargins(0, 0, 0, 0)
-        columnLayout.addWidget(recentTitle)
-        columnLayout.addSpacing(8)
-        self.recentList = RecentList()
-        columnLayout.addWidget(self.recentList.widget)
-        columnLayout.addSpacing(16)
-        self.dropBottomSlot = qt.QVBoxLayout()
-        self.dropBottomSlot.setContentsMargins(0, 0, 0, 0)
-        columnLayout.addLayout(self.dropBottomSlot)
-        columnLayout.addSpacing(16)
+        # Studies (V-02): the studies of the folder and those opened from elsewhere, as row cards
+        self.studiesSection = None
+        try:
+            from . import projects_ui
 
-        # Footer links
+            self.studiesSection = projects_ui.StudiesSection()
+            columnLayout.addWidget(self.studiesSection.widget)
+        except Exception:
+            logging.error(f"Studio Library: the Studies section failed:\n{traceback.format_exc()}")
+
+        # A compact row of ghost buttons under Studies: New study…, Open study…, Load sample data, Classic interface
         linkRow = qt.QHBoxLayout()
         linkRow.setSpacing(4)
         self.newStudyLink = None
         self.openStudyLink = None
         if _studyUi() is not None:
-            self.newStudyLink = self._link(_("New study…"), "StudioLibraryNewStudyLink", newStudy)
+            self.newStudyLink = self._ghost(_("New study…"), "StudioLibraryNewStudyLink", newStudy, "users")
             self.newStudyLink.setToolTip(_("Make a study of a folder of scans and lesion masks"))
-            self.openStudyLink = self._link(_("Open study…"), "StudioLibraryOpenStudyLink", openStudy)
+            self.openStudyLink = self._ghost(_("Open study…"), "StudioLibraryOpenStudyLink", openStudy, "folder-open")
+            self.openStudyLink.setToolTip(_("Open a study folder (study.json)"))
             for link in (self.newStudyLink, self.openStudyLink):
                 linkRow.addWidget(link)
-                separator = qt.QLabel("·")
-                separator.setObjectName("StudioLibraryLinkSeparator")
-                linkRow.addWidget(separator)
-        self.sampleDataLink = self._link(_("Load sample data"), "StudioLibrarySampleDataLink", openSampleData)
+        self.sampleDataLink = self._ghost(_("Load sample data"), "StudioLibrarySampleDataLink", openSampleData, "download")
+        self.sampleDataLink.setToolTip(_("Load a sample scan (downloaded from the 3D Slicer sample data)"))
         linkRow.addWidget(self.sampleDataLink)
-        separator = qt.QLabel("·")
-        separator.setObjectName("StudioLibraryLinkSeparator")
-        linkRow.addWidget(separator)
-        self.classicLink = self._link(_("Classic interface"), "StudioLibraryClassicLink", switchToClassic)
+        self.classicLink = self._ghost(_("Classic interface"), "StudioLibraryClassicLink", switchToClassic, "monitor")
         self.classicLink.setToolTip(_("Switch to the Classic interface (Ctrl+Alt+0)"))
         linkRow.addWidget(self.classicLink)
         linkRow.addStretch(1)
         columnLayout.addLayout(linkRow)
+        columnLayout.addSpacing(28)
+
+        # Opened from elsewhere: the folders and files opened from outside the Slicer Studio folder (the studies are listed
+        # in Studies, the projects in All projects)
+        recentTitle = ui.sectionLabel(_("Opened from elsewhere"), "StudioLibrarySectionTitle")
+        recentTitle.setContentsMargins(0, 0, 0, 0)
+        ui.setText(recentTitle, "section")
+        self.recentTitle = recentTitle
+        columnLayout.addWidget(recentTitle)
+        columnLayout.addSpacing(8)
+        self.recentList = RecentList(includeStudies=False, outsideRootOnly=True)
+        columnLayout.addWidget(self.recentList.widget)
+        columnLayout.addSpacing(16)
+        # The drop strip of earlier versions went here; files can be dropped anywhere on the window (the header says so)
+        self.dropBottomSlot = qt.QVBoxLayout()
+        self.dropBottomSlot.setContentsMargins(0, 0, 0, 0)
+        columnLayout.addLayout(self.dropBottomSlot)
 
         # Footer line (the research-use line of the first run): one 32 px line, nothing while no one sets it
         self.footerFrame = qt.QFrame()
@@ -5163,6 +5242,22 @@ class LibraryCanvas(qt.QObject):
         return _linkButton(text, objectName, callback)
 
     @staticmethod
+    def _ghost(text, objectName, callback, iconName):
+        """A compact ghost button (28 px, text2 with a 16 px icon) of the row under Studies."""
+        button = qt.QPushButton(text)
+        button.setObjectName(objectName)
+        button.setProperty("studioIconName", iconName)
+        button.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
+        button.setFixedHeight(ui.COMPACT_HEIGHT)
+        button.setIconSize(qt.QSize(16, 16))
+        button.setSizePolicy(qt.QSizePolicy.Minimum, qt.QSizePolicy.Fixed)
+        ui.setText(button, "body")
+        ui.setRole(button, "ghost")
+        button.connect("clicked()", callback)
+        ui.installButtonKeys(button)
+        return button
+
+    @staticmethod
     def _styleSheet():
         t = {name: ui.token(name).name() for name in ("canvas", "text", "text2", "text3", "border", "hairline", "accent-fg", "accent-subtle")}
         t["control-border"] = _controlBorder()
@@ -5193,6 +5288,9 @@ class LibraryCanvas(qt.QObject):
         for button, iconName in ((self.openButton, "import"), (self.openFolderButton, "folder-open"), (self.templateButton, "globe")):
             button.setIcon(ui.icon(iconName, 16, "onAccent" if button is self.openButton else "normal"))
         self.templateMenuButton.setIcon(ui.icon("chevron-down", 16))
+        for button in (self.newStudyLink, self.openStudyLink, self.sampleDataLink, self.classicLink):
+            if button is not None:
+                button.setIcon(ui.icon(str(button.property("studioIconName")), 16))
 
     def _refreshCaption(self):
         """The caption under the title: where the projects are saved (A-09), else what Library is for."""
@@ -5317,6 +5415,7 @@ class LibraryCanvas(qt.QObject):
         self.dropCompact.setVisible(strip)
         self.dropFrame.setProperty("studioStrip", bool(strip))
         if strip:
+            # With data the page has no drop strip (V-02): files are dropped anywhere on the window, as the header says
             self.dropZone.setMinimumWidth(0)
             self.dropZone.setMaximumWidth(16777215)
             self.dropZone.setFixedHeight(DROP_STRIP_HEIGHT)
@@ -5327,6 +5426,8 @@ class LibraryCanvas(qt.QObject):
             self.dropFrame.layout().addWidget(self.dropZone)
             self.dropBottomSlot.addWidget(self.dropFrame)
             self.headerButtons.layout().addWidget(self.buttonRow)
+        self.dropFrame.setVisible(not strip)
+        self.captionDropHint.setVisible(bool(strip))
         else:
             self.dropZone.setFixedSize(COLUMN_WIDTH, DROP_ZONE_HEIGHT)
             self.dropZone.setSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Fixed)
@@ -5353,6 +5454,11 @@ class LibraryCanvas(qt.QObject):
             self.projectsSection.refresh()
             if self._currentWork is not None and hasattr(self.projectsSection, "currentInfo"):
                 self._currentWork.setProject(self.projectsSection.currentInfo())
+        if self.studiesSection is not None:
+            try:
+                self.studiesSection.refresh()
+            except Exception:
+                logging.error(f"Studio Library: the Studies section failed:\n{traceback.format_exc()}")
         self._refreshCaption()
         self.recentList.refresh(force=False)
 
@@ -5457,6 +5563,8 @@ class LibraryCanvas(qt.QObject):
         self.folderCardSlot.close()
         if self.projectsSection is not None:
             self.projectsSection.dispose()
+        if self.studiesSection is not None:
+            self.studiesSection.dispose()
         self.recentList.dispose()
         for card in (self._currentWork, self._loadedSet, self._studyPage):
             if card is not None:
@@ -5496,8 +5604,13 @@ class ProjectOverviewCard(qt.QObject):
         self.thumbnail.setFixedHeight(self.THUMBNAIL_HEIGHT)
         self.thumbnail.setAlignment(qt.Qt.AlignCenter)
         self.thumbnail.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
-        layout.addWidget(self.thumbnail)
-        layout.addSpacing(6)
+        # The thumbnail heads the inspector, above "Open now" (VISUAL 4.2): a widget of its own that the panel places
+        self.header = qt.QFrame()
+        self.header.setObjectName("StudioProjectOverviewHeader")
+        headerLayout = qt.QVBoxLayout(self.header)
+        headerLayout.setContentsMargins(ui.INSPECTOR_PADDING, 4, ui.INSPECTOR_PADDING, 4)
+        headerLayout.addWidget(self.thumbnail)
+        self.header.hide()
         layout.addWidget(ui.sectionLabel(_("In this project"), "StudioProjectOverviewTitle"))
         grid = qt.QGridLayout()
         grid.setSpacing(8)
@@ -5530,7 +5643,7 @@ class ProjectOverviewCard(qt.QObject):
         layout.addLayout(buttons)
         self._key = None
         ui.bindStyleSheet(self.widget, lambda: (
-            "QFrame#StudioProjectOverview { background: transparent; border: none; }"
+            "QFrame#StudioProjectOverview, QFrame#StudioProjectOverviewHeader { background: transparent; border: none; }"
             "QLabel#StudioProjectOverviewThumbnail { background-color: #000000; border: none; border-radius: 10px; }"
             f"QFrame#StudioProjectOverviewTile {{ background-color: {ui.token('card').name()}; border: none; border-radius: 10px; }}"
             "QFrame#StudioProjectOverviewTile QLabel { background: transparent; border: none; }"
@@ -5570,6 +5683,7 @@ class ProjectOverviewCard(qt.QObject):
         project = projects.currentProject() if projects is not None else None
         if project is None or not os.path.isdir(project.path):
             self.widget.hide()
+            self.header.hide()
             self._key = None
             return False
         info = projects.ProjectInfo(project.path)
@@ -5595,9 +5709,12 @@ class ProjectOverviewCard(qt.QObject):
             setElidedText(self.createdLabel, _("Created {date}").format(date=created) if created else "")
             self.createdLabel.setVisible(bool(created))
         self.widget.show()
+        self.header.show()
         return True
 
     def dispose(self):
+        if _isAlive(self.header):
+            _discard(self.header)
         if _isAlive(self.widget):
             ui.bindStyleSheet(self.widget, None)
             _discard(self.widget)
@@ -5659,10 +5776,12 @@ class LibraryPanel(qt.QObject):
             openLayout.addWidget(row)
         layout.addWidget(self.openCard)
 
+        # The project's thumbnail, "Open now", then "In this project" (VISUAL 4.2)
         self.overviewCard = ProjectOverviewCard()
-        layout.addWidget(self.overviewCard.widget)
+        layout.addWidget(self.overviewCard.header)
         self.openNowCard = OpenNowCard()
         layout.addWidget(self.openNowCard.widget)
+        layout.addWidget(self.overviewCard.widget)
 
         self.folderCardSlot = _FolderCardSlot()
         layout.addLayout(self.folderCardSlot.layout)
@@ -5693,7 +5812,7 @@ class LibraryPanel(qt.QObject):
         studySession = _studySession()
         if studySession is not None:
             self._ensureStudyCards(withList=not withCanvas)
-            for card in (self.openCard, self.recentCard, self.openNowCard.widget, self.overviewCard.widget):
+            for card in (self.openCard, self.recentCard, self.openNowCard.widget, self.overviewCard.widget, self.overviewCard.header):
                 card.hide()
             self.studyCards.refresh()
             return
@@ -5709,6 +5828,7 @@ class LibraryPanel(qt.QObject):
             self.overviewCard.refresh()
         else:
             self.overviewCard.widget.hide()
+            self.overviewCard.header.hide()
 
     def _ensureStudyCards(self, withList):
         """The study cards (created when a study is first shown; created again when Studio and Classic swap the list)."""
