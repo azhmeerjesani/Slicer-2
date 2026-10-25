@@ -2154,6 +2154,7 @@ class OpenNowCard(qt.QObject):
             addAction(_("Open in Draw"), "StudioOpenNowOpenInDraw", lambda: continueInDraw(_shell(), node()))
         else:
             addAction(_("Open in Draw"), "StudioOpenNowOpenInDraw", lambda: openScanInDraw(node(), _shell()), enabled=canDraw)
+        self._addExportAction(menu, item, node)
         addAction(_("Show in Data module"), "StudioOpenNowShowInData", lambda: showInDataModule(node()))
         if kind == "set":
             addAction(_("Close set"), "StudioOpenNowClose", lambda: closeLoadedSet())  # noqa: PLW0108

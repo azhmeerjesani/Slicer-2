@@ -12,8 +12,8 @@ The index is built on the first open and refreshed incrementally on later opens:
   "Map", alias "Lesion network mapping") and the Classic interface;
 - every other module that is not hidden (``slicer.app.moduleManager()``), opened as a transient module;
 - the Segment Editor tools by their Studio name ("Brush" for Paint), with their live positional key;
-- built-in actions (Open…, Open folder…, Start on MNI template, New lesion, Save lesion as NIfTI…, Close
-  scene, Save now (the project, else the Save dialog), Place point, Python console, Error log, Settings…, Keyboard shortcuts, Recent
+- built-in actions (Open…, Open folder…, Start on MNI template, New lesion, Save lesion as NIfTI…, Export as NIfTI…,
+  Export project as NIfTI…, Convert DICOM to NIfTI (``niftiexport_ui``), Close scene, Save now (the project, else the Save dialog), Place point, Python console, Error log, Settings…, Keyboard shortcuts, Recent
   messages, theme, density, Hide panels, Show inspector, Reset panel width, Show Data Probe);
 - view commands (Show crosshair, Slice intersections, Link views, Reset views, Maximize view,
   Window/level: Auto, Brain, Narrow and Reset, and the CT display presets of the Volumes module, applied in place);
@@ -984,6 +984,12 @@ class Index:
                                            "binary labelmap", "export mask"),
                                  enabled=_hasLesion, description=_("The lesion as a NIfTI mask that official 3D Slicer, FSL and other tools read"),
                                  iconName="download"))
+        # Export as NIfTI (A-11): images, segmentations and maps, the whole project, DICOM series
+        niftiUi = _importOptional("StudioLib.niftiexport_ui")
+        if niftiUi is not None and hasattr(niftiUi, "paletteEntries"):
+            for entryId, title, callback, synonyms, enabled, description in niftiUi.paletteEntries():
+                entries.append(Entry(entryId, title, action, lambda callback=callback: callback(shell=shell), synonyms=synonyms, enabled=enabled,
+                                     description=description, iconName="download"))
         entries += [
             Entry("view.crosshair", _("Show crosshair"), view, lambda: toggleCrosshair(shell), key="Shift+move",
                   synonyms=("crosshair", "cursor", "cross hair", "crosshairs", "hide crosshair"), description=_("Show where the other views cut"),
