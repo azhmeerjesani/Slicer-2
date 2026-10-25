@@ -488,6 +488,81 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
         self.assertEqual(str(widget.peaksTable.horizontalHeaderItem(0).text()), "Peak region")
         seedCard.collapsed = False
 
+    def test_map_done_steps_collapse_on_entry(self):
+        """A step that is already done when the panel takes the Studio look (a connectome remembered from an earlier
+        session) collapses to its row then, not only at its next change (V-03 review).
+        """
+        studioShell = self._applyStudio()
+        studioShell.switchTo("map")
+        self._pump(10)
+        widget = getattr(slicer.modules, "LesionNetworkMappingWidget", None)
+        if widget is None:
+            self.skipTest("the Map module is not available")
+        connectome = widget._cardWidgets["connectome"][1]
+        # The Classic look of the panel: the steps are remembered but never collapsed
+        widget.setStudioPresentation(False, refresh=False)
+        savedBundle = widget.bundle
+        savedAccepted = bool(widget.acceptTermsCheckBox.checked)
+
+        class Bundle:
+            name = "Test connectome"
+            n_subjects = 10
+
+        widget.bundle = Bundle()
+        widget.acceptTermsCheckBox.blockSignals(True)
+        widget.acceptTermsCheckBox.setChecked(True)
+        widget.acceptTermsCheckBox.blockSignals(False)
+        try:
+            widget._updateSteps()
+            self.assertEqual(widget._stepStates["connectome"][0], "done")
+            connectome.collapsed = False
+            widget.setStudioPresentation(True, refresh=False)
+            self.assertTrue(bool(connectome.collapsed))
+        finally:
+            widget.bundle = savedBundle
+            widget.acceptTermsCheckBox.blockSignals(True)
+            widget.acceptTermsCheckBox.setChecked(savedAccepted)
+            widget.acceptTermsCheckBox.blockSignals(False)
+            widget._updateSteps()
+            connectome.collapsed = False
+
+    def test_map_overlay_follows_layout(self):
+        """The map legend and layer chips hide while a layout hides the main view and come back with it (V-03 review)."""
+        from StudioLib import mappage
+
+        studioShell = self._applyStudio()
+        studioShell.switchTo("map")
+        self._pump(10)
+        overlay = mappage.overlay()
+        if overlay is None:
+            self.skipTest("the Map overlay is not available")
+        # A map in the views, as the Map module reports it
+        state = {"statistic": "T", "window": 4.0, "level": 0.0, "threshold": None, "thresholdText": "Unthresholded", "sign": "both",
+                 "opacity": 0.8, "outline": False}
+        refresh = overlay.refresh
+
+        def place():
+            overlay._state = state
+            overlay.place()
+
+        overlay.refresh = place
+        self._restores.append(lambda: setattr(overlay, "refresh", refresh))
+        initialLayout = self.layoutManager.layout
+        self._restores.append(lambda: self.layoutManager.setLayout(initialLayout))
+        self.layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
+        self._pump(6)
+        place()
+        self._pump(4)
+        self.assertTrue(overlay.legend.isVisible())
+        self.layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUp3DView)
+        self._pump(6)
+        self.assertFalse(overlay.legend.isVisible())
+        self.assertFalse(overlay.chips.isVisible())
+        self.layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
+        self._pump(6)
+        self.assertTrue(self._wait(overlay.legend.isVisible, 2000))
+        self.assertTrue(overlay.chips.isVisible())
+
     def test_flat_view_bar(self):
         studioShell = self._applyStudio()
         volume = self._addVolume()

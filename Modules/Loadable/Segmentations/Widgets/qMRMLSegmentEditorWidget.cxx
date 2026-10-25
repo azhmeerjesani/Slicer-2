@@ -850,10 +850,6 @@ void qMRMLSegmentEditorWidgetPrivate::updateMaskingTitle()
 //-----------------------------------------------------------------------------
 void qMRMLSegmentEditorWidgetPrivate::updateSectionFrames()
 {
-  if (qEnvironmentVariableIsSet("STUDIO_AB_NO_SECTION_FRAMES")) // TEMPORARY A/B (V-03 review), removed before the report
-  {
-    return;
-  }
   // Studio look: the options frame is shown without the group box around it (Fusion keeps a frame and a title
   // row in a group box even without a title); the classic presentation puts it back
   QVBoxLayout* groupBoxLayout = qobject_cast<QVBoxLayout*>(this->OptionsGroupBox->layout());

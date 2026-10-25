@@ -469,7 +469,8 @@ class MapOverlay:
 
     def _sliceWidget(self):
         """The main slice view widget, shown or not: it stays watched while a layout hides it, so that its Show event
-        puts the overlays back."""
+        puts the overlays back.
+        """
         layoutManager = slicer.app.layoutManager()
         return layoutManager.sliceWidget(OVERLAY_VIEW) if layoutManager is not None else None
 

@@ -879,8 +879,10 @@ def listRow(iconName, text, value=None, callback=None, objectName="StudioListRow
     textLabel = label(text, "body", "text", "StudioListRowText")
     layout.addWidget(textLabel, 1)
     valueLabel = label(value or "", "caption", "text3", "StudioListRowValue")
-    valueLabel.setVisible(bool(value))
     layout.addWidget(valueLabel)
+    # Only once it is in the row: showing a label without a parent would open it as a window (a native window that is
+    # created and destroyed again, 20 ms each at the first open of Draw)
+    valueLabel.setVisible(bool(value))
     chevron = qt.QLabel()
     chevron.setObjectName("StudioListRowChevron")
     chevron.setFixedSize(14, 14)

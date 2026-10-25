@@ -420,6 +420,79 @@ class StudioOrientationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertGreater(y, orientation.CORNER_ANNOTATION_MARGIN + orientation.STATEMENT_GAP)
         cornerAnnotation.SetText(1, "")
 
+    @staticmethod
+    def _displayBox(view, actor):
+        """(x0, x1, y0, y1) of a text actor in display pixels (the rendered text, at the actor's position)."""
+        box = [0.0] * 4
+        actor.GetBoundingBox(view.renderer, box)
+        x, y = actor.GetPositionCoordinate().GetComputedDisplayValue(view.renderer)[:2]
+        return (x + box[0], x + box[1], y + box[2], y + box[3])
+
+    def test_statement_fits_narrow_views(self):
+        """In a narrow view the statement never runs into the bottom letter: the short form ("L on right"), raised above the
+        letter when even that does not fit; a wide view keeps the full statement (V-03 review).
+        """
+        from StudioLib import orientation
+
+        studioShell = self._applyStudio()
+        self._ensureLetters(studioShell)
+        # Twelve slice views (4 x 3): the coronal and axial ones are a few hundred pixels wide
+        self.layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourByThreeSliceView)
+        self._pump(8)
+        orientation.update()
+        views = orientation.instance().views
+        checked = 0
+        for name, view in views.items():
+            if not view.statement or not view.letters[3]:
+                continue
+            checked += 1
+            self.layoutManager.sliceWidget(name).sliceView().forceRender()
+            statementBox = self._displayBox(view, view.statementActor)
+            letterBox = self._displayBox(view, view.actors[3])
+            overlapX = statementBox[0] < letterBox[1] + 1 and letterBox[0] < statementBox[1] + 1
+            overlapY = statementBox[2] < letterBox[3] + 1 and letterBox[2] < statementBox[3] + 1
+            self.assertFalse(overlapX and overlapY, f"{name}: {view.shownStatement!r} {statementBox} touches {view.letters[3]!r} {letterBox}")
+            self.assertIn(view.shownStatement, (view.statement, view.shortStatement))
+            self.assertEqual(orientation.viewShownStatement(name), view.shownStatement)
+        self.assertGreater(checked, 0)
+        # The pure function: the short forms
+        redNode = self.layoutManager.sliceWidget("Red").mrmlSliceNode()
+        redNode.SetOrientationToAxial()
+        self.assertEqual(orientation.displayStatement(redNode.GetSliceToRAS(), short=True), "L on right")
+
+        # One view: wide, the full statement at the corner margin
+        self.layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUpRedSliceView)
+        self._pump(8)
+        redNode.SetOrientationToAxial()
+        self._pump(4)
+        orientation.update()
+        view = orientation.instance().views["Red"]
+        self.assertEqual(view.shownStatement, "Radiological · L on right")
+
+        # A narrow axial view (the main window made narrow): the statement is shortened or raised, never touching
+        mainWindow = self.mainWindow
+        size = (mainWindow.width, mainWindow.height)
+        mainWindow.showNormal()
+        sliceWidget = self.layoutManager.sliceWidget("Red")
+        sliceWidget.setMaximumWidth(220)
+        try:
+            self._pump(10)
+            orientation.update()
+            view = orientation.instance().views["Red"]
+            renderWidth = view.renderer.GetSize()[0]
+            sliceWidget.sliceView().forceRender()
+            statementBox = self._displayBox(view, view.statementActor)
+            letterBox = self._displayBox(view, view.actors[3])
+            touching = (statementBox[0] < letterBox[1] + 1 and letterBox[0] < statementBox[1] + 1
+                        and statementBox[2] < letterBox[3] + 1 and letterBox[2] < statementBox[3] + 1)
+            self.assertFalse(touching, f"width {renderWidth}: {view.shownStatement!r} {statementBox} {letterBox}")
+            if renderWidth <= 230:
+                self.assertEqual(view.shownStatement, "L on right")
+        finally:
+            sliceWidget.setMaximumWidth(16777215)
+            mainWindow.resize(*size)
+            self._pump(4)
+
     def test_letters_absent_in_classic(self):
         """Classic shows no statement and no figure tag, and under --testing without Studio nothing exists."""
         from StudioLib import orientation
