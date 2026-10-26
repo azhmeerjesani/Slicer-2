@@ -620,3 +620,66 @@ class StudioAccessibilityTest(ScriptedLoadableModule.ScriptedLoadableModuleTest)
         studioShell.classic(persist=False)
         self._pump()
         self.assertEqual(self._closeProperties(), ("", ""))
+
+    def test_close_summary_study(self):
+        """With a study open, closing writes the current subject first (a study has no Save) and asks only "All changes are
+        saved in study <name>. Quit?": never the no-study "Save lesion…" / "Don't save" prompt, whose "Don't save" the
+        study could not honour (it writes the subject when the application quits).
+        """
+        import shutil
+
+        import numpy as np
+        from LesionNetworkMappingLib import nifti
+        from LesionNetworkMappingLib.study import Study
+
+        from StudioLib import firstrun, study_ui
+
+        if not hasattr(self.mainWindow, "closeSummaryRequested"):
+            self.skipTest("the main window has no close summary hook (W3-03)")
+        studioShell = self._applyStudio()
+        scan = self._scanFile()
+        folder = os.path.join(os.path.dirname(scan), "Close study")
+        study = Study.create(folder, name="Close study")
+        study.add_subject("sub-01", scan=study.relpath(scan), status="untraced", group="case")
+        study.save()
+        try:
+            session = study_ui.openStudy(folder, studioShell, subject="sub-01")
+            self._pump(8)
+            segmentationNode, volumeNode = session.segmentationNode(), session.volumeNode()
+            self.assertIsNotNone(segmentationNode)
+            segmentId = segmentationNode.GetSegmentation().GetNthSegmentID(0)
+
+            def paint(region):
+                array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, volumeNode)
+                array[region] = 1
+                slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, volumeNode)
+                self._pump()
+
+            def voxels():
+                path = session.study.abspath(session.study.subject("sub-01").get("lesion"))
+                if not path or not os.path.isfile(path):
+                    return 0
+                return int((nifti.read_nifti(path)[0] > 0).sum())
+
+            paint((slice(8, 10), slice(10, 12), slice(6, 8)))
+            self.assertTrue(session.isDirty())
+            self.assertEqual(voxels(), 0)
+            # The subject is written when the prompt is described: the question cannot discard it
+            mode, summary = self._closeProperties()
+            self.assertEqual(mode, firstrun.CLOSE_MODE_LESION_SAVED)
+            self.assertEqual(summary, "All changes are saved in study Close study. Quit?")
+            self.assertEqual(voxels(), 8)
+            self.assertFalse(session.isDirty())
+            self.assertEqual(session.current(), "sub-01", "Cancel keeps the subject open")
+            # More edits after Cancel are written the same way
+            paint((slice(2, 4), slice(2, 4), slice(2, 4)))
+            self.assertEqual(self._closeProperties()[0], firstrun.CLOSE_MODE_LESION_SAVED)
+            self.assertEqual(voxels(), 16)
+            # Other unsaved data (not part of the study): the classic prompt, which saves everything
+            other = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "Other")
+            slicer.util.updateVolumeFromArray(other, np.zeros((2, 2, 2), dtype=np.int16))
+            self.assertEqual(self._closeProperties(), ("", ""))
+            slicer.mrmlScene.RemoveNode(other)
+        finally:
+            study_ui.closeStudy()
+            shutil.rmtree(os.path.dirname(scan), ignore_errors=True)

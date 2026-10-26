@@ -2468,40 +2468,47 @@ class StudySession:
         """Leave the current subject: write its edits (Lightroom: no Save), stop the journal. Return False to stay."""
         if self._current is None:
             return True
-        stripSaved = True
-        if write:
-            self._applyPendingSmartFill()
-            _commitDrawCardEdits()
-            # A case strip field being edited is saved too; an invalid value keeps the case open (after the lesion is
-            # written: a closing study still writes it)
-            stripSaved, reason = _commitCaseStripEdit(self)
-            if not stripSaved:
-                _toast(self._shell, _("{sid} stays open: {reason}").format(sid=self._current, reason=reason), ms=6000, level="warning")
-            if self.isDirty():
-                mask = lesionMask(self.segmentationNode())
-                if mask is None:
-                    # Erasing every voxel never traps the user on the subject: nothing is written, the file is kept
-                    self._leaveEmpty()
-                elif not self._markedDirty and self._sameAsLesionFile(mask):
-                    # Edits that cancel out (paint, then undo): the file and the row stay as they are
-                    if self._journal is not None:
-                        self._journal.discard(self._current)
-                else:
-                    try:
-                        self._write(status=None, runHooks=False, mask=mask)
-                    except Blocking as e:
-                        _toast(self._shell, str(e), ms=6000, level="warning")
-                        return False
-                    except Exception as e:
-                        logging.error(f"Studio: cannot write the lesion of {self._current}:\n{traceback.format_exc()}")
-                        _toast(self._shell, _("The lesion of {sid} could not be written: {error}").format(sid=self._current, error=e), ms=6000,
-                               level="warning")
-                        return False
-        if not stripSaved:
+        if write and not self.writeCurrent():
             return False
         if self._journal is not None:
             self._journal.detach()
         return True
+
+    def writeCurrent(self):
+        """Write the current subject's edits now; the subject stays open (``_leave()`` and the close prompt: a study has
+        no Save). Return True when nothing is left unwritten (also when there was nothing to write), False when the
+        lesion or a case strip field could not be written (a toast says why).
+        """
+        if self._current is None:
+            return True
+        self._applyPendingSmartFill()
+        _commitDrawCardEdits()
+        # A case strip field being edited is saved too; an invalid value keeps the case open (after the lesion is
+        # written: a closing study still writes it)
+        stripSaved, reason = _commitCaseStripEdit(self)
+        if not stripSaved:
+            _toast(self._shell, _("{sid} stays open: {reason}").format(sid=self._current, reason=reason), ms=6000, level="warning")
+        if self.isDirty():
+            mask = lesionMask(self.segmentationNode())
+            if mask is None:
+                # Erasing every voxel never traps the user on the subject: nothing is written, the file is kept
+                self._leaveEmpty()
+            elif not self._markedDirty and self._sameAsLesionFile(mask):
+                # Edits that cancel out (paint, then undo): the file and the row stay as they are
+                if self._journal is not None:
+                    self._journal.discard(self._current)
+            else:
+                try:
+                    self._write(status=None, runHooks=False, mask=mask)
+                except Blocking as e:
+                    _toast(self._shell, str(e), ms=6000, level="warning")
+                    return False
+                except Exception as e:
+                    logging.error(f"Studio: cannot write the lesion of {self._current}:\n{traceback.format_exc()}")
+                    _toast(self._shell, _("The lesion of {sid} could not be written: {error}").format(sid=self._current, error=e), ms=6000,
+                           level="warning")
+                    return False
+        return stripSaved
 
     def _leaveEmpty(self):
         """Leave a subject whose lesion was erased: nothing is written, its lesion file (if any) is kept, it says so."""

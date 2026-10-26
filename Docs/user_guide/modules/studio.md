@@ -218,7 +218,8 @@ Saving a lesion and saving the scene are different things, with different keys:
   When you open the lesion alone later, `Source` lets Studio offer to open the scan it was drawn on.
 - **Quitting.** If only saved lesions and the template are unsaved, the message says "Your lesion is saved as
   sub-01_lesion.nii.gz. The session (scene) is not saved." with **Quit** as the default. If a lesion has changes
-  since it was saved, **Save lesion…** is the default.
+  since it was saved, **Save lesion…** is the default. With a study open, there is no Save: the current subject is
+  written to the study first and the message only asks "All changes are saved in study <name>. Quit?".
 
 Autosave (see [below](#autosave-and-recovery)) is not Save: it says "Autosaved", never "Saved".
 

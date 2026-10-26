@@ -19,7 +19,9 @@ in Classic, which then behaves exactly as official Slicer.
   prompt). The autosave line (``autosave.unsavedSummary()``) is appended when the autosave service runs. While the
   scene is a project (A-09), the project is saved first and, when that succeeded, the question is only "All changes are
   saved in Projects/<name>. Quit?" (Quit is the default); when saving failed, the classic prompt asks, and a message
-  gives the reason.
+  gives the reason. While a study is open (a study has no Save: its current subject is written when the application
+  quits), the subject is written first and, when that succeeded, the question is only "All changes are saved in study
+  <name>. Quit?"; it never offers a "Don't save" that the study could not honour.
 """
 
 import logging
@@ -262,12 +264,49 @@ def projectCloseSummary():
     return CLOSE_MODE_LESION_SAVED, _("All changes are saved in {project}. Quit?").format(project=project.relativeName())
 
 
+def studyCloseSummary():
+    """``(mode, summary)`` of the close prompt while a study is open (SPEC D7: a study has no Save, its current subject
+    is written when the application quits): the subject's edits are written now and, when that succeeded and nothing
+    outside the study is unsaved, the question is only "All changes are saved in study <name>. Quit?" (the answer
+    cannot discard them, so the prompt never offers "Don't save" or a "Save lesion…" outside the study). ``("", "")``
+    (the classic prompt) when writing failed (a toast gives the reason) or other data is unsaved; None without a study.
+    """
+    try:
+        from . import study_ui
+    except ImportError:
+        return None
+    studySession = study_ui.session() if hasattr(study_ui, "session") else None
+    if studySession is None:
+        return None
+    ok = studySession.writeCurrent()
+    ok = studySession.flush() and ok
+    if not ok:
+        return "", ""
+    # The study's nodes (the subject's scan and lesion, the shared template) are in the study now
+    others = [node for node in _modifiedStorableNodes()
+              if not node.GetAttribute(study_ui.SUBJECT_ATTRIBUTE) and not _isTemplate(node)]
+    if others:
+        return "", ""
+    return CLOSE_MODE_LESION_SAVED, _("All changes are saved in study {study}. Quit?").format(study=studySession.name)
+
+
 def computeCloseSummary():
     """Set the close prompt properties of the main window (``closeSummaryRequested()``). Never raises: on an error the
     classic prompt runs.
     """
     mainWindow = slicer.util.mainWindow()
     if mainWindow is None:
+        return
+    try:
+        studySummary = studyCloseSummary()
+    except Exception:
+        logging.error(f"Studio: writing the study before quitting failed:\n{traceback.format_exc()}")
+        studySummary = ("", "")
+    if studySummary is not None:
+        mode, summary = studySummary
+        if mode:
+            mainWindow.setProperty(CLOSE_SUMMARY_PROPERTY, summary)
+            mainWindow.setProperty(CLOSE_MODE_PROPERTY, mode)
         return
     try:
         projectSummary = projectCloseSummary()
