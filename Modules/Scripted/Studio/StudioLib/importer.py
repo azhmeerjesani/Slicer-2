@@ -669,14 +669,15 @@ def openNodeForFile(path):
     """The scan or segmentation of the scene that was loaded from ``path`` (same real path), or None.
 
     Only nodes shown to the user are considered: scans (not label maps) and segmentations whose storage node
-    reads that file.
+    reads that file. A node whose file the open project took over (its storage node now names the copy in the project) is
+    found by the file it was read from (``_projectSourceNodes()``).
     """
     if not path:
         return None
     target = _normalizedPath(path)
     for className in ("vtkMRMLScalarVolumeNode", "vtkMRMLSegmentationNode"):
         for node in slicer.util.getNodesByClass(className):
-            if node.GetHideFromEditors() or (className == "vtkMRMLScalarVolumeNode" and not _isScan(node)):
+            if _shownNodeForFile(node) is None:
                 continue
             storageNode = node.GetStorageNode()
             fileName = storageNode.GetFileName() if storageNode is not None else None
@@ -687,10 +688,47 @@ def openNodeForFile(path):
         storageNode = sequenceNode.GetStorageNode()
         fileName = storageNode.GetFileName() if storageNode is not None else None
         if fileName and _normalizedPath(fileName) == target:
-            proxyNode = _sequenceProxy(sequenceNode)
-            if proxyNode is not None and _isScan(proxyNode):
+            proxyNode = _shownNodeForFile(sequenceNode)
+            if proxyNode is not None:
                 return proxyNode
+    for node in _projectSourceNodes(path):
+        shown = _shownNodeForFile(node)
+        if shown is not None:
+            return shown
     return None
+
+
+def _shownNodeForFile(node):
+    """The node shown to the user for ``node`` read from a file: a scan (not a label map) or a segmentation, the proxy scan
+    of a sequence; None for anything else.
+    """
+    if node is None:
+        return None
+    if node.IsA("vtkMRMLSequenceNode"):
+        proxyNode = _sequenceProxy(node)
+        return proxyNode if proxyNode is not None and _isScan(proxyNode) else None
+    if node.GetHideFromEditors():
+        return None
+    if node.IsA("vtkMRMLScalarVolumeNode"):
+        return node if _isScan(node) else None
+    return node if node.IsA("vtkMRMLSegmentationNode") else None
+
+
+def _projectSourceNodes(path):
+    """Nodes of the scene read from ``path``, a file outside the open project that the project took over (A-09: the project
+    copies or writes it into its own folders and its storage node names that file from then on).
+    """
+    try:
+        from . import autosave
+
+        service = autosave.instance()
+    except ImportError:
+        return []
+    writer = getattr(service, "projectWriter", None) if service is not None else None
+    if writer is None or not hasattr(writer, "nodeIdsForSource"):
+        return []
+    nodes = (slicer.mrmlScene.GetNodeByID(nodeId) for nodeId in writer.nodeIdsForSource(path))
+    return [node for node in nodes if node is not None]
 
 
 def _sequenceProxy(sequenceNode):
@@ -721,6 +759,9 @@ def _openReference(path, role):
         storageNode = node.GetStorageNode()
         fileName = storageNode.GetFileName() if storageNode is not None else None
         if fileName and _normalizedPath(fileName) == target:
+            return node
+    for node in _projectSourceNodes(path):
+        if node.IsA("vtkMRMLVolumeNode") and node.GetAttribute(space.ROLE_ATTRIBUTE) == role:
             return node
     return None
 

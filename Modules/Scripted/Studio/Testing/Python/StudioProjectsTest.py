@@ -25,7 +25,8 @@ folder "Slicer Studio tést" (spaces and non-ASCII characters). The tests cover:
 - a detached-header volume (.nhdr) from outside is written into the project as one file;
 - a project loaded in Classic continues in place in Studio (no copy); the Library order follows official saves;
 - a project saves when its data fits on the disk, also with less than 1 GB free (only the private autosave keeps 1 GB);
-- a scene file that another program changed is kept: Studio writes "<project> (Slicer Studio).mrml" next to it.
+- a scene file that another program changed is kept: Studio writes "<project> (Slicer Studio).mrml" next to it;
+- a file from outside that the project took over is "already open" when it is opened again, also after a restart.
 """
 
 import hashlib
@@ -1000,6 +1001,82 @@ class StudioProjectsTest(unittest.TestCase):
             importer.loadFiles([projects.sceneFile(firstPath)], studioShell)
             self.assertEqual(service.project.path, firstPath)
             self.assertEqual(len(slicer.util.getNodes("First scan", useLists=True).get("First scan", [])), 1)
+        finally:
+            self.autosave._service = running
+            studioShell.dispose()
+            slicer.app.processEvents()
+
+    def test_24_reopen_outside_file_after_save(self):
+        """A file from outside the folder that the project took over (copied into Images/, Lesions/...) is "already open" when
+        it is opened again (Open…, drop, Recent, a folder card's Load all), also after a restart: no second node, no second
+        file in the project. The outside path is kept in .studio only (the scene file holds relative paths only).
+        """
+        from StudioLib import importer, shell
+
+        volume, scanPath = self._userVolume("patient_T1", shape=(12, 14, 16))
+        slicer.mrmlScene.RemoveNode(volume)
+        labels = np.zeros((16, 14, 12), np.uint8)
+        labels[4:8, 5:9, 3:6] = 1
+        lesionNode = slicer.util.addVolumeFromArray(labels, name="patient_T1_lesion", nodeClassName="vtkMRMLLabelMapVolumeNode")
+        lesionPath = os.path.join(self.userDir, "patient_T1_lesion.nii.gz")
+        self.assertTrue(slicer.util.saveNode(lesionNode, lesionPath))
+        slicer.mrmlScene.RemoveNode(lesionNode)
+        service = self._service()
+        running = self.autosave._service
+        self.autosave._service = service  # as the running service of the application
+        studioShell = shell.Shell(force=True)
+
+        def count(name, className):
+            return len([node for node in slicer.util.getNodesByClass(className) if node.GetName() == name])
+
+        try:
+            studioShell.apply()
+            slicer.app.processEvents()
+            result = importer.loadFiles([scanPath, lesionPath], studioShell)
+            self.assertEqual(len(result.volumes), 1)
+            self.assertEqual(len(result.segmentations), 1)
+            scan, lesion = result.volumes[0], result.segmentations[0]
+            project = self._projectFor(service)
+            self._save(service)
+            projectPath = project.path
+            for node in (scan, lesion):
+                self.assertTrue(self.projects.isInside(node.GetStorageNode().GetFileName(), projectPath),
+                                f"{node.GetName()} is saved in the project")
+            filesBefore = self._projectFiles(project)
+            # Opened again (Open…, drop, Load all): the nodes become current again, nothing is loaded twice
+            again = importer.loadFiles([scanPath, lesionPath], studioShell)
+            self.assertEqual((again.volumes, again.segmentations), ([], []))
+            self.assertEqual({node.GetID() for node in again.alreadyOpen}, {scan.GetID(), lesion.GetID()})
+            self.assertEqual(importer.openNodeForFile(scanPath).GetID(), scan.GetID())
+            # Recent
+            recent = importer.loadRecentFile({"fileName": scanPath, "fileType": "VolumeFile"}, shell=studioShell)
+            self.assertEqual([node.GetID() for node in recent.alreadyOpen], [scan.GetID()])
+            self.assertEqual(count(scan.GetName(), "vtkMRMLScalarVolumeNode"), 1)
+            self.assertEqual(count(lesion.GetName(), "vtkMRMLSegmentationNode"), 1)
+            self._save(service)
+            self.assertEqual(self._projectFiles(project), filesBefore, "no second copy in the project")
+            # The outside paths stay out of the scene file
+            with open(project.scenePath, encoding="utf-8") as f:
+                sceneText = f.read()
+            self.assertNotIn(os.path.basename(self.userDir), sceneText)
+            # After a restart (the project is closed and opened again): still the same nodes
+            scanName, lesionName = scan.GetName(), lesion.GetName()
+            slicer.mrmlScene.Clear(0)
+            self.io.backgroundWriter().drain(10.0)
+            self.assertIsNone(service.project)
+            self.assertTrue(service.openProject(projectPath))
+            scan = slicer.mrmlScene.GetFirstNodeByName(scanName)
+            self.assertIsNotNone(scan)
+            reopened = importer.loadFiles([scanPath, lesionPath], studioShell)
+            self.assertEqual((reopened.volumes, reopened.segmentations), ([], []))
+            self.assertEqual(len(reopened.alreadyOpen), 2)
+            self.assertEqual(count(scanName, "vtkMRMLScalarVolumeNode"), 1)
+            self.assertEqual(count(lesionName, "vtkMRMLSegmentationNode"), 1)
+            # Closed and opened again from outside: loaded anew (nothing is matched to a node that left the scene)
+            slicer.mrmlScene.RemoveNode(scan)
+            fresh = importer.loadFiles([scanPath], studioShell)
+            self.assertEqual(len(fresh.volumes), 1)
+            self.assertEqual(fresh.alreadyOpen, [])
         finally:
             self.autosave._service = running
             studioShell.dispose()

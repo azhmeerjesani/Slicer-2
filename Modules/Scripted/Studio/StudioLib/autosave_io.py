@@ -1709,6 +1709,11 @@ DETACHED_EXTENSIONS = (".nhdr", ".seg.nhdr", ".seq.nhdr", ".mhd", ".hdr", ".vtm"
 #: files only: a .nhdr, a table and its schema or a DICOM series stay where they are)
 MOVABLE_EXTENSIONS = (".nrrd", ".nii", ".nii.gz", ".mha", ".seg.nrrd", ".mrk.json", ".vtk", ".vtp", ".stl", ".obj", ".ply", ".h5", ".tfm",
                       ".ctbl", ".txt")
+#: File of the project's .studio folder (app state, never shared, never read by official Slicer) that remembers, for the files
+#: of the project that Studio took over from files outside it, the outside file each one came from: a file the user opens
+#: again is then "already open", also after the project saved it (and after a restart)
+SOURCES_FILE = "sources.json"
+SOURCES_FORMAT = "slicer-studio-sources"
 
 
 def _projects():
@@ -1809,6 +1814,8 @@ class ProjectPlan(GenerationPlan):
         #: [(name of the file another program changed, name of the file Studio wrote)]
         self.conflicts = []
         self.projectJson = None
+        #: the new content of .studio/sources.json, None when it did not change
+        self.sourcesJson = None
         self.thumbnailPath = os.path.join(projectDir, ".studio", "thumbnail.png")
 
 
@@ -1851,6 +1858,11 @@ class ProjectWriter(SlotWriter):
         self.lastResult = None
         #: [(other program's file name, Studio's file name)] not reported yet (``takeConflicts()``)
         self.conflicts = []
+        #: node ID -> canonical path of the file outside the project that the node was read from (the project took it over:
+        #: its storage node now names a file of the project). Kept in .studio/sources.json (``SOURCES_FILE``)
+        self.sources = {}
+        #: the content of .studio/sources.json as last read or written (it is written again only when it changes)
+        self._sourcesWritten = None
         #: "<project> (Slicer Studio).mrml" once another program changed the scene file: Studio's scene is written there
         self.sceneConflictPath = None
         #: ``vtkMRMLScene::GetStoredTime()`` after the scene file was last read or written by this writer: a later value
@@ -1897,14 +1909,51 @@ class ProjectWriter(SlotWriter):
         self._record(self.project.scenePath, ours=False)
         self._sceneStoredTime = scene.GetStoredTime()
         rootDirectory = scene.GetRootDirectory()
+        stored = self._readSources()
         nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
         for index in range(nodes.GetNumberOfItems()):
             node = nodes.GetItemAsObject(index)
-            if node.GetHideFromEditors():
+            hidden = node.GetHideFromEditors()
+            if hidden and not node.IsA("vtkMRMLSequenceNode"):
                 continue
-            for path in _storagePaths(node.GetStorageNode(), rootDirectory):
+            files = _storagePaths(node.GetStorageNode(), rootDirectory)
+            for path in files if not hidden else ():
                 if _projects().isInside(path, self.project.path) and not self._isPrivateFile(path):
                     self._record(path, ours=False)
+            source = stored.get(self._projectRelative(files[0])) if files else None
+            if source:
+                self.sources[node.GetID()] = source
+        self._sourcesWritten = stored
+
+    def _sourcesPath(self):
+        return os.path.join(self.project.path, ".studio", SOURCES_FILE)
+
+    def _rememberSource(self, nodeId, files, projectCanonical):
+        """A node read from a file outside the project, which the project takes over now: remember that file."""
+        if files and not _isUnder(_canonical(files[0]), projectCanonical):
+            self.sources[nodeId] = _canonical(files[0])
+
+    def _projectRelative(self, path):
+        """``path`` relative to the project folder with "/" (a key of .studio/sources.json), None if it is outside."""
+        canonical, projectCanonical = _canonical(path), _canonical(self.project.path)
+        if canonical == projectCanonical or not _isUnder(canonical, projectCanonical):
+            return None
+        return os.path.relpath(canonical, projectCanonical).replace(os.sep, "/")
+
+    def _readSources(self):
+        """The content of .studio/sources.json: {file of the project (relative, "/"): canonical outside file}."""
+        data = readJson(self._sourcesPath())
+        sources = data.get("sources") if isinstance(data, dict) and data.get("format") == SOURCES_FORMAT else None
+        if not isinstance(sources, dict):
+            return {}
+        return {key: value for key, value in sources.items() if isinstance(key, str) and isinstance(value, str) and value}
+
+    def nodeIdsForSource(self, path):
+        """IDs of the nodes that were read from ``path``, a file outside the project that the project took over."""
+        if not path:
+            return []
+        target = _canonical(path)
+        return [nodeId for nodeId, source in self.sources.items() if source == target]
 
     def relocate(self, oldPath, newPath):
         """The project folder moved (renamed, or the Slicer Studio folder moved): follow it."""
@@ -1952,6 +2001,9 @@ class ProjectWriter(SlotWriter):
         snapshotJobs = []
         for index in range(storableNodes.GetNumberOfItems()):
             node = storableNodes.GetItemAsObject(index)
+            if node.GetHideFromEditors() and node.IsA("vtkMRMLSequenceNode") and node.GetSaveWithScene():
+                # The sequence of a 4D image (its proxy volume is what the user sees)
+                self._rememberSource(node.GetID(), _storagePaths(node.GetStorageNode(), plan.rootDirectory), projectCanonical)
             if not node.GetSaveWithScene() or node.GetHideFromEditors():
                 # Hidden nodes are written by vtkMRMLScene::Commit itself, into "<scene>_Private"
                 continue
@@ -1970,6 +2022,7 @@ class ProjectWriter(SlotWriter):
             modified = bool(node.GetModifiedSinceRead())
             exists = bool(files) and os.path.isfile(files[0]) and (len(files) == 1 or all(os.path.exists(path) for path in files[1:2]))
             inside = bool(files) and all(_isUnder(_canonical(path), projectCanonical) for path in files)
+            self._rememberSource(nodeId, files, projectCanonical)
             if inside and any(self._isTemporaryFile(path) for path in files):
                 modified = True  # left in a temporary folder by an interrupted generation: written into its kind folder
             if not modified and exists and inside:
@@ -2241,6 +2294,20 @@ class ProjectWriter(SlotWriter):
             plan.orphans.append((path, record["stat"]))
             del self.records[path]
         self.conflicts.extend(plan.conflicts)
+        # The outside files of the nodes that are still in the scene, by the file of the project that holds each node now
+        sources = {}
+        for nodeId, source in list(self.sources.items()):
+            node = scene.GetNodeByID(nodeId)
+            if node is None:
+                del self.sources[nodeId]
+                continue
+            files = _storagePaths(node.GetStorageNode(), rootDirectory)
+            key = self._projectRelative(files[0]) if files else None
+            if key is not None:
+                sources[key] = source
+        if sources != self._sourcesWritten:
+            plan.sourcesJson = sources
+            self._sourcesWritten = sources
         plan.projectJson = self.project.jsonData("open", scene, savedAt=time.time())
         plan.summary = projects.counts(scene)
 
@@ -2278,6 +2345,9 @@ class ProjectWriter(SlotWriter):
         if plan.projectJson is not None:
             os.makedirs(os.path.join(projectDir, ".studio"), exist_ok=True)
             atomicWriteJson(os.path.join(projectDir, ".studio", "project.json"), plan.projectJson)
+        if plan.sourcesJson is not None:
+            os.makedirs(os.path.join(projectDir, ".studio"), exist_ok=True)
+            atomicWriteJson(os.path.join(projectDir, ".studio", SOURCES_FILE), {"format": SOURCES_FORMAT, "version": 1, "sources": plan.sourcesJson})
         return {"bytes": 0, "workerMs": (time.perf_counter() - start) * 1000.0, "generation": plan.generation}
 
     def abort(self, plan, reason):

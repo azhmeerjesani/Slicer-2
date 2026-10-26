@@ -32,7 +32,7 @@ Slicer Studio/
 │       ├── Markups/             point lists and other markups
 │       ├── Models/  Tables/  Transforms/  Other/
 │       ├── Exports/             screenshots, figures, reports, exported tables and nifti/ (NIfTI exports)
-│       └── .studio/             Slicer Studio's own notes (thumbnail, lock): safe to ignore
+│       └── .studio/             Slicer Studio's own notes (thumbnail, lock, where copies came from): safe to ignore
 ├── Studies/
 │   └── Stroke cohort/           lesion network mapping studies
 ├── Templates/
@@ -56,7 +56,11 @@ you compute. In Slicer Studio:
   example `sub-012 T1w`, or `Untitled project`. A message says
   "Saving to Projects/sub-012 T1w"; its **Rename** button renames it.
 - The files you open are **copied** into the project. Your original files are
-  never changed or moved.
+  never changed or moved. Opening one of them again (Open…, a drop, Recent, or a
+  folder's **Load all**) does not load a second copy: its scan or lesion becomes
+  current again ("<name> is already open"), also after a restart. Slicer Studio
+  remembers where each copy came from in the project's `.studio/` folder, never
+  in the scene file.
 - Opening a Slicer scene (`.mrml` or `.mrb`) from somewhere else makes a new
   project that starts as a copy: "Opened a copy in Projects/<name>. The original
   is not changed."
