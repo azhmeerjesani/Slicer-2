@@ -823,6 +823,33 @@ def _parseXml(text):
         return ET.fromstring(_BARE_AMPERSAND.sub("&amp;", text))
 
 
+def repairBareAmpersands(path):
+    """Escape the bare "&" of a scene file that is not well-formed XML because of them. Return True if it was rewritten.
+
+    Scenes written before vtkMRMLStorageNode XML-escaped file names (and by official 3D Slicer) keep the "&" of
+    a file name such as "Smith & Jones T1.nii.gz" raw, and then no Slicer can load them.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except (OSError, UnicodeDecodeError):
+        return False
+    if "&" not in text:
+        return False
+    try:
+        ET.fromstring(text)
+        return False
+    except ET.ParseError:
+        pass
+    repaired = _BARE_AMPERSAND.sub("&amp;", text)
+    try:
+        ET.fromstring(repaired)
+    except ET.ParseError:
+        return False
+    atomicWriteText(path, repaired)
+    return True
+
+
 def _isUrl(path):
     return "://" in path
 

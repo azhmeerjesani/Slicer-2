@@ -1684,6 +1684,11 @@ class AutosaveService:
         if projects.isLockedByOther(path):
             self._announce("locked", projects.Project(path))
             return False
+        try:
+            if _io().repairBareAmpersands(scenePath):
+                logging.warning(f"Slicer Studio: escaped the bare '&' of the file names in {os.path.basename(scenePath)}")
+        except Exception:
+            logging.error("Slicer Studio: repairing the project scene failed:\n" + traceback.format_exc())
         self._forceProjectOpen = True
         try:
             # The scene is replaced (Load Scene): the open project is saved and closed first (StartCloseEvent)

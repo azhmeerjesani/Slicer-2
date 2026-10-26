@@ -934,7 +934,8 @@ def _rewritePrivatePaths(scenePath, oldFolder, newFolder):
             text = f.read()
     except OSError:
         return
-    encodedOld, encodedNew = autosave_io.urlEncode(oldFolder), autosave_io.urlEncode(newFolder)
+    # MRML writes file names URL-encoded and then XML-escaped ("&" is not URL-encoded; it is written as "&amp;")
+    encodedOld, encodedNew = (autosave_io.urlEncode(folder).replace("&", "&amp;") for folder in (oldFolder, newFolder))
     updated = re.sub(r'(fileName="|fileListMember\d+=")' + re.escape(encodedOld) + "/", lambda m: m.group(1) + encodedNew + "/", text)
     if updated != text:
         autosave_io.atomicWriteText(scenePath, updated)

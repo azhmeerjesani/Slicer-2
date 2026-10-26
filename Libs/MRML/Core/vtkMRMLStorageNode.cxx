@@ -127,7 +127,9 @@ void vtkMRMLStorageNode::WriteXML(ostream& of, int nIndent)
       name = vtksys::SystemTools::RelativePath(this->GetScene()->GetRootDirectory(), this->FileName);
     }
 
-    of << " fileName=\"" << vtkMRMLNode::URLEncodeString(name.c_str()) << "\"";
+    // URLEncodeString does not encode "&", so the value is also XML-escaped: a raw "&" makes the scene
+    // not well-formed. The XML parser restores "&" before URLDecodeString is applied in ReadXMLAttributes.
+    of << " fileName=\"" << this->XMLAttributeEncodeString(vtkMRMLNode::URLEncodeString(name.c_str())) << "\"";
 
     // if there is a file list, add the archetype to it. add file will check
     // that it's not already there. currently needed for reading in multi
@@ -164,7 +166,7 @@ void vtkMRMLStorageNode::WriteXML(ostream& of, int nIndent)
       name = vtksys::SystemTools::RelativePath(this->GetScene()->GetRootDirectory(), this->GetNthFileName(i));
     }
 
-    of << " fileListMember" << i << "=\"" << vtkMRMLNode::URLEncodeString(name.c_str()) << "\"";
+    of << " fileListMember" << i << "=\"" << this->XMLAttributeEncodeString(vtkMRMLNode::URLEncodeString(name.c_str())) << "\"";
     if (this->GetScene() && this->IsFilePathRelative(this->GetNthFileName(i)))
     {
       // go back to absolute
@@ -183,11 +185,11 @@ void vtkMRMLStorageNode::WriteXML(ostream& of, int nIndent)
 
   if (this->URI != nullptr)
   {
-    of << " uri=\"" << vtkMRMLNode::URLEncodeString(this->URI) << "\"";
+    of << " uri=\"" << this->XMLAttributeEncodeString(vtkMRMLNode::URLEncodeString(this->URI)) << "\"";
   }
   for (int i = 0; i < this->GetNumberOfURIs(); i++)
   {
-    of << " uriListMember" << i << "=\"" << vtkMRMLNode::URLEncodeString(this->GetNthURI(i)) << "\"";
+    of << " uriListMember" << i << "=\"" << this->XMLAttributeEncodeString(vtkMRMLNode::URLEncodeString(this->GetNthURI(i))) << "\"";
   }
 
   std::stringstream ss;

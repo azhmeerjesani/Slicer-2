@@ -699,6 +699,54 @@ class StudioProjectsTest(unittest.TestCase):
         os.utime(older.scenePath, (now, now))
         self.assertEqual([info.name for info in projects.listProjects()], ["Older", "Newer"])
 
+    def test_18_ampersand_in_file_names(self):
+        """A scan named "Smith & Jones T1" gives a well-formed project scene that opens again (MRML escapes "&")."""
+        import xml.etree.ElementTree as ET
+
+        projects = self.projects
+        service = self._service()
+        volume, _path = self._userVolume("Smith & Jones T1", shape=(12, 14, 16))
+        self._lesion(volume, name="Lesions (Smith & Jones T1)")
+        project = self._projectFor(service)
+        self._save(service)
+        scenePath = projects.sceneFile(project.path)
+        with open(scenePath, encoding="utf-8") as f:
+            text = f.read()
+        try:
+            root = ET.fromstring(text)
+        except ET.ParseError as error:
+            self.fail(f"the project scene is not well-formed XML: {error}")
+        fileNames = [self.io.urlDecode(element.get("fileName")) for element in root.iter() if element.get("fileName")]
+        self.assertTrue(any("&" in name and name.startswith("Images/") for name in fileNames), fileNames)
+        for name in fileNames:
+            self.assertTrue(os.path.isfile(os.path.join(project.path, name)), name)
+        # The project opens again with its scan and lesion
+        projectPath = project.path
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertTrue(service.openProject(projectPath))
+        self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("Smith & Jones T1"))
+        self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("Lesions (Smith & Jones T1)"))
+        storage = slicer.mrmlScene.GetFirstNodeByName("Smith & Jones T1").GetStorageNode()
+        self.assertTrue(os.path.isfile(storage.GetFileName()), storage.GetFileName())
+        # A project scene written with a bare "&" (older builds, official 3D Slicer) is repaired when it is opened
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        with open(scenePath, "w", encoding="utf-8") as f:
+            f.write(text.replace("&amp;", "&"))
+        self.assertTrue(service.openProject(projectPath))
+        self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("Smith & Jones T1"))
+        with open(scenePath, encoding="utf-8") as f:
+            ET.fromstring(f.read())
+        self.assertFalse(self.io.repairBareAmpersands(scenePath), "a well-formed scene is not rewritten")
+        # Renaming the folder of hidden nodes follows escaped names
+        privateScene = os.path.join(self.tempDir, "private.mrml")
+        with open(privateScene, "w", encoding="utf-8") as f:
+            f.write('<MRML><Volume id="v" fileName="R&amp;D%20T1_Private/a.nrrd"/></MRML>')
+        projects._rewritePrivatePaths(privateScene, "R&D T1_Private", "R&D T2_Private")
+        with open(privateScene, encoding="utf-8") as f:
+            self.assertEqual(ET.fromstring(f.read()).find("Volume").get("fileName"), "R&D%20T2_Private/a.nrrd")
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk
