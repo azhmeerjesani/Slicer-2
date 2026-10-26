@@ -10,6 +10,8 @@ Unambiguous files load directly, without the Add Data dialog:
   keep their names, colors and terminology, whatever their number (SPEC 9.7: a file saved again after it was
   opened in Studio has the same content);
 - other NIfTI, NRRD and MetaImage files are loaded as scalar volumes and shown in all slice views;
+- a 4D NIfTI image (fMRI, a 4D mask: ``isNifti4D()``), which the volume reader refuses, is loaded as a sequence (as
+  3D Slicer's Add Data does), whatever its name; the volume that shows its current time point is the scan;
 - ``.mrb`` and ``.mrml`` files are loaded as scenes. They keep their own layout and views; a scene opened in
   Library is shown in Draw (the Library page covers the views). In Studio with a project open, a scene opens as its
   own project instead of being added to the open one (A-09: the open project is saved and closed first).
@@ -60,6 +62,7 @@ import struct
 import sys
 import time
 import traceback
+import zlib
 
 import qt
 import slicer
@@ -208,9 +211,11 @@ def isLesionName(path):
 
 
 def fileKind(path):
-    """How a dropped or opened path is loaded: "folder", "scene", "lesion", "statmap", "volume", "figure", "table" or "other".
+    """How a dropped or opened path is loaded: "folder", "scene", "sequence", "lesion", "statmap", "volume", "figure", "table"
+    or "other".
 
-    Lesion names have priority over statistical map names.
+    A 4D NIfTI image (fMRI, a 4D mask) is a "sequence" whatever its name: the volume reader cannot read it. Lesion names
+    have priority over statistical map names.
     """
     if os.path.isdir(path):
         return "folder"
@@ -219,6 +224,8 @@ def fileKind(path):
         return "scene"
     if extension in SEGMENTATION_FILE_EXTENSIONS:
         return "lesion"
+    if extension in NIFTI_EXTENSIONS and isNifti4D(path):
+        return "sequence"
     if extension in VOLUME_EXTENSIONS:
         if isLesionName(path):
             return "lesion"
@@ -236,15 +243,46 @@ def isNiftiFile(path):
     return _extension(path) in NIFTI_EXTENSIONS
 
 
-def niftiIntentCode(path):
-    """The intent code of a NIfTI-1 file (header bytes 68-69, in the byte order given by ``sizeof_hdr``), None if unreadable."""
+def _niftiHeader(path, size):
+    """The first ``size`` bytes of a NIfTI file (gzip or not), None if unreadable.
+
+    A damaged file is unreadable, never an exception: gzip raises ``OSError`` (``BadGzipFile``) for a file that is not
+    gzip, ``EOFError`` for a truncated one and ``zlib.error`` for a corrupt deflate stream.
+    """
     try:
         opener = gzip.open if _extension(path) == ".nii.gz" or str(path).lower().endswith(".gz") else open
         with opener(path, "rb") as f:
-            header = f.read(348)
-    except (OSError, EOFError):
+            return f.read(size)
+    except (OSError, EOFError, zlib.error):
         return None
-    if len(header) < 348:
+
+
+def niftiDimensions(path):
+    """The ``dim`` field of a NIfTI-1 or NIfTI-2 header (``dim[0]`` is the number of dimensions), None if unreadable."""
+    header = _niftiHeader(path, 540)
+    if header is None or len(header) < 348:
+        return None
+    for byteOrder in ("<", ">"):
+        sizeOfHeader = struct.unpack(byteOrder + "i", header[0:4])[0]
+        if sizeOfHeader == 348:
+            return list(struct.unpack(byteOrder + "8h", header[40:56]))
+        if sizeOfHeader == 540 and len(header) >= 540:
+            return list(struct.unpack(byteOrder + "8q", header[16:80]))
+    return None
+
+
+def isNifti4D(path):
+    """True for a NIfTI image with several time points (``dim[4] > 1``): a time series such as fMRI, read as a sequence."""
+    if _extension(path) not in NIFTI_EXTENSIONS or not os.path.isfile(path):
+        return False
+    dims = niftiDimensions(path)
+    return dims is not None and 4 <= dims[0] <= 7 and dims[4] > 1
+
+
+def niftiIntentCode(path):
+    """The intent code of a NIfTI-1 file (header bytes 68-69, in the byte order given by ``sizeof_hdr``), None if unreadable."""
+    header = _niftiHeader(path, 348)
+    if header is None or len(header) < 348:
         return None
     for byteOrder in ("<", ">"):
         if struct.unpack(byteOrder + "i", header[0:4])[0] == 348:
@@ -644,7 +682,32 @@ def openNodeForFile(path):
             fileName = storageNode.GetFileName() if storageNode is not None else None
             if fileName and _normalizedPath(fileName) == target:
                 return node
+    for sequenceNode in slicer.util.getNodesByClass("vtkMRMLSequenceNode"):
+        # A 4D image (``loadSequence()``): the volume that shows its current item
+        storageNode = sequenceNode.GetStorageNode()
+        fileName = storageNode.GetFileName() if storageNode is not None else None
+        if fileName and _normalizedPath(fileName) == target:
+            proxyNode = _sequenceProxy(sequenceNode)
+            if proxyNode is not None and _isScan(proxyNode):
+                return proxyNode
     return None
+
+
+def _sequenceProxy(sequenceNode):
+    """The node that shows the current item of ``sequenceNode`` (its first sequence browser's proxy), None if none."""
+    browserNode = slicer.modules.sequences.logic().GetFirstBrowserNodeForSequenceNode(sequenceNode)
+    return browserNode.GetProxyNode(sequenceNode) if browserNode is not None else None
+
+
+def loadSequence(path):
+    """Load a 4D image (fMRI, a 4D mask) as a sequence, as 3D Slicer's Add Data does, and return the volume that shows its
+    current time point (the sequence browser's proxy node).
+    """
+    sequenceNode = slicer.util.loadNodeFromFile(path, "SequenceFile")
+    proxyNode = _sequenceProxy(sequenceNode)
+    if proxyNode is None or not proxyNode.IsA("vtkMRMLVolumeNode"):
+        raise RuntimeError(_("{path} was loaded as a sequence but has no volume to show").format(path=path))
+    return proxyNode
 
 
 def _openReference(path, role):
@@ -932,7 +995,7 @@ def loadFiles(paths, shell=None, pairedLesion=None):
     if shell is None:
         # Classic: 3D Slicer's routes (a picture or a table goes to Add Data, a statistical map is a volume)
         kinds = ["volume" if kind == "statmap" else kind for kind in kinds]
-        if any(kind not in ("scene", "volume", "lesion") for kind in kinds):
+        if any(kind not in ("scene", "volume", "sequence", "lesion") for kind in kinds):
             result.addDataPaths = paths
             openAddDataDialog(paths)
             return result
@@ -947,15 +1010,15 @@ def loadFiles(paths, shell=None, pairedLesion=None):
             paths, kinds = [path for path, _kind in kept], [kind for _path, kind in kept]
             if not paths:
                 return result
-        if any(kind not in ("scene", "volume", "lesion", "figure", "statmap") for kind in kinds):
+        if any(kind not in ("scene", "volume", "sequence", "lesion", "figure", "statmap") for kind in kinds):
             result.addDataPaths = paths
             openAddDataDialog(paths)
             return result
 
     loadedPaths = []
     with slicer.util.WaitCursor():
-        # Scenes first (they may replace nodes), then scans, then lesions (shown over the scans)
-        for wantedKind in ("scene", "volume", "lesion"):
+        # Scenes first (they may replace nodes), then scans (a 4D image is a sequence), then lesions (shown over the scans)
+        for wantedKind in ("scene", "volume", "sequence", "lesion"):
             for path, kind in zip(paths, kinds, strict=True):
                 if kind != wantedKind:
                     continue
@@ -972,6 +1035,8 @@ def loadFiles(paths, shell=None, pairedLesion=None):
                         result.scenes.append(path)
                     elif kind == "volume":
                         result.volumes.append(slicer.util.loadVolume(path, {"singleFile": True}))
+                    elif kind == "sequence":
+                        result.volumes.append(loadSequence(path))
                     else:
                         segmentationNode = loadLesion(path)
                         restoreSidecarText(segmentationNode, path)

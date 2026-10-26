@@ -338,6 +338,125 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(importer.fileKind(os.path.join(self.directory, "fig.PNG")), "figure")
         self.assertEqual(importer.fileKind(os.path.join(self.directory, "participants.tsv")), "table")
 
+    def _write4D(self, name, timePoints=3, dtype=np.int16):
+        """Write a 4D NIfTI image (16 x 12 x 8 voxels, ``timePoints`` time points) and return its path."""
+        import SimpleITK as sitk
+
+        rng = np.random.default_rng(4)
+        frames = []
+        for _index in range(timePoints):
+            frame = sitk.GetImageFromArray((rng.random((8, 12, 16)) * 100).astype(dtype))
+            frame.SetSpacing((2.0, 2.0, 3.0))
+            frames.append(frame)
+        image = sitk.JoinSeries(frames)
+        image.SetSpacing((2.0, 2.0, 3.0, 2.0))
+        path = os.path.join(self.directory, name)
+        sitk.WriteImage(image, path)
+        return path
+
+    def test_4d_nifti_opens_as_sequence(self):
+        """A 4D NIfTI image (fMRI, a 4D mask) is opened as a sequence in Classic and Studio, never refused by the volume reader."""
+        from StudioLib import importer
+
+        bold = self._write4D("task-rest_bold.nii.gz", timePoints=5, dtype=np.float32)
+        mask = self._write4D("sub-21_lesion_mask4d.nii.gz", timePoints=2, dtype=np.uint8)
+        plain = self._writeVolume("sub-21_T1w.nii.gz", GRID_2009C_2MM)
+
+        def sequenceNodes():
+            return [node for node in slicer.util.getNodesByClass("vtkMRMLSequenceNode") if node.GetName() == "task-rest_bold"]
+
+        # Classic: loaded as a sequence (as Add Data does) and shown in the slice views
+        result = importer.loadFiles([bold])
+        self._pump()
+        self.assertEqual(result.errors, [])
+        self.assertEqual(result.addDataPaths, [])
+        self.assertEqual(len(sequenceNodes()), 1)
+        self.assertEqual(sequenceNodes()[0].GetNumberOfDataNodes(), 5)
+        self.assertEqual(len(result.volumes), 1)
+        self.assertTrue(result.volumes[0].IsA("vtkMRMLScalarVolumeNode"))
+        self.assertEqual(importer._backgroundVolume().GetID(), result.volumes[0].GetID())
+        slicer.mrmlScene.Clear(0)
+
+        # Studio: Open... and drop load it as the scan of Draw; a second drop does not load it again
+        studioShell = self._applyStudio()
+        result = importer.loadFiles([bold], studioShell)
+        self._pump()
+        self.assertEqual(result.errors, [])
+        proxy = result.volumes[0]
+        self.assertEqual(importer._backgroundVolume().GetID(), proxy.GetID())
+        self.assertEqual(importer.openNodeForFile(bold).GetID(), proxy.GetID())
+        result = importer.handleDrop([bold], shell=studioShell)
+        self._pump()
+        self.assertEqual(result.errors, [])
+        self.assertEqual([node.GetID() for node in result.alreadyOpen], [proxy.GetID()])
+        self.assertEqual(len(sequenceNodes()), 1)
+        # A lesion-named 4D mask cannot be a lesion segmentation: it opens as a sequence instead of failing
+        result = importer.handleDrop([mask], shell=studioShell)
+        self._pump()
+        self.assertEqual(result.errors, [])
+        self.assertEqual(result.segmentations, [])
+        self.assertEqual(len(result.volumes), 1)
+        # Detection: the NIfTI header (dim[4] > 1), whatever the name
+        self.assertEqual(importer.niftiDimensions(bold)[:5], [4, 16, 12, 8, 5])
+        self.assertTrue(importer.isNifti4D(bold))
+        self.assertFalse(importer.isNifti4D(plain))
+        self.assertEqual(importer.fileKind(bold), "sequence")
+        self.assertEqual(importer.fileKind(mask), "sequence")
+        self.assertEqual(importer.fileKind(plain), "volume")
+        # A NIfTI-2 header (big endian), and a vector image (dim[4] == 1, dim[5] == 3) that the volume reader reads
+        header = bytearray(544)
+        header[0:4] = struct.pack(">i", 540)
+        header[16:80] = struct.pack(">8q", 4, 10, 10, 10, 7, 1, 1, 1)
+        nifti2 = os.path.join(self.directory, "nifti2_bold.nii")
+        with open(nifti2, "wb") as f:
+            f.write(bytes(header))
+        self.assertTrue(importer.isNifti4D(nifti2))
+        header = bytearray(352)
+        header[0:4] = struct.pack("<i", 348)
+        header[40:56] = struct.pack("<8h", 5, 10, 10, 10, 1, 3, 1, 1)
+        vector = os.path.join(self.directory, "displacement.nii")
+        with open(vector, "wb") as f:
+            f.write(bytes(header))
+        self.assertFalse(importer.isNifti4D(vector))
+
+    def test_damaged_nifti_gz_is_sorted_without_an_exception(self):
+        """A ``.nii.gz`` that cannot be decompressed (corrupt deflate stream, truncated, not gzip, empty) is sorted by its name
+        and reported by the volume reader: the header readers return None and never raise (gzip raises ``zlib.error``, not an
+        ``OSError``, for a corrupt deflate stream).
+        """
+        import zlib
+
+        from StudioLib import importer
+
+        good = gzip.compress(bytes(range(256)) * 20)
+        corrupt = bytearray(good)
+        corrupt[20:40] = b"x" * 20
+        with self.assertRaises(zlib.error):
+            gzip.decompress(bytes(corrupt))  # the damage this test is about
+        files = {
+            "corrupt_bold.nii.gz": bytes(corrupt),
+            "sub-02_lesion_corrupt.nii.gz": bytes(corrupt),
+            "truncated.nii.gz": good[:60],
+            "notgzip.nii.gz": b"hello" * 100,
+            "empty.nii.gz": b"",
+        }
+        paths = {}
+        for name, content in files.items():
+            paths[name] = os.path.join(self.directory, name)
+            with open(paths[name], "wb") as f:
+                f.write(content)
+        for name, path in paths.items():
+            self.assertIsNone(importer.niftiDimensions(path), name)
+            self.assertIsNone(importer.niftiIntentCode(path), name)
+            self.assertFalse(importer.isNifti4D(path), name)
+            self.assertFalse(importer.isStatMap(path), name)
+            self.assertEqual(importer.fileKind(path), "lesion" if "lesion" in name else "volume", name)
+        # Open.../drop: the damaged file is a load error (the generic "could not be loaded" message), not an exception
+        result = importer.loadFiles([paths["corrupt_bold.nii.gz"]], self._applyStudio())
+        self._pump()
+        self.assertEqual(len(result.errors), 1)
+        self.assertEqual(result.volumes, [])
+
     #
     # Figures
     #
