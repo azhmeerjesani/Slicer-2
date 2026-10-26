@@ -1622,6 +1622,7 @@ class StudySession:
         self._templateFiles = {}  # template volume node ID -> its NIfTI file
         self._gridReference = None  # the file whose header the lesion is written with
         self._openStamp = None
+        self._sidecarText = ("", "")  # the Notes and SourceReference of the current lesion's sidecar (see _sidecarTextChanged)
         self._dirty = False
         self._markedDirty = False  # markDirty(): an edit that the lesion's voxels do not show (always written)
         self._activeSeconds = 0.0
@@ -2618,6 +2619,8 @@ class StudySession:
         self._lesionStamp = lesionStamp
         self._openedEpoch = openedEpoch
         self._openStamp = _contentStamp(segmentationNode)
+        # The Notes and source reference of the lesion's sidecar are shown again (Draw's Lesion card) and kept on rewrite
+        self._sidecarText = self._restoreSidecarText(sid, segmentationNode)
         self._dirty = False
         self._markedDirty = False
         self._activeSeconds = 0.0
@@ -2679,6 +2682,13 @@ class StudySession:
                     _toast(self._shell, _("The lesion of {sid} could not be written: {error}").format(sid=self._current, error=e), ms=6000,
                            level="warning")
                     return False
+        # Notes or a source reference typed without a mask edit are written too (to the lesion's sidecar)
+        segmentationNode = self.segmentationNode()
+        if segmentationNode is not None and self._sidecarTextChanged(segmentationNode):
+            error = self._writeSidecar(self._current, segmentationNode)
+            if error is not None:
+                _toast(self._shell, _("The notes of {sid} could not be written: {error}").format(sid=self._current, error=error), ms=6000,
+                       level="warning")
         return stripSaved
 
     def _leaveEmpty(self):
@@ -2899,26 +2909,62 @@ class StudySession:
         _notify(self)
         return {"sid": sid, "path": target, "values": updates, "conflict": conflict}
 
-    def _writeSidecar(self, sid, segmentationNode):
-        """The BIDS sidecar of the lesion (``Study.write_lesion_sidecar``) with Draw's Notes and source reference (W2-05)."""
+    @staticmethod
+    def _sidecarTextKeys():
+        """``((sidecar key, node attribute), ...)`` of Draw's Notes and source reference (W2-05)."""
         draw = _draw()
-        notesKey = getattr(draw, "NOTES_ATTRIBUTE", "Studio.LesionNotes")
-        referenceKey = getattr(draw, "SOURCE_REFERENCE_ATTRIBUTE", "Studio.LesionSourceReference")
+        return (("Notes", getattr(draw, "NOTES_ATTRIBUTE", "Studio.LesionNotes")),
+                ("SourceReference", getattr(draw, "SOURCE_REFERENCE_ATTRIBUTE", "Studio.LesionSourceReference")))
+
+    def _restoreSidecarText(self, sid, segmentationNode):
+        """Set the ``Notes`` and ``SourceReference`` of the subject's lesion sidecar on its lesion node (a value already on
+        the node wins), as ``importer.restoreSidecarText`` does for a lesion opened alone. Return the sidecar's values.
+        """
+        try:
+            sidecar = self.study.read_lesion_sidecar(sid) or {}
+        except (OSError, ValueError):
+            sidecar = {}
+        values = []
+        for key, attribute in self._sidecarTextKeys():
+            value = sidecar.get(key)
+            value = value if isinstance(value, str) else ""
+            if value and segmentationNode.GetAttribute(attribute) is None:
+                segmentationNode.SetAttribute(attribute, value)
+            values.append(value)
+        return tuple(values)
+
+    def _sidecarTextChanged(self, segmentationNode):
+        """True when the lesion's Notes or source reference differ from what its sidecar holds."""
+        current = tuple(segmentationNode.GetAttribute(attribute) or "" for _key, attribute in self._sidecarTextKeys())
+        return current != tuple(self._sidecarText)
+
+    def _writeSidecar(self, sid, segmentationNode):
+        """The BIDS sidecar of the lesion (``Study.write_lesion_sidecar``) with Draw's Notes and source reference (W2-05).
+        A value cleared on the lesion is removed from the sidecar. Return None, or the error when it was not written.
+        """
         try:
             path = self.study.write_lesion_sidecar(sid, studio={"generated_by": f"Slicer Studio {slicer.app.applicationVersion}"})
             with open(path, encoding="utf-8") as f:
                 content = json.load(f)
-            notes = segmentationNode.GetAttribute(notesKey) or ""
-            reference = segmentationNode.GetAttribute(referenceKey) or ""
             changed = False
-            for key, value in (("Notes", notes), ("SourceReference", reference)):
+            for key, attribute in self._sidecarTextKeys():
+                value = segmentationNode.GetAttribute(attribute)
+                if value is None:
+                    continue  # never set on this lesion: the sidecar's value is kept
                 if value and content.get(key) != value:
                     content[key] = value
                     changed = True
+                elif not value and key in content:
+                    del content[key]
+                    changed = True
             if changed:
                 _lnm("schema").write_text_atomic(path, json.dumps(content, indent=2, ensure_ascii=False) + "\n")
-        except Exception:
+        except Exception as e:
             logging.warning(f"Studio: the sidecar of {sid} could not be written:\n{traceback.format_exc()}")
+            return e
+        if sid == self._current:
+            self._sidecarText = tuple(segmentationNode.GetAttribute(attribute) or "" for _key, attribute in self._sidecarTextKeys())
+        return None
 
     def done(self, writeLesion=True):
         """Done → next: write the lesion (status traced, metrics), then open ``next_subject()``: the next case of the active

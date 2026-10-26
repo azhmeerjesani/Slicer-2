@@ -17,6 +17,9 @@ Run with the main window and testing enabled::
   says so when it is opened; a lesion file that the other window wrote after this one opened the subject is copied to
   ``.studio/conflicts/`` (with a toast) before it is replaced, never lost silently; closing leaves the other session's
   heartbeat live (``pipeline init`` still refuses the study).
+- ``test_5_study_notes_kept`` (BB-1): the Notes and source reference of Draw's Lesion card for a study subject are written to
+  its lesion sidecar when the subject is left without a mask edit (an untraced subject too), are shown again when it is
+  reopened, survive a later mask write, and a cleared value is removed from the sidecar.
 """
 
 import json
@@ -420,6 +423,82 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertFalse(any("also open" in text for text, _level in toasts), toasts)
         with open(sessionFile, encoding="utf-8") as f:
             self.assertEqual(json.load(f)["heartbeat_epoch"], 0)
+
+    def test_5_study_notes_kept(self):
+        from LesionNetworkMappingLib.study import Study
+
+        from StudioLib import draw, study_ui
+
+        folder = os.path.join(self.directory, "Notes study")
+        study = Study.create(folder, name="Notes study")
+        for sid in ("sub-01", "sub-02"):
+            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "StudioTestScan")
+            z, y, x = np.mgrid[0:24, 0:28, 0:20]
+            slicer.util.updateVolumeFromArray(node, (100 * np.exp(-((x - 10) ** 2 + (y - 14) ** 2 + (z - 12) ** 2) / 50.0)).astype(np.int16))
+            node.SetSpacing(2.0, 2.0, 2.5)
+            scan = os.path.join(self.directory, f"{sid}_T1w.nii.gz")
+            self.assertTrue(slicer.util.saveNode(node, scan))
+            slicer.mrmlScene.RemoveNode(node)
+            study.add_subject(sid, scan=study.relpath(scan), status="untraced", group="case")
+        study.save()
+        notesKey, referenceKey = draw.NOTES_ATTRIBUTE, draw.SOURCE_REFERENCE_ATTRIBUTE
+        notes, reference = "deep WM, check slice 40", "Doe 2019 Fig 3"
+
+        try:
+            session = study_ui.openStudy(folder, None, subject="sub-01", showLibrary=False)
+            for _ in range(4):
+                slicer.app.processEvents()
+
+            def paint(region):
+                segmentationNode, volumeNode = session.segmentationNode(), session.volumeNode()
+                segmentId = segmentationNode.GetSegmentation().GetNthSegmentID(0)
+                array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, volumeNode)
+                array[region] = 1
+                slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, volumeNode)
+                for _ in range(4):
+                    slicer.app.processEvents()
+
+            def sidecar(sid):
+                return session.study.read_lesion_sidecar(sid) or {}
+
+            def text():
+                node = session.segmentationNode()
+                return node.GetAttribute(notesKey) or "", node.GetAttribute(referenceKey) or ""
+
+            # sub-01 has a lesion file; Notes typed afterwards, no mask edit, then the subject is left
+            paint((slice(8, 10), slice(10, 12), slice(6, 8)))
+            self.assertTrue(session.writeCurrent())
+            lesionPath = session.study.abspath(session.study.subject("sub-01")["lesion"])
+            lesionStat = os.stat(lesionPath)
+            self.assertNotIn("Notes", sidecar("sub-01"))
+            session.segmentationNode().SetAttribute(notesKey, notes)
+            session.segmentationNode().SetAttribute(referenceKey, reference)
+            self.assertFalse(session.isDirty())
+            self.assertTrue(session.open("sub-02", switchToDraw=False))
+            self.assertEqual(sidecar("sub-01").get("Notes"), notes, "notes typed without a mask edit are written")
+            self.assertEqual(sidecar("sub-01").get("SourceReference"), reference)
+            self.assertEqual(os.stat(lesionPath).st_mtime_ns, lesionStat.st_mtime_ns, "the lesion file is not rewritten")
+            # sub-02 has no lesion yet: its notes are kept too
+            session.segmentationNode().SetAttribute(notesKey, "untraced note")
+            # Reopened: the Lesion card's values are back on the lesion
+            self.assertTrue(session.open("sub-01", switchToDraw=False))
+            self.assertEqual(text(), (notes, reference))
+            self.assertTrue(session.open("sub-02", switchToDraw=False))
+            self.assertEqual(text(), ("untraced note", ""))
+            self.assertTrue(session.open("sub-01", switchToDraw=False))
+            # A later mask write keeps them
+            paint((slice(2, 4), slice(2, 4), slice(14, 16)))
+            self.assertTrue(session.writeCurrent())
+            self.assertEqual(sidecar("sub-01").get("Notes"), notes)
+            # A cleared value is removed from the sidecar (the other one is kept)
+            session.segmentationNode().SetAttribute(notesKey, "")
+            self.assertTrue(session.open("sub-02", switchToDraw=False))
+            self.assertNotIn("Notes", sidecar("sub-01"))
+            self.assertEqual(sidecar("sub-01").get("SourceReference"), reference)
+            self.assertTrue(session.open("sub-01", switchToDraw=False))
+            self.assertEqual(text(), ("", reference))
+        finally:
+            study_ui.closeStudy()
 
     @staticmethod
     def _isAncestor(ancestor, widget):
