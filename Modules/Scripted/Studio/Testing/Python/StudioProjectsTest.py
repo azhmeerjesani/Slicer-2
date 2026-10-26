@@ -23,7 +23,8 @@ folder "Slicer Studio tést" (spaces and non-ASCII characters). The tests cover:
 - a file that official Slicer saved next to the scene file is moved into its kind folder;
 - a closed-surface segmentation (a file plus a folder) saved again in place; temporary folders left by a crash go;
 - a detached-header volume (.nhdr) from outside is written into the project as one file;
-- a project loaded in Classic continues in place in Studio (no copy); the Library order follows official saves.
+- a project loaded in Classic continues in place in Studio (no copy); the Library order follows official saves;
+- a project saves when its data fits on the disk, also with less than 1 GB free (only the private autosave keeps 1 GB).
 """
 
 import hashlib
@@ -781,6 +782,47 @@ class StudioProjectsTest(unittest.TestCase):
             self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName(present))
             self.assertIsNone(slicer.mrmlScene.GetFirstNodeByName(absent))
             self.assertEqual(projects.readJson(projects.projectFile(closedPath))["state"], "closed")
+
+    def test_20_save_with_less_than_1gb_free(self):
+        """A project saves (continuously and with Ctrl+S) when its data fits on the disk, also below 1 GB free (D-A16).
+
+        The 1 GB floor belongs to the private recovery autosave (A-01) only; a project save needs room for its data.
+        """
+        import shutil as shutilModule
+        from unittest import mock
+
+        service = self._service()
+        self._userVolume("Small disk", shape=(20, 24, 28))
+        project = self._projectFor(service)
+        realDiskUsage = shutilModule.disk_usage
+        freeBytes = [12 << 20]  # 12 MB free: far below 1 GB, far above what this project needs
+
+        def diskUsage(path):
+            return realDiskUsage(path)._replace(free=freeBytes[0])
+
+        with mock.patch.object(shutilModule, "disk_usage", side_effect=diskUsage):
+            self.assertTrue(service.saveNow("test", progress=False), service._projectPausedReason)
+            self.io.backgroundWriter().drain(30.0)
+            self.assertIn("Images/Small disk.nii.gz", self._projectFiles(project))
+            self.assertIn("Small disk.mrml", self._projectFiles(project))
+            # A lesion added later is saved too
+            volume = slicer.util.getNode("Small disk")
+            segmentation, segmentId, array = self._lesion(volume, name="Lesion")
+            self.assertTrue(service.saveNow("test", progress=False), service._projectPausedReason)
+            self.io.backgroundWriter().drain(30.0)
+            self.assertIn("Segmentations/Lesion.seg.nrrd", self._projectFiles(project))
+            self.assertEqual(service.unsavedSummary(), "")
+            # A save that does not fit is still refused, with the reason
+            freeBytes[0] = 1024
+            array[12:14, 12:14, 12:14] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentation, segmentId, volume)
+            self.assertFalse(service.saveNow("test", progress=False))
+            self.assertIn("free on the disk", service._projectPausedReason)
+            self.assertNotIn("1.0 GB", service._projectPausedReason)
+            # The private recovery autosave keeps its 1 GB floor
+            freeBytes[0] = 12 << 20
+            self.assertFalse(service._enoughSpace(0, self.tempDir))
+            self.assertTrue(service._enoughSpace(0, self.tempDir, project=True))
 
 
 def _sphere(center=(0, 0, 0)):

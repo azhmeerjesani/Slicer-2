@@ -74,7 +74,11 @@ MAX_CLOSED_SLOTS = 2
 FINAL_GENERATION_BUDGET_MS = 300
 #: Estimated main-thread write speed, for that estimate (raw C++ NRRD writes run at 2-3 GB/s)
 _ESTIMATED_WRITE_BYTES_PER_MS = 500 * 1024
+#: The private recovery autosave (A-01) pauses while less than max(this, 2 x the estimate) is free on the disk
 MIN_FREE_BYTES = 1 << 30
+#: Saving a project is the user's actual saving (D-A16), so it never has that floor: it needs 2 x the estimate (atomic
+#: writes keep the old file until the new one is complete) plus this margin for the scene file and project.json
+PROJECT_FREE_MARGIN_BYTES = 1 << 20
 #: While the autosave folder is larger than MaxDiskMB, the retention rules run again at most this often
 RUNTIME_PRUNE_INTERVAL_S = 600
 #: A synchronous save of a project (Save now, closing, quitting) shows a progress dialog after this many seconds ...
@@ -636,7 +640,7 @@ class AutosaveService:
         estimated = sum(job.entry.get("bytes") or 0 for job in plan.jobs if hasattr(job, "entry"))
         if not self._enoughSpace(estimated):
             writer.abort(plan, "not enough disk space")
-            self._pause(_("Autosave paused: less than {size} free on the disk.").format(size=_formatBytes(max(MIN_FREE_BYTES, 2 * estimated))))
+            self._pause(_("Autosave paused: less than {size} free on the disk.").format(size=_formatBytes(_requiredFreeBytes(estimated))))
             return False
         if mainThreadOnly:
             self._dropSnapshotJobs(plan)
@@ -812,14 +816,14 @@ class AutosaveService:
         if plan.wroteData:
             self._showClassicStatusMessage()
 
-    def _enoughSpace(self, estimatedBytes, folder=None):
+    def _enoughSpace(self, estimatedBytes, folder=None, project=False):
         import shutil
 
         try:
             free = shutil.disk_usage(folder or self.sessionDir or self.rootDirectory()).free
         except OSError:
             return True
-        return free >= max(MIN_FREE_BYTES, 2 * estimatedBytes)
+        return free >= _requiredFreeBytes(estimatedBytes, project)
 
     def _pause(self, message):
         self._pausedUntil = time.time() + ERROR_RETRY_S
@@ -1466,9 +1470,9 @@ class AutosaveService:
             return False
         plan.reason = reason
         estimated = sum(entry.get("bytes") or 0 for entry in plan.entries.values() if entry.get("kind") in ("write", "import"))
-        if not self._enoughSpace(estimated, self.project.path):
+        if not self._enoughSpace(estimated, self.project.path, project=True):
             writer.abort(plan, "not enough disk space")
-            self._projectFailed(_("less than {size} free on the disk").format(size=_formatBytes(max(MIN_FREE_BYTES, 2 * estimated))))
+            self._projectFailed(_("less than {size} free on the disk").format(size=_formatBytes(_requiredFreeBytes(estimated, project=True))))
             return False
         plan.writerRef = writer
         self.plan = plan
@@ -1998,6 +2002,13 @@ def _canonicalPath(path):
 
 def _isoTime(seconds=None):
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(seconds if seconds is not None else time.time()))
+
+
+def _requiredFreeBytes(estimatedBytes, project=False):
+    """Free space a generation needs: a project save needs room for its data only, the private autosave keeps 1 GB free."""
+    if project:
+        return 2 * estimatedBytes + PROJECT_FREE_MARGIN_BYTES
+    return max(MIN_FREE_BYTES, 2 * estimatedBytes)
 
 
 def _formatBytes(size):
