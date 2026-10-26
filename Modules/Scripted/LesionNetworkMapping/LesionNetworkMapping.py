@@ -836,6 +836,10 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
         if qc.get("weight_total", 0.0) < 1.0:
             result.update(reason=_("Lesion smaller than one connectome voxel."), kind="small")
             return result
+        if int(qc.get("voxels_in_mask", 0)) == 0:
+            # On the grid but with no voxel in the connectome's brain mask: no time course to correlate (an all-zero map)
+            result.update(reason=_("The lesion lies outside the connectome's brain mask: no connectome voxel to map from."), kind="outside")
+            return result
         result["ok"] = True
         return result
 
@@ -1822,6 +1826,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.runPartial = False
         self.runPreviewN = None
         self.runDescSuffix = ""
+        #: {"runDir", "reason", "outputsFailed"} of the last run that failed after a map ("_shownRunFailure()")
+        self._runFailure = None
         #: The connectome the shown run was computed with: its V, mask and name belong to the run, not to the one selected later
         self._runBundle = None
         #: {connectome folder: run state} of runs parked when another connectome was chosen (they come back with their connectome)
@@ -4015,6 +4021,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         if self.loadedMap is not None and not getattr(self, "runOutputs", None):
             # A map opened from a file was not computed here: Compute is not "Done"
             computeState, computeSummary = "", _("Opened from a file")
+        elif self._shownRunFailure() is not None:
+            # A run that failed after a map is not "Done": the step opens on its failure banner
+            computeState, computeSummary = "action", _("Run failed: {reason}").format(reason=self._shownRunFailure()["reason"] or _("unknown error"))
         elif hasResult:
             computeState, computeSummary = "done", _("Done")
             if getattr(self, "nullCheckBox", None) is not None and self.nullCheckBox.checked and self.seedMode() == "lesion":
@@ -4030,6 +4039,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         if hasResult:
             n = self._resultN() if hasattr(self, "_resultN") else None
             nText = _("N = {n:,}").format(n=n) if n else _("N unknown")
+            if n and self.loadedMap is None and self.runPartial and getattr(self, "runOutputs", None):
+                nText = _("N = {n:,} (partial)").format(n=n)
             resultSummary = " · ".join(part for part in (nText, self.currentStatistic(), resultSummary) if part)
         for number, (key, state, summary) in enumerate((("seed", seedState, seedSummary), ("connectome", connectomeState, connectomeSummary),
                                                          ("compute", computeState, computeSummary), ("result", resultState, resultSummary)), start=1):
@@ -4322,8 +4333,11 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             self.runPartial = True
             self.scheduleRefresh(reloadMaps=True)
         else:
-            # Failed after a partial map: like Stop, the latest snapshot is kept, labelled "N=<n> (partial)"
+            # Failed after a partial map: like Stop, the latest snapshot is kept, labelled "N=<n> (partial)". The Compute step
+            # says the run failed; when the engine finished but its maps failed the post-run checks (a constant map...), they
+            # cannot be exported
             self.runPartial = True
+            self._runFailure = {"runDir": self.runDir, "reason": job.failureReason or "", "outputsFailed": getattr(job, "doneEvent", None) is not None}
             self.scheduleRefresh(reloadMaps=True)
             self._showRunFailure(job)
         # The job runner shows "Done" for a few seconds; Map's own chip ("Done · N=1000") follows
@@ -4335,6 +4349,13 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             self._refreshAfterPark()  # another connectome was chosen while it ran
         self.updateComputeState()
         self._notifyControllers("onRunDone", job)
+
+    def _shownRunFailure(self):
+        """The failure of the shown run (a run that failed after a map, ``onRunDone()``), or None."""
+        failure = self._runFailure
+        if failure is None or self.loadedMap is not None or not self.runOutputs or not self.runDir or failure["runDir"] != self.runDir:
+            return None
+        return failure
 
     def _showRunFailure(self, job):
         reason = job.failureReason or _("unknown error")
@@ -4823,7 +4844,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         hasMap = self._hasResult()
         loaded = self.loadedMap
         self.binarizeButton.setEnabled(hasMap and resultVolume is not None)
-        self.resultExportButton.setEnabled(hasMap and resultVolume is not None and loaded is None)
+        failure = self._shownRunFailure()
+        self.resultExportButton.setEnabled(hasMap and resultVolume is not None and loaded is None and not (failure is not None and failure["outputsFailed"]))
         if loaded is not None:
             state = _("N={n}").format(n=n) if n else _("N unknown")
             if loaded.get("partial"):
@@ -5341,7 +5363,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             n = self.loadedMap.get("n")
             text, level = (_("Map · N={n:,}").format(n=n) if n else _("Map")), "neutral"
         elif self.runOutputs and self.runN:
-            if self.runPartial:
+            if self._shownRunFailure() is not None:
+                text, level = _("Run failed · N={n} (partial)").format(n=self.runN), "warn"
+            elif self.runPartial:
                 text, level = _("Stopped · N={n} (partial)").format(n=self.runN), "neutral"
             elif self.runPreviewN:
                 text, level = _("Done · Preview N={n}").format(n=self.runN), "ok"
@@ -5668,15 +5692,18 @@ class LesionNetworkMappingTest(ScriptedLoadableModuleTest):
             self.tearDown()
             self.setUp()
             self.test_LesionNetworkMapping_switchConnectome()
+            self.tearDown()
+            self.setUp()
+            self.test_LesionNetworkMapping_outsideMask()
         finally:
             self.tearDown()
 
-    def _sphereLesion(self, meta, radius=4.0):
-        """A segmentation with a "Lesion" sphere segment in planted blob A, drawn on a 2 mm grid around it (MNI-like world)."""
+    def _sphereLesion(self, meta, radius=4.0, center=None):
+        """A segmentation with a "Lesion" sphere segment in planted blob A (or at ``center``), drawn on a 2 mm grid around it (MNI-like world)."""
         import numpy as np
 
         affine = np.asarray(meta["affine"])
-        center = np.asarray(meta["blobs"]["A"]["center_world"])
+        center = np.asarray(meta["blobs"]["A"]["center_world"] if center is None else center)
         shape = tuple(meta["shape"])
         grid = np.indices(shape).reshape(3, -1).T
         world = grid @ affine[:3, :3].T + affine[:3, 3]
@@ -5799,6 +5826,75 @@ class LesionNetworkMappingTest(ScriptedLoadableModuleTest):
         self.assertEqual(sidecar["connectome"]["n_voxels"], vA)
         self.assertEqual(sidecar["threshold"]["resolved"]["v"], vA)
         self.assertAlmostEqual(sidecar["threshold"]["resolved"]["value"], expectedA, places=4)
+
+    def test_LesionNetworkMapping_outsideMask(self):
+        """A lesion with no voxel in the connectome mask is refused before mapping; a run that fails after its map is
+        never shown as Done (Compute says it failed, and maps that failed the post-run checks are not exportable).
+        """
+        import numpy as np
+
+        from LesionNetworkMappingLib import connectome, thresholds
+
+        self.delayDisplay("A lesion inside the connectome grid but outside its brain mask is refused")
+        widget = slicer.modules.lesionnetworkmapping.widgetRepresentation().self()
+        widget.initializeParameterNode()
+        meta = connectome.make_synthetic(os.path.join(self.tempDir, "mask.lnmc"), shape=(20, 24, 20), n_subjects=20, runs=(20,), seed=0, name="Mask test")
+        widget.refreshConnectomes(select=os.path.abspath(meta["path"]))
+        widget.acceptTermsCheckBox.setChecked(True)
+        widget.subjectsGroup.button(0).click()
+        widget.setRule(thresholds.DEFAULT_RULE)
+        corner = (np.asarray(meta["affine"]) @ np.array([2.0, 2.0, 2.0, 1.0]))[:3]  # outside the ellipsoid mask
+        segNode, segmentId, _voxels = self._sphereLesion(meta, center=corner)
+        widget.ctx.setSeed(segNode, segmentId)
+        widget.updateGUIFromParameterNode()
+        widget.updateSeed()
+        check = widget.seedCheck
+        self.assertEqual(check["qc"]["voxels_in_mask"], 0, check)
+        self.assertGreaterEqual(check["qc"]["weight_total"], 1.0, check)  # on the grid: not "smaller than one voxel"
+        self.assertFalse(check["ok"], check)
+        self.assertEqual(check["kind"], "outside")
+        self.assertIn("brain mask", check["reason"])
+        self.assertTrue(widget.seedErrorBanner.isVisibleTo(widget.parent))
+        self.assertFalse(widget.computeButton.enabled)
+
+        self.delayDisplay("A run whose maps fail the post-run checks is shown as failed, not Done, and is not exportable")
+        segNode, segmentId, _voxels = self._sphereLesion(meta)
+        widget.ctx.setSeed(segNode, segmentId)
+        widget.updateGUIFromParameterNode()
+        widget.updateSeed()
+        self.assertTrue(widget.seedCheck["ok"], widget.seedCheck)
+        self.assertTrue(widget.computeButton.enabled, widget.computeReasonLabel.text)
+
+        def failingCheck(job):
+            return ["forced post-run failure (selftest)"]
+
+        widget.ctx.afterRun.append(failingCheck)
+        try:
+            job = widget.compute()
+            self.assertTrue(self._waitFor(job.isFinished, 300), "the engine did not finish")
+        finally:
+            widget.ctx.afterRun.remove(failingCheck)
+        self._waitFor(lambda: False, 0.5)  # the job's last events and the deferred refresh
+        self.assertEqual(job.state, "failed")
+        self.assertIn("forced post-run failure", job.failureReason)
+        self.assertTrue(widget.runOutputs)  # the map is kept, labelled partial
+        self.assertIn("(partial)", widget._parameterNode.resultVolume.GetName())
+        computeCard = widget._cardWidgets["compute"][1]
+        self.assertEqual(computeCard.property("studioStepState"), "action")
+        self.assertIn("Run failed", computeCard.property("studioStepSummary"))
+        self.assertTrue(widget.computeBanner.isVisibleTo(widget.parent))
+        self.assertIn("(partial)", widget._cardWidgets["result"][1].property("studioStepSummary"))
+        self.assertFalse(widget.resultExportButton.enabled)
+        self.assertIsNone(widget.ctx.card("export")._run())
+
+        self.delayDisplay("The next successful run is Done again")
+        job = widget.compute()
+        self.assertTrue(self._waitFor(job.isFinished, 300), "the engine did not finish")
+        self.assertEqual(job.state, "done", f"{job.failureReason} {list(job.logTail)}")
+        self.assertTrue(self._waitFor(lambda: widget.resolved is not None and widget._hasResult() and widget.ctx.currentRun is not None, 30))
+        self.assertEqual(computeCard.property("studioStepState"), "done")
+        self.assertFalse(widget.computeBanner.isVisibleTo(widget.parent))
+        self.assertTrue(self._waitFor(lambda: widget.resultExportButton.enabled, 10))  # after the deferred refresh of the final map
 
     def test_LesionNetworkMapping_v1(self):
         import numpy as np

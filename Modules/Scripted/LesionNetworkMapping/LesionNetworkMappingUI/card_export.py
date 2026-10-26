@@ -110,6 +110,8 @@ class ExportCard:
         job = getattr(run, "job", None)
         if job is not None and not job.isFinished():
             return None
+        if job is not None and getattr(job, "state", None) == "failed" and getattr(job, "doneEvent", None) is not None:
+            return None  # the engine finished but its maps failed the post-run checks (a constant map...): nothing to export
         return run
 
     def _studyPath(self):
