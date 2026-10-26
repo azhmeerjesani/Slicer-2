@@ -339,6 +339,9 @@ browser, edited in a spreadsheet and backed up by copying it.
 - **One writer.** While Studio has a study open, only Studio writes `participants.tsv`. Programs that run in the
   background post their results to `.studio/inbox/`, and Studio merges them. If you edit the file in a spreadsheet
   while the study is open, Studio keeps the cells you changed on disk, unless it changed the same cell.
+- **Two windows on one study.** Opening a study that another Slicer Studio window (or a lab member on a shared drive)
+  has open shows a warning; trace each subject in one window only. If both windows save the same subject's lesion, the
+  later save is written and the other window's version is kept in `.studio/conflicts/`, and a message names that copy.
 - **No absolute paths.** The files that are meant to be shared (the study, the tables, the sidecars) store paths
   relative to the study folder. `.studio` is application state and `derivatives/lnm/*/provenance.json` and
   `reproduce.sh` keep full local paths on purpose, because they reproduce one run on one computer.

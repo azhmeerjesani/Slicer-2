@@ -1607,6 +1607,9 @@ def regenerate(study, sid, session=None, source="lesion", normal=None):
     values["lesion_size"] = stat.st_size
     if _core is not None:
         _core.lastSeen[sid] = (stat.st_mtime_ns, stat.st_size)  # before the commit: the listener must not take this write for a drawn lesion
+    noteWritten = getattr(session, "noteLesionWritten", None) if session is not None else None
+    if noteWritten is not None and "lesion" in files:
+        noteWritten(sid, lesionPath)  # the open session must not take this write for another window's
     audit["files"] = {name: study.relpath(path) for name, path in files.items()}
     if removed:
         audit["removed"] = removed

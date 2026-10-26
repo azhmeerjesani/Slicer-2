@@ -42,6 +42,10 @@ A study is a plain folder (``LesionNetworkMappingLib.study``): ``study.json``, `
   ``Study.save()`` (lock and merge). Jobs post to ``.studio/inbox``; the session merges the inbox when a study is
   opened, when Library is shown and on request. ``.studio/session.json`` holds a heartbeat (every 15 s) while the
   study is open, and the trace queue; it is kept with ``heartbeat_epoch`` 0 when the study is closed.
+- **Two windows on one study**: opening a study whose ``session.json`` is the live heartbeat of another process says so
+  (a warning toast; the other window is told at its next heartbeat), and closing never marks that other session closed.
+  A lesion file that another window wrote after this one opened the subject is never replaced silently: it is copied
+  to ``.studio/conflicts/`` first and a toast names the copy.
 
 The session works in Studio and in Classic (the Studio module panel lists the subjects there). Settings: only
 ``Studio/RecentStudies`` (a JSON list of the recently opened studies).
@@ -73,6 +77,13 @@ MAX_RECENT_STUDIES = 10
 #: .studio/session.json is refreshed this often while a study is open (A-04's ``pipeline init`` refuses a live one)
 HEARTBEAT_INTERVAL_MS = 15000
 SESSION_FILE = "session.json"
+#: A heartbeat younger than this is a live session (as ``pipeline.SESSION_STALE_S`` of A-04's ``pipeline init``)
+SESSION_STALE_S = 60.0
+#: Folder of .studio/ that keeps a lesion file another window wrote before this one replaced it
+CONFLICTS_DIR = "conflicts"
+#: A lesion file that this session did not read and that changed this long before its subject was opened (or later) is
+#: taken as written by another window (file times can be this coarse)
+CONFLICT_MTIME_SLACK_S = 2.0
 #: participants.tsv is saved this long after the last change (changes are kept in memory meanwhile)
 SAVE_DELAY_MS = 400
 #: How long a save waits for .studio/participants.lock on the main thread before it is retried from a timer
@@ -263,6 +274,39 @@ def _isAlive(qobject):
 
 def _now():
     return _lnm("study").now_iso()
+
+
+def _fileStamp(path):
+    """``(normcase path, mtime_ns, size)`` of a file, None when it does not exist."""
+    try:
+        stat = os.stat(path)
+    except (OSError, TypeError, ValueError):
+        return None
+    return (os.path.normcase(os.path.abspath(path)), stat.st_mtime_ns, stat.st_size)
+
+
+def _liveOtherSession(record):
+    """``record`` (the content of a study's ``.studio/session.json``) when it is the heartbeat of another live session, else
+    None: younger than ``SESSION_STALE_S``, of another process, and on this host a process that still exists.
+    """
+    if not isinstance(record, dict):
+        return None
+    try:
+        beat = float(record.get("heartbeat_epoch") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if beat <= 0.0 or time.time() - beat > SESSION_STALE_S:
+        return None
+    if record.get("host") == socket.gethostname():
+        pid = record.get("pid")
+        if pid == os.getpid():
+            return None
+        try:
+            if pid and not _lnm("jobs").pid_alive(pid):
+                return None
+        except ImportError:
+            pass
+    return record
 
 
 def _isNifti(path):
@@ -1536,6 +1580,10 @@ class StudySession:
         self._heartbeatTimer.setInterval(HEARTBEAT_INTERVAL_MS)
         self._heartbeatTimer.connect("timeout()", self._writeHeartbeat)
         self._startedAt = _now()
+        self._otherSession = None  # the last heartbeat seen of another live session of this study (two windows)
+        self._warnedSessions = set()  # (host, pid) of the other sessions this one was told about
+        self._lesionStamp = None  # (normcase path, mtime_ns, size) of the current lesion file as read or written here
+        self._openedEpoch = None  # time.time() when the current subject was opened
 
     # Identity (A-01b records these in every autosave slot)
 
@@ -1566,6 +1614,8 @@ class StudySession:
         The trace queue and the position of the last session (``.studio/session.json``) are restored first.
         """
         self._restoreQueue()
+        # Another window with this study open: said now, before this session's heartbeat replaces the other one's
+        self._noticeOtherSession(_liveOtherSession(self._readSessionRecord()))
         self._writeHeartbeat()
         self._heartbeatTimer.start()
         self._sceneCloseTag = slicer.mrmlScene.AddObserver(slicer.mrmlScene.EndCloseEvent, self._onSceneClosed)
@@ -1658,10 +1708,47 @@ class StudySession:
             return
         self._writeSessionRecord()
 
+    def _readSessionRecord(self):
+        try:
+            with open(self._sessionFile(), encoding="utf-8") as f:
+                record = json.load(f)
+        except (OSError, ValueError):
+            return None
+        return record if isinstance(record, dict) else None
+
+    def _noticeOtherSession(self, other):
+        """Another live session has this study open (``other``: its heartbeat): remember it, and say so once per session."""
+        if other is None:
+            return
+        self._otherSession = other
+        key = (other.get("host"), other.get("pid"))
+        if key in self._warnedSessions:
+            return
+        self._warnedSessions.add(key)
+        logging.warning(f"Studio: the study {self.study.name} is also open in process {other.get('pid')} on {other.get('host')}")
+        _toast(self._shell, _("Study {name} is also open in another Slicer Studio window (process {pid} on {host}). Trace each "
+                              "subject in one window only.").format(name=self.study.name, pid=other.get("pid"), host=other.get("host")),
+               ms=12000, level="warning")
+
     def _writeSessionRecord(self, closed=False):
         """``.studio/session.json``: the heartbeat while the study is open (``heartbeat_epoch`` 0 once closed), the
         current subject and the trace queue with its position (L-45).
+
+        Another live session of the study (a second window) is noticed here; closing never marks it closed: its heartbeat
+        is left (or put back) for ``pipeline init`` and the next session.
         """
+        other = _liveOtherSession(self._readSessionRecord())
+        if closed:
+            if other is not None:
+                return
+            if _liveOtherSession(self._otherSession) is not None:
+                try:
+                    _lnm("schema").write_text_atomic(self._sessionFile(), json.dumps(self._otherSession) + "\n")
+                except OSError:
+                    logging.warning(f"Studio: cannot write the study heartbeat:\n{traceback.format_exc()}")
+                return
+        else:
+            self._noticeOtherSession(other)
         content = {"format": "slicer-studio-session", "pid": os.getpid(), "host": socket.gethostname(), "app": "Slicer Studio",
                    "started": self._startedAt, "heartbeat": _now(), "heartbeat_epoch": 0 if closed else time.time(), "subject": self._current}
         if closed:
@@ -2416,6 +2503,9 @@ class StudySession:
         previous = dict(self._nodeIds)
         previousVolume = self.volumeNode()
         self._cropCache = {}
+        # The lesion file as it is before it is read: a later change of it is another window's (see _write)
+        openedEpoch = time.time()
+        lesionStamp = _fileStamp(lesionPath) if lesionPath else None
         prefetched = self._takePrefetchedLesion(sid, lesionPath)
         self.lastSwitchPrefetched = prefetched is not None
         with importer._ownLoad():
@@ -2448,6 +2538,8 @@ class StudySession:
         self._nodeIds = {"scan": volumeNode.GetID(), "segmentation": segmentationNode.GetID()}
         self._current = sid
         self._gridReference = gridReference
+        self._lesionStamp = lesionStamp
+        self._openedEpoch = openedEpoch
         self._openStamp = _contentStamp(segmentationNode)
         self._dirty = False
         self._markedDirty = False
@@ -2499,7 +2591,9 @@ class StudySession:
                     self._journal.discard(self._current)
             else:
                 try:
-                    self._write(status=None, runHooks=False, mask=mask)
+                    result = self._write(status=None, runHooks=False, mask=mask)
+                    if result.get("conflict"):
+                        _toast(self._shell, self._conflictText(result), ms=15000, level="consequence", toolTip=result["conflict"])
                 except Blocking as e:
                     _toast(self._shell, str(e), ms=6000, level="warning")
                     return False
@@ -2578,6 +2672,52 @@ class StudySession:
         except (OSError, ValueError):
             return None
 
+    def _changedElsewhere(self, target):
+        """True when the lesion file ``target`` was written by another program (a second window of the study) since this
+        session opened the subject: it is not the file as this session read or wrote it, or, when this session did not
+        read it, it changed after the subject was opened.
+        """
+        stamp = _fileStamp(target)
+        if stamp is None:
+            return False
+        known = self._lesionStamp
+        if known is not None and known[0] == stamp[0]:
+            return known != stamp
+        try:
+            modified = os.stat(target).st_mtime
+        except OSError:
+            return False
+        return self._openedEpoch is not None and modified >= self._openedEpoch - CONFLICT_MTIME_SLACK_S
+
+    def noteLesionWritten(self, sid, path):
+        """This program rewrote the lesion file of the open subject ``sid`` outside ``_write`` (the 2D extrusion of
+        ``lesionqc.regenerate``): it is not another window's change.
+        """
+        if sid is not None and sid == self._current:
+            self._lesionStamp = _fileStamp(path)
+
+    def _keepConflictCopy(self, target):
+        """Copy the lesion file ``target`` to ``.studio/conflicts/`` before it is replaced; return the copy's path."""
+        studyModule = _lnm("study")
+        folder = os.path.join(self.study.path, studyModule.PRIVATE_DIR, CONFLICTS_DIR)
+        name = os.path.basename(target)
+        extension = ".nii.gz" if name.lower().endswith(".nii.gz") else os.path.splitext(name)[1]
+        stem = name[:-len(extension)] if extension else name
+        stamp = time.strftime("%Y%m%dT%H%M%S")
+        os.makedirs(folder, exist_ok=True)
+        copy = os.path.join(folder, f"{stem}_{stamp}{extension}")
+        counter = 2
+        while os.path.exists(copy):
+            copy = os.path.join(folder, f"{stem}_{stamp}-{counter}{extension}")
+            counter += 1
+        shutil.copy2(target, copy)
+        return copy
+
+    def _conflictText(self, result):
+        """The toast of a write that kept another window's version of the lesion (``result["conflict"]``)."""
+        return _("{sid} was also saved in another Slicer Studio window. Your tracing is saved; the other version is kept as "
+                 "{copy}").format(sid=result["sid"], copy=self.study.relpath(result["conflict"]))
+
     def _write(self, status=None, runHooks=False, mask=None):
         """Write the current lesion (see the module docstring) and update its row. Return a result dict.
 
@@ -2618,14 +2758,23 @@ class StudySession:
         os.makedirs(os.path.dirname(target), exist_ok=True)
         extension = ".nii.gz" if target.lower().endswith(".nii.gz") else ".nii"
         temporary = f"{target[:-len(extension)]}.{os.getpid()}.tmp{extension}"
+        conflict = None
         try:
             nifti.write_like(temporary, array, ijkToRas, reference, dtype=np.uint8, descrip="Slicer Studio lesion")
+            # Another window wrote this subject's lesion since it was opened here: its version is kept, not lost
+            if self._changedElsewhere(target):
+                try:
+                    conflict = self._keepConflictCopy(target)
+                except OSError as e:
+                    raise Blocking(_("The lesion of {sid} was changed in another window and could not be kept: {error}").format(sid=sid, error=e)) from e
+                logging.warning(f"Studio: the lesion of {sid} was changed by another program; that version was kept as {conflict}")
             _replaceFile(temporary, target)
         except ValueError as e:
             raise Blocking(_("The lesion of {sid} cannot be written on its grid: {error}").format(sid=sid, error=e)) from e
         finally:
             with contextlib.suppress(OSError):
                 os.remove(temporary)
+        self._lesionStamp = _fileStamp(target)
         self._prefetched.pop(sid, None)
         # Row values
         method = row.get("trace_method")
@@ -2671,7 +2820,7 @@ class StudySession:
         if self._journal is not None:
             self._journal.discard(sid)
         _notify(self)
-        return {"sid": sid, "path": target, "values": updates}
+        return {"sid": sid, "path": target, "values": updates, "conflict": conflict}
 
     def _writeSidecar(self, sid, segmentationNode):
         """The BIDS sidecar of the lesion (``Study.write_lesion_sidecar``) with Draw's Notes and source reference (W2-05)."""
@@ -2736,7 +2885,9 @@ class StudySession:
             logging.error(f"Studio: Done failed for {sid}:\n{traceback.format_exc()}")
             _toast(shell, _("The lesion of {sid} could not be saved: {error}").format(sid=sid, error=e), ms=6000, level="warning")
             return None
-        if result.get("path"):
+        if result.get("conflict"):
+            _toast(shell, self._conflictText(result), ms=15000, level="consequence", toolTip=result["conflict"])
+        elif result.get("path"):
             _toast(shell, _("Saved {name}").format(name=os.path.basename(result["path"])), ms=2500, toolTip=result["path"])
         # The active trace queue decides the next case (L-45); without one, the next untraced subject (W3-07)
         spec = self.queue()

@@ -13,6 +13,10 @@ Run with the main window and testing enabled::
 - ``test_3_map_primary_pinned``: in Studio, the primary button of Map is in the inspector's sticky footer (above the
   disclaimer), so that it never scrolls out of view or moves when a card above it grows; it is back in the Compute card in
   Classic and in the other workspaces.
+- ``test_4_two_windows_same_study`` (BB-1): a study whose ``.studio/session.json`` is the live heartbeat of another process
+  says so when it is opened; a lesion file that the other window wrote after this one opened the subject is copied to
+  ``.studio/conflicts/`` (with a toast) before it is replaced, never lost silently; closing leaves the other session's
+  heartbeat live (``pipeline init`` still refuses the study).
 """
 
 import json
@@ -285,6 +289,137 @@ class StudioRegressionTest(unittest.TestCase):
                 card.collapsed = False  # no state left for later tests
         widget = slicer.modules.LesionNetworkMappingWidget
         self.assertTrue(self._isAncestor(widget.parent.findChild("QWidget", "LNMComputeCard"), widget.computeButton), "Classic: in the Compute card")
+
+    # Two windows on one study (BB-1)
+
+    def test_4_two_windows_same_study(self):
+        import glob
+        import socket
+        import time
+
+        from LesionNetworkMappingLib import nifti, pipeline
+        from LesionNetworkMappingLib.study import Study
+
+        from StudioLib import study_ui
+
+        # Two subjects on one scan file each
+        folder = os.path.join(self.directory, "Two windows")
+        study = Study.create(folder, name="Two windows")
+        for sid in ("sub-01", "sub-02"):
+            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "StudioTestScan")
+            z, y, x = np.mgrid[0:24, 0:28, 0:20]
+            slicer.util.updateVolumeFromArray(node, (100 * np.exp(-((x - 10) ** 2 + (y - 14) ** 2 + (z - 12) ** 2) / 50.0)).astype(np.int16))
+            node.SetSpacing(2.0, 2.0, 2.5)
+            scan = os.path.join(self.directory, f"{sid}_T1w.nii.gz")
+            self.assertTrue(slicer.util.saveNode(node, scan))
+            slicer.mrmlScene.RemoveNode(node)
+            study.add_subject(sid, scan=study.relpath(scan), status="untraced", group="case")
+        study.save()
+        sessionFile = os.path.join(folder, ".studio", "session.json")
+
+        def otherHeartbeat(subject):
+            """The heartbeat of another Slicer Studio window (a live process of this host: this process's parent)."""
+            record = {"format": "slicer-studio-session", "pid": os.getppid(), "host": socket.gethostname(), "app": "Slicer Studio",
+                      "heartbeat_epoch": time.time(), "subject": subject}
+            os.makedirs(os.path.dirname(sessionFile), exist_ok=True)
+            with open(sessionFile, "w", encoding="utf-8") as f:
+                json.dump(record, f)
+
+        toasts = []
+        originalToast = study_ui._toast
+        study_ui._toast = lambda shell, text, **kwargs: toasts.append((str(text), kwargs.get("level")))
+        self.addCleanup(setattr, study_ui, "_toast", originalToast)
+        otherHeartbeat("sub-01")
+        try:
+            session = study_ui.openStudy(folder, None, subject="sub-01", showLibrary=False)
+            for _ in range(4):
+                slicer.app.processEvents()
+            # The study is open in the other window: said when it is opened
+            self.assertTrue(any("also open in another Slicer Studio window" in text and level == "warning" for text, level in toasts), toasts)
+
+            def paint(region):
+                segmentationNode, volumeNode = session.segmentationNode(), session.volumeNode()
+                segmentId = segmentationNode.GetSegmentation().GetNthSegmentID(0)
+                array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, volumeNode)
+                array[region] = 1
+                slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, volumeNode)
+                for _ in range(4):
+                    slicer.app.processEvents()
+
+            def lesionFile(sid):
+                return session.study.abspath(session.study.subject(sid).get("lesion"))
+
+            def voxels(path):
+                return int((nifti.read_nifti(path)[0] > 0).sum())
+
+            def otherWindowWrites(path, reference, box):
+                """The other window's Done: its own tracing (``box``, voxel ijk slices) replaces the file."""
+                data, affine, _header = nifti.read_nifti(reference)
+                mask = np.zeros(data.shape[:3], np.uint8)
+                mask[box] = 1
+                nifti.write_nifti(path, mask, affine)
+                stat = os.stat(path)
+                os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 5 * 10**9))
+
+            def conflicts():
+                return sorted(glob.glob(os.path.join(folder, ".studio", study_ui.CONFLICTS_DIR, "*.nii.gz")))
+
+            # This window writes sub-01 (8 voxels): nothing to keep
+            paint((slice(8, 10), slice(10, 12), slice(6, 8)))
+            self.assertTrue(session.writeCurrent())
+            target = lesionFile("sub-01")
+            self.assertEqual(voxels(target), 8)
+            self.assertEqual(conflicts(), [])
+            # The other window saves its own tracing of sub-01 (27 voxels), then this window writes again
+            otherWindowWrites(target, session.study.abspath(session.study.subject("sub-01")["scan"]), (slice(2, 5), slice(2, 5), slice(2, 5)))
+            toasts.clear()
+            paint((slice(2, 4), slice(2, 4), slice(14, 16)))
+            self.assertTrue(session.writeCurrent())
+            self.assertEqual(voxels(target), 16, "this window's tracing is written")
+            kept = conflicts()
+            self.assertEqual(len(kept), 1, "the other window's version is kept")
+            self.assertEqual(voxels(kept[0]), 27)
+            self.assertTrue(any("also saved in another Slicer Studio window" in text and os.path.basename(kept[0]) in text for text, _level in toasts), toasts)
+            # A later write of this window's own file keeps nothing more
+            paint((slice(14, 16), slice(2, 4), slice(2, 4)))
+            self.assertTrue(session.writeCurrent())
+            self.assertEqual(voxels(target), 24)
+            self.assertEqual(len(conflicts()), 1)
+            # sub-02 has no lesion when it is opened here; the other window traces it first (as Done -> next of both windows)
+            self.assertTrue(session.open("sub-02", switchToDraw=False))
+            target2 = target.replace("sub-01", "sub-02")
+            otherWindowWrites(target2, session.study.abspath(session.study.subject("sub-02")["scan"]), (slice(2, 5), slice(2, 5), slice(2, 5)))
+            paint((slice(8, 10), slice(10, 12), slice(6, 8)))
+            toasts.clear()
+            self.assertIsNotNone(session.done())
+            self.assertEqual(lesionFile("sub-02"), target2)
+            self.assertEqual(voxels(target2), 8)
+            kept = [path for path in conflicts() if os.path.basename(path).startswith("sub-02")]
+            self.assertEqual(len(kept), 1)
+            self.assertEqual(voxels(kept[0]), 27)
+            self.assertTrue(any("also saved in another Slicer Studio window" in text for text, _level in toasts), toasts)
+            # The other window's heartbeat, then this window's (which replaces the record): closing this window leaves the
+            # other one's heartbeat live
+            otherHeartbeat("sub-02")
+            session._writeHeartbeat()
+            with open(sessionFile, encoding="utf-8") as f:
+                self.assertEqual(json.load(f)["pid"], os.getpid())
+        finally:
+            study_ui.closeStudy()
+        with open(sessionFile, encoding="utf-8") as f:
+            record = json.load(f)
+        self.assertEqual(record["pid"], os.getppid())
+        self.assertGreater(record["heartbeat_epoch"], 0)
+        self.assertIsNotNone(pipeline._session_live(folder), "pipeline init still sees the other window's session")
+        # Alone (the other window's heartbeat is stale): nothing is said, and closing marks the study closed, as before
+        with open(sessionFile, "w", encoding="utf-8") as f:
+            json.dump({**record, "heartbeat_epoch": time.time() - 2 * study_ui.SESSION_STALE_S}, f)
+        toasts.clear()
+        study_ui.openStudy(folder, None, showLibrary=False)
+        study_ui.closeStudy()
+        self.assertFalse(any("also open" in text for text, _level in toasts), toasts)
+        with open(sessionFile, encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["heartbeat_epoch"], 0)
 
     @staticmethod
     def _isAncestor(ancestor, widget):
