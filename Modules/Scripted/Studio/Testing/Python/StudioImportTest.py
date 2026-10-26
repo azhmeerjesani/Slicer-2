@@ -1465,6 +1465,68 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         with open(path, "rb") as f:
             self.assertEqual(f.read(), before)
 
+    def test_probabilistic_lesion_keeps_its_voxels(self):
+        """BB-1: a float lesion file with fractional values (a probabilistic mask, ``desc-lesionProb``) opens with every
+        voxel above 0 as the lesion, where the segmentation reader truncates values below 1 to 0 (an empty lesion, or
+        only the voxels equal to 1). It is "Saved · <file>" until painted, the file is unchanged and the load toast says
+        so. A float file with only 0 and 1 is read as before.
+        """
+        from StudioLib import draw, importer
+
+        studioShell = self._applyStudio()
+        dims = GRID_2009C_2MM[0]
+        fractional = np.zeros((dims[2], dims[1], dims[0]), np.float32)
+        fractional[38:43, 48:53, 43:48] = 0.3
+        fractional[39:42, 49:52, 44:47] = 0.6
+        fractional[40, 50, 45] = 0.95
+        mixed = np.zeros_like(fractional)
+        mixed[38:43, 48:53, 43:48] = 0.6
+        mixed[40, 50, 45] = 1.0
+        ones = (fractional > 0).astype(np.float32)
+        for name, array in (("sub-11_desc-lesionProb_mask.nii.gz", fractional), ("sub-12_desc-lesionProb_mask.nii.gz", mixed)):
+            path = self._writeVolume(name, GRID_2009C_2MM, array)
+            with open(path, "rb") as f:
+                before = f.read()
+            lesion = importer.loadLesion(path)
+            self._pump()
+            self.assertEqual(self._voxels(lesion), int(np.count_nonzero(array > 0)), name)
+            self.assertEqual(lesion.GetSegmentation().GetNumberOfSegments(), 1, name)
+            segmentId = lesion.GetSegmentation().GetNthSegmentID(0)
+            self.assertEqual(lesion.GetSegmentation().GetSegment(segmentId).GetName(), importer.LESION_SEGMENT_NAME)
+            self.assertTrue(lesion.GetAttribute(importer.LESION_FRACTIONAL_ATTRIBUTE), name)
+            # The voxels are where the file has them (the file's grid, as the volume reader places it)
+            reference = slicer.util.loadVolume(path, {"show": False})
+            shown = slicer.util.arrayFromSegmentBinaryLabelmap(lesion, segmentId, reference)
+            np.testing.assert_array_equal(shown > 0, slicer.util.arrayFromVolume(reference) > 0)
+            slicer.mrmlScene.RemoveNode(reference)
+            self.assertEqual(draw.lesionSaveState(lesion)[0], "saved", name)
+            with open(path, "rb") as f:
+                self.assertEqual(f.read(), before, name)
+            slicer.mrmlScene.RemoveNode(lesion)
+        # Painted: "Unsaved changes", as any loaded lesion
+        path = os.path.join(self.directory, "sub-11_desc-lesionProb_mask.nii.gz")
+        lesion = importer.loadLesion(path)
+        segmentId = lesion.GetSegmentation().GetNthSegmentID(0)
+        reference = slicer.util.loadVolume(path, {"show": False})
+        array = slicer.util.arrayFromSegmentBinaryLabelmap(lesion, segmentId, reference)
+        array[0, 0, 0] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, lesion, segmentId, reference)
+        slicer.mrmlScene.RemoveNode(reference)
+        self._pump()
+        self.assertEqual(draw.lesionSaveState(lesion)[0], "unsaved")
+        slicer.mrmlScene.RemoveNode(lesion)
+        # Opened from Library or a drop: the toast says how the file is shown
+        result = importer.loadFiles([os.path.join(self.directory, "sub-12_desc-lesionProb_mask.nii.gz")], studioShell)
+        self._pump(8)
+        self.assertEqual(self._voxels(result.segmentations[0]), int(np.count_nonzero(mixed > 0)))
+        self.assertTrue(any("fractional values" in text for _time, text, _level in studioShell.recentMessages()), studioShell.recentMessages())
+        # Control: a float file with only 0 and 1 is an ordinary mask
+        path = self._writeVolume("sub-13_lesion.nii.gz", GRID_2009C_2MM, ones)
+        lesion = importer.loadLesion(path)
+        self.assertEqual(self._voxels(lesion), int(np.count_nonzero(ones)))
+        self.assertFalse(lesion.GetAttribute(importer.LESION_FRACTIONAL_ATTRIBUTE))
+        self.assertEqual(draw.lesionSaveState(lesion)[0], "saved")
+
     def test_sidecar_notes_reopen(self):
         """The Notes and SourceReference of a lesion's sidecar are on the lesion opened again (the Lesion card shows
         them), and Save lesion to the same file keeps them; a value cleared in the card is written cleared.

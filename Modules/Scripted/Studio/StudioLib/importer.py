@@ -161,6 +161,8 @@ MAX_RECENT_FOLDERS = 10
 
 #: Node attribute: the reference image geometry of a lesion when it was loaded (W2-05 saves on it)
 LESION_GRID_ATTRIBUTE = "Studio.LesionGrid"
+#: Node attribute: the lesion was read from a file with fractional values (a probabilistic mask), as "<min> <max>"
+LESION_FRACTIONAL_ATTRIBUTE = "Studio.LesionFractional"
 #: Keys of a lesion's sidecar that Draw's Lesion card edits, and their node attributes (``draw.NOTES_ATTRIBUTE``,
 #: ``draw.SOURCE_REFERENCE_ATTRIBUTE``)
 LESION_SIDECAR_TEXT_ATTRIBUTES = (("Notes", "Studio.LesionNotes"), ("SourceReference", "Studio.LesionSourceReference"))
@@ -447,10 +449,101 @@ def _applyLesionNaming(segmentationNode, path):
     styleLesionSegment(segmentationNode, segmentId)
 
 
+#: Lesions whose voxels ``loadLesion()`` set after the reader (a fractional file): {node ID: (weak reference, voxel stamp)}.
+#: The storage node's read time is older than these voxels, which are still the file as read (``unchangedSinceLoad()``).
+_convertedOnLoad = {}
+
+
+def _voxelStamp(segmentationNode):
+    """(segment count, newest binary labelmap MTime): changes when any segment's voxels change (``draw._contentStamp``)."""
+    segmentation = segmentationNode.GetSegmentation()
+    binaryName = slicer.vtkSegmentationConverter.GetBinaryLabelmapRepresentationName()
+    newest = 0
+    for index in range(segmentation.GetNumberOfSegments()):
+        representation = segmentation.GetNthSegment(index).GetRepresentation(binaryName)
+        if representation is not None:
+            newest = max(newest, representation.GetMTime())
+    return segmentation.GetNumberOfSegments(), newest
+
+
+def unchangedSinceLoad(segmentationNode):
+    """True when ``loadLesion()`` set the voxels of this lesion from its fractional file and they were not changed since."""
+    if segmentationNode is None:
+        return False
+    record = _convertedOnLoad.get(segmentationNode.GetID())
+    if record is None or record[0].Get() is not segmentationNode:
+        return False
+    return record[1] == _voxelStamp(segmentationNode)
+
+
+def _fractionalMask(path):
+    """``(mask, (low, high))`` for a NIfTI lesion file with fractional values (a probabilistic mask), else None.
+
+    ``mask`` is the bool array [i, j, k] of the voxels above 0, in file voxel order; ``low``/``high`` the value range.
+    Slicer's readers cast an image to an integer type by truncation, so such a file would open empty (all values below
+    1) or with only its voxels equal to 1. Only float (or scaled) images are read here: an integer mask costs a header.
+    """
+    if not str(path).lower().endswith(NIFTI_EXTENSIONS):
+        return None
+    try:
+        import importlib
+
+        import numpy as np
+
+        nifti = importlib.import_module("LesionNetworkMappingLib.nifti")
+        header = nifti.read_nifti_header(path)
+        slope, inter = header["scl_slope"], header["scl_inter"]
+        scaled = np.isfinite(slope) and slope != 0 and (slope != 1 or (np.isfinite(inter) and inter != 0))
+        if header["dtype"].kind != "f" and not scaled:
+            return None
+        data, _affine, _header = nifti.read_nifti(path)
+    except Exception:
+        logging.warning(f"Studio: the values of {path} could not be checked:\n{traceback.format_exc()}")
+        return None
+    if data.ndim > 3 and all(n == 1 for n in data.shape[3:]):
+        data = data.reshape(data.shape[:3])
+    if data.ndim != 3:
+        return None
+    values = data[np.isfinite(data) & (data != 0)]
+    if not values.size or np.array_equal(values, np.round(values)):
+        return None
+    return np.isfinite(data) & (data > 0), (float(values.min()), float(values.max()))
+
+
+def _setFractionalMask(segmentationNode, mask):
+    """Make the segmentation one segment (Segment_1, label 1) of the voxels of ``mask`` on its reference geometry.
+
+    Return False (nothing changed) when the reference geometry of the segmentation is not the grid of ``mask``.
+    """
+    import vtk.util.numpy_support
+
+    segmentation = segmentationNode.GetSegmentation()
+    geometry = segmentation.GetConversionParameter(slicer.vtkSegmentationConverter.GetReferenceImageGeometryParameterName())
+    labelmap = slicer.vtkOrientedImageData()
+    if not geometry or not slicer.vtkSegmentationConverter.DeserializeImageGeometry(geometry, labelmap, True, vtk.VTK_UNSIGNED_CHAR, 1):
+        return False
+    if tuple(labelmap.GetDimensions()) != tuple(mask.shape):
+        return False
+    scalars = vtk.util.numpy_support.vtk_to_numpy(labelmap.GetPointData().GetScalars())
+    scalars[:] = mask.transpose(2, 1, 0).ravel()
+    labelmap.Modified()
+    segmentation.RemoveAllSegments()
+    if mask.any():
+        segment = slicer.vtkSegment()
+        segment.SetName(LESION_SEGMENT_NAME)
+        segment.SetColor(*LESION_COLOR)
+        segment.SetLabelValue(1)
+        segment.AddRepresentation(slicer.vtkSegmentationConverter.GetBinaryLabelmapRepresentationName(), labelmap)
+        segmentation.AddSegment(segment, "Segment_1")
+    return True
+
+
 def loadLesion(path):
     """Load a lesion file as a segmentation (see ``_applyLesionNaming()`` for the "Lesion" segment).
 
-    Image files that the segmentation reader cannot read are loaded as a labelmap volume and converted.
+    Image files that the segmentation reader cannot read are loaded as a labelmap volume and converted. A NIfTI file
+    with fractional values (a probabilistic mask, ``desc-lesionProb``) is shown with every voxel above 0 as the lesion,
+    not truncated to integers by the reader; the node gets ``LESION_FRACTIONAL_ATTRIBUTE`` and the file is unchanged.
     """
     try:
         segmentationNode = slicer.util.loadSegmentation(path, {})
@@ -468,11 +561,24 @@ def loadLesion(path):
             slicer.mrmlScene.RemoveNode(labelmapNode)
             raise RuntimeError(_("Failed to convert {path} to a segmentation").format(path=path))
         slicer.mrmlScene.RemoveNode(labelmapNode)
+    fractional = None if storesSegments(path) else _fractionalMask(path)
+    if fractional is not None:
+        mask, (low, high) = fractional
+        if _setFractionalMask(segmentationNode, mask):
+            segmentationNode.SetAttribute(LESION_FRACTIONAL_ATTRIBUTE, f"{low:g} {high:g}")
+            logging.info(f"Studio: {path} has fractional values ({low:g} to {high:g}): the voxels above 0 are the lesion")
+        else:
+            logging.warning(f"Studio: {path} has fractional values but its grid is not the segmentation's: values below 1 are lost")
     baseName = _baseName(path)
     if baseName and segmentationNode.GetName() != baseName and _extension(path) in VOLUME_EXTENSIONS:
         # The segmentation reader keeps ".nii" in the node name of "x.nii.gz"
         segmentationNode.SetName(slicer.mrmlScene.GenerateUniqueName(baseName))
     _applyLesionNaming(segmentationNode, path)
+    if segmentationNode.GetAttribute(LESION_FRACTIONAL_ATTRIBUTE):
+        # The mask is how the file reads as a lesion, not an edit: Draw says "Saved · <file>" as for a 0/1 file
+        reference = vtk.vtkWeakReference()
+        reference.Set(segmentationNode)
+        _convertedOnLoad[segmentationNode.GetID()] = (reference, _voxelStamp(segmentationNode))
     return segmentationNode
 
 
@@ -1278,6 +1384,12 @@ def _bindToScanGrid(segmentationNode, volumeNode, tolerance=1e-3):
 
 
 def _loadToast(result, shell):
+    fractional = [node for node in result.segmentations if node.GetAttribute(LESION_FRACTIONAL_ATTRIBUTE)]
+    if fractional:
+        # A probabilistic mask is not an ordinary 0/1 lesion: say how it is shown (a study offers Binarize at 0.5)
+        shell.toast(_("{name} has fractional values (a probabilistic mask): every voxel above 0 is shown as the lesion. "
+                      "The file is unchanged.").format(name=fractional[0].GetName()), ms=6000, level="warning")
+        return
     loaded = result.nodes()
     if loaded:
         name = loaded[0].GetName()

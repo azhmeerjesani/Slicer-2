@@ -1674,6 +1674,9 @@ def _unchangedSinceRead(segmentationNode, storageNode):
     """
     if not segmentationNode.GetModifiedSinceRead():
         return True
+    importer = _importer()
+    if importer is not None and hasattr(importer, "unchangedSinceLoad") and importer.unchangedSinceLoad(segmentationNode):
+        return True  # a fractional file whose voxels the importer set after the reader (as the file reads as a lesion)
     try:
         storedTime = storageNode.GetStoredTime().GetMTime()
     except (AttributeError, TypeError):

@@ -99,6 +99,9 @@ labels:
 keep the original file, and are recorded in the study (an audit line each). The mirror is a mirror of the world x axis and
 is labelled **approximate**. The Library shows a **Flags** column and the filters "Has flags" and "2D".
 
+A lesion file with fractional values (a probabilistic mask such as `desc-lesionProb`) opens with every voxel above 0 as the
+lesion; the file itself is not changed. In a study, the Mask hygiene chip then offers **Binarize at 0.5**.
+
 ## Review, blinding and agreement
 
 Papers say that lesions "were checked by an expert" and rarely show it. The module records the check.

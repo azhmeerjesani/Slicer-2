@@ -20,6 +20,9 @@ Run with the main window and testing enabled::
 - ``test_5_study_notes_kept`` (BB-1): the Notes and source reference of Draw's Lesion card for a study subject are written to
   its lesion sidecar when the subject is left without a mask edit (an untraced subject too), are shown again when it is
   reopened, survive a later mask write, and a cleared value is removed from the sidecar.
+- ``test_6_probabilistic_lesion_binarize`` (BB-1): a study subject whose lesion file is a probabilistic mask (float values
+  below 1) opens with its voxels above 0, not as an empty lesion with unsaved changes; the Mask chip offers Binarize at 0.5,
+  which keeps the voxels of at least 0.5 and the original file as ``desc-prebinarize``.
 """
 
 import json
@@ -27,6 +30,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 
 try:
@@ -499,6 +503,60 @@ class StudioRegressionTest(unittest.TestCase):
             self.assertEqual(text(), ("", reference))
         finally:
             study_ui.closeStudy()
+
+    def test_6_probabilistic_lesion_binarize(self):
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import draw, lesionqc, shell, study_ui
+
+        if slicer.util.mainWindow() is None:
+            self.skipTest("needs the main window")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        data = np.zeros(grid.shape, np.float32)
+        data[30:35, 50:55, 45:50] = 0.3
+        data[31:34, 51:54, 46:49] = 0.8
+        folder = os.path.join(self.directory, "Probabilistic study")
+        os.makedirs(folder)
+        path = os.path.join(folder, "sub-01_lesion.nii.gz")
+        nifti.write_nifti(path, data, grid.affine)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        try:
+            session = study_ui.createStudy([path], studioShell, folder=folder)
+            self.assertTrue(session.open("sub-01", switchToDraw=True))
+            segmentationNode = session.segmentationNode()
+            self.assertEqual(draw.lesionMetrics(segmentationNode, compute=True)["voxels"], int(np.count_nonzero(data > 0)),
+                             "the voxels above 0 are the lesion (the reader truncates values below 1 to 0)")
+            self.assertFalse(session.isDirty())
+            self.assertEqual(draw.lesionSaveState(segmentationNode)[0], "saved")
+            qc = getattr(draw.lesionCard(), "qc", None)
+            self.assertIsNotNone(qc)
+
+            def actions():
+                return [action["id"] for chip in (qc.chips or []) for action in chip.get("actions", [])]
+
+            end = time.time() + 60
+            while time.time() < end and "binarize" not in actions():
+                lesionqc.core().waitIdle(1.0)
+                slicer.app.processEvents()
+                time.sleep(0.02)
+            self.assertIn("binarize", actions(), qc.chips)
+            self.assertTrue(qc.binarize())
+            for _ in range(4):
+                slicer.app.processEvents()
+            self.assertEqual(draw.lesionMetrics(session.segmentationNode(), compute=True)["voxels"], int(np.count_nonzero(data >= 0.5)))
+            # The original file is kept, values and all
+            lesions = os.path.join(folder, "lesions")
+            kept = [name for name in os.listdir(lesions) if "_desc-prebinarize_" in name]
+            self.assertTrue(kept, os.listdir(lesions))
+            np.testing.assert_allclose(np.squeeze(nifti.read_nifti(os.path.join(lesions, kept[0]))[0]), data)
+        finally:
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
 
     @staticmethod
     def _isAncestor(ancestor, widget):
