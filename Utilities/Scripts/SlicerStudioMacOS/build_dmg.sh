@@ -1292,6 +1292,71 @@ default_jobs() {
   echo "${cpus}"
 }
 
+setup_pythonqt_generator() {
+  # CTK runs the PythonQt wrapper generator, which reads the Qt headers of
+  # QTDIR, or else those at the QLibraryInfo paths of the Qt it is linked to.
+  # Homebrew installs Qt as one keg per module (qtbase, qtmultimedia, ...) and
+  # links them all into its prefix, but QLibraryInfo does not name that
+  # prefix. The generator then finds no headers, writes no wrappers and still
+  # succeeds, and PythonQt stops with "missing generated wrapper sources".
+  # Give it a Qt directory that holds every module, linked from the prefix.
+  if [ "${QT_MODE}" != "homebrew" ]; then
+    return 0
+  fi
+  local qt_dir="${WORK_DIR}/pythonqt-qt"
+  info "PythonQt wrapper generator: QTDIR=${qt_dir} (the Qt modules of ${BREW_PREFIX})"
+  export QTDIR="${qt_dir}"
+  if [ "${DRY_RUN}" = 1 ]; then
+    return 0
+  fi
+  rm -rf "${qt_dir}" && mkdir -p "${qt_dir}/include" "${qt_dir}/lib" ||
+    die "${EXIT_BUILD}" "could not create ${qt_dir}"
+  local entry name
+  for entry in "${BREW_PREFIX}"/lib/Qt*.framework; do
+    [ -d "${entry}" ] || continue
+    name=$(basename "${entry}" .framework)
+    ln -s "${entry}" "${qt_dir}/lib/${name}.framework"
+    if [ -d "${BREW_PREFIX}/include/${name}" ]; then
+      ln -s "${BREW_PREFIX}/include/${name}" "${qt_dir}/include/${name}"
+    elif [ -d "${entry}/Headers" ]; then
+      ln -s "${entry}/Headers" "${qt_dir}/include/${name}"
+    fi
+  done
+  # Modules that are not frameworks (static libraries)
+  for entry in "${BREW_PREFIX}"/include/Qt*; do
+    name=$(basename "${entry}")
+    if [ -d "${entry}" ] && [ ! -e "${qt_dir}/include/${name}" ]; then
+      ln -s "${entry}" "${qt_dir}/include/${name}"
+    fi
+  done
+  if [ ! -f "${qt_dir}/include/QtCore/qtcoreversion.h" ]; then
+    die "${EXIT_BUILD}" "no Qt headers found in ${BREW_PREFIX} (QtCore/qtcoreversion.h); is Homebrew's Qt linked? Try: brew link qtbase"
+  fi
+}
+
+reset_empty_pythonqt_wrappers() {
+  # A generator run that wrote no wrappers still marks its step as done, so
+  # re-running the build would fail again: run the generator again.
+  local ctk_build="${BUILD_DIR}/CTK-build"
+  local stamp="${ctk_build}/PythonQt-cmake/src/PythonQt-stamp/PythonQt-GenerateWrapper"
+  local wrappers="${ctk_build}/PythonQtGenerator-output-${QT_VERSION_FOUND}/generated_cpp"
+  if [ -f "${stamp}" ] && [ ! -d "${wrappers}" ]; then
+    info "the PythonQt wrappers are missing (${wrappers}): generating them again"
+    run rm -f "${stamp}"
+  fi
+}
+
+explain_build_failure() {
+  local ctk_build="${BUILD_DIR}/CTK-build"
+  if ! tail -n 400 "${LOG_DIR}/build.log" 2>/dev/null | grep -q "PythonQt: missing generated wrapper sources"; then
+    return 0
+  fi
+  warn "the PythonQt wrapper generator wrote no wrappers. From its logs in ${ctk_build}:"
+  cat "${ctk_build}/PythonQt_GenerateWrapper_step_output.txt" "${ctk_build}/PythonQt_GenerateWrapper_step_error.txt" 2>/dev/null |
+    grep -E "QTDIR|Using Qt|Qt version|Aborting|Classes in typesystem|header\.\.\." | sed 's/^/      /' >&2
+  warn "run this script again to retry; to build with the official Qt instead, add --qt=official --clean"
+}
+
 build_superbuild() {
   section "Build (Release superbuild)"
   JOBS=${JOBS:-$(default_jobs)}
@@ -1306,9 +1371,13 @@ build_superbuild() {
   if [ "${DRY_RUN}" = 0 ] && command -v ccache >/dev/null 2>&1; then
     ccache --zero-stats >/dev/null 2>&1
   fi
+  setup_pythonqt_generator
+  reset_empty_pythonqt_wrappers
   local start=${SECONDS}
-  run_logged "${LOG_DIR}/build.log" make -C "${BUILD_DIR}" "-j${JOBS}" ||
+  if ! run_logged "${LOG_DIR}/build.log" make -C "${BUILD_DIR}" "-j${JOBS}"; then
+    explain_build_failure
     die "${EXIT_BUILD}" "the build failed (see ${LOG_DIR}/build.log; re-run this script to continue)"
+  fi
   if [ "${DRY_RUN}" = 0 ]; then
     info "build finished in $(format_duration $((SECONDS - start)))"
     if command -v ccache >/dev/null 2>&1; then
