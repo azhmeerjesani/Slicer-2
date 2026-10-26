@@ -2903,12 +2903,17 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             return _("Map the study seed") if n == 1 else _("Map {n} study seeds").format(n=n) if n else _("Map study seeds")
         return _("Map the stimulation seed") if n == 1 else _("Map {n} stimulation seeds").format(n=n) if n else _("Map stimulation seeds")
 
-    def prepareSeedSet(self, runDir):
-        """Write the seeds of the current seed-set mode in ``runDir`` (coords.py); return lesions.tsv."""
+    def prepareSeedSet(self, runDir, checkMask=True):
+        """Write the seeds of the current seed-set mode in ``runDir`` (coords.py); return lesions.tsv.
+
+        ``checkMask``: refuse seeds with no weight in the connectome's brain mask, naming them (coords.OutsideMaskError,
+        a ValueError): their maps would be all zero and fail the whole run.
+        """
         from LesionNetworkMappingLib import coords
 
         mode = self.seedMode()
         radius, diameter = self.sphereSettings()
+        maskIndices = self.bundle.mask_indices if checkMask else None
         os.makedirs(runDir, exist_ok=True)
         if mode == "coordinates":
             # The foci as a plain table in the run folder: the seeds' source and the null's input (no local path is kept)
@@ -2917,7 +2922,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
                 f.write("study\tx\ty\tz\tspace\tradius\n")
                 for focus in self.coordinateFoci:
                     f.write(f"{focus.study}\t{focus.x!r}\t{focus.y!r}\t{focus.z!r}\t{focus.space}\t{'' if focus.radius_mm is None else repr(focus.radius_mm)}\n")
-            return coords.prepare_coordinates(runDir, self.coordinateFoci, self.bundle.grid, radius, diameter, source=fociPath, grid_space=coords.grid_space(self.bundle))
+            return coords.prepare_coordinates(runDir, self.coordinateFoci, self.bundle.grid, radius, diameter, source=fociPath, grid_space=coords.grid_space(self.bundle),
+                                              mask_indices=maskIndices)
         outcomes = self.stimulationOutcomes()
         column = self.stimOutcomeCombo.currentData if self.stimOutcomeCombo.count else ""
         safeColumn = column if column and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", column) else "outcome"
@@ -2925,7 +2931,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         kind = self.stimulationKind()
         threshold = float(self.stimThresholdSpin.value) or None
         return coords.prepare_stimulation(runDir, items, self.bundle.grid, kind, radius if kind == "points" else None, diameter if kind == "points" else None,
-                                          self.stimWeightingCombo.currentData or None, threshold, safeColumn)
+                                          self.stimWeightingCombo.currentData or None, threshold, safeColumn, mask_indices=maskIndices)
 
     def computeSeedSet(self):
         """Make the seeds of the Coordinates or Stimulation mode and map them with ``cohortmaps``; return the job or None."""
@@ -3002,7 +3008,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         fociPath = os.path.join(runDir, "foci.tsv")
         if not os.path.isfile(fociPath):
             try:
-                self.prepareSeedSet(runDir)
+                # Only foci.tsv is needed here (the null makes its own seeds): no brain-mask check
+                self.prepareSeedSet(runDir, checkMask=False)
             except (OSError, ValueError) as exc:
                 self.coordNullResultLabel.setText(_("The seeds cannot be made: {error}").format(error=exc))
                 self.coordNullResultLabel.show()
@@ -5757,9 +5764,33 @@ class LesionNetworkMappingTest(ScriptedLoadableModuleTest):
         record = coords.read_seed_record(os.path.dirname(lesionsTsv))
         self.assertEqual(record["sphere"]["diameter_mm"], 6.0)
         self.assertEqual(record["conversion"]["converted"], 1)
+
+        self.delayDisplay("A seed outside the connectome's brain mask is refused by name before mapping")
+        import numpy as np
+
+        corner = (np.asarray(widget.bundle.affine) @ np.array([1.0, 1.0, 1.0, 1.0]))[:3]  # on the grid, outside the ellipsoid mask
+        with open(csv, "w", encoding="utf-8") as f:
+            f.write(f"study,x,y,z,space\nSmith 2020,{a[0]},{a[1]},{a[2]},MNI\nOut 2021,{corner[0]},{corner[1]},{corner[2]},MNI\n")
+        self.assertEqual(len(widget.importCoordinates(csv)), 2)
+        with self.assertRaises(coords.OutsideMaskError) as caught:
+            widget.prepareSeedSet(os.path.join(self.tempDir, "coords outside"))
+        self.assertEqual(caught.exception.labels, ["Out 2021"])
+        widget.acceptTermsCheckBox.setChecked(True)
+        self.assertIsNone(widget.computeSeedSet())  # refused before a run: no job, no all-zero map failing the whole set
+        bannerText = widget.computeBanner.findChild(qt.QLabel, "LNMBannerText").text
+        self.assertIn("Out 2021 lies outside the connectome's brain mask", bannerText)
+        self.assertTrue(widget.computeBanner.isVisibleTo(widget.parent))
         widget.seedModeGroup.button(widget.seedModes.index("stimulation")).click()
         self.assertTrue(widget.stimulationSeedPanel.isVisibleTo(widget.parent))
         self.assertFalse(widget.coordinateSeedPanel.isVisibleTo(widget.parent))
+        sites = os.path.join(self.tempDir, "sites.csv")
+        with open(sites, "w", encoding="utf-8") as f:
+            f.write(f"participant_id,x,y,z\nsub-01,{a[0]},{a[1]},{a[2]}\nsub-03,{corner[0]},{corner[1]},{corner[2]}\n")
+        self.assertIsNotNone(widget.importStimulation(sites))
+        with self.assertRaises(coords.OutsideMaskError) as caught:
+            widget.prepareSeedSet(os.path.join(self.tempDir, "stim outside"))
+        self.assertEqual(caught.exception.labels, ["sub-03"])
+        widget.acceptTermsCheckBox.setChecked(False)
         widget.seedModeGroup.button(0).click()
         widget.setCoordinates([])
 

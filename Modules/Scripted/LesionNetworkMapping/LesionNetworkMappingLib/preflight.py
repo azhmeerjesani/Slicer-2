@@ -1442,6 +1442,15 @@ def assert_run_outputs(run_json_or_outputs, expected_n, kind="map", reference_he
 
     # Maps: existence, header, values
     maps = [os.fspath(path) for path in found["maps"]]
+    # The participant of each map of a maps.tsv: a failure names it, not only the map's file (a cache name)
+    owners = {}
+    if found["rows"]:
+        from .cohortmaps import MAP_KEYS
+
+        for row in found["rows"]:
+            for key in MAP_KEYS:
+                if row.get("participant_id") and not schema.is_missing(row.get(key)):
+                    owners.setdefault(os.path.normpath(os.fspath(row[key])), row["participant_id"])
     if not maps:
         failures.append(_failure("no_outputs", "The run lists no output maps.", found["record_path"] or found["folder"]))
     try:
@@ -1481,7 +1490,9 @@ def assert_run_outputs(run_json_or_outputs, expected_n, kind="map", reference_he
             if not finite.all():
                 failures.append(_failure("non_finite", f"{os.path.basename(path)} has {int(values.size - np.count_nonzero(finite))} non-finite values.", path, count=int(values.size - np.count_nonzero(finite))))
             elif (found["value_maps"] is None or path in found["value_maps"]) and (values.size == 0 or float(values.max()) == float(values.min())):
-                failures.append(_failure("constant_map", f"{os.path.basename(path)} has the same value everywhere (zero variance).", path))
+                owner = owners.get(os.path.normpath(path))
+                what = f"The map of {owner} ({os.path.basename(path)})" if owner else os.path.basename(path)
+                failures.append(_failure("constant_map", f"{what} has the same value everywhere (zero variance).", path))
 
     # Sidecars
     required = SIDECAR_FIELDS.get(kind, DEFAULT_SIDECAR_FIELDS)

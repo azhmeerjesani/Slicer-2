@@ -701,6 +701,26 @@ class AssertRunOutputsTest(_Fixture):
         self.assertEqual(self.codes(preflight.assert_run_outputs(tsv, self.bundle.n_subjects, expected_lesions=3)), ["wrong_lesion_count"])
         self.assertEqual(self.codes(preflight.assert_run_outputs(tsv, 50, expected_lesions=2)), ["wrong_n"])
 
+    def test_constant_map_names_its_participant(self):
+        """A constant map of a maps.tsv is named by its participant, not only by its file (a cache name)."""
+        folder = os.path.join(self.tmp, "cohort constant")
+        os.makedirs(folder)
+        record = self.run_record(self.run_dir)
+        maps = next(iter(record["maps"].values()))
+        flat = {}
+        for key, path in maps.items():
+            flat[key] = os.path.join(folder, "lesion-5a1b45d615e2_" + os.path.basename(path))
+            shutil.copyfile(path, flat[key])
+        data, affine, _ = nifti.read_nifti(flat["AvgR"])
+        nifti.write_nifti(flat["AvgR"], np.zeros_like(np.asarray(data, dtype=np.float32)), affine)
+        rows = [{"participant_id": "sub-01", "lesion": "x.nii.gz", **maps}, {"participant_id": "sub-03", "lesion": "y.nii.gz", **flat}]
+        cohortmaps.write_maps_tsv(os.path.join(folder, cohortmaps.MAPS_TSV), rows)
+        with open(os.path.join(folder, cohortmaps.COHORTMAPS_JSON), "w", encoding="utf-8") as f:
+            json.dump({"format": cohortmaps.FORMAT_NAME, "status": "done", "n": self.bundle.n_subjects, "bundle": record["bundle"]}, f)
+        failures = preflight.assert_run_outputs(os.path.join(folder, cohortmaps.MAPS_TSV), self.bundle.n_subjects, kind="cohortmaps", expected_lesions=2)
+        self.assertEqual(self.codes(failures), ["constant_map"])
+        self.assertTrue(failures[0]["message"].startswith("The map of sub-03 (lesion-5a1b45d615e2_"), failures[0]["message"])
+
 
 class GroupRecordTest(_Fixture):
     """assert_run_outputs on real glm.json and cohort.json records (16 lesion maps of a cohortmaps run)."""

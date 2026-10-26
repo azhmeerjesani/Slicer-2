@@ -116,6 +116,19 @@ class FamilyError(ValueError):
     """The gray-matter mask is not in the template family of the grid (or a space is unknown)."""
 
 
+class OutsideMaskError(ValueError):
+    """Seeds with no weight inside the connectome's brain mask (``labels``: their labels, in order).
+
+    Such a seed has no connectome time course: its map would be all zero and fail the run's checks.
+    """
+
+    def __init__(self, labels):
+        self.labels = list(labels)
+        one = len(self.labels) == 1
+        super().__init__(f"{', '.join(self.labels)} {'lies' if one else 'lie'} outside the connectome's brain mask: no connectome voxel to map from. "
+                         f"Remove {'it' if one else 'them'} (or check {'its' if one else 'their'} position and space) and map again.")
+
+
 class Focus(NamedTuple):
     """One reported coordinate (mm) with its study, coordinate space and optional sphere radius."""
 
@@ -912,17 +925,25 @@ def seed_id(label, used=None):
     return name
 
 
-def write_seed_set(out_dir, seeds, grid, kind, record=None):
+def write_seed_set(out_dir, seeds, grid, kind, record=None, mask_indices=None):
     """Write seed NIfTIs, ``lesions.tsv`` and ``seeds.json`` in ``out_dir``; return the path of lesions.tsv.
 
     ``seeds``: [(participant_id, label, volume float [i, j, k], extra dict)] on ``grid``. Paths in the files are
-    relative to ``out_dir``; sources are named by file name and sha256 only.
+    relative to ``out_dir``; sources are named by file name and sha256 only. ``mask_indices`` (the connectome's
+    in-mask voxels, flat C-order, e.g. ``bundle.mask_indices``): when given, seeds with no weight in the mask are
+    refused before anything is written (:class:`OutsideMaskError`, naming every such seed by its label).
     """
     from .nifti import write_nifti
 
     if kind not in KINDS:
         raise ValueError(f"Unknown seed kind {kind!r}")
     grid = _as_grid(grid)
+    if mask_indices is not None:
+        indices = np.asarray(mask_indices)
+        outside = [str(label) for _sid, label, volume, _extra in seeds
+                   if np.any(np.asarray(volume) > 0) and not np.any(np.asarray(volume, dtype=np.float32).reshape(-1)[indices] > 0)]
+        if outside:
+            raise OutsideMaskError(outside)
     out_dir = os.path.abspath(os.fspath(out_dir))
     folder = os.path.join(out_dir, SEED_FOLDER)
     os.makedirs(folder, exist_ok=True)
@@ -967,8 +988,12 @@ def _source(path):
     return {"file": os.path.basename(os.fspath(path)), "sha256": _sha256(path)} if path and os.path.isfile(path) else None
 
 
-def prepare_coordinates(out_dir, foci, grid, radius_mm=None, diameter_mm=None, tal_matrix=DEFAULT_TAL_MATRIX, source=None, grid_space=None, supersample=DEFAULT_SUPERSAMPLE):
-    """Study-level union seeds of ``foci`` in ``out_dir`` (Talairach foci converted, recorded); return lesions.tsv."""
+def prepare_coordinates(out_dir, foci, grid, radius_mm=None, diameter_mm=None, tal_matrix=DEFAULT_TAL_MATRIX, source=None, grid_space=None, supersample=DEFAULT_SUPERSAMPLE,
+                        mask_indices=None):
+    """Study-level union seeds of ``foci`` in ``out_dir`` (Talairach foci converted, recorded); return lesions.tsv.
+
+    ``mask_indices``: refuse studies whose seed has no weight in the connectome's brain mask (:func:`write_seed_set`).
+    """
     if not foci:
         raise ValueError("No coordinates")
     mni, conversion = to_mni(foci, tal_matrix)
@@ -982,11 +1007,11 @@ def prepare_coordinates(out_dir, foci, grid, radius_mm=None, diameter_mm=None, t
               "studies": len(groups), "foci": len(foci), "seed_rule": "study-level union of spheres (Darby et al. 2019)",
               "placement": f"MNI coordinates are used as the world mm of the connectome grid ({grid_space or 'space not stated'}); no template-family warp",
               "source": _source(source)}
-    return write_seed_set(out_dir, seeds, grid, "coordinates", record)
+    return write_seed_set(out_dir, seeds, grid, "coordinates", record, mask_indices)
 
 
-def prepare_atrophy(out_dir, wmaps, grid, rule=DEFAULT_ATROPHY_RULE, weighted=False):
-    """Atrophy seeds of per-patient w-maps {participant_id: path} on ``grid``; return lesions.tsv."""
+def prepare_atrophy(out_dir, wmaps, grid, rule=DEFAULT_ATROPHY_RULE, weighted=False, mask_indices=None):
+    """Atrophy seeds of per-patient w-maps {participant_id: path} on ``grid``; return lesions.tsv (``mask_indices``: see :func:`write_seed_set`)."""
     from .geometry import resample_to_grid
     from .nifti import read_nifti
 
@@ -1004,14 +1029,15 @@ def prepare_atrophy(out_dir, wmaps, grid, rule=DEFAULT_ATROPHY_RULE, weighted=Fa
         seeds.append((seed_id(sid, used), sid, seed, {"atrophy": record}))
         sources[sid] = _source(path)
     return write_seed_set(out_dir, seeds, grid, "atrophy", {"rule": rule, "weighted": bool(weighted), "sources": sources,
-                                                            "seed_rule": "per-patient w-map thresholded (Tetreault et al. 2020)"})
+                                                            "seed_rule": "per-patient w-map thresholded (Tetreault et al. 2020)"}, mask_indices)
 
 
-def prepare_stimulation(out_dir, items, grid, kind, radius_mm=None, diameter_mm=None, weighting=None, threshold=None, outcome_column="outcome"):
+def prepare_stimulation(out_dir, items, grid, kind, radius_mm=None, diameter_mm=None, weighting=None, threshold=None, outcome_column="outcome", mask_indices=None):
     """Stimulation seeds of ``items`` [{participant_id, points | image, outcome}] in ``out_dir``; return lesions.tsv.
 
     Points of rows with the same participant_id form one seed (a union). The outcomes, when given, are written to
-    ``outcomes.tsv`` (for :func:`slnm_arguments`).
+    ``outcomes.tsv`` (for :func:`slnm_arguments`). ``mask_indices``: refuse participants whose seed has no weight
+    in the connectome's brain mask (:func:`write_seed_set`).
     """
     grid = _as_grid(grid)
     merged = {}
@@ -1040,7 +1066,7 @@ def prepare_stimulation(out_dir, items, grid, kind, radius_mm=None, diameter_mm=
     tsv = write_seed_set(out_dir, seeds, grid, "stimulation", {
         "stimulation": {"kind": kind, "weighting": weighting or STIMULATION_WEIGHTINGS[kind][0],
                         "sphere": sphere_radius(radius_mm, diameter_mm)[1] if kind == "points" else None},
-        "outcome_column": outcome_column if outcomes else None, "research_use": RESEARCH_ONLY})
+        "outcome_column": outcome_column if outcomes else None, "research_use": RESEARCH_ONLY}, mask_indices)
     if outcomes:
         write_outcome_table(os.path.join(os.path.dirname(tsv), OUTCOMES_TSV), outcomes, outcome_column)
     return tsv
@@ -1189,7 +1215,8 @@ def main(argv=None):
     try:
         if args.command == "seeds":
             foci = read_foci(args.foci, normalize_space(args.space))
-            tsv = prepare_coordinates(out_dir, foci, bundle.grid, args.radius, args.diameter, args.tal_matrix, args.foci, grid_space(bundle))
+            tsv = prepare_coordinates(out_dir, foci, bundle.grid, args.radius, args.diameter, args.tal_matrix, args.foci, grid_space(bundle),
+                                      mask_indices=bundle.mask_indices)
             jobs.emit("done", outputs=[tsv, os.path.join(out_dir, SEEDS_JSON)], elapsed=round(jobs.elapsed(), 3), n=len(group_by_study(foci)))
             return jobs.EXIT_OK
         if args.command == "atrophy":
@@ -1199,7 +1226,7 @@ def main(argv=None):
                 if not sid or not path:
                     raise jobs.JobError(f"--wmap needs ID=FILE, got {item!r}", code="usage", exit_code=jobs.EXIT_USAGE)
                 wmaps[sid] = path
-            tsv = prepare_atrophy(out_dir, wmaps, bundle.grid, args.rule, args.weighted)
+            tsv = prepare_atrophy(out_dir, wmaps, bundle.grid, args.rule, args.weighted, mask_indices=bundle.mask_indices)
             jobs.emit("done", outputs=[tsv, os.path.join(out_dir, SEEDS_JSON)], elapsed=round(jobs.elapsed(), 3), n=len(wmaps))
             return jobs.EXIT_OK
         return _run_null(args, argv, bundle, out_dir)

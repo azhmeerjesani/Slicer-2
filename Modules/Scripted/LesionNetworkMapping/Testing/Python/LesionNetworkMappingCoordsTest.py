@@ -416,6 +416,40 @@ class SeedSetTest(CoordsTestCase):
         mask = self.bundle.mask
         self.assertGreater(np.corrcoef(np.asarray(t1)[mask], np.asarray(t3)[mask])[0, 1], 0.5)  # A and A2 share a network
 
+    def test_seed_outside_the_mask_is_refused_by_name(self):
+        """A seed with no weight in the connectome's brain mask is refused before anything is written, named by its
+        participant id or study (its all-zero map would otherwise fail the whole seed-set run under a cache name).
+        """
+        a = self.meta["blobs"]["A"]["center_world"]
+        corner = (np.asarray(self.bundle.affine) @ np.array([1.0, 1.0, 1.0, 1.0]))[:3]  # on the grid, outside the ellipsoid mask
+        items = [{"participant_id": "sub-01", "points": [tuple(a)]}, {"participant_id": "sub-03", "points": [tuple(corner)]},
+                 {"participant_id": "sub-02", "points": [tuple(a)]}]
+        out = os.path.join(self.tmp, "stim outside")
+        with self.assertRaises(coords.OutsideMaskError) as caught:
+            coords.prepare_stimulation(out, items, self.bundle.grid, "points", radius_mm=3, mask_indices=self.bundle.mask_indices)
+        self.assertIsInstance(caught.exception, ValueError)  # the UI's "The seeds cannot be made" path
+        self.assertEqual(caught.exception.labels, ["sub-03"])
+        self.assertIn("sub-03 lies outside the connectome's brain mask", str(caught.exception))
+        self.assertFalse(os.path.exists(os.path.join(out, coords.LESIONS_TSV)))
+        self.assertFalse(os.path.exists(os.path.join(out, coords.SEED_FOLDER)))
+        # The seeds inside the mask are made as before; without a mask nothing is checked (the library's earlier contract)
+        tsv = coords.prepare_stimulation(out, [items[0], items[2]], self.bundle.grid, "points", radius_mm=3, mask_indices=self.bundle.mask_indices)
+        self.assertEqual([row["participant_id"] for row in read_tsv(tsv)[1]], ["sub-01", "sub-02"])
+        coords.prepare_stimulation(os.path.join(self.tmp, "stim unchecked"), items, self.bundle.grid, "points", radius_mm=3)
+        # Coordinates: the study is named; several are all named
+        foci = [coords.Focus(*a, study="Smith 2020"), coords.Focus(*corner, study="Out 2021"), coords.Focus(*corner, study="Far 2022")]
+        with self.assertRaises(coords.OutsideMaskError) as caught:
+            coords.prepare_coordinates(os.path.join(self.tmp, "coords outside"), foci, self.bundle.grid, radius_mm=3, mask_indices=self.bundle.mask_indices)
+        self.assertEqual(caught.exception.labels, ["Out 2021", "Far 2022"])
+        self.assertIn("Out 2021, Far 2022 lie outside", str(caught.exception))
+        # The command line refuses the same way, naming the study
+        source = self.write("outside.csv", "study,x,y,z,space\n" + f"Smith 2020,{a[0]},{a[1]},{a[2]},MNI\nOut 2021,{corner[0]},{corner[1]},{corner[2]},MNI\n")
+        process = subprocess.run([sys.executable, "-m", "LesionNetworkMappingLib.coords", "seeds", "--foci", source, "--bundle", self.bundle.path,
+                                  "--out", os.path.join(self.tmp, "cli outside"), "--radius", "3"],
+                                 check=False, cwd=MODULE_DIR, env=_env(), capture_output=True, text=True, timeout=300)
+        self.assertNotEqual(process.returncode, 0)
+        self.assertIn("Out 2021 lies outside the connectome's brain mask", process.stdout + process.stderr)
+
     def test_atrophy_prepare(self):
         w = np.zeros(self.bundle.shape, dtype=np.float32)
         w[self.bundle.mask] = 0.5
