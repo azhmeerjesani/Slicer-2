@@ -87,7 +87,11 @@ Finder/Files** or **Move to Trash**.
 
 If another program changes a file of a project while Slicer Studio has it open,
 that file is never overwritten: Slicer Studio saves its own version next to it,
-as `<name> (Slicer Studio).<ext>`, and tells you.
+as `<name> (Slicer Studio).<ext>`, and tells you. This includes the scene file:
+if official 3D Slicer saves `<name>.mrml` while the project is open, Slicer
+Studio keeps it and saves its own scene as `<name> (Slicer Studio).mrml` from
+then on. The next time, the project opens `<name>.mrml`; open the
+`(Slicer Studio)` file to continue with Slicer Studio's version.
 
 When you close something in a project (a scan, a point list), its file goes to
 `.studio/removed/` in the project, where it stays for 14 days.

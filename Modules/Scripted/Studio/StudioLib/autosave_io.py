@@ -1824,7 +1824,8 @@ class ProjectWriter(SlotWriter):
     - The scene file is written last (``vtkMRMLScene::Commit`` to a temporary file, then replaced), with paths relative
       to the project folder; files of nodes that left the scene are moved to ``.studio/removed``.
     - A file another program changed since Studio wrote it (size or time differ) is never overwritten: Studio writes
-      "<name> (Slicer Studio).<ext>" and reports it in ``conflicts``.
+      "<name> (Slicer Studio).<ext>" and reports it in ``conflicts``. The scene file too: Studio then writes its scene to
+      "<project> (Slicer Studio).mrml" for the rest of the session (``sceneConflictPath``).
 
     The scheduling is the autosave service's (``autosave.AutosaveService``): ``plan()``, ``runMainThreadStep()`` from a
     timer, then ``submitFinalize()``.
@@ -1850,6 +1851,11 @@ class ProjectWriter(SlotWriter):
         self.lastResult = None
         #: [(other program's file name, Studio's file name)] not reported yet (``takeConflicts()``)
         self.conflicts = []
+        #: "<project> (Slicer Studio).mrml" once another program changed the scene file: Studio's scene is written there
+        self.sceneConflictPath = None
+        #: ``vtkMRMLScene::GetStoredTime()`` after the scene file was last read or written by this writer: a later value
+        #: means that this Slicer wrote the scene to a file since (the official Save dialog), not another program
+        self._sceneStoredTime = None
 
     def manifestPath(self):
         return None
@@ -1888,6 +1894,8 @@ class ProjectWriter(SlotWriter):
         """Remember the files of the project that the scene references (a project opened in place): another program that
         changes one of them later is detected, and a file that leaves the scene is moved to .studio/removed.
         """
+        self._record(self.project.scenePath, ours=False)
+        self._sceneStoredTime = scene.GetStoredTime()
         rootDirectory = scene.GetRootDirectory()
         nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
         for index in range(nodes.GetNumberOfItems()):
@@ -1914,6 +1922,8 @@ class ProjectWriter(SlotWriter):
         for entry in self.entries.values():
             if entry.get("files"):
                 entry["files"] = [moved(os.path.normpath(path), oldPath, newPath) for path in entry["files"]]
+        if self.sceneConflictPath:
+            self.sceneConflictPath = moved(os.path.normpath(self.sceneConflictPath), oldPath, newPath)
         self.slotDir = newPath
 
     #
@@ -2120,6 +2130,24 @@ class ProjectWriter(SlotWriter):
     # Commit (main thread, last job)
     #
 
+    def _sceneTarget(self, scene):
+        """The scene file to write and the conflict to report: (path, None), or (path, (their name, our name)).
+
+        The scene file of the project, unless another program changed it since Studio read or wrote it: then it is kept
+        and Studio writes "<project> (Slicer Studio).mrml" next to it (and keeps writing there in this session).
+        """
+        projects = _projects()
+        current = self.sceneConflictPath or self.project.scenePath
+        record = self.records.get(_canonical(current))
+        stat = _statOrNone(current)
+        if stat is None or record is None or record["stat"] == stat:
+            return current, None
+        if self._sceneStoredTime is not None and scene.GetStoredTime() != self._sceneStoredTime:
+            return current, None  # written by this Slicer since (the official Save dialog): not another program
+        stem = os.path.basename(self.project.scenePath)[: -len(projects.SCENE_EXTENSION)]
+        name = projects.uniqueName(self.project.path, f"{stem}{CONFLICT_SUFFIX}{projects.SCENE_EXTENSION}")
+        return os.path.join(self.project.path, name), (os.path.basename(current), name)
+
     def commit(self, plan, scene):
         """Point the copied and snapshot nodes at their files, then replace the scene file (relative paths)."""
         projects = _projects()
@@ -2165,9 +2193,11 @@ class ProjectWriter(SlotWriter):
             scene.SetURL(scenePath)
         if os.path.normpath(scene.GetRootDirectory() or "") != os.path.normpath(projectDir):
             scene.SetRootDirectory(projectDir)
+        # A scene file that another program changed is kept: Studio writes its own next to it
+        target, sceneConflict = self._sceneTarget(scene)
         # vtkMRMLScene names the folder of hidden nodes after the scene file up to its first dot: the temporary scene
         # file keeps that part of the name
-        stem = os.path.basename(scenePath)[: -len(projects.SCENE_EXTENSION)]
+        stem = os.path.basename(target)[: -len(projects.SCENE_EXTENSION)]
         temporary = os.path.join(projectDir, f"{stem}.{PROJECT_TEMPORARY_PREFIX.strip('.')}{uuid.uuid4().hex[:8]}{projects.SCENE_EXTENSION}")
         start = time.perf_counter()
         try:
@@ -2175,21 +2205,25 @@ class ProjectWriter(SlotWriter):
             if not written or not os.path.isfile(temporary):
                 raise OSError(_tr("The scene file could not be written."))
             fsyncFile(temporary)
-            replaceWithRetry(temporary, scenePath)
+            replaceWithRetry(temporary, target)
         finally:
             _removeQuietly(temporary)
+        if sceneConflict is not None:
+            self.sceneConflictPath = target
+            plan.conflicts.append(sceneConflict)
+        self._sceneStoredTime = scene.GetStoredTime()
         plan.committed = True
         plan.metrics["sceneMs"] = round((time.perf_counter() - start) * 1000.0, 2)
         # After the commit: writing the scene may modify a node once (the subject hierarchy)
         plan.fingerprint = sceneFingerprint(scene, sentinelIds())
-        self._record(scenePath, ours=True)
+        self._record(target, ours=True)
         for nodeId in plan.nodeIds:
             node = scene.GetNodeByID(nodeId)
             entry = plan.entries.get(nodeId) or {}
             if node is not None and node.GetModifiedSinceRead() and entry.get("kind") not in ("skip",):
                 plan.incomplete = True
         # Files of nodes that left the scene
-        referenced = {_canonical(scenePath)}
+        referenced = {_canonical(scenePath), _canonical(target)}
         rootDirectory = scene.GetRootDirectory()
         nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
         for index in range(nodes.GetNumberOfItems()):

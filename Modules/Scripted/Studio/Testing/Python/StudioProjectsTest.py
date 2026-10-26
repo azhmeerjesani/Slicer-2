@@ -24,7 +24,8 @@ folder "Slicer Studio tést" (spaces and non-ASCII characters). The tests cover:
 - a closed-surface segmentation (a file plus a folder) saved again in place; temporary folders left by a crash go;
 - a detached-header volume (.nhdr) from outside is written into the project as one file;
 - a project loaded in Classic continues in place in Studio (no copy); the Library order follows official saves;
-- a project saves when its data fits on the disk, also with less than 1 GB free (only the private autosave keeps 1 GB).
+- a project saves when its data fits on the disk, also with less than 1 GB free (only the private autosave keeps 1 GB);
+- a scene file that another program changed is kept: Studio writes "<project> (Slicer Studio).mrml" next to it.
 """
 
 import hashlib
@@ -886,6 +887,64 @@ class StudioProjectsTest(unittest.TestCase):
             qt.QSettings().remove(projects.ROOT_KEY)
             qt.QSettings().remove(projects.ROOT_CHOSEN_KEY)
             os.environ[projects.ROOT_ENVIRONMENT] = self.root
+
+    def test_22_scene_file_changed_by_another_program(self):
+        """The project's .mrml that another program (official 3D Slicer) changed is kept: Studio writes its own scene as
+        "<project> (Slicer Studio).mrml" next to it, says so once, and keeps saving there. A scene file that this Slicer
+        wrote itself (the official Save dialog) is not another program's change.
+        """
+        service = self._service()
+        volume, _path = self._userVolume("Scan", shape=(12, 14, 16))
+        project = self._projectFor(service)
+        self._save(service)
+        announced = []
+        service.setProjectAnnouncer(lambda event, project, **info: announced.append((event, info)))
+
+        def edit(value):
+            array = slicer.util.arrayFromVolume(volume)
+            array[0, 0, 0] = value
+            slicer.util.arrayFromVolumeModified(volume)
+            self._save(service)
+
+        # This Slicer saves the scene file itself (the official Save dialog): Studio goes on writing it
+        self.assertTrue(slicer.util.saveScene(project.scenePath))
+        edit(11)
+        self.assertEqual([event for event, _info in announced], [])
+        self.assertEqual([name for name in os.listdir(project.path) if name.endswith(".mrml")], ["Scan.mrml"])
+        # Another program adds a node to the scene file
+        time.sleep(0.02)
+        with open(project.scenePath, encoding="utf-8") as f:
+            text = f.read()
+        added = '<MarkupsFiducial id="vtkMRMLMarkupsFiducialNodeOther" name="Added by official Slicer" ></MarkupsFiducial>\n'
+        with open(project.scenePath, "w", encoding="utf-8") as f:
+            f.write(text.replace("</MRML>", added + "</MRML>"))
+        theirs = _md5File(project.scenePath)
+        edit(22)
+        self.assertEqual(_md5File(project.scenePath), theirs, "the other program's scene file is never overwritten")
+        ours = os.path.join(project.path, "Scan (Slicer Studio).mrml")
+        self.assertTrue(os.path.isfile(ours))
+        self.assertIn(("conflict", {"conflicts": [("Scan.mrml", "Scan (Slicer Studio).mrml")]}), announced)
+        self.assertFalse(slicer.mrmlScene.GetModifiedSinceRead())
+        self.assertEqual(slicer.mrmlScene.GetURL(), project.scenePath)
+        # The next saves go on in Studio's scene file, without another notice or another copy
+        del announced[:]
+        edit(33)
+        self.assertEqual(_md5File(project.scenePath), theirs)
+        self.assertEqual(announced, [])
+        self.assertEqual(sorted(name for name in os.listdir(project.path) if name.endswith(".mrml")), ["Scan (Slicer Studio).mrml", "Scan.mrml"])
+        self.assertFalse(os.path.exists(os.path.join(project.path, ".studio", "removed")), "no scene file is moved away")
+        # Studio's scene file is a standard scene with relative paths: it loads with the last edit
+        with open(ours, encoding="utf-8") as f:
+            self.assertNotIn(self.tempDir, f.read())
+        imageFile = volume.GetStorageNode().GetFileName()
+        service.dispose()
+        self.services.remove(service)
+        slicer.mrmlScene.Clear(0)
+        slicer.util.loadScene(ours)
+        loaded = slicer.util.getNode("Scan")
+        self.assertEqual(os.path.normpath(loaded.GetStorageNode().GetFileName()), os.path.normpath(imageFile))
+        self.assertEqual(int(slicer.util.arrayFromVolume(loaded)[0, 0, 0]), 33)
+
 
 
 def _sphere(center=(0, 0, 0)):
