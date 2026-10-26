@@ -77,7 +77,7 @@ SEGMENTATION_MODE_KEY = "Studio/NiftiExport/SegmentationMode"
 #: Node attribute written by the DICOM scalar volume plug-in
 DICOM_UIDS_ATTRIBUTE = "DICOM.instanceUIDs"
 #: A BIDS subject entity in a name: "sub-01"
-_BIDS_SUBJECT_PATTERN = re.compile(r"(?:^|[_\-/\s.])(sub-[A-Za-z0-9]+)")
+_BIDS_SUBJECT_PATTERN = re.compile(r"(?:^|[_\-/\s.(])(sub-[A-Za-z0-9]+)")
 #: Modality suffixes recognised in scan names (BIDS spelling)
 _MODALITIES = (("flair", "FLAIR"), ("t1w", "T1w"), ("t1", "T1w"), ("mprage", "T1w"), ("t2w", "T2w"), ("t2", "T2w"), ("dwi", "dwi"), ("bold", "bold"),
                ("ct", "CT"))
@@ -309,6 +309,15 @@ def exportableNodes(includeTemplates=True):
     return sorted(nodes, key=lambda node: order.get(kindOf(node), 5))
 
 
+def hasExportableNodes():
+    """True when the scene has an image or a segmentation with segments (cheap: no voxel is read; for Search)."""
+    for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
+        if not node.GetHideFromEditors() and not isFigure(node) and node.GetImageData() is not None:
+            return True
+    return any(not node.GetHideFromEditors() and node.GetSegmentation().GetNumberOfSegments() > 0
+               for node in slicer.util.getNodesByClass("vtkMRMLSegmentationNode"))
+
+
 def dicomNodes():
     """The loaded volumes that came from DICOM (the DICOM scalar volume plug-in tags them)."""
     return [node for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode") if isDicomNode(node) and not node.GetHideFromEditors()]
@@ -345,11 +354,14 @@ def templateInfo(node, grid=None):
 def spaceInfo(node, grid, transformed=False):
     """``(space name or None, resolution, template info or None)`` of an exported image.
 
-    The node's ``Studio.Space`` attribute wins (it also covers an image normalized with a transform); else the grid is
-    compared with the known MNI grids and the user's templates.
+    The node's ``Studio.Space`` attribute wins; else the grid is compared with the known MNI grids and the user's
+    templates. With ``transformed`` (a transform was applied to the exported copy) the image is no longer on the grid
+    or in the space it is tagged with, so there is no space (code 2, aligned).
     """
+    if transformed:
+        return None, None, None
     named = space.spaceOf(node) if node is not None and node.GetAttribute(space.SPACE_ATTRIBUTE) else None
-    if named is None and grid is not None and not transformed:
+    if named is None and grid is not None:
         named = space.spaceOf(grid)
         if named is None and node is not None and isTemplateNode(node):
             named = space.spaceOf(node)
@@ -400,8 +412,10 @@ def volumeData(volumeNode):
     if transformNode is not None and not transformNode.IsTransformToWorldLinear():
         clone = _cloneVolume(volumeNode)
         slicer.vtkSlicerTransformLogic().hardenTransform(clone)
+        # Label maps (also the temporary ones of segmentations) are resampled nearest neighbour, other volumes linearly
+        interpolation = "nearest neighbour" if volumeNode.IsA("vtkMRMLLabelMapVolumeNode") else "linear interpolation"
         note = {"Name": transformNode.GetName(), "Linear": False,
-                "Description": "A non-linear transform was applied to the exported copy (resampled, linear interpolation)"}
+                "Description": f"A non-linear transform was applied to the exported copy (resampled, {interpolation})"}
         volumeNode = clone
         transformNode = None
     matrix = vtk.vtkMatrix4x4()
@@ -481,11 +495,19 @@ def _writeText(path, text):
 
 
 def _writeWithSlicer(task):
-    """Fallback without LesionNetworkMappingLib: 3D Slicer's own writer (codes stay 1), then the side files."""
+    """Fallback without LesionNetworkMappingLib: 3D Slicer's own writer (codes stay 1), then the side files.
+
+    A storage node outside the scene writes the file, so the node keeps its own storage node and file name.
+    """
     folder = os.path.dirname(task.path)
     if folder:
         os.makedirs(folder, exist_ok=True)
-    if not slicer.util.saveNode(task.node, task.path):
+    storageNode = task.node.CreateDefaultStorageNode()
+    if storageNode is None:
+        raise ExportError(_("Failed to write {path}").format(path=task.path))
+    storageNode.SetFileName(task.path)
+    storageNode.SetUseCompression(task.path.lower().endswith(".gz"))
+    if not storageNode.WriteData(task.node):
         raise ExportError(_("Failed to write {path}").format(path=task.path))
     task._writeSideFiles()
     return task.files()
@@ -590,7 +612,7 @@ class Job:
                 candidate = f"{value}{index}"
                 index += 1
             taken.add(candidate.lower())
-            result.append((segmentId, f"{base}_label-{candidate}_mask{extension}"))
+            result.append((segmentId, maskBaseName(base, candidate) + extension))
         return result
 
     def prepare(self):
@@ -796,7 +818,7 @@ def _tsvText(text):
 
 
 def labelTableItkSnap(labels):
-    """An ITK-SNAP label description file (Segmentation > Import Label Descriptions; FSLeyes and MRIcroGL read the names)."""
+    """An ITK-SNAP label description file (ITK-SNAP: Segmentation > Import Label Descriptions)."""
     lines = [
         "################################################",
         "# ITK-SnAP Label Description File (Slicer Studio NIfTI export)",
@@ -840,6 +862,10 @@ def thresholdMask(data, threshold, sign="both"):
 def _dicomValue(uid, tag):
     database = getattr(slicer, "dicomDatabase", None)
     if database is None or not uid:
+        return ""
+    isOpen = getattr(database, "isOpen", False)
+    if not (isOpen() if callable(isOpen) else isOpen):
+        # Without a database (a volume loaded from a scene), Qt would log an SQL error per query
         return ""
     try:
         return str(database.instanceValue(uid, tag) or "").strip()
@@ -897,7 +923,8 @@ def defaultBaseName(node, kind=None, bids=False):
     """The base file name (without extension) proposed for ``node``.
 
     With ``bids`` (project exports), names are BIDS-like when the node names a subject: ``sub-01_T1w``,
-    ``sub-01_desc-lesion`` (masks add ``_label-<segment>_mask``), ``sub-01_stat-T_statmap``; otherwise the node name.
+    ``sub-01_desc-lesion`` (masks are ``sub-01_label-<segment>_desc-lesion_mask``), ``sub-01_stat-T_statmap``; otherwise the
+    node name.
     """
     kind = kind or kindOf(node)
     name = node.GetName()
@@ -917,6 +944,17 @@ def defaultBaseName(node, kind=None, bids=False):
         return f"{subject}_dseg"
     modality = _modality(name) or _modality(os.path.basename(_storageFile(node) or ""))
     return f"{subject}_{modality}" if modality else f"{subject}_{safeName(name.replace(subject, ''), 'scan')}"
+
+
+def maskBaseName(base, segment):
+    """The base name of the mask of ``segment``: ``<base>_label-<segment>_mask``, with BIDS entity order kept.
+
+    BIDS puts ``desc`` last of the entities, so ``sub-01_desc-lesion`` gives ``sub-01_label-<segment>_desc-lesion_mask``.
+    """
+    match = re.match(r"^(.+)_(desc-[A-Za-z0-9]+)$", base)
+    if match:
+        return f"{match.group(1)}_label-{segment}_{match.group(2)}_mask"
+    return f"{base}_label-{segment}_mask"
 
 
 def uniquePath(path, reserved):
@@ -957,7 +995,7 @@ def planExport(nodes, folder, extension=".nii.gz", segmentationMode=SEGMENTATION
             continue
         kind = kindOf(node)
         base = (names or {}).get(node.GetID()) or defaultBaseName(node, kind, bids=bids)
-        if kind == KIND_SEGMENTATION and segmentationMode == SEGMENTATION_LABELMAP and not bids:
+        if kind == KIND_SEGMENTATION and segmentationMode == SEGMENTATION_LABELMAP:
             base = f"{base}_dseg"
         path = uniquePath(os.path.join(folder, base + extension), reserved)
         options = {}
@@ -1100,7 +1138,7 @@ def exportVolume(node, path, overwrite=False, threshold=None, sign="both"):
 
 
 def exportSegmentation(node, path, mode=SEGMENTATION_LABELMAP, reference=None, overwrite=False):
-    """Export a segmentation as one label map (``path``) or as one mask per segment (``<base>_label-<name>_mask``)."""
+    """Export a segmentation as one label map (``path``) or as one mask per segment (``<base>_label-<name>_mask``, see ``maskBaseName``)."""
     path = withExtension(os.path.abspath(str(path)))
     if kindOf(node) != KIND_SEGMENTATION:
         raise ExportError(_("{name} is not a segmentation").format(name=node.GetName() if node is not None else ""))

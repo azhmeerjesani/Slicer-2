@@ -2,7 +2,8 @@
 
 Export… writes, for the current run, the AvgR, AvgRFz and T maps (exact connectome header), one JSON
 sidecar per lesion (N, df, subset, rule and resolved threshold, QA, disclaimer), ``provenance.json``,
-``methods.md`` and ``reproduce.sh``. With an open study the destination is
+``methods.md`` and ``reproduce.sh``. "Map as NIfTI…" (Slicer Studio, A-11) writes the map shown as float32 NIfTI with a
+binary mask of the voxels that pass the threshold and a sidecar. With an open study the destination is
 ``<study>/derivatives/lnm/conn-<label>[_n-<N>]``; otherwise the user chooses a folder. A run stopped
 early is exported as a partial run (N = its last snapshot). L-30 and later work packages extend it.
 """
@@ -17,6 +18,16 @@ from . import ORDER_EXPORT, widgets
 
 #: Last export folder chosen without a study (fork-only setting, SPEC Appendix B)
 LAST_FOLDER_SETTING = "Studio/LNM/LastExportFolder"
+
+
+def _niftiExportUi():
+    """``StudioLib.niftiexport_ui`` when Slicer Studio is part of this build, else None."""
+    try:
+        from StudioLib import niftiexport_ui
+
+        return niftiexport_ui
+    except ImportError:
+        return None
 
 
 class ExportCard:
@@ -37,9 +48,18 @@ class ExportCard:
         self.exportButton = qt.QPushButton(_("Export…"))
         self.exportButton.setObjectName("LNMExportButton")
         self.exportButton.setProperty("slicerRole", "secondary")
-        self.exportButton.setToolTip(_("Write the maps, their sidecars, provenance.json, methods.md and reproduce.sh"))
+        self.exportButton.setToolTip(_("Write the maps as NIfTI (.nii.gz), their sidecars, provenance.json, methods.md and reproduce.sh"))
         self.exportButton.connect("clicked()", self.export)
         row.addWidget(self.exportButton)
+        # Slicer Studio (A-11): the map shown as float32 NIfTI, with a binary mask of the voxels that pass the threshold
+        self.niftiButton = qt.QPushButton(_("Map as NIfTI…"))
+        self.niftiButton.setObjectName("LNMExportNiftiButton")
+        self.niftiButton.setProperty("slicerRole", "secondary")
+        self.niftiButton.setToolTip(_("The map shown, as a float32 NIfTI file with a .json sidecar and a binary mask of the voxels that pass the "
+                                      "threshold, for FSL, SPM or nibabel"))
+        self.niftiButton.connect("clicked()", self.exportNifti)
+        self.niftiButton.setVisible(_niftiExportUi() is not None)
+        row.addWidget(self.niftiButton)
         self.showFolderButton = qt.QPushButton(_("Show folder"))
         self.showFolderButton.setObjectName("LNMExportShowFolderButton")
         self.showFolderButton.setProperty("slicerRole", "ghost")
@@ -116,6 +136,7 @@ class ExportCard:
     def refresh(self):
         run = self._run()
         self.exportButton.setEnabled(run is not None)
+        self.niftiButton.setEnabled(run is not None)
         if run is None:
             self.destinationLabel.setText(_("Export is available once a map is computed (or stopped with a partial map)."))
             return
@@ -189,6 +210,13 @@ class ExportCard:
             except Exception:
                 pass
         return result
+
+    def exportNifti(self):
+        """Map as NIfTI… (Slicer Studio's export dialog, A-11); return the dialog, or None."""
+        niftiExportUi = _niftiExportUi()
+        if niftiExportUi is None or self._run() is None:
+            return None
+        return niftiExportUi.exportMapDialog(self.ctx.shell())
 
     def showFolder(self):
         path = getattr(self, "lastDestination", None)

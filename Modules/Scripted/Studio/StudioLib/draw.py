@@ -3131,6 +3131,18 @@ def focusNotes(shell=None, field="notes"):
         ext.card.focusNotes(field)
 
 
+def exportSegmentMasks(shell=None):
+    """⋯ Export each segment as a NIfTI mask… (A-11): one binary mask (uint8 0/1) per segment of the lesion, on its own grid
+    (or resampled onto a chosen image), each with a sidecar. Return the dialog, or None.
+    """
+    shell = _currentShell(shell)
+    _applyPendingSmartFill(shell)
+    _commitCardEdits()
+    from . import niftiexport_ui
+
+    return niftiexport_ui.exportLesionMasksDialog(shell)
+
+
 def lesionMenuActions(shell=None):
     """Items of the Lesion card ⋯ menu: [(label, callback)] (None for a separator)."""
     actions = [
@@ -3139,6 +3151,7 @@ def lesionMenuActions(shell=None):
         (_("Hide lesion"), lambda: hideLesion(shell)),
         None,
         (_("Save lesion as…"), lambda: saveLesionDialog(shell)),
+        (_("Export each segment as a NIfTI mask…"), lambda: exportSegmentMasks(shell)),
         (_("Fill gaps and specks"), lambda: fillGapsAndSpecks(shell)),
         (_("Keep largest part"), lambda: keepLargestPart(shell)),
     ]

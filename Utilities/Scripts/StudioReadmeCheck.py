@@ -159,6 +159,7 @@ FEATURE_WPS = [
     (r"visual redesign|design tokens|redesigned visuals", ["V-01"]),
     (r"project thumbnails|project menu|grouped search|opened from elsewhere", ["V-02"]),
     (r"orientation cue|map legend|layer chips|peaks? table|region names|collapsed steps|overlay slider", ["V-03"]),
+    (r"export as nifti|nifti export|export project as nifti|convert dicom to nifti|one mask per segment", ["A-11"]),
 ]
 
 #: Work packages of wave 5 (A-07): the README of that wave may be written only when all of them passed

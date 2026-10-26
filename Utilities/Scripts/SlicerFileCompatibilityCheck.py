@@ -24,7 +24,12 @@ reloading; finally the official installation loads the project the fork saved. A
 writes a project drawn on the user's own MNI template (a 1.5 mm template added with ``StudioLib.templates``: the project's
 Images/ holds a copy of it); every installation loads it and must find the template and the lesion aligned (same
 voxels, same lesion voxel count and world centroid), and each official installation adds a point list and saves it,
-after which the fork loads it again and must still recognize the template (its ``Studio.Space``). With ``--autosave``, a fork writer first writes the scene with the Slicer Studio scene autosave
+after which the fork loads it again and must still recognize the template (its ``Studio.Space``). With ``--nifti`` (A-11), every writer also exports the scene's images as NIfTI: a fork with Slicer Studio's "Export as
+NIfTI" (``StudioLib.niftiexport``: the oblique scalar volume, the segmentation as one label map and as one mask per segment,
+the T map with a thresholded mask and a phantom with a marker in the LEFT hemisphere), an official installation with its
+own writer (``slicer.util.saveNode``). Every checker loads each file and must find the writer's IJK to RAS matrix, the same
+voxel sums and the marker at negative RAS x; it also saves each loaded image again with its own NIfTI writer, and the
+affine of that file must equal the affine of the exported one (official 3D Slicer's export of the same image). With ``--autosave``, a fork writer first writes the scene with the Slicer Studio scene autosave
 (``StudioLib.autosave_io.writeSnapshot``, before the regular saves, so that every node is written by the autosave)
 into ``autosave/``; checkers load that ``Scene.mrml`` as a third scene, with the same checks. A fork writer also
 runs the lesion network mapping command-line interface
@@ -54,7 +59,7 @@ into the output directory, with screenshots in ``shots/``. The exit code is non-
 Usage::
 
   SlicerFileCompatibilityCheck.py --slicer NAME=PATH [--slicer NAME=PATH ...] --out DIR
-      [--pairs all|cross|WRITER:CHECKER[,WRITER:CHECKER...]] [--fork NAME ...] [--testing] [--autosave] [--projects]
+      [--pairs all|cross|WRITER:CHECKER[,WRITER:CHECKER...]] [--fork NAME ...] [--testing] [--autosave] [--projects] [--nifti]
       [--timeout SECONDS] [--no-xvfb] [--lnm-lib-dir DIR]
 
   --slicer NAME=PATH  a Slicer launcher to test (repeatable). NAMEs starting with "fork" are treated as
@@ -66,6 +71,7 @@ Usage::
   --testing           start Slicer with --testing (by default the normal user interface is used)
   --autosave          also check the scene autosave of fork writers (skipped when StudioLib is missing)
   --projects          also check projects of the Slicer Studio folder (A-09), in both directions
+  --nifti             also check NIfTI exports (A-11): Slicer Studio's export -> every installation, official export -> fork
   --timeout SECONDS   time limit for each Slicer process (default: 900)
   --no-xvfb           do not wrap the Slicer processes in xvfb-run
   --lnm-lib-dir DIR   directory that contains the LesionNetworkMappingLib package, used when a fork
@@ -146,6 +152,10 @@ OFFICIAL_POINT_LIST_NAME = "OfficialPoints"
 TEMPLATE_PROJECT_NAME = "Own template project"
 TEMPLATE_NAME = "Compat template 1.5 mm"
 TEMPLATE_SPACE = "MNI152NLin2009bAsym"
+#: --nifti: the phantom whose only bright voxel is in the LEFT hemisphere (RAS x < 0), and the T map threshold
+NIFTI_PHANTOM_NAME = "CompatLeftPhantom"
+NIFTI_MARKER_RAS = (-6.0, 2.0, 4.0)
+NIFTI_THRESHOLD = 2.0
 # Folder name of the writer case with non-ASCII characters and spaces in the path
 UNICODE_FOLDER_NAME = "\u00c9tude with spaces"
 
@@ -820,8 +830,199 @@ def _runWriter(config):
             result["lnm"] = {"status": "error", "stderr": traceback.format_exc()}
     else:
         result["lnm"] = {"status": "skipped", "reason": "official writer (LNM is a fork module)"}
+    if config.get("nifti") and not config.get("skipLnm"):
+        try:
+            result["nifti"] = _writeNiftiExports(config)
+        except Exception:
+            result["nifti"] = {"status": "error", "stderr": traceback.format_exc()}
     result["messages"] = capture.stop()
     return result
+
+
+# -----------------------------------------------------------------------------
+# NIfTI exports (--nifti, A-11)
+
+
+def _niftiHeader(path):
+    """sform/qform codes and the sform rows of a NIfTI-1 file (read with the standard library: no extra module)."""
+    import gzip
+    import struct
+
+    with (gzip.open(path, "rb") if path.lower().endswith(".gz") else open(path, "rb")) as f:
+        raw = f.read(348)
+    order = "<" if struct.unpack("<i", raw[:4])[0] == 348 else ">"
+    qformCode, sformCode = struct.unpack(order + "hh", raw[252:256])
+    srow = list(struct.unpack(order + "12f", raw[280:328]))
+    datatype = struct.unpack(order + "h", raw[70:72])[0]
+    return {"qformCode": qformCode, "sformCode": sformCode, "srow": srow, "datatype": datatype}
+
+
+def _volumeRecord(node, path, kind, expected=None):
+    """What a NIfTI file must hold: the IJK to RAS matrix and voxel sums of the image it was exported from."""
+    import numpy as np
+    import vtk
+
+    import slicer
+
+    matrix = vtk.vtkMatrix4x4()
+    node.GetIJKToRASMatrix(matrix)
+    array = slicer.util.arrayFromVolume(node).astype(np.float64)
+    record = {"path": path, "kind": kind, "ijkToRas": _matrixToList(matrix), "shape": list(array.shape), "sum": float(array.sum()),
+              "nonzero": int(np.count_nonzero(array))}
+    record.update(expected or {})
+    return record
+
+
+def _phantomNode():
+    """A 21 mm cube with one bright voxel in the LEFT hemisphere, stored LPS (the DICOM order)."""
+    import numpy as np
+    import vtk
+
+    import slicer
+
+    node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", NIFTI_PHANTOM_NAME)
+    array = np.zeros((21, 21, 21), np.int16)
+    ijkToRas = np.array([[-1.0, 0, 0, 10], [0, -1.0, 0, 10], [0, 0, 1.0, -10], [0, 0, 0, 1]])
+    i, j, k = (round(value) for value in np.linalg.solve(ijkToRas, np.array([*NIFTI_MARKER_RAS, 1.0]))[:3])
+    array[k, j, i] = 1000
+    slicer.util.updateVolumeFromArray(node, array)
+    matrix = vtk.vtkMatrix4x4()
+    for row in range(4):
+        for column in range(4):
+            matrix.SetElement(row, column, float(ijkToRas[row, column]))
+    node.SetIJKToRASMatrix(matrix)
+    return node
+
+
+def _writeNiftiExports(config):
+    """Export the images of the scene as NIfTI: Slicer Studio's export in a fork, the official writer otherwise."""
+    import importlib
+
+    import numpy as np
+
+    import slicer
+
+    folder = os.path.join(config["outDir"], "nifti")
+    shutil.rmtree(folder, ignore_errors=True)
+    os.makedirs(folder)
+    volume = _nodeByName(VOLUME_NAME, "vtkMRMLScalarVolumeNode")
+    tmap = _nodeByName(TMAP_NAME, "vtkMRMLScalarVolumeNode")
+    segmentation = _nodeByName(SEGMENTATION_NAME, "vtkMRMLSegmentationNode")
+    phantom = _phantomNode()
+    segmentIds = [segmentation.GetSegmentation().GetNthSegmentID(index) for index in range(segmentation.GetSegmentation().GetNumberOfSegments())]
+
+    def labelmapOf(ids):
+        """The segments on the segmentation's own grid (values 1..N), as a temporary label map (the expected content)."""
+        labelmap = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode")
+        idArray = __import__("vtk").vtkStringArray()
+        for segmentId in ids:
+            idArray.InsertNextValue(segmentId)
+        slicer.modules.segmentations.logic().ExportSegmentsToLabelmapNode(segmentation, idArray, labelmap, None, slicer.vtkSegmentation.EXTENT_REFERENCE_GEOMETRY)
+        return labelmap
+
+    files = []
+    temporary = [phantom]
+    try:
+        niftiexport = None
+        if config["isFork"]:
+            try:
+                niftiexport = importlib.import_module("StudioLib.niftiexport")
+            except ImportError:
+                niftiexport = None
+        tmapArray = slicer.util.arrayFromVolume(tmap).astype(np.float64)
+        if niftiexport is not None:
+            how = "Slicer Studio export (StudioLib.niftiexport)"
+            for node, name, kind in ((volume, VOLUME_NAME, "volume"), (phantom, NIFTI_PHANTOM_NAME, "phantom")):
+                result = niftiexport.exportVolume(node, os.path.join(folder, f"{name}.nii.gz"))
+                if result.errors:
+                    raise RuntimeError(result.errors[0])
+                files.append(_volumeRecord(node, result.images[0], kind))
+            # The T map as a map of the Map module (after the scene was saved and recorded: the checks are not affected)
+            tmap.SetAttribute("LNM.Statistic", "T")
+            try:
+                result = niftiexport.exportVolume(tmap, os.path.join(folder, f"{TMAP_NAME}.nii.gz"), threshold=NIFTI_THRESHOLD)
+            finally:
+                tmap.RemoveAttribute("LNM.Statistic")
+            if result.errors:
+                raise RuntimeError(result.errors[0])
+            files.append(_volumeRecord(tmap, result.images[0], "volume"))
+            mask = (np.abs(tmapArray) >= NIFTI_THRESHOLD).astype(np.float64)
+            files.append(dict(_volumeRecord(tmap, result.images[1], "mask"), sum=float(mask.sum()), nonzero=int(np.count_nonzero(mask))))
+            result = niftiexport.exportSegmentation(segmentation, os.path.join(folder, f"{SEGMENTATION_NAME}.nii.gz"))
+            if result.errors:
+                raise RuntimeError(result.errors[0])
+            labelmap = labelmapOf(segmentIds)
+            temporary.append(labelmap)
+            files.append(_volumeRecord(labelmap, result.images[0], "labelmap"))
+            result = niftiexport.exportSegmentation(segmentation, os.path.join(folder, f"{SEGMENTATION_NAME}.nii.gz"), mode=niftiexport.SEGMENTATION_MASKS)
+            if result.errors:
+                raise RuntimeError(result.errors[0])
+            nonEmpty = [segmentId for segmentId in segmentIds if not niftiexport.isSegmentEmpty(segmentation, segmentId)]
+            for segmentId, path in zip(nonEmpty, result.images, strict=True):
+                labelmap = labelmapOf([segmentId])
+                temporary.append(labelmap)
+                files.append(_volumeRecord(labelmap, path, "mask"))
+        else:
+            how = "3D Slicer's NIfTI writer (slicer.util.saveNode)"
+            for node, name, kind in ((volume, VOLUME_NAME, "volume"), (phantom, NIFTI_PHANTOM_NAME, "phantom"), (tmap, TMAP_NAME, "volume")):
+                path = os.path.join(folder, f"{name}.nii.gz")
+                if not slicer.util.saveNode(node, path):
+                    raise RuntimeError(f"saving {path} failed")
+                files.append(_volumeRecord(node, path, kind))
+            labelmap = labelmapOf(segmentIds)
+            temporary.append(labelmap)
+            path = os.path.join(folder, f"{SEGMENTATION_NAME}.nii.gz")
+            if not slicer.util.saveNode(labelmap, path):
+                raise RuntimeError(f"saving {path} failed")
+            files.append(_volumeRecord(labelmap, path, "labelmap"))
+    finally:
+        for node in temporary:
+            if node is not None and node.GetScene() is not None:
+                displayNode = node.GetDisplayNode() if hasattr(node, "GetDisplayNode") else None
+                colorNode = displayNode.GetColorNode() if displayNode is not None and node.IsA("vtkMRMLLabelMapVolumeNode") else None
+                slicer.mrmlScene.RemoveNode(node)
+                if colorNode is not None and colorNode.GetScene() is not None and colorNode.GetType() == colorNode.User:
+                    slicer.mrmlScene.RemoveNode(colorNode)
+    for record in files:
+        record["header"] = _niftiHeader(record["path"])
+    return {"status": "ok", "writer": how, "files": files}
+
+
+def _checkNiftiExports(nifti, capture, workDir):
+    """Load each exported NIfTI file, record its geometry and voxels, and save it again with this installation's writer."""
+    import numpy as np
+    import vtk
+
+    import slicer
+
+    checked = []
+    resaveDir = os.path.join(workDir, "nifti-resaved")
+    os.makedirs(resaveDir, exist_ok=True)
+    for index, item in enumerate(nifti.get("files", [])):
+        capture.start()
+        record = {"path": item["path"]}
+        try:
+            node = slicer.util.loadVolume(item["path"], {"labelmap": item["kind"] in ("labelmap", "mask"), "show": False, "singleFile": True})
+            matrix = vtk.vtkMatrix4x4()
+            node.GetIJKToRASMatrix(matrix)
+            array = slicer.util.arrayFromVolume(node).astype(np.float64)
+            kji = np.unravel_index(int(np.argmax(array)), array.shape)
+            ras = (np.array(_matrixToList(matrix)).reshape(4, 4) @ np.array([kji[2], kji[1], kji[0], 1.0]))[:3]
+            record.update({"ijkToRas": _matrixToList(matrix), "shape": list(array.shape), "sum": float(array.sum()), "nonzero": int(np.count_nonzero(array)),
+                           "brightestRas": [float(value) for value in ras]})
+            resaved = os.path.join(resaveDir, f"{index:02d}.nii.gz")
+            if slicer.util.saveNode(node, resaved):
+                record["resavedHeader"] = _niftiHeader(resaved)
+            displayNode = node.GetDisplayNode()
+            colorNode = displayNode.GetColorNode() if displayNode is not None and node.IsA("vtkMRMLLabelMapVolumeNode") else None
+            slicer.mrmlScene.RemoveNode(node)
+            if colorNode is not None and colorNode.GetScene() is not None and colorNode.GetType() == colorNode.User:
+                slicer.mrmlScene.RemoveNode(colorNode)
+        except Exception:
+            record["exception"] = traceback.format_exc()
+        record["messages"] = capture.stop()
+        checked.append(record)
+    return checked
 
 
 def _writeAutosave(config):
@@ -1334,6 +1535,8 @@ def _runChecker(config):
         slicer.mrmlScene.Clear(0)
         if manifest.get("lnm", {}).get("status") == "ok":
             records["lnm"] = _checkLnmOutputs(manifest["lnm"], capture)
+        if manifest.get("nifti", {}).get("status") == "ok":
+            records["nifti"] = _checkNiftiExports(manifest["nifti"], capture, os.path.join(os.path.dirname(config["resultPath"]), writer["name"]))
         result["writers"][writer["name"]] = records
     return result
 
@@ -1552,6 +1755,44 @@ def compareLnm(writerOutputs, checked):
     return problems
 
 
+def compareNifti(writerNifti, checked):
+    """--nifti: the checker found the writer's geometry and voxels, the left marker at x < 0, and its own writer gives the same affine."""
+    problems = []
+    byPath = {record["path"]: record for record in checked}
+    for item in writerNifti.get("files", []):
+        name = os.path.basename(item["path"])
+        record = byPath.get(item["path"])
+        if record is None or "exception" in record:
+            problems.append(f"{name}: could not be loaded" + (f": {record['exception'].strip().splitlines()[-1]}" if record else ""))
+            continue
+        if not _closeLists(item["ijkToRas"], record["ijkToRas"], 1e-4):
+            problems.append(f"{name}: IJK to RAS differs from the exported image ({item['ijkToRas']} != {record['ijkToRas']})")
+        if record["shape"] != item["shape"]:
+            problems.append(f"{name}: shape {record['shape']} != {item['shape']}")
+        if not _close(item["sum"], record["sum"], max(1e-6 * abs(item["sum"]), 1e-3)) or item["nonzero"] != record["nonzero"]:
+            problems.append(f"{name}: voxel values differ (sum {record['sum']} != {item['sum']}, non-zero {record['nonzero']} != {item['nonzero']})")
+        if item["kind"] == "phantom":
+            if not record.get("brightestRas") or record["brightestRas"][0] >= 0 or not _closeLists(record["brightestRas"], NIFTI_MARKER_RAS, 1e-3):
+                problems.append(f"{name}: the LEFT marker is at {record.get('brightestRas')}, expected {list(NIFTI_MARKER_RAS)}")
+        resaved = record.get("resavedHeader")
+        if resaved is None:
+            problems.append(f"{name}: this installation could not save it again as NIfTI")
+        elif not _closeLists(resaved["srow"], item["header"]["srow"], 1e-4):
+            problems.append(f"{name}: the affine differs from this installation's own NIfTI export ({item['header']['srow']} != {resaved['srow']})")
+        errors = [m for m in record.get("messages", []) if m["level"] in ERROR_LEVELS and not _isNoise(m)]
+        if errors:
+            problems.append(f"{name}: errors while loading: {errors[0]['text'].strip()[:300]}")
+    return problems
+
+
+def niftiAffineDifference(writerNifti, checked):
+    """Largest difference (mm) between the sform of each exported file and this installation's own export of the loaded image."""
+    byPath = {record["path"]: record for record in checked}
+    differences = [max(abs(a - b) for a, b in zip(item["header"]["srow"], byPath[item["path"]]["resavedHeader"]["srow"], strict=True))
+                   for item in writerNifti.get("files", []) if byPath.get(item["path"], {}).get("resavedHeader")]
+    return max(differences) if differences else None
+
+
 # =============================================================================
 # Format comparison (informational): structure of the files written by different installations
 # =============================================================================
@@ -1730,6 +1971,8 @@ def _evaluateWriter(name, writer):
             problems.append(f"could not set layout {STUDIO_FOCUS_LAYOUT} (layout is {writer.get('layout')})")
         if writer.get("lnm", {}).get("status") == "error":
             problems.append(f"LNM command line failed: {writer['lnm'].get('stderr', '').strip()[-300:]}")
+        if (writer.get("nifti") or {}).get("status") == "error":
+            problems.append(f"NIfTI export failed: {writer['nifti'].get('stderr', '').strip()[-300:]}")
         autosave = writer.get("autosave", {})
         if autosave.get("status") == "error":
             problems.append(f"autosave failed: {autosave.get('stderr', '').strip()[-300:]}")
@@ -1805,6 +2048,14 @@ def _evaluatePair(writerName, checkerName, writer, checker, isFork):
         evaluation["lnm"] = {"problems": compareLnm(lnm["outputs"], records.get("lnm", []))}
     else:
         evaluation["lnm"] = {"problems": [], "skipped": lnm.get("reason") or lnm.get("status")}
+    nifti = writer.get("nifti")
+    if nifti is not None:
+        if nifti.get("status") == "ok":
+            checked = records.get("nifti", [])
+            evaluation["nifti"] = {"problems": compareNifti(nifti, checked), "files": len(nifti.get("files", [])),
+                                   "affineDifferenceMm": niftiAffineDifference(nifti, checked)}
+        else:
+            evaluation["nifti"] = {"problems": [f"the NIfTI export failed: {nifti.get('stderr', '').strip()[-300:]}"]}
     return evaluation
 
 
@@ -1880,6 +2131,8 @@ def _formatReport(report):
         if "autosave" in writer:
             autosave = writer["autosave"]
             lnmText += f"; autosave: {autosave.get('status')}" + (f" ({autosave.get('reason')})" if autosave.get("reason") else f" ({autosave.get('seconds')} s)")
+        if writer.get("nifti"):
+            lnmText += f"; NIfTI: {writer['nifti'].get('status')} ({writer['nifti'].get('writer') or ''}, {writer['nifti'].get('files')} files)"
         lines.append(f"  {name:<20} {status}  layout {writer.get('layout')}; {lnmText}")
         if writer.get("outDir") and UNICODE_FOLDER_NAME in writer["outDir"]:
             lines.append(f"      (saved in {writer['outDir']})")
@@ -1889,6 +2142,8 @@ def _formatReport(report):
     writerNames = list(report["writers"])
     width = max(len(n) for n in names + writerNames) + 2
     formats = "dir/mrb/autosave/lnm" if any("autosave" in writer for writer in report["writers"].values()) else "dir/mrb/lnm"
+    if any(writer.get("nifti") for writer in report["writers"].values()):
+        formats += "/nifti"
     lines += ["", f"Matrix (rows: writer, columns: checker; formats {formats}):", " " * width + "".join(f"{n:<{width + 4}}" for n in names)]
     for writerName in writerNames:
         row = f"{writerName:<{width}}"
@@ -1917,6 +2172,8 @@ def _formatReport(report):
                 extra = f" layout {part['layout']} (expected {part['expectedLayout']}), slice views {','.join(part['sliceViewsShown']) or 'none'}"
                 render = part.get("render") or {}
                 extra += f", render {render.get('status')}" + (f" ({render.get('distinctColors')} colors)" if render.get("status") == "ok" else "")
+            if part.get("files") is not None:
+                extra = f" {part['files']} files, affine vs this installation's own export: {part.get('affineDifferenceMm')} mm"
             lines.append(f"    {key:<4} {status}{extra}")
             lines += [f"         - {p}" for p in part["problems"]]
             if part.get("coveredAfterLoad"):
@@ -1952,6 +2209,7 @@ def main(argv=None):
     parser.add_argument("--testing", action="store_true", help="start Slicer with --testing")
     parser.add_argument("--autosave", action="store_true", help="also check the scene autosave of fork writers (Slicer Studio)")
     parser.add_argument("--projects", action="store_true", help="also check projects of the Slicer Studio folder (A-09), in both directions")
+    parser.add_argument("--nifti", action="store_true", help="also check NIfTI exports (A-11): Slicer Studio's export and the official writer, in both directions")
     parser.add_argument("--timeout", type=int, default=900, help="time limit for each Slicer process in seconds")
     parser.add_argument("--no-xvfb", action="store_true", help="do not run Slicer in xvfb-run")
     parser.add_argument("--lnm-lib-dir", default=os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "Modules", "Scripted", "LesionNetworkMapping")))
@@ -1981,7 +2239,7 @@ def main(argv=None):
         outDir = os.path.join(args.out, "write", name)
         os.makedirs(outDir)
         writers[name] = _runSlicer(slicers[name], "writer", name, {"outDir": outDir, "isFork": isFork[name], "lnmLibDir": args.lnm_lib_dir, "autosave": args.autosave,
-                                                                  "projects": args.projects}, args)
+                                                                  "projects": args.projects, "nifti": args.nifti}, args)
         with open(os.path.join(outDir, "manifest.json"), "w", encoding="utf-8") as f:
             json.dump(writers[name], f, indent=1, sort_keys=True)
 
@@ -2030,6 +2288,8 @@ def main(argv=None):
             "problems": _evaluateWriter(name, writer),
             "layout": writer.get("layout"),
             "lnm": {key: writer.get("lnm", {}).get(key) for key in ("status", "library", "reason")},
+            "nifti": ({"status": writer["nifti"].get("status"), "writer": writer["nifti"].get("writer"), "files": len(writer["nifti"].get("files", []))}
+                      if writer.get("nifti") else None),
             "seconds": writer.get("seconds"),
             "outDir": os.path.dirname(writer.get("files", {}).get("dir") or "") or None,
         }

@@ -226,8 +226,12 @@ ROWS = (
     Row("export-segmentation", _("Segment Editor > Segmentations > Export to files..."),
         _("Draw > Save lesion ({key:Ctrl+Shift+S}): a NIfTI mask (.nii.gz) that official 3D Slicer, FSL and other tools read"),
         key="Ctrl+Shift+S", target="StudioSaveLesionButton", workspace="draw",
-        keywords="export segmentation labelmap nifti mask save lesion binary labelmap export to file",
-        note=_("In 3D Slicer you can also right-click the segmentation in the Data module > Export visible segments to binary labelmap."),
+        keywords="export segmentation labelmap nifti mask save lesion binary labelmap export to file export as nifti nii nii.gz fsl spm "
+                 "afni nibabel export scan export volume export map one mask per segment label map dicom to nifti convert dicom",
+        note=_("Export as NIfTI… (the ⋯ of a row under Open now in Library, the project menu, Draw's lesion ⋯ or Search) writes scans, label "
+               "maps, maps and segmentations (one label map, or one mask per segment) as NIfTI with sidecars; Search > Convert DICOM to "
+               "NIfTI converts the loaded DICOM series. In 3D Slicer: File > Save Data with the .nii.gz format, or right-click the "
+               "segmentation in the Data module > Export visible segments to binary labelmap."),
         category="editor"),
     Row("segment-editor-undo", _("Segment Editor Undo / Redo"), _("Undo and Redo in the top bar while you draw ({key:Ctrl+Z}, {key:Ctrl+Y})"),
         officialKey="Ctrl+Z / Ctrl+Shift+Z", key="Ctrl+Z", target="StudioUndoButton", workspace="draw", keywords="undo redo history", category="editor",

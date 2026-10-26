@@ -429,6 +429,13 @@ def saveCopyAs(path=None):
     return None
 
 
+def exportProjectAsNifti():
+    """Export project as NIfTI… (A-11): every image, lesion (one mask per segment) and map into Exports/nifti, with a README."""
+    from . import niftiexport_ui
+
+    return niftiexport_ui.exportProjectDialog(_shell())
+
+
 def showProjectFolder():
     """Show the open project's folder in Finder, Explorer or Files (else the Slicer Studio folder)."""
     project = projects.currentProject()
@@ -1170,14 +1177,18 @@ class ProjectsSection(qt.QObject):
         self.scheduleRefresh()
 
     def menuActions(self, path):
-        """``[(text, callback)]`` of a project card's context menu."""
-        return [
+        """``[(text, callback)]`` of a project card's context menu (the open project can also be exported as NIfTI)."""
+        actions = [
             (_("Open"), lambda: self.open(path)),
             (_("Rename…"), lambda: renameDialog(path)),
             (_("Duplicate"), lambda: duplicate(path)),
             (_("Show in {manager}").format(manager=projects.fileManagerName()), lambda: projects.showInFileManager(path)),
             (_("Move to Trash"), lambda: moveToTrash(path)),
         ]
+        project = projects.currentProject()
+        if project is not None and os.path.normcase(os.path.realpath(project.path)) == os.path.normcase(os.path.realpath(path)):
+            actions.insert(4, (_("Export project as NIfTI…"), exportProjectAsNifti))
+        return actions
 
     def showMenu(self, card, path, point):
         menu = qt.QMenu(card)
@@ -1604,6 +1615,7 @@ def addStatusMenuActions(menu, owner=None):
         ("rename", _("Rename project…"), renameDialog, "StudioSaveStatusRenameAction"),
         ("folder", _("Show project folder"), showProjectFolder, "StudioSaveStatusShowProjectAction"),
         ("copy", _("Save a copy as…"), saveCopyAs, "StudioSaveStatusSaveCopyAction"),
+        ("nifti", _("Export project as NIfTI…"), exportProjectAsNifti, "StudioSaveStatusExportNiftiAction"),
         ("new", _("New project") + "\t" + _keyText("Ctrl+N"), newProject, "StudioSaveStatusNewProjectAction"),
         ("open", _("Open project…"), openProjectDialog, "StudioSaveStatusOpenProjectAction"),
     ):

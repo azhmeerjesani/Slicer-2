@@ -230,8 +230,8 @@ _STUDIO_STEPS = (
          workspace="draw", inspector=True, placement="left"),
     Step("save-lesion", "StudioSaveLesionButton", _("Save lesion"),
          _("Writes the lesion as a NIfTI mask (.nii.gz) on its own grid, which official 3D Slicer, FSL and other tools read; in a "
-           "project the dialog proposes its Lesions folder. After the first save it saves again to the same file. The whole project is saved "
-           "automatically; Ctrl+S saves it at once."),
+           "project the dialog proposes its Lesions folder. After the first save it saves again to the same file. ⋯ > Export each segment as a "
+           "NIfTI mask… writes one mask per segment. The whole project is saved automatically; Ctrl+S saves it at once."),
          rows=("export-segmentation",), keys=((("Ctrl+Shift+S",), _("save lesion")), (("Ctrl+Enter",), _("the blue button"))),
          workspace="draw", inspector=True, placement="left"),
     Step("inspector", "StudioPanelHeader", _("The inspector"),
@@ -328,8 +328,9 @@ _LIBRARY_STEPS = (
     Step("projects", "studioProjectsSection", _("Projects"),
          _("Everything you open or draw is saved automatically as a project in the Slicer Studio folder (Projects/<name>), with "
            "Images, Segmentations, Lesions, Maps and Exports folders inside. Each card shows the lesion on its scan. Click a project to "
-           "continue it; right-click to rename, duplicate, show it in your file manager or move it to the Trash. Last edited ▾ sorts them "
-           "by name or creation date, and the two buttons next to it switch between cards and a list."),
+           "continue it; right-click to rename, duplicate, show it in your file manager or move it to the Trash (the open one also to Export "
+           "project as NIfTI…, into its Exports/nifti folder). Last edited ▾ sorts them by name or creation date, and the two buttons next "
+           "to it switch between cards and a list."),
          rows=("save-data", "where-files"), keys=((("Ctrl+S",), _("save now")), (("Ctrl+N",), _("new project"))), workspace="library"),
     Step("studies", "studioStudiesSection", _("Studies"),
          _("Your lesion network mapping studies, with how many subjects are traced and how many need review. Click one to open it; "
@@ -374,7 +375,8 @@ _DRAW_STEPS = (
          rows=("segment-editor-undo",), keys=((("Ctrl+Z",), _("undo")), (("Ctrl+Y",), _("redo"))), workspace="draw", placement="below"),
     Step("save", "StudioSaveLesionButton", _("Save lesion"),
          _("Writes the lesion as a NIfTI mask (.nii.gz) on its own grid, which official 3D Slicer, FSL and other tools read, with a small .json "
-           "sidecar (scan, space, notes). After the first save it saves again to the same file. Ctrl+S still saves the whole scene."),
+           "sidecar (scan, space, notes). After the first save it saves again to the same file. Ctrl+S still saves the whole scene. "
+           "Export as NIfTI… (the ⋯ of an Open now row in Library, or Search) writes scans, label maps and maps too."),
          rows=("export-segmentation",), keys=((("Ctrl+Enter", "Ctrl+Shift+S"), _("save lesion")),), workspace="draw", inspector=True, placement="left"),
 )
 

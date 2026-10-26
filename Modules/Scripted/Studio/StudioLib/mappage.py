@@ -650,16 +650,35 @@ def _removeOverlay():
             logging.error(f"Studio Map: the map legend could not be removed:\n{traceback.format_exc()}")
 
 
+def exportMapAsNifti(shell=None):
+    """⋯ Export map as NIfTI… (A-11): the map shown (float32) with a binary mask of the voxels that pass its threshold."""
+    from . import niftiexport_ui
+
+    return niftiexport_ui.exportMapDialog(_shellOrNone(shell))
+
+
 def moreMenuActions(shell):
-    """⋯ of the Map panel header: the recipes and the reporting checks (their header rows show only with a study)."""
+    """⋯ of the Map panel header: the recipes and the reporting checks (their header rows show only with a study), then
+    "Export map as NIfTI…" while a map is shown.
+    """
     widget = moduleWidget(create=False)
     if widget is None or not hasattr(widget, "studioMenuActions"):
         return []
     try:
-        return widget.studioMenuActions()
+        items = list(widget.studioMenuActions())
     except Exception:
         logging.error(f"Studio Map: the menu items could not be listed:\n{traceback.format_exc()}")
-        return []
+        items = []
+    hasMap = False
+    try:
+        hasMap = widget.legendState() is not None if hasattr(widget, "legendState") else False
+    except Exception:
+        hasMap = False
+    if hasMap:
+        if items:
+            items.append(None)
+        items.append((_("Export map as NIfTI…"), lambda: exportMapAsNifti(shell), None))
+    return items
 
 
 def enter(shell):

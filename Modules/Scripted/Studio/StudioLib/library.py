@@ -1980,7 +1980,7 @@ class _DisplayObserver(VTKObservationMixin):
 class OpenNowCard(qt.QObject):
     """"Open now": the volumes and lesions of the scene in 28 px rows (the same name as the section of the canvas).
 
-    Each row has the kind in text2 and a ⋯ menu: Rename…, Open in Draw, Show in Data module and Close. A lesion also has an
+    Each row has the kind in text2 and a ⋯ menu: Rename…, Open in Draw, Export as NIfTI…, Show in Data module and Close. A lesion also has an
     eye that shows or hides it in the views (its display node). A volume has no eye: the display node of a volume does not
     decide what the slice views show. "Close" is the only removal verb of Studio; "Delete" stays the word of the Data module.
     """
@@ -2160,6 +2160,39 @@ class OpenNowCard(qt.QObject):
             addAction(_("Close set"), "StudioOpenNowClose", lambda: closeLoadedSet())  # noqa: PLW0108
         else:
             addAction(_("Close"), "StudioOpenNowClose", lambda: closeNode(node()))
+
+    @staticmethod
+    def _addExportAction(menu, item, node):
+        """"Export as NIfTI…" (A-11): the dialog lists every image with this one checked (others can be checked too); a loaded
+        set checks all its lesions. Disabled, with the reason as tooltip, for what NIfTI cannot hold (a figure).
+        """
+        try:
+            from . import niftiexport, niftiexport_ui
+        except ImportError:
+            return
+        if item["kind"] == "set":
+            importer = _importer()
+            loaded = importer.loadedSet()
+
+            def nodes():
+                return loaded.nodes() if loaded is not None else []
+        else:
+
+            def nodes():
+                return [node()]
+        menu.setToolTipsVisible(True)
+        action = menu.addAction(_("Export as NIfTI…"))
+        action.setObjectName("StudioOpenNowExportNifti")
+        action.connect("triggered()", lambda: niftiexport_ui.exportNodesDialog(nodes(), _shell()))
+
+        def update():
+            # A lesion that was empty when the row was made may have voxels now: checked each time the menu opens
+            reason = niftiexport.unavailableReason(node()) if item["kind"] != "set" else ""
+            action.setEnabled(not reason)
+            action.setToolTip(reason or _("Write it as a NIfTI file (check others to export them at once) for FSL, SPM, AFNI or nibabel"))
+
+        update()
+        menu.connect("aboutToShow()", update)
 
     def refresh(self):
         """Read the scene again: rows are created when the nodes or their names changed, the eyes are updated in place."""

@@ -116,6 +116,12 @@ On a normal launch Slicer Studio shows its own interface, Studio, instead of the
   theme. Icons are [Lucide](https://lucide.dev) SVGs.
 - **Modes are visible.** While a mouse mode is active (placing points, adjusting window/level), a pill at
   the top of the views says so and has an exit; `Esc` also leaves it.
+- **Export as NIfTI.** Any scan, label map, segmentation (one label map, or one mask per segment), map (with
+  a mask of the voxels that pass its threshold), every loaded DICOM series or the whole project is written as
+  NIfTI (`.nii.gz` or `.nii`) with a `.json` sidecar: *Export as NIfTI…* in the `⋯` of a Library row (several
+  at once), Draw's lesion `⋯`, Map's `⋯`, the project menu and Search. The affine is 3D Slicer's IJK-to-RAS
+  matrix, so left stays left in FSL, SPM, AFNI and nibabel; sform/qform codes say MNI (4), aligned (2) or
+  scanner (1). See [Export as NIfTI](Docs/user_guide/studio_nifti_export.md).
 - **Guided tours.** `≡ > Help > Take a tour…` is a two-minute tour that points at the controls on screen
   and says how the same thing is done in 3D Slicer; *Where did it go?* is a searchable list for people who
   come from 3D Slicer (see [Coming from 3D Slicer](Docs/user_guide/studio_coming_from_slicer.md)). The

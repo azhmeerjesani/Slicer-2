@@ -31,7 +31,7 @@ Slicer Studio/
 │       ├── Maps/                network maps and statistic maps
 │       ├── Markups/             point lists and other markups
 │       ├── Models/  Tables/  Transforms/  Other/
-│       ├── Exports/             screenshots, figures, reports and exported tables
+│       ├── Exports/             screenshots, figures, reports, exported tables and nifti/ (NIfTI exports)
 │       └── .studio/             Slicer Studio's own notes (thumbnail, lock): safe to ignore
 ├── Studies/
 │   └── Stroke cohort/           lesion network mapping studies
@@ -117,6 +117,11 @@ next to the `.mrml` file into their folders.
   file anywhere. The project itself stays where it is and keeps saving there.
 - Scene files hold no absolute paths of your computer, so a copied project opens
   on another computer.
+- **Use the images in FSL, SPM, AFNI or Python**: **Export project as NIfTI…**
+  (the save status menu of the top bar, the project's card in Library, or
+  Search) writes every image, lesion and map of the project as NIfTI files into
+  `Exports/nifti/`, with a `README.txt` that lists them. See
+  [Export as NIfTI](studio_nifti_export.md).
 
 Scans and lesion masks can contain patient data. Keep the Slicer Studio folder
 private, and share projects only as your data protection rules allow.

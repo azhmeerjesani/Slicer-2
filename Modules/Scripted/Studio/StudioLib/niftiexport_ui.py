@@ -44,8 +44,11 @@ def message(text, level="info", action=None, actionText=None, ms=4000, toolTip=N
     shell = _shell()
     if shell is not None:
         shell.toast(text, ms=ms, action=action, actionText=actionText, level=level, toolTip=toolTip)
-    else:
-        logging.info(f"Slicer Studio: {text}")
+        return
+    # Classic (the Map module's Export card): the status bar
+    logging.info(f"Slicer Studio: {text}")
+    if slicer.util.mainWindow() is not None:
+        slicer.util.showStatusMessage(text, max(ms, 5000))
 
 
 def _projects():
@@ -98,6 +101,11 @@ def _isAlive(widget):
         return True
     except Exception:
         return False
+
+
+def _connectIdClicked(group, slot):
+    """Connect a QButtonGroup's id click: buttonClicked(int) is gone in Qt 6; idClicked(int) exists since Qt 5.15."""
+    group.connect("idClicked(int)" if hasattr(group, "idClicked") else "buttonClicked(int)", slot)
 
 
 #
@@ -248,12 +256,17 @@ class ExportDialog(qt.QDialog):
         self.mode = mode
         self.executor = executor
         self.mapOptions = dict(mapOptions or {})
+        self._existingShown = False
         self.runner = None
         self.lastResult = None
         if nodes is None:
             nodes = niftiexport.projectNodes() if mode == "project" else niftiexport.dicomNodes() if mode == "dicom" else niftiexport.exportableNodes()
         self.nodeIds = [node.GetID() for node in nodes]
-        checkedIds = {node.GetID() if hasattr(node, "GetID") else str(node) for node in checked} if checked is not None else set(self.nodeIds)
+        if checked is not None:
+            checkedIds = {node.GetID() if hasattr(node, "GetID") else str(node) for node in checked}
+        else:
+            # Everything but the templates (public files, known by name)
+            checkedIds = {node.GetID() for node in nodes if niftiexport.kindOf(node) != niftiexport.KIND_TEMPLATE}
         self.setMinimumWidth(DIALOG_WIDTH)
         self.setMaximumWidth(DIALOG_WIDTH + 120)
         layout = qt.QVBoxLayout(self)
@@ -318,7 +331,7 @@ class ExportDialog(qt.QDialog):
         formatFrame.setObjectName("StudioNiftiExportFormat")
         formatIndex = 1 if _setting(niftiexport.FORMAT_KEY) == ".nii" else 0
         self.formatGroup.button(formatIndex).setChecked(True)
-        self.formatGroup.connect("buttonClicked(int)", lambda index: self.updateSummary())
+        _connectIdClicked(self.formatGroup, lambda index: self.updateSummary())
         options.addWidget(formatFrame, 0, 1, qt.Qt.AlignLeft)
         self.segmentationLabel = ui.label(_("Segmentations"), "body", "text2", "StudioNiftiExportSegmentationLabel")
         options.addWidget(self.segmentationLabel, 1, 0)
@@ -328,7 +341,7 @@ class ExportDialog(qt.QDialog):
         segmentationMode = segmentationMode or (niftiexport.SEGMENTATION_MASKS if mode == "project" else _setting(niftiexport.SEGMENTATION_MODE_KEY,
                                                                                                                   niftiexport.SEGMENTATION_LABELMAP))
         self.segmentationGroup.button(1 if segmentationMode == niftiexport.SEGMENTATION_MASKS else 0).setChecked(True)
-        self.segmentationGroup.connect("buttonClicked(int)", lambda index: self.updateSummary())
+        _connectIdClicked(self.segmentationGroup, lambda index: self.updateSummary())
         options.addWidget(modeFrame, 1, 1, qt.Qt.AlignLeft)
         self.referenceLabel = ui.label(_("Grid"), "body", "text2", "StudioNiftiExportReferenceLabel")
         options.addWidget(self.referenceLabel, 2, 0)
@@ -336,7 +349,8 @@ class ExportDialog(qt.QDialog):
         self.referenceCombo.setObjectName("StudioNiftiExportReference")
         self.referenceCombo.addItem(_("The segmentation's own grid"), "")
         for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
-            if node.GetHideFromEditors() or niftiexport.isFigure(node) or node.IsA("vtkMRMLLabelMapVolumeNode"):
+            if (node.GetHideFromEditors() or niftiexport.isFigure(node) or node.IsA("vtkMRMLLabelMapVolumeNode")
+                    or niftiexport.kindOf(node) == niftiexport.KIND_MAP):
                 continue
             self.referenceCombo.addItem(_("Resampled onto {name} (nearest neighbour)").format(name=node.GetName()), node.GetID())
         self.referenceCombo.setToolTip(_("Masks keep the grid they were drawn on, unless you choose an image here"))
@@ -383,6 +397,7 @@ class ExportDialog(qt.QDialog):
         layout.addLayout(footer)
         ui.dialogChrome(self, styleSheet=self._styleSheet)
         self.updateSummary()
+        self._scrollToFirstChecked()
 
     @staticmethod
     def _styleSheet():
@@ -403,6 +418,19 @@ class ExportDialog(qt.QDialog):
                 if node is not None:
                     nodes.append(node)
         return nodes
+
+    def _scrollToFirstChecked(self):
+        """Bring the first checked image into view (the list shows a few rows; the chosen image may be further down)."""
+        for row in range(self.list.count):
+            item = self.list.item(row)
+            if item.checkState() == qt.Qt.Checked:
+                self.list.scrollToItem(item, qt.QAbstractItemView.EnsureVisible)
+                return
+
+    def showEvent(self, event):
+        qt.QDialog.showEvent(self, event)
+        # Before the dialog is shown the list's viewport has no final height yet
+        self._scrollToFirstChecked()
 
     def setChecked(self, nodeIds):
         nodeIds = set(nodeIds)
@@ -461,6 +489,7 @@ class ExportDialog(qt.QDialog):
             return
         nodes = self.checkedNodes()
         hasSegmentation = any(niftiexport.kindOf(node) == niftiexport.KIND_SEGMENTATION for node in nodes)
+        resize = self.segmentationFrame.isVisibleTo(self) != hasSegmentation
         for widget in (self.segmentationLabel, self.segmentationFrame, self.referenceLabel, self.referenceCombo):
             widget.setVisible(hasSegmentation)
         self.folderLabel.setText(shortPath(self.folder))
@@ -494,6 +523,19 @@ class ExportDialog(qt.QDialog):
         self.exportButton.setEnabled(bool(images) and self.runner is None)
         self._jobs = jobs
         self._existing = existing
+        if resize or bool(existing) != self._existingShown:
+            # Rows appeared or went away: the dialog takes its new height (a frameless dialog is not resized by its layout)
+            self._existingShown = bool(existing)
+            qt.QTimer.singleShot(0, self._fitHeight)
+
+    def _fitHeight(self):
+        layout = self.layout() if _isAlive(self) else None
+        if layout is None:
+            return
+        layout.activate()
+        # The height the wrapped texts need at the dialog's width (sizeHint() would assume a narrower dialog)
+        height = layout.totalHeightForWidth(self.width) if layout.hasHeightForWidth() else layout.totalSizeHint().height()
+        self.resize(self.width, max(height, layout.totalMinimumSize().height()))
 
     #
     # Export
@@ -720,11 +762,11 @@ def paletteEntries():
         ("niftiexport.export", _("Export as NIfTI…"), exportNodesDialog,
          ("export nifti", "export as nifti", "nifti export", "save as nifti", "export image", "export scan", "export volume", "export map",
           "export labelmap", "export label map", "fsl", "spm", "afni", "nibabel", "nii export", "export nii"),
-         lambda: bool(niftiexport.exportableNodes()),
+         niftiexport.hasExportableNodes,
          _("Scans, label maps, segmentations and maps as NIfTI files with sidecars (left stays left)")),
         ("niftiexport.project", _("Export project as NIfTI…"), exportProjectDialog,
          ("export project", "export project nifti", "project nifti", "export all nifti", "export everything", "bids export", "export all images"),
-         lambda: bool(niftiexport.projectNodes()),
+         lambda: niftiexport.projectExportFolder() is not None and niftiexport.hasExportableNodes(),
          _("Every image, lesion (one mask per segment) and map of the project into Exports/nifti, with a README")),
         ("niftiexport.dicom", _("Convert DICOM to NIfTI"), convertDicomDialog,
          ("dicom to nifti", "convert dicom", "dcm2nii", "dcm2niix", "dicom nifti", "dicom export", "export dicom"),
