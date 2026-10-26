@@ -63,7 +63,9 @@ you compute. In Slicer Studio:
   in the scene file.
 - Opening a Slicer scene (`.mrml` or `.mrb`) from somewhere else makes a new
   project that starts as a copy: "Opened a copy in Projects/<name>. The original
-  is not changed."
+  is not changed." If some of its files cannot be read (missing or damaged), the
+  copy holds what loaded and a warning names what is missing; if nothing loads
+  (for example a damaged scene file), no project is made.
 - Opening a project from **Library › Projects** continues it where you left it.
 - While a lesion network mapping **study** is open, the study saves its own
   files (in `Studies/`): no project is made for it.

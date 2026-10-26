@@ -1749,6 +1749,11 @@ def announce(event, project, **info):
     elif event == "copy":
         message(_("Opened a copy in {project}. The original is not changed.").format(project=name), level="consequence",
                 action=lambda *_args: renameDialog(), actionText=_("Rename"), toolTip=project.path if project is not None else None)
+    elif event == "copy-incomplete":
+        unread = info.get("unread") or []
+        message(_("Some data could not be loaded ({names}): {project} holds the rest. The original is not changed.").format(
+                project=name, names=", ".join(unread)), level="warning", action=lambda *_args: renameDialog(), actionText=_("Rename"),
+                toolTip=project.path if project is not None else None)
     elif event == "opened":
         message(_("Continuing {project}").format(project=name), ms=2500)
     elif event == "locked":

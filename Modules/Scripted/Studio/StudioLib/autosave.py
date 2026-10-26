@@ -41,6 +41,7 @@ import uuid
 
 import qt
 import slicer
+import vtk
 from slicer.i18n import tr as _
 
 #: Delay after startupCompleted before the menu actions, the settings panel and the poll timer are installed
@@ -1222,7 +1223,9 @@ class AutosaveService:
         self._projectPresenter = presenter
 
     def setProjectAnnouncer(self, announcer):
-        """``announcer(event, project, **info)``: "created", "copy", "opened", "locked", "conflict", "failed", "saved"."""
+        """``announcer(event, project, **info)``: "created", "copy", "copy-incomplete", "opened", "locked", "conflict", "failed",
+        "saved".
+        """
         self._projectAnnouncer = announcer
 
     def pendingProjectRecoveries(self):
@@ -1764,11 +1767,47 @@ class AutosaveService:
             return
         if not self.projectsActive():
             return
+        unread = self._removeUnreadNodes(scene)
+        if not projects.sceneHasUserData(scene):
+            return  # nothing could be loaded (for example a truncated scene file): no empty project (A-09)
         name = projects.displayName(os.path.basename(source or url))
-        project = self.createProject(name, announce="copy")
+        project = self.createProject(name, announce=None if unread else "copy")
         if project is not None:
+            if unread:
+                self._announce("copy-incomplete", project, unread=unread)
             # Copy the files now (in the background): the original is never changed
             qt.QTimer.singleShot(0, lambda: self.autosaveNow("copy"))
+
+    @staticmethod
+    def _removeUnreadNodes(scene):
+        """Remove the nodes whose file could not be read by the scene load that just ended (a missing or broken file) and
+        return their names. They hold no data, so a copy cannot save them and closing the scene would ask about them.
+        """
+        unread = []
+        nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+        for index in range(nodes.GetNumberOfItems()):
+            node = nodes.GetItemAsObject(index)
+            for storageIndex in range(node.GetNumberOfStorageNodes()):
+                storageNode = node.GetNthStorageNode(storageIndex)
+                if storageNode is None or storageNode.GetStoredTime().GetMTime() != 0:
+                    continue  # read (a successful read sets the stored time)
+                messages = storageNode.GetUserMessages()
+                if messages is not None and messages.GetNumberOfMessagesOfType(vtk.vtkCommand.ErrorEvent) > 0:
+                    unread.append(node)
+                    break
+        names = []
+        for node in unread:
+            names.append(node.GetName() or node.GetID())
+            related = [node.GetNthStorageNode(index) for index in range(node.GetNumberOfStorageNodes())]
+            if node.IsA("vtkMRMLDisplayableNode"):
+                related += [node.GetNthDisplayNode(index) for index in range(node.GetNumberOfDisplayNodes())]
+            scene.RemoveNode(node)
+            for other in related:
+                if other is not None and other.GetScene() is not None:
+                    scene.RemoveNode(other)
+        if names:
+            logging.warning("Slicer Studio: not copied (their files could not be read): " + ", ".join(names))
+        return names
 
     def renameProject(self, newName):
         """Rename the open project: its folder, its scene file, project.json and every file path of the scene."""

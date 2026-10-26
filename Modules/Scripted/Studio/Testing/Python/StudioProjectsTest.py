@@ -30,6 +30,7 @@ folder "Slicer Studio tést" (spaces and non-ASCII characters). The tests cover:
 - Studio's own folders (Studies/, Projects/, a project, the Slicer Studio folder) never become a study.
 """
 
+import contextlib
 import hashlib
 import json
 import os
@@ -40,6 +41,7 @@ import unittest
 
 import numpy as np
 import qt
+import vtk
 
 import slicer
 
@@ -1168,6 +1170,61 @@ class StudioProjectsTest(unittest.TestCase):
         os.makedirs(aphasia)
         study_ui.createStudy([], folder=aphasia, openIt=False)
         self.assertEqual(sorted(os.path.basename(path) for path in projects.listStudies()), ["Aphasia", "Stroke"])
+
+    def test_26_failed_scene_load_leaves_no_broken_project(self):
+        """A scene from elsewhere that does not load (truncated .mrml) leaves no project and no "Opened a copy" message; one
+        whose files are partly missing opens as a copy of what loaded, says what is missing, and leaves nothing unsaved
+        (New project then closes the scene without 3D Slicer's "Save before closing scene?").
+        """
+        projects = self.projects
+        volume, volumePath = self._userVolume("MR Head", shape=(12, 14, 16), extension=".nrrd")
+        segmentation, _segmentId, _array = self._lesion(volume, "Tumor")
+        self.assertTrue(slicer.util.saveNode(segmentation, os.path.join(self.userDir, "Tumor.seg.nrrd")))
+        outside = os.path.join(self.tempDir, "outside scene")
+        os.makedirs(outside)
+        scenePath = os.path.join(outside, "Head study.mrml")
+        self.assertTrue(slicer.util.saveScene(scenePath))
+        with open(scenePath, encoding="utf-8") as file:
+            text = file.read()
+        brokenPath = os.path.join(outside, "Broken study.mrml")
+        with open(brokenPath, "w", encoding="utf-8") as file:
+            file.write(text[: len(text) // 2])
+        slicer.mrmlScene.Clear(0)
+        service = self._service()
+        announced = []
+        service.setProjectAnnouncer(lambda event, project, **info: announced.append((event, info)))
+
+        # Truncated scene file: nothing is loaded, so no project is created
+        service.setPendingSceneSource(brokenPath)
+        with contextlib.suppress(Exception):
+            slicer.util.loadScene(brokenPath)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertIsNone(service.project, "a scene that does not load is not copied into a project")
+        self.assertEqual([info.name for info in projects.listProjects()], [])
+        self.assertEqual(announced, [])
+
+        # A scan of the scene is missing: the copy holds the rest and says what is missing
+        slicer.mrmlScene.Clear(0)
+        os.remove(volumePath)
+        service.setPendingSceneSource(scenePath)
+        with contextlib.suppress(Exception):
+            slicer.util.loadScene(scenePath)
+        project = service.project
+        self.assertIsNotNone(project, "the data that loaded opens as a copy")
+        self.assertEqual([event for event, _info in announced], ["copy-incomplete"], "no success message")
+        self.assertEqual(announced[0][1].get("unread"), ["MR Head"])
+        self.assertIsNone(slicer.mrmlScene.GetFirstNodeByName("MR Head"), "a node without data is not kept in the copy")
+        self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("Tumor"))
+        self._save(service)
+        modified = vtk.vtkCollection()
+        slicer.mrmlScene.GetStorableNodesModifiedSinceRead(modified)
+        names = [modified.GetItemAsObject(index).GetName() for index in range(modified.GetNumberOfItems())]
+        self.assertEqual(names, [], "no data file is left unsaved (closing the scene does not ask about it)")
+        files = self._projectFiles(project)
+        self.assertTrue(any(path.startswith("Segmentations/") for path in files), files)
+        self.assertFalse(any("MR Head" in path for path in files), files)
+        self.assertEqual([info.name for info in projects.listProjects()], ["Head study"])
+
 
 
 def _sphere(center=(0, 0, 0)):
