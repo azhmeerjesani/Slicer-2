@@ -796,8 +796,14 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         # The menus
         menu = rows[1][0].findChild("QMenu", "StudioOpenNowMenu")
         actions = {str(action.objectName): action for action in menu.actions()}
-        self.assertEqual(set(actions), {"StudioOpenNowRename", "StudioOpenNowOpenInDraw", "StudioOpenNowShowInData", "StudioOpenNowClose"})
+        self.assertEqual(set(actions), {"StudioOpenNowRename", "StudioOpenNowOpenInDraw", "StudioOpenNowShowInData", "StudioOpenNowExportNifti",
+                                        "StudioOpenNowClose"})
         self.assertEqual(actions["StudioOpenNowClose"].text, "Close")
+        # "Export as NIfTI…" (A-11): the empty lesion has nothing to write (disabled, reason as tooltip); the template can be written
+        self.assertFalse(actions["StudioOpenNowExportNifti"].enabled)
+        self.assertTrue(actions["StudioOpenNowExportNifti"].toolTip)
+        volumeActions = {str(action.objectName): action for action in rows[0][0].findChild("QMenu", "StudioOpenNowMenu").actions()}
+        self.assertTrue(volumeActions["StudioOpenNowExportNifti"].enabled)
         self.assertFalse(any("elete" in str(action.text) for row in rows for action in row[0].findChild("QMenu", "StudioOpenNowMenu").actions()))
         # Rename
         library.renameNode(segmentationNode, "Infarct")
