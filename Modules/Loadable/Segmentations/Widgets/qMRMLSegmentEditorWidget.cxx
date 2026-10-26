@@ -2869,7 +2869,7 @@ void qMRMLSegmentEditorWidget::installKeyboardShortcuts(QWidget* parent /*=nullp
   deactivateEffectShortcut->setProperty("effectIndex", 0);
   QObject::connect(deactivateEffectShortcut, SIGNAL(activated()), this, SLOT(onSelectEffectShortcut()));
 
-  // Space => activate/deactivate last effect
+  // Space => activate/deactivate last effect (Slicer Studio: pause/resume the active effect)
   QShortcut* toggleActiveEffectShortcut = new QShortcut(QKeySequence(Qt::Key_Space), parent);
   d->KeyboardShortcuts.push_back(toggleActiveEffectShortcut);
   toggleActiveEffectShortcut->setProperty("effectIndex", -1);
@@ -2962,6 +2962,12 @@ void qMRMLSegmentEditorWidget::onSelectEffectShortcut()
     }
     d->prepareSegmentForEffectActivation(selectedEffect);
     this->setActiveEffect(selectedEffect);
+  }
+  else if (d->StudioPresentation && activeEffect != nullptr)
+  {
+    // Slicer Studio: Space pauses the active effect (LastActiveEffect then remembers it, so the next Space resumes
+    // it). Switching to LastActiveEffect would activate the previous tool after any tool switch.
+    this->setActiveEffect(nullptr);
   }
   else
   {

@@ -670,6 +670,46 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, sourceVolumeNode)
         return int(slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, sourceVolumeNode).sum())
 
+    def _pressSpace(self, editor):
+        """Trigger the Segment Editor's own Space shortcut, as the key does."""
+        shortcuts = [shortcut for shortcut in self.mainWindow.findChildren("QShortcut")
+                     if shortcut.property("effectIndex") == -1 and shortcut.key.toString(qt.QKeySequence.PortableText) == "Space"]
+        self.assertEqual(len(shortcuts), 1, "the Segment Editor installs one Space shortcut while Draw is shown")
+        shortcuts[0].activated()
+        self._pump()
+
+    def test_10a_space_pauses_after_tool_switch(self):
+        """Space pauses the active tool and resumes it, also after a switch of tools (it must not activate the
+        previous tool: a drag meant to adjust contrast would then erase the lesion).
+        """
+        studioShell = self._applyStudio()
+        _path, editor = self._openScanInDraw(studioShell)
+        editor.setActiveEffectByName("Paint")
+        self._pump()
+        self._pressSpace(editor)
+        self.assertIsNone(self._effect(editor))
+        self._pressSpace(editor)
+        self.assertEqual(self._effect(editor), "Paint")
+
+        # After any switch (E, E: Erase and back to Brush; or the tiles) Space still pauses the current tool
+        for previous, current in (("Erase", "Paint"), ("Draw", "Paint"), ("Paint", "Erase")):
+            editor.setActiveEffectByName(previous)
+            self._pump()
+            editor.setActiveEffectByName(current)
+            self._pump()
+            self._pressSpace(editor)
+            self.assertIsNone(self._effect(editor), f"Space after {previous} -> {current} must pause")
+            self._pressSpace(editor)
+            self.assertEqual(self._effect(editor), current, f"Space resumes {current}")
+
+        # Esc, then Space resumes the deselected tool
+        editor.setActiveEffect(None)
+        self._pump()
+        self._pressSpace(editor)
+        self.assertEqual(self._effect(editor), "Erase")
+        editor.setActiveEffect(None)
+        self._pump()
+
     def test_10_draw_round_trips(self):
         """A dropped scan lands unarmed with Brush suggested; the chosen tool and segment survive round trips; Esc is
         respected; a lesion opened to be traced (template, New lesion) arms Brush (NAV-02, NFT-03, D-U2).
