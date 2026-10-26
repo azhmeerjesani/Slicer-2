@@ -26,7 +26,8 @@ folder "Slicer Studio tést" (spaces and non-ASCII characters). The tests cover:
 - a project loaded in Classic continues in place in Studio (no copy); the Library order follows official saves;
 - a project saves when its data fits on the disk, also with less than 1 GB free (only the private autosave keeps 1 GB);
 - a scene file that another program changed is kept: Studio writes "<project> (Slicer Studio).mrml" next to it;
-- a file from outside that the project took over is "already open" when it is opened again, also after a restart.
+- a file from outside that the project took over is "already open" when it is opened again, also after a restart;
+- Studio's own folders (Studies/, Projects/, a project, the Slicer Studio folder) never become a study.
 """
 
 import hashlib
@@ -1082,6 +1083,91 @@ class StudioProjectsTest(unittest.TestCase):
             studioShell.dispose()
             slicer.app.processEvents()
 
+    def test_25_studio_folders_never_become_studies(self):
+        """New study…, Create study and the folder card refuse Studio's own folders: Studies/ (where the New study dialog
+        starts), Projects/, a project, the Slicer Studio folder, LNM/, a folder that holds the Slicer Studio folder and a
+        folder inside a study; no study.json is written there. A folder of the user's that holds another study keeps that
+        study's files out of the new one; a new folder inside Studies/ is a study as before.
+        """
+        from StudioLib import library, study_ui
+
+        if not study_ui.isAvailable():
+            self.skipTest("studies are not part of this build")
+        projects = self.projects
+        projects.ensureRoot()
+        _volume, scanPath = self._userVolume("patient_T1", shape=(12, 14, 16))
+        slicer.mrmlScene.Clear(0)
+        scanFolder = library._importer().scanFolder
+        # A project (Images/ and .studio/) and a study made the intended way: Studies/Stroke
+        project = os.path.join(projects.projectsFolder(), "alpha T1")
+        os.makedirs(os.path.join(project, "Images"))
+        os.makedirs(os.path.join(project, ".studio"))
+        shutil.copy(scanPath, os.path.join(project, "Images", "alpha_T1.nii.gz"))
+        stroke = os.path.join(projects.studiesFolder(), "Stroke")
+        os.makedirs(stroke)
+        shutil.copy(scanPath, os.path.join(stroke, "sub-01_T1w.nii.gz"))
+        study_ui.createStudy(scanFolder(stroke)[0], folder=stroke, openIt=False)
+        self.assertTrue(os.path.isfile(os.path.join(stroke, "study.json")))
+        # New study…, accepting the folder the dialog opens on (Studies/), then choosing a project
+        answers, starts = [], []
+
+        class FileDialog:
+            @staticmethod
+            def getExistingDirectory(parent, title, start, *args):
+                starts.append(start)
+                return answers.pop(0) if answers else start
+
+        class FakeQt:
+            QFileDialog = FileDialog
+
+            def __getattr__(self, name):
+                return getattr(qt, name)
+
+        study_ui.qt = FakeQt()
+        try:
+            self.assertIsNone(study_ui.newStudyDialog())
+            answers.append(project)
+            self.assertIsNone(study_ui.newStudyDialog())
+        finally:
+            study_ui.qt = qt
+        self.assertEqual(os.path.normpath(starts[0]), os.path.normpath(projects.studiesFolder()))
+        self.assertFalse(os.path.exists(os.path.join(projects.studiesFolder(), "study.json")))
+        self.assertFalse(os.path.exists(os.path.join(project, "study.json")))
+        self.assertEqual(projects.listStudies(), [stroke])
+        self.assertIsNone(study_ui.studyFolderProblem(stroke))
+        os.makedirs(projects.lnmFolder())
+        refused = [projects.studiesFolder(), projects.projectsFolder(), project, os.path.join(project, "Images"), self.root,
+                   self.tempDir, projects.lnmFolder(), os.path.join(stroke, "lesions")]
+        for folder in refused:
+            self.assertTrue(study_ui.studyFolderProblem(folder), folder)
+            with self.assertRaises(ValueError, msg=folder):
+                study_ui.createStudy(scanFolder(folder)[0], folder=folder, openIt=False)
+            self.assertFalse(os.path.exists(os.path.join(folder, "study.json")), folder)
+        # The folder card of Projects/ says why instead of offering Create study
+        card = library.FolderCard(projects.projectsFolder(), scanFolder(projects.projectsFolder())[0])
+        try:
+            self.assertIsNone(card.createStudyButton)
+            self.assertEqual(card.planLabel.text, study_ui.studyFolderProblem(projects.projectsFolder()))
+            self.assertEqual(card.loadAllButton.property("slicerRole"), "primary")
+        finally:
+            card.close()
+        self.assertEqual([info.name for info in projects.listProjects()], ["alpha T1"])
+        # A folder of the user's that holds a study: that study's files are not subjects of the new one
+        shutil.copy(scanPath, os.path.join(self.userDir, "sub-02_T1w.nii.gz"))
+        inner = os.path.join(self.userDir, "older study")
+        os.makedirs(inner)
+        shutil.copy(scanPath, os.path.join(inner, "sub-09_T1w.nii.gz"))
+        study_ui.createStudy(scanFolder(inner)[0], folder=inner, openIt=False)
+        files = scanFolder(self.userDir)[0]
+        self.assertIn(os.path.join(inner, "sub-09_T1w.nii.gz"), files)
+        outer = study_ui.createStudy(files, folder=self.userDir, openIt=False)
+        self.assertIn("sub-02", outer.subject_ids)
+        self.assertNotIn("sub-09", outer.subject_ids)
+        # A new folder inside Studies/ is a study as before
+        aphasia = os.path.join(projects.studiesFolder(), "Aphasia")
+        os.makedirs(aphasia)
+        study_ui.createStudy([], folder=aphasia, openIt=False)
+        self.assertEqual(sorted(os.path.basename(path) for path in projects.listStudies()), ["Aphasia", "Stroke"])
 
 
 def _sphere(center=(0, 0, 0)):

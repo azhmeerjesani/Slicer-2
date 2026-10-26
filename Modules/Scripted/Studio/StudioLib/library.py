@@ -1872,6 +1872,13 @@ class LoadedSetCard(qt.QObject):
         if studyUi is None or loaded is None:
             return None
         files = [nodeFile(node) for node in loaded.nodes() if nodeFile(node)]
+        problem = studyUi.studyFolderProblem(studyUi._commonFolder(files)) if files else None
+        if problem:
+            # Checked before the set is closed: Studio's own folders (a project's Images/, ...) never become a study
+            shell = _shell()
+            if shell is not None:
+                shell.toast(problem, ms=8000, level="warning")
+            return None
         if not closeLoadedSet(confirm=True):
             return None
         return _runAction(lambda: studyUi.createStudy(files, _shell()), _("Failed to create the study."))
@@ -4721,7 +4728,8 @@ class FolderCard:
     """Card offered for a folder with several NIfTI files: "N NIfTI files found", the reason when there are too many to
     load at once, and an enabled way on: Load all (up to ``MAX_LOAD_ALL_FILES`` files), Open one subject…, and
     Create study when the study page (W3-07) is part of this build: the primary button for any number of files, with the
-    group mapping of a participants table whose groups are not case / control.
+    group mapping of a participants table whose groups are not case / control. Studio's own folders (Studies/, Projects/,
+    a project, the Slicer Studio folder: ``study_ui.studyFolderProblem``) show why instead of Create study.
     """
 
     def __init__(self, folder, files, onClose=None):
@@ -4766,13 +4774,20 @@ class FolderCard:
         self.participantsPath = table
         # The reason is in the card, not in a tool tip
         self.studyAvailable = _studyUi() is not None
+        # Studio's own folders (Studies/, Projects/, a project, ...) never become a study: the reason replaces the plan
+        self.studyProblem = _studyUi().studyFolderProblem(folder) if self.studyAvailable else None
         self.groupColumn = None
         self.groupCombos = {}
-        if self.studyAvailable:
+        if self.studyProblem:
+            self.planLabel = self._textLabel(self.studyProblem, "StudioFolderCardStudyPlan")
+            layout.addWidget(self.planLabel)
+        elif self.studyAvailable:
             self._addStudyPlan(layout, folder, table)
         self.reasonLabel = None
         if self.tooMany:
-            if self.studyAvailable:
+            if self.studyProblem:
+                reason = _("{count} files: open one subject at a time").format(count=len(self.files))
+            elif self.studyAvailable:
                 reason = _("{count} files: open one subject at a time, or create a study").format(count=len(self.files))
             else:
                 reason = _("{count} files: open one subject at a time, or create a study when available").format(count=len(self.files))
@@ -4783,7 +4798,7 @@ class FolderCard:
         buttonRow.setSpacing(8)
         buttonRow.addStretch(1)
         self.createStudyButton = None
-        if self.studyAvailable:
+        if self.studyAvailable and not self.studyProblem:
             # The study is the way on for a folder of subjects (any number of files)
             self.createStudyButton = qt.QPushButton(_("Create study"))
             self.createStudyButton.setToolTip(_("Make a study of this folder: study.json, participants.tsv and lesions/ are written here; "

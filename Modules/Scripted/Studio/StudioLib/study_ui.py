@@ -322,6 +322,69 @@ def _isInside(path, folder):
     return relative != ".." and not relative.startswith(".." + os.sep) and not os.path.isabs(relative)
 
 
+def _samePath(first, second):
+    return os.path.normcase(os.path.realpath(first)) == os.path.normcase(os.path.realpath(second))
+
+
+def studyFolderProblem(folder):
+    """Why ``folder`` cannot become a new study, or None (A-09 layout): the Slicer Studio folder or a folder that holds it,
+    its Projects/, Studies/ and LNM/ folders, a project or a folder inside one, LNM/'s folders, or a folder inside another
+    study. Their NIfTI files belong to projects and to other studies; a study goes in its own folder (Studies/<name>/).
+    """
+    if not folder:
+        return None
+    folder = os.path.abspath(str(folder))
+    try:
+        from . import projects
+    except ImportError:
+        projects = None
+    if projects is not None and projects.isEnabled():
+        rootPath = projects.root()
+        if _samePath(folder, rootPath):
+            return _("This is the Slicer Studio folder: choose or create a folder inside Studies/ for the study")
+        if _isInside(rootPath, folder):
+            return _("{name} holds the Slicer Studio folder, whose projects and studies would become subjects: "
+                     "choose the folder of your study's files").format(name=os.path.basename(folder) or folder)
+        studiesPath = projects.studiesFolder(rootPath)
+        if _samePath(folder, studiesPath):
+            return _("Studies/ holds your studies: choose or create a folder inside it (one folder per study)")
+        projectsPath = projects.projectsFolder(rootPath)
+        if _samePath(folder, projectsPath):
+            return _("Projects/ holds your projects, not a study: choose or create a folder inside Studies/")
+        if _isInside(folder, projectsPath):
+            project = projects.projectOfPath(folder, rootPath)
+            name = os.path.basename(project) if project else os.path.basename(folder)
+            return _("This folder is part of the project {name}: choose or create a folder inside Studies/ for the study").format(name=name)
+        lnmPath = projects.lnmFolder(rootPath)
+        if _isInside(folder, lnmPath):
+            return _("LNM/ holds lesion network mapping data, not a study: choose or create a folder inside Studies/")
+    studyModule = _lnm("study")
+    if not studyModule.Study.is_study(folder):
+        parent = os.path.dirname(folder)
+        while parent and parent != os.path.dirname(parent):
+            if studyModule.Study.is_study(parent):
+                return _("This folder is inside the study {name}: open that study, or choose a folder outside it").format(
+                    name=os.path.basename(parent))
+            parent = os.path.dirname(parent)
+    return None
+
+
+def _outsideOtherStudies(files, folder):
+    """``files`` without those inside another study (a subfolder of ``folder`` with a study.json): never subjects of this one."""
+    studyModule = _lnm("study")
+    folder = os.path.normcase(os.path.realpath(folder))
+    cache = {}
+
+    def inStudy(directory):
+        if os.path.normcase(directory) == folder or os.path.dirname(directory) == directory:
+            return False
+        if directory not in cache:
+            cache[directory] = studyModule.Study.is_study(directory) or inStudy(os.path.dirname(directory))
+        return cache[directory]
+
+    return [path for path in files if not (_isInside(path, folder) and inStudy(os.path.dirname(os.path.realpath(path))))]
+
+
 #
 # Group mapping (adopt in place, participants tables)
 #
@@ -623,9 +686,15 @@ def createStudy(files, shell=None, folder=None, groupColumn=None, groupMapping=N
     folder = os.path.abspath(folder or _commonFolder(files) or "")
     if not folder or not os.path.isdir(folder):
         raise ValueError(_("Choose a study folder"))
+    # Studio's own folders (Studies/, Projects/, a project, ...) and folders inside a study never become a study
+    problem = studyFolderProblem(folder)
+    if problem:
+        raise ValueError(problem)
     # The study's own application files and network maps are never subjects
     excluded = [os.path.join(folder, studyModule.PRIVATE_DIR), os.path.join(folder, studyModule.DERIVATIVES_DIR, "lnm")]
     files = [path for path in files if not any(_isInside(path, other) for other in excluded)]
+    # Nor are the files of another study in a subfolder
+    files = _outsideOtherStudies(files, folder)
     startTime = time.perf_counter()
     if studyModule.Study.is_study(folder):
         studyObject = studyModule.Study.open(folder)
@@ -855,7 +924,8 @@ def _studiesFolder():
 
 def newStudyDialog(shell=None):
     """New study…: choose a folder (the dialog starts in Studies/ of the Slicer Studio folder); its NIfTI files (if any)
-    become the subjects, its participants.tsv is adopted.
+    become the subjects, its participants.tsv is adopted. Studies/ itself and Studio's other own folders are refused with
+    a warning (``studyFolderProblem()``): a study goes in a folder of its own.
     """
     if not isAvailable():
         _toast(shell, _("Studies are not available in this build"))
@@ -865,6 +935,10 @@ def newStudyDialog(shell=None):
     if created and os.path.isdir(created) and not os.listdir(created):
         os.rmdir(created)  # created for the dialog only: never leave an empty folder
     if not folder:
+        return None
+    problem = studyFolderProblem(folder)
+    if problem:
+        _toast(shell, problem, ms=8000, level="warning")
         return None
     niftiFiles, _isDicom = _importer().scanFolder(folder)
     studyModule = _lnm("study")
@@ -885,7 +959,10 @@ def openParticipantsTable(path, shell=None):
             added=len(result["added"]), updated=len(result["updated"]), study=_session.study.name), ms=5000, level="consequence")
         return result
     folder = os.path.dirname(os.path.abspath(path))
-    if shell is not None:
+    problem = studyFolderProblem(folder) if shell is not None else None
+    if problem:
+        shell.toast(summary + " · " + problem, ms=8000, level="warning")
+    elif shell is not None:
         def create():
             niftiFiles, _isDicom = _importer().scanFolder(folder)
             createStudy(niftiFiles, shell, folder=folder)
