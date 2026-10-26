@@ -1039,6 +1039,23 @@ def _sameVolume(first, second):
         return False
 
 
+def _copyError(source, error):
+    """A short OSError for a failed copy of ``source``: its first reason (``shutil.Error`` lists every file that failed)."""
+    number = error.errno
+    reason = error.strerror or str(error)
+    if isinstance(error, shutil.Error) and error.args and isinstance(error.args[0], list) and error.args[0]:
+        first = error.args[0][0]
+        if isinstance(first, tuple) and len(first) == 3:
+            reason = str(first[2])  # "[Errno 28] No space left on device: 'source' -> 'destination'"
+            match = re.match(r"\[Errno (\d+)\]", reason)
+            if match:
+                number = int(match.group(1))
+                reason = os.strerror(number)
+    result = OSError(_("Copying {name} failed: {reason}").format(name=os.path.basename(source), reason=reason))
+    result.errno = number
+    return result
+
+
 def _mergeMove(source, destination, sameVolume, progress=None):
     """Move ``source`` (a file or folder) to ``destination``: a rename on the same volume, else copy, check the sizes and
     delete the original. Folders that exist on both sides are merged; names that exist are kept (" 2"). Worker-safe.
@@ -1066,13 +1083,24 @@ def _mergeMove(source, destination, sameVolume, progress=None):
             progress(os.path.basename(source))
         return
     if os.path.isdir(source):
-        shutil.copytree(source, destination)
+        try:
+            shutil.copytree(source, destination)
+        except OSError as error:
+            # copytree goes on after a file that fails (a full disk) and leaves a partial copy: never keep it, the
+            # original stays the only copy
+            shutil.rmtree(destination, ignore_errors=True)
+            raise _copyError(source, error) from error
         if treeSize(source) != treeSize(destination):
             shutil.rmtree(destination, ignore_errors=True)
             raise OSError(_("Copying {name} failed: the sizes differ").format(name=os.path.basename(source)))
         shutil.rmtree(source)
     else:
-        shutil.copy2(source, destination)
+        try:
+            shutil.copy2(source, destination)
+        except OSError as error:
+            if os.path.isfile(destination):
+                os.remove(destination)
+            raise _copyError(source, error) from error
         if os.path.getsize(source) != os.path.getsize(destination):
             os.remove(destination)
             raise OSError(_("Copying {name} failed: the sizes differ").format(name=os.path.basename(source)))

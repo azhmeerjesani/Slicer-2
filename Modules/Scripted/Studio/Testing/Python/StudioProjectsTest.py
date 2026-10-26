@@ -824,6 +824,69 @@ class StudioProjectsTest(unittest.TestCase):
             self.assertFalse(service._enoughSpace(0, self.tempDir))
             self.assertTrue(service._enoughSpace(0, self.tempDir, project=True))
 
+    def test_21_failed_root_move_keeps_open_project(self):
+        """A move of the Slicer Studio folder that fails (the new disk is full) leaves the open project where it was.
+
+        No partial copy stays in the new folder, the setting is unchanged, and the open project keeps saving into the
+        old folder, where Library lists it.
+        """
+        import errno
+        import shutil as shutilModule
+        from unittest import mock
+
+        projects = self.projects
+        service = self._service()
+        self._userVolume("Big scan", shape=(20, 24, 28))
+        self._projectFor(service)
+        self._save(service)
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        volume, _path = self._userVolume("Open scan", shape=(12, 14, 16))
+        project = self._projectFor(service)
+        self._save(service)
+        openPath = project.path
+        os.environ.pop(projects.ROOT_ENVIRONMENT)
+        qt.QSettings().setValue(projects.ROOT_KEY, self.root)
+        realCopyfile = shutilModule.copyfile
+
+        def fullDisk(source, destination, *args, **kwargs):
+            if os.sep + "Big scan" + os.sep in os.fspath(source):
+                with open(destination, "wb") as f:
+                    f.write(b"\0" * 16)  # what fitted on the disk
+                raise OSError(errno.ENOSPC, "No space left on device", destination)
+            return realCopyfile(source, destination, *args, **kwargs)
+
+        try:
+            newRoot = os.path.join(self.tempDir, "full disk", "Slicer Studio")
+            with mock.patch.object(projects, "_sameVolume", return_value=False), mock.patch.object(shutilModule, "copyfile", side_effect=fullDisk):
+                with self.assertRaises(OSError) as context:
+                    service.moveRoot(newRoot, moveContent=True)
+            self.assertEqual(projects.root(), os.path.normpath(self.root), "the setting is unchanged")
+            # The open project stays in the old folder, with its scene and its files
+            self.assertIs(service.project, project)
+            self.assertEqual(project.path, openPath)
+            self.assertEqual(os.path.normpath(slicer.mrmlScene.GetURL()), os.path.normpath(projects.sceneFile(openPath)))
+            self.assertTrue(volume.GetStorageNode().GetFileName().startswith(openPath + os.sep))
+            self.assertTrue(os.path.isfile(os.path.join(openPath, ".studio", "lock")), "the project is locked again")
+            self.assertIn(openPath, [info.path for info in projects.listProjects()])
+            self.assertEqual(sorted(info.name for info in projects.listProjects()), ["Big scan", "Open scan"])
+            # No partial copy stays in the new folder, and the message names the first reason only
+            self.assertFalse(os.path.exists(os.path.join(newRoot, "Projects")), "no partial copy stays in the new folder")
+            self.assertEqual(context.exception.errno, errno.ENOSPC)
+            self.assertIn("No space left on device", str(context.exception))
+            self.assertNotIn(self.root, str(context.exception))
+            # A later edit is saved into the old folder
+            array = slicer.util.arrayFromVolume(volume)
+            array[0, 0, 0] = 4242
+            slicer.util.arrayFromVolumeModified(volume)
+            self._save(service)
+            saved = slicer.util.loadVolume(volume.GetStorageNode().GetFileName(), {"show": False})
+            self.assertEqual(int(slicer.util.arrayFromVolume(saved)[0, 0, 0]), 4242)
+        finally:
+            qt.QSettings().remove(projects.ROOT_KEY)
+            qt.QSettings().remove(projects.ROOT_CHOSEN_KEY)
+            os.environ[projects.ROOT_ENVIRONMENT] = self.root
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk

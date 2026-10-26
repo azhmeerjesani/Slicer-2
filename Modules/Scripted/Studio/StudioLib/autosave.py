@@ -1834,16 +1834,21 @@ class AutosaveService:
             for timer in timers:
                 timer.stop()
             self._suspendCount += 1
+            succeeded = False
             try:
                 function = lambda: projects.moveContent(oldRoot, newRoot)  # noqa: E731
                 moved = run(function) if run is not None else function()
+                succeeded = True
             finally:
                 self._suspendCount -= 1
                 for timer in timers:
                     timer.start()
                 if project is not None:
                     newPath = projects.pathAfterMove(project.path, oldRoot, newRoot)
-                    if os.path.isdir(newPath) and os.path.normpath(newPath) != os.path.normpath(project.path):
+                    # Follow the project only when it really moved: after a failed move its folder may still be in the
+                    # old folder (where Library lists it), whatever exists in the new one
+                    hasMoved = succeeded or not os.path.isdir(project.path)
+                    if hasMoved and os.path.isdir(newPath) and os.path.normpath(newPath) != os.path.normpath(project.path):
                         self._relocateProject(project.path, newPath)
                     else:
                         project.lock()
