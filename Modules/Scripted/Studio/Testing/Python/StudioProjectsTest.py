@@ -747,6 +747,41 @@ class StudioProjectsTest(unittest.TestCase):
         with open(privateScene, encoding="utf-8") as f:
             self.assertEqual(ET.fromstring(f.read()).find("Volume").get("fileName"), "R&D%20T2_Private/a.nrrd")
 
+    def test_19_open_another_project_while_one_is_open(self):
+        """Opening project A while project B is open saves and closes B, then loads A (B is not read again)."""
+        projects = self.projects
+        service = self._service()
+        self._userVolume("First scan", shape=(12, 14, 16))
+        first = self._projectFor(service)
+        self._save(service)
+        firstPath = first.path
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertIsNone(service.project)
+        self._userVolume("Second scan", shape=(12, 14, 16))
+        second = self._projectFor(service)
+        self.assertNotEqual(second.path, firstPath)
+        self._save(service)
+        secondPath = second.path
+        for openedPath, closedPath, present, absent in (
+            (firstPath, secondPath, "First scan", "Second scan"),
+            (secondPath, firstPath, "Second scan", "First scan"),
+        ):
+            urls = []
+            tag = slicer.mrmlScene.AddObserver(slicer.vtkMRMLScene.StartImportEvent, lambda caller, event, urls=urls: urls.append(slicer.mrmlScene.GetURL()))
+            try:
+                self.assertTrue(service.openProject(openedPath))
+            finally:
+                slicer.mrmlScene.RemoveObserver(tag)
+            self.io.backgroundWriter().drain(10.0)
+            self.assertEqual(urls, [projects.sceneFile(openedPath)], "the scene of the opened project is read")
+            self.assertIsNotNone(service.project)
+            self.assertEqual(service.project.path, openedPath)
+            self.assertEqual(os.path.normpath(slicer.mrmlScene.GetURL()), os.path.normpath(projects.sceneFile(openedPath)))
+            self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName(present))
+            self.assertIsNone(slicer.mrmlScene.GetFirstNodeByName(absent))
+            self.assertEqual(projects.readJson(projects.projectFile(closedPath))["state"], "closed")
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk

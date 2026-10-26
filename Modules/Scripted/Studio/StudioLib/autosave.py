@@ -1653,12 +1653,22 @@ class AutosaveService:
         """The scene is closed (New project, Close scene, loading another scene): save the project, then release it."""
         if self.plan is not None:
             self._abortGeneration("the scene is closed")
+        # Loading a scene sets the scene URL to the new file before it clears the scene (vtkSlicerSceneReader), and
+        # vtkMRMLScene::Connect then imports from that URL. Saving the project points the URL at the project scene file:
+        # the URL is restored afterwards, or the open project would be read again instead of the scene being loaded.
+        scene = slicer.mrmlScene
+        url = scene.GetURL()
+        rootDirectory = scene.GetRootDirectory()
         try:
             if self._recovering == 0 and self.enabled():
                 self.saveNow("close", progress=True, ignoreBusy=True)
         except Exception:
             logging.error("Slicer Studio: saving the project before closing failed:\n" + traceback.format_exc())
         finally:
+            if scene.GetURL() != url:
+                scene.SetURL(url)
+            if scene.GetRootDirectory() != rootDirectory:
+                scene.SetRootDirectory(rootDirectory)
             self.releaseProject()
             self._nextSlot()
 
