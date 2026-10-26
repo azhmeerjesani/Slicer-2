@@ -89,10 +89,7 @@ class SegmentEditorMarginEffect(AbstractScriptedSegmentEditorEffect):
         self.scriptedEffect.setParameterDefault("MarginSizeMm", 3)
 
     def getMarginSizePixel(self):
-        selectedSegmentLabelmapSpacing = [1.0, 1.0, 1.0]
-        selectedSegmentLabelmap = self.scriptedEffect.selectedSegmentLabelmap()
-        if selectedSegmentLabelmap:
-            selectedSegmentLabelmapSpacing = selectedSegmentLabelmap.GetSpacing()
+        selectedSegmentLabelmapSpacing = self.segmentSpacing()
 
         marginSizeMM = abs(self.scriptedEffect.doubleParameter("MarginSizeMm"))
         marginSizePixel = [math.floor(marginSizeMM / spacing) for spacing in selectedSegmentLabelmapSpacing]
@@ -112,10 +109,12 @@ class SegmentEditorMarginEffect(AbstractScriptedSegmentEditorEffect):
         self.shrinkOptionRadioButton.setChecked(marginSizeMM < 0)
         self.shrinkOptionRadioButton.blockSignals(wasBlocked)
 
-        selectedSegmentLabelmapSpacing = [1.0, 1.0, 1.0]
-        selectedSegmentLabelmap = self.scriptedEffect.selectedSegmentLabelmap()
-        if selectedSegmentLabelmap:
-            selectedSegmentLabelmapSpacing = selectedSegmentLabelmap.GetSpacing()
+        # Check if there is a selected segment without computing its labelmap (that would be slow for large images)
+        parameterSetNode = self.scriptedEffect.parameterSetNode()
+        segmentationNode = parameterSetNode.GetSegmentationNode() if parameterSetNode else None
+        selectedSegmentID = parameterSetNode.GetSelectedSegmentID() if parameterSetNode else None
+        if (segmentationNode and selectedSegmentID and segmentationNode.GetSegmentation().GetSegment(selectedSegmentID)
+                and self.scriptedEffect.referenceGeometryImage()):
             marginSizePixel = self.getMarginSizePixel()
             if marginSizePixel[0] < 1 or marginSizePixel[1] < 1 or marginSizePixel[2] < 1:
                 self.marginSizeLabel.text = _("Not feasible at current resolution.")
@@ -132,7 +131,7 @@ class SegmentEditorMarginEffect(AbstractScriptedSegmentEditorEffect):
         self.applyToAllVisibleSegmentsCheckBox.setCheckState(applyToAllVisibleSegments)
         self.applyToAllVisibleSegmentsCheckBox.blockSignals(wasBlocked)
 
-        self.setWidgetMinMaxStepFromImageSpacing(self.marginSizeMMSpinBox, self.scriptedEffect.selectedSegmentLabelmap())
+        self.setWidgetMinMaxStepFromImageSpacing(self.marginSizeMMSpinBox, self.scriptedEffect.referenceGeometryImage())
 
     def growOperationToggled(self, toggled):
         if toggled:
@@ -149,10 +148,7 @@ class SegmentEditorMarginEffect(AbstractScriptedSegmentEditorEffect):
         self.scriptedEffect.setParameter("ApplyToAllVisibleSegments", applyToAllVisibleSegments)
 
     def getMarginSizeMM(self):
-        selectedSegmentLabelmapSpacing = [1.0, 1.0, 1.0]
-        selectedSegmentLabelmap = self.scriptedEffect.selectedSegmentLabelmap()
-        if selectedSegmentLabelmap:
-            selectedSegmentLabelmapSpacing = selectedSegmentLabelmap.GetSpacing()
+        selectedSegmentLabelmapSpacing = self.segmentSpacing()
 
         marginSizePixel = self.getMarginSizePixel()
         marginSizeMM = [abs((marginSizePixel[i]) * selectedSegmentLabelmapSpacing[i]) for i in range(3)]
@@ -166,11 +162,23 @@ class SegmentEditorMarginEffect(AbstractScriptedSegmentEditorEffect):
         slicer.app.processEvents()
 
     def processMargin(self):
-        # Get modifier labelmap and parameters
-        modifierLabelmap = self.scriptedEffect.defaultModifierLabelmap()
-        selectedSegmentLabelmap = self.scriptedEffect.selectedSegmentLabelmap()
-
+        # Get parameters
         marginSizeMM = self.scriptedEffect.doubleParameter("MarginSizeMm")
+
+        # The segment can only change within the margin size around its current extent, and the selected segment
+        # is replaced (the "Set" modification mode clears it everywhere), therefore it is enough to process this region.
+        # Voxel coordinates computed in the distance map filter are single-precision, therefore the results may slightly
+        # depend on the voxel position relative to the start of the image, which the cropping takes into account.
+        marginVoxels = math.ceil(abs(marginSizeMM) / min(self.segmentSpacing())) + 2
+        selectedSegmentLabelmap = self.croppedSelectedSegmentLabelmap(marginVoxels, singlePrecisionCoordinates=True)
+
+        if marginSizeMM < 0:
+            effectiveExtent = [0, -1, 0, -1, 0, -1]
+            if not slicer.vtkOrientedImageDataResample.CalculateEffectiveExtent(selectedSegmentLabelmap, effectiveExtent):
+                # The segment is empty, therefore it remains empty. Processing the inverted (all background) labelmap
+                # would not work: the distance map is invalid and the entire volume would be filled.
+                logging.info("Margin operation skipped: the segment is empty.")
+                return
 
         # We need to know exactly the value of the segment voxels, apply threshold to make force the selected label value
         labelValue = 1
@@ -196,6 +204,11 @@ class SegmentEditorMarginEffect(AbstractScriptedSegmentEditorEffect):
         margin.SetOuterMarginMM(abs(marginSizeMM))
         margin.Update()
 
+        # The result covers the processed (cropped) region and it replaces the segment ("Set" modification mode),
+        # therefore it is stored in a new labelmap instead of defaultModifierLabelmap(), which would allocate and clear
+        # a labelmap as large as the reference geometry.
+        modifierLabelmap = slicer.vtkOrientedImageData()
+        modifierLabelmap.CopyDirections(selectedSegmentLabelmap)
         if marginSizeMM >= 0:
             modifierLabelmap.ShallowCopy(margin.GetOutput())
         else:

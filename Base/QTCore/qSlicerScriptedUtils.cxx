@@ -21,7 +21,10 @@
 #include "qSlicerScriptedUtils_p.h"
 
 // Qt includes
+#include <QDir>
 #include <QFileInfo>
+#include <QSet>
+#include <QSettings>
 
 // PythonQt includes
 #include <PythonQt.h>
@@ -115,6 +118,40 @@ bool qSlicerScriptedUtils::importModulePythonExtensions(qSlicerCorePythonManager
     QStringList paths;
     paths << scopedCurrentDir.currentPath();
     pythonManager->appendPythonPaths(paths);
+  }
+
+  // With the setting Studio/LazyPythonWrappers, register the class index generated at build time
+  // (Utilities/Scripts/GenerateSlicerWrapperIndex.py) instead of importing every wrapper of the
+  // directory: each wrapper is then imported on first use, and the remaining ones while the
+  // application is idle after startup (slicer.util._registerLazyWrapperIndex). Directories without
+  // an index, such as those of extensions, are imported eagerly.
+  static QSet<QString> lazyDirectories;
+  const QString directory = scopedCurrentDir.currentPath();
+  if (lazyDirectories.contains(directory))
+  {
+    return true;
+  }
+  qSlicerCoreApplication* app = qSlicerCoreApplication::application();
+  QSettings* settings = app ? app->userSettings() : nullptr;
+  // On by default since the full sweep passed with it (work package W4-03): startup, visiting every
+  // module, the slicer package tests, module self-tests and generic tests with --no-main-window.
+  const bool lazyByDefault = true;
+  if (settings && settings->value("Studio/LazyPythonWrappers", lazyByDefault).toBool())
+  {
+    const QString indexPath = QDir(directory).filePath("SlicerWrapperIndex.json");
+    if (QFileInfo::exists(indexPath))
+    {
+      QVariant registered = pythonManager->executeString(QString("__import__('slicer.util').util._registerLazyWrapperIndex(%1, %2)")
+                                                           .arg(qSlicerCorePythonManager::toPythonStringLiteral(directory))
+                                                           .arg(qSlicerCorePythonManager::toPythonStringLiteral(indexPath)),
+                                                         ctkAbstractPythonManager::EvalInput);
+      // On failure (for example an unreadable index), fall back to the eager import below
+      if (!pythonManager->pythonErrorOccured() && registered.toBool())
+      {
+        lazyDirectories.insert(directory);
+        return true;
+      }
+    }
   }
 
   pythonManager->executeString(QString("from slicer.util import importVTKClassesFromDirectory;"

@@ -22,6 +22,7 @@
 
 // Qt includes
 #include <QAction>
+#include <QApplication>
 #include <QCloseEvent>
 #include <QDebug>
 #include <QDesktopServices>
@@ -29,10 +30,12 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QKeySequence>
+#include <QLayout>
 #include <QMenu>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QQueue>
+#include <QSet>
 #include <QSettings>
 #include <QShowEvent>
 #include <QSignalMapper>
@@ -40,6 +43,7 @@
 #include <QTableView>
 #include <QTextEdit>
 #include <QTimer>
+#include <QToolBar>
 #include <QToolButton>
 
 // CTK includes
@@ -102,6 +106,19 @@ void setThemeIcon(QAction* action, const QString& name)
   action->setIcon(QIcon::fromTheme(name, action->icon()));
 }
 
+// Width of the module panel kept between modules. A key of the fork: official Slicer does not read it.
+const char PanelWidthSettingsKey[] = "Studio/ClassicPanelWidth";
+
+// Dynamic property of the main window, true until the window is first shown: the main window state is restored
+// then, once all modules have added their toolbars.
+const char DeferRestoreStatePropertyName[] = "SlicerDeferRestoreState";
+
+// Dynamic property of toolbars and dock widgets that stay shown in focus mode
+const char KeepInFocusModePropertyName[] = "SlicerKeepInFocusMode";
+
+// Dynamic property of the main window, true while the application manages the module panel width itself
+const char ConstrainedPanelPropertyName[] = "SlicerStudioConstrainedPanel";
+
 } // end of anonymous namespace
 
 //-----------------------------------------------------------------------------
@@ -123,6 +140,7 @@ void qSlicerMainWindowPrivate::init()
 
   this->setupStatusBar();
   q->setupMenuActions();
+  this->addMenuShortcutActions();
   this->StartupState = q->saveState();
   q->restoreGUIState();
 }
@@ -135,6 +153,10 @@ void qSlicerMainWindowPrivate::setupUi(QMainWindow* mainWindow)
   this->Ui_qSlicerMainWindow::setupUi(mainWindow);
 
   qSlicerApplication* app = qSlicerApplication::application();
+
+  // Modules that add a toolbar do not need to restore the main window state: it is restored once, when the
+  // window is first shown (see restoreGUIState() and showEvent())
+  q->setProperty(DeferRestoreStatePropertyName, true);
 
   //----------------------------------------------------------------------------
   // Recently loaded files
@@ -157,6 +179,31 @@ void qSlicerMainWindowPrivate::setupUi(QMainWindow* mainWindow)
                                                                               "the entire application window"));
   this->PanelDockWidget->toggleViewAction()->setShortcut(QKeySequence("Ctrl+5"));
   this->AppearanceMenu->insertAction(this->ShowStatusBarAction, this->PanelDockWidget->toggleViewAction());
+
+  // Keep the module panel width between modules (see qSlicerMainWindow::panelWidth)
+  this->PanelDockWidget->installEventFilter(q);
+  QObject::connect(this->ModulePanel, &qSlicerAbstractModulePanel::moduleAdded, q, [this]() { this->schedulePanelWidthUpdate(); });
+  this->PanelWidthPersistTimer = new QTimer(q);
+  this->PanelWidthPersistTimer->setSingleShot(true);
+  this->PanelWidthPersistTimer->setInterval(300);
+  QObject::connect(this->PanelWidthPersistTimer, &QTimer::timeout, q, [this]() { this->persistPanelWidth(); });
+
+  //----------------------------------------------------------------------------
+  // Focus mode
+  //----------------------------------------------------------------------------
+  // View > Maximize view (Ctrl+6, F11) hides the module panel, the toolbars and the dock widgets
+  QList<QKeySequence> focusModeShortcuts = this->WindowMaximizeViewAction->shortcuts();
+  focusModeShortcuts << QKeySequence(Qt::Key_F11);
+  this->WindowMaximizeViewAction->setShortcuts(focusModeShortcuts);
+  QObject::connect(this->WindowMaximizeViewAction, SIGNAL(triggered(bool)), q, SLOT(setFocusMode(bool)));
+  QList<QAction*> viewMenuActions = this->ViewMenu->actions();
+  int appearanceMenuIndex = viewMenuActions.indexOf(this->AppearanceMenu->menuAction());
+  QAction* focusModeBeforeAction = nullptr; // nullptr means at the end
+  if (appearanceMenuIndex >= 0 && appearanceMenuIndex + 1 < viewMenuActions.size())
+  {
+    focusModeBeforeAction = viewMenuActions.at(appearanceMenuIndex + 1);
+  }
+  this->ViewMenu->insertAction(focusModeBeforeAction, this->WindowMaximizeViewAction);
 
   //----------------------------------------------------------------------------
   // ModuleManager
@@ -559,6 +606,21 @@ bool qSlicerMainWindowPrivate::confirmCloseApplication()
 {
   Q_Q(qSlicerMainWindow);
 
+  // The application may describe what is unsaved itself (see qSlicerMainWindow::closeSummaryRequested())
+  q->setProperty("SlicerStudioCloseMode", QVariant());
+  q->setProperty("SlicerStudioCloseSummary", QVariant());
+  emit q->closeSummaryRequested();
+  const QString closeMode = q->property("SlicerStudioCloseMode").toString();
+  const QString closeSummary = q->property("SlicerStudioCloseSummary").toString();
+  if (closeMode == "unsavedLesion")
+  {
+    return this->confirmCloseApplicationUnsavedLesion(closeSummary);
+  }
+  if (closeMode == "lesionSaved")
+  {
+    return this->confirmCloseApplicationLesionSaved(closeSummary);
+  }
+
   QString details;
   bool sceneModified = isSceneContentModifiedSinceRead(details);
 
@@ -627,6 +689,50 @@ bool qSlicerMainWindowPrivate::confirmCloseApplication()
     }
   }
   return close;
+}
+
+//-----------------------------------------------------------------------------
+bool qSlicerMainWindowPrivate::confirmCloseApplicationUnsavedLesion(const QString& summary)
+{
+  Q_Q(qSlicerMainWindow);
+  // Allocated on the stack so that clickedButton() can be queried after exec() returns. Each button has its own
+  // role, and the chosen one is identified by clickedButton() (see confirmCloseApplication()).
+  QMessageBox messageBox(QMessageBox::Warning, qSlicerMainWindow::tr("Save before exit?"), summary, QMessageBox::NoButton, q);
+  QPushButton* saveButton = messageBox.addButton(qSlicerMainWindow::tr("Save lesion..."), QMessageBox::AcceptRole);
+  QPushButton* discardButton = messageBox.addButton(qSlicerMainWindow::tr("Don't save"), QMessageBox::DestructiveRole);
+  QPushButton* cancelButton = messageBox.addButton(qSlicerMainWindow::tr("Cancel"), QMessageBox::RejectRole);
+  messageBox.setDefaultButton(saveButton);
+  messageBox.setEscapeButton(cancelButton);
+  messageBox.exec();
+  QAbstractButton* clickedButton = messageBox.clickedButton();
+  if (clickedButton == saveButton)
+  {
+    // The application saves the lesion (possibly asking for a file name) and reports the result
+    q->setProperty("SlicerStudioSaveResult", QVariant());
+    emit q->saveRequested();
+    return q->property("SlicerStudioSaveResult").toString() == "saved";
+  }
+  return clickedButton == discardButton;
+}
+
+//-----------------------------------------------------------------------------
+bool qSlicerMainWindowPrivate::confirmCloseApplicationLesionSaved(const QString& summary)
+{
+  Q_Q(qSlicerMainWindow);
+  QMessageBox messageBox(QMessageBox::Question, qSlicerMainWindow::tr("Quit?"), summary, QMessageBox::NoButton, q);
+  QPushButton* quitButton = messageBox.addButton(qSlicerMainWindow::tr("Quit"), QMessageBox::AcceptRole);
+  QPushButton* saveButton = messageBox.addButton(qSlicerMainWindow::tr("Save session..."), QMessageBox::ActionRole);
+  QPushButton* cancelButton = messageBox.addButton(qSlicerMainWindow::tr("Cancel"), QMessageBox::RejectRole);
+  messageBox.setDefaultButton(quitButton);
+  messageBox.setEscapeButton(cancelButton);
+  messageBox.exec();
+  QAbstractButton* clickedButton = messageBox.clickedButton();
+  if (clickedButton == saveButton)
+  {
+    // Quit only if the scene was saved (the Save Data dialog returns false if it was cancelled)
+    return qSlicerApplication::application()->ioManager()->openSaveDataDialog();
+  }
+  return clickedButton == quitButton;
 }
 
 //-----------------------------------------------------------------------------
@@ -738,6 +844,160 @@ void qSlicerMainWindowPrivate::setupStatusBar()
 
   QObject::connect(
     qSlicerApplication::application()->errorLogModel(), SIGNAL(entryAdded(ctkErrorLogLevel::LogLevel)), q, SLOT(onWarningsOrErrorsOccurred(ctkErrorLogLevel::LogLevel)));
+}
+
+//-----------------------------------------------------------------------------
+void qSlicerMainWindowPrivate::addMenuShortcutActions()
+{
+  Q_Q(qSlicerMainWindow);
+  // The shortcut of a menu action only works while the menu bar is shown: adding the action to the main window
+  // too keeps it working when the menu bar is hidden. Undo and redo are left out: Ctrl+Z and Ctrl+Y belong to
+  // the module that has the focus (for example the Segment Editor), not to the application.
+  QList<QMenu*> menus = { this->FileMenu, this->EditMenu, this->ViewMenu, this->HelpMenu };
+  QSet<QMenu*> visitedMenus;
+  const QList<QAction*> mainWindowActions = q->actions();
+  QList<QAction*> shortcutActions;
+  while (!menus.isEmpty())
+  {
+    QMenu* menu = menus.takeFirst();
+    if (!menu || visitedMenus.contains(menu))
+    {
+      continue;
+    }
+    visitedMenus.insert(menu);
+    for (QAction* const action : menu->actions())
+    {
+      if (action->menu())
+      {
+        menus << action->menu();
+        continue;
+      }
+      if (action->isSeparator() || action->shortcuts().isEmpty() //
+          || action == this->EditUndoAction || action == this->EditRedoAction)
+      {
+        continue;
+      }
+      if (action->shortcutContext() != Qt::WindowShortcut && action->shortcutContext() != Qt::ApplicationShortcut)
+      {
+        continue;
+      }
+      if (!mainWindowActions.contains(action) && !shortcutActions.contains(action))
+      {
+        shortcutActions << action;
+      }
+    }
+  }
+  q->addActions(shortcutActions);
+}
+
+//-----------------------------------------------------------------------------
+void qSlicerMainWindowPrivate::updateFocusModeAction()
+{
+  this->WindowMaximizeViewAction->setChecked(this->FocusMode);
+}
+
+//-----------------------------------------------------------------------------
+bool qSlicerMainWindowPrivate::isPanelWidthKept() const
+{
+  Q_Q(const qSlicerMainWindow);
+  if (qSlicerApplication::application()->testAttribute(qSlicerCoreApplication::AA_EnableTesting))
+  {
+    // Classic behavior in tests
+    return false;
+  }
+  // The application manages the width of the module panel itself (Slicer Studio constrains the module panel):
+  // it says so with the property, or by giving the module panel a larger minimum width than its layout needs
+  if (q->property(ConstrainedPanelPropertyName).toBool())
+  {
+    return false;
+  }
+  QLayout* modulePanelLayout = this->ModulePanel->layout();
+  if (modulePanelLayout && this->ModulePanel->minimumWidth() > modulePanelLayout->totalMinimumSize().width())
+  {
+    return false;
+  }
+  return true;
+}
+
+//-----------------------------------------------------------------------------
+void qSlicerMainWindowPrivate::schedulePanelWidthUpdate()
+{
+  Q_Q(qSlicerMainWindow);
+  if (this->PanelWidthUpdatePending)
+  {
+    return;
+  }
+  this->PanelWidthUpdatePending = true;
+  // When the event loop runs again: the new module widget is in the module panel
+  QTimer::singleShot(0,
+                     q,
+                     [this]()
+                     {
+                       this->PanelWidthUpdatePending = false;
+                       this->updatePanelWidth();
+                     });
+}
+
+//-----------------------------------------------------------------------------
+void qSlicerMainWindowPrivate::updatePanelWidth()
+{
+  Q_Q(qSlicerMainWindow);
+  if (!this->WindowInitialShowCompleted || !this->isPanelWidthKept())
+  {
+    return;
+  }
+  QDockWidget* dock = this->PanelDockWidget;
+  Qt::DockWidgetArea area = q->dockWidgetArea(dock);
+  if (dock->isHidden() || dock->isFloating() || (area != Qt::LeftDockWidgetArea && area != Qt::RightDockWidgetArea))
+  {
+    return;
+  }
+  if (this->PanelWidth <= 0)
+  {
+    // The width shown at startup is kept until the user chooses another one
+    this->PanelWidth = dock->width();
+    return;
+  }
+  // Wider only if the module needs it (the dock widget cannot be narrower than its minimum size anyway)
+  int width = qMax(this->PanelWidth, dock->minimumSizeHint().width());
+  if (dock->width() != width)
+  {
+    q->resizeDocks({ dock }, { width }, Qt::Horizontal);
+  }
+}
+
+//-----------------------------------------------------------------------------
+void qSlicerMainWindowPrivate::onPanelResized()
+{
+  Q_Q(qSlicerMainWindow);
+  // Only a resize by the user (dragging the edge of the panel) changes the kept width
+  if (!this->WindowInitialShowCompleted || !(QApplication::mouseButtons() & Qt::LeftButton) || !this->isPanelWidthKept())
+  {
+    return;
+  }
+  if (!this->PanelWidthPersistTimer->isActive())
+  {
+    this->PanelWidthPersistWindowWidth = q->width();
+  }
+  this->PanelWidthPersistTimer->start();
+}
+
+//-----------------------------------------------------------------------------
+void qSlicerMainWindowPrivate::persistPanelWidth()
+{
+  Q_Q(qSlicerMainWindow);
+  QDockWidget* dock = this->PanelDockWidget;
+  if (q->width() != this->PanelWidthPersistWindowWidth)
+  {
+    // The main window was resized, not the panel
+    return;
+  }
+  if (!this->isPanelWidthKept() || dock->isHidden() || dock->isFloating() || dock->width() == this->PanelWidth)
+  {
+    return;
+  }
+  q->setPanelWidth(dock->width());
+  QSettings().setValue(PanelWidthSettingsKey, this->PanelWidth);
 }
 
 //-----------------------------------------------------------------------------
@@ -902,6 +1162,89 @@ QDockWidget* qSlicerMainWindow::errorLogDockWidget() const
 {
   Q_D(const qSlicerMainWindow);
   return d->ErrorLogDockWidget;
+}
+
+//---------------------------------------------------------------------------
+bool qSlicerMainWindow::focusMode() const
+{
+  Q_D(const qSlicerMainWindow);
+  return d->FocusMode;
+}
+
+//---------------------------------------------------------------------------
+void qSlicerMainWindow::setFocusMode(bool enabled)
+{
+  Q_D(qSlicerMainWindow);
+  if (enabled == d->FocusMode)
+  {
+    d->updateFocusModeAction();
+    return;
+  }
+  d->FocusModeChanging = true;
+  // Set first: the handlers of the Hide and Show events below see the new mode
+  d->FocusMode = enabled;
+  if (enabled)
+  {
+    QList<QWidget*> widgets;
+    widgets << d->PanelDockWidget;
+    for (QDockWidget* const dockWidget : this->findChildren<QDockWidget*>(QString(), Qt::FindDirectChildrenOnly))
+    {
+      if (dockWidget != d->PanelDockWidget && !dockWidget->property(KeepInFocusModePropertyName).toBool())
+      {
+        widgets << dockWidget;
+      }
+    }
+    for (QToolBar* const toolBar : this->findChildren<QToolBar*>(QString(), Qt::FindDirectChildrenOnly))
+    {
+      if (!toolBar->property(KeepInFocusModePropertyName).toBool())
+      {
+        widgets << toolBar;
+      }
+    }
+    // Remember what is shown, so that exactly that is shown again
+    d->FocusModeHiddenWidgets.clear();
+    for (QWidget* const widget : widgets)
+    {
+      if (!widget->isHidden())
+      {
+        d->FocusModeHiddenWidgets << QPointer<QWidget>(widget);
+      }
+    }
+    for (const QPointer<QWidget>& widget : d->FocusModeHiddenWidgets)
+    {
+      widget->hide();
+    }
+  }
+  else
+  {
+    for (const QPointer<QWidget>& widget : d->FocusModeHiddenWidgets)
+    {
+      if (widget && widget->isHidden())
+      {
+        widget->show();
+      }
+    }
+    d->FocusModeHiddenWidgets.clear();
+  }
+  d->FocusModeChanging = false;
+  d->updateFocusModeAction();
+  emit focusModeChanged(enabled);
+}
+
+//---------------------------------------------------------------------------
+int qSlicerMainWindow::panelWidth() const
+{
+  Q_D(const qSlicerMainWindow);
+  return d->PanelWidth;
+}
+
+//---------------------------------------------------------------------------
+void qSlicerMainWindow::setPanelWidth(int width)
+{
+  Q_D(qSlicerMainWindow);
+  d->PanelWidth = qMax(0, width);
+  d->PanelWidthChosen = (d->PanelWidth > 0);
+  d->updatePanelWidth();
 }
 
 //---------------------------------------------------------------------------
@@ -1184,6 +1527,7 @@ void qSlicerMainWindow::onPythonConsoleToggled(bool toggled)
 void qSlicerMainWindow::on_WindowToolbarsResetToDefaultAction_triggered()
 {
   Q_D(qSlicerMainWindow);
+  this->setFocusMode(false);
   this->restoreState(d->StartupState);
 }
 
@@ -1260,6 +1604,19 @@ void qSlicerMainWindow::showEvent(QShowEvent* event)
   {
     d->WindowInitialShowCompleted = true;
 
+    // Restore the main window state once, now that all modules have added their toolbars
+    this->setProperty(DeferRestoreStatePropertyName, QVariant());
+    if (d->WindowStateRestoreDeferred)
+    {
+      d->WindowStateRestoreDeferred = false;
+      this->restoreState(d->DeferredWindowState);
+      d->DeferredWindowState.clear();
+    }
+    // Keep the module panel width from now on
+    d->schedulePanelWidthUpdate();
+    // Menu actions added by modules keep their shortcut without the menu bar too
+    d->addMenuShortcutActions();
+
     // Show layout (updates were disabled until now to prevent detached viewports
     // appear before the main window appears).
     qSlicerLayoutManager* layoutManager = qSlicerApplication::application()->layoutManager();
@@ -1328,7 +1685,24 @@ void qSlicerMainWindow::disclaimer()
   disclaimerMessage->setText(message);
   disclaimerMessage->setIcon(QMessageBox::Information);
   disclaimerMessage->setDontShowAgainSettingsKey("MainWindow/DontShowDisclaimerMessage");
-  QTimer::singleShot(0, disclaimerMessage, SLOT(exec()));
+  // Shown when the event loop runs. An application that shows the message itself sets the application property
+  // SlicerDisclaimerHandledByApplication to true until then (for example in a module or in startupCompleted()): it
+  // gets disclaimerRequested() instead, unless the user chose not to show the message again.
+  QTimer::singleShot(0,
+                     disclaimerMessage,
+                     [this, disclaimerMessage, message]()
+                     {
+                       if (!qSlicerCoreApplication::application()->property("SlicerDisclaimerHandledByApplication").toBool())
+                       {
+                         disclaimerMessage->exec();
+                         return;
+                       }
+                       disclaimerMessage->deleteLater();
+                       if (QSettings().value(disclaimerMessage->dontShowAgainSettingsKey(), static_cast<int>(QMessageBox::InvalidRole)).toInt() == QMessageBox::InvalidRole)
+                       {
+                         emit disclaimerRequested(message);
+                       }
+                     });
 }
 
 //-----------------------------------------------------------------------------
@@ -1679,7 +2053,16 @@ void qSlicerMainWindow::restoreGUIState(bool force /*=false*/)
   if (restore || force)
   {
     this->restoreGeometry(settings.value("geometry").toByteArray());
-    this->restoreState(settings.value("windowState").toByteArray());
+    if (this->property(DeferRestoreStatePropertyName).toBool())
+    {
+      // Restored when the window is first shown, once all modules have added their toolbars
+      d->DeferredWindowState = settings.value("windowState").toByteArray();
+      d->WindowStateRestoreDeferred = true;
+    }
+    else
+    {
+      this->restoreState(settings.value("windowState").toByteArray());
+    }
     qSlicerLayoutManager* layoutManager = qSlicerApplication::application()->layoutManager();
     if (layoutManager)
     {
@@ -1688,6 +2071,13 @@ void qSlicerMainWindow::restoreGUIState(bool force /*=false*/)
   }
   settings.endGroup();
   d->FavoriteModules << settings.value("Modules/FavoriteModules").toStringList();
+
+  int panelWidth = settings.value(PanelWidthSettingsKey, 0).toInt();
+  if (panelWidth > 0)
+  {
+    d->PanelWidth = panelWidth;
+    d->PanelWidthChosen = true;
+  }
 
   for (const qSlicerIO::IOProperties& fileProperty : qSlicerMainWindowPrivate::readRecentlyLoadedFiles())
   {
@@ -1701,13 +2091,16 @@ void qSlicerMainWindow::restoreGUIState(bool force /*=false*/)
 void qSlicerMainWindow::saveGUIState(bool force /*=false*/)
 {
   Q_D(qSlicerMainWindow);
+  // Never save hidden panels
+  this->setFocusMode(false);
   QSettings settings;
   settings.beginGroup("MainWindow");
   bool restore = settings.value("RestoreGeometry", false).toBool();
   if (restore || force)
   {
     settings.setValue("geometry", this->saveGeometry());
-    settings.setValue("windowState", this->saveState());
+    // Before the first show the saved state is not restored yet (SlicerDeferRestoreState): keep it as it is
+    settings.setValue("windowState", d->WindowStateRestoreDeferred ? d->DeferredWindowState : this->saveState());
     qSlicerLayoutManager* layoutManager = qSlicerApplication::application()->layoutManager();
     if (layoutManager)
     {
@@ -1715,6 +2108,11 @@ void qSlicerMainWindow::saveGUIState(bool force /*=false*/)
     }
   }
   settings.endGroup();
+  if (d->PanelWidthChosen && d->PanelWidth > 0 && settings.value(PanelWidthSettingsKey, 0).toInt() != d->PanelWidth
+      && !qSlicerApplication::application()->testAttribute(qSlicerCoreApplication::AA_EnableTesting))
+  {
+    settings.setValue(PanelWidthSettingsKey, d->PanelWidth);
+  }
   qSlicerMainWindowPrivate::writeRecentlyLoadedFiles(d->RecentlyLoadedFileProperties);
 }
 
@@ -1731,6 +2129,7 @@ void qSlicerMainWindow::setHomeModuleCurrent()
 void qSlicerMainWindow::restoreToolbars()
 {
   Q_D(qSlicerMainWindow);
+  this->setFocusMode(false);
   this->restoreState(d->StartupState);
 }
 
@@ -1738,6 +2137,18 @@ void qSlicerMainWindow::restoreToolbars()
 bool qSlicerMainWindow::eventFilter(QObject* object, QEvent* event)
 {
   Q_D(qSlicerMainWindow);
+  if (object == d->PanelDockWidget)
+  {
+    if (event->type() == QEvent::Resize)
+    {
+      d->onPanelResized();
+    }
+    else if (event->type() == QEvent::Show && d->FocusMode && !d->FocusModeChanging)
+    {
+      // The module panel was shown (for example a module was selected): leave the focus mode
+      this->setFocusMode(false);
+    }
+  }
 #ifdef Slicer_USE_PYTHONQT
   if (object == this->pythonConsole())
   {

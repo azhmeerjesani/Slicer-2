@@ -1,0 +1,45 @@
+{
+  "format": "slicer-lnm-recipe",
+  "version": 1,
+  "id": "petersen2026_label_permutation",
+  "recipe_version": "1",
+  "title": "Symptom-anchored label permutation (Petersen 2026)",
+  "status": "2026-preprint",
+  "cited_as": "Petersen et al. 2026",
+  "citations": [
+    "10.64898/2026.02.16.26346377"
+  ],
+  "differences_from_source": [
+    "Inference uses this library's Freedman-Lane permutation GLM (labels permuted within datasets, 5000 permutations, voxel max-statistic FWE primary, BH-FDR secondary) with a lesion-volume covariate; the source's software and exact settings are not reproduced."
+  ],
+  "description": "Within-cohort case-control design: every dataset holds lesions with and without the symptom, and the group labels are permuted within datasets. A single 2026 preprint; it is not established practice.",
+  "parameters": {
+    "design": {
+      "test": "two_group",
+      "contrast": "A>B",
+      "covariates": [
+        "volume_ml"
+      ],
+      "permute": "within"
+    },
+    "n_perm": 5000
+  },
+  "steps": [
+    "maps",
+    "specificity",
+    "qa",
+    "robustness",
+    "clusters",
+    "report"
+  ],
+  "requires": [
+    "clusters",
+    "cohortmaps",
+    "design",
+    "glm",
+    "methods",
+    "qa",
+    "report",
+    "robustness"
+  ]
+}

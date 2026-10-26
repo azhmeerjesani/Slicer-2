@@ -1,0 +1,55 @@
+{
+  "_comment": "USABILITY.md section 16: human actions per task. official = official 3D Slicer 5.13; wave1 = measured on the wave 1 build before QW-A/QW-B (kept for the record); afterQW = the estimate for the post-QW build (the gate baseline is compared with it, +-15%); target_wN = the limit after wave N. null = not applicable. Metrics of a task are listed as <task>.<metric>; the key without a dot is the headline of the task.",
+  "novice": {
+    "title": "novice-first-trace: template, 5-slice lesion, check views, undo and erase, save sub-01_lesion.nii.gz, quit",
+    "official": 64, "wave1": 52, "afterQW": 32, "target_w2": 30, "target_w3": 28, "target_w4": 28
+  },
+  "nav": {
+    "title": "patient-scan-navigation: load, frontal, zoom/pan, W/L, layouts, link, crosshair, maximize, paint with range, smooth, back to Library",
+    "official": 58, "wave1": 72, "afterQW": 66, "target_w2": 40, "target_w3": 36, "target_w4": 36
+  },
+  "find-tools": {
+    "title": "find-tools-and-return, scored T1-T6 and T9, first session",
+    "official": 33, "wave1": 93, "afterQW": 42, "target_w2": 38, "target_w3": 36, "target_w4": 36
+  },
+  "find-tools.total": {
+    "title": "find-tools-and-return, total including the T7 exploration",
+    "official": null, "wave1": 168, "afterQW": 120, "target_w2": 62, "target_w3": 58, "target_w4": 58
+  },
+  "find-tools-warm": {
+    "title": "find-tools-and-return, scored T1-T6 and T9, warm (MRU or Favorites)",
+    "official": 33, "wave1": null, "afterQW": null, "target_w2": 30, "target_w3": 28, "target_w4": 28
+  },
+  "classic": {
+    "title": "classic-migration persona A, familiar tour",
+    "official": 13, "wave1": 28, "afterQW": 26, "target_w2": 27, "target_w3": 25, "target_w4": 25
+  },
+  "classic.core": {
+    "title": "classic-migration persona A, productive core (load sample, paint, save)",
+    "official": 7, "wave1": null, "afterQW": null, "target_w2": 8, "target_w3": 8, "target_w4": 8
+  },
+  "classic.keysToDicomMenu": {
+    "title": "classic-migration persona B: keys to reach the menu File > Add DICOM data (unreachable counts as failed)",
+    "official": 2, "wave1": null, "afterQW": null, "target_w2": 5, "target_w3": 5, "target_w4": 5
+  },
+  "classic.invisibleTabStops": {
+    "title": "persona B: Tab stops on Library without a visible focus cue",
+    "official": 0, "wave1": 5, "afterQW": 5, "target_w2": 0, "target_w3": 0, "target_w4": 0
+  },
+  "classic.tabToggles": {
+    "title": "persona B: Tab presses that toggle the inspector",
+    "official": 0, "wave1": null, "afterQW": 0, "target_w2": 0, "target_w3": 0, "target_w4": 0
+  },
+  "case": {
+    "title": "case-report-tracing, 2 cases",
+    "official": 156, "wave1": 149, "afterQW": 126, "target_w2": 75, "target_w3": 70, "target_w4": 45, "target_w5": 35
+  },
+  "lnm": {
+    "title": "lnm-cohort (A): Load all, Review in Draw, one-subject QC, next subject, thresholded T map",
+    "official": 25, "wave1": 45, "afterQW": 45, "target_w2": 20, "target_w3": 15, "target_w4": 15
+  },
+  "lnm.B": {
+    "title": "lnm-cohort (B): folder, cohort maps, group stats, export (needs code before W3-07/W3-08/A-04)",
+    "official": null, "wave1": null, "afterQW": null, "target_w2": null, "target_w3": 35, "target_w4": 25
+  }
+}

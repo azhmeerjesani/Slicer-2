@@ -8,6 +8,7 @@ set(modules
   SegmentEditor
   SegmentStatistics
   SelfTests
+  Studio
   VectorToScalarVolume
   WebServer
   )
@@ -23,6 +24,7 @@ if(Slicer_USE_NUMPY)
 endif()
 if(Slicer_USE_SCIPY)
   list(APPEND modules
+    LesionNetworkMapping
     LineProfile
     )
 endif()
@@ -48,3 +50,13 @@ foreach(module ${modules})
     add_subdirectory(${module})
   endif()
 endforeach()
+
+# The lesion network mapping library (LesionNetworkMappingLib, pure Python) is installed even when the
+# module user interface is disabled, so that "PythonSlicer -m LesionNetworkMappingLib.engine" works.
+if(Slicer_USE_NUMPY)
+  slicer_is_scripted_builtin_module_enabled(LesionNetworkMapping _build_lesion_network_mapping)
+  if(NOT Slicer_USE_SCIPY OR NOT _build_lesion_network_mapping)
+    set(LesionNetworkMapping_LIBRARY_ONLY TRUE)
+    add_subdirectory(LesionNetworkMapping)
+  endif()
+endif()

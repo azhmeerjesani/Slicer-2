@@ -58,6 +58,10 @@ set(APP_SRCS
   Main.cxx
   )
 
+# Fork defaults: the macro copies Resources/SlicerDefaultSettings.ini to "<build>/${Slicer_SHARE_DIR}" and
+# installs it into ${Slicer_INSTALL_SHARE_DIR}, which is where qSlicerCoreApplication::slicerDefaultSettingsFilePath()
+# looks. The defaults are merged into the user settings after the command line is parsed, so --testing and
+# --disable-settings keep using temporary settings.
 slicerMacroBuildApplication(
   NAME ${PROJECT_NAME}
   APPLICATION_NAME ${${PROJECT_NAME}_APPLICATION_NAME}
@@ -67,6 +71,7 @@ slicerMacroBuildApplication(
   WIN_ICON_FILE ${SlicerApp_WIN_ICON_FILE}
   LINUX_ICON_FILE ${SlicerApp_LINUX_ICON_FILE}
   LICENSE_FILE ${SlicerApp_LICENSE_FILE}
+  DEFAULT_SETTINGS_FILE ${CMAKE_CURRENT_SOURCE_DIR}/Resources/SlicerDefaultSettings.ini
   FOLDER ${${PROJECT_NAME}_FOLDER}
   SRCS ${APP_SRCS}
   TARGET_LIBRARIES ${APPLIB_NAME}

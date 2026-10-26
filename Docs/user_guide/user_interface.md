@@ -57,6 +57,33 @@ Toolbar provides quick access to commonly used functions. Individual toolbar pan
 
 This panel may display application status, such as current operation in progress. Clicking the little **X** icons displays the Error Log window.
 
+## Slicer Studio and the classic interface
+
+This fork of 3D Slicer starts in the **Slicer Studio** interface. The description above, with the menu bar, toolbars,
+module panel on the left and the status bar, is the **classic interface**, which Slicer Studio keeps unchanged and which
+official 3D Slicer shows. The two are two faces of the same application: the same modules, files and Python interface.
+
+**Studio.** One 44 px top bar holds the ≡ menu, the breadcrumb, the switcher **Library | Draw | Map**, Undo/Redo, the layout
+picker, **Search** and the autosave status. The module panel moves to the right as the **inspector**. Library, Draw and Map are
+the workspaces; every other module opens in the inspector from Search (**Ctrl+K**), with a back button such as "← Draw".
+The Data Probe, status bar, menu bar and toolbars are hidden, and everything they offer is in Search or in the ≡ menu (File,
+Edit, View and Help are submenus of ≡).
+
+**Switching.** **Ctrl+Alt+0**, **≡ > Classic interface** or **⋯ > Open in Classic** switches to the classic interface, and
+**View > Studio interface** (or Ctrl+Alt+0 again) switches back. The choice is remembered. To start in the classic
+interface once, set the environment variable `SLICER_CLASSIC_UI=1`; to turn Studio off, set `Studio/Enabled` to false
+(see [Settings](settings.md#slicer-studio-settings)). Slicer started with `--testing` or `--no-main-window` always behaves as the
+classic interface.
+
+**What is where.** Application Settings is in ≡ (or Ctrl+2). The module list is in Search. The Python console is Ctrl+3
+and the error log Ctrl+0, as before. The module panel is toggled with **Ctrl+\\** or **Ctrl+5** in Studio (Ctrl+5 is the
+classic key). **F11** or **Ctrl+6** hides all panels; **Esc** takes you one step back at a time. The Studio keys and the Esc ladder
+are described in [Slicer Studio](modules/studio.md#keyboard-reference); the **Help > Take a tour…** tour and the
+**Where did it go?** search show the place of every classic control in Studio.
+
+**Keyboard access.** **F10** opens the ≡ menu; **F6** and **Shift+F6** move the focus between the top bar, the inspector
+and the active view; **Tab** and **Shift+Tab** move the focus and never hide the inspector.
+
 ## Review loaded data
 
 Data available in Slicer can be reviewed in the Data module, which can be found on the toolbar or the modules list ![](../../Modules/Loadable/Data/Resources/Icons/SubjectHierarchy.png). More details about the module can be found on the [Slicer wiki](https://www.slicer.org/wiki/Documentation/Nightly/Modules/Data).
@@ -123,6 +150,8 @@ Medical images typically contain thousands of gray levels, but regular computer 
 By default 3D Slicer uses window/level setting that is specified in the DICOM file. If it is not available then window/level is set to contain the entire intensity range of the image (except top/bottom 0.1%, calculated using percentiles, to not let a very thin tail of the intensity distribution to decrease the image contrast too much).
 
 Window/level can be manually adjusted anytime by clicking on "Adjust window/level" button on the toolbar then left-click-and-drag in any of the slice viewers. Optimal window/level can be computed for a chosen area by lef-click-and-dragging while holding down <kbd>Ctrl</kbd> key.
+
+In the Slicer Studio interface, left-click-and-drag in a slice view adjusts window/level without switching mouse mode, whenever no tool or mode is active (see [Navigation in Studio](#navigation-in-studio)).
 
 [![](https://img.youtube.com/vi/u1B0F1KcVsk/0.jpg)](https://youtu.be/u1B0F1KcVsk "Demo video of how to adjust image window/level")
 
@@ -239,7 +268,8 @@ The following shortcuts are available when a slice view is active. To
 activate a view, click inside the view: if you do not want to change
 anything in the view, just activate it then do `right-click` without
 moving the mouse. Note that simply hovering over the mouse over a slice
-view will not activate the view.
+view will not activate the view (except in the Slicer Studio interface, see
+[Navigation in Studio](#navigation-in-studio)).
 
 | Shortcut | Operation |
 | -------- | --------- |
@@ -264,8 +294,9 @@ view will not activate the view.
 The following shortcuts are available when a 3D view is active. To
 activate a view, click inside the view: if you do not want to change
 anything in the view, just activate it then do `right-click` without
-moving the mouse. Note that simply hovering over the mouse over a slice
-view will not activate the view.
+moving the mouse. Note that simply hovering over the mouse over a 3D
+view will not activate the view (except in the Slicer Studio interface, see
+[Navigation in Studio](#navigation-in-studio)).
 
 | Shortcut | Operation |
 | -------- | --------- |
@@ -300,6 +331,38 @@ Simulation if shortcuts not available on your device:
 - Trackpad: instead of `right-click` do `two-finger click`
 
 :::
+
+### Navigation in Studio
+
+The Slicer Studio interface adds the following behaviours to the slice and 3D views. They apply only while
+the Studio interface is active: the Classic interface (and Slicer started with `--testing`) keeps the
+standard behaviour described above, and switching back to Classic restores it immediately.
+
+| Shortcut | Operation |
+| -------- | --------- |
+| hover the mouse over a view | the view under the mouse becomes active: its keyboard shortcuts work without a click |
+| `Page Up` / `Page Down` (slice view) | move 10 slices forward/backward (the number of slices is configurable) |
+| `Home` / `End` (slice view) | move to the first/last slice of the volume |
+| `left arrow` / `right arrow`, `mouse wheel`, `Page Up` / `Page Down` (slice view) | stop at the first and last slice of the volume instead of moving past it |
+| `Ctrl` + `mouse wheel` (slice view) | zoom in and out by the same factor, so that one step in and one step out cancel exactly |
+| `left-click` + `drag` (slice view) | adjust window/level when no tool or mode is active; Markups placement and Segment Editor tools keep the left button |
+| `Space` (while a Draw tool is active) | pause or resume the tool; while it is paused, `left-click` + `drag` adjusts window/level |
+
+Notes:
+- Hovering does not take the keyboard focus away from a text field (for example a search field, a spin
+  box or the Python console), and not while a menu, popup or dialog is open, or while the window is not
+  active.
+- In 3D views, `Page Down`, `Home` and `End` keep their standard meaning (rotate to a standard view).
+- The behaviours can be changed in *Application Settings > Views > Navigation in Studio*:
+
+| Setting | Default | Description |
+| ------- | ------- | ----------- |
+| Left-drag adjusts window/level (`Studio/LeftDragWindowLevel`) | on | Left-click-and-drag adjusts window/level in slice views when no tool or mode is active |
+| Keys act on the view under the mouse (`Studio/FocusFollowsMouse`) | on | Slice and 3D views become active when the mouse enters them |
+| Page Up / Page Down step (`Studio/PageStepSlices`) | 10 | Number of slices that `Page Up` and `Page Down` move (1-100) |
+
+Changes take effect when the settings dialog is closed. These settings are used only by Slicer Studio;
+other Slicer installations that share the same settings file ignore them.
 
 ### Python console
 

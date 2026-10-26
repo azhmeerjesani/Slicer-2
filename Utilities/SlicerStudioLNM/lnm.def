@@ -1,0 +1,63 @@
+# slicer-lnm: Slicer Studio's lesion network mapping library as an Apptainer (Singularity) image.
+# The Apptainer equivalent of the Dockerfile next to this file; local builds only (see README.md).
+#
+# Build from the module folder (the %files paths are relative to the current folder):
+#
+#   cd Modules/Scripted/LesionNetworkMapping
+#   apptainer build --build-arg SLICER_FORK_REV=$(git rev-parse --short=12 HEAD) \
+#     slicer-lnm.sif ../../../Utilities/SlicerStudioLNM/lnm.def
+#
+# The image holds no data; bind the inputs, the output folder and the connectome (read-only):
+#
+#   apptainer run --containall -B /data/bids:/bids:ro -B /data/out:/out -B /data/GSP1000.lnmc:/connectome:ro \
+#     slicer-lnm.sif /bids /out participant --connectome /connectome --accept-terms --threads 4
+
+Bootstrap: docker
+From: python:3.12-slim
+
+%arguments
+    SLICER_FORK_REV=local
+    NUMPY_VERSION=2.4.6
+    SCIPY_VERSION=1.17.1
+    WITH_PILLOW=1
+    PILLOW_VERSION=12.2.0
+
+%files
+    pyproject.toml /opt/slicer-lnm-src/pyproject.toml
+    LesionNetworkMappingLib /opt/slicer-lnm-src/LesionNetworkMappingLib
+
+%post
+    set -e
+    export PIP_DISABLE_PIP_VERSION_CHECK=1
+    # numpy, scipy and Pillow at the versions that Slicer Studio bundles (PythonSlicer); WITH_PILLOW=0 leaves
+    # Pillow out (report.html and the figures are then not rendered)
+    pip install --no-cache-dir "numpy=={{ NUMPY_VERSION }}" "scipy=={{ SCIPY_VERSION }}"
+    if [ "{{ WITH_PILLOW }}" = "1" ]; then pip install --no-cache-dir "pillow=={{ PILLOW_VERSION }}"; fi
+    cd /opt/slicer-lnm-src
+    find LesionNetworkMappingLib -name "__pycache__" -type d -prune -exec rm -rf {} +
+    SLICER_FORK_REV="{{ SLICER_FORK_REV }}" pip wheel --no-cache-dir --no-deps -w /opt/slicer-lnm-dist .
+    pip install --no-cache-dir --no-deps /opt/slicer-lnm-dist/slicer_lnm-*.whl
+    cd /
+    rm -rf /opt/slicer-lnm-src /opt/slicer-lnm-dist
+    slicer-lnm --version
+
+%environment
+    export PYTHONDONTWRITEBYTECODE=1
+    export PYTHONUNBUFFERED=1
+    export SLICER_LNM_OFFLINE=1
+
+%runscript
+    exec slicer-lnm "$@"
+
+%test
+    slicer-lnm --version
+
+%labels
+    org.opencontainers.image.title slicer-lnm
+    org.opencontainers.image.description Lesion network mapping BIDS-App (Slicer Studio LesionNetworkMappingLib). Research use only. Contains no data.
+    org.opencontainers.image.licenses LicenseRef-3D-Slicer
+
+%help
+    slicer-lnm <input_dir> <output_dir> {participant,group} --connectome PATH --accept-terms [options]
+    slicer-lnm <command> [arguments]   (library jobs: engine, cohortmaps, pipeline, glm, slnm, ...)
+    Research use only. The image contains no data: bind the connectome read-only.

@@ -10,6 +10,17 @@
 #include "vtkMRMLLayoutNode.h"
 #include "vtkMRMLAbstractViewNode.h"
 
+namespace
+{
+// User layout IDs reserved by the fork (Slicer Studio layouts, registered in vtkMRMLLayoutLogic).
+// Other Slicer versions do not know them: a scene that stored such an ID as currentViewArrangement
+// would load there with an empty view area. These IDs are therefore saved with the conventional
+// layout as portable fallback in currentViewArrangement and the actual ID in the
+// studioViewArrangement attribute, which ReadXMLAttributes of other versions ignores.
+const int StudioLayoutIdFirst = 7001;
+const int StudioLayoutIdLast = 7099;
+} // namespace
+
 //----------------------------------------------------------------------------
 vtkMRMLNodeNewMacro(vtkMRMLLayoutNode);
 
@@ -60,7 +71,16 @@ void vtkMRMLLayoutNode::WriteXML(ostream& of, int nIndent)
 
   Superclass::WriteXML(of, nIndent);
 
-  of << " currentViewArrangement=\"" << this->ViewArrangement << "\"";
+  if (this->ViewArrangement >= StudioLayoutIdFirst && this->ViewArrangement <= StudioLayoutIdLast)
+  {
+    // Portable fallback for versions that do not know the layout
+    of << " currentViewArrangement=\"" << vtkMRMLLayoutNode::SlicerLayoutConventionalView << "\"";
+    of << " studioViewArrangement=\"" << this->ViewArrangement << "\"";
+  }
+  else
+  {
+    of << " currentViewArrangement=\"" << this->ViewArrangement << "\"";
+  }
   of << " guiPanelVisibility=\"" << this->GUIPanelVisibility << "\"";
   of << " bottomPanelVisibility =\"" << this->BottomPanelVisibility << "\"";
   of << " guiPanelLR=\"" << this->GUIPanelLR << "\"";
@@ -85,6 +105,10 @@ void vtkMRMLLayoutNode::ReadXMLAttributes(const char** atts)
 
   const char* attName;
   const char* attValue;
+  // The layout saved in studioViewArrangement takes precedence over the portable fallback saved
+  // in currentViewArrangement, whatever the order of the attributes
+  bool hasStudioViewArrangement = false;
+  int studioViewArrangement = vtkMRMLLayoutNode::SlicerLayoutNone;
 
   while (*atts != nullptr)
   {
@@ -99,6 +123,13 @@ void vtkMRMLLayoutNode::ReadXMLAttributes(const char** atts)
       {
         this->ViewArrangement = vtkMRMLLayoutNode::SlicerLayoutInitialView;
       }
+    }
+    else if (!strcmp(attName, "studioViewArrangement"))
+    {
+      std::stringstream ss;
+      ss << attValue;
+      ss >> studioViewArrangement;
+      hasStudioViewArrangement = !ss.fail() && studioViewArrangement >= vtkMRMLLayoutNode::SlicerLayoutInitialView;
     }
     else if (!strcmp(attName, "guiPanelVisibility"))
     {
@@ -156,6 +187,10 @@ void vtkMRMLLayoutNode::ReadXMLAttributes(const char** atts)
     {
       // this->SetAndParseCurrentLayoutDescription(attValue);
     }
+  }
+  if (hasStudioViewArrangement)
+  {
+    this->ViewArrangement = studioViewArrangement;
   }
 
   this->EndModify(disabledModify);

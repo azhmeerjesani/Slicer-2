@@ -1043,7 +1043,16 @@ void qSlicerSegmentEditorScissorsEffectPrivate::paintApply(qMRMLWidget* viewWidg
   {
     std::string segmentID = allProcessedSegmentIDs->GetValue(segmentIndex);
     q->parameterSetNode()->SetSelectedSegmentID(segmentID.c_str());
-    q->modifySelectedSegmentByLabelmap(modifierLabelmap, modificationMode);
+    if (this->operationInside())
+    {
+      // The modifier labelmap is non-zero only within the stencil's extent (the brush extent, see
+      // updateBrushStencil): process only that part instead of the whole labelmap
+      q->modifySelectedSegmentByLabelmap(modifierLabelmap, modificationMode, stencilExtent);
+    }
+    else
+    {
+      q->modifySelectedSegmentByLabelmap(modifierLabelmap, modificationMode);
+    }
   }
 
   // restore original segment selection

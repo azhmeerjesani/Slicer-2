@@ -24,7 +24,9 @@
 #include <QInputDialog>
 #include <QLabel>
 #include <QMenu>
+#include <QPair>
 #include <QSettings>
+#include <QToolButton>
 #include <QWidgetAction>
 
 // CTK includes
@@ -36,6 +38,7 @@
 // qMRML includes
 #include "qMRMLColors.h"
 #include "qMRMLNodeFactory.h"
+#include "qMRMLSymbolicIconEngine.h"
 #include "qMRMLThreeDView.h"
 #include "qMRMLThreeDViewControllerWidget_p.h"
 
@@ -230,6 +233,9 @@ void qMRMLThreeDViewControllerWidgetPrivate::setupPopupUi()
   backgroundColorActions->addAction(this->actionSetBlackBackground);
   backgroundColorActions->addAction(this->actionSetWhiteBackground);
   QObject::connect(this->actionSetLightBlueBackground, SIGNAL(triggered()), q, SLOT(setLightBlueBackground()));
+  // The first background action applies the background of the scene default view node (the theme background)
+  this->actionSetLightBlueBackground->setText(qMRMLThreeDViewControllerWidget::tr("Theme default"));
+  this->actionSetLightBlueBackground->setToolTip(qMRMLThreeDViewControllerWidget::tr("Set the default background of the theme"));
   QObject::connect(this->actionSetWhiteBackground, SIGNAL(triggered()), q, SLOT(setWhiteBackground()));
   QObject::connect(this->actionSetBlackBackground, SIGNAL(triggered()), q, SLOT(setBlackBackground()));
 
@@ -346,8 +352,111 @@ void qMRMLThreeDViewControllerWidgetPrivate::init()
   this->ViewLabel->setText(qMRMLThreeDViewControllerWidget::tr("1"));
   this->BarLayout->addStretch(1);
 
+  // Flat bar: badge, Center, "View" and "Background" menus, options, maximize
+  QToolButton* viewDirectionButton = this->createFlatToolButton("ViewDirectionButton");
+  viewDirectionButton->setMinimumSize(0, this->OptionsButton->height());
+  viewDirectionButton->setMaximumSize(QWIDGETSIZE_MAX, this->OptionsButton->height());
+  viewDirectionButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
+  viewDirectionButton->setPopupMode(QToolButton::InstantPopup);
+  viewDirectionButton->setText(qMRMLThreeDViewControllerWidget::tr("View"));
+  viewDirectionButton->setToolTip(Superclass::flatToolTip(
+    qMRMLThreeDViewControllerWidget::tr("View direction"), QString(), qMRMLThreeDViewControllerWidget::tr("Look from anterior, posterior, left, right, superior or inferior")));
+  // The menus are not children of the bar, whose palette has the color stripe
+  QMenu* viewDirectionMenu = new QMenu(qMRMLThreeDViewControllerWidget::tr("View"), q);
+  viewDirectionMenu->setObjectName("ViewDirectionMenu");
+  const QList<QPair<QString, ctkAxesWidget::Axis>> directions = {
+    { qMRMLThreeDViewControllerWidget::tr("Anterior"), ctkAxesWidget::Anterior }, { qMRMLThreeDViewControllerWidget::tr("Posterior"), ctkAxesWidget::Posterior },
+    { qMRMLThreeDViewControllerWidget::tr("Left"), ctkAxesWidget::Left },         { qMRMLThreeDViewControllerWidget::tr("Right"), ctkAxesWidget::Right },
+    { qMRMLThreeDViewControllerWidget::tr("Superior"), ctkAxesWidget::Superior }, { qMRMLThreeDViewControllerWidget::tr("Inferior"), ctkAxesWidget::Inferior },
+  };
+  for (const QPair<QString, ctkAxesWidget::Axis>& direction : directions)
+  {
+    ctkAxesWidget::Axis axis = direction.second;
+    QAction* action = viewDirectionMenu->addAction(direction.first);
+    QObject::connect(action, &QAction::triggered, q, [q, axis]() { q->lookFromAxis(axis); });
+  }
+  viewDirectionMenu->addSeparator();
+  QAction* resetViewAction = viewDirectionMenu->addAction(qMRMLThreeDViewControllerWidget::tr("Reset view"));
+  resetViewAction->setObjectName("ResetViewAction");
+  QObject::connect(resetViewAction,
+                   &QAction::triggered,
+                   q,
+                   [this]()
+                   {
+                     if (!this->ThreeDView)
+                     {
+                       return;
+                     }
+                     this->ViewLogic->StartCameraNodeInteraction(vtkMRMLCameraNode::CameraInteractionFlag);
+                     this->ThreeDView->resetCamera();
+                     this->ViewLogic->EndCameraNodeInteraction();
+                   });
+  viewDirectionButton->setMenu(viewDirectionMenu);
+  this->BarLayout->addWidget(viewDirectionButton);
+
+  QToolButton* backgroundButton = this->createFlatToolButton("BackgroundButton");
+  backgroundButton->setMinimumSize(0, this->OptionsButton->height());
+  backgroundButton->setMaximumSize(QWIDGETSIZE_MAX, this->OptionsButton->height());
+  backgroundButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
+  backgroundButton->setPopupMode(QToolButton::InstantPopup);
+  backgroundButton->setText(qMRMLThreeDViewControllerWidget::tr("Background"));
+  backgroundButton->setToolTip(Superclass::flatToolTip(
+    qMRMLThreeDViewControllerWidget::tr("Background"), QString(), qMRMLThreeDViewControllerWidget::tr("Theme default, black, white or the legacy light blue")));
+  QMenu* backgroundMenu = new QMenu(qMRMLThreeDViewControllerWidget::tr("Background"), q);
+  backgroundMenu->setObjectName("BackgroundMenu");
+  backgroundMenu->addAction(this->actionSetLightBlueBackground);
+  backgroundMenu->addAction(this->actionSetBlackBackground);
+  backgroundMenu->addAction(this->actionSetWhiteBackground);
+  QAction* legacyBackgroundAction = backgroundMenu->addAction(qMRMLThreeDViewControllerWidget::tr("Light blue (legacy)"));
+  legacyBackgroundAction->setObjectName("LegacyBackgroundAction");
+  QObject::connect(legacyBackgroundAction,
+                   &QAction::triggered,
+                   q,
+                   [q]()
+                   {
+                     const double* color = vtkMRMLViewNode::defaultBackgroundColor();
+                     const double* color2 = vtkMRMLViewNode::defaultBackgroundColor2();
+                     q->setBackgroundColor(QColor::fromRgbF(color[0], color[1], color[2]), QColor::fromRgbF(color2[0], color2[1], color2[2]));
+                   });
+  backgroundButton->setMenu(backgroundMenu);
+  this->BarLayout->addWidget(backgroundButton);
+
+  this->FlatLeadingWidgets << this->CenterToolButton << viewDirectionButton << backgroundButton;
+  this->OptionsButton->setToolTip(Superclass::flatToolTip(
+    qMRMLThreeDViewControllerWidget::tr("Options"), QString(), qMRMLThreeDViewControllerWidget::tr("Spin, stereo, orientation marker, ruler, rendering and shadows")));
+
+  // The center action is shared with the popup: its flat icon and tooltip are set while the bar is flat
+  QIcon classicCenterIcon = this->actionCenter->icon();
+  QString classicCenterToolTip = this->actionCenter->toolTip();
+  QIcon flatCenterIcon = qMRMLSymbolicIconEngine::icon("crosshair");
+  QObject::connect(this,
+                   &qMRMLViewControllerBarPrivate::flatStyleChanged,
+                   this,
+                   [this, classicCenterIcon, classicCenterToolTip, flatCenterIcon](bool flat)
+                   {
+                     this->actionCenter->setIcon(flat ? flatCenterIcon : classicCenterIcon);
+                     this->actionCenter->setToolTip(
+                       flat ? Superclass::flatToolTip(qMRMLThreeDViewControllerWidget::tr("Center"), QString(), qMRMLThreeDViewControllerWidget::tr("Center the view on the scene"))
+                            : classicCenterToolTip);
+                     if (flat)
+                     {
+                       this->setFlatFixedSize(this->CenterToolButton, this->OptionsButton->size());
+                       this->CenterToolButton->setIconSize(this->OptionsButton->iconSize());
+                     }
+                     else
+                     {
+                       this->restoreClassicSize(this->CenterToolButton);
+                       this->CenterToolButton->setIconSize(this->MaximizeViewButton->iconSize());
+                     }
+                     vtkMRMLViewNode* viewNode = vtkMRMLViewNode::SafeDownCast(this->ViewNode);
+                     this->ViewLabel->setToolTip(flat && viewNode ? qMRMLThreeDViewControllerWidget::tr("3D view %1").arg(QString::fromUtf8(viewNode->GetLayoutLabel()))
+                                                                  : QString());
+                   });
+
   vtkNew<vtkMRMLViewLogic> defaultLogic;
   q->setViewLogic(defaultLogic.GetPointer());
+
+  this->ensureFlatStyleApplied();
 }
 
 // --------------------------------------------------------------------------
@@ -571,6 +680,14 @@ void qMRMLThreeDViewControllerWidget::updateWidgetFromMRMLView()
   d->RockButton->setChecked(viewNode->GetAnimationMode() == vtkMRMLViewNode::Rock);
 
   d->ViewLabel->setText(viewNode->GetLayoutLabel());
+  if (d->AppliedFlatStyle)
+  {
+    QString viewToolTip = tr("3D view %1").arg(QString::fromUtf8(viewNode->GetLayoutLabel()));
+    if (d->ViewLabel->toolTip() != viewToolTip)
+    {
+      d->ViewLabel->setToolTip(viewToolTip);
+    }
+  }
 
   double* layoutColorVtk = viewNode->GetLayoutColor();
   QColor layoutColor = QColor::fromRgbF(layoutColorVtk[0], layoutColorVtk[1], layoutColorVtk[2]);
@@ -836,9 +953,12 @@ void qMRMLThreeDViewControllerWidget::setFPSVisible(bool visible)
 // --------------------------------------------------------------------------
 void qMRMLThreeDViewControllerWidget::setLightBlueBackground()
 {
-  this->setBackgroundColor(
-    QColor::fromRgbF(vtkMRMLViewNode::defaultBackgroundColor()[0], vtkMRMLViewNode::defaultBackgroundColor()[1], vtkMRMLViewNode::defaultBackgroundColor()[2]),
-    QColor::fromRgbF(vtkMRMLViewNode::defaultBackgroundColor2()[0], vtkMRMLViewNode::defaultBackgroundColor2()[1], vtkMRMLViewNode::defaultBackgroundColor2()[2]));
+  // "Theme default": the background of the scene default view node (set from the application settings),
+  // else the vtkMRMLViewNode defaults (light blue)
+  vtkMRMLViewNode* defaultViewNode = this->mrmlScene() ? vtkMRMLViewNode::SafeDownCast(this->mrmlScene()->GetDefaultNodeByClass("vtkMRMLViewNode")) : nullptr;
+  const double* color = defaultViewNode ? defaultViewNode->GetBackgroundColor() : vtkMRMLViewNode::defaultBackgroundColor();
+  const double* color2 = defaultViewNode ? defaultViewNode->GetBackgroundColor2() : vtkMRMLViewNode::defaultBackgroundColor2();
+  this->setBackgroundColor(QColor::fromRgbF(color[0], color[1], color[2]), QColor::fromRgbF(color2[0], color2[1], color2[2]));
 }
 
 // --------------------------------------------------------------------------

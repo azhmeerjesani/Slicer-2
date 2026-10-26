@@ -2,9 +2,19 @@ import inspect
 import logging
 import os
 import re
+import sys
 
 # Cache that stores context name computed from file paths to make translations faster
 FILEPATH_TO_CONTEXT = {}
+
+# Cache that stores the source file path found by inspect for each code file name (`co_filename`) that tr() is called from.
+# inspect.getsourcefile() is slow (it may scan all loaded modules), therefore it is only called once for each code file.
+_CODE_FILENAME_TO_SOURCE_FILE = {}
+
+# Placeholders (replacement fields) in a format string: all text delimited by curly braces,
+# except the ones enclosed in double-braces.
+# See https://docs.python.org/3/library/string.html#formatstrings
+_PLACEHOLDER_PATTERN = re.compile(r"(?<!\{)\{([^\{\}]+)\}(?!\})")
 
 def translate(context, text):
     """Translate message to the current application language.
@@ -65,22 +75,13 @@ def tr(text):
 
     """
 
-    def findBracedStrings(text):
-        """Get all placeholders (replacement fields) in the input format string text.
-
-        All placeholders delimited by curly braces are returned except the ones enclosed in
-        double-braces.
-
-        See https://docs.python.org/3/library/string.html#formatstrings
-        """
-        pattern = r"(?<!\{)\{([^\{\}]+)\}(?!\})"
-        matches = re.findall(pattern, text)
-        return matches
-
-    # inspect.stack() would get all the frames, which can take more than 100ms, therefore we use lower level APIs
-    frame = inspect.currentframe()
-    frame = frame.f_back  # go up in the stack one level
-    filename = inspect.getsourcefile(frame) or inspect.getfile(frame)
+    # Get the source file of the caller from the cache to make translations faster.
+    # inspect.stack() would get all the frames, which can take more than 100ms, therefore we use lower level APIs.
+    frame = sys._getframe(1)  # go up in the stack one level
+    filename = _CODE_FILENAME_TO_SOURCE_FILE.get(frame.f_code.co_filename)
+    if filename is None:
+        filename = inspect.getsourcefile(frame) or inspect.getfile(frame)
+        _CODE_FILENAME_TO_SOURCE_FILE[frame.f_code.co_filename] = filename
 
     contextName = getContext(filename)
     translatedText = translate(contextName, text)
@@ -92,7 +93,8 @@ def tr(text):
     # would fail at runtime with a KeyError when `_("delete {count} files").format(count=numberOfSomeItems)` is called,
     # as after translation it turns into `"supprimer {compter} fichiers".format(count=numberOfSomeItems)`.
     # The check prevents the runtime error: only a warning is logged and the incorrect translation is ignored.
-    if set(findBracedStrings(text)) != set(findBracedStrings(translatedText)):
+    # The check is skipped if the text is not translated (for example, the application language is English).
+    if translatedText != text and set(_PLACEHOLDER_PATTERN.findall(text)) != set(_PLACEHOLDER_PATTERN.findall(translatedText)):
         logging.warning(f"In context '{contextName}', translation of '{text}' to '{translatedText}' is incorrect: placeholders do not match")
         return text
 

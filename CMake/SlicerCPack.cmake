@@ -39,6 +39,7 @@ if(NOT Slicer_USE_SYSTEM_QT)
 
   set(SlicerBlockInstallQtPlugins_subdirectories
     audio
+    iconengines:qsvgicon
     imageformats
     printsupport
     sqldrivers

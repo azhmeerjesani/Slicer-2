@@ -57,6 +57,12 @@ class QMRML_WIDGETS_EXPORT qMRMLViewControllerBar : public qMRMLWidget
   Q_OBJECT
   QVTK_OBJECT
   Q_PROPERTY(bool showMaximizeViewButton READ showMaximizeViewButton WRITE setShowMaximizeViewButton)
+  /// Flat presentation of the bar: a 24 px bar in the "view-bar" color of the palette with a 3 px stripe of
+  /// the view color, a color swatch as view label, palette-tinted icons and an options button that opens the
+  /// popup on click (the pin button and the popup on hover are classic only).
+  /// It is initialized from defaultFlatStyle() when the bar is created.
+  /// \sa setDefaultFlatStyle()
+  Q_PROPERTY(bool flatStyle READ flatStyle WRITE setFlatStyle)
 
 public:
   /// Superclass typedef
@@ -95,10 +101,22 @@ public:
 
   bool showMaximizeViewButton() const;
 
+  /// Set the presentation of the bars created from now on (false, the classic presentation, by default).
+  /// Existing bars keep their presentation: use setFlatStyle() to change it.
+  /// \sa flatStyle
+  static void setDefaultFlatStyle(bool flat);
+  static bool defaultFlatStyle();
+
+  bool flatStyle() const;
+
 public slots:
   void maximizeView();
 
   void setShowMaximizeViewButton(bool show);
+
+  /// Switch the bar between the flat and the classic presentation.
+  /// \sa flatStyle
+  void setFlatStyle(bool flat);
 
 protected slots:
   virtual void updateWidgetFromMRMLView();

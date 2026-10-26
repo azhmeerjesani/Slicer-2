@@ -1,0 +1,50 @@
+{
+  "format": "slicer-lnm-recipe",
+  "version": 1,
+  "id": "classic_ferguson2019_adapted",
+  "recipe_version": "1",
+  "title": "Classic sensitivity and specificity (Ferguson 2019)",
+  "status": "adapted",
+  "cited_as": "Ferguson et al. 2019",
+  "citations": [
+    "10.1038/s41467-019-11353-z"
+  ],
+  "differences_from_source": [
+    "Specificity: the source used SPM12's parametric two-sample t-test of the lesion network maps against control lesions; here it is a Freedman-Lane permutation GLM (5000 permutations, voxel max-statistic FWE primary, BH-FDR secondary) with a lesion-volume covariate.",
+    "Per-lesion maps are thresholded with the N-aware Bonferroni FWE rule instead of a fixed |T|.",
+    "Group statistics use the per-lesion mean Fisher z maps (AvgFz), which do not depend on the connectome's N.",
+    "Connectome QA chips (degree and PC1) are added."
+  ],
+  "description": "Sensitivity (overlap of thresholded maps in the cases) and specificity (cases against control lesions), combined in a conjunction map.",
+  "parameters": {
+    "overlap": 90.0,
+    "design": {
+      "test": "two_group",
+      "contrast": "A>B",
+      "covariates": [
+        "volume_ml"
+      ],
+      "permute": "auto"
+    },
+    "n_perm": 5000
+  },
+  "steps": [
+    "maps",
+    "overlap",
+    "specificity",
+    "conjunction",
+    "qa",
+    "clusters",
+    "report"
+  ],
+  "requires": [
+    "clusters",
+    "cohort",
+    "cohortmaps",
+    "design",
+    "glm",
+    "methods",
+    "qa",
+    "report"
+  ]
+}

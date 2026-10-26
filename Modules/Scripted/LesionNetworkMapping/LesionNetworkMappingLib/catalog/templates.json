@@ -1,0 +1,368 @@
+{
+  "format": "slicer-lnm-catalog",
+  "version": 1,
+  "catalog": "templates",
+  "updated": "2026-10-21",
+  "note": "Templates, tissue priors, template-family transforms and label sets fetched on request, never bundled (except the 2009c 2 mm brain and mask, which are in the app). Transform direction: SPEC 7.12.",
+  "entries": [
+    {
+      "id": "nlin6asym-res01-t1w",
+      "title": "MNI152NLin6Asym 1 mm T1w (FSL terms)",
+      "kind": "template",
+      "urls": [
+        "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin6Asym/tpl-MNI152NLin6Asym_res-01_T1w.nii.gz"
+      ],
+      "filename": "tpl-MNI152NLin6Asym_res-01_T1w.nii.gz",
+      "size": 11027773,
+      "checksum": {
+        "algo": "sha256",
+        "value": "f675946c0a077e0682885c3d6085f10acb0dd22b2274a6cbbf04969c08a77258"
+      },
+      "licence": "FSL-terms",
+      "badge": "amber",
+      "terms_url": "https://fsl.fmrib.ox.ac.uk/fsl/docs/license.html",
+      "citation": "Janke AL et al. FSL's MNI ICBM 152 non-linear 6th generation asymmetric average brain (MNI152NLin6Asym). Ciric R et al. TemplateFlow: FAIR-sharing of multi-scale, multi-species brain models. Nature Methods 19:1568-1571 (2022). doi:10.1038/s41592-022-01681-2",
+      "space": "MNI152NLin6Asym",
+      "family": "fsl6",
+      "grid": "NLin6-1mm",
+      "resolution_mm": 1,
+      "note": "FSL terms (free for non-commercial use; commercial use goes through Oxford University Innovation). TemplateFlow's description says 'See LICENSE file' but the bucket has no such file."
+    },
+    {
+      "id": "nlin6asym-res01-brain-mask",
+      "title": "MNI152NLin6Asym 1 mm brain mask (FSL terms)",
+      "kind": "template",
+      "urls": [
+        "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin6Asym/tpl-MNI152NLin6Asym_res-01_desc-brain_mask.nii.gz"
+      ],
+      "filename": "tpl-MNI152NLin6Asym_res-01_desc-brain_mask.nii.gz",
+      "size": 149930,
+      "checksum": {
+        "algo": "sha256",
+        "value": "6d540075dac093fa5070a929dc5ea52795d54cc9ab57fe1272086dc70314b428"
+      },
+      "licence": "FSL-terms",
+      "badge": "amber",
+      "terms_url": "https://fsl.fmrib.ox.ac.uk/fsl/docs/license.html",
+      "citation": "Janke AL et al. FSL's MNI ICBM 152 non-linear 6th generation asymmetric average brain (MNI152NLin6Asym). Ciric R et al. TemplateFlow: FAIR-sharing of multi-scale, multi-species brain models. Nature Methods 19:1568-1571 (2022). doi:10.1038/s41592-022-01681-2",
+      "space": "MNI152NLin6Asym",
+      "family": "fsl6",
+      "grid": "NLin6-1mm",
+      "resolution_mm": 1,
+      "note": "FSL terms (free for non-commercial use; commercial use goes through Oxford University Innovation). TemplateFlow's description says 'See LICENSE file' but the bucket has no such file."
+    },
+    {
+      "id": "nlin6asym-res02-t1w",
+      "title": "MNI152NLin6Asym 2 mm T1w (FSL terms)",
+      "kind": "template",
+      "urls": [
+        "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin6Asym/tpl-MNI152NLin6Asym_res-02_T1w.nii.gz"
+      ],
+      "filename": "tpl-MNI152NLin6Asym_res-02_T1w.nii.gz",
+      "size": 1412252,
+      "checksum": {
+        "algo": "sha256",
+        "value": "2a814da50173599a857d96246dc057d548072bd6dffa499f75724dbad20792b1"
+      },
+      "licence": "FSL-terms",
+      "badge": "amber",
+      "terms_url": "https://fsl.fmrib.ox.ac.uk/fsl/docs/license.html",
+      "citation": "Janke AL et al. FSL's MNI ICBM 152 non-linear 6th generation asymmetric average brain (MNI152NLin6Asym). Ciric R et al. TemplateFlow: FAIR-sharing of multi-scale, multi-species brain models. Nature Methods 19:1568-1571 (2022). doi:10.1038/s41592-022-01681-2",
+      "space": "MNI152NLin6Asym",
+      "family": "fsl6",
+      "grid": "NLin6-2mm",
+      "resolution_mm": 2,
+      "note": "FSL terms (free for non-commercial use; commercial use goes through Oxford University Innovation). TemplateFlow's description says 'See LICENSE file' but the bucket has no such file."
+    },
+    {
+      "id": "nlin6asym-res02-brain-mask",
+      "title": "MNI152NLin6Asym 2 mm brain mask (FSL terms)",
+      "kind": "template",
+      "urls": [
+        "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin6Asym/tpl-MNI152NLin6Asym_res-02_desc-brain_mask.nii.gz"
+      ],
+      "filename": "tpl-MNI152NLin6Asym_res-02_desc-brain_mask.nii.gz",
+      "size": 28557,
+      "checksum": {
+        "algo": "sha256",
+        "value": "e4e2b284170271afdafe26ac0997b2af5a0f5ddac35e28a7e796b52e8bc5adb1"
+      },
+      "licence": "FSL-terms",
+      "badge": "amber",
+      "terms_url": "https://fsl.fmrib.ox.ac.uk/fsl/docs/license.html",
+      "citation": "Janke AL et al. FSL's MNI ICBM 152 non-linear 6th generation asymmetric average brain (MNI152NLin6Asym). Ciric R et al. TemplateFlow: FAIR-sharing of multi-scale, multi-species brain models. Nature Methods 19:1568-1571 (2022). doi:10.1038/s41592-022-01681-2",
+      "space": "MNI152NLin6Asym",
+      "family": "fsl6",
+      "grid": "NLin6-2mm",
+      "resolution_mm": 2,
+      "note": "FSL terms (free for non-commercial use; commercial use goes through Oxford University Innovation). TemplateFlow's description says 'See LICENSE file' but the bucket has no such file."
+    },
+    {
+      "id": "nlin2009casym-res01-t1w",
+      "title": "MNI152NLin2009cAsym 1 mm T1w",
+      "kind": "template",
+      "urls": [
+        "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin2009cAsym/tpl-MNI152NLin2009cAsym_res-01_T1w.nii.gz"
+      ],
+      "filename": "tpl-MNI152NLin2009cAsym_res-01_T1w.nii.gz",
+      "size": 13685075,
+      "checksum": {
+        "algo": "sha256",
+        "value": "1f27aabea9f7183dc0c69dafa71e1787b921ca778d655d9c1bf302b273d5627a"
+      },
+      "licence": "MNI-McGill-permissive",
+      "badge": "green",
+      "terms_url": "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin2009cAsym/LICENSE",
+      "citation": "Fonov V, Evans AC, Botteron K, Almli CR, McKinstry RC, Collins DL. Unbiased average age-appropriate atlases for pediatric studies. NeuroImage 54:313-327 (2011). doi:10.1016/j.neuroimage.2010.07.033; Ciric R et al. TemplateFlow: FAIR-sharing of multi-scale, multi-species brain models. Nature Methods 19:1568-1571 (2022). doi:10.1038/s41592-022-01681-2",
+      "space": "MNI152NLin2009cAsym",
+      "family": "2009",
+      "grid": "TF2009-1mm",
+      "resolution_mm": 1,
+      "note": "Also a sample-data entry of Slicer (category MNI152 (neuro)): the same file and checksum. The 2 mm brain and mask are bundled with the app.",
+      "sampledata": "MNI152NLin2009cAsym 1mm T1w"
+    },
+    {
+      "id": "nlin2009casym-res01-brain-mask",
+      "title": "MNI152NLin2009cAsym 1 mm brain mask",
+      "kind": "template",
+      "urls": [
+        "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin2009cAsym/tpl-MNI152NLin2009cAsym_res-01_desc-brain_mask.nii.gz"
+      ],
+      "filename": "tpl-MNI152NLin2009cAsym_res-01_desc-brain_mask.nii.gz",
+      "size": 159538,
+      "checksum": {
+        "algo": "sha256",
+        "value": "e40bb1816736504d4c25abc243c1c8503df1d308f64c048318aa4b829e09a7ae"
+      },
+      "licence": "MNI-McGill-permissive",
+      "badge": "green",
+      "terms_url": "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin2009cAsym/LICENSE",
+      "citation": "Fonov V, Evans AC, Botteron K, Almli CR, McKinstry RC, Collins DL. Unbiased average age-appropriate atlases for pediatric studies. NeuroImage 54:313-327 (2011). doi:10.1016/j.neuroimage.2010.07.033; Ciric R et al. TemplateFlow: FAIR-sharing of multi-scale, multi-species brain models. Nature Methods 19:1568-1571 (2022). doi:10.1038/s41592-022-01681-2",
+      "space": "MNI152NLin2009cAsym",
+      "family": "2009",
+      "grid": "TF2009-1mm",
+      "resolution_mm": 1,
+      "note": "Also a sample-data entry of Slicer: the same file and checksum.",
+      "sampledata": "MNI152NLin2009cAsym 1mm brain mask"
+    },
+    {
+      "id": "nlin2009casym-res02-gm-probseg",
+      "title": "MNI152NLin2009cAsym 2 mm GM probability",
+      "kind": "prior",
+      "urls": [
+        "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin2009cAsym/tpl-MNI152NLin2009cAsym_res-02_label-GM_probseg.nii.gz"
+      ],
+      "filename": "tpl-MNI152NLin2009cAsym_res-02_label-GM_probseg.nii.gz",
+      "size": 1044456,
+      "checksum": {
+        "algo": "sha256",
+        "value": "66aab92950c4256a6560e7c5293484c5e62de1f8bfddee4e20e35ba725b2cf7d"
+      },
+      "licence": "MNI-McGill-permissive",
+      "badge": "green",
+      "terms_url": "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin2009cAsym/LICENSE",
+      "citation": "Fonov V, Evans AC, Botteron K, Almli CR, McKinstry RC, Collins DL. Unbiased average age-appropriate atlases for pediatric studies. NeuroImage 54:313-327 (2011). doi:10.1016/j.neuroimage.2010.07.033; Ciric R et al. TemplateFlow: FAIR-sharing of multi-scale, multi-species brain models. Nature Methods 19:1568-1571 (2022). doi:10.1038/s41592-022-01681-2",
+      "space": "MNI152NLin2009cAsym",
+      "family": "2009",
+      "grid": "TF2009-2mm",
+      "resolution_mm": 2,
+      "note": "Tissue prior of the 2009 family."
+    },
+    {
+      "id": "nlin2009casym-res02-wm-probseg",
+      "title": "MNI152NLin2009cAsym 2 mm WM probability",
+      "kind": "prior",
+      "urls": [
+        "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin2009cAsym/tpl-MNI152NLin2009cAsym_res-02_label-WM_probseg.nii.gz"
+      ],
+      "filename": "tpl-MNI152NLin2009cAsym_res-02_label-WM_probseg.nii.gz",
+      "size": 993575,
+      "checksum": {
+        "algo": "sha256",
+        "value": "88d15b840383ab37dfd2d7355b89a9eadc23d5d93ab681afc3131be266fd1969"
+      },
+      "licence": "MNI-McGill-permissive",
+      "badge": "green",
+      "terms_url": "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin2009cAsym/LICENSE",
+      "citation": "Fonov V, Evans AC, Botteron K, Almli CR, McKinstry RC, Collins DL. Unbiased average age-appropriate atlases for pediatric studies. NeuroImage 54:313-327 (2011). doi:10.1016/j.neuroimage.2010.07.033; Ciric R et al. TemplateFlow: FAIR-sharing of multi-scale, multi-species brain models. Nature Methods 19:1568-1571 (2022). doi:10.1038/s41592-022-01681-2",
+      "space": "MNI152NLin2009cAsym",
+      "family": "2009",
+      "grid": "TF2009-2mm",
+      "resolution_mm": 2,
+      "note": "Tissue prior of the 2009 family."
+    },
+    {
+      "id": "nlin2009casym-res02-csf-probseg",
+      "title": "MNI152NLin2009cAsym 2 mm CSF probability",
+      "kind": "prior",
+      "urls": [
+        "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin2009cAsym/tpl-MNI152NLin2009cAsym_res-02_label-CSF_probseg.nii.gz"
+      ],
+      "filename": "tpl-MNI152NLin2009cAsym_res-02_label-CSF_probseg.nii.gz",
+      "size": 886518,
+      "checksum": {
+        "algo": "sha256",
+        "value": "c98c2fb2beb6ebca86742a0580e8c7accb1df5b012da38fce0e93b057983c02c"
+      },
+      "licence": "MNI-McGill-permissive",
+      "badge": "green",
+      "terms_url": "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin2009cAsym/LICENSE",
+      "citation": "Fonov V, Evans AC, Botteron K, Almli CR, McKinstry RC, Collins DL. Unbiased average age-appropriate atlases for pediatric studies. NeuroImage 54:313-327 (2011). doi:10.1016/j.neuroimage.2010.07.033; Ciric R et al. TemplateFlow: FAIR-sharing of multi-scale, multi-species brain models. Nature Methods 19:1568-1571 (2022). doi:10.1038/s41592-022-01681-2",
+      "space": "MNI152NLin2009cAsym",
+      "family": "2009",
+      "grid": "TF2009-2mm",
+      "resolution_mm": 2,
+      "note": "Tissue prior of the 2009 family."
+    },
+    {
+      "id": "nlin6asym-res02-gm-probseg",
+      "title": "MNI152NLin6Asym 2 mm GM probability (derived)",
+      "kind": "prior",
+      "urls": [],
+      "derive": {
+        "from": "nlin2009casym-res02-gm-probseg",
+        "transform": "xfm-nlin6asym-from-2009c",
+        "interpolation": "linear",
+        "target_grid": "NLin6-2mm",
+        "note": "TemplateFlow has no tissue priors on the NLin6Asym grid: warp the 2009c prior once with the TemplateFlow transform and record it."
+      },
+      "licence": "derived",
+      "badge": "amber",
+      "terms_url": "https://fsl.fmrib.ox.ac.uk/fsl/docs/license.html",
+      "citation": "Fonov V, Evans AC, Botteron K, Almli CR, McKinstry RC, Collins DL. Unbiased average age-appropriate atlases for pediatric studies. NeuroImage 54:313-327 (2011). doi:10.1016/j.neuroimage.2010.07.033; Ciric R et al. TemplateFlow: FAIR-sharing of multi-scale, multi-species brain models. Nature Methods 19:1568-1571 (2022). doi:10.1038/s41592-022-01681-2",
+      "space": "MNI152NLin6Asym",
+      "family": "fsl6",
+      "grid": "NLin6-2mm",
+      "resolution_mm": 2,
+      "note": "Not downloadable: derived from the 2009c prior and the 2009c to NLin6 transform (the licences of both templates apply)."
+    },
+    {
+      "id": "nlin6asym-res02-wm-probseg",
+      "title": "MNI152NLin6Asym 2 mm WM probability (derived)",
+      "kind": "prior",
+      "urls": [],
+      "derive": {
+        "from": "nlin2009casym-res02-wm-probseg",
+        "transform": "xfm-nlin6asym-from-2009c",
+        "interpolation": "linear",
+        "target_grid": "NLin6-2mm",
+        "note": "TemplateFlow has no tissue priors on the NLin6Asym grid: warp the 2009c prior once with the TemplateFlow transform and record it."
+      },
+      "licence": "derived",
+      "badge": "amber",
+      "terms_url": "https://fsl.fmrib.ox.ac.uk/fsl/docs/license.html",
+      "citation": "Fonov V, Evans AC, Botteron K, Almli CR, McKinstry RC, Collins DL. Unbiased average age-appropriate atlases for pediatric studies. NeuroImage 54:313-327 (2011). doi:10.1016/j.neuroimage.2010.07.033; Ciric R et al. TemplateFlow: FAIR-sharing of multi-scale, multi-species brain models. Nature Methods 19:1568-1571 (2022). doi:10.1038/s41592-022-01681-2",
+      "space": "MNI152NLin6Asym",
+      "family": "fsl6",
+      "grid": "NLin6-2mm",
+      "resolution_mm": 2,
+      "note": "Not downloadable: derived from the 2009c prior and the 2009c to NLin6 transform (the licences of both templates apply)."
+    },
+    {
+      "id": "nlin6asym-res02-csf-probseg",
+      "title": "MNI152NLin6Asym 2 mm CSF probability (derived)",
+      "kind": "prior",
+      "urls": [],
+      "derive": {
+        "from": "nlin2009casym-res02-csf-probseg",
+        "transform": "xfm-nlin6asym-from-2009c",
+        "interpolation": "linear",
+        "target_grid": "NLin6-2mm",
+        "note": "TemplateFlow has no tissue priors on the NLin6Asym grid: warp the 2009c prior once with the TemplateFlow transform and record it."
+      },
+      "licence": "derived",
+      "badge": "amber",
+      "terms_url": "https://fsl.fmrib.ox.ac.uk/fsl/docs/license.html",
+      "citation": "Fonov V, Evans AC, Botteron K, Almli CR, McKinstry RC, Collins DL. Unbiased average age-appropriate atlases for pediatric studies. NeuroImage 54:313-327 (2011). doi:10.1016/j.neuroimage.2010.07.033; Ciric R et al. TemplateFlow: FAIR-sharing of multi-scale, multi-species brain models. Nature Methods 19:1568-1571 (2022). doi:10.1038/s41592-022-01681-2",
+      "space": "MNI152NLin6Asym",
+      "family": "fsl6",
+      "grid": "NLin6-2mm",
+      "resolution_mm": 2,
+      "note": "Not downloadable: derived from the 2009c prior and the 2009c to NLin6 transform (the licences of both templates apply)."
+    },
+    {
+      "id": "xfm-nlin6asym-from-2009c",
+      "title": "Transform: MNI152NLin2009cAsym images onto the MNI152NLin6Asym grid (tpl-MNI152NLin6Asym_from-MNI152NLin2009cAsym)",
+      "kind": "transform",
+      "urls": [
+        "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin6Asym/tpl-MNI152NLin6Asym_from-MNI152NLin2009cAsym_mode-image_xfm.h5"
+      ],
+      "filename": "tpl-MNI152NLin6Asym_from-MNI152NLin2009cAsym_mode-image_xfm.h5",
+      "size": 204735104,
+      "checksum": {
+        "algo": "sha256",
+        "value": "2a19853bc99ebd1d711d230ea4a4dc4db3b9a60f8b50b9181f93b44036dfbd0f"
+      },
+      "licence": "derived",
+      "badge": "amber",
+      "terms_url": "https://fsl.fmrib.ox.ac.uk/fsl/docs/license.html",
+      "citation": "Janke AL et al. FSL's MNI ICBM 152 non-linear 6th generation asymmetric average brain (MNI152NLin6Asym). Ciric R et al. TemplateFlow: FAIR-sharing of multi-scale, multi-species brain models. Nature Methods 19:1568-1571 (2022). doi:10.1038/s41592-022-01681-2",
+      "space": "MNI152NLin6Asym",
+      "family": "fsl6",
+      "source_space": "MNI152NLin2009cAsym",
+      "note": "Resamples images of the source space onto the grid of the target space (it maps target points to source points). Coordinates go the other way with the opposite file (SPEC 7.12). Same size as its opposite, 204,735,104 B."
+    },
+    {
+      "id": "xfm-2009c-from-nlin6asym",
+      "title": "Transform: MNI152NLin6Asym images onto the MNI152NLin2009cAsym grid (tpl-MNI152NLin2009cAsym_from-MNI152NLin6Asym)",
+      "kind": "transform",
+      "urls": [
+        "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin2009cAsym/tpl-MNI152NLin2009cAsym_from-MNI152NLin6Asym_mode-image_xfm.h5"
+      ],
+      "filename": "tpl-MNI152NLin2009cAsym_from-MNI152NLin6Asym_mode-image_xfm.h5",
+      "size": 204735104,
+      "checksum": {
+        "algo": "sha256",
+        "value": "2e3869a07b96aec406e0419ca2e434afc54882d37cc212b933b139d1b63a4dfe"
+      },
+      "licence": "derived",
+      "badge": "amber",
+      "terms_url": "https://fsl.fmrib.ox.ac.uk/fsl/docs/license.html",
+      "citation": "Fonov V, Evans AC, Botteron K, Almli CR, McKinstry RC, Collins DL. Unbiased average age-appropriate atlases for pediatric studies. NeuroImage 54:313-327 (2011). doi:10.1016/j.neuroimage.2010.07.033; Ciric R et al. TemplateFlow: FAIR-sharing of multi-scale, multi-species brain models. Nature Methods 19:1568-1571 (2022). doi:10.1038/s41592-022-01681-2",
+      "space": "MNI152NLin2009cAsym",
+      "family": "2009",
+      "source_space": "MNI152NLin6Asym",
+      "note": "Resamples images of the source space onto the grid of the target space (it maps target points to source points). Coordinates go the other way with the opposite file (SPEC 7.12)."
+    },
+    {
+      "id": "nlin6asym-hospa-ventricles",
+      "title": "Lateral ventricle labels for the CSF check (Harvard-Oxford subcortical th25, 2 mm, MNI152NLin6Asym)",
+      "kind": "labels",
+      "urls": [
+        "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin6Asym/tpl-MNI152NLin6Asym_res-02_atlas-HOSPA_desc-th25_dseg.nii.gz"
+      ],
+      "filename": "tpl-MNI152NLin6Asym_res-02_atlas-HOSPA_desc-th25_dseg.nii.gz",
+      "size": 47599,
+      "checksum": {
+        "algo": "sha256",
+        "value": "29fb7de1c25210a7c51a750c9f18cf45fbdf34b7d50b289a1d2b6401d2d15500"
+      },
+      "licence": "CC-BY-SA-4.0",
+      "badge": "amber",
+      "terms_url": "https://fsl.fmrib.ox.ac.uk/fsl/docs/license.html",
+      "citation": "Harvard-Oxford cortical and subcortical structural atlases (Harvard Center for Morphometric Analysis), as distributed with FSL: Desikan RS et al. NeuroImage 31:968-980 (2006). doi:10.1016/j.neuroimage.2006.01.021",
+      "space": "MNI152NLin6Asym",
+      "family": "fsl6",
+      "grid": "NLin6-2mm",
+      "resolution_mm": 2,
+      "note": "The same file as the Harvard-Oxford subcortical atlas (shared in the cache). Share-alike licence.",
+      "labels_of_interest": {
+        "left_lateral_ventricle": 3,
+        "right_lateral_ventricle": 14
+      },
+      "label_table": {
+        "format": "tsv",
+        "source": "TemplateFlow dseg table",
+        "urls": [
+          "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin6Asym/tpl-MNI152NLin6Asym_atlas-HOSPA_dseg.tsv"
+        ],
+        "filename": "tpl-MNI152NLin6Asym_atlas-HOSPA_dseg.tsv",
+        "size": 678,
+        "checksum": {
+          "algo": "sha256",
+          "value": "0503599182be67d206deb8b6c6d3288fa9eecba3e1a158008c649d1836573d25"
+        }
+      }
+    }
+  ]
+}

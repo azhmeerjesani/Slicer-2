@@ -130,6 +130,17 @@ public:
   static const char* GetAdjustWindowLevelModeAsString(int id);
   static int GetAdjustWindowLevelModeFromString(const char* name);
 
+  /// @{
+  /// If enabled then left-click-and-drag adjusts window/level in the "view transform" mouse mode
+  /// as well (not just in the "adjust window/level" mouse mode), in all slice views. Widgets that are
+  /// closer to the mouse pointer (such as markup control points) and interactor observers (such as
+  /// Segment Editor effects) still take precedence. A left click without dragging is not consumed,
+  /// so it can still be processed as a click by other widgets.
+  /// Default is false (the behavior of earlier versions).
+  static void SetLeftDragWindowLevel(bool enable);
+  static bool GetLeftDragWindowLevel();
+  /// @}
+
 protected:
   vtkMRMLWindowLevelWidget();
   ~vtkMRMLWindowLevelWidget() override;
@@ -140,6 +151,13 @@ protected:
 
   bool ProcessAdjustWindowLevelStart(vtkMRMLInteractionEventData* eventData);
   void ProcessAdjustWindowLevel(vtkMRMLInteractionEventData* eventData);
+
+  /// Left-click-and-drag window/level adjustment in view transform mouse mode (see SetLeftDragWindowLevel).
+  /// The adjustment starts when the mouse has moved by a few pixels.
+  bool ProcessLeftDragWindowLevelStart(vtkMRMLInteractionEventData* eventData);
+  bool ProcessLeftDragWindowLevelMove(vtkMRMLInteractionEventData* eventData);
+  /// Returns true if the event starts a left-click-and-drag window/level adjustment in view transform mouse mode.
+  bool IsLeftDragWindowLevelStartEvent(unsigned long widgetEvent);
 
   bool ProcessSetWindowLevelFromRegionStart(vtkMRMLInteractionEventData* eventData);
   void ProcessSetWindowLevelFromRegion(vtkMRMLInteractionEventData* eventData);
@@ -180,6 +198,9 @@ protected:
   bool ForegroundVolumeEditable;
 
   int AdjustMode;
+
+  /// The left button is down for a left-drag window/level adjustment, but the mouse has not moved enough yet.
+  bool LeftDragPending;
 
 private:
   vtkMRMLWindowLevelWidget(const vtkMRMLWindowLevelWidget&) = delete;

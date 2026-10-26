@@ -1,0 +1,710 @@
+"""Projects of Slicer Studio: the Slicer Studio folder and the continuous saving of a project (A-09, D-A16).
+
+Run with the main window and testing enabled:
+
+  Slicer --no-splash --testing --python-code "import slicer.testing; slicer.testing.runUnitTest(['<this dir>'], 'StudioProjectsTest'); slicer.app.exit(0)"
+
+Nothing runs by itself under --testing: each test creates ``AutosaveService(force=True)`` with
+``studioActiveOverride=True`` (the service acts as in Studio) and ``SLICER_STUDIO_PROJECTS_ROOT`` set to a temporary
+folder "Slicer Studio tést" (spaces and non-ASCII characters). The tests cover:
+
+- names (macOS/Windows/Linux), unique names, compound extensions, cloud-synced folders, the web default;
+- the layout: a project is created only for user data, named after the scan; Images/ holds a byte-for-byte copy of the
+  scan (the original is untouched); kind folders (Segmentations, Maps, Markups, Tables, Models, Transforms) exist only
+  when something is written into them; the scene file has relative paths only (StudioPrivacyCheck passes);
+- after a save nothing is "modified since read" and the close summary says everything is saved (no question about
+  unsaved changes);
+- incremental saving: an edited lesion rewrites its own file only; a file another program changed is kept and Studio
+  writes "<name> (Slicer Studio).<ext>"; a removed node's file goes to .studio/removed;
+- copy-on-open of a scene from outside (the original is not modified), continuing a project in place, rename,
+  duplicate, trash, moving the folder with the open project;
+- the crash offer (a project left "open" with a stale lock), study suppression and Classic (no project is created);
+- a large volume written by the background writer (marked stored without a second write on the main thread);
+- a file that official Slicer saved next to the scene file is moved into its kind folder;
+- a closed-surface segmentation (a file plus a folder) saved again in place; temporary folders left by a crash go;
+- a detached-header volume (.nhdr) from outside is written into the project as one file;
+- a project loaded in Classic continues in place in Studio (no copy); the Library order follows official saves.
+"""
+
+import hashlib
+import json
+import os
+import shutil
+import tempfile
+import time
+import unittest
+
+import numpy as np
+import qt
+
+import slicer
+
+
+def _md5File(path):
+    with open(path, "rb") as f:
+        return hashlib.md5(f.read()).hexdigest()
+
+
+def _relativeFiles(root):
+    found = []
+    for directory, _folders, files in os.walk(root):
+        for name in files:
+            found.append(os.path.relpath(os.path.join(directory, name), root).replace(os.sep, "/"))
+    return sorted(found)
+
+
+def _privacyModule():
+    import importlib.util
+
+    source = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))))
+    path = os.path.join(source, "Utilities", "Scripts", "StudioPrivacyCheck.py")
+    if not os.path.isfile(path):
+        return None
+    spec = importlib.util.spec_from_file_location("StudioPrivacyCheck", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class StudioProjectsTest(unittest.TestCase):
+    """The Slicer Studio folder, projects and their continuous saving. Needs the main window."""
+
+    def setUp(self):
+        from StudioLib import autosave, autosave_io, projects
+
+        self.autosave, self.io, self.projects = autosave, autosave_io, projects
+        slicer.mrmlScene.Clear(0)
+        self.tempDir = tempfile.mkdtemp(prefix="StudioProjectsTest-")
+        self.root = os.path.join(self.tempDir, "Slicer Studio tést")
+        self.userDir = os.path.join(self.tempDir, "user data é")
+        os.makedirs(self.userDir)
+        self._environment = {name: os.environ.get(name) for name in (projects.ROOT_ENVIRONMENT, projects.ENABLED_ENVIRONMENT)}
+        os.environ[projects.ROOT_ENVIRONMENT] = self.root
+        os.environ.pop(projects.ENABLED_ENVIRONMENT, None)
+        self.services = []
+
+    def tearDown(self):
+        for service in self.services:
+            service.dispose()
+        self.io.backgroundWriter().drain(30.0)
+        slicer.mrmlScene.Clear(0)
+        for name, value in self._environment.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        shutil.rmtree(self.tempDir, ignore_errors=True)
+
+    #
+    # Helpers
+    #
+
+    def _service(self, studio=True):
+        service = self.autosave.AutosaveService(force=True, root=os.path.join(self.tempDir, "private autosave"))
+        service.studioActiveOverride = studio
+        service.reloadSettings()
+        self.services.append(service)
+        return service
+
+    def _userVolume(self, name="sub-012_T1w", shape=(30, 40, 50), extension=".nii.gz"):
+        k, j, i = np.indices(shape)
+        voxels = ((i * 7 + j * 13 + k * 29) % 500).astype(np.int16)
+        node = slicer.util.addVolumeFromArray(voxels, name=name)
+        node.SetSpacing(1.0, 1.1, 1.2)
+        path = os.path.join(self.userDir, name + extension)
+        self.assertTrue(slicer.util.saveNode(node, path))
+        slicer.mrmlScene.RemoveNode(node)
+        return slicer.util.loadVolume(path), path
+
+    def _lesion(self, volume, name="Lesions"):
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", name)
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(volume)
+        segmentId = segmentation.GetSegmentation().AddEmptySegment("Lesion")
+        shape = slicer.util.arrayFromVolume(volume).shape
+        array = np.zeros(shape, np.uint8)
+        array[5:10, 6:12, 7:14] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentation, segmentId, volume)
+        return segmentation, segmentId, array
+
+    def _projectFor(self, service):
+        service.poll()
+        self.assertIsNotNone(service.project, "a project is created for the user's data")
+        return service.project
+
+    def _save(self, service):
+        self.assertTrue(service.saveNow("test", progress=False))
+        self.io.backgroundWriter().drain(30.0)
+
+    def _projectFiles(self, project):
+        return [path for path in _relativeFiles(project.path) if not path.startswith(".studio/")]
+
+    #
+    # Tests
+    #
+
+    def test_01_names(self):
+        projects = self.projects
+        self.assertEqual(projects.sanitizeName('a/b\\c:d*e?f"g<h>i|j. '), "a b c d e f g h i j")
+        self.assertEqual(projects.sanitizeName("CON"), "_CON")
+        self.assertEqual(projects.sanitizeName("   "), projects.UNTITLED_NAME)
+        self.assertEqual(len(projects.sanitizeName("x" * 300)), projects.MAX_NAME_LENGTH)
+        self.assertEqual(projects.splitExtension("Lesions.seg.nrrd"), ("Lesions", ".seg.nrrd"))
+        self.assertEqual(projects.splitExtension("sub-01_T1w.nii.gz"), ("sub-01_T1w", ".nii.gz"))
+        self.assertEqual(projects.splitExtension("Peaks.mrk.json"), ("Peaks", ".mrk.json"))
+        self.assertEqual(projects.displayName("sub-012_T1w.nii.gz"), "sub-012 T1w")
+        folder = os.path.join(self.tempDir, "names")
+        os.makedirs(folder)
+        open(os.path.join(folder, "Lesions.seg.nrrd"), "w").close()
+        self.assertEqual(projects.uniqueName(folder, "Lesions.seg.nrrd"), "Lesions 2.seg.nrrd")
+        self.assertEqual(projects.uniqueName(folder, "lesions.SEG.nrrd", reserved=("lesions 2.seg.nrrd",)), "lesions 3.SEG.nrrd")
+        os.makedirs(os.path.join(folder, "Project"))
+        self.assertEqual(projects.uniqueName(folder, "Project", isFile=False), "Project 2")
+        for path, service in (("/Users/a/Library/Mobile Documents/com~apple~CloudDocs/Slicer Studio", "iCloud Drive"),
+                              ("/Users/a/Dropbox (Lab)/Slicer Studio", "Dropbox"), ("C:\\Users\\a\\OneDrive - Uni\\Slicer Studio", "OneDrive"),
+                              ("/Users/a/Library/CloudStorage/GoogleDrive-a@b.c/My Drive/x", "Google Drive"), ("/Users/a/Box/x", "Box"),
+                              ("/home/a/Documents/Slicer Studio", None), ("/home/a/boxes/x", None)):
+            self.assertEqual(projects.syncedService(path), service, path)
+        # The environment wins and skips the chooser
+        self.assertEqual(projects.root(), os.path.normpath(self.root))
+        self.assertFalse(projects.needsChooser())
+        os.environ.pop(projects.ROOT_ENVIRONMENT)
+        self.assertTrue(projects.root().endswith(os.path.join("Documents", "Slicer Studio")) or projects.isWebBuild()
+                        or bool(qt.QSettings().value(projects.ROOT_KEY)))
+        os.environ["SLICER_STUDIO_WEB"] = "1"
+        try:
+            self.assertEqual(projects.defaultRoot(), "/data/Slicer Studio")
+            self.assertTrue(projects.isRootChosen())
+        finally:
+            os.environ.pop("SLICER_STUDIO_WEB")
+        os.environ[projects.ROOT_ENVIRONMENT] = self.root
+
+    def test_02_layout(self):
+        projects = self.projects
+        service = self._service()
+        # No user data: no project (an empty drawing is not data)
+        empty = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Empty")
+        service.poll()
+        self.assertIsNone(service.project)
+        self.assertFalse(os.path.exists(self.root), "nothing is written before there is data")
+        slicer.mrmlScene.RemoveNode(empty)
+        volume, path = self._userVolume()
+        sourceMd5, sourceTime = _md5File(path), os.stat(path).st_mtime_ns
+        project = self._projectFor(service)
+        self.assertEqual(project.name, "sub-012 T1w")
+        self.assertEqual(os.path.dirname(project.path), os.path.join(os.path.normpath(self.root), "Projects"))
+        self.assertTrue(os.path.isfile(os.path.join(self.root, projects.ABOUT_FILE)))
+        self.assertIs(projects.currentProject(), project)
+        self._save(service)
+        files = self._projectFiles(project)
+        self.assertIn("Images/sub-012_T1w.nii.gz", files)
+        self.assertIn("sub-012 T1w.mrml", files)
+        self.assertEqual(_md5File(os.path.join(project.path, "Images", "sub-012_T1w.nii.gz")), sourceMd5, "a byte-for-byte copy")
+        self.assertEqual((_md5File(path), os.stat(path).st_mtime_ns), (sourceMd5, sourceTime), "the original is never changed")
+        for kind in ("Segmentations", "Maps", "Markups", "Tables", "Models", "Transforms", "Lesions", "Exports", "Other"):
+            self.assertFalse(os.path.exists(os.path.join(project.path, kind)), f"no empty {kind} folder")
+        self.assertEqual(volume.GetStorageNode().GetFileName(), os.path.join(project.path, "Images", "sub-012_T1w.nii.gz"))
+        self.assertFalse(volume.GetModifiedSinceRead())
+        self.assertEqual(slicer.mrmlScene.GetURL(), project.scenePath)
+        data = projects.readJson(projects.projectFile(project.path))
+        self.assertEqual((data["format"], data["name"], data["state"], data["counts"]["scans"]), ("slicer-studio-project", "sub-012 T1w", "open", 1))
+        text = open(project.scenePath, encoding="utf-8").read()
+        self.assertNotIn(self.tempDir, text)
+        self.assertIn('fileName="Images/sub-012_T1w.nii.gz"', text)
+        privacy = _privacyModule()
+        if privacy is not None:
+            self.assertEqual(privacy.scan([self.root], out=lambda line: None), 0)
+
+    def test_03_kinds_and_saved_state(self):
+        import vtk
+
+        service = self._service()
+        volume, _path = self._userVolume()
+        _segmentation, _segmentId, _array = self._lesion(volume)
+        tmap = slicer.util.addVolumeFromArray(np.random.default_rng(1).normal(0, 3, (20, 20, 20)).astype(np.float32), name="T map")
+        tmap.SetAttribute("LNM.Result", "1")
+        points = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "Peaks")
+        points.AddControlPoint((1, 2, 3))
+        table = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTableNode", "Stats")
+        table.AddColumn().SetName("name")
+        values = vtk.vtkDoubleArray()
+        values.SetName("value")
+        table.AddColumn(values)
+        table.AddEmptyRow()
+        table.SetCellText(0, 0, "a")
+        table.SetCellText(0, 1, "1.5")
+        model = slicer.modules.models.logic().AddModel(_sphere())
+        model.SetName("Sphere")
+        transform = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", "Align")
+        matrix = vtk.vtkMatrix4x4()
+        matrix.SetElement(0, 3, 5.0)
+        transform.SetMatrixTransformToParent(matrix)
+        project = self._projectFor(service)
+        self._save(service)
+        files = self._projectFiles(project)
+        for expected in ("Segmentations/Lesions.seg.nrrd", "Maps/T map.nrrd", "Markups/Peaks.mrk.json", "Tables/Stats.tsv", "Transforms/Align.h5"):
+            self.assertIn(expected, files)
+        self.assertTrue(any(path.startswith("Models/Sphere.") for path in files), files)
+        # A table's schema file is part of it: it stays when the table is saved again
+        self.assertIn("Tables/Stats.schema.tsv", files)
+        table.SetCellText(0, 0, "b")
+        self._save(service)
+        self.assertIn("Tables/Stats.schema.tsv", self._projectFiles(project))
+        self.assertFalse([path for path in _relativeFiles(project.path) if path.startswith(".studio/removed/")])
+        self.assertFalse(slicer.mrmlScene.GetStorableNodesModifiedSinceRead(), "saved data is not 'modified since read'")
+        self.assertFalse(slicer.mrmlScene.GetModifiedSinceRead(), "the scene file is saved")
+        self.assertFalse(service.projectNeedsSave(includeScene=True))
+        self.assertEqual(service.unsavedSummary(), "")
+        # Quitting asks nothing about unsaved changes: the close summary says everything is saved
+        from StudioLib import firstrun
+
+        autosaveInstance = self.autosave._service
+        self.autosave._service = service
+        try:
+            mode, summary = firstrun.projectCloseSummary()
+        finally:
+            self.autosave._service = autosaveInstance
+        self.assertEqual(mode, firstrun.CLOSE_MODE_LESION_SAVED)
+        self.assertIn("All changes are saved in Projects/sub-012 T1w", summary)
+        self.assertEqual(service.closeFlushResult, (True, ""))
+
+    def test_04_incremental_and_other_program(self):
+        service = self._service()
+        volume, _path = self._userVolume()
+        segmentation, segmentId, array = self._lesion(volume)
+        project = self._projectFor(service)
+        self._save(service)
+        segmentationFile = os.path.join(project.path, "Segmentations", "Lesions.seg.nrrd")
+        imageFile = os.path.join(project.path, "Images", "sub-012_T1w.nii.gz")
+        imageTime = os.stat(imageFile).st_mtime_ns
+        before = os.stat(segmentationFile).st_mtime_ns
+        time.sleep(0.02)
+        array[12:14, 12:14, 12:14] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentation, segmentId, volume)
+        self.assertTrue(service.projectNeedsSave())
+        self._save(service)
+        self.assertNotEqual(os.stat(segmentationFile).st_mtime_ns, before, "the lesion's own file is rewritten")
+        self.assertEqual(os.stat(imageFile).st_mtime_ns, imageTime, "unchanged data is not written again")
+        # Another program changes the file: it is kept, Studio writes its own version next to it
+        time.sleep(0.02)
+        with open(segmentationFile, "ab") as f:
+            f.write(b"\n")
+        theirs = _md5File(segmentationFile)
+        array[2:4, 2:4, 2:4] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentation, segmentId, volume)
+        announced = []
+        service.setProjectAnnouncer(lambda event, project, **info: announced.append((event, info)))
+        self._save(service)
+        self.assertEqual(_md5File(segmentationFile), theirs, "the other program's file is never overwritten")
+        ours = os.path.join(project.path, "Segmentations", "Lesions (Slicer Studio).seg.nrrd")
+        self.assertTrue(os.path.isfile(ours))
+        self.assertEqual(segmentation.GetStorageNode().GetFileName(), ours)
+        self.assertIn(("conflict", {"conflicts": [("Lesions.seg.nrrd", "Lesions (Slicer Studio).seg.nrrd")]}), announced)
+        self.assertFalse(segmentation.GetModifiedSinceRead())
+
+    def test_05_removed_node(self):
+        service = self._service()
+        _volume, _path = self._userVolume()
+        points = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "Peaks")
+        points.AddControlPoint((1, 2, 3))
+        project = self._projectFor(service)
+        self._save(service)
+        self.assertTrue(os.path.isfile(os.path.join(project.path, "Markups", "Peaks.mrk.json")))
+        slicer.mrmlScene.RemoveNode(points)
+        self._save(service)
+        self.assertFalse(os.path.exists(os.path.join(project.path, "Markups")), "the empty kind folder is removed")
+        removed = [path for path in _relativeFiles(project.path) if path.startswith(".studio/removed/")]
+        self.assertEqual([os.path.basename(path) for path in removed], ["Peaks.mrk.json"], "kept in .studio/removed, not deleted")
+        self.assertNotIn("Peaks", open(project.scenePath, encoding="utf-8").read())
+
+    def test_06_copy_on_open_and_continue(self):
+        projects = self.projects
+        # A scene saved by 3D Slicer somewhere else
+        volume, _path = self._userVolume("MR Head", extension=".nrrd")
+        self._lesion(volume)
+        outside = os.path.join(self.tempDir, "outside scene")
+        os.makedirs(outside)
+        scenePath = os.path.join(outside, "Head study.mrml")
+        self.assertTrue(slicer.util.saveScene(scenePath))
+        before = {path: (_md5File(os.path.join(outside, path)), os.stat(os.path.join(outside, path)).st_mtime_ns) for path in _relativeFiles(outside)}
+        before.update({os.path.join("..", "user data é", "MR Head.nrrd"): (_md5File(os.path.join(self.userDir, "MR Head.nrrd")), None)})
+        slicer.mrmlScene.Clear(0)
+        service = self._service()
+        announced = []
+        service.setProjectAnnouncer(lambda event, project, **info: announced.append(event))
+        service.setPendingSceneSource(scenePath)
+        slicer.util.loadScene(scenePath)
+        self.assertIsNotNone(service.project, "a scene from elsewhere opens as a new project")
+        self.assertEqual(service.project.name, "Head study")
+        self.assertIn("copy", announced)
+        self._save(service)
+        project = service.project
+        files = self._projectFiles(project)
+        self.assertIn("Images/MR Head.nrrd", files)
+        self.assertTrue(any(path.startswith("Segmentations/") for path in files), files)
+        for path, (md5, mtime) in before.items():
+            full = os.path.normpath(os.path.join(outside, path))
+            self.assertEqual(_md5File(full), md5, f"{path} is not changed")
+            if mtime is not None:
+                self.assertEqual(os.stat(full).st_mtime_ns, mtime)
+        # Closing the scene keeps the project on disk; opening it again continues in place
+        projectPath = project.path
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertIsNone(service.project)
+        self.assertEqual(projects.readJson(projects.projectFile(projectPath))["state"], "closed")
+        times = {path: os.stat(os.path.join(projectPath, path)).st_mtime_ns for path in self._projectFiles(project)}
+        self.assertTrue(service.openProject(projectPath))
+        self.assertEqual(service.project.path, projectPath)
+        self.assertFalse(service.dirty, "a project opened in place is up to date")
+        self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("Lesions"))
+        self.assertTrue(service.saveNow("test", progress=False))
+        for path, mtime in times.items():
+            if not path.endswith(".mrml"):
+                self.assertEqual(os.stat(os.path.join(projectPath, path)).st_mtime_ns, mtime, f"{path} is not rewritten")
+
+    def test_07_rename_duplicate_trash(self):
+        projects = self.projects
+        service = self._service()
+        volume, _path = self._userVolume()
+        self._lesion(volume)
+        project = self._projectFor(service)
+        self._save(service)
+        oldPath = project.path
+        newPath = service.renameProject("Patient A: left/right")
+        self.assertEqual(os.path.basename(newPath), "Patient A left right")
+        self.assertFalse(os.path.exists(oldPath))
+        self.assertTrue(os.path.isfile(os.path.join(newPath, "Patient A left right.mrml")))
+        self.assertFalse(os.path.exists(os.path.join(newPath, "sub-012 T1w.mrml")))
+        self.assertEqual(slicer.mrmlScene.GetURL(), os.path.join(newPath, "Patient A left right.mrml"))
+        self.assertTrue(volume.GetStorageNode().GetFileName().startswith(newPath + os.sep))
+        self._save(service)
+        self.assertEqual(projects.readJson(projects.projectFile(newPath))["name"], "Patient A left right")
+        # Another project of the folder: duplicate, rename and trash it (never the open one)
+        duplicated = []
+        copyPath = projects.duplicateFolder(newPath, onDone=duplicated.append)
+        self.io.backgroundWriter().drain(30.0)
+        self.assertEqual(duplicated, [copyPath])
+        self.assertTrue(os.path.isfile(os.path.join(copyPath, os.path.basename(copyPath) + ".mrml")))
+        self.assertFalse(os.path.exists(os.path.join(copyPath, ".studio", "lock")))
+        renamed = projects.renameFolder(copyPath, "Copy B")
+        self.assertTrue(os.path.isfile(os.path.join(renamed, "Copy B.mrml")))
+        with self.assertRaises(projects.ProjectError):
+            projects.trashFolder(newPath)
+        self.assertTrue(projects.trashFolder(renamed, confirmDelete=lambda: True))
+        self.assertFalse(os.path.exists(renamed))
+        names = [info.name for info in projects.listProjects()]
+        self.assertEqual(names, ["Patient A left right"])
+        # The renamed project loads with all its data
+        slicer.mrmlScene.Clear(0)
+        self.assertTrue(service.openProject(newPath))
+        self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("Lesions"))
+        self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("sub-012_T1w"))
+
+    def test_08_move_root(self):
+        projects = self.projects
+        service = self._service()
+        volume, _path = self._userVolume()
+        self._lesion(volume)
+        project = self._projectFor(service)
+        self._save(service)
+        os.makedirs(os.path.join(self.root, "Studies", "Study A"))
+        with open(os.path.join(self.root, "Studies", "Study A", "study.json"), "w") as f:
+            json.dump({"name": "Study A"}, f)
+        os.environ.pop(projects.ROOT_ENVIRONMENT)
+        qt.QSettings().setValue(projects.ROOT_KEY, self.root)
+        try:
+            newRoot = os.path.join(self.tempDir, "moved", "Slicer Studio")
+            moved = service.moveRoot(newRoot, moveContent=True)
+            self.assertEqual(sorted(moved), sorted(["Projects", "Studies", projects.ABOUT_FILE]))
+            self.assertEqual(projects.root(), os.path.normpath(newRoot))
+            self.assertTrue(service.project.path.startswith(os.path.normpath(newRoot) + os.sep))
+            self.assertTrue(os.path.isfile(os.path.join(newRoot, "Studies", "Study A", "study.json")))
+            self.assertFalse(os.path.exists(os.path.join(self.root, "Projects")))
+            self.assertTrue(volume.GetStorageNode().GetFileName().startswith(os.path.normpath(newRoot)))
+            self._save(service)
+            self.assertIs(service.project, project)
+            self.assertTrue(os.path.isfile(project.scenePath))
+        finally:
+            qt.QSettings().remove(projects.ROOT_KEY)
+            qt.QSettings().remove(projects.ROOT_CHOSEN_KEY)
+            os.environ[projects.ROOT_ENVIRONMENT] = self.root
+
+    def test_09_crash_offer(self):
+        projects = self.projects
+        service = self._service()
+        _volume, _path = self._userVolume()
+        project = self._projectFor(service)
+        self._save(service)
+        path = project.path
+        # A crash: the lock of a process that is gone and project.json still "open"
+        project.unlock()
+        service.project = None
+        service.projectWriter = None
+        projects.setCurrentProject(None)
+        self.io.backgroundWriter().drain(10.0)
+        data = projects.readJson(projects.projectFile(path))
+        data["state"] = "open"
+        self.io.atomicWriteJson(projects.projectFile(path), data)
+        with open(os.path.join(path, ".studio", "lock"), "w") as f:
+            f.write("999999\nSlicer\n" + qt.QSysInfo.machineHostName() + "\n")
+        offered = []
+        service.setProjectPresenter(offered.append)
+        crashed = service.scanProjectsAtStartup()
+        self.assertEqual([info.name for info in crashed], ["sub-012 T1w"])
+        self.assertEqual(len(offered), 1)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertEqual(projects.readJson(projects.projectFile(path))["state"], "crashed", "offered once")
+        self.assertEqual(service.scanProjectsAtStartup(), [])
+        self.assertTrue(service.openProject(path))
+        self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("sub-012_T1w"))
+        # A project open in another (live) Slicer Studio is never offered nor taken
+        other = projects.createProject("Busy")
+        self.assertTrue(other.lock())
+        try:
+            self.assertTrue(projects.isLockedByOther(other.path))
+            infos = [info for info in projects.listProjects() if info.name == "Busy"]
+            self.assertEqual(infos[0].state, "open")
+            self.assertNotIn("Busy", [info.name for info in service.scanProjectsAtStartup()])
+        finally:
+            other.unlock()
+
+    def test_10_study_and_classic(self):
+        service = self._service(studio=False)
+        volume, _path = self._userVolume()
+        service.poll()
+        self.assertIsNone(service.project, "Classic never creates a project")
+        self.assertFalse(os.path.exists(os.path.join(self.root, "Projects")))
+        service.studioActiveOverride = True
+        service._studyOpen = lambda: True
+        service._lastProjectCheck = None
+        service.poll()
+        self.assertIsNone(service.project, "no project while a study is open")
+        service._studyOpen = lambda: False
+        service._lastProjectCheck = None
+        project = self._projectFor(service)
+        self._save(service)
+        # A study opens: the project is saved and stops
+        service._studyOpen = lambda: True
+        self._lesion(volume)
+        service.poll()
+        self.assertIsNone(service.project)
+        self.assertTrue(os.path.isfile(os.path.join(project.path, "Segmentations", "Lesions.seg.nrrd")))
+        # Projects turned off: the private recovery autosave as before
+        service._studyOpen = lambda: False
+        os.environ[self.projects.ENABLED_ENVIRONMENT] = "0"
+        service._lastProjectCheck = None
+        service.poll()
+        self.assertIsNone(service.project)
+
+    def test_11_large_volume(self):
+        service = self._service()
+        _volume, _path = self._userVolume()
+        project = self._projectFor(service)
+        self._save(service)
+        big = slicer.util.addVolumeFromArray(np.random.default_rng(2).random((64, 128, 128)).astype(np.float32), name="Derived")
+        self.assertTrue(service.autosaveNow("test"))
+        self.assertTrue(service.waitForIdle(120.0))
+        metrics = service.metrics["last"]
+        self.assertLess(metrics["maxSliceMs"], 100.0, metrics)
+        self.assertGreater(metrics["workerMs"], 0.0)
+        derived = os.path.join(project.path, "Images", "Derived.nrrd")
+        self.assertTrue(os.path.isfile(derived))
+        self.assertFalse(big.GetModifiedSinceRead(), "marked stored without a second write")
+        self.assertEqual(big.GetStorageNode().GetFileName(), derived)
+        loaded = slicer.util.loadVolume(derived)
+        self.assertTrue(np.array_equal(slicer.util.arrayFromVolume(loaded), slicer.util.arrayFromVolume(big)))
+
+    def test_12_official_save_moved_into_kind_folder(self):
+        service = self._service()
+        _volume, _path = self._userVolume()
+        project = self._projectFor(service)
+        self._save(service)
+        # 3D Slicer's Save dialog put a new node's file next to the scene file
+        points = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "Targets")
+        points.AddControlPoint((4, 5, 6))
+        self.assertTrue(slicer.util.saveNode(points, os.path.join(project.path, "Targets.mrk.json")))
+        self.assertFalse(points.GetModifiedSinceRead())
+        self.assertTrue(service.saveNow("test", progress=False))
+        self.io.backgroundWriter().drain(10.0)
+        self.assertFalse(os.path.exists(os.path.join(project.path, "Targets.mrk.json")))
+        self.assertTrue(os.path.isfile(os.path.join(project.path, "Markups", "Targets.mrk.json")))
+        self.assertEqual(points.GetStorageNode().GetFileName(), os.path.join(project.path, "Markups", "Targets.mrk.json"))
+        text = open(project.scenePath, encoding="utf-8").read()
+        self.assertIn('fileName="Markups/Targets.mrk.json"', text)
+
+    def test_13_ui(self):
+        """The Library section, the folder chooser and the save status of a project (built with the ui builders)."""
+        from StudioLib import projects_ui
+
+        from StudioLib import draw, library
+
+        service = self._service()
+        volume, _path = self._userVolume()
+        segmentation, _segmentId, _array = self._lesion(volume)
+        self._projectFor(service)
+        self._save(service)
+        # The lesion is saved with the project: the Lesion card says so, and closing the scene asks nothing (it saves first)
+        self.assertTrue(draw.saveStateText(segmentation)[0].startswith("Saved in the project"), draw.saveStateText(segmentation))
+        running = self.autosave._service
+        self.autosave._service = service  # as the running service of the application
+        try:
+            self.assertIs(library._projectService(), service)
+        finally:
+            self.autosave._service = running
+        section = projects_ui.ProjectsSection()
+        try:
+            section.refresh()
+            self.assertEqual(section.widget.objectName, "studioProjectsSection")
+            cards = section.cards()
+            self.assertEqual(len(cards), 1)
+            self.assertEqual(cards[0].objectName, "studioProjectCard")
+            self.assertTrue(cards[0].property("studioCurrent"))
+            texts = [label.text for label in cards[0].findChildren("QLabel")]
+            self.assertIn("sub-012 T1w", texts)
+            self.assertTrue(any("1 scan · 1 lesion" in text for text in texts), texts)
+            self.assertEqual([text for text, _callback in section.menuActions(cards[0].property("studioProjectPath"))][:3],
+                             ["Open", "Rename…", "Duplicate"])
+        finally:
+            section.dispose()
+            section.widget.deleteLater()
+        dialog = projects_ui.FolderChooserDialog(proposal=os.path.join(self.tempDir, "Dropbox", "Slicer Studio"))
+        try:
+            self.assertEqual(dialog.objectName, "StudioProjectsFolderDialog")
+            self.assertFalse(dialog.syncedLabel.isHidden())
+            self.assertIn("Dropbox", dialog.syncedLabel.text)
+            dialog.setPath(os.path.join(self.tempDir, "Slicer Studio"))
+            self.assertTrue(dialog.syncedLabel.isHidden())
+            dialog.reject()  # Escape accepts the proposal
+            self.assertEqual(dialog.result(), qt.QDialog.Accepted)
+        finally:
+            dialog.deleteLater()
+        status = service.status()
+        self.assertEqual(status.projectName, "sub-012 T1w")
+        text, level, toolTip, _icon = projects_ui.projectStatus(status)
+        self.assertEqual((text, level), ("Saved", "ok"))
+        self.assertIn("Projects/sub-012 T1w", toolTip)
+        items = {item["id"] for item in projects_ui.paletteItems()}
+        self.assertTrue({"projects.new", "projects.open", "projects.rename", "projects.showFolder", "projects.changeFolder"} <= items)
+
+    def test_14_closed_surface_segmentation(self):
+        """A segmentation written as "<name>.seg.vtm" plus a "<name>.seg/" folder is saved again in place (the folder is
+        replaced) and the project reloads with every segment; nothing refers to a temporary folder.
+        """
+        service = self._service()
+        _volume, _path = self._userVolume()
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Surfaces")
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.GetSegmentation().SetSourceRepresentationName("Closed surface")
+        logic = slicer.modules.segmentations.logic()
+        for center in ((0, 0, 0), (20, 0, 0)):
+            model = slicer.modules.models.logic().AddModel(_sphere(center))
+            self.assertTrue(logic.ImportModelToSegmentationNode(model, segmentation))
+            slicer.mrmlScene.RemoveNode(model)
+            project = self._projectFor(service)
+            self._save(service)
+            self.assertFalse(segmentation.GetModifiedSinceRead())
+            self.assertEqual(segmentation.GetStorageNode().GetFileName(), os.path.join(project.path, "Segmentations", "Surfaces.seg.vtm"))
+        files = _relativeFiles(project.path)
+        self.assertFalse([path for path in files if "studio-tmp" in path], files)
+        self.assertFalse([path for path in files if path.startswith(".studio/removed/")], files)
+        self.assertEqual(len([path for path in files if path.startswith("Segmentations/Surfaces.seg/")]), 2, files)
+        self.assertNotIn("studio-tmp", open(project.scenePath, encoding="utf-8").read())
+        projectPath = project.path
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertTrue(service.openProject(projectPath))
+        reloaded = slicer.mrmlScene.GetFirstNodeByName("Surfaces")
+        self.assertIsNotNone(reloaded)
+        self.assertEqual(reloaded.GetSegmentation().GetNumberOfSegments(), 2)
+        # A temporary folder left by a save that was interrupted is deleted when the project is opened again
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        leftover = os.path.join(projectPath, "Segmentations", self.io.PROJECT_TEMPORARY_PREFIX + "deadbeef")
+        os.makedirs(leftover)
+        open(os.path.join(leftover, "Surfaces.seg.vtm"), "w").close()
+        self.assertTrue(service.openProject(projectPath))
+        self.io.backgroundWriter().drain(10.0)
+        self.assertFalse(os.path.exists(leftover))
+
+    def test_15_detached_header_from_outside(self):
+        """A volume read from a detached header (.nhdr + data file) outside the folder is written into the project as a
+        self-contained file (copying the header alone would break it).
+        """
+        service = self._service()
+        volume, _path = self._userVolume("Head", extension=".nhdr")
+        self.assertTrue([name for name in os.listdir(self.userDir) if name.startswith("Head") and not name.endswith(".nhdr")])
+        expected = slicer.util.arrayFromVolume(volume).copy()
+        project = self._projectFor(service)
+        self._save(service)
+        files = self._projectFiles(project)
+        self.assertFalse([name for name in files if name.endswith(".nhdr")], files)
+        self.assertIn("Images/Head.nrrd", files)
+        self.assertEqual(volume.GetStorageNode().GetFileName(), os.path.join(project.path, "Images", "Head.nrrd"))
+        self.assertFalse(volume.GetModifiedSinceRead())
+        projectPath = project.path
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertTrue(service.openProject(projectPath))
+        reloaded = slicer.mrmlScene.GetFirstNodeByName("Head")
+        self.assertIsNotNone(reloaded)
+        self.assertTrue(np.array_equal(slicer.util.arrayFromVolume(reloaded), expected))
+
+    def test_16_project_loaded_in_classic_continues_in_place(self):
+        """A project of the folder loaded in Classic (official Load Scene) continues in place when Studio is shown: no copy."""
+        projects = self.projects
+        service = self._service()
+        self._userVolume()
+        project = self._projectFor(service)
+        self._save(service)
+        projectPath, scenePath = project.path, project.scenePath
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertIsNone(service.project)
+        classic = self._service(studio=False)
+        service.dispose()
+        self.services.remove(service)
+        slicer.util.loadScene(scenePath)
+        classic.poll()
+        self.assertIsNone(classic.project, "Classic loads a project like any scene")
+        classic.studioActiveOverride = True
+        classic._lastProjectCheck = None
+        classic.poll()
+        self.assertIsNotNone(classic.project)
+        self.assertEqual(os.path.normpath(classic.project.path), os.path.normpath(projectPath))
+        self.assertEqual(sorted(os.listdir(projects.projectsFolder())), [os.path.basename(projectPath)], "no duplicate project")
+        # vtkMRMLScene::Clear keeps the scene URL: new data after it starts a new project, never goes into the old one
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertIsNone(classic.project)
+        self._userVolume("Other scan")
+        classic._lastProjectCheck = None
+        classic.poll()
+        self.assertIsNotNone(classic.project)
+        self.assertEqual(classic.project.name, "Other scan")
+
+    def test_17_library_order_after_official_save(self):
+        """A project that official 3D Slicer saved last (project.json not updated) is listed first."""
+        projects = self.projects
+        older = projects.createProject("Older")
+        newer = projects.createProject("Newer")
+        now = time.time()
+        for project, modified in ((older, now - 60), (newer, now - 30)):
+            with open(project.scenePath, "w", encoding="utf-8") as f:
+                f.write("<MRML></MRML>\n")
+            os.utime(project.scenePath, (modified, modified))
+            self.io.atomicWriteJson(projects.projectFile(project.path), {"name": project.name, "modified": projects._isoTime(modified)})
+        self.assertEqual([info.name for info in projects.listProjects()], ["Newer", "Older"])
+        # Official 3D Slicer saves the older project now: it comes first
+        os.utime(older.scenePath, (now, now))
+        self.assertEqual([info.name for info in projects.listProjects()], ["Older", "Newer"])
+
+
+def _sphere(center=(0, 0, 0)):
+    import vtk
+
+    source = vtk.vtkSphereSource()
+    source.SetCenter(center)
+    source.SetRadius(5)
+    source.Update()
+    return source.GetOutput()

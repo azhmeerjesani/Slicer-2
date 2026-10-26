@@ -90,8 +90,19 @@ public:
   /// Append image onto image. Resamples appended image and saves result in input image
   static void AppendImage(vtkOrientedImageData* inputImage, vtkOrientedImageData* appendedImage);
 
+  /// Append image onto image, returning the modified extent.
+  /// Only the part of the input image that the appended image covers is resampled and combined (in place, by
+  /// maximum), instead of the whole input image. That part is returned in modifiedExtent, in the voxel
+  /// coordinates of the input image (invalid, with max < min, when the appended image is outside the input image),
+  /// so that it can be passed as modification extent to ModifySegmentByLabelmap.
+  static void AppendImage(vtkOrientedImageData* inputImage, vtkOrientedImageData* appendedImage, int modifiedExtent[6]);
+
   /// Rasterize a poly data onto the input image into the slice view
   static void AppendPolyMask(vtkOrientedImageData* input, vtkPolyData* polyData, vtkMRMLSliceNode* sliceNode, vtkMRMLSegmentationNode* segmentationNode = nullptr);
+
+  /// Rasterize a poly data onto the input image into the slice view, returning the modified extent
+  /// (the voxels of the input image that the poly data covers; see AppendImage).
+  static void AppendPolyMask(vtkOrientedImageData* input, vtkPolyData* polyData, vtkMRMLSliceNode* sliceNode, vtkMRMLSegmentationNode* segmentationNode, int modifiedExtent[6]);
 
   /// \return true if volume, segmentation and reference geometry are defined
   bool CanAddSegments() const;

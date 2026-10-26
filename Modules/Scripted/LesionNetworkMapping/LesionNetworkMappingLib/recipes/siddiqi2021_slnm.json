@@ -1,0 +1,49 @@
+{
+  "format": "slicer-lnm-recipe",
+  "version": 1,
+  "id": "siddiqi2021_slnm",
+  "recipe_version": "1",
+  "title": "Symptom lesion network mapping, sLNM (Siddiqi 2021)",
+  "status": "adapted",
+  "cited_as": "Siddiqi et al. 2021",
+  "citations": [
+    "10.1038/s41562-021-01161-1"
+  ],
+  "differences_from_source": [
+    "The map is the partial correlation of the symptom score with each voxel's Fz, from a permutation GLM with a lesion-volume covariate (score permuted within datasets, 5000 permutations, voxel max-statistic FWE primary); a parametric p-value is never the primary inference here.",
+    "Leave-one-dataset-out maps and their convergence are added when there are at least two datasets of ten or more lesions.",
+    "Connectome QA chips (degree and PC1) are added."
+  ],
+  "description": "Maps where connectivity with the lesion locations correlates with a symptom score, with out-of-sample validation against baselines.",
+  "parameters": {
+    "design": {
+      "test": "continuous",
+      "contrast": "two_sided",
+      "covariates": [
+        "volume_ml"
+      ],
+      "permute": "auto"
+    },
+    "n_perm": 5000,
+    "validation": {
+      "scheme": "auto"
+    }
+  },
+  "steps": [
+    "maps",
+    "slnm",
+    "qa",
+    "validation",
+    "clusters",
+    "report"
+  ],
+  "requires": [
+    "clusters",
+    "cohortmaps",
+    "methods",
+    "qa",
+    "report",
+    "slnm",
+    "validate"
+  ]
+}

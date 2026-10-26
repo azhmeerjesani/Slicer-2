@@ -55,10 +55,29 @@
 //----------------------------------------------------------------------------
 vtkStandardNewMacro(vtkMRMLSliceLayerLogic);
 
+// Exact comparison (zero tolerance): an unchanged slice must not re-execute the reslice,
+// while any real change, however small, must still reach the rendered image.
 bool AreMatricesEqual(const vtkMatrix4x4* first, const vtkMatrix4x4* second)
 {
-  return vtkAddonMathUtilities::MatrixAreEqual(first, second);
+  return vtkAddonMathUtilities::MatrixAreEqual(first, second, 0.0);
 }
+
+namespace
+{
+//----------------------------------------------------------------------------
+// Use a linear transform as reslice transform, unless the current reslice transform
+// is a linear transform with the very same matrix: replacing it with an equal one
+// would make the reslice (and all the views showing it) update for nothing.
+void SetLinearResliceTransform(vtkImageReslice* reslice, vtkTransform* transform)
+{
+  vtkHomogeneousTransform* currentTransform = vtkHomogeneousTransform::SafeDownCast(reslice->GetResliceTransform());
+  if (currentTransform && AreMatricesEqual(currentTransform->GetMatrix(), transform->GetMatrix()))
+  {
+    return;
+  }
+  reslice->SetResliceTransform(transform);
+}
+} // namespace
 
 // Convert a linear transform that is almost exactly a permute transform
 // to an exact permute transform.
@@ -273,8 +292,17 @@ void vtkMRMLSliceLayerLogic::OnMRMLNodeModified(vtkMRMLNode* node)
     this->Modified();
     this->EndModify(wasModifying);
   }
-  else if (node == this->SliceNode || //
-           node == this->VolumeNode)
+  else if (node == this->VolumeNode)
+  {
+    // The voxels may have been modified in place: make the reslice execute again
+    // (the reslice transform is not replaced anymore at every update)
+    int wasModifying = this->StartModify();
+    this->Reslice->Modified();
+    this->ResliceUVW->Modified();
+    this->UpdateLogic();
+    this->EndModify(wasModifying);
+  }
+  else if (node == this->SliceNode)
   {
     this->UpdateLogic();
   }
@@ -294,6 +322,9 @@ void vtkMRMLSliceLayerLogic::SetSliceNode(vtkMRMLSliceNode* sliceNode)
   this->UpdateTransforms();
   this->UpdateImageDisplay();
   this->UpdateGlyphs();
+
+  // The layer shows another slice now (UpdateTransforms only notifies about reslice changes)
+  this->Modified();
 
   this->EndModify(wasModifying);
 }
@@ -316,6 +347,9 @@ void vtkMRMLSliceLayerLogic::SetVolumeNode(vtkMRMLVolumeNode* volumeNode)
   this->UpdateTransforms();
   this->UpdateImageDisplay();
   this->UpdateGlyphs();
+
+  // The layer shows another volume (or none) now (UpdateTransforms only notifies about reslice changes)
+  this->Modified();
 
   this->EndModify(wasModifying);
 }
@@ -530,11 +564,13 @@ void vtkMRMLSliceLayerLogic::UpdateTransforms()
     // vtkImageReslice works faster if the input is a linear transform, so try to convert it
     // to a linear transform.
     // Also attempt to make it a permute transform, as it makes reslicing even faster.
+    // The linear transforms are only set if their matrix changed, so that an unchanged
+    // slice node does not make the reslice execute again.
     vtkSmartPointer<vtkTransform> linearXYToIJKTransform = vtkSmartPointer<vtkTransform>::New();
     if (vtkMRMLTransformNode::IsGeneralTransformLinear(this->XYToIJKTransform, linearXYToIJKTransform))
     {
       SnapToPermuteMatrix(linearXYToIJKTransform);
-      this->Reslice->SetResliceTransform(linearXYToIJKTransform);
+      SetLinearResliceTransform(this->Reslice, linearXYToIJKTransform);
     }
     else
     {
@@ -544,7 +580,7 @@ void vtkMRMLSliceLayerLogic::UpdateTransforms()
     if (vtkMRMLTransformNode::IsGeneralTransformLinear(this->UVWToIJKTransform, linearUVWToIJKTransform))
     {
       SnapToPermuteMatrix(linearUVWToIJKTransform);
-      this->ResliceUVW->SetResliceTransform(linearUVWToIJKTransform);
+      SetLinearResliceTransform(this->ResliceUVW, linearUVWToIJKTransform);
     }
     else
     {
@@ -552,31 +588,19 @@ void vtkMRMLSliceLayerLogic::UpdateTransforms()
     }
   }
 
-  /***
-  // Optimisation: If there is no volume, calling or not Modified() won't
-  // have any visual impact. the transform has no sense if there is no volume
-  bool transformModified = this->VolumeNode && //
-    !AreMatricesEqual(this->XYToIJKTransform->GetMatrix(), xyToIJK.GetPointer());
-  if (transformModified)
-    {
-    this->XYToIJKTransform->SetMatrix(xyToIJK.GetPointer());
-    }
-
-  bool transformModifiedUVW = this->VolumeNode && //
-    !AreMatricesEqual(this->UVWToIJKTransform->GetMatrix(), uvwToIJK.GetPointer());
-  if (transformModifiedUVW)
-    {
-    this->UVWToIJKTransform->SetMatrix(uvwToIJK.GetPointer());
-    }
-  ***/
-
   this->Reslice->SetOutputExtent(0, dimensions[0] - 1, 0, dimensions[1] - 1, 0, dimensions[2] - 1);
 
   this->ResliceUVW->SetOutputExtent(0, dimensionsUVW[0] - 1, 0, dimensionsUVW[1] - 1, 0, dimensionsUVW[2] - 1);
 
   this->UpdatingTransforms = 0;
 
-  // if (transformModified || transformModifiedUVW)
+  // Only notify if the reslice changed since the last notification: its transform or extent
+  // changed above, or another of its properties was changed by another class (for example
+  // the slab reconstruction settings, set by vtkMRMLSliceLogic).
+  // Without a volume the layer has no output, so whatever changed, it has no visual impact.
+  if (this->VolumeNode                                 //
+      && (this->Reslice->GetMTime() > this->GetMTime() //
+          || this->ResliceUVW->GetMTime() > this->GetMTime()))
   {
     this->Modified();
   }
@@ -791,14 +815,18 @@ void vtkMRMLSliceLayerLogic::UpdateImageDisplay()
     }
   }
 
-  if (oldReSliceMTime != this->Reslice->GetMTime() ||                                        //
-      oldReSliceUVWMTime != this->ResliceUVW->GetMTime() ||                                  //
-      oldAssign != this->AssignAttributeTensorsToScalars->GetMTime() ||                      //
-      oldLabel != this->LabelOutline->GetMTime() ||                                          //
-      oldLabelUVW != this->LabelOutlineUVW->GetMTime() ||                                    //
-      (volumeNode != nullptr && (volumeNode->GetMTime() > oldReSliceMTime)) ||               //
-      (volumeDisplayNode != nullptr && (volumeDisplayNode->GetMTime() > oldReSliceMTime)) || //
-      (volumeDisplayNodeUVW != nullptr && (volumeDisplayNodeUVW->GetMTime() > oldReSliceUVWMTime)))
+  // The volume and display nodes are compared with the time of the last notification
+  // of this logic: a change that observers were already notified about (for example
+  // a window/level change, notified in OnMRMLNodeModified) does not need a new one.
+  vtkMTimeType lastNotificationMTime = this->GetMTime();
+  if (oldReSliceMTime != this->Reslice->GetMTime() ||                                              //
+      oldReSliceUVWMTime != this->ResliceUVW->GetMTime() ||                                        //
+      oldAssign != this->AssignAttributeTensorsToScalars->GetMTime() ||                            //
+      oldLabel != this->LabelOutline->GetMTime() ||                                                //
+      oldLabelUVW != this->LabelOutlineUVW->GetMTime() ||                                          //
+      (volumeNode != nullptr && (volumeNode->GetMTime() > lastNotificationMTime)) ||               //
+      (volumeDisplayNode != nullptr && (volumeDisplayNode->GetMTime() > lastNotificationMTime)) || //
+      (volumeDisplayNodeUVW != nullptr && (volumeDisplayNodeUVW->GetMTime() > lastNotificationMTime)))
   {
     this->Modified();
   }

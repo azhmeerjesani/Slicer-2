@@ -22,13 +22,17 @@
 #include <QActionGroup>
 #include <QButtonGroup>
 #include <QDebug>
+#include <QEvent>
+#include <QFontMetrics>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMenu>
 #include <QMessageBox>
+#include <QMetaObject>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QTimer>
 #include <QWidgetAction>
 
 // CTK includes
@@ -43,6 +47,7 @@
 // qMRML includes
 #include "qMRMLSliceControllerWidget_p.h"
 #include "qMRMLSliderWidget.h"
+#include "qMRMLSymbolicIconEngine.h"
 
 // MRMLLogic includes
 #include <vtkMRMLSliceLayerLogic.h>
@@ -60,11 +65,193 @@
 #include <vtkMRMLSliceViewDisplayableManagerFactory.h>
 #include <vtkMRMLUnitNode.h>
 
+// MRML includes
+#include <vtkMRMLTransformNode.h>
+#include <vtkMRMLVolumeNode.h>
+
 // VTK includes
+#include <vtkImageData.h>
+#include <vtkMath.h>
 #include <vtkMatrix4x4.h>
 #include <vtkNew.h>
 #include <vtkStringArray.h>
 #include <vtkImageReslice.h>
+
+// STD includes
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+
+namespace
+{
+/// Minimum width of the offset slider in the flat bar
+const int FlatSliderMinimumWidth = 48;
+/// Fixed space at the end of the bar layout (qMRMLViewControllerBarPrivate::init)
+const int FlatBarTrailingSpace = 5;
+/// Stretch of the optional parts of the flat bar (readout, fit button): they get the room they need before the
+/// offset slider (stretch 1) grows
+const int FlatOptionalStretch = 1000;
+
+//---------------------------------------------------------------------------
+/// Return the IJK to RAS matrix of the volume, with its parent transform (the same matrix as
+/// vtkMRMLSliceLogic::GetSliceIndexFromOffset).
+void getVolumeIJKToWorld(vtkMRMLVolumeNode* volumeNode, vtkMatrix4x4* ijkToWorld)
+{
+  volumeNode->GetIJKToRASMatrix(ijkToWorld);
+  vtkMRMLTransformNode* transformNode = volumeNode->GetParentTransformNode();
+  if (transformNode)
+  {
+    vtkNew<vtkMatrix4x4> rasToWorld;
+    transformNode->GetMatrixTransformToWorld(rasToWorld);
+    vtkMatrix4x4::Multiply4x4(rasToWorld, ijkToWorld, ijkToWorld);
+  }
+}
+
+//---------------------------------------------------------------------------
+/// Return the number of slices of the volume along the slice normal, or 0 if no volume axis is aligned
+/// with it (same tolerance as vtkMRMLSliceLogic::GetSliceIndexFromOffset).
+int sliceCountAlongNormal(vtkMRMLVolumeNode* volumeNode, vtkMRMLSliceNode* sliceNode)
+{
+  vtkImageData* image = volumeNode ? volumeNode->GetImageData() : nullptr;
+  if (!image || !sliceNode)
+  {
+    return 0;
+  }
+  vtkNew<vtkMatrix4x4> ijkToWorld;
+  getVolumeIJKToWorld(volumeNode, ijkToWorld);
+  double normal[3] = { sliceNode->GetSliceToRAS()->GetElement(0, 2), sliceNode->GetSliceToRAS()->GetElement(1, 2), sliceNode->GetSliceToRAS()->GetElement(2, 2) };
+  vtkMath::Normalize(normal);
+  int dimensions[3] = { 0, 0, 0 };
+  image->GetDimensions(dimensions);
+  for (int axis = 0; axis < 3; ++axis)
+  {
+    double axisDirection[3] = { ijkToWorld->GetElement(0, axis), ijkToWorld->GetElement(1, axis), ijkToWorld->GetElement(2, axis) };
+    vtkMath::Normalize(axisDirection);
+    double misalignmentDegrees = vtkMath::DegreesFromRadians(std::acos(std::min(1.0, std::fabs(vtkMath::Dot(normal, axisDirection)))));
+    if (misalignmentDegrees < 0.1)
+    {
+      return dimensions[axis];
+    }
+  }
+  return 0;
+}
+
+//---------------------------------------------------------------------------
+/// Return the tooltip of the slice offset slider: "I <-----> S" in the classic bar, "Name · key · description"
+/// in the flat bar.
+QString sliceOffsetSliderToolTip(vtkMRMLSliceNode* sliceNode, bool flat)
+{
+  vtkMatrix4x4* sliceToRAS = sliceNode->GetSliceToRAS();
+  double planeNormal[3] = { sliceToRAS->GetElement(0, 2), sliceToRAS->GetElement(1, 2), sliceToRAS->GetElement(2, 2) };
+  QString positiveAxisLabel = QString::fromStdString(sliceNode->GetDirectionLabel(planeNormal, true));
+  QString negativeAxisLabel = QString::fromStdString(sliceNode->GetDirectionLabel(planeNormal, false));
+  if (flat)
+  {
+    return qMRMLViewControllerBarPrivate::flatToolTip(qMRMLSliceControllerWidget::tr("Slice position"),
+                                                      QString(),
+                                                      qMRMLSliceControllerWidget::tr("Drag to move the slice between %1 and %2").arg(negativeAxisLabel).arg(positiveAxisLabel));
+  }
+  return QString("%1 <-----> %2").arg(negativeAxisLabel).arg(positiveAxisLabel);
+}
+
+//---------------------------------------------------------------------------
+/// Return true if the volume is known to be on an MNI template grid, where x = 0 is the midline.
+/// It follows the rules of the Studio space helper (StudioLib.space.spaceOf): the "Studio.Space" node attribute,
+/// then the "Studio.Role" attribute, then the grids of the MNI152NLin2009cAsym and MNI152NLin6Asym templates.
+bool isOnMniGrid(vtkMRMLVolumeNode* volumeNode)
+{
+  if (!volumeNode)
+  {
+    return false;
+  }
+  const char* spaceAttribute = volumeNode->GetAttribute("Studio.Space");
+  if (spaceAttribute && strlen(spaceAttribute) > 0)
+  {
+    QString space = QString::fromUtf8(spaceAttribute).section(' ', 0, 0).toLower();
+    return !(space == "native" || space == "scanner" || space == "orig" || space == "individual");
+  }
+  const char* roleAttribute = volumeNode->GetAttribute("Studio.Role");
+  QString role = roleAttribute ? QString::fromUtf8(roleAttribute) : QString();
+  if (role == "figure" || volumeNode->GetParentTransformNode())
+  {
+    return false;
+  }
+  if (role == "template")
+  {
+    return true;
+  }
+  vtkImageData* image = volumeNode->GetImageData();
+  if (!image)
+  {
+    return false;
+  }
+  int dimensions[3] = { 0, 0, 0 };
+  image->GetDimensions(dimensions);
+  vtkNew<vtkMatrix4x4> ijkToRAS;
+  volumeNode->GetIJKToRASMatrix(ijkToRAS);
+  // Number of voxels, voxel size and lowest voxel center along R, A and S
+  int shape[3] = { 0, 0, 0 };
+  double spacing[3] = { 0., 0., 0. };
+  double lowest[3] = { ijkToRAS->GetElement(0, 3), ijkToRAS->GetElement(1, 3), ijkToRAS->GetElement(2, 3) };
+  bool used[3] = { false, false, false };
+  for (int axis = 0; axis < 3; ++axis)
+  {
+    int worldAxis = 0;
+    for (int row = 1; row < 3; ++row)
+    {
+      if (std::fabs(ijkToRAS->GetElement(row, axis)) > std::fabs(ijkToRAS->GetElement(worldAxis, axis)))
+      {
+        worldAxis = row;
+      }
+    }
+    double step = ijkToRAS->GetElement(worldAxis, axis);
+    for (int row = 0; row < 3; ++row)
+    {
+      if (row != worldAxis && std::fabs(ijkToRAS->GetElement(row, axis)) > 1e-3 * std::fabs(step))
+      {
+        return false;
+      }
+    }
+    if (used[worldAxis] || step == 0.)
+    {
+      return false;
+    }
+    used[worldAxis] = true;
+    shape[worldAxis] = dimensions[axis];
+    spacing[worldAxis] = std::fabs(step);
+    if (step < 0.)
+    {
+      lowest[worldAxis] += step * (dimensions[axis] - 1);
+    }
+  }
+  struct KnownGrid
+  {
+    int Shape[3];
+    double Spacing;
+    double Lowest[3];
+  };
+  const KnownGrid knownGrids[] = {
+    { { 97, 115, 97 }, 2.0, { -96.5, -132.5, -78.5 } },   // MNI152NLin2009cAsym 2 mm
+    { { 193, 229, 193 }, 1.0, { -96.0, -132.0, -78.0 } }, // MNI152NLin2009cAsym 1 mm
+    { { 91, 109, 91 }, 2.0, { -90.0, -126.0, -72.0 } },   // MNI152NLin6Asym 2 mm
+    { { 182, 218, 182 }, 1.0, { -91.0, -126.0, -72.0 } }, // MNI152NLin6Asym 1 mm
+  };
+  const double tolerance = 0.01;
+  for (const KnownGrid& grid : knownGrids)
+  {
+    bool match = true;
+    for (int axis = 0; match && axis < 3; ++axis)
+    {
+      match = (shape[axis] == grid.Shape[axis]) && std::fabs(spacing[axis] - grid.Spacing) <= tolerance && std::fabs(lowest[axis] - grid.Lowest[axis]) <= tolerance;
+    }
+    if (match)
+    {
+      return true;
+    }
+  }
+  return false;
+}
+} // namespace
 
 //--------------------------------------------------------------------------
 // qMRMLSliceViewPrivate methods
@@ -124,6 +311,11 @@ void qMRMLSliceControllerWidgetPrivate::setupPopupUi()
 
   this->Superclass::setupPopupUi();
   this->Ui_qMRMLSliceControllerWidget::setupUi(this->PopupWidget);
+  // The popup widgets are refreshed when the popup is shown (see updateWidgetFromMRMLSliceNode)
+  this->PopupWidget->installEventFilter(this);
+
+  this->AutomaticSliceSpacingIcon = QIcon(":/Icons/SlicerAutomaticSliceSpacing.png");
+  this->ManualSliceSpacingIcon = QIcon(":/Icons/SlicerManualSliceSpacing.png");
 
   this->SegmentationOpacitySlider->spinBox()->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Minimum);
   this->LabelMapOpacitySlider->spinBox()->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Minimum);
@@ -363,10 +555,491 @@ void qMRMLSliceControllerWidgetPrivate::init()
   // Hide all buttons by default
   this->MoreButton->setChecked(false);
 
+  this->setupFlatBar();
+
   vtkNew<vtkMRMLSliceLogic> defaultLogic;
   defaultLogic->SetMRMLApplicationLogic(vtkMRMLSliceViewDisplayableManagerFactory::GetInstance()->GetMRMLApplicationLogic());
 
   q->setSliceLogic(defaultLogic.GetPointer());
+
+  this->ensureFlatStyleApplied();
+}
+
+// --------------------------------------------------------------------------
+void qMRMLSliceControllerWidgetPrivate::setupFlatBar()
+{
+  Q_Q(qMRMLSliceControllerWidget);
+
+  // Orientation button: "Axial" with a menu of orientations and reformat actions
+  this->OrientationButton = this->createFlatToolButton("OrientationButton");
+  this->OrientationButton->setMinimumSize(0, this->OptionsButton->height());
+  this->OrientationButton->setMaximumSize(QWIDGETSIZE_MAX, this->OptionsButton->height());
+  this->OrientationButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
+  this->OrientationButton->setPopupMode(QToolButton::InstantPopup);
+  this->OrientationButton->setToolTip(
+    Self::flatToolTip(qMRMLSliceControllerWidget::tr("Orientation"), QString(), qMRMLSliceControllerWidget::tr("Axial, sagittal, coronal, reformat")));
+  // The menu is not a child of the bar, whose palette has the color stripe
+  this->OrientationMenu = new QMenu(qMRMLSliceControllerWidget::tr("Orientation"), q);
+  this->OrientationMenu->setObjectName("OrientationMenu");
+  this->OrientationActions = new QActionGroup(this->OrientationMenu);
+  this->OrientationActions->setExclusive(true);
+  const QStringList orientations = { "Axial", "Sagittal", "Coronal" };
+  const QStringList orientationTexts = { qMRMLSliceControllerWidget::tr("Axial"), qMRMLSliceControllerWidget::tr("Sagittal"), qMRMLSliceControllerWidget::tr("Coronal") };
+  for (int index = 0; index < orientations.count(); ++index)
+  {
+    QAction* action = this->OrientationMenu->addAction(orientationTexts[index]);
+    action->setObjectName(QString("Orientation%1Action").arg(orientations[index]));
+    action->setCheckable(true);
+    action->setData(orientations[index]);
+    this->OrientationActions->addAction(action);
+  }
+  QObject::connect(this->OrientationActions, &QActionGroup::triggered, q, [q](QAction* action) { q->setSliceOrientation(action->data().toString()); });
+  this->OrientationMenu->addSeparator();
+  this->OrientationMenu->addAction(this->actionRotate_to_volume_plane);
+  this->ReformatAction = this->OrientationMenu->addAction(qMRMLSliceControllerWidget::tr("Reformat..."));
+  this->ReformatAction->setObjectName("ReformatAction");
+  this->ReformatAction->setToolTip(qMRMLSliceControllerWidget::tr("Rotate and move the slice freely (Reformat module)"));
+  QObject::connect(this->ReformatAction, &QAction::triggered, this, &qMRMLSliceControllerWidgetPrivate::openReformat);
+  this->ResetOrientationAction = this->OrientationMenu->addAction(qMRMLSliceControllerWidget::tr("Reset orientation"));
+  this->ResetOrientationAction->setObjectName("ResetOrientationAction");
+  QObject::connect(this->ResetOrientationAction,
+                   &QAction::triggered,
+                   q,
+                   [q]()
+                   {
+                     vtkMRMLSliceNode* sliceNode = q->mrmlSliceNode();
+                     const char* defaultOrientation = sliceNode ? sliceNode->GetDefaultOrientation() : nullptr;
+                     if (defaultOrientation && strlen(defaultOrientation) > 0 && strcmp(defaultOrientation, vtkMRMLSliceNode::GetReformatOrientationName()) != 0)
+                     {
+                       q->setSliceOrientation(QString::fromUtf8(defaultOrientation));
+                     }
+                   });
+  this->OrientationButton->setMenu(this->OrientationMenu);
+  this->BarLayout->addWidget(this->OrientationButton);
+
+  // Readout "S 96.0 mm · 97/193". It has a fixed size (its width only grows), so that a new text does not
+  // lay out the bar again at every slice change. Its holder may be narrower (minimum 1 px): the readout never
+  // sets the minimum width of the bar, the bar shortens or hides it instead (updateFlatBarWidgetsVisibility).
+  this->SliceIndexHolder = new QWidget(this->BarWidget);
+  this->SliceIndexHolder->setObjectName("SliceIndexHolder");
+  this->SliceIndexHolder->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+  this->SliceIndexHolder->setMinimumWidth(1);
+  this->SliceIndexHolder->setFixedHeight(this->OptionsButton->height());
+  QHBoxLayout* holderLayout = new QHBoxLayout(this->SliceIndexHolder);
+  holderLayout->setContentsMargins(0, 0, 0, 0);
+  holderLayout->setSpacing(0);
+  this->SliceIndexLabel = new QLabel(this->SliceIndexHolder);
+  this->SliceIndexLabel->setObjectName("SliceIndexLabel");
+  this->SliceIndexLabel->setFixedHeight(this->OptionsButton->height());
+  this->SliceIndexLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+  holderLayout->addWidget(this->SliceIndexLabel);
+  this->SliceIndexHolder->setVisible(false);
+  this->FlatOnlyWidgets << this->SliceIndexHolder;
+  this->BarLayout->addWidget(this->SliceIndexHolder);
+
+  // Link toggle: "unlink" when off, "link" (and the checked background) when on
+  this->BarLinkButton = this->createFlatToolButton("BarLinkButton");
+  this->BarLinkButton->setCheckable(true);
+  this->BarLinkButton->setIcon(qMRMLSymbolicIconEngine::icon("unlink", "link"));
+  this->BarLinkButton->setToolTip(
+    Self::flatToolTip(qMRMLSliceControllerWidget::tr("Link views"), QString(), qMRMLSliceControllerWidget::tr("Keep zoom and slices of all views together")));
+  // Hot linking stays available from the context menu (actions added to the button would make it a menu button)
+  this->BarLinkButton->setContextMenuPolicy(Qt::CustomContextMenu);
+  QMenu* linkMenu = new QMenu(qMRMLSliceControllerWidget::tr("Linked"), q);
+  linkMenu->setObjectName("BarLinkMenu");
+  linkMenu->addAction(this->actionHotLinked);
+  QObject::connect(
+    this->BarLinkButton, &QWidget::customContextMenuRequested, linkMenu, [this, linkMenu](const QPoint& position) { linkMenu->popup(this->BarLinkButton->mapToGlobal(position)); });
+  QObject::connect(this->BarLinkButton, SIGNAL(clicked(bool)), q, SLOT(setSliceLink(bool)));
+  this->BarLayout->addWidget(this->BarLinkButton);
+
+  this->FlatFitIcon = qMRMLSymbolicIconEngine::icon("scan");
+
+  // Flat bar order: stripe, view label, orientation, offset slider (stretch), readout, link, fit, options, maximize
+  this->FlatLeadingWidgets << this->OrientationButton;
+  this->FlatTrailingWidgets.clear();
+  this->FlatTrailingWidgets << this->SliceIndexHolder << this->BarLinkButton << this->FitToWindowToolButton << this->OptionsButton << this->MaximizeViewButton;
+}
+
+// --------------------------------------------------------------------------
+void qMRMLSliceControllerWidgetPrivate::updateFlatStyle()
+{
+  Q_Q(qMRMLSliceControllerWidget);
+  const bool flat = this->FlatStyle;
+  if (flat && !this->AppliedFlatStyle)
+  {
+    // Classic state of the widgets that the flat presentation changes
+    this->ClassicViewLabelToolTip = this->ViewLabel->toolTip();
+    this->ClassicFitIcon = this->actionFit_to_window->icon();
+    this->ClassicFitToolTip = this->actionFit_to_window->toolTip();
+    this->ClassicSpinBoxStyleSheet = this->SliceOffsetSlider->spinBox()->styleSheet();
+    this->ClassicSpinBoxVisible = this->SliceOffsetSlider->isSpinBoxVisible();
+    this->ClassicMoreButtonChecked = this->MoreButton->isChecked();
+    this->ClassicMoreButtonHidden = this->MoreButton->isHidden();
+    this->ClassicStateRecorded = true;
+  }
+
+  this->Superclass::updateFlatStyle();
+
+  int sliderIndex = this->BarLayout->indexOf(this->SliceOffsetSlider);
+  if (flat)
+  {
+    this->actionFit_to_window->setIcon(this->FlatFitIcon);
+    this->actionFit_to_window->setToolTip(Self::flatToolTip(qMRMLSliceControllerWidget::tr("Fit"), QString(), qMRMLSliceControllerWidget::tr("Fit the images to the view")));
+    this->setFlatFixedSize(this->FitToWindowToolButton, this->OptionsButton->size());
+    // The optional parts (fit button, readout) and the slider neither set the minimum width of the bar nor make its
+    // size hint differ from one view to the other (splitters share the room by size hints): their horizontal size
+    // hints are ignored. A narrow bar hides the optional parts (updateFlatBarWidgetsVisibility); a shown part gets
+    // its room first (stretch), then the slider.
+    this->FitToWindowToolButton->setMinimumWidth(1);
+    this->FitToWindowToolButton->setIconSize(this->OptionsButton->iconSize());
+    if (!this->ClassicSizePoliciesRecorded)
+    {
+      this->ClassicFitSizePolicy = this->FitToWindowToolButton->sizePolicy();
+      this->ClassicSliderSizePolicy = this->SliceOffsetSlider->sizePolicy();
+      this->ClassicSizePoliciesRecorded = true;
+    }
+    this->FitToWindowToolButton->setSizePolicy(QSizePolicy::Ignored, this->ClassicFitSizePolicy.verticalPolicy());
+    // The readout replaces the offset spin box (and its black text)
+    this->SliceOffsetSlider->spinBox()->setStyleSheet(QString());
+    this->SliceOffsetSlider->setSpinBoxVisible(false);
+    if (!this->ClassicSizes.contains(this->SliceOffsetSlider))
+    {
+      this->ClassicSizes.insert(this->SliceOffsetSlider, ClassicSize{ this->SliceOffsetSlider->minimumSize(), this->SliceOffsetSlider->maximumSize() });
+    }
+    this->SliceOffsetSlider->setMinimumWidth(FlatSliderMinimumWidth);
+    this->SliceOffsetSlider->setSizePolicy(QSizePolicy::Ignored, this->ClassicSliderSizePolicy.verticalPolicy());
+    if (sliderIndex >= 0)
+    {
+      this->BarLayout->setStretch(sliderIndex, 1);
+    }
+    for (QWidget* optional : { static_cast<QWidget*>(this->SliceIndexHolder), static_cast<QWidget*>(this->FitToWindowToolButton) })
+    {
+      int optionalIndex = this->BarLayout->indexOf(optional);
+      if (optionalIndex >= 0)
+      {
+        this->BarLayout->setStretch(optionalIndex, FlatOptionalStretch);
+      }
+    }
+    // Options popup: all the layer rows at once, no "more" expansion; link and orientation are on the bar
+    this->MoreButton->setChecked(true);
+    this->MoreButton->setVisible(false);
+    this->SliceLinkButton->setVisible(false);
+    this->SliceOrientationSelector->setVisible(false);
+    if (this->MRMLSliceCompositeNode)
+    {
+      this->BarLinkButton->setChecked(this->MRMLSliceCompositeNode->GetLinkedControl());
+    }
+    QFontMetrics fontMetrics(this->SliceIndexLabel->font());
+    this->FullReadoutWidth = std::max(this->FullReadoutWidth, fontMetrics.horizontalAdvance(QString("S 000.0 mm   000 / 000")) + 4);
+    this->CompactReadoutWidth = std::max(this->CompactReadoutWidth, fontMetrics.horizontalAdvance(QString("000 / 000")) + 4);
+    this->updateReadoutLabel();
+    this->updateFlatBarFromMRMLSliceNode();
+    this->updateFlatBarWidgetsVisibility();
+  }
+  else if (this->ClassicStateRecorded)
+  {
+    this->actionFit_to_window->setIcon(this->ClassicFitIcon);
+    this->actionFit_to_window->setToolTip(this->ClassicFitToolTip);
+    this->restoreClassicSize(this->FitToWindowToolButton);
+    this->restoreClassicSize(this->SliceOffsetSlider);
+    if (this->ClassicSizePoliciesRecorded)
+    {
+      this->FitToWindowToolButton->setSizePolicy(this->ClassicFitSizePolicy);
+      this->SliceOffsetSlider->setSizePolicy(this->ClassicSliderSizePolicy);
+    }
+    this->FitToWindowToolButton->setIconSize(this->MaximizeViewButton->iconSize());
+    this->FitToWindowToolButton->setVisible(true);
+    this->SliceOffsetSlider->spinBox()->setStyleSheet(this->ClassicSpinBoxStyleSheet);
+    this->SliceOffsetSlider->setSpinBoxVisible(this->ClassicSpinBoxVisible);
+    this->MoreButton->setChecked(this->ClassicMoreButtonChecked);
+    this->MoreButton->setVisible(!this->ClassicMoreButtonHidden);
+    this->SliceLinkButton->setVisible(true);
+    this->SliceOrientationSelector->setVisible(true);
+    this->ViewLabel->setToolTip(this->ClassicViewLabelToolTip);
+  }
+  if (vtkMRMLSliceNode* sliceNode = q->mrmlSliceNode())
+  {
+    this->SliceOffsetSlider->setToolTip(sliceOffsetSliderToolTip(sliceNode, this->AppliedFlatStyle));
+  }
+}
+
+// --------------------------------------------------------------------------
+void qMRMLSliceControllerWidgetPrivate::updateFlatBarWidgetsVisibility()
+{
+  if (!this->AppliedFlatStyle)
+  {
+    return;
+  }
+  // Narrow views: hide the fit button, then shorten the readout, then hide it, so that the slider keeps some room.
+  // The view color stripe, the view label, the orientation, the link, options and maximize buttons always stay.
+  // The decision only depends on the width of the bar, which these widgets do not set (their minimum width is
+  // 1 px), so it cannot oscillate.
+  const int spacing = this->BarLayout->spacing();
+  const QMargins margins = this->BarLayout->contentsMargins();
+  int required = margins.left() + margins.right() + FlatBarTrailingSpace + FlatSliderMinimumWidth + spacing;
+  for (QWidget* widget : { static_cast<QWidget*>(this->ViewLabel),
+                           static_cast<QWidget*>(this->OrientationButton),
+                           static_cast<QWidget*>(this->BarLinkButton),
+                           static_cast<QWidget*>(this->OptionsButton),
+                           static_cast<QWidget*>(this->MaximizeViewButton) })
+  {
+    if (!widget->isHidden())
+    {
+      required += widget->sizeHint().width() + spacing;
+    }
+  }
+  const int available = this->BarWidget->width();
+  const int fullWidth = this->FullReadoutWidth + spacing;
+  const int compactWidth = this->CompactReadoutWidth + spacing;
+  const int fitWidth = this->OptionsButton->width() + spacing;
+  bool showReadout = true;
+  bool compact = false;
+  bool showFit = false;
+  if (available >= required + fullWidth + fitWidth)
+  {
+    showFit = true;
+  }
+  else if (available >= required + fullWidth)
+  {
+    // full readout, no fit button
+  }
+  else if (available >= required + compactWidth)
+  {
+    compact = true;
+  }
+  else
+  {
+    showReadout = false;
+  }
+  if (compact != this->CompactReadout)
+  {
+    this->CompactReadout = compact;
+    this->updateReadoutLabel();
+  }
+  if (this->SliceIndexHolder->isHidden() == showReadout)
+  {
+    this->SliceIndexHolder->setVisible(showReadout);
+  }
+  if (this->FitToWindowToolButton->isHidden() == showFit)
+  {
+    this->FitToWindowToolButton->setVisible(showFit);
+  }
+}
+
+// --------------------------------------------------------------------------
+void qMRMLSliceControllerWidgetPrivate::updateReadoutLabel()
+{
+  if (!this->SliceIndexLabel)
+  {
+    return;
+  }
+  const QString& text = this->CompactReadout ? this->CompactReadoutText : this->FullReadoutText;
+  const int width = this->CompactReadout ? this->CompactReadoutWidth : this->FullReadoutWidth;
+  if (this->SliceIndexLabel->minimumWidth() != width || this->SliceIndexLabel->maximumWidth() != width)
+  {
+    this->SliceIndexLabel->setFixedWidth(width);
+  }
+  if (this->SliceIndexHolder && this->SliceIndexHolder->maximumWidth() != width)
+  {
+    this->SliceIndexHolder->setMaximumWidth(width);
+  }
+  // The full readout shows the slice index in the tertiary text color: "S 17.5 mm   49 / 97"
+  QString shownText = text;
+  if (!this->CompactReadout && !this->ReadoutIndexText.isEmpty() && text.endsWith(this->ReadoutIndexText))
+  {
+    QColor indexColor = this->styleToken("text3");
+    if (!indexColor.isValid())
+    {
+      indexColor = this->SliceIndexLabel->palette().color(QPalette::WindowText);
+      indexColor.setAlphaF(0.6);
+    }
+    const QString position = text.left(text.size() - this->ReadoutIndexText.size()).trimmed();
+    shownText = QString("<span style=\"white-space: pre\">%1   <span style=\"color: %2\">%3</span></span>")
+                  .arg(position.toHtmlEscaped())
+                  .arg(indexColor.name(QColor::HexArgb))
+                  .arg(this->ReadoutIndexText.toHtmlEscaped());
+  }
+  if (this->SliceIndexLabel->text() != shownText)
+  {
+    this->SliceIndexLabel->setText(shownText);
+  }
+}
+
+// --------------------------------------------------------------------------
+void qMRMLSliceControllerWidgetPrivate::requestFlatBarUpdate()
+{
+  if (!this->AppliedFlatStyle || this->FlatBarUpdatePending)
+  {
+    return;
+  }
+  this->FlatBarUpdatePending = true;
+  QTimer::singleShot(0, this, [this]() { this->updateFlatBarFromMRMLSliceNode(); });
+}
+
+// --------------------------------------------------------------------------
+void qMRMLSliceControllerWidgetPrivate::updateFlatBarFromMRMLSliceNode()
+{
+  this->FlatBarUpdatePending = false;
+  Q_Q(qMRMLSliceControllerWidget);
+  if (!this->AppliedFlatStyle || !this->SliceIndexLabel)
+  {
+    return;
+  }
+  vtkMRMLSliceNode* sliceNode = q->mrmlSliceNode();
+  if (!sliceNode)
+  {
+    return;
+  }
+
+  // Orientation button and view label tooltip ("Red view (axial)")
+  QString orientation = QString::fromUtf8(sliceNode->GetOrientation().c_str());
+  QString orientationText = orientation;
+  for (QAction* action : this->OrientationActions->actions())
+  {
+    bool current = (action->data().toString() == orientation);
+    if (action->isChecked() != current)
+    {
+      action->setChecked(current);
+    }
+    if (current)
+    {
+      orientationText = action->text();
+    }
+  }
+  if (orientation == QString::fromUtf8(vtkMRMLSliceNode::GetReformatOrientationName()))
+  {
+    orientationText = qMRMLSliceControllerWidget::tr("Oblique");
+  }
+  if (this->OrientationButton->text() != orientationText)
+  {
+    this->OrientationButton->setText(orientationText);
+  }
+  QString viewName = QString::fromUtf8(sliceNode->GetLayoutName() ? sliceNode->GetLayoutName() : "");
+  QString viewToolTip = qMRMLSliceControllerWidget::tr("%1 view (%2)").arg(viewName).arg(orientationText.toLower());
+  if (this->ViewLabel->toolTip() != viewToolTip)
+  {
+    this->ViewLabel->setToolTip(viewToolTip);
+  }
+
+  if (!this->SliceLogic)
+  {
+    return;
+  }
+  // Position along the slice normal, as a direction letter and a distance (never a minus sign)
+  double offset = this->SliceLogic->GetSliceOffset();
+  vtkMatrix4x4* sliceToRAS = sliceNode->GetSliceToRAS();
+  double normal[3] = { sliceToRAS->GetElement(0, 2), sliceToRAS->GetElement(1, 2), sliceToRAS->GetElement(2, 2) };
+  QString direction = QString::fromStdString(sliceNode->GetDirectionLabel(normal, offset >= 0.));
+  double displayCoefficient = 1.;
+  QString suffix = "mm";
+  if (this->SelectionNode && q->mrmlScene())
+  {
+    vtkMRMLUnitNode* unitNode = vtkMRMLUnitNode::SafeDownCast(q->mrmlScene()->GetNodeByID(this->SelectionNode->GetUnitNodeID("length")));
+    if (unitNode)
+    {
+      displayCoefficient = unitNode->GetDisplayCoefficient();
+      if (unitNode->GetSuffix() && strlen(unitNode->GetSuffix()) > 0)
+      {
+        suffix = QString::fromUtf8(unitNode->GetSuffix()).trimmed();
+      }
+    }
+  }
+  const int decimals = (this->SliceOffsetResolution >= 0.5) ? 1 : 2;
+  QString position = QString("%1 %2 %3").arg(direction).arg(std::fabs(offset) * displayCoefficient, 0, 'f', decimals).arg(suffix);
+
+  // Slice index in the first volume layer
+  vtkMRMLVolumeNode* volumeNode = nullptr;
+  if (this->MRMLSliceCompositeNode && q->mrmlScene())
+  {
+    for (const char* volumeID :
+         { this->MRMLSliceCompositeNode->GetBackgroundVolumeID(), this->MRMLSliceCompositeNode->GetForegroundVolumeID(), this->MRMLSliceCompositeNode->GetLabelVolumeID() })
+    {
+      volumeNode = volumeID ? vtkMRMLVolumeNode::SafeDownCast(q->mrmlScene()->GetNodeByID(volumeID)) : nullptr;
+      if (volumeNode && volumeNode->GetImageData())
+      {
+        break;
+      }
+      volumeNode = nullptr;
+    }
+  }
+  QString indexText;
+  QString indexDescription;
+  if (volumeNode)
+  {
+    int sliceIndex = this->SliceLogic->GetSliceIndexFromOffset(offset, volumeNode);
+    int sliceCount = sliceCountAlongNormal(volumeNode, sliceNode);
+    if (sliceIndex > 0 && sliceCount > 0)
+    {
+      indexText = QString("%1 / %2").arg(sliceIndex).arg(sliceCount);
+      indexDescription = qMRMLSliceControllerWidget::tr("slice %1 of %2").arg(sliceIndex).arg(sliceCount);
+    }
+    else if (sliceIndex == vtkMRMLSliceLogic::SLICE_INDEX_ROTATED || (sliceIndex > 0 && sliceCount == 0))
+    {
+      indexText = qMRMLSliceControllerWidget::tr("oblique");
+      indexDescription = qMRMLSliceControllerWidget::tr("the slice is oblique to the image");
+    }
+    else if (sliceIndex == vtkMRMLSliceLogic::SLICE_INDEX_OUT_OF_VOLUME)
+    {
+      indexText = qMRMLSliceControllerWidget::tr("outside");
+      indexDescription = qMRMLSliceControllerWidget::tr("the slice is outside the image");
+    }
+  }
+  QString text = indexText.isEmpty() ? position : position + QString("   ") + indexText;
+  this->ReadoutIndexText = indexText;
+  QString compactText = indexText.isEmpty() ? position : indexText;
+  QString description = position;
+  if (!indexDescription.isEmpty())
+  {
+    description += QString(", ") + indexDescription;
+  }
+  if (!isOnMniGrid(volumeNode))
+  {
+    description += QString(" ") + qMRMLSliceControllerWidget::tr("(from the image origin, not the midline)");
+  }
+  QString toolTip = Self::flatToolTip(qMRMLSliceControllerWidget::tr("Slice position"), QString(), description);
+  if (this->FullReadoutText != text || this->CompactReadoutText != compactText)
+  {
+    // The reserved widths only grow: a fixed width does not lay out the bar again when the text changes
+    const QFontMetrics fontMetrics = this->SliceIndexLabel->fontMetrics();
+    const int fullWidth = fontMetrics.horizontalAdvance(text) + 4;
+    const int compactWidth = fontMetrics.horizontalAdvance(compactText) + 4;
+    const bool grown = (fullWidth > this->FullReadoutWidth || compactWidth > this->CompactReadoutWidth);
+    this->FullReadoutWidth = std::max(this->FullReadoutWidth, fullWidth);
+    this->CompactReadoutWidth = std::max(this->CompactReadoutWidth, compactWidth);
+    this->FullReadoutText = text;
+    this->CompactReadoutText = compactText;
+    this->updateReadoutLabel();
+    if (grown)
+    {
+      this->updateFlatBarWidgetsVisibility();
+    }
+  }
+  if (this->SliceIndexLabel->toolTip() != toolTip)
+  {
+    this->SliceIndexLabel->setToolTip(toolTip);
+  }
+}
+
+// --------------------------------------------------------------------------
+void qMRMLSliceControllerWidgetPrivate::openReformat()
+{
+  Q_Q(qMRMLSliceControllerWidget);
+  // The application layout manager (qSlicerLayoutManager) is a child of an ancestor of the view and
+  // has a selectModule(QString) signal that the main window connects to the module selector.
+  for (QWidget* ancestor = q->parentWidget(); ancestor; ancestor = ancestor->parentWidget())
+  {
+    for (QObject* child : ancestor->children())
+    {
+      if (child->inherits("qMRMLLayoutManager") && child->metaObject()->indexOfSignal("selectModule(QString)") >= 0)
+      {
+        QMetaObject::invokeMethod(child, "selectModule", Qt::DirectConnection, Q_ARG(QString, QString("Reformat")));
+        return;
+      }
+    }
+  }
+  // No module selection available (for example in a custom application): interactive reformat in the views
+  q->showReformatWidget(true);
 }
 
 // --------------------------------------------------------------------------
@@ -453,7 +1126,7 @@ void qMRMLSliceControllerWidgetPrivate::setupSliceSpacingMenu()
   this->SliceSpacingMenu->addAction(this->actionSliceSpacingModeAutomatic);
   QMenu* sliceSpacingManualMode = new QMenu(tr("Manual spacing"), this->SliceSpacingMenu);
   sliceSpacingManualMode->setObjectName("slicerSpacingManualMode");
-  sliceSpacingManualMode->setIcon(QIcon(":/Icon/SlicerManualSliceSpacing.png"));
+  sliceSpacingManualMode->setIcon(QIcon(":/Icons/SlicerManualSliceSpacing.png"));
   this->SliceSpacingSpinBox = new ctkDoubleSpinBox(sliceSpacingManualMode);
   this->SliceSpacingSpinBox->setDecimals(3);
   this->SliceSpacingSpinBox->setRange(0.001, VTK_FLOAT_MAX);
@@ -467,7 +1140,7 @@ void qMRMLSliceControllerWidgetPrivate::setupSliceSpacingMenu()
 
   QMenu* sliceFOVMenu = new QMenu(tr("Field of view"), this->SliceSpacingMenu);
   sliceFOVMenu->setObjectName("slicerFOVMenu");
-  sliceFOVMenu->setIcon(QIcon(":/Icon/SlicesFieldOfView.png"));
+  sliceFOVMenu->setIcon(QIcon(":/Icons/SlicesFieldOfView.png"));
   QWidget* sliceFOVWidget = new QWidget(this->SliceSpacingMenu);
   QHBoxLayout* sliceFOVLayout = new QHBoxLayout(sliceFOVWidget);
   sliceFOVLayout->setContentsMargins(0, 0, 0, 0);
@@ -688,15 +1361,11 @@ void qMRMLSliceControllerWidgetPrivate::updateSliceOrientationSelector(vtkMRMLSl
   vtkNew<vtkStringArray> orientationNames;
   sliceNode->GetSliceOrientationPresetNames(orientationNames.GetPointer());
 
-  bool wasBlocked = sliceOrientationSelector->blockSignals(true);
-
-  // Clear list
-  sliceOrientationSelector->clear();
-
-  // Add all available presets
+  // All available presets
+  QStringList orientations;
   for (int idx = 0; idx < orientationNames->GetNumberOfValues(); ++idx)
   {
-    sliceOrientationSelector->addItem(QString::fromStdString(orientationNames->GetValue(idx)));
+    orientations << QString::fromStdString(orientationNames->GetValue(idx));
   }
 
   QString currentOrientation = QString::fromStdString(sliceNode->GetOrientation());
@@ -704,7 +1373,24 @@ void qMRMLSliceControllerWidgetPrivate::updateSliceOrientationSelector(vtkMRMLSl
   // Add "Reformat" only if current orientation is "Reformat"
   if (currentOrientation == "Reformat")
   {
-    sliceOrientationSelector->addItem(currentOrientation);
+    orientations << currentOrientation;
+  }
+
+  bool wasBlocked = sliceOrientationSelector->blockSignals(true);
+
+  // Only rebuild the list if it changed (this is called at every slice node change)
+  bool orientationsChanged = (sliceOrientationSelector->count() != orientations.count());
+  for (int idx = 0; !orientationsChanged && idx < orientations.count(); ++idx)
+  {
+    orientationsChanged = (sliceOrientationSelector->itemText(idx) != orientations[idx]);
+  }
+  if (orientationsChanged)
+  {
+    sliceOrientationSelector->clear();
+    for (const QString& orientation : orientations)
+    {
+      sliceOrientationSelector->addItem(orientation);
+    }
   }
 
   // Update orientation selector state
@@ -728,11 +1414,15 @@ void qMRMLSliceControllerWidgetPrivate::updateWidgetFromMRMLSliceNode()
     return;
   }
 
+  // This is called at every slice node change (scrolling, panning, zooming...): the widgets are only
+  // updated if what they show changed, as updating the visible bar makes it lay out and repaint again.
+
   double* layoutColorVtk = sliceNode->GetLayoutColor();
   QColor layoutColor = QColor::fromRgbF(layoutColorVtk[0], layoutColorVtk[1], layoutColorVtk[2]);
-  this->setColor(layoutColor);
-
-  bool wasBlocked;
+  if (layoutColor != this->color())
+  {
+    this->setColor(layoutColor);
+  }
 
   // Update abbreviated slice view name
   this->ViewLabel->setText(sliceNode->GetLayoutLabel());
@@ -743,9 +1433,16 @@ void qMRMLSliceControllerWidgetPrivate::updateWidgetFromMRMLSliceNode()
   vtkMatrix4x4* sliceToRas = sliceNode->GetSliceToRAS();
   double planeNormal[3] = { sliceToRas->GetElement(0, 2), sliceToRas->GetElement(1, 2), sliceToRas->GetElement(2, 2) };
   std::string positiveAxisLabel = sliceNode->GetDirectionLabel(planeNormal, true);
-  std::string negativeAxisLabel = sliceNode->GetDirectionLabel(planeNormal, false);
-  this->SliceOffsetSlider->setToolTip(QString("%1 <-----> %2").arg(QString::fromStdString(negativeAxisLabel)).arg(QString::fromStdString(positiveAxisLabel)));
-  this->SliceOffsetSlider->setPrefix(QString("%1: ").arg(QString::fromStdString(positiveAxisLabel)));
+  QString sliceOffsetToolTip = sliceOffsetSliderToolTip(sliceNode, this->AppliedFlatStyle);
+  if (this->SliceOffsetSlider->toolTip() != sliceOffsetToolTip)
+  {
+    this->SliceOffsetSlider->setToolTip(sliceOffsetToolTip);
+  }
+  QString sliceOffsetPrefix = QString("%1: ").arg(QString::fromStdString(positiveAxisLabel));
+  if (this->SliceOffsetSlider->prefix() != sliceOffsetPrefix)
+  {
+    this->SliceOffsetSlider->setPrefix(sliceOffsetPrefix);
+  }
 
   // Update slice visibility toggle
   this->actionShow_in_3D->setChecked(sliceNode->GetSliceVisible());
@@ -775,19 +1472,16 @@ void qMRMLSliceControllerWidgetPrivate::updateWidgetFromMRMLSliceNode()
   this->SlabReconstructionTypesActions->setEnabled(sliceNode->GetSlabReconstructionEnabled());
 
   // Slice spacing mode
-  this->SliceSpacingButton->setIcon(sliceNode->GetSliceSpacingMode() == vtkMRMLSliceNode::AutomaticSliceSpacingMode ? QIcon(":/Icons/SlicerAutomaticSliceSpacing.png")
-                                                                                                                    : QIcon(":/Icons/SlicerManualSliceSpacing.png"));
+  const QIcon& sliceSpacingIcon = sliceNode->GetSliceSpacingMode() == vtkMRMLSliceNode::AutomaticSliceSpacingMode ? this->AutomaticSliceSpacingIcon : this->ManualSliceSpacingIcon;
+  if (this->SliceSpacingButton->icon().cacheKey() != sliceSpacingIcon.cacheKey())
+  {
+    this->SliceSpacingButton->setIcon(sliceSpacingIcon);
+  }
   this->actionSliceSpacingModeAutomatic->setChecked(sliceNode->GetSliceSpacingMode() == vtkMRMLSliceNode::AutomaticSliceSpacingMode);
   // Prescribed slice spacing
   double spacing[3] = { 0.0, 0.0, 0.0 };
   sliceNode->GetPrescribedSliceSpacing(spacing);
   this->SliceSpacingSpinBox->setValue(spacing[2]);
-  // Field of view
-  double fov[3] = { 0.0, 0.0, 0.0 };
-  sliceNode->GetFieldOfView(fov);
-  wasBlocked = this->SliceFOVSpinBox->blockSignals(true);
-  this->SliceFOVSpinBox->setValue(fov[0] < fov[1] ? fov[0] : fov[1]);
-  this->SliceFOVSpinBox->blockSignals(wasBlocked);
 
   this->actionSliceModelModeVolumes->setChecked(sliceNode->GetSliceResolutionMode() == vtkMRMLSliceNode::SliceResolutionMatchVolumes);
   this->actionSliceModelMode2D->setChecked(sliceNode->GetSliceResolutionMode() == vtkMRMLSliceNode::SliceResolutionMatch2DView);
@@ -796,37 +1490,16 @@ void qMRMLSliceControllerWidgetPrivate::updateWidgetFromMRMLSliceNode()
   // this->actionSliceModelModeCustom->setChecked(sliceNode->GetSliceResolutionMode() ==
   //                                               vtkMRMLSliceNode::SliceResolutionCustom);
 
-  double UVWExtents[] = { 256, 256, 256 };
-  double UVWOrigin[] = { 0, 0, 0 };
-  int UVWDimensions[] = { 256, 256, 256 };
-
-  sliceNode->GetUVWExtents(UVWExtents);
-  sliceNode->GetUVWOrigin(UVWOrigin);
-  sliceNode->GetUVWDimensions(UVWDimensions);
-
-  wasBlocked = this->SliceModelFOVXSpinBox->blockSignals(true);
-  this->SliceModelFOVXSpinBox->setValue(UVWExtents[0]);
-  this->SliceModelFOVXSpinBox->blockSignals(wasBlocked);
-
-  wasBlocked = this->SliceModelFOVYSpinBox->blockSignals(true);
-  this->SliceModelFOVYSpinBox->setValue(UVWExtents[1]);
-  this->SliceModelFOVYSpinBox->blockSignals(wasBlocked);
-
-  wasBlocked = this->SliceModelDimensionXSpinBox->blockSignals(true);
-  this->SliceModelDimensionXSpinBox->setValue(UVWDimensions[0]);
-  this->SliceModelDimensionXSpinBox->blockSignals(wasBlocked);
-
-  wasBlocked = this->SliceModelDimensionYSpinBox->blockSignals(true);
-  this->SliceModelDimensionYSpinBox->setValue(UVWDimensions[1]);
-  this->SliceModelDimensionYSpinBox->blockSignals(wasBlocked);
-
-  wasBlocked = this->SliceModelOriginXSpinBox->blockSignals(true);
-  this->SliceModelOriginXSpinBox->setValue(UVWOrigin[0]);
-  this->SliceModelOriginXSpinBox->blockSignals(wasBlocked);
-
-  wasBlocked = this->SliceModelOriginYSpinBox->blockSignals(true);
-  this->SliceModelOriginYSpinBox->setValue(UVWOrigin[1]);
-  this->SliceModelOriginYSpinBox->blockSignals(wasBlocked);
+  // The field of view and slice model spin boxes (their signals are blocked while they are updated)
+  // only need to be up to date while the popup is shown.
+  if (this->PopupWidget->isVisible())
+  {
+    this->updatePopupWidgetsFromMRMLSliceNode();
+  }
+  else
+  {
+    this->PopupWidgetsUpdatePending = true;
+  }
 
   this->actionSliceEdgeVisibility3D->setChecked(sliceNode->GetSliceEdgeVisibility3D());
 
@@ -862,6 +1535,81 @@ void qMRMLSliceControllerWidgetPrivate::updateWidgetFromMRMLSliceNode()
   {
     action->setChecked(true);
   }
+
+  this->requestFlatBarUpdate();
+}
+
+// --------------------------------------------------------------------------
+void qMRMLSliceControllerWidgetPrivate::updatePopupWidgetsFromMRMLSliceNode()
+{
+  Q_Q(qMRMLSliceControllerWidget);
+
+  this->PopupWidgetsUpdatePending = false;
+  vtkMRMLSliceNode* sliceNode = q->mrmlSliceNode();
+  if (!sliceNode)
+  {
+    return;
+  }
+
+  bool wasBlocked;
+
+  // Field of view
+  double fov[3] = { 0.0, 0.0, 0.0 };
+  sliceNode->GetFieldOfView(fov);
+  wasBlocked = this->SliceFOVSpinBox->blockSignals(true);
+  this->SliceFOVSpinBox->setValue(fov[0] < fov[1] ? fov[0] : fov[1]);
+  this->SliceFOVSpinBox->blockSignals(wasBlocked);
+
+  double UVWExtents[] = { 256, 256, 256 };
+  double UVWOrigin[] = { 0, 0, 0 };
+  int UVWDimensions[] = { 256, 256, 256 };
+
+  sliceNode->GetUVWExtents(UVWExtents);
+  sliceNode->GetUVWOrigin(UVWOrigin);
+  sliceNode->GetUVWDimensions(UVWDimensions);
+
+  wasBlocked = this->SliceModelFOVXSpinBox->blockSignals(true);
+  this->SliceModelFOVXSpinBox->setValue(UVWExtents[0]);
+  this->SliceModelFOVXSpinBox->blockSignals(wasBlocked);
+
+  wasBlocked = this->SliceModelFOVYSpinBox->blockSignals(true);
+  this->SliceModelFOVYSpinBox->setValue(UVWExtents[1]);
+  this->SliceModelFOVYSpinBox->blockSignals(wasBlocked);
+
+  wasBlocked = this->SliceModelDimensionXSpinBox->blockSignals(true);
+  this->SliceModelDimensionXSpinBox->setValue(UVWDimensions[0]);
+  this->SliceModelDimensionXSpinBox->blockSignals(wasBlocked);
+
+  wasBlocked = this->SliceModelDimensionYSpinBox->blockSignals(true);
+  this->SliceModelDimensionYSpinBox->setValue(UVWDimensions[1]);
+  this->SliceModelDimensionYSpinBox->blockSignals(wasBlocked);
+
+  wasBlocked = this->SliceModelOriginXSpinBox->blockSignals(true);
+  this->SliceModelOriginXSpinBox->setValue(UVWOrigin[0]);
+  this->SliceModelOriginXSpinBox->blockSignals(wasBlocked);
+
+  wasBlocked = this->SliceModelOriginYSpinBox->blockSignals(true);
+  this->SliceModelOriginYSpinBox->setValue(UVWOrigin[1]);
+  this->SliceModelOriginYSpinBox->blockSignals(wasBlocked);
+}
+
+// --------------------------------------------------------------------------
+bool qMRMLSliceControllerWidgetPrivate::eventFilter(QObject* object, QEvent* event)
+{
+  if (object == this->PopupWidget && event->type() == QEvent::Show && this->PopupWidgetsUpdatePending)
+  {
+    this->updatePopupWidgetsFromMRMLSliceNode();
+  }
+  else if (object == this->BarWidget && event->type() == QEvent::Resize && this->AppliedFlatStyle)
+  {
+    this->updateFlatBarWidgetsVisibility();
+  }
+  else if (object == this->BarWidget && (event->type() == QEvent::PaletteChange || event->type() == QEvent::StyleChange) && this->AppliedFlatStyle)
+  {
+    // The slice index of the readout is drawn in the tertiary text color of the theme: build the text again
+    this->updateReadoutLabel();
+  }
+  return this->Superclass::eventFilter(object, event);
 }
 
 // --------------------------------------------------------------------------
@@ -898,6 +1646,10 @@ void qMRMLSliceControllerWidgetPrivate::updateWidgetFromMRMLSliceCompositeNode()
   else
   {
     this->SliceLinkButton->setIcon(QIcon(":Icons/LinkOff.png"));
+  }
+  if (this->AppliedFlatStyle && this->BarLinkButton->isChecked() != this->MRMLSliceCompositeNode->GetLinkedControl())
+  {
+    this->BarLinkButton->setChecked(this->MRMLSliceCompositeNode->GetLinkedControl());
   }
 
   // Update "foreground layer" node selector
@@ -940,12 +1692,18 @@ void qMRMLSliceControllerWidgetPrivate::updateWidgetFromMRMLSliceCompositeNode()
   // Foreground/Background/Label volumes, we need to explicitly call
   // the function to enable the buttons, slides, etc.
   this->enableLayerWidgets();
+
+  // The slice index of the readout depends on the volume layers
+  this->requestFlatBarUpdate();
 }
 
 // --------------------------------------------------------------------------
 void qMRMLSliceControllerWidgetPrivate::updateWidgetFromUnitNode()
 {
   Q_Q(qMRMLSliceControllerWidget);
+  // The unit precision may have changed the slider range (rounded to the displayed decimals):
+  // set the range again at the next update from the slice logic.
+  this->SliceOffsetRangeSet = false;
   q->setSliceOffsetResolution(q->sliceOffsetResolution());
   if (this->SelectionNode && q->mrmlScene())
   {
@@ -1141,13 +1899,44 @@ void qMRMLSliceControllerWidgetPrivate::onSliceLogicModifiedEvent()
     return;
   }
 
-  bool wasBlocking = this->SliceOffsetSlider->blockSignals(true);
-  q->setSliceOffsetRange(offsetRange[0], offsetRange[1]);
-  q->setSliceOffsetResolution(offsetResolution);
-  this->SliceOffsetSlider->setValue(this->SliceLogic->GetSliceOffset());
-  this->SliceOffsetSlider->blockSignals(wasBlocking);
+  // The slice logic may be modified several times for one change (for example by linked views):
+  // update the slider once, when the event loop runs.
+  if (!this->SliceOffsetSliderUpdatePending)
+  {
+    this->SliceOffsetSliderUpdatePending = true;
+    QTimer::singleShot(0, this, [this]() { this->updateSliceOffsetSliderFromSliceLogic(); });
+  }
 
   emit q->renderRequested();
+}
+
+// --------------------------------------------------------------------------
+void qMRMLSliceControllerWidgetPrivate::updateSliceOffsetSliderFromSliceLogic()
+{
+  Q_Q(qMRMLSliceControllerWidget);
+  this->SliceOffsetSliderUpdatePending = false;
+
+  double offsetRange[2] = { -1.0, 1.0 };
+  double offsetResolution = 1.0;
+  if (!this->SliceLogic || !this->SliceLogic->GetSliceOffsetRangeResolution(offsetRange, offsetResolution))
+  {
+    return;
+  }
+
+  bool wasBlocking = this->SliceOffsetSlider->blockSignals(true);
+  // Setting the range makes the slider compute the width of its spin box again: only set it if it changed
+  if (!this->SliceOffsetRangeSet || offsetRange[0] != this->SliceOffsetRange[0] || offsetRange[1] != this->SliceOffsetRange[1])
+  {
+    q->setSliceOffsetRange(offsetRange[0], offsetRange[1]);
+  }
+  this->SliceOffsetSlider->setValue(this->SliceLogic->GetSliceOffset());
+  // The step is cheap to set, and it is set at every update, after the value, on purpose: the slider maps
+  // values to handle positions depending on the value it had when the step was last set
+  // (see ctkDoubleSlider::setSingleStep), and the slice logic used to be modified several times per change.
+  q->setSliceOffsetResolution(offsetResolution);
+  this->SliceOffsetSlider->blockSignals(wasBlocking);
+
+  this->updateFlatBarFromMRMLSliceNode();
 }
 
 //---------------------------------------------------------------------------
@@ -1724,6 +2513,9 @@ void qMRMLSliceControllerWidget::setImageDataConnection(vtkAlgorithmOutput* newI
 void qMRMLSliceControllerWidget::setSliceOffsetRange(double min, double max)
 {
   Q_D(qMRMLSliceControllerWidget);
+  d->SliceOffsetRange[0] = min;
+  d->SliceOffsetRange[1] = max;
+  d->SliceOffsetRangeSet = true;
   d->SliceOffsetSlider->setRange(min, max);
 }
 
@@ -1824,6 +2616,32 @@ void qMRMLSliceControllerWidget::fitSliceToBackground()
   d->SliceLogic->FitSliceToBackground();
   this->mrmlSliceNode()->UpdateMatrices();
   d->SliceLogic->EndSliceNodeInteraction();
+
+  if (d->AppliedFlatStyle && d->MRMLSliceCompositeNode && d->MRMLSliceCompositeNode->GetBackgroundVolumeID())
+  {
+    // The fit centers the slice on all the layers: bring the slice back into the background volume
+    // when it is outside (for example after the background was replaced by a smaller volume).
+    double bounds[6] = { 0., -1., 0., -1., 0., -1. };
+    d->SliceLogic->GetBackgroundSliceBounds(bounds);
+    double offset = d->SliceLogic->GetSliceOffset();
+    if (bounds[4] <= bounds[5] && (offset < bounds[4] || offset > bounds[5]))
+    {
+      // Snap within the interaction, so that the linked views get the snapped offset too
+      vtkMRMLApplicationLogic* applicationLogic = vtkMRMLSliceViewDisplayableManagerFactory::GetInstance()->GetMRMLApplicationLogic();
+      if (applicationLogic)
+      {
+        applicationLogic->PauseRender();
+      }
+      d->SliceLogic->StartSliceOffsetInteraction();
+      d->SliceLogic->SetSliceOffset((bounds[4] + bounds[5]) / 2.);
+      d->SliceLogic->SnapSliceOffsetToIJK();
+      d->SliceLogic->EndSliceOffsetInteraction();
+      if (applicationLogic)
+      {
+        applicationLogic->ResumeRender();
+      }
+    }
+  }
 }
 
 //---------------------------------------------------------------------------

@@ -46,6 +46,7 @@ Copyright (c) Laboratory for Percutaneous Surgery (PerkLab)
 #include <vtkSegment.h>
 #include <vtkSegmentation.h>
 #include <vtkSegmentationHistory.h>
+#include <vtkSegmentationModifier.h>
 
 // VTK includes
 #include <vtkAlgorithmOutput.h>
@@ -53,7 +54,6 @@ Copyright (c) Laboratory for Percutaneous Surgery (PerkLab)
 #include <vtkGeneralTransform.h>
 #include <vtkImageExtractComponents.h>
 #include <vtkImageFillROI.h>
-#include <vtkImageMathematics.h>
 #include <vtkImageThreshold.h>
 #include <vtkMatrix4x4.h>
 #include <vtkNew.h>
@@ -64,6 +64,10 @@ Copyright (c) Laboratory for Percutaneous Surgery (PerkLab)
 #include <vtkSmartPointer.h>
 #include <vtkTransform.h>
 #include <vtkWeakPointer.h>
+
+// STD includes
+#include <algorithm>
+#include <vector>
 
 //----------------------------------------------------------------------------
 /// \brief Helper class to emit pause / resume events on construction and destruction
@@ -90,6 +94,218 @@ public:
 private:
   vtkWeakPointer<vtkSlicerSegmentEditorLogic> m_logic;
 };
+
+namespace
+{
+//----------------------------------------------------------------------------
+bool IsExtentNonEmpty(const int extent[6])
+{
+  return extent[0] <= extent[1] && extent[2] <= extent[3] && extent[4] <= extent[5];
+}
+
+//----------------------------------------------------------------------------
+/// Intersect extent with intersectedExtent (in place). Returns true if the result is not empty.
+bool IntersectExtent(int extent[6], const int intersectedExtent[6])
+{
+  for (int axis = 0; axis < 3; ++axis)
+  {
+    extent[axis * 2] = std::max(extent[axis * 2], intersectedExtent[axis * 2]);
+    extent[axis * 2 + 1] = std::min(extent[axis * 2 + 1], intersectedExtent[axis * 2 + 1]);
+  }
+  return IsExtentNonEmpty(extent);
+}
+
+//----------------------------------------------------------------------------
+/// Update the threshold filter (that has inputImage as input) only in the extent. The entire input is processed
+/// if extent is nullptr or if the input geometry differs from referenceImage (the image that extent refers to).
+/// Returns false if the input does not overlap with the extent (the filter is not updated then).
+bool UpdateImageThreshold(vtkImageThreshold* threshold, vtkOrientedImageData* inputImage, vtkOrientedImageData* referenceImage, const int* extent)
+{
+  if (!extent || !vtkOrientedImageDataResample::DoGeometriesMatch(inputImage, referenceImage))
+  {
+    threshold->Update();
+    return true;
+  }
+  int updateExtent[6] = { 0, -1, 0, -1, 0, -1 };
+  inputImage->GetExtent(updateExtent);
+  if (!IntersectExtent(updateExtent, extent))
+  {
+    return false;
+  }
+  threshold->UpdateExtent(updateExtent);
+  return true;
+}
+
+//----------------------------------------------------------------------------
+template <class LabelmapScalarType, class ModifierScalarType>
+bool IsLabelToEraseUnderModifierGeneric2(vtkImageData* labelmap,
+                                         vtkImageData* modifier,
+                                         int extent[6],
+                                         const std::vector<double>& protectedLabelValues,
+                                         bool& protectedLabelInExtent)
+{
+  LabelmapScalarType* labelmapPtr = static_cast<LabelmapScalarType*>(labelmap->GetScalarPointerForExtent(extent));
+  ModifierScalarType* modifierPtr = static_cast<ModifierScalarType*>(modifier->GetScalarPointerForExtent(extent));
+  if (!labelmapPtr || !modifierPtr)
+  {
+    // Cannot determine, assume that there is something to erase
+    return true;
+  }
+  vtkIdType labelmapIncX = 0;
+  vtkIdType labelmapIncY = 0;
+  vtkIdType labelmapIncZ = 0;
+  vtkIdType modifierIncX = 0;
+  vtkIdType modifierIncY = 0;
+  vtkIdType modifierIncZ = 0;
+  labelmap->GetContinuousIncrements(extent, labelmapIncX, labelmapIncY, labelmapIncZ);
+  modifier->GetContinuousIncrements(extent, modifierIncX, modifierIncY, modifierIncZ);
+  for (int z = extent[4]; z <= extent[5]; ++z)
+  {
+    for (int y = extent[2]; y <= extent[3]; ++y)
+    {
+      for (int x = extent[0]; x <= extent[1]; ++x)
+      {
+        // Voxels where the modifier is positive are erased (see the inverter in ModifySegmentByLabelmap).
+        // Outside the modifier, labels are only looked up until the first protected label is found.
+        if (*labelmapPtr != 0 && (*modifierPtr > 0 || !protectedLabelInExtent))
+        {
+          if (std::find(protectedLabelValues.begin(), protectedLabelValues.end(), static_cast<double>(*labelmapPtr)) == protectedLabelValues.end())
+          {
+            if (*modifierPtr > 0)
+            {
+              return true;
+            }
+          }
+          else
+          {
+            protectedLabelInExtent = true;
+          }
+        }
+        ++labelmapPtr;
+        ++modifierPtr;
+      }
+      labelmapPtr += labelmapIncY;
+      modifierPtr += modifierIncY;
+    }
+    labelmapPtr += labelmapIncZ;
+    modifierPtr += modifierIncZ;
+  }
+  return false;
+}
+
+//----------------------------------------------------------------------------
+template <class LabelmapScalarType>
+bool IsLabelToEraseUnderModifierGeneric(vtkImageData* labelmap,
+                                        vtkImageData* modifier,
+                                        int extent[6],
+                                        const std::vector<double>& protectedLabelValues,
+                                        bool& protectedLabelInExtent)
+{
+  bool found = true;
+  switch (modifier->GetScalarType())
+  {
+    vtkTemplateMacro(found = (IsLabelToEraseUnderModifierGeneric2<LabelmapScalarType, VTK_TT>(labelmap, modifier, extent, protectedLabelValues, protectedLabelInExtent)));
+    default: break;
+  }
+  return found;
+}
+
+//----------------------------------------------------------------------------
+/// Returns true if the labelmap contains a non-zero label that is not in protectedLabelValues
+/// in a voxel within the extent where the modifier is positive (that is, where the modifier would erase it).
+/// If false is returned then protectedLabelInExtent tells if any voxel of the labelmap within the extent
+/// (under the modifier or not) has a label value in protectedLabelValues.
+/// The labelmap and the modifier must have the same geometry.
+bool IsLabelToEraseUnderModifier(vtkOrientedImageData* labelmap,
+                                 vtkOrientedImageData* modifier,
+                                 const int extent[6],
+                                 const std::vector<double>& protectedLabelValues,
+                                 bool& protectedLabelInExtent)
+{
+  protectedLabelInExtent = false;
+  if (!labelmap->GetPointData()->GetScalars() || !modifier->GetPointData()->GetScalars() //
+      || labelmap->GetNumberOfScalarComponents() != 1 || modifier->GetNumberOfScalarComponents() != 1)
+  {
+    // Cannot determine, assume that there is something to erase
+    return true;
+  }
+  int checkedExtent[6] = { extent[0], extent[1], extent[2], extent[3], extent[4], extent[5] };
+  if (!IntersectExtent(checkedExtent, labelmap->GetExtent()) || !IntersectExtent(checkedExtent, modifier->GetExtent()))
+  {
+    return false;
+  }
+  bool found = true;
+  switch (labelmap->GetScalarType())
+  {
+    vtkTemplateMacro(found = IsLabelToEraseUnderModifierGeneric<VTK_TT>(labelmap, modifier, checkedExtent, protectedLabelValues, protectedLabelInExtent));
+    default: break;
+  }
+  return found;
+}
+
+//----------------------------------------------------------------------------
+template <class ScalarType>
+bool HasPositiveVoxelGeneric(vtkImageData* image, const int extent[6])
+{
+  for (int z = extent[4]; z <= extent[5]; ++z)
+  {
+    for (int y = extent[2]; y <= extent[3]; ++y)
+    {
+      ScalarType* voxelPtr = static_cast<ScalarType*>(image->GetScalarPointer(extent[0], y, z));
+      for (int x = extent[0]; x <= extent[1]; ++x, ++voxelPtr)
+      {
+        if (*voxelPtr > 0)
+        {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+//----------------------------------------------------------------------------
+/// Shrink the labelmap of a segment to its effective extent (extent of the non-zero voxels), if it is not already.
+/// The voxels do not change, therefore other representations of the segments are kept.
+/// Checking a labelmap that is already shrunk is fast: it has non-zero voxels on all faces of its extent.
+void ShrinkLabelmapToEffectiveExtent(vtkSegmentation* segmentation, const std::string& segmentID, vtkOrientedImageData* labelmap)
+{
+  int* extent = labelmap->GetExtent();
+  if (!IsExtentNonEmpty(extent) || !labelmap->GetPointData()->GetScalars() || labelmap->GetNumberOfScalarComponents() != 1)
+  {
+    return;
+  }
+  bool shrunk = true;
+  for (int face = 0; face < 6 && shrunk; ++face)
+  {
+    int faceExtent[6] = { extent[0], extent[1], extent[2], extent[3], extent[4], extent[5] };
+    faceExtent[face - face % 2] = extent[face];
+    faceExtent[face - face % 2 + 1] = extent[face];
+    switch (labelmap->GetScalarType())
+    {
+      vtkTemplateMacro(shrunk = HasPositiveVoxelGeneric<VTK_TT>(labelmap, faceExtent));
+      default: break;
+    }
+  }
+  if (shrunk)
+  {
+    return;
+  }
+  // vtkSegmentationModifier shrinks the labelmap after the modification, without invalidating other representations.
+  // A minimum operation with a modifier voxel that is outside the labelmap does not change any voxel.
+  vtkNew<vtkOrientedImageData> outsideModifier;
+  outsideModifier->SetExtent(extent[1] + 1, extent[1] + 1, extent[2], extent[2], extent[4], extent[4]);
+  outsideModifier->SetSpacing(labelmap->GetSpacing());
+  outsideModifier->SetOrigin(labelmap->GetOrigin());
+  outsideModifier->CopyDirections(labelmap);
+  outsideModifier->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+  vtkOrientedImageDataResample::FillImage(outsideModifier, VTK_UNSIGNED_CHAR_MAX);
+  std::vector<std::string> sharedSegmentIDs;
+  segmentation->GetSegmentIDsSharingBinaryLabelmapRepresentation(segmentID, sharedSegmentIDs, true);
+  vtkSegmentationModifier::ModifyBinaryLabelmap(
+    outsideModifier, segmentation, segmentID, vtkSegmentationModifier::MODE_MERGE_MIN, nullptr, /*minimumOfAllSegments=*/true, false, sharedSegmentIDs);
+}
+} // namespace
 
 //-----------------------------------------------------------------------------
 vtkStandardNewMacro(vtkSlicerSegmentEditorLogic);
@@ -1315,23 +1531,72 @@ bool IsSegmentIDValid(const std::string& segmentID)
 //-----------------------------------------------------------------------------
 void vtkSlicerSegmentEditorLogic::AppendImage(vtkOrientedImageData* inputImage, vtkOrientedImageData* appendedImage)
 {
+  int modifiedExtent[6] = { 0, -1, 0, -1, 0, -1 };
+  vtkSlicerSegmentEditorLogic::AppendImage(inputImage, appendedImage, modifiedExtent);
+}
+
+//-----------------------------------------------------------------------------
+void vtkSlicerSegmentEditorLogic::AppendImage(vtkOrientedImageData* inputImage, vtkOrientedImageData* appendedImage, int modifiedExtent[6])
+{
+  if (modifiedExtent)
+  {
+    vtkOrientedImageDataResample::InvalidateExtent(modifiedExtent);
+  }
   if (!inputImage || !appendedImage)
   {
     vtkErrorWithObjectMacro(nullptr, "" << __func__ << ": Invalid inputs!");
     return;
   }
 
-  // Make sure appended image has the same lattice as the input image
-  vtkSmartPointer<vtkOrientedImageData> resampledAppendedImage = vtkSmartPointer<vtkOrientedImageData>::New();
-  vtkOrientedImageDataResample::ResampleOrientedImageToReferenceOrientedImage(appendedImage, inputImage, resampledAppendedImage);
+  // Extent of the input image that the appended image covers: the corners of the appended image's extent in
+  // the voxel coordinates of the input image, extended by one voxel for rounding and clipped to the input image.
+  // Only this part is resampled and combined (the appended image is usually a thin slab of a few slices
+  // of the input image, which may be as large as the reference geometry).
+  vtkNew<vtkTransform> appendedToInputTransform;
+  vtkOrientedImageDataResample::GetTransformBetweenOrientedImages(appendedImage, inputImage, appendedToInputTransform);
+  int coveredExtent[6] = { 0, -1, 0, -1, 0, -1 };
+  vtkOrientedImageDataResample::TransformExtent(appendedImage->GetExtent(), appendedToInputTransform, coveredExtent);
+  int inputExtent[6] = { 0, -1, 0, -1, 0, -1 };
+  inputImage->GetExtent(inputExtent);
+  for (int axis = 0; axis < 3; ++axis)
+  {
+    if (coveredExtent[axis * 2] > coveredExtent[axis * 2 + 1])
+    {
+      // Empty appended image
+      return;
+    }
+    coveredExtent[axis * 2] = std::max(coveredExtent[axis * 2] - 1, inputExtent[axis * 2]);
+    coveredExtent[axis * 2 + 1] = std::min(coveredExtent[axis * 2 + 1] + 1, inputExtent[axis * 2 + 1]);
+    if (coveredExtent[axis * 2] > coveredExtent[axis * 2 + 1])
+    {
+      // The appended image is outside the input image: nothing to append
+      return;
+    }
+  }
 
-  // Add image created from poly data to input image
-  vtkSmartPointer<vtkImageMathematics> imageMath = vtkSmartPointer<vtkImageMathematics>::New();
-  imageMath->SetInput1Data(inputImage);
-  imageMath->SetInput2Data(resampledAppendedImage);
-  imageMath->SetOperationToMax();
-  imageMath->Update();
-  inputImage->DeepCopy(imageMath->GetOutput());
+  // Make sure appended image has the same lattice as the input image (computed for the covered extent only)
+  vtkNew<vtkMatrix4x4> inputImageToWorldMatrix;
+  inputImage->GetImageToWorldMatrix(inputImageToWorldMatrix);
+  vtkNew<vtkOrientedImageData> coveredGeometry;
+  coveredGeometry->SetImageToWorldMatrix(inputImageToWorldMatrix);
+  coveredGeometry->SetExtent(coveredExtent);
+  vtkNew<vtkOrientedImageData> resampledAppendedImage;
+  if (!vtkOrientedImageDataResample::ResampleOrientedImageToReferenceOrientedImage(appendedImage, coveredGeometry, resampledAppendedImage))
+  {
+    vtkErrorWithObjectMacro(nullptr, "" << __func__ << ": Failed to resample the appended image");
+    return;
+  }
+
+  // Add image created from poly data to input image (maximum, in place, within the covered extent)
+  if (!vtkOrientedImageDataResample::ModifyImage(inputImage, resampledAppendedImage, vtkOrientedImageDataResample::OPERATION_MAXIMUM, coveredExtent))
+  {
+    vtkErrorWithObjectMacro(nullptr, "" << __func__ << ": Failed to append the image");
+    return;
+  }
+  if (modifiedExtent)
+  {
+    std::copy(coveredExtent, coveredExtent + 6, modifiedExtent);
+  }
 }
 
 //-----------------------------------------------------------------------------
@@ -1339,6 +1604,17 @@ void vtkSlicerSegmentEditorLogic::AppendPolyMask(vtkOrientedImageData* input,
                                                  vtkPolyData* polyData,
                                                  vtkMRMLSliceNode* sliceWidget,
                                                  vtkMRMLSegmentationNode* segmentationNode /*=nullptr*/)
+{
+  int modifiedExtent[6] = { 0, -1, 0, -1, 0, -1 };
+  vtkSlicerSegmentEditorLogic::AppendPolyMask(input, polyData, sliceWidget, segmentationNode, modifiedExtent);
+}
+
+//-----------------------------------------------------------------------------
+void vtkSlicerSegmentEditorLogic::AppendPolyMask(vtkOrientedImageData* input,
+                                                 vtkPolyData* polyData,
+                                                 vtkMRMLSliceNode* sliceWidget,
+                                                 vtkMRMLSegmentationNode* segmentationNode,
+                                                 int modifiedExtent[6])
 {
   // Rasterize a poly data onto the input image into the slice view
   // - Points are specified in current XY space
@@ -1364,7 +1640,7 @@ void vtkSlicerSegmentEditorLogic::AppendPolyMask(vtkOrientedImageData* input,
   }
 
   // Append poly mask onto input image
-  vtkSlicerSegmentEditorLogic::AppendImage(input, polyMaskImage);
+  vtkSlicerSegmentEditorLogic::AppendImage(input, polyMaskImage, modifiedExtent);
 }
 
 //-----------------------------------------------------------------------------
@@ -1725,12 +2001,64 @@ void vtkSlicerSegmentEditorLogic::ModifySegmentByLabelmap(vtkMRMLSegmentationNod
   RenderBlocker renderBlocker(this);
   constexpr float eraseValue{ 0.0 };
 
+  const int* extent = modificationExtent;
+  if (extent[0] > extent[1] || extent[2] > extent[3] || extent[4] > extent[5])
+  {
+    // invalid extent, it means we have to work with the entire modifier labelmap
+    extent = nullptr;
+  }
+
   vtkSmartPointer<vtkOrientedImageData> modifierLabelmap = modifierLabelmapInput;
   if ((!bypassMasking && parameterSetNode->GetMaskMode() != vtkMRMLSegmentationNode::EditAllowedEverywhere) || parameterSetNode->GetSourceVolumeIntensityMask())
   {
     constexpr float fillValue{ 1.0 };
+
+    vtkSmartPointer<vtkOrientedImageData> segmentLayerLabelmap =
+      vtkOrientedImageData::SafeDownCast(segment->GetRepresentation(segmentationNode->GetSegmentation()->GetSourceRepresentationName()));
+
+    // Masks are only computed in the region of the modifier labelmap that can change the segmentation
+    // (instead of the entire modifier labelmap, which is usually as large as the reference geometry):
+    // the modification extent or, if it is not specified, the extent of the non-zero voxels of the modifier labelmap.
+    int maskExtent[6] = { 0, -1, 0, -1, 0, -1 };
+    modifierLabelmapInput->GetExtent(maskExtent);
+    int workExtent[6] = { 0, -1, 0, -1, 0, -1 };
+    bool maskExtentCropped = false;
+    if (extent)
+    {
+      std::copy(extent, extent + 6, workExtent);
+      maskExtentCropped = IntersectExtent(workExtent, maskExtent);
+    }
+    else if (vtkOrientedImageDataResample::CalculateEffectiveExtent(modifierLabelmapInput, workExtent))
+    {
+      maskExtentCropped = true;
+      int* segmentLayerExtent = segmentLayerLabelmap ? segmentLayerLabelmap->GetExtent() : nullptr;
+      if (modificationMode == vtkSlicerSegmentEditorLogic::ModificationModeSet && segmentLayerExtent && IsExtentNonEmpty(segmentLayerExtent))
+      {
+        // In "set" mode, the segment outside the editable region is added to the modifier labelmap,
+        // therefore the region must contain the segment, too.
+        if (vtkOrientedImageDataResample::DoGeometriesMatch(segmentLayerLabelmap, modifierLabelmapInput))
+        {
+          for (int axis = 0; axis < 3; ++axis)
+          {
+            workExtent[axis * 2] = std::min(workExtent[axis * 2], segmentLayerExtent[axis * 2]);
+            workExtent[axis * 2 + 1] = std::max(workExtent[axis * 2 + 1], segmentLayerExtent[axis * 2 + 1]);
+          }
+          IntersectExtent(workExtent, maskExtent);
+        }
+        else
+        {
+          maskExtentCropped = false;
+        }
+      }
+    }
+    if (maskExtentCropped)
+    {
+      std::copy(workExtent, workExtent + 6, maskExtent);
+    }
+    const int* thresholdExtent = maskExtentCropped ? maskExtent : nullptr;
+
     vtkNew<vtkOrientedImageData> maskImage;
-    maskImage->SetExtent(modifierLabelmap->GetExtent());
+    maskImage->SetExtent(maskExtent);
     maskImage->SetSpacing(modifierLabelmap->GetSpacing());
     maskImage->SetOrigin(modifierLabelmap->GetOrigin());
     maskImage->CopyDirections(modifierLabelmap);
@@ -1740,15 +2068,59 @@ void vtkSlicerSegmentEditorLogic::ModifySegmentByLabelmap(vtkMRMLSegmentationNod
     // Apply mask to modifier labelmap if masking is enabled
     if (!bypassMasking && parameterSetNode->GetMaskMode() != vtkMRMLSegmentationNode::EditAllowedEverywhere)
     {
-      if (!this->UpdateMaskLabelmap())
+      if (maskExtentCropped)
       {
-        if (this->IsVerbose)
+        // Same as UpdateMaskLabelmap, but the mask is only generated in the masking region of the reference geometry
+        vtkMRMLSegmentationNode* maskSegmentationNode = parameterSetNode->GetSegmentationNode();
+        std::string referenceGeometryStr = this->GetReferenceImageGeometryString();
+        vtkNew<vtkOrientedImageData> referenceGeometry;
+        if (!maskSegmentationNode || referenceGeometryStr.empty() || !vtkSegmentationConverter::DeserializeImageGeometry(referenceGeometryStr, referenceGeometry, false))
         {
-          vtkErrorMacro("" << __func__ << ": Failed to update mask labelmap");
+          if (this->IsVerbose)
+          {
+            vtkErrorMacro("" << __func__ << ": Failed to update mask labelmap");
+          }
+          return;
         }
-        return;
+        bool maskRegionInReferenceGeometry = true;
+        if (vtkOrientedImageDataResample::DoGeometriesMatch(referenceGeometry, maskImage))
+        {
+          int referenceExtent[6] = { 0, -1, 0, -1, 0, -1 };
+          referenceGeometry->GetExtent(referenceExtent);
+          maskRegionInReferenceGeometry = IntersectExtent(referenceExtent, maskExtent);
+          referenceGeometry->SetExtent(referenceExtent);
+        }
+        // Voxels outside the reference geometry are editable (the mask is 0 there)
+        if (maskRegionInReferenceGeometry)
+        {
+          vtkNew<vtkOrientedImageData> editMask;
+          if (!maskSegmentationNode->GenerateEditMask(editMask,
+                                                      parameterSetNode->GetMaskMode(),
+                                                      referenceGeometry,
+                                                      parameterSetNode->GetSelectedSegmentID() ? parameterSetNode->GetSelectedSegmentID() : "",
+                                                      parameterSetNode->GetMaskSegmentID() ? parameterSetNode->GetMaskSegmentID() : ""))
+          {
+            if (this->IsVerbose)
+            {
+              vtkErrorMacro("" << __func__ << ": Failed to update mask labelmap");
+            }
+            return;
+          }
+          vtkOrientedImageDataResample::ModifyImage(maskImage, editMask, vtkOrientedImageDataResample::OPERATION_MAXIMUM);
+        }
       }
-      vtkOrientedImageDataResample::ModifyImage(maskImage, this->GetMaskLabelmap(), vtkOrientedImageDataResample::OPERATION_MAXIMUM);
+      else
+      {
+        if (!this->UpdateMaskLabelmap())
+        {
+          if (this->IsVerbose)
+          {
+            vtkErrorMacro("" << __func__ << ": Failed to update mask labelmap");
+          }
+          return;
+        }
+        vtkOrientedImageDataResample::ModifyImage(maskImage, this->GetMaskLabelmap(), vtkOrientedImageDataResample::OPERATION_MAXIMUM);
+      }
     }
 
     // Apply threshold mask if paint threshold is turned on
@@ -1790,18 +2162,17 @@ void vtkSlicerSegmentEditorLogic::ModifySegmentByLabelmap(vtkMRMLSegmentationNod
       threshold->SetInValue(eraseValue);
       threshold->SetOutValue(fillValue);
       threshold->SetOutputScalarTypeToUnsignedChar();
-      threshold->Update();
-
-      vtkSmartPointer<vtkOrientedImageData> thresholdMask = vtkSmartPointer<vtkOrientedImageData>::New();
-      thresholdMask->ShallowCopy(threshold->GetOutput());
-      vtkSmartPointer<vtkMatrix4x4> modifierLabelmapToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-      modifierLabelmap->GetImageToWorldMatrix(modifierLabelmapToWorldMatrix);
-      thresholdMask->SetGeometryFromImageToWorldMatrix(modifierLabelmapToWorldMatrix);
-      vtkOrientedImageDataResample::ModifyImage(maskImage, thresholdMask, vtkOrientedImageDataResample::OPERATION_MAXIMUM);
+      if (UpdateImageThreshold(threshold, sourceVolumeOrientedImageData, maskImage, thresholdExtent))
+      {
+        vtkSmartPointer<vtkOrientedImageData> thresholdMask = vtkSmartPointer<vtkOrientedImageData>::New();
+        thresholdMask->ShallowCopy(threshold->GetOutput());
+        vtkSmartPointer<vtkMatrix4x4> modifierLabelmapToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+        modifierLabelmap->GetImageToWorldMatrix(modifierLabelmapToWorldMatrix);
+        thresholdMask->SetGeometryFromImageToWorldMatrix(modifierLabelmapToWorldMatrix);
+        vtkOrientedImageDataResample::ModifyImage(maskImage, thresholdMask, vtkOrientedImageDataResample::OPERATION_MAXIMUM);
+      }
     }
 
-    vtkSmartPointer<vtkOrientedImageData> segmentLayerLabelmap =
-      vtkOrientedImageData::SafeDownCast(segment->GetRepresentation(segmentationNode->GetSegmentation()->GetSourceRepresentationName()));
     if (segmentLayerLabelmap && this->GetSegmentEditorNode()->GetMaskMode() == vtkMRMLSegmentationNode::EditAllowedInsideSingleSegment
         && modificationMode == vtkSlicerSegmentEditorLogic::ModificationModeRemove)
     {
@@ -1814,17 +2185,26 @@ void vtkSlicerSegmentEditorLogic::ModifySegmentByLabelmap(vtkMRMLSegmentationNod
       segmentInverter->ReplaceInOn();
       segmentInverter->ThresholdBetween(segment->GetLabelValue(), segment->GetLabelValue());
       segmentInverter->SetOutputScalarTypeToUnsignedChar();
-      segmentInverter->Update();
-
-      vtkNew<vtkOrientedImageData> invertedSegment;
-      invertedSegment->ShallowCopy(segmentInverter->GetOutput());
-      invertedSegment->CopyDirections(segmentLayerLabelmap);
-      vtkOrientedImageDataResample::ModifyImage(maskImage, invertedSegment, vtkOrientedImageDataResample::OPERATION_MINIMUM);
+      if (UpdateImageThreshold(segmentInverter, segmentLayerLabelmap, maskImage, thresholdExtent))
+      {
+        vtkNew<vtkOrientedImageData> invertedSegment;
+        invertedSegment->ShallowCopy(segmentInverter->GetOutput());
+        invertedSegment->CopyDirections(segmentLayerLabelmap);
+        vtkOrientedImageDataResample::ModifyImage(maskImage, invertedSegment, vtkOrientedImageDataResample::OPERATION_MINIMUM);
+      }
     }
 
     // Apply the mask to the modifier labelmap. Make a copy so that we don't modify the original.
     modifierLabelmap = vtkSmartPointer<vtkOrientedImageData>::New();
-    modifierLabelmap->DeepCopy(modifierLabelmapInput);
+    if (maskExtentCropped)
+    {
+      // Only the masking region of the modifier labelmap is needed
+      vtkOrientedImageDataResample::CopyImage(modifierLabelmapInput, modifierLabelmap, maskExtent);
+    }
+    else
+    {
+      modifierLabelmap->DeepCopy(modifierLabelmapInput);
+    }
     vtkOrientedImageDataResample::ApplyImageMask(modifierLabelmap, maskImage, eraseValue, true);
 
     if (segmentLayerLabelmap && modificationMode == vtkSlicerSegmentEditorLogic::ModificationModeSet)
@@ -1838,10 +2218,11 @@ void vtkSlicerSegmentEditorLogic::ModifySegmentByLabelmap(vtkMRMLSegmentationNod
       segmentThreshold->ReplaceInOn();
       segmentThreshold->ThresholdBetween(segment->GetLabelValue(), segment->GetLabelValue());
       segmentThreshold->SetOutputScalarTypeToUnsignedChar();
-      segmentThreshold->Update();
-
       int segmentThresholdExtent[6] = { 0, -1, 0, -1, 0, -1 };
-      segmentThreshold->GetOutput()->GetExtent(segmentThresholdExtent);
+      if (UpdateImageThreshold(segmentThreshold, segmentLayerLabelmap, maskImage, thresholdExtent))
+      {
+        segmentThreshold->GetOutput()->GetExtent(segmentThresholdExtent);
+      }
       if (segmentThresholdExtent[0] <= segmentThresholdExtent[1] && segmentThresholdExtent[2] <= segmentThresholdExtent[3]
           && segmentThresholdExtent[4] <= segmentThresholdExtent[5])
       {
@@ -1852,17 +2233,18 @@ void vtkSlicerSegmentEditorLogic::ModifySegmentByLabelmap(vtkMRMLSegmentationNod
         vtkOrientedImageDataResample::ModifyImage(modifierLabelmap, segmentOutsideMask, vtkOrientedImageDataResample::OPERATION_MAXIMUM);
       }
     }
+
+    if (maskExtentCropped && !extent)
+    {
+      // Without a modification extent the entire modifier labelmap is used, so restore its original extent
+      vtkSmartPointer<vtkOrientedImageData> paddedModifierLabelmap = vtkSmartPointer<vtkOrientedImageData>::New();
+      vtkOrientedImageDataResample::CopyImage(modifierLabelmap, paddedModifierLabelmap, modifierLabelmapInput->GetExtent());
+      modifierLabelmap = paddedModifierLabelmap;
+    }
   }
 
   // Copy the temporary padded modifier labelmap to the segment.
   // Mask and threshold was already applied on modifier labelmap at this point if requested.
-  const int* extent = modificationExtent;
-  if (extent[0] > extent[1] || extent[2] > extent[3] || extent[4] > extent[5])
-  {
-    // invalid extent, it means we have to work with the entire modifier labelmap
-    extent = nullptr;
-  }
-
   std::vector<std::string> allSegmentIDs;
   segmentationNode->GetSegmentation()->GetSegmentIDs(allSegmentIDs);
   // remove selected segment, that is already handled
@@ -1909,6 +2291,26 @@ void vtkSlicerSegmentEditorLogic::ModifySegmentByLabelmap(vtkMRMLSegmentationNod
   inverter->SetOutValue(eraseValue);
   inverter->ThresholdByLower(0);
   inverter->SetOutputScalarTypeToUnsignedChar();
+  // With a modification extent, the modifier labelmap is only used in that extent, therefore the inverted labelmap
+  // is only computed there (instead of in the entire modifier labelmap, which is usually as large as the reference geometry).
+  int inverterExtent[6] = { 0, -1, 0, -1, 0, -1 };
+  modifierLabelmap->GetExtent(inverterExtent);
+  if (extent)
+  {
+    IntersectExtent(inverterExtent, extent);
+  }
+  const bool inverterExtentCropped = extent && IsExtentNonEmpty(inverterExtent);
+  auto updateInverter = [&]()
+  {
+    if (inverterExtentCropped)
+    {
+      inverter->UpdateExtent(inverterExtent);
+    }
+    else
+    {
+      inverter->Update();
+    }
+  };
 
   if (modificationMode == ModificationModeSet)
   {
@@ -1955,7 +2357,7 @@ void vtkSlicerSegmentEditorLogic::ModifySegmentByLabelmap(vtkMRMLSegmentationNod
   }
   else if (modificationMode == vtkSlicerSegmentEditorLogic::ModificationModeRemove || modificationMode == vtkSlicerSegmentEditorLogic::ModificationModeRemoveAll)
   {
-    inverter->Update();
+    updateInverter();
     vtkNew<vtkOrientedImageData> invertedModifierLabelmap;
     invertedModifierLabelmap->ShallowCopy(inverter->GetOutput());
     vtkNew<vtkMatrix4x4> imageToWorldMatrix;
@@ -2003,7 +2405,7 @@ void vtkSlicerSegmentEditorLogic::ModifySegmentByLabelmap(vtkMRMLSegmentationNod
           || modificationMode == vtkSlicerSegmentEditorLogic::ModificationModeAdd //
           || modificationMode == vtkSlicerSegmentEditorLogic::ModificationModeRemoveAll))
   {
-    inverter->Update();
+    updateInverter();
     vtkNew<vtkOrientedImageData> invertedModifierLabelmap;
     invertedModifierLabelmap->ShallowCopy(inverter->GetOutput());
     vtkNew<vtkMatrix4x4> imageToWorldMatrix;
@@ -2034,6 +2436,31 @@ void vtkSlicerSegmentEditorLogic::ModifySegmentByLabelmap(vtkMRMLSegmentationNod
         }
       }
 
+      // Skip the layer if the modifier does not overlap with any segment that would be erased in it.
+      // This avoids reallocating the labelmap and re-converting other representations (such as the closed surface)
+      // of segments that are not changed.
+      // The layer is not skipped if a segment that must not be overwritten (dontOverwriteIDs) is in the modified region
+      // (inverterExtent), because then the merge below moves eraseSegmentID to a separate layer even if no voxel is erased
+      // (see vtkSegmentationModifier::SeparateModifiedSegmentFromSharedLabelmap). The layers determine the result of
+      // later modifications, so they must stay the same as without skipping.
+      if (currentLabelmap && vtkOrientedImageDataResample::DoGeometriesMatch(currentLabelmap, modifierLabelmap))
+      {
+        std::vector<double> protectedLabelValues;
+        for (const std::string& dontOverwriteID : dontOverwriteIDs)
+        {
+          protectedLabelValues.push_back(segmentationNode->GetSegmentation()->GetSegment(dontOverwriteID)->GetLabelValue());
+        }
+        bool protectedLabelInExtent = false;
+        if (!IsLabelToEraseUnderModifier(currentLabelmap, modifierLabelmap, inverterExtent, protectedLabelValues, protectedLabelInExtent) && !protectedLabelInExtent)
+        {
+          // Erasing would have shrunk the labelmap to its effective extent. Do it here, too (only changes
+          // labelmaps that are not shrunk yet, such as ones loaded from file), as large labelmap extents
+          // make display, undo and masking slower.
+          ShrinkLabelmapToEffectiveExtent(segmentationNode->GetSegmentation(), eraseSegmentID, currentLabelmap);
+          continue;
+        }
+      }
+
       vtkSmartPointer<vtkOrientedImageData> invertedModifierLabelmap2 = invertedModifierLabelmap;
       if (!dontOverwriteIDs.empty())
       {
@@ -2051,7 +2478,11 @@ void vtkSlicerSegmentEditorLogic::ModifySegmentByLabelmap(vtkMRMLSegmentationNod
           threshold->SetInValue(1);
           threshold->SetOutValue(0);
           threshold->SetOutputScalarTypeToUnsignedChar();
-          threshold->Update();
+          // Only the region of the inverted modifier labelmap is needed
+          if (!UpdateImageThreshold(threshold, currentLabelmap, invertedModifierLabelmap2, invertedModifierLabelmap2->GetExtent()))
+          {
+            continue;
+          }
           maskImage->ShallowCopy(threshold->GetOutput());
           vtkOrientedImageDataResample::ApplyImageMask(invertedModifierLabelmap2, maskImage, VTK_UNSIGNED_CHAR_MAX, true);
         }

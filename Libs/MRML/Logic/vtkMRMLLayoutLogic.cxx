@@ -1120,6 +1120,123 @@ const char* dualMonitorFourUpView = //
 
   "</viewports>";
 
+// Slicer Studio layouts.
+// The IDs are user layout IDs in the range 7001-7099 that the fork reserves (they are not part of
+// vtkMRMLLayoutNode::SlicerLayout), and vtkMRMLLayoutNode saves them with a portable fallback.
+// The descriptions are canonical: Studio registers the very same strings from Python on builds
+// that do not have them, so they must stay byte-identical (no whitespace between elements).
+const int studioFocusViewId = 7001;
+const int studioFocus3DViewId = 7002;
+const int studioRowViewId = 7003;
+// 7004 is reserved for the Trace layout (L-29)
+const int studioCompareViewId = 7005;
+
+const char* studioFocusView = //
+  "<layout type=\"horizontal\" split=\"true\">"
+  "<item splitSize=\"720\">"
+  "<view class=\"vtkMRMLSliceNode\" singletontag=\"Red\">"
+  "<property name=\"orientation\" action=\"default\">Axial</property>"
+  "<property name=\"viewlabel\" action=\"default\">R</property>"
+  "<property name=\"viewcolor\" action=\"default\">#F34A33</property>"
+  "</view>"
+  "</item>"
+  "<item splitSize=\"280\">"
+  "<layout type=\"vertical\" split=\"true\">"
+  "<item>"
+  "<view class=\"vtkMRMLSliceNode\" singletontag=\"Green\">"
+  "<property name=\"orientation\" action=\"default\">Coronal</property>"
+  "<property name=\"viewlabel\" action=\"default\">G</property>"
+  "<property name=\"viewcolor\" action=\"default\">#6EB04B</property>"
+  "</view>"
+  "</item>"
+  "<item>"
+  "<view class=\"vtkMRMLSliceNode\" singletontag=\"Yellow\">"
+  "<property name=\"orientation\" action=\"default\">Sagittal</property>"
+  "<property name=\"viewlabel\" action=\"default\">Y</property>"
+  "<property name=\"viewcolor\" action=\"default\">#EDD54C</property>"
+  "</view>"
+  "</item>"
+  "</layout>"
+  "</item>"
+  "</layout>";
+
+const char* studioFocus3DView = //
+  "<layout type=\"horizontal\" split=\"true\">"
+  "<item splitSize=\"720\">"
+  "<view class=\"vtkMRMLSliceNode\" singletontag=\"Red\">"
+  "<property name=\"orientation\" action=\"default\">Axial</property>"
+  "<property name=\"viewlabel\" action=\"default\">R</property>"
+  "<property name=\"viewcolor\" action=\"default\">#F34A33</property>"
+  "</view>"
+  "</item>"
+  "<item splitSize=\"280\">"
+  "<layout type=\"vertical\" split=\"true\">"
+  "<item>"
+  "<view class=\"vtkMRMLSliceNode\" singletontag=\"Green\">"
+  "<property name=\"orientation\" action=\"default\">Coronal</property>"
+  "<property name=\"viewlabel\" action=\"default\">G</property>"
+  "<property name=\"viewcolor\" action=\"default\">#6EB04B</property>"
+  "</view>"
+  "</item>"
+  "<item>"
+  "<view class=\"vtkMRMLSliceNode\" singletontag=\"Yellow\">"
+  "<property name=\"orientation\" action=\"default\">Sagittal</property>"
+  "<property name=\"viewlabel\" action=\"default\">Y</property>"
+  "<property name=\"viewcolor\" action=\"default\">#EDD54C</property>"
+  "</view>"
+  "</item>"
+  "<item>"
+  "<view class=\"vtkMRMLViewNode\" singletontag=\"1\">"
+  "<property name=\"viewlabel\" action=\"default\">1</property>"
+  "</view>"
+  "</item>"
+  "</layout>"
+  "</item>"
+  "</layout>";
+
+const char* studioRowView = //
+  "<layout type=\"horizontal\" split=\"true\">"
+  "<item>"
+  "<view class=\"vtkMRMLSliceNode\" singletontag=\"Red\">"
+  "<property name=\"orientation\" action=\"default\">Axial</property>"
+  "<property name=\"viewlabel\" action=\"default\">R</property>"
+  "<property name=\"viewcolor\" action=\"default\">#F34A33</property>"
+  "</view>"
+  "</item>"
+  "<item>"
+  "<view class=\"vtkMRMLSliceNode\" singletontag=\"Green\">"
+  "<property name=\"orientation\" action=\"default\">Coronal</property>"
+  "<property name=\"viewlabel\" action=\"default\">G</property>"
+  "<property name=\"viewcolor\" action=\"default\">#6EB04B</property>"
+  "</view>"
+  "</item>"
+  "<item>"
+  "<view class=\"vtkMRMLSliceNode\" singletontag=\"Yellow\">"
+  "<property name=\"orientation\" action=\"default\">Sagittal</property>"
+  "<property name=\"viewlabel\" action=\"default\">Y</property>"
+  "<property name=\"viewcolor\" action=\"default\">#EDD54C</property>"
+  "</view>"
+  "</item>"
+  "</layout>";
+
+const char* studioCompareView = //
+  "<layout type=\"horizontal\" split=\"true\">"
+  "<item splitSize=\"550\">"
+  "<view class=\"vtkMRMLSliceNode\" singletontag=\"Red\">"
+  "<property name=\"orientation\" action=\"default\">Axial</property>"
+  "<property name=\"viewlabel\" action=\"default\">R</property>"
+  "<property name=\"viewcolor\" action=\"default\">#F34A33</property>"
+  "</view>"
+  "</item>"
+  "<item splitSize=\"450\">"
+  "<view class=\"vtkMRMLSliceNode\" singletontag=\"Yellow\">"
+  "<property name=\"orientation\" action=\"default\">Axial</property>"
+  "<property name=\"viewlabel\" action=\"default\">Y</property>"
+  "<property name=\"viewcolor\" action=\"default\">#EDD54C</property>"
+  "</view>"
+  "</item>"
+  "</layout>";
+
 //----------------------------------------------------------------------------
 vtkStandardNewMacro(vtkMRMLLayoutLogic);
 
@@ -1512,6 +1629,15 @@ void vtkMRMLLayoutLogic::AddDefaultLayouts()
                                          threeByThreeSliceView);
   this->LayoutNode->AddLayoutDescription(vtkMRMLLayoutNode::SlicerLayoutDualMonitorFourUpView,
                                          dualMonitorFourUpView);
+  // Slicer Studio layouts
+  this->LayoutNode->AddLayoutDescription(studioFocusViewId,
+                                         studioFocusView);
+  this->LayoutNode->AddLayoutDescription(studioFocus3DViewId,
+                                         studioFocus3DView);
+  this->LayoutNode->AddLayoutDescription(studioRowViewId,
+                                         studioRowView);
+  this->LayoutNode->AddLayoutDescription(studioCompareViewId,
+                                         studioCompareView);
   // clang-format on
 
   // add the CompareView modes which are defined programmatically

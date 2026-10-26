@@ -36,8 +36,10 @@
 #      Python wheels). A stale rpath is harmless on its own -- dyld skips paths
 #      that do not exist -- so this is a hygiene signal, not a loadability error;
 #      genuinely unsatisfied dependencies are caught by check 2 instead.
-#   4. Dependencies on known optional database backends under /usr/local or
-#      /opt (the ODBC / PostgreSQL / MySQL / Mimer Qt SQL drivers), and
+#   4. Dependencies on known optional database backends under /usr/local,
+#      /opt or /Applications/Postgres.app (the ODBC / PostgreSQL / MySQL /
+#      Mimer Qt SQL drivers; the official Qt PostgreSQL driver links to
+#      Postgres.app), and
 #      unresolved weak dependencies. These are not bundled by design and only
 #      disable the corresponding optional plugin. Any other dependency under
 #      /usr/local or /opt is treated as check 2 (FATAL).
@@ -250,7 +252,7 @@ function(_bv_resolve dep loader_dir rpaths out_status)
     if(dep MATCHES "^(/usr/lib/|/System/)")
       set(${out_status} "SYSTEM" PARENT_SCOPE)
       return()
-    elseif(dep MATCHES "^(/usr/local/|/opt/)")
+    elseif(dep MATCHES "^(/usr/local/|/opt/|/Applications/Postgres\\.app/)")
       # Only known optional runtime backends (Qt SQL/ODBC drivers) are
       # external-by-design; anything else under /usr/local or /opt would make
       # the bundle depend on the packaging machine and is a hard error.
@@ -359,6 +361,16 @@ foreach(_f IN LISTS _maybe_exes)
   endif()
 endforeach()
 
+# Verify each file once, at its real path: dyld expands @loader_path from the
+# real location of a binary, not from a symlink to it (for example the
+# top-level "Foo.framework/Foo -> Versions/Current/Foo" framework symlink, which
+# would otherwise make "@loader_path/../../../" point outside the bundle).
+set(_real_macho_files "")
+foreach(_f IN LISTS macho_files)
+  get_filename_component(_rf "${_f}" REALPATH)
+  list(APPEND _real_macho_files "${_rf}")
+endforeach()
+set(macho_files ${_real_macho_files})
 if(macho_files)
   list(REMOVE_DUPLICATES macho_files)
 endif()

@@ -1,0 +1,449 @@
+{
+ "format": "slicer-lnm-tutorials",
+ "version": 1,
+ "entries": [
+  {
+   "id": "joutsa2022_addiction",
+   "title": "Addiction lesions (Joutsa 2022)",
+   "summary": "129 lesion masks that are already in MNI space, from the lesion network mapping study of addiction. There are no scores or labels: use it to learn the overlap map and the lesion network map.",
+   "licence": "CC0-1.0",
+   "badge": "green",
+   "terms_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+   "citation": "Joutsa J. Smoker lesion datasets. Harvard Dataverse, V1 (2022). doi:10.7910/DVN/8BHHRS. Paper: Joutsa J, Moussawi K, Siddiqi SH, et al. Brain lesions disrupting addiction map to a common human brain circuit. Nat Med 28, 1249-1255 (2022). doi:10.1038/s41591-022-01834-y",
+   "homepage": "https://doi.org/10.7910/DVN/8BHHRS",
+   "native": false,
+   "space": "MNI152NLin6Asym",
+   "size_bytes": 116484549,
+   "n_subjects": 129,
+   "source": {
+    "type": "dataverse",
+    "server": "https://dataverse.harvard.edu",
+    "doi": "doi:10.7910/DVN/8BHHRS",
+    "id_regex": "^(?P<sid>[A-Za-z]*[0-9]+)_lesion_MNI\\.nii$",
+    "files": [
+    [6176054, "0318_lesion_MNI.nii", 902981, "7207872d41efa5c16407e1efb3d2332c"],
+    [6176029, "0590_lesion_MNI.nii", 902981, "c9415af3b274214b2828355ed2a45f29"],
+    [6176027, "0650_lesion_MNI.nii", 902981, "fb46944e02e6d5b9a500ef7571932cee"],
+    [6176022, "0675_lesion_MNI.nii", 902981, "717a2229d295a996e38ee9ebe85f8b67"],
+    [6175990, "0747_lesion_MNI.nii", 902981, "7b24e8ad7372f327efcab4c4de52a18c"],
+    [6175952, "0999_lesion_MNI.nii", 902981, "d3b5e90614a32f8d1a870413fafa3339"],
+    [6176025, "1077_lesion_MNI.nii", 902981, "e9a72d6bd09ffd73f81e8eb44371b2ac"],
+    [6176035, "1106_lesion_MNI.nii", 902981, "5832a3d3d1ebccc9c7c6192a677bfdb4"],
+    [6175995, "1188_lesion_MNI.nii", 902981, "9acb3b542e4f42de80279729b3acb201"],
+    [6176030, "1254_lesion_MNI.nii", 902981, "b3913c8f0e47c09143f1d7c7b2aec48a"],
+    [6176069, "1290_lesion_MNI.nii", 902981, "22e0551eb35363338f096bb23df526fe"],
+    [6176008, "1366_lesion_MNI.nii", 902981, "453c49bd2f1705372f06d60fd1845a9c"],
+    [6175971, "1561_lesion_MNI.nii", 902981, "c8cc2bcb4414c9d43a7e05571765d61f"],
+    [6175982, "1584_lesion_MNI.nii", 902981, "533132ece41c8c09a30967073301985e"],
+    [6175972, "1652_lesion_MNI.nii", 902981, "f27b6443773af17c5f7f6572330d0066"],
+    [6175978, "1688_lesion_MNI.nii", 902981, "99a3916f839128ecb5e3e556ab42fbb8"],
+    [6175983, "1715_lesion_MNI.nii", 902981, "4db75898b38fab8fb8f5b547224170c1"],
+    [6175958, "1760_lesion_MNI.nii", 902981, "d5a2a212679874f7c38c13436cf4f413"],
+    [6175953, "1801_lesion_MNI.nii", 902981, "cdb70239ab666fdaac5852d6372c460f"],
+    [6176016, "1815_lesion_MNI.nii", 902981, "c0e0bfbb4e8805fc24149590180c0b2e"],
+    [6176044, "1848_lesion_MNI.nii", 902981, "1c8c0c8ef1f6f065addbd93297708761"],
+    [6176019, "1978_lesion_MNI.nii", 902981, "d64fdf80e45f239325af4e1250bec145"],
+    [6176055, "1986_lesion_MNI.nii", 902981, "c080c13626d90703975053f6b291f95f"],
+    [6175963, "2054_lesion_MNI.nii", 902981, "f6e6eb0cc7e9cf45f8de1b2491079ac6"],
+    [6175981, "2127_lesion_MNI.nii", 902981, "33fe56dc899be0775e0386d886ad29c6"],
+    [6176078, "2151_lesion_MNI.nii", 902981, "824071cca5cc7d56922e0305fa28c835"],
+    [6175960, "2194_lesion_MNI.nii", 902981, "3bf34a010c2c01e884b123d2d64f185b"],
+    [6176045, "2218_lesion_MNI.nii", 902981, "e315754a25a04ae1d6bb737e04a38285"],
+    [6175967, "2367_lesion_MNI.nii", 902981, "9a4bd892cd60acfd726ba7f09d1df771"],
+    [6176046, "2523_lesion_MNI.nii", 902981, "eab5d93dc5b81c2acd0741d8aac24a58"],
+    [6176037, "2553_lesion_MNI.nii", 902981, "cc4ace235e8edbcd6577c7553fcdb0ef"],
+    [6176073, "2570_lesion_MNI.nii", 902981, "bbaecd9a7e30d7372b3032fea137025a"],
+    [6175969, "2577_lesion_MNI.nii", 902981, "331275753acf9f5833389c158c34a1a3"],
+    [6176043, "2589_lesion_MNI.nii", 902981, "0a47a34d1bee1f15916e268a95c7b32c"],
+    [6176072, "2611_lesion_MNI.nii", 902981, "5a7c53dca8b19cd516fde9e8fe465a1d"],
+    [6175954, "2662_lesion_MNI.nii", 902981, "3e301100d7eb0903c7e2ccc74be1241a"],
+    [6175976, "2673_lesion_MNI.nii", 902981, "2b3208dd2e4362df71524b047182a4f9"],
+    [6175986, "2697_lesion_MNI.nii", 902981, "e73b02e18295ec08c090ac7e9b3a3565"],
+    [6175959, "2741_lesion_MNI.nii", 902981, "d49cfdae7197c7ba16378ff9dece3457"],
+    [6176053, "2748_lesion_MNI.nii", 902981, "40ae75b511b68eb536ed34cf9e5a3b74"],
+    [6175968, "2758_lesion_MNI.nii", 902981, "64add6a5393263f8c261c8edd677d65d"],
+    [6176080, "2764_lesion_MNI.nii", 902981, "6bdb008b9432face9c10a5142c671b68"],
+    [6176048, "2773_lesion_MNI.nii", 902981, "8f04f3f66e7ddffb17d4eb903b29b0a9"],
+    [6176033, "2815_lesion_MNI.nii", 902981, "08531dc6dbad8c982b1815a0bf504cf5"],
+    [6176002, "2825_lesion_MNI.nii", 902981, "a9886f56bd4091502bb28c55da06d7e2"],
+    [6175984, "2879_lesion_MNI.nii", 902981, "4bbf1229cd5db8d3d345875a65791a8f"],
+    [6176017, "2886_lesion_MNI.nii", 902981, "c9f7dc240f96e3567709ec3e876ee0f2"],
+    [6176038, "2890_lesion_MNI.nii", 902981, "6034516ae60895f91f7b0c6425a66990"],
+    [6175970, "2931_lesion_MNI.nii", 902981, "9cfb06ede2ebf571c533a3b34d80530c"],
+    [6176057, "2962_lesion_MNI.nii", 902981, "ff29dfc58566934e6f88153ea9532d86"],
+    [6175997, "2968_lesion_MNI.nii", 902981, "8d3af9f83d1b9da0c0127b4685111a81"],
+    [6176031, "2991_lesion_MNI.nii", 902981, "9d983cd3dcf2059aef17d9b80e068551"],
+    [6176021, "3048_lesion_MNI.nii", 902981, "ba7195fd171f8bdbc10178b24da1c13f"],
+    [6176077, "3053_lesion_MNI.nii", 902981, "5cb406bcf306d4b3a09bd2dc0a311b88"],
+    [6176070, "3062_lesion_MNI.nii", 902981, "e242b7639850ae38c7d8fc69fb59e99f"],
+    [6175993, "3085_lesion_MNI.nii", 902981, "4d2c76cb5f691198508601fafd093bd1"],
+    [6176051, "3126_lesion_MNI.nii", 902981, "21103560dd4da9513a11aa2b8ac3f370"],
+    [6175996, "3127_lesion_MNI.nii", 902981, "be26c04ab2e0018444978b63022e0e52"],
+    [6176026, "3130_lesion_MNI.nii", 902981, "9d8c7181c1a7c8651d7bb0999e83cc2d"],
+    [6176010, "3131_lesion_MNI.nii", 902981, "bd92a3751f9471ec73d3b0ca8a07b1c1"],
+    [6175985, "3154_lesion_MNI.nii", 902981, "0904a2b55f1ebf31f4bdd5655f62d290"],
+    [6175987, "3155_lesion_MNI.nii", 902981, "a2af8f63b4383434b442e7fa2e038dee"],
+    [6175965, "3159_lesion_MNI.nii", 902981, "689667883aade9f85f1d11f27874464c"],
+    [6176076, "3165_lesion_MNI.nii", 902981, "d6855bc7512d41c9cef11aaa347ef923"],
+    [6175992, "3169_lesion_MNI.nii", 902981, "ee99e2d4bdae6917f26a031ab1058bf2"],
+    [6176005, "3172_lesion_MNI.nii", 902981, "b0f9a4a7be21f21076e3cac9f9a32ff0"],
+    [6176006, "3191_lesion_MNI.nii", 902981, "1e3f1da120ca3b34ebedd57ac1437638"],
+    [6176003, "r102_lesion_MNI.nii", 902981, "b10341d668d398f703d1c2ac31cfb445"],
+    [6176075, "r103_lesion_MNI.nii", 902981, "3db5ac6bc3852751c2f89dec9a38c301"],
+    [6176060, "r109_lesion_MNI.nii", 902981, "db5f174b2db2fdb6bd3ee87434d7f350"],
+    [6176039, "r110_lesion_MNI.nii", 902981, "351d8bf0f058d86df6b1a0aea980b16d"],
+    [6176007, "r112_lesion_MNI.nii", 902981, "bb3d01ec0c37a020e87772b1cd0a1ccd"],
+    [6176058, "r114_lesion_MNI.nii", 902981, "60c1e9eaa905c7a6085b1f4bb584c0d2"],
+    [6176036, "r120_lesion_MNI.nii", 902981, "bdcb55a1a3fc2d3ac5b1f3e59cd4a161"],
+    [6176062, "r121_lesion_MNI.nii", 902981, "9b54e4e188db4222f1b047485baaccc5"],
+    [6176001, "r123_lesion_MNI.nii", 902981, "260217f17196fea641a4a3db32666aa9"],
+    [6176065, "r131_lesion_MNI.nii", 902981, "94b8efc88c34ae58d23f2cdd07dccbcb"],
+    [6176009, "r134_lesion_MNI.nii", 902981, "f68de9d86084b8fd5d8f6e788f1d7faa"],
+    [6176042, "r138_lesion_MNI.nii", 902981, "ba5491fbc4d655819759b87eeaf171ac"],
+    [6175956, "r139_lesion_MNI.nii", 902981, "b99d9f7e16b22aa3387fb021ca29c473"],
+    [6176018, "r143_lesion_MNI.nii", 902981, "e89ebf719a13854c16731cbb2dcef293"],
+    [6175988, "r145_lesion_MNI.nii", 902981, "0cf8ad94112b21e53fca13dac9ee4093"],
+    [6176061, "r146_lesion_MNI.nii", 902981, "c2ccbdc6ec282f31e8375b17b37f75ff"],
+    [6176041, "r147_lesion_MNI.nii", 902981, "9d49199d7d6574a6cae790c201f92170"],
+    [6176049, "r148_lesion_MNI.nii", 902981, "602b18b9052224f60e75698811d679f7"],
+    [6176000, "r149_lesion_MNI.nii", 902981, "4afb408c5c5f4b2d6f49a9d2990ae33a"],
+    [6176068, "r151_lesion_MNI.nii", 902981, "6bf3b0860685ac552b4bc007ca3350e0"],
+    [6175999, "r158_lesion_MNI.nii", 902981, "e0779b791f946224fa86d47c404350d8"],
+    [6176040, "r164_lesion_MNI.nii", 902981, "90db06089735164418c8b050fa953de9"],
+    [6176063, "r165_lesion_MNI.nii", 902981, "e989e199c3b4e5d46a7894b6b2b2d81b"],
+    [6176052, "r167_lesion_MNI.nii", 902981, "cc7ef597a552e72ce5c7cc0abf29641a"],
+    [6176028, "r168_lesion_MNI.nii", 902981, "e6136ec9637c024056e4c3f1c955d399"],
+    [6176079, "r170_lesion_MNI.nii", 902981, "da9a7a1cf8cb3ee04eb3e393d5434ee7"],
+    [6176015, "r171_lesion_MNI.nii", 902981, "56f2850df216d5e822949ceca100caf1"],
+    [6176032, "r176_lesion_MNI.nii", 902981, "d5deabb516fa1d0da252a5c2ef3d2a8c"],
+    [6176034, "r177_lesion_MNI.nii", 902981, "d7e7158bab0bba6c07996e234a478af1"],
+    [6175979, "r179_lesion_MNI.nii", 902981, "f64f7758cd193373d7a804111a025151"],
+    [6176023, "r182_lesion_MNI.nii", 902981, "e51c832d343ff8db17a63a06ee535609"],
+    [6175957, "r183_lesion_MNI.nii", 902981, "5e693f0c9d6bf50e4ce9ff3dfd49bbfc"],
+    [6176011, "r184_lesion_MNI.nii", 902981, "3eb5f3a737117106f6de722f4522be74"],
+    [6175964, "r185_lesion_MNI.nii", 902981, "ba57346e854fae6bbfdfee32ebd31e32"],
+    [6176066, "r187_lesion_MNI.nii", 902981, "ad417932e086f495a9545301f4db6efd"],
+    [6176059, "r189_lesion_MNI.nii", 902981, "4bd6bf4685bddc8cbe9da946d6dd3e19"],
+    [6175966, "r190_lesion_MNI.nii", 902981, "5309b87baba175662e9b39567eb66ca3"],
+    [6176004, "r191_lesion_MNI.nii", 902981, "ccd566e07c5ac1a19d52ec55d3520ab2"],
+    [6175962, "r193_lesion_MNI.nii", 902981, "3257a2ff32bd948eb7bbaa1f055f1cb6"],
+    [6175989, "r194_lesion_MNI.nii", 902981, "b6c4c565560cfe61b83035e05c8e9f5a"],
+    [6176064, "r195_lesion_MNI.nii", 902981, "e5d11d98bf1c7f6c8c21a382cc31f85e"],
+    [6176050, "r204_lesion_MNI.nii", 902981, "88a8c746151e6e31d63acbc6c912e71d"],
+    [6176012, "r206_lesion_MNI.nii", 902981, "89611c13afd037607dbd879fb732fb88"],
+    [6175977, "r214_lesion_MNI.nii", 902981, "b678fb9ed189a8aec178c03b3215cc48"],
+    [6175973, "r215_lesion_MNI.nii", 902981, "54461f912daada1bfbab09e636974965"],
+    [6176014, "r219_lesion_MNI.nii", 902981, "f9aab8ace25a99e3497d1d30b77131bb"],
+    [6175994, "r224_lesion_MNI.nii", 902981, "74ea52e5e95a9e74755aa56a21b999ee"],
+    [6175991, "r225_lesion_MNI.nii", 902981, "58df67b0bf162f03d670fa2dbed45867"],
+    [6175974, "r227_lesion_MNI.nii", 902981, "9fc36c10f12ea3573182b4bfe34db5d6"],
+    [6175961, "r232_lesion_MNI.nii", 902981, "77316782340175236c0d4cec98744e80"],
+    [6176071, "r233_lesion_MNI.nii", 902981, "9aedcfe922e4c746dcbc953e954181e4"],
+    [6175955, "r234_lesion_MNI.nii", 902981, "a0a449068adfbf6fe45a6009bd9f0e2b"],
+    [6176067, "r235_lesion_MNI.nii", 902981, "3a30d6bb77954d0db4fcac3c9037adf3"],
+    [6176020, "r241_lesion_MNI.nii", 902981, "e29e46b4c779622035f87b032e733197"],
+    [6176074, "r242_lesion_MNI.nii", 902981, "07a28f1f684793a7f9de41a3e1b3b1c6"],
+    [6175975, "r243_lesion_MNI.nii", 902981, "a01635790c1238e275d9917abb415e8e"],
+    [6176047, "r244_lesion_MNI.nii", 902981, "8d6600270c3d42cacf86bc0953d1f634"],
+    [6175980, "r247_lesion_MNI.nii", 902981, "c1274dd4aeb1f2dc15ed63362e5106e1"],
+    [6176013, "r248_lesion_MNI.nii", 902981, "fdbb9c3c787eba4fa863bfa6b2619a7c"],
+    [6176024, "r249_lesion_MNI.nii", 902981, "b94446b44a1dbbe5155c617ba95ed282"],
+    [6176056, "r252_lesion_MNI.nii", 902981, "2af96ad1cc16091a5a90bafd334b1d85"],
+    [6175998, "r255_lesion_MNI.nii", 902981, "f2a9570d754da8b5dd31a5071f782acf"]
+   ]
+   },
+   "study": {
+    "name": "Tutorial: addiction lesions (Joutsa 2022)",
+    "group": "case",
+    "columns": {}
+   },
+   "teaches": [
+    "Cohort diagnostics and the overlap map",
+    "Lesion network mapping of every lesion with a connectome",
+    "The group map"
+   ],
+   "steps": [
+    "Download and build the study (about 116 MB, 129 masks, 2 mm MNI).",
+    "Open Cohort diagnostics and the lesion overview: look at the overlap map and the lesion volumes.",
+    "Get a connectome (Get a connectome...), then map the network of every lesion on the Map tab.",
+    "Look at the group map. There are no labels or scores, so contrast and symptom tabs are not available."
+   ],
+   "volume_covariate": null,
+   "notes": "The masks are published without labels. Every row is a case."
+  },
+  {
+   "id": "soop_nihss",
+   "title": "Acute stroke and NIHSS (SOOP)",
+   "summary": "Lesion masks of acute and chronic stroke on diffusion images (native space) with the NIH Stroke Scale at admission. Normalize to MNI first.",
+   "licence": "CC0-1.0",
+   "badge": "green",
+   "terms_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+   "citation": "Rorden C, Absher J, Newman-Norlund R. Stroke Outcome Optimization Project (SOOP). OpenNeuro ds004889 v1.1.2. doi:10.18112/openneuro.ds004889.v1.1.2",
+   "homepage": "https://openneuro.org/datasets/ds004889",
+   "native": true,
+   "space": "native",
+   "size_bytes": 4295952,
+   "n_subjects": 1455,
+   "scan_bytes_each": 730000,
+   "source": {
+    "type": "s3",
+    "base": "https://s3.amazonaws.com/openneuro.org",
+    "dataset": "ds004889",
+    "mask_prefix": "ds004889/derivatives/lesion_masks/",
+    "mask_regex": "^(?P<rel>sub-(?P<sid>[0-9]+)/dwi/sub-[0-9]+_space-TRACE_desc-lesion_mask\\.nii\\.gz)$",
+    "table": "ds004889/participants.tsv",
+    "scan": {
+     "root": "ds004889/",
+     "replace": [
+      [
+       "_space-TRACE_desc-lesion_mask\\.nii\\.gz$",
+       "_rec-TRACE_dwi.nii.gz"
+      ]
+     ],
+     "modality": "dwi"
+    },
+    "expected": {
+     "masks": 1455,
+     "bytes": 4186151
+    }
+   },
+   "study": {
+    "name": "Tutorial: acute stroke NIHSS (SOOP)",
+    "group": "case",
+    "columns": {
+     "nihss": {
+      "role": "score",
+      "type": "numeric",
+      "units": "score",
+      "description": "NIH Stroke Scale at admission"
+     },
+     "gs_rankin_6isdeath": {
+      "role": "score",
+      "type": "numeric",
+      "units": "score",
+      "description": "Rankin score at discharge (6 is death)"
+     },
+     "age": {
+      "role": "covariate",
+      "type": "numeric",
+      "units": "years",
+      "description": "Age in years at the scan (clamped to 89)"
+     },
+     "sex": {
+      "role": "covariate",
+      "type": "categorical",
+      "levels": {
+       "F": "female",
+       "M": "male"
+      }
+     },
+     "bmi": {
+      "role": "covariate",
+      "type": "numeric",
+      "description": "Body mass index"
+     },
+     "race": {
+      "role": "metadata",
+      "type": "categorical",
+      "levels": {
+       "b": "Black or African American",
+       "w": "White"
+      },
+      "description": "Race and ethnicity code from the health record"
+     },
+     "acuteischaemicstroke": {
+      "role": "metadata",
+      "type": "categorical",
+      "levels": {
+       "0": "Not acute ischemic stroke",
+       "1": "Acute ischemic stroke"
+      },
+      "description": "Acute ischemic stroke diagnosed at admission"
+     },
+     "priorstroke": {
+      "role": "metadata",
+      "type": "categorical",
+      "levels": {
+       "0": "No chronic stroke",
+       "1": "Previous chronic stroke"
+      },
+      "description": "Evidence of a prior stroke"
+     },
+     "etiology": {
+      "role": "metadata",
+      "type": "text",
+      "description": "Stroke etiology"
+     }
+    }
+   },
+   "teaches": [
+    "Native-space masks: normalize first",
+    "A symptom score and the lesion volume covariate",
+    "Reviewing the normalization QC"
+   ],
+   "steps": [
+    "Download and build the study. Tick the scans (about 730 KB each) when you want to normalize in the app.",
+    "Normalize to MNI (Library > Normalization, or `normalize batch`) and review the normalization QC; only rows that pass go into analyses.",
+    "Open Cohort diagnostics and the overlap map.",
+    "Get a connectome and run sLNM for nihss with lesion volume (volume_ml) as a covariate."
+   ],
+   "volume_covariate": "The NIH Stroke Scale rises with lesion size, so a map of nihss mostly shows where large lesions are. Keep lesion volume (volume_ml) as a covariate; sLNM includes it unless you turn it off with a written reason.",
+   "notes": "The masks are the combined acute and chronic lesion masks drawn on the diffusion (TRACE) images. About one in eight subjects has no row in participants.tsv and so no score."
+  },
+  {
+   "id": "arc_aphasia",
+   "title": "Chronic aphasia and WAB-AQ (ARC)",
+   "summary": "Lesion masks of chronic stroke on native T2-weighted images with the Western Aphasia Battery aphasia quotient. Aphasia severity is largely a volume effect: this is the tutorial for the volume covariate.",
+   "licence": "CC0-1.0",
+   "badge": "green",
+   "terms_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+   "citation": "Gibson M, Newman-Norlund R, Bonilha L, Fridriksson J, Hickok G, Hillis AE, den Ouden DB, Rorden C. The Aphasia Recovery Cohort, an open-source chronic stroke repository. Sci Data 11, 981 (2024). doi:10.1038/s41597-024-03819-7. Data: OpenNeuro ds004884 v1.0.2, doi:10.18112/openneuro.ds004884.v1.0.2",
+   "homepage": "https://openneuro.org/datasets/ds004884",
+   "native": true,
+   "space": "native",
+   "size_bytes": 5697300,
+   "n_subjects": 228,
+   "scan_bytes_each": 4400000,
+   "source": {
+    "type": "s3",
+    "base": "https://s3.amazonaws.com/openneuro.org",
+    "dataset": "ds004884",
+    "mask_prefix": "ds004884/derivatives/lesion_masks/",
+    "mask_regex": "^(?P<rel>sub-(?P<sid>[A-Za-z0-9]+)/ses-[A-Za-z0-9]+/anat/[^/]+_desc-lesion_mask\\.nii\\.gz)$",
+    "table": "ds004884/participants.tsv",
+    "scan": {
+     "root": "ds004884/",
+     "replace": [
+      [
+       "_desc-lesion_mask\\.nii\\.gz$",
+       ".nii.gz"
+      ]
+     ],
+     "modality": "anat"
+    },
+    "expected": {
+     "masks": 228,
+     "bytes": 5688846
+    }
+   },
+   "study": {
+    "name": "Tutorial: chronic aphasia WAB-AQ (ARC)",
+    "group": "case",
+    "columns": {
+     "wab_aq": {
+      "role": "score",
+      "type": "numeric",
+      "units": "score",
+      "description": "Western Aphasia Battery-Revised Aphasia Quotient"
+     },
+     "wab_days": {
+      "role": "covariate",
+      "type": "numeric",
+      "units": "days",
+      "description": "Days since the stroke when the WAB was collected"
+     },
+     "age_at_stroke": {
+      "role": "covariate",
+      "type": "numeric",
+      "units": "years",
+      "description": "Age at the time of the stroke"
+     },
+     "sex": {
+      "role": "covariate",
+      "type": "categorical",
+      "levels": {
+       "F": "female",
+       "M": "male"
+      }
+     },
+     "race": {
+      "role": "metadata",
+      "type": "categorical",
+      "levels": {
+       "b": "Black",
+       "w": "White"
+      },
+      "description": "Race as reported by the participant"
+     },
+     "wab_type": {
+      "role": "metadata",
+      "type": "categorical",
+      "description": "Aphasia type from the Western Aphasia Battery",
+      "levels": {
+       "Anomic": "Anomic",
+       "Broca": "Broca's aphasia",
+       "Conduction": "Conduction",
+       "Global": "Global",
+       "TranscorticalMotor": "Transcortical motor",
+       "Wernicke": "Wernicke's",
+       "none": "Not aphasic by the WAB cut-offs"
+      }
+     }
+    },
+    "value_map": {
+     "wab_type": {
+      "None": "none"
+     }
+    }
+   },
+   "teaches": [
+    "The volume covariate in sLNM",
+    "Native-space masks: normalize first",
+    "Time since stroke as a second covariate"
+   ],
+   "steps": [
+    "Download and build the study. Tick the scans (about 4.4 MB each) when you want to normalize in the app.",
+    "Normalize to MNI (Library > Normalization, or `normalize batch`) and review the normalization QC.",
+    "Look at lesion volume against wab_aq in Cohort diagnostics: larger lesions go with lower scores.",
+    "Get a connectome and run sLNM for wab_aq twice: with the default volume covariate, then without it (a written reason is required) and compare the maps."
+   ],
+   "volume_covariate": "Aphasia severity is largely a volume effect: the larger the lesion, the lower the aphasia quotient. Without lesion volume as a covariate the map for wab_aq mostly shows where large lesions lie. sLNM adjusts for volume_ml by default; turning that off needs a written reason that goes into the methods text. Time since stroke (wab_days) and age at stroke are also set as covariates.",
+   "notes": "One mask per subject (the session with a T2-weighted scan). Subjects without an aphasia type are not aphasic by the WAB cut-offs (wab_type none)."
+  },
+  {
+   "id": "lesymap_groundtruth",
+   "title": "Simulated ground truth (LESYMAP)",
+   "summary": "Lesion masks with simulated scores from the LESYMAP package, on the Colin27 grid. The region behind the score is known, so you can check that a map finds it. Download the package yourself, then choose its folder.",
+   "licence": "Apache-2.0",
+   "badge": "green",
+   "terms_url": "https://www.apache.org/licenses/LICENSE-2.0",
+   "citation": "Pustina D, Avants B, Faseyitan OK, Medaglia JD, Coslett HB. Improved accuracy of lesion to symptom mapping with multivariate sparse canonical correlations. Neuropsychologia 115, 154-166 (2018). doi:10.1016/j.neuropsychologia.2017.08.027. LESYMAP: https://github.com/dorianps/LESYMAP",
+   "homepage": "https://github.com/dorianps/LESYMAP",
+   "native": false,
+   "space": "MNIColin27",
+   "size_bytes": null,
+   "n_subjects": null,
+   "source": {
+    "type": "folder",
+    "link": "https://github.com/dorianps/LESYMAP",
+    "grid": "SPM-1mm",
+    "grid_space": "MNIColin27",
+    "exclude_regex": "(template|colin|atlas|brain|aal|mask_of)",
+    "table_regex": "(behaviou?r|scores?|participants|symptom)[^/]*\\.(csv|tsv)$",
+    "score_columns": [
+     "score",
+     "behavior",
+     "behaviour",
+     "symptom"
+    ]
+   },
+   "study": {
+    "name": "Tutorial: simulated ground truth (LESYMAP)",
+    "group": "case",
+    "columns": {}
+   },
+   "teaches": [
+    "A symptom map with a known answer",
+    "Voxel-based lesion-symptom mapping (VLSM)",
+    "Why the volume covariate matters"
+   ],
+   "steps": [
+    "Get the LESYMAP package from its page (a link, nothing is downloaded by the app) and choose the folder that holds the lesion masks and the score table.",
+    "Build the study: the lesion masks are on the Colin27 grid (the app records your answer to the grid question).",
+    "Run VLSM on the score with lesion volume as a covariate and compare the map with the region the simulation used."
+   ],
+   "volume_covariate": "Simulated scores can still correlate with lesion size. Keep lesion volume as a covariate and check that the map still finds the true region.",
+   "notes": "The folder layout of the package is detected, not assumed: the masks are the NIfTI files that are not templates, and the scores come from the first behavior or scores table."
+  }
+ ]
+}

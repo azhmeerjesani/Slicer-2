@@ -44,6 +44,8 @@
 
 // ITK includes
 #include <itkArchetypeSeriesFileNames.h>
+#include <itkImageIOBase.h>
+#include <itkImageIOFactory.h>
 
 // STD includes
 #include <algorithm>
@@ -206,6 +208,32 @@ bool vtkSlicerVolumesReader::Load(vtkMRMLIOProperties* properties)
 }
 
 //----------------------------------------------------------------------------
+namespace
+{
+/// Return true if the file contains an image that has more than one slice (a 3D or higher dimensional volume).
+/// Only the image header is read.
+bool IsVolumeFile(const std::string& filePath)
+{
+  try
+  {
+    itk::ImageIOBase::Pointer imageIO = itk::ImageIOFactory::CreateImageIO(filePath.c_str(), itk::ImageIOFactory::IOFileModeEnum::ReadMode);
+    if (imageIO.IsNull())
+    {
+      return false;
+    }
+    imageIO->SetFileName(filePath);
+    imageIO->ReadImageInformation();
+    return imageIO->GetNumberOfDimensions() >= 3 && imageIO->GetDimensions(2) > 1;
+  }
+  catch (...)
+  {
+    // For example, an itk::ExceptionObject or a std::exception from a malformed header
+    return false;
+  }
+}
+} // namespace
+
+//----------------------------------------------------------------------------
 std::string vtkSlicerVolumesReader::ExamineFileList(std::vector<std::string>& fileList, vtkMRMLIOProperties* ioProperties)
 {
   if (!ioProperties)
@@ -219,6 +247,12 @@ std::string vtkSlicerVolumesReader::ExamineFileList(std::vector<std::string>& fi
   for (size_t fileIndex = 0; fileIndex < fileList.size(); ++fileIndex)
   {
     const std::string archetypeFile = fileList[fileIndex];
+    if (IsVolumeFile(archetypeFile))
+    {
+      // A file that contains a 3D (or higher dimensional) image is a complete volume, never a slice
+      // of an image series, even if its name is numbered (for example sub-001_lesion.nii.gz ... sub-100_lesion.nii.gz).
+      continue;
+    }
     std::vector<std::string> candidateFiles;
     try
     {
@@ -271,6 +305,11 @@ void vtkSlicerVolumesReader::GetOptionsDescription(vtkMRMLIOOptionsDescription* 
   // Because '_' is considered as a word character (\w), \b
   // doesn't consider '_' as a word boundary.
   static const std::regex labelMapName(R"((\b|_)([Ll]abel(s)?)(\b|_))");
+  // Lesion, mask and region of interest images are usually binary labelmaps (whole words only, so that
+  // for example "masked_T1" is not a labelmap). Probability maps (for example "lesion_prob" or
+  // "desc-lesionProb_mask") have fractional values, so they are not labelmaps.
+  static const std::regex lesionMaskName(R"((\b|_)([Ll]esion(s)?|LESION(S)?|[Mm]ask(s)?|MASK(S)?|[Rr]oi(s)?|ROI(S|s)?)(\b|_))");
+  static const std::regex probabilityName(R"([Pp]rob|PROB)");
   static const std::regex segName(R"((\b|_)([Ss]eg)(\b|_))");
   static const std::regex onlyNumber(R"(^[0-9.\-_@()~]+$)");
   for (const std::string& filePath : description->GetFileNames())
@@ -290,7 +329,8 @@ void vtkSlicerVolumesReader::GetOptionsDescription(vtkMRMLIOOptionsDescription* 
       std::string suffix = (lastDot == std::string::npos) ? std::string() : fileName.substr(lastDot + 1);
       onlyNumberInExtension = !suffix.empty() && suffix.find_first_not_of("0123456789") == std::string::npos;
     }
-    if (std::regex_search(fileBaseName, labelMapName) || std::regex_search(fileBaseName, segName))
+    if (std::regex_search(fileBaseName, labelMapName) || std::regex_search(fileBaseName, segName)
+        || (std::regex_search(fileBaseName, lesionMaskName) && !std::regex_search(fileBaseName, probabilityName)))
     {
       hasLabelMapName = true;
     }

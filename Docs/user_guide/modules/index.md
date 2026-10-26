@@ -1,5 +1,19 @@
 # Modules
 
+**Slicer Studio**
+
+```{toctree}
+:maxdepth: 1
+studio.md
+lesionnetworkmapping.md
+lnm_statistics.md
+lnm_data.md
+lnm_intake.md
+../install_studio.md
+../studio_coming_from_slicer.md
+../studio_projects.md
+```
+
 **Main modules**
 
 ```{toctree}

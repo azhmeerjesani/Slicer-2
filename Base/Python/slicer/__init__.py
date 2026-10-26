@@ -224,6 +224,32 @@ for kit in available_kits:
 from .ScriptedFileIO import vtkSlicerScriptedFileReader, vtkSlicerScriptedFileWriter  # noqa: F401
 
 # -----------------------------------------------------------------------------
+# Classes of the loadable-module Python wrappers imported on demand (setting
+# Studio/LazyPythonWrappers): ``slicer.<Class>`` imports the wrapper that provides
+# the class, using the index registered by slicer.util._registerLazyWrapperIndex.
+# Without a registered index, these behave as without them.
+
+
+def __getattr__(name):
+    import sys
+
+    util = sys.modules.get(__name__ + ".util")
+    if name.startswith("__") or util is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return util._resolveLazyWrapperAttribute(name)
+
+
+def __dir__():
+    import sys
+
+    names = set(globals())
+    util = sys.modules.get(__name__ + ".util")
+    if util is not None:
+        names.update(util._lazyWrapperClassNames())
+    return sorted(names)
+
+
+# -----------------------------------------------------------------------------
 # Cleanup: Removing things the user shouldn't have to see.
 
 del _createModule

@@ -118,7 +118,9 @@ void qSlicerSequencesModulePrivate::addToolBar()
   QSettings settings;
   settings.beginGroup("MainWindow");
   bool restore = settings.value("RestoreGeometry", false).toBool();
-  if (restore)
+  // A main window with the property SlicerDeferRestoreState restores its state itself when it is first shown,
+  // after all modules have added their toolbars.
+  if (restore && !mainWindow->property("SlicerDeferRestoreState").toBool())
   {
     mainWindow->restoreState(settings.value("windowState").toByteArray());
   }

@@ -32,6 +32,10 @@
 // We mean it.
 //
 
+// Qt includes
+#include <QIcon>
+#include <QSizePolicy>
+
 // CTK includes
 #include <ctkPimpl.h>
 #include <ctkVTKObject.h>
@@ -55,6 +59,8 @@ class ctkDynamicSpacer;
 class ctkSignalMapper;
 class ctkDoubleSpinBox;
 class ctkVTKSliceView;
+class QActionGroup;
+class QLabel;
 class QSpinBox;
 class qMRMLSliderWidget;
 class vtkMRMLSliceNode;
@@ -79,6 +85,21 @@ public:
 
   void init() override;
   void setColor(QColor color) override;
+  void updateFlatStyle() override;
+
+  /// Create the widgets of the flat bar (orientation button, slice readout, link button).
+  void setupFlatBar();
+  /// Update the readout "S 96.0 mm   97 / 193", the orientation button and the view label tooltip
+  /// of the flat bar (no-op in the classic presentation).
+  void updateFlatBarFromMRMLSliceNode();
+  /// Update the flat bar when the event loop runs (with the offset slider): the slice node and the slice logic
+  /// are modified several times per slice change, and each separate repaint of the bar costs a window update.
+  void requestFlatBarUpdate();
+  /// Hide the less important flat bar widgets when the bar is narrow.
+  void updateFlatBarWidgetsVisibility();
+  /// Select the Reformat module (through the layout manager of the application), or show the
+  /// reformat widget when no module can be selected.
+  void openReformat();
 
   void setupLinkedOptionsMenu();
   void setupReformatOptionsMenu();
@@ -105,6 +126,15 @@ public:
   /// Create a list of orientation containing the regular presets and also
   /// the "Reformat" string if sliceToRAS is different one of the preset.
   static void updateSliceOrientationSelector(vtkMRMLSliceNode* sliceNode, QComboBox* sliceOrientationSelector);
+
+  /// Update the spin boxes of the popup menus that show slice node properties (field of view,
+  /// slice model). They are only updated while the popup is visible, and when it is shown.
+  void updatePopupWidgetsFromMRMLSliceNode();
+
+  /// Update the range, step and value of the slice offset slider from the slice logic.
+  void updateSliceOffsetSliderFromSliceLogic();
+
+  bool eventFilter(QObject* object, QEvent* event) override;
 
 public slots:
   /// Update widget state when the scene is modified
@@ -173,6 +203,15 @@ public:
   ctkDynamicSpacer* SliderSpacer;
   /// Slicer offset resolution without applying display scaling.
   double SliceOffsetResolution{ 1.0 };
+  /// Slice offset range last set with setSliceOffsetRange() (valid if SliceOffsetRangeSet is true).
+  /// The slider range is only set again when it changes.
+  double SliceOffsetRange[2]{ 0.0, 0.0 };
+  bool SliceOffsetRangeSet{ false };
+  /// True while an update of the slice offset slider from the slice logic is queued: the slice logic can be
+  /// modified several times per slice change, the slider is only updated once.
+  bool SliceOffsetSliderUpdatePending{ false };
+  /// True if the popup widgets need an update when the popup is shown
+  bool PopupWidgetsUpdatePending{ false };
   double LastLabelMapOpacity;
   double LastForegroundOpacity;
   double LastBackgroundOpacity;
@@ -201,6 +240,9 @@ public:
 
   QSize ViewSize;
 
+  QIcon AutomaticSliceSpacingIcon;
+  QIcon ManualSliceSpacingIcon;
+
   ctkSignalMapper* OrientationMarkerTypesMapper;
   ctkSignalMapper* OrientationMarkerSizesMapper;
 
@@ -212,6 +254,45 @@ public:
   QActionGroup* SlabReconstructionTypesActions{ nullptr };
 
   bool ShowSliceOffsetSlider{ true };
+
+  // Flat bar (qMRMLViewControllerBar::flatStyle)
+  QToolButton* OrientationButton{ nullptr };
+  QMenu* OrientationMenu{ nullptr };
+  QActionGroup* OrientationActions{ nullptr };
+  QAction* ReformatAction{ nullptr };
+  QAction* ResetOrientationAction{ nullptr };
+  QLabel* SliceIndexLabel{ nullptr };
+  /// Holds the readout in the bar layout: its minimum width is 1 px, so the readout never sets the minimum width
+  /// of the bar (the readout is shortened, then hidden, when the bar is narrow); the label keeps a fixed width
+  /// so that a new text does not lay out the bar again
+  QWidget* SliceIndexHolder{ nullptr };
+  /// Readout texts: "S 96.0 mm   97 / 193" and the short form "97 / 193" (or "S 96.0 mm" without an image)
+  QString FullReadoutText;
+  QString CompactReadoutText;
+  /// Slice index part of the full readout ("49 / 97"), shown in the tertiary text color
+  QString ReadoutIndexText;
+  /// The bar shows the short readout (updateFlatBarWidgetsVisibility)
+  bool CompactReadout{ false };
+  /// Width reserved for each readout form: it only grows, so the label does not change size at every slice
+  int FullReadoutWidth{ 0 };
+  int CompactReadoutWidth{ 0 };
+  /// Show the readout text of the current form in the label, with its reserved width.
+  void updateReadoutLabel();
+  /// Classic size policies of the widgets whose size hint the flat bar ignores
+  QSizePolicy ClassicFitSizePolicy;
+  QSizePolicy ClassicSliderSizePolicy;
+  bool ClassicSizePoliciesRecorded{ false };
+  QToolButton* BarLinkButton{ nullptr };
+  QIcon FlatFitIcon;
+  QString ClassicViewLabelToolTip;
+  QIcon ClassicFitIcon;
+  QString ClassicFitToolTip;
+  QString ClassicSpinBoxStyleSheet;
+  bool ClassicSpinBoxVisible{ true };
+  bool ClassicMoreButtonChecked{ false };
+  bool ClassicMoreButtonHidden{ false };
+  bool ClassicStateRecorded{ false };
+  bool FlatBarUpdatePending{ false };
 };
 
 #endif

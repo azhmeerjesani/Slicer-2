@@ -19,6 +19,7 @@
 ==============================================================================*/
 
 // Qt includes
+#include <QApplication>
 #include <QDebug>
 #include <QDropEvent>
 #include <QShowEvent>
@@ -411,6 +412,17 @@ void qMRMLThreeDView::setMRMLScene(vtkMRMLScene* newScene)
   {
     this->setMRMLViewNode(nullptr);
   }
+
+  // Until a view node is set, show the background of new views of the scene
+  // (the scene default view node may have another background than vtkMRMLViewNode).
+  vtkMRMLViewNode* defaultViewNode = newScene ? vtkMRMLViewNode::SafeDownCast(newScene->GetDefaultNodeByClass("vtkMRMLViewNode")) : nullptr;
+  if (!d->MRMLViewNode && defaultViewNode)
+  {
+    double* backgroundColor = defaultViewNode->GetBackgroundColor();
+    double* backgroundColor2 = defaultViewNode->GetBackgroundColor2();
+    this->setBackgroundColor(QColor::fromRgbF(backgroundColor[0], backgroundColor[1], backgroundColor[2]));
+    this->setBackgroundColor2(QColor::fromRgbF(backgroundColor2[0], backgroundColor2[1], backgroundColor2[2]));
+  }
 }
 
 //---------------------------------------------------------------------------
@@ -587,6 +599,40 @@ void qMRMLThreeDView::showEvent(QShowEvent* event)
 {
   this->Superclass::showEvent(event);
   this->scheduleRender();
+}
+
+//------------------------------------------------------------------------------
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+void qMRMLThreeDView::enterEvent(QEnterEvent* event)
+#else
+void qMRMLThreeDView::enterEvent(QEvent* event)
+#endif
+{
+  this->Superclass::enterEvent(event);
+  // Focus follows mouse is enabled by the application (for example, the Slicer Studio interface)
+  // with a dynamic property, so that it is off by default and can be set from Python.
+  if (!qApp || !qApp->property("SlicerFocusFollowsMouse").toBool())
+  {
+    return;
+  }
+  QWidget* vtkWidget = this->VTKWidget();
+  if (!vtkWidget || vtkWidget->hasFocus() || !this->isActiveWindow())
+  {
+    return;
+  }
+  if (QApplication::activePopupWidget() || QApplication::activeModalWidget())
+  {
+    return;
+  }
+  QWidget* focusWidget = QApplication::focusWidget();
+  if (focusWidget
+      && (focusWidget->inherits("QLineEdit") || focusWidget->inherits("QAbstractSpinBox") || focusWidget->inherits("QTextEdit") || focusWidget->inherits("QPlainTextEdit")
+          || focusWidget->inherits("ctkConsole")))
+  {
+    // Do not interrupt text input
+    return;
+  }
+  vtkWidget->setFocus(Qt::MouseFocusReason);
 }
 
 //------------------------------------------------------------------------------

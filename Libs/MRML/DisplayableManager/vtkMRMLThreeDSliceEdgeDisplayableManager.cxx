@@ -76,6 +76,7 @@ public:
   void UpdateAllSliceEdgePipelines();
   // return with true if rendering is required
   void UpdateSliceEdgeWidgetRepresentation(vtkMRMLSliceNode*, vtkMRMLSliceEdgeWidgetRepresentation*);
+  bool IsSliceEdgeShown(vtkMRMLSliceNode* sliceNode);
   void UpdateSliceEdgeWidgetRepresentationVisibility(vtkMRMLSliceEdgeWidgetRepresentation* rep, vtkMRMLSliceNode* sliceNode);
   void UpdateSliceEdgeWidgetRepresentationMesh(vtkMRMLSliceEdgeWidgetRepresentation* rep, vtkMRMLSliceNode* sliceNode);
 
@@ -231,6 +232,13 @@ vtkMRMLSliceNode* vtkMRMLThreeDSliceEdgeDisplayableManager::vtkInternal::GetSlic
 }
 
 //---------------------------------------------------------------------------
+bool vtkMRMLThreeDSliceEdgeDisplayableManager::vtkInternal::IsSliceEdgeShown(vtkMRMLSliceNode* sliceNode)
+{
+  return sliceNode->IsDisplayableInThreeDView(this->External->GetMRMLViewNode()->GetID()) //
+         && sliceNode->GetSliceVisible() && sliceNode->GetSliceEdgeVisibility3D();
+}
+
+//---------------------------------------------------------------------------
 void vtkMRMLThreeDSliceEdgeDisplayableManager::vtkInternal::UpdateSliceEdgeWidgetRepresentationVisibility(vtkMRMLSliceEdgeWidgetRepresentation* rep, vtkMRMLSliceNode* sliceNode)
 {
   if (!rep || !sliceNode)
@@ -243,8 +251,7 @@ void vtkMRMLThreeDSliceEdgeDisplayableManager::vtkInternal::UpdateSliceEdgeWidge
     return;
   }
 
-  bool show = sliceNode->IsDisplayableInThreeDView(this->External->GetMRMLViewNode()->GetID()) //
-              && sliceNode->GetSliceVisible() && sliceNode->GetSliceEdgeVisibility3D();
+  bool show = this->IsSliceEdgeShown(sliceNode);
 
   bool isShown = renderer->HasViewProp(rep);
   if (show == isShown)
@@ -339,8 +346,12 @@ void vtkMRMLThreeDSliceEdgeDisplayableManager::vtkInternal::UpdateSliceEdgeWidge
     this->SliceEdgeWidgetRepresentations.find(sliceNode->GetID())->second = rep;
   }
 
-  // Update rep
-  this->UpdateSliceEdgeWidgetRepresentationMesh(rep, sliceNode);
+  // Update rep. A hidden edge needs neither a mesh update nor a render (for example while the slice
+  // that is not shown in 3D is browsed): its mesh is updated when it is shown again.
+  if (this->IsSliceEdgeShown(sliceNode))
+  {
+    this->UpdateSliceEdgeWidgetRepresentationMesh(rep, sliceNode);
+  }
   this->UpdateSliceEdgeWidgetRepresentationVisibility(rep, sliceNode);
 }
 

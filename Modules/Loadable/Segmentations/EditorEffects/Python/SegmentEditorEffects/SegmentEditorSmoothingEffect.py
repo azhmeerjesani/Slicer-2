@@ -138,10 +138,7 @@ If segments overlap, segment higher in the segments table will have priority. <b
         self.applyToAllVisibleSegmentsCheckBox.setVisible(smoothingMethod != JOINT_TAUBIN)
 
     def getKernelSizePixel(self):
-        selectedSegmentLabelmapSpacing = [1.0, 1.0, 1.0]
-        selectedSegmentLabelmap = self.scriptedEffect.selectedSegmentLabelmap()
-        if selectedSegmentLabelmap:
-            selectedSegmentLabelmapSpacing = selectedSegmentLabelmap.GetSpacing()
+        selectedSegmentLabelmapSpacing = self.segmentSpacing()
 
         # size rounded to nearest odd number. If kernel size is even then image gets shifted.
         kernelSizeMM = self.scriptedEffect.doubleParameter("KernelSizeMm")
@@ -155,14 +152,14 @@ If segments overlap, segment higher in the segments table will have priority. <b
         self.methodSelectorComboBox.blockSignals(wasBlocked)
 
         wasBlocked = self.kernelSizeMMSpinBox.blockSignals(True)
-        self.setWidgetMinMaxStepFromImageSpacing(self.kernelSizeMMSpinBox, self.scriptedEffect.selectedSegmentLabelmap())
+        self.setWidgetMinMaxStepFromImageSpacing(self.kernelSizeMMSpinBox, self.scriptedEffect.referenceGeometryImage())
         self.kernelSizeMMSpinBox.value = self.scriptedEffect.doubleParameter("KernelSizeMm")
         self.kernelSizeMMSpinBox.blockSignals(wasBlocked)
         kernelSizePixel = self.getKernelSizePixel()
         self.kernelSizePixel.text = f"{kernelSizePixel[0]}x{kernelSizePixel[1]}x{kernelSizePixel[2]} pixel"
 
         wasBlocked = self.gaussianStandardDeviationMMSpinBox.blockSignals(True)
-        self.setWidgetMinMaxStepFromImageSpacing(self.gaussianStandardDeviationMMSpinBox, self.scriptedEffect.selectedSegmentLabelmap())
+        self.setWidgetMinMaxStepFromImageSpacing(self.gaussianStandardDeviationMMSpinBox, self.scriptedEffect.referenceGeometryImage())
         self.gaussianStandardDeviationMMSpinBox.value = self.scriptedEffect.doubleParameter("GaussianStandardDeviationMm")
         self.gaussianStandardDeviationMMSpinBox.blockSignals(wasBlocked)
 
@@ -282,8 +279,15 @@ If segments overlap, segment higher in the segments table will have priority. <b
     def smoothSelectedSegment(self, maskImage=None, maskExtent=None):
         try:
             # Get modifier labelmap
-            modifierLabelmap = self.scriptedEffect.defaultModifierLabelmap()
-            selectedSegmentLabelmap = self.scriptedEffect.selectedSegmentLabelmap()
+            referenceGeometryImage = self.scriptedEffect.referenceGeometryImage()
+            if maskImage is None and maskExtent is None and referenceGeometryImage is not None:
+                # The whole segment is smoothed in a cropped region (see selectedSegmentLabelmapForSmoothing) and the result
+                # replaces the segment, therefore the result is stored in a new labelmap (with the reference geometry) instead of
+                # defaultModifierLabelmap(), which would allocate and clear a labelmap as large as the reference geometry.
+                modifierLabelmap = slicer.vtkOrientedImageData()
+                modifierLabelmap.ShallowCopy(referenceGeometryImage)
+            else:
+                modifierLabelmap = self.scriptedEffect.defaultModifierLabelmap()
 
             smoothingMethod = self.scriptedEffect.parameter("SmoothingMethod")
 
@@ -297,6 +301,7 @@ If segments overlap, segment higher in the segments table will have priority. <b
                 for idx in range(3):
                     standardDeviationPixel[idx] = standardDeviationMM / spacing[idx]
                     radiusPixel[idx] = int(standardDeviationPixel[idx] * radiusFactor) + 1
+                selectedSegmentLabelmap = self.selectedSegmentLabelmapForSmoothing(maskImage, maskExtent, radiusPixel)
                 if maskExtent:
                     clippedSelectedSegmentLabelmap = self.clipImage(selectedSegmentLabelmap, maskExtent, radiusPixel)
                 else:
@@ -327,6 +332,7 @@ If segments overlap, segment higher in the segments table will have priority. <b
             else:
                 # size rounded to nearest odd number. If kernel size is even then image gets shifted.
                 kernelSizePixel = self.getKernelSizePixel()
+                selectedSegmentLabelmap = self.selectedSegmentLabelmapForSmoothing(maskImage, maskExtent, [size // 2 for size in kernelSizePixel])
 
                 if maskExtent:
                     clippedSelectedSegmentLabelmap = self.clipImage(selectedSegmentLabelmap, maskExtent, kernelSizePixel)
@@ -365,6 +371,18 @@ If segments overlap, segment higher in the segments table will have priority. <b
 
         except IndexError:
             logging.error("apply: Failed to apply smoothing")
+
+    def selectedSegmentLabelmapForSmoothing(self, maskImage, maskExtent, kernelRadiusPixel):
+        """Get the selected segment labelmap for smoothing with a kernel of the specified radius (in voxels, for each axis).
+
+        When the whole segment is smoothed (no mask is specified) then the result replaces the segment ("Set" modification
+        mode clears the segment everywhere), therefore only the region around the segment needs to be processed:
+        voxels may only change within one kernel radius around the segment, and their new values depend on voxels within
+        one more kernel radius (for filters with two passes, such as opening and closing, the result is still identical).
+        """
+        if maskImage is not None or maskExtent is not None:
+            return self.scriptedEffect.selectedSegmentLabelmap()
+        return self.croppedSelectedSegmentLabelmap([2 * radius + 1 for radius in kernelRadiusPixel])
 
     def smoothMultipleSegments(self, maskImage=None, maskExtent=None):
         import vtkSegmentationCorePython as vtkSegmentationCore

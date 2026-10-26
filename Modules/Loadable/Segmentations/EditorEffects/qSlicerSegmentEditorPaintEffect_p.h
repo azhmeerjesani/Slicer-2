@@ -61,8 +61,13 @@ class QToolButton;
 class qMRMLSliceWidget;
 class qMRMLSliderWidget;
 class qMRMLSpinBox;
+class QTimer;
 class vtkActor2D;
+class vtkGlyph2D;
 class vtkGlyph3D;
+class vtkMatrix4x4;
+class vtkRegularPolygonSource;
+class vtkTrivialProducer;
 class vtkPoints;
 class vtkPolyDataNormals;
 class vtkPolyDataToImageStencil;
@@ -90,7 +95,8 @@ public:
   /// Update paint circle glyph
   void updateBrush(qMRMLWidget* viewWidget, BrushPipeline* brush);
 
-  /// Update brushes
+  /// Update brushes. The view that the mouse is in is always rendered, other views only if the brush
+  /// or the stroke feedback may have changed what they show.
   void updateBrushes();
 
   /// Update brush model (shape and position)
@@ -127,11 +133,37 @@ protected:
 
   bool brushPositionInWorld(qMRMLWidget* viewWidget, int brushPositionInView[2], double brushPosition_World[3]);
 
+  /// Radius of a sphere around the brush position that contains the brush model
+  double brushBoundingRadius();
+
+  /// Add the stroke points that have no feedback glyph yet to the feedback (glyphs only the new points)
+  void addFeedbackPoints();
+
+  /// Remove all points from the stroke feedback
+  void resetFeedback();
+
+  /// Show the brush size next to the brush for a short time (or while Shift is held)
+  void showBrushSizeHud();
+
+  /// Update text, position and visibility of the brush size display of a slice view
+  void updateBrushSizeHud(qMRMLWidget* viewWidget, BrushPipeline* pipeline);
+
+  /// Hide the brush size display if it is not requested anymore
+  void hideBrushSizeHudIfExpired();
+
+  /// True if [ and ] keys resize the brush (Studio/BracketKeysResizeBrush setting,
+  /// always false when testing or without main window)
+  bool bracketKeysResizeBrush() const;
+
+  /// True if the brush size display may be shown (false when testing or without main window)
+  bool brushSizeHudEnabled() const;
+
   std::string segmentAtPosition(qMRMLWidget* viewWidget, double* ras);
 
 public slots:
   void onDiameterUnitsClicked();
   void onDiameterValueChanged(double);
+  void onBrushSizeHudTimeout();
 
 public:
   QIcon PaintIcon;
@@ -149,10 +181,42 @@ public:
     WorldOriginToModifierLabelmapIjkTransform; // transforms from polydata source to modifierLabelmap's IJK coordinate system (brush origin in IJK origin)
   vtkSmartPointer<vtkPolyDataToImageStencil> BrushPolyDataToStencil;
 
-  vtkSmartPointer<vtkGlyph3D> FeedbackGlyphFilter;
-
   vtkSmartPointer<vtkPoints> PaintCoordinates_World;
-  vtkSmartPointer<vtkPolyData> FeedbackPointsPolyData;
+
+  /// Stroke feedback, built incrementally: only the new stroke points are glyphed (by reusable glyph
+  /// filters) and the glyphs are appended to persistent polydata, so the pipeline has a constant size.
+  /// Brush glyphs in world coordinates (shown in 3D views and cut by the other slice views).
+  vtkSmartPointer<vtkPolyData> FeedbackPolyData3D;
+  vtkSmartPointer<vtkTrivialProducer> FeedbackProducer3D;
+  /// Circle glyphs in the slice coordinate system of the slice view that the stroke is painted in.
+  vtkSmartPointer<vtkPolyData> FeedbackPolyData2D;
+  vtkSmartPointer<vtkTrivialProducer> FeedbackProducer2D;
+  /// Reusable filters that glyph the new stroke points
+  vtkSmartPointer<vtkPolyData> FeedbackNewPoints3D;
+  vtkSmartPointer<vtkGlyph3D> FeedbackGlyph3D;
+  vtkSmartPointer<vtkPolyData> FeedbackNewPoints2D;
+  vtkSmartPointer<vtkRegularPolygonSource> FeedbackCircleSource;
+  vtkSmartPointer<vtkGlyph2D> FeedbackGlyph2D;
+  /// Number of stroke points that already have a feedback glyph
+  vtkIdType FeedbackPointCount;
+  /// Slice view that the current stroke is painted in (nullptr if painting in a 3D view)
+  qMRMLWidget* FeedbackViewWidget;
+  vtkSmartPointer<vtkMatrix4x4> FeedbackRasToSlice;
+
+  /// Current brush center position (set by updateBrushModel)
+  double BrushPosition_World[3];
+  bool BrushPositionValid;
+  /// Brush center position at the previous updateBrushes call
+  double PreviousBrushPosition_World[3];
+  /// Brush model and brushes are up to date for the last hover position in the active view
+  bool BrushModelUpToDate;
+
+  /// Brush size display
+  QTimer* BrushSizeHudTimer;
+  bool ShiftKeyHeld;
+  bool BrushSizeParametersInitialized;
+  int LastBrushDiameterIsRelative;
+  double LastBrushDiameter;
 
   /// If a new point is added at less than this squared distance
   /// then the point is not added. It can be used for limiting number of

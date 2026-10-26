@@ -46,9 +46,22 @@
 #include "vtkTransform.h"
 #include "vtkWidgetEvent.h"
 
+#include <cstdlib>
 #include <deque>
 
 vtkStandardNewMacro(vtkMRMLWindowLevelWidget);
+
+namespace
+{
+// Application-wide option (see SetLeftDragWindowLevel), off by default as in earlier versions.
+// It is read when events are processed, so a change applies to existing widgets immediately.
+bool LeftDragWindowLevel = false;
+
+// Distance (in pixels, sum of the horizontal and vertical distance) the mouse has to move with
+// the left button down before a left-drag window/level adjustment starts, so that a click with a
+// slight jitter remains a click.
+const int LeftDragWindowLevelStartDistance = 3;
+} // namespace
 
 //----------------------------------------------------------------------------------
 vtkMRMLWindowLevelWidget::vtkMRMLWindowLevelWidget()
@@ -75,6 +88,8 @@ vtkMRMLWindowLevelWidget::vtkMRMLWindowLevelWidget()
   this->CenteredRubberBand = true;
 
   this->AdjustMode = ModeAdjust;
+
+  this->LeftDragPending = false;
 
   this->SetEventTranslationClickAndDrag(
     WidgetStateIdle, vtkCommand::LeftButtonPressEvent, vtkEvent::NoModifier, WidgetStateAdjustWindowLevel, WidgetEventAdjustWindowLevelStart, WidgetEventAdjustWindowLevelEnd);
@@ -131,6 +146,15 @@ bool vtkMRMLWindowLevelWidget::CanProcessInteractionEvent(vtkMRMLInteractionEven
     return false;
   }
 
+  if (this->LeftDragPending && eventData->GetType() == vtkCommand::LeftButtonReleaseEvent)
+  {
+    // Left-drag window/level adjustment was not started because the mouse did not move:
+    // do not consume the button release, so that other widgets can process the click.
+    this->LeftDragPending = false;
+    this->SetWidgetState(WidgetStateIdle);
+    return false;
+  }
+
   // If we are currently dragging a point then we interact everywhere
   if (this->WidgetState == WidgetStateAdjustWindowLevel //
       || this->WidgetState == WidgetStateAdjustWindowLevelAlternative)
@@ -140,9 +164,11 @@ bool vtkMRMLWindowLevelWidget::CanProcessInteractionEvent(vtkMRMLInteractionEven
   }
 
   if (this->GetInteractionNode()->GetCurrentInteractionMode() != vtkMRMLInteractionNode::AdjustWindowLevel //
-      && (widgetEvent < WidgetEventAlwaysOnResetWindowLevel || widgetEvent > WidgetEventAlwaysOnAdjustWindowLevelAlternativeCancel))
+      && (widgetEvent < WidgetEventAlwaysOnResetWindowLevel || widgetEvent > WidgetEventAlwaysOnAdjustWindowLevelAlternativeCancel)
+      && !this->IsLeftDragWindowLevelStartEvent(widgetEvent))
   {
     // if we are not in adjust window/level mouse mode then only always-on widget events are processed
+    // (and left-click-and-drag in view transform mode, if enabled)
     return false;
   }
 
@@ -164,6 +190,28 @@ bool vtkMRMLWindowLevelWidget::ProcessInteractionEvent(vtkMRMLInteractionEventDa
   unsigned long widgetEvent = this->TranslateInteractionEventToWidgetEvent(eventData);
 
   bool processedEvent = true;
+
+  if (this->LeftDragPending)
+  {
+    // Left button is down for left-drag window/level adjustment, but the adjustment has not started yet
+    switch (widgetEvent)
+    {
+      case WidgetEventMouseMove: return this->ProcessLeftDragWindowLevelMove(eventData);
+      case WidgetEventAdjustWindowLevelEnd:
+      case WidgetEventAdjustWindowLevelCancel:
+      case WidgetEventAlwaysOnAdjustWindowLevelEnd:
+      case WidgetEventAlwaysOnAdjustWindowLevelCancel:
+        // Window/level has not been changed, so there is nothing to restore
+        this->LeftDragPending = false;
+        return this->ProcessEndMouseDrag(eventData);
+      default: return false;
+    }
+  }
+
+  if (this->IsLeftDragWindowLevelStartEvent(widgetEvent))
+  {
+    return this->ProcessLeftDragWindowLevelStart(eventData);
+  }
 
   switch (widgetEvent)
   {
@@ -242,6 +290,7 @@ bool vtkMRMLWindowLevelWidget::ProcessInteractionEvent(vtkMRMLInteractionEventDa
 //-------------------------------------------------------------------------
 void vtkMRMLWindowLevelWidget::Leave(vtkMRMLInteractionEventData* eventData)
 {
+  this->LeftDragPending = false;
   this->SetWidgetState(WidgetStateIdle);
   if (this->WidgetRep)
   {
@@ -436,6 +485,91 @@ bool vtkMRMLWindowLevelWidget::ProcessAdjustWindowLevelStart(vtkMRMLInteractionE
   this->StartVolumeWindowLevel[1] = this->LastVolumeWindowLevel[1];
   this->SetWidgetState(WidgetStateAdjustWindowLevel);
   return this->ProcessStartMouseDrag(eventData);
+}
+
+//----------------------------------------------------------------------------
+bool vtkMRMLWindowLevelWidget::IsLeftDragWindowLevelStartEvent(unsigned long widgetEvent)
+{
+  if (!LeftDragWindowLevel || widgetEvent != WidgetEventAdjustWindowLevelStart || this->WidgetState != WidgetStateIdle)
+  {
+    return false;
+  }
+  vtkMRMLInteractionNode* interactionNode = this->GetInteractionNode();
+  // Only in view transform mode: in adjust window/level mode the event is processed as usual,
+  // and in other modes (such as place mode) the left button is used for something else.
+  return interactionNode && interactionNode->GetCurrentInteractionMode() == vtkMRMLInteractionNode::ViewTransform;
+}
+
+//----------------------------------------------------------------------------
+bool vtkMRMLWindowLevelWidget::ProcessLeftDragWindowLevelStart(vtkMRMLInteractionEventData* eventData)
+{
+  vtkMRMLSliceLogic* sliceLogic = this->GetSliceLogic();
+  if (!sliceLogic || !sliceLogic->GetSliceCompositeNode())
+  {
+    return false;
+  }
+  int editedLayer = this->GetEditableLayerAtEventPosition(eventData);
+  if (editedLayer != vtkMRMLSliceLogic::LayerForeground //
+      && editedLayer != vtkMRMLSliceLogic::LayerBackground)
+  {
+    return false;
+  }
+  this->WindowLevelAdjustedLayer = editedLayer;
+  this->AdjustMode = ModeAdjust;
+  const int* displayPos = eventData->GetDisplayPosition();
+  this->StartEventPosition[0] = displayPos[0];
+  this->StartEventPosition[1] = displayPos[1];
+  this->PreviousEventPosition[0] = displayPos[0];
+  this->PreviousEventPosition[1] = displayPos[1];
+  // Window/level is not changed (and auto window/level is not switched off) until the mouse moves
+  this->LeftDragPending = true;
+  this->SetWidgetState(WidgetStateAdjustWindowLevel);
+  return true;
+}
+
+//----------------------------------------------------------------------------
+bool vtkMRMLWindowLevelWidget::ProcessLeftDragWindowLevelMove(vtkMRMLInteractionEventData* eventData)
+{
+  const int* displayPos = eventData->GetDisplayPosition();
+  if (std::abs(displayPos[0] - this->StartEventPosition[0]) + std::abs(displayPos[1] - this->StartEventPosition[1]) < LeftDragWindowLevelStartDistance)
+  {
+    // not a drag yet
+    return true;
+  }
+  vtkMRMLSliceLogic* sliceLogic = this->GetSliceLogic();
+  if (!sliceLogic)
+  {
+    return false;
+  }
+  this->LeftDragPending = false;
+  sliceLogic->GetMRMLScene()->SaveStateForUndo();
+  if (this->WindowLevelAdjustedLayer == vtkMRMLSliceLogic::LayerForeground)
+  {
+    sliceLogic->GetForegroundWindowLevelAndRange(
+      this->LastVolumeWindowLevel[0], this->LastVolumeWindowLevel[1], this->VolumeScalarRange[0], this->VolumeScalarRange[1], this->IsStartVolumeAutoWindowLevel);
+  }
+  else
+  {
+    sliceLogic->GetBackgroundWindowLevelAndRange(
+      this->LastVolumeWindowLevel[0], this->LastVolumeWindowLevel[1], this->VolumeScalarRange[0], this->VolumeScalarRange[1], this->IsStartVolumeAutoWindowLevel);
+  }
+  this->StartVolumeWindowLevel[0] = this->LastVolumeWindowLevel[0];
+  this->StartVolumeWindowLevel[1] = this->LastVolumeWindowLevel[1];
+  // The adjustment is relative to the position where the button was pressed (PreviousEventPosition)
+  this->ProcessAdjustWindowLevel(eventData);
+  return true;
+}
+
+//----------------------------------------------------------------------------
+void vtkMRMLWindowLevelWidget::SetLeftDragWindowLevel(bool enable)
+{
+  LeftDragWindowLevel = enable;
+}
+
+//----------------------------------------------------------------------------
+bool vtkMRMLWindowLevelWidget::GetLeftDragWindowLevel()
+{
+  return LeftDragWindowLevel;
 }
 
 //----------------------------------------------------------------------------

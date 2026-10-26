@@ -85,6 +85,18 @@ public:
   /// Get the current number of states.
   int GetNumberOfStates();
 
+  /// Cheap snapshots: when enabled (the default), a saved state deep-copies only the source representation of
+  /// each segment and shallow-copies derived poly data representations (such as closed surfaces) into fresh
+  /// objects that share their arrays with the segmentation. Conversion rules replace those arrays through
+  /// ShallowCopy instead of modifying them in place, so the shared arrays stay valid. Restoring a state also
+  /// skips every segment that is unchanged since the state was saved (same source representation object and
+  /// MTime, shared by the same segments, same metadata, same contained representations), so an undo touches
+  /// only the segments that differ. Code must not modify the points or cells of a derived closed surface in
+  /// place (for example through GetPoints()->SetPoint()): that would also change the saved states.
+  /// Static: it applies to every history (and lets scripts detect the cheap snapshots).
+  static void SetShallowDerivedRepresentations(bool enabled);
+  static bool GetShallowDerivedRepresentations();
+
 protected:
   /// Callback function called when the segmentation has been modified.
   /// It clears all states that are more recent than the last restored state.
@@ -99,17 +111,36 @@ protected:
   /// Restores a state defined by stateIndex.
   bool RestoreState(unsigned int stateIndex);
 
+  /// Copy a segment into a snapshot. Same as vtkSegmentation::CopySegment (representations that are
+  /// up-to-date in the baseline are reused), except that derived poly data representations are shallow-copied
+  /// when \sa GetShallowDerivedRepresentations is enabled. The source representation is always deep-copied.
+  static void CopySegmentToSnapshot(vtkSegment* destination,
+                                    vtkSegment* source,
+                                    vtkSegment* baseline,
+                                    std::map<vtkDataObject*, vtkDataObject*>& cachedRepresentations,
+                                    const std::string& sourceRepresentationName);
+
+  /// True if the metadata that a snapshot restores (name, color, label value, tags) is the same in both segments.
+  static bool IsSameMetadata(vtkSegment* segment1, vtkSegment* segment2);
+
 protected:
   vtkSegmentationHistory();
   ~vtkSegmentationHistory() override;
 
   typedef std::map<std::string, vtkSmartPointer<vtkSegment>> SegmentsMap;
 
+  /// Source representation object of a segment and its MTime when the state was saved.
+  /// The pointer is only compared with the live object, never dereferenced.
+  typedef std::map<std::string, std::pair<vtkDataObject*, vtkMTimeType>> SourceRepresentationsMap;
+
   struct SegmentationState
   {
     SegmentsMap Segments;
     std::vector<std::string> SegmentIds; // order of segments
+    SourceRepresentationsMap SourceRepresentations;
   };
+
+  static bool ShallowDerivedRepresentations;
 
   vtkSegmentation* Segmentation;
   vtkCallbackCommand* SegmentationModifiedCallbackCommand;

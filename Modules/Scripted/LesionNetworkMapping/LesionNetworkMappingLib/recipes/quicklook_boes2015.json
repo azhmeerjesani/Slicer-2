@@ -1,0 +1,40 @@
+{
+  "format": "slicer-lnm-recipe",
+  "version": 1,
+  "id": "quicklook_boes2015",
+  "recipe_version": "1",
+  "title": "Quick look: lesion network overlap (Boes 2015)",
+  "status": "adapted",
+  "cited_as": "Boes et al. 2015",
+  "citations": [
+    "10.1093/brain/awv228"
+  ],
+  "differences_from_source": [
+    "Per-lesion maps are thresholded with the N-aware Bonferroni FWE rule (alpha 0.05, re-derived for the connectome's N); the source thresholded each map at a fixed |T| (4.25, voxelwise p < 0.00005 uncorrected) on a 98-subject connectome.",
+    "The connectome is the one chosen in Map (for example GSP1000), not the source's.",
+    "Connectome QA chips (similarity to connectome degree and PC1) are shown next to the overlap; the source had no such check.",
+    "No specificity test and no null model: the overlap map is descriptive and is not evidence of specificity."
+  ],
+  "description": "Classic overlap of thresholded lesion network maps (count and percent of lesions, at the overlap level) for a first look at a cohort. Descriptive only.",
+  "parameters": {
+    "overlap": 90.0,
+    "nulls": {
+      "mode": "off"
+    }
+  },
+  "steps": [
+    "maps",
+    "overlap",
+    "qa",
+    "clusters",
+    "report"
+  ],
+  "requires": [
+    "clusters",
+    "cohort",
+    "cohortmaps",
+    "methods",
+    "qa",
+    "report"
+  ]
+}

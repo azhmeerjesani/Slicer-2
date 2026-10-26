@@ -19,10 +19,12 @@
 ==============================================================================*/
 
 // Qt includes
+#include <QColor>
 #include <QDebug>
 #include <QSettings>
 
 // Slicer includes
+#include <qSlicerSettingsViewsPanel.h>
 
 // Slices QTModule includes
 #include "qSlicerViewControllersModule.h"
@@ -36,6 +38,38 @@
 #include <vtkMRMLSliceNode.h>
 #include <vtkMRMLViewNode.h>
 #include <vtkNew.h>
+
+namespace
+{
+// Settings of the default 3D view background and box (see qSlicerSettingsViewsPanel::threeDViewDefault()).
+// They are fork-only settings, which other Slicer installations sharing the settings file ignore.
+const char* const ThreeDViewDefaultsGroup = "Appearance/Default3DView/";
+
+QColor colorFromRGB(const double rgb[3])
+{
+  return QColor::fromRgbF(rgb[0], rgb[1], rgb[2]);
+}
+
+/// Save a 3D view default only if it is already saved or if it differs from the theme default,
+/// so that the defaults keep following the theme until the user chooses another value.
+void writeThreeDViewDefault(QSettings& settings, const QString& name, const QVariant& value)
+{
+  QString key = ThreeDViewDefaultsGroup + name;
+  QVariant themeDefault = qSlicerSettingsViewsPanel::threeDViewThemeDefault(name);
+  if (value.userType() == QMetaType::QColor)
+  {
+    QColor color = value.value<QColor>();
+    if (settings.contains(key) || color.name() != themeDefault.value<QColor>().name())
+    {
+      settings.setValue(key, color.name());
+    }
+  }
+  else if (settings.contains(key) || value.toBool() != themeDefault.toBool())
+  {
+    settings.setValue(key, value.toBool());
+  }
+}
+} // namespace
 
 //-----------------------------------------------------------------------------
 class qSlicerViewControllersModulePrivate
@@ -190,6 +224,20 @@ void qSlicerViewControllersModule::readDefaultThreeDViewSettings(vtkMRMLViewNode
     defaultViewNode->SetAmbientShadowsIntensityShift(settings.value("AmbientShadowsIntensityShift").toDouble());
   }
   readCommonViewSettings(defaultViewNode, settings);
+  settings.endGroup();
+
+  // Background and box: they follow the theme unless the user chose them (Appearance/Default3DView/*).
+  // When testing or without main window, the vtkMRMLViewNode defaults are kept.
+  if (qSlicerSettingsViewsPanel::threeDViewThemeDefaultsEnabled())
+  {
+    QColor backgroundColor = qSlicerSettingsViewsPanel::threeDViewDefault("BackgroundColor").value<QColor>();
+    QColor backgroundColor2 = qSlicerSettingsViewsPanel::threeDViewDefault("BackgroundColor2").value<QColor>();
+    QColor boxColor = qSlicerSettingsViewsPanel::threeDViewDefault("BoxColor").value<QColor>();
+    defaultViewNode->SetBackgroundColor(backgroundColor.redF(), backgroundColor.greenF(), backgroundColor.blueF());
+    defaultViewNode->SetBackgroundColor2(backgroundColor2.redF(), backgroundColor2.greenF(), backgroundColor2.blueF());
+    defaultViewNode->SetBoxVisible(qSlicerSettingsViewsPanel::threeDViewDefault("BoxVisible").toBool());
+    defaultViewNode->SetBoxColor(boxColor.redF(), boxColor.greenF(), boxColor.blueF());
+  }
 }
 
 //-----------------------------------------------------------------------------
@@ -201,8 +249,26 @@ void qSlicerViewControllersModule::writeDefaultThreeDViewSettings(vtkMRMLViewNod
     return;
   }
   QSettings settings;
+  bool themeDefaults = qSlicerSettingsViewsPanel::threeDViewThemeDefaultsEnabled();
+  if (themeDefaults)
+  {
+    // The box visibility of the default view node follows Appearance/Default3DView/BoxVisible,
+    // and Default3DView/BoxVisibility is shared with other Slicer installations: keep its value.
+    writeThreeDViewDefault(settings, "BackgroundColor", colorFromRGB(defaultViewNode->GetBackgroundColor()));
+    writeThreeDViewDefault(settings, "BackgroundColor2", colorFromRGB(defaultViewNode->GetBackgroundColor2()));
+    writeThreeDViewDefault(settings, "BoxVisible", bool(defaultViewNode->GetBoxVisible()));
+    writeThreeDViewDefault(settings, "BoxColor", colorFromRGB(defaultViewNode->GetBoxColor()));
+  }
   settings.beginGroup("Default3DView");
-  settings.setValue("BoxVisibility", bool(defaultViewNode->GetBoxVisible()));
+  if (!themeDefaults)
+  {
+    settings.setValue("BoxVisibility", bool(defaultViewNode->GetBoxVisible()));
+  }
+  else if (!settings.contains("BoxVisibility"))
+  {
+    vtkNew<vtkMRMLViewNode> classicViewNode;
+    settings.setValue("BoxVisibility", bool(classicViewNode->GetBoxVisible()));
+  }
   settings.setValue("AxisLabelsVisibility", bool(defaultViewNode->GetAxisLabelsVisible()));
   settings.setValue("UseOrthographicProjection", defaultViewNode->GetRenderMode() == vtkMRMLViewNode::Orthographic);
   settings.setValue("UseDepthPeeling", bool(defaultViewNode->GetUseDepthPeeling()));

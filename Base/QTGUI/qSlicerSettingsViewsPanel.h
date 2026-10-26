@@ -62,6 +62,24 @@ public:
   QString threeDOrientationMarkerSize() const;
   QString threeDRulerType() const;
 
+  /// Return true if the default background and box of 3D views follow the theme and the
+  /// Appearance/Default3DView/* settings (BackgroundColor, BackgroundColor2, BoxVisible, BoxColor).
+  /// Return false when testing is enabled or the application runs without main window: the
+  /// vtkMRMLViewNode defaults are used then.
+  static bool threeDViewThemeDefaultsEnabled();
+
+  /// Default of the 3D view setting \a name (BackgroundColor, BackgroundColor2, BoxVisible or BoxColor)
+  /// used when Appearance/Default3DView/<name> is not set. It follows the theme: dark if the
+  /// application palette is dark. Colors are returned as QColor, BoxVisible as bool. The box is hidden
+  /// if the Default3DView/BoxVisibility setting is false.
+  /// Return an invalid QVariant if threeDViewThemeDefaultsEnabled() is false.
+  static QVariant threeDViewThemeDefault(const QString& name);
+
+  /// Default of the 3D view setting \a name: the Appearance/Default3DView/<name> setting if it is set,
+  /// otherwise threeDViewThemeDefault().
+  /// Return an invalid QVariant if threeDViewThemeDefaultsEnabled() is false.
+  static QVariant threeDViewDefault(const QString& name);
+
 public slots:
   /// Change the current value based on its name
   void setCurrentMSAA(const QString&);
@@ -72,6 +90,14 @@ public slots:
   void setThreeDOrientationMarkerSize(const QString&);
   void setThreeDRulerType(const QString&);
   void sliceViewOrientationChangedByUser();
+
+  /// Reimplemented to also handle the "Navigation in Studio" settings (Studio/LeftDragWindowLevel,
+  /// Studio/FocusFollowsMouse, Studio/PageStepSlices). They are saved only when the user changes them
+  /// and are applied by the Slicer Studio interface while it is active, never by the panel.
+  void applySettings() override;
+  void resetSettings() override;
+  void restoreDefaultSettings() override;
+  void reloadSettings() override;
 
 signals:
   /// Signal emitted when the current value is changed
@@ -85,8 +111,15 @@ signals:
 
 protected slots:
   void onMSAAChanged(const QString&);
+  void onThreeDBackgroundColorChanged(const QColor&);
+  void onThreeDBackgroundColor2Changed(const QColor&);
+  void onThreeDBoxVisibleToggled(bool);
+  void onThreeDBoxColorChanged(const QColor&);
+  void resetThreeDViewDefaults();
 
 protected:
+  void changeEvent(QEvent* event) override;
+
   QScopedPointer<qSlicerSettingsViewsPanelPrivate> d_ptr;
 
 private:

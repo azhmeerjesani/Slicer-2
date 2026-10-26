@@ -20,15 +20,19 @@
 
 // Qt includes
 #include <QDebug>
+#include <QEvent>
 #include <QFileDialog>
+#include <QFontDatabase>
 #include <QMainWindow>
 #include <QSettings>
 #include <QStyleFactory>
 
 // QtGUI includes
 #include "qSlicerApplication.h"
+#include "qSlicerCommandOptions.h"
 #include "qSlicerRelativePathMapper.h"
 #include "qSlicerSettingsStylesPanel.h"
+#include "qSlicerStyle.h"
 #include "ui_qSlicerSettingsStylesPanel.h"
 
 // --------------------------------------------------------------------------
@@ -49,11 +53,75 @@ public:
   int styleIndex(const QString& styleName) const;
   void populateStyles();
 
+  /// Apply the standard palette of the current application style, if it changed.
+  void applyStylePalette();
+  /// Show the current accent color in the accent color widgets.
+  void updateAccentColorWidgets();
+  /// The theme only applies to the "Slicer" style, other styles have their own palette.
+  void updateThemeWidgets();
+  /// Default accent color of the current palette (the accent color used when none is set).
+  QColor defaultAccentColor() const;
+  /// Show the application font in the font button, without changing any setting.
+  void updateFontButton();
+  /// Font used when no font is chosen in Appearance/Font, as qSlicerApplication applies it at
+  /// startup: the font saved in the "font" setting if it is not the default platform font,
+  /// otherwise the default font of the fork (Appearance/ForkDefaultFontFamily and
+  /// Appearance/ForkDefaultFontPointSize). Return false if there is no such font.
+  bool defaultAppearanceFont(QFont& font) const;
+  /// Font saved in the "font" setting if it is set and is not the default platform font (a font chosen in
+  /// another Slicer installation, or before this one used Inter). Return false otherwise.
+  bool userFontSetting(QFont& font) const;
+
+  /// Return true if the application palette is dark.
+  static bool isDarkPalette();
+  /// Return true if the theme and the accent color are not applied: the historical light
+  /// appearance is kept when testing is enabled or the application runs without main window.
+  static bool isClassicAppearance();
+
   static bool isQtStyle(const QString& styleName);
   static QStringList qtStyles();
 
   QStringList AdditionalPaths;
+  /// Accent color name, empty for the default accent color
+  QString AccentColor;
+  bool UpdatingAccentColorWidgets{ false };
+  /// Font chosen in the Appearance settings, empty for the default font
+  QString AppearanceFont;
+  /// True if the font is saved in Appearance/Font instead of the "font" setting
+  bool UseAppearanceFont{ false };
+  /// Application font when the panel was created, before the font of the fork is applied
+  QFont PlatformFont;
+  bool UpdatingFontButton{ false };
 };
+
+namespace
+{
+//-----------------------------------------------------------------------------
+bool fontFromSettingsValue(const QVariant& value, QFont& font)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+  if (value.typeId() == QMetaType::QFont)
+#else
+  if (value.userType() == QMetaType::QFont)
+#endif
+  {
+    font = value.value<QFont>();
+    return !font.family().isEmpty();
+  }
+  QString fontString = value.toString();
+  return !fontString.isEmpty() && font.fromString(fontString) && !font.family().isEmpty();
+}
+
+//-----------------------------------------------------------------------------
+bool isFontFamilyAvailable(const QString& family)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+  return QFontDatabase::families().contains(family);
+#else
+  return QFontDatabase().families().contains(family);
+#endif
+}
+} // namespace
 
 // --------------------------------------------------------------------------
 // qSlicerSettingsStylesPanelPrivate methods
@@ -77,7 +145,29 @@ void qSlicerSettingsStylesPanelPrivate::init()
   QObject::connect(this->ShowToolButtonTextCheckBox, SIGNAL(toggled(bool)), q, SLOT(onShowToolButtonTextToggled(bool)));
 
   q->registerProperty("no-tooltip", this->ShowToolTipsCheckBox, /*no tr*/ "checked", SIGNAL(toggled(bool)));
-  q->registerProperty("font", this->FontButton, "currentFont", SIGNAL(currentFontChanged(QFont)));
+  // The "font" setting is shared with other Slicer installations. When the theme is applied,
+  // qSlicerApplication uses the font of the fork (Inter) at runtime unless the user changed the
+  // "font" setting, and a font chosen here is saved in Appearance/Font instead, so that the
+  // "font" setting is never written. The font button shows the font actually used.
+  this->UseAppearanceFont = !Self::isClassicAppearance();
+  if (this->UseAppearanceFont)
+  {
+    this->PlatformFont = QApplication::font();
+    q->registerProperty("Appearance/Font", q, "appearanceFont", SIGNAL(appearanceFontChanged(QString)), qSlicerSettingsStylesPanel::tr("Font"));
+    // Without a usable font chosen here, the default font is applied: a font chosen in the "font" setting
+    // (as the classic panel does), else Inter. qSlicerApplication applies Inter at startup, but not when
+    // Appearance/Font names a font that is not installed (for example a settings file from another computer).
+    QFont defaultFont;
+    if (this->AppearanceFont.isEmpty() && this->defaultAppearanceFont(defaultFont) && defaultFont != QApplication::font())
+    {
+      qSlicerApplication::application()->setFont(defaultFont);
+    }
+    this->updateFontButton();
+  }
+  else
+  {
+    q->registerProperty("font", this->FontButton, "currentFont", SIGNAL(currentFontChanged(QFont)));
+  }
   q->registerProperty("MainWindow/ShowToolButtonText",
                       this->ShowToolButtonTextCheckBox,
                       /*no tr*/ "checked",
@@ -98,10 +188,36 @@ void qSlicerSettingsStylesPanelPrivate::init()
                       ctkSettingsPanel::OptionRequireRestart);
 
   // Style setting
+  // Connect before setting the default style, so that the palette of the style is
+  // applied whenever the style is set.
   this->populateStyles();
-  q->setCurrentStyle("Slicer");
   QObject::connect(this->StyleComboBox, &QComboBox::currentTextChanged, q, &qSlicerSettingsStylesPanel::onStyleChanged);
+  q->setCurrentStyle("Slicer");
   q->registerProperty("Styles/Style", q, "currentStyle", SIGNAL(currentStyleChanged(QString)), qSlicerSettingsStylesPanel::tr("Current style"));
+
+  // Theme, accent color and density settings.
+  // These are stored in Appearance/* keys and not in Styles/Style, so that other Slicer
+  // installations sharing the same settings file are not affected.
+  // The theme and the accent color are already applied at startup by qSlicerApplication.
+  this->ThemeComboBox->addItem(qSlicerSettingsStylesPanel::tr("System"), qSlicerStyle::themeToString(qSlicerStyle::SystemTheme));
+  this->ThemeComboBox->addItem(qSlicerSettingsStylesPanel::tr("Dark"), qSlicerStyle::themeToString(qSlicerStyle::DarkTheme));
+  this->ThemeComboBox->addItem(qSlicerSettingsStylesPanel::tr("Light"), qSlicerStyle::themeToString(qSlicerStyle::LightTheme));
+  q->setTheme(qSlicerSettingsStylesPanel::defaultTheme());
+  QObject::connect(this->ThemeComboBox, SIGNAL(currentIndexChanged(int)), q, SLOT(onThemeChanged(int)));
+  q->registerProperty("Appearance/Theme", q, "theme", SIGNAL(themeChanged(QString)), qSlicerSettingsStylesPanel::tr("Theme"));
+
+  this->updateAccentColorWidgets();
+  QObject::connect(this->AccentColorPickerButton, SIGNAL(colorChanged(QColor)), q, SLOT(onAccentColorPicked(QColor)));
+  QObject::connect(this->AccentColorResetButton, SIGNAL(clicked()), q, SLOT(onAccentColorReset()));
+  q->registerProperty("Appearance/Accent", q, "accentColor", SIGNAL(accentColorChanged(QString)), qSlicerSettingsStylesPanel::tr("Accent color"));
+
+  this->DensityComboBox->addItem(qSlicerSettingsStylesPanel::tr("Comfortable"), qSlicerStyle::densityToString(qSlicerStyle::Comfortable));
+  this->DensityComboBox->addItem(qSlicerSettingsStylesPanel::tr("Compact"), qSlicerStyle::densityToString(qSlicerStyle::Compact));
+  q->setDensity(qSlicerStyle::densityToString(qSlicerStyle::Comfortable));
+  QObject::connect(this->DensityComboBox, SIGNAL(currentIndexChanged(int)), q, SLOT(onDensityChanged(int)));
+  q->registerProperty("Appearance/Density", q, "density", SIGNAL(densityChanged(QString)), qSlicerSettingsStylesPanel::tr("Density"), ctkSettingsPanel::OptionRequireRestart);
+
+  this->updateThemeWidgets();
 
   // Connect AdditionalStylePaths buttons
   QObject::connect(this->AddAdditionalStylePathButton, SIGNAL(clicked()), q, SLOT(onAddStyleAdditionalPathClicked()));
@@ -119,6 +235,174 @@ int qSlicerSettingsStylesPanelPrivate::styleIndex(const QString& styleName) cons
     styleIndex = this->StyleComboBox->findText("Slicer", Qt::MatchFixedString);
   }
   return styleIndex;
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsStylesPanelPrivate::applyStylePalette()
+{
+  qSlicerApplication* app = qSlicerApplication::application();
+  if (!app || !app->style())
+  {
+    return;
+  }
+  QPalette palette = app->style()->standardPalette();
+  // Setting the application palette updates all widgets, skip it if nothing changed.
+  if (palette != app->palette())
+  {
+    app->setPalette(palette);
+  }
+  this->updateAccentColorWidgets();
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsStylesPanelPrivate::updateAccentColorWidgets()
+{
+  QColor accentColor(this->AccentColor);
+  bool isDefault = !accentColor.isValid();
+  if (isDefault)
+  {
+    // Show the default accent color of the current palette
+    accentColor = this->defaultAccentColor();
+  }
+  bool wasUpdating = this->UpdatingAccentColorWidgets;
+  this->UpdatingAccentColorWidgets = true;
+  this->AccentColorPickerButton->setColor(accentColor);
+  this->AccentColorPickerButton->setColorName(isDefault ? qSlicerSettingsStylesPanel::tr("Default") : QString());
+  this->UpdatingAccentColorWidgets = wasUpdating;
+  bool classicAppearance = Self::isClassicAppearance();
+  this->AccentColorPickerButton->setEnabled(!classicAppearance);
+  this->AccentColorResetButton->setEnabled(!isDefault && !classicAppearance);
+  this->AccentColorPickerButton->setToolTip(
+    classicAppearance ? qSlicerSettingsStylesPanel::tr("The accent color is not applied when testing is enabled or the application runs without main window.")
+                      : qSlicerSettingsStylesPanel::tr("Color of selected items, links and highlighted controls."));
+}
+
+// --------------------------------------------------------------------------
+QColor qSlicerSettingsStylesPanelPrivate::defaultAccentColor() const
+{
+  // tokenColor() returns the accent color override if one is set, so clear it temporarily.
+  QColor accentColor = qSlicerStyle::accentColor();
+  qSlicerStyle::setAccentColor(QColor());
+  QColor defaultColor = qSlicerStyle::tokenColor("accent", Self::isDarkPalette());
+  qSlicerStyle::setAccentColor(accentColor);
+  return defaultColor;
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsStylesPanelPrivate::updateFontButton()
+{
+  if (!this->UseAppearanceFont)
+  {
+    return;
+  }
+  bool wasUpdating = this->UpdatingFontButton;
+  this->UpdatingFontButton = true;
+  this->FontButton->setCurrentFont(QApplication::font());
+  this->UpdatingFontButton = wasUpdating;
+}
+
+// --------------------------------------------------------------------------
+bool qSlicerSettingsStylesPanelPrivate::userFontSetting(QFont& font) const
+{
+  qSlicerCoreApplication* app = qSlicerCoreApplication::application();
+  QSettings* settings = app ? app->userSettings() : nullptr;
+  QFont savedFont;
+  if (!settings || !settings->contains("font") || !fontFromSettingsValue(settings->value("font"), savedFont))
+  {
+    return false;
+  }
+  // Same rules as qSlicerApplicationPrivate::forkFont()
+  bool savedFontIsDefault = !savedFont.bold() && !savedFont.italic()
+                            && ((savedFont.family() == QLatin1String("Sans Serif") && qFuzzyCompare(savedFont.pointSizeF(), 9.0))
+                                || (savedFont.family() == this->PlatformFont.family() && qFuzzyCompare(savedFont.pointSizeF(), this->PlatformFont.pointSizeF())));
+  if (savedFontIsDefault)
+  {
+    return false;
+  }
+  font = savedFont;
+  return true;
+}
+
+// --------------------------------------------------------------------------
+bool qSlicerSettingsStylesPanelPrivate::defaultAppearanceFont(QFont& font) const
+{
+  qSlicerCoreApplication* app = qSlicerCoreApplication::application();
+  QSettings* settings = app ? app->userSettings() : nullptr;
+  if (!settings)
+  {
+    return false;
+  }
+  // A font chosen in the "font" setting (by another Slicer installation) is kept
+  if (this->userFontSetting(font))
+  {
+    return true;
+  }
+  QFont savedFont;
+  bool hasSavedFont = settings->contains("font") && fontFromSettingsValue(settings->value("font"), savedFont);
+  QSettings* defaultSettings = app->defaultSettings();
+  QString family = settings
+                     ->value("Appearance/ForkDefaultFontFamily", //
+                             defaultSettings ? defaultSettings->value("Appearance/ForkDefaultFontFamily") : QVariant())
+                     .toString();
+  double pointSize = settings
+                       ->value("Appearance/ForkDefaultFontPointSize", //
+                               defaultSettings ? defaultSettings->value("Appearance/ForkDefaultFontPointSize") : QVariant())
+                       .toDouble();
+  if (family.isEmpty() || !isFontFamilyAvailable(family))
+  {
+    // No font of the fork: the platform font (or the saved one) is used.
+    font = hasSavedFont ? savedFont : this->PlatformFont;
+    return true;
+  }
+  font = this->PlatformFont;
+  font.setFamily(family);
+  if (pointSize > 0.0)
+  {
+    font.setPointSizeF(pointSize);
+  }
+  return true;
+}
+
+// --------------------------------------------------------------------------
+bool qSlicerSettingsStylesPanelPrivate::isDarkPalette()
+{
+  qSlicerApplication* app = qSlicerApplication::application();
+  return app && app->palette().color(QPalette::Window).lightness() < 128;
+}
+
+// --------------------------------------------------------------------------
+bool qSlicerSettingsStylesPanelPrivate::isClassicAppearance()
+{
+  if (qSlicerCoreApplication::testAttribute(qSlicerCoreApplication::AA_EnableTesting))
+  {
+    return true;
+  }
+  qSlicerApplication* app = qSlicerApplication::application();
+  qSlicerCommandOptions* options = app ? app->commandOptions() : nullptr;
+  return options && options->noMainWindow();
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsStylesPanelPrivate::updateThemeWidgets()
+{
+  Q_Q(qSlicerSettingsStylesPanel);
+  bool slicerStyle = (q->currentStyle().compare("Slicer", Qt::CaseInsensitive) == 0);
+  bool classicAppearance = Self::isClassicAppearance();
+  this->ThemeComboBox->setEnabled(slicerStyle && !classicAppearance);
+  if (!slicerStyle)
+  {
+    this->ThemeComboBox->setToolTip(qSlicerSettingsStylesPanel::tr("The colors are set by the '%1' style (see Advanced section). "
+                                                                   "Select the 'Slicer' style to choose the theme here.")
+                                      .arg(q->currentStyle()));
+  }
+  else if (classicAppearance)
+  {
+    this->ThemeComboBox->setToolTip(qSlicerSettingsStylesPanel::tr("The light theme is always used when testing is enabled or the application runs without main window."));
+  }
+  else
+  {
+    this->ThemeComboBox->setToolTip(qSlicerSettingsStylesPanel::tr("Color theme of the application."));
+  }
 }
 
 namespace
@@ -284,6 +568,7 @@ void qSlicerSettingsStylesPanel::setCurrentStyle(const QString& newStyleName)
 // --------------------------------------------------------------------------
 void qSlicerSettingsStylesPanel::onStyleChanged(const QString& newStyleName)
 {
+  Q_D(qSlicerSettingsStylesPanel);
   qSlicerApplication* app = qSlicerApplication::application();
   app->removeEventFilter(app->style());
 
@@ -300,13 +585,177 @@ void qSlicerSettingsStylesPanel::onStyleChanged(const QString& newStyleName)
   app->installEventFilter(app->style());
   app->setPalette(newStyle->standardPalette());
 
+  d->updateThemeWidgets();
+  d->updateAccentColorWidgets();
+
   emit this->currentStyleChanged(newStyleName);
+}
+
+// --------------------------------------------------------------------------
+QString qSlicerSettingsStylesPanel::defaultTheme()
+{
+  QString theme;
+  qSlicerCoreApplication* coreApp = qSlicerCoreApplication::application();
+  if (coreApp && coreApp->defaultSettings())
+  {
+    theme = coreApp->defaultSettings()->value("Appearance/ForkDefaultTheme").toString();
+  }
+  return qSlicerStyle::themeToString(qSlicerStyle::themeFromString(theme, qSlicerStyle::DarkTheme));
+}
+
+// --------------------------------------------------------------------------
+QString qSlicerSettingsStylesPanel::theme() const
+{
+  Q_D(const qSlicerSettingsStylesPanel);
+  return d->ThemeComboBox->currentData().toString();
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsStylesPanel::setTheme(const QString& theme)
+{
+  Q_D(qSlicerSettingsStylesPanel);
+  QString themeName = qSlicerStyle::themeToString(qSlicerStyle::themeFromString(theme, qSlicerStyle::themeFromString(qSlicerSettingsStylesPanel::defaultTheme())));
+  d->ThemeComboBox->setCurrentIndex(d->ThemeComboBox->findData(themeName));
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsStylesPanel::onThemeChanged(int index)
+{
+  Q_D(qSlicerSettingsStylesPanel);
+  QString themeName = d->ThemeComboBox->itemData(index).toString();
+  qSlicerStyle::setTheme(qSlicerStyle::themeFromString(themeName));
+  d->applyStylePalette();
+  emit this->themeChanged(themeName);
+}
+
+// --------------------------------------------------------------------------
+QString qSlicerSettingsStylesPanel::accentColor() const
+{
+  Q_D(const qSlicerSettingsStylesPanel);
+  return d->AccentColor;
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsStylesPanel::setAccentColor(const QString& colorName)
+{
+  Q_D(qSlicerSettingsStylesPanel);
+  QColor color(colorName);
+  QString newColorName = color.isValid() ? color.name() : QString();
+  if (newColorName == d->AccentColor)
+  {
+    return;
+  }
+  d->AccentColor = newColorName;
+  qSlicerStyle::setAccentColor(color);
+  d->applyStylePalette();
+  emit this->accentColorChanged(newColorName);
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsStylesPanel::onAccentColorPicked(const QColor& color)
+{
+  Q_D(qSlicerSettingsStylesPanel);
+  if (d->UpdatingAccentColorWidgets)
+  {
+    return;
+  }
+  // Picking the default accent color of the current theme restores the default accent color,
+  // so that each theme keeps its own default.
+  this->setAccentColor(color == d->defaultAccentColor() ? QString() : color.name());
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsStylesPanel::onAccentColorReset()
+{
+  this->setAccentColor(QString());
+}
+
+// --------------------------------------------------------------------------
+QString qSlicerSettingsStylesPanel::density() const
+{
+  Q_D(const qSlicerSettingsStylesPanel);
+  return d->DensityComboBox->currentData().toString();
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsStylesPanel::setDensity(const QString& density)
+{
+  Q_D(qSlicerSettingsStylesPanel);
+  QString densityName = qSlicerStyle::densityToString(qSlicerStyle::densityFromString(density));
+  d->DensityComboBox->setCurrentIndex(d->DensityComboBox->findData(densityName));
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsStylesPanel::onDensityChanged(int index)
+{
+  Q_D(qSlicerSettingsStylesPanel);
+  // The density is applied by qSlicerApplication at startup (the setting requires a restart).
+  emit this->densityChanged(d->DensityComboBox->itemData(index).toString());
+}
+
+// --------------------------------------------------------------------------
+QString qSlicerSettingsStylesPanel::appearanceFont() const
+{
+  Q_D(const qSlicerSettingsStylesPanel);
+  return d->AppearanceFont;
+}
+
+// --------------------------------------------------------------------------
+void qSlicerSettingsStylesPanel::setAppearanceFont(const QString& fontString)
+{
+  Q_D(qSlicerSettingsStylesPanel);
+  QFont font;
+  bool validFont = fontFromSettingsValue(fontString, font) && isFontFamilyAvailable(font.family());
+  QString newFontString = validFont ? font.toString() : QString();
+  if (newFontString == d->AppearanceFont)
+  {
+    return;
+  }
+  d->AppearanceFont = newFontString;
+  if (d->UseAppearanceFont && (validFont || d->defaultAppearanceFont(font)))
+  {
+    if (font != QApplication::font())
+    {
+      qSlicerApplication::application()->setFont(font);
+    }
+    d->updateFontButton();
+  }
+  emit this->appearanceFontChanged(newFontString);
 }
 
 // --------------------------------------------------------------------------
 void qSlicerSettingsStylesPanel::onFontChanged(const QFont& font)
 {
-  qSlicerApplication::application()->setFont(font);
+  Q_D(qSlicerSettingsStylesPanel);
+  if (d->UpdatingFontButton)
+  {
+    return;
+  }
+  if (!d->UseAppearanceFont)
+  {
+    qSlicerApplication::application()->setFont(font);
+    return;
+  }
+  // Choosing the default font again clears the choice, so that the default keeps applying.
+  QFont defaultFont;
+  bool isDefault = d->defaultAppearanceFont(defaultFont) && font == defaultFont;
+  this->setAppearanceFont(isDefault ? QString() : font.toString());
+  // The default font may already be in the setting while another font is shown
+  if (font != QApplication::font())
+  {
+    qSlicerApplication::application()->setFont(font);
+  }
+}
+
+// --------------------------------------------------------------------------
+bool qSlicerSettingsStylesPanel::event(QEvent* event)
+{
+  Q_D(qSlicerSettingsStylesPanel);
+  if (event->type() == QEvent::ApplicationFontChange || event->type() == QEvent::FontChange || event->type() == QEvent::Show)
+  {
+    d->updateFontButton();
+  }
+  return this->Superclass::event(event);
 }
 
 // --------------------------------------------------------------------------

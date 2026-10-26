@@ -182,6 +182,8 @@ set(MRMLWidgets_SRCS
   qMRMLSortFilterProxyModel.h
   qMRMLSpinBox.cxx
   qMRMLSpinBox.h
+  qMRMLSymbolicIconEngine.cxx
+  qMRMLSymbolicIconEngine.h
   qMRMLTableModel.cxx
   qMRMLTableModel.h
   qMRMLTableView.cxx

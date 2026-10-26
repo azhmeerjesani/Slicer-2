@@ -2103,11 +2103,13 @@ bool vtkSlicerSegmentationsModuleLogic::SetBinaryLabelmapToSegment(vtkOrientedIm
   bool result =
     vtkSegmentationModifier::ModifyBinaryLabelmap(labelmap, segmentation, segmentID, mergeMode, extent, minimumOfAllSegments, false, segmentIdsToOverwrite, &modifiedSegmentIDs);
 
-  // Re-convert all other representations
+  // Re-convert all other representations of the modified segments.
+  // If no segment was modified (for example, the erased region did not contain the segment)
+  // then all other representations are still up-to-date.
   bool conversionHappened = false;
   std::vector<std::string> representationNames;
   vtkSegment* segment = segmentation->GetSegment(segmentID);
-  if (segment)
+  if (segment && !modifiedSegmentIDs.empty())
   {
     segment->GetContainedRepresentationNames(representationNames);
     for (std::vector<std::string>::iterator reprIt = representationNames.begin(); reprIt != representationNames.end(); ++reprIt)

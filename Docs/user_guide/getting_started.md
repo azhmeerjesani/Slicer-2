@@ -25,6 +25,10 @@ GPU: Graphics must support minimum OpenGL 3.2. Integrated graphics card is suffi
 
 ## Installing 3D Slicer
 
+:::{note}
+**Slicer Studio**, the redesigned edition of 3D Slicer built from this source tree, is not available on download.slicer.org. To install it as a macOS disk image or a Linux package, or to run it in a web browser, see [Install Slicer Studio](install_studio.md). It can be installed next to the official 3D Slicer described below.
+:::
+
 To download Slicer, click [here](https://download.slicer.org/).
 
 ![](https://github.com/Slicer/Slicer/releases/download/docs-resources/getting_started_download.png)
@@ -47,9 +51,9 @@ Once downloaded, follow the instructions below to complete installation:
 ### Mac
 
 - Open the install package (.dmg file).
-- Drag the Slicer application (Slicer.app) to your Applications folder (or other location of your choice).
+- Drag the Slicer application ("3D Slicer <version>.app", or "Slicer.app" in older releases) to your Applications folder (or other location of your choice).
   - This step is necessary because content of a .dmg file is opened as a read-only volume, and you cannot install extensions or Python packages into a read-only volume.
-- Delete the Slicer.app folder to uninstall.
+- Delete the application folder to uninstall.
 
 #### Installing Preview Releases
 

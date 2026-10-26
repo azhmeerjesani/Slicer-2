@@ -1,27 +1,8 @@
 name: Update Preview Branch
 
+# Slicer Studio: manual runs only. GitHub is used only as the git remote (see CLAUDE.md), so no workflow
+# runs on pushes, pull requests, tags or a schedule.
 on:
-  schedule:
-    # Daily at 04:00 AM UTC (this corresponds to the time set in CTestConfig.cmake + 1 hour)
-    #
-    # This workflow is synchronized with the nightly builds on the Kitware-hosted dashboards,
-    # which are configured via crontab to trigger daily at 11:00 PM Eastern Time (ET). The conversion
-    # from ET to UTC depends on whether daylight saving time is in effect:
-    #
-    # - During the spring/summer months (typically March to November), Eastern Daylight Time (EDT),
-    #   which is UTC-04:00, is observed. Thus, 11:00 PM EDT corresponds to 03:00 AM UTC.
-    # - During the autumn/winter months (typically November to March), Eastern Standard Time (EST),
-    #   which is UTC-05:00, is observed. Thus, 11:00 PM EST corresponds to 04:00 AM UTC.
-    #
-    # The build jobs are configured to start via the crontab on the Kitware-hosted dashboards at
-    # 11:00 PM ET, and this workflow is scheduled to run daily at 04:00 AM UTC to ensure it executes
-    # after the nightly builds have started and completed their source checkout, regardless of daylight
-    # saving time.
-    #
-    # This is important because the preview branch should be updated to reflect the state of the
-    # repository as of the latest nightly build.
-    - cron: "0 4 * * *"
-  # Manual trigger
   workflow_dispatch:
 
 permissions:

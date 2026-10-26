@@ -1128,7 +1128,9 @@ int vtkMRMLScene::Commit(const char* url, vtkMRMLMessageCollection* userMessages
   }
 
   bool success = (userMessages->GetNumberOfMessagesOfType(vtkCommand::ErrorEvent) == 0);
-  if (success)
+  // Serializing into SceneXMLString (autosave, GetReferencedSubScene) does not store the scene in a file:
+  // it must stay modified since read.
+  if (success && !this->GetSaveToXMLString())
   {
     this->StoredTime.Modified();
   }

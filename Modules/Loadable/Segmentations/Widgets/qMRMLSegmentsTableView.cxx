@@ -200,6 +200,9 @@ public:
   /// Sets table message and takes care of the visibility of the label
   void setMessage(const QString& message);
 
+  /// Tool button without padding around its icon
+  void setCompactButtonStyle(QToolButton* button);
+
   /// Creates a QToolButton for the visibility cell at the given proxy row.
   void setupVisibilityButton(int row);
   /// Creates a QToolButton for the status cell at the given proxy row.
@@ -417,6 +420,21 @@ void qMRMLSegmentsTableViewPrivate::setMessage(const QString& message)
 }
 
 //-----------------------------------------------------------------------------
+void qMRMLSegmentsTableViewPrivate::setCompactButtonStyle(QToolButton* button)
+{
+  // The Slicer styles paint the "compact" role, which is cheaper than a stylesheet per row;
+  // other styles get the equivalent stylesheet.
+  if (button->style()->property("supportsSlicerRole").toBool())
+  {
+    button->setProperty("slicerRole", "compact");
+  }
+  else
+  {
+    button->setStyleSheet("QToolButton { padding: 0px; }");
+  }
+}
+
+//-----------------------------------------------------------------------------
 void qMRMLSegmentsTableViewPrivate::setupVisibilityButton(int row)
 {
   Q_Q(qMRMLSegmentsTableView);
@@ -432,7 +450,7 @@ void qMRMLSegmentsTableViewPrivate::setupVisibilityButton(int row)
   button->setFocusPolicy(Qt::NoFocus);
   int iconSize = button->style()->pixelMetric(QStyle::PM_SmallIconSize);
   button->setIconSize(QSize(iconSize, iconSize));
-  button->setStyleSheet("QToolButton { padding: 0px; }");
+  this->setCompactButtonStyle(button);
   button->setIcon(proxyIndex.data(qMRMLSegmentsModel::VisibilityIconRole).value<QIcon>());
 
   QObject::connect(button,
@@ -467,7 +485,7 @@ void qMRMLSegmentsTableViewPrivate::setupStatusButton(int row)
   button->setFocusPolicy(Qt::NoFocus);
   int iconSize = button->style()->pixelMetric(QStyle::PM_SmallIconSize);
   button->setIconSize(QSize(iconSize, iconSize));
-  button->setStyleSheet("QToolButton { padding: 0px; }");
+  this->setCompactButtonStyle(button);
   button->setIcon(proxyIndex.data(qMRMLSegmentsModel::StatusIconRole).value<QIcon>());
 
   QObject::connect(button,
@@ -514,7 +532,7 @@ void qMRMLSegmentsTableViewPrivate::setupColorButton(int row)
   button->setFocusPolicy(Qt::NoFocus);
   int iconSize = button->style()->pixelMetric(QStyle::PM_SmallIconSize);
   button->setIconSize(QSize(iconSize, iconSize));
-  button->setStyleSheet("QToolButton { padding: 0px; }");
+  this->setCompactButtonStyle(button);
   button->setIcon(colorSwatchIcon(proxyIndex.data(qMRMLSegmentsModel::ColorRole).value<QColor>()));
 
   QPersistentModelIndex persistentIndex(proxyIndex);
@@ -814,7 +832,9 @@ void qMRMLSegmentsTableView::onSegmentAddedOrRemoved()
   }
   else if (d->SegmentationNode->GetSegmentation()->GetNumberOfSegments() == 0)
   {
-    d->setMessage(tr("Empty segmentation"));
+    // The segment editor sets the "studioPresentation" property in the Slicer Studio presentation,
+    // where the Paint and Draw effect buttons are labeled Brush and Outline.
+    d->setMessage(this->property("studioPresentation").toBool() ? tr("Pick Brush or Outline to start a segment") : tr("Empty segmentation"));
     return;
   }
   d->setMessage(QString());

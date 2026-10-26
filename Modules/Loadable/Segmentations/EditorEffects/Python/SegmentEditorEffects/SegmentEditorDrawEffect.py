@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 
 import qt
@@ -50,7 +51,56 @@ class SegmentEditorDrawEffect(AbstractScriptedSegmentEditorLabelEffect):
         self.drawPipelines = {}
 
     def setupOptionsFrame(self):
-        pass
+        self.operationAddRadioButton = qt.QRadioButton(_("Add"))
+        self.operationAddRadioButton.objectName = self.__class__.__name__ + "OperationAdd"
+        self.operationAddRadioButton.setToolTip(_("Add the region inside the outline to the selected segment."))
+        self.operationSubtractRadioButton = qt.QRadioButton(_("Subtract"))
+        self.operationSubtractRadioButton.objectName = self.__class__.__name__ + "OperationSubtract"
+        self.operationSubtractRadioButton.setToolTip(_("Remove the region inside the outline from the selected segment."))
+        self.operationButtonGroup = qt.QButtonGroup()
+        self.operationButtonGroup.addButton(self.operationAddRadioButton)
+        self.operationButtonGroup.addButton(self.operationSubtractRadioButton)
+        self.operationAddRadioButton.setChecked(True)
+        operationLayout = qt.QHBoxLayout()
+        operationLayout.addWidget(self.operationAddRadioButton)
+        operationLayout.addWidget(self.operationSubtractRadioButton)
+        operationLayout.addStretch(1)
+        self.scriptedEffect.addLabeledOptionsWidget(_("Operation:"), operationLayout)
+
+        self.applyOnReleaseCheckBox = qt.QCheckBox(_("Apply on release (lasso)"))
+        self.applyOnReleaseCheckBox.objectName = self.__class__.__name__ + "ApplyOnRelease"
+        self.applyOnReleaseCheckBox.setToolTip(_("Apply the outline when the mouse button is released after drawing it by dragging."))
+        self.scriptedEffect.addOptionsWidget(self.applyOnReleaseCheckBox)
+
+        self.hintLabel = qt.QLabel(_("Drag = lasso · click = points · Enter/right-click closes · X removes last"))
+        self.hintLabel.objectName = self.__class__.__name__ + "Hint"
+        self.hintLabel.wordWrap = True
+        self.scriptedEffect.addOptionsWidget(self.hintLabel)
+
+        self.operationSubtractRadioButton.connect("toggled(bool)", self.updateMRMLFromGUI)
+        self.applyOnReleaseCheckBox.connect("toggled(bool)", self.updateMRMLFromGUI)
+
+    def setMRMLDefaults(self):
+        self.scriptedEffect.setParameterDefault("Operation", OUTLINE_OPERATION_ADD)
+        self.scriptedEffect.setParameterDefault("ApplyOnRelease", 0)
+
+    def updateGUIFromMRML(self):
+        subtract = isOutlineSubtracted(self.scriptedEffect)
+        wasBlocked = self.operationSubtractRadioButton.blockSignals(True)
+        self.operationSubtractRadioButton.setChecked(subtract)
+        self.operationSubtractRadioButton.blockSignals(wasBlocked)
+        wasBlocked = self.operationAddRadioButton.blockSignals(True)
+        self.operationAddRadioButton.setChecked(not subtract)
+        self.operationAddRadioButton.blockSignals(wasBlocked)
+
+        wasBlocked = self.applyOnReleaseCheckBox.blockSignals(True)
+        self.applyOnReleaseCheckBox.setChecked(isOutlineAppliedOnRelease(self.scriptedEffect))
+        self.applyOnReleaseCheckBox.blockSignals(wasBlocked)
+
+    def updateMRMLFromGUI(self):
+        self.scriptedEffect.setParameter("Operation",
+                                         OUTLINE_OPERATION_SUBTRACT if self.operationSubtractRadioButton.checked else OUTLINE_OPERATION_ADD)
+        self.scriptedEffect.setParameter("ApplyOnRelease", 1 if self.applyOnReleaseCheckBox.checked else 0)
 
     def processInteractionEvents(self, callerInteractor, eventId, viewWidget):
         abortEvent = False
@@ -64,6 +114,7 @@ class SegmentEditorDrawEffect(AbstractScriptedSegmentEditorLabelEffect):
             return abortEvent
 
         anyModifierKeyPressed = callerInteractor.GetShiftKey() or callerInteractor.GetControlKey() or callerInteractor.GetAltKey()
+        hadPoints = pipeline.rasPoints.GetNumberOfPoints() > 0
 
         if eventId == vtk.vtkCommand.LeftButtonPressEvent and not anyModifierKeyPressed:
             # Make sure the user wants to do the operation, even if the segment is not visible
@@ -83,12 +134,20 @@ class SegmentEditorDrawEffect(AbstractScriptedSegmentEditorLabelEffect):
             xy = callerInteractor.GetEventPosition()
             ras = self.xyToRas(xy, viewWidget)
             pipeline.addPoint(ras)
+            pipeline.dragStartXY = xy
+            pipeline.dragDistance = 0.0
             abortEvent = True
         elif eventId == vtk.vtkCommand.LeftButtonReleaseEvent:
             if pipeline.actionState == "drawing":
                 pipeline.actionState = "moving"
                 self.scriptedEffect.cursorOn(viewWidget)
                 abortEvent = True
+                # Lasso: drawing by dragging is completed by releasing the mouse button
+                if (isOutlineAppliedOnRelease(self.scriptedEffect)
+                        and pipeline.dragDistance >= LASSO_MINIMUM_DRAG_DISTANCE_PIXEL
+                        and pipeline.rasPoints.GetNumberOfPoints() >= 3):
+                    pipeline.apply()
+                    pipeline.actionState = ""
         elif eventId == vtk.vtkCommand.RightButtonPressEvent and not anyModifierKeyPressed:
             pipeline.actionState = "finishing"
             sliceNode = viewWidget.sliceLogic().GetSliceNode()
@@ -105,7 +164,12 @@ class SegmentEditorDrawEffect(AbstractScriptedSegmentEditorLabelEffect):
             if pipeline.actionState == "drawing":
                 xy = callerInteractor.GetEventPosition()
                 ras = self.xyToRas(xy, viewWidget)
+                numberOfPoints = pipeline.rasPoints.GetNumberOfPoints()
                 pipeline.addPoint(ras)
+                if pipeline.rasPoints.GetNumberOfPoints() > numberOfPoints and pipeline.dragStartXY is not None:
+                    # Point was added (on the active slice)
+                    pipeline.dragDistance = max(pipeline.dragDistance,
+                                                math.hypot(xy[0] - pipeline.dragStartXY[0], xy[1] - pipeline.dragStartXY[1]))
                 abortEvent = True
         elif eventId == vtk.vtkCommand.KeyPressEvent:
             key = callerInteractor.GetKeySym()
@@ -118,7 +182,9 @@ class SegmentEditorDrawEffect(AbstractScriptedSegmentEditorLabelEffect):
         else:
             pass
 
-        pipeline.positionActors()
+        # Only update the outline if there is something to show (or something to remove), to avoid rendering on every mouse move
+        if hadPoints or pipeline.rasPoints.GetNumberOfPoints() > 0 or pipeline.actionState == "drawing":
+            pipeline.positionActors()
         return abortEvent
 
     def processViewNodeEvents(self, callerViewNode, eventId, viewWidget):
@@ -134,7 +200,8 @@ class SegmentEditorDrawEffect(AbstractScriptedSegmentEditorLabelEffect):
             sliceLogic = viewWidget.sliceLogic()
             lineMode = "solid"
             currentSliceOffset = sliceLogic.GetSliceOffset()
-            if pipeline.activeSliceOffset:
+            # Slice offset 0.0 is a valid active slice offset (for example, the origin slice of MNI space)
+            if pipeline.activeSliceOffset is not None:
                 offset = abs(currentSliceOffset - pipeline.activeSliceOffset)
                 if offset > 0.01:
                     if pipeline.rasPoints.GetNumberOfPoints() == 1:
@@ -175,6 +242,9 @@ class DrawPipeline:
         self.activeSliceOffset = None
         self.lastInsertSliceNodeMTime = None
         self.actionState = None
+        # Mouse position where the last drag started and largest distance from it (in pixels) where a point was added
+        self.dragStartXY = None
+        self.dragDistance = 0.0
 
         self.xyPoints = vtk.vtkPoints()
         self.rasPoints = vtk.vtkPoints()
@@ -186,7 +256,8 @@ class DrawPipeline:
         self.actor.SetMapper(self.mapper)
         actorProperty = self.actor.GetProperty()
         actorProperty.SetColor(1, 1, 0)
-        actorProperty.SetLineWidth(1)
+        actorProperty.SetLineWidth(2)
+        self.updateColorFromSelectedSegment()
 
         self.createStippleTexture(0xAAAA, 8)
 
@@ -241,7 +312,7 @@ class DrawPipeline:
         # Store active slice when first point is added
         sliceLogic = self.sliceWidget.sliceLogic()
         currentSliceOffset = sliceLogic.GetSliceOffset()
-        if not self.activeSliceOffset:
+        if self.activeSliceOffset is None:
             self.activeSliceOffset = currentSliceOffset
             self.setLineMode("solid")
 
@@ -276,8 +347,24 @@ class DrawPipeline:
             self.polyData.GetPointData().SetTCoords(self.tcoords)
             self.actor.SetTexture(self.texture)
 
+    def updateColorFromSelectedSegment(self):
+        """Show the outline in the color of the selected segment (the color is not changed if there is no selected segment)"""
+        parameterSetNode = self.scriptedEffect.parameterSetNode()
+        segmentationNode = parameterSetNode.GetSegmentationNode() if parameterSetNode else None
+        segmentID = parameterSetNode.GetSelectedSegmentID() if parameterSetNode else None
+        segment = segmentationNode.GetSegmentation().GetSegment(segmentID) if segmentationNode and segmentID else None
+        if segment is None:
+            return
+        color = segment.GetColor()
+        displayNode = segmentationNode.GetDisplayNode()
+        if displayNode:
+            displayColor = displayNode.GetSegmentColor(segmentID)
+            color = (displayColor.GetX(), displayColor.GetY(), displayColor.GetZ())
+        self.actor.GetProperty().SetColor(color)
+
     def positionActors(self):
         # Update draw feedback to follow slice node
+        self.updateColorFromSelectedSegment()
         sliceLogic = self.sliceWidget.sliceLogic()
         sliceNode = sliceLogic.GetSliceNode()
         rasToXY = vtk.vtkTransform()
@@ -303,12 +390,41 @@ class DrawPipeline:
 
             # Apply poly data on modifier labelmap
             segmentationNode = self.scriptedEffect.parameterSetNode().GetSegmentationNode()
-            self.scriptedEffect.appendPolyMask(modifierLabelmap, self.polyData, self.sliceWidget, segmentationNode)
+            modificationExtent = self.appendPolyMask(modifierLabelmap, segmentationNode)
 
         self.resetPolyData()
         if lineExists:
             self.scriptedEffect.saveStateForUndo()
-            self.scriptedEffect.modifySelectedSegmentByLabelmap(modifierLabelmap, slicer.qSlicerSegmentEditorAbstractEffect.ModificationModeAdd)
+            if isOutlineSubtracted(self.scriptedEffect):
+                modificationMode = slicer.qSlicerSegmentEditorAbstractEffect.ModificationModeRemove
+            else:
+                modificationMode = slicer.qSlicerSegmentEditorAbstractEffect.ModificationModeAdd
+            if modificationExtent is not None:
+                # Only the voxels of the outline's slab are processed (masking, merging, surface update)
+                self.scriptedEffect.modifySelectedSegmentByLabelmap(modifierLabelmap, modificationMode, modificationExtent)
+            else:
+                self.scriptedEffect.modifySelectedSegmentByLabelmap(modifierLabelmap, modificationMode)
+
+    def appendPolyMask(self, modifierLabelmap, segmentationNode):
+        """Rasterize the outline onto the modifier labelmap.
+
+        Returns the modified extent (a list of 6 ints, in the voxel coordinates of the modifier labelmap) when the
+        editor logic can report it, None otherwise (older builds: the whole labelmap is then processed).
+        """
+        logic = getattr(slicer, "vtkSlicerSegmentEditorLogic", None)
+        if logic is not None and hasattr(logic, "AppendPolyMask"):
+            modificationExtent = [0, -1, 0, -1, 0, -1]
+            try:
+                logic.AppendPolyMask(modifierLabelmap, self.polyData, self.sliceWidget.mrmlSliceNode(), segmentationNode, modificationExtent)
+            except TypeError:
+                # No overload with the extent output in this build
+                pass
+            else:
+                # An invalid extent (max < min) means that the outline is outside the labelmap: nothing to modify,
+                # which modifySelectedSegmentByLabelmap handles as "the whole labelmap" (all zeros, no change)
+                return modificationExtent if modificationExtent[0] <= modificationExtent[1] else None
+        self.scriptedEffect.appendPolyMask(modifierLabelmap, self.polyData, self.sliceWidget, segmentationNode)
+        return None
 
     def resetPolyData(self):
         # Return the polyline to initial state with no points
@@ -333,3 +449,19 @@ class DrawPipeline:
             self.polyData.RemoveDeletedCells()
 
         self.positionActors()
+
+
+def isOutlineSubtracted(scriptedEffect):
+    """Return True if the "Operation" parameter of the effect is set to subtract the region (default: add)"""
+    # Parameters may be missing (for example, in scenes saved by Slicer versions that did not have them)
+    return scriptedEffect.parameterDefined("Operation") and scriptedEffect.parameter("Operation") == OUTLINE_OPERATION_SUBTRACT
+
+
+def isOutlineAppliedOnRelease(scriptedEffect):
+    """Return True if the "ApplyOnRelease" parameter of the effect is enabled (default: disabled)"""
+    return scriptedEffect.parameterDefined("ApplyOnRelease") and scriptedEffect.integerParameter("ApplyOnRelease") != 0
+
+
+OUTLINE_OPERATION_ADD = "Add"
+OUTLINE_OPERATION_SUBTRACT = "Subtract"
+LASSO_MINIMUM_DRAG_DISTANCE_PIXEL = 5

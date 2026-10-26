@@ -105,6 +105,29 @@ int qSlicerVolumesIOOptionsWidgetTest1(int argc, char* argv[])
     return EXIT_FAILURE;
   }
 
+  // Lesion, mask and region of interest images are labelmaps (whole words only)
+  const char* labelMapFileNames[] = { "sub-001_lesion.nii.gz", "brain_mask.nii.gz", "roi.nrrd", "MASK.nii.gz", "LESION.nii.gz" };
+  for (const char* fileName : labelMapFileNames)
+  {
+    optionsWidget.setFileName(fileName);
+    if (!optionsWidget.properties()["labelmap"].toBool())
+    {
+      std::cerr << __LINE__ << ": " << fileName << " must be a labelmap" << std::endl;
+      return EXIT_FAILURE;
+    }
+  }
+  // Partial words and probability maps are not labelmaps
+  const char* notLabelMapFileNames[] = { "masked_T1.nii.gz", "lesion_prob.nii.gz", "sub-01_desc-lesionProb_mask.nii.gz" };
+  for (const char* fileName : notLabelMapFileNames)
+  {
+    optionsWidget.setFileName(fileName);
+    if (optionsWidget.properties()["labelmap"].toBool())
+    {
+      std::cerr << __LINE__ << ": " << fileName << " is not a labelmap" << std::endl;
+      return EXIT_FAILURE;
+    }
+  }
+
   optionsWidget.show();
 
   if (argc < 2 || QString(argv[2]) != "-I")

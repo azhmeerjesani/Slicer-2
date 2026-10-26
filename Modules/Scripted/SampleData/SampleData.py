@@ -94,6 +94,14 @@ with a permissive copyright-license (<a href="https://creativecommons.org/licens
 and is exclusively available for research and teaching. You are not authorized to redistribute or sell it, or
 use it for commercial purposes.</p>
 """)
+        self.parent.acknowledgementText += _("""
+<p>MNI152NLin2009cAsym 2 mm brain template and brain mask (ICBM 2009c Nonlinear Asymmetric) are bundled with this module:
+Copyright (C) 1993-2009 Louis Collins, McConnell Brain Imaging Centre, Montreal Neurological Institute, McGill University
+(Fonov et al., NeuroImage 2011, <a href="https://doi.org/10.1016/j.neuroimage.2010.07.033">doi:10.1016/j.neuroimage.2010.07.033</a>).
+The other templates and atlases of the MNI152 (neuro) category are downloaded on request from
+<a href="https://www.templateflow.org">TemplateFlow</a> (Ciric et al., Nature Methods 2022).
+MNI152NLin6Asym templates and the Harvard-Oxford atlas: FSL licence terms apply (non-commercial); downloaded on request.</p>
+""")
 
         if slicer.mrmlScene.GetTagByClassName("vtkMRMLScriptedModuleNode") != "ScriptedModule":
             slicer.mrmlScene.RegisterNodeClass(vtkMRMLScriptedModuleNode())
@@ -260,6 +268,19 @@ class TextEditFinishEventFilter(qt.QObject):
             return True  # stop further handling
         return False
 
+
+class ResizeEventFilter(qt.QObject):
+
+    def __init__(self, *args, **kwargs):
+        qt.QObject.__init__(self, *args, **kwargs)
+        self.resizedCallback = None
+
+    def eventFilter(self, object, event):
+        if self.resizedCallback is not None and event.type() == qt.QEvent.Resize:
+            self.resizedCallback()
+        return False
+
+
 class SampleDataWidget(ScriptedLoadableModuleWidget):
     """Uses ScriptedLoadableModuleWidget base class, available at:
     https://github.com/Slicer/Slicer/blob/main/Base/Python/slicer/ScriptedLoadableModule.py
@@ -318,8 +339,44 @@ class SampleDataWidget(ScriptedLoadableModuleWidget):
         # Add spacer to layout
         self.layout.addStretch(1)
 
+        # Thumbnails follow the width of the module panel
+        self.resizeEventFilter = ResizeEventFilter()
+        self.resizeEventFilter.resizedCallback = self.updateThumbnailSizes
+        self.parent.installEventFilter(self.resizeEventFilter)
+
     def cleanup(self):
+        if hasattr(self, "resizeEventFilter"):
+            self.parent.removeEventFilter(self.resizeEventFilter)
         SampleDataWidget.setCategoriesFromSampleDataSources(self.categoryLayout, {}, self.logic)
+
+    @staticmethod
+    def thumbnailSizeForPanelWidth(panelWidth):
+        """Square thumbnail size for which two columns of sample data buttons fit in a module panel of the given width."""
+        side = max(96, (panelWidth - 48) // 2)
+        return qt.QSize(side, side)
+
+    def updateThumbnailSizes(self):
+        """Resize the thumbnails so that two columns of buttons fill the module panel."""
+        iconSize = SampleDataWidget.thumbnailSizeForPanelWidth(self.parent.width)
+        for button in self.parent.findChildren(qt.QToolButton):
+            if button.property("sampleDataText") is not None and button.iconSize != iconSize:
+                SampleDataWidget.setThumbnailSize(button, iconSize)
+
+    @staticmethod
+    def setThumbnailSize(button, iconSize):
+        """Set the thumbnail size of a sample data button.
+
+        Text lines that are wider than the thumbnail are elided (the full text is in the tooltip), because the
+        buttons of a category all get the size of the largest one, so one long name would break the two columns.
+        """
+        button.setIconSize(iconSize)
+        text = button.property("sampleDataText")
+        fontMetrics = qt.QFontMetrics(button.font)
+        textWidth = iconSize.width() - 2 * fontMetrics.horizontalAdvance(" ")  # QToolButton pads the text with two spaces
+        lines = text.split("\n")
+        elidedLines = [fontMetrics.elidedText(line, qt.Qt.ElideRight, textWidth) for line in lines]
+        button.setText("\n".join(elidedLines))
+        button.setToolTip(text if elidedLines != lines else "")
 
     def onCustomDataDownload(self):
         uris = self.customSampleUrlEdit.toPlainText().strip()
@@ -378,7 +435,12 @@ class SampleDataWidget(ScriptedLoadableModuleWidget):
         """
         iconPath = os.path.join(os.path.dirname(__file__).replace("\\", "/"), "Resources", "Icons")
         mainWindow = slicer.util.mainWindow()
-        if mainWindow:
+        panelWidget = categoryLayout.parentWidget()
+        if mainWindow and panelWidget and panelWidget.isVisible():
+            # Square thumbnails sized to the module panel width, so that two columns of buttons fill the panel
+            # (SampleDataWidget.updateThumbnailSizes keeps them sized when the panel width changes)
+            iconSize = SampleDataWidget.thumbnailSizeForPanelWidth(panelWidget.width)
+        elif mainWindow:
             # Set thumbnail size from default icon size. This results in toolbutton size that makes
             # two columns of buttons fit into the size of the Welcome module's minimum width
             # on screens with a various resolution and scaling (see qt.QDesktopWidget().size,
@@ -425,6 +487,7 @@ class SampleDataWidget(ScriptedLoadableModuleWidget):
 
                 b = qt.QToolButton()
                 b.setText(name)
+                b.setProperty("sampleDataText", name)
 
                 # Set thumbnail
                 if source.thumbnailFileName:
@@ -443,7 +506,7 @@ class SampleDataWidget(ScriptedLoadableModuleWidget):
                 if thumbnailImage and os.path.exists(thumbnailImage):
                     b.setIcon(qt.QIcon(thumbnailImage))
 
-                b.setIconSize(iconSize)
+                SampleDataWidget.setThumbnailSize(b, iconSize)
                 b.setToolButtonStyle(qt.Qt.ToolButtonTextUnderIcon)
                 qSize = qt.QSizePolicy()
                 qSize.setHorizontalPolicy(qt.QSizePolicy.Expanding)
@@ -663,7 +726,10 @@ class SampleDataLogic:
         SampleDataLogic.registerCustomSampleDataCategory(self.builtInCategoryName, title=_("General"))
         self.developmentCategoryName = "Development"
         SampleDataLogic.registerCustomSampleDataCategory(self.developmentCategoryName, title=_("Development"))
+        self.neuroCategoryName = "MNI152 (neuro)"
+        SampleDataLogic.registerCustomSampleDataCategory(self.neuroCategoryName, title=_("MNI152 (neuro)"))
         self.registerBuiltInSampleDataSources()
+        self.registerNeuroTemplateSampleDataSources()
         self.registerDevelopmentSampleDataSources()
         if slicer.app.testingEnabled():
             self.registerTestingDataSources()
@@ -757,6 +823,72 @@ class SampleDataLogic:
             if SampleDataLogic.isSampleDataSourceRegistered(self.builtInCategoryName, dataSource):
                 continue
             slicer.modules.sampleDataSources[self.builtInCategoryName].append(dataSource)
+
+    def registerNeuroTemplateSampleDataSources(self):
+        """Fills in the MNI152 templates and atlases (category "MNI152 (neuro)").
+
+        The MNI152NLin2009cAsym 2 mm brain and brain mask are bundled with the module (see
+        Resources/Data/LICENSE-MNI152NLin2009cAsym.txt), so they load without network access.
+        The other templates and atlases are downloaded from TemplateFlow on request.
+        """
+        moduleDir = os.path.dirname(__file__).replace("\\", "/")
+        iconPath = os.path.join(moduleDir, "Resources", "Icons")
+
+        def bundled(fileName):
+            return qt.QUrl.fromLocalFile(os.path.join(moduleDir, "Resources", "Data", fileName)).toString()
+
+        def templateFlow(fileName):
+            templateId = fileName.split("_")[0]  # for example "tpl-MNI152NLin6Asym"
+            return f"https://templateflow.s3.amazonaws.com/{templateId}/{fileName}"
+
+        # Both thumbnails are rendered from MNI152NLin2009cAsym data: no FSL-licensed data is distributed with the module
+        nlin2009cAsymThumbnail = os.path.join(iconPath, "MNI152NLin2009cAsym.png")
+        nlin6AsymThumbnail = os.path.join(iconPath, "MNI152NLin6Asym.png")
+        labelmap = {"labelmap": True}
+
+        #   Arguments:
+        #     sampleName, sampleDescription (button text, in the "MNI152 (neuro)" category), uri, fileName, nodeName, checksum,
+        #     thumbnailFileName, loadFileProperties
+        sourceArguments = (
+            ("MNI152NLin2009cAsym 2mm brain", "NLin2009cAsym\n2mm brain", bundled("tpl-MNI152NLin2009cAsym_res-02_desc-brain_T1w.nii.gz"),
+             "tpl-MNI152NLin2009cAsym_res-02_desc-brain_T1w.nii.gz", "MNI152NLin2009cAsym_2mm_brain",
+             "SHA256:7b168153a9508f5f116ac37d33835fa44dd168ba7a9ae31a3b33e6f63bd23292", nlin2009cAsymThumbnail, None),
+            ("MNI152NLin2009cAsym 2mm brain mask", "NLin2009cAsym\n2mm brain mask", bundled("tpl-MNI152NLin2009cAsym_res-02_desc-brain_mask.nii.gz"),
+             "tpl-MNI152NLin2009cAsym_res-02_desc-brain_mask.nii.gz", "MNI152NLin2009cAsym_2mm_brain_mask",
+             "SHA256:7a71e9ce99d2af7b68bb5c163908c8e25f4c7a198806fb0893a5c1759b480ecd", nlin2009cAsymThumbnail, labelmap),
+            ("MNI152NLin2009cAsym 1mm T1w", "NLin2009cAsym\n1mm T1w", templateFlow("tpl-MNI152NLin2009cAsym_res-01_T1w.nii.gz"),
+             "tpl-MNI152NLin2009cAsym_res-01_T1w.nii.gz", "MNI152NLin2009cAsym_1mm_T1w",
+             "SHA256:1f27aabea9f7183dc0c69dafa71e1787b921ca778d655d9c1bf302b273d5627a", nlin2009cAsymThumbnail, None),
+            ("MNI152NLin2009cAsym 1mm brain mask", "NLin2009cAsym\n1mm brain mask", templateFlow("tpl-MNI152NLin2009cAsym_res-01_desc-brain_mask.nii.gz"),
+             "tpl-MNI152NLin2009cAsym_res-01_desc-brain_mask.nii.gz", "MNI152NLin2009cAsym_1mm_brain_mask",
+             "SHA256:e40bb1816736504d4c25abc243c1c8503df1d308f64c048318aa4b829e09a7ae", nlin2009cAsymThumbnail, labelmap),
+            # FSL licence terms apply (non-commercial) to MNI152NLin6Asym and the Harvard-Oxford atlas: downloaded on request only
+            ("MNI152NLin6Asym 2mm T1w (FSL terms)", "NLin6Asym\n2mm T1w\n(FSL terms)", templateFlow("tpl-MNI152NLin6Asym_res-02_T1w.nii.gz"),
+             "tpl-MNI152NLin6Asym_res-02_T1w.nii.gz", "MNI152NLin6Asym_2mm_T1w",
+             "SHA256:2a814da50173599a857d96246dc057d548072bd6dffa499f75724dbad20792b1", nlin6AsymThumbnail, None),
+            ("MNI152NLin6Asym 2mm brain mask (FSL terms)", "NLin6Asym\n2mm brain mask\n(FSL terms)", templateFlow("tpl-MNI152NLin6Asym_res-02_desc-brain_mask.nii.gz"),
+             "tpl-MNI152NLin6Asym_res-02_desc-brain_mask.nii.gz", "MNI152NLin6Asym_2mm_brain_mask",
+             "SHA256:e4e2b284170271afdafe26ac0997b2af5a0f5ddac35e28a7e796b52e8bc5adb1", nlin6AsymThumbnail, labelmap),
+            ("MNI152NLin6Asym 1mm T1w (FSL terms)", "NLin6Asym\n1mm T1w\n(FSL terms)", templateFlow("tpl-MNI152NLin6Asym_res-01_T1w.nii.gz"),
+             "tpl-MNI152NLin6Asym_res-01_T1w.nii.gz", "MNI152NLin6Asym_1mm_T1w",
+             "SHA256:f675946c0a077e0682885c3d6085f10acb0dd22b2274a6cbbf04969c08a77258", nlin6AsymThumbnail, None),
+            ("Schaefer2018 400 parcels 7 networks (2mm)", "Schaefer2018 400\n7 networks (2mm)", templateFlow("tpl-MNI152NLin6Asym_res-02_atlas-Schaefer2018_desc-400Parcels7Networks_dseg.nii.gz"),
+             "tpl-MNI152NLin6Asym_res-02_atlas-Schaefer2018_desc-400Parcels7Networks_dseg.nii.gz", "Schaefer2018_400Parcels7Networks_2mm",
+             "SHA256:3bc579ab8a00eaf86c5f311b1808b482327ec97670a57393678a50fafc408e8c", nlin6AsymThumbnail, labelmap),
+            ("Harvard-Oxford th25 (2mm)", "Harvard-Oxford\nth25 (2mm)", templateFlow("tpl-MNI152NLin6Asym_res-02_atlas-HOCPA_desc-th25_dseg.nii.gz"),
+             "tpl-MNI152NLin6Asym_res-02_atlas-HOCPA_desc-th25_dseg.nii.gz", "HarvardOxford_cortical_th25_2mm",
+             "SHA256:b34746e73c87de08ca92503d5bf2aaee2b1e481925a271397c63686237a16b41", nlin6AsymThumbnail, labelmap),
+        )
+
+        if self.neuroCategoryName not in slicer.modules.sampleDataSources:
+            slicer.modules.sampleDataSources[self.neuroCategoryName] = []
+        for sampleName, sampleDescription, uri, fileName, nodeName, checksum, thumbnailFileName, loadFileProperties in sourceArguments:
+            dataSource = SampleDataSource(
+                sampleName=sampleName, sampleDescription=sampleDescription, uris=uri, fileNames=fileName, nodeNames=nodeName, checksums=checksum,
+                thumbnailFileName=thumbnailFileName, loadFileTypes="VolumeFile", loadFileProperties=loadFileProperties)
+            if SampleDataLogic.isSampleDataSourceRegistered(self.neuroCategoryName, dataSource):
+                continue
+            slicer.modules.sampleDataSources[self.neuroCategoryName].append(dataSource)
 
     def registerDevelopmentSampleDataSources(self):
         """Fills in the sample data sources displayed only if developer mode is enabled."""
@@ -958,6 +1090,8 @@ class SampleDataLogic:
                     loadedNode = self.loadNode(filePath, nodeName, loadFileType, source.loadFileProperties.copy())
                     if loadedNode:
                         # Success
+                        if source.loadFileProperties.get("labelmap") and self.categoryForSource(source) == self.neuroCategoryName:
+                            SampleDataLogic.convertLabelmapToIntegerScalarType(loadedNode)
                         resultNodes.append(loadedNode)
                         break
                 else:
@@ -997,6 +1131,29 @@ class SampleDataLogic:
                 if a_source == source:
                     return category
         return None
+
+    @staticmethod
+    def convertLabelmapToIntegerScalarType(labelmapNode):
+        """Convert the voxels of a labelmap volume node read as floating point to the smallest integer type that holds them.
+
+        For example, the TemplateFlow MNI152NLin2009cAsym 2 mm brain mask stores 0/255 values with a 1/255 scaling
+        (NIfTI scl_slope) that the reader applies. Labels that are not integer values are left unchanged.
+        Returns True if the voxels were converted.
+        """
+        import numpy as np
+
+        imageData = labelmapNode.GetImageData() if labelmapNode.IsA("vtkMRMLLabelMapVolumeNode") else None
+        if not imageData or imageData.GetScalarType() not in (vtk.VTK_FLOAT, vtk.VTK_DOUBLE):
+            return False
+        voxels = slicer.util.arrayFromVolume(labelmapNode)
+        labels = np.rint(voxels)
+        if not np.allclose(voxels, labels, rtol=0.0, atol=1e-3):
+            return False
+        for scalarType in (np.uint8, np.int16, np.int32):
+            if labels.min() >= np.iinfo(scalarType).min and labels.max() <= np.iinfo(scalarType).max:
+                slicer.util.updateVolumeFromArray(labelmapNode, labels.astype(scalarType))
+                return True
+        return False
 
     def downloadFromURL(self, uris=None, fileNames=None, nodeNames=None, checksums=None, loadFiles=None,
                         customDownloader=None, loadFileTypes=None, loadFileProperties={}, forceDownload=False):
@@ -1269,6 +1426,7 @@ class SampleDataTest(ScriptedLoadableModuleTest):
             self.test_defaultFileType,
             self.test_customDownloader,
             self.test_categoryForSource,
+            self.test_neuroTemplates,
         ]:
             self.setUp()
             test()
@@ -1550,3 +1708,38 @@ class SampleDataTest(ScriptedLoadableModuleTest):
         logic = SampleDataLogic()
         source = slicer.modules.sampleDataSources[logic.builtInCategoryName][0]
         self.assertEqual(logic.categoryForSource(source), logic.builtInCategoryName)
+
+    def test_neuroTemplates(self):
+        """The bundled MNI152NLin2009cAsym 2 mm brain and mask load without network access, with verified checksums."""
+        logic = SampleDataLogic()
+        sampleNames = [source.sampleName for source in SampleDataLogic.sampleDataSourcesByCategory(logic.neuroCategoryName)]
+        self.assertEqual(sampleNames, [
+            "MNI152NLin2009cAsym 2mm brain", "MNI152NLin2009cAsym 2mm brain mask",
+            "MNI152NLin2009cAsym 1mm T1w", "MNI152NLin2009cAsym 1mm brain mask",
+            "MNI152NLin6Asym 2mm T1w (FSL terms)", "MNI152NLin6Asym 2mm brain mask (FSL terms)", "MNI152NLin6Asym 1mm T1w (FSL terms)",
+            "Schaefer2018 400 parcels 7 networks (2mm)", "Harvard-Oxford th25 (2mm)"])
+        for source in SampleDataLogic.sampleDataSourcesByCategory(logic.neuroCategoryName):
+            self.assertTrue(source.checksums[0].startswith("SHA256:"))
+            self.assertTrue(os.path.exists(source.thumbnailFileName))
+
+        expectedClassNames = {
+            "MNI152NLin2009cAsym 2mm brain": "vtkMRMLScalarVolumeNode",
+            "MNI152NLin2009cAsym 2mm brain mask": "vtkMRMLLabelMapVolumeNode",
+        }
+        cacheDirectory = slicer.mrmlScene.GetCacheManager().GetRemoteCacheDirectory()
+        for sampleName, className in expectedClassNames.items():
+            source = logic.sourceForSampleName(sampleName)
+            self.assertTrue(source.uris[0].startswith("file:"))
+            # Remove the cached copy so that the bundled file is copied into the cache and its checksum is verified
+            cachedFilePath = os.path.join(cacheDirectory, source.fileNames[0])
+            if os.path.exists(cachedFilePath):
+                os.remove(cachedFilePath)
+            node = logic.downloadSample(sampleName)
+            self.assertEqual(node.GetClassName(), className)
+            self.assertEqual(node.GetImageData().GetDimensions(), (97, 115, 97))
+            if node.IsA("vtkMRMLLabelMapVolumeNode"):
+                # The file stores 0/255 with a 1/255 scaling (NIfTI scl_slope): labels are converted to integers
+                self.assertEqual(node.GetImageData().GetScalarTypeAsString(), "unsigned char")
+                self.assertEqual(node.GetImageData().GetScalarRange(), (0.0, 1.0))
+            (algo, digest) = extractAlgoAndDigest(source.checksums[0])
+            self.assertEqual(computeChecksum(algo, cachedFilePath), digest)

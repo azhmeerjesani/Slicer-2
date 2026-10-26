@@ -20,6 +20,9 @@
 
 // Qt includes
 #include <QDebug>
+#include <QHash>
+#include <QPointer>
+#include <QSet>
 #include <QSettings>
 
 // CTK includes
@@ -54,6 +57,14 @@ public:
   QAction* action(const QVariant& actionData, const QMenu* parentMenu = nullptr) const;
   QAction* action(const QString& text, const QMenu* parentMenu = nullptr) const;
   QMenu* actionMenu(QAction* action, QMenu* parentMenu) const;
+
+  /// Action of the module in the menu (or a submenu), or nullptr. Same result as action(QVariant(moduleName)),
+  /// without searching the menus.
+  QAction* moduleAction(const QString& moduleName) const;
+  /// Forget the module actions that are not in the menu anymore (for example after a category was removed).
+  void removeUnreachableModuleActions();
+  bool isDeveloperModeEnabled();
+
   // clang-format off
   qSlicerModuleManager* ModuleManager;
   QAction*              NoModuleAction; //< Can be used to remove the current module
@@ -61,6 +72,11 @@ public:
   bool                  DuplicateActions;
   bool                  ShowHiddenModules;
   QStringList           TopLevelCategoryOrder;
+  /// Module actions in the menu, by module name (the data of the action). Guarded: the actions belong to the
+  /// modules, which may delete them without removing them from every menu first (at exit for example).
+  QHash<QString, QPointer<QAction>> ModuleActions;
+  /// Developer/DeveloperMode, read once (-1: not read yet)
+  int                   DeveloperModeEnabled{ -1 };
   // clang-format on
 };
 
@@ -165,6 +181,60 @@ QAction* qSlicerModulesMenuPrivate::action(const QString& text, const QMenu* par
     }
   }
   return nullptr;
+}
+
+//---------------------------------------------------------------------------
+QAction* qSlicerModulesMenuPrivate::moduleAction(const QString& moduleName) const
+{
+  // A deleted action is not in any menu anymore: nullptr, as the search in the menus would return
+  return this->ModuleActions.value(moduleName).data();
+}
+
+//---------------------------------------------------------------------------
+void qSlicerModulesMenuPrivate::removeUnreachableModuleActions()
+{
+  Q_Q(qSlicerModulesMenu);
+  QSet<QAction*> reachableActions;
+  QList<QMenu*> menus = { q };
+  QSet<QMenu*> visitedMenus;
+  while (!menus.isEmpty())
+  {
+    QMenu* menu = menus.takeFirst();
+    if (visitedMenus.contains(menu))
+    {
+      continue;
+    }
+    visitedMenus.insert(menu);
+    for (QAction* const action : menu->actions())
+    {
+      reachableActions.insert(action);
+      if (action->menu())
+      {
+        menus << action->menu();
+      }
+    }
+  }
+  for (auto it = this->ModuleActions.begin(); it != this->ModuleActions.end();)
+  {
+    if (it.value() && reachableActions.contains(it.value().data()))
+    {
+      ++it;
+    }
+    else
+    {
+      it = this->ModuleActions.erase(it);
+    }
+  }
+}
+
+//---------------------------------------------------------------------------
+bool qSlicerModulesMenuPrivate::isDeveloperModeEnabled()
+{
+  if (this->DeveloperModeEnabled < 0)
+  {
+    this->DeveloperModeEnabled = QSettings().value("Developer/DeveloperMode", false).toBool() ? 1 : 0;
+  }
+  return this->DeveloperModeEnabled > 0;
 }
 
 //---------------------------------------------------------------------------
@@ -454,6 +524,7 @@ bool qSlicerModulesMenu::removeCategory(const QString& categoryName)
     parentCategory = menus.takeLast();
   }
   parentCategory->removeAction(category->menuAction());
+  d->removeUnreachableModuleActions();
   return true;
 }
 
@@ -475,9 +546,13 @@ void qSlicerModulesMenu::setModuleManager(qSlicerModuleManager* moduleManager)
   }
 
   this->clear();
+  d->ModuleActions.clear();
   d->addDefaultCategories();
 
   d->ModuleManager = moduleManager;
+  // Read once for all the modules (a change of the developer mode applies after a restart)
+  d->DeveloperModeEnabled = -1;
+  d->isDeveloperModeEnabled();
 
   if (!d->ModuleManager)
   {
@@ -500,7 +575,7 @@ qSlicerModuleManager* qSlicerModulesMenu::moduleManager() const
 QAction* qSlicerModulesMenu::moduleAction(const QString& moduleName) const
 {
   Q_D(const qSlicerModulesMenu);
-  return d->action(QVariant(moduleName));
+  return d->moduleAction(moduleName);
 }
 
 //---------------------------------------------------------------------------
@@ -528,9 +603,7 @@ void qSlicerModulesMenu::addModule(qSlicerAbstractCoreModule* moduleToAdd)
 
   // Only show modules in Testing category if developer mode is enabled
   // to not clutter the module list for regular users with tests
-  QSettings settings;
-  bool developerModeEnabled = settings.value("Developer/DeveloperMode", false).toBool();
-  if (!developerModeEnabled)
+  if (!d->isDeveloperModeEnabled())
   {
     bool testOnlyModule = qSlicerUtils::isTestingModule(module);
     if (testOnlyModule)
@@ -563,6 +636,10 @@ void qSlicerModulesMenu::addModule(qSlicerAbstractCoreModule* moduleToAdd)
     }
     d->addModuleAction(menu, moduleAction, true, module->isBuiltIn());
   }
+  if (!module->categories().isEmpty())
+  {
+    d->ModuleActions.insert(moduleAction->data().toString(), QPointer<QAction>(moduleAction));
+  }
 
   // Maybe the module was set current before it was added into the menu
   if (d->CurrentModule == moduleAction->data().toString())
@@ -589,12 +666,19 @@ bool qSlicerModulesMenu::removeModule(qSlicerAbstractCoreModule* moduleToRemove)
     qWarning() << "A module needs a QAction to be handled by qSlicerModulesMenu";
     return false;
   }
-  QAction* moduleAction = d->action(module->action()->data());
+  QAction* moduleAction = d->moduleAction(module->action()->data().toString());
   if (!moduleAction)
   {
+    // Forget the entry of an action that was deleted
+    d->ModuleActions.remove(module->action()->data().toString());
     return false;
   }
   bool success = d->removeTopLevelModuleAction(moduleAction);
+  if (success && !d->actionMenu(moduleAction, this))
+  {
+    // Not in any category menu anymore
+    d->ModuleActions.remove(moduleAction->data().toString());
+  }
   // TBD: what if the module is the current module ?
   return success;
 }
@@ -603,7 +687,7 @@ bool qSlicerModulesMenu::removeModule(qSlicerAbstractCoreModule* moduleToRemove)
 void qSlicerModulesMenu::setCurrentModule(const QString& moduleName)
 {
   Q_D(qSlicerModulesMenu);
-  QAction* moduleAction = (!moduleName.isEmpty() ? d->action(QVariant(moduleName)) : d->NoModuleAction);
+  QAction* moduleAction = (!moduleName.isEmpty() ? d->moduleAction(moduleName) : d->NoModuleAction);
   if (!moduleAction)
   {
     // maybe the module hasn't been added yet.

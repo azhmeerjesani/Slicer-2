@@ -4,6 +4,8 @@ version: 2
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"
+    # Slicer Studio: no update pull requests (GitHub is used only as the git remote, see CLAUDE.md)
+    open-pull-requests-limit: 0
     schedule:
       # Check for updates to GitHub Actions every month
       interval: "monthly"

@@ -1,14 +1,8 @@
 name: "Commit Message Check"
+# Slicer Studio: manual runs only. GitHub is used only as the git remote (see CLAUDE.md), so no workflow
+# runs on pushes, pull requests, tags or a schedule.
 on:
-  pull_request:
-    types:
-      - opened
-      - edited
-      - reopened
-      - synchronize
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 permissions:
   contents: read
