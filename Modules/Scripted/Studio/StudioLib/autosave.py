@@ -1711,6 +1711,34 @@ class AutosaveService:
             self._forceProjectOpen = False
         return self.project is not None
 
+    def opensSceneAsProject(self):
+        """True if a scene file opened now (Open…, drop, Open folder…) replaces the open project instead of being added to it.
+
+        In Studio with projects, every scene opens as its own project (A-09): a project of the Slicer Studio folder continues
+        in place, a scene from elsewhere opens as a new project that starts as a copy. Classic, a study and a scene without a
+        project keep 3D Slicer's behavior (the scene's data is added to the open scene).
+        """
+        return self.project is not None and self.projectsActive()
+
+    def openSceneFile(self, path):
+        """Open a scene file (.mrml/.mrb) as its own project while a project is open (``opensSceneAsProject()``).
+
+        The open project is saved and closed first (Load Scene clears the scene). Opening the scene file of the open project
+        again keeps it as it is. Return True if the scene is open.
+        """
+        projects = self._projects()
+        path = os.path.abspath(str(path))
+        projectPath = projects.projectOfPath(path)
+        scenePath = projects.sceneFile(projectPath) if projectPath is not None else None
+        if scenePath is not None and os.path.normcase(os.path.realpath(scenePath)) == os.path.normcase(os.path.realpath(path)):
+            current = self.project
+            if current is not None and os.path.normcase(os.path.realpath(current.path)) == os.path.normcase(os.path.realpath(projectPath)):
+                return True  # the open project: nothing to load (adding it again would duplicate every node)
+            return self.openProject(projectPath)
+        self.setPendingSceneSource(path)
+        slicer.util.loadScene(path, {"clear": True})
+        return True
+
     def _afterSceneImport(self):
         """A scene was loaded: a project of the folder continues in place; in Studio a scene from elsewhere is copied."""
         projects = self._projects()

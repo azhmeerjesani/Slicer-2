@@ -11,7 +11,8 @@ Unambiguous files load directly, without the Add Data dialog:
   opened in Studio has the same content);
 - other NIfTI, NRRD and MetaImage files are loaded as scalar volumes and shown in all slice views;
 - ``.mrb`` and ``.mrml`` files are loaded as scenes. They keep their own layout and views; a scene opened in
-  Library is shown in Draw (the Library page covers the views).
+  Library is shown in Draw (the Library page covers the views). In Studio with a project open, a scene opens as its
+  own project instead of being added to the open one (A-09: the open project is saved and closed first).
 
 In Studio, a scan or lesion file that is already loaded (same real path as the file of a node in the scene) is
 not loaded a second time: it becomes current again, with the toast "<name> is already open". Classic keeps the
@@ -966,8 +967,8 @@ def loadFiles(paths, shell=None, pairedLesion=None):
                     continue
                 try:
                     if kind == "scene":
-                        _announceSceneSource(path)
-                        slicer.util.loadScene(path, {})
+                        if not _loadScene(path, shell):
+                            continue  # not opened (for example a project locked by another computer): already announced
                         result.scenes.append(path)
                     elif kind == "volume":
                         result.volumes.append(slicer.util.loadVolume(path, {"singleFile": True}))
@@ -1270,6 +1271,28 @@ def loadFolder(path, shell=None):
             return "nifti"
     openAddDataDialog([path])
     return "addData"
+
+
+def _loadScene(path, shell):
+    """Load a scene file; return True if it is open.
+
+    In Studio with a project open, the scene opens as its own project (A-09: the open project is saved and closed first; a
+    scene from outside the Slicer Studio folder becomes a new project that starts as a copy). Otherwise its data is added
+    to the open scene, as 3D Slicer's Add Data does.
+    """
+    service = None
+    if shell is not None:
+        try:
+            from . import autosave
+
+            service = autosave.instance()
+        except ImportError:
+            service = None
+    if service is not None and hasattr(service, "opensSceneAsProject") and service.opensSceneAsProject():
+        return bool(service.openSceneFile(path))
+    _announceSceneSource(path)
+    slicer.util.loadScene(path, {})
+    return True
 
 
 def _announceSceneSource(path):

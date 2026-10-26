@@ -945,6 +945,66 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertEqual(os.path.normpath(loaded.GetStorageNode().GetFileName()), os.path.normpath(imageFile))
         self.assertEqual(int(slicer.util.arrayFromVolume(loaded)[0, 0, 0]), 33)
 
+    def test_23_scene_opened_while_a_project_is_open(self):
+        """Open… (or drop, or Open folder…) of a scene while a project is open opens the scene as its own project (A-09):
+        the open project is saved and closed and keeps its data; a scene from outside the folder opens as a new project that
+        starts as a copy; a project of the folder continues in place; the open project's own scene is not added again.
+        """
+        from StudioLib import importer, shell
+
+        projects = self.projects
+        # A scene bundle saved by 3D Slicer somewhere else
+        volume, _path = self._userVolume("MR Head", shape=(12, 14, 16), extension=".nrrd")
+        self._lesion(volume, "Outside lesion")
+        bundlePath = os.path.join(self.tempDir, "Outside bundle.mrb")
+        self.assertTrue(slicer.util.saveScene(bundlePath))
+        bundleMd5 = _md5File(bundlePath)
+        slicer.mrmlScene.Clear(0)
+        service = self._service()
+        announced = []
+        service.setProjectAnnouncer(lambda event, project, **info: announced.append((event, project.name if project else None)))
+        self._userVolume("First scan", shape=(12, 14, 16))
+        first = self._projectFor(service)
+        self._save(service)
+        firstPath = first.path
+        running = self.autosave._service
+        self.autosave._service = service  # as the running service of the application
+        studioShell = shell.Shell(force=True)
+        try:
+            studioShell.apply()
+            slicer.app.processEvents()
+            # A scene from outside the folder: a new project that starts as a copy; the open project is not changed
+            del announced[:]
+            result = importer.loadFiles([bundlePath], studioShell)
+            self.io.backgroundWriter().drain(30.0)
+            self.assertEqual(result.scenes, [bundlePath])
+            self.assertIsNotNone(service.project)
+            self.assertNotEqual(service.project.path, firstPath, "the scene is not added to the open project")
+            self.assertEqual(service.project.name, "Outside bundle")
+            self.assertIn(("copy", "Outside bundle"), announced)
+            self.assertEqual(projects.readJson(projects.projectFile(firstPath))["state"], "closed")
+            for name in ("MR Head", "Outside lesion"):
+                self.assertEqual(len(slicer.util.getNodes(name, useLists=True).get(name, [])), 1, name)
+            self.assertIsNone(slicer.mrmlScene.GetFirstNodeByName("First scan"))
+            self.assertEqual([path for path in self._projectFiles(first) if "MR Head" in path or "Outside" in path], [])
+            self.assertEqual(_md5File(bundlePath), bundleMd5, "the original is not changed")
+            # Open folder… on a project of the folder: it continues in place (the open project is closed first)
+            secondPath = service.project.path
+            self.assertEqual(importer.loadFolder(firstPath, studioShell), "scene")
+            self.io.backgroundWriter().drain(30.0)
+            self.assertEqual(service.project.path, firstPath)
+            self.assertEqual(projects.readJson(projects.projectFile(secondPath))["state"], "closed")
+            self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("First scan"))
+            self.assertIsNone(slicer.mrmlScene.GetFirstNodeByName("MR Head"))
+            # The open project's own scene file: nothing is added again
+            importer.loadFiles([projects.sceneFile(firstPath)], studioShell)
+            self.assertEqual(service.project.path, firstPath)
+            self.assertEqual(len(slicer.util.getNodes("First scan", useLists=True).get("First scan", [])), 1)
+        finally:
+            self.autosave._service = running
+            studioShell.dispose()
+            slicer.app.processEvents()
+
 
 
 def _sphere(center=(0, 0, 0)):
