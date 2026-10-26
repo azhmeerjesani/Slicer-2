@@ -2072,6 +2072,26 @@ def _userTemplateOf(volumeNode):
         return None
 
 
+def _sidecarText(segmentationNode, attribute, key, path):
+    """Notes or source reference for the sidecar of ``path``: the lesion's attribute (an empty one was cleared in the
+    Lesion card). Without the attribute, a re-save to the file the lesion was loaded from keeps that sidecar's text.
+    """
+    value = segmentationNode.GetAttribute(attribute)
+    if value is not None:
+        return value
+    storageNode = segmentationNode.GetStorageNode()
+    loadedPath = storageNode.GetFileName() if storageNode is not None else None
+    if not loadedPath or os.path.normcase(os.path.realpath(loadedPath)) != os.path.normcase(os.path.realpath(path)):
+        return ""
+    try:
+        with open(sidecarPath(path), encoding="utf-8") as f:
+            existing = json.load(f)
+    except (OSError, ValueError):
+        return ""
+    value = existing.get(key) if isinstance(existing, dict) else None
+    return value if isinstance(value, str) else ""
+
+
 def writeSidecar(path, segmentationNode, sourceVolumeNode=None):
     """Write the BIDS-style sidecar of a saved lesion (D-U3; official Slicer and FSL ignore it). Return its path.
 
@@ -2084,8 +2104,8 @@ def writeSidecar(path, segmentationNode, sourceVolumeNode=None):
     content = {
         "Source": _sidecarSource(sidecar, sourceVolumeNode) if sourceVolumeNode is not None else None,
         "Space": lesionSpace[0] if lesionSpace else "scanner",
-        "Notes": segmentationNode.GetAttribute(NOTES_ATTRIBUTE) or "",
-        "SourceReference": segmentationNode.GetAttribute(SOURCE_REFERENCE_ATTRIBUTE) or "",
+        "Notes": _sidecarText(segmentationNode, NOTES_ATTRIBUTE, "Notes", path),
+        "SourceReference": _sidecarText(segmentationNode, SOURCE_REFERENCE_ATTRIBUTE, "SourceReference", path),
         "GeneratedBy": f"Slicer Studio {slicer.app.applicationVersion}",
     }
     if content["Source"] is None:

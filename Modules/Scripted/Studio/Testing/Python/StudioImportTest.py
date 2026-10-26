@@ -1346,6 +1346,59 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         with open(path, "rb") as f:
             self.assertEqual(f.read(), before)
 
+    def test_sidecar_notes_reopen(self):
+        """The Notes and SourceReference of a lesion's sidecar are on the lesion opened again (the Lesion card shows
+        them), and Save lesion to the same file keeps them; a value cleared in the card is written cleared.
+        """
+        from StudioLib import draw, importer
+
+        self.assertEqual(dict(importer.LESION_SIDECAR_TEXT_ATTRIBUTES),
+                         {"Notes": draw.NOTES_ATTRIBUTE, "SourceReference": draw.SOURCE_REFERENCE_ATTRIBUTE})
+        studioShell = self._applyStudio()
+        path = self._writeMask("sub-09_lesion.nii.gz", GRID_2009C_2MM)
+        with open(importer.sidecarPath(path), "w", encoding="utf-8") as f:
+            json.dump({"Space": "MNI152NLin2009cAsym", "Notes": "periventricular, check slice 40",
+                       "SourceReference": "10.1000/xyz Fig 2B", "GeneratedBy": "Slicer Studio"}, f)
+        result = importer.loadFiles([path], studioShell)
+        self._pump(8)
+        lesion = result.segmentations[0]
+        self.assertEqual(lesion.GetAttribute(draw.NOTES_ATTRIBUTE), "periventricular, check slice 40")
+        self.assertEqual(lesion.GetAttribute(draw.SOURCE_REFERENCE_ATTRIBUTE), "10.1000/xyz Fig 2B")
+        self.assertEqual(self._editor().segmentationNode().GetID(), lesion.GetID())
+        self.assertEqual(studioShell.currentWorkspace(), "draw")
+        self._pump(4)
+        card = draw.extension().card
+        self.assertEqual(card.notesEdit.toPlainText(), "periventricular, check slice 40")
+        self.assertEqual(card.sourceReferenceEdit.text, "10.1000/xyz Fig 2B")
+
+        def sidecar():
+            with open(importer.sidecarPath(path), encoding="utf-8") as f:
+                return json.load(f)
+
+        # Save lesion to the same file keeps them
+        self.assertEqual(draw.saveLesionDialog(studioShell, path=path), path)
+        self.assertEqual(sidecar()["Notes"], "periventricular, check slice 40")
+        self.assertEqual(sidecar()["SourceReference"], "10.1000/xyz Fig 2B")
+        # A lesion without the attributes (not opened by Studio) re-saved to its own file keeps the sidecar's text
+        lesion.RemoveAttribute(draw.NOTES_ATTRIBUTE)
+        lesion.RemoveAttribute(draw.SOURCE_REFERENCE_ATTRIBUTE)
+        draw.writeSidecar(path, lesion)
+        self.assertEqual(sidecar()["Notes"], "periventricular, check slice 40")
+        self.assertEqual(sidecar()["SourceReference"], "10.1000/xyz Fig 2B")
+        # ... but saved over another lesion's file, it does not take that file's text
+        otherPath = os.path.join(os.path.dirname(path), "sub-10_lesion.nii.gz")
+        with open(importer.sidecarPath(otherPath), "w", encoding="utf-8") as f:
+            json.dump({"Notes": "another lesion", "SourceReference": "another source"}, f)
+        draw.writeSidecar(otherPath, lesion)
+        with open(importer.sidecarPath(otherPath), encoding="utf-8") as f:
+            otherSidecar = json.load(f)
+        self.assertEqual([otherSidecar["Notes"], otherSidecar["SourceReference"]], ["", ""])
+        # Cleared in the card: written cleared
+        lesion.SetAttribute(draw.NOTES_ATTRIBUTE, "")
+        lesion.SetAttribute(draw.SOURCE_REFERENCE_ATTRIBUTE, "")
+        draw.writeSidecar(path, lesion)
+        self.assertEqual([sidecar()["Notes"], sidecar()["SourceReference"]], ["", ""])
+
     def test_tsv_drop_no_add_data(self):
         """A dropped participants.tsv never opens Add Data (a toast says what it holds); Shift+drop still does."""
         from StudioLib import importer

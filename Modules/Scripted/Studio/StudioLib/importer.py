@@ -157,6 +157,9 @@ MAX_RECENT_FOLDERS = 10
 
 #: Node attribute: the reference image geometry of a lesion when it was loaded (W2-05 saves on it)
 LESION_GRID_ATTRIBUTE = "Studio.LesionGrid"
+#: Keys of a lesion's sidecar that Draw's Lesion card edits, and their node attributes (``draw.NOTES_ATTRIBUTE``,
+#: ``draw.SOURCE_REFERENCE_ATTRIBUTE``)
+LESION_SIDECAR_TEXT_ATTRIBUTES = (("Notes", "Studio.LesionNotes"), ("SourceReference", "Studio.LesionSourceReference"))
 
 #: Statistical map overlay: name of its colour table, opacity, and the default threshold (fraction of the window)
 STATMAP_COLOR_NODE_NAME = "StudioStatMapDiverging"
@@ -969,7 +972,9 @@ def loadFiles(paths, shell=None, pairedLesion=None):
                     elif kind == "volume":
                         result.volumes.append(slicer.util.loadVolume(path, {"singleFile": True}))
                     else:
-                        result.segmentations.append(loadLesion(path))
+                        segmentationNode = loadLesion(path)
+                        restoreSidecarText(segmentationNode, path)
+                        result.segmentations.append(segmentationNode)
                     loadedPaths.append(path)
                 except Exception as e:
                     logging.error(f"Studio: cannot load {path}:\n{traceback.format_exc()}")
@@ -1511,21 +1516,40 @@ def sidecarPath(lesionPath):
     return os.path.join(os.path.dirname(lesionPath), _baseName(lesionPath) + ".json")
 
 
+def readSidecar(lesionPath):
+    """The content of the sidecar of a lesion file (a dict), or None when there is none or it is not a JSON object."""
+    if not lesionPath:
+        return None
+    try:
+        with open(sidecarPath(lesionPath), encoding="utf-8") as f:
+            sidecar = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return sidecar if isinstance(sidecar, dict) else None
+
+
+def restoreSidecarText(segmentationNode, lesionPath):
+    """The ``Notes`` and ``SourceReference`` of a lesion file's sidecar (written by Draw's Save lesion) on the lesion
+    loaded from it: the Lesion card shows them and the next Save lesion keeps them. A value already on the node wins.
+    """
+    sidecar = readSidecar(lesionPath)
+    if segmentationNode is None or sidecar is None:
+        return
+    for key, attribute in LESION_SIDECAR_TEXT_ATTRIBUTES:
+        value = sidecar.get(key)
+        if isinstance(value, str) and segmentationNode.GetAttribute(attribute) is None:
+            segmentationNode.SetAttribute(attribute, value)
+
+
 def sidecarSource(lesionPath):
     """The scan that the sidecar of a lesion file names, if that file exists: ``Source`` (D-U3), else the BIDS keys
     ``Sources`` (a list) and ``SpatialReference`` of study lesions. Paths are relative to the sidecar; BIDS URIs and
     URLs are not resolved.
     """
-    if not lesionPath:
+    sidecar = readSidecar(lesionPath)
+    if sidecar is None:
         return None
     path = sidecarPath(lesionPath)
-    try:
-        with open(path, encoding="utf-8") as f:
-            sidecar = json.load(f)
-    except (OSError, ValueError):
-        return None
-    if not isinstance(sidecar, dict):
-        return None
     candidates = [sidecar.get("Source"), sidecar.get("source")]
     sources = sidecar.get("Sources")
     candidates.extend(sources if isinstance(sources, list) else [sources])
