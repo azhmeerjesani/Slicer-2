@@ -188,6 +188,40 @@ class LesionNetworkMappingPlanUITest(unittest.TestCase):
             _pump(50)
         self.assertTrue(self.ctx.computeEnabled(), self.ctx.computeDisabledReasons())
 
+    def test_7_reopen_follows_the_plan(self):
+        """Opening the study again (a new session: default rule and Run everything options) shows no change from the plan.
+
+        The Map rule lives in the scene and the Run everything options in the settings, so a new session (or another
+        computer) starts from the defaults; opening the study sets them to the locked plan with its recorded deviations
+        instead of asking for a reason for changes nobody made (bug lnm-cohort:locked-plan-phantom-deviation-on-reopen).
+        """
+        top5 = {"kind": "top_pct", "value": 5.0, "statistic": "Fz", "sign": "both"}
+        self.widget.setRule(top5)
+        self.header.refresh()
+        _pump(50)
+        self.assertEqual([change["field"] for change in self.header.pending], ["rule"], self._pendingText())
+        self.assertEqual(len(self.header.recordPending("Sensitivity analysis")), 1)
+        recorded = len(self.recipes.read_deviations(self.study))
+        effective = self.recipes.effective_parameters(self.study)
+        self.assertEqual(effective["rule"]["kind"], "top_pct")
+        # A new session: no study, the default rule, the default Run everything options, the Contrast tab's default
+        self.ctx.setStudy(None)
+        self.widget.cohortStudy = None
+        _pump(50)
+        self.widget.setRule(self.plan["parameters"]["rule"])
+        qt.QSettings().remove(self.cp.OPTIONS_SETTING)
+        self.contrast.permSpinBox.setValue(5000)
+        self.widget.openCohortStudy(self.study)
+        _pump(100)
+        self._refresh(self.contrast)
+        self.assertEqual(self.header.pending, [], self._pendingText())
+        self.assertTrue(self.header.prompt.isHidden(), "the reason row is shown on open")
+        self.assertTrue(self.ctx.computeEnabled(), self.ctx.computeDisabledReasons())
+        self.assertIsNone(self.header.checkBeforeCompute())
+        self.assertEqual(self.header.currentParameters()["rule"], effective["rule"])
+        self.assertEqual(self.contrast.nPerm(), 1000, "the Contrast tab does not follow the plan's recorded deviation")
+        self.assertEqual(len(self.recipes.read_deviations(self.study)), recorded, "opening the study recorded something")
+
 
 if __name__ == "__main__":
     unittest.main()

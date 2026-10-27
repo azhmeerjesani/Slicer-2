@@ -8,7 +8,9 @@ A header strip above the Seed card (every seed mode, Studio and Classic):
   settings stay as they are until a recipe is picked. Picking one sets the primary threshold rule (Result card) and the
   options of Run everything (``Studio/LNM/Pipeline/Options`` through card_pipeline): steps that are not in the recipe
   are turned off there, so the Run everything pipeline (A-04) runs the recipe's steps. The study remembers the choice
-  (``derivatives/lnm/recipe.json``).
+  (``derivatives/lnm/recipe.json``). Opening a study whose plan is locked sets the rule, the Run everything options and
+  the Cohort analyses' settings to the plan's (with its recorded deviations), as **Use the plan's settings** does;
+  nothing is recorded.
 - **Status line** (``LNMRecipeStatus``): the status tag, "Custom (based on X) · 2 changes" when the Map settings differ
   from the recipe, and the partial-recipe badge "1 step not available in this build: Coordinate seeds".
 - **Plan chip** (``LNMPlanChip``): "Plan: open" or "Plan: locked 2026-10-18 · 3f2a1b9c" ("modified after lock" in red
@@ -29,8 +31,8 @@ Search entries (``StudioLib.palette.registerProvider``): "Choose an analysis rec
 "Lock analysis plan…" and "Show deviations from the analysis plan".
 
 Settings: reads and extends ``Studio/LNM/RecipeFolders`` (a list of folders; only when the user adds one); writes
-``Studio/LNM/Pipeline/Options`` through ``card_pipeline.saveOptions`` only when a recipe is picked. No prompt, setting or
-file is written at start or under ``--testing``.
+``Studio/LNM/Pipeline/Options`` through ``card_pipeline.saveOptions`` only when a recipe is picked, a plan is locked or
+restored, or a study with a locked plan is opened. No prompt, setting or file is written at start or under ``--testing``.
 """
 
 import html
@@ -487,13 +489,25 @@ class RecipeHeader:
             logging.exception("Lesion network mapping: the recipes could not be read")
             self.recipes = []
         path = self.studyPath()
+        opened = bool(path) and path != self._lastStudyPath
         self._lastStudyPath = path
         chosen = self.recipe.id if self.recipe is not None else None
         if path:
             chosen = (recipes.selected_recipe(path) or {}).get("id") or chosen  # the study's choice (its locked plan's recipe first)
         self.recipe = next((recipe for recipe in self.recipes if recipe.id == chosen), None)
         self._fillCombo()
+        # A study with a locked plan was opened: Map starts from the plan's settings (with its recorded deviations), not
+        # from the defaults of a new session or another study's options, so only the user's later changes ask for a reason
+        if opened and self._planLocked(path) and self.restorePlanSettings():
+            return
         self.refresh()
+
+    def _planLocked(self, path):
+        try:
+            return _recipes().read_plan(path) is not None
+        except Exception:
+            logging.exception("Lesion network mapping: the analysis plan could not be read")
+            return False
 
     def _fillCombo(self):
         recipes = _recipes()
@@ -753,10 +767,14 @@ class RecipeHeader:
         """
         recipes = _recipes()
         path = self.studyPath()
-        params = recipes.effective_parameters(path) if path else None
+        try:
+            params = recipes.effective_parameters(path) if path else None
+            steps = recipes.effective_steps(path) if params is not None else None
+        except (recipes.RecipeError, ValueError, TypeError, OSError):  # a hand-edited plan (the chip says "modified")
+            logging.exception("Lesion network mapping: the locked plan's settings could not be read")
+            return False
         if params is None:
             return False
-        steps = recipes.effective_steps(path)
         widget = _mapWidget()
         try:
             if widget is not None and hasattr(widget, "setRule"):
