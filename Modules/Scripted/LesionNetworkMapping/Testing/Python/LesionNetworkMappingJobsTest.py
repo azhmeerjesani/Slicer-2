@@ -170,6 +170,49 @@ class SelfTestJobTest(_TempDirTestCase):
         self.assertEqual(result.stdout, "")
         self.assertIn("--threads", result.stderr)
 
+    def test_help_of_commands_with_percent_in_help(self):
+        # argparse expands every option's help with "help % params": a bare "%" (as in "top % of") broke the whole --help
+        for args in (["LesionNetworkMappingLib.calibrate", "--help"], ["LesionNetworkMappingLib.circuits", "damage", "--help"]):
+            result = subprocess.run([sys.executable, "-m", *args], check=False, capture_output=True, text=True, env=_env(), cwd=self.tmp, timeout=120)
+            self.assertEqual(result.returncode, 0, (args, result.stdout, result.stderr))
+            self.assertEqual(result.stdout, "", args)
+            self.assertIn("% of the", result.stderr, args)
+
+    def test_all_cli_help_strings_format(self):
+        # Every literal help= of the LNM command lines must survive argparse's "help % params" (a literal percent is "%%")
+        import ast
+
+        class _Params(dict):
+            def __missing__(self, key):
+                return ""
+
+        failures = []
+        for package in ("LesionNetworkMappingLib", "LesionNetworkMappingUI"):
+            folder = os.path.join(MODULE_DIR, package)
+            for name in sorted(os.listdir(folder)):
+                if not name.endswith(".py"):
+                    continue
+                with open(os.path.join(folder, name), encoding="utf-8") as stream:
+                    tree = ast.parse(stream.read(), filename=name)
+                for node in ast.walk(tree):
+                    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in ("add_argument", "add_parser")):
+                        continue
+                    for keyword in node.keywords:
+                        if keyword.arg != "help":
+                            continue
+                        value = keyword.value
+                        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                            text = value.value
+                        elif isinstance(value, ast.JoinedStr):
+                            text = "".join(part.value if isinstance(part, ast.Constant) else "x" for part in value.values)
+                        else:
+                            continue
+                        try:
+                            text % _Params()
+                        except (TypeError, ValueError, KeyError) as error:
+                            failures.append(f"{package}/{name}:{node.lineno}: {error}")
+        self.assertEqual(failures, [])
+
     def test_blas_threads_set_before_numpy(self):
         code, events, stderr = self._run("--seconds", "0", "--units", "1", "--threads", "3", "--numpy")
         self.assertEqual(code, 0, stderr)

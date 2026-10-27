@@ -1300,7 +1300,7 @@ def build_parser():
     damage.add_argument("--circuit", required=True, help="circuit NIfTI on the connectome grid")
     damage.add_argument("--out", required=True, help="output folder (damage.tsv, damage.json)")
     damage.add_argument("--name", default=None, help="circuit name (default: from circuit.json or the file name)")
-    damage.add_argument("--threshold", type=float, default=None, help="threshold of the % of the lesion in the circuit (default: 0.5 for a binary circuit)")
+    damage.add_argument("--threshold", type=float, default=None, help="threshold of the %% of the lesion in the circuit (default: 0.5 for a binary circuit)")
     damage.add_argument("--sign", choices=SIGNS, default="both", help="both (|circuit| >= t), pos or neg")
     masks = damage.add_mutually_exclusive_group()
     masks.add_argument("--mask", default=None, help="connectome mask NIfTI (default: the bundle of the maps)")
