@@ -266,6 +266,81 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
                 self._pump()
 
     #
+    # (b2) role text on a transparent background
+    #
+
+    def _roleTextColor(self, host, label):
+        """The text color painted by the label (its rectangle in a grab of the host): the pixel farthest from the most common one."""
+        from collections import Counter
+
+        host.show()
+        self._pump()
+        image = host.grab().toImage()
+        rect = label.geometry
+        pixels = []
+        for y in range(rect.top(), rect.bottom() + 1):
+            for x in range(rect.left(), rect.right() + 1):
+                color = qt.QColor(image.pixel(x, y))
+                pixels.append((color.red(), color.green(), color.blue()))
+        background = Counter(pixels).most_common(1)[0][0]
+        foreground = max(pixels, key=lambda p: sum(abs(p[i] - background[i]) for i in range(3)))
+        return qt.QColor(*foreground), qt.QColor(*background)
+
+    def test_role_text_on_transparent_background(self):
+        """A stylesheet "background: transparent" (a parent panel's QLabel rule) must not make the light theme paint role
+        text with the dark tokens: the transparent window brush is black, which isDark() read as a dark palette.
+        """
+        from StudioLib import ui
+
+        for theme in ("dark", "light"):
+            self._setTheme(theme)
+            for role, token in (("caption", "text3"), ("secondaryText", "text2"), ("kbd", "text2")):
+                host = qt.QWidget()
+                host.setAttribute(qt.Qt.WA_DontShowOnScreen, True)
+                host.setAutoFillBackground(True)
+                hostPalette = host.palette
+                hostPalette.setColor(qt.QPalette.Window, ui.token("card"))
+                host.setPalette(hostPalette)
+                layout = qt.QVBoxLayout(host)
+                label = qt.QLabel("Volume")
+                label.setProperty("slicerRole", role)
+                label.setStyleSheet("QLabel { background: transparent; }")
+                layout.addWidget(label)
+                try:
+                    painted, background = self._roleTextColor(host, label)
+                    self.assertEqual(label.palette.color(qt.QPalette.Window).alpha(), 0, "the label has a transparent window brush")
+                    ratio = ui.contrastRatio(painted, background)
+                    self.assertGreaterEqual(ratio, 4.5, f"{theme} {role}: text {painted.name()} on {background.name()} is {ratio:.2f}:1")
+                    # The antialiased edge pixels are blended: the darkest/lightest pixel is within a few levels of the token
+                    expected = ui.token(token)
+                    self.assertLessEqual(abs(painted.red() - expected.red()) + abs(painted.green() - expected.green()) + abs(painted.blue() - expected.blue()), 60,
+                                         f"{theme} {role}: painted {painted.name()}, token {token} is {expected.name()}")
+                finally:
+                    host.hide()
+                    host.deleteLater()
+                    self._pump()
+        # A dark panel in the light theme: the closest opaque ancestor decides, so the dark tokens are right there
+        self._setTheme("light")
+        panel = qt.QWidget()
+        panel.setAttribute(qt.Qt.WA_DontShowOnScreen, True)
+        panel.setAutoFillBackground(True)
+        panelPalette = panel.palette
+        panelPalette.setColor(qt.QPalette.Window, qt.QColor("#18181b"))
+        panel.setPalette(panelPalette)
+        layout = qt.QVBoxLayout(panel)
+        label = qt.QLabel("Volume")
+        label.setProperty("slicerRole", "caption")
+        label.setStyleSheet("QLabel { background: transparent; }")
+        layout.addWidget(label)
+        try:
+            painted, background = self._roleTextColor(panel, label)
+            self.assertGreaterEqual(ui.contrastRatio(painted, background), 4.5, f"dark panel in the light theme: {painted.name()} on {background.name()}")
+        finally:
+            panel.hide()
+            panel.deleteLater()
+            self._pump()
+
+    #
     # (c) switches
     #
 

@@ -248,13 +248,41 @@ void applyAccentColor(QPalette& palette, bool dark)
 }
 
 //------------------------------------------------------------------------------
+/// Return true if the window brush of \a palette is transparent (no brush or an alpha 0 color). A stylesheet such as
+/// "background: transparent" gives a widget such a brush, which says nothing about the colors behind the widget.
+bool hasTransparentWindow(const QPalette& palette)
+{
+  const QBrush& window = palette.brush(QPalette::Window);
+  if (window.style() == Qt::NoBrush)
+  {
+    return true;
+  }
+  return window.style() == Qt::SolidPattern && window.color().alpha() == 0;
+}
+
+//------------------------------------------------------------------------------
 /// Return true if the palette is dark (window color lightness < 128).
 /// The color of a gradient brush is black, so for a gradient window brush the lightness is the one
 /// that covers most of the widget: the mean lightness of the stops when the gradient is stretched
 /// over the widget (e.g. the classic view bars), otherwise the lightness of the last stop, which pads
 /// the rest of the widget (e.g. the colored stripe of the flat view bars).
-bool isDark(const QPalette& palette)
+/// A transparent window brush (e.g. from the stylesheet "background: transparent" of a parent panel) is
+/// black with lightness 0, which would read as dark in the light theme: it is skipped, and the palette
+/// of the closest ancestor of \a widget with an opaque window brush decides, or the application palette
+/// when there is none.
+bool isDark(const QPalette& palette, const QWidget* widget = nullptr)
 {
+  if (hasTransparentWindow(palette))
+  {
+    for (const QWidget* ancestor = widget ? widget->parentWidget() : nullptr; ancestor; ancestor = ancestor->parentWidget())
+    {
+      if (!hasTransparentWindow(ancestor->palette()))
+      {
+        return isDark(ancestor->palette());
+      }
+    }
+    return isDark(QApplication::palette());
+  }
   const QBrush& window = palette.brush(QPalette::Window);
   const QGradient* gradient = window.gradient();
   if (!gradient || gradient->stops().isEmpty())
@@ -280,9 +308,9 @@ bool isDark(const QPalette& palette)
 
 //------------------------------------------------------------------------------
 /// Return true if the option is drawn with a dark palette (window color lightness < 128)
-bool hasDarkPalette(const QStyleOption* option)
+bool hasDarkPalette(const QStyleOption* option, const QWidget* widget = nullptr)
 {
-  return option && isDark(option->palette);
+  return option && isDark(option->palette, widget);
 }
 
 //------------------------------------------------------------------------------
@@ -1451,7 +1479,7 @@ bool isCardCollapsible(const QWidget* widget)
 /// SemiBold, an optional one-line summary in "text3" ("studioStepSummary") and a chevron on the right.
 void drawCardHeader(QPainter* painter, const QRect& headerRect, const QPalette& palette, bool enabled, const QString& text, const QWidget* widget)
 {
-  const bool dark = isDark(palette);
+  const bool dark = isDark(palette, widget);
   auto token = [dark](const char* name) { return qSlicerStyle::tokenColor(QLatin1String(name), dark); };
   painter->save();
   painter->setRenderHint(QPainter::Antialiasing, true);
@@ -2679,7 +2707,7 @@ void qSlicerStyle::drawItemText(QPainter* painter, const QRect& rect, int flags,
     this->Superclass::drawItemText(painter, rect, flags, pal, enabled, text, textRole);
     return;
   }
-  const bool dark = isDark(pal);
+  const bool dark = isDark(pal, widget);
   auto token = [dark](const char* name) { return qSlicerStyle::tokenColor(QLatin1String(name), dark); };
   const QAbstractButton* button = qobject_cast<const QAbstractButton*>(widget);
   // Buttons that are hovered, pressed or checked use the normal text color
