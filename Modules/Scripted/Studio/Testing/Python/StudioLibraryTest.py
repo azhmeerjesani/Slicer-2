@@ -779,6 +779,50 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         for name in names:
             self.assertTrue(any(text.startswith(name) for text in shown), (name, shown))
 
+    def test_narrow_window_reflows_the_page(self):
+        """USABILITY 9.4: at QT_SCALE_FACTOR=2 on 1080p (a window of 960x540 logical px, a viewport of about 600 px) no control
+        of the Library page is cut off: the header buttons go under the title, the actions of the Continue card under its
+        content, a long folder path is elided; a wide window brings the side-by-side layout back.
+        """
+        studioShell = self._applyStudio()
+        self._template(studioShell)
+        oldSize = self.mainWindow.size
+        self.mainWindow.showNormal()
+        self.cleanup.append(lambda: self.mainWindow.resize(oldSize))
+        self.mainWindow.resize(960, 540)
+        self._wait(300)
+        canvas = self._library(studioShell)
+        self._wait(200)
+        scroll = canvas.scrollArea
+        viewport = scroll.viewport()
+        self.assertLess(viewport.width, 700, "the window did not get narrow")
+        right = viewport.mapToGlobal(qt.QPoint(viewport.width, 0)).x()
+        cut = []
+        for button in canvas.widget.findChildren("QAbstractButton"):
+            if not button.isVisible() or not button.isWidgetType():
+                continue
+            buttonRight = button.mapToGlobal(qt.QPoint(button.width, 0)).x()
+            if buttonRight > right + 1:
+                cut.append(button.objectName or button.text)
+        self.assertEqual(cut, [], "controls past the right edge of the Library page")
+        self.assertTrue(canvas.isNarrow())
+        self.assertGreaterEqual(canvas.currentWork.stage(), 1)
+        self.assertTrue(canvas.currentWork.continueButton.isVisible())
+        self.assertLessEqual(canvas.currentWork.continueButton.mapToGlobal(qt.QPoint(canvas.currentWork.continueButton.width, 0)).x(),
+                             right + 1)
+        self.assertEqual(scroll.horizontalScrollBar().maximum, 0, "the page needs a horizontal scroll bar")
+        # The folder path is elided to the room of the title column; the whole path is its tool tip
+        self.assertLessEqual(canvas.captionLabel.width, canvas.header.width)
+
+        self.mainWindow.resize(1920, 1000)
+        self._wait(300)
+        self.assertFalse(canvas.isNarrow())
+        self.assertEqual(canvas.currentWork.stage(), 0)
+        self.assertTrue(canvas.currentWork.continueButton.isVisible())
+        # Side by side again: the action column is right of the content
+        self.assertGreater(canvas.currentWork.continueButton.mapTo(canvas.currentWork.widget, qt.QPoint(0, 0)).x(),
+                           canvas.currentWork.widget.width // 2)
+
     def test_close_button(self):
         """Close runs File > Close scene (module function ``closeScene``)."""
         from StudioLib import library

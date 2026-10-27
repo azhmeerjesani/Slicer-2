@@ -1341,7 +1341,9 @@ class _LesionBlock:
         font = qt.QFont(self.nameLabel.font)
         font.setWeight(qt.QFont.Medium)
         self.nameLabel.setFont(font)
-        self.nameLabel.setSizePolicy(qt.QSizePolicy.Preferred, qt.QSizePolicy.Preferred)
+        # An Ignored label as wide as its whole text (at most 220 px; ``refresh()`` sets the maximum) and as the row allows: a
+        # Preferred label would take the width of its elided text and never grow back ("L...n" in a wide row)
+        self.nameLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
         self.nameLabel.setMinimumWidth(40)
         self.nameLabel.setMaximumWidth(220)
         self.metricsLabel = qt.QLabel()
@@ -1355,7 +1357,7 @@ class _LesionBlock:
         self.metricsLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
         self.stateLabel.setSizePolicy(qt.QSizePolicy.Maximum, qt.QSizePolicy.Fixed)
         self.stateLabel.setFixedHeight(20)
-        layout.addWidget(self.nameLabel)
+        layout.addWidget(self.nameLabel, 3)
         layout.addWidget(self.metricsLabel, 1)
         layout.addWidget(self.stateLabel)
 
@@ -1389,10 +1391,14 @@ class CurrentWorkCard(qt.QObject):
         cardLayout = qt.QHBoxLayout()
         cardLayout.setSpacing(20)
         outerLayout.addLayout(cardLayout)
+        self._outerLayout = outerLayout
+        self._cardLayout = cardLayout
+        self._stage = 0
         # The project's thumbnails, on black (the image is the hero): the axial view, and the coronal and sagittal views
         # beside it (V-02)
         strip = qt.QWidget()
         strip.setObjectName("StudioCurrentWorkThumbnails")
+        self._strip = strip
         stripLayout = qt.QHBoxLayout(strip)
         stripLayout.setContentsMargins(0, 0, 0, 0)
         stripLayout.setSpacing(4)
@@ -1435,6 +1441,7 @@ class CurrentWorkCard(qt.QObject):
         actions = qt.QWidget()
         actions.setObjectName("StudioCurrentWorkActions")
         actions.setFixedWidth(self.ACTIONS_WIDTH)
+        self._actions = actions
         actionsLayout = qt.QVBoxLayout(actions)
         actionsLayout.setContentsMargins(0, 0, 0, 0)
         actionsLayout.setSpacing(8)
@@ -1480,6 +1487,43 @@ class CurrentWorkCard(qt.QObject):
         ui.bindStyleSheet(self.widget, self._styleSheet)
         ui.addPaletteListener(self._onPalette)
         self._showProject()
+
+    def fit(self, width):
+        """Lay the card out for a page ``width`` px wide (USABILITY 9.4: at ``QT_SCALE_FACTOR=2`` on 1080p the window is 960
+        logical px wide and the inspector takes a third of it), the first of these that fits:
+
+        0. the thumbnails, the details and the 200 px action column side by side;
+        1. the actions under the thumbnails and the details, as wide as the card;
+        2. the thumbnails above the details too.
+
+        So that the primary "Continue in Draw" is never cut off.
+        """
+        for stage in (0, 1, 2):
+            self._setStage(stage)
+            if self.widget.minimumSizeHint.width() <= width:
+                break
+
+    def stage(self):
+        """0 (side by side), 1 (the actions below) or 2 (the thumbnails above the details too)."""
+        return self._stage
+
+    def _setStage(self, stage):
+        if stage == self._stage:
+            return
+        self._stage = stage
+        actions = self._actions
+        if stage >= 1:
+            self._cardLayout.removeWidget(actions)
+            self._outerLayout.insertWidget(1, actions)
+            actions.setMinimumWidth(0)
+            actions.setMaximumWidth(16777215)
+        else:
+            self._outerLayout.removeWidget(actions)
+            self._cardLayout.addWidget(actions)
+            actions.setFixedWidth(self.ACTIONS_WIDTH)
+        actions.show()
+        self._cardLayout.setDirection(qt.QBoxLayout.TopToBottom if stage >= 2 else qt.QBoxLayout.LeftToRight)
+        self._cardLayout.setAlignment(self._strip, qt.Qt.AlignLeft if stage >= 2 else qt.Qt.AlignTop)
 
     @staticmethod
     def _styleSheet():
@@ -1624,6 +1668,7 @@ class CurrentWorkCard(qt.QObject):
             if displayNode is not None and not (displayNode.GetVisibility() and displayNode.GetVisibility2D()):
                 title += " · " + _("hidden")
             setElidedText(block.nameLabel, title, lesion.GetName())
+            block.nameLabel.setMaximumWidth(min(220, qt.QFontMetrics(block.nameLabel.font).horizontalAdvance(title) + 4))
             segmentation = lesion.GetSegmentation()
             segment = segmentation.GetNthSegment(0) if segmentation.GetNumberOfSegments() else None
             color = qt.QColor.fromRgbF(*segment.GetColor()[:3]).name() if segment is not None else ui.token("lesion").name()
@@ -5031,6 +5076,11 @@ FOOTER_LINE_HEIGHT = 32
 #: The page (VISUAL 4.2): at most 1100 px of content, 40 px on the sides and 28 px at the top
 PAGE_MAX_WIDTH = 1100
 PAGE_SIDE_PADDING = 40
+#: Space between the title and the buttons of the header (side by side, or one above the other on a narrow page)
+HEADER_SPACING = 16
+HEADER_SPACING_NARROW = 12
+#: The narrowest the folder caption gets (elided in the middle) before the header buttons go under the title
+CAPTION_MIN_WIDTH = 220
 PAGE_TOP_PADDING = 28
 #: The dashed frame of the empty state around the drop zone
 DROP_FRAME_SIZE = (620, 340)
@@ -5072,8 +5122,12 @@ class LibraryCanvas(qt.QObject):
         self.scrollArea.setObjectName("StudioLibraryScroll")
         self.scrollArea.setFrameShape(qt.QFrame.NoFrame)
         self.scrollArea.setWidgetResizable(True)
-        self.scrollArea.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+        # Below the page's minimum width the header and the Continue card reflow (``_updateNarrow()``); the scroll bar is the
+        # last resort for what still does not fit (a control is never cut off without a way to reach it)
+        self.scrollArea.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAsNeeded)
         outerLayout.addWidget(self.scrollArea)
+        self._narrow = False
+        _installEventFilter(self.scrollArea.viewport(), self)
         content = qt.QWidget()
         content.setObjectName("StudioLibraryContent")
         self.contentLayout = qt.QVBoxLayout(content)
@@ -5131,7 +5185,7 @@ class LibraryCanvas(qt.QObject):
         self.header.setObjectName("StudioLibraryHeader")
         headerLayout = qt.QHBoxLayout(self.header)
         headerLayout.setContentsMargins(0, 0, 0, 0)
-        headerLayout.setSpacing(16)
+        headerLayout.setSpacing(HEADER_SPACING)
         titleColumn = qt.QVBoxLayout()
         titleColumn.setSpacing(4)
         self.pageTitle = ui.label(_("Projects"), "display", "text", "StudioLibraryTitle")
@@ -5143,6 +5197,7 @@ class LibraryCanvas(qt.QObject):
         self.captionIcon.setFixedSize(14, 14)
         captionRow.addWidget(self.captionIcon)
         self.captionLabel = ui.label("", "caption", "text3", "StudioLibraryCaption")
+        self._captionText = ""
         captionRow.addWidget(self.captionLabel)
         self.captionSeparator = ui.label("·", "caption", "text3", "StudioLibraryLinkSeparator")
         captionRow.addWidget(self.captionSeparator)
@@ -5163,6 +5218,7 @@ class LibraryCanvas(qt.QObject):
         headerButtonsLayout.setContentsMargins(0, 0, 0, 0)
         headerButtonsLayout.setSpacing(8)
         headerLayout.addWidget(self.headerButtons, 0, qt.Qt.AlignBottom)
+        self.headerLayout = headerLayout
         columnLayout.addWidget(self.header)
         columnLayout.addSpacing(24)
 
@@ -5474,13 +5530,68 @@ class LibraryCanvas(qt.QObject):
         self.pageTitle.setText(_("Projects") if enabled else _("Library"))
         if not enabled:
             text = _("Open scans and lesion masks, or start on the MNI template")
-        self.captionLabel.setText(text)
+        self._captionText = text
         self.captionLabel.setToolTip(toolTip)
         self.captionLink.setVisible(enabled)
         self.captionSeparator.setVisible(enabled)
         self.captionIcon.setVisible(enabled)
+        self._fitCaption()
+
+    def _fitCaption(self):
+        """Show the caption elided (in the middle) to the room the title column has, so that a long folder path never widens
+        the page (USABILITY 9.4); the tool tip has the whole path.
+        """
+        if not _isAlive(self.captionLabel):
+            return
+        text = self._captionText
+        room = min(PAGE_MAX_WIDTH, self.scrollArea.viewport().width - 2 * PAGE_SIDE_PADDING)
+        if not self._narrow and self.headerButtons.isVisibleTo(self.header):
+            room -= self.headerButtons.sizeHint.width() + HEADER_SPACING + 12  # 12 px of slack for the stretches of the page
+        for widget in (self.captionIcon, self.captionSeparator, self.captionLink):
+            if widget.isVisibleTo(self.header):
+                room -= widget.sizeHint.width() + 6
+        if not self._narrow:
+            # Side by side with the buttons the caption is cut to 220 px at the most; under them the page can reflow
+            room = max(room, CAPTION_MIN_WIDTH)
+        if room < 80 or self.scrollArea.viewport().width <= 8:
+            # Not laid out yet (the Resize event of the viewport comes) or no room: the whole text
+            self.captionLabel.setText(text)
+            return
+        self.captionLabel.setText(qt.QFontMetrics(self.captionLabel.font).elidedText(text, qt.Qt.ElideMiddle, room))
+
+    def _setHeaderNarrow(self, narrow):
+        self._narrow = narrow
+        self.headerLayout.setDirection(qt.QBoxLayout.TopToBottom if narrow else qt.QBoxLayout.LeftToRight)
+        self.headerLayout.setSpacing(HEADER_SPACING_NARROW if narrow else HEADER_SPACING)
+        self.headerLayout.setAlignment(self.headerButtons, qt.Qt.AlignLeft if narrow else qt.Qt.AlignBottom)
+        self._fitCaption()
+
+    def _updateNarrow(self):
+        """Reflow the header and the Continue card when the page is narrower than they are side by side (USABILITY 9.4: at
+        ``QT_SCALE_FACTOR=2`` on 1080p the window is 960 logical px wide and the inspector takes a third of it): the header
+        buttons go under the title, the card's parts under each other (``CurrentWorkCard.fit()``).
+        """
+        if not _isAlive(self.scrollArea):
+            return
+        available = min(PAGE_MAX_WIDTH, self.scrollArea.viewport().width - 2 * PAGE_SIDE_PADDING)
+        # Side by side: the buttons, and the caption (its icon, at least CAPTION_MIN_WIDTH of text, the separator and the link)
+        needed = self.headerButtons.sizeHint.width() + HEADER_SPACING + CAPTION_MIN_WIDTH
+        for widget in (self.captionIcon, self.captionSeparator, self.captionLink):
+            if widget.isVisibleTo(self.header):
+                needed += widget.sizeHint.width() + 6
+        self._setHeaderNarrow(self.headerButtons.isVisibleTo(self.header) and needed > available)
+        if self._currentWork is not None:
+            self._currentWork.fit(available)
+
+    def isNarrow(self):
+        """Whether the header and the Continue card are laid out for a narrow page."""
+        return bool(self._narrow)
 
     def eventFilter(self, obj, event):
+        if obj == self.scrollArea.viewport():
+            if event.type() == qt.QEvent.Resize and hasattr(self, "column"):
+                self._updateNarrow()
+            return False
         # A click on the drop zone (or on its frame) opens files
         if obj in (self.dropZone, self.dropFrame) and event.type() in (qt.QEvent.MouseButtonPress, qt.QEvent.MouseButtonRelease):
             if event.button() != qt.Qt.LeftButton:
@@ -5571,6 +5682,7 @@ class LibraryCanvas(qt.QObject):
                     card.widget.hide()
         self.dataSection.setVisible(shown)
         self._setStrip(shown)
+        self._updateNarrow()
         return shown
 
     def _setStrip(self, strip):

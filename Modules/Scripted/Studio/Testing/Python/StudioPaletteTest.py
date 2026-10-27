@@ -587,6 +587,42 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
     # Probe
     #
 
+    def test_08b_cheat_sheet_title_in_a_narrow_window(self):
+        """USABILITY 9.4: in a window of 960x540 logical px (QT_SCALE_FACTOR=2 on 1080p) the title of the overlay is not cut
+        off; the hint gives way (it is also the tool tip of the close button), and the search field shrinks.
+        """
+        from StudioLib import cheatsheet
+
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        self._pump()
+        oldSize = self.mainWindow.size
+        self.mainWindow.showNormal()
+        self.mainWindow.resize(960, 540)
+        self._wait(0.3)
+        try:
+            studioShell.toggleCheatSheet()
+            self._wait(0.3)
+            self.assertTrue(cheatsheet.isVisible())
+            sheet = cheatsheet.instance()
+            title = sheet.title
+            self.assertGreaterEqual(title.width, title.sizeHint.width(), "the title is cut off")
+            self.assertGreaterEqual(sheet.field.width, cheatsheet.SEARCH_MIN_WIDTH)
+            if sheet.hint.isVisible():
+                self.assertGreaterEqual(sheet.hint.width, sheet.hint.sizeHint.width(), "the hint is cut off")
+            self.assertLessEqual(sheet.closeButton.mapTo(sheet.widget, qt.QPoint(sheet.closeButton.width, 0)).x(), sheet.widget.width)
+            # Narrower still (a larger font): the hint gives way
+            sheet._placeContent(560, 540)
+            self.assertFalse(sheet.hint.isVisible())
+            self.mainWindow.resize(1920, 1000)
+            self._wait(0.3)
+            self.assertTrue(sheet.hint.isVisible())
+            self.assertGreaterEqual(sheet.hint.width, sheet.hint.sizeHint.width())
+        finally:
+            if cheatsheet.isVisible():
+                studioShell.toggleCheatSheet()
+            self.mainWindow.resize(oldSize)
+
     def test_09_probe_texts(self):
         """The probe in MNI space, in scanner space and over a figure; hidden when the mouse leaves; Classic has none."""
         from StudioLib import importer, probe

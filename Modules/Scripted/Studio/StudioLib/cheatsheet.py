@@ -42,6 +42,11 @@ CARD_INSET_Y = 24
 CARD_INSET_X = 32
 CARD_MAX_WIDTH = 1120
 CARD_RADIUS = 14
+#: The search field of the header: its width, and the narrowest it gets before the hint is hidden
+SEARCH_WIDTH = 240
+SEARCH_MIN_WIDTH = 120
+#: Space between the title, the hint, the search field and the close button
+HEADER_SPACING = 12
 
 #: Sections, in the order of the columns
 SECTION_DRAW = "Draw"
@@ -432,7 +437,7 @@ class CheatSheet:
         self.outerLayout = outer
 
         header = qt.QHBoxLayout()
-        header.setSpacing(12)
+        header.setSpacing(HEADER_SPACING)
         title = qt.QLabel(_("Keyboard shortcuts"))
         title.setObjectName("StudioCheatSheetTitle")
         header.addWidget(title)
@@ -444,7 +449,10 @@ class CheatSheet:
         field.setObjectName("StudioCheatSheetSearch")
         field.setPlaceholderText(_("Search keys"))
         field.setClearButtonEnabled(True)
-        field.setFixedWidth(240)
+        # 240 px when there is room, narrower (down to 120) in a narrow window (USABILITY 9.4)
+        field.setMinimumWidth(SEARCH_MIN_WIDTH)
+        field.setMaximumWidth(SEARCH_WIDTH)
+        field.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
         header.addWidget(field)
         closeButton = qt.QToolButton()
         closeButton.setObjectName("StudioCheatSheetClose")
@@ -602,6 +610,11 @@ class CheatSheet:
         card = cardRect(width, height)
         self.outerLayout.setContentsMargins(card.left() + MARGIN, card.top() + MARGIN - 8, width - card.right() - 1 + MARGIN,
                                             height - card.bottom() - 1 + MARGIN - 8)
+        # The title is never cut off: in a card too narrow for the title, the hint, the search field and the close button,
+        # the hint ("Ctrl+/ or Esc closes this list", also the tool tip of the close button) is hidden
+        needed = (self.title.sizeHint.width() + self.hint.sizeHint.width() + SEARCH_MIN_WIDTH + self.closeButton.sizeHint.width()
+                  + 3 * HEADER_SPACING)
+        self.hint.setVisible(card.width() - 2 * MARGIN >= needed)
 
     def updateGeometry(self):
         if not _isAlive(self.widget):
