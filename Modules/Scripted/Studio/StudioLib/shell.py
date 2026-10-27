@@ -3284,6 +3284,15 @@ class Shell:
         self._toast.show(text, ms, level=level)
         self._toast.label.setAccessibleName(str(text))
 
+    def consequenceHeld(self):
+        """True while a consequence toast is still within its minimum time (``STICKY_TOAST_MINIMUM_MS``).
+
+        A plain confirmation shown then would replace it at once: the caller that only confirms ("Loaded x") leaves
+        the consequence on screen instead.
+        """
+        sticky = self._stickyToast
+        return sticky is not None and sticky.isVisible() and sticky.isSticky() and sticky.minimumTimer.isActive()
+
     def _hidePlainToast(self):
         toast = self._toast
         if toast is None:

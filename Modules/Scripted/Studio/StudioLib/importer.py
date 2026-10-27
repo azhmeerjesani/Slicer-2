@@ -1390,6 +1390,11 @@ def _loadToast(result, shell):
         shell.toast(_("{name} has fractional values (a probabilistic mask): every voxel above 0 is shown as the lesion. "
                       "The file is unchanged.").format(name=fractional[0].GetName()), ms=6000, level="warning")
         return
+    held = getattr(shell, "consequenceHeld", None)
+    if callable(held) and held():
+        # A consequence of the load ("Opened a copy in Projects/x. The original is not changed.") is on screen: a
+        # plain "Loaded x" would replace it at once, and the user would never read it
+        return
     loaded = result.nodes()
     if loaded:
         name = loaded[0].GetName()

@@ -1463,6 +1463,43 @@ class StudioProjectsTest(unittest.TestCase):
             self.autosave._service = running
             canvas.dispose()
 
+    def test_31_copy_notice_is_not_replaced_by_the_loaded_toast(self):
+        """A scene from outside opens as a copy: the toast "Opened a copy in Projects/<name>. The original is not changed."
+        (a consequence, it stays) is still shown after the load; the plain "Loaded <file>" does not replace it.
+        """
+        from StudioLib import importer, projects_ui, shell
+
+        self._userVolume("MR Head", shape=(12, 14, 16), extension=".nrrd")
+        bundlePath = os.path.join(self.tempDir, "Outside bundle.mrb")
+        self.assertTrue(slicer.util.saveScene(bundlePath))
+        slicer.mrmlScene.Clear(0)
+        service = self._service()
+        service.setProjectAnnouncer(projects_ui.announce)
+        running = self.autosave._service
+        self.autosave._service = service
+        studioShell = shell.Shell(force=True)
+        try:
+            studioShell.apply()
+            slicer.app.processEvents()
+            importer.loadFiles([bundlePath], studioShell)
+            self.io.backgroundWriter().drain(30.0)
+            slicer.app.processEvents()
+            texts = [text for _time, text, _level in studioShell.recentMessages()]
+            self.assertTrue(any(text.startswith("Opened a copy in ") for text in texts), texts)
+            self.assertIn("Opened a copy in ", studioShell.toastText())
+            self.assertIn("The original is not changed.", studioShell.toastText())
+            self.assertTrue(studioShell.consequenceHeld())
+            # Nothing is held once the consequence is gone: a plain "Loaded" confirmation is shown as before
+            studioShell._stickyToast.hide()
+            self.assertFalse(studioShell.consequenceHeld())
+            slicer.mrmlScene.Clear(0)
+            importer.loadFiles([os.path.join(self.userDir, "MR Head.nrrd")], studioShell)
+            self.assertEqual(studioShell.toastText(), "Loaded MR Head")
+        finally:
+            self.autosave._service = running
+            studioShell.dispose()
+            slicer.app.processEvents()
+
 
 
 def _sphere(center=(0, 0, 0)):
