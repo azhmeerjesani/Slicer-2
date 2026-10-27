@@ -59,6 +59,7 @@ from .card_clusters import (
     sharedAtlases,
     sharedModel,
 )
+from .cohort_contrast import _idClickedSignal
 
 #: Fork-only settings (SPEC Appendix B)
 SCHEME_SETTING = "Studio/LNM/Networks/Scheme"
@@ -722,7 +723,7 @@ class NetworksCard:
         self.schemeFrame, self.schemeGroup = widgets.segmented([SCHEMES[key]["title"] for key in SCHEMES])
         self.schemeFrame.setObjectName("LNMNetworksSchemeSegmented")
         self.schemeGroup.button(list(SCHEMES).index(self.scheme)).setChecked(True)
-        self.schemeGroup.connect("buttonClicked(int)", self._onSchemeClicked)
+        self.schemeGroup.connect(_idClickedSignal(self.schemeGroup), self._onSchemeClicked)
         schemeRow.addWidget(self.schemeFrame)
         schemeRow.addStretch(1)
         layout.addLayout(schemeRow)
