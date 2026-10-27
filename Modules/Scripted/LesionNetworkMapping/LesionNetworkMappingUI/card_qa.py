@@ -835,12 +835,36 @@ class QACard:
         widget.setChecked(checked)
         widget.blockSignals(blocked)
 
+    def shownOverlay(self):
+        """The derived map this card shows in the views (the debiased view or the analytic z), or None:
+        ``{"kind", "volume", "statistic"}``, where ``statistic`` is the short name the map legend and the layer chip show.
+        Both maps are descriptive: no threshold rule applies to them.
+        """
+        entry = self._overlays.get(self._shown) if self._shown is not None else None
+        if entry is None or entry[0] is None or entry[0].GetScene() is None:
+            return None
+        if self._shown == "debiased":
+            statistic = _("{statistic} resid").format(statistic={"AvgRFz": "Fz", "AvgR": "r"}.get(entry[2], entry[2]))
+        else:
+            statistic = _("RL z")
+        return {"kind": self._shown, "volume": entry[0], "statistic": statistic}
+
+    def _notifyShownOverlay(self):
+        """The Map widget's legend, layer chips and peak table follow the map shown in the views."""
+        widget = getattr(slicer.modules, "LesionNetworkMappingWidget", None)
+        if widget is not None and hasattr(widget, "onDerivedOverlayChanged"):
+            try:
+                widget.onDerivedOverlayChanged()
+            except Exception:
+                logging.exception("Lesion network mapping: the map legend could not follow the QA view")
+
     def setDebiased(self, checked):
         """Show (or hide) the debiased view: the map's residual on [1, μC_r, PC1] as the volume ``desc-<x>Resid``."""
         if not checked:
             if self._shown == "debiased":
                 self._shown = None
                 self._restoreForeground()
+                self._notifyShownOverlay()
             return None
         if self._shown == "analytic":
             self._setChecked(self.analyticButton, False)
@@ -850,6 +874,7 @@ class QACard:
             return None
         self._shown = "debiased"
         self._showForeground(volume)
+        self._notifyShownOverlay()
         return volume
 
     def debiasedVolume(self):
@@ -890,6 +915,7 @@ class QACard:
             if self._shown == "analytic":
                 self._shown = None
                 self._restoreForeground()
+                self._notifyShownOverlay()
             return None
         if self._shown == "debiased":
             self._setChecked(self.debiasedCheckBox, False)
@@ -899,6 +925,7 @@ class QACard:
             return None
         self._shown = "analytic"
         self._showForeground(volume)
+        self._notifyShownOverlay()
         return volume
 
     def analyticVolume(self):

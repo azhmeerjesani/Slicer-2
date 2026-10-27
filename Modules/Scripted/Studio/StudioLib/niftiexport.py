@@ -1038,7 +1038,8 @@ def mapOptionsFromMapModule():
     if widget is None or not hasattr(widget, "legendState"):
         return {}
     try:
-        state = widget.legendState()
+        # The threshold of the map itself, also while the views show a descriptive QA map (whose legend has none)
+        state = widget.resultLegendState() if hasattr(widget, "resultLegendState") else widget.legendState()
         node = widget._parameterNode.resultVolume if widget._parameterNode is not None else None
     except Exception:
         logging.debug("Slicer Studio: the Map threshold could not be read", exc_info=True)

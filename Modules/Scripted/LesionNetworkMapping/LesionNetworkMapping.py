@@ -2175,6 +2175,57 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
     def legendState(self):
         """What the Studio map legend and layer chips show (``StudioLib.mappage``), or None without a map in the views:
         ``{statistic, window (half-width), level, threshold (None: unthresholded), thresholdText, sign, opacity, outline}``.
+
+        While the QA card shows a derived map in the views (the debiased view or the analytic z), the legend describes
+        that map: its own window, no threshold (both are descriptive) and ``"derived"`` set to its kind.
+        """
+        state = self.resultLegendState()
+        overlay = self._shownDerivedOverlay() if state is not None else None
+        if overlay is None:
+            return state
+        volume = overlay["volume"]
+        displayNode = volume.GetDisplayNode()
+        state.update({"statistic": overlay["statistic"], "window": displayNode.GetWindow() / 2.0 if displayNode is not None else 0.0,
+                      "level": displayNode.GetLevel() if displayNode is not None else 0.0, "threshold": None, "thresholdText": _("Descriptive"),
+                      "derived": overlay["kind"]})
+        return state
+
+    def _shownDerivedOverlay(self):
+        """The QA card's derived map (``{"kind", "volume", "statistic"}``) while it is the foreground of a slice view, else None."""
+        qa = self.ctx.card("qa") if self.ctx is not None else None
+        overlay = qa.shownOverlay() if qa is not None and hasattr(qa, "shownOverlay") else None
+        if overlay is None:
+            return None
+        volumeID = overlay["volume"].GetID()
+        for composite in slicer.util.getNodesByClass("vtkMRMLSliceCompositeNode"):
+            if composite.GetForegroundVolumeID() == volumeID:
+                return overlay
+        return None
+
+    def onDerivedOverlayChanged(self):
+        """The QA card showed or hid a derived map: the legend, the layer chips and the peak table's header follow."""
+        if hasattr(self, "peaksTable"):
+            self._setPeakValueHeader(self.currentStatistic())
+        self._refreshMapOverlay()
+
+    def _setPeakValueHeader(self, statistic):
+        """The peak table's value column: the statistic, or "<statistic> map" while the views show a QA derived map (the
+        peaks stay those of the map, not of the derived map).
+        """
+        header = self.peaksTable.horizontalHeaderItem(2)
+        if header is None:
+            return
+        text, tip = statistic, ""
+        if self._shownDerivedOverlay() is not None:
+            text = _("{statistic} map").format(statistic=statistic)
+            tip = _("Peaks of the {statistic} map; the views show a descriptive map from the QA card").format(statistic=statistic)
+        if str(header.text()) != text:
+            header.setText(text)
+        header.setToolTip(tip)
+
+    def resultLegendState(self):
+        """``legendState()`` of the map itself (``parameterNode.resultVolume``), whatever the views show: its window and the
+        threshold rule applied to it (the NIfTI export masks the map with it).
         """
         from LesionNetworkMappingLib import display, thresholds
 
@@ -5226,9 +5277,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             except Exception:
                 logging.exception("Lesion network mapping: the peak table could not be computed")
         table = self.peaksTable
-        valueHeader = table.horizontalHeaderItem(2)
-        if valueHeader is not None and str(valueHeader.text()) != statistic:
-            valueHeader.setText(statistic)
+        self._setPeakValueHeader(statistic)
         table.setRowCount(len(self._peaks))
         for row, peak in enumerate(self._peaks):
             x, y, z = peak["world"]
@@ -5740,6 +5789,9 @@ class LesionNetworkMappingTest(ScriptedLoadableModuleTest):
             self.tearDown()
             self.setUp()
             self.test_LesionNetworkMapping_binarizeRule()
+            self.tearDown()
+            self.setUp()
+            self.test_LesionNetworkMapping_debiasedLegend()
         finally:
             self.tearDown()
 
@@ -6051,6 +6103,69 @@ class LesionNetworkMappingTest(ScriptedLoadableModuleTest):
         self.assertIsNotNone(mask)
         self.assertEqual(int(np.count_nonzero(slicer.util.arrayFromVolume(mask))), widget.lastPassing)
         widget.onSwitchToFwe()
+
+    def test_LesionNetworkMapping_debiasedLegend(self):
+        """While the QA card shows its debiased view (or the analytic z) in the views, the legend and the layer chip describe
+        that descriptive map (its own window, no threshold); the peak table says its values are of the map; unticking brings
+        the map's legend back. The NIfTI export keeps the map's own threshold.
+        """
+        from LesionNetworkMappingLib import connectome, reference, thresholds
+
+        def settle():
+            self._waitFor(lambda: False, 0.3)  # the refresh of the Result card
+
+        self.delayDisplay("The legend follows the debiased view")
+        widget = slicer.modules.lesionnetworkmapping.widgetRepresentation().self()
+        widget.initializeParameterNode()
+        meta = connectome.make_synthetic(os.path.join(self.tempDir, "debiased.lnmc"), shape=(20, 24, 20), n_subjects=30, runs=(20,), seed=0, name="Debiased test")
+        segNode, segmentId, _voxels = self._sphereLesion(meta)
+        widget.refreshConnectomes(select=os.path.abspath(meta["path"]))
+        reference.build(widget.bundle, n_seeds=40, k=3, power_iters=2, register=False, emit=lambda *args, **kwargs: None)
+        widget.ctx.setSeed(segNode, segmentId)
+        widget.updateGUIFromParameterNode()
+        widget.updateSeed()
+        widget.acceptTermsCheckBox.setChecked(True)
+        widget.subjectsGroup.button(0).click()
+        widget.setRule(thresholds.DEFAULT_RULE)
+        self.assertTrue(widget.computeButton.enabled, widget.computeReasonLabel.text)
+        job = widget.compute()
+        self.assertTrue(self._waitFor(job.isFinished, 300), "the engine did not finish")
+        self.assertEqual(job.state, "done", f"{job.failureReason} {list(job.logTail)}")
+        self.assertTrue(self._waitFor(lambda: widget.resolved is not None and widget._hasResult() and widget.ctx.currentRun is not None, 30))
+        widget.statisticGroup.button(STATISTICS.index("T")).click()
+        settle()
+        before = widget.legendState()
+        self.assertEqual(before["statistic"], "T")
+        self.assertIsNotNone(before["threshold"])
+        mapWindow = before["window"]
+
+        qa = widget.ctx.card("qa")
+        for kind, toggle, expected in (("debiased", qa.debiasedCheckBox, "T resid"), ("analytic", qa.analyticButton, "RL z")):
+            toggle.setChecked(True)
+            settle()
+            # The volume the views show (the derived map, not the map)
+            composite = slicer.app.layoutManager().sliceWidget("Red").mrmlSliceCompositeNode()
+            shown = slicer.mrmlScene.GetNodeByID(composite.GetForegroundVolumeID())
+            self.assertIsNot(shown, widget._parameterNode.resultVolume, kind)
+            displayNode = shown.GetDisplayNode()
+            state = widget.legendState()
+            self.assertEqual(state["statistic"], expected)
+            self.assertIsNone(state["threshold"], kind)
+            self.assertEqual(state.get("derived"), kind)
+            self.assertNotIn("FWE", state["thresholdText"])
+            self.assertAlmostEqual(state["window"], displayNode.GetWindow() / 2.0, places=4)
+            self.assertNotAlmostEqual(state["window"], mapWindow, places=2)
+            self.assertEqual(str(widget.peaksTable.horizontalHeaderItem(2).text()), "T map")
+            # The export of the map keeps the map's threshold (keyed by the map node, never the derived one)
+            self.assertIsNotNone(getattr(widget, "resultLegendState", widget.legendState)()["threshold"])
+            toggle.setChecked(False)
+            settle()
+            after = widget.legendState()
+            self.assertEqual(after["statistic"], "T")
+            self.assertIsNotNone(after["threshold"])
+            self.assertNotIn("derived", after)
+            self.assertAlmostEqual(after["window"], mapWindow, places=4)
+            self.assertEqual(str(widget.peaksTable.horizontalHeaderItem(2).text()), "T")
 
     def test_LesionNetworkMapping_emptySeed(self):
         """A segment that was never drawn is an empty seed ("trace it in Draw first"), not a read error with logged tracebacks."""
