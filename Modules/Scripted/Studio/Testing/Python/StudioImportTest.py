@@ -1132,6 +1132,25 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(slicer.mrmlScene.GetNumberOfNodes(), count)
         self.assertEqual(editor.segmentationNode().GetID(), lesion.GetID())
 
+    def test_recent_lesion_node_name_has_no_extension(self):
+        """A lesion mask re-opened from Recent is named like one opened with Open... (no ".nii.gz" in the node name,
+        the toast or the project file name).
+        """
+        from StudioLib import importer
+
+        studioShell = self._applyStudio()
+        path = self._writeMask("sub-08_lesion.nii.gz", GRID_SHIFTED)
+        opened = importer.loadLesion(path)
+        self.assertEqual(opened.GetName(), "sub-08_lesion")
+        slicer.mrmlScene.Clear(0)  # as New project does: a removed node would leave its name counted in the scene
+        self._pump(6)
+        studioShell.switchTo("library")
+        self._pump()
+        result = importer.loadRecentFile({"fileName": path, "fileType": "SegmentationFile"}, None, studioShell)
+        self._pump(6)
+        self.assertEqual([node.GetName() for node in result.segmentations], ["sub-08_lesion"])
+        self.assertEqual(studioShell.toastText(), "Loaded sub-08_lesion")
+
     def test_reopen_reference_from_recent(self):
         """A figure or a T map re-opened from Recent (or loaded by a route of 3D Slicer) takes its own route: never the
         Draw source, no segmentation bound to it; a file that is already open is shown again, not loaded twice.

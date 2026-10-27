@@ -538,6 +538,17 @@ def _setFractionalMask(segmentationNode, mask):
     return True
 
 
+def _nameSegmentationAfterFile(segmentationNode, path):
+    """Name a segmentation node that was read from a volume file (``x.nii.gz``) after the file without its extension.
+
+    The segmentation reader keeps ".nii" in the node name of "x.nii.gz". Used by ``loadLesion()`` and by
+    ``loadRecentFile()``, so that a lesion has the same name (and project file name) however it was opened.
+    """
+    baseName = _baseName(path)
+    if baseName and segmentationNode.GetName() != baseName and _extension(path) in VOLUME_EXTENSIONS:
+        segmentationNode.SetName(slicer.mrmlScene.GenerateUniqueName(baseName))
+
+
 def loadLesion(path):
     """Load a lesion file as a segmentation (see ``_applyLesionNaming()`` for the "Lesion" segment).
 
@@ -569,10 +580,7 @@ def loadLesion(path):
             logging.info(f"Studio: {path} has fractional values ({low:g} to {high:g}): the voxels above 0 are the lesion")
         else:
             logging.warning(f"Studio: {path} has fractional values but its grid is not the segmentation's: values below 1 are lost")
-    baseName = _baseName(path)
-    if baseName and segmentationNode.GetName() != baseName and _extension(path) in VOLUME_EXTENSIONS:
-        # The segmentation reader keeps ".nii" in the node name of "x.nii.gz"
-        segmentationNode.SetName(slicer.mrmlScene.GenerateUniqueName(baseName))
+    _nameSegmentationAfterFile(segmentationNode, path)
     _applyLesionNaming(segmentationNode, path)
     if segmentationNode.GetAttribute(LESION_FRACTIONAL_ATTRIBUTE):
         # The mask is how the file reads as a lesion, not an edit: Draw says "Saved · <file>" as for a 0/1 file
@@ -1456,6 +1464,8 @@ def loadRecentFile(properties, action=None, shell=None):
         if node.IsA("vtkMRMLScalarVolumeNode"):
             result.volumes.append(node)
         elif node.IsA("vtkMRMLSegmentationNode"):
+            if fileName:
+                _nameSegmentationAfterFile(node, fileName)
             if fileName and isLesionName(fileName):
                 _applyLesionNaming(node, fileName)
             result.segmentations.append(node)
