@@ -56,6 +56,7 @@ KINDS = [
     "fastindex",
     "vlsm",
     "circuits",
+    "comparison",
     "export",
     "normalization",
     "pipeline",

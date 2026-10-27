@@ -228,8 +228,16 @@ def _g9_reference_qa(records):
     return DONE, value, evidence
 
 
+def _comparison_without_references(records, record):
+    """A Compare card export that compared no reference map of the library (only this study's own maps)."""
+    if record.get("kind") != "comparison":
+        return False
+    summary = records.summary(record)
+    return isinstance(summary, dict) and summary.get("n_reference_maps") == 0
+
+
 def _g10_cross_condition(records):
-    runs = records.done_runs(CROSS_CONDITION_KINDS)
+    runs = [record for record in records.done_runs(CROSS_CONDITION_KINDS) if not _comparison_without_references(records, record)]
     if not runs:
         return NOT_RUN, "no comparison with maps of unrelated conditions", []
     return DONE, f"{len(runs)} comparison run(s)", [record["id"] for record in runs]

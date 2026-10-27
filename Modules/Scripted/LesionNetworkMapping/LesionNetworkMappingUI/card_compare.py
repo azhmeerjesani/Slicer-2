@@ -149,6 +149,7 @@ class CompareCard:
         self.tests = {}
         self.top = []
         self.lastExport = None
+        self.lastRunId = None
         self.job = None
         self.notice = ""
         self._raw = None  # (key, matrix, participant ids)
@@ -984,9 +985,31 @@ class CompareCard:
             self._setNotice(_("The comparison could not be exported: {error}").format(error=exc))
             return None
         self.lastExport = out
+        self._registerRun(out, infos, reference)
         self.folderButton.setEnabled(True)
         self._setNotice(_("Exported to {folder}").format(folder=os.path.join(refmaps.COMPARE_DIR, stamp)))
         return written["json"] and out
+
+    def registryRunsRoot(self):
+        """The root of the run registry (``<root>/derivatives/lnm/runs.jsonl``): the study folder, else the default run root."""
+        study = getattr(self.ctx, "study", None)
+        path = getattr(study, "path", None) if study is not None else None
+        return os.fspath(path) if path else self.outputRoot()
+
+    def _registerRun(self, out, infos, reference):
+        """Record the exported comparison as a done run of kind "comparison" (checklist item G10 reads it)."""
+        from LesionNetworkMappingLib import runs
+
+        references = [info for info in infos.values() if info.get("id")]  # the library's reference maps (the others carry no library id)
+        params = {"maps": list(self.comparison.names), "covariates": list(self.comparison.covariates),
+                  "references": [{"id": info.get("id"), "sha256": info.get("sha256"), "condition": info.get("condition")} for info in references],
+                  "reference_sha256": reference.sha256 if reference is not None else None}
+        summary = {"n_maps": len(self.comparison.names), "n_reference_maps": len(references), "n_tests": len(self.tests or {})}
+        self.lastRunId = None
+        try:
+            self.lastRunId = runs.register(self.registryRunsRoot(), "comparison", out, params=params, status="done", summary=summary)
+        except Exception:
+            logging.exception("Lesion network mapping: the comparison could not be recorded in the run registry")
 
     def showFolder(self):
         if self.lastExport:
