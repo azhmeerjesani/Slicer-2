@@ -1336,6 +1336,62 @@ class StudioProjectsTest(unittest.TestCase):
             else:
                 os.environ["SLICER_STUDIO_WEB"] = webValue
 
+    def test_28_save_copy_as_starts_in_an_existing_folder(self):
+        """"Save a copy as…" opens in an existing folder, never the current folder that Qt uses for a missing one (HOME in
+        the web container, "/" for a Finder-started app): Exports/ of a new project (created), else Studio/LastSaveFolder
+        (/data in the web build), else the home folder.
+        """
+        from StudioLib import projects_ui
+
+        settings = qt.QSettings()
+        savedFolder = settings.value("Studio/LastSaveFolder")
+        lastFolder = os.path.join(self.tempDir, "data")
+        os.makedirs(lastFolder)
+        elsewhere = os.path.join(self.tempDir, "working directory")
+        os.makedirs(elsewhere)
+        starts = []
+        realGetSaveFileName = qt.QFileDialog.getSaveFileName
+
+        def fakeGetSaveFileName(parent, caption, start, *args):
+            starts.append(start)
+            return ""  # Cancel
+
+        workingDirectory = os.getcwd()
+        running = self.autosave._service
+        qt.QFileDialog.getSaveFileName = fakeGetSaveFileName
+        try:
+            os.chdir(elsewhere)
+            # No project: the last save folder, else the home folder
+            self.assertIsNone(self.projects.currentProject())
+            settings.setValue("Studio/LastSaveFolder", lastFolder)
+            self.assertIsNone(projects_ui.saveCopyAs())
+            self.assertEqual(os.path.realpath(os.path.dirname(starts[-1])), os.path.realpath(lastFolder))
+            settings.setValue("Studio/LastSaveFolder", os.path.join(lastFolder, "missing"))
+            self.assertIsNone(projects_ui.saveCopyAs())
+            self.assertEqual(os.path.realpath(os.path.dirname(starts[-1])), os.path.realpath(qt.QDir.homePath()))
+            # A new project: its Exports/ folder, created for the dialog (it did not exist yet)
+            settings.setValue("Studio/LastSaveFolder", lastFolder)
+            service = self._service()
+            self.autosave._service = service  # as the running service of the application
+            self._userVolume()
+            project = self._projectFor(service)
+            self._save(service)
+            exports = project.folder(self.projects.EXPORTS)
+            self.assertFalse(os.path.isdir(exports), "a new project has no Exports/ folder yet")
+            self.assertIsNone(projects_ui.saveCopyAs())
+            start = starts[-1]
+            self.assertTrue(os.path.isdir(os.path.dirname(start)), f"the dialog starts in an existing folder: {start}")
+            self.assertEqual(os.path.realpath(os.path.dirname(start)), os.path.realpath(exports))
+            self.assertEqual(os.path.basename(start), project.name + ".mrb")
+        finally:
+            qt.QFileDialog.getSaveFileName = realGetSaveFileName
+            self.autosave._service = running
+            os.chdir(workingDirectory)
+            if savedFolder is None:
+                settings.remove("Studio/LastSaveFolder")
+            else:
+                settings.setValue("Studio/LastSaveFolder", savedFolder)
+
 
 
 def _sphere(center=(0, 0, 0)):

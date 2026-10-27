@@ -397,14 +397,32 @@ def saveNow(shell=None):
     return ok
 
 
+def saveCopyStartFolder():
+    """Folder of the "Save a copy as…" dialog: Exports/ of the open project (A-09, created here: a missing folder makes Qt
+    fall back to the current folder, HOME in the web container or "/" for a Finder-started app), else the last save
+    folder (/data in the web build), else the home folder. Always an existing folder (USABILITY 8, rule 6).
+    """
+    project = projects.currentProject()
+    if project is not None and os.path.isdir(project.path):
+        try:
+            folder = projects.exportsFolder(create=True)
+        except OSError:
+            folder = None
+        if folder and os.path.isdir(folder):
+            return folder
+    lastFolder = str(slicer.util.settingsValue("Studio/LastSaveFolder", "") or "")
+    if lastFolder and os.path.isdir(lastFolder):
+        return lastFolder
+    return qt.QDir.homePath()
+
+
 def saveCopyAs(path=None):
     """Save a copy as… (Export): the whole scene as one .mrb file anywhere. The project stays where it is."""
     service = _service()
     mainWindow = slicer.util.mainWindow()
     project = service.currentProject() if service is not None else None
     if path is None:
-        start = os.path.join(projects.exportsFolder(create=False) or os.path.expanduser("~"),
-                             (project.name if project is not None else "Scene") + ".mrb")
+        start = os.path.join(saveCopyStartFolder(), (project.name if project is not None else "Scene") + ".mrb")
         path = qt.QFileDialog.getSaveFileName(mainWindow, _("Save a copy as"), start, _("Slicer data bundle") + " (*.mrb)")
         if not path:
             return None
