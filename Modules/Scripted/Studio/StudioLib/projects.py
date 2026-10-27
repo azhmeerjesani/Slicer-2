@@ -400,6 +400,7 @@ def sceneHasUserData(scene=None):
     """True if the scene holds data of the user (a scan, drawing, figure, map...): a project is then created."""
     scene = scene or slicer.mrmlScene
     nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+    nodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
     for index in range(nodes.GetNumberOfItems()):
         if _isUserNode(nodes.GetItemAsObject(index)):
             return True
@@ -410,6 +411,7 @@ def defaultProjectName(scene=None):
     """The name of a new project: the first loaded scan ("sub-012 T1w"), else the scene file, else "Untitled project"."""
     scene = scene or slicer.mrmlScene
     volumes = scene.GetNodesByClass("vtkMRMLScalarVolumeNode")
+    volumes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
     for index in range(volumes.GetNumberOfItems()):
         node = volumes.GetItemAsObject(index)
         if node.GetHideFromEditors() or node.IsA("vtkMRMLLabelMapVolumeNode") or isTemplateNode(node) or isMapNode(node):
@@ -429,6 +431,7 @@ def counts(scene=None):
     scene = scene or slicer.mrmlScene
     result = {"scans": 0, "lesions": 0, "maps": 0, "markups": 0, "tables": 0, "models": 0}
     nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+    nodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
     for index in range(nodes.GetNumberOfItems()):
         node = nodes.GetItemAsObject(index)
         if node.GetHideFromEditors() or not node.GetSaveWithScene():

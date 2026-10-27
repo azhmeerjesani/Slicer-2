@@ -3429,11 +3429,16 @@ class VTKObservationMixin:
                 obj.RemoveObserver(tag)
             self.__observations.clear()
         else:
-            for obj, events in self.__observations.items():
-                for e, methods in events.items():
+            for obj, events in list(self.__observations.items()):
+                for e, methods in list(events.items()):
                     if method in methods:
                         _g, t, _p = methods.pop(method)
                         obj.RemoveObserver(t)
+                        if not methods:
+                            del events[e]
+                if not events:
+                    # Without observations, the object is not kept alive by the mixin
+                    del self.__observations[obj]
 
     def addObserver(self, obj, event, method, group="none", priority=0.0):
         from warnings import warn
@@ -3458,6 +3463,12 @@ class VTKObservationMixin:
             obj.RemoveObserver(tag)
         except KeyError:
             warn("does not have observer")
+            return
+        # Without observations, the object is not kept alive by the mixin (a removed node would stay in memory)
+        if not methods:
+            del events[event]
+        if not events:
+            del self.__observations[obj]
 
     def getObserver(self, obj, event, method, default=None):
         try:

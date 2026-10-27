@@ -240,6 +240,33 @@ class SlicerUtilVTKObservationMixinTests(unittest.TestCase):
         foo.removeObservers(method=callback)
         self.assertEqual(len(foo.Observations), 1)
 
+    def test_removedObservationsReleaseObject(self):
+        """Once its last observation is removed, an object is no longer kept alive by the mixin.
+
+        Otherwise each node observed in turn (the segmentation of each case) stays in memory after it is removed
+        from the scene.
+        """
+        for removeAll in (False, True):
+            foo = Foo()
+            obj = vtk.vtkObject()
+            deleted = []
+            obj.AddObserver(vtk.vtkCommand.DeleteEvent, lambda caller, event, deleted=deleted: deleted.append(True))
+            event = vtk.vtkCommand.ModifiedEvent
+            foo.addObserver(obj, event, foo.onObjectModified)
+            foo.addObserver(obj, vtk.vtkCommand.AnyEvent, foo.onObjectModifiedAgain)
+            if removeAll:
+                foo.removeObservers(method=foo.onObjectModified)
+                foo.removeObservers(method=foo.onObjectModifiedAgain)
+            else:
+                foo.removeObserver(obj, event, foo.onObjectModified)
+                self.assertEqual(len(foo.Observations), 1)
+                foo.removeObserver(obj, vtk.vtkCommand.AnyEvent, foo.onObjectModifiedAgain)
+            self.assertEqual(len(foo.Observations), 0)
+            self.assertIsNone(foo.getObserver(obj, event, foo.onObjectModified))
+            foo.ModifiedEventCount.clear()
+            del obj
+            self.assertEqual(deleted, [True], f"removeAll={removeAll}")
+
     def test_moduleWidgetMixin(self):
         class MyModule(ScriptedLoadableModuleWidget, VTKObservationMixin):
             pass

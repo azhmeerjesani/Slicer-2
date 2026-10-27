@@ -355,6 +355,7 @@ def migrateLegacyConnectomePaths(scene=None):
     """
     scene = scene or slicer.mrmlScene
     nodes = scene.GetNodesByClass("vtkMRMLScriptedModuleNode")
+    nodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
     logic, changed = None, 0
     for index in range(nodes.GetNumberOfItems()):
         node = nodes.GetItemAsObject(index)

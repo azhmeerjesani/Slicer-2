@@ -68,6 +68,7 @@ def findLUT(scene=None):
 def _nodesByClass(scene, className):
     nodes = []
     collection = scene.GetNodesByClass(className)
+    collection.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
     for index in range(collection.GetNumberOfItems()):
         nodes.append(collection.GetItemAsObject(index))
     return nodes

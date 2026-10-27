@@ -210,6 +210,7 @@ def _sharedGridSpace(segmentationNode, grid):
     role = slicer.vtkMRMLSegmentationNode.GetReferenceImageGeometryReferenceRole()
     candidates = [segmentationNode.GetNodeReference(role)]
     volumes = scene.GetNodesByClass("vtkMRMLVolumeNode")
+    volumes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
     candidates += [volumes.GetItemAsObject(index) for index in range(volumes.GetNumberOfItems())]
     seen = set()
     for volume in candidates:

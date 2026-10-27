@@ -340,6 +340,7 @@ def autosaveSlotOfScene(scene, roots):
     """The slot folder (``scene-<n>``) of the autosave folder that the storage nodes of ``scene`` point into, or None."""
     canonicalRoots = [_canonical(root) for root in roots if root]
     storageNodes = scene.GetNodesByClass("vtkMRMLStorageNode")
+    storageNodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
     for index in range(storageNodes.GetNumberOfItems()):
         fileName = storageNodes.GetItemAsObject(index).GetFileName()
         if not fileName:
@@ -370,6 +371,7 @@ def rehomeAfterLoad(scene, slotDir, manifest=None, restoreUrl=None):
     report = {"restored": 0, "written": 0, "copied": 0, "unlinked": 0, "changed": [], "missing": []}
     storableOfStorage = {}
     storableNodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+    storableNodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
     for index in range(storableNodes.GetNumberOfItems()):
         node = storableNodes.GetItemAsObject(index)
         for storageIndex in range(node.GetNumberOfStorageNodes()):
@@ -377,6 +379,7 @@ def rehomeAfterLoad(scene, slotDir, manifest=None, restoreUrl=None):
             if storageNode is not None:
                 storableOfStorage[storageNode.GetID()] = node
     storageNodes = scene.GetNodesByClass("vtkMRMLStorageNode")
+    storageNodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
     for index in range(storageNodes.GetNumberOfItems()):
         storageNode = storageNodes.GetItemAsObject(index)
         fileName = storageNode.GetFileName()
@@ -450,6 +453,7 @@ def rehomeAfterLoad(scene, slotDir, manifest=None, restoreUrl=None):
 
 def sceneHasDisplayableData(scene):
     nodes = scene.GetNodesByClass("vtkMRMLDisplayableNode")
+    nodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
     for index in range(nodes.GetNumberOfItems()):
         node = nodes.GetItemAsObject(index)
         if node.GetSaveWithScene() and not node.GetHideFromEditors() and not node.IsA("vtkMRMLSliceNode"):

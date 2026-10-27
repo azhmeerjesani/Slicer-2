@@ -516,6 +516,7 @@ def diceHistogramImage(counts, edges, width, height=PLOT_HEIGHT, ratio=1.0, flag
 def _nodesNamed(name, className):
     found = []
     collection = slicer.mrmlScene.GetNodesByClassByName(className, name)
+    collection.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
     for index in range(collection.GetNumberOfItems()):
         found.append(collection.GetItemAsObject(index))
     return found

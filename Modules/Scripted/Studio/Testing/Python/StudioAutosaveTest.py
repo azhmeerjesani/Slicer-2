@@ -37,6 +37,7 @@ Studio surfaces (StudioLib/autosave_ui.py, A-01b), with ``Shell(force=True).appl
   them; no visible string says "Saved".
 - (x) A-09: while the scene is a project it is saved there and no private session is written; when the project is
   released (a study opens) the private recovery autosave runs again.
+- (y) a node removed after the autosave and project helpers listed it is freed (no leaked GetNodesByClass collection).
 """
 
 import hashlib
@@ -1163,6 +1164,72 @@ class StudioAutosaveTest(unittest.TestCase):
             self._generate(service)
             self.assertIsNotNone(service.sessionDirectory())
             self.assertTrue(os.path.isfile(os.path.join(service.slotDirectory(), self.io.SCENE_FILE)))
+        finally:
+            if environment is None:
+                os.environ.pop(projects.ROOT_ENVIRONMENT, None)
+            else:
+                os.environ[projects.ROOT_ENVIRONMENT] = environment
+
+    def test_y_removedNodesAreFreed(self):
+        """BB-1: every helper that lists scene nodes (private autosave poll and generation, project save, recovery,
+        projects and Lesion Network Mapping helpers) must release the collection that GetNodesByClass returns;
+        otherwise the collection keeps each listed node, and its image data, in memory after it is removed.
+        """
+        import gc
+
+        import LesionNetworkMapping
+        from LesionNetworkMappingLib import display
+        from StudioLib import projects, recovery
+
+        freed = set()
+
+        def watch(name, obj):
+            obj.AddObserver(vtk.vtkCommand.DeleteEvent, lambda caller, event, name=name: freed.add(name))
+
+        def addData():
+            # A volume shown in the views is released by the view pipeline only at its next display change, also in
+            # official Slicer: nothing is shown here
+            array = np.arange(40 * 50 * 60, dtype=np.int16).reshape(40, 50, 60)
+            path = os.path.join(self.userDir, "Saved scan.nrrd")
+            self.assertTrue(slicer.util.saveNode(slicer.util.addVolumeFromArray(array, name="Saved scan"), path))
+            slicer.mrmlScene.Clear(0)
+            saved = slicer.util.loadVolume(path, {"show": False})  # has a storage node: listed, not copied
+            unsaved = slicer.util.addVolumeFromArray(np.arange(30 * 40 * 50, dtype=np.int16).reshape(30, 40, 50), name="Unsaved scan")
+            segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesions")
+            segmentation.CreateDefaultDisplayNodes()
+            segmentation.GetSegmentation().AddEmptySegment("Lesion")
+            for node in (saved, unsaved, segmentation):
+                watch(node.GetName(), node)
+            watch("Saved scan image", saved.GetImageData())
+            watch("Unsaved scan image", unsaved.GetImageData())
+            return [node.GetID() for node in (saved, unsaved, segmentation)]
+
+        environment = os.environ.get(projects.ROOT_ENVIRONMENT)
+        os.environ[projects.ROOT_ENVIRONMENT] = os.path.join(self.tempDir, "Slicer Studio")
+        try:
+            nodeIDs = addData()
+            service = self._service()
+            service.poll()
+            self._generate(service)  # private recovery autosave
+            service.studioActiveOverride = True
+            service.poll()
+            self.assertIsNotNone(service.project)
+            self.assertTrue(service.saveNow("test", progress=False))  # project save
+            scene = slicer.mrmlScene
+            projects.sceneHasUserData(scene)
+            projects.defaultProjectName(scene)
+            projects.counts(scene)
+            recovery.sceneHasDisplayableData(scene)
+            recovery.autosaveSlotOfScene(scene, [self.root])
+            LesionNetworkMapping.migrateLegacyConnectomePaths(scene)
+            display.ensureLUT(scene)
+            self.io.backgroundWriter().drain(30.0)
+            for nodeID in nodeIDs:
+                slicer.mrmlScene.RemoveNode(slicer.mrmlScene.GetNodeByID(nodeID))
+            service.poll()
+            self.io.backgroundWriter().drain(30.0)
+            gc.collect()
+            self.assertEqual(sorted(freed), sorted(["Saved scan", "Unsaved scan", "Lesions", "Saved scan image", "Unsaved scan image"]))
         finally:
             if environment is None:
                 os.environ.pop(projects.ROOT_ENVIRONMENT, None)

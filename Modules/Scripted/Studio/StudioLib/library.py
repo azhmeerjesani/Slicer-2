@@ -2141,7 +2141,8 @@ class OpenNowCard(qt.QObject):
         more.setMenu(menu)
         layout.addWidget(more)
         self.rowsLayout.addWidget(row)
-        self._rows.append((row, eye, item))
+        # The row keeps the node ID, not the node: a removed scan or a closed scene is freed even while the row lives
+        self._rows.append((row, eye, {key: value for key, value in item.items() if key != "node"}))
 
     def _fillMenu(self, menu, item):
         kind = item["kind"]
@@ -2182,7 +2183,8 @@ class OpenNowCard(qt.QObject):
             from . import niftiexport, niftiexport_ui
         except ImportError:
             return
-        if item["kind"] == "set":
+        isSet = item["kind"] == "set"  # the closures below do not keep the item (it holds the node)
+        if isSet:
             importer = _importer()
             loaded = importer.loadedSet()
 
@@ -2199,7 +2201,7 @@ class OpenNowCard(qt.QObject):
 
         def update():
             # A lesion that was empty when the row was made may have voxels now: checked each time the menu opens
-            reason = niftiexport.unavailableReason(node()) if item["kind"] != "set" else ""
+            reason = niftiexport.unavailableReason(node()) if not isSet else ""
             action.setEnabled(not reason)
             action.setToolTip(reason or _("Write it as a NIfTI file (check others to export them at once) for FSL, SPM, AFNI or nibabel"))
 

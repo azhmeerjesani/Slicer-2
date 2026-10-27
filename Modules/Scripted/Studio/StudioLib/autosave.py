@@ -522,6 +522,7 @@ class AutosaveService:
         """True if the scene has data stored in files (not only views and cameras, which are storable nodes too)."""
         io = _io()
         nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+        nodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
         for index in range(nodes.GetNumberOfItems()):
             node = nodes.GetItemAsObject(index)
             if node.GetSaveWithScene() and not node.GetHideFromEditors() and (node.GetStorageNode() is not None or io.defaultStorageNodeClassName(node)):
@@ -954,6 +955,7 @@ class AutosaveService:
         entries = self.writer.entries if self.writer is not None else {}
         total = 0.0
         nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+        nodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
         for index in range(nodes.GetNumberOfItems()):
             node = nodes.GetItemAsObject(index)
             if not node.GetSaveWithScene() or not node.GetModifiedSinceRead():
@@ -1305,6 +1307,7 @@ class AutosaveService:
         projectDir = os.path.normcase(os.path.realpath(projectPath))
         rootDirectory = scene.GetRootDirectory()
         nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+        nodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
         for index in range(nodes.GetNumberOfItems()):
             node = nodes.GetItemAsObject(index)
             storageNode = node.GetStorageNode()
@@ -1337,6 +1340,7 @@ class AutosaveService:
         rootDirectory = scene.GetRootDirectory()
         projectDir = os.path.normcase(os.path.realpath(project.path))
         nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+        nodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
         for index in range(nodes.GetNumberOfItems()):
             node = nodes.GetItemAsObject(index)
             if not node.GetSaveWithScene() or node.GetHideFromEditors():
@@ -1429,6 +1433,7 @@ class AutosaveService:
         io = _io()
         modified = []
         nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+        nodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
         for index in range(nodes.GetNumberOfItems()):
             node = nodes.GetItemAsObject(index)
             if not node.GetSaveWithScene() or node.GetHideFromEditors() or not node.GetModifiedSinceRead():
@@ -1785,6 +1790,7 @@ class AutosaveService:
         """
         unread = []
         nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+        nodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
         for index in range(nodes.GetNumberOfItems()):
             node = nodes.GetItemAsObject(index)
             for storageIndex in range(node.GetNumberOfStorageNodes()):
@@ -1855,6 +1861,7 @@ class AutosaveService:
             return path
 
         storageNodes = scene.GetNodesByClass("vtkMRMLStorageNode")
+        storageNodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
         for index in range(storageNodes.GetNumberOfItems()):
             storageNode = storageNodes.GetItemAsObject(index)
             names = [storageNode.GetNthFileName(i) for i in range(storageNode.GetNumberOfFileNames())]

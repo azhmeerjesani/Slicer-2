@@ -1031,6 +1031,7 @@ class SlotWriter:
             roots = volatileRoots(self.options["autosaveRoot"])
         maxNodeBytes = self.options["maxNodeBytes"]
         storableNodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+        storableNodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
         snapshotJobs = []
         for index in range(storableNodes.GetNumberOfItems()):
             node = storableNodes.GetItemAsObject(index)
@@ -1911,6 +1912,7 @@ class ProjectWriter(SlotWriter):
         rootDirectory = scene.GetRootDirectory()
         stored = self._readSources()
         nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+        nodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
         for index in range(nodes.GetNumberOfItems()):
             node = nodes.GetItemAsObject(index)
             hidden = node.GetHideFromEditors()
@@ -1998,6 +2000,7 @@ class ProjectWriter(SlotWriter):
         plan.unsaved = bool(scene.GetStorableNodesModifiedSinceRead())
         projectCanonical = _canonical(projectDir)
         storableNodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+        storableNodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
         snapshotJobs = []
         for index in range(storableNodes.GetNumberOfItems()):
             node = storableNodes.GetItemAsObject(index)
@@ -2279,6 +2282,7 @@ class ProjectWriter(SlotWriter):
         referenced = {_canonical(scenePath), _canonical(target)}
         rootDirectory = scene.GetRootDirectory()
         nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+        nodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
         for index in range(nodes.GetNumberOfItems()):
             for path in _storagePaths(nodes.GetItemAsObject(index).GetStorageNode(), rootDirectory):
                 referenced.add(_canonical(path))
