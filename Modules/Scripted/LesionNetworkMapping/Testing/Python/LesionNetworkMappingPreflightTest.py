@@ -278,6 +278,19 @@ class RunLevelBlockTest(_Fixture):
         error = self.preflight(design_spec={"test": "two_group", "covariates": ["age"]})
         self.assertIn("design.error", _ids(error, "block"))
 
+    def test_design_volume_covariate_uses_measured_volumes(self):
+        # A study without stored volumes (as made from a BIDS dataset): the default lesion-volume covariate
+        # takes the volumes this preflight measures, as the run does, instead of dropping every subject.
+        for index in range(10):
+            data = self.lesion_array(radius=2 + index % 3)
+            self.add(f"sub-{index:02d}", data, fresh=False, group="case" if index < 5 else "control", volume_ml="n/a", fractional_sum="n/a")
+        report = self.preflight(design_spec=design.DesignSpec(test="two_group").to_dict())
+        self.assertEqual(design.DesignSpec(test="two_group").covariates, [design.VOLUME_COLUMN])
+        self.assertEqual(len(report["measured"]), 10)
+        self.assertNotIn("design.error", _ids(report), report["checks"])
+        self.assertFalse(report["blocked"], [check["message"] for check in report["checks"] if check["level"] == "block"])
+        self.assertTrue(all(self.study.value(sid, design.VOLUME_COLUMN) is None for sid in self.study.subject_ids))  # the study is not changed
+
     def test_disk_space(self):
         self.add_many(3)
         usage = shutil.disk_usage(self.tmp)

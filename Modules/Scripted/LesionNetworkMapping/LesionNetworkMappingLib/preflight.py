@@ -441,11 +441,29 @@ class _Hasher:
         self.changed = False
 
 
-def _subset_study(study, sids):
-    """An in-memory copy of a study that holds only these rows (for the shared design checks; never saved)."""
+def _subset_study(study, sids, measured=None):
+    """An in-memory copy of a study that holds only these rows (for the shared design checks; never saved).
+
+    :param measured: {sid: values} that this preflight measured (stale or missing metrics): a missing
+      volume_ml is filled from them, as the run fills it from the lesion it maps (otherwise a study
+      without stored volumes, such as one made from a BIDS dataset, loses every subject to the
+      default lesion-volume covariate).
+    """
     keep = set(sids)
-    rows = [row for row in study.subjects if row["participant_id"] in keep]
-    return studylib.Study(study.path, dict(study.metadata), study.columns, rows, study.dictionary)
+    measured = measured or {}
+    column = designlib.VOLUME_COLUMN
+    rows = []
+    for row in study.subjects:  # copies
+        if row["participant_id"] not in keep:
+            continue
+        volume = (measured.get(row["participant_id"]) or {}).get(column)
+        if schema.is_missing(row.get(column)) and volume is not None:
+            row[column] = f"{volume:.6g}"
+        rows.append(row)
+    columns = list(study.columns)
+    if column not in columns and any(column in row for row in rows):
+        columns.append(column)
+    return studylib.Study(study.path, dict(study.metadata), columns, rows, study.dictionary)
 
 
 # Preflight
@@ -858,7 +876,7 @@ def run_preflight(
         if path and not _is_ascii(path):
             run_checks.append(Check("non_ascii_path", "info", [], f"The {label} path has non-ASCII characters: official 3D Slicer 5.12 reads it only with a UTF-8 locale.", None, "run", detail={"which": label}))
     run_checks.extend(_rule_checks(recipe_rule, bundle, n_subjects))
-    design_checks = _design_checks(study, included, design_spec)
+    design_checks = _design_checks(study, included, design_spec, measured)
     if design_spec is None:
         run_checks.extend(_dimensionality_share(study, included_rows))
     run_checks.extend(design_checks)
@@ -1078,15 +1096,18 @@ def _design_dict(spec):
         return None
 
 
-def _design_checks(study, included, design_spec):
-    """The shared design checks (``design.build_design``) on the subjects this preflight includes."""
+def _design_checks(study, included, design_spec, measured=None):
+    """The shared design checks (``design.build_design``) on the subjects this preflight includes.
+
+    :param measured: {sid: values} measured by this preflight; they fill missing volumes (see :func:`_subset_study`).
+    """
     if design_spec is None:
         return []
     if not included:
         return []
     try:
         spec = designlib.as_spec(design_spec)
-        built = designlib.build_design(_subset_study(study, included), spec)
+        built = designlib.build_design(_subset_study(study, included, measured), spec)
     except (OSError, ValueError) as exc:  # DesignError is a ValueError
         return [Check("design.error", "block", [], f"The design cannot be built: {exc}", None, "run")]
     out = []
