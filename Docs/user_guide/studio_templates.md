@@ -56,8 +56,11 @@ In the dialog:
    - **Whole-head image**: helps normalization recover tilted scans. It must be on
      the grid of the image too.
    - **3D brain surfaces** (`.gii`, `.vtk`, `.vtp`, `.obj`, `.stl`, `.ply`): shown in
-     the 3D view when you start on the template. They must lie in MNI space. GIfTI
-     files need a reader, for example the SlicerFreeSurfer extension.
+     the 3D view when you start on the template. They must lie in MNI space, whose
+     coordinates are RAS: a file that does not state its coordinate system (most
+     FreeSurfer, BrainNet or nibabel exports) is read as RAS, and a `SPACE=RAS` or
+     `SPACE=LPS` header, as in every file Slicer saves, is followed. GIfTI files
+     need a reader, for example the SlicerFreeSurfer extension.
    - **Source and licence**: where the template comes from and how to cite it.
 4. Turn on **Use as my default template** if *Start on template* should open it.
 5. Press **Add template**. The files are copied into your Slicer Studio folder with

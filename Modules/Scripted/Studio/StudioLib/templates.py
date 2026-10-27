@@ -473,6 +473,11 @@ def checkCompanion(detection, path):
 #
 
 
+# Template surfaces are meshes in MNI coordinates, which are RAS: files that state no coordinate system are read as RAS.
+# A SPACE=RAS/LPS header (every file Slicer writes has one) still decides.
+SURFACE_COORDINATE_SYSTEM = slicer.vtkMRMLStorageNode.CoordinateSystemRAS
+
+
 def surfaceReaderAvailable(path):
     """True if Slicer can read this surface file (GIfTI only with a reader, e.g. an extension)."""
     storage = slicer.vtkMRMLModelStorageNode()
@@ -481,6 +486,8 @@ def surfaceReaderAvailable(path):
 
 def _readSurfaceBounds(path):
     storage = slicer.vtkMRMLModelStorageNode()
+    # MNI coordinates are RAS: a file without a SPACE= header (FreeSurfer, BrainNet, nibabel exports) is RAS, not Slicer's LPS default.
+    storage.SetCoordinateSystem(SURFACE_COORDINATE_SYSTEM)
     storage.SetFileName(path)
     model = slicer.vtkMRMLModelNode()
     if not storage.ReadData(model):

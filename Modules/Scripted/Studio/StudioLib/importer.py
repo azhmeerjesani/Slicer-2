@@ -2519,7 +2519,7 @@ def _loadTemplateSurfaces(template):
             continue
         try:
             with _ownLoad():
-                modelNode = slicer.modules.models.logic().AddModel(path)
+                modelNode = slicer.modules.models.logic().AddModel(path, templates.SURFACE_COORDINATE_SYSTEM)
             if modelNode is None:
                 raise RuntimeError(name)
         except Exception:

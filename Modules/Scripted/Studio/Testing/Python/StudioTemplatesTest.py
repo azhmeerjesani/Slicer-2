@@ -697,3 +697,84 @@ class StudioTemplatesTest(unittest.TestCase):
             else:
                 settings.setValue(study_ui.RECENT_STUDIES_KEY, recent)
             shutil.rmtree(study.path, ignore_errors=True)
+
+    def test_13_surfaces_without_coordinate_header_are_mni_ras(self):
+        from StudioLib import importer
+
+        templates = self.templates
+        folder = os.path.join(self.tempDir, "headerless surfaces")
+        os.makedirs(folder, exist_ok=True)
+
+        def ellipsoid(low, high):
+            source = vtk.vtkSphereSource()
+            source.SetThetaResolution(24)
+            source.SetPhiResolution(24)
+            source.SetRadius(0.5)
+            transform = vtk.vtkTransform()
+            transform.Translate(*[(a + b) / 2.0 for a, b in zip(low, high, strict=True)])
+            transform.Scale(*[b - a for a, b in zip(low, high, strict=True)])
+            moved = vtk.vtkTransformPolyDataFilter()
+            moved.SetTransform(transform)
+            moved.SetInputConnection(source.GetOutputPort())
+            triangles = vtk.vtkTriangleFilter()
+            triangles.SetInputConnection(moved.GetOutputPort())
+            triangles.Update()
+            return triangles.GetOutput()
+
+        def writeObj(path, polyData, comment=None):
+            # As FreeSurfer, BrainNet or nibabel exports write it: no coordinate system comment unless given
+            with open(path, "w", encoding="ascii") as f:
+                if comment:
+                    f.write(f"# {comment}\n")
+                for index in range(polyData.GetNumberOfPoints()):
+                    f.write("v {:.4f} {:.4f} {:.4f}\n".format(*polyData.GetPoint(index)))
+                ids = vtk.vtkIdList()
+                polys = polyData.GetPolys()
+                polys.InitTraversal()
+                while polys.GetNextCell(ids):
+                    f.write("f " + " ".join(str(ids.GetId(i) + 1) for i in range(ids.GetNumberOfIds())) + "\n")
+            return path
+
+        def writeWith(writer, path, polyData):
+            writer.SetFileName(path)
+            writer.SetInputData(polyData)
+            writer.Write()
+            return path
+
+        # A left hemisphere in MNI (RAS) coordinates, without a coordinate system comment, as .obj, .stl and legacy .vtk
+        hemisphere = ellipsoid((-68.0, -100.0, -44.0), (-4.0, 68.0, 76.0))
+        headerless = [writeObj(os.path.join(folder, "lh.pial.obj"), hemisphere),
+                      writeWith(vtk.vtkSTLWriter(), os.path.join(folder, "lh.pial.stl"), hemisphere),
+                      writeWith(vtk.vtkPolyDataWriter(), os.path.join(folder, "lh.pial.vtk"), hemisphere)]
+        for path in headerless:
+            self.assertEqual(templates.checkSurface(path), (True, ""), f"{os.path.basename(path)}: MNI coordinates are RAS")
+            bounds = templates._readSurfaceBounds(path)
+            self.assertLess(bounds[1], 0.0, f"{os.path.basename(path)} stays in the left hemisphere")
+            self.assertLess(bounds[2], -90.0, f"{os.path.basename(path)} keeps its occipital pole at the back")
+        # A file that states its coordinate system is still read in it: the same hemisphere stored as LPS
+        flipped = vtk.vtkTransformPolyDataFilter()
+        lpsTransform = vtk.vtkTransform()
+        lpsTransform.Scale(-1.0, -1.0, 1.0)
+        flipped.SetTransform(lpsTransform)
+        flipped.SetInputData(hemisphere)
+        flipped.Update()
+        lps = writeObj(os.path.join(folder, "lh.pial_lps.obj"), flipped.GetOutput(), comment="exported SPACE=LPS")
+        self.assertEqual(templates.checkSurface(lps), (True, ""))
+        self.assertLess(templates._readSurfaceBounds(lps)[1], 0.0)
+
+        # A small left-anterior structure on a template: its model is where the file says, not mirrored
+        blob = writeObj(os.path.join(folder, "left_blob.obj"), ellipsoid((-55.0, 5.0, 5.0), (-25.0, 35.0, 35.0)))
+        self.assertEqual(templates.checkSurface(blob), (True, ""))
+        template = self._add(surfaces=(blob,), space="MNI152NLin6Asym")
+        importer.startOnTemplate(shell=self._shell(), templateId=template.id)
+        models = [node for node in slicer.util.getNodesByClass("vtkMRMLModelNode") if node.GetAttribute("Studio.Role") == templates.ROLE_SURFACE]
+        self.assertEqual(len(models), 1)
+        bounds = [0.0] * 6
+        models[0].GetRASBounds(bounds)
+        self.assertTrue(-56.0 < bounds[0] < bounds[1] < -24.0, f"left, not mirrored: {bounds}")
+        self.assertTrue(4.0 < bounds[2] < bounds[3] < 36.0, f"anterior, not mirrored: {bounds}")
+        # Saved with the project as Slicer writes models (with a coordinate system header), so official Slicer reads it unmirrored
+        path = os.path.join(folder, "saved_blob.vtk")
+        self.assertTrue(slicer.util.saveNode(models[0], path))
+        self.assertTrue(-56.0 < templates._readSurfaceBounds(path)[1] < -24.0)
+        shutil.rmtree(folder, ignore_errors=True)
