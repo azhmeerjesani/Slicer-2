@@ -2195,8 +2195,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         resolved = self.resolved
         threshold = None
         thresholdText = _("Unthresholded")
-        applied = resolved is not None and (resolved.allowed or rule.get("override")) and math.isfinite(resolved.value)
-        if applied and statistic == self._ruleStatistic(rule):
+        if self._ruleAppliesToShownMap():
             threshold = float(resolved.value)
             quantity = {"both": f"|{statistic}|", "pos": statistic, "neg": f"−{statistic}"}.get(self._sign(), statistic)  # noqa: RUF001
             label = thresholds.RULE_LABELS.get(rule["kind"], rule["kind"])
@@ -4692,6 +4691,17 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             display.setForegroundOpacity(value)
         self._refreshMapOverlay()
 
+    def _ruleAppliesToShownMap(self):
+        """True when the resolved rule thresholds the map shown: it is applied (allowed, or kept with Keep), its value is
+        finite, and it is a rule on the statistic shown (never r). The legend and Binarize use the same condition as the colours.
+        """
+        resolved = self.resolved
+        if resolved is None or not math.isfinite(resolved.value):
+            return False
+        rule = self.currentRule()
+        statistic = self.currentStatistic()
+        return bool(resolved.allowed or rule.get("override")) and statistic != "r" and statistic == self._ruleStatistic(rule)
+
     def _ruleStatistic(self, rule):
         if rule["kind"] == "top_pct":
             return rule.get("statistic", "Fz")
@@ -4862,7 +4872,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         resultVolume = node.resultVolume if node is not None else None
         hasMap = self._hasResult()
         loaded = self.loadedMap
-        self.binarizeButton.setEnabled(hasMap and resultVolume is not None)
+        self.binarizeButton.setEnabled(False)  # enabled below once the rule is resolved and applies to the map shown
         failure = self._shownRunFailure()
         self.resultExportButton.setEnabled(hasMap and resultVolume is not None and loaded is None and not (failure is not None and failure["outputsFailed"]))
         if loaded is not None:
@@ -4933,6 +4943,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.ruleBanner.setVisible(bool(banner))
         self.ruleNotesLabel.setText(" ".join(notes))
         self.ruleNotesLabel.setVisible(bool(notes))
+
+        # Binarize makes a mask only of what the colours show: the rule applied to the map shown
+        self.binarizeButton.setEnabled(bool(hasMap and resultVolume is not None and self._ruleAppliesToShownMap()))
 
         # Display: only the colour table alphas change
         self.lastPassing = None
@@ -5323,7 +5336,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
 
         node = self._parameterNode
         volume = node.resultVolume if node is not None else None
-        if volume is None or self.resolved is None or not math.isfinite(self.resolved.value):
+        if volume is None or not self._ruleAppliesToShownMap():
+            # The rule applies to another statistic's map, or is not applied (the map is shown unthresholded or empty)
             return None
         array = slicer.util.arrayFromVolume(volume)
         sign, value = self._sign(), self.resolved.value
@@ -5717,6 +5731,9 @@ class LesionNetworkMappingTest(ScriptedLoadableModuleTest):
             self.tearDown()
             self.setUp()
             self.test_LesionNetworkMapping_emptySeed()
+            self.tearDown()
+            self.setUp()
+            self.test_LesionNetworkMapping_binarizeRule()
         finally:
             self.tearDown()
 
@@ -5941,6 +5958,93 @@ class LesionNetworkMappingTest(ScriptedLoadableModuleTest):
         self.assertEqual(computeCard.property("studioStepState"), "done")
         self.assertFalse(widget.computeBanner.isVisibleTo(widget.parent))
         self.assertTrue(self._waitFor(lambda: widget.resultExportButton.enabled, 10))  # after the deferred refresh of the final map
+
+    def test_LesionNetworkMapping_binarizeRule(self):
+        """Binarize masks only what the colours and the legend show: the rule applied to the statistic shown. It is off
+        (and makes no mask) when the rule applies to another statistic's map, or is not applied (a |T| >= 7 convention
+        defined for N=1000 on a smaller run) until Keep.
+        """
+        import numpy as np
+
+        from LesionNetworkMappingLib import connectome, thresholds
+
+        def settle():
+            self._waitFor(lambda: False, 0.3)  # the refresh of the Result card (rule, colours, Binarize)
+
+        def masks():
+            return [volume for volume in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode") if " mask " in volume.GetName()]
+
+        self.delayDisplay("Binarize follows the rule shown")
+        widget = slicer.modules.lesionnetworkmapping.widgetRepresentation().self()
+        widget.initializeParameterNode()
+        meta = connectome.make_synthetic(os.path.join(self.tempDir, "binarize.lnmc"), shape=(20, 24, 20), n_subjects=30, runs=(20,), seed=0, name="Binarize test")
+        segNode, segmentId, _voxels = self._sphereLesion(meta)
+        widget.refreshConnectomes(select=os.path.abspath(meta["path"]))
+        widget.ctx.setSeed(segNode, segmentId)
+        widget.updateGUIFromParameterNode()
+        widget.updateSeed()
+        widget.acceptTermsCheckBox.setChecked(True)
+        widget.subjectsGroup.button(0).click()
+        widget.setRule(thresholds.DEFAULT_RULE)
+        self.assertTrue(widget.computeButton.enabled, widget.computeReasonLabel.text)
+        job = widget.compute()
+        self.assertTrue(self._waitFor(job.isFinished, 300), "the engine did not finish")
+        self.assertEqual(job.state, "done", f"{job.failureReason} {list(job.logTail)}")
+        self.assertTrue(self._waitFor(lambda: widget.resolved is not None and widget._hasResult() and widget.ctx.currentRun is not None, 30))
+
+        # T shown with the FWE T rule: the mask is the voxels the colours show
+        widget.statisticGroup.button(STATISTICS.index("T")).click()
+        settle()
+        self.assertIsNotNone(widget.legendState()["threshold"])
+        self.assertTrue(widget.binarizeButton.enabled)
+        mask = widget.onBinarize()
+        self.assertIsNotNone(mask)
+        self.assertEqual(int(np.count_nonzero(slicer.util.arrayFromVolume(mask))), widget.lastPassing)
+        slicer.mrmlScene.RemoveNode(mask)
+
+        # Fz and r shown with the T rule: shown unthresholded, so no mask (never a T cutoff on Fz or r values)
+        for statistic in ("Fz", "r"):
+            widget.statisticGroup.button(STATISTICS.index(statistic)).click()
+            settle()
+            self.assertIsNone(widget.legendState()["threshold"], statistic)
+            self.assertFalse(widget.binarizeButton.enabled, statistic)
+            self.assertIsNone(widget.onBinarize(), statistic)
+        self.assertEqual(masks(), [])
+
+        # T shown with an Fz rule: the rule applies to the Fz map, not to T values
+        widget.statisticGroup.button(STATISTICS.index("T")).click()
+        settle()
+        widget.setRule({"kind": "fz_abs", "value": 0.05})
+        settle()
+        self.assertFalse(widget.binarizeButton.enabled)
+        self.assertIsNone(widget.onBinarize())
+        widget.statisticGroup.button(STATISTICS.index("Fz")).click()
+        settle()
+        self.assertTrue(widget.binarizeButton.enabled)
+        mask = widget.onBinarize()
+        self.assertIsNotNone(mask)
+        self.assertIn("Fz≥0.05", mask.GetName())
+        self.assertEqual(int(np.count_nonzero(slicer.util.arrayFromVolume(mask))), widget.lastPassing)
+        slicer.mrmlScene.RemoveNode(mask)
+
+        # The |T| >= 7 convention at N=30 is not applied ("Nothing is shown") until Keep
+        widget.statisticGroup.button(STATISTICS.index("T")).click()
+        settle()
+        widget.setRule({"kind": "t_convention", "value": 7.0, "reference_n": 1000})
+        settle()
+        self.assertFalse(widget.resolved.allowed)
+        self.assertIsNone(widget.legendState()["threshold"])
+        self.assertFalse(widget.binarizeButton.enabled)
+        self.assertIsNone(widget.onBinarize())
+        self.assertEqual(masks(), [])
+        widget.onKeepRule()
+        settle()
+        self.assertIsNotNone(widget.legendState()["threshold"])
+        self.assertTrue(widget.binarizeButton.enabled)
+        mask = widget.onBinarize()
+        self.assertIsNotNone(mask)
+        self.assertEqual(int(np.count_nonzero(slicer.util.arrayFromVolume(mask))), widget.lastPassing)
+        widget.onSwitchToFwe()
 
     def test_LesionNetworkMapping_emptySeed(self):
         """A segment that was never drawn is an empty seed ("trace it in Draw first"), not a read error with logged tracebacks."""
