@@ -194,6 +194,7 @@ _EXPORTS = {
         "select_recipe",
         "compare_parameters",
         "describe_change",
+        "analysis_pending",
     ],
     "reference": ["Reference", "load_reference", "reference_status", "select_seeds", "external_on_grid", "compare_to_external", "seeds_sha256", "subjects_data_sha256"],
     "roi": ["RoiError", "RoiResult", "roi_means", "roi_glm", "small_volume_fwe", "read_roi", "write_svc_mask"],

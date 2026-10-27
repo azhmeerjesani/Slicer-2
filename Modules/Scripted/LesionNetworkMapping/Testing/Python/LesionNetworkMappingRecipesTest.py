@@ -343,6 +343,41 @@ class PlanLockTest(_TempCase):
         recipes.record_deviation(study, "n_perm", 1000, 10, "hand edit")
         self.assertEqual(recipes.effective_parameters(study)["n_perm"], 1000)
 
+    def test_cohort_analysis_deviations(self):
+        """The Cohort card's Contrast and Symptom analyses are compared with the plan apart from Run everything."""
+        study = self.make_study()
+        self.assertEqual(recipes.analysis_pending(study, "contrast", {"n_perm": 1000}), [])  # no plan: nothing to deviate from
+        self.lock(study)
+        planned = {"n_perm": 5000, "design.covariates": ["volume_ml"], "design.tfce": False, "fdr": True, "statistic": "Fz"}
+        self.assertEqual(recipes.analysis_parameters(study, "contrast"), planned)
+        self.assertEqual(recipes.analysis_pending(study, "contrast", planned), [])
+        # Below the plan's minimum (a preview) and volume off are changes too
+        current = dict(planned, **{"n_perm": 500, "design.covariates": ["age"]})
+        pending = recipes.analysis_pending(study, "contrast", current)
+        self.assertEqual([(item["field"], item["old"], item["new"], item["scope"]) for item in pending],
+                         [("contrast.n_perm", 5000, 500, "contrast"), ("contrast.design.covariates", ["volume_ml"], ["age"], "contrast")])
+        self.assertEqual(pending[0]["description"], "Contrast GLM: n_perm 500 instead of 5000")
+        self.assertEqual(recipes.analysis_pending(study, "contrast", dict(planned, **{"design.covariates": ["age", "volume_ml"]}))[0]["new"], ["age", "volume_ml"])
+        self.assertEqual(recipes.analysis_pending(study, "symptom", {"n_perm": 5000, "design.covariates": ["volume_ml"]}), [])
+        with self.assertRaises(recipes.RecipeError):
+            recipes.analysis_parameters(study, "unknown")
+        # Recorded: the analysis follows its deviation; Run everything (effective parameters) and the other analysis do not
+        for item in pending:
+            recipes.record_deviation(study, item["field"], item["old"], item["new"], "matched volumes; a preview first", description=item["description"])
+        self.assertEqual(recipes.analysis_pending(study, "contrast", current), [])
+        self.assertEqual(recipes.analysis_parameters(study, "contrast")["n_perm"], 500)
+        self.assertEqual(recipes.effective_parameters(study)["n_perm"], 5000)
+        self.assertEqual(recipes.effective_parameters(study)["design"]["covariates"], ["volume_ml"])
+        self.assertEqual(recipes.analysis_parameters(study, "symptom")["n_perm"], 5000)
+        self.assertEqual(recipes.to_pipeline_config(self.builtin("classic_ferguson2019_adapted"), study)["config"]["perm"], 5000)
+        # A later deviation of the plan itself is followed by the analysis too (in the order recorded)
+        recipes.record_deviation(study, "n_perm", 5000, 10000, "more permutations")
+        self.assertEqual(recipes.analysis_parameters(study, "contrast")["n_perm"], 10000)
+        self.assertEqual(recipes.analysis_parameters(study, "contrast")["design.covariates"], ["age"])
+        # The methods text lists the analysis's deviations with their reason
+        text = methods.find_section(methods.methods_sections(study.path), "deviations").text()
+        self.assertIn("Contrast GLM: n_perm 500 instead of 5000 (reason: matched volumes; a preview first", text)
+
     def test_selection(self):
         study = self.make_study()
         self.assertIsNone(recipes.selected_recipe(study))

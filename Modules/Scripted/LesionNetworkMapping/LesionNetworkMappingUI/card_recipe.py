@@ -18,7 +18,10 @@ A header strip above the Seed card (every seed mode, Studio and Classic):
 - After the lock, a change of the rule or of the Run everything options shows an **inline reason row**
   (``LNMDeviationPrompt``: "Changed after the plan was locked: n_perm 1000 instead of 5000", a reason field and
   **Record**). Until the reason is recorded in ``analysis_plan_deviations.jsonl``, Compute and Run everything are
-  blocked (``MapContext.setComputeEnabled(False, …, key="recipe")``); setting the value back clears it.
+  blocked (``MapContext.setComputeEnabled(False, …, key="recipe")``); setting the value back clears it. The Cohort
+  card's Contrast and Symptom analyses hold their own permutations, covariates and inference options
+  (``recipes.analysis_pending``): their changes are shown in the same row ("Contrast GLM: n_perm 1000 instead of
+  5000"), hold only that analysis's Run until the reason is recorded, and are recorded as "contrast.n_perm".
 - **Deviations (n)** (``LNMDeviationsButton``) opens a popover with the log; the ⋯ menu has Recipe details…,
   Save as lab recipe…, Add recipe folder… and Reload recipes.
 
@@ -376,7 +379,7 @@ class RecipeHeader:
         promptLayout.addLayout(row)
         self.restoreButton = qt.QPushButton(_("Use the plan's settings"))
         self.restoreButton.setObjectName("LNMRestorePlanButton")
-        self.restoreButton.setToolTip(_("Set the threshold rule and the Run everything options back to the locked plan (nothing is recorded)"))
+        self.restoreButton.setToolTip(_("Set the threshold rule, the Run everything options and the Cohort analyses' settings back to the locked plan (nothing is recorded)"))
         self.restoreButton.setProperty("slicerRole", "ghost")
         self.restoreButton.connect("clicked()", self.restorePlanSettings)
         promptLayout.addWidget(self.restoreButton, 0, qt.Qt.AlignLeft)
@@ -443,6 +446,21 @@ class RecipeHeader:
         except (ValueError, TypeError):  # a hand-edited plan with invalid parameters (the chip says "modified")
             logging.exception("Lesion network mapping: the locked plan's parameters are not valid")
             return recipes.apply(self.recipe) if self.recipe is not None else recipes.normalize_parameters({})
+
+    def analysisTabs(self):
+        """The Cohort-card analyses that hold their own copy of plan parameters (``PLAN_SCOPE``: Contrast, Symptom)."""
+        card = self.ctx.card("cohort")
+        return [controller for _key, controller in getattr(card, "tabControllers", None) or [] if getattr(controller, "PLAN_SCOPE", None)]
+
+    def analysisPending(self):
+        """Changes of the Cohort-card analyses from the locked plan that wait for a reason (each with its ``scope``)."""
+        pending = []
+        for tab in self.analysisTabs():
+            try:
+                pending.extend(tab.planPending())
+            except Exception:
+                logging.exception("Lesion network mapping: a Cohort analysis could not be compared with the locked plan")
+        return pending
 
     def currentSteps(self):
         """The steps Run everything would run now (the plan's or the recipe's steps, following the options)."""
@@ -584,7 +602,8 @@ class RecipeHeader:
         self.planRow.setVisible(bool(path))
         self.statusLabel.setToolTip("\n".join(f"{change['description']}" for change in recipes.diff(self.recipe, params)) if self.recipe is not None else "")
         level = {"open": "neutral", "locked": "ok", "modified": "danger"}[status["state"]]
-        self.pending = recipes.pending_deviations(path, params, steps=self.currentSteps()) if locked and path else []
+        # The Cohort analyses' own changes (scoped) only hold their own Run; the others block every computation
+        self.pending = recipes.pending_deviations(path, params, steps=self.currentSteps()) + self.analysisPending() if locked and path else []
         if self.pending:
             level = "warn"
         widgets.setChipLevel(self.planChip, level, status["chip"])
@@ -653,7 +672,7 @@ class RecipeHeader:
             text = _("Changed after the plan was locked: {changes}.").format(changes="; ".join(change["description"] for change in pending))
             self.promptLabel.setText(text)
         self.prompt.setVisible(bool(pending))
-        blocked = bool(pending)
+        blocked = any(not change.get("scope") for change in pending)
         if blocked != self._blocked or blocked:
             self.ctx.setComputeEnabled(not blocked, _("Give a reason for the change from the locked analysis plan (Recipe, top of Map)") if blocked else "", key=BLOCK_KEY)
             self._blocked = blocked
@@ -661,9 +680,10 @@ class RecipeHeader:
     def checkBeforeCompute(self):
         """``ctx.beforeCompute``: a change from the locked plan needs its reason first."""
         self.refresh()
-        if not self.pending:
+        pending = [change for change in self.pending if not change.get("scope")]  # a Cohort analysis's change holds only its Run
+        if not pending:
             return None
-        return False, _("Changed after the plan was locked: {changes}. Give the reason in the Recipe header.").format(changes="; ".join(change["description"] for change in self.pending)), (_("Give reason"), self.focusReason)
+        return False, _("Changed after the plan was locked: {changes}. Give the reason in the Recipe header.").format(changes="; ".join(change["description"] for change in pending)), (_("Give reason"), self.focusReason)
 
     def focusReason(self):
         self.ctx.focusCard("recipe")
@@ -684,6 +704,8 @@ class RecipeHeader:
                 logging.error(f"Lesion network mapping: the deviation could not be recorded: {exc}")
         self.reasonEdit.clear()
         self.refresh()
+        for tab in self.analysisTabs():
+            tab.showState()  # Run of a Cohort analysis waited for this reason
         return records
 
     #
@@ -726,7 +748,9 @@ class RecipeHeader:
         return plan
 
     def restorePlanSettings(self):
-        """Set the threshold rule and the Run everything options back to the locked plan (with its recorded deviations)."""
+        """Set the threshold rule, the Run everything options and the Cohort analyses' settings back to the locked plan
+        (with its recorded deviations).
+        """
         recipes = _recipes()
         path = self.studyPath()
         params = recipes.effective_parameters(path) if path else None
@@ -750,6 +774,14 @@ class RecipeHeader:
                     card.onRunSettingsChanged()
             except Exception:
                 logging.exception("Lesion network mapping: the Run everything options could not follow the locked plan")
+        for tab in self.analysisTabs():
+            try:
+                values = recipes.analysis_parameters(path, tab.PLAN_SCOPE)
+                if values is not None:
+                    tab.applyPlanValues(values)
+                    tab.refresh()
+            except Exception:
+                logging.exception("Lesion network mapping: a Cohort analysis could not follow the locked plan")
         self.refresh()
         return True
 

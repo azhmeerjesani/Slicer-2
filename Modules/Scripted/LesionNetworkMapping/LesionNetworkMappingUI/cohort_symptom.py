@@ -48,6 +48,7 @@ class SymptomTab(CohortTab):
 
     PREFIX = "LNMSymptom"
     TITLE = "sLNM"
+    PLAN_SCOPE = "symptom"
 
     def __init__(self, ctx):
         self.sdesign = None
@@ -194,6 +195,18 @@ class SymptomTab(CohortTab):
 
     def covariateColumns(self):
         return [name for name in self.covariates.checked() if name != self.score()]
+
+    def planValues(self):
+        return {"n_perm": self.nPerm(), "design.covariates": self.covariateColumns()}
+
+    def applyPlanValues(self, values):
+        if values.get("n_perm") is not None:
+            self.permSpinBox.setValue(int(values["n_perm"]))
+        if values.get("design.covariates") is not None:
+            for name, button in self.covariates.buttons.items():
+                if name != self.score():
+                    button.setChecked(name in values["design.covariates"])
+        self.onSettingsChanged()
 
     def volumeOffReason(self):
         return None if self.volumeOn() else (self.volumeReasonEdit.text.strip() or None)

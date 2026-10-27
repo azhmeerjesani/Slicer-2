@@ -21,6 +21,11 @@ and Hedges g maps are then listed (one shown at a time in the Cohort card's grou
 the module colour table), with glm.json's warnings, the smallest attainable p, the FDR floor and the limitations.
 No parametric p is ever shown: every p-value comes from permutations.
 
+After the analysis plan is locked (Recipe header, card_recipe.py), the permutations, covariates, input, FDR and TFCE
+of this tab (and the permutations and covariates of the Symptom tab) are compared with the plan
+(``recipes.analysis_pending``): a change is shown in the header's reason row and Run waits until its reason is
+recorded as a deviation ("contrast.n_perm"), or until "Use the plan's settings" sets the tab back.
+
 "Export for PALM…" writes the design and the maps with ``palm.export_palm`` into ``<study>/derivatives/lnm/palm/<run>``
 and validates the files with ``palm.validate_palm_export``; it runs as a job of this module (below), because loading
 the n maps and writing the 4D image would block the application. "Import PALM results…" reads PALM's outputs back
@@ -468,6 +473,9 @@ class CohortTab:
 
     PREFIX = "LNMCohortTab"
     TITLE = "Analysis"
+    #: recipes.ANALYSIS_SCOPES key of the analysis whose settings (``planValues``) follow the locked analysis plan: a
+    #: change from the plan is shown in the Recipe header and Run waits for its reason (L-39); None: no plan parameters
+    PLAN_SCOPE = None
 
     def __init__(self, ctx):
         self.ctx = ctx
@@ -484,6 +492,7 @@ class CohortTab:
         self.result = None  # (folder, record) of the shown analysis
         self._resultScope = None
         self._cleanedUp = False
+        self._planShown = []  # the plan changes the Recipe header was last asked to show
         self.widget = qt.QWidget()
         self.widget.setObjectName(f"{self.PREFIX}Tab")
         self.layout = qt.QVBoxLayout(self.widget)
@@ -738,6 +747,10 @@ class CohortTab:
             return False, _("Choose a connectome in the Connectome card.")
         if self.running():
             return False, _("Mapping the lesions first…") if self.job is None or self.job.isFinished() else _("{title} running…").format(title=self.TITLE)
+        pending = self.planPending()
+        if pending:
+            return False, _("Changed after the analysis plan was locked: {changes}. Give the reason in the Recipe header (top of Map), or use the plan's settings.").format(
+                changes="; ".join(change["description"] for change in pending))
         if self.design is None:
             return False, self.designError or _("No design.")
         settings = self.blockingSettings()
@@ -794,6 +807,7 @@ class CohortTab:
 
     def showState(self):
         enabled, reason = self.runState()
+        self.showPlanPending()
         self.runButton.setText(self.runText())
         self.runButton.setEnabled(enabled)
         self.reasonLabel.setText(reason)
@@ -808,6 +822,44 @@ class CohortTab:
         self.showDesignState()
         self.preview.setDesign(self.design, self.designNote, self.designError, self.previewTitle())
         self.preview.showAt(self.previewButton)
+
+    #
+    # Analysis plan (L-39): after the lock, a change of this analysis's plan parameters waits for its reason
+    #
+
+    def planValues(self):
+        """{recipes.ANALYSIS_FIELDS field: value} of the plan parameters this analysis holds (none by default)."""
+        return {}
+
+    def studyPath(self):
+        study = self.ctx.study
+        return os.fspath(study.path) if study is not None and getattr(study, "path", None) else None
+
+    def planPending(self):
+        """Changes of this analysis's settings from the locked plan that wait for a reason (recipes.analysis_pending)."""
+        from LesionNetworkMappingLib import recipes
+
+        path = self.studyPath()
+        if self.PLAN_SCOPE is None or not path:
+            return []
+        try:
+            return recipes.analysis_pending(path, self.PLAN_SCOPE, self.planValues())
+        except (recipes.RecipeError, TypeError, ValueError, OSError):
+            logging.exception("Lesion network mapping: the settings could not be compared with the locked analysis plan")
+            return []
+
+    def showPlanPending(self):
+        """Let the Recipe header show (or stop showing) this analysis's changes from the locked plan."""
+        pending = [change["description"] for change in self.planPending()]
+        if pending == self._planShown:
+            return
+        self._planShown = pending
+        header = self.ctx.card("recipe")
+        if header is not None and hasattr(header, "refresh"):
+            header.refresh()
+
+    def applyPlanValues(self, values):
+        """Set the controls of the plan parameters this analysis holds to ``values`` (recipes.analysis_parameters)."""
 
     #
     # Run
@@ -1127,6 +1179,7 @@ class ContrastTab(CohortTab):
 
     PREFIX = "LNMContrast"
     TITLE = "GLM"
+    PLAN_SCOPE = "contrast"
 
     def __init__(self, ctx):
         self.palmJob = None
@@ -1316,6 +1369,24 @@ class ContrastTab(CohortTab):
 
     def nPerm(self):
         return int(self.permSpinBox.value)
+
+    def planValues(self):
+        return {"n_perm": self.nPerm(), "design.covariates": self.covariates.checked(), "design.tfce": bool(self.tfceCheckBox.checked),
+                "fdr": bool(self.fdrCheckBox.checked), "statistic": self.input()}
+
+    def applyPlanValues(self, values):
+        if values.get("n_perm") is not None:
+            self.permSpinBox.setValue(int(values["n_perm"]))
+        if values.get("design.covariates") is not None:
+            for name, button in self.covariates.buttons.items():
+                button.setChecked(name in values["design.covariates"])
+        if values.get("design.tfce") is not None:
+            self.tfceCheckBox.setChecked(bool(values["design.tfce"]))
+        if values.get("fdr") is not None:
+            self.fdrCheckBox.setChecked(bool(values["fdr"]))
+        if values.get("statistic") in INPUTS:
+            self.inputGroup.button(INPUTS.index(values["statistic"])).setChecked(True)
+        self.onSettingsChanged()
 
     def spec(self):
         """The ``design.DesignSpec`` of the current settings (n_perm at least the design minimum; ``nPerm()`` is run)."""

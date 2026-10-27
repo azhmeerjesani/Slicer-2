@@ -305,7 +305,10 @@ or a study's `recipes` folder). A step that is not available in a build is shown
 
 **Lock analysis plan…** writes `derivatives/lnm/analysis_plan.json` (the recipe, the parameters, the hypotheses with the
 sha256 of any a-priori ROI) and its own sha256. After the lock, every change of a parameter is appended with its reason to
-`analysis_plan_deviations.jsonl`, which the methods text reports.
+`analysis_plan_deviations.jsonl`, which the methods text reports. This includes the permutations, covariates, input, FDR
+and TFCE of the Cohort card's Contrast tab and the permutations and covariates of its Symptom tab: a change there is shown
+in the Recipe header ("Contrast GLM: n_perm 1000 instead of 5000"), and that tab's Run waits until the reason is recorded
+or **Use the plan's settings** sets the tab back. These changes apply to that analysis only, not to Run everything.
 
 ## Reporting checklist
 

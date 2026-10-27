@@ -32,6 +32,10 @@ sha256, primary rule, alpha, n_perm, seeds) and the plan's own sha256 (of its ca
 ``analysis_plan_deviations.jsonl`` (:func:`record_deviation`), which the methods text reports (methods.py,
 "Deviations from the analysis plan"). :func:`plan_status` says whether the plan is open, locked or modified
 after the lock (its sha256 no longer matches). Paths in the plan are relative to the study (SPEC 9.7).
+The analyses of the Map Cohort card (the Contrast GLM and the Symptom sLNM) hold their own permutations,
+covariates and inference options: :func:`analysis_pending` compares them with the locked plan apart from the
+threshold rule and Run everything's options, and their deviations are recorded as "<analysis>.<field>" (for
+example "contrast.n_perm"), so a deviation of one never changes what the other follows.
 
 Pipeline (A-04): :func:`to_pipeline_config` turns a recipe into ``pipeline.PipelineConfig`` fields and a
 recipe record (with the locked plan's sha256) for pipeline.json.
@@ -1013,6 +1017,90 @@ def pending_deviations(study, current, steps=None):
     if steps is not None and ordered_steps(steps) != planned:
         steps = ordered_steps(steps)
         out.append({"field": "steps", "old": planned, "new": steps, "description": describe_change("steps", planned, steps)})
+    return out
+
+
+#: Analyses of the Map Cohort card that hold their own copy of plan parameters, with the text of their deviations
+ANALYSIS_SCOPES = {"contrast": "Contrast GLM", "symptom": "Symptom sLNM"}
+#: Plan parameters such an analysis may hold (the reason volume is off is a reason, not a setting: it is not compared)
+ANALYSIS_FIELDS = ("n_perm", "design.covariates", "design.tfce", "fdr", "statistic")
+
+
+def _analysis_value(field, value):
+    """``value`` of an analysis ``field`` in the plan's types (raises ValueError or TypeError)."""
+    if field == "n_perm":
+        if isinstance(value, bool):
+            raise ValueError("n_perm must be a number")
+        return int(value)
+    if field == "design.covariates":
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("covariates must be a list")
+        return [str(name) for name in value]
+    if field in ("design.tfce", "fdr"):
+        if not isinstance(value, bool):
+            raise ValueError(f"{field} must be true or false")
+        return value
+    return str(value)
+
+
+def analysis_parameters(study, scope):
+    """{field: value} of :data:`ANALYSIS_FIELDS` that the Cohort-card analysis ``scope`` follows under the locked
+    plan: the plan's parameters with the deviations of the plan (as :func:`effective_parameters`) and the analysis's
+    own deviations ("<scope>.<field>") applied in the order recorded (the latest change of a field wins).
+
+    :return: None without a locked plan, or when its parameters are not valid.
+    """
+    if scope not in ANALYSIS_SCOPES:
+        raise RecipeError(f"Unknown analysis {scope!r}; expected one of {', '.join(ANALYSIS_SCOPES)}")
+    plan = read_plan(study)
+    if plan is None:
+        return None
+    try:
+        params = normalize_parameters(plan.get("parameters") or {})
+    except RecipeError as exc:
+        logging.warning(f"The locked plan's parameters are not valid: {exc}")
+        return None
+    own = {}  # the analysis's own deviations
+    prefix = f"{scope}."
+    for item in read_deviations(study):
+        field = str(item.get("field") or "")
+        if field.startswith(prefix) and field[len(prefix):] in ANALYSIS_FIELDS:
+            field = field[len(prefix):]
+            try:
+                own[field] = _analysis_value(field, item.get("new"))
+            except (TypeError, ValueError) as exc:
+                logging.warning(f"Deviation of {scope}.{field} skipped (invalid recorded value {item.get('new')!r}): {exc}")
+        elif field and field in flatten_parameters(params):  # a deviation of the plan, as effective_parameters applies it
+            try:
+                params = normalize_parameters(set_field(params, field, item.get("new")))
+            except (RecipeError, TypeError, ValueError, AttributeError):
+                continue
+            own.pop(field, None)
+    flat = flatten_parameters(params)
+    return {field: copy.deepcopy(own[field] if field in own else flat.get(field)) for field in ANALYSIS_FIELDS}
+
+
+def analysis_pending(study, scope, current):
+    """Changes of the Cohort-card analysis ``scope``'s ``current`` settings ({field: value} of
+    :data:`ANALYSIS_FIELDS`) from what it follows under the locked plan (:func:`analysis_parameters`) that still
+    need a reason. Record each with :func:`record_deviation` (``field`` "<scope>.<field>", ``description``).
+
+    :return: [{"field", "old", "new", "description", "scope"}]; empty without a plan.
+    """
+    planned = analysis_parameters(study, scope)
+    if planned is None:
+        return []
+    out = []
+    for field in ANALYSIS_FIELDS:
+        if field not in current:
+            continue
+        new, old = _analysis_value(field, current[field]), planned.get(field)
+        if field == "design.covariates":
+            same = sorted(old or []) == sorted(new)  # the order of the covariates does not change the inference
+        else:
+            same = _same(old, new)
+        if not same:
+            out.append({"field": f"{scope}.{field}", "old": old, "new": new, "description": f"{ANALYSIS_SCOPES[scope]}: {describe_change(field, old, new)}", "scope": scope})
     return out
 
 
