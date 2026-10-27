@@ -1674,7 +1674,8 @@ def paletteItems(shell=None):
         {"id": "projects.changeFolder", "title": _("Change Slicer Studio folder…"), "category": "File", "callback": showSavingSettings,
          "synonyms": ["folder", "location", "where", "root", "documents", "move projects", "saving"]},
         {"id": "projects.saveCopy", "title": _("Save a copy as…"), "category": "File", "callback": saveCopyAs,
-         "synonyms": ["export", "mrb", "save as", "copy", "bundle", "share"]},
+         # no "export": that query is the gate of "Save lesion as NIfTI…" (SPEC 2.12), which a command synonym here would outrank
+         "synonyms": ["mrb", "save as", "copy", "bundle", "share"]},
     ]
     if project is not None:
         items.insert(1, {"id": "projects.rename", "title": _("Rename project"), "category": "File", "callback": renameDialog,

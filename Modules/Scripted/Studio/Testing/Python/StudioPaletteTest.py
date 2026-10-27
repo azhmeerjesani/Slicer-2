@@ -77,7 +77,7 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             draw.saveLesionDialog = self._saveLesionDialog
             del self._saveLesionDialog
         for provider in palette.providers():
-            if provider is _w205Provider:
+            if provider is _w205Provider or getattr(provider, "__name__", "") == "paletteItems":
                 palette.unregisterProvider(provider)
         live = shell._shell
         if live is not None:
@@ -192,6 +192,11 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         from StudioLib import palette
 
         studioShell = self._applyStudio()
+        # The real app registers the projects provider ("Save a copy as…" has the synonym "export"): so do the gate queries
+        from StudioLib import projects_ui
+
+        palette.registerProvider(projects_ui.paletteItems)
+        self.assertTrue(any(entry.id == "projects.saveCopy" for entry in palette.search(studioShell, "copy")))
         for withW205 in (False, True):
             if withW205:
                 palette.registerProvider(_w205Provider)
