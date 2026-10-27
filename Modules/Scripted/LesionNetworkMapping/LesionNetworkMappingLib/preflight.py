@@ -36,7 +36,8 @@ the process and in ``<study>/.studio/cache/lesion_sha256.json``; a preflight has
 - Information: radiological (left-handed) storage; ambiguous grids (2009c/2009a); lesions of unknown
   space against a known connectome; lesions stored as floating point (possibly non-binary); non-ASCII
   paths (official Slicer 5.12.4 needs a UTF-8 locale to read them); rows that are not included
-  (include = 0, false or no, as ``Study.analysis_rows`` reads it); hashes deferred to a later
+  (include = 0, false or no, as ``Study.analysis_rows`` reads it) and lesions marked QC fail (qc = fail,
+  excluded as ``Study.analysis_rows`` excludes them); hashes deferred to a later
   preflight; info-level design checks.
 
 The report is a JSON-compatible dict; :func:`save_report` writes it to
@@ -576,6 +577,16 @@ def run_preflight(
         if not studylib._included(row):  # the analyses' own test (Study.analysis_rows): 0, false, no
             collector.add("include_off", "info", sid, lambda sids, _d: f"{_count(len(sids), 'subject')} with include = 0 {'is' if len(sids) == 1 else 'are'} not analysed: {_listed(sids)}.")
             exclude(sid, studylib.EXCLUDED_INCLUDE)
+            continue
+        if studylib.qc_failed(row):  # marked "QC fail" in the Library: never analysed (Study.analysis_rows)
+            collector.add(
+                "qc_fail",
+                "info",
+                sid,
+                lambda sids, _d: f"{_count(len(sids), 'lesion')} marked QC fail {'is' if len(sids) == 1 else 'are'} not analysed: {_listed(sids)}.",
+                _library_fix(),
+            )
+            exclude(sid, studylib.EXCLUDED_QC)
             continue
         path = study.abspath(row.get("lesion"))
         if not path or not os.path.isfile(path):

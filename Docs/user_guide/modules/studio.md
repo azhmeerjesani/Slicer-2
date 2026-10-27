@@ -139,7 +139,7 @@ and cached in the study's `.studio` folder. Each thumbnail is marked **R** at it
 | --------------------------------- | --------- |
 | `↑` `↓` | move between subjects |
 | `Enter`, or double-click | open the subject in Draw |
-| `P` / `X` / `U` | QC pass / QC fail / not reviewed |
+| `P` / `X` / `U` | QC pass / QC fail (left out of every analysis) / not reviewed |
 | `Delete` | remove from the study (files are kept; Undo in the message) |
 | `Ctrl+A` | select all subjects |
 | `/` | search the subjects |

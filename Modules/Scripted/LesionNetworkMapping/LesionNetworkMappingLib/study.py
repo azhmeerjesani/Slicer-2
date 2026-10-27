@@ -99,6 +99,8 @@ LOCK_STALE_S = 30
 LOCK_TIMEOUT_S = 40
 #: Reasons of rows that Study.analysis_rows excludes (plus "missing <column>" and "not a number: <column>")
 EXCLUDED_INCLUDE = "include=0"
+#: A lesion marked "QC fail" (the qc column, Library ▸ QC) is never analysed: every analysis and Run everything leave it out
+EXCLUDED_QC = "qc=fail"
 EXCLUDED_REVIEW = "review_status != approved"
 EXCLUDED_NORM_QC = "norm_qc != pass"
 EXCLUDED_AUTO = "automatic segmentation not approved"
@@ -269,6 +271,11 @@ def _normalize(column, text):
 
 def _included(row):
     return str(row.get("include", "1")).strip().lower() not in ("0", "false", "no")
+
+
+def qc_failed(row):
+    """True when the row's lesion is marked "QC fail" (qc = fail): analyses leave it out (:data:`EXCLUDED_QC`)."""
+    return str(row.get("qc") or "").strip().lower() == "fail"
 
 
 def _digest(data):
@@ -932,7 +939,7 @@ class Study:
         """Columns with the role "block" (exchangeability blocks, such as dataset)."""
         return self._columns_with_role("block")
 
-    def analysis_rows(self, columns=(), include_only=True, require_review=None, require_norm_qc=True):
+    def analysis_rows(self, columns=(), include_only=True, require_review=None, require_norm_qc=True, exclude_qc_fail=True):
         """Rows an analysis may use, with listwise exclusion (missing values are never imputed).
 
         :param columns: columns that must have a value in every row used (numeric columns must hold numbers).
@@ -941,9 +948,10 @@ class Study:
           :attr:`review_required`. Unless False (a recorded override), an automatic segmentation (an
           ``auto:<tool>`` token in trace_method) that no human approved is excluded whatever the setting.
         :param require_norm_qc: exclude normalized rows (with a norm_method) whose norm_qc is not "pass".
+        :param exclude_qc_fail: exclude rows whose lesion is marked "QC fail" (qc = fail), as Run everything does.
         :return: (copies of the rows used, {reason: [participant ids]}); each excluded row is counted once,
-          under the first reason: :data:`EXCLUDED_INCLUDE`, :data:`EXCLUDED_REVIEW`, :data:`EXCLUDED_AUTO`,
-          :data:`EXCLUDED_NORM_QC`, "missing <column>" or "not a number: <column>".
+          under the first reason: :data:`EXCLUDED_INCLUDE`, :data:`EXCLUDED_QC`, :data:`EXCLUDED_REVIEW`,
+          :data:`EXCLUDED_AUTO`, :data:`EXCLUDED_NORM_QC`, "missing <column>" or "not a number: <column>".
         """
         if isinstance(columns, str):
             columns = (columns,)
@@ -954,6 +962,8 @@ class Study:
             reason = None
             if include_only and not _included(row):
                 reason = EXCLUDED_INCLUDE
+            elif exclude_qc_fail and qc_failed(row):
+                reason = EXCLUDED_QC
             elif review and row.get("review_status") != "approved":
                 reason = EXCLUDED_REVIEW
             elif require_review is not False and row.get("review_status") != "approved" and any(

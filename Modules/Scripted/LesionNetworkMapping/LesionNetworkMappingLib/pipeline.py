@@ -217,7 +217,7 @@ NATIVE_EXCLUDED = "native space: not normalized"
 CHANGED_SNAPSHOT = "changed during snapshot"
 CHANGED_RUN = "changed during the run"
 OUTSIDE_MASK = "no lesion voxel inside the connectome mask (its maps would be all zero)"
-QC_FAIL = "qc=fail"
+QC_FAIL = "qc=fail"  # study.EXCLUDED_QC: preflight and Study.analysis_rows exclude these lesions with this reason
 #: Sidecar "kind" of the nulls job's group maps (nulls.OUTPUT_DESCS): the excess is in signed percentage points
 NULL_MAP_KINDS = {"sensNullExcess": "stat", "sensNullP": "p", "sensNullQ": "p", "sensNullPFwe": "p", "sensNullBias": "fraction"}
 UNIVERSAL_NOTE = "Group maps of the pipeline are descriptive unless they carry a permutation p-value; specificity is never claimed from overlap maps."
@@ -1023,7 +1023,7 @@ def _overrides(config):
 def _builtin_row_checks(study, config):
     """{sid: reason} of the rows the plan's own checks exclude (the fallback of preflight.run_preflight)."""
     from . import nifti
-    from .study import EXCLUDED_INCLUDE, EXCLUDED_NORM_QC, EXCLUDED_REVIEW, is_missing
+    from .study import EXCLUDED_INCLUDE, EXCLUDED_NORM_QC, EXCLUDED_QC, EXCLUDED_REVIEW, is_missing, qc_failed
 
     excluded = {}
     review = study.review_required and not config.include_unreviewed
@@ -1031,6 +1031,9 @@ def _builtin_row_checks(study, config):
         sid = row["participant_id"]
         if row.get("include", "1") in ("0", "false", "no"):
             excluded[sid] = EXCLUDED_INCLUDE
+            continue
+        if qc_failed(row):
+            excluded[sid] = EXCLUDED_QC
             continue
         path = study.abspath(row.get("lesion"))
         if not path or not os.path.isfile(path):
@@ -1129,7 +1132,7 @@ def plan(config, hash_lesions=True, providers=None):
         for check in report["checks"]:
             if check["level"] == "warn" and check["scope"] == "run":
                 warnings.append({"code": check["id"], "message": check["message"]})
-            elif check["level"] == "info" and check["id"] not in ("include_off",):
+            elif check["level"] == "info" and check["id"] not in ("include_off", "qc_fail"):
                 infos.append({"code": check["id"], "message": check["message"]})
     else:
         excluded = _builtin_row_checks(study, config)
@@ -1142,8 +1145,6 @@ def plan(config, hash_lesions=True, providers=None):
         item = {"participant_id": sid, "group": row.get("group") or "n/a", "lesion": lesion, "path": path, "space": row.get("space"), "sha256": None, "status": "compute", "reason": None,
                 "snapshot": None, "source_status": row.get("status")}
         reason = excluded.get(sid)
-        if reason is None and row.get("qc") == "fail":
-            reason = QC_FAIL
         if reason == NATIVE_EXCLUDED or (reason and reason.startswith("native space")):
             if config.native == "skip":
                 reason = NATIVE_SKIPPED

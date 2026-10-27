@@ -319,6 +319,44 @@ class RunLevelBlockTest(_Fixture):
         self.assertEqual(sorted(report["excluded"]), ["sub-003", "sub-004"])
         self.assertEqual(sorted(_check(report, "include_off")["subjects"]), ["sub-003", "sub-004"])
 
+    def test_qc_fail_excluded_by_every_analysis(self):
+        # A lesion marked "QC fail" in the Library is left out by the Cohort card's analyses (Study.analysis_rows:
+        # map lesions, Overlap, Contrast, Symptom, VLSM) and by preflight, as Run everything leaves it out
+        from LesionNetworkMappingLib import study as studylib
+
+        paths = {}
+        for index in range(4):
+            paths[f"sub-a{index}"] = self.add(f"sub-a{index}", group="case")
+        for index in range(4):
+            self.add(f"sub-b{index}", group="control")
+        self.study.set("sub-a1", qc="fail")
+        self.study.set("sub-b2", qc="fail")
+        self.study.set("sub-b3", qc="pass")
+        failed = ["sub-a1", "sub-b2"]
+        rows, excluded = self.study.analysis_rows()
+        self.assertEqual(sorted(excluded.get(studylib.EXCLUDED_QC, [])), failed)
+        self.assertEqual(len(rows), 6)
+        self.assertNotIn("sub-a1", [row["participant_id"] for row in self.study.analysis_rows(include_only=False)[0]])
+        self.assertIn("sub-a1", [row["participant_id"] for row in self.study.analysis_rows(exclude_qc_fail=False)[0]])
+        lesions, excluded = cohortmaps.study_lesions(self.study)
+        self.assertEqual(sorted(sid for sid, _path, _sha in lesions), sorted(row["participant_id"] for row in rows))
+        self.assertEqual(sorted(excluded.get(studylib.EXCLUDED_QC, [])), failed)
+        built = design.build_design(self.study, {"test": "two_group", "levels": ["case", "control"]})
+        self.assertEqual(len(built.sids), 6)
+        self.assertEqual(sorted(built.excluded.get(studylib.EXCLUDED_QC, [])), failed)
+        report = self.preflight()
+        self.assertEqual({sid: report["excluded"][sid] for sid in failed}, dict.fromkeys(failed, studylib.EXCLUDED_QC))
+        self.assertEqual(sorted(sid for sid in self.study.subject_ids if sid not in report["excluded"]), sorted(row["participant_id"] for row in rows))
+        check = _check(report, "qc_fail")
+        self.assertEqual((check["level"], sorted(check["subjects"]), check["fix"]["id"]), ("info", failed, preflight.FIX_LIBRARY))
+        self.assertIn("QC fail", check["message"])
+        self.assertFalse(report["blocked"], report["checks"])
+        # A QC-failed lesion whose file is gone is reported as QC fail, not as a missing file that blocks a strict run
+        os.remove(paths["sub-a1"])
+        strict = self.preflight(strict=True)
+        self.assertEqual(strict["excluded"]["sub-a1"], studylib.EXCLUDED_QC)
+        self.assertNotIn("lesion_missing", _ids(strict))
+
 
 class WarningTest(_Fixture):
     def test_xform_nonbinary_outside(self):
