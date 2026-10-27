@@ -4190,10 +4190,14 @@ class StudyCard(qt.QObject):
     def _merge(self):
         studySession = _studySession()
         if studySession is not None:
-            applied = studySession.applyInbox()
+            applied = studySession.applyInbox(report=False)
+            rejected = studySession.inboxRejectedText()
+            # Only the files with values that were merged count; a rejected file is said apart, with why
+            merged = sum(1 for _path, sids in applied if sids)
+            text = _("Merged {n} job results").format(n=merged) if merged else ("" if rejected else _("No job results to merge"))
             shell = _shell()
             if shell is not None:
-                shell.toast(_("Merged {n} job results").format(n=len(applied)) if applied else _("No job results to merge"))
+                shell.toast(" · ".join(part for part in (text, rejected) if part), ms=9000 if rejected else 1600, level="warning" if rejected else "info")
 
     def _close(self):
         studyUi = _studyUi()

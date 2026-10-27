@@ -935,6 +935,71 @@ class StudioRegressionTest(unittest.TestCase):
         with open(os.path.join(folder, ".studio", "participants.orig.tsv"), encoding="utf-8") as f:
             self.assertEqual(f.read(), fixed)
 
+    def test_14_rejected_inbox_results_are_said(self):
+        """Job results that the inbox merge rejects are said (toast, ``lastInboxRejected``), not only moved to rejected/ and logged (BB-1)."""
+        from LesionNetworkMappingLib.study import Study
+
+        from StudioLib import library, study_ui
+
+        folder, _study = self._adopt("Inbox", ["participant_id", "age"], [["sub-01", "60"], ["sub-02", "61"], ["sub-03", "62"]])
+        toasts = []
+        originalToast = study_ui._toast
+        study_ui._toast = lambda shell, text, **kwargs: toasts.append((str(text), kwargs.get("level")))
+        self.addCleanup(setattr, study_ui, "_toast", originalToast)
+        session = study_ui.openStudy(folder, None, showLibrary=False)
+        self.addCleanup(study_ui.closeStudy)
+        inbox = os.path.join(folder, ".studio", "inbox")
+        rejectedFolder = os.path.join(inbox, "rejected")
+        # A valid result alone: merged without a notice
+        toasts.clear()
+        Study.post_result(folder, "sub-01", {"age": 70}, "regression")
+        self.assertEqual(len(session.applyInbox()), 1)
+        self.assertEqual(session.lastInboxRejected, [])
+        self.assertEqual(toasts, [])
+        self.assertEqual(session.study.subject("sub-01")["age"], "70")
+        # A result for an unknown subject (removed while the job ran), an invalid strict value and a broken file
+        Study.post_result(folder, "sub-02", {"age": 71}, "regression")
+        Study.post_result(folder, "sub-nobody", {"age": 1}, "regression")
+        with open(os.path.join(inbox, "zz-strict.json"), "w", encoding="utf-8") as f:
+            json.dump({"format": "slicer-studio-inbox", "version": 1, "source": "x", "rows": {"sub-03": {"review_status": "maybe"}}}, f)
+        with open(os.path.join(inbox, "zz-broken.json"), "w", encoding="utf-8") as f:
+            f.write("{not json")
+        toasts.clear()
+        applied = session.applyInbox()
+        self.assertEqual(len(applied), 4)
+        self.assertEqual(len(os.listdir(rejectedFolder)), 3)
+        self.assertEqual(session.study.subject("sub-02")["age"], "71")
+        self.assertEqual(sorted(sid for _path, sid, _message in session.lastInboxRejected if sid), ["sub-03", "sub-nobody"])
+        self.assertEqual(len(toasts), 1, toasts)
+        text, level = toasts[0]
+        self.assertEqual(level, "warning")
+        self.assertIn("3 job results were not merged", text)
+        self.assertIn("sub-nobody: unknown subject", text)
+        self.assertIn("rejected", text)
+        # The next merge has nothing new: no repeated notice
+        toasts.clear()
+        self.assertEqual(session.applyInbox(), [])
+        self.assertEqual((session.lastInboxRejected, toasts), ([], []))
+        # The Merge button: counts only the merged files and says the rejected one apart
+        Study.post_result(folder, "sub-02", {"age": 72}, "regression")
+        Study.post_result(folder, "sub-nobody", {"age": 2}, "regression")
+        shown = []
+
+        class FakeShell:
+            def toast(self, text, **kwargs):
+                shown.append((str(text), kwargs.get("level")))
+
+        originals = (library._shell, library._studySession)
+        library._shell, library._studySession = FakeShell, (lambda: session)
+        try:
+            library.StudyCard._merge(None)
+        finally:
+            library._shell, library._studySession = originals
+        self.assertEqual(len(shown), 1, shown)
+        self.assertIn("Merged 1 job results", shown[0][0])
+        self.assertIn("1 job result was not merged", shown[0][0])
+        self.assertEqual(shown[0][1], "warning")
+
     @staticmethod
     def _isAncestor(ancestor, widget):
         current = widget

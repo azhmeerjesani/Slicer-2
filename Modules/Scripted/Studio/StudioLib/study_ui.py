@@ -1714,6 +1714,7 @@ class StudySession:
         self._swallowNext = False
         self._lastSaveTime = None
         self._lastSaveError = None
+        self.lastInboxRejected = []  # [(file, participant id or None, message)] that the last applyInbox() rejected
         self._removed = []  # undo records of "Remove from study"
         self.creationReport = None
         self._gridRows = {}
@@ -1978,14 +1979,21 @@ class StudySession:
             return _("Journal saved"), journalTime
         return _("All changes saved"), self._lastSaveTime
 
-    def applyInbox(self):
-        """Merge the values that jobs posted to .studio/inbox (on open, when Library is shown, on request). Return the files applied."""
+    def applyInbox(self, report=True):
+        """Merge the values that jobs posted to .studio/inbox (on open, when Library is shown, on request). Return the files applied.
+
+        Files that the merge rejects (unknown subject, invalid value, unreadable file) are moved to
+        ``.studio/inbox/rejected/``; ``lastInboxRejected`` lists them and, with ``report``, a toast says that
+        they were not merged and why (``inboxRejectedText()``).
+        """
         jobs = _lnm("jobs")
+        known = len(self.study.inbox_errors)
         try:
             applied = self.study.apply_inbox(save=False)
         except Exception:
             logging.error(f"Studio: the study inbox could not be merged:\n{traceback.format_exc()}")
             return []
+        self.lastInboxRejected = list(self.study.inbox_errors[known:])
         if applied:
             try:
                 self.study.save(lock_timeout=SAVE_LOCK_TIMEOUT_S)
@@ -1993,7 +2001,26 @@ class StudySession:
             except jobs.Locked:
                 self.scheduleSave()
             _notify(self)
+        if self.lastInboxRejected and report:
+            _toast(self._shell, self.inboxRejectedText(), ms=9000, level="warning")
         return applied
+
+    def inboxRejectedText(self, rejected=None):
+        """Sentence for the job results that the last merge rejected ("" when none): how many files and why."""
+        rejected = self.lastInboxRejected if rejected is None else rejected
+        files = list(dict.fromkeys(path for path, _sid, _message in rejected))
+        if not files:
+            return ""
+        reasons = []
+        for _path, sid, message in rejected:
+            message = message if len(message) <= 80 else message[:77] + "…"
+            reason = f"{sid}: {message}" if sid else message
+            if reason not in reasons:
+                reasons.append(reason)
+        shown = "; ".join(reasons[:3]) + (" …" if len(reasons) > 3 else "")
+        if len(files) == 1:
+            return _("1 job result was not merged ({reasons}). It is kept in .studio/inbox/rejected.").format(reasons=shown)
+        return _("{n} job results were not merged ({reasons}). They are kept in .studio/inbox/rejected.").format(n=len(files), reasons=shown)
 
     mergeInbox = applyInbox
 
