@@ -3738,6 +3738,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.updateComputeState()
         if changed:
             self._refreshAfterPark()
+        else:
+            # The planned threshold rule (and the chip) depend on the connectome: re-resolve them now, not on the next action
+            self.refreshResult(reloadMaps=False)
 
     def _refreshAfterPark(self):
         node = self._parameterNode
@@ -3921,6 +3924,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             self._updateDemoButton(_("Creating the demo… {percent}%").format(percent=percent))
 
     def _onDemoDone(self, job):
+        from LesionNetworkMappingUI import jobrunner
+
         self._demoJob = None
         self._updateDemoButton()
         if not job.succeeded():
@@ -3932,6 +3937,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             self.logic._bundleCache.pop(os.path.abspath(path), None)
             self.logic.registerConnectome(path)
             self.refreshConnectomes(select=os.path.abspath(path))
+            # The job runner shows "Done" for a few seconds (nothing was mapped): Map's own chip ("Ready") follows
+            qt.QTimer.singleShot(jobrunner.FINISHED_CHIP_MS + 200, self._refreshStatusChip)
         except Exception as e:
             logging.exception("Lesion network mapping: the demo connectome could not be registered")
             slicer.util.errorDisplay(_("The demo connectome could not be created."), detailedText=str(e))
