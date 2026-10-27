@@ -612,6 +612,17 @@ def _newMetadata(studyModule, folder, name, template):
     }
 
 
+def _makeDirs(path, root, made):
+    """``os.makedirs(path, exist_ok=True)``; the folders that were created (parents first) are appended to ``made``."""
+    missing = []
+    current = path
+    while current != root and not os.path.isdir(current):
+        missing.append(current)
+        current = os.path.dirname(current)
+    os.makedirs(path, exist_ok=True)
+    made.extend(reversed(missing))
+
+
 def adoptFolder(folder, name=None, groupColumn=None, groupMapping=None, template=None):
     """Make a study of a folder that has a participants.tsv (adopt in place) and return the opened ``Study``.
 
@@ -625,18 +636,9 @@ def adoptFolder(folder, name=None, groupColumn=None, groupMapping=None, template
     folder = os.path.abspath(folder)
     tsvPath = os.path.join(folder, studyModule.PARTICIPANTS_TSV)
     privateDir = os.path.join(folder, studyModule.PRIVATE_DIR)
-    for subfolder in (studyModule.LESIONS_DIR, studyModule.DERIVATIVES_DIR, os.path.join(studyModule.PRIVATE_DIR, "thumbs"),
-                      os.path.join(studyModule.PRIVATE_DIR, "journal")):
-        os.makedirs(os.path.join(folder, subfolder), exist_ok=True)
-    backup = os.path.join(privateDir, ADOPT_BACKUP)
-    if not os.path.exists(backup):
-        shutil.copy2(tsvPath, backup)
     dictionaryPath = os.path.join(folder, studyModule.PARTICIPANTS_JSON)
     dictionary = {}
     if os.path.isfile(dictionaryPath):
-        dictionaryBackup = os.path.join(privateDir, ADOPT_DICTIONARY_BACKUP)
-        if not os.path.exists(dictionaryBackup):
-            shutil.copy2(dictionaryPath, dictionaryBackup)
         try:
             with open(dictionaryPath, encoding="utf-8-sig") as f:
                 dictionary = json.load(f)
@@ -674,10 +676,31 @@ def adoptFolder(folder, name=None, groupColumn=None, groupMapping=None, template
     ordered += [column for column in studyModule.STANDARD_COLUMNS if column not in ordered]
     ordered += [column for column in added if column not in ordered]
     template = template or defaultTemplate()
-    studyObject = studyModule.Study(folder, _newMetadata(studyModule, folder, name, template), ordered, rows, dictionary)
-    # The new study.json is written next to the user's table, without the merge of a later save (nothing else writes it yet)
-    studyObject.save(merge=False)
-    opened = studyModule.Study.open(folder)
+    # Everything that can fail on the user's table has been checked: only now the folders and the backups are made, so a
+    # table that cannot be adopted leaves the folder as it was (and a retry backs up the table that is adopted then).
+    # What this call made is removed again when the rest fails.
+    made = []
+    try:
+        for subfolder in (studyModule.LESIONS_DIR, studyModule.DERIVATIVES_DIR, os.path.join(studyModule.PRIVATE_DIR, "thumbs"),
+                          os.path.join(studyModule.PRIVATE_DIR, "journal")):
+            _makeDirs(os.path.join(folder, subfolder), folder, made)
+        for source, backupName in ((tsvPath, ADOPT_BACKUP), (dictionaryPath, ADOPT_DICTIONARY_BACKUP)):
+            backup = os.path.join(privateDir, backupName)
+            if os.path.isfile(source) and not os.path.exists(backup):
+                shutil.copy2(source, backup)
+                made.append(backup)
+        studyObject = studyModule.Study(folder, _newMetadata(studyModule, folder, name, template), ordered, rows, dictionary)
+        # The new study.json is written next to the user's table, without the merge of a later save (nothing else writes it yet)
+        studyObject.save(merge=False)
+        opened = studyModule.Study.open(folder)
+    except BaseException:
+        if not os.path.exists(os.path.join(folder, studyModule.STUDY_JSON)):
+            for path in reversed(made):
+                try:
+                    os.rmdir(path) if os.path.isdir(path) else os.remove(path)
+                except OSError:
+                    pass
+        raise
     opened.adoptedRenames = renamed
     return opened
 

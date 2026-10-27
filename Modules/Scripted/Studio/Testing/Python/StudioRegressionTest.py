@@ -33,6 +33,9 @@ Run with the main window and testing enabled::
   marks that one (it went to the first row: the wrong subject was marked); a selection made elsewhere moves the cursor too.
 - ``test_12_quit_with_study_subject_open_in_draw`` (BB-1): a child process opens a study subject in Draw and quits: no traceback
   (the segment editor masking observer read the destroyed "More tools" button), exit code 0.
+- ``test_13_failed_adopt_leaves_folder_unchanged`` (BB-1): a participants.tsv that cannot be adopted (ids "01" and "sub-01" collide,
+  or no participant_id column) raises and leaves the folder as it was (no .studio/, lesions/ or derivatives/); after the table
+  is fixed the study is created and .studio/participants.orig.tsv is the table that was adopted, not the broken one.
 - ``test_10_scripted_module_ui_widgets`` (BB-1): the build has the Qt Designer plugins of CTK and MRML, so that
   ``slicer.util.loadUI`` creates the CTK and qMRML widgets of a scripted module's ``.ui`` file (a ``qMRMLWidget`` root, a
   ``qMRMLNodeComboBox``, a ``ctkCollapsibleButton``), and Line Profile, Vector to Scalar Volume and Surface Toolbox set up
@@ -897,6 +900,40 @@ class StudioRegressionTest(unittest.TestCase):
         chosen = chip(studyOpen=True, policy={"mode": "fractional", "total_mm": 2})
         self.assertEqual(chosen["level"], "neutral")
         self.assertEqual([a["text"] for a in chosen["actions"]], ["Change…"])
+
+    def test_13_failed_adopt_leaves_folder_unchanged(self):
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import study_ui
+
+        if not study_ui.isAvailable():
+            self.skipTest("needs the lesion network mapping library")
+        folder = os.path.join(self.directory, "Collide")
+        os.makedirs(folder)
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        paths = []
+        for index in range(1, 3):
+            paths.append(os.path.join(folder, f"sub-0{index}_T1w.nii.gz"))
+            nifti.write_nifti(paths[-1], np.zeros(grid.shape, np.uint8), grid.affine)
+        before = sorted(os.listdir(folder))
+        tsv = os.path.join(folder, "participants.tsv")
+        for broken, message in (
+            ("participant_id\tage\n01\t40\nsub-01\t41\n02\t42\n", "appears twice"),
+            ("id\tage\n1\t40\n", "no participant_id column"),
+        ):
+            with open(tsv, "w", encoding="utf-8") as f:
+                f.write(broken)
+            with self.assertRaises(ValueError) as raised:
+                study_ui.createStudy(paths, folder=folder, openIt=False)
+            self.assertIn(message, str(raised.exception))
+            self.assertEqual(sorted(os.listdir(folder)), sorted(before + ["participants.tsv"]))
+        fixed = "participant_id\tage\tnote\n01\t40\tfixed table\n02\t42\tfixed table\n"
+        with open(tsv, "w", encoding="utf-8") as f:
+            f.write(fixed)
+        study = study_ui.createStudy(paths, folder=folder, openIt=False)
+        self.assertEqual(study.subject_ids, ["sub-01", "sub-02"])
+        with open(os.path.join(folder, ".studio", "participants.orig.tsv"), encoding="utf-8") as f:
+            self.assertEqual(f.read(), fixed)
 
     @staticmethod
     def _isAncestor(ancestor, widget):
