@@ -674,6 +674,11 @@ def changeRootDialog(parent=None):
         return None
     move = False
     if projects.hasContent(oldRoot):
+        try:
+            projects.checkMoveTarget(oldRoot, newRoot)
+        except OSError as error:
+            slicer.util.infoDisplay(str(error), windowTitle=_("Change the Slicer Studio folder"))
+            return None
         if _studyOpen():
             slicer.util.infoDisplay(_("Close the open study first: its files are in the Slicer Studio folder."),
                                     windowTitle=_("Change the Slicer Studio folder"))

@@ -1123,12 +1123,24 @@ def _mergeMove(source, destination, sameVolume, progress=None):
         progress(os.path.basename(source))
 
 
+def checkMoveTarget(oldRoot, newRoot):
+    """Raise OSError (a plain message, nothing created) when the content of ``oldRoot`` cannot be moved to ``newRoot``.
+
+    A new folder inside the old one (inside a project, or inside Projects/) would have to receive the folder that holds
+    it. Worker-safe.
+    """
+    if newRoot and oldRoot and os.path.normcase(os.path.realpath(oldRoot)) != os.path.normcase(os.path.realpath(newRoot)) and isInside(newRoot, oldRoot):
+        raise OSError(_("The new folder is inside the current Slicer Studio folder, so your projects cannot be moved into it. "
+                        "Choose a folder outside {folder}.").format(folder=oldRoot))
+
+
 def moveContent(oldRoot, newRoot, progress=None):
     """Move Projects/, Studies/, LNM/ and "About this folder.txt" from ``oldRoot`` to ``newRoot``. Worker-safe.
 
     Return the list of moved items. Raise OSError on failure (what was moved stays moved; nothing is deleted before it was
-    copied and checked).
+    copied and checked), and before anything is created when ``newRoot`` is inside ``oldRoot``.
     """
+    checkMoveTarget(oldRoot, newRoot)
     os.makedirs(newRoot, exist_ok=True)
     sameVolume = _sameVolume(oldRoot, newRoot)
     moved = []

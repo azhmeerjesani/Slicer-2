@@ -1895,6 +1895,7 @@ class AutosaveService:
         newRoot = os.path.normpath(os.path.abspath(newRoot))
         moved = []
         if moveContent and os.path.normcase(os.path.realpath(oldRoot)) != os.path.normcase(os.path.realpath(newRoot)):
+            projects.checkMoveTarget(oldRoot, newRoot)  # before the open project is saved and unlocked
             if self._studyOpen():
                 # The open study writes its journal and participants into Studies/ while it is open
                 raise OSError(_("Close the open study first."))

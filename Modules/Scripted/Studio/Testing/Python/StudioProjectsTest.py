@@ -27,7 +27,8 @@ folder "Slicer Studio tést" (spaces and non-ASCII characters). The tests cover:
 - a project saves when its data fits on the disk, also with less than 1 GB free (only the private autosave keeps 1 GB);
 - a scene file that another program changed is kept: Studio writes "<project> (Slicer Studio).mrml" next to it;
 - a file from outside that the project took over is "already open" when it is opened again, also after a restart;
-- Studio's own folders (Studies/, Projects/, a project, the Slicer Studio folder) never become a study.
+- Studio's own folders (Studies/, Projects/, a project, the Slicer Studio folder) never become a study;
+- moving the Slicer Studio folder into a folder inside it is refused before anything is made.
 """
 
 import contextlib
@@ -1499,6 +1500,94 @@ class StudioProjectsTest(unittest.TestCase):
             self.autosave._service = running
             studioShell.dispose()
             slicer.app.processEvents()
+
+    def test_32_root_move_into_its_own_content_is_refused_before_anything_is_created(self):
+        """Moving the Slicer Studio folder into a folder inside it (a project, Projects/, the folder itself) is refused with a
+        plain message before anything is made: it used to fail with "[Errno 22] Invalid argument" and leave the new folder
+        (for "Slicer Studio" picked inside a project, a stray folder inside the project) behind.
+        """
+        from unittest import mock
+
+        from StudioLib import projects_ui
+
+        projects = self.projects
+        service = self._service()
+        self._userVolume()
+        project = self._projectFor(service)
+        self._save(service)
+        oldRoot = projects.root()
+
+        def snapshot():
+            found = []
+            for folder, _names, _files in os.walk(oldRoot):
+                if os.sep + ".studio" not in folder:
+                    found.append(os.path.relpath(folder, oldRoot))
+            return sorted(found)
+
+        before = snapshot()
+        targets = [os.path.join(project.path, "sub"),
+                   os.path.join(project.path, "Images", projects.ROOT_FOLDER_NAME),
+                   os.path.join(projects.projectsFolder(), "newhome"),
+                   os.path.join(oldRoot, "newhome")]
+        os.environ.pop(projects.ROOT_ENVIRONMENT)
+        qt.QSettings().setValue(projects.ROOT_KEY, self.root)
+        running = self.autosave._service
+        self.autosave._service = service
+        try:
+            for target in targets:
+                with self.assertRaises(OSError) as context:
+                    service.moveRoot(target, moveContent=True)
+                self.assertIn("inside the current Slicer Studio folder", str(context.exception))
+                self.assertNotIn("Errno", str(context.exception))
+                self.assertFalse(os.path.exists(target), target)
+                self.assertEqual(snapshot(), before, "no folder is made")
+                self.assertEqual(projects.root(), os.path.normpath(self.root), "the setting is unchanged")
+                with self.assertRaises(OSError):
+                    projects.moveContent(oldRoot, target)
+                self.assertFalse(os.path.exists(target), target)
+            # Nothing happened to the open project
+            self.assertIs(service.project, project)
+            self.assertTrue(os.path.isdir(project.path))
+            self.assertTrue(os.path.isfile(os.path.join(project.path, ".studio", "lock")), "the project is still locked")
+            # The Change… dialog says it before asking anything, and makes nothing
+            pick = os.path.join(project.path, "Images", projects.ROOT_FOLDER_NAME)
+            shown = []
+
+            class FakeChooser:
+                path = pick
+                continueButton = mock.Mock()
+                setWindowTitle = mock.Mock()
+                choose = mock.Mock()
+                exec = mock.Mock()
+                exec_ = mock.Mock()
+                deleteLater = mock.Mock()
+
+                def __init__(self, *args, **kwargs):
+                    pass
+
+            def fail(*args, **kwargs):
+                raise AssertionError("the question is not asked")
+
+            with mock.patch.object(projects_ui, "FolderChooserDialog", FakeChooser), \
+                    mock.patch.object(projects_ui, "_question", fail), \
+                    mock.patch.object(slicer.util, "infoDisplay", lambda text, *a, **k: shown.append(text)), \
+                    mock.patch.object(slicer.util, "errorDisplay", lambda text, *a, **k: shown.append(text)):
+                self.assertIsNone(projects_ui.changeRootDialog(None))
+            self.assertEqual(len(shown), 1, shown)
+            self.assertIn("inside the current Slicer Studio folder", shown[0])
+            self.assertNotIn("Errno", shown[0])
+            self.assertFalse(os.path.exists(pick))
+            self.assertEqual(snapshot(), before)
+            self.assertEqual(projects.root(), os.path.normpath(self.root))
+            # A folder outside still works, and so does the parent of the folder
+            outside = os.path.join(self.tempDir, "elsewhere", "Slicer Studio")
+            self.assertIn("Projects", service.moveRoot(outside, moveContent=True))
+            self.assertEqual(projects.root(), os.path.normpath(outside))
+        finally:
+            self.autosave._service = running
+            qt.QSettings().remove(projects.ROOT_KEY)
+            qt.QSettings().remove(projects.ROOT_CHOSEN_KEY)
+            os.environ[projects.ROOT_ENVIRONMENT] = self.root
 
 
 
