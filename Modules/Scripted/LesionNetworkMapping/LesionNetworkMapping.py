@@ -4042,6 +4042,10 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         elif self._shownRunFailure() is not None:
             # A run that failed after a map is not "Done": the step opens on its failure banner
             computeState, computeSummary = "action", _("Run failed: {reason}").format(reason=self._shownRunFailure()["reason"] or _("unknown error"))
+        elif hasResult and self.loadedMap is None and self.runPartial and getattr(self, "runOutputs", None) and not (self.job is not None and not self.job.isFinished()):
+            # A stopped run keeps its latest snapshot: it is not "Done" and its specificity check did not finish. The card stays open
+            # (a rerun is the next action)
+            computeState, computeSummary = "current", _("Stopped · partial map, N = {n:,}").format(n=self.runN or 0)
         elif hasResult:
             computeState, computeSummary = "done", _("Done")
             if getattr(self, "nullCheckBox", None) is not None and self.nullCheckBox.checked and self.seedMode() == "lesion":
@@ -4059,6 +4063,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             nText = _("N = {n:,}").format(n=n) if n else _("N unknown")
             if n and self.loadedMap is None and self.runPartial and getattr(self, "runOutputs", None):
                 nText = _("N = {n:,} (partial)").format(n=n)
+            elif n and self.loadedMap is None and self.runPreviewN and getattr(self, "runOutputs", None):
+                nText = _("N = {n:,} · Preview").format(n=n)
             resultSummary = " · ".join(part for part in (nText, self.currentStatistic(), resultSummary) if part)
         for number, (key, state, summary) in enumerate((("seed", seedState, seedSummary), ("connectome", connectomeState, connectomeSummary),
                                                          ("compute", computeState, computeSummary), ("result", resultState, resultSummary)), start=1):
@@ -6288,6 +6294,13 @@ class LesionNetworkMappingTest(ScriptedLoadableModuleTest):
             self.assertTrue(widget.runPartial)
             self.assertIn("(partial)", node.resultVolume.GetName())
             self.assertIn(f"N={widget.runN}", node.resultVolume.GetName())
+            self._waitFor(lambda: False, 0.5)  # the deferred refresh
+            widget._updateSteps()
+            computeCard, resultCard = widget._cardWidgets["compute"][1], widget._cardWidgets["result"][1]
+            self.assertNotEqual(computeCard.property("studioStepState"), "done")
+            self.assertTrue(str(computeCard.property("studioStepSummary")).startswith("Stopped"), computeCard.property("studioStepSummary"))
+            self.assertNotIn("specificity", str(computeCard.property("studioStepSummary")))
+            self.assertIn("(partial)", resultCard.property("studioStepSummary"))
 
         self.delayDisplay("A new run stopped before its first map leaves the previous result as it was")
         previous = node.resultVolume
@@ -6311,6 +6324,19 @@ class LesionNetworkMappingTest(ScriptedLoadableModuleTest):
             if widget.lastPassing:
                 lookupTable = display.findLUT().GetLookupTable()
                 self.assertGreater(sum(lookupTable.GetTableValue(index)[3] for index in range(256)), 0)
+
+        self.delayDisplay("A Preview run is named so in the Result step row, as a partial run is")
+        widget.subjectsGroup.button(1).click()
+        job = widget.compute()
+        self.assertTrue(self._waitFor(job.isFinished, 300), "the engine did not finish")
+        self.assertEqual(job.state, "done", f"{job.failureReason} {list(job.logTail)}")
+        self.assertTrue(self._waitFor(lambda: widget.runPreviewN and widget._hasResult() and widget.ctx.currentRun is not None, 30))
+        widget._updateSteps()
+        computeCard, resultCard = widget._cardWidgets["compute"][1], widget._cardWidgets["result"][1]
+        self.assertEqual(computeCard.property("studioStepState"), "done")
+        self.assertIn("Preview", resultCard.property("studioStepSummary"))
+        self.assertNotIn("(partial)", resultCard.property("studioStepSummary"))
+        widget.subjectsGroup.button(0).click()
 
         self.delayDisplay("A native-space lesion is refused with a stated reason")
         mniConnectome = type("Bundle", (), {"shape": (91, 109, 91), "affine": np.array([[-2.0, 0, 0, 90], [0, 2, 0, -126], [0, 0, 2, -72], [0, 0, 0, 1]])})()
