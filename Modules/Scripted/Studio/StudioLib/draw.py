@@ -1674,8 +1674,25 @@ def fillGaps(shell=None):
     for name in ("fillOneClick", "onFill", "fill"):
         method = getattr(scripted, name, None)
         if callable(method):
+            before = _lesionVoxelCount(editor)
             method()
+            # The effect only says "Nothing to fill." for an empty preview, but the preview always holds the strokes:
+            # one-voxel-thin strokes and separate foci are not bridged, and the link must not seem dead
+            after = _lesionVoxelCount(editor)
+            if before is not None and before == after:
+                _toast(_currentShell(shell), _("Nothing to fill between these slices: the strokes are too thin or too far "
+                                               "apart to join. Paint a wider shape on the slices, then fill again."))
             return
+
+
+def _lesionVoxelCount(editor):
+    """Voxels of the edited segment, or None when it cannot be read."""
+    segmentationNode = editor.segmentationNode() if editor is not None else None
+    segmentId = editor.currentSegmentID() if editor is not None else None
+    if segmentationNode is None or not segmentId:
+        return None
+    data = _labelmapArray(segmentationNode, segmentId)
+    return int(np.count_nonzero(data[0])) if data is not None else 0
 
 
 #

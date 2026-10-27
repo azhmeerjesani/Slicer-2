@@ -1741,6 +1741,39 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertTrue(studioShell.toastText().startswith("Smooth removed"), studioShell.toastText())
         editor.setActiveEffect(None)
 
+    def test_29b_draw_fill_gaps_link_says_when_nothing_was_filled(self):
+        """The card's "Fill" link must not do nothing silently: thin strokes that interpolation cannot join give a message."""
+        from StudioLib import draw
+
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        segmentationNode, segmentId, source = editor.segmentationNode(), editor.currentSegmentID(), editor.sourceVolumeNode()
+
+        def setLesion(planes):
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, source)
+            array[:] = 0
+            for k, j0, j1, i0, i1 in planes:
+                array[k, j0:j1, i0:i1] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, source)
+
+        # Two one-voxel-thin lines three slices apart: the Fill between slices effect adds nothing
+        setLesion([(40, 50, 51, 30, 36), (44, 50, 51, 30, 36)])
+        before = self._voxels(editor)
+        studioShell.toast("")
+        draw.fillGaps(studioShell)
+        self._pump()
+        self.assertEqual(self._voxels(editor), before)
+        self.assertTrue(studioShell.toastText().startswith("Nothing to fill"), studioShell.toastText())
+        # Two wide plates: the slices between are filled and no such message is shown
+        setLesion([(40, 50, 56, 30, 36), (44, 50, 56, 30, 36)])
+        before = self._voxels(editor)
+        studioShell.toast("")
+        draw.fillGaps(studioShell)
+        self._pump()
+        self.assertGreater(self._voxels(editor), before)
+        self.assertFalse(studioShell.toastText().startswith("Nothing to fill"), studioShell.toastText())
+        editor.setActiveEffect(None)
+
     def test_30_draw_extension_points(self):
         """Inspector cards, card rows and ⋯ items of other work packages; network maps leave Draw; assisted counts (LNM addendum)."""
         import numpy as np
