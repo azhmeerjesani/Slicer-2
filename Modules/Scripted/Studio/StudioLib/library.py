@@ -876,11 +876,18 @@ def lesionScan(segmentationNode):
 
 
 def lesionTitle(segmentationNode):
-    """Name shown for a lesion: its segment ("Lesion") when it has one, else the name of the segmentation."""
+    """Name shown for a lesion: the name of its segmentation node (as Draw's lesion switcher and Open now show it).
+
+    The importer names every imported mask's segment "Lesion", so the segment name cannot tell lesion files apart;
+    it is used only when the node has no name.
+    """
+    name = segmentationNode.GetName()
+    if name:
+        return name
     segmentation = segmentationNode.GetSegmentation()
     if segmentation.GetNumberOfSegments() == 1:
-        return segmentation.GetNthSegment(0).GetName() or segmentationNode.GetName()
-    return segmentationNode.GetName()
+        return segmentation.GetNthSegment(0).GetName()
+    return ""
 
 
 def nodeFile(node):

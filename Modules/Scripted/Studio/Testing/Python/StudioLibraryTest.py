@@ -228,7 +228,7 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual([self._plain(label) for label in scanNames], [volumeNode.GetName()])
         self.assertIn("MNI template", self._plain(self._labels(canvas, "StudioCurrentWorkScanFolder")[0]))
         lesionNames = self._labels(canvas, "StudioCurrentWorkLesionName")
-        self.assertEqual([label.property("fullText") for label in lesionNames], ["Lesion"])
+        self.assertEqual([label.property("fullText") for label in lesionNames], [segmentationNode.GetName()])
         self.assertEqual(canvas.currentWork.closeButton.text, "Close")
         self.assertEqual(canvas.currentWork.continueButton.text, "Continue in Draw →")
         self.assertTrue(canvas.currentWork.continueButton.isVisible())
@@ -735,6 +735,27 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(len(names), 2)
         self.assertTrue(any(name.endswith("hidden") for name in names), names)
         self.assertFalse(library.OpenNowCard.isShown(segmentationNode))
+
+    def test_lesion_rows_tell_files_apart(self):
+        """Every imported mask's segment is named "Lesion": the Continue card names each lesion row by its segmentation node."""
+        from StudioLib import library
+
+        studioShell = self._applyStudio()
+        volumeNode, _firstLesion = self._template(studioShell)
+        names = ["patient_T1_lesion", "patient_T1_lesion-rater2"]
+        for name in names:
+            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", name)
+            node.CreateDefaultDisplayNodes()
+            node.SetReferenceImageGeometryParameterFromVolumeNode(volumeNode)
+            node.GetSegmentation().AddEmptySegment("", "Lesion")
+            self.assertEqual(library.lesionTitle(node), name)
+        self._pump(4)
+        canvas = self._library(studioShell)
+        shown = [label.property("fullText") for label in self._labels(canvas, "StudioCurrentWorkLesionName")]
+        self.assertEqual(len(shown), 3, shown)
+        self.assertEqual(len(set(shown)), 3, shown)
+        for name in names:
+            self.assertTrue(any(text.startswith(name) for text in shown), (name, shown))
 
     def test_close_button(self):
         """Close runs File > Close scene (module function ``closeScene``)."""
