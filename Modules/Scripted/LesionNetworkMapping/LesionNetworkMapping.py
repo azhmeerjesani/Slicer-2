@@ -724,8 +724,20 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
             segmentIds.InsertNextValue(segmentId)
             if not slicer.modules.segmentations.logic().ExportSegmentsToLabelmapNode(segNode, segmentIds, labelmap, None, slicer.vtkSegmentation.EXTENT_REFERENCE_GEOMETRY):
                 raise RuntimeError(f"The segment {segmentId} could not be exported")
-            data = slicer.util.arrayFromVolume(labelmap)  # [k, j, i]
             matrix = vtk.vtkMatrix4x4()
+            image = labelmap.GetImageData()
+            if image is None or image.GetPointData().GetScalars() is None:
+                # A segment that was never drawn exports to an image without voxels (zero extent, no scalars):
+                # it is an all-zero mask on the segmentation's reference geometry
+                geometry = slicer.vtkOrientedImageData()
+                serialized = segNode.GetSegmentation().GetConversionParameter(slicer.vtkSegmentationConverter.GetReferenceImageGeometryParameterName())
+                if serialized and slicer.vtkSegmentationConverter.DeserializeImageGeometry(serialized, geometry, False):
+                    dims = geometry.GetDimensions()
+                    geometry.GetImageToWorldMatrix(matrix)
+                    return np.zeros((int(dims[0]), int(dims[1]), int(dims[2])), np.uint8), np.array([[matrix.GetElement(row, column) for column in range(4)] for row in range(4)])
+                data = np.zeros((0, 0, 0), np.uint8)
+            else:
+                data = slicer.util.arrayFromVolume(labelmap)  # [k, j, i]
             labelmap.GetIJKToRASMatrix(matrix)
             affine = np.array([[matrix.GetElement(row, column) for column in range(4)] for row in range(4)])
             return (np.transpose(data, (2, 1, 0)) != 0).astype(np.uint8), affine
@@ -5702,6 +5714,9 @@ class LesionNetworkMappingTest(ScriptedLoadableModuleTest):
             self.tearDown()
             self.setUp()
             self.test_LesionNetworkMapping_outsideMask()
+            self.tearDown()
+            self.setUp()
+            self.test_LesionNetworkMapping_emptySeed()
         finally:
             self.tearDown()
 
@@ -5926,6 +5941,54 @@ class LesionNetworkMappingTest(ScriptedLoadableModuleTest):
         self.assertEqual(computeCard.property("studioStepState"), "done")
         self.assertFalse(widget.computeBanner.isVisibleTo(widget.parent))
         self.assertTrue(self._waitFor(lambda: widget.resultExportButton.enabled, 10))  # after the deferred refresh of the final map
+
+    def test_LesionNetworkMapping_emptySeed(self):
+        """A segment that was never drawn is an empty seed ("trace it in Draw first"), not a read error with logged tracebacks."""
+        import logging
+
+        import numpy as np
+        import vtk
+
+        records = []
+
+        class _Handler(logging.Handler):
+            def emit(self, record):
+                if record.levelno >= logging.WARNING:
+                    records.append(record.getMessage())
+
+        handler = _Handler()
+        logging.getLogger().addHandler(handler)
+        try:
+            widget = slicer.modules.lesionnetworkmapping.widgetRepresentation().self()
+            widget.initializeParameterNode()
+            logic = widget.logic
+            volume = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "reference")
+            image = vtk.vtkImageData()
+            image.SetDimensions(12, 14, 16)
+            image.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 1)
+            volume.SetAndObserveImageData(image)
+            volume.SetSpacing(2.0, 2.0, 2.0)
+            segNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesion segmentation")
+            segNode.CreateDefaultDisplayNodes()
+            segNode.SetReferenceImageGeometryParameterFromVolumeNode(volume)
+            segmentId = segNode.GetSegmentation().AddEmptySegment("Lesion")
+            data, affine = logic.seedArray(segNode, segmentId)
+            self.assertEqual(data.shape, (12, 14, 16))  # the reference geometry, all zero
+            self.assertEqual(int(np.count_nonzero(data)), 0)
+            self.assertEqual(float(affine[0, 0]), 2.0)
+            check = logic.checkSeed(segNode, segmentId)
+            self.assertEqual(check["kind"], "empty", check)
+            self.assertFalse(check["ok"])
+            self.assertEqual(check["reason"], "The lesion segment is empty: trace it in Draw first.")
+            self.assertEqual(check["volumeMl"], 0.0)
+            widget.ctx.setSeed(segNode, segmentId)
+            widget.updateGUIFromParameterNode()
+            widget.updateSeed()
+            self.assertEqual(widget.seedCheck["kind"], "empty", widget.seedCheck)
+            self.assertEqual(widget.seedCheck["reason"], "The lesion segment is empty: trace it in Draw first.")
+            self.assertEqual(records, [])  # nothing logged as an error
+        finally:
+            logging.getLogger().removeHandler(handler)
 
     def test_LesionNetworkMapping_v1(self):
         import numpy as np
