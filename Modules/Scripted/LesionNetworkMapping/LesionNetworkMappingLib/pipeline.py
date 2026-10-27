@@ -175,6 +175,9 @@ POPULATIONS = ("auto", "cases", "all")
 EVENT_MODES = ("auto", "json", "text")
 KEEP_AWAKE_MODES = ("auto", "on", "off")
 INPUTS = ("AvgFz", "T")
+#: Contrasts of the case-vs-control GLM (--contrast; design.py's names: A is case, B is control). A one-sided
+#: contrast tests one direction (tails 1), as a recipe or a locked analysis plan states it.
+CONTRASTS = ("two_sided", "A>B", "B>A")
 MIN_PER_GROUP = 3  # subjects per contrast group for the GLM (preflight's MIN_PER_CONTRAST_GROUP)
 MIN_SLNM_N = 10
 DEFAULT_SENSITIVITY = 90.0
@@ -523,6 +526,7 @@ class PipelineConfig:
     alpha: float = 0.05
     fdr: bool = True
     tfce: bool = False
+    contrast: str = "two_sided"
     covariates: list = dataclasses.field(default_factory=lambda: ["volume_ml"])
     volume_off_reason: str | None = None
     scores: object = "auto"
@@ -575,7 +579,7 @@ class PipelineConfig:
         if not 50.0 <= self.sensitivity <= 100.0:
             raise ValueError(f"The sensitivity must be between 50 and 100 %, got {self.sensitivity:g}")
         for key, allowed in (("sensitivity_population", POPULATIONS), ("specificity", SPECIFICITY_MODES), ("input", INPUTS), ("nulls", NULL_MODES), ("native", NATIVE_MODES),
-                             ("events", EVENT_MODES), ("keep_awake", KEEP_AWAKE_MODES), ("slnm_method", ("pearson", "spearman")), ("reference", ("auto", "off"))):
+                             ("events", EVENT_MODES), ("keep_awake", KEEP_AWAKE_MODES), ("contrast", CONTRASTS), ("slnm_method", ("pearson", "spearman")), ("reference", ("auto", "off"))):
             if getattr(self, key) not in allowed:
                 raise ValueError(f"{key} must be one of {', '.join(allowed)}, got {getattr(self, key)!r}")
         self.perm = int(self.perm)
@@ -618,6 +622,8 @@ class PipelineConfig:
             value = getattr(self, field.name)
             if analysis_only and field.name in self.RUN_KEYS:
                 continue
+            if field.name == "contrast" and value == "two_sided":
+                continue  # the default is left out, so configurations and stage fingerprints of earlier runs are unchanged
             if base is not None and field.name in self.PATH_KEYS and isinstance(value, str) and os.path.isabs(value):
                 value = relpath(value, base)
             out[field.name] = value
@@ -1119,7 +1125,7 @@ def plan(config, hash_lesions=True, providers=None):
 
         design_spec = None
         if config.specificity == "glm":
-            design_spec = {"test": "two_group", "group_column": "group", "levels": ["case", "control"], "contrast": "two_sided", "covariates": config.covariates,
+            design_spec = {"test": "two_group", "group_column": "group", "levels": ["case", "control"], "contrast": config.contrast, "covariates": config.covariates,
                            "input": "Fz" if config.input == "AvgFz" else "T", "inference": {"n_perm": config.perm, "seed": config.perm_seed, "tfce": config.tfce, "fdr": config.fdr},
                            "volume_off_reason": config.volume_off_reason}
         report = preflight.run_preflight(study, bundle, recipe_rule=config.rule, design_spec=design_spec, accepted_terms=bool(config.accept_terms), strict=config.strict,
@@ -2434,7 +2440,7 @@ class Runner:
         inference = {"fwe": True, "fdr": self.config.fdr, "tfce": self.config.tfce if test == "two_group" else False, "n_perm": self.config.perm, "seed": self.config.perm_seed}
         covariates = list(self.config.covariates)
         if test == "two_group":
-            return designlib.DesignSpec(test="two_group", group_column="group", levels=["case", "control"], contrast="two_sided", covariates=covariates, input="Fz" if self.config.input == "AvgFz" else "T",
+            return designlib.DesignSpec(test="two_group", group_column="group", levels=["case", "control"], contrast=self.config.contrast, covariates=covariates, input="Fz" if self.config.input == "AvgFz" else "T",
                                         inference=inference, volume_off_reason=self.config.volume_off_reason)
         return designlib.DesignSpec(test="continuous", score_column=score, contrast="two_sided", covariates=covariates, input="Fz" if self.config.input == "AvgFz" else "T", inference=inference,
                                     volume_off_reason=self.config.volume_off_reason)
@@ -3361,6 +3367,7 @@ def _add_run_arguments(parser):
     parser.add_argument("--alpha", type=float, default=S, help="FWE alpha (default 0.05)")
     parser.add_argument("--no-fdr", dest="fdr", action="store_false", default=S, help="do not write the FDR maps")
     parser.add_argument("--tfce", action="store_true", default=S, help="add TFCE to the GLM (slow)")
+    parser.add_argument("--contrast", choices=CONTRASTS, default=S, help="contrast of the case-vs-control GLM: two_sided (default), A>B (case > control) or B>A (control > case)")
     parser.add_argument("--no-volume-covariate", dest="volume_off_reason", default=S, metavar="REASON", help="leave lesion volume out of the covariates (the reason is recorded)")
     parser.add_argument("--covariates", default=S, help="comma-separated covariate columns (default volume_ml)")
     parser.add_argument("--scores", default=S, help="auto (confirmed score columns), none, or a comma-separated list")

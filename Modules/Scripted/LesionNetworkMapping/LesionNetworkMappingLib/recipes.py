@@ -1129,6 +1129,18 @@ def steps_from_options(steps, options):
 
 #: Pipeline options of the Map "Run everything" card (card_pipeline.DEFAULT_OPTIONS keys) and the parameters they hold
 OPTION_FIELDS = (("sensitivity", "overlap"), ("perm", "n_perm"), ("tfce", "design.tfce"), ("extra_rules", "extra_rules"), ("preview_n", "preview_n"))
+#: One-sided contrasts the pipeline's case-vs-control GLM runs (pipeline --contrast; A is case, B is control)
+PIPELINE_ONE_SIDED = ("A>B", "B>A")
+
+
+def pipeline_contrast(params):
+    """The contrast of the pipeline's case-vs-control GLM for the parameters (pipeline --contrast).
+
+    A one-sided group contrast (A>B, B>A) is run as stated; anything else is the two-sided test (the F test of two
+    groups is the two-sided t test; the effect contrasts of a score design are not about the groups).
+    """
+    contrast = ((params or {}).get("design") or {}).get("contrast")
+    return contrast if contrast in PIPELINE_ONE_SIDED else "two_sided"
 
 
 def pipeline_options(params, steps, options=None):
@@ -1141,6 +1153,7 @@ def pipeline_options(params, steps, options=None):
     out["sensitivity"] = params["overlap"]
     out["perm"] = params["n_perm"]
     out["tfce"] = params["design"]["tfce"]
+    out["contrast"] = pipeline_contrast(params)
     out["extra_rules"] = list(params["extra_rules"])
     out["preview_n"] = params["preview_n"]
     out["preview_seed"] = params["seeds"]["preview"]
@@ -1176,6 +1189,9 @@ def parameters_from_map(base, rule=None, options=None):
                 elif option == "extra_rules":
                     value = [_rule(item) for item in value or []]
                 params = set_field(params, field, value)
+        contrast = options.get("contrast")
+        if contrast is not None and contrast != pipeline_contrast(params):
+            params["design"]["contrast"] = str(contrast)
         if options.get("preview_seed") is not None:
             params["seeds"]["preview"] = int(options["preview_seed"])
         if options.get("null_relocations") is not None:
@@ -1225,6 +1241,7 @@ def to_pipeline_config(recipe, study=None, params=None, module_available=None):
         "alpha": params["alpha"],
         "fdr": params["fdr"],
         "tfce": params["design"]["tfce"],
+        "contrast": pipeline_contrast(params),
         "covariates": params["design"]["covariates"],
         "scores": options["scores"],
         "nulls": options["nulls"],

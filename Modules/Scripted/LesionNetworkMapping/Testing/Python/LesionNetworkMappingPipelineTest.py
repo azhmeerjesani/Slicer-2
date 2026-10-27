@@ -499,6 +499,26 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
             expected = thresholds.resolve(rule, n, self.bundle.n_voxels, values=masked(export.map_paths(out, sid, self.bundle.name)["AvgFz"], self.bundle))
             self.assertAlmostEqual(sidecar["threshold"]["resolved"]["value"], expected.value, places=5)
 
+    def test_locked_plan_contrast_is_run(self):
+        """Run everything runs the locked plan's one-sided contrast (Ferguson 2019: A>B, case > control), not a two-sided GLM (BB-1)."""
+        if self.baseline:
+            self.skipTest("The GLM is not available with the wave-1 providers")
+        from LesionNetworkMappingLib import glm, recipes
+
+        self.assertNotIn("contrast", self.pipeline_json["config"])  # a two-sided run stores what earlier versions stored
+        self.assertEqual(read_json(os.path.join(self.out, "stages", "glm", glm.GLM_JSON))["tails"], 2)
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f12"))
+        recipe = next(item for item in recipes.load_recipes(study=fx["study"]) if item.id == "classic_ferguson2019_adapted")
+        recipes.lock_plan(fx["study"], recipe, recipes.apply(recipe), {"primary": {"kind": "contrast", "contrast": "A>B"}, "rois": [], "alpha": 0.05, "n_perm": 1000, "seeds": {"permutation": 0}})
+        config = dict(recipes.to_pipeline_config(recipe, fx["study"])["config"], bundle=fx["bundle"], accept_terms=True, events="json", report=False)
+        code = pipeline.run(pipeline.PipelineConfig.from_json(config), emit=pipeline.Emitter("json", sink=lambda event, record: None))
+        self.assertEqual(code, 0)
+        record = read_json(os.path.join(fx["out"], "stages", "glm", glm.GLM_JSON))
+        self.assertEqual((record["contrast"]["label"], record["contrast"]["spec"], record["tails"]), ("caseGtControl", "A>B", 1))
+        self.assertEqual(read_json(os.path.join(fx["out"], pipeline.PIPELINE_JSON))["config"]["contrast"], "A>B")
+        self.assertTrue(os.path.isfile(self.group_path("caseGtControlTstat", fx["out"])))
+        self.assertEqual(recipes.read_deviations(fx["study"]), [])  # the plan was followed
+
     def test_lesion_outside_mask_is_excluded(self):
         fx = fixture.make_fixture(os.path.join(self.tmp, "f10"))
         study = Study.open(fx["study"])

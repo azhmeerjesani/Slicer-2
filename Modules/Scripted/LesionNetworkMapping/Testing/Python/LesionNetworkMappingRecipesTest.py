@@ -155,6 +155,34 @@ class StepsTest(_TempCase):
         preview = pipeline.PipelineConfig.from_json(recipes.to_pipeline_config(self.builtin("preview"))["config"])
         self.assertEqual(preview.preview_n, 100)
 
+    def test_pipeline_runs_the_recipe_contrast(self):
+        """Run everything tests the recipe's (or the locked plan's) one-sided contrast, and the Map options carry it (BB-1)."""
+        from LesionNetworkMappingLib import pipeline
+
+        recipe = self.builtin("classic_ferguson2019_adapted")
+        params = recipes.apply(recipe)
+        self.assertEqual(params["design"]["contrast"], "A>B")
+        config = pipeline.PipelineConfig.from_json(recipes.to_pipeline_config(recipe, module_available=lambda name: True)["config"])
+        self.assertEqual(config.contrast, "A>B")
+        self.assertEqual(config.to_json()["contrast"], "A>B")
+        # A two-sided run keeps the configuration of earlier versions (no "contrast" key)
+        self.assertNotIn("contrast", pipeline.PipelineConfig.from_json(recipes.to_pipeline_config(self.builtin("siddiqi2021_slnm"))["config"]).to_json())
+        with self.assertRaises(ValueError):
+            pipeline.PipelineConfig(contrast="positive")
+        # The Map options hold the contrast; a two-sided run of an A>B plan is a deviation (held until a reason is given)
+        options = recipes.pipeline_options(params, recipe.steps, {})
+        self.assertEqual(options["contrast"], "A>B")
+        self.assertEqual(recipes.parameters_from_map(params, rule=params["rule"], options=options), params)
+        current = recipes.parameters_from_map(params, rule=params["rule"], options=dict(options, contrast="two_sided"))
+        changes = recipes.diff(recipe, current)
+        self.assertEqual([item["field"] for item in changes], ["design.contrast"])
+        self.assertEqual(recipes.pipeline_options(current, recipe.steps, {})["contrast"], "two_sided")
+        # The F test of two groups is the two-sided t test
+        self.assertEqual(recipes.pipeline_contrast(recipes.set_field(params, "design.contrast", "F")), "two_sided")
+        # The command line takes it too
+        args = pipeline._parser().parse_args(["run", "--study", "s", "--bundle", "b", "--contrast", "B>A"])
+        self.assertEqual(pipeline.config_from_args(args).contrast, "B>A")
+
 
 class ApplyDiffTest(_TempCase):
     def test_apply_and_diff(self):

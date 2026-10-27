@@ -88,6 +88,7 @@ DEFAULT_OPTIONS = {
     "volume_off_reason": None,
     "perm": 5000,
     "tfce": False,
+    "contrast": "two_sided",
     "scores": "auto",
     "null_relocations": "auto",
     "nulls": "auto",
@@ -99,6 +100,8 @@ DEFAULT_OPTIONS = {
 }
 #: Options of the dialog that are also accepted from the stored JSON (tests); others are ignored
 EXTRA_OPTION_KEYS = ("memory_budget_gb",)
+#: Options without a control in the dialog that it keeps as they are: the GLM contrast is set by a recipe (recipes.pipeline_options)
+KEPT_OPTION_KEYS = ("contrast",)
 PREVIEW_N = 100
 #: Extra rules offered by the dialog: (key, label, rule)
 EXTRA_RULES = (
@@ -409,7 +412,7 @@ def configDict(studyPath, bundlePath, options, rule=None, software=None, acceptT
     """The ``pipeline.PipelineConfig`` fields of a run (also what the staleness plan uses)."""
     config = {"study": studyPath, "bundle": bundlePath, "rule": rule, "extra_rules": list(options.get("extra_rules") or []),
               "sensitivity": float(options.get("sensitivity", 90.0)), "specificity": options.get("specificity") or "auto",
-              "perm": int(options.get("perm") or 5000), "tfce": bool(options.get("tfce")), "scores": options.get("scores", "auto"),
+              "perm": int(options.get("perm") or 5000), "tfce": bool(options.get("tfce")), "contrast": options.get("contrast") or "two_sided", "scores": options.get("scores", "auto"),
               "null_relocations": options.get("null_relocations", "auto"), "nulls": options.get("nulls") or "auto",
               "build_references": bool(options.get("build_references")), "native": options.get("native") or "normalize",
               "recompute": bool(recompute), "accept_terms": bool(acceptTerms), "nice": NICE,
@@ -459,6 +462,8 @@ def commandArguments(config):
     args += ["--sensitivity", f"{float(config.get('sensitivity', 90.0)):g}", "--specificity", config.get("specificity", "auto"), "--perm", str(config.get("perm", 5000))]
     if config.get("tfce"):
         args.append("--tfce")
+    if (config.get("contrast") or "two_sided") != "two_sided":
+        args += ["--contrast", config["contrast"]]
     if config.get("volume_off_reason"):
         args += ["--no-volume-covariate", config["volume_off_reason"]]
     scores = config.get("scores", "auto")
@@ -2282,7 +2287,7 @@ class OptionsDialog:
     def load(self, options):
         """Show ``options`` (the stored ones) and the facts of the current study and connectome."""
         card = self.card
-        self.extra = {key: options[key] for key in EXTRA_OPTION_KEYS if key in options}
+        self.extra = {key: options[key] for key in (*EXTRA_OPTION_KEYS, *KEPT_OPTION_KEYS) if key in options}
         preview = options.get("preview_n")
         self.subjectsGroup.button(1 if preview else 0).setChecked(True)
         self.previewSpin.setValue(int(preview or PREVIEW_N))

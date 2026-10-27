@@ -463,6 +463,7 @@ class LesionNetworkMappingPipelineUITest(unittest.TestCase):
     def test_9_options_dialog_and_settings(self):
         """The options dialog is non-modal, at most 420 px wide, and stores its values in Studio/LNM/Pipeline/Options only."""
         card = self.card
+        self.cp.saveOptions(dict(self.cp.DEFAULT_OPTIONS, contrast="A>B"))  # a recipe's one-sided contrast (no control in the dialog)
         options = card.showOptions()
         dialog = options.dialog
         self.assertEqual(dialog.objectName, "LNMPipelineOptionsDialog")
@@ -476,12 +477,15 @@ class LesionNetworkMappingPipelineUITest(unittest.TestCase):
         values = options.values()
         self.assertEqual(values["volume_off_reason"], "volume is matched by design")
         self.assertEqual(values["sensitivity"], 80.0)
+        self.assertEqual(values["contrast"], "A>B", "the dialog keeps the recipe's contrast")
         self.assertFalse(options.ruleChecks["t7"].enabled, "|T| >= 7 needs N close to 1000")
         self.cp.saveOptions(values)
         config = card.config(values, forRun=True)
         args = self.cp.commandArguments(config)
         self.assertIn("--no-volume-covariate", args)
         self.assertEqual(args[args.index("--sensitivity") + 1], "80")
+        self.assertEqual(args[args.index("--contrast") + 1], "A>B")
+        self.assertNotIn("--contrast", self.cp.commandArguments(card.config(dict(values, contrast="two_sided"), forRun=True)))
         dialog.close()
         qt.QSettings().remove(self.cp.OPTIONS_SETTING)
         added = set(qt.QSettings().allKeys()) - self.settingsBefore
