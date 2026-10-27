@@ -526,7 +526,13 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         return [name for name in order if name in available]
 
     def _moreToolsShown(self):
-        return self._moreToolsButton is not None and bool(self._moreToolsButton.checked)
+        if self._moreToolsButton is None:
+            return False
+        try:
+            return bool(self._moreToolsButton.checked)
+        except ValueError:
+            # The button was destroyed (application exit): nothing is shown any more
+            return False
 
     def setMoreToolsShown(self, shown):
         """Studio presentation: show every tool ("More tools") or only the five tiles."""
@@ -1140,6 +1146,8 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def cleanup(self):
         self._removePresentationShortcuts()
+        # The masking observer reads the "More tools" button: a node change while the application shuts down must not reach it
+        self._observeMasking(False)
         self.removeObservers()
         if self._columnTimer is not None:
             self._columnTimer.stop()

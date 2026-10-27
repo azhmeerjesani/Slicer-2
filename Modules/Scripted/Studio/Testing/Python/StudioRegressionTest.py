@@ -31,6 +31,8 @@ Run with the main window and testing enabled::
 - ``test_8_study_list_qc_keeps_cursor`` (BB-1): a QC key (P / X / U) refreshes the subject list (a model reset) but keeps the
   keyboard cursor (the current index) on the subject, so that the next Down goes to the next subject and the next QC key
   marks that one (it went to the first row: the wrong subject was marked); a selection made elsewhere moves the cursor too.
+- ``test_12_quit_with_study_subject_open_in_draw`` (BB-1): a child process opens a study subject in Draw and quits: no traceback
+  (the segment editor masking observer read the destroyed "More tools" button), exit code 0.
 - ``test_10_scripted_module_ui_widgets`` (BB-1): the build has the Qt Designer plugins of CTK and MRML, so that
   ``slicer.util.loadUI`` creates the CTK and qMRML widgets of a scripted module's ``.ui`` file (a ``qMRMLWidget`` root, a
   ``qMRMLNodeComboBox``, a ``ctkCollapsibleButton``), and Line Profile, Vector to Scalar Volume and Surface Toolbox set up
@@ -101,6 +103,59 @@ def main():
     pending = bool(qc is not None and qc._timer.isActive())
     rows = bool(qc is not None and ui._isAlive(qc.panel.widget))
     print(f"QUITTEST READY qc={qc is not None} pending={pending} row={rows}", flush=True)
+    slicer.app.exit(0)
+
+
+try:
+    main()
+except Exception:
+    import traceback
+
+    traceback.print_exc()
+    sys.stdout.flush()
+    slicer.app.exit(3)
+"""
+
+
+QUIT_STUDY_SCRIPT = r"""
+import os
+import sys
+import time
+
+import numpy as np
+import qt
+import slicer
+
+
+def pump(ms):
+    end = time.monotonic() + ms / 1000.0
+    while time.monotonic() < end:
+        slicer.app.processEvents()
+        time.sleep(0.005)
+
+
+def main():
+    from LesionNetworkMappingLib import geometry, nifti
+
+    from StudioLib import shell, study_ui
+
+    folder = os.environ["QUITTEST_FOLDER"]
+    studioShell = shell.Shell(force=True)
+    studioShell.apply()
+    pump(200)
+    grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+    mask = np.zeros(grid.shape, np.uint8)
+    mask[30:34, 60:64, 50:53] = 1
+    files = []
+    for sid in ("sub-01", "sub-02"):
+        path = os.path.join(folder, sid + "_lesion.nii.gz")
+        nifti.write_nifti(path, mask, grid.affine, dtype=np.uint8)
+        files.append(path)
+    session = study_ui.createStudy(files, studioShell, folder=folder)
+    pump(500)
+    session.open("sub-01", switchToDraw=True)
+    pump(800)
+    print("QUITTEST READY", flush=True)
     slicer.app.exit(0)
 
 
@@ -216,6 +271,34 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertTrue(ready, output[-3000:])
         self.assertIn("qc=True", ready[0], ready[0])
         self.assertIn("pending=True", ready[0], ready[0])
+        self.assertNotIn("Traceback", output, output[-3000:])
+        self.assertNotIn("exit abnormally", output, output[-3000:])
+        self.assertEqual(process.returncode, 0, json.dumps(output[-3000:]))
+
+    def test_12_quit_with_study_subject_open_in_draw(self):
+        """Quitting while a study subject is open in Draw is clean: the segment editor's masking observer (it reads the "More
+        tools" button) is removed with the module widget, so a node change at shutdown does not read a destroyed button.
+        """
+        launcher = slicer.app.launcherExecutableFilePath
+        launcher = launcher() if callable(launcher) else launcher
+        if not launcher or not os.path.isfile(launcher):
+            self.skipTest("no Slicer launcher")
+        script = os.path.join(self.directory, "quit_with_study.py")
+        with open(script, "w") as stream:
+            stream.write(QUIT_STUDY_SCRIPT)
+        home = os.path.join(self.directory, "quit_home")
+        folder = os.path.join(self.directory, "quit_study")
+        os.makedirs(home)
+        os.makedirs(folder)
+        environment = dict(os.environ)
+        environment.update({"HOME": home, "XDG_CONFIG_HOME": os.path.join(home, ".config"), "QUITTEST_FOLDER": folder,
+                            "SLICER_STUDIO_PROJECTS_ROOT": os.path.join(self.directory, "quit_projects")})
+        for key in ("SLICERRC", "SLICER_STUDIO_WEB"):
+            environment.pop(key, None)
+        process = subprocess.run([launcher, "--no-splash", "--testing", "--python-script", script], env=environment, stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, timeout=QUIT_TIMEOUT_S, check=False)
+        output = process.stdout.decode("utf-8", "replace")
+        self.assertIn("QUITTEST READY", output, output[-3000:])
         self.assertNotIn("Traceback", output, output[-3000:])
         self.assertNotIn("exit abnormally", output, output[-3000:])
         self.assertEqual(process.returncode, 0, json.dumps(output[-3000:]))
