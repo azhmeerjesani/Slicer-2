@@ -518,6 +518,30 @@ def _safeName(text, default="lesion"):
     return name or default
 
 
+def _lesionFallbackLabel(segNode, segmentName):
+    """The label of a lesion mapped outside a study: its BIDS subject ("sub-01", read from the segmentation's name, the
+    segment's name or the file it was loaded from), else the names of the node and the segment (not twice the same name).
+
+    ``_safeName`` drops underscores, which are the separators of BIDS entities: without this a file named
+    ``sub-01_space-MNI_desc-lesion_mask`` gave run and export names such as ``sub-01spaceMNIdesc-lesionmask-Lesion_conn-...``.
+    """
+    candidates = [segNode.GetName(), segmentName]
+    storage = segNode.GetStorageNode()
+    if storage is not None and storage.GetFileName():
+        candidates.append(os.path.basename(storage.GetFileName()))
+    try:
+        from StudioLib import importer
+
+        for text in candidates:
+            subject = importer.bidsSubject(text)
+            if subject:
+                return subject
+    except ImportError:  # Map without the Studio package: the names below
+        pass
+    nodeName = segNode.GetName()
+    return nodeName if segmentName == nodeName else f"{nodeName}-{segmentName}"
+
+
 class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
     """Computation and data handling of the Map module, usable without the GUI (tests, scripts)."""
 
@@ -4241,7 +4265,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         node = self._parameterNode
         segNode, segmentId = self.ctx.seed()
         segmentName = segNode.GetSegmentation().GetSegment(segmentId).GetName()
-        lesionName = _safeName(self._subjectLabel() or f"{segNode.GetName()}-{segmentName}")
+        lesionName = _safeName(self._subjectLabel() or _lesionFallbackLabel(segNode, segmentName))
         runDir = self.logic.runDirectory(self.ctx, lesionName)
         lesionPath = os.path.join(runDir, "lesion", f"{lesionName}.nii.gz")
         self.logic.exportSeedLesion(segNode, segmentId, lesionPath)
