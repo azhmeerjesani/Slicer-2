@@ -2405,12 +2405,14 @@ class StudySession:
 
         Generalizes ``Study.next_subject(after, status)`` (W3-07): with a queue (a key, a spec, a predicate ``fn(row)``, or
         by default the active queue) the first subject after ``after`` in table order, wrapping around, that the queue still
-        has to do; without one, the next untraced subject (W3-07). Return its participant_id, or None.
+        has to do; without one, the next untraced subject (W3-07), and when none is left the next one still in progress (a
+        subject left half-traced by Alt+←/→ is not done, so Done never reports a study traced while one is open). Return its
+        participant_id, or None.
         """
         after = after if after is not None else (self._current or self._queuePosition)
         spec = self._resolveQueue(queue)
         if spec is None:
-            return self.study.next_subject(after, status="untraced")
+            return self.study.next_subject(after, status="untraced") or self.study.next_subject(after, status="inprogress")
         ids = self.study.subject_ids
         start = ids.index(after) + 1 if after in ids else 0
         for sid in ids[start:] + ids[:start]:

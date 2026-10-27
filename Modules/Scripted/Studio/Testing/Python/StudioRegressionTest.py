@@ -701,6 +701,59 @@ class StudioRegressionTest(unittest.TestCase):
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
 
+    # Done -> next without a queue reaches the subjects left in progress (BB-1)
+
+    def test_9_done_next_reaches_inprogress(self):
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Loop study")
+        os.makedirs(folder)
+        paths = []
+        for index in range(1, 4):
+            paths.append(os.path.join(folder, f"sub-0{index}_T1w.nii.gz"))
+            nifti.write_nifti(paths[-1], np.zeros(grid.shape, np.uint8), grid.affine)
+        toasts = []
+        originalToast = study_ui._toast
+        study_ui._toast = lambda shell, text, **kwargs: toasts.append(str(text))
+        self.addCleanup(setattr, study_ui, "_toast", originalToast)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        try:
+            session = study_ui.createStudy(paths, studioShell, folder=folder)
+            self.assertIsNotNone(session)
+            self.assertIsNone(session.queue())
+            session.open("sub-01", switchToDraw=False)
+            study = session.study
+            # Untraced subjects come first; a subject left in progress (Alt+Left/Right) is the fallback
+            study.set("sub-02", status="inprogress")
+            self.assertEqual(session.next_subject("sub-01"), "sub-03")
+            study.set("sub-03", status="traced")
+            self.assertEqual(session.next_subject("sub-01"), "sub-02")
+            # Done on the last untraced subject opens the one still in progress, and does not say that all are traced
+            del toasts[:]
+            session.done(writeLesion=False)
+            self.assertEqual(study.subject("sub-01")["status"], "traced")
+            self.assertEqual(session.current(), "sub-02")
+            self.assertFalse([text for text in toasts if "are traced" in text], toasts)
+            # Done on the last subject to do: every subject is traced
+            session.done(writeLesion=False)
+            self.assertEqual([study.subject(sid)["status"] for sid in study.subject_ids], ["traced"] * 3)
+            self.assertIsNone(session.next_subject("sub-02"))
+            self.assertTrue([text for text in toasts if "are traced" in text], toasts)
+        finally:
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
+
     @staticmethod
     def _isAncestor(ancestor, widget):
         current = widget
