@@ -69,6 +69,24 @@ class LesionNetworkMappingReadyStateTest(unittest.TestCase):
         self.assertNotIn("Choose a connectome", str(widget.derivedLabel.text))
         self.assertTrue(str(widget.derivedLabel.text).startswith("Planned:"), str(widget.derivedLabel.text))
 
+    def test_family_notice_is_shown_outside_the_collapsing_seed_card(self):
+        """The family notice (A-10) is repeated in the Compute and Result cards: the Seed card collapses once the lesion is done."""
+        widget = self.widget
+        notice = "The lesion is on MNI152NLin2009bAsym, the connectome on MNI152NLin2009cAsym: the template families are a few millimetres apart."
+        widget.seedCheck = {"ok": True, "kind": "mni", "space": ("MNI152NLin2009bAsym", 1.5), "volumeMl": 2.0, "qc": None, "notice": notice, "reason": ""}
+        widget._showSeed(None, None)
+        widget._updateSteps()
+        _pump(100)
+        for name in ("computeFamilyLabel", "resultFamilyLabel"):
+            label = getattr(widget, name)
+            self.assertEqual(str(label.text), notice, name)
+            self.assertFalse(label.isHidden(), name)
+        widget.seedCheck = {"ok": True, "kind": "mni", "space": ("MNI152NLin2009cAsym", 1.0), "volumeMl": 2.0, "qc": None, "notice": "", "reason": ""}
+        widget._showSeed(None, None)
+        for name in ("computeFamilyLabel", "resultFamilyLabel"):
+            self.assertTrue(getattr(widget, name).isHidden(), name)
+            self.assertEqual(str(getattr(widget, name).text), "", name)
+
     def test_demo_done_republishes_the_chip_after_the_runner_releases_it(self):
         from LesionNetworkMappingUI import jobrunner
 

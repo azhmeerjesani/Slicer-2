@@ -16,7 +16,7 @@ spatial modes, its hubs), so the card says how far a map is from that, calibrate
 - **Reference maps.** Without them: "Build reference maps (~N min)" runs ``reference build`` as a heavy job (an ETA from the
   bundle size); nothing builds them implicitly.
 - The relocated null (always stated, also when it is off), the hubness line (``qa degree``), the GSR negative-peaks note,
-  the coverage and space-family notice, and the N / df / preview / partial badges.
+  the coverage notice (the space-family notice is in the Compute and Result cards), and the N / df / preview / partial badges.
 
 The card expands itself when the calibrated chip (or the null) is amber or red.
 """

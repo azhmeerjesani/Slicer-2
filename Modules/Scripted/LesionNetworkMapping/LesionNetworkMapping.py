@@ -3475,10 +3475,25 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         notice = check.get("notice") or ""
         self.seedFamilyLabel.setText(notice)
         self.seedFamilyLabel.setVisible(bool(notice))
+        self._updateFamilyNotice()
         reason = check.get("reason") if not check.get("ok") and check.get("kind") not in ("none",) else ""
         self.widgets.setBannerText(self.seedErrorBanner, reason or "")
         self.seedErrorBanner.setVisible(bool(reason))
         self.normalizeLinkButton.setVisible(check.get("kind") == "native")
+
+    def _updateFamilyNotice(self):
+        """Show the family notice of the lesion (A-10) where the user maps and reads the result, not only in the Seed card.
+
+        The Seed card collapses to its row as soon as the lesion is done, and the notice usually becomes known later (when a
+        connectome is chosen), so the Compute card (before and while the map runs) and the Result card (after) repeat it.
+        Only in Seed = Lesion: the other seeds have no lesion template.
+        """
+        notice = str(self.seedFamilyLabel.text) if hasattr(self, "seedFamilyLabel") and self.seedMode() == "lesion" else ""
+        for name in ("computeFamilyLabel", "resultFamilyLabel"):
+            label = getattr(self, name, None)
+            if label is not None:
+                label.setText(notice)
+                label.setVisible(bool(notice))
 
     def onNormalize(self):
         """The native-space action: A-03's one-click normalization when present, else the Normalize to MNI card."""
@@ -3991,6 +4006,11 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.nullCheckBox.setToolTip(_("Map 50 copies of the lesion moved elsewhere in the brain in the same pass, to compare the map with what any lesion of this shape gives"))
         self.nullCheckBox.connect("toggled(bool)", self.onNullToggled)
         layout.addWidget(self.nullCheckBox)
+        # The family notice of the seed (A-10) also lives here: the Seed card collapses once the lesion is done
+        self.computeFamilyLabel = self._label("", role="secondaryText", objectName="LNMComputeFamilyNotice")
+        self.computeFamilyLabel.setWordWrap(True)
+        self.computeFamilyLabel.hide()
+        layout.addWidget(self.computeFamilyLabel)
         self.computeButton = qt.QPushButton(_("Map network"))
         self.computeButton.setObjectName("LNMComputeButton")
         self.computeButton.setProperty("slicerRole", "primary")
@@ -4143,6 +4163,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         In Studio a step collapses to its 44 px row when it becomes done (or, for Compute, when the map was opened from a
         file) and opens again when it needs the user; a click on the row opens it in between (``_applyStepCollapse()``).
         """
+        self._updateFamilyNotice()
         steps = {key: self._cardWidgets.get(key, (None, None))[1] for key in ("seed", "connectome", "compute", "result")}
         if any(card is None or card.property("collapsed") is None for card in steps.values()):
             return
@@ -4630,6 +4651,11 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.derivedLabel = self._label("", role="secondaryText", objectName="LNMDerivedLine")
         self.derivedLabel.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
         layout.addWidget(self.derivedLabel)
+        # The seed's family notice (A-10) stays visible with the map, after the Seed and Compute cards have collapsed
+        self.resultFamilyLabel = self._label("", role="secondaryText", objectName="LNMResultFamilyNotice")
+        self.resultFamilyLabel.setWordWrap(True)
+        self.resultFamilyLabel.hide()
+        layout.addWidget(self.resultFamilyLabel)
         # Studio: the explanations of the rule and the display (N unknown, shown unthresholded, notes) are one warning line
         # with "Details" (VISUAL 4.5); Classic shows them as paragraphs
         self.resultNotice = self.widgets.noticeLine("LNMResultNotice")
