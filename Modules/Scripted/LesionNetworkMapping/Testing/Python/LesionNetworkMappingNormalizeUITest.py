@@ -261,7 +261,9 @@ class LesionNetworkMappingNormalizeUITest(unittest.TestCase):
         self.assertTrue(space.isMni(segmentation))
         for node in (segmentation, result.volumeNode):
             self.assertEqual(node.GetAttribute(nc.SPACE_ATTRIBUTE), TEMPLATE)
-            self.assertEqual(node.GetAttribute(nc.NORMALIZATION_ATTRIBUTE), os.path.join(result.outDir, "normalization.json"))
+            # A portable reference, never the absolute path (SPEC 9.7 rules 2 and 10)
+            self.assertEqual(node.GetAttribute(nc.NORMALIZATION_ATTRIBUTE), f"normalization/{os.path.basename(result.outDir)}/normalization.json")
+            self.assertEqual(os.path.normpath(nc.resolveReference(node.GetAttribute(nc.NORMALIZATION_ATTRIBUTE))), os.path.normpath(result.provenancePath))
             self.assertIn(node.GetAttribute(nc.SUGGESTION_ATTRIBUTE), ("looks-ok", "review"))
         self.assertEqual(segmentation.GetAttribute(nc.NORMALIZED_FROM_ATTRIBUTE), f"{self.native.GetID()}|{self.nativeSegmentId}")
         self.assertFalse(result.volumeNode.GetDisplayNode().GetAutoWindowLevel())
@@ -284,6 +286,51 @@ class LesionNetworkMappingNormalizeUITest(unittest.TestCase):
             spec.loader.exec_module(module)
             lines = []
             self.assertEqual(module.scan([result.outDir], False, lines.append), 0, "\n".join(lines))
+
+    def test_03b_scene_holds_no_absolute_path(self):
+        """A saved scene (project, .mrb) holds no absolute local path in the normalization attributes; earlier absolute values are replaced."""
+        import re
+
+        nc = self.nc
+        self.assertIsNotNone(self.result)
+
+        def sceneXml():
+            scene = slicer.mrmlScene
+            scene.InvokeEvent(slicer.vtkMRMLScene.StartSaveEvent)  # as File > Save and .mrb writing do: the scene migration runs
+            scene.SetSaveToXMLString(1)
+            try:
+                scene.Commit()
+                return scene.GetSceneXMLString()
+            finally:
+                scene.SetSaveToXMLString(0)
+
+        def lnmValues(xml):
+            return re.findall(r"LNM\.(?:Normalization|NormLesionWarp):([^;\"]*)", xml)
+
+        xml = sceneXml()
+        values = lnmValues(xml)
+        self.assertTrue(values, "no LNM.Normalization attribute in the scene")
+        for value in values:
+            self.assertFalse(value.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", value), f"absolute path in a scene attribute: {value}")
+        self.assertNotIn(self.tmp, "".join(values))
+        # A scene of an earlier version (absolute values) is migrated before it is saved again
+        volume = self.result.volumeNode
+        reference = volume.GetAttribute(nc.NORMALIZATION_ATTRIBUTE)
+        volume.SetAttribute(nc.NORMALIZATION_ATTRIBUTE, self.result.provenancePath)
+        volume.SetAttribute(nc.LESION_WARP_ATTRIBUTE, os.path.join(self.result.outDir, "warps", "sub-01_edit-1234_desc-lesion_mask.nii.gz"))
+        try:
+            for value in lnmValues(sceneXml()):
+                self.assertNotIn(self.tmp, value)
+            self.assertEqual(volume.GetAttribute(nc.NORMALIZATION_ATTRIBUTE), reference)
+            self.assertEqual(volume.GetAttribute(nc.LESION_WARP_ATTRIBUTE), f"normalization/{os.path.basename(self.result.outDir)}/warps/sub-01_edit-1234_desc-lesion_mask.nii.gz")
+        finally:
+            volume.RemoveAttribute(nc.LESION_WARP_ATTRIBUTE)
+            volume.SetAttribute(nc.NORMALIZATION_ATTRIBUTE, reference)
+        # References of other computers and of studies
+        self.assertEqual(nc.portableReference("/Users/a/Studies/s1/derivatives/normalization/sub-02/normalization.json"), "derivatives/normalization/sub-02/normalization.json")
+        self.assertEqual(nc.portableReference("C:\\Users\\a\\Documents\\Slicer Studio\\LNM\\normalization\\sub-02-0a1b2c3d\\normalization.json"), "normalization/sub-02-0a1b2c3d/normalization.json")
+        self.assertEqual(nc.portableReference("/data/out/normalization.json"), "out/normalization.json")
+        self.assertEqual(nc.resolveReference("derivatives/normalization/sub-02/normalization.json", "/study"), os.path.join("/study", "derivatives", "normalization", "sub-02", "normalization.json"))
 
     def test_04_rerun_reused(self):
         """Normalizing the same lesion again reuses the result (no new nodes) within 2 s."""
@@ -378,7 +425,9 @@ class LesionNetworkMappingNormalizeUITest(unittest.TestCase):
         self.assertFalse(controller.edited)
         # The updated segmentation no longer holds the run's lesion: a reuse of the run must not return it
         self.assertNotEqual(segmentation.GetAttribute(self.nc.FINGERPRINT_ATTRIBUTE), controller.result.fingerprint or "")
-        self.assertTrue(os.path.isfile(segmentation.GetAttribute(self.nc.LESION_WARP_ATTRIBUTE) or ""))
+        warp = segmentation.GetAttribute(self.nc.LESION_WARP_ATTRIBUTE) or ""
+        self.assertFalse(os.path.isabs(warp), warp)
+        self.assertTrue(os.path.isfile(self.nc.resolveReference(warp) or ""), warp)
         # An edit far outside the original lesion needs a new registration
         array = slicer.util.arrayFromSegmentBinaryLabelmap(self.native, self.nativeSegmentId, self.scan)
         array[5:9, 5:9, 5:9] = 1

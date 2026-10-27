@@ -293,7 +293,8 @@ SCENE_MIGRATION_PRIORITY = 10.0
 
 
 def installSceneMigration():
-    """Observe the scene (import and save) to replace a legacy ``connectomePath`` (``migrateLegacyConnectomePaths``).
+    """Observe the scene (import and save) to replace a legacy ``connectomePath`` (``migrateLegacyConnectomePaths``)
+    and absolute normalization references (``migrateNormalizationReferences``).
 
     Scenes of earlier versions hold the connectome bundle's absolute path. It is replaced as soon as such a scene
     is loaded, and again before every save, whether or not the Map module was opened, so that a scene saved again
@@ -310,10 +311,32 @@ def installSceneMigration():
             migrateLegacyConnectomePaths(caller)
         except Exception:
             logging.exception("Lesion network mapping: the connectome path of an earlier scene could not be replaced")
+        try:
+            migrateNormalizationReferences(caller)
+        except Exception:
+            logging.exception("Lesion network mapping: the normalization references of an earlier scene could not be replaced")
 
     installSceneMigration._tags = [scene.AddObserver(event, onSceneEvent, SCENE_MIGRATION_PRIORITY)
                                    for event in (slicer.vtkMRMLScene.EndImportEvent, slicer.vtkMRMLScene.StartSaveEvent)]
     return True
+
+
+def migrateNormalizationReferences(scene=None):
+    """Replace absolute ``LNM.Normalization`` / ``LNM.NormLesionWarp`` values of earlier scenes by portable references.
+
+    Scenes of earlier versions hold the absolute path of normalization.json (SPEC 9.7 rule 10). The controller is
+    imported only when such a value is found. Return the number of attributes changed.
+    """
+    scene = scene or slicer.mrmlScene
+    for index in range(scene.GetNumberOfNodes()):
+        node = scene.GetNthNode(index)
+        for attribute in ("LNM.Normalization", "LNM.NormLesionWarp"):
+            value = node.GetAttribute(attribute)
+            if value and re.match(r"^([A-Za-z]:)?[\\/]", value):
+                from LesionNetworkMappingUI import normalize_controller
+
+                return normalize_controller.migrateAbsoluteReferences(scene)
+    return 0
 
 
 def legacyConnectomeName(path):

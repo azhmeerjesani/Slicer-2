@@ -61,7 +61,7 @@ DEFAULT_DILATE_MM = 3.0
 LESION_SEGMENT = "Lesion"
 LESION_COLOR = (0xF2 / 255.0, 0x54 / 255.0, 0x5B / 255.0)
 
-#: Node attributes (SPEC 9.7 rule 2: official Slicer ignores them)
+#: Node attributes (SPEC 9.7 rule 2: official Slicer ignores them). The file references are portable (``portableReference()``)
 NORMALIZATION_ATTRIBUTE = "LNM.Normalization"
 NORMALIZED_FROM_ATTRIBUTE = "LNM.NormalizedFrom"
 SUGGESTION_ATTRIBUTE = "LNM.NormSuggestion"
@@ -198,6 +198,73 @@ def defaultOutputDirectory(scanNode=None, scanPath=None, subject=None, studyPath
             identity = f"{slicer.mrmlScene.GetURL()}|{scanNode.GetID()}|{scanNode.GetName()}"
     digest = hashlib.sha1(os.path.abspath(identity).encode("utf-8") if os.path.isabs(identity) else identity.encode("utf-8")).hexdigest()[:8]
     return os.path.join(dataDirectory(), "normalization", f"{stem}-{digest}")
+
+
+def _isAbsoluteReference(value):
+    """True for an absolute path of any platform (``/…``, a backslash, a drive letter), whatever the platform of this computer."""
+    return bool(value) and (os.path.isabs(value) or re.match(r"^([A-Za-z]:)?[\\/]", value) is not None)
+
+
+def portableReference(path, outDir=None):
+    """The value of ``LNM.Normalization`` / ``LNM.NormLesionWarp`` for a file of a normalization result folder.
+
+    Node attributes never hold an absolute user path (SPEC 9.7 rules 2 and 10: scenes and .mrb files are shared).
+    The reference starts at the result folder: ``derivatives/normalization/<sid>/…`` inside a study (as
+    ``libcard_normalize`` writes it, study-relative), ``normalization/<folder>/…`` in the data directory
+    (``dataDirectory()``-relative), else ``<folder>/…``. ``outDir`` is the result folder (default: the folder of
+    ``path``, or its parent for a file in ``warps``). A relative value is returned as is (with ``/``).
+    """
+    if not path:
+        return ""
+    path = str(path)
+    if not _isAbsoluteReference(path):
+        return path.replace("\\", "/")
+    parts = [part for part in re.split(r"[\\/]+", path) if part]
+    start = None
+    if outDir:
+        outParts = [part for part in re.split(r"[\\/]+", str(outDir)) if part]
+        if outParts and parts[:len(outParts)] == outParts and len(parts) > len(outParts):
+            start = len(outParts) - 1
+    if start is None:
+        start = max(len(parts) - 2, 0)
+        if start >= 1 and parts[start] == "warps":
+            start -= 1
+    if start >= 1 and parts[start - 1] == "normalization":
+        start -= 1
+        if start >= 1 and parts[start - 1] == "derivatives":
+            start -= 1
+    return "/".join(parts[start:])
+
+
+def resolveReference(value, studyPath=None):
+    """The local path of a ``portableReference()`` (``derivatives/…`` needs ``studyPath``), an earlier absolute value as is, or None."""
+    if not value:
+        return None
+    if _isAbsoluteReference(value):
+        return value
+    parts = [part for part in str(value).split("/") if part]
+    if not parts:
+        return None
+    base = os.fspath(studyPath) if parts[0] == "derivatives" and studyPath else (dataDirectory() if parts[0] == "normalization" else None)
+    return os.path.join(base, *parts) if base else None
+
+
+def migrateAbsoluteReferences(scene=None):
+    """Replace the absolute ``LNM.Normalization`` / ``LNM.NormLesionWarp`` values of earlier scenes by ``portableReference()``.
+
+    Called when a scene is loaded and before it is saved (``LesionNetworkMapping.installSceneMigration``). Return
+    the number of attributes changed.
+    """
+    scene = scene or slicer.mrmlScene
+    changed = 0
+    for index in range(scene.GetNumberOfNodes()):
+        node = scene.GetNthNode(index)
+        for attribute in (NORMALIZATION_ATTRIBUTE, LESION_WARP_ATTRIBUTE):
+            value = node.GetAttribute(attribute)
+            if value and _isAbsoluteReference(value):
+                node.SetAttribute(attribute, portableReference(value))
+                changed += 1
+    return changed
 
 
 def sampleDataDirectory():
@@ -936,6 +1003,11 @@ class NormalizeResult:
     def provenancePath(self):
         return os.path.join(self.outDir, _normalizeLib().PROVENANCE_JSON)
 
+    @property
+    def reference(self):
+        """The ``LNM.Normalization`` value of the nodes made from this result (``portableReference()``, never absolute)."""
+        return portableReference(self.provenancePath, self.outDir)
+
     def pixmap(self, thumbnail=False):
         """The QC mosaic (``thumbnail``: the small copy made by the worker, when there is one)."""
         pixmap = qt.QPixmap()
@@ -1426,11 +1498,15 @@ class NormalizeController(VTKObservationMixin):
 
     @staticmethod
     def _existingNodes(provenancePath, fingerprint):
-        """The volume and segmentation already made from this result (same normalization.json and fingerprint), or (None, None)."""
+        """The volume and segmentation already made from this result (same normalization.json and fingerprint), or (None, None).
+
+        Nodes hold ``portableReference(provenancePath)``; nodes of earlier scenes may still hold the absolute path.
+        """
         volume = segmentation = None
+        references = {portableReference(provenancePath, os.path.dirname(provenancePath)), provenancePath}
         for className in ("vtkMRMLScalarVolumeNode", "vtkMRMLSegmentationNode"):
             for node in slicer.util.getNodesByClass(className):
-                if node.GetAttribute(NORMALIZATION_ATTRIBUTE) == provenancePath and node.GetAttribute(FINGERPRINT_ATTRIBUTE) == (fingerprint or ""):
+                if node.GetAttribute(NORMALIZATION_ATTRIBUTE) in references and node.GetAttribute(FINGERPRINT_ATTRIBUTE) == (fingerprint or ""):
                     if className == "vtkMRMLScalarVolumeNode" and volume is None:
                         volume = node
                     elif className == "vtkMRMLSegmentationNode" and segmentation is None:
@@ -1490,7 +1566,7 @@ class NormalizeController(VTKObservationMixin):
 
     @staticmethod
     def _tag(node, result):
-        node.SetAttribute(NORMALIZATION_ATTRIBUTE, result.provenancePath)
+        node.SetAttribute(NORMALIZATION_ATTRIBUTE, result.reference)
         node.SetAttribute(SPACE_ATTRIBUTE, spaceAttributeValue(result.templateId, result.record))
         node.SetAttribute(SUGGESTION_ATTRIBUTE, result.suggestion or "")
         node.SetAttribute(FINGERPRINT_ATTRIBUTE, result.fingerprint or "")
@@ -1537,7 +1613,7 @@ class NormalizeController(VTKObservationMixin):
         node = slicer.util.loadTransform(path)
         if node is not None:
             node.SetName(f"native → {result.templateId}")
-            node.SetAttribute(NORMALIZATION_ATTRIBUTE, result.provenancePath)
+            node.SetAttribute(NORMALIZATION_ATTRIBUTE, result.reference)
         result.transformNode = node
         return node
 
@@ -1829,7 +1905,7 @@ class NormalizeController(VTKObservationMixin):
         stamp = uuid.uuid4().hex[:8]
         segmentation.SetAttribute(FINGERPRINT_ATTRIBUTE, f"{result.fingerprint or ''}+edit-{stamp}")
         if warpPath:
-            segmentation.SetAttribute(LESION_WARP_ATTRIBUTE, warpPath)
+            segmentation.SetAttribute(LESION_WARP_ATTRIBUTE, portableReference(warpPath, result.outDir))
         return True
 
     #
