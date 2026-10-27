@@ -204,7 +204,13 @@ def resolveTarget(target, shell):
                 widget = None
         else:
             widget = _migration().resolveTarget(alternative, shell.mainWindow)
-        if widget is not None and _isAlive(widget) and widget.isWidgetType() and _isShown(widget, shell.mainWindow):
+        if widget is None or not _isAlive(widget) or not widget.isWidgetType():
+            continue
+        if not _isShown(widget, shell.mainWindow) and widget.isVisible():
+            # A control that exists but is scrolled out of its page (the Library below the fold in a small window):
+            # scroll it into view instead of skipping the step
+            _scrollIntoView(widget)
+        if _isShown(widget, shell.mainWindow):
             return widget
     return None
 

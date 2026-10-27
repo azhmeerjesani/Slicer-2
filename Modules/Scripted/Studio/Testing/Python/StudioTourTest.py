@@ -811,3 +811,37 @@ class StudioTourTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         finally:
             tour.stopTour()
             self._pump()
+
+    def test_15_targets_below_the_fold_are_scrolled_into_view(self):
+        """A control that is only scrolled out of its page (Library in a small window) is scrolled to, not skipped."""
+        from StudioLib import tour
+
+        studioShell = self._applyStudio()
+        self._resize(1366, 768)
+        studioShell.switchTo("library")
+        self._pump()
+        recentList = self.mainWindow.findChild("QWidget", "StudioRecentList")
+        self.assertIsNotNone(recentList)
+        scrollArea = recentList
+        while scrollArea is not None and not scrollArea.inherits("QScrollArea"):
+            scrollArea = scrollArea.parentWidget()
+        self.assertIsNotNone(scrollArea, "the Library page is not in a scroll area")
+        # A window so low that the list is below the fold, whatever is open
+        for height in (700, 600, 520, 460):
+            self._resize(1366, height)
+            scrollArea.verticalScrollBar().setValue(0)
+            self._pump()
+            if recentList.visibleRegion().isEmpty():
+                break
+        self.assertTrue(recentList.isVisible())
+        self.assertTrue(recentList.visibleRegion().isEmpty(), "the list is not below the fold in this window")
+        self.assertGreater(scrollArea.verticalScrollBar().maximum, 0)
+        self.assertTrue(tour.showMe("recent"), "Show me skipped a control that is only scrolled out")
+        self._pump()
+        player = tour.activePlayer()
+        self.assertIsNotNone(player)
+        self.assertGreater(scrollArea.verticalScrollBar().value, 0)
+        self.assertFalse(recentList.visibleRegion().isEmpty())
+        self._checkStep(player, "below-the-fold")
+        tour.stopTour()
+        self._pump()
