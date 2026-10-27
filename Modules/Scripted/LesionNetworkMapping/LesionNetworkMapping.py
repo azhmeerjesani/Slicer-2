@@ -970,7 +970,7 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
 
         Updates ``volumeNode`` in place (``updateVolumeFromArray``, partial snapshots; one modified event)
         or adds a new scalar volume. The volume gets the node attribute ``LNM.Result`` = "1" (Draw hides
-        such volumes) and the given ``attributes``.
+        such volumes) and the given ``attributes`` (a value of None removes the attribute).
         """
         from LesionNetworkMappingLib import display
 
@@ -993,10 +993,31 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
                 volumeNode.SetName(name)
         volumeNode.SetAttribute(display.RESULT_ATTRIBUTE, "1")
         for key, value in (attributes or {}).items():
-            volumeNode.SetAttribute(key, str(value))
+            if value is None:
+                volumeNode.RemoveAttribute(key)
+            else:
+                volumeNode.SetAttribute(key, str(value))
         volumeNode.SetSaveWithScene(bool(saveWithScene))
         volumeNode.EndModify(wasModifying)
         return volumeNode
+
+    @staticmethod
+    def connectomeSpaceName(bundle):
+        """Template space of a connectome's maps (``Studio.Space`` of a Map result), None when it has none.
+
+        The space declared in connectome.json ("space": also on grids that are not standard, such as the demo's, and
+        on the user's own conversions), else the standard grid the connectome is on. A native or unknown space gives
+        None: the map is then in no template space.
+        """
+        from LesionNetworkMappingLib import geometry
+
+        if bundle is None:
+            return None
+        declared = (getattr(bundle, "metadata", None) or {}).get("space")
+        if declared and geometry.space_family(declared) not in ("native", "unknown"):
+            return str(declared)
+        detected = geometry.detect_space((bundle.shape, bundle.affine))
+        return str(detected[0]) if detected else None
 
     @staticmethod
     def maskedValues(volumeOrArray, bundle):
@@ -1143,11 +1164,11 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
         The statistic comes from the engine's "desc" label (T, AvgRFz, AvgR), else the NIfTI intent (T for t and z maps);
         N from the sidecar (``<name>_conn-<label>[_desc-<suffix>]_lnm.json``), else from a T map's intent (df = N - 1).
         """
-        from LesionNetworkMappingLib import nifti
+        from LesionNetworkMappingLib import geometry, nifti
 
         folder, base = os.path.split(os.path.abspath(path))
         match = re.match(r"^(?P<name>.+?)_conn-(?P<label>[A-Za-z0-9]+)_desc-(?P<desc>AvgRFz|AvgR|T)(?P<suffix>[A-Za-z0-9]*)_funcmap\.nii(?:\.gz)?$", base)
-        info = {"path": os.path.abspath(path), "statistic": "T", "n": None, "name": re.sub(r"(?i)\.nii(\.gz)?$", "", base), "label": None, "connectome": None,
+        info = {"path": os.path.abspath(path), "statistic": "T", "n": None, "name": re.sub(r"(?i)\.nii(\.gz)?$", "", base), "label": None, "connectome": None, "space": None,
                 "siblings": {}, "sidecar": None, "lesion": None, "preview": False}
         if match is not None:
             info.update(statistic=DESC_STATISTICS[match.group("desc")], name=match.group("name"), connectome=match.group("label"), preview=match.group("suffix").startswith("PreviewN"))
@@ -1164,6 +1185,9 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
                     with open(sidecar, encoding="utf-8") as f:
                         record = json.load(f)
                     info["n"] = int(record["N"]) if record.get("N") else None
+                    declared = (record.get("connectome") or {}).get("space")
+                    if declared and geometry.space_family(declared) not in ("native", "unknown"):
+                        info["space"] = str(declared)  # the connectome's template space, also on a non-standard grid
                     lesion = (record.get("lesion") or {}).get("file")
                     if lesion:
                         lesionPath = lesion if os.path.isabs(lesion) else os.path.normpath(os.path.join(folder, *lesion.split("/")))
@@ -4926,7 +4950,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
                 if reloadMaps or self._mapStamp.get("volume") != stamp or resultVolume is None:
                     saveWithScene = not self.runPartial or not (self.job is not None and self.job.isRunning())
                     saveWithScene = saveWithScene and not self.runPreviewN
-                    attributes = {"LNM.Statistic": statistic, "LNM.N": self.runN, "LNM.Partial": "1" if self.runPartial else "0"}
+                    # The map is in the connectome's template space (a code 4 file, as the engine wrote it)
+                    attributes = {"LNM.Statistic": statistic, "LNM.N": self.runN, "LNM.Partial": "1" if self.runPartial else "0",
+                                  "Studio.Space": self.logic.connectomeSpaceName(self._runBundle or self.bundle)}
                     newVolume = self.logic.loadMap(path, self._resultName(statistic), resultVolume, saveWithScene=saveWithScene, attributes=attributes)
                     self._mapStamp["volume"] = stamp
                     mapChanged = True
@@ -5238,7 +5264,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             self.initializeParameterNode()
             node = self._parameterNode
         statistic = info["statistic"]
-        attributes = {"LNM.Statistic": statistic, "LNM.N": info["n"] or "", "LNM.Partial": "0", LOADED_MAP_ATTRIBUTE: os.path.basename(path), "Studio.Role": "statmap"}
+        attributes = {"LNM.Statistic": statistic, "LNM.N": info["n"] or "", "LNM.Partial": "0", LOADED_MAP_ATTRIBUTE: os.path.basename(path), "Studio.Role": "statmap",
+                      "Studio.Space": info.get("space")}
         name = f"{info['label']} LNM {statistic}" + (f" N={info['n']}" if info["n"] else "")
         previous = self._loadedVolume()
         volume = self.logic.loadMap(path, name, previous, saveWithScene=True, attributes=attributes)

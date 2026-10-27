@@ -591,6 +591,46 @@ class StudioNiftiExportTest(unittest.TestCase):
         positive = self.export.thresholdMask(values.transpose(2, 1, 0), 4.5, "pos")
         self.assertEqual(int(positive.sum()), 1)
 
+    def test_07b_map_on_a_declared_connectome_space_is_mni(self):
+        """A Map result of a connectome on a grid that is not a built-in one (the demo, the user's conversions) is in the
+        connectome's declared space: code 4 and that space in the sidecar, as the engine's own file of the map.
+        """
+        import LesionNetworkMapping as lnm
+        from LesionNetworkMappingLib import connectome, nifti
+
+        logic = lnm.LesionNetworkMappingLogic()
+        demoPath = os.path.join(self.tempDir, "demo.lnmc")
+        lnm.writeDemoConnectome(demoPath, nSubjects=2, shape=(8, 9, 8), runs=(12,))
+        demo = connectome.ConnectomeBundle.open(demoPath)
+        self.assertEqual(logic.connectomeSpaceName(demo), lnm.DEMO_SPACE)
+        nativePath = os.path.join(self.tempDir, "native.lnmc")
+        native = connectome.ConnectomeBundle.open(connectome.make_synthetic(nativePath, shape=(8, 9, 8), n_subjects=2, runs=(12,))["path"])
+        self.assertIsNone(logic.connectomeSpaceName(native))
+        self.assertIsNone(logic.connectomeSpaceName(None))
+
+        values = np.zeros(tuple(demo.shape), np.float32)
+        values[3, 4, 3] = 6.0
+        enginePath = os.path.join(self.tempDir, "lesion_conn-Demo_desc-T_funcmap.nii.gz")
+        nifti.write_nifti(enginePath, values, demo.affine)
+        self.assertEqual(nifti.read_nifti_header(enginePath)["sform_code"], 4)
+        volume = logic.loadMap(enginePath, "Lesion T", None, attributes={"LNM.Statistic": "T", "LNM.N": 2,
+                                                                         "Studio.Space": logic.connectomeSpaceName(demo)})
+        self.assertEqual(self.export.kindOf(volume), self.export.KIND_MAP)
+        result = self.export.exportVolume(volume, os.path.join(self.tempDir, "mapout", "map.nii.gz"), threshold=4.0)
+        self.assertEqual(len(result.images), 2)
+        for path in result.images:
+            _data, _affine, header = self._read(path)
+            self.assertEqual((header["sform_code"], header["qform_code"]), (4, 4), path)
+            self.assertEqual(self._sidecar(path)["Space"], lnm.DEMO_SPACE)
+        # A later map with a connectome without a space removes the attribute (no stale space)
+        logic.loadMap(enginePath, "Lesion T", volume, attributes={"Studio.Space": logic.connectomeSpaceName(native)})
+        self.assertIsNone(volume.GetAttribute("Studio.Space"))
+        # A map file opened from disk takes the space of its sidecar
+        sidecar = os.path.join(self.tempDir, "lesion_conn-Demo_lnm.json")
+        with open(sidecar, "w", encoding="utf-8") as f:
+            json.dump({"N": 2, "connectome": {"space": lnm.DEMO_SPACE}}, f)
+        self.assertEqual(logic.mapFileInfo(enginePath)["space"], lnm.DEMO_SPACE)
+
     def test_08_dialog_multi_select_and_overwrite(self):
         """The dialog exports several images at once, asks before replacing files and remembers only Studio/* keys."""
         from StudioLib import autosave_io, niftiexport_ui
