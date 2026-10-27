@@ -513,6 +513,28 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         card.close()
         self._pump(4)
 
+    def test_folder_card_group_mapping_offers_every_value(self):
+        """A group column with more than 8 distinct values: every value gets a combo (none silently becomes group n/a)."""
+        from StudioLib import importer, library
+
+        studioShell = self._applyStudio()
+        folder = self._writeTinyFiles(10, "manygroups")
+        values = ["patient", "HC", "stroke", "control", "TIA", "MS", "tumour", "healthy", "ICH", "SAH"]
+        with open(os.path.join(folder, "participants.tsv"), "w", encoding="utf-8") as f:
+            f.write("participant_id\tgroup\n" + "".join("sub-%02d\t%s\n" % (i + 1, value) for i, value in enumerate(values)))
+        importer.loadFolder(folder, studioShell)
+        self._pump(6)
+        card = library.canvas().folderCard()
+        self.assertIsNotNone(card)
+        if card.createStudyButton is None:
+            return
+        self.assertEqual(sorted(card.groupCombos), sorted(values))
+        self.assertEqual(sorted(card.groupMapping()), sorted(values))
+        # The rows scroll inside the card; the last value's combo is one of the card's widgets
+        self.assertIsNotNone(card.widget.findChild("QScrollArea", "StudioFolderCardGroupScroll"))
+        card.close()
+        self._pump(4)
+
     #
     # Loaded set
     #

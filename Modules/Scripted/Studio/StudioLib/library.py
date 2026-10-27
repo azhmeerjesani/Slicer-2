@@ -4899,6 +4899,8 @@ class FolderCard:
         self.close()
         return _runAction(lambda: _importer().loadFiles(paths, _shell()), _("Failed to load the files."))
 
+    GROUP_ROWS_SHOWN = 8  # rows visible at once; more values scroll
+
     def _addStudyPlan(self, layout, folder, table):
         """Where the study goes and, for a participants table whose groups are not case / control, how they map (L-01)."""
         studyUi = _studyUi()
@@ -4919,7 +4921,14 @@ class FolderCard:
         label = self._textLabel(_("Groups in column '{column}':").format(column=self.groupColumn), "StudioFolderCardGroupTitle")
         layout.addWidget(label)
         targets = ((_("Case"), "case"), (_("Control"), "control"), (_("Exclude"), "exclude"), ("—", None))
-        for value, target in list(mapping.items())[:8]:
+        # Every distinct value gets a combo (a value without one would silently end up as group n/a); a long list
+        # scrolls inside the card instead of growing it
+        rowsWidget = qt.QWidget()
+        rowsWidget.setObjectName("StudioFolderCardGroupRows")
+        rowsLayout = qt.QVBoxLayout(rowsWidget)
+        rowsLayout.setContentsMargins(0, 0, 0, 0)
+        rowsLayout.setSpacing(4)
+        for value, target in mapping.items():
             row = qt.QHBoxLayout()
             row.setSpacing(8)
             valueLabel = self._textLabel(f"{value}  →", "StudioFolderCardGroupValue")
@@ -4930,8 +4939,21 @@ class FolderCard:
                 combo.addItem(text, data)
             combo.setCurrentIndex(next(index for index, (_text, data) in enumerate(targets) if data == target))
             row.addWidget(combo)
-            layout.addLayout(row)
+            rowsLayout.addLayout(row)
             self.groupCombos[value] = combo
+        if len(mapping) <= self.GROUP_ROWS_SHOWN:
+            layout.addWidget(rowsWidget)
+            return
+        scroll = qt.QScrollArea()
+        scroll.setObjectName("StudioFolderCardGroupScroll")
+        scroll.setFrameShape(qt.QFrame.NoFrame)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea#StudioFolderCardGroupScroll, QWidget#StudioFolderCardGroupRows { background: transparent; }"
+                             "QScrollArea#StudioFolderCardGroupScroll > QWidget#qt_scrollarea_viewport { background: transparent; }")
+        scroll.setWidget(rowsWidget)
+        scroll.setFixedHeight(self.GROUP_ROWS_SHOWN * (qt.QComboBox().sizeHint.height() + 4))
+        layout.addWidget(scroll)
 
     def groupMapping(self):
         """{value: "case" | "control" | "exclude" | None} as chosen in the card (None without a group column to map)."""
