@@ -82,6 +82,10 @@ KIND_FOLDERS = (IMAGES, SEGMENTATIONS, LESIONS, MAPS, MARKUPS, MODELS, TABLES, T
 UNTITLED_NAME = "Untitled project"
 #: Longest file or folder name written (characters)
 MAX_NAME_LENGTH = 80
+#: Longest file or folder name written (UTF-8 bytes). File systems limit names in bytes (255 on Linux and APFS), not in
+#: characters, and Studio adds to a name: ".studio-tmp-xxxxxxxx.mrml" (25 bytes) on the scene file it writes, " (Slicer Studio)"
+#: (16) when another program changed it, " 99" for a taken name and ".studio-part" (12) on a copy in progress
+MAX_NAME_BYTES = 200
 
 #: Compound file extensions, longest first (the part after the base name)
 COMPOUND_EXTENSIONS = (".seg.nrrd", ".seg.nhdr", ".seg.vtm", ".nii.gz", ".mrk.json", ".schema.tsv", ".schema.csv", ".seq.nrrd", ".seq.nhdr",
@@ -261,11 +265,18 @@ _UNSAFE = re.compile(r'[<>:"/\\|?*\x00-\x1f\x7f]')
 _RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
 
 
-def sanitizeName(name, maxLength=MAX_NAME_LENGTH, fallback=UNTITLED_NAME):
-    r"""A file or folder name valid on macOS, Windows and Linux: no / \ : * ? " < > |, no trailing dot or space. Worker-safe."""
+def sanitizeName(name, maxLength=MAX_NAME_LENGTH, fallback=UNTITLED_NAME, maxBytes=MAX_NAME_BYTES):
+    r"""A file or folder name valid on macOS, Windows and Linux: no / \ : * ? " < > |, no trailing dot or space.
+
+    At most ``maxLength`` characters and ``maxBytes`` UTF-8 bytes (cut on a character boundary: 80 Japanese characters are
+    240 bytes). Worker-safe.
+    """
     name = _UNSAFE.sub(" ", str(name or ""))
     name = re.sub(r"\s+", " ", name).strip()
-    name = name[:maxLength].rstrip(". ").lstrip(". ")
+    name = name[:maxLength]
+    while len(name.encode("utf-8", "replace")) > maxBytes:
+        name = name[:-1]
+    name = name.rstrip(". ").lstrip(". ")
     if not name:
         return fallback
     if name.split(".")[0].upper() in _RESERVED:

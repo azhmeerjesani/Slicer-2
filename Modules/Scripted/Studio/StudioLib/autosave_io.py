@@ -2124,7 +2124,9 @@ class ProjectWriter(SlotWriter):
             self._reserve(plan, os.path.dirname(done[2]), os.path.basename(done[2]))
             return
         folder = os.path.join(self.project.path, projects.kindFolder(node))
-        destination = self._newPath(plan, folder, projects.sanitizeName(os.path.basename(source), fallback="data"))
+        # The name is capped before its extension, which must stay whole (a copied "x.nii.gz" must still open)
+        base, extension = projects.splitExtension(os.path.basename(source))
+        destination = self._newPath(plan, folder, projects.sanitizeName(base, fallback="data") + extension)
         plan.imports.append((nodeId, source, stat, destination))
         plan.copyJobs.append((nodeId, source, stat, destination))
         entry["bytes"] = stat[0] if stat else 0

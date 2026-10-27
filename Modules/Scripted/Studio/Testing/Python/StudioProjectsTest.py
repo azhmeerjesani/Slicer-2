@@ -1392,6 +1392,40 @@ class StudioProjectsTest(unittest.TestCase):
             else:
                 settings.setValue("Studio/LastSaveFolder", savedFolder)
 
+    def test_29_long_non_ascii_names_stay_under_the_file_name_limit(self):
+        """A name is capped in bytes, not only in characters: 84 Japanese characters are 252 bytes, and the temporary scene
+        file (+25 bytes) went over the 255 bytes of a file name, so the project was never saved.
+        """
+        projects = self.projects
+        for text in ("脳卒中患者の拡散強調画像" * 7, "😀" * 70, "é" * 300, "x" * 300):
+            name = projects.sanitizeName(text)
+            self.assertLessEqual(len(name), projects.MAX_NAME_LENGTH)
+            self.assertLessEqual(len(name.encode("utf-8")), projects.MAX_NAME_BYTES, text[:3])
+            self.assertEqual(name, text[: len(name)], "cut on a character boundary, nothing else changed")
+            # The longest file Studio writes for the name: the temporary scene file of the conflict copy
+            longest = f"{name}{self.io.CONFLICT_SUFFIX} 99.studio-tmp-12345678{projects.SCENE_EXTENSION}"
+            self.assertLess(len(longest.encode("utf-8")), 255)
+        self.assertEqual(projects.sanitizeName("脳卒中" * 100, maxLength=1000), "脳卒中" * 22)
+        # A copied file keeps its whole extension
+        service = self._service()
+        fileName = "脳卒中患者の拡散強調画像" * 5 + "脳卒中患者の拡散強調"  # 70 characters, 210 bytes: a file name
+        volume, _path = self._userVolume(name=fileName)
+        volume.SetName("脳卒中患者の拡散強調画像" * 7)  # 84 characters, 252 bytes
+        project = self._projectFor(service)
+        self.assertLessEqual(len(project.name.encode("utf-8")), projects.MAX_NAME_BYTES)
+        self._save(service)
+        self.assertTrue(os.path.isfile(project.scenePath), "the scene file is written")
+        self.assertTrue(any(path.endswith(".nii.gz") and "脳卒中" in path for path in self._projectFiles(project)), self._projectFiles(project))
+        for path in _relativeFiles(project.path):
+            for part in path.split("/"):
+                self.assertLess(len(part.encode("utf-8")), 255, path)
+        # Rename to a long emoji name: capped, no raw "File name too long"
+        renamed = service.renameProject("😀" * 70)
+        self.assertLessEqual(len(os.path.basename(renamed).encode("utf-8")), projects.MAX_NAME_BYTES)
+        self._save(service)
+        self.assertTrue(os.path.isfile(service.project.scenePath))
+        self.assertTrue(volume.GetStorageNode().GetFileName().startswith(renamed + os.sep))
+
 
 
 def _sphere(center=(0, 0, 0)):
