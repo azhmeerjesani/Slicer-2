@@ -1592,6 +1592,7 @@ class Shell:
         self._uninstallPlugins()
         self._setSegmentEditorPresentation("classic")
         self._setMapPresentation(False)
+        self._setSliceAnnotationsPresentation(False)
         self._active = False
         self._pauseLesionQc()
         self._disconnectAll()
@@ -1909,6 +1910,7 @@ class Shell:
         # Save dialog (Ctrl+S).
         self._setSegmentEditorPresentation("studio")
         self._setMapPresentation(True)
+        self._setSliceAnnotationsPresentation(True)
         self._fixSceneRootDirectory()
         self._sceneCloseObservation = slicer.mrmlScene.AddObserver(slicer.vtkMRMLScene.EndCloseEvent, self._onSceneEndClose)
         self._sceneImportObservation = slicer.mrmlScene.AddObserver(slicer.vtkMRMLScene.EndImportEvent, self._onSceneEndImport)
@@ -2388,6 +2390,25 @@ class Shell:
                 widget.setStudioPresentation(bool(studio), refresh=False)
             except Exception:
                 logging.error(f"Studio: cannot set the look of Map:\n{traceback.format_exc()}")
+
+    @staticmethod
+    def _setSliceAnnotationsPresentation(studio):
+        """The Studio corner text of flat slice views (the readable name of the image alone, VISUAL 4.3); ``False`` gives
+        Classic the corner text of official 3D Slicer back ("L:", "F:" and "B:" lines).
+        """
+        try:
+            from DataProbeLib.SliceViewAnnotations import STUDIO_ACTIVE_PROPERTY
+        except ImportError:
+            # The DataProbe module is turned off: no corner text
+            return
+        slicer.app.setProperty(STUDIO_ACTIVE_PROPERTY, bool(studio))
+        dataProbe = getattr(slicer.modules, "DataProbeInstance", None)
+        sliceAnnotations = getattr(getattr(dataProbe, "infoWidget", None), "sliceAnnotations", None)
+        if sliceAnnotations is not None:
+            try:
+                sliceAnnotations.refreshAnnotations()
+            except Exception:
+                logging.error(f"Studio: cannot refresh the corner text of the slice views:\n{traceback.format_exc()}")
 
     @staticmethod
     def _setSegmentEditorPresentation(name):

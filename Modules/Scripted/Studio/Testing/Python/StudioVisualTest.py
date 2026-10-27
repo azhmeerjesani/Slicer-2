@@ -14,7 +14,8 @@ without writing a setting):
 - (c) switches: the switch track is on the right edge of a ``ui.switch()`` row, the label on the left;
 - (d) text that fits: in a 1366 x 768 window, every visible plain-text label and text button of the Studio surfaces
   (top bar, Library, Draw, Map) shows its whole text (or elides it on purpose with an ellipsis);
-- (e) the view bars: the flat bar is a pill with the view dot, and the slice readout keeps its plain text.
+- (e) the view bars: the flat bar is a pill with the view dot, and the slice readout keeps its plain text; the corner text
+  of a flat view is the Studio text only while Studio is shown (Classic keeps the "L:", "F:" and "B:" lines).
 """
 
 import os
@@ -603,3 +604,47 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
         self._pump(4)
         self.assertFalse(bool(bar.property("slicerFlatViewBar")))
         self.assertNotEqual(bar.height, 34)
+
+    def _bottomLeftCornerText(self, sliceViewName="Red"):
+        """The bottom-left corner text of a slice view once the pending annotation updates are done."""
+        sliceAnnotations = slicer.modules.DataProbeInstance.infoWidget.sliceAnnotations
+        self._pump(4)
+        sliceAnnotations.updatePendingViewAnnotations()
+        return str(self.layoutManager.sliceWidget(sliceViewName).sliceView().cornerAnnotation().GetText(0))
+
+    def test_flat_view_corner_text_classic(self):
+        """Classic keeps the corner text of official 3D Slicer on flat view bars (D13): "L:", "F:" with the opacity and
+        "B:" lines. Studio names only the image under the layers (VISUAL 4.3), and switching back to Classic brings the
+        official lines back without another change of the view.
+        """
+        dataProbe = getattr(slicer.modules, "DataProbeInstance", None)
+        if dataProbe is None or dataProbe.infoWidget is None:
+            self.skipTest("the Data Probe is not shown")
+        sliceAnnotations = dataProbe.infoWidget.sliceAnnotations
+        if not sliceAnnotations.sliceViewAnnotationsEnabled or not sliceAnnotations.bottomLeft:
+            self.skipTest("the bottom-left slice view annotations are turned off in this profile")
+        self.layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUpRedSliceView)
+        controller = self.layoutManager.sliceWidget("Red").sliceController()
+        flatBefore = controller.flatStyle
+        self._restores.append(lambda: controller.setProperty("flatStyle", flatBefore))
+        controller.setProperty("flatStyle", True)
+        background = self._addVolume("MR_head")
+        foreground = self._addVolume("Overlay")
+        label = slicer.modules.volumes.logic().CreateAndAddLabelVolume(slicer.mrmlScene, background, "Labels")
+        slicer.util.setSliceViewerLayers(background=background, foreground=foreground, foregroundOpacity=0.4, label=label, fit=True)
+        official = f"L: {label.GetName()} (100%)\nF: Overlay (40%)\nB: MR_head\n"
+
+        # Classic with a flat view bar: the text of official 3D Slicer
+        self.assertTrue(controller.flatStyle)
+        self.assertEqual(self._bottomLeftCornerText(), official)
+
+        # Studio: the readable name of the image alone
+        studioShell = self._applyStudio()
+        controller.setProperty("flatStyle", True)
+        self._pump(4)
+        self.assertEqual(self._bottomLeftCornerText(), "MR head\n")
+
+        # Back to Classic (Ctrl+Alt+0): the official lines again, with no other change of the view
+        studioShell.classic(persist=False)
+        self.assertTrue(controller.flatStyle)
+        self.assertEqual(self._bottomLeftCornerText(), official)
