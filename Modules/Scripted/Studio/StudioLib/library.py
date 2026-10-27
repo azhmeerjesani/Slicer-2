@@ -3001,6 +3001,9 @@ class StudyList(qt.QObject):
         selected = studySelection()
         # A model reset scrolls to the top: keep the place of the user (a QC key, a thumbnail or a save refreshes the rows)
         scrolls = [(view, view.verticalScrollBar().value) for view in self._itemViews()]
+        # It also clears the keyboard cursor (the current index): without it the next arrow key starts at the first row
+        currentIndex = self.table.currentIndex()
+        currentId = self.model.sid(currentIndex.row()) if currentIndex.isValid() else None
         self._settingSelection = True
         try:
             self.model.setRows(rows, studySession.current())
@@ -3009,6 +3012,7 @@ class StudyList(qt.QObject):
                 row = self.model.rowOf(sid)
                 if row >= 0:
                     selectionModel.select(self.model.index(row, 0), qt.QItemSelectionModel.Select | qt.QItemSelectionModel.Rows)
+            self._restoreCurrent(currentId)
         finally:
             self._settingSelection = False
         self._sizeColumns()
@@ -3055,10 +3059,28 @@ class StudyList(qt.QObject):
                 row = self.model.rowOf(sid)
                 if row >= 0:
                     selectionModel.select(self.model.index(row, 0), qt.QItemSelectionModel.Select | qt.QItemSelectionModel.Rows)
+            currentIndex = self.table.currentIndex()
+            self._restoreCurrent(self.model.sid(currentIndex.row()) if currentIndex.isValid() else None)
         finally:
             self._settingSelection = False
         if self.onSelection is not None:
             self.onSelection()
+
+    def _restoreCurrent(self, sid):
+        """Put the keyboard cursor (the current index, shared by the list and the grid) on ``sid`` when it is selected or
+        nothing is, else on the first selected row; the selection is not changed (the arrow keys go on from there).
+        """
+        selectionModel = self.table.selectionModel()
+        selectedRows = sorted({index.row() for index in selectionModel.selectedRows()})
+        row = self.model.rowOf(sid) if sid else -1
+        if row < 0 or (selectedRows and row not in selectedRows):
+            row = selectedRows[0] if selectedRows else -1
+        if row < 0:
+            return
+        current = self.table.currentIndex()
+        if current.isValid() and current.row() == row:
+            return
+        selectionModel.setCurrentIndex(self.model.index(row, max(0, current.column())), qt.QItemSelectionModel.NoUpdate)
 
     def selectIds(self, sids):
         _setStudySelection(list(sids))

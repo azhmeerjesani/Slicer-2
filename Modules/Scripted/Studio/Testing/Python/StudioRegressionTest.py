@@ -28,6 +28,9 @@ Run with the main window and testing enabled::
   status at untraced, so that Done -> next finds the next subject and tracing never overwrites the user's values; an
   "include" column of yes / no is kept as ``include_original`` and keeps its meaning; a status column of study values is
   the study's own column (empty cells untraced).
+- ``test_8_study_list_qc_keeps_cursor`` (BB-1): a QC key (P / X / U) refreshes the subject list (a model reset) but keeps the
+  keyboard cursor (the current index) on the subject, so that the next Down goes to the next subject and the next QC key
+  marks that one (it went to the first row: the wrong subject was marked); a selection made elsewhere moves the cursor too.
 """
 
 import json
@@ -617,6 +620,86 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertNotIn("status_original", study.columns)
         self.assertEqual([study.subject(sid)["status"] for sid in study.subject_ids], ["traced", "untraced", "untraced"])
         self.assertEqual(study.next_subject("sub-01"), "sub-02")
+
+    # Keyboard triage of the subject list (BB-1)
+
+    def test_8_study_list_qc_keeps_cursor(self):
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import library, shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Triage study")
+        os.makedirs(folder)
+        paths = []
+        for index in range(1, 7):
+            paths.append(os.path.join(folder, f"sub-0{index}_T1w.nii.gz"))
+            nifti.write_nifti(paths[-1], np.zeros(grid.shape, np.uint8), grid.affine)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        studyList = None
+
+        def pump():
+            for _ in range(6):
+                slicer.app.processEvents()
+
+        def key(code):
+            slicer.app.sendEvent(table, qt.QKeyEvent(qt.QEvent.KeyPress, code, qt.Qt.NoModifier))
+            pump()
+
+        try:
+            session = study_ui.createStudy(paths, studioShell, folder=folder)
+            self.assertIsNotNone(session)
+            studyList = library.StudyList()
+            studyList.widget.resize(900, 400)
+            studyList.widget.show()
+            studyList.refresh()
+            pump()
+            table, model = studyList.table, studyList.model
+            self.assertEqual([model.sid(row) for row in range(model.rowCount())], [f"sub-0{index}" for index in range(1, 7)])
+            # A click on sub-04 (current and selected), then P
+            table.selectionModel().setCurrentIndex(model.index(3, 0), qt.QItemSelectionModel.ClearAndSelect | qt.QItemSelectionModel.Rows)
+            pump()
+            self.assertEqual(studyList.selectedIds(), ["sub-04"])
+            studyList.setQc("pass")
+            pump()
+            self.assertEqual(session.study.subject("sub-04")["qc"], "pass")
+            self.assertEqual(studyList.selectedIds(), ["sub-04"])
+            self.assertEqual(table.currentIndex().row(), 3, "the QC key keeps the keyboard cursor on the subject")
+            # Down goes on to sub-05, and X marks sub-05 (not sub-01)
+            key(qt.Qt.Key_Down)
+            self.assertEqual(studyList.selectedIds(), ["sub-05"])
+            studyList.setQc("fail")
+            pump()
+            self.assertEqual(session.study.subject("sub-05")["qc"], "fail")
+            self.assertNotEqual(session.study.subject("sub-01")["qc"], "fail")
+            # U changes nothing on an unreviewed subject but still refreshes: the cursor stays
+            key(qt.Qt.Key_Down)
+            self.assertEqual(studyList.selectedIds(), ["sub-06"])
+            studyList.setQc("unreviewed")
+            pump()
+            self.assertEqual(table.currentIndex().row(), 5)
+            key(qt.Qt.Key_Up)
+            self.assertEqual(studyList.selectedIds(), ["sub-05"])
+            # A selection made elsewhere (another list, the grid, Draw) moves the cursor with it
+            library._setStudySelection(["sub-02"])
+            pump()
+            self.assertEqual(studyList.selectedIds(), ["sub-02"])
+            self.assertEqual(table.currentIndex().row(), 1)
+            key(qt.Qt.Key_Down)
+            self.assertEqual(studyList.selectedIds(), ["sub-03"])
+        finally:
+            if studyList is not None:
+                studyList.dispose()
+                studyList.widget.deleteLater()
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
 
     @staticmethod
     def _isAncestor(ancestor, widget):
