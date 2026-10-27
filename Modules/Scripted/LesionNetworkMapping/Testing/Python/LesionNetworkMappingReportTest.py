@@ -195,6 +195,63 @@ class ReportTest(unittest.TestCase):
         self.assertNotIn('href="report.html"', files)
         self.assertIn("Neurological convention", text)
 
+    def test_watermark(self):
+        """L-53: a tutorial study (TUTORIAL DATA) or a synthetic connectome (SYNTHETIC) is named in the title and a
+        header banner, and every map figure carries the watermark (bug bash BB-1: reports had none).
+        """
+        from PIL import Image
+
+        def title(text):
+            return re.search(r"<title>([^<]*)</title>", text).group(1)
+
+        def overlap_png(text):
+            source = re.search(r'<img src="data:image/png;base64,([^"]+)"[^>]*alt="Lesion overlap montage"', text).group(1)
+            return np.asarray(Image.open(io.BytesIO(base64.b64decode(source))).convert("RGB")).astype(int)
+
+        # The fixture's connectome is synthetic
+        self.assertIn("(SYNTHETIC)", title(self.text))
+        self.assertRegex(section_html(self.text, "header"), r'<p class="banner watermark" role="alert">SYNTHETIC: ')
+        # A tutorial study wins over the synthetic connectome (figures.watermark_for)
+        study_json = os.path.join(self.fx["study"], "study.json")
+        original = read(study_json)
+
+        def restore():
+            with open(study_json, "w", encoding="utf-8") as f:
+                f.write(original)
+
+        self.addCleanup(restore)
+        edit_json(study_json, lambda data: data.update(tutorial=True))
+        tutorial = read(report.render_report(copy_out(self.out, "copy-tutorial"), now=NOW, strict=True))
+        self.assertIn("(TUTORIAL DATA)", title(tutorial))
+        self.assertRegex(section_html(tutorial, "header"), r'<p class="banner watermark" role="alert">TUTORIAL DATA: ')
+        self.assertEqual(report.lint_wording(tutorial), [])
+        # Without a watermark the page and the figures carry none
+        with mock.patch.object(report._Report, "_watermark", return_value=None):
+            plain = read(report.render_report(copy_out(self.out, "copy-nowatermark"), now=NOW, strict=True))
+        self.assertNotIn("TUTORIAL DATA", plain)
+        self.assertNotIn("banner watermark", plain)
+        marked, unmarked = overlap_png(tutorial), overlap_png(plain)
+        self.assertEqual(marked.shape, unmarked.shape)
+        changed = np.abs(marked - unmarked).sum(axis=2) > 0
+        self.assertGreater(int(changed.sum()), 50, "the watermark is burnt into the report figures")
+        height, width = changed.shape
+        rows, columns = np.nonzero(changed)
+        self.assertLess(abs(rows.mean() - height / 2), height / 4, "centred")
+        self.assertLess(abs(columns.mean() - width / 2), width / 4, "centred")
+        # Every canvas figure records and draws it
+        canvas, shape, affine = self.canvas()
+        marked_canvas = reportfigs.Canvas(canvas.template, watermark="tutorial")
+        lesion = np.zeros(shape, dtype=np.uint8)
+        lesion[18:22, 22:26, 18:22] = 1
+        volume = figures.Volume(lesion, affine, "lesion")
+        for name, call in (("montage", lambda c: c.montage(volume, "lesion", slices=[0.0])),
+                           ("ortho", lambda c: c.ortho(volume, (0.0, 0.0, 0.0))),
+                           ("gallery_strip", lambda c: c.gallery_strip(volume, None, None, 1.0, label="1"))):
+            with_mark, without = call(marked_canvas), call(canvas)
+            self.assertEqual(with_mark.meta["watermark"], "TUTORIAL DATA", name)
+            self.assertIsNone(without.meta["watermark"], name)
+            self.assertFalse(np.array_equal(np.asarray(with_mark.image), np.asarray(without.image)), name)
+
     def test_preview_overrides_and_missing_inputs(self):
         out = copy_out(self.out, "copy-preview")
 

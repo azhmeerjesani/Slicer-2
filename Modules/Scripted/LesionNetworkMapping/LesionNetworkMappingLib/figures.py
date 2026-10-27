@@ -113,6 +113,9 @@ LUT_ENTRIES = colormaps.DEFAULT_ENTRIES
 WINDOW_PERCENTILE = 99.5  # SPEC §4.12 (as display.WINDOW_PERCENTILE)
 WIDEN_FACTOR = 1.1  # a threshold at or above W widens W to at least this multiple of the threshold
 WATERMARKS = {"tutorial": "TUTORIAL DATA", "synthetic": "SYNTHETIC"}
+#: Colour and opacity of the watermark (figures here and the report figures of :mod:`reportfigs`)
+WATERMARK_COLOR = "#808080"
+WATERMARK_OPACITY = 0.25
 #: Font sizes in points (converted to pixels at the figure's dpi)
 TEXT_PT = 7.0
 LETTER_PT = 9.0
@@ -1063,7 +1066,7 @@ def _compose(panels, options, fonts, colorbars=(), panel_columns=1, heading=None
         tiles_out.append(record)
     if options.watermark:
         # First, so every label and stamp is drawn over it and stays readable
-        annotations.insert(0, Annotation("text", width_px / 2, height / 2, text=options.watermark, size=min(width_px / max(len(options.watermark), 1) * 1.2, height * 0.3), color="#808080", opacity=0.25, anchor="mm", bold=True, role="watermark"))
+        annotations.insert(0, Annotation("text", width_px / 2, height / 2, text=options.watermark, size=min(width_px / max(len(options.watermark), 1) * 1.2, height * 0.3), color=WATERMARK_COLOR, opacity=WATERMARK_OPACITY, anchor="mm", bold=True, role="watermark"))
     return base, annotations, tiles_out
 
 

@@ -15,6 +15,9 @@ Sections, by id and in this order: header, summary, preflight, lesions, network-
 specificity, conjunction, slnm-<Label> (one per score; "slnm" when none), qa, clusters, gallery, methods,
 checklist, reproduce, files. The research-only disclaimer appears at the top and at the bottom.
 
+A tutorial study ("TUTORIAL DATA") or a synthetic connectome ("SYNTHETIC", :func:`figures.watermark_for`) is named
+in the page title and in a banner under the header, and every map figure carries the same watermark (L-53).
+
 Re-render without computing anything::
 
     python -m LesionNetworkMappingLib.pipeline report --out DIR [--atlas A --atlas-labels L --template T --figure-convention C]
@@ -55,6 +58,10 @@ REFERENCES = (
     ("Siddiqi et al., 2026, bioRxiv", "10.64898/2026.02.24.707529"),
     ("Zalesky & Cash, 2026, Nat Neurosci", "10.1038/s41593-026-02259-3"),
 )
+WATERMARK_NOTES = {
+    "TUTORIAL DATA": "this study was built from a published tutorial dataset to practise the workflow; its maps are a teaching example, not a new analysis.",
+    "SYNTHETIC": "these maps were computed on a synthetic connectome (simulated data for testing); they do not describe real brain connectivity.",
+}
 NOT_AVAILABLE_QA = "not available: no reference maps (μC/PC1) for this connectome and subject list; build them with --build-references"
 
 CSS = (
@@ -244,6 +251,7 @@ class _Report:
         self.alpha = float(self.config.get("alpha") or 0.05)
         self.space = self.connectome.get("space") or self.lesionset.get("space")
         self.convention = convention or self.config.get("figure_convention") or None
+        self.watermark = self._watermark()
         self.template = self._template(template)
         self.atlas_arg = atlas or self._path_or_id(self.config.get("atlas"))
         self.atlas_labels_arg = atlas_labels or self._resolve(self.config.get("atlas_labels"))
@@ -288,6 +296,13 @@ class _Report:
                 out[sid] = content
         return out
 
+    def _watermark(self):
+        """"TUTORIAL DATA" for a tutorial study, "SYNTHETIC" for a synthetic connectome, else None (L-53)."""
+        from . import figures
+
+        study = os.path.join(self.study_path, "study.json") if self.study_path else None
+        return figures.watermark_for(study if study and os.path.isfile(study) else None, self.connectome)
+
     def _template(self, explicit):
         from . import reportfigs
 
@@ -327,7 +342,7 @@ class _Report:
             reference = None if self.template else self.reference_image()
             if self.template is None and reference is None:
                 return None
-            self._canvas = reportfigs.Canvas(self.template, reference=reference, convention=self.convention)
+            self._canvas = reportfigs.Canvas(self.template, reference=reference, convention=self.convention, watermark=self.watermark)
         return self._canvas
 
     def reference_image(self):
@@ -463,7 +478,7 @@ class _Report:
             self.total = self.done
             self.emit("progress", stage="report", done=self.done, total=self.total, unit="figures")
         footer = f'<section id="footer"><div class="disc" role="note">{_e(export.DISCLAIMER)}</div></section>'
-        title = f"Lesion network mapping report: {self.study_name()}"
+        title = f"Lesion network mapping report: {self.study_name()}" + (f" ({self.watermark})" if self.watermark else "")
         page = (
             '<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width,initial-scale=1">\n'
             f"<title>{_e(title)}</title>\n<style>{CSS}</style>\n</head>\n<body>\n<main>\n" + "\n".join(part for part in body if part) + "\n" + footer + "\n</main>\n</body>\n</html>\n"
@@ -487,6 +502,9 @@ class _Report:
 
         data, connectome = self.data, self.connectome
         parts = [f"<h1>{_e(self.study_name())}</h1>", '<p class="mut">Lesion network mapping cohort report</p>']
+        if self.watermark:
+            note = WATERMARK_NOTES.get(self.watermark, "the figures of this report are watermarked.")
+            parts.append(f'<p class="banner watermark" role="alert">{_e(self.watermark)}: {_e(note)}</p>')
         identity = [f"Connectome <b>{_e(connectome.get('name') or 'not recorded')}</b>",
                     f"N = {_num(connectome.get('n_subjects') or connectome.get('N'))}",
                     f"V = {_num(connectome.get('n_voxels'))} voxels",
