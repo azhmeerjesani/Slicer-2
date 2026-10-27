@@ -1033,6 +1033,33 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         for button in (header.helpButton, header.moreButton, header.closeButton):
             self.assertEqual(button.focusPolicy, qt.Qt.TabFocus)
 
+    def test_12b_library_help_names_current_keys(self):
+        """The Library help (module help text) names the D-U1 keys: Alt+1..5, Ctrl+5 as inspector key, F6 regions, Hide panels."""
+        import re
+
+        studioShell = self._applyStudio()
+        studioShell.switchTo("library")
+        self._pump()
+
+        def plain(html):
+            return " ".join(re.sub("<[^>]+>", " ", html).replace("&gt;", ">").split())
+
+        shown = plain(studioShell.panelHeader.helpHtml())
+        for text in (shown, plain(slicer.util.getModule("Studio").helpText)):
+            self.assertIn("Alt+1..5 change the view layout", text)
+            self.assertIn("Ctrl+\\ (or Ctrl+5) shows or hides the inspector", text)
+            self.assertIn("F6 and Shift+F6 move the keyboard focus", text)
+            self.assertIn("F11 (or Ctrl+6) hides or shows the panels", text)
+            for stale in ("Alt+1..4", "(or F6)", "focus mode"):
+                self.assertNotIn(stale, text)
+        # The keys the help names do what it says
+        from StudioLib import shell
+
+        self.assertEqual(shell.INSPECTOR_SHORTCUT, "Ctrl+\\")
+        self.assertEqual(shell.INSPECTOR_ALTERNATE_SHORTCUT, "Ctrl+5")
+        self.assertEqual(tuple(shell.FOCUS_MODE_SHORTCUTS), ("F11", "Ctrl+6"))
+        self.assertEqual(tuple(shell.FOCUS_REGION_SHORTCUTS), ("F6", "Shift+F6"))
+
     def test_13_scene_root_directory(self):
         """The Save dialog (Ctrl+S) never opens in the application folder: Studio sets the scene root, Classic restores it."""
         import tempfile

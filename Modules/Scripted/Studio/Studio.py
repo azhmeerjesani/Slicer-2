@@ -120,9 +120,10 @@ Its three workspaces follow the path of a lesion network mapping study:
 <b>Library</b> (open data and choose a subject), <b>Draw</b> (trace the lesion) and <b>Map</b>
 (compute and read a network map).</p>
 <p>Keyboard: Ctrl+Alt+1/2/3 switch workspaces, Ctrl+K searches tools and actions,
-Alt+1..4 change the view layout, Ctrl+\\ (or F6) shows or hides the inspector,
-F11 toggles the focus mode, Esc backs out of the place and window/level modes, a maximized view
-and the focus mode, and Ctrl+Alt+0 switches to the Classic interface and back
+Alt+1..5 change the view layout, Ctrl+\\ (or Ctrl+5) shows or hides the inspector,
+F6 and Shift+F6 move the keyboard focus between the top bar, the inspector and the views,
+F11 (or Ctrl+6) hides or shows the panels, Esc backs out of the place and window/level modes, a maximized view
+and hidden panels, and Ctrl+Alt+0 switches to the Classic interface and back
 (also View &gt; Studio interface). On Windows, where AltGr and Ctrl+Alt cannot be told apart, text fields
 keep the characters typed with AltGr (for example @) and in a view AltGr+digit acts as Ctrl+Alt+digit.</p>
 <p>The Classic interface is never removed. Studio is not used when testing,

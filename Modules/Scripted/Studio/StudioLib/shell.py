@@ -2513,7 +2513,7 @@ class Shell:
         if cheatsheet is not None and hasattr(cheatsheet, "toggle"):
             cheatsheet.toggle(self)
             return
-        self.toast(_("Ctrl+K search · Ctrl+Alt+1 Library, 2 Draw, 3 Map · Alt+1..4 layouts · {inspector} inspector · {panels} hide panels · "
+        self.toast(_("Ctrl+K search · Ctrl+Alt+1 Library, 2 Draw, 3 Map · Alt+1..5 layouts · {inspector} inspector · {panels} hide panels · "
                      "F10 menu · F6 regions · Ctrl+Alt+0 Classic").format(
             inspector=self.inspectorShortcutText(alternate=True), panels=focusModeKeyText()), 6000)
 
