@@ -930,7 +930,7 @@ def lesionSummary(segmentationNode, compute=False):
     """What the Current work card says about a lesion: ``{"text", "side", "metrics"}``.
 
     ``text`` is "Left · 2.27 mL · 1 part" (the side word, "Left", "Right" or "Both hemispheres", only when the lesion grid is
-    a known MNI grid), "Empty" for a lesion without voxels, "…" while the metrics are not computed yet (the cache of
+    a known MNI grid; the enclosed volume for a closed surface source), "Empty" for a lesion without voxels, "…" while the metrics are not computed yet (the cache of
     ``draw.lesionMetrics()`` is cold; ``compute`` computes them now) and "Nothing drawn yet" without a segment.
     """
     if segmentationNode.GetSegmentation().GetNumberOfSegments() == 0:
@@ -940,7 +940,12 @@ def lesionSummary(segmentationNode, compute=False):
     if metrics is None:
         return {"text": "…", "side": None, "metrics": None}
     if not metrics["voxels"]:
-        return {"text": _("Empty"), "side": None, "metrics": metrics}
+        surface = draw.surfaceMetrics(segmentationNode)
+        if surface is None:
+            return {"text": _("Empty"), "side": None, "metrics": metrics}
+        # A closed surface source (official 3D Slicer can save one): its enclosed volume and pieces
+        metrics = dict(metrics, mL=surface["mL"], parts=surface["parts"], centroidRas=surface["centroidRas"],
+                       spans_both=surface["spans_both"])
     side = space.hemisphereWord(metrics["centroidRas"][0], segmentationNode, partsSpanBoth=bool(metrics.get("spans_both")))
     volume = metrics["mL"]
     parts = [side] if side else []

@@ -766,6 +766,45 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
     # Open now
     #
 
+    def test_open_now_closed_surface_segmentation(self):
+        """A segmentation whose source is a closed surface (official 3D Slicer saves one when a model is imported) is not
+        empty, gets an Open now row with an enabled NIfTI export, and its summary gives the enclosed volume.
+        """
+        import importlib
+
+        from StudioLib import draw, library, niftiexport
+
+        nc = importlib.import_module("LesionNetworkMappingUI.normalize_controller")
+        studioShell = self._applyStudio()
+        sphere = vtk.vtkSphereSource()
+        sphere.SetRadius(15.0)
+        sphere.SetCenter(10.0, 0.0, 0.0)
+        sphere.SetThetaResolution(24)
+        sphere.SetPhiResolution(24)
+        sphere.Update()
+        model = slicer.modules.models.logic().AddModel(sphere.GetOutput())
+        segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "SurfaceSeg")
+        segmentationNode.CreateDefaultDisplayNodes()
+        closedSurface = slicer.vtkSegmentationConverter.GetSegmentationClosedSurfaceRepresentationName()
+        segmentationNode.GetSegmentation().SetSourceRepresentationName(closedSurface)
+        self.assertTrue(slicer.modules.segmentations.logic().ImportModelToSegmentationNode(model, segmentationNode))
+        slicer.mrmlScene.RemoveNode(model)
+        segmentId = segmentationNode.GetSegmentation().GetNthSegmentID(0)
+        self.assertIsNone(segmentationNode.GetBinaryLabelmapInternalRepresentation(segmentId))
+        self.assertFalse(draw.isLesionEmpty(segmentationNode))
+        self.assertEqual(niftiexport.unavailableReason(segmentationNode), "")
+        self.assertFalse(nc.lesionIsEmpty(segmentationNode, segmentId))
+        summary = library.lesionSummary(segmentationNode, compute=True)
+        self.assertTrue(summary["text"].endswith("mL · 1 part"), summary["text"])
+        volume = summary["metrics"]["mL"]
+        self.assertAlmostEqual(volume, 4.0 / 3.0 * np.pi * 15.0 ** 3 / 1000.0, delta=0.5)
+        self._library(studioShell)
+        self.assertIn("SurfaceSeg", self._panel().openNowCard.rowNames())
+        # An empty closed surface segment is empty
+        emptyId = segmentationNode.GetSegmentation().AddEmptySegment("", "Nothing")
+        self.assertTrue(draw.isLesionEmpty(segmentationNode, [emptyId]))
+        self.assertTrue(nc.lesionIsEmpty(segmentationNode, emptyId))
+
     def test_open_now_card(self):
         """The inspector lists what is open; a lesion has an eye bound to its display node, every row a ⋯ menu with Close."""
         from StudioLib import library

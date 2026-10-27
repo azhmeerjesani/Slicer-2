@@ -424,11 +424,83 @@ def isLesionEmpty(segmentationNode, segmentIds=None):
         if data is not None and data[0].any():
             return False
         if data is None and segmentationNode.GetBinaryLabelmapInternalRepresentation(segmentId) is None:
-            # Not a binary labelmap (closed surface source): not known to be empty
-            segment = segmentation.GetSegment(segmentId)
-            if segment is not None and segment.GetRepresentationNames():
+            # Not a binary labelmap (closed surface source): empty only when its source representation is
+            if segmentHasNonLabelmapContent(segmentationNode, segmentId):
                 return False
     return True
+
+
+def _sourceRepresentation(segmentationNode, segmentId):
+    """The data of a segment's source representation (for example its closed surface ``vtkPolyData``), or None."""
+    if segmentationNode is None or not segmentId:
+        return None
+    segmentation = segmentationNode.GetSegmentation()
+    segment = segmentation.GetSegment(segmentId)
+    if segment is None:
+        return None
+    # vtkSegment has no Python-usable list of its representations: ask for the source one by name
+    representation = segment.GetRepresentation(segmentation.GetSourceRepresentationName())
+    if representation is None:
+        representation = segment.GetRepresentation(slicer.vtkSegmentationConverter.GetSegmentationClosedSurfaceRepresentationName())
+    return representation
+
+
+def segmentHasNonLabelmapContent(segmentationNode, segmentId):
+    """True when a segment without binary labelmap holds data in its source representation (a closed surface with
+    points, or a non-empty image such as a fractional labelmap).
+    """
+    representation = _sourceRepresentation(segmentationNode, segmentId)
+    if representation is None:
+        return False
+    if representation.IsA("vtkPolyData"):
+        return representation.GetNumberOfPoints() > 0
+    if representation.IsA("vtkImageData"):
+        return not representation.IsEmpty() if hasattr(representation, "IsEmpty") else representation.GetNumberOfPoints() > 0
+    return True
+
+
+#: Surface metrics of segments with a closed surface source: {(node ID, segment ID): (polydata, MTime, metrics)}
+_surfaceMetricsCache = {}
+
+
+def surfaceMetrics(segmentationNode, segmentId=None):
+    """``{"mL", "parts", "centroidRas", "spans_both"}`` of the closed surface of a segment that has no binary labelmap
+    (a segmentation whose source representation is "Closed surface", as official 3D Slicer writes it), else None.
+    """
+    if segmentationNode is None:
+        return None
+    segmentId = segmentId or _selectedSegmentId(segmentationNode)
+    if not segmentId or segmentationNode.GetBinaryLabelmapInternalRepresentation(segmentId) is not None:
+        return None
+    polyData = _sourceRepresentation(segmentationNode, segmentId)
+    if polyData is None or not polyData.IsA("vtkPolyData") or polyData.GetNumberOfPoints() == 0:
+        return None
+    key = (segmentationNode.GetID(), segmentId)
+    cached = _surfaceMetricsCache.get(key)
+    if cached is not None and cached[0] is polyData and cached[1] == polyData.GetMTime():
+        return cached[2]
+    triangles = vtk.vtkTriangleFilter()
+    triangles.SetInputData(polyData)
+    connectivity = vtk.vtkPolyDataConnectivityFilter()
+    connectivity.SetInputConnection(triangles.GetOutputPort())
+    connectivity.SetExtractionModeToAllRegions()
+    connectivity.Update()
+    parts = connectivity.GetNumberOfExtractedRegions()
+    mass = vtk.vtkMassProperties()
+    mass.SetInputConnection(triangles.GetOutputPort())
+    mass.Update()
+    volume = abs(mass.GetVolume()) / 1000.0 if polyData.GetNumberOfPolys() else 0.0
+    bounds = polyData.GetBounds()
+    center = vtk.vtkCenterOfMass()
+    center.SetInputData(polyData)
+    center.SetUseScalarsAsWeights(False)
+    center.Update()
+    metrics = {"mL": volume, "parts": max(parts, 1), "centroidRas": tuple(center.GetCenter()),
+               "spans_both": bounds[0] < 0 < bounds[1]}
+    _surfaceMetricsCache[key] = (polyData, polyData.GetMTime(), metrics)
+    if len(_surfaceMetricsCache) > 64:
+        _surfaceMetricsCache.pop(next(iter(_surfaceMetricsCache)))
+    return metrics
 
 
 #

@@ -614,7 +614,14 @@ def lesionIsEmpty(segmentationNode, segmentId):
         return True
     labelmap = segmentationNode.GetBinaryLabelmapInternalRepresentation(segmentId)
     if labelmap is None:
-        return not segment.GetRepresentationNames()
+        # vtkSegment has no Python-usable list of its representations: look at the source one (closed surface)
+        segmentation = segmentationNode.GetSegmentation()
+        representation = segment.GetRepresentation(segmentation.GetSourceRepresentationName())
+        if representation is None:
+            representation = segment.GetRepresentation(slicer.vtkSegmentationConverter.GetSegmentationClosedSurfaceRepresentationName())
+        if representation is None:
+            return True
+        return representation.GetNumberOfPoints() == 0 if hasattr(representation, "GetNumberOfPoints") else False
     extent = labelmap.GetExtent()
     if extent[1] < extent[0] or extent[3] < extent[2] or extent[5] < extent[4]:
         return True
