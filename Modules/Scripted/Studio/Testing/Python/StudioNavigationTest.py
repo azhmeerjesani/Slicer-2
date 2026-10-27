@@ -265,6 +265,40 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertIsNone(self.mainWindow.findChild("QToolButton", "StudioExitFocusModeButton"))
         self.assertTrue(self.mainWindow.menuBar().isVisible())
 
+    def test_2b_focus_mode_keys_show_pill_and_toast(self):
+        """F11 and Ctrl+6 reach the main window's setFocusMode (not shell.setFocusMode): the "Show panels" pill and
+        the consequence toast must appear all the same, once.
+        """
+        studioShell = self._applyStudio()
+        if not hasattr(self.mainWindow, "setFocusMode"):
+            self.skipTest("The main window has no setFocusMode: Studio installs its own keys")
+        studioShell.switchTo("draw")
+        self._pump()
+        pill = studioShell._focusModePill
+        self.assertFalse(pill.isVisible())
+        before = len(studioShell.recentMessages())
+        self.mainWindow.setFocusMode(True)  # what the key actions (WindowMaximizeViewAction) do
+        self._pump()
+        self.assertTrue(studioShell.focusMode())
+        self.assertTrue(pill.isVisible())
+        self.assertIn("Panels hidden", studioShell.toastText())
+        texts = [text for when, text, level in studioShell.recentMessages()[before:] if "Panels hidden" in text]
+        self.assertEqual(len(texts), 1)
+        # Showing the panels again through the key route removes the pill and the toast
+        self.mainWindow.setFocusMode(False)
+        self._pump()
+        self.assertFalse(studioShell.focusMode())
+        self.assertFalse(pill.isVisible())
+        self.assertNotIn("Panels hidden", studioShell.toastText())
+        # The menu route still shows one toast only
+        before = len(studioShell.recentMessages())
+        studioShell.toggleFocusMode()
+        self._pump()
+        texts = [text for when, text, level in studioShell.recentMessages()[before:] if "Panels hidden" in text]
+        self.assertEqual(len(texts), 1)
+        studioShell.setFocusMode(False)
+        self._pump()
+
     def test_3_escape_stack(self):
         """Esc leaves place / window-level mode, then a maximized view, then the focus mode (NAV-08)."""
         studioShell = self._applyStudio()

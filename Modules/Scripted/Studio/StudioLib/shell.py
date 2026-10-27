@@ -1384,6 +1384,8 @@ class Shell:
         #: The Studio look of the settings dialog (``SettingsDialogLook``), while Studio is applied
         self._settingsLook = None
         self._focusModeHidden = None
+        #: Whether the "Show panels" pill and toast for hidden panels were last shown (see _updateFocusModeIndicators)
+        self._focusModeIndicated = False
         self._focusModePill = None
         self._panelWidthTimer = None
         self._panelUpdateTimer = None
@@ -1880,6 +1882,9 @@ class Shell:
         layouts.register()
 
         self._connect(mainWindow.moduleSelector(), "moduleSelected(QString)", self.workspaces.onModuleSelected)
+        if hasattr(mainWindow, "setFocusMode"):
+            # F11 and Ctrl+6 (the Hide panels action of the main window) do not pass through setFocusMode() here
+            self._connect(mainWindow, "focusModeChanged(bool)", self._onMainWindowFocusModeChanged)
         self._connect(modulePanel, "moduleAdded(QString)", self._onModuleAdded)
         layoutManager = slicer.app.layoutManager()
         if layoutManager is not None:
@@ -3530,8 +3535,18 @@ class Shell:
                 self._focusModeHidden = None
         self._updateFocusModeIndicators(wasFocusMode)
 
-    def _updateFocusModeIndicators(self, wasFocusMode):
+    def _onMainWindowFocusModeChanged(self, enabled):
+        self._updateFocusModeIndicators()
+
+    def _updateFocusModeIndicators(self, wasFocusMode=None):
+        """Show or hide the "Show panels" pill and the consequence toast to match the state of the panels.
+
+        Runs for every route (≡ menu, Esc, the pill, and the F11 / Ctrl+6 keys through ``focusModeChanged``),
+        so the toast is shown once, on the change, whichever route is first.
+        """
+        wasFocusMode = self._focusModeIndicated
         focusMode = self._active and self.focusMode()
+        self._focusModeIndicated = bool(focusMode)
         if self._focusModePill is not None:
             if focusMode:
                 self._focusModePill.show()
