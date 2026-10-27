@@ -5270,6 +5270,9 @@ class LibraryCanvas(qt.QObject):
 
             self.projectsSection = projects_ui.ProjectsSection()
             columnLayout.addWidget(self.projectsSection.widget)
+            # The Continue card names the open project: the section lists the projects again when one is created (a scan
+            # was loaded) or changes, with no workspace switch
+            self.projectsSection.onRefreshed = self._syncCurrentProject
         except Exception:
             logging.error(f"Studio Library: the Projects section failed:\n{traceback.format_exc()}")
 
@@ -5527,6 +5530,8 @@ class LibraryCanvas(qt.QObject):
                 except Exception:
                     logging.error(f"Studio Library: {type(card).__name__} failed:\n{traceback.format_exc()}")
                     card.widget.hide()
+            # A card made now (a scan was loaded while Library showed) starts with the open project, if there is one
+            self._syncCurrentProject()
         else:
             for card in (self._currentWork, self._loadedSet):
                 if card is not None:
@@ -5580,12 +5585,16 @@ class LibraryCanvas(qt.QObject):
     def isStrip(self):
         return bool(self._dataShown)
 
+    def _syncCurrentProject(self):
+        """Show the open project (as the Projects section lists it) on the Continue card."""
+        if self._currentWork is not None and self.projectsSection is not None and hasattr(self.projectsSection, "currentInfo"):
+            self._currentWork.setProject(self.projectsSection.currentInfo())
+
     def refresh(self):
         self.refreshData()
         if self.projectsSection is not None:
             self.projectsSection.refresh()
-            if self._currentWork is not None and hasattr(self.projectsSection, "currentInfo"):
-                self._currentWork.setProject(self.projectsSection.currentInfo())
+            self._syncCurrentProject()
         if self.studiesSection is not None:
             try:
                 self.studiesSection.refresh()

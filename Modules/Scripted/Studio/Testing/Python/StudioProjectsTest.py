@@ -1426,6 +1426,43 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertTrue(os.path.isfile(service.project.scenePath))
         self.assertTrue(volume.GetStorageNode().GetFileName().startswith(renamed + os.sep))
 
+    def test_30_continue_card_follows_the_project_created_while_library_shows(self):
+        """A scan loaded while Library is shown makes the project a moment later: the Continue card named "Open now · Not in
+        a project yet" until the next workspace switch, while the project card, the top bar and the inspector knew the project.
+        """
+        from StudioLib import library
+
+        def card(canvas):
+            return canvas.currentWork.titleLabel.property("fullText"), canvas.currentWork.metaLabel.property("fullText")
+
+        service = self._service()
+        self._userVolume()
+        canvas = library.LibraryCanvas()
+        running = self.autosave._service
+        self.autosave._service = service
+        try:
+            canvas.refresh()
+            self.assertIsNone(self.projects.currentProject(), "no project yet")
+            self.assertEqual(card(canvas), ("Open now", "Not in a project yet"))
+            project = self._projectFor(service)  # the project is made after the card was shown: the listeners are told
+            deadline = time.time() + 10
+            while time.time() < deadline and card(canvas)[0] == "Open now":
+                slicer.app.processEvents()
+                time.sleep(0.02)
+            self.assertEqual(card(canvas)[0], project.name)
+            self.assertIn("Projects \u203a " + project.name, card(canvas)[1])
+            self.assertNotIn("Not in a project yet", card(canvas)[1])
+            # A card made while the project is already open starts with it
+            second = library.LibraryCanvas()
+            try:
+                second.refreshData()
+                self.assertEqual(card(second)[0], project.name)
+            finally:
+                second.dispose()
+        finally:
+            self.autosave._service = running
+            canvas.dispose()
+
 
 
 def _sphere(center=(0, 0, 0)):

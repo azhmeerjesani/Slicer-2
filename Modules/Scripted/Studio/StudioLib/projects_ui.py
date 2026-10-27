@@ -893,6 +893,9 @@ class ProjectsSection(qt.QObject):
         self._cards = []
         self._columns = 0
         self._infos = []
+        #: Called (no arguments) each time the projects were listed again: the Library canvas shows the open project on its
+        #: Continue card, which must follow the project that a load creates or a listener change renames
+        self.onRefreshed = None
         self._clickFilter = _ClickFilter(self)
         self.widget.installEventFilter(self._clickFilter)
         # The Python event filter must be gone before the interpreter is finalized (the section may outlive the shell, a
@@ -1019,6 +1022,11 @@ class ProjectsSection(qt.QObject):
         self.caption.setToolTip(projects.root())
         infos = sortProjects(projects.listProjects(), self.sortOrder)
         self._infos = infos
+        if self.onRefreshed is not None:
+            try:
+                self.onRefreshed()
+            except Exception:
+                logging.error(f"Studio Projects: the refresh callback failed:\n{traceback.format_exc()}")
         shown = infos[:self._shownCount(len(infos))]
         signature = (self.viewMode, tuple((info.path, info.modified, info.isCurrent(), tuple(sorted(info.views.items())),
                                            tuple(sorted(info.counts.items()))) for info in shown))
