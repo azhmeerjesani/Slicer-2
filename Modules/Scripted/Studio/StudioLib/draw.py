@@ -3375,6 +3375,7 @@ class _DisplayCard:
         layout.setSpacing(0)
         self._updating = False
         self._fillShown = True
+        self._lastOpacity = 0.4  # the fill opacity brought back when the outline goes off while the fill is at 0%
 
         opacityRow = qt.QHBoxLayout()
         opacityRow.setSpacing(10)
@@ -3420,6 +3421,8 @@ class _DisplayCard:
                 segmentId = _selectedSegmentId(segmentationNode)
                 opacity = displayNode.GetSegmentOpacity2DFill(segmentId) if segmentId else displayNode.GetOpacity2DFill()
             self._fillShown = fill
+            if fill and opacity > 0:
+                self._lastOpacity = opacity
             # A hidden fill shows as 0%: moving the slider shows the fill again
             percent = round(opacity * 100) if fill else 0
             if self.opacitySlider.value != percent:
@@ -3444,19 +3447,35 @@ class _DisplayCard:
         segmentId = _selectedSegmentId(segmentationNode)
         if value > 0 and not displayNode.GetVisibility2DFill():
             displayNode.SetVisibility2DFill(True)
+        if value > 0:
+            self._lastOpacity = value / 100.0
         if segmentId:
             displayNode.SetSegmentOpacity2DFill(segmentId, value / 100.0)
         else:
             displayNode.SetOpacity2DFill(value / 100.0)
+        if value == 0 and not displayNode.GetVisibility2DOutline():
+            # Never nothing: a fill at 0% without the outline would hide the lesion, so the outline comes back
+            self.outlineSwitch.setChecked(True)
 
     def _onOutline(self, checked):
         displayNode = self._displayNode()
         if self._updating or displayNode is None:
             return
         displayNode.SetVisibility2DOutline(bool(checked))
-        if not checked and not displayNode.GetVisibility2DFill():
-            # Never nothing: without the outline the fill comes back
+        if checked:
+            return
+        segmentationNode, _source = lesionNodes()
+        segmentId = _selectedSegmentId(segmentationNode)
+        opacity = displayNode.GetSegmentOpacity2DFill(segmentId) if segmentId else displayNode.GetOpacity2DFill()
+        if not displayNode.GetVisibility2DFill() or opacity <= 0:
+            # Never nothing: without the outline the fill comes back (also from 0%, which showed the outline only)
             displayNode.SetVisibility2DFill(True)
+            restored = self._lastOpacity if self._lastOpacity > 0 else 0.4
+            if segmentId:
+                displayNode.SetSegmentOpacity2DFill(segmentId, restored)
+            else:
+                displayNode.SetOpacity2DFill(restored)
+            self.opacitySlider.setValue(round(restored * 100))
 
     def isShownIn3D(self):
         displayNode = self._displayNode()

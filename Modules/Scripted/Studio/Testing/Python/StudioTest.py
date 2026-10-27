@@ -1944,6 +1944,42 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
     # Trace from a figure (L-29)
     #
 
+    def test_32b_draw_overlay_zero_outline_off_never_nothing(self):
+        """Overlay at 0% plus Outline off never leaves the lesion undrawn, in either order (the card's "never nothing" rule)."""
+        from StudioLib import draw
+
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        self._drag("Red", [(dx, 0) for dx in range(0, 40, 4)])
+        self.assertGreater(self._voxels(editor), 0)
+        card = draw.extension().displayCard
+        displayNode = editor.segmentationNode().GetDisplayNode()
+        segmentId = editor.currentSegmentID()
+
+        def drawn():
+            return bool((displayNode.GetVisibility2DFill() and displayNode.GetSegmentOpacity2DFill(segmentId) > 0)
+                        or displayNode.GetVisibility2DOutline())
+
+        # Slider to 0% first, then the Outline off: the fill comes back
+        card.opacitySlider.setValue(0)
+        self._pump()
+        self.assertTrue(card.outlineSwitch.checked)
+        card.outlineSwitch.setChecked(False)
+        self._pump()
+        self.assertTrue(drawn())
+        self.assertGreater(displayNode.GetSegmentOpacity2DFill(segmentId), 0)
+        self.assertEqual(card.opacitySlider.value, round(displayNode.GetSegmentOpacity2DFill(segmentId) * 100))
+        # The Outline off first, then the slider to 0%: the outline comes back
+        card.opacitySlider.setValue(60)
+        card.outlineSwitch.setChecked(False)
+        self._pump()
+        self.assertFalse(displayNode.GetVisibility2DOutline())
+        card.opacitySlider.setValue(0)
+        self._pump()
+        self.assertTrue(drawn())
+        self.assertTrue(displayNode.GetVisibility2DOutline())
+        self.assertTrue(card.outlineSwitch.checked)
+
     def test_33_figure_round_trip(self):
         """A synthetic figure and 5 landmark pairs: RMS < 0.5 mm; the crop and fit file are saved; Show source rebuilds the
         overlay in <= 300 ms with the same fit; Ctrl+V follows the clipboard; the trace views are restored on close.
