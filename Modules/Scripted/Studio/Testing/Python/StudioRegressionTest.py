@@ -31,6 +31,10 @@ Run with the main window and testing enabled::
 - ``test_8_study_list_qc_keeps_cursor`` (BB-1): a QC key (P / X / U) refreshes the subject list (a model reset) but keeps the
   keyboard cursor (the current index) on the subject, so that the next Down goes to the next subject and the next QC key
   marks that one (it went to the first row: the wrong subject was marked); a selection made elsewhere moves the cursor too.
+- ``test_10_scripted_module_ui_widgets`` (BB-1): the build has the Qt Designer plugins of CTK and MRML, so that
+  ``slicer.util.loadUI`` creates the CTK and qMRML widgets of a scripted module's ``.ui`` file (a ``qMRMLWidget`` root, a
+  ``qMRMLNodeComboBox``, a ``ctkCollapsibleButton``), and Line Profile, Vector to Scalar Volume and Surface Toolbox set up
+  their panel and logic. Without the plugins every such widget was a plain QWidget and ``setup()`` raised AttributeError.
 """
 
 import json
@@ -753,6 +757,41 @@ class StudioRegressionTest(unittest.TestCase):
                 slicer.app.processEvents()
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
+
+    # Scripted module .ui files need the Qt Designer plugins (BB-1)
+
+    def test_10_scripted_module_ui_widgets(self):
+        import sys
+        import traceback
+
+        loader = qt.QUiLoader()
+        available = set(loader.availableWidgets())
+        for className in ("qMRMLWidget", "qMRMLNodeComboBox", "qMRMLSpinBox", "qSlicerSimpleMarkupsWidget", "ctkCollapsibleButton",
+                          "ctkSliderWidget", "qMRMLSubjectHierarchyTreeView"):
+            self.assertIn(className, available, f"QUiLoader cannot create {className}: are the Qt Designer plugins built?")
+        # The widgets of a .ui file are created with their own class, not as a plain QWidget
+        uiPath = os.path.join(os.path.dirname(slicer.modules.lineprofile.path), "Resources", "UI", "LineProfile.ui")
+        uiWidget = slicer.util.loadUI(uiPath)
+        self.addCleanup(uiWidget.deleteLater)
+        self.assertEqual(uiWidget.className(), "qMRMLWidget")
+        ui = slicer.util.childWidgetVariables(uiWidget)
+        self.assertEqual(ui.inputVolumeSelector.className(), "qMRMLNodeComboBox")
+        self.assertEqual(ui.parametersCollapsibleButton.className(), "ctkCollapsibleButton")
+        uiWidget.setMRMLScene(slicer.mrmlScene)
+        self.assertEqual(list(ui.inputVolumeSelector.nodeTypes), ["vtkMRMLScalarVolumeNode"])
+        # The modules set up their panel and logic without an error (setup() errors are only printed)
+        errors = []
+        originalHook = sys.excepthook
+        sys.excepthook = lambda kind, value, tb: errors.append("".join(traceback.format_exception(kind, value, tb)))
+        self.addCleanup(setattr, sys, "excepthook", originalHook)
+        names = [name for name in ("LineProfile", "VectorToScalarVolume", "SurfaceToolbox") if hasattr(slicer.modules, name.lower())]
+        self.assertIn("LineProfile", names)
+        for name in names:
+            widget = slicer.util.getModuleWidget(name)
+            slicer.app.processEvents()
+            self.assertIsNotNone(widget, name)
+            self.assertIsNotNone(getattr(widget, "logic", None), f"{name}: no logic after setup()")
+            self.assertEqual(errors, [], name)
 
     @staticmethod
     def _isAncestor(ancestor, widget):

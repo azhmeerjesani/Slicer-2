@@ -1033,7 +1033,8 @@ A build made on Ubuntu 24.04 (before the Studio changes) started in 2.5–3.3 s,
 the official Linux nightly package on the same idle machine. This comes from Ubuntu's linker default
 (`--as-needed`, which drops unused library dependencies) and from building without the Qt Designer
 plugins (`Slicer_BUILD_QT_DESIGNER_PLUGINS=OFF`, about 0.6 s less first-load work), not from Slicer
-Studio code. Measured again with the Studio changes (fresh settings, machine under some load), the
+Studio code. The Designer plugins are on again since the bug bash, because scripted modules need them
+to load their `.ui` files. Measured again with the Studio changes (fresh settings, machine under some load), the
 build started in 3.3–3.9 s and the official 5.13 nightly in 8.0–8.8 s. Wave 4 added the CMake option
 `Slicer_USE_LINKER_AS_NEEDED` (on by default) so that toolchains that do not link this way by default do too.
 On this build it changed nothing: GCC on Ubuntu already did it (the libraries record the same 2,858 dependencies
@@ -1216,7 +1217,7 @@ cmake -S Slicer -B Slicer-SuperBuild-Release \
   -DBUILD_TESTING:BOOL=OFF \
   -DSlicer_BUILD_DOCUMENTATION:BOOL=OFF \
   -DSlicer_USE_VTK_DEBUG_LEAKS:BOOL=OFF \
-  -DSlicer_BUILD_QT_DESIGNER_PLUGINS:BOOL=OFF
+  -DSlicer_BUILD_QT_DESIGNER_PLUGINS:BOOL=ON
 cmake --build Slicer-SuperBuild-Release --parallel "$(nproc)"
 Slicer-SuperBuild-Release/Slicer-build/Slicer
 ```
@@ -1226,6 +1227,10 @@ Slicer-SuperBuild-Release/Slicer-build/Slicer
   ("TLS initialization failed"), and for example the Extensions Manager cannot download its catalog.
 - `BUILD_TESTING=OFF` shortens the build. The test commands in [Development](#development) do not need
   ctest.
+- Keep the Qt Designer plugins on (`Slicer_BUILD_QT_DESIGNER_PLUGINS=ON`, the default; it needs
+  `qttools5-dev`). `slicer.util.loadUI` creates the CTK and MRML widgets of scripted module `.ui` files
+  with them: without them Line Profile, Surface Toolbox, Vector to Scalar Volume and extensions built from
+  the Extension Wizard template fail to open.
 - To make the Linux package: `cmake --build Slicer-SuperBuild-Release/Slicer-build --target package`.
 - The first build takes hours. Python-only changes need no compilation: run
   `make CopySlicerPythonScriptFiles CopySlicerPythonResourceFiles` in `Slicer-build`.

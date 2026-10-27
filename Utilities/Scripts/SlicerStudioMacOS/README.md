@@ -147,7 +147,10 @@ Exit codes:
    [Choosing Qt](#choosing-qt).
 4. **Configure.** The superbuild is configured with these options:
    - `Release`, `BUILD_TESTING=OFF`, `Slicer_BUILD_DOCUMENTATION=OFF`;
-   - `Slicer_USE_VTK_DEBUG_LEAKS=OFF`, `Slicer_BUILD_QT_DESIGNER_PLUGINS=OFF`;
+   - `Slicer_USE_VTK_DEBUG_LEAKS=OFF`, `Slicer_BUILD_QT_DESIGNER_PLUGINS=ON`. The Qt Designer
+     plugins of CTK and MRML are needed at run time: `slicer.util.loadUI` creates the widgets of
+     scripted module `.ui` files (Line Profile, Surface Toolbox, extensions) with them. A build
+     directory configured with them off by an earlier version of the script is configured again;
    - `CMAKE_OSX_ARCHITECTURES=$(uname -m)`, `CMAKE_OSX_DEPLOYMENT_TARGET`, the SDK;
    - `Qt6_DIR` (or `Qt5_DIR`) and the matching `Slicer_REQUIRED_QT_VERSION`;
    - `Slicer_USE_SYSTEM_QT=OFF`, so that Qt is embedded in the package.

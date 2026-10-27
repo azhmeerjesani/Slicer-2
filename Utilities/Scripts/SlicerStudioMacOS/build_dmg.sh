@@ -1211,6 +1211,19 @@ setup_compilers() {
   chmod 755 "${C_COMPILER}" "${CXX_COMPILER}"
 }
 
+designer_plugins_in_extra_args() {
+  # True when a --cmake-arg sets Slicer_BUILD_QT_DESIGNER_PLUGINS (the user's choice is kept).
+  local arg
+  if [ ${#CMAKE_EXTRA_ARGS[@]} -gt 0 ]; then
+    for arg in "${CMAKE_EXTRA_ARGS[@]}"; do
+      case "${arg}" in
+        *Slicer_BUILD_QT_DESIGNER_PLUGINS*) return 0 ;;
+      esac
+    done
+  fi
+  return 1
+}
+
 configure_superbuild() {
   section "Configure the superbuild"
   setup_compilers
@@ -1231,8 +1244,14 @@ configure_superbuild() {
       fi
     fi
     if [ "${RECONFIGURE}" = 0 ]; then
-      info "already configured: ${BUILD_DIR} (use --reconfigure to run CMake again)"
-      return 0
+      if grep -q '^Slicer_BUILD_QT_DESIGNER_PLUGINS:BOOL=OFF$' "${BUILD_DIR}/CMakeCache.txt" && ! designer_plugins_in_extra_args; then
+        # Earlier versions of this script turned the Qt Designer plugins off. Without them slicer.util.loadUI
+        # cannot create CTK and qMRML widgets, and scripted modules such as Line Profile fail to open.
+        info "${BUILD_DIR} was configured without the Qt Designer plugins: running CMake again to turn them on"
+      else
+        info "already configured: ${BUILD_DIR} (use --reconfigure to run CMake again)"
+        return 0
+      fi
     fi
   fi
 
@@ -1249,7 +1268,9 @@ configure_superbuild() {
     -DBUILD_TESTING:BOOL=OFF
     -DSlicer_BUILD_DOCUMENTATION:BOOL=OFF
     -DSlicer_USE_VTK_DEBUG_LEAKS:BOOL=OFF
-    -DSlicer_BUILD_QT_DESIGNER_PLUGINS:BOOL=OFF
+    # The Qt Designer plugins (CTK and qMRML widgets) are needed at run time too: slicer.util.loadUI
+    # creates the widgets of scripted module .ui files with them.
+    -DSlicer_BUILD_QT_DESIGNER_PLUGINS:BOOL=ON
     "-DCMAKE_OSX_ARCHITECTURES:STRING=${HOST_ARCH}"
     "-DCMAKE_OSX_DEPLOYMENT_TARGET:STRING=${MACOS_MIN}"
     "-DCMAKE_OSX_SYSROOT:PATH=${sysroot}"
