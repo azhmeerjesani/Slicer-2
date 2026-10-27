@@ -793,6 +793,28 @@ class StudioRegressionTest(unittest.TestCase):
             self.assertIsNotNone(getattr(widget, "logic", None), f"{name}: no logic after setup()")
             self.assertEqual(errors, [], name)
 
+    def test_11_dimensionality_chip_needs_study_to_choose(self):
+        """Outside a study the 2D chip is neutral and does not ask for a choice that cannot be made (no Choose... action)."""
+        from StudioLib import lesionqc
+
+        result = {"dimensionality": {"dimensionality": "2D", "planes": ["axial"], "n_slices": {"axial": 1}}, "spacing": 1.0}
+
+        def chip(**kwargs):
+            chips = [c for c in lesionqc.buildChips(result, mni=True, **kwargs) if c["key"] == "dimensionality"]
+            self.assertEqual(len(chips), 1)
+            return chips[0]
+
+        outside = chip(studyOpen=False)
+        self.assertEqual(outside["level"], "neutral")
+        self.assertNotIn("choose", outside["text"].lower())
+        self.assertEqual(outside["actions"], [])
+        inside = chip(studyOpen=True)
+        self.assertEqual(inside["level"], "warn")
+        self.assertEqual([a["text"] for a in inside["actions"]], ["Choose…"])
+        chosen = chip(studyOpen=True, policy={"mode": "fractional", "total_mm": 2})
+        self.assertEqual(chosen["level"], "neutral")
+        self.assertEqual([a["text"] for a in chosen["actions"]], ["Change…"])
+
     @staticmethod
     def _isAncestor(ancestor, widget):
         current = widget

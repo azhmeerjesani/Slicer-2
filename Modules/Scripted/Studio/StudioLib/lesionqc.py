@@ -291,10 +291,11 @@ def policySemantics(mode, totalMm=DEFAULT_EXTRUDE_MM, step=1.0):
     return SEMANTICS[MODE_FRACTIONAL].format(total=float(totalMm))
 
 
-def dimensionalityText(info, policy=None, spacing=None):
+def dimensionalityText(info, policy=None, spacing=None, studyOpen=True):
     """``(text, level)`` of the dimensionality chip: "2D · axial · 1 slice → 2 mm", None for an empty lesion.
 
-    ``level`` is "warn" for a 2D tracing whose study has no policy yet, else "neutral".
+    ``level`` is "warn" for a 2D tracing whose study has no policy yet, else "neutral". The policy belongs to a study
+    (``trace_policy.extrude_2d``): with no study open (``studyOpen`` False) there is nothing to choose, so the text stays plain.
     """
     if not info or not info.get("dimensionality"):
         return None
@@ -310,6 +311,8 @@ def dimensionalityText(info, policy=None, spacing=None):
     else:
         head = _("Several single slices") + (f" · {' + '.join(planes)}" if planes else "")
     chosen = policyText(policy, spacing)
+    if chosen is None and not studyOpen:
+        return head, "neutral"
     if chosen is None:
         return head + " → " + _("choose how to use it"), "warn"
     return head + " → " + chosen, "neutral"
@@ -636,7 +639,7 @@ def buildChips(result, row=None, mni=False, duplicates=(), policy=None, studyOpe
                       "actions": [{"id": "markDuplicate", "text": _("Mark duplicate"), "tooltip": _("Exclude this lesion from analyses and record that it duplicates {sid}").format(sid=other)},
                                   {"id": "notDuplicate", "text": _("Not a duplicate"), "tooltip": _("Dismiss: the pair is not flagged again (recorded)")}]})
     # Dimensionality
-    shown = dimensionalityText(result.get("dimensionality"), policy, result.get("spacing"))
+    shown = dimensionalityText(result.get("dimensionality"), policy, result.get("spacing"), studyOpen=studyOpen)
     if shown is not None and result["dimensionality"]["dimensionality"] != "3D":
         text, level = shown
         chips.append({"key": "dimensionality", "level": level, "badge": _("Slices"), "text": text,
