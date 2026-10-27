@@ -778,6 +778,9 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
                 from StudioLib import space as studioSpace
 
                 detected = studioSpace.spaceOf(grid)
+                if detected is None and segNode is not None:
+                    # A lesion on the grid of a volume whose space is known (a template not registered on this computer)
+                    detected = studioSpace.spaceOf(segNode)
             except Exception:
                 detected = None
         return detected

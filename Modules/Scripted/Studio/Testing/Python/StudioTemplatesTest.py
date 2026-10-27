@@ -624,3 +624,76 @@ class StudioTemplatesTest(unittest.TestCase):
         self.assertTrue(importer._isStudyTemplateChoice(builtin, other.id), "the default template")
         self.assertFalse(importer._isStudyTemplateChoice(builtin, template.id))
         self.assertFalse(importer._isStudyTemplateChoice(builtin, "user:not-here"))
+
+    #
+    # A lesion on a template that is not registered here (BB-1: removed, another computer, a study without it)
+    #
+
+    def test_12_missing_template_lesion_stays_mni(self):
+        import LesionNetworkMapping
+
+        from LesionNetworkMappingLib import nifti
+        from LesionNetworkMappingLib.study import Study
+
+        from StudioLib import draw, importer, space, study_ui
+
+        templates = self.templates
+        template = self._add(name="Lab ICBM 1.5", space="MNI152NLin6Asym")
+        expected = ("MNI152NLin6Asym", 1.5)
+        logic = LesionNetworkMapping.LesionNetworkMappingLogic()
+
+        def checkMni(segmentation, label):
+            self.assertEqual(space.spaceOf(segmentation), expected, label)
+            self.assertEqual(space.hemisphereWord(-20.0, segmentation), "Left", label)
+            check = logic.checkSeed(segmentation, segmentation.GetSegmentation().GetNthSegmentID(0))
+            self.assertEqual(tuple(check["space"] or ()), expected, f"{label}: Map's seed space")
+
+        # (1) The template is removed in Settings while a lesion drawn on it is open
+        volume, segmentation = importer.startOnTemplate(shell=self._shell(), templateId=template.id)
+        segmentId = segmentation.GetSegmentation().GetNthSegmentID(0)
+        lesion = np.zeros(slicer.util.arrayFromVolume(volume).shape, np.uint8)
+        lesion[60:70, 70:80, 30:40] = 1  # k, j, i: left hemisphere
+        slicer.util.updateSegmentBinaryLabelmapFromArray(lesion, segmentation, segmentId, volume)
+        checkMni(segmentation, "template registered")
+        self.assertTrue(templates.removeTemplate(template.id, confirmDelete=lambda: True))
+        self.assertIsNone(space.spaceOf(space.gridOf(segmentation)), "the grid alone is no longer known")
+        checkMni(segmentation, "template removed while open")
+        line, level = draw.DrawExtension._spaceLine(None, segmentation, volume)
+        self.assertNotIn("scan space", line or "")
+        self.assertNotEqual(level, "warn")
+        # (2) A project reopened without the template: its volume in Images/ still says Studio.Space; the lesion has no
+        # node reference to it
+        role = slicer.vtkMRMLSegmentationNode.GetReferenceImageGeometryReferenceRole()
+        segmentation.RemoveNodeReferenceIDs(role)
+        checkMni(segmentation, "volume on the same grid")
+        slicer.mrmlScene.Clear(0)
+
+        # (3) A study drawn on the template, opened where the template is not: the case opens on the built-in template
+        template = self._add(name="Lab ICBM 1.5", space="MNI152NLin6Asym")
+        record = templates.studyRecord(template)
+        study = Study.create(os.path.join(self.tempDir, "study missing template"), name="Study", template=record)
+        sid = "sub-case001"
+        study.add_subject(sid, {"group": "case", "status": "traced", "space": "MNI152NLin6Asym", "trace_template": "MNI152NLin6Asym"})
+        lesionPath = os.path.join(study.path, *study.lesion_relpath(sid).split("/"))
+        os.makedirs(os.path.dirname(lesionPath), exist_ok=True)
+        _data, affine, _header = nifti.read_nifti(template.imagePath)
+        mask = np.zeros(self.shape15, np.uint8)
+        mask[30:40, 70:80, 60:70] = 1  # i, j, k: left hemisphere
+        nifti.write_nifti(lesionPath, mask, affine)
+        study.set(sid, {"lesion": study.relpath(lesionPath)})
+        study.save()
+        self.assertTrue(templates.removeTemplate(template.id, confirmDelete=lambda: True))
+        settings = qt.QSettings()
+        recent = settings.value(study_ui.RECENT_STUDIES_KEY)
+        try:
+            session = study_ui.openStudy(study.path, shell=self._shell(), subject=sid, showLibrary=False)
+            slicer.app.processEvents()
+            self.assertIsNone(session.volumeNode().GetAttribute("Studio.TemplateId"), "the built-in template meanwhile")
+            checkMni(session.segmentationNode(), "study case without its template")
+        finally:
+            study_ui.closeStudy()
+            if recent is None:
+                settings.remove(study_ui.RECENT_STUDIES_KEY)
+            else:
+                settings.setValue(study_ui.RECENT_STUDIES_KEY, recent)
+            shutil.rmtree(study.path, ignore_errors=True)

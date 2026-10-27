@@ -109,7 +109,11 @@ shared files.
   study on another computer that does not have the template, Slicer Studio says
   "This study uses the template … Add it…"; *Add it…* opens the dialog and accepts
   only the file with the same checksum. Until then the study opens on the built-in
-  template of the same family. *Normalize all* in the Library (and `normalize
+  template of the same family; its lesions stay in the study's MNI space (sides,
+  Map), and the Lesion card notes that the lesion grid and the template differ by a
+  few millimetres. A project reopened without the template, or a template removed
+  while it is open, keeps its lesion in the template's space in the same way.
+  *Normalize all* in the Library (and `normalize
   batch --template auto`) normalizes the study's lesions to the study's template
   when it is on this computer with a brain mask; otherwise it uses the built-in
   2009c brain and says so. With a study open, *Start on template* (or choosing the

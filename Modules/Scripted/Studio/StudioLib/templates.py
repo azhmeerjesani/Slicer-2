@@ -106,7 +106,7 @@ _BUILTINS = (
 BUILTIN_DEFAULT = _BUILTINS[0][0]
 
 _listeners = []
-_registered = {"root": None, "ids": set(), "others": []}
+_registered = {"root": None, "stamp": None, "ids": set(), "others": []}
 _thumbnails = {}
 
 
@@ -783,7 +783,9 @@ def registerGrids(rootPath=None, force=False):
     except ImportError:
         return False
     root = templatesFolder(rootPath)
-    if not force and _registered["root"] == root:
+    # A template folder added or removed outside the app changes the folder's time stamp
+    stamp = _folderStamp(root)
+    if not force and _registered["root"] == root and _registered["stamp"] == stamp:
         return True
     for gridId in list(_registered["ids"]):
         geometry.unregister_grid(gridId)
@@ -804,7 +806,16 @@ def registerGrids(rootPath=None, force=False):
         except Exception:
             logging.warning(f"Slicer Studio: the grid of template {template.name} could not be registered")
     _registered["root"] = root
+    _registered["stamp"] = stamp
     return True
+
+
+def _folderStamp(folder):
+    """The modification time of a folder (None when it does not exist)."""
+    try:
+        return os.stat(folder).st_mtime_ns
+    except OSError:
+        return None
 
 
 def gridSpace(shape, affine):

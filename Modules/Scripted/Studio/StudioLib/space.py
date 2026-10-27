@@ -186,6 +186,47 @@ def _templatesModule():
         return None
 
 
+def _sameWorldGrid(firstGrid, secondGrid, tolerance=GRID_TOLERANCE_MM):
+    """True when two ``(dims, ijkToRas)`` grids put their voxel centres at the same RAS positions (any storage order)."""
+    first, second = worldBox(*firstGrid), worldBox(*secondGrid)
+    if first is None or second is None:
+        return (tuple(firstGrid[0]) == tuple(secondGrid[0])
+                and bool(np.all(np.abs(np.asarray(firstGrid[1], dtype=float) - np.asarray(secondGrid[1], dtype=float)) <= tolerance)))
+    return (first[0] == second[0] and bool(np.all(np.abs(first[1] - second[1]) <= tolerance))
+            and bool(np.all(np.abs(first[2] - second[2]) <= tolerance)))
+
+
+def _sharedGridSpace(segmentationNode, grid):
+    """The space named by the ``Studio.Space`` attribute of a volume that is on exactly the lesion's grid (its reference
+    volume first, then any volume of the scene), else None.
+
+    A lesion drawn on one of your templates keeps that template's space where the template's grid is not registered: a
+    project opened on another computer (its template volume in Images/ still says ``Studio.Space``), or a template removed
+    in Settings while it is open (A-10).
+    """
+    scene = segmentationNode.GetScene() if hasattr(segmentationNode, "GetScene") else None
+    if scene is None:
+        return None
+    role = slicer.vtkMRMLSegmentationNode.GetReferenceImageGeometryReferenceRole()
+    candidates = [segmentationNode.GetNodeReference(role)]
+    volumes = scene.GetNodesByClass("vtkMRMLVolumeNode")
+    candidates += [volumes.GetItemAsObject(index) for index in range(volumes.GetNumberOfItems())]
+    seen = set()
+    for volume in candidates:
+        if volume is None or not volume.IsA("vtkMRMLVolumeNode") or volume.GetID() in seen:
+            continue
+        seen.add(volume.GetID())
+        if not volume.GetAttribute(SPACE_ATTRIBUTE) or volume.GetParentTransformNode() is not None:
+            continue
+        volumeGrid = gridOf(volume)
+        if volumeGrid is None or not _sameWorldGrid(grid, volumeGrid):
+            continue
+        found = spaceOf(volume)
+        if found is not None:
+            return found
+    return None
+
+
 def _userTemplateGridSpace(dims, ijkToRas):
     templates = _templatesModule()
     if templates is None:
@@ -210,7 +251,8 @@ def spaceOf(nodeOrGeometry):
 
     The node attribute ``Studio.Space`` ("MNI152NLin6Asym", optionally with the resolution: "MNI152NLin6Asym 2") wins;
     else the built-in ``KNOWN_GRIDS``; else ``LesionNetworkMappingLib.geometry.detect_space`` when it is importable (more
-    spaces and resolutions, with the same ±0.01 mm origin tolerance).
+    spaces and resolutions, with the same ±0.01 mm origin tolerance); else, for a segmentation, the ``Studio.Space`` of a
+    volume on exactly its grid (``_sharedGridSpace``).
     A node under a parent transform is only recognized by its attribute (its grid is not where the file put it).
     """
     node = nodeOrGeometry if hasattr(nodeOrGeometry, "GetAttribute") else None
@@ -240,6 +282,9 @@ def spaceOf(nodeOrGeometry):
         detected = _detectSpace((dims, ijkToRas)) or None
     if detected is None:
         detected = _userTemplateGridSpace(dims, ijkToRas)
+    if detected is None and node is not None and node.IsA("vtkMRMLSegmentationNode"):
+        # A lesion on the grid of a volume whose space is known (a template that is not registered on this computer)
+        detected = _sharedGridSpace(node, grid)
     if detected is None and node is not None and node.GetAttribute(ROLE_ATTRIBUTE) == ROLE_TEMPLATE:
         # A template volume is in its template's space, whatever grid it was resampled on
         spacing = worldBox(dims, ijkToRas)

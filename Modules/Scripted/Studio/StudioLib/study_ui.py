@@ -2174,6 +2174,37 @@ class StudySession:
         self._templateFiles[node.GetID()] = _storagePath(node) or sampleFile(sampleName)
         return node
 
+    def _tagTemplateLesionSpace(self, row, segmentationNode):
+        """Tag a lesion drawn on the study's own template with that template's space (``Studio.Space``) when its grid is not
+        recognized: the template is not on this computer (A-10 step 5: the case opens on the built-in template of its family
+        with the mismatch notice, and the lesion stays an MNI lesion, as the study, participants.tsv and the sidecar say).
+        """
+        from . import templates
+
+        record = self.templateRecord()
+        if not templates.isUserStudyRecord(record) or segmentationNode.GetAttribute(space.SPACE_ATTRIBUTE):
+            return
+        recordSpace = str(record.get("space") or record.get("id") or "")
+        rowSpace = row.get("space")
+        if not recordSpace or recordSpace.lower() in ("native", "scanner", "orig", "individual"):
+            return
+        if not _missing(rowSpace) and str(rowSpace) != recordSpace:
+            return
+        if space.spaceOf(segmentationNode) is not None:
+            return
+        resolution = record.get("res")
+        grid = space.gridOf(segmentationNode)
+        box = space.worldBox(*grid) if grid is not None else None
+        try:
+            resolution = float(resolution) if resolution is not None else None
+        except (TypeError, ValueError):
+            resolution = None
+        if resolution is not None and (box is None or abs(float(box[1].min()) - resolution) > 0.01):
+            # Not on a grid of that template's voxel size: the lesion file says nothing reliable about its space
+            return
+        value = f"{recordSpace} {resolution:g}" if resolution is not None else recordSpace
+        segmentationNode.SetAttribute(space.SPACE_ATTRIBUTE, value)
+
     def _offerMissingTemplate(self, record):
         """The notice of a study template that is not on this computer (once per session); Add it… reopens the case on it."""
         if getattr(self, "_missingTemplateOffered", False):
@@ -2605,6 +2636,8 @@ class StudySession:
                 gridReference = scanPath or self._templateFiles.get(volumeNode.GetID()) or _storagePath(volumeNode)
         segmentationNode.SetName(sid)
         segmentationNode.SetAttribute(SUBJECT_ATTRIBUTE, sid)
+        if not scanPath and lesionPath:
+            self._tagTemplateLesionSpace(row, segmentationNode)
         displayNode = segmentationNode.GetDisplayNode()
         if displayNode is not None:
             displayNode.SetVisibility(True)
