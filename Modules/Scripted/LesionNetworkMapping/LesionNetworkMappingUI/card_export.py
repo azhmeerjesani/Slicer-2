@@ -223,7 +223,7 @@ class ExportCard:
     def showFolder(self):
         path = getattr(self, "lastDestination", None)
         if path and os.path.isdir(path):
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(path))
+            widgets.showInFileManager(path)
 
 
 CARD = {

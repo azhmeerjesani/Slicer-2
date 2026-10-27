@@ -271,6 +271,12 @@ def _toast(shell, text, **kwargs):
         logging.info(f"Studio study: {text}")
 
 
+def _showFolder(folder):
+    from . import projects
+
+    projects.showInFileManager(folder)
+
+
 def _isAlive(qobject):
     try:
         qobject.objectName
@@ -784,7 +790,7 @@ def createStudy(files, shell=None, folder=None, groupColumn=None, groupMapping=N
         message += " · " + _("your {column} column is kept as {kept}").format(column=column, kept=kept)
     if report.get("skipped"):
         message += " · " + (_("1 file skipped") if len(report["skipped"]) == 1 else _("{n} files skipped").format(n=len(report["skipped"])))
-    _toast(shell, message, ms=5000, action=lambda: qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(folder)), actionText=_("Show folder"),
+    _toast(shell, message, ms=5000, action=lambda: _showFolder(folder), actionText=_("Show folder"),
            level="consequence")
     return session
 

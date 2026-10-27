@@ -1048,7 +1048,7 @@ class NullsCard:
     def showFolder(self):
         folder = self.result[0] if self.result is not None else None
         if folder and os.path.isdir(folder) and not slicer.app.testingEnabled():
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(folder))
+            widgets.showInFileManager(folder)
 
     #
     # Card protocol (called by the Map widget)

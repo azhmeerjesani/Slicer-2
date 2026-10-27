@@ -256,7 +256,9 @@ class AutosaveSettingsPanel(ctk.ctkSettingsPanel):
     def onOpenDirectory(self):
         path = io.defaultRoot()
         if os.path.isdir(path):
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(path))
+            from . import projects
+
+            projects.showInFileManager(path)
 
     def onRecover(self):
         from . import recovery

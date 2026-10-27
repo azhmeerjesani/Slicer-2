@@ -3555,7 +3555,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         moreMenu.addAction(_("Use the demo")).connect("triggered()", self.onCreateDemo)
         moreMenu.addAction(_("Convert…")).connect("triggered()", lambda: self.openManager().openConvert())
         moreMenu.addSeparator()
-        moreMenu.addAction(_("GSP1000 on the Harvard Dataverse")).connect("triggered()", lambda: qt.QDesktopServices.openUrl(qt.QUrl(GSP_DATAVERSE_URL)))
+        moreMenu.addAction(_("GSP1000 on the Harvard Dataverse")).connect("triggered()", lambda: self.widgets.openLink(GSP_DATAVERSE_URL))
         self.connectomeMoreButton.setMenu(moreMenu)
         buttons.addWidget(self.connectomeMoreButton)
         emptyLayout.addLayout(buttons)

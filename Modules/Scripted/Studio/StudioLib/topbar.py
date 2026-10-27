@@ -687,7 +687,9 @@ class TopBar:
             qt.QApplication.clipboard().setText(self.libraryCommand())
             self.shell.toast(_("Command copied"))
         elif link == "readme":
-            qt.QDesktopServices.openUrl(self.readmeUrl())
+            from . import projects
+
+            projects.openLink(self.readmeUrl())
         if popover is not None:
             popover.close()
 

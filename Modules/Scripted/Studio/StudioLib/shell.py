@@ -737,7 +737,9 @@ class PanelHeader:
         if url.toString().startswith("#"):
             browser.scrollToAnchor(url.fragment())
             return
-        qt.QDesktopServices.openUrl(url)
+        from . import projects
+
+        projects.openLink(url)
 
     def helpPopoverPosition(self):
         """Global position of the help popover: the bottom left corner of the header."""

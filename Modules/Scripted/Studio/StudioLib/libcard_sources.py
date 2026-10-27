@@ -46,6 +46,12 @@ TABLE_KEYS = (
 FILE_FILTER = "Reference files (*.ris *.nbib *.bib *.bibtex *.txt *.csv *.tsv *.medline);;All files (*)"
 
 
+def _projects():
+    from . import projects
+
+    return projects
+
+
 def _sources():
     import importlib
 
@@ -629,7 +635,7 @@ class SourcesCard:
         else:
             folder = self._run(lambda: self.attachmentsFolder(recordId))
         if folder:
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(folder))
+            _projects().showInFileManager(folder)
         return folder
 
     # Duplicates
@@ -765,7 +771,7 @@ class SourcesCard:
         def work():
             _counts, paths = _sources().export_prisma(studyObject, records)
             _toast(_("PRISMA counts and flow diagram written to derivatives/prisma"), ms=4000)
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(os.path.dirname(paths[0])))
+            _projects().showInFileManager(os.path.dirname(paths[0]))
             return paths
 
         return self._run(work)

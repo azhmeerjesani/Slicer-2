@@ -805,7 +805,9 @@ class RecoveryDialog(qt.QDialog):
         slot = self.currentSlot()
         path = slot.session.path if slot is not None else (self.root or io.defaultRoot())
         if os.path.isdir(path):
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(path))
+            from . import projects
+
+            projects.showInFileManager(path)
 
     def onSettings(self):
         from . import autosave

@@ -1017,7 +1017,7 @@ class CohortTab:
     def showFolder(self):
         folder = self.result[0] if self.result else None
         if folder and os.path.isdir(folder) and not slicer.app.testingEnabled():
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(folder))
+            widgets.showInFileManager(folder)
 
     def message(self, text, ms=3000):
         """A consequence message: a toast in Studio, the reason line in Classic."""

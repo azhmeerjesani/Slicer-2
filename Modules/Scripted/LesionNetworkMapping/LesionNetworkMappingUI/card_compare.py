@@ -990,7 +990,7 @@ class CompareCard:
 
     def showFolder(self):
         if self.lastExport:
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(self.lastExport))
+            widgets.showInFileManager(self.lastExport)
 
     def testDifferences(self):
         """Open the Cohort card's Contrast tab (differences are tested there, by label permutation)."""
@@ -1010,7 +1010,7 @@ class CompareCard:
     def openLibraryFolder(self):
         root = registryRoot()
         os.makedirs(root, exist_ok=True)
-        qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(root))
+        widgets.showInFileManager(root)
 
     def removeSelectedReference(self):
         from LesionNetworkMappingLib import refmaps

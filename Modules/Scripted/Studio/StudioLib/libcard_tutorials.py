@@ -466,7 +466,9 @@ class TutorialsDialog:
         entry = self.entry()
         link = entry["source"].get("link") if entry else None
         if link:
-            qt.QDesktopServices.openUrl(qt.QUrl(link))
+            from . import projects
+
+            projects.openLink(link)
 
     def browse(self):
         start = os.path.dirname(self.folder()) or os.path.expanduser("~")

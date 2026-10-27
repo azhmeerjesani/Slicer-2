@@ -87,6 +87,12 @@ def _shell():
     return shell.instance()
 
 
+def _openLink(url):
+    from . import projects
+
+    projects.openLink(url)
+
+
 def _draw():
     try:
         from . import draw
@@ -614,7 +620,7 @@ class CaseStrip:
             _studyUi().showSubjectSwitcher(_shell())
             return
         if key == "doi" and text:
-            qt.QDesktopServices.openUrl(qt.QUrl("https://doi.org/" + text))
+            _openLink("https://doi.org/" + text)
             return
         self.startEdit(key)
 
@@ -625,7 +631,7 @@ class CaseStrip:
         menu.setObjectName("StudioCaseStripFieldMenu")
         text = fieldText(key, self._row)
         if key == "doi" and text:
-            menu.addAction(_("Open in the browser")).connect("triggered()", lambda: qt.QDesktopServices.openUrl(qt.QUrl("https://doi.org/" + text)))
+            menu.addAction(_("Open in the browser")).connect("triggered()", lambda: _openLink("https://doi.org/" + text))
         if key != "case":
             menu.addAction(_("Edit…") if key != "review" else _("Read")).connect("triggered()", lambda: self.startEdit(key))
         if text:

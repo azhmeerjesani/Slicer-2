@@ -194,6 +194,10 @@ the Qt 5 of Ubuntu 24.04, which is why the image is based on Ubuntu 24.04.
 - **Figures enter through "Open figure...".** The browser build has no image clipboard
   and no drag-and-drop from your computer into Slicer, so paste and drop do not work;
   use "Open figure..." and pick the file from `/data`.
+- **"Show in Files" and links.** The container has no file manager and no browser, so
+  "Show in Files", "Show folder", "Open folder" and link-outs (a DOI, a connectome page)
+  show a small window instead: the folder path (a path under `/data` is in your `--data`
+  folder on the host) or the link, with a Copy button.
 - **File dialogs start in `/data`** until you choose another folder (the container's
   start-up script sets the Studio settings `Studio/LastSaveFolder` and `Studio/LastOpenDirectory` when they are empty or point to a missing folder).
 - **Apple Silicon.** The image is `linux/amd64`, so on an Apple Silicon Mac it runs under

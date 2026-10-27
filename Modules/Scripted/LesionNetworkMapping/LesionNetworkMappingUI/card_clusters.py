@@ -1615,7 +1615,7 @@ class ClustersCard:
 
     def showFolder(self):
         if self.lastFolder and os.path.isdir(self.lastFolder):
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(self.lastFolder))
+            widgets.showInFileManager(self.lastFolder)
 
 
 CARD = {

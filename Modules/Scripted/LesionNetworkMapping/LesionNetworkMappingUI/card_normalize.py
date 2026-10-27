@@ -671,7 +671,7 @@ class NormalizeCard:
     def openFolder(self):
         outDir = getattr(self.controller, "outDir", None)
         if outDir and os.path.isdir(outDir):
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(outDir))
+            widgets.showInFileManager(outDir)
 
     #
     # Controller callbacks
@@ -741,7 +741,7 @@ class NormalizeCard:
             actions.append((label, lambda: self.downloadTemplate(templateId, ("fixed", "mask"), then=self.start)))
         job = info.get("job")
         if job is not None and getattr(job, "logPath", None):
-            actions.append((_("Show log"), lambda: qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(job.logPath))))
+            actions.append((_("Show log"), lambda: widgets.showInFileManager(job.logPath)))
         self._showMessage(text, actions, level="warn")
         self.refreshState()
 

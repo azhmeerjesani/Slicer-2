@@ -789,13 +789,13 @@ class CatalogDialog(qt.QDialog):
     def openFolder(self):
         path = self.controller.status().get("path")
         if path:
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(os.path.dirname(path)))
+            widgets.showInFileManager(os.path.dirname(path))
 
     def openSource(self):
         entry = self.entry
         url = (entry.get("link_url") or (entry.get("source") or {}).get("url")) if entry else None
         if url:
-            qt.QDesktopServices.openUrl(qt.QUrl(url))
+            widgets.openLink(url)
 
     # Catalog updates
 

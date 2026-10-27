@@ -1023,7 +1023,9 @@ class CohortCard:
         session = _session()
         if session is not None:
             folder = os.path.join(session.study.path, "derivatives", "lesions")
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(folder if os.path.isdir(folder) else session.study.path))
+            from . import projects
+
+            projects.showInFileManager(folder if os.path.isdir(folder) else session.study.path)
 
     def _toggleContext(self):
         show = not self.contextLabel.isVisibleTo(self.widget)

@@ -1225,6 +1225,117 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertFalse(any("MR Head" in path for path in files), files)
         self.assertEqual([info.name for info in projects.listProjects()], ["Head study"])
 
+    def test_27_show_in_files_and_link_outs_without_a_desktop(self):
+        """Show in Files and link-outs do something visible where the desktop cannot open them: the web build (no file manager or
+        browser in the container) and a desktop without a launcher show the location (the --data folder in the web build)
+        with [Copy path] / [Copy link]; where the desktop opens it, nothing extra shows.
+        """
+        projects = self.projects
+        folder = os.path.join(self.tempDir, "A folder")
+        os.makedirs(folder)
+        opened = []
+        launcher = {"works": True}
+        realOpenUrl = qt.QDesktopServices.openUrl
+
+        def fakeOpenUrl(url):
+            opened.append(url.toString())
+            return launcher["works"]
+
+        def dialog():
+            for found in slicer.util.mainWindow().findChildren("QDialog"):
+                if found.objectName == "StudioLocationDialog" and found.isVisible():
+                    return found
+            return None
+
+        def closeDialog():
+            found = dialog()
+            if found is not None:
+                found.close()
+            slicer.app.processEvents()
+
+        def field():
+            return dialog().findChild(qt.QLineEdit, "StudioLocationField").text
+
+        webValue = os.environ.get("SLICER_STUDIO_WEB")
+        qt.QDesktopServices.openUrl = fakeOpenUrl
+        try:
+            # A desktop that opens it: no message
+            os.environ.pop("SLICER_STUDIO_WEB", None)
+            if not os.path.exists("/.dockerenv"):
+                self.assertTrue(projects.showInFileManager(folder))
+                self.assertEqual(len(opened), 1)
+                self.assertIsNone(dialog(), "nothing extra shows when the file manager opened the folder")
+                self.assertTrue(projects.openLink("https://doi.org/10.1000/182"))
+                self.assertEqual(len(opened), 2)
+                self.assertIsNone(dialog())
+                # A desktop without a launcher
+                launcher["works"] = False
+                self.assertTrue(projects.showInFileManager(folder))
+                self.assertIsNotNone(dialog(), "the location shows when no file manager could be started")
+                self.assertEqual(field(), folder)
+                closeDialog()
+                launcher["works"] = True
+
+            # The web build: no attempt to start a launcher that is not there
+            os.environ["SLICER_STUDIO_WEB"] = "1"
+            del opened[:]
+            self.assertFalse(projects.showInFileManager(os.path.join(folder, "missing")), "a missing folder is still reported")
+            self.assertIsNone(dialog())
+            self.assertTrue(projects.showInFileManager(folder))
+            self.assertEqual(opened, [], "the web build does not call the desktop")
+            self.assertIsNotNone(dialog(), "Show in Files shows the folder")
+            self.assertEqual(field(), folder)
+            self.assertNotIn("/data is the data folder", "".join(label.text for label in dialog().findChildren(qt.QLabel)))
+            qt.QApplication.clipboard().setText("")
+            dialog().findChild(qt.QPushButton, "StudioLocationCopyButton").click()
+            self.assertEqual(qt.QApplication.clipboard().text(), folder)
+            closeDialog()
+
+            # The folder of the web build is the --data folder of the host
+            projects._showLocationDialog("folder", "/data/Slicer Studio/Projects/Head")
+            note = dialog().findChild(qt.QLabel, "StudioLocationHostNote")
+            self.assertIsNotNone(note, "the host data folder is named")
+            self.assertIn("--data", note.text)
+            self.assertIn("Slicer Studio/Projects/Head", note.text)
+            closeDialog()
+
+            # The buttons of the interface
+            from StudioLib import projects_ui
+
+            self.assertTrue(projects_ui.showRootFolder() is not None)
+            self.assertIsNotNone(dialog(), "the project folder commands show the folder too")
+            self.assertEqual(field(), projects.root())
+            closeDialog()
+
+            # Link-outs show the link to copy
+            self.assertTrue(projects.openLink("https://doi.org/10.1000/182"))
+            self.assertEqual(opened, [])
+            self.assertEqual(field(), "https://doi.org/10.1000/182")
+            dialog().findChild(qt.QPushButton, "StudioLocationCopyButton").click()
+            self.assertEqual(qt.QApplication.clipboard().text(), "https://doi.org/10.1000/182")
+            closeDialog()
+            from StudioLib import libcard_columns
+
+            libcard_columns.openExternalUrl("https://example.org/page")
+            self.assertEqual(field(), "https://example.org/page")
+            closeDialog()
+            from LesionNetworkMappingUI import widgets
+
+            self.assertTrue(widgets.showInFileManager(folder))
+            self.assertEqual(field(), folder)
+            closeDialog()
+            widgets.openLink("https://example.org/lnm")
+            self.assertEqual(field(), "https://example.org/lnm")
+            closeDialog()
+            self.assertEqual(opened, [])
+        finally:
+            qt.QDesktopServices.openUrl = realOpenUrl
+            closeDialog()
+            if webValue is None:
+                os.environ.pop("SLICER_STUDIO_WEB", None)
+            else:
+                os.environ["SLICER_STUDIO_WEB"] = webValue
+
 
 
 def _sphere(center=(0, 0, 0)):

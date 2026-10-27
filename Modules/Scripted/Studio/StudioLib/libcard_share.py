@@ -572,7 +572,9 @@ class ShareDialog:
 def showPath(path):
     """Show an exported folder (or the folder of a zip file) in the file manager."""
     folder = path if os.path.isdir(path) else os.path.dirname(path)
-    qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(folder))
+    from . import projects
+
+    projects.showInFileManager(folder)
 
 
 _dialogs = []  # open dialogs (kept alive)

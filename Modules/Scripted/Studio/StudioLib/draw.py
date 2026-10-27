@@ -2201,7 +2201,9 @@ def _toast(shell, text, **kwargs):
 
 
 def _showInFolder(path):
-    qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(os.path.dirname(path)))
+    from . import projects
+
+    projects.showInFileManager(os.path.dirname(path))
 
 
 def _commitCardEdits():

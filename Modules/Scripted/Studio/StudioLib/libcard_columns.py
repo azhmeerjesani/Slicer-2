@@ -623,8 +623,10 @@ def doiUrl(text):
 
 
 def openExternalUrl(url):
-    """Open a web address in the browser (tests replace this function)."""
-    return qt.QDesktopServices.openUrl(qt.QUrl(url))
+    """Open a web address in the browser, or show the link to copy in the web build (tests replace this function)."""
+    from . import projects
+
+    return projects.openLink(url)
 
 
 def parseSourceReference(text):

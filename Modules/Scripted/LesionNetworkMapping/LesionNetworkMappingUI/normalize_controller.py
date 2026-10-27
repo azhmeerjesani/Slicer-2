@@ -2004,7 +2004,7 @@ class NormalizeController(VTKObservationMixin):
         menuButton.setStyleSheet("QToolButton::menu-indicator { image: none; width: 0px; }")
         menu = qt.QMenu(menuButton)
         menu.setObjectName("LNMNormalizeMenu")
-        menu.addAction(_("Open folder")).connect("triggered()", lambda: qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(result.outDir)))
+        menu.addAction(_("Open folder")).connect("triggered()", lambda: widgets.showInFileManager(result.outDir))
         menu.addAction(_("Load transform")).connect("triggered()", lambda: self.loadTransform(result))
         if onRedo is not None:
             menu.addSeparator()

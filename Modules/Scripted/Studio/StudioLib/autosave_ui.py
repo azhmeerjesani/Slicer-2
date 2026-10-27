@@ -340,7 +340,9 @@ class AutosaveUi:
     def openFolder(self):
         path = self.folder()
         if path and os.path.isdir(path):
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(path))
+            from . import projects
+
+            projects.showInFileManager(path)
 
     #
     # Recovery

@@ -4176,7 +4176,9 @@ class StudyCard(qt.QObject):
     def _showFolder(self):
         studySession = _studySession()
         if studySession is not None:
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(studySession.study.path))
+            from . import projects
+
+            projects.showInFileManager(studySession.study.path)
 
     def _merge(self):
         studySession = _studySession()

@@ -511,7 +511,7 @@ class ParityDialog(qt.QDialog):
     def openFolder(self):
         if self.parityResult is None:
             return
-        qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(self.outputFolder()))
+        widgets.showInFileManager(self.outputFolder())
 
 
 #

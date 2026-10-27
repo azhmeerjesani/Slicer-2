@@ -1144,12 +1144,102 @@ def shortPath(path):
     return path
 
 
+#: The web build mounts the host folder of ``--data`` at this path
+WEB_DATA_FOLDER = "/data"
+
+#: Keeps the non-modal location message alive (one at a time)
+_locationDialog = None
+
+
+def _openDesktopUrl(url):
+    """Hand ``url`` (a ``QUrl``) to the desktop (file manager or browser); return whether it was handed over.
+
+    False in the web build, where the container has no file manager or browser (Qt would only log that it cannot detect a
+    launcher), and when the desktop has no launcher. Tests replace this function.
+    """
+    if isWebBuild():
+        return False
+    return bool(qt.QDesktopServices.openUrl(url))
+
+
+def _showLocationDialog(kind, text):
+    """A non-modal message with ``text`` (a folder path or a link) in a read-only field and a [Copy] button.
+
+    ``kind`` is "folder" or "link". The object names are ``StudioLocationDialog``, ``StudioLocationField`` and
+    ``StudioLocationCopyButton``. Return the dialog.
+    """
+    global _locationDialog
+    if _locationDialog is not None:
+        try:
+            _locationDialog.close()
+            _locationDialog.deleteLater()
+        except Exception:
+            pass
+        _locationDialog = None
+    folder = kind == "folder"
+    dialog = qt.QDialog(slicer.util.mainWindow())
+    dialog.setObjectName("StudioLocationDialog")
+    dialog.setModal(False)
+    dialog.setWindowTitle(_("Folder location") if folder else _("Link"))
+    layout = qt.QVBoxLayout(dialog)
+    intro = _("This build cannot open it here. Its location:") if folder else _("This build cannot open a browser. Copy the link and open it in your browser:")
+    label = qt.QLabel(intro)
+    label.setObjectName("StudioLocationText")
+    label.setWordWrap(True)
+    layout.addWidget(label)
+    field = qt.QLineEdit(text)
+    field.setObjectName("StudioLocationField")
+    field.setReadOnly(True)
+    field.setMinimumWidth(420)
+    layout.addWidget(field)
+    if folder and isWebBuild() and (text == WEB_DATA_FOLDER or text.startswith(WEB_DATA_FOLDER + "/")):
+        relative = text[len(WEB_DATA_FOLDER):].strip("/")
+        hostNote = _("/data is the data folder that you shared with --data on the computer that runs this build.")
+        if relative:
+            hostNote += " " + _("In that folder: {relative}").format(relative=relative)
+        note = qt.QLabel(hostNote)
+        note.setObjectName("StudioLocationHostNote")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+    buttons = qt.QHBoxLayout()
+    buttons.addStretch(1)
+    copy = qt.QPushButton(_("Copy path") if folder else _("Copy link"))
+    copy.setObjectName("StudioLocationCopyButton")
+    copy.connect("clicked()", lambda: qt.QApplication.clipboard().setText(text))
+    buttons.addWidget(copy)
+    close = qt.QPushButton(_("Close"))
+    close.setObjectName("StudioLocationCloseButton")
+    close.connect("clicked()", dialog.close)
+    buttons.addWidget(close)
+    layout.addLayout(buttons)
+    dialog.setMaximumWidth(720)
+    dialog.show()
+    _locationDialog = dialog
+    return dialog
+
+
 def showInFileManager(path):
-    """Open ``path`` (a folder) in Finder, Explorer or the file manager."""
-    if path and os.path.exists(path):
-        qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(path))
-        return True
-    return False
+    """Open ``path`` (a folder or file) in Finder, Explorer or the file manager.
+
+    Where the desktop cannot open it (the web build, a Linux desktop without a launcher) a message shows the path, with the
+    host folder in the web build, and [Copy path]. Return False when ``path`` does not exist, else True (it was opened or shown).
+    """
+    if not path or not os.path.exists(path):
+        return False
+    if not _openDesktopUrl(qt.QUrl.fromLocalFile(path)):
+        _showLocationDialog("folder", str(path))
+    return True
+
+
+def openLink(url):
+    """Open a web address in the browser; where there is none (the web build) a message shows the link and [Copy link].
+
+    ``url`` is a string or a ``QUrl``. Return True (it was opened or shown).
+    """
+    qurl = url if hasattr(url, "toString") else qt.QUrl(str(url))
+    if not _openDesktopUrl(qurl):
+        _showLocationDialog("link", qurl.toString())
+    return True
 
 
 def fileManagerName():

@@ -562,7 +562,7 @@ class CohortCard:
     def showFolder(self):
         folder = self.folder()
         if folder and os.path.isdir(folder) and not slicer.app.testingEnabled():
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(folder))
+            widgets.showInFileManager(folder)
 
 
 CARD = {

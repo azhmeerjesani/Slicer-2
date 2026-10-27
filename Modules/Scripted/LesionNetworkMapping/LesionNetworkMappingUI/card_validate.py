@@ -1550,7 +1550,7 @@ class ValidateCard:
     def showFolder(self):
         folder = self.result[0] if self.result else (self.frozenResult[0] if self.frozenResult else None)
         if folder and os.path.isdir(folder) and not slicer.app.testingEnabled():
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(folder))
+            widgets.showInFileManager(folder)
 
     #
     # Frozen circuit

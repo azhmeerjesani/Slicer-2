@@ -35,6 +35,31 @@ def _studioUi():
     return ui
 
 
+def showInFileManager(path):
+    """Open a folder or file with the desktop; where there is no file manager (the web build) show its location with [Copy path].
+
+    ``StudioLib.projects`` does the work when the Studio module is available, else the desktop is asked directly.
+    """
+    try:
+        from StudioLib import projects
+    except Exception:
+        projects = None
+    if projects is not None:
+        return projects.showInFileManager(path)
+    return bool(qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(path)))
+
+
+def openLink(url):
+    """Open a web address in the browser; where there is none (the web build) show the link with [Copy link]."""
+    try:
+        from StudioLib import projects
+    except Exception:
+        projects = None
+    if projects is not None:
+        return projects.openLink(url)
+    return bool(qt.QDesktopServices.openUrl(qt.QUrl(url)))
+
+
 def _styleSupportsRoles():
     app = getattr(slicer, "app", None)
     return bool(app is not None and app.style().property("supportsSlicerRole"))

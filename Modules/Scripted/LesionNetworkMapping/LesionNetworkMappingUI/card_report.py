@@ -713,7 +713,7 @@ class ReportCard:
         else:
             path = _evidenceTarget(self.state.root, link)
         if path and os.path.exists(path):
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(path))
+            widgets.showInFileManager(path)
         else:
             self.detailLabel.setText(_("That file or run folder is not on disk."))
 
@@ -741,7 +741,7 @@ class ReportCard:
     def openReport(self):
         path = latestReport(self.state.root)
         if path:
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(path))
+            widgets.showInFileManager(path)
 
     def onExportClicked(self):
         self.exportBundle()

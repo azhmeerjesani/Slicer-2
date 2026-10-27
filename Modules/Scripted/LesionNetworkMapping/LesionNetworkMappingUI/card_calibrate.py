@@ -681,7 +681,7 @@ class CalibrateCard:
     def showFolder(self):
         if self.result is None:
             return
-        qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(self.result[0]))
+        widgets.showInFileManager(self.result[0])
 
 
 #
