@@ -1306,7 +1306,7 @@ def plan(config, hash_lesions=True, providers=None):
         elif name == "specificity" and specificity != "glm":
             status, reason = ("unavailable" if specificity == "unavailable" else "skip"), specificity_reason
         elif name == "slnm" and not score_columns:
-            status, reason = "skip", "no confirmed score column"
+            status, reason = "skip", _slnm_skip_reason(config)
         elif name == "lesionset" and n_mapped > 100:
             status, reason = "planned", None
         elif name == "report" and not config.report:
@@ -1319,6 +1319,13 @@ def plan(config, hash_lesions=True, providers=None):
     result.nulls_mode = nulls_mode  # "exact" | "fast" | "skip" | "unavailable"
     result.elapsed = time.perf_counter() - started
     return result
+
+
+def _slnm_skip_reason(config):
+    """Why sLNM has no score column: not requested (--scores none, or a recipe without sLNM), or the study has none confirmed."""
+    if config.scores == "none":
+        return "not requested (scores: none)"
+    return "no confirmed score column"
 
 
 def _stage_mode(name):
@@ -2532,7 +2539,7 @@ class Runner:
     def _stage_slnm(self, planned):
         columns = list(self.plan.scores)
         if not columns or planned["status"] in ("skip", "unavailable"):
-            return self._skip("slnm", planned["reason"] or "no confirmed score column", "skipped")
+            return self._skip("slnm", planned["reason"] or _slnm_skip_reason(self.config), "skipped")
         import numpy as np
 
         rows = self.mapped_rows

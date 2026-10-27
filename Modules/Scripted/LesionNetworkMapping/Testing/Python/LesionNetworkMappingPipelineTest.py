@@ -875,6 +875,16 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         self.assertFalse(os.path.exists(result.out), "plan writes nothing")
         self.assertEqual(sha256(os.path.join(study.path, "participants.tsv")), before)
 
+    def test_slnm_skip_reason_names_the_real_cause(self):
+        base = dict(study=self.fx["study"], bundle=self.fx["bundle"], accept_terms=True, nulls="off")
+        auto = {stage["name"]: stage for stage in pipeline.plan(pipeline.PipelineConfig(**base)).stages}
+        self.assertEqual(auto["slnm"]["status"], "planned", "the study has a confirmed score column")
+        none = {stage["name"]: stage for stage in pipeline.plan(pipeline.PipelineConfig(scores="none", **base)).stages}
+        self.assertEqual(none["slnm"]["status"], "skip")
+        self.assertIn("not requested", none["slnm"]["reason"])
+        self.assertNotIn("no confirmed score column", none["slnm"]["reason"])
+        self.assertEqual(pipeline._slnm_skip_reason(pipeline.PipelineConfig(scores="auto", **base)), "no confirmed score column")
+
     # Code rules
 
     def test_code_rules(self):
