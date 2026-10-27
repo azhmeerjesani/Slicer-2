@@ -5531,7 +5531,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.initializeParameterNode()
         self._syncStudy()
         self.refreshConnectomes()
-        if self._adoptSceneResult():
+        adopted = self._adoptSceneResult()
+        if adopted:
             self._displayWindow(self._parameterNode.resultVolume, False)
         if self.seedMode() == "cohort":
             self.refreshCohort()
@@ -5554,7 +5555,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self._statusChipText = None
         self.updateComputeState()
         self._preloadScientificModules()
-        self.refreshResult(reloadMaps=False)
+        # A map adopted from the scene has no peak table yet (the map did not change in this session): compute it now
+        self.refreshResult(reloadMaps=False, peaks=True if adopted else None)
 
     def _preloadScientificModules(self):
         """Import scipy.stats (about 2 s) in a background thread on the first visit, so that resolving the
