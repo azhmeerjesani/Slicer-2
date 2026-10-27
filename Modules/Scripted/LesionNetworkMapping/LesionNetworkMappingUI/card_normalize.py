@@ -326,7 +326,7 @@ class NormalizeCard:
         templateId = self.templateId()
         if not nc.templateAvailable(templateId):
             if nc.isUserTemplate(templateId):
-                return _("Your template {name} needs an image and a brain mask (Settings › Templates).").format(name=nc.templateName(templateId))  # noqa: RUF001
+                return _("Your template {name} needs an image and a brain mask (Settings > Templates).").format(name=nc.templateName(templateId))  # noqa: RUF001
             return _("The {template} template is not on this computer (Options → download it).").format(template=templateId)
         available = nc.normalizationAvailable()
         if not available:
@@ -394,12 +394,7 @@ class NormalizeCard:
 
         self.templateCombo = qt.QComboBox()
         self.templateCombo.setObjectName("LNMNormalizeTemplate")
-        self.templateCombo.addItem(_("Automatic (the connectome's family)"), "")
-        for templateId in nc.TEMPLATE_IDS:
-            self.templateCombo.addItem(templateId, templateId)
-        # The user's own templates with a brain mask (A-10)
-        for templateId, name in nc.userTemplates():
-            self.templateCombo.addItem(_("{name} (yours)").format(name=name), templateId)
+        self._fillTemplateCombo()
         self.templateCombo.connect("currentIndexChanged(int)", self._onOptionsChanged)
         form.addRow(_("Template"), self.templateCombo)
 
@@ -476,6 +471,24 @@ class NormalizeCard:
         self.optionsPopover = popover
         self._showOptionValues()
 
+    def _fillTemplateCombo(self):
+        """(Re)fill the Template list: Automatic, the standard templates, then the user's templates with a brain mask (A-10).
+
+        The user templates change while the app runs (Settings > Templates), so showOptions() calls this each time
+        the popover opens; the selection is restored afterwards by _showOptionValues().
+        """
+        combo = self.templateCombo
+        wasBlocked = combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItem(_("Automatic (the connectome's family)"), "")
+            for templateId in nc.TEMPLATE_IDS:
+                combo.addItem(templateId, templateId)
+            for templateId, name in nc.userTemplates():
+                combo.addItem(_("{name} (yours)").format(name=name), templateId)
+        finally:
+            combo.blockSignals(wasBlocked)
+
     def _showOptionValues(self):
         widgetsToBlock = (self.templateCombo, self.qualityCombo, self.modalityCombo, self.marginSpinBox, self.rememberCheckBox, self.anatSelector)
         blocked = [widget.blockSignals(True) for widget in widgetsToBlock]
@@ -543,6 +556,7 @@ class NormalizeCard:
         if self.optionsPopover is None:
             self._buildOptions()
         else:
+            self._fillTemplateCombo()
             self._showOptionValues()
         popover = self.optionsPopover
         popover.adjustSize()

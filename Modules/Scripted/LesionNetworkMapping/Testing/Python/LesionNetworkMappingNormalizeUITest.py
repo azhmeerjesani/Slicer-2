@@ -587,6 +587,41 @@ class LesionNetworkMappingNormalizeUITest(unittest.TestCase):
         popover.close()
         self.assertFalse([key for key in _settingsKeys() - self.keysBefore if key.startswith("Studio/LNM")])
 
+    def test_09b_template_list_follows_user_templates(self):
+        """Options > Template is rebuilt each time the popover opens: an added user template is offered, a removed one is not."""
+        nc = self.nc
+        original = nc.userTemplates
+        shown = []
+
+        def offered():
+            popover = self.card.showOptions()
+            _pump(50)
+            texts = [self.card.templateCombo.itemText(i) for i in range(self.card.templateCombo.count)]
+            shown.append(self.card.templateCombo.currentData)
+            popover.close()
+            return texts
+
+        try:
+            nc.userTemplates = lambda: [("user:first", "First (with mask)")]
+            self.card.options["templateId"] = None
+            self.assertTrue(any("First (with mask) (yours)" in text for text in offered()))
+            nc.userTemplates = lambda: [("user:second", "Second (added later)")]
+            texts = offered()
+            self.assertTrue(any("Second (added later) (yours)" in text for text in texts), texts)
+            self.assertFalse(any("First (with mask)" in text for text in texts), texts)
+            self.assertEqual(sum("(yours)" in text for text in texts), 1, texts)
+            # The chosen template stays selected across reopenings
+            self.card.options["templateId"] = "user:second"
+            offered()
+            self.assertEqual(shown[-1], "user:second")
+            nc.userTemplates = lambda: []
+            texts = offered()
+            self.assertFalse(any("(yours)" in text for text in texts), texts)
+            self.assertEqual(shown[-1], "")  # a removed template falls back to Automatic
+        finally:
+            nc.userTemplates = original
+            self.card.options["templateId"] = None
+
     #
     # Scene close (last: it clears the scene)
     #
