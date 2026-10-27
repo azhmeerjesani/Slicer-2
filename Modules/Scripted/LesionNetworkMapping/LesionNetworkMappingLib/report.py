@@ -771,9 +771,9 @@ class _Report:
     def stage(self, name):
         return next((stage for stage in self.data.get("stages") or [] if stage.get("name") == name), {})
 
-    def not_run(self, name, prefix="not run"):
+    def not_run(self, name, prefix="not run", reason=None):
         stage = self.stage(name)
-        reason = stage.get("reason") or stage.get("status") or "not recorded"
+        reason = stage.get("reason") or reason or stage.get("status") or "not recorded"
         estimate = f" (estimated {_duration(stage['estimate_s'])})" if stage.get("estimate_s") else ""
         return f'<p class="mut">{_e(prefix)}: {_e(reason)}{_e(estimate)}</p>'
 
@@ -799,8 +799,9 @@ class _Report:
         from . import methods
 
         info = self.cohort.get("nulls")
-        if not info:
-            return self.section("nulls", "Null models", self.not_run("nulls"))
+        if not info or not (info.get("mode_label") or info.get("k") is not None):
+            # a skipped stage records only {"reason": ...} (pipeline._skip): show it, as the other sections do
+            return self.section("nulls", "Null models", self.not_run("nulls", "not computed", (info or {}).get("reason")))
         parts = [(f"<p>{_e(info.get('mode_label'))} ({_e(info.get('kind'))}{', approximate' if info.get('approximate') else ''}); K = {_num(info.get('k'))} null cohorts; "
                  f"minimum attainable p = {_num(info.get('min_attainable_p'))}, q = {_num(info.get('min_attainable_q'))}; BH-FDR needs at least {_num(info.get('fdr_floor_voxels'))} voxels.</p>")]
         classic = info.get("classic_rule") or {}

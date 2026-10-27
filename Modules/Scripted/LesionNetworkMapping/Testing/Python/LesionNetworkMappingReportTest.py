@@ -274,6 +274,31 @@ class ReportTest(unittest.TestCase):
         self.assertIn("not computed: no confirmed score column", section_html(text, "slnm"))
         self.assertNotIn('id="slnm-AphasiaScore"', text)
 
+    def test_nulls_off_shows_reason(self):
+        """Bug bash BB-1: with null models off the section read 'Null models (); K = n/a ...' instead of the reason."""
+        reason = "null models are off (--nulls off)"
+        out = copy_out(self.out, "copy-nullsoff")
+
+        def change(data):
+            data["cohort"]["nulls"] = {"reason": reason}  # what pipeline._skip records
+            for stage in data["stages"]:
+                if stage["name"] == "nulls":
+                    stage.update(status="skipped", reason=reason)
+
+        edit_json(os.path.join(out, pipeline.PIPELINE_JSON), change)
+        nulls = section_html(read(report.render_report(out, now=NOW, strict=True)), "nulls")
+        self.assertIn(f"not computed: {html.escape(reason)}", nulls)
+        self.assertNotIn("n/a null cohorts", nulls)
+        self.assertNotIn("()", nulls)
+
+        # a record without a stage entry still shows its own reason
+        def change2(data):
+            data["stages"] = [stage for stage in data["stages"] if stage["name"] != "nulls"]
+
+        edit_json(os.path.join(out, pipeline.PIPELINE_JSON), change2)
+        nulls = section_html(read(report.render_report(out, now=NOW, strict=True)), "nulls")
+        self.assertIn(f"not computed: {html.escape(reason)}", nulls)
+
     def test_no_template(self):
         out = copy_out(self.out, "copy-notemplate")
         with mock.patch.object(reportfigs, "find_template", return_value=None):
