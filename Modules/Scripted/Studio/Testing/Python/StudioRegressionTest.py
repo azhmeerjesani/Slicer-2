@@ -23,6 +23,11 @@ Run with the main window and testing enabled::
 - ``test_6_probabilistic_lesion_binarize`` (BB-1): a study subject whose lesion file is a probabilistic mask (float values
   below 1) opens with its voxels above 0, not as an empty lesion with unsaved changes; the Mask chip offers Binarize at 0.5,
   which keeps the voxels of at least 0.5 and the original file as ``desc-prebinarize``.
+- ``test_7_adopted_status_column_kept`` (BB-1): adopting a folder whose participants.tsv has its own "status" column
+  (alive / deceased) keeps it as ``status_original`` (values, position and data dictionary entry) and starts the study's
+  status at untraced, so that Done -> next finds the next subject and tracing never overwrites the user's values; an
+  "include" column of yes / no is kept as ``include_original`` and keeps its meaning; a status column of study values is
+  the study's own column (empty cells untraced).
 """
 
 import json
@@ -557,6 +562,61 @@ class StudioRegressionTest(unittest.TestCase):
                 slicer.app.processEvents()
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
+
+    # Adopted participants.tsv with columns named like the study's (BB-1)
+
+    def _adopt(self, name, header, values, dictionary=None):
+        """Adopt a folder of sub-01..03 T1w scans and a participants.tsv of ``header`` and ``values`` (one list per subject)."""
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import study_ui
+
+        if not study_ui.isAvailable():
+            self.skipTest("needs the lesion network mapping library")
+        folder = os.path.join(self.directory, name)
+        os.makedirs(folder)
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        paths = []
+        for index in range(1, 4):
+            paths.append(os.path.join(folder, f"sub-0{index}_T1w.nii.gz"))
+            nifti.write_nifti(paths[-1], np.zeros(grid.shape, np.uint8), grid.affine)
+        with open(os.path.join(folder, "participants.tsv"), "w", encoding="utf-8") as f:
+            f.write("\t".join(header) + "\n" + "".join("\t".join(row) + "\n" for row in values))
+        if dictionary is not None:
+            with open(os.path.join(folder, "participants.json"), "w", encoding="utf-8") as f:
+                json.dump(dictionary, f)
+        return folder, study_ui.createStudy(paths, folder=folder, openIt=False)
+
+    def test_7_adopted_status_column_kept(self):
+        from LesionNetworkMappingLib.study import read_tsv
+
+        header = ["participant_id", "age", "status", "include"]
+        values = [["sub-01", "60", "alive", "yes"], ["sub-02", "61", "deceased", "no"], ["sub-03", "62", "alive", "yes"]]
+        folder, study = self._adopt("Clinical", header, values, {"status": {"Description": "Vital status"}})
+        self.assertEqual(study.columns[:4], ["participant_id", "age", "status_original", "include_original"])
+        self.assertEqual(study.adoptedRenames, {"status": "status_original", "include": "include_original"})
+        self.assertEqual([study.subject(sid)["status"] for sid in study.subject_ids], ["untraced"] * 3)
+        self.assertEqual([study.subject(sid)["include"] for sid in study.subject_ids], ["1", "0", "1"])
+        # Done -> next: sub-02 is excluded (include "no"), sub-03 is the next untraced subject
+        self.assertEqual(study.next_subject("sub-01"), "sub-03")
+        study.set("sub-01", status="traced")
+        study.save()
+        columns, rows = read_tsv(os.path.join(folder, "participants.tsv"))
+        self.assertEqual(columns[:4], ["participant_id", "age", "status_original", "include_original"])
+        self.assertEqual([row["status_original"] for row in rows], ["alive", "deceased", "alive"])
+        self.assertEqual([row["include_original"] for row in rows], ["yes", "no", "yes"])
+        self.assertEqual([row["status"] for row in rows], ["traced", "untraced", "untraced"])
+        with open(os.path.join(folder, "participants.json"), encoding="utf-8") as f:
+            dictionary = json.load(f)
+        self.assertEqual(dictionary["status_original"]["Description"], "Vital status")
+        self.assertEqual(dictionary["status"]["Description"], "Tracing and mapping progress")
+        # A status column of study values is the study's own column
+        header = ["participant_id", "status"]
+        folder, study = self._adopt("Earlier study", header, [["sub-01", "traced"], ["sub-02", "n/a"], ["sub-03", "untraced"]])
+        self.assertEqual(study.adoptedRenames, {})
+        self.assertNotIn("status_original", study.columns)
+        self.assertEqual([study.subject(sid)["status"] for sid in study.subject_ids], ["traced", "untraced", "untraced"])
+        self.assertEqual(study.next_subject("sub-01"), "sub-02")
 
     @staticmethod
     def _isAncestor(ancestor, widget):

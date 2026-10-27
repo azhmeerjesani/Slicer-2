@@ -7,6 +7,8 @@ A study is a plain folder (``LesionNetworkMappingLib.study``): ``study.json``, `
   that already has a ``participants.tsv`` is adopted in place: its columns and their order are kept, a backup is
   written once to ``.studio/participants.orig.tsv`` and the values of a group column ("patient", "HC", "1"...) are
   mapped to case / control / exclude (``groupMappingProposal()``); the original text is kept in ``group_original``.
+  Another column named like a study column but holding other values (a "status" of "alive" / "deceased") is kept as
+  ``status_original``, so that tracing never overwrites it.
 - ``StudySession`` is ``shell.studySession`` (SPEC 2.10): ``study``, ``current()``, ``open(sid)``, ``next()``,
   ``previous()``, ``done()``, ``markDirty()`` and the extension points of the LNM addendum (``addDoneHook()``,
   ``addOpenHook()``, ``next(queue=…)``, ``flush()``, ``applyInbox()`` / ``mergeInbox()``, ``isDirty()``,
@@ -96,6 +98,11 @@ ADOPT_BACKUP = "participants.orig.tsv"
 ADOPT_DICTIONARY_BACKUP = "participants.orig.json"
 #: Column that keeps the original text of a mapped "group" column
 GROUP_ORIGINAL_COLUMN = "group_original"
+#: An adopted column named like a study column with fixed values (status, qc, include, group) but holding other values
+#: ("alive", "deceased") is kept as "<name>_original"; the study column gets its default values
+ORIGINAL_SUFFIX = "_original"
+#: Values of an adopted "include" column that keep their meaning in the study's include column (1 / 0)
+_INCLUDE_WORDS = {"1": "1", "true": "1", "yes": "1", "y": "1", "0": "0", "false": "0", "no": "0", "n": "0"}
 #: Node attribute of the subject's nodes (a participant id, never a path)
 SUBJECT_ATTRIBUTE = "Studio.StudySubject"
 #: The default tracing template: the bundled MNI152NLin2009cAsym 2 mm brain (works offline)
@@ -604,7 +611,9 @@ def adoptFolder(folder, name=None, groupColumn=None, groupMapping=None, template
 
     The table's columns and their order are kept (the missing standard columns are appended); its rows keep their
     values, except the ids (normalized to "sub-<label>", the original in ``source_id``) and the group mapping
-    (``applyGroupMapping()``). participants.tsv and participants.json are backed up once to ``.studio/``.
+    (``applyGroupMapping()``). A column named like a study column with fixed values (status, qc, include, group) that
+    holds other values ("alive", "deceased") is kept as ``<name>_original`` (``_keepClashingColumns()``; the returned
+    study's ``adoptedRenames`` lists them). participants.tsv and participants.json are backed up once to ``.studio/``.
     """
     studyModule = _lnm("study")
     folder = os.path.abspath(folder)
@@ -652,14 +661,56 @@ def adoptFolder(folder, name=None, groupColumn=None, groupMapping=None, template
             added.append(GROUP_ORIGINAL_COLUMN)
             for row in rows:
                 row.setdefault(GROUP_ORIGINAL_COLUMN, studyModule.NA)
-    ordered = ["participant_id"] + [column for column in columns if column != "participant_id"]
+    columns = [column for column in columns if column != "participant_id"]
+    renamed = _keepClashingColumns(studyModule, columns + added, rows, dictionary)
+    columns = [renamed.get(column, column) for column in columns]
+    ordered = ["participant_id"] + columns
     ordered += [column for column in studyModule.STANDARD_COLUMNS if column not in ordered]
     ordered += [column for column in added if column not in ordered]
     template = template or defaultTemplate()
     studyObject = studyModule.Study(folder, _newMetadata(studyModule, folder, name, template), ordered, rows, dictionary)
     # The new study.json is written next to the user's table, without the merge of a later save (nothing else writes it yet)
     studyObject.save(merge=False)
-    return studyModule.Study.open(folder)
+    opened = studyModule.Study.open(folder)
+    opened.adoptedRenames = renamed
+    return opened
+
+
+def _keepClashingColumns(studyModule, columns, rows, dictionary):
+    """Keep the user's columns that are named like a study column with fixed values but hold other values.
+
+    A "status" column of "alive" / "deceased" is renamed to ``status_original`` (its values, position and data dictionary
+    entry unchanged) and the study's own column gets its default values (an "include" column of yes / no / true / false
+    keeps its meaning as 1 / 0), so that tracing never overwrites the user's values. A study column that already holds
+    allowed values only is the study's column; its empty cells get the default. ``columns`` (without participant_id),
+    ``rows`` and ``dictionary`` are changed in place.
+
+    :return: {old name: new name} of the renamed columns.
+    """
+    renamed = {}
+    for column, allowed in studyModule.ALLOWED_VALUES.items():
+        if column not in columns:
+            continue
+        default = studyModule.DEFAULTS.get(column, studyModule.NA)
+        values = [str(row.get(column, studyModule.NA)).strip() for row in rows]
+        if all(studyModule.is_missing(value) or value in allowed for value in values):
+            for row in rows:
+                if studyModule.is_missing(row.get(column)):
+                    row[column] = default
+            continue
+        target, number = column + ORIGINAL_SUFFIX, 2
+        while target in columns or target in dictionary or any(target in row for row in rows):
+            target, number = f"{column}{ORIGINAL_SUFFIX}{number}", number + 1
+        columns[columns.index(column)] = target
+        for row, value in zip(rows, values, strict=True):
+            row[target] = row.pop(column, studyModule.NA)
+            mapped = _INCLUDE_WORDS.get(value.lower()) if column == "include" else None
+            row[column] = mapped or default
+        if column in dictionary:
+            dictionary[target] = dictionary.pop(column)
+        renamed[column] = target
+        logging.info(f"Studio: the adopted column {column} holds other values than the study's ({', '.join(allowed)}); kept as {target}")
+    return renamed
 
 
 def _commonFolder(files):
@@ -729,6 +780,8 @@ def createStudy(files, shell=None, folder=None, groupColumn=None, groupMapping=N
         "adopted": _("Study {name} created in place: {n} subjects (participants.tsv kept, backup in .studio)"),
         "opened": _("Study {name}: {n} subjects"),
     }[how].format(name=studyObject.name, n=len(studyObject))
+    for column, kept in (getattr(studyObject, "adoptedRenames", None) or {}).items():
+        message += " · " + _("your {column} column is kept as {kept}").format(column=column, kept=kept)
     if report.get("skipped"):
         message += " · " + (_("1 file skipped") if len(report["skipped"]) == 1 else _("{n} files skipped").format(n=len(report["skipped"])))
     _toast(shell, message, ms=5000, action=lambda: qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(folder)), actionText=_("Show folder"),
