@@ -586,6 +586,48 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
             self.assertAlmostEqual(again["cohort"]["slnm"][label]["max_abs_r"], value["max_abs_r"], places=6)
         self.assertEqual(again["cohort"]["nulls"]["classic_rule"], self.pipeline_json["cohort"]["nulls"]["classic_rule"])
 
+    def test_reproduce_pipeline_uses_slicer_lnm_without_pythonslicer(self):
+        """A wheel or container run has no PythonSlicer: reproduce_pipeline.sh then runs 'slicer-lnm pipeline run' (like reproduce.sh)."""
+        script = os.path.join(self.out, "reproduce_pipeline.sh")
+        bin_dir = os.path.join(self.tmp, "fakebin")
+        os.makedirs(bin_dir, exist_ok=True)
+        log = os.path.join(self.tmp, "fake-slicer-lnm.log")
+        fake = os.path.join(bin_dir, "slicer-lnm")
+        with open(fake, "w", encoding="utf-8") as f:
+            f.write('#!/bin/sh\nprintf "%s\\n" "$@" > "$FAKE_LOG"\n')
+        os.chmod(fake, 0o755)
+        no_pythonslicer = dict(PYTHONSLICER=None, SLICER_LNM=None, FAKE_LOG=log, ACCEPT_TERMS="1", OUT=os.path.join(self.tmp, "reproduced-lnm"))
+        system_path = os.pathsep.join(path for path in ("/usr/bin", "/bin") if os.path.isdir(path))
+        # slicer-lnm on PATH, no PythonSlicer anywhere: the documented command works
+        result = subprocess.run(["sh", script], env=_env(PATH=bin_dir + os.pathsep + system_path, **no_pythonslicer), capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+        with open(log, encoding="utf-8") as f:
+            called = f.read().splitlines()
+        self.assertEqual(called[:2], ["pipeline", "run"], called)
+        self.assertIn("--accept-terms", called)
+        self.assertEqual(called[called.index("--config") + 1], os.path.join(self.out, "pipeline.json"))
+        # $SLICER_LNM names the command when it is not on PATH
+        os.remove(log)
+        result = subprocess.run(["sh", script], env=_env(PATH=system_path, **dict(no_pythonslicer, SLICER_LNM=fake)), capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+        self.assertTrue(os.path.isfile(log))
+        # $PYTHONSLICER forces the Python route, also when slicer-lnm is on PATH
+        os.remove(log)
+        result = subprocess.run(["sh", script], env=_env(PATH=bin_dir + os.pathsep + system_path, **dict(no_pythonslicer, PYTHONSLICER=fake)), capture_output=True, text=True, check=False)
+        self.assertTrue(os.path.isfile(log))
+        with open(log, encoding="utf-8") as f:
+            self.assertEqual(f.read().splitlines()[:3], ["-m", "LesionNetworkMappingLib.pipeline", "run"])
+        # the script remembers the slicer-lnm that wrote it (a venv that is not activated)
+        venv_bin = os.path.join(self.tmp, "venv", "bin")
+        os.makedirs(venv_bin, exist_ok=True)
+        shutil.copy(fake, os.path.join(venv_bin, "slicer-lnm"))
+        with mock.patch.object(pipeline.sys, "executable", os.path.join(venv_bin, "python")), mock.patch.object(pipeline.shutil, "which", return_value=None):
+            self.assertEqual(pipeline._slicer_lnm_executable(), os.path.join(venv_bin, "slicer-lnm"))
+        with open(script, encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("DEFAULT_SLICER_LNM=", text)
+        self.assertIn("slicer-lnm pipeline run", text)
+
     def test_cancel_during_maps_and_resume(self):
         fx = self.fx
         out = os.path.join(self.tmp, "cancel-maps")

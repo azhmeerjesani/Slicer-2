@@ -133,7 +133,9 @@ refers to; `provenance.json` and the reproduce scripts keep the paths of the run
 `reproduce.sh` (next to the maps) recomputes the maps with `slicer-lnm engine` when `slicer-lnm` is on
 PATH (or `SLICER_LNM=/path/to/slicer-lnm`), otherwise with `PythonSlicer -m LesionNetworkMappingLib.engine`;
 `PYTHONSLICER=/path/to/PythonSlicer` forces the second. `OUT=folder sh reproduce.sh` writes the maps to
-`folder`. `reproduce_pipeline.sh` re-runs the whole pipeline from `pipeline.json` with PythonSlicer.
+`folder`. `reproduce_pipeline.sh` re-runs the whole pipeline from `pipeline.json` (`ACCEPT_TERMS=1 sh
+reproduce_pipeline.sh`) with `slicer-lnm pipeline run` when `slicer-lnm` is on PATH, is `SLICER_LNM` or is the command that
+wrote the script, otherwise with `PythonSlicer`; `PYTHONSLICER` forces the second.
 
 ## Licences and data
 
