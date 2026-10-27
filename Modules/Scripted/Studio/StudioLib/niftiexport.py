@@ -600,17 +600,28 @@ class Job:
         return files
 
     def _maskPaths(self, node):
-        """``[(segment ID, path)]`` of the masks of a segmentation (non-empty segments, unique names)."""
+        """``[(segment ID, path)]`` of the masks of a segmentation (non-empty segments, unique names).
+
+        The first segment of a name keeps it. A later segment whose name gives the same entity value (the names differ
+        only by case, spaces or punctuation) gets ``dup<N>`` after it, and N skips every value another segment has. So
+        no file name equals the name of another segment: "Lesion 1", "Lesion-1" and "Lesion 12" give ``Lesion1``,
+        ``Lesion1dup2`` and ``Lesion12``.
+        """
         base, extension = splitExtension(self.path)
         segmentation = node.GetSegmentation()
-        result = []
+        entries = [(segmentId, entityValue(segmentation.GetSegment(segmentId).GetName()))
+                   for segmentId in segmentIds(node, nonEmpty=True)]
+        reserved = {value.lower() for _segmentId, value in entries}
         taken = set()
-        for segmentId in segmentIds(node, nonEmpty=True):
-            value = entityValue(segmentation.GetSegment(segmentId).GetName())
+        result = []
+        for segmentId, value in entries:
             candidate, index = value, 2
             while candidate.lower() in taken:
-                candidate = f"{value}{index}"
+                candidate = f"{value}dup{index}"
                 index += 1
+                while candidate.lower() in reserved:
+                    candidate = f"{value}dup{index}"
+                    index += 1
             taken.add(candidate.lower())
             result.append((segmentId, maskBaseName(base, candidate) + extension))
         return result

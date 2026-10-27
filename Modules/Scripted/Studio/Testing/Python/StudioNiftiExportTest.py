@@ -566,6 +566,30 @@ class StudioNiftiExportTest(unittest.TestCase):
         self.assertEqual(self.export.maskBaseName("sub-01_desc-lesion", "Lesion"), "sub-01_label-Lesion_desc-lesion_mask")
         self.assertEqual(self.export.maskBaseName("lesions", "Left"), "lesions_label-Left_mask")
 
+    def test_06d_mask_names_never_equal_another_segments_name(self):
+        """Names that differ only by punctuation or case: a suffix never makes a file name that is another segment's name."""
+        scan = self._volume("scan", np.zeros((30, 30, 30), np.int16), np.eye(4))
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesions")
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(scan)
+        names = ("Lesion 1", "Lesion-1", "Lesion 12", "Cyst", "cyst", "Cyst2")
+        for index, name in enumerate(names):
+            segmentId = segmentation.GetSegmentation().AddEmptySegment("", name)
+            data = np.zeros((30, 30, 30), np.uint8)
+            data[3 + 4 * index, 5, 5] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(data, segmentation, segmentId, scan)
+        result = self.export.exportSegmentation(segmentation, os.path.join(self.out, "Lesions.nii.gz"), mode=self.export.SEGMENTATION_MASKS)
+        self.assertEqual(result.errors, [])
+        found = {os.path.basename(path): self._sidecar(path)["Segment"] for path in result.images}
+        self.assertEqual(found, {
+            "Lesions_label-Lesion1_mask.nii.gz": "Lesion 1",
+            "Lesions_label-Lesion1dup2_mask.nii.gz": "Lesion-1",
+            "Lesions_label-Lesion12_mask.nii.gz": "Lesion 12",
+            "Lesions_label-Cyst_mask.nii.gz": "Cyst",
+            "Lesions_label-cystdup2_mask.nii.gz": "cyst",
+            "Lesions_label-Cyst2_mask.nii.gz": "Cyst2",
+        })
+
     def test_07_map_with_threshold_mask(self):
         """A map is written as float32 with a thresholded binary mask (|T| >= t, or one sign) and the threshold in the sidecar."""
         ijkToRas = np.array([[-2.0, 0, 0, 90], [0, 2.0, 0, -126], [0, 0, 2.0, -72], [0, 0, 0, 1]])
