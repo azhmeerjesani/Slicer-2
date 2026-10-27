@@ -564,6 +564,51 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
         self.assertTrue(self._wait(overlay.legend.isVisible, 2000))
         self.assertTrue(overlay.chips.isVisible())
 
+    def test_map_overlay_follows_one_up_sagittal_coronal(self):
+        """The map legend and layer chips follow the only slice view of a one-up Sagittal or Coronal layout, not Red only."""
+        from StudioLib import mappage
+
+        studioShell = self._applyStudio()
+        studioShell.switchTo("map")
+        self._pump(10)
+        overlay = mappage.overlay()
+        if overlay is None:
+            self.skipTest("the Map overlay is not available")
+        state = {"statistic": "T", "window": 4.0, "level": 0.0, "threshold": None, "thresholdText": "Unthresholded", "sign": "both",
+                 "opacity": 0.8, "outline": False}
+        refresh = overlay.refresh
+
+        def place():
+            overlay._state = state
+            overlay.place()
+
+        overlay.refresh = place
+        self._restores.append(lambda: setattr(overlay, "refresh", refresh))
+        initialLayout = self.layoutManager.layout
+        self._restores.append(lambda: self.layoutManager.setLayout(initialLayout))
+        layouts = (("Red", slicer.vtkMRMLLayoutNode.SlicerLayoutOneUpRedSliceView),
+                   ("Yellow", slicer.vtkMRMLLayoutNode.SlicerLayoutOneUpYellowSliceView),
+                   ("Green", slicer.vtkMRMLLayoutNode.SlicerLayoutOneUpGreenSliceView),
+                   ("Red", slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView))
+        for name, layout in layouts:
+            self.layoutManager.setLayout(layout)
+            self._pump(6)
+            place()
+            self._pump(4)
+            self.assertTrue(self.layoutManager.sliceWidget(name).isVisible(), name)
+            self.assertTrue(self._wait(overlay.legend.isVisible, 2000), f"legend in the layout of {name}")
+            self.assertTrue(overlay.chips.isVisible(), f"chips in the layout of {name}")
+            # The legend sits inside the view that is shown
+            view = self.layoutManager.sliceWidget(name).sliceView()
+            topLeft = overlay.parent.mapFromGlobal(view.mapToGlobal(qt.QPoint(0, 0)))
+            self.assertGreaterEqual(overlay.legend.x, topLeft.x())
+            self.assertLessEqual(overlay.legend.x + overlay.legend.width, topLeft.x() + view.width)
+        # A layout without slice views still hides them
+        self.layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUp3DView)
+        self._pump(6)
+        self.assertFalse(overlay.legend.isVisible())
+        self.assertFalse(overlay.chips.isVisible())
+
     def test_flat_view_bar(self):
         studioShell = self._applyStudio()
         volume = self._addVolume()

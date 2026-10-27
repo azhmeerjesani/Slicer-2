@@ -361,7 +361,7 @@ LEGEND_WIDTH = 220
 OVERLAY_MARGIN = 10
 #: Height of the colour bar of the legend
 LEGEND_BAR_HEIGHT = 8
-#: The view under the overlays: the large view of the Studio layouts
+#: The view under the overlays: the large view of the Studio layouts (another slice view takes over while it is hidden)
 OVERLAY_VIEW = "Red"
 #: Height reserved at the bottom of the view for its corner text (the image name) under the layer chips
 CORNER_TEXT_HEIGHT = 22
@@ -446,7 +446,7 @@ class MapOverlay:
             ui.bindStyleSheet(widget, self._styleSheet)
             widget.hide()
         self._state = None
-        self._view = None
+        self._views = []
         self._filter = _OverlayFilter(self)
         self._placeTimer = qt.QTimer()
         self._placeTimer.setSingleShot(True)
@@ -468,20 +468,25 @@ class MapOverlay:
                 f" border: 1px solid {border.name()}; border-radius: 6px; padding: 2px 8px; }}")
 
     def _sliceWidget(self):
-        """The main slice view widget, shown or not: it stays watched while a layout hides it, so that its Show event
-        puts the overlays back.
+        """The main slice view widget: the large view of the Studio layouts (Red) while it is shown; when a layout or a
+        maximized view hides it (a one-up Sagittal or Coronal view), the visible slice view that shows the map (else the
+        first visible one). Hidden views stay watched, so that their Show event puts the overlays back.
         """
-        layoutManager = slicer.app.layoutManager()
-        return layoutManager.sliceWidget(OVERLAY_VIEW) if layoutManager is not None else None
+        return _mainSliceWidget()
 
-    def _watch(self, sliceWidget):
-        if sliceWidget is self._view:
+    def _watch(self, sliceWidgets):
+        if sliceWidgets is None:
+            sliceWidgets = []
+        elif not isinstance(sliceWidgets, (list, tuple)):
+            sliceWidgets = [sliceWidgets]
+        if len(sliceWidgets) == len(self._views) and all(a is b for a, b in zip(sliceWidgets, self._views, strict=True)):
             return
-        if self._view is not None and self.ui._isAlive(self._view):
-            self._view.removeEventFilter(self._filter)
-        self._view = sliceWidget
-        if sliceWidget is not None:
-            sliceWidget.installEventFilter(self._filter)
+        for view in self._views:
+            if self.ui._isAlive(view):
+                view.removeEventFilter(self._filter)
+        self._views = list(sliceWidgets)
+        for view in self._views:
+            view.installEventFilter(self._filter)
 
     def refresh(self):
         """Show what the Map module shows now (``LesionNetworkMappingWidget.legendState()``), or hide."""
@@ -504,13 +509,17 @@ class MapOverlay:
         self._paintBar()
         opacity = round(100 * float(state["opacity"]))
         self.chipLabels["network"].setText(_("Network {statistic} · {pct}%").format(statistic=statistic, pct=opacity))
-        templateName = _templateChipText()
-        self.chipLabels["template"].setText(templateName)
-        self.chipLabels["template"].setVisible(bool(templateName))
+        self._updateTemplateChip(_mainSliceWidget())
         lesion = self.chipLabels["lesion"]
         lesion.setText("\u25a1 " + _("Lesion outline"))
         lesion.setVisible(bool(state["outline"]))
         self.place()
+
+    def _updateTemplateChip(self, sliceWidget):
+        """The template chip names the image under the map in the main view."""
+        templateName = _templateChipText(sliceWidget)
+        self.chipLabels["template"].setText(templateName)
+        self.chipLabels["template"].setVisible(bool(templateName))
 
     def _paintBar(self):
         """The colour bar: the LNM diverging colours from -window to +window."""
@@ -547,11 +556,12 @@ class MapOverlay:
         if not self.ui._isAlive(self.legend):
             return
         sliceWidget = self._sliceWidget()
-        self._watch(sliceWidget)
+        self._watch(_sliceWidgets())
         if self._state is None or sliceWidget is None or not sliceWidget.isVisible():
             self.legend.hide()
             self.chips.hide()
             return
+        self._updateTemplateChip(sliceWidget)
         view = sliceWidget.sliceView()
         topLeft = self.parent.mapFromGlobal(view.mapToGlobal(qt.QPoint(0, 0)))
         rect = qt.QRect(topLeft.x(), topLeft.y(), view.width, view.height)
@@ -595,10 +605,39 @@ def _tickText(value):
     return text.replace("-", "\u2212")
 
 
-def _templateChipText():
-    """The short name of the image under the map in the main view ("MNI152NLin2009cAsym"), or ""."""
+def _sliceWidgets():
+    """All the slice view widgets of the layout manager, the large view of the Studio layouts first."""
     layoutManager = slicer.app.layoutManager()
-    sliceWidget = layoutManager.sliceWidget(OVERLAY_VIEW) if layoutManager is not None else None
+    if layoutManager is None:
+        return []
+    names = [str(name) for name in layoutManager.sliceViewNames()]
+    if OVERLAY_VIEW in names:
+        names.remove(OVERLAY_VIEW)
+        names.insert(0, OVERLAY_VIEW)
+    widgets = (layoutManager.sliceWidget(name) for name in names)
+    return [widget for widget in widgets if widget is not None]
+
+
+def _mainSliceWidget():
+    """The slice view the overlays follow: the large view (``OVERLAY_VIEW``) while it is shown; otherwise the shown view
+    that has a map (a foreground volume), else the first shown one; else the large view (hidden), or None.
+    """
+    widgets = _sliceWidgets()
+    if not widgets:
+        return None
+    shown = [widget for widget in widgets if widget.isVisible()]
+    if not shown or shown[0] is widgets[0]:
+        return widgets[0]
+    for widget in shown:
+        if widget.mrmlSliceCompositeNode().GetForegroundVolumeID():
+            return widget
+    return shown[0]
+
+
+def _templateChipText(sliceWidget=None):
+    """The short name of the image under the map in the main view ("MNI152NLin2009cAsym"), or ""."""
+    if sliceWidget is None:
+        sliceWidget = _mainSliceWidget()
     compositeNode = sliceWidget.mrmlSliceCompositeNode() if sliceWidget is not None else None
     node = slicer.mrmlScene.GetNodeByID(compositeNode.GetBackgroundVolumeID()) if compositeNode is not None and compositeNode.GetBackgroundVolumeID() else None
     if node is None:
