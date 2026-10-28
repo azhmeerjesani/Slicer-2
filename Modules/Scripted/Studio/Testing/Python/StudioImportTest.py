@@ -1207,6 +1207,48 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual([node.GetName() for node in result.segmentations], ["sub-08_lesion"])
         self.assertEqual(studioShell.toastText(), "Loaded sub-08_lesion")
 
+    def test_recent_lesion_opens_as_with_open(self):
+        """BB-1: a lesion re-opened from Recent (recorded as a segmentation) is the lesion that Open... shows: a
+        probabilistic mask keeps every voxel above 0 (the reader would truncate it to an empty lesion) with its toast,
+        and the Notes and SourceReference of the sidecar are restored, for a 0/1 mask too.
+        """
+        from StudioLib import draw, importer
+
+        studioShell = self._applyStudio()
+        dims = GRID_2009C_2MM[0]
+        fractional = np.zeros((dims[2], dims[1], dims[0]), np.float32)
+        fractional[38:43, 48:53, 43:48] = 0.6
+        fractional[40, 50, 45] = 0.9
+        binary = np.zeros((dims[2], dims[1], dims[0]), np.uint8)
+        binary[30:35, 40:45, 40:45] = 1
+        for name, array, isFractional in (("sub-21_lesion.nii.gz", fractional, True), ("sub-22_lesion.nii.gz", binary, False)):
+            path = self._writeVolume(name, GRID_2009C_2MM, array)
+            with open(importer.sidecarPath(path), "w", encoding="utf-8") as f:
+                json.dump({"Notes": f"notes of {name}", "SourceReference": "Fig. 3"}, f)
+            slicer.mrmlScene.Clear(0)
+            self._pump(6)
+            studioShell.switchTo("library")
+            self._pump()
+            result = importer.loadRecentFile({"fileName": path, "fileType": "SegmentationFile"}, None, studioShell)
+            self._pump(8)
+            self.assertEqual(len(result.segmentations), 1, name)
+            lesion = result.segmentations[0]
+            self.assertEqual(lesion.GetName(), name[:-len(".nii.gz")])
+            self.assertEqual(self._voxels(lesion), int(np.count_nonzero(array > 0)), name)
+            self.assertEqual(bool(lesion.GetAttribute(importer.LESION_FRACTIONAL_ATTRIBUTE)), isFractional, name)
+            self.assertEqual(lesion.GetAttribute(draw.NOTES_ATTRIBUTE), f"notes of {name}", name)
+            self.assertEqual(lesion.GetAttribute(draw.SOURCE_REFERENCE_ATTRIBUTE), "Fig. 3", name)
+            self.assertEqual(draw.lesionSaveState(lesion)[0], "saved", name)
+            if isFractional:
+                self.assertTrue(any("fractional values" in text for _time, text, _level in studioShell.recentMessages()),
+                                studioShell.recentMessages())
+            # Opened again from Recent while it is open: shown again, not loaded twice
+            count = slicer.mrmlScene.GetNumberOfNodes()
+            again = importer.loadRecentFile({"fileName": path, "fileType": "SegmentationFile"}, None, studioShell)
+            self._pump(4)
+            self.assertEqual([node.GetID() for node in again.alreadyOpen], [lesion.GetID()], name)
+            self.assertEqual(slicer.mrmlScene.GetNumberOfNodes(), count, name)
+
     def test_reopen_reference_from_recent(self):
         """A figure or a T map re-opened from Recent (or loaded by a route of 3D Slicer) takes its own route: never the
         Draw source, no segmentation bound to it; a file that is already open is shown again, not loaded twice.

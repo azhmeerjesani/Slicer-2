@@ -1446,18 +1446,32 @@ def _loadToast(result, shell):
         shell.toast(_("Loaded {name}").format(name=os.path.basename(result.scenes[0])))
 
 
+def _recordedFileType(properties):
+    """The file type of a recent file entry: the recorded ``fileType``, else the type 3D Slicer gives to its file name."""
+    properties = properties or {}
+    fileType = properties.get("fileType")
+    if not fileType and properties.get("fileName"):
+        fileType = slicer.app.coreIOManager().fileType(str(properties["fileName"]))
+    return str(fileType or "")
+
+
 def loadRecentFile(properties, action=None, shell=None):
     """Load an entry of the recently loaded files (``fileParameters`` of a "RecentlyLoadedMenu" action).
 
     The file is loaded with its recorded properties (by triggering ``action`` if given). In Studio, a
     loaded scan is shown in Draw, as for ``loadFiles()``, and a scan or lesion that is already open is not
-    loaded again (it becomes current). A scene keeps its own views.
+    loaded again (it becomes current). A scene keeps its own views. A lesion recorded as a segmentation, a figure and a
+    statistical map are opened as with ``loadFiles()`` (Open...).
     """
     shell = _currentShell(shell)
     fileName = str((properties or {}).get("fileName", ""))
     isScene = (properties or {}).get("fileType") == "SceneFile" or _extension(fileName) in SCENE_EXTENSIONS
     if shell is not None and not isScene and os.path.isfile(fileName) and fileKind(fileName) in ("figure", "statmap"):
         # A figure or a statistical map takes its own route (never a scan of Draw); an open one is shown again
+        return loadFiles([fileName], shell)
+    if shell is not None and not isScene and os.path.isfile(fileName) and fileKind(fileName) == "lesion" and _recordedFileType(properties) == "SegmentationFile":
+        # A lesion opens as with Open...: a probabilistic mask is not truncated to integers by the reader (it would
+        # open empty), and the notes of its sidecar are restored (loadLesion, restoreSidecarText)
         return loadFiles([fileName], shell)
     openNode = openNodeForFile(fileName) if shell is not None and not isScene else None
     if openNode is not None:
