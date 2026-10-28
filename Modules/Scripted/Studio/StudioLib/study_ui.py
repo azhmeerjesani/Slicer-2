@@ -227,6 +227,11 @@ def _renderPaused():
         slicer.app.resumeRender()
 
 
+def _plainOSError(error):
+    from . import autosave
+    return autosave.plainOSError(error)
+
+
 def _replaceFile(source, destination):
     """``os.replace``, retried while another program holds the file (``autosave_io.replaceWithRetry``)."""
     try:
@@ -2821,6 +2826,12 @@ class StudySession:
                 except Blocking as e:
                     _toast(self._shell, str(e), ms=6000, level="warning")
                     return False
+                except OSError as e:
+                    # Expected (a folder that cannot be written, a full disk): plain words, a warning without a traceback
+                    logging.warning(f"Studio: cannot write the lesion of {self._current}: {e}")
+                    _toast(self._shell, _("The lesion of {sid} could not be written: {error}").format(sid=self._current, error=_plainOSError(e)),
+                           ms=6000, level="warning")
+                    return False
                 except Exception as e:
                     logging.error(f"Studio: cannot write the lesion of {self._current}:\n{traceback.format_exc()}")
                     _toast(self._shell, _("The lesion of {sid} could not be written: {error}").format(sid=self._current, error=e), ms=6000,
@@ -3147,6 +3158,10 @@ class StudySession:
                 result = {"sid": sid, "path": None, "values": {"status": "traced"}}
         except Blocking as e:
             _toast(shell, str(e), ms=6000, level="warning")
+            return None
+        except OSError as e:
+            logging.warning(f"Studio: Done could not write the lesion of {sid}: {e}")
+            _toast(shell, _("The lesion of {sid} could not be saved: {error}").format(sid=sid, error=_plainOSError(e)), ms=6000, level="warning")
             return None
         except Exception as e:
             logging.error(f"Studio: Done failed for {sid}:\n{traceback.format_exc()}")

@@ -45,6 +45,7 @@ Run with the main window and testing enabled::
 """
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -837,6 +838,67 @@ class StudioRegressionTest(unittest.TestCase):
             self.assertEqual([study.subject(sid)["status"] for sid in study.subject_ids], ["traced"] * 3)
             self.assertIsNone(session.next_subject("sub-02"))
             self.assertTrue([text for text in toasts if "are traced" in text], toasts)
+        finally:
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
+
+    def test_16_unwritable_lesion_folder_is_a_warning_in_plain_words(self):
+        """A study folder that cannot be written (Done) is anticipated: a warning without a traceback, and a toast
+        without the error number and the temporary file path; the subject stays open (BB-1).
+        """
+        from unittest import mock
+
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Read-only study")
+        os.makedirs(folder)
+        paths = [os.path.join(folder, f"sub-0{index}_T1w.nii.gz") for index in (1, 2)]
+        for path in paths:
+            nifti.write_nifti(path, np.zeros(grid.shape, np.uint8), grid.affine)
+        toasts = []
+        originalToast = study_ui._toast
+        study_ui._toast = lambda shell, text, **kwargs: toasts.append(str(text))
+        self.addCleanup(setattr, study_ui, "_toast", originalToast)
+        records = []
+
+        class Recorder(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        handler = Recorder(level=logging.DEBUG)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        try:
+            session = study_ui.createStudy(paths, studioShell, folder=folder)
+            self.assertIsNotNone(session)
+            session.open("sub-01", switchToDraw=False)
+            temporary = os.path.join(folder, "lesions", "sub-01.123.tmp.nii.gz")
+            error = PermissionError(13, "Permission denied", temporary)
+            logging.getLogger().addHandler(handler)
+            try:
+                with mock.patch.object(session, "_write", side_effect=error):
+                    self.assertIsNone(session.done())
+            finally:
+                logging.getLogger().removeHandler(handler)
+            self.assertEqual(session.current(), "sub-01", "the subject stays open")
+            self.assertEqual(session.study.subject("sub-01")["status"], "untraced")
+            self.assertEqual([record for record in records if record.levelno >= logging.ERROR], [])
+            self.assertTrue([record for record in records if record.levelno == logging.WARNING])
+            self.assertFalse([record for record in records if record.exc_info or "Traceback" in record.getMessage()])
+            self.assertTrue([text for text in toasts if "could not be saved: Permission denied" in text], toasts)
+            for text in toasts:
+                self.assertNotIn("Errno", text)
+                self.assertNotIn(".tmp", text)
         finally:
             study_ui.closeStudy()
             studioShell.dispose()

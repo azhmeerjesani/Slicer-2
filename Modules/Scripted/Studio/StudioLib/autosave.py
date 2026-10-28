@@ -1470,7 +1470,7 @@ class AutosaveService:
         except io.GenerationAborted:
             return False
         except OSError as error:
-            self._projectFailed(str(error))
+            self._projectFailed(plainOSError(error))
             return False
         except Exception:
             logging.error("Slicer Studio: planning the save failed:\n" + traceback.format_exc())
@@ -1513,8 +1513,13 @@ class AutosaveService:
             writer.abort(plan, str(error))
             self.plan = None
             self._removePlanObservers()
-            logging.error("Slicer Studio: saving the project failed:\n" + traceback.format_exc())
-            self._projectFailed(str(error))
+            if isinstance(error, OSError):
+                # An anticipated I/O failure (a folder that cannot be written, a full disk, a timeout): plain words, no traceback
+                reason = plainOSError(error)
+            else:
+                logging.error("Slicer Studio: saving the project failed:\n" + traceback.format_exc())
+                reason = str(error)
+            self._projectFailed(reason)
             return False
         finally:
             if dialog is not None:
@@ -2089,6 +2094,11 @@ def _requiredFreeBytes(estimatedBytes, project=False):
     if project:
         return 2 * estimatedBytes + PROJECT_FREE_MARGIN_BYTES
     return max(MIN_FREE_BYTES, 2 * estimatedBytes)
+
+
+def plainOSError(error):
+    """An I/O error in plain words: "Permission denied", without the error number and the (temporary) file path."""
+    return (getattr(error, "strerror", None) or str(error)).strip()
 
 
 def _formatBytes(size):

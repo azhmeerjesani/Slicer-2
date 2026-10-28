@@ -1705,6 +1705,43 @@ class StudioProjectsTest(unittest.TestCase):
                 self.assertIn(status, (0, None), f"{name} {flag} exits with 0")
                 self.assertIn("usage:", printed, f"{name} {flag} prints its usage text")
 
+    def test_36_unwritable_project_folder_is_a_warning_in_plain_words(self):
+        """A project folder that cannot be written (Ctrl+S) is anticipated: a warning without a traceback, and a reason
+        without the error number and the temporary file path (BB-1).
+        """
+        import logging
+        from unittest import mock
+
+        service = self._service()
+        self._userVolume("Read only", shape=(20, 24, 28))
+        project = self._projectFor(service)
+        self._save(service)
+        slicer.util.getNode("Read only").SetSpacing(2.0, 2.0, 2.0)
+        slicer.util.getNode("Read only").Modified()
+        records = []
+
+        class Recorder(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        handler = Recorder(level=logging.DEBUG)
+        temporary = os.path.join(project.path, "Images", ".studio-tmp-04a5c3ad")
+        error = PermissionError(13, "Permission denied", temporary)
+        logging.getLogger().addHandler(handler)
+        try:
+            with mock.patch.object(type(service.projectWriter), "runMainThreadStep", side_effect=error):
+                self.assertFalse(service.saveNow("test", progress=False))
+        finally:
+            logging.getLogger().removeHandler(handler)
+        self.io.backgroundWriter().drain(30.0)
+        self.assertEqual(service._projectPausedReason, "Permission denied")
+        self.assertEqual([record for record in records if record.levelno >= logging.ERROR], [])
+        self.assertTrue([record for record in records if record.levelno == logging.WARNING])
+        self.assertFalse([record for record in records if record.exc_info or "Traceback" in record.getMessage()])
+        # Nothing stays pending: the next save works once the folder is writable again
+        self.assertTrue(service.saveNow("test", progress=False), service._projectPausedReason)
+        self.io.backgroundWriter().drain(30.0)
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk
