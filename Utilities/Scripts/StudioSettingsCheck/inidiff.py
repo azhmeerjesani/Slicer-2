@@ -36,6 +36,9 @@ def isFork(key):
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] in (["-h"], ["--help"]):
+        print(__doc__)
+        sys.exit(0)
     if sys.argv[1] == "--keys":
         d = parse(sys.argv[2])
         print(json.dumps({"official_keys": sorted(k for k in d if not isFork(k)), "fork_keys": sorted(k for k in d if isFork(k))}, indent=1))

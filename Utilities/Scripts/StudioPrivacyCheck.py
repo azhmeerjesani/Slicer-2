@@ -120,6 +120,9 @@ def scan(roots, strict=False, out=print, counts=None):
 
 
 def main(argv):
+    if argv[:1] in (["-h"], ["--help"]):
+        print(__doc__)
+        return 0
     strict = "--strict" in argv
     roots = [a for a in argv if a != "--strict"]
     if not roots:

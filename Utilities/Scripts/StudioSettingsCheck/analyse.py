@@ -8,6 +8,10 @@ import os
 import subprocess
 import sys
 
+if sys.argv[1:2] in (["-h"], ["--help"]):
+    print(__doc__)
+    sys.exit(0)
+
 D = sys.argv[1]
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)

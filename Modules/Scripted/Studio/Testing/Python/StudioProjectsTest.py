@@ -1680,6 +1680,31 @@ class StudioProjectsTest(unittest.TestCase):
                 archive.writestr("scene/Data/" + member, "sub-01,Data/sub-01_lesion.nii.gz\n")
             self.assertEqual(checker.scan([clean], out=lambda _line: None), 0)
 
+    def test_35_utilities_scripts_print_their_usage_for_help(self):
+        import io
+        import runpy
+        import sys
+
+        source = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))))
+        scripts = os.path.join(source, "Utilities", "Scripts")
+        names = ["StudioPrivacyCheck.py", os.path.join("StudioSettingsCheck", "analyse.py"), os.path.join("StudioSettingsCheck", "inidiff.py")]
+        if not all(os.path.isfile(os.path.join(scripts, name)) for name in names):
+            self.skipTest("Utilities/Scripts not found")
+        for name in names:
+            for flag in ("--help", "-h"):
+                saved = sys.argv, sys.stdout, list(sys.path)
+                sys.argv, sys.stdout = [name, flag], io.StringIO()
+                status = None
+                try:
+                    runpy.run_path(os.path.join(scripts, name), run_name="__main__")
+                except SystemExit as exit:
+                    status = exit.code
+                finally:
+                    printed = sys.stdout.getvalue()
+                    sys.argv, sys.stdout, sys.path[:] = saved
+                self.assertIn(status, (0, None), f"{name} {flag} exits with 0")
+                self.assertIn("usage:", printed, f"{name} {flag} prints its usage text")
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk
