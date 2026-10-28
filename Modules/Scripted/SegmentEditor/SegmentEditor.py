@@ -85,11 +85,16 @@ STUDIO_TERMINOLOGY_SETTINGS_KEY = "Studio/Draw/UseTerminologySelector"
 
 #: Effect tiles of the studio presentation: preferred 62 x 60 px (style), a 20 px icon, at least 56 px wide so that a
 #: narrow inspector shrinks the tiles instead of widening; five columns when the inspector viewport (the width of the
-#: module widget) is at least 5 x 62 + 4 x 4 px, else four
+#: module widget) is at least ``FIVE_COLUMNS_WIDTH``, else four
 TILE_MINIMUM_SIZE = (56, 60)
 TILE_ICON_SIZE = 20
 TILE_SPACING = 4
-FIVE_COLUMNS_WIDTH = 5 * 62 + 4 * TILE_SPACING
+#: Padding of the inspector in the studio presentation (VISUAL 2.7): the tiles start and end this far from its edges, on
+#: the edges of the section labels and cards. The tile grid has no frame there; ``_updateTileGridInset()`` makes up what the
+#: margins of the editor (they follow the density of the style) leave of it.
+STUDIO_INSPECTOR_PADDING = 16
+#: Inspector viewport width from which a tile is at least ``TILE_MINIMUM_SIZE[0]`` wide in five columns
+FIVE_COLUMNS_WIDTH = 5 * TILE_MINIMUM_SIZE[0] + 4 * TILE_SPACING + 2 * STUDIO_INSPECTOR_PADDING
 
 #: Mnemonics of the studio presentation: (key, effect name or action, description)
 STUDIO_MNEMONICS = (
@@ -394,6 +399,7 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 optionsWidget.setMinimumWidth(0)
         effectsGroupBox = self._child("QFrame", "EffectsGroupBox")
         if effectsGroupBox is not None:
+            effectsGroupBox.setFrameShape(qt.QFrame.StyledPanel)
             effectsGroupBox.layout().setContentsMargins(-1, -1, -1, -1)
             effectsGroupBox.layout().setSpacing(-1)
         tableView = self._segmentsTableView()
@@ -449,7 +455,9 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 optionsWidget.setMinimumWidth(1)
         effectsGroupBox = self._child("QFrame", "EffectsGroupBox")
         if effectsGroupBox is not None:
-            effectsGroupBox.layout().setContentsMargins(0, 0, 0, 0)
+            # No box around the tiles (VISUAL 4.4): they sit on the inspector padding, like the labels and cards
+            effectsGroupBox.setFrameShape(qt.QFrame.NoFrame)
+            self._updateTileGridInset()
             effectsGroupBox.layout().setSpacing(TILE_SPACING)
         tableView = self._segmentsTableView()
         if tableView is not None:
@@ -780,11 +788,28 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         """Columns of the tile grid: 5 when the inspector viewport is at least ``FIVE_COLUMNS_WIDTH`` px wide, else 4."""
         return 5 if viewportWidth >= FIVE_COLUMNS_WIDTH else 4
 
+    def _updateTileGridInset(self):
+        """Studio presentation: the tile grid starts and ends ``STUDIO_INSPECTOR_PADDING`` from the edges of the module widget
+        (the margins of the module widget and of the editor are part of it).
+        """
+        effectsGroupBox = self._child("QFrame", "EffectsGroupBox")
+        if effectsGroupBox is None:
+            return
+        outer = self.layout.contentsMargins()
+        inner = self.editor.layout().contentsMargins()
+        left = max(0, STUDIO_INSPECTOR_PADDING - outer.left() - inner.left())
+        right = max(0, STUDIO_INSPECTOR_PADDING - outer.right() - inner.right())
+        gridLayout = effectsGroupBox.layout()
+        margins = gridLayout.contentsMargins()
+        if (margins.left(), margins.top(), margins.right(), margins.bottom()) != (left, 0, right, 0):
+            gridLayout.setContentsMargins(left, 0, right, 0)
+
     def _updateColumnCount(self):
         if self._appliedPresentation != "studio" or self.editor is None:
             return
         if self._child("QFrame", "EffectsGroupBox") is None or not self.parent.isVisible():
             return
+        self._updateTileGridInset()
         # The module widget fills the viewport of the module panel's scroll area
         columns = self.studioColumnCount(self.parent.width)
         if self.editor.effectColumnCount != columns:

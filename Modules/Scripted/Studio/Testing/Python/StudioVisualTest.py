@@ -560,6 +560,49 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
         self._pump(4)
         draw.session(studioShell).refreshPanel(computeMetrics=True)
 
+    def test_draw_inspector_padding(self):
+        """The Lesion card, the section label and the tool tiles of Draw sit on one 16 px inspector padding (VISUAL 2.7, 4.4).
+
+        The card ran from edge to edge of the inspector and the tiles sat in a square 1 px box (the frame of the tool grid)
+        that started 9 px from the edge: three left edges in one column. The classic presentation keeps the frame.
+        """
+        from StudioLib import draw, importer, ui
+
+        studioShell = self._applyStudio()
+        self.mainWindow.showNormal()
+        self.mainWindow.resize(1366, 768)
+        self._wait(lambda: self.mainWindow.width <= 1366, 2000)
+        importer.startOnTemplate(shell=studioShell)
+        self._restores.append(importer._closeTemplateBanner)
+        self._pump(10)
+        editor = slicer.modules.SegmentEditorWidget.editor
+        scrollArea = self.mainWindow.findChild("QDockWidget", "PanelDockWidget").findChild("QScrollArea", "ScrollArea")
+        viewport = scrollArea.viewport()
+        padding = ui.INSPECTOR_PADDING
+        for theme in ("dark", "light"):
+            self._setTheme(theme)
+            self._pump(6)
+            left = viewport.mapToGlobal(qt.QPoint(0, 0)).x()
+            right = left + viewport.width
+
+            def edges(widget, left=left, right=right):
+                x = widget.mapToGlobal(qt.QPoint(0, 0)).x()
+                return x - left, right - (x + widget.width)
+
+            card = draw.lesionCard().widget
+            label = self.mainWindow.findChild("QLabel", "StudioDrawToolsLabel")
+            frame = editor.findChild("QFrame", "EffectsGroupBox")
+            tiles = [button for button in frame.findChildren("QToolButton") if button.isVisible() and button.property("slicerRole") == "toolTile"]
+            self.assertGreaterEqual(len(tiles), 4, theme)
+            self.assertEqual(edges(card), (padding, padding), f"{theme}: the Lesion card is not inset by the inspector padding")
+            self.assertEqual(edges(label)[0], padding, theme)
+            self.assertEqual(min(edges(tile)[0] for tile in tiles), padding, f"{theme}: the tool tiles are not on the left edge of the cards")
+            self.assertEqual(min(edges(tile)[1] for tile in tiles), padding, f"{theme}: the tool tiles do not end at the right padding")
+            self.assertEqual(frame.frameShape, qt.QFrame.NoFrame, f"{theme}: the tool tiles sit in a bordered box")
+        studioShell.classic(persist=False)
+        self._pump()
+        self.assertEqual(frame.frameShape, qt.QFrame.StyledPanel, "the classic presentation lost the frame of the tool grid")
+
     def test_draw_size_row_keeps_its_size_with_two_images_1366(self):
         """With a second image the source chip "on <scan> ▾" does not squeeze the Size control (1 / 3 / 6 / 12).
 

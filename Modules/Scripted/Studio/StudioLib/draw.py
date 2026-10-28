@@ -2641,7 +2641,9 @@ class DrawExtension:
         header.setObjectName("StudioDrawHeader")
         header.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Maximum)
         layout = qt.QVBoxLayout(header)
-        layout.setContentsMargins(0, 4, 0, 4)
+        # The cards of the header (the empty state, the Lesion card, the cards before the tools) are inset by the inspector
+        # padding on both sides (VISUAL 2.7: 16), like the section labels and the tool tiles
+        layout.setContentsMargins(ui.INSPECTOR_PADDING, 4, ui.INSPECTOR_PADDING, 4)
         layout.setSpacing(6)
         self._header = header
         self._headerLayout = layout
@@ -2733,8 +2735,8 @@ class DrawExtension:
         self.toolsRow.setObjectName("StudioDrawToolsRow")
         self.toolsRow.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
         self.toolsRowLayout = qt.QHBoxLayout(self.toolsRow)
-        # Aligned with the inspector padding (VISUAL 4.4: 16)
-        self.toolsRowLayout.setContentsMargins(ui.INSPECTOR_PADDING, 8, 0, 0)
+        # The header has the inspector padding (VISUAL 4.4: 16) on both sides
+        self.toolsRowLayout.setContentsMargins(0, 8, 0, 0)
         self.toolsRowLayout.setSpacing(6)
         self.toolsLabel = ui.sectionLabel(_("Tools"), "StudioDrawToolsLabel")
         self.toolsRowLayout.addWidget(self.toolsLabel)
