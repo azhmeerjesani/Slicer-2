@@ -1389,8 +1389,19 @@ def geometry_value(text):
     return f"{int(match.group(1))}x{int(match.group(2))}"
 
 
+def port_value(text):
+    """Return a TCP port number from 1 to 65535 (argparse type)."""
+    try:
+        port = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid port '{text}': --port must be between 1 and 65535") from None
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError("--port must be between 1 and 65535")
+    return port
+
+
 def add_server_options(parser):
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"browser port on this computer (default {DEFAULT_PORT})")
+    parser.add_argument("--port", type=port_value, default=DEFAULT_PORT, help=f"browser port on this computer (default {DEFAULT_PORT})")
     parser.add_argument("--listen", default=DEFAULT_LISTEN, metavar="ADDRESS",
                         help=f"network address to listen on (default {DEFAULT_LISTEN}: this computer only; 0.0.0.0 allows other computers and needs a password)")
     parser.add_argument("--geometry", metavar="WxH", type=geometry_value, help=f"initial screen size (default {DEFAULT_GEOMETRY}; the browser window size is used once connected)")

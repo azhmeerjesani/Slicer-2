@@ -31,6 +31,7 @@ service never starts by itself under --testing; the tests create ``UpdateService
 - (k) nothing runs under --testing (onStartupCompleted() only calls then()).
 """
 
+import contextlib
 import functools
 import hashlib
 import http.server
@@ -1212,6 +1213,17 @@ fi
             web.fetch_update_manifest(self.feed)
         _Handler.cutChunkedPaths = set()
         self.assertEqual(web.package_studio_version(os.path.join(self.feedDir, data["assets"]["linux-x86_64"]["name"])), "1.2.0")
+        # --port outside 1-65535 (or not a number) is an argument error, not a traceback or a 60 s wait
+        parser = web.build_parser()
+        for command in ("local", "run"):
+            self.assertEqual(parser.parse_args([command, "--port", "65535"]).port, 65535)
+            self.assertEqual(parser.parse_args([command, "--port", "1"]).port, 1)
+            for bad in ("0", "-5", "65536", "99999", "abc", ""):
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+                    parser.parse_args([command, "--port", bad])
+                self.assertEqual(raised.exception.code, 2, f"{command} --port {bad!r}")
+                self.assertIn("--port must be between 1 and 65535", stderr.getvalue())
 
     #
     # (k) testing
