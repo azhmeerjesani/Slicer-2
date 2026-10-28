@@ -2322,22 +2322,45 @@ def check(template=None, template_dirs=(), brainsfit=None, brainsresample=None, 
     return report, bool(ok)
 
 
+def _user_template_missing_message(template_id, found):
+    """'Template user:<id> ("<name>"): its image <file> is missing from <folder>' for the required files of a user
+    template that are not on disk (None when none is missing).
+    """
+    missing = [role for role in REQUIRED_TEMPLATE_FILES if role in found["missing"]]
+    if not missing:
+        return None
+    record = _USER_TEMPLATES.get(template_id) or {}
+    listed = record.get("files") or {}
+    parts = []
+    for role in missing:
+        key, what = {"fixed": ("image", "image"), "mask": ("mask", "brain mask")}[role]
+        name = listed.get(key)
+        parts.append(f"its {what} {name}" if name else f"its {what} (not listed in template.json)")
+    where = f" from {record['folder']}" if record.get("folder") else ""
+    verb = "is" if len(parts) == 1 else "are"
+    return f'Template {template_id} ("{found["user"]["name"]}"): ' + " and ".join(parts) + f" {verb} missing{where}"
+
+
 def _check_user_template(template_id, template_dirs):
     """The ``check`` report of a user template."""
     try:
         found = find_template(template_id, dirs=template_dirs)
-        grid = template_grid(template_id)
     except jobs.JobError as exc:
         return {"usable": False, "message": exc.message, "files": {}}
+    files = {role: {"path": path, "found": bool(path), "sha256": found["sha256"].get(role)} for role, path in found["files"].items() if role != "reference"}
+    message = _user_template_missing_message(template_id, found)
+    if message:
+        return {"usable": False, "message": message, "name": found["user"]["name"], "space": found["user"]["space"], "files": files}
+    grid = template_grid(template_id)
     return {
-        "usable": not any(role in found["missing"] for role in REQUIRED_TEMPLATE_FILES),
+        "usable": True,
         "name": found["user"]["name"],
         "space": found["user"]["space"],
         "head_template": found["head_available"],
         "header_reference": True,
         "grid1": {"id": grid.grid_id, "shape": list(grid.shape), "affine": grid.affine.tolist()},
         "terms": "your own template (its licence is yours to check)",
-        "files": {role: {"path": path, "found": bool(path), "sha256": found["sha256"].get(role)} for role, path in found["files"].items() if role != "reference"},
+        "files": files,
     }
 
 

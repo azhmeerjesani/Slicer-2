@@ -272,6 +272,26 @@ class TemplatesNormalizeTest(unittest.TestCase):
         code, _events, stderr = _cli("check", "--template", "bogus")
         self.assertEqual(code, jobs.EXIT_USAGE, stderr)
 
+    def test_check_names_the_missing_file_of_a_user_template(self):
+        """A user template whose image or brain mask file was deleted is reported by file and folder, not by an internal message."""
+        broken_dir = os.path.join(self.tmp, "broken")
+        folder, _record = make_user_template(broken_dir, "Broken one", "broken-one", "MNI", self.image, self.mask)
+        os.remove(os.path.join(folder, os.path.basename(self.image)))
+        folder2, _record2 = make_user_template(broken_dir, "Broken two", "broken-two", "MNI", self.image, self.mask)
+        os.remove(os.path.join(folder2, os.path.basename(self.mask)))
+        entry = normalize._check_user_template("user:broken-one", [broken_dir])
+        self.assertFalse(entry["usable"])
+        self.assertNotIn("find_template", entry["message"])
+        self.assertIn('Template user:broken-one ("Broken one")', entry["message"])
+        self.assertIn(f"its image {os.path.basename(self.image)} is missing from {folder}", entry["message"])
+        self.assertFalse(entry["files"]["fixed"]["found"])
+        entry = normalize._check_user_template("user:broken-two", [broken_dir])
+        self.assertFalse(entry["usable"])
+        self.assertIn(f"its brain mask {os.path.basename(self.mask)} is missing from {folder2}", entry["message"])
+        code, events, stderr = _cli("check", "--template", "user:broken-one", "--template-dir", broken_dir)
+        self.assertNotEqual(code, 0)
+        self.assertNotIn("find_template", json.dumps(events), stderr[-2000:])
+
     @unittest.skipUnless(_tools_available(), "BRAINSFit/BRAINSResample or the bundled template are not available (run with PythonSlicer)")
     def test_normalize_to_user_template(self):
         import lnm_normalize_fixture as fixture
