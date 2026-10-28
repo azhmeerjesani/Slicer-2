@@ -5405,7 +5405,8 @@ class LibraryCanvas(qt.QObject):
             columnLayout.addWidget(self.projectsSection.widget)
             # The Continue card names the open project: the section lists the projects again when one is created (a scan
             # was loaded) or changes, with no workspace switch
-            self.projectsSection.onRefreshed = self._syncCurrentProject
+            # (the same refresh keeps the caption right when the projects folder is chosen or changed)
+            self.projectsSection.onRefreshed = self._onProjectsRefreshed
         except Exception:
             logging.error(f"Studio Library: the Projects section failed:\n{traceback.format_exc()}")
 
@@ -5783,6 +5784,11 @@ class LibraryCanvas(qt.QObject):
 
     def isStrip(self):
         return bool(self._dataShown)
+
+    def _onProjectsRefreshed(self):
+        """The Projects section listed the projects again (a project changed, or the folder was chosen or changed)."""
+        self._syncCurrentProject()
+        self._refreshCaption()
 
     def _syncCurrentProject(self):
         """Show the open project (as the Projects section lists it) on the Continue card."""

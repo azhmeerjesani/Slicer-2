@@ -1171,6 +1171,38 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertFalse(text.startswith("Saved automatically in " + sep), text)
         self.assertIn(root, str(canvas.captionLabel.toolTip))
 
+    def test_caption_follows_a_changed_projects_folder(self):
+        """The caption under "Projects" names the new folder as soon as the folder is chosen or changed, without leaving Library."""
+        from StudioLib import projects
+
+        saved = os.environ.get("SLICER_STUDIO_PROJECTS_ROOT")
+
+        def restore():
+            if saved is None:
+                os.environ.pop("SLICER_STUDIO_PROJECTS_ROOT", None)
+            else:
+                os.environ["SLICER_STUDIO_PROJECTS_ROOT"] = saved
+            projects.notifyChanged()
+
+        self.cleanup.append(restore)
+        first = os.path.join(self.directory, "CaptionFirst", "Slicer Studio")
+        second = os.path.join(self.directory, "CaptionSecond", "Slicer Studio")
+        os.makedirs(first, exist_ok=True)
+        os.makedirs(second, exist_ok=True)
+        os.environ["SLICER_STUDIO_PROJECTS_ROOT"] = first
+        studioShell = self._applyStudio()
+        canvas = self._library(studioShell)
+        self.assertIn("CaptionFirst", canvas._captionText)
+        self.assertIn(first, str(canvas.captionLabel.toolTip))
+        # The folder changes while Library stays open (the first-start chooser, Settings > Saving > Change...)
+        os.environ["SLICER_STUDIO_PROJECTS_ROOT"] = second
+        projects.notifyChanged()
+        self._wait(900)
+        self._pump(4)
+        self.assertIn("CaptionSecond", canvas._captionText)
+        self.assertNotIn("CaptionFirst", canvas._captionText)
+        self.assertIn(second, str(canvas.captionLabel.toolTip))
+
     def test_footer_line(self):
         """One 32 px text2 line at the bottom of the canvas, with link-style actions; it survives a new canvas."""
         from StudioLib import library
