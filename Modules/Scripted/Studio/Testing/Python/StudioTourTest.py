@@ -1002,3 +1002,45 @@ class StudioTourTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         finally:
             canvas.hide()
             canvas.deleteLater()
+
+    def test_18_workspace_key_during_the_draw_tour(self):
+        """A workspace key (Ctrl+Alt+1, Ctrl+Alt+3) during the Draw tour takes the Lesion card out of the window: the
+        layouts that the watcher queued before the tour shows the step again must not map it to the window (a crash in
+        QWidget.mapTo). The tour goes on in Draw or ends, and Studio keeps running.
+        """
+        from StudioLib import tour, workspaces
+
+        # A widget that is no longer inside the window, and one that was deleted, have no rectangle in it
+        detached = qt.QFrame()
+        self.assertFalse(tour._isInside(detached, self.mainWindow))
+        self.assertTrue(tour._rectIn(detached, self.mainWindow).isEmpty())
+        detached.delete()
+        self.assertFalse(tour._isInside(detached, self.mainWindow))
+        self.assertTrue(tour._rectIn(detached, self.mainWindow).isEmpty())
+
+        studioShell = self._applyStudio()
+        self._resize(1366, 768)
+        self._loadVolume()
+        others = [key for key in ("map", "library") if workspaces.workspace(key) is not None and workspaces.isAvailable(workspaces.workspace(key))]
+        self.assertIn("library", others)
+        for other in others:
+            studioShell.switchTo("draw")
+            self._pump()
+            self.assertTrue(tour.startTour("draw"), other)
+            player = tour.activePlayer()
+            self._wait(300)
+            self.assertEqual(player.currentStep().id, "lesion", other)
+            self.assertEqual(player.target.objectName, "StudioLesionCard", other)
+            # What Ctrl+Alt+1 and Ctrl+Alt+3 do: the Draw panel and its Lesion card leave the window
+            studioShell.switchTo(other)
+            for index in range(10):
+                self._pump()
+                self._wait(tour.FOLLOW_INTERVAL_MS)
+            if player.active:
+                self.assertEqual(studioShell.currentWorkspace(), "draw", other)
+                self.assertTrue(tour._isInside(player.target, self.mainWindow), other)
+                self.assertTrue(self.mainWindow.rect.intersects(player.spotlightRect()), other)
+                tour.stopTour()
+                self._pump()
+            self.assertFalse(player.active, other)
+            self.assertIsNone(self.mainWindow.findChild("QWidget", "StudioTourOverlay"), other)

@@ -227,7 +227,30 @@ def _isShown(widget, mainWindow):
     return rect.intersects(mainWindow.rect)
 
 
+def _isInside(widget, ancestor):
+    """True if ``widget`` still exists and is ``ancestor`` or one of its descendants. ``QWidget.mapTo()`` needs that: in
+    a release build it walks up past the top of the widget tree and crashes (a workspace switch takes the Draw panel out
+    of the main window while the tour still points at its Lesion card).
+    """
+    if not _isAlive(widget) or not _isAlive(ancestor):
+        return False
+    if ancestor.isAncestorOf(widget):
+        return True
+    # isAncestorOf() stops at windows (a floating dock): mapTo() does not
+    parent = widget
+    while parent is not None:
+        if parent == ancestor:
+            return True
+        parent = parent.parentWidget()
+    return False
+
+
 def _rectIn(widget, mainWindow):
+    """The rectangle of ``widget`` in the coordinates of its ancestor ``mainWindow``, or an empty rectangle when
+    ``widget`` is gone or no longer inside ``mainWindow``.
+    """
+    if not _isInside(widget, mainWindow):
+        return qt.QRect()
     topLeft = widget.mapTo(mainWindow, qt.QPoint(0, 0))
     return qt.QRect(topLeft.x(), topLeft.y(), widget.width, widget.height)
 
@@ -1213,6 +1236,10 @@ class TourPlayer:
         if not self.active or self.target is None or (self._busy and not force):
             return
         mainWindow = self.shell.mainWindow
+        if not _isInside(self.target, mainWindow):
+            # The control was deleted or taken out of the window (a key switched the workspace): a layout queued by the
+            # watcher runs before _follow() shows the step again or the next one, so keep the last layout until then
+            return
         spot = self._spotRect()
         windowRect = qt.QRect(mainWindow.rect)
         signature = (spot.x(), spot.y(), spot.width(), spot.height(), windowRect.width(), windowRect.height())
