@@ -916,6 +916,18 @@ class SettingsDialogLook:
             layout.setHorizontalSpacing(20)
             layout.setVerticalSpacing(12)
         self.applied = True
+        # A panel selected while the dialog was hidden (Check for updates opens Settings at Updates) is not scrolled to by the
+        # tree; the rows have their final size only after the show event, so scroll once the dialog has been laid out
+        qt.QTimer.singleShot(0, self._scrollToCurrentPanel)
+
+    def _scrollToCurrentPanel(self):
+        """Scroll the panel list so that the selected panel's entry is fully visible."""
+        if not ui._isAlive(self.dialog) or not self.dialog.isVisible():
+            return
+        tree = self._tree()
+        item = tree.currentItem() if tree is not None else None
+        if item is not None:
+            tree.scrollToItem(item)
 
     #: Labels of the Appearance panel (``qSlicerSettingsStylesPanel``) and its check boxes, drawn as switches in Studio
     APPEARANCE_LABELS = ("ThemeLabel", "AccentColorLabel", "DensityLabel", "FontLabel", "ShowToolTipsLabel", "ShowToolButtonTextLabel", "RestoreUILabel")

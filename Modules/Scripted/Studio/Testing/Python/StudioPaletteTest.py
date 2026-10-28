@@ -905,3 +905,37 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertFalse([key for key in entries if key.endswith("*")], entries)
         finally:
             item.setText(0, original)
+
+    def test_15_settings_panel_list_scrolls_to_a_panel_chosen_while_hidden(self):
+        """Search > "Check for updates" selects the Updates panel while the settings dialog is still hidden: once shown, the
+        panel list is scrolled so that the selected entry is fully visible instead of cut off at the bottom of the list.
+        """
+        self._applyStudio()
+        dialog = slicer.app.settingsDialog()
+        tree = dialog.findChild("QTreeWidget", "SettingsTreeWidget")
+        self.assertIsNotNone(tree)
+        panels = []
+        for index in range(tree.topLevelItemCount):
+            panels.append(str(tree.topLevelItem(index).data(0, qt.Qt.UserRole + 1101) or tree.topLevelItem(index).text(0)))
+        self.assertGreater(len(panels), 4, panels)
+        try:
+            dialog.hide()
+            self._pump()
+            # A short list (the dialog has a minimum height), so that the last panel's entry is below its visible part
+            tree.setMaximumHeight(250)
+            dialog.setCurrentPanel(panels[0])
+            dialog.setCurrentPanel(panels[-1])
+            dialog.show()
+            self._wait(0.5)
+            item = tree.currentItem()
+            self.assertIsNotNone(item)
+            self.assertEqual(str(item.data(0, qt.Qt.UserRole + 1101) or item.text(0)), panels[-1])
+            rect = tree.visualItemRect(item)
+            self.assertGreater(tree.verticalScrollBar().maximum, 0, "the list does not scroll: the test needs a shorter list")
+            self.assertGreaterEqual(rect.y(), 0, "the selected entry starts above the list")
+            self.assertLessEqual(rect.y() + rect.height(), tree.viewport().height,
+                                 f"the selected entry is cut off: y={rect.y()}, h={rect.height()}, viewport {tree.viewport().height}")
+        finally:
+            dialog.hide()
+            tree.setMaximumHeight(16777215)
+            self._pump()
