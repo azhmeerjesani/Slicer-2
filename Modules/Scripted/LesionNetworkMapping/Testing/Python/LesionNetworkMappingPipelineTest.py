@@ -913,6 +913,32 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         self.assertNotIn("no confirmed score column", none["slnm"]["reason"])
         self.assertEqual(pipeline._slnm_skip_reason(pipeline.PipelineConfig(scores="auto", **base)), "no confirmed score column")
 
+    def test_cohort_preflight_warning_is_emitted_once(self):
+        """A subject-scope warning of the preflight is one cohort-level sentence: one event, not one per subject."""
+        subjects = [f"sub-{index:02d}" for index in range(1, 13)]
+        message = f"The lesion metrics of {len(subjects)} subjects are missing (sub-01, sub-02 and 10 more); they were measured now."
+        report = {"run_id": "pf-test", "counts": {}, "blocked": False, "checks": [
+            {"id": "metrics_stale", "level": "warn", "scope": "subject", "subjects": subjects, "message": message, "excludes": False},
+            {"id": "float_storage", "level": "warn", "scope": "subject", "subjects": ["sub-03"], "message": "sub-03 is stored as float.", "excludes": False}]}
+        events = []
+        runner = mock.MagicMock()
+        runner.plan.preflight = report
+        runner.providers = {"preflight": mock.MagicMock(kind="preferred")}
+        runner.rows = []
+        runner.study.path = self.tmp
+        runner._cached.return_value = ("fp", None)
+        runner.emit = lambda event, **fields: events.append((event, fields))
+        with mock.patch("LesionNetworkMappingLib.preflight.save_report", return_value=os.path.join(self.tmp, "preflight.json")):
+            pipeline.Runner._stage_preflight(runner, None)
+        warnings = [fields for event, fields in events if event == "warning"]
+        self.assertEqual(len([w for w in warnings if w["message"] == message]), 1, "the cohort sentence is emitted once")
+        cohort_event = next(w for w in warnings if w["code"] == "metrics_stale")
+        self.assertEqual(cohort_event["participants"], subjects, "all subjects are listed, without a cap")
+        self.assertNotIn("participant_id", cohort_event)
+        single = next(w for w in warnings if w["code"] == "float_storage")
+        self.assertEqual(single["participant_id"], "sub-03")
+        self.assertEqual(len(warnings), 2)
+
     # Code rules
 
     def test_code_rules(self):

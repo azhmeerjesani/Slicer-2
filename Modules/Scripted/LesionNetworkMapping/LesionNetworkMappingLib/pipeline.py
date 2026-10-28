@@ -1869,8 +1869,11 @@ class Runner:
         path = preflight.save_report(self.study, report)
         for check in report["checks"]:
             if check["level"] == "warn" and check["scope"] == "subject" and not check["excludes"]:
-                for sid in check["subjects"][:50]:
-                    self.emit("warning", stage="preflight", participant_id=sid, code=check["id"], message=check["message"])
+                # One event per check: its message is the cohort-level sentence that already names the subjects, so one event
+                # per subject would print the same sentence once per subject (as the standalone preflight job does, with a list)
+                subjects = list(check["subjects"])
+                fields = {"participant_id": subjects[0]} if len(subjects) == 1 else {}
+                self.emit("warning", stage="preflight", code=check["id"], participants=subjects, message=check["message"], **fields)
         result = {"report": relpath(path, self.study.path), "run_id": report.get("run_id"), "counts": report["counts"], "blocked": report["blocked"]}
         return self._save("preflight", fp, result, [], child_run_id=report.get("run_id"), start=start)
 
