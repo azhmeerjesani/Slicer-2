@@ -232,6 +232,17 @@ def _rectIn(widget, mainWindow):
     return qt.QRect(topLeft.x(), topLeft.y(), widget.width, widget.height)
 
 
+def _labelAlignment(label):
+    """The horizontal and vertical alignment flags of the QLabel ``label`` as an int, or None when they cannot be read:
+    with Qt 6 the QFlags property ``alignment`` is an opaque object in PythonQt that int() rejects. Callers then keep the
+    whole label box instead of guessing where the text is painted.
+    """
+    try:
+        return int(label.property("alignment"))
+    except (TypeError, ValueError):
+        return None
+
+
 def _pageContentItems(column, canvas):
     """``[(rect, interactive)]`` of what the visible part of the Library page ``column`` paints, in ``canvas``
     coordinates: its labels (the extent of their text), buttons, fields and other leaf widgets, and its cards and dashed
@@ -249,16 +260,14 @@ def _pageContentItems(column, canvas):
         rect = _rectIn(widget, canvas)
         if widget.inherits("QLabel"):
             # The text, not the label box: a caption is as wide as the column
-            textWidth = min(widget.width, widget.sizeHint.width())
-            try:
-                alignment = int(widget.property("alignment"))
-            except (TypeError, ValueError):
-                alignment = int(qt.Qt.AlignLeft)
-            if alignment & int(qt.Qt.AlignRight):
-                rect.setLeft(rect.right() - textWidth + 1)
-            elif alignment & int(qt.Qt.AlignHCenter):
-                rect.setLeft(rect.left() + (widget.width - textWidth) // 2)
-            rect.setWidth(textWidth)
+            alignment = _labelAlignment(widget)
+            if alignment is not None:
+                textWidth = min(widget.width, widget.sizeHint.width())
+                if alignment & int(qt.Qt.AlignRight):
+                    rect.setLeft(rect.right() - textWidth + 1)
+                elif alignment & int(qt.Qt.AlignHCenter):
+                    rect.setLeft(rect.left() + (widget.width - textWidth) // 2)
+                rect.setWidth(textWidth)
         elif not (widget.property("slicerRole") or widget.objectName == "StudioDropZoneFrame" or str(widget.objectName).endswith("Card")):
             container = any(child.isWidgetType() and child.isVisible() for child in widget.children())
             if container or widget.className() == "QWidget":

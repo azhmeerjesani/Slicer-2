@@ -950,3 +950,55 @@ class StudioTourTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         finally:
             tour.stopTour()
             self._pump()
+
+    def test_17_label_extent_without_a_readable_alignment(self):
+        """The tour card avoids the text of a centred or right-aligned Library label. When the alignment cannot be read
+        (Qt 6: the QFlags property is an opaque object in PythonQt), the whole label box counts, not the left edge.
+        """
+        from StudioLib import tour
+
+        class OpaqueFlags:
+            """What PythonQt with Qt 6 returns for a QFlags property: int() raises TypeError."""
+
+        class Qt6Label:
+            def property(self, name):
+                return OpaqueFlags()
+
+        self.assertIsNone(tour._labelAlignment(Qt6Label()))
+
+        canvas = qt.QWidget()
+        canvas.resize(700, 100)
+        column = qt.QWidget(canvas)
+        column.resize(700, 100)
+        layout = qt.QVBoxLayout(column)
+        layout.setContentsMargins(0, 0, 0, 0)
+        label = qt.QLabel("Open a file", column)
+        label.setAlignment(qt.Qt.AlignHCenter | qt.Qt.AlignVCenter)
+        layout.addWidget(label)
+        canvas.show()
+        try:
+            slicer.app.processEvents()
+
+            def labelRect():
+                rects = [rect for rect, _interactive in tour._pageContentItems(column, canvas)]
+                self.assertEqual(len(rects), 1)
+                return rects[0]
+
+            textWidth = label.sizeHint.width()
+            self.assertLess(textWidth, label.width)
+            centred = labelRect()
+            if tour._labelAlignment(label) is not None:  # Qt 5: the text is found where it is painted
+                self.assertEqual(centred.width(), textWidth)
+                self.assertEqual(centred.left(), (label.width - textWidth) // 2)
+
+            original = tour._labelAlignment
+            tour._labelAlignment = lambda widget: None
+            try:
+                unknown = labelRect()
+            finally:
+                tour._labelAlignment = original
+            self.assertEqual(unknown.left(), 0)
+            self.assertEqual(unknown.width(), label.width)
+        finally:
+            canvas.hide()
+            canvas.deleteLater()
