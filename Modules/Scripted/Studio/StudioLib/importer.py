@@ -611,10 +611,41 @@ def _isBoundTo(segmentationNode, volumeNode):
     return segmentationNode.GetNodeReferenceID(role) == volumeNode.GetID() and _referenceGeometryMatches(segmentationNode, volumeNode)
 
 
-def isSegmentationEmpty(segmentationNode):
-    """True if no segment of the segmentation has any voxel (or the segmentation has no segment)."""
+# Result of the last voxel scans of isSegmentationEmpty(), keyed by the modification times of the labelmap and of its
+# scalars (vtkTimeStamp values are unique in the process): the scan is O(voxels), the answer is asked on every refresh.
+_labelValueScanCache = {}
+_LABEL_VALUE_SCAN_CACHE_SIZE = 64
+_LABEL_VALUE_SCAN_BLOCK_VOXELS = 1 << 22
+
+
+def _labelmapHasLabelValue(labelmap, labelValue):
+    """True if ``labelmap`` has a voxel with ``labelValue``.
+
+    The scan runs in blocks and stops at the first hit, so it allocates no full-size temporary array and a lesion
+    costs a fraction of the image. The answer is cached until the labelmap or its scalars are modified.
+    """
     import vtk.util.numpy_support
 
+    scalars = labelmap.GetPointData().GetScalars()
+    key = (labelmap.GetMTime(), scalars.GetMTime(), labelValue)
+    cached = _labelValueScanCache.get(key)
+    if cached is not None:
+        return cached
+    array = vtk.util.numpy_support.vtk_to_numpy(scalars)
+    found = False
+    blockSize = max(1, _LABEL_VALUE_SCAN_BLOCK_VOXELS)
+    for start in range(0, array.shape[0], blockSize):
+        if (array[start:start + blockSize] == labelValue).any():
+            found = True
+            break
+    if len(_labelValueScanCache) >= _LABEL_VALUE_SCAN_CACHE_SIZE:
+        _labelValueScanCache.clear()
+    _labelValueScanCache[key] = found
+    return found
+
+
+def isSegmentationEmpty(segmentationNode):
+    """True if no segment of the segmentation has any voxel (or the segmentation has no segment)."""
     segmentation = segmentationNode.GetSegmentation()
     for index in range(segmentation.GetNumberOfSegments()):
         segmentId = segmentation.GetNthSegmentID(index)
@@ -627,8 +658,7 @@ def isSegmentationEmpty(segmentationNode):
             return False
         if labelmap.IsEmpty() or labelmap.GetPointData().GetScalars() is None:
             continue
-        labelValue = segmentation.GetSegment(segmentId).GetLabelValue()
-        if (vtk.util.numpy_support.vtk_to_numpy(labelmap.GetPointData().GetScalars()) == labelValue).any():
+        if _labelmapHasLabelValue(labelmap, segmentation.GetSegment(segmentId).GetLabelValue()):
             return False
     return True
 

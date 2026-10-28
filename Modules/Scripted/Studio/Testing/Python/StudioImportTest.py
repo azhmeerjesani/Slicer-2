@@ -1659,3 +1659,47 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             importer.recordFolder(os.path.join(self.directory, f"d{index}"), "nifti", 1)
         self.assertEqual(len(importer.recentFolders()), importer.MAX_RECENT_FOLDERS)
         self.assertEqual(importer.recentFolders()[0]["path"], os.path.join(self.directory, "d11"))
+
+    def test_segmentation_empty_check_is_not_a_full_scan_each_time(self):
+        """BB-1: ``isSegmentationEmpty`` (asked on every Library entry) scans the labelmap in blocks and remembers the
+        answer until the labelmap changes, where it built a full-size comparison array on every call (0.3 s with a
+        0.5 mm template, over the 50 ms budget of a workspace switch). The answer stays right after every edit.
+        """
+        from vtk.util import numpy_support
+
+        from StudioLib import importer
+
+        volume = slicer.util.addVolumeFromArray(np.zeros((12, 14, 16), np.float32), name="BBScan")
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "BBLesion")
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(volume)
+        segmentId = segmentation.GetSegmentation().AddEmptySegment("Lesion")
+        self.assertTrue(importer.isSegmentationEmpty(segmentation))
+
+        scans = []
+        original = numpy_support.vtk_to_numpy
+        numpy_support.vtk_to_numpy = lambda *args, **kwargs: scans.append(1) or original(*args, **kwargs)
+        blockBackup = getattr(importer, "_LABEL_VALUE_SCAN_BLOCK_VOXELS", None)
+        try:
+            importer._LABEL_VALUE_SCAN_BLOCK_VOXELS = 100  # many blocks
+            painted = slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, segmentId, volume)
+            painted[11, 13, 15] = 1  # in the last block
+            slicer.util.updateSegmentBinaryLabelmapFromArray(painted, segmentation, segmentId, volume)
+            scans.clear()
+            self.assertFalse(importer.isSegmentationEmpty(segmentation))
+            self.assertEqual(len(scans), 1)
+            for index in range(3):
+                self.assertFalse(importer.isSegmentationEmpty(segmentation))
+            self.assertEqual(len(scans), 1, "an unchanged labelmap is not scanned again")
+            # Erasing is noticed
+            painted[:] = 0
+            slicer.util.updateSegmentBinaryLabelmapFromArray(painted, segmentation, segmentId, volume)
+            self.assertTrue(importer.isSegmentationEmpty(segmentation))
+            # Painting again is noticed
+            painted[0, 0, 0] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(painted, segmentation, segmentId, volume)
+            self.assertFalse(importer.isSegmentationEmpty(segmentation))
+        finally:
+            numpy_support.vtk_to_numpy = original
+            if blockBackup is not None:
+                importer._LABEL_VALUE_SCAN_BLOCK_VOXELS = blockBackup
