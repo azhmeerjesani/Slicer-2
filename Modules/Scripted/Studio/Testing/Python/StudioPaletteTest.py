@@ -883,3 +883,25 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         widget.editor.setActiveEffect(None)
         if hasattr(widget, "setMoreToolsShown"):
             widget.setMoreToolsShown(False)
+
+    def test_14_settings_entries_ignore_the_restart_marker(self):
+        """After a theme or density change CTK shows "Appearance*" in the settings tree: the Search entry keeps the
+        plain page name and id (and opens that page), instead of "Settings: Appearance*" (settings.Appearance*).
+        """
+        from StudioLib import palette
+
+        dialog = slicer.app.settingsDialog()
+        tree = dialog.findChild("QTreeWidget")
+        item = next((tree.topLevelItem(i) for i in range(tree.topLevelItemCount) if str(tree.topLevelItem(i).text(0)).rstrip("*") == "Appearance"), None)
+        self.assertIsNotNone(item, "the settings dialog has an Appearance page")
+        original = item.text(0)
+        try:
+            item.setText(0, "Appearance*")
+            self.assertIn("Appearance", palette._settingsPanels(dialog))
+            self.assertFalse([title for title in palette._settingsPanels(dialog) if title.endswith("*")])
+            palette.search(self._applyStudio(), "x")
+            entries = {entry.id: entry.title for entry in palette._palette.index._settingsEntries(dialog)}
+            self.assertEqual(entries.get("settings.Appearance"), "Settings: Appearance", entries)
+            self.assertFalse([key for key in entries if key.endswith("*")], entries)
+        finally:
+            item.setText(0, original)

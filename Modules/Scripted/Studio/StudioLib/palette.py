@@ -1218,7 +1218,8 @@ def _settingsPanels(dialog):
     titles = []
 
     def visit(item):
-        title = str(item.text(0))
+        # CTK appends "*" to a page whose setting needs a restart (a theme or density change): not part of its name
+        title = str(item.text(0)).rstrip("* \t")
         if title:
             titles.append(title)
         for index in range(item.childCount()):
