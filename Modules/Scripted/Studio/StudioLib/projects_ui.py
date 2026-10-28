@@ -635,6 +635,24 @@ def renameDialog(path=None, parent=None):
 
 
 def duplicate(path):
+    """Duplicate: copy the project folder ``path`` to "<name> copy". The open project is saved first (as Rename, Open
+    project and Save a copy as… do), so the copy holds what the user sees, not the last autosave. Return the new folder,
+    or None if the open project could not be saved (nothing is copied then).
+    """
+    project = projects.currentProject()
+    service = _service()
+    if (service is not None and project is not None
+            and os.path.normcase(os.path.realpath(project.path)) == os.path.normcase(os.path.realpath(path))):
+        if not service.saveNow("duplicate", progress=True):
+            reason = service._projectPausedReason or _("see the error log")
+            message(_("Not duplicated: the project could not be saved first ({reason})").format(reason=reason), level="warning",
+                    action=lambda: duplicate(path), actionText=_("Retry"), ms=8000)
+            return None
+        from . import autosave_io
+
+        # The copy starts from the project files just written (as Rename does)
+        autosave_io.backgroundWriter().drain(10.0)
+
     def done(newPath):
         projects.notifyChanged()
         message(_("Duplicated as {name}").format(name=os.path.basename(newPath)))
@@ -642,7 +660,7 @@ def duplicate(path):
     def failed(error):
         message(_("The project could not be duplicated: {error}").format(error=error), level="warning", ms=8000)
 
-    projects.duplicateFolder(path, onDone=done, onError=failed)
+    return projects.duplicateFolder(path, onDone=done, onError=failed)
 
 
 def moveToTrash(path, parent=None):

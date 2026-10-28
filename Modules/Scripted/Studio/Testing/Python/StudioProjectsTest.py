@@ -2199,6 +2199,59 @@ class StudioProjectsTest(unittest.TestCase):
             os.environ[projects.ROOT_ENVIRONMENT] = self.root
             templates.registerGrids(force=True)
 
+    def test_43_duplicate_of_the_open_project_holds_the_latest_edits(self):
+        """Library card > Duplicate of the open project saves it first (as Rename, Open project and Save a copy as… do), so the
+        copy holds what the user sees (BB-1). It used to copy the folder as the last autosave left it: a lesion drawn since
+        then (up to IdleSeconds + IntervalMinutes) was missing from the copy, while the toast said "Duplicated as". When the
+        save fails, nothing is copied.
+        """
+        from StudioLib import projects_ui
+
+        projects = self.projects
+        service = self._service()
+        volume, _scanPath = self._userVolume()
+        project = self._projectFor(service)
+        self._save(service)
+        # Edits after the last save: a lesion and a markup, not saved yet
+        self._lesion(volume, name="New lesion")
+        markup = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "Points")
+        markup.AddControlPoint(1, 2, 3)
+        self.assertFalse(os.path.isdir(os.path.join(project.path, "Segmentations")), "the edits are not on disk yet")
+        running = self.autosave._service
+        self.autosave._service = service
+        try:
+            returned = projects_ui.duplicate(project.path)
+            self.io.backgroundWriter().drain(30.0)
+            copyPath = os.path.join(os.path.dirname(project.path), os.path.basename(project.path) + " copy")
+            self.assertTrue(os.path.isdir(copyPath), copyPath)
+            files = _relativeFiles(copyPath)
+            self.assertTrue([f for f in files if f.startswith("Segmentations/") and f.endswith(".seg.nrrd")], files)
+            self.assertTrue([f for f in files if f.startswith("Markups/") and f.endswith(".mrk.json")], files)
+            self.assertEqual(returned, copyPath)
+            with open(projects.sceneFile(copyPath), encoding="utf-8") as f:
+                sceneText = f.read()
+            self.assertIn('name="New lesion"', sceneText)
+            self.assertIn('name="Points"', sceneText)
+            self.assertFalse(os.path.exists(os.path.join(copyPath, ".studio", "lock")))
+            self.assertEqual(projects.currentProject().path, project.path, "the open project stays open")
+            # When the open project cannot be saved, nothing is copied (no "Duplicated as" with stale data)
+            markup.AddControlPoint(4, 5, 6)
+            before = sorted(os.listdir(os.path.dirname(project.path)))
+            saveNow = service.saveNow
+            service.saveNow = lambda *args, **kwargs: False
+            try:
+                self.assertIsNone(projects_ui.duplicate(project.path))
+            finally:
+                service.saveNow = saveNow
+            self.io.backgroundWriter().drain(30.0)
+            self.assertEqual(sorted(os.listdir(os.path.dirname(project.path))), before)
+            # Another project (not the open one) is copied as it is, without saving the open project
+            otherPath = projects_ui.duplicate(copyPath)
+            self.io.backgroundWriter().drain(30.0)
+            self.assertTrue(os.path.isfile(os.path.join(otherPath, os.path.basename(otherPath) + ".mrml")))
+        finally:
+            self.autosave._service = running
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk
