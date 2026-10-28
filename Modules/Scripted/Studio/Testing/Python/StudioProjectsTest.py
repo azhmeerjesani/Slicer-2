@@ -2252,6 +2252,67 @@ class StudioProjectsTest(unittest.TestCase):
         finally:
             self.autosave._service = running
 
+    def test_44_recent_outside_scene_opens_as_its_own_project(self):
+        """Library > Recent on a scene from outside the folder (.mrb or .mrml) while a project is open opens the scene as its
+        own project, as Open... and drop do (A-09, BB-1): the open project is saved and closed and keeps only its data. It used
+        to trigger the recent file action, which added the scene's nodes to the open project, and autosave wrote them into
+        that project's folder (two subjects mixed in one project).
+        """
+        from StudioLib import importer, shell
+
+        projects = self.projects
+        volume, _path = self._userVolume("MR Head", shape=(12, 14, 16), extension=".nrrd")
+        segmentation, _segmentId, _array = self._lesion(volume, "Outside lesion")
+        outside = os.path.join(self.tempDir, "outside recent")
+        os.makedirs(outside)
+        bundlePath = os.path.join(outside, "Outside bundle.mrb")
+        self.assertTrue(slicer.util.saveScene(bundlePath))
+        self.assertTrue(slicer.util.saveNode(segmentation, os.path.join(outside, "Outside lesion.seg.nrrd")))
+        scenePath = os.path.join(outside, "Outside scene.mrml")
+        self.assertTrue(slicer.util.saveScene(scenePath))
+        bundleMd5 = _md5File(bundlePath)
+        sceneMd5 = _md5File(scenePath)
+        slicer.mrmlScene.Clear(0)
+        service = self._service()
+        announced = []
+        service.setProjectAnnouncer(lambda event, project, **info: announced.append((event, project.name if project else None)))
+        running = self.autosave._service
+        self.autosave._service = service  # as the running service of the application
+        studioShell = shell.Shell(force=True)
+        try:
+            studioShell.apply()
+            slicer.app.processEvents()
+            for index, (path, expectedName) in enumerate(((bundlePath, "Outside bundle"), (scenePath, "Outside scene"))):
+                if service.project is not None:
+                    self._save(service)
+                slicer.mrmlScene.Clear(0)
+                self._userVolume(f"Own scan {index}", shape=(12, 14, 16))
+                own = self._projectFor(service)
+                self._save(service)
+                ownPath = own.path
+                del announced[:]
+                result = importer.loadRecentFile({"fileName": path, "fileType": "SceneFile"}, None, studioShell)
+                self.io.backgroundWriter().drain(30.0)
+                self.assertEqual(result.scenes, [path])
+                self.assertIsNotNone(service.project)
+                self.assertNotEqual(service.project.path, ownPath, "the scene is not added to the open project")
+                self.assertEqual(service.project.name, expectedName)
+                self.assertIn(("copy", expectedName), announced)
+                self.assertEqual(projects.readJson(projects.projectFile(ownPath))["state"], "closed")
+                self.assertIsNone(slicer.mrmlScene.GetFirstNodeByName(f"Own scan {index}"))
+                for name in ("MR Head", "Outside lesion"):
+                    self.assertEqual(len(slicer.util.getNodes(name, useLists=True).get(name, [])), 1, name)
+                ownFiles = _relativeFiles(ownPath)
+                self.assertEqual([f for f in ownFiles if "MR Head" in f or "Outside" in f], [], ownFiles)
+                with open(projects.sceneFile(ownPath), encoding="utf-8") as f:
+                    self.assertNotIn('name="MR Head"', f.read())
+            self.assertEqual(_md5File(bundlePath), bundleMd5, "the original is not changed")
+            self.assertEqual(_md5File(scenePath), sceneMd5, "the original is not changed")
+        finally:
+            self.autosave._service = running
+            studioShell.dispose()
+            slicer.app.processEvents()
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk

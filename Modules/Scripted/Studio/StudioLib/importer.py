@@ -1460,8 +1460,9 @@ def loadRecentFile(properties, action=None, shell=None):
 
     The file is loaded with its recorded properties (by triggering ``action`` if given). In Studio, a
     loaded scan is shown in Draw, as for ``loadFiles()``, and a scan or lesion that is already open is not
-    loaded again (it becomes current). A scene keeps its own views. A lesion recorded as a segmentation, a figure and a
-    statistical map are opened as with ``loadFiles()`` (Open...).
+    loaded again (it becomes current). A scene keeps its own views; with a project open, it opens as its own project as
+    with Open... (A-09: the open project is saved and closed first; a scene from outside the folder opens as a copy). A
+    lesion recorded as a segmentation, a figure and a statistical map are opened as with ``loadFiles()`` (Open...).
     """
     shell = _currentShell(shell)
     fileName = str((properties or {}).get("fileName", ""))
@@ -1484,6 +1485,23 @@ def loadRecentFile(properties, action=None, shell=None):
     nodeIdsBefore = {scene.GetNthNode(index).GetID() for index in range(scene.GetNumberOfNodes())}
     loaded = True
     if isScene:
+        service = _sceneProjectService(shell)
+        if service is not None and os.path.isfile(fileName):
+            # As Open... and drop (_loadScene): the scene opens as its own project (A-09), the open project is saved and
+            # closed first; triggering the recent file action would add the scene's data to the open project instead
+            result = LoadResult()
+            try:
+                opened = bool(service.openSceneFile(fileName))
+            except Exception as e:
+                logging.error(f"Studio: cannot load {fileName}:\n{traceback.format_exc()}")
+                result.errors.append((fileName, str(e)))
+                slicer.util.errorDisplay(_("Failed to load {path}").format(path=fileName), detailedText=str(e))
+                opened = False
+            if opened:
+                result.scenes.append(fileName)
+                recordOpenTimes([fileName])
+            _afterLoad(result, shell)
+            return result
         _announceSceneSource(fileName)
     if action is not None:
         action.trigger()
@@ -1557,19 +1575,29 @@ def _loadScene(path, shell):
     scene from outside the Slicer Studio folder becomes a new project that starts as a copy). Otherwise its data is added
     to the open scene, as 3D Slicer's Add Data does.
     """
-    service = None
-    if shell is not None:
-        try:
-            from . import autosave
-
-            service = autosave.instance()
-        except ImportError:
-            service = None
-    if service is not None and hasattr(service, "opensSceneAsProject") and service.opensSceneAsProject():
+    service = _sceneProjectService(shell)
+    if service is not None:
         return bool(service.openSceneFile(path))
     _announceSceneSource(path)
     slicer.util.loadScene(path, {})
     return True
+
+
+def _sceneProjectService(shell):
+    """The autosave service if a scene opened now in Studio opens as its own project (``opensSceneAsProject()``), else None
+    (Classic, a study or no open project: the scene's data is added to the open scene, as in 3D Slicer).
+    """
+    if shell is None:
+        return None
+    try:
+        from . import autosave
+
+        service = autosave.instance()
+    except ImportError:
+        return None
+    if service is not None and hasattr(service, "opensSceneAsProject") and service.opensSceneAsProject():
+        return service
+    return None
 
 
 def _announceSceneSource(path):
