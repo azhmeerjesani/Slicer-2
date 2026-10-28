@@ -223,11 +223,16 @@ class _Elider(qt.QObject):
 _elider = None
 
 
-def _elidedLabel(text="", pixelSize=12, objectName=None, mode="middle", keepTail=0):
-    """A plain-text label whose text is elided to its width (``setElidedText()``); the full text is its tool tip."""
+def _elidedLabelFilter():
+    """The shared event filter (``_Elider``) that keeps the text of labels made by ``_elidedLabel()`` elided to their width."""
     global _elider
     if _elider is None:
         _elider = _Elider()
+    return _elider
+
+
+def _elidedLabel(text="", pixelSize=12, objectName=None, mode="middle", keepTail=0):
+    """A plain-text label whose text is elided to its width (``setElidedText()``); the full text is its tool tip."""
     label = qt.QLabel()
     if objectName:
         label.setObjectName(objectName)
@@ -236,7 +241,7 @@ def _elidedLabel(text="", pixelSize=12, objectName=None, mode="middle", keepTail
     _setFont(label, pixelSize)
     label.setProperty("elideMode", mode)
     label.setProperty("keepTail", int(keepTail))
-    _installEventFilter(label, _elider)
+    _installEventFilter(label, _elidedLabelFilter())
     setElidedText(label, text)
     return label
 
@@ -5205,9 +5210,13 @@ class LibraryCanvas(qt.QObject):
         captionRow.addStretch(1)
         titleColumn.addLayout(captionRow)
         # Once data is loaded the page has no drop zone: a second caption line says that files can be dropped anywhere
-        self.captionDropHint = ui.label(_("Drop scans, lesion masks or folders anywhere on the window to add them"), "caption", "text3",
-                                        "StudioLibraryDropHint")
+        self.captionDropHint = ui.label("", "caption", "text3", "StudioLibraryDropHint")
         self.captionDropHint.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+        # Side by side with the buttons the title column can be narrower than the sentence (1366x768 with the inspector open):
+        # the hint is elided to the column (the whole sentence is the tool tip) and never cut in the middle of a letter
+        self.captionDropHint.setProperty("elideMode", "middle")
+        _installEventFilter(self.captionDropHint, _elidedLabelFilter())
+        setElidedText(self.captionDropHint, _("Drop scans, lesion masks or folders anywhere on the window to add them"))
         self.captionDropHint.hide()
         titleColumn.addWidget(self.captionDropHint)
         headerLayout.addLayout(titleColumn, 1)
