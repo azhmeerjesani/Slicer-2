@@ -128,6 +128,9 @@ MAX_WORKSPACE_PANEL_WIDTH = 600
 #: does not widen again when a tool is chosen: "Studio/WorkspacePanelWidths/<module name>" holds
 #: "<width>@<layout signature>" (see ``Shell._layoutSignature()``)
 _WORKSPACE_PANEL_WIDTHS_GROUP = "Studio/WorkspacePanelWidths"
+#: Version of what the stored widths measure (part of the layout signature). 2: the widths are layout minimum size hints; before, a
+#: module widget with the Minimum policy measured its size hint, and a study widened the inspector to 409-433 px for good
+_WORKSPACE_PANEL_WIDTHS_VERSION = 2
 
 #: Part of the available screen area given to the main window when Slicer did not restore its geometry
 FIRST_RUN_WINDOW_FRACTION = 0.9
@@ -1409,6 +1412,8 @@ class Shell:
         self._sessionAllowedToolBars = []
         #: Classic minimum width of the module panel and policy of its horizontal scroll bar
         self._classicModulePanelState = None
+        #: Module widgets whose horizontal size policy Studio changed from Minimum to Preferred (``_relaxModuleWidgetPolicy()``)
+        self._relaxedModuleWidgets = []
         #: ctkFittedTextBrowser widgets given an explicit minimum width in Studio
         self._fittedTextBrowsers = []
         #: True from an Esc shortcut override that the Esc stack handled to the matching key press
@@ -2787,8 +2792,10 @@ class Shell:
             return
         contents = dock.widget()
         target = self.panelWidth
-        needed = self._modulePanelNeededWidth()
         workspace = self.currentWorkspace()
+        if workspace is not None:
+            self._relaxModuleWidgetPolicy()
+        needed = self._modulePanelNeededWidth()
         known = self._workspacePanelWidths.get(self.currentModuleName()) if workspace is not None else dock.width
         if known is None or needed > known:
             # A wider measurement is kept (a workspace's for good): measure again once the pending layouts (a module
@@ -2811,6 +2818,44 @@ class Shell:
             contents.setMinimumWidth(contentsMinimumWidth)
         if dock.width < target or (shrink and dock.width != target):
             self.mainWindow.resizeDocks([dock], [target], qt.Qt.Horizontal)
+
+    def _relaxModuleWidgetPolicy(self):
+        """Let the layout of the module panel make a workspace module widget as narrow as its minimum size hint.
+
+        The module panel gives the module widget the Minimum horizontal size policy (``qSlicerModulePanel::setModule``), so
+        that a layout never makes it narrower than its size hint: the width of its widest row, for example a form with its
+        labels next to the fields. Rows that wrap when the inspector is narrow then still make the inspector wider than
+        ``Studio/PanelWidth``, and the widest width stays (``_workspacePanelWidth()``). With the Preferred policy the layout
+        minimum is the minimum size hint (rows wrapped) and wider contents scroll (SPEC 2.5).
+        """
+        modulePanel = self._modulePanel()
+        scrollArea = modulePanel.findChild("QScrollArea", "ScrollArea") if modulePanel is not None else None
+        contents = scrollArea.widget() if scrollArea is not None else None
+        layout = contents.layout() if contents is not None else None
+        if layout is None:
+            return
+        for index in range(layout.count()):
+            item = layout.itemAt(index)
+            widget = item.widget() if item is not None else None
+            if widget is None or widget.objectName == "HelpCollapsibleButton":
+                continue
+            policy = widget.sizePolicy
+            # The module panel sets the Minimum policy again each time the module is selected
+            if policy.horizontalPolicy() == qt.QSizePolicy.Minimum:
+                widget.setSizePolicy(qt.QSizePolicy.Preferred, policy.verticalPolicy())
+                if widget not in self._relaxedModuleWidgets:
+                    self._relaxedModuleWidgets.append(widget)
+
+    def _restoreModuleWidgetPolicy(self):
+        """Give the module widgets that ``_relaxModuleWidgetPolicy()`` changed the Minimum policy again (Classic)."""
+        for widget in self._relaxedModuleWidgets:
+            try:
+                policy = widget.sizePolicy
+                widget.setSizePolicy(qt.QSizePolicy.Minimum, policy.verticalPolicy())
+            except Exception:
+                # Deleted with its module
+                pass
+        self._relaxedModuleWidgets = []
 
     def _modulePanelNeededWidth(self):
         """Width of the inspector at which the module widget is not clipped (its layout minimum).
@@ -2856,7 +2901,7 @@ class Shell:
     def _layoutSignature():
         """What the layout minimum of a module widget depends on: the Slicer build and the application font."""
         font = slicer.app.font()
-        return f"{slicer.app.applicationVersion}-{slicer.app.revision}-{font.family()}-{font.pointSizeF()}-{font.pixelSize()}"
+        return f"{slicer.app.applicationVersion}-{slicer.app.revision}-{font.family()}-{font.pointSizeF()}-{font.pixelSize()}-{_WORKSPACE_PANEL_WIDTHS_VERSION}"
 
     def resetWorkspacePanelWidths(self):
         """Forget the widths needed by the workspace modules (they are measured again as tools are used)."""
@@ -2895,6 +2940,7 @@ class Shell:
             self._fitTextBrowsers()
             return
         self._unfitTextBrowsers()
+        self._restoreModuleWidgetPolicy()
         if self._classicModulePanelState is not None:
             modulePanelMinimumWidth, contentsMinimumWidth, policy = self._classicModulePanelState
             modulePanel.setMinimumWidth(modulePanelMinimumWidth)

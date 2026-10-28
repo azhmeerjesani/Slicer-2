@@ -36,6 +36,8 @@ SIGNS = ("both", "pos", "neg")
 SIGN_LABELS = {"both": "±", "pos": "+", "neg": "−"}  # noqa: RUF001
 #: Order of the Overlap tab among the cohort_*.py tabs
 OVERLAP_ORDER = 10
+#: Top and bottom margin of a cohort tab page (px); the pages have no side margins, see CohortCard
+TAB_PAGE_MARGIN = 8
 
 
 def _mapWidget():
@@ -397,6 +399,11 @@ class CohortCard:
             entries.append((spec["order"], spec["id"], str(spec.get("title", spec["id"])), tabWidget))
         entries.sort(key=lambda entry: (entry[0], entry[1]))
         for _order, tabId, title, tabWidget in entries:
+            # The tab pages have no side margins: the card has its own, and 22 more px would make the inspector wider than
+            # its stored width (the segmented controls of the tabs are about 290 px wide)
+            pageLayout = tabWidget.layout() if hasattr(tabWidget, "layout") else None
+            if pageLayout is not None and hasattr(pageLayout, "setContentsMargins"):
+                pageLayout.setContentsMargins(0, TAB_PAGE_MARGIN, 0, TAB_PAGE_MARGIN)
             index = self.tabs.addTab(tabWidget, title)
             self.tabs.setTabToolTip(index, title)
         for name in ("studyChanged", "bundleChanged", "ruleChanged", "computeEnabledChanged"):

@@ -35,6 +35,15 @@ def _studioUi():
     return ui
 
 
+def wrapCheckBox(checkBox):
+    """Return the widget to add to a layout in place of ``checkBox``: a row with the check box and its text as a word-wrapped
+    label (Studio), so that a long text does not make the inspector wider. Without Studio it is ``checkBox`` itself.
+    Show or hide the returned row, not the check box.
+    """
+    ui = _studioUi()
+    return ui.wrapCheckBox(checkBox) if ui is not None else checkBox
+
+
 def showInFileManager(path):
     """Open a folder or file with the desktop; where there is no file manager (the web build) show its location with [Copy path].
 
@@ -125,6 +134,10 @@ def card(title, objectName=None, collapsed=False):
     if objectName:
         button.setObjectName(objectName)
     button.setProperty("slicerRole", "card")
+    # Preferred, not the Minimum policy of the button: with Minimum a layout never makes the card narrower than its size hint
+    # (the widest a row of the card can be, for example a form with its labels next to the fields), which would make the
+    # inspector wider than its stored width. Preferred shrinks the card to its minimum size hint (rows wrap).
+    button.setSizePolicy(qt.QSizePolicy.Preferred, button.sizePolicy.verticalPolicy())
     # The button measures its title row when its style changes: measure it again for the card role
     qt.QApplication.sendEvent(button, qt.QEvent(qt.QEvent.StyleChange))
     button.collapsed = bool(collapsed)

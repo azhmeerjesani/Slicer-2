@@ -36,6 +36,8 @@ Run with the main window and testing enabled::
 - ``test_13_failed_adopt_leaves_folder_unchanged`` (BB-1): a participants.tsv that cannot be adopted (ids "01" and "sub-01" collide,
   or no participant_id column) raises and leaves the folder as it was (no .studio/, lesions/ or derivatives/); after the table
   is fixed the study is created and .studio/participants.orig.tsv is the table that was adopted, not the broken one.
+- ``test_15_inspector_keeps_width_with_a_study`` (BB-1): with a study open (Library cards, Map cohort tabs) the inspector stays at its
+  stored width in every workspace, and no workspace module's stored width (``Studio/WorkspacePanelWidths/*``) is wider than it.
 - ``test_10_scripted_module_ui_widgets`` (BB-1): the build has the Qt Designer plugins of CTK and MRML, so that
   ``slicer.util.loadUI`` creates the CTK and qMRML widgets of a scripted module's ``.ui`` file (a ``qMRMLWidget`` root, a
   ``qMRMLNodeComboBox``, a ``ctkCollapsibleButton``), and Line Profile, Vector to Scalar Volume and Surface Toolbox set up
@@ -999,6 +1001,110 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertIn("Merged 1 job results", shown[0][0])
         self.assertIn("1 job result was not merged", shown[0][0])
         self.assertEqual(shown[0][1], "warning")
+
+    def test_15_inspector_keeps_width_with_a_study(self):
+        """A study neither widens the inspector (Library cards, Map cohort cards) nor leaves it wide (BB-1).
+
+        With a study open the Library cards (the grid question row, two check boxes with long texts) and the Map Cohort
+        card (a form per tab, the seed modes, a combo next to a button) made the layout minimum of the workspace modules
+        wider than ``Studio/PanelWidth``, and the widest minimum stayed for good (409 px with a study, 433 px with the
+        Map cohort tabs, at 1366x768 with a stored width of 340 px). The inspector stays at its stored width in every
+        workspace, the stored widths of the workspaces stay within it, and the views do not move.
+        """
+        from StudioLib import shell, study_ui, templates
+
+        mainWindow = slicer.util.mainWindow()
+        if mainWindow is None or not hasattr(slicer.modules, "lesionnetworkmapping"):
+            self.skipTest("needs the main window and the Map module")
+        settings = qt.QSettings()
+        keys = [f"{shell._WORKSPACE_PANEL_WIDTHS_GROUP}/{name}" for name in ("Studio", "SegmentEditor", "LesionNetworkMapping")]
+        saved = {key: settings.value(key) for key in keys}
+        for key in keys:
+            settings.remove(key)
+        savedGeometry = mainWindow.saveGeometry()
+        studioShell = None
+        try:
+            mainWindow.resize(1366, 768)
+            studioShell = shell.Shell(force=True)
+            studioShell.apply()
+            dock = mainWindow.findChild("QDockWidget", "PanelDockWidget")
+
+            def pump(count=10):
+                for _ in range(count):
+                    slicer.app.processEvents()
+
+            def widest():
+                """The widest visible widgets of the module panel that a layout cannot shrink, for the failure messages."""
+                scrollArea = mainWindow.findChild("QWidget", "ModulePanel").findChild("QScrollArea", "ScrollArea")
+                found = []
+
+                def walk(widget):
+                    for child in widget.children():
+                        if child.isWidgetType() and child.isVisible() and child.sizePolicy.horizontalPolicy() != qt.QSizePolicy.Ignored:
+                            text = getattr(child, "text", "")
+                            found.append((child.minimumSizeHint.width(), child.objectName or child.metaObject().className(), text if isinstance(text, str) else "", child.sizePolicy.horizontalPolicy()))
+                            walk(child)
+
+                walk(scrollArea.widget())
+                return sorted(found, reverse=True)[:12]
+
+            def check(step):
+                pump()
+                self.assertLessEqual(dock.width, studioShell.panelWidth + 2, f"{step}: the inspector is {dock.width} px, widest {widest()}")
+                held = {name: width for name, width in studioShell._workspacePanelWidths.items() if width > studioShell.panelWidth + 2}
+                self.assertEqual(held, {}, f"{step}: a workspace module asks for more than the stored width")
+                for key in keys:
+                    stored = str(settings.value(key, "") or "")
+                    width = int(stored.partition("@")[0] or 0)
+                    self.assertLessEqual(width, studioShell.panelWidth + 2, f"{step}: {key} = {stored}")
+
+            for workspace in ("library", "draw", "map", "library"):
+                studioShell.switchTo(workspace)
+                check(f"project, {workspace}")
+            folder = os.path.join(self.directory, "S")
+            os.makedirs(folder)
+            files = []
+            for index in range(1, 4):
+                path = os.path.join(folder, f"sub-{index:02d}_T1w.nii.gz")
+                shutil.copyfile(templates.builtinTemplates()[0].imagePath, path)
+                files.append(path)
+            session = study_ui.createStudy(files, shell=studioShell, folder=folder, name="S")
+            pump(20)
+            studioShell.switchTo("library")
+            check("study, library")
+            session.open(session.study.subject_ids[0])
+            for _ in range(30):
+                if studioShell.currentWorkspace() == "draw":
+                    break
+                pump(4)
+            check("study, draw")
+            studioShell.switchTo("map")
+            check("study, map")
+            widget = slicer.modules.LesionNetworkMappingWidget
+            self.assertIn("cohort", widget.seedModes)
+            widget.seedModeGroup.button(widget.seedModes.index("cohort")).click()
+            check("study, map cohort")
+            # Every tab of the Cohort card, and the cards below it
+            tabs = widget.parent.findChild("QTabWidget", "LNMCohortTabs")
+            self.assertIsNotNone(tabs)
+            for index in range(tabs.count):
+                tabs.setCurrentIndex(index)
+                check(f"study, map cohort tab {index}")
+            study_ui.closeStudy()
+            studioShell.switchTo("library")
+            check("study closed, library")
+            studioShell.switchTo("draw")
+            check("study closed, draw")
+        finally:
+            if studioShell is not None:
+                studioShell.dispose()
+            mainWindow.restoreGeometry(savedGeometry)
+            for key, value in saved.items():
+                if value is None:
+                    settings.remove(key)
+                else:
+                    settings.setValue(key, value)
+            slicer.mrmlScene.Clear(0)
 
     @staticmethod
     def _isAncestor(ancestor, widget):

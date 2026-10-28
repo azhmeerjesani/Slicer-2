@@ -33,10 +33,13 @@ import re
 import qt
 from slicer.i18n import tr as _
 
+from . import widgets
 from .cohort_contrast import DEFAULT_PERM, CohortTab, CovariateChips, _fill, _fmtP, _idClickedSignal, _readJson, checksHtml, label, segmented
 
 #: Order of the tab in the Cohort card (Overlap 10, Contrast 20, Symptom 30, VLSM 40)
 ORDER_SYMPTOM = 30
+#: Width (px) below which the leave-one-dataset-out check box and the Control scores button stack
+EXTRAS_WRAP_WIDTH = 310
 METHODS = ("pearson", "spearman")
 P_MAPS = ("p_fwe", "p_fdr")
 #: Observers of the current circuit (``ctx.currentCircuitChanged``, created on first use: MapContext has no such list)
@@ -69,6 +72,7 @@ class SymptomTab(CohortTab):
 
     def buildControls(self, layout):
         form = qt.QFormLayout()
+        form.setRowWrapPolicy(qt.QFormLayout.WrapLongRows)
         form.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
         self.scoreCombo = qt.QComboBox()
         self.scoreCombo.setObjectName("LNMSymptomScore")
@@ -103,6 +107,7 @@ class SymptomTab(CohortTab):
         layout.addWidget(self.volumeReasonEdit)
 
         options = qt.QFormLayout()
+        options.setRowWrapPolicy(qt.QFormLayout.WrapLongRows)
         methodRow = qt.QHBoxLayout()
         self.methodFrame, self.methodGroup = segmented([_("Pearson"), _("Spearman")], "LNMSymptomMethod",
                                                        _("Pearson: partial r of the score and the maps · Spearman: the same on ranks (scores, numeric covariates and maps)"))
@@ -136,21 +141,28 @@ class SymptomTab(CohortTab):
         self.permuteLabel = label("", "LNMSymptomPermuteReason", "secondaryText")
         layout.addWidget(self.permuteLabel)
 
-        extras = qt.QHBoxLayout()
         self.lodoCheckBox = qt.QCheckBox(_("Leave-one-dataset-out"))
         self.lodoCheckBox.setObjectName("LNMSymptomLodo")
         self.lodoCheckBox.setToolTip(_("Per-dataset maps, their cross-dataset similarity with a block-permutation p, and convergence (Stouffer z, I²; descriptive). "
                                        "Datasets need at least 10 subjects"))
         self.lodoCheckBox.connect("toggled(bool)", lambda checked: self.onSettingsChanged())
-        extras.addWidget(self.lodoCheckBox)
-        extras.addStretch(1)
         self.controlsButton = qt.QPushButton(_("Control scores…"))
         self.controlsButton.setObjectName("LNMSymptomControlsButton")
         self.controlsButton.setProperty("slicerRole", "ghost")
         self.controlsButton.setToolTip(_("Other scores mapped with the same pipeline and compared with this map (spatial r and partial r given PC1 and μC)"))
         self.controlsButton.connect("clicked()", self.showControls)
-        extras.addWidget(self.controlsButton)
-        layout.addLayout(extras)
+        studioUi = widgets._studioUi()
+        if studioUi is not None:
+            # The button goes under the check box when the inspector is narrow: side by side they are wider than the
+            # cohort tab of a 340 px inspector (they would make the inspector wider)
+            self.controlsButton.setSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Fixed)
+            layout.addWidget(studioUi.wrapRow([self.lodoCheckBox, self.controlsButton], width=EXTRAS_WRAP_WIDTH))
+        else:
+            extras = qt.QHBoxLayout()
+            extras.addWidget(self.lodoCheckBox)
+            extras.addStretch(1)
+            extras.addWidget(self.controlsButton)
+            layout.addLayout(extras)
         self.controlsLabel = label("", "LNMSymptomControlsText", "secondaryText")
         self.controlsLabel.hide()
         layout.addWidget(self.controlsLabel)

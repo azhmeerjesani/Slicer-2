@@ -231,7 +231,8 @@ class ReviewCard:
         self.blindCheck.setToolTip(_("Tracers and reviewers do not see the group, score and symptom columns, and network maps are never shown "
                                      "while tracing or reviewing. Recorded in the provenance."))
         self.blindCheck.connect("toggled(bool)", lambda checked: self._setSetting("blind_tracing", checked))
-        layout.addWidget(self.blindCheck)
+        # A long text: it wraps (a check box shows it on one line and would widen the inspector)
+        layout.addWidget(library.ui.wrapCheckBox(self.blindCheck))
         self.gateLabel = library._cardLabel("StudioReviewGateLabel", 12, "text2")
         layout.addWidget(self.gateLabel)
 

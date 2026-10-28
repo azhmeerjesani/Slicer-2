@@ -420,6 +420,7 @@ class ValidateCard:
 
     def _buildControls(self, layout):
         form = qt.QFormLayout()
+        form.setRowWrapPolicy(qt.QFormLayout.WrapLongRows)
         form.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
         self.outcomeCombo = self._combo("LNMValidateOutcome", _("The outcome the circuit is validated against: a group column with two levels (binary: AUC, odds ratio) or a score (continuous: r, out-of-sample R²)"),
                                         self.onOutcomeChanged)
@@ -492,6 +493,7 @@ class ValidateCard:
         self.options = qt.QWidget()
         self.options.setObjectName("LNMValidateOptions")
         options = qt.QFormLayout(self.options)
+        options.setRowWrapPolicy(qt.QFormLayout.WrapLongRows)
         options.setContentsMargins(0, 0, 0, 0)
         self.scoreCombo = self._combo("LNMValidateScore", _("The lesion score the models use: the Fisher-z spatial r of the lesion's network map with the circuit (default), the damage score (needs the lesion "
                                                             "occupancy of the cohort maps) or the ROI connectivity (top-x% circuits only)"))

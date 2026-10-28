@@ -4189,18 +4189,17 @@ class StudyCard(qt.QObject):
             label = _cardLabel("StudioStudyGridQuestion", 12, "text")
             label.setText(_("{n} files are on the {grid} grid, which several templates share. Which space are they in?").format(n=count, grid=gridId))
             self.questionsLayout.addWidget(label)
-            row = qt.QWidget()
-            rowLayout = qt.QHBoxLayout(row)
-            rowLayout.setContentsMargins(0, 0, 0, 0)
-            rowLayout.setSpacing(4)
+            buttons = []
             for candidate in candidates:
                 button = qt.QPushButton(candidate.replace("MNI152", ""))
                 button.setObjectName("StudioStudyGridAnswer")
                 button.setToolTip(candidate)
                 ui.setRole(button, "secondary")
                 button.connect("clicked()", lambda gridId=gridId, candidate=candidate: studySession.answerGrid(gridId, candidate))
-                rowLayout.addWidget(button)
-            self.questionsLayout.addWidget(row)
+                buttons.append(button)
+            # The answers go under each other when the inspector is narrow: three of them side by side
+            # are wider than the 340 px inspector (they would scroll)
+            self.questionsLayout.addWidget(ui.wrapRow(buttons, width=ui.WRAP_ROW_WIDTH + 60, spacing=4))
 
     def _refreshExtras(self, studySession):
         cards = libcardCards("study")

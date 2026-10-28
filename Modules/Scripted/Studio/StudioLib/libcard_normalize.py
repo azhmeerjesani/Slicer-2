@@ -1496,7 +1496,7 @@ class NormalizationCard:
         self.autoCheck = _checkBox(_("Normalize native lesions automatically after Done → next"), "StudioNormalizeAutoCheck", self._onAuto)
         self.autoCheck.setToolTip(_("After Done, a native lesion is normalized in the background (one at a time, with a lower priority); "
                                     "the result waits for your review"))
-        layout.addWidget(self.autoCheck)
+        layout.addWidget(library.ui.wrapCheckBox(self.autoCheck))
         from LesionNetworkMappingUI import widgets
 
         self.progress = widgets.ProgressRow(_("Stop"), "StudioNormalize")

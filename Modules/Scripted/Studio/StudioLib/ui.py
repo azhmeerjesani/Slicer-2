@@ -240,7 +240,7 @@ def _deleteOrphansAtExit():
 
 def removeStudioEventFilters(widget):
     """Remove the shared Python event filters of this module (``wrapRow()``/``noticeLine()`` wrapping, ``installButtonKeys()``,
-    ``elideLabel()``)
+    ``elideLabel()``, ``wrapCheckBox()``)
     from ``widget`` and its children.
 
     Call it before deleting a widget from Python (``widget.delete()``): the destruction of its layout sends events to the widget,
@@ -248,7 +248,7 @@ def removeStudioEventFilters(widget):
     """
     if not _isAlive(widget):
         return
-    filters = [instance for instance in (_wrapFilter, _buttonKeys, _elideFilter) if instance is not None]
+    filters = [instance for instance in (_wrapFilter, _buttonKeys, _elideFilter, _checkLabelFilter) if instance is not None]
     if not filters:
         return
     for target in (widget, *widget.findChildren("QWidget")):
@@ -1250,6 +1250,52 @@ def wrapRow(widgets, width=WRAP_ROW_WIDTH, spacing=6):
     for widget in widgets:
         layout.addWidget(widget)
     _installWrap(row, width)
+    return row
+
+
+class _CheckLabelFilter(qt.QObject):
+    """A click on the text of a ``wrapCheckBox()`` toggles its check box."""
+
+    def eventFilter(self, obj, event):
+        if event.type() == qt.QEvent.MouseButtonRelease:
+            row = obj.parentWidget()
+            checkBox = row.findChild("QCheckBox") if row is not None else None
+            if checkBox is not None and checkBox.isEnabled():
+                checkBox.click()
+        return False
+
+
+_checkLabelFilter = None
+
+
+def wrapCheckBox(checkBox):
+    """Return a row with ``checkBox`` and its text as a word-wrapped label (a QCheckBox draws its text on one line, so a long
+    text would make the inspector wider). The check box keeps its object name, state and signals; its text moves to the label
+    and stays the accessible name. Its row has an Ignored horizontal size policy: it never widens its container.
+    """
+    global _checkLabelFilter
+    if _checkLabelFilter is None:
+        _checkLabelFilter = _CheckLabelFilter()
+    text = str(checkBox.text)
+    checkBox.setText("")
+    checkBox.setAccessibleName(text)
+    row = qt.QWidget()
+    row.setObjectName("StudioWrapCheckBoxRow")
+    layout = qt.QHBoxLayout(row)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(6)
+    layout.addWidget(checkBox, 0, qt.Qt.AlignTop)
+    label = qt.QLabel(text)
+    label.setObjectName("StudioWrapCheckBoxText")
+    label.setWordWrap(True)
+    label.setTextFormat(qt.Qt.PlainText)
+    label.setToolTip(checkBox.toolTip)
+    label.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+    label.installEventFilter(_checkLabelFilter)
+    layout.addWidget(label, 1)
+    policy = qt.QSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+    policy.setHeightForWidth(True)
+    row.setSizePolicy(policy)
     return row
 
 

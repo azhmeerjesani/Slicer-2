@@ -2376,8 +2376,10 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             if self.layout.indexOf(self._seedModeRow) < 0:
                 self.layout.insertWidget(self.layout.indexOf(seedCard), self._seedModeRow)
             frame.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
+            # Ignored: the buttons share the row equally and never widen the inspector (four modes with a count are
+            # wider than the 340 px inspector at their size hints)
             for button in self.seedModeGroup.buttons():
-                button.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
+                button.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
             self._seedModeRow.setVisible(len(self.seedModes) > 1)
             # The frame may come from a collapsed Seed card, which hid it with its other contents
             self._showSeedModeFrame()

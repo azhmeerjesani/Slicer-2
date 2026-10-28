@@ -1203,6 +1203,7 @@ class ContrastTab(CohortTab):
         from LesionNetworkMappingLib import design as designlib
 
         form = qt.QFormLayout()
+        form.setRowWrapPolicy(qt.QFormLayout.WrapLongRows)
         form.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
         self.groupCombo = qt.QComboBox()
         self.groupCombo.setObjectName("LNMContrastGroupColumn")
@@ -1253,11 +1254,14 @@ class ContrastTab(CohortTab):
             self.permuteCombo.addItem(_(text), mode)
         self.permuteCombo.setToolTip(_("Override the automatic exchangeability decision"))
         self.permuteCombo.connect("currentIndexChanged(int)", lambda index: self.onSettingsChanged())
+        # Ignored: the combos share the row and never make the inspector wider
+        self.permuteCombo.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
         permute.addWidget(self.permuteCombo, 1)
         self.blockCombo = qt.QComboBox()
         self.blockCombo.setObjectName("LNMContrastBlockColumn")
         self.blockCombo.setToolTip(_("Exchangeability blocks: dataset, else source_type (a column with the role block)"))
         self.blockCombo.connect("currentIndexChanged(int)", lambda index: self.onSettingsChanged())
+        self.blockCombo.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
         permute.addWidget(self.blockCombo, 1)
         layout.addLayout(permute)
         self.permuteLabel = label("", "LNMContrastPermuteReason", "secondaryText")
@@ -1266,8 +1270,10 @@ class ContrastTab(CohortTab):
         self.restrictCheckBox = qt.QCheckBox(_("Only the blocks that hold both levels (within-cohort design)"))
         self.restrictCheckBox.setObjectName("LNMContrastRestrictBlocks")
         self.restrictCheckBox.connect("toggled(bool)", lambda checked: self.onSettingsChanged())
-        self.restrictCheckBox.hide()
-        layout.addWidget(self.restrictCheckBox)
+        # A long text: it wraps (a check box shows it on one line and would widen the inspector)
+        self.restrictRow = widgets.wrapCheckBox(self.restrictCheckBox)
+        self.restrictRow.hide()
+        layout.addWidget(self.restrictRow)
         self.varianceCheckBox = qt.QCheckBox(_("Unequal variances (Aspin–Welch v)"))  # noqa: RUF001
         self.varianceCheckBox.setObjectName("LNMContrastVarianceGroups")
         self.varianceCheckBox.setToolTip(_("Use the groups as variance groups (two-group tests; suggested when the variance ratio is above 4)"))
@@ -1275,6 +1281,7 @@ class ContrastTab(CohortTab):
         layout.addWidget(self.varianceCheckBox)
 
         options = qt.QFormLayout()
+        options.setRowWrapPolicy(qt.QFormLayout.WrapLongRows)
         self.inputFrame, self.inputGroup = segmented(["Fz", "T"], "LNMContrastInput", _("Per-lesion maps tested: mean Fisher z (AvgFz, default; independent of the connectome N) or T"))
         self.inputGroup.connect(_idClickedSignal(self.inputGroup), lambda index: self.onSettingsChanged())
         options.addRow(_("Input"), self.inputFrame)
@@ -1524,7 +1531,7 @@ class ContrastTab(CohortTab):
         design = self.design
         nested = next((check for check in design.checks if check.code == "nested"), None) if design is not None else None
         mixed = (nested.detail or {}).get("mixed_blocks") if nested is not None and isinstance(nested.detail, dict) else None
-        self.restrictCheckBox.setVisible(bool(mixed) or self.restrictCheckBox.checked)
+        self.restrictRow.setVisible(bool(mixed) or self.restrictCheckBox.checked)
         if design is None:
             self.permuteLabel.setText("")
             self.permuteLabel.hide()
