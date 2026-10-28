@@ -59,6 +59,8 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
     redirects = {}
     slowPaths = set()
     tricklePaths = set()
+    stallPaths = set()
+    stallRelease = threading.Event()
 
     def do_GET(self):
         path = self.path.split("?", 1)[0]
@@ -78,6 +80,20 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                     self.wfile.write(body[i:i + 1])
                     self.wfile.flush()
                     time.sleep(0.05)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
+        if path in self.stallPaths:
+            # A server that sends the headers and a few bytes, then nothing (until the test releases it)
+            with open(os.path.join(self.directory, path.lstrip("/")), "rb") as f:
+                body = f.read()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body[:100])
+                self.wfile.flush()
+                self.stallRelease.wait(30)
             except (BrokenPipeError, ConnectionResetError):
                 pass
             return
@@ -126,6 +142,8 @@ class StudioUpdatesTest(unittest.TestCase):
         _Handler.redirects = {}
         _Handler.slowPaths = set()
         _Handler.tricklePaths = set()
+        _Handler.stallPaths = set()
+        _Handler.stallRelease = threading.Event()
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(_Handler, directory=self.feedDir))
         self.serverThread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.serverThread.start()
@@ -148,6 +166,7 @@ class StudioUpdatesTest(unittest.TestCase):
         updates.installTargetOverride = None
         updates.currentVersionOverride = None
         updates.stateDirectoryOverride = None
+        _Handler.stallRelease.set()
         self.server.shutdown()
         self.server.server_close()
         if self.savedEnvironment is None:
@@ -374,6 +393,40 @@ class StudioUpdatesTest(unittest.TestCase):
         # The real feed downloads from the tag of the release
         self.assertEqual(updates.assetUrl(manifest, manifest.asset("linux-x86_64"), updates.DEFAULT_FEED_URL),
                          f"https://github.com/azhmeerjesani/Slicer-2/releases/download/v1.2.0/{data['assets']['linux-x86_64']['name']}")
+
+    def test_DownloadCancelWhileStalled(self):
+        """Cancel stops a download at once when the server stops sending (it does not wait for the next block or the timeout)."""
+        updates = self.updates
+        data = self._publish("1.2.0")
+        manifest = updates.parseManifest(data)
+        _Handler.stallPaths = {"/" + data["assets"]["linux-x86_64"]["name"]}
+        downloads = os.path.join(self.tempDir, "downloads")
+        cancel = threading.Event()
+        received = []
+        outcome = {}
+
+        def work():
+            try:
+                updates.downloadAsset(manifest, "linux-x86_64", downloads, feed=self.feed,
+                                      progress=lambda r, t: received.append(r), cancelled=cancel.is_set)
+                outcome["error"] = None
+            except updates.UpdateError as error:
+                outcome["error"] = str(error)
+            outcome["end"] = time.monotonic()
+
+        thread = threading.Thread(target=work, daemon=True)
+        thread.start()
+        self.assertTrue(self._waitFor(lambda: received and received[-1] >= 100, 10), "the first bytes arrive")
+        self.assertEqual(received[0], 0, "the progress is reported from the start")
+        self._pump(1.0)
+        self.assertNotIn("end", outcome, "the stalled download is still running")
+        cancelAt = time.monotonic()
+        cancel.set()
+        self.assertTrue(self._waitFor(lambda: "end" in outcome, 8), "Cancel is noticed while the server is silent")
+        self.assertLess(outcome["end"] - cancelAt, 5)
+        self.assertIn("cancelled", outcome["error"])
+        self.assertEqual(os.listdir(downloads), [], "the partial file is deleted")
+        thread.join(5)
 
     #
     # (e) Linux swap

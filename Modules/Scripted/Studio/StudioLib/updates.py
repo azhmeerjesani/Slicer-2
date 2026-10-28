@@ -105,9 +105,12 @@ MANIFEST_MAX_BYTES = 256 * 1024
 CHECK_DEADLINE_S = 2 * CHECK_TIMEOUT_S
 #: Longest release notes kept (characters)
 NOTES_MAX_CHARS = 20000
-#: Network timeout of a download, per read (seconds)
+#: A download that receives no byte for this long (seconds) fails with "timed out" (also the timeout of connecting)
 DOWNLOAD_TIMEOUT_S = 60
+#: Largest block taken from the connection at once (bytes); a read returns what has arrived, it does not wait for a full block
 DOWNLOAD_CHUNK = 256 * 1024
+#: The download looks at Cancel at least this often (seconds), also while the server is slow or silent
+DOWNLOAD_POLL_S = 0.5
 #: While the application runs, a check is made when the last one is older than this (seconds)
 RECHECK_INTERVAL_S = 24 * 3600
 #: The optional-update notice is shown at the earliest this long after startup (ms), when no other prompt is shown
@@ -437,6 +440,68 @@ def verifyFile(path, size, sha256):
         raise UpdateError(_("The download does not have the SHA-256 checksum of the release: it was refused."))
 
 
+class _BodyReader:
+    """Reads the body of ``response`` in a helper thread, so that the download can look at Cancel while the server is
+    slow or silent (a read of the connection cannot be interrupted, and one that is cut by a timeout cannot be resumed).
+    ``get(timeout)`` returns the next block (``b""`` at the end), or None when nothing came within ``timeout``, or raises
+    the error of the connection. ``stop()`` ends the thread: it closes the connection for reading, which wakes a read
+    that waits.
+    """
+
+    def __init__(self, response, size):
+        import queue
+
+        self.response = response
+        self.size = size
+        self.blocks = queue.Queue(maxsize=4)
+        self.stopped = threading.Event()
+        self.thread = threading.Thread(target=self._run, name="StudioDownload", daemon=True)
+        self.thread.start()
+
+    def _put(self, item):
+        import queue
+
+        while not self.stopped.is_set():
+            try:
+                self.blocks.put(item, timeout=0.2)
+                return
+            except queue.Full:
+                pass
+
+    def _run(self):
+        read = getattr(self.response, "read1", self.response.read)  # what has arrived: not a wait for a full block
+        try:
+            while not self.stopped.is_set():
+                block = read(self.size)
+                self._put(("data", block))
+                if not block:
+                    return
+        except Exception as error:
+            self._put(("error", error))
+
+    def get(self, timeout):
+        import queue
+
+        try:
+            kind, value = self.blocks.get(timeout=timeout)
+        except queue.Empty:
+            return None
+        if kind == "error":
+            raise value
+        return value
+
+    def stop(self):
+        import socket
+
+        self.stopped.set()
+        if self.thread.is_alive():
+            try:
+                self.response.fp.raw._sock.shutdown(socket.SHUT_RDWR)
+            except (AttributeError, OSError):
+                pass
+            self.thread.join(2)
+
+
 def downloadAsset(manifest, key, directory, feed=None, progress=None, cancelled=None):
     """Download the release file of the platform ``key`` to ``directory`` and verify it. Return its path.
 
@@ -468,19 +533,27 @@ def downloadAsset(manifest, key, directory, feed=None, progress=None, cancelled=
             length = response.headers.get("Content-Length") if hasattr(response, "headers") else None
             if length and length.isdigit() and int(length) != size:
                 raise UpdateError(_("The download has the wrong size ({actual} bytes instead of {expected}): it was refused.").format(actual=int(length), expected=size))
-            while True:
-                if cancelled is not None and cancelled():
-                    raise UpdateError(_("The download was cancelled."))
-                block = response.read(DOWNLOAD_CHUNK)
-                if not block:
-                    break
-                received += len(block)
-                if received > size:
-                    raise UpdateError(_("The download is larger than the release file ({expected} bytes): it was refused.").format(expected=size))
-                digest.update(block)
-                stream.write(block)
-                if progress:
-                    progress(received, size)
+            if progress:
+                progress(0, size)
+            reader = _BodyReader(response, DOWNLOAD_CHUNK)
+            try:
+                while True:
+                    if cancelled is not None and cancelled():
+                        raise UpdateError(_("The download was cancelled."))
+                    block = reader.get(DOWNLOAD_POLL_S)
+                    if block is None:
+                        continue  # nothing arrived yet: look at Cancel again (the connection gives up after DOWNLOAD_TIMEOUT_S)
+                    if not block:
+                        break
+                    received += len(block)
+                    if received > size:
+                        raise UpdateError(_("The download is larger than the release file ({expected} bytes): it was refused.").format(expected=size))
+                    digest.update(block)
+                    stream.write(block)
+                    if progress:
+                        progress(received, size)
+            finally:
+                reader.stop()
         if received != size:
             raise UpdateError(_("The download has the wrong size ({actual} bytes instead of {expected}): it was refused.").format(actual=received, expected=size))
         if digest.hexdigest() != asset["sha256"]:
