@@ -571,7 +571,10 @@ class ExportDialog(qt.QDialog):
                                  count=len(existing), folder=os.path.basename(self.folder)) + "\n\n" + names, qt.QMessageBox.NoButton, self)
         box.setObjectName("StudioNiftiExportReplaceQuestion")
         replace = box.addButton(_("Replace"), qt.QMessageBox.DestructiveRole)
-        box.addButton(_("Cancel"), qt.QMessageBox.RejectRole)
+        # The safe choice is the default (Enter) and the Escape button: Enter must never overwrite files
+        keep = box.addButton(_("Cancel"), qt.QMessageBox.RejectRole)
+        box.setDefaultButton(keep)
+        box.setEscapeButton(keep)
         run = getattr(box, "exec", None) or box.exec_
         run()
         return box.clickedButton() == replace

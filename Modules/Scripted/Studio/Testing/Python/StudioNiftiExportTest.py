@@ -728,6 +728,34 @@ class StudioNiftiExportTest(unittest.TestCase):
             slicer.mrmlScene.RemoveNode(node)
         self._assertNoAbsolutePaths(self.out)
 
+    def test_08a_replace_question_defaults_to_keeping_the_files(self):
+        """In the "Replace existing files?" question the default (Enter) and Escape button is Cancel, never Replace."""
+        from StudioLib import autosave_io, niftiexport_ui
+
+        node = self._volume("keep scan", np.zeros((3, 3, 3), np.int16), np.eye(4))
+        dialog = niftiexport_ui.exportNodesDialog([node], show=False, executor=autosave_io.InlineExecutor())
+        dialog.setFolder(self.out)
+        seen = {}
+
+        def answer():
+            for widget in qt.QApplication.topLevelWidgets():
+                if widget.isVisible() and widget.objectName == "StudioNiftiExportReplaceQuestion":
+                    default, escape = widget.defaultButton(), widget.escapeButton()
+                    seen["default"] = default.text if default is not None else None
+                    seen["escape"] = escape.text if escape is not None else None
+                    if default is not None:
+                        default.click()  # what Enter does
+                    else:
+                        widget.reject()
+                    return
+            qt.QTimer.singleShot(50, answer)
+
+        qt.QTimer.singleShot(50, answer)
+        self.assertFalse(dialog.confirmOverwrite([os.path.join(self.out, "keep_scan.nii.gz")]))
+        self.assertEqual(seen, {"default": "Cancel", "escape": "Cancel"})
+        dialog.close()
+        slicer.mrmlScene.RemoveNode(node)
+
     def test_08b_message_names_the_skipped_segments_and_other_notes(self):
         """The message after an export carries the notes (empty segments skipped, empty threshold mask, transform), not only the log."""
         from StudioLib import niftiexport_ui
