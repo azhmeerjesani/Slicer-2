@@ -250,7 +250,7 @@ def checkLesionSet(studyPath, includeUnreviewed=False, priors=None, overview=Fal
             raise jobs.Cancelled()
 
     study = Study.open(studyPath)
-    included = [row for row in study.subjects if str(row.get("include", "1")).strip() == "1"]
+    included = [row for row in study.subjects if _lnm("study").is_included(row)]
     review = {"required": bool(study.review_required), "included": len(included), "approved": sum(1 for row in included if row.get("review_status") == "approved")}
     note("load", 0, len(included))
     occ = lesionset.load_occupancies(study, require_review=False if includeUnreviewed else None, cancel=cancel, progress=lambda done, total: note("load", done, total))
@@ -890,7 +890,7 @@ class CohortCard:
             self.matchLabel.setText("")
             self.contextLabel.setVisible(False)
             self.contextLink.setText(_("Literature context ▸"))
-        included = [row for row in study.subjects if str(row.get("include", "1")).strip() == "1"]
+        included = [row for row in study.subjects if _lnm("study").is_included(row)]
         pending = study.review_required and any(row.get("review_status") != "approved" for row in included)
         self.includeCheck.setVisible(bool(pending))
         self._renderStatus()
@@ -911,7 +911,7 @@ class CohortCard:
         study = session.study
         _importForWorker()
         priors = priorsFor(study)
-        size = sum(1 for row in study.subjects if str(row.get("include", "1")).strip() == "1")
+        size = sum(1 for row in study.subjects if _lnm("study").is_included(row))
         self._wantOverview = bool(overview)
         self._runPath = study.path
         if size > CLI_MIN_LESIONS and not overview and not self.includeUnreviewed:

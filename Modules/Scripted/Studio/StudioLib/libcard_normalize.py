@@ -144,7 +144,7 @@ def isStale(row):
 
 
 def _included(row):
-    return str(row.get("include", "1")).strip() == "1"
+    return _lnm("study").is_included(row)
 
 
 def needsNormalization(row):

@@ -335,7 +335,10 @@ _hookedSessions = set()
 
 def allTraced(study):
     """``(n, traced)``: the included subjects and whether every one of them is traced (or mapped)."""
-    rows = [row for row in study.subjects if str(row.get("include", "1")).strip() == "1"]
+    import importlib
+
+    isIncluded = importlib.import_module("LesionNetworkMappingLib.study").is_included
+    rows = [row for row in study.subjects if isIncluded(row)]
     return len(rows), bool(rows) and all(row.get("status") in TRACED for row in rows)
 
 

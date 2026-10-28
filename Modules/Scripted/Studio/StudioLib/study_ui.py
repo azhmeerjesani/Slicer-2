@@ -101,8 +101,6 @@ GROUP_ORIGINAL_COLUMN = "group_original"
 #: An adopted column named like a study column with fixed values (status, qc, include, group) but holding other values
 #: ("alive", "deceased") is kept as "<name>_original"; the study column gets its default values
 ORIGINAL_SUFFIX = "_original"
-#: Values of an adopted "include" column that keep their meaning in the study's include column (1 / 0)
-_INCLUDE_WORDS = {"1": "1", "true": "1", "yes": "1", "y": "1", "0": "0", "false": "0", "no": "0", "n": "0"}
 #: Node attribute of the subject's nodes (a participant id, never a path)
 SUBJECT_ATTRIBUTE = "Studio.StudySubject"
 #: The default tracing template: the bundled MNI152NLin2009cAsym 2 mm brain (works offline)
@@ -714,8 +712,8 @@ def _keepClashingColumns(studyModule, columns, rows, dictionary):
     """Keep the user's columns that are named like a study column with fixed values but hold other values.
 
     A "status" column of "alive" / "deceased" is renamed to ``status_original`` (its values, position and data dictionary
-    entry unchanged) and the study's own column gets its default values (an "include" column of yes / no / true / false
-    keeps its meaning as 1 / 0), so that tracing never overwrites the user's values. A study column that already holds
+    entry unchanged) and the study's own column gets its default values (an "include" column of yes / no / true / false or
+    1.0 / 0.0 keeps its meaning as 1 / 0, ``study.include_value``), so that tracing never overwrites the user's values. A study column that already holds
     allowed values only is the study's column; its empty cells get the default. ``columns`` (without participant_id),
     ``rows`` and ``dictionary`` are changed in place.
 
@@ -738,7 +736,7 @@ def _keepClashingColumns(studyModule, columns, rows, dictionary):
         columns[columns.index(column)] = target
         for row, value in zip(rows, values, strict=True):
             row[target] = row.pop(column, studyModule.NA)
-            mapped = _INCLUDE_WORDS.get(value.lower()) if column == "include" else None
+            mapped = studyModule.include_value(value) if column == "include" else None
             row[column] = mapped or default
         if column in dictionary:
             dictionary[target] = dictionary.pop(column)
@@ -1278,7 +1276,8 @@ def _missing(value):
 
 
 def isIncluded(row):
-    return str((row or {}).get("include", "1")).strip().lower() not in ("0", "false", "no")
+    """True unless the row's include value means 0: the study library's own test (``study.is_included``)."""
+    return _lnm("study").is_included(row)
 
 
 def normalizeDoi(text):

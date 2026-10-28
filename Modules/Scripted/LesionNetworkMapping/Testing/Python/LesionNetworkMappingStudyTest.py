@@ -104,6 +104,48 @@ class StudyTest(unittest.TestCase):
         self.assertEqual(self._tsv_lines(folder)[0].split("\t")[:6], ["participant_id", "age", "group", "sex", "score_b", "score_a"])
         self.assertEqual(again.subject("sub-02")["score_c"], "n/a")
 
+    def test_include_written_by_pandas(self):
+        # pandas writes an integer column with an empty cell as floats (1.0 / 0.0 / empty): every reader must see
+        # include = 0 as excluded and 1.0 as included, and the next save writes the values as Studio does
+        folder = self.path("pandas")
+        created = Study.create(folder)
+        for number in range(1, 5):
+            created.add_subject(f"sub-0{number}", status="traced", lesion=f"lesions/sub-0{number}_lesion.nii.gz")
+        created.save()
+        lines = self._tsv_lines(folder)
+        header = lines[0].split("\t")
+        column = {name: index for index, name in enumerate(header)}
+        cells = [line.split("\t") for line in lines[1:] if line]
+        for row, include in zip(cells, ("1.0", "0.0", "1.0", ""), strict=True):
+            row[column["include"]] = include
+        cells[1][column["status"]] = "Traced"  # another case of an allowed value
+        cells[3][column["status"]] = cells[3][column["qc"]] = ""  # a row appended without these columns
+        with open(os.path.join(folder, study.PARTICIPANTS_TSV), "w", encoding="utf-8") as f:
+            f.write("\n".join(["\t".join(header)] + ["\t".join(row) for row in cells]) + "\n")
+
+        opened = Study.open(folder)
+        rows, excluded = opened.analysis_rows()
+        self.assertEqual(([row["participant_id"] for row in rows], excluded), (["sub-01", "sub-03", "sub-04"], {study.EXCLUDED_INCLUDE: ["sub-02"]}))
+        self.assertEqual([sid for sid, _path in opened.lesion_paths(with_ids=True)], ["sub-01", "sub-03", "sub-04"])
+        self.assertEqual([row["include"] for row in opened.subjects], ["1", "0", "1", "1"])
+        self.assertEqual([(row["status"], row["qc"]) for row in opened.subjects][1:], [("traced", "unreviewed"), ("traced", "unreviewed"), ("untraced", "unreviewed")])
+        self.assertEqual([study.is_included(row) for row in opened.subjects], [True, False, True, True])
+        # The next save repairs the file
+        opened.save()
+        saved = [line.split("\t") for line in self._tsv_lines(folder)[1:] if line]
+        self.assertEqual([(row[column["include"]], row[column["status"]], row[column["qc"]]) for row in saved],
+                         [("1", "traced", "unreviewed"), ("0", "traced", "unreviewed"), ("1", "traced", "unreviewed"), ("1", "untraced", "unreviewed")])
+        # A float written on disk while the study is open is merged as the same value
+        saved[2][column["include"]] = "0.0"
+        with open(os.path.join(folder, study.PARTICIPANTS_TSV), "w", encoding="utf-8") as f:
+            f.write("\n".join(["\t".join(header)] + ["\t".join(row) for row in saved]) + "\n")
+        opened.set("sub-04", notes="kept")
+        opened.save()
+        self.assertEqual([row["include"] for row in opened.subjects], ["1", "0", "0", "1"])
+        self.assertEqual([row["include"] for row in Study.open(folder).subjects], ["1", "0", "0", "1"])
+        self.assertEqual([study.include_value(v) for v in ("1", "0", "1.0", "0.0", " 1.00 ", "-0.0", "True", "no", "N", "2", "n/a", "", None)],
+                         ["1", "0", "1", "0", "1", "0", "1", "0", "0", None, None, None, None])
+
     def test_validation(self):
         created = Study.create(self.path("v"))
         created.add_subject("sub-01")

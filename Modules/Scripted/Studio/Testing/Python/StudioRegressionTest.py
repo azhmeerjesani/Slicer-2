@@ -27,7 +27,8 @@ Run with the main window and testing enabled::
   (alive / deceased) keeps it as ``status_original`` (values, position and data dictionary entry) and starts the study's
   status at untraced, so that Done -> next finds the next subject and tracing never overwrites the user's values; an
   "include" column of yes / no is kept as ``include_original`` and keeps its meaning; a status column of study values is
-  the study's own column (empty cells untraced).
+  the study's own column (empty cells untraced); an include column written by pandas (1.0 / 0.0 / empty) keeps its meaning
+  too, and Library, the cards and the analyses read it the same way (``study.is_included``).
 - ``test_8_study_list_qc_keeps_cursor`` (BB-1): a QC key (P / X / U) refreshes the subject list (a model reset) but keeps the
   keyboard cursor (the current index) on the subject, so that the next Down goes to the next subject and the next QC key
   marks that one (it went to the first row: the wrong subject was marked); a selection made elsewhere moves the cursor too.
@@ -713,6 +714,20 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertNotIn("status_original", study.columns)
         self.assertEqual([study.subject(sid)["status"] for sid in study.subject_ids], ["traced", "untraced", "untraced"])
         self.assertEqual(study.next_subject("sub-01"), "sub-02")
+        # An include column written by pandas (1.0 / 0.0 / empty) keeps its meaning, and every reader agrees (BB-1)
+        from StudioLib import libcard_analysis, libcard_cohort, libcard_normalize, study_ui
+
+        header = ["participant_id", "include"]
+        folder, study = self._adopt("Pandas study", header, [["sub-01", "1.0"], ["sub-02", "0.0"], ["sub-03", ""]])
+        self.assertEqual([study.subject(sid)["include"] for sid in study.subject_ids], ["1", "0", "1"])
+        for sid in study.subject_ids:
+            study.set(sid, status="traced")
+        study.save()
+        study = study_ui._lnm("study").Study.open(folder)
+        readers = (study_ui.isIncluded, libcard_normalize._included, libcard_cohort._lnm("study").is_included)
+        self.assertEqual([[reader(row) for row in study.subjects] for reader in readers], [[True, False, True]] * 3)
+        self.assertEqual(libcard_analysis.allTraced(study), (2, True))
+        self.assertEqual([row["participant_id"] for row in study.analysis_rows()[0]], ["sub-01", "sub-03"])
 
     # Keyboard triage of the subject list (BB-1)
 

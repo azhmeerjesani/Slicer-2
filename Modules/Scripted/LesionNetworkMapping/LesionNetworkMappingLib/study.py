@@ -270,8 +270,69 @@ def _normalize(column, text):
     return schema.normalize_value(column, text)
 
 
-def _included(row):
-    return str(row.get("include", "1")).strip().lower() not in ("0", "false", "no")
+#: Spellings of include values (any case) that keep their meaning, besides numbers equal to 1 or 0 (:func:`include_value`)
+INCLUDE_WORDS = {"1": "1", "true": "1", "yes": "1", "y": "1", "0": "0", "false": "0", "no": "0", "n": "0"}
+
+
+def include_value(value):
+    """The canonical include value ("1" or "0") of a cell, or None when it is missing or not an include value.
+
+    Besides 1 and 0 it accepts :data:`INCLUDE_WORDS` and numbers equal to 1 or 0, which is how pandas and
+    spreadsheets write the column ("1.0", "0.0", for example when a column of integers has an empty cell).
+    """
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in INCLUDE_WORDS:
+        return INCLUDE_WORDS[text]
+    try:
+        number = float(text)
+    except ValueError:
+        return None
+    return "1" if number == 1 else "0" if number == 0 else None
+
+
+def is_included(row):
+    """True unless the row's include value means 0 (:func:`include_value`); the one test every reader uses."""
+    return include_value((row or {}).get("include", "1")) != "0"
+
+
+_included = is_included
+
+
+def _canonical_cells(rows, path, fill_absent=False):
+    """Write the standard columns with fixed values (:data:`ALLOWED_VALUES`) of rows read from a file as Studio does.
+
+    Tables edited outside Studio can hold other spellings: an include column written by pandas holds "1.0" / "0.0"
+    and empty cells. Include values are made "1" or "0" (:func:`include_value`), other values in another case
+    ("Traced") the allowed one, and missing cells (empty, "n/a" or "nan") the default (:data:`DEFAULTS`), so that every
+    reader sees the same values and the next save repairs the file. Unknown values are kept (with a warning).
+
+    :param fill_absent: also give a missing column its default (on open; a merge treats a column missing on disk as
+      unchanged there).
+    """
+    unknown = {}
+    for row in rows:
+        for column, allowed in ALLOWED_VALUES.items():
+            if column not in row:
+                if fill_absent:
+                    row[column] = DEFAULTS.get(column, NA)
+                continue
+            value = row[column]
+            if value in allowed:
+                continue
+            text = str(value).strip().lower()
+            if is_missing(text) or text == "nan":
+                row[column] = DEFAULTS.get(column, NA)
+                continue
+            canonical = include_value(text) if column == "include" else next((v for v in allowed if v == text), None)
+            if canonical is None:
+                unknown.setdefault(column, []).append(row.get("participant_id"))
+            else:
+                row[column] = canonical
+    for column, sids in unknown.items():
+        logging.warning(f"{path}: {column} has values other than {', '.join(ALLOWED_VALUES[column])} ({', '.join(map(str, sids[:5]))}"
+                        f"{', ...' if len(sids) > 5 else ''}); they are kept as they are")
 
 
 def qc_failed(row):
@@ -447,6 +508,7 @@ class Study:
         # participant_id first, other columns in file order, then the missing standard columns
         columns = ["participant_id"] + [c for c in columns if c != "participant_id"]
         columns += [c for c in STANDARD_COLUMNS if c not in columns]
+        _canonical_cells(rows, tsv, fill_absent=True)
         dictionary_path = os.path.join(path, PARTICIPANTS_JSON)
         dictionary, dictionary_error, data = {}, None, None
         try:
@@ -572,6 +634,7 @@ class Study:
         tsv_path, data = changed(PARTICIPANTS_TSV)
         if data is not None:
             columns, rows = _parse_tsv(data.decode("utf-8-sig"), tsv_path)
+            _canonical_cells(rows, tsv_path)
             self._merge_rows(base["rows"], columns, rows, conflicts)
         _, data = changed(STUDY_JSON)
         if data is not None:

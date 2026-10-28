@@ -592,7 +592,7 @@ def run_preflight(
 
     for row in study.subjects:
         sid = row["participant_id"]
-        if not studylib._included(row):  # the analyses' own test (Study.analysis_rows): 0, false, no
+        if not studylib._included(row):  # the analyses' own test (Study.analysis_rows, study.is_included)
             collector.add("include_off", "info", sid, lambda sids, _d: f"{_count(len(sids), 'subject')} with include = 0 {'is' if len(sids) == 1 else 'are'} not analysed: {_listed(sids)}.")
             exclude(sid, studylib.EXCLUDED_INCLUDE)
             continue

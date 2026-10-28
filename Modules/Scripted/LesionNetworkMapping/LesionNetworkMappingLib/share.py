@@ -53,7 +53,7 @@ import numpy as np
 
 from . import export
 from . import schema
-from .study import NA, PRIVATE_DIR, Study, is_missing
+from .study import NA, PRIVATE_DIR, Study, is_included, is_missing
 
 SHARE_FORMAT = "slicer-studio-share"
 SHARE_VERSION = 1
@@ -267,7 +267,7 @@ def is_own_patient(row):
 def _rows(study, options):
     rows = study.subjects
     if not options["include_excluded"]:
-        rows = [row for row in rows if row.get("include", "1") != "0"]
+        rows = [row for row in rows if is_included(row)]
     return rows
 
 

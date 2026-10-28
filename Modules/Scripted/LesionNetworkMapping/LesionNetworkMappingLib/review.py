@@ -153,7 +153,9 @@ def needs_review(row):
     rejection waits with include = 0 until it is approved).
     """
     row = row or {}
-    return status_of(row) == "pending" and (str(row.get("include", "1")) != "0" or not _missing(row.get("reviewer")))
+    from .study import is_included
+
+    return status_of(row) == "pending" and (is_included(row) or not _missing(row.get("reviewer")))
 
 
 def changes_requested(row):
@@ -228,7 +230,9 @@ def apply_transition(study, sid, to, who, comment=None, reason=None, save=False,
     if to in DECISIONS:
         values["reviewer"] = who
         values["review_comment"] = _comment_text(to, comment, reason)
-    excluded = str(row.get("include", "1")) == "0"
+    from .study import is_included
+
+    excluded = not is_included(row)
     held = held_include(study, sid) if excluded else None
     if to == "rejected":
         record["reason"] = reason
