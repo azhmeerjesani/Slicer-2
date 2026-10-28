@@ -828,10 +828,13 @@ class StudioNiftiExportTest(unittest.TestCase):
         self.assertEqual(os.path.normpath(dialog.folder), os.path.normpath(folder))
         self.assertEqual(dialog.segmentationMode(), self.export.SEGMENTATION_MASKS)
         self.assertNotIn(template.GetID(), [node.GetID() for node in dialog.checkedNodes()])
+        announced = int(dialog.folderMeta.text.split()[0])
         runner = dialog.export(confirm=lambda existing: self.fail(f"{existing} exist"))
         self.assertTrue(runner.wait(60))
         self.assertEqual(runner.result.errors, [])
         names = sorted(os.path.basename(path) for path in _allFiles(folder))
+        # The folder card counts every file written, README.txt included
+        self.assertEqual(announced, len(names))
         for expected in ("README.txt", "sub-07_T1w.nii.gz", "sub-07_T1w.json", "sub-07_label-Lesion_desc-lesion_mask.nii.gz",
                          "sub-07_stat-T_statmap.nii.gz"):
             self.assertIn(expected, names)

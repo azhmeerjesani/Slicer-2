@@ -533,8 +533,10 @@ class ExportDialog(qt.QDialog):
         else:
             text = _("Check at least one image to export.")
         self.summaryLabel.setText(text)
-        self.folderMeta.setText(_("{count} files will be written here").format(count=len(images) + others) if images else "")
         readme = self.readme()
+        # The project README.txt is written too (export() only when there are images), so it is counted as well
+        written = len(images) + others + (1 if readme else 0)
+        self.folderMeta.setText(_("{count} files will be written here").format(count=written) if images else "")
         existing = niftiexport.existingFiles(jobs, [readme[0]] if readme else [])
         if existing:
             ui.setNotice(self.existingNotice, (_("1 file already exists and will be replaced after you confirm: {name}") if len(existing) == 1 else
