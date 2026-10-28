@@ -61,9 +61,22 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
     tricklePaths = set()
     stallPaths = set()
     stallRelease = threading.Event()
+    notHttpPaths = set()
+    cutChunkedPaths = set()
 
     def do_GET(self):
         path = self.path.split("?", 1)[0]
+        if path in self.notHttpPaths:
+            # A reply that is not HTTP (http.client.BadStatusLine, which is not an OSError)
+            self.wfile.write(b"NOT HTTP AT ALL\r\n\r\n")
+            self.close_connection = True
+            return
+        if path in self.cutChunkedPaths:
+            # A chunked body that stops in the middle of a chunk, as when the network drops (http.client.IncompleteRead)
+            self.wfile.write(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n1000\r\n" + b"x" * 100)
+            self.wfile.flush()
+            self.close_connection = True
+            return
         if path in self.redirects:
             self.send_response(302)
             self.send_header("Location", self.redirects[path])
@@ -144,6 +157,8 @@ class StudioUpdatesTest(unittest.TestCase):
         _Handler.tricklePaths = set()
         _Handler.stallPaths = set()
         _Handler.stallRelease = threading.Event()
+        _Handler.notHttpPaths = set()
+        _Handler.cutChunkedPaths = set()
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(_Handler, directory=self.feedDir))
         self.serverThread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.serverThread.start()
@@ -393,6 +408,30 @@ class StudioUpdatesTest(unittest.TestCase):
         # The real feed downloads from the tag of the release
         self.assertEqual(updates.assetUrl(manifest, manifest.asset("linux-x86_64"), updates.DEFAULT_FEED_URL),
                          f"https://github.com/azhmeerjesani/Slicer-2/releases/download/v1.2.0/{data['assets']['linux-x86_64']['name']}")
+
+    def test_NetworkProtocolErrors(self):
+        """A reply that is not HTTP, or a chunked download that is cut, is an UpdateError with a plain message (not a
+        raw http.client exception, which is no OSError), and no partial file is left.
+        """
+        updates = self.updates
+        data = self._publish("1.2.0")
+        manifest = updates.parseManifest(data)
+        name = data["assets"]["linux-x86_64"]["name"]
+        _Handler.notHttpPaths = {"/studio-update.json"}
+        with self.assertRaises(updates.UpdateError) as caught:
+            updates.fetchManifest(self.feed)
+        self.assertNotIn("NOT HTTP", str(caught.exception))
+        self.assertIn("valid answer", str(caught.exception))
+        _Handler.notHttpPaths = set()
+        _Handler.cutChunkedPaths = {"/" + name}
+        downloads = os.path.join(self.tempDir, "downloads")
+        with self.assertRaisesRegex(updates.UpdateError, "connection was interrupted"):
+            updates.downloadAsset(manifest, "linux-x86_64", downloads, feed=self.feed)
+        self.assertEqual(os.listdir(downloads), [], "the partial file is deleted")
+        # The manifest itself cut in the middle of a chunk
+        _Handler.cutChunkedPaths = {"/studio-update.json"}
+        with self.assertRaisesRegex(updates.UpdateError, "connection was interrupted"):
+            updates.fetchManifest(self.feed)
 
     def test_DownloadCancelWhileStalled(self):
         """Cancel stops a download at once when the server stops sending (it does not wait for the next block or the timeout)."""

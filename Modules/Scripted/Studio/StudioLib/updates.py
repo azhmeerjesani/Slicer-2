@@ -38,6 +38,7 @@ The functions above the "Service" section use no Qt and no Slicer object (the te
 """
 
 import hashlib
+import http.client
 import importlib
 import json
 import logging
@@ -267,6 +268,9 @@ def _open(url, feed, timeout):
     except (urllib.error.URLError, OSError, ValueError) as error:
         reason = getattr(error, "reason", error)
         raise UpdateError(_("Cannot reach the update server: {reason}").format(reason=reason))
+    except http.client.HTTPException:
+        # not an OSError: a reply that is not HTTP (BadStatusLine), cut off or malformed
+        raise UpdateError(_("Cannot reach the update server: it did not send a valid answer."))
 
 
 #
@@ -362,6 +366,8 @@ def fetchManifest(feed=None, timeout=CHECK_TIMEOUT_S):
                 block = read(16 * 1024)
             except OSError as error:
                 raise UpdateError(_("Cannot reach the update server: {reason}").format(reason=error))
+            except http.client.HTTPException:  # not an OSError: a chunked or other reply that is cut off or malformed
+                raise UpdateError(_("Cannot reach the update server: the connection was interrupted."))
             if not block:
                 break
             blocks.append(block)
@@ -565,6 +571,9 @@ def downloadAsset(manifest, key, directory, feed=None, progress=None, cancelled=
     except OSError as error:
         _removeQuietly(part)
         raise UpdateError(_("The download failed: {error}").format(error=error))
+    except http.client.HTTPException:  # not an OSError: a chunked reply that is cut off or malformed (the network dropped)
+        _removeQuietly(part)
+        raise UpdateError(_("The download failed: the connection was interrupted."))
     return path
 
 
