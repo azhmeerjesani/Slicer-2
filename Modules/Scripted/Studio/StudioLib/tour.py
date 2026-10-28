@@ -1683,6 +1683,12 @@ class _OfferCard:
         if column is not None and column.isVisible():
             self._watchPage(column)
             content = _pageContentItems(column, self.canvas)
+            # The notices (an update, a required update) are above the column, in their own container, and their buttons
+            # must stay reachable: at a small window the top right corner is on their right end
+            notices = self.canvas.findChild("QWidget", "StudioLibraryNotices")
+            if notices is not None and notices.isVisible():
+                self._watchPage(notices)
+                content += _pageContentItems(notices, self.canvas)
         if content:
             below = max(contentRect.bottom() for contentRect, _interactive in content) + margin
             columnRect = _rectIn(column, self.canvas)

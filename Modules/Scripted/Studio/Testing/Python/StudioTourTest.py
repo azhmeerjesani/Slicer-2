@@ -498,6 +498,59 @@ class StudioTourTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertEqual(slicer.mrmlScene.GetModifiedSinceRead(), modifiedBefore, tourId)
             self.assertEqual(self._viewState(studioShell), stateBefore, tourId)
 
+    def test_09b_offer_keeps_clear_of_notices(self):
+        """The offer avoids the buttons of the Library notices (an update, a required update), at both window sizes (BB-1)."""
+        from StudioLib import library, tour
+
+        studioShell = self._applyStudio()
+        settings = qt.QSettings()
+        # The last case: a short window and a wide card (a large font), where the bottom right corner covers the right end of
+        # the drop zone and the top right corner, where the notice buttons are, is the only place left
+        for width, height, cardWidth in SIZES[0] + (None,), SIZES[1] + (None,), (1366, 600, 450):
+            self._resize(width, height)
+            settings.remove("Studio/Tour")
+            studioShell.switchTo("library")
+            self._pump()
+            self.assertTrue(tour.offerTour(), (width, height))
+            self._pump()
+            card = tour.plugin().offerWidget()
+            self.assertIsNotNone(card)
+            if cardWidth is not None:
+                offerCard = tour.plugin().offerCard
+                offerCard.frame.setFixedWidth(cardWidth)
+                offerCard._fitHeight()
+                offerCard.updatePosition()
+                self._pump()
+            # The notice appears after the offer, with its buttons at the right end of the row, like "Update now" and "Skip"
+            notice = qt.QFrame()
+            notice.setObjectName("StudioTestNotice")
+            row = qt.QHBoxLayout(notice)
+            row.addWidget(qt.QLabel("A new version is available"))
+            row.addStretch(1)
+            buttons = []
+            for text in ("Update now", "Skip"):
+                button = qt.QPushButton(text)
+                button.setObjectName("StudioTestNotice" + text.split()[0])
+                row.addWidget(button)
+                buttons.append(button)
+            try:
+                library.showNotice("StudioTestNotice", notice)
+                self._wait(200)
+                self.assertTrue(card.isVisible())
+                offerRect = tour._rectIn(card, self.mainWindow)
+                for button in buttons:
+                    self.assertTrue(button.isVisible(), button.text)
+                    buttonRect = tour._rectIn(button, self.mainWindow)
+                    self.assertFalse(offerRect.intersects(buttonRect), (width, height, button.text, offerRect, buttonRect))
+                    at = qt.QApplication.widgetAt(button.mapToGlobal(qt.QPoint(button.width // 2, button.height // 2)))
+                    self.assertTrue(at is not None and at.objectName == button.objectName, (width, height, button.text, at))
+            finally:
+                library.closeNotice("StudioTestNotice")
+                notice.deleteLater()
+                self._pump()
+            tour.plugin().offerWidget().findChild("QPushButton", "StudioTourOfferNotNowButton").click()
+            self._pump()
+
     def test_09_first_start_offer(self):
         """The first-start offer is a non-modal card shown once; any answer (or opening a file) is remembered."""
         from StudioLib import tour
