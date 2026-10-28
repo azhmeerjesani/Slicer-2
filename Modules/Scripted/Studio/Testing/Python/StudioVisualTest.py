@@ -378,6 +378,41 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
                 host.deleteLater()
                 self._pump()
 
+    def test_appearance_switches_centred_on_their_labels(self):
+        """Settings > Appearance (VISUAL 4.7): the three switches are as tall as the 44 px label rows, so each one is
+        centred on its label; Classic gives the check boxes their natural height back.
+        """
+        from StudioLib import shell, ui
+
+        self._setTheme("dark")
+        self._applyStudio()
+        dialog = slicer.app.settingsDialog()
+        dialog.setCurrentPanel("Appearance")
+        dialog.show()
+        self._pump(6)
+        try:
+            panel = dialog.findChild("QWidget", "qSlicerSettingsStylesPanel")
+            self.assertIsNotNone(panel)
+            pairs = (("ShowToolTipsLabel", "ShowToolTipsCheckBox"), ("ShowToolButtonTextLabel", "ShowToolButtonTextCheckBox"),
+                     ("RestoreUILabel", "RestoreUICheckBox"))
+            for labelName, boxName in pairs:
+                label = panel.findChild("QLabel", labelName)
+                box = panel.findChild("QCheckBox", boxName)
+                self.assertEqual(box.property("slicerRole"), "switch", boxName)
+                self.assertGreaterEqual(box.minimumHeight, ui.SETTINGS_ROW_HEIGHT, boxName)
+                labelCentre = label.mapToGlobal(qt.QPoint(0, label.height // 2)).y()
+                boxCentre = box.mapToGlobal(qt.QPoint(0, box.height // 2)).y()
+                self.assertLessEqual(abs(labelCentre - boxCentre), 2, f"{boxName}: switch centre {boxCentre}, label centre {labelCentre}")
+            # Classic: the natural height again
+            live = shell._shell
+            live._settingsLook.restore()
+            self._pump()
+            for _labelName, boxName in pairs:
+                self.assertLess(panel.findChild("QCheckBox", boxName).minimumHeight, ui.SETTINGS_ROW_HEIGHT, boxName)
+        finally:
+            dialog.hide()
+            self._pump()
+
     #
     # (d) text that fits at 1366 x 768
     #

@@ -932,7 +932,7 @@ class SettingsDialogLook:
         form = panel.layout() if panel is not None else None
         if form is None or "appearance" in self._saved:
             return
-        saved = {"labels": {}, "margins": None, "spacing": _propertyValue(form, "verticalSpacing"), "header": None}
+        saved = {"labels": {}, "boxes": {}, "margins": None, "spacing": _propertyValue(form, "verticalSpacing"), "header": None}
         margins = form.contentsMargins()
         saved["margins"] = (margins.left(), margins.top(), margins.right(), margins.bottom())
         for name in self.APPEARANCE_LABELS:
@@ -945,6 +945,9 @@ class SettingsDialogLook:
         for name in self.APPEARANCE_CHECKBOXES:
             box = panel.findChild("QCheckBox", name)
             if box is not None:
+                # The same 44 px row as the label, so that the form row centres the switch on its label
+                saved["boxes"][name] = box.minimumHeight
+                box.setMinimumHeight(ui.SETTINGS_ROW_HEIGHT)
                 box.setProperty("slicerRole", "switch")
                 box.style().unpolish(box)
                 box.style().polish(box)
@@ -974,6 +977,8 @@ class SettingsDialogLook:
         for name in self.APPEARANCE_CHECKBOXES:
             box = panel.findChild("QCheckBox", name)
             if box is not None:
+                if name in saved["boxes"]:
+                    box.setMinimumHeight(saved["boxes"][name])
                 box.setProperty("slicerRole", "")
                 box.style().unpolish(box)
                 box.style().polish(box)
