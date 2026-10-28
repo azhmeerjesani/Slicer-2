@@ -1049,6 +1049,9 @@ def mapOptionsFromMapModule():
     if widget is None or not hasattr(widget, "legendState"):
         return {}
     try:
+        # A reopened project has not restored its map until Map is first entered: the widget does that quietly
+        if hasattr(widget, "restoreSceneResult"):
+            widget.restoreSceneResult()
         # The threshold of the map itself, also while the views show a descriptive QA map (whose legend has none)
         state = widget.resultLegendState() if hasattr(widget, "resultLegendState") else widget.legendState()
         node = widget._parameterNode.resultVolume if widget._parameterNode is not None else None

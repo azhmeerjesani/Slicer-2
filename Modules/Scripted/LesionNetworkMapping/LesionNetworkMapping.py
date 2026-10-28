@@ -1939,6 +1939,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self._footerInShell = False
         self._ruleOverride = False
         self._entered = False
+        self._peaksPending = False
         self._seedDirty = True
         self._pendingProgress = None
         self._pendingReload = False
@@ -2297,6 +2298,28 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         if str(header.text()) != text:
             header.setText(text)
         header.setToolTip(tip)
+
+    def restoreSceneResult(self):
+        """Make the map of a reloaded scene (a reopened project) available without showing Map; return True when the Result
+        card has a map afterwards.
+
+        The parameter node, the connectome and the scene's result volume are normally picked up when Map is first entered
+        (``enter``), so that until then the threshold rule applied to the map cannot be read (the NIfTI export of the project
+        needs it). This does the same steps as ``enter`` without its presentation; entering Map afterwards still shows the peak
+        table of a map adopted here. Without a map volume in the scene it changes nothing.
+        """
+        if self._hasResult():
+            return True
+        if not any(volume.GetAttribute("LNM.Statistic") for volume in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")):
+            return False
+        self.initializeParameterNode()
+        self.refreshConnectomes()
+        if not self._adoptSceneResult():
+            return self._hasResult()
+        self._peaksPending = True  # enter() computes the peak table of the adopted map
+        self._displayWindow(self._parameterNode.resultVolume, False)
+        self.refreshResult(reloadMaps=False)
+        return self._hasResult()
 
     def resultLegendState(self):
         """``legendState()`` of the map itself (``parameterNode.resultVolume``), whatever the views show: its window and the
@@ -5590,7 +5613,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.initializeParameterNode()
         self._syncStudy()
         self.refreshConnectomes()
-        adopted = self._adoptSceneResult()
+        adopted = self._adoptSceneResult() or self._peaksPending
+        self._peaksPending = False
         if adopted:
             self._displayWindow(self._parameterNode.resultVolume, False)
         if self.seedMode() == "cohort":
@@ -5797,6 +5821,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self._runBundle = None
         self._parkedRuns.clear()
         self.loadedMap = None
+        self._peaksPending = False
         self._valuesCache.clear()
         self._mapStamp.clear()
         self.ctx.setResultVolume(None)

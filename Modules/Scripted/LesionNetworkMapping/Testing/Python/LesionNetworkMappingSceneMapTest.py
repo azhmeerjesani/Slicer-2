@@ -68,6 +68,40 @@ class LesionNetworkMappingSceneMapTest(unittest.TestCase):
         self.assertFalse(widget.peaksTable.isHidden())
         self.assertEqual(widget.peaksTable.rowCount, 5)
 
+    def test_project_nifti_export_reads_the_threshold_of_a_reopened_map_before_map_is_shown(self):
+        """A reopened project exports the map with its thresholded mask without Map having been entered (BB-1)."""
+        from StudioLib import niftiexport
+
+        widget = self.widget
+        widget.exit()
+        volume = self._sceneMap()
+        widget.initializeParameterNode()
+        widget._parameterNode.resultVolume = volume
+        # What a reopened project looks like: the scene holds the map and the parameter node, the widget has restored nothing
+        widget.setParameterNode(None)
+        widget.loadedMap = None
+        widget.runOutputs = {}
+        widget._peaks = []
+        widget.resolved = None
+        self.assertFalse(widget._hasResult())
+        options = niftiexport.mapOptionsFromMapModule()
+        self.assertEqual(list(options), [volume.GetID()], options)
+        self.assertGreater(options[volume.GetID()]["threshold"], 0.0)
+        self.assertTrue(options[volume.GetID()]["rule"])
+        # Entering Map afterwards still shows the peak table of the map restored quietly
+        widget.enter()
+        _pump(300)
+        self.assertEqual(len(widget._peaks), 5, widget._peaks)
+        self.assertEqual(widget.peaksTable.rowCount, 5)
+
+    def test_nifti_export_options_without_a_map_in_the_scene_change_nothing(self):
+        from StudioLib import niftiexport
+
+        self.widget.exit()
+        self.widget.setParameterNode(None)
+        self.assertEqual(niftiexport.mapOptionsFromMapModule(), {})
+        self.assertIsNone(self.widget._parameterNode)
+
 
 if __name__ == "__main__":
     unittest.main()
