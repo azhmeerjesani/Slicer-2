@@ -756,6 +756,32 @@ class StudioNiftiExportTest(unittest.TestCase):
         dialog.close()
         slicer.mrmlScene.RemoveNode(node)
 
+    def test_08aa_dialog_grows_when_the_summary_wraps(self):
+        """Select all makes the summary wrap onto more lines: the dialog grows and the image list stays above the folder card."""
+        from StudioLib import autosave_io, niftiexport_ui
+
+        nodes = []
+        for index in range(12):
+            name = f"scan {index:02d}" if index != 3 else "sub-03_ses-preoperative_acq-highresolution_run-01_T1w_with_a_really_long_descriptive_name"
+            nodes.append(self._volume(name, np.zeros((3, 3, 3), np.int16), np.eye(4)))
+        dialog = niftiexport_ui.exportNodesDialog([nodes[0]], show=False, executor=autosave_io.InlineExecutor())
+        dialog.setFolder(self.out)
+        dialog.show()
+        for _ in range(5):
+            slicer.app.processEvents()
+        card = dialog.findChild(qt.QWidget, "StudioNiftiExportFolderCard")
+        heightBefore = dialog.height
+        summaryBefore = dialog.summaryLabel.height
+        dialog.selectAll()
+        for _ in range(5):
+            slicer.app.processEvents()
+        self.assertGreater(dialog.summaryLabel.height, summaryBefore, "the summary wraps onto more lines")
+        self.assertGreater(dialog.height, heightBefore, "the dialog grows with the summary")
+        listBottom = dialog.list.geometry.y() + dialog.list.geometry.height()
+        self.assertLessEqual(listBottom, card.geometry.y(), "the image list is not drawn under the folder card")
+        self.assertEqual(dialog.list.height, dialog.list.minimumHeight)
+        dialog.close()
+
     def test_08b_message_names_the_skipped_segments_and_other_notes(self):
         """The message after an export carries the notes (empty segments skipped, empty threshold mask, transform), not only the log."""
         from StudioLib import niftiexport_ui

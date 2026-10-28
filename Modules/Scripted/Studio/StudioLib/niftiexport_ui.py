@@ -277,6 +277,7 @@ class ExportDialog(qt.QDialog):
         self.executor = executor
         self.mapOptions = dict(mapOptions or {})
         self._existingShown = False
+        self._summaryHeight = None
         self.runner = None
         self.lastResult = None
         if nodes is None:
@@ -543,7 +544,12 @@ class ExportDialog(qt.QDialog):
         self.exportButton.setEnabled(bool(images) and self.runner is None)
         self._jobs = jobs
         self._existing = existing
-        if resize or bool(existing) != self._existingShown:
+        # The summary wraps onto more or fewer lines when the names change: the dialog must follow, or the squeezed layout
+        # draws the fixed-height image list under the folder card
+        summaryHeight = self.summaryLabel.heightForWidth(max(self.summaryLabel.width, 1)) if self.summaryLabel.hasHeightForWidth() else 0
+        wrapped = summaryHeight != self._summaryHeight and self._summaryHeight is not None
+        self._summaryHeight = summaryHeight
+        if resize or wrapped or bool(existing) != self._existingShown:
             # Rows appeared or went away: the dialog takes its new height (a frameless dialog is not resized by its layout)
             self._existingShown = bool(existing)
             qt.QTimer.singleShot(0, self._fitHeight)
