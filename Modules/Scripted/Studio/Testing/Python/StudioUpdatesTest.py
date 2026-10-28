@@ -409,6 +409,28 @@ class StudioUpdatesTest(unittest.TestCase):
         self.assertEqual(updates.assetUrl(manifest, manifest.asset("linux-x86_64"), updates.DEFAULT_FEED_URL),
                          f"https://github.com/azhmeerjesani/Slicer-2/releases/download/v1.2.0/{data['assets']['linux-x86_64']['name']}")
 
+    def test_DownloadMissingReleaseFile(self):
+        """The manifest is there but the release file it names is not (404): the message says the file is missing, not
+        that no release with a manifest was found. A missing manifest keeps its own message.
+        """
+        updates = self.updates
+        data = self._publish("1.2.0")
+        manifest = updates.parseManifest(data)
+        name = data["assets"]["linux-x86_64"]["name"]
+        os.remove(os.path.join(self.feedDir, name))
+        downloads = os.path.join(self.tempDir, "downloads")
+        with self.assertRaises(updates.UpdateError) as caught:
+            updates.downloadAsset(manifest, "linux-x86_64", downloads, feed=self.feed)
+        message = str(caught.exception)
+        self.assertIn("1.2.0", message)
+        self.assertIn(name, message)
+        self.assertIn("404", message)
+        self.assertNotIn("update manifest", message)
+        self.assertEqual(os.listdir(downloads), [], "no partial file is left")
+        os.remove(os.path.join(self.feedDir, "studio-update.json"))
+        with self.assertRaisesRegex(updates.UpdateError, "No release with an update manifest"):
+            updates.fetchManifest(self.feed)
+
     def test_NetworkProtocolErrors(self):
         """A reply that is not HTTP, or a chunked download that is cut, is an UpdateError with a plain message (not a
         raw http.client exception, which is no OSError), and no partial file is left.

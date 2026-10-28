@@ -245,8 +245,12 @@ def _policy(feed):
     return {"extraHosts": _overrideHosts(feed), "allowInsecureLoopback": overridden, "allowFile": overridden}
 
 
-def _open(url, feed, timeout):
-    """Open ``url`` with the redirect and host rules of ``feed``. Return the response."""
+def _open(url, feed, timeout, notFound=None):
+    """Open ``url`` with the redirect and host rules of ``feed``. Return the response.
+
+    A 404 means "no release with an update manifest" when the manifest is fetched; ``notFound`` is the message for
+    another file (the release file of a download), where the manifest was found and the file is missing.
+    """
     import urllib.error
     import urllib.request
 
@@ -263,7 +267,7 @@ def _open(url, feed, timeout):
         raise
     except urllib.error.HTTPError as error:
         if error.code == 404:
-            raise UpdateError(_("No release with an update manifest was found ({address}).").format(address=url))
+            raise UpdateError(notFound or _("No release with an update manifest was found ({address}).").format(address=url))
         raise UpdateError(_("The server answered {code} {reason}.").format(code=error.code, reason=error.reason))
     except (urllib.error.URLError, OSError, ValueError) as error:
         reason = getattr(error, "reason", error)
@@ -535,7 +539,9 @@ def downloadAsset(manifest, key, directory, feed=None, progress=None, cancelled=
     digest = hashlib.sha256()
     received = 0
     try:
-        with _open(url, feed, DOWNLOAD_TIMEOUT_S) as response, open(part, "wb") as stream:
+        missing = _("The release {version} has no downloadable file {name} yet (404: {address}).").format(
+            version=manifest.version, name=asset["name"], address=url)
+        with _open(url, feed, DOWNLOAD_TIMEOUT_S, notFound=missing) as response, open(part, "wb") as stream:
             length = response.headers.get("Content-Length") if hasattr(response, "headers") else None
             if length and length.isdigit() and int(length) != size:
                 raise UpdateError(_("The download has the wrong size ({actual} bytes instead of {expected}): it was refused.").format(actual=int(length), expected=size))
