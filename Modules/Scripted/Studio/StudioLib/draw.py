@@ -1746,6 +1746,27 @@ def _onSceneStartImport(caller=None, event=None):
         logging.error("Studio Draw: preparing the scene load failed:\n" + traceback.format_exc())
 
 
+def relocateSavedLesions(oldFolder, newFolder):
+    """A folder moved (the open project was renamed, or the Slicer Studio folder moved): the lesions saved in this session
+    inside ``oldFolder`` are now in ``newFolder``, so Save (the CTA and Ctrl+Shift+S) writes there and never makes the
+    old folder again (a ghost project in the Library).
+    """
+    if not oldFolder or not newFolder:
+        return
+    oldNorm, newNorm = os.path.normpath(oldFolder), os.path.normpath(newFolder)
+    oldReal = os.path.normcase(os.path.realpath(oldNorm))
+    for segmentationId, (reference, path, stamp, savedTime) in list(_savedRecords.items()):
+        normalized = os.path.normpath(path)
+        if normalized == oldNorm or normalized.startswith(oldNorm + os.sep):
+            relative = normalized[len(oldNorm):].lstrip(os.sep)
+        else:
+            real = os.path.normcase(os.path.realpath(normalized))
+            if real != oldReal and not real.startswith(oldReal + os.sep):
+                continue
+            relative = os.path.realpath(normalized)[len(os.path.realpath(oldNorm)):].lstrip(os.sep)
+        _savedRecords[segmentationId] = (reference, os.path.join(newNorm, relative) if relative else newNorm, stamp, savedTime)
+
+
 def _savedRecord(segmentationNode):
     if segmentationNode is None:
         return None
@@ -2290,6 +2311,8 @@ def saveLesionDialog(shell=None, path=None):
             _toast(shell, _("The lesion is empty: nothing was saved"), ms=4000, level="warning")
             return None
         record = _savedRecord(segmentationNode)
+        if record is not None and not os.path.isdir(os.path.dirname(record[1])):
+            record = None  # its folder is gone: propose the default folder (the project's Lesions/), not the old one
         directory = os.path.dirname(record[1]) if record is not None else defaultSaveDirectory(sourceVolumeNode)
         name = os.path.basename(record[1]) if record is not None else defaultLesionFileName(segmentationNode, sourceVolumeNode, directory)
         segmentCount = segmentationNode.GetSegmentation().GetNumberOfSegments()
@@ -2316,8 +2339,9 @@ def saveLesionNow(shell=None):
     _applyPendingSmartFill(shell)
     segmentationNode, sourceVolumeNode = lesionNodes()
     record = _savedRecord(segmentationNode)
-    if record is not None:
+    if record is not None and os.path.isdir(os.path.dirname(record[1])):
         return _writeLesion(shell, segmentationNode, sourceVolumeNode, record[1])
+    # Never saved, or its folder is gone (moved or deleted outside Slicer Studio): ask, never make the folder again
     return saveLesionDialog(shell)
 
 

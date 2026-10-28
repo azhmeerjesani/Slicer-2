@@ -33,7 +33,9 @@ folder "Slicer Studio tést" (spaces and non-ASCII characters). The tests cover:
 - a 4D NIfTI image is saved as .seq.nrrd (official 3D Slicer 5.12 reads volume sequences from NRRD only), also in a
   project saved before with a copy of the NIfTI;
 - a disk that fills up during a save: the save fails with the reason, the saved scene and lesion files stay as they were,
-  and the next save once space is free writes everything again.
+  and the next save once space is free writes everything again;
+- Save lesion after the open project was renamed or the folder moved writes into the project where it is now (no ghost
+  folder of the old name).
 """
 
 import contextlib
@@ -2066,6 +2068,82 @@ class StudioProjectsTest(unittest.TestCase):
         finally:
             busy.unlock()
             self.autosave._service = running
+            qt.QSettings().remove(projects.ROOT_KEY)
+            qt.QSettings().remove(projects.ROOT_CHOSEN_KEY)
+            os.environ[projects.ROOT_ENVIRONMENT] = self.root
+
+    def test_41_save_lesion_follows_a_renamed_or_moved_project(self):
+        """Save lesion (the CTA and Ctrl+Shift+S) after the open project was renamed, or the Slicer Studio folder moved
+        (BB-1), writes the lesion's file in the project where it is now. It used to write to the absolute path of the
+        first save: the old project folder was made again (a ghost project in the Library), the project kept the older
+        lesion, and the Lesion card still showed the old path.
+        """
+        from StudioLib import draw
+
+        projects = self.projects
+        service = self._service()
+        volume, _path = self._userVolume()
+        segmentation, segmentId, array = self._lesion(volume)
+        project = self._projectFor(service)
+        self._save(service)
+
+        def voxels(path):
+            node = slicer.util.loadLabelVolume(path, {"show": False})
+            try:
+                return int(np.count_nonzero(slicer.util.arrayFromVolume(node)))
+            finally:
+                slicer.mrmlScene.RemoveNode(node)
+
+        def paint(box):
+            array[box] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentation, segmentId, volume)
+
+        originalNodes = draw.lesionNodes
+        draw.lesionNodes = lambda editor=None: (segmentation, volume)
+        os.environ.pop(projects.ROOT_ENVIRONMENT)
+        qt.QSettings().setValue(projects.ROOT_KEY, self.root)
+        try:
+            first = os.path.join(project.path, projects.LESIONS, "lesA.nii.gz")
+            self.assertEqual(draw.saveLesionDialog(None, path=first), first)
+            firstCount = voxels(first)
+            oldPath = project.path
+            # Rename the open project: Save follows it
+            newPath = service.renameProject("Patient A")
+            renamedLesion = os.path.join(newPath, projects.LESIONS, "lesA.nii.gz")
+            self.assertEqual(draw.lesionSaveState(segmentation)[:2], ("saved", renamedLesion), "the state shows the new path")
+            paint(np.s_[12:16, 14:20, 16:22])
+            self.assertEqual(draw.lesionSaveState(segmentation)[0], "unsaved")
+            self.assertEqual(draw.saveLesionNow(), renamedLesion)
+            self.assertFalse(os.path.exists(oldPath), "the folder of the old name is not made again")
+            self.assertEqual([info.name for info in projects.listProjects()], ["Patient A"], "no ghost project")
+            secondCount = voxels(renamedLesion)
+            self.assertGreater(secondCount, firstCount, "the project's own lesion has the new paint")
+            self.assertEqual(draw.lesionSaveState(segmentation)[:2], ("saved", renamedLesion))
+            # Move the Slicer Studio folder: Save follows the project into the new folder
+            newRoot = os.path.join(self.tempDir, "moved", "Slicer Studio")
+            service.moveRoot(newRoot, moveContent=True)
+            movedLesion = os.path.join(service.project.path, projects.LESIONS, "lesA.nii.gz")
+            self.assertTrue(movedLesion.startswith(os.path.normpath(newRoot) + os.sep))
+            self.assertEqual(draw.lesionSaveState(segmentation)[:2], ("saved", movedLesion))
+            paint(np.s_[18:22, 14:20, 16:22])
+            self.assertEqual(draw.saveLesionNow(), movedLesion)
+            self.assertFalse(os.path.exists(os.path.join(self.root, "Projects")), "nothing is made in the old folder")
+            self.assertGreater(voxels(movedLesion), secondCount)
+            # The folder of the saved file is gone (deleted outside Slicer Studio): Save asks, it never makes it again
+            shutil.rmtree(os.path.dirname(movedLesion))
+            paint(np.s_[24:26, 14:20, 16:22])
+            dialogs = []
+            originalDialog = draw.saveLesionDialog
+            draw.saveLesionDialog = lambda shell=None, path=None: dialogs.append(path)
+            try:
+                self.assertIsNone(draw.saveLesionNow())
+            finally:
+                draw.saveLesionDialog = originalDialog
+            self.assertEqual(dialogs, [None])
+            self.assertFalse(os.path.exists(os.path.dirname(movedLesion)))
+        finally:
+            draw.lesionNodes = originalNodes
+            draw._savedRecords.clear()
             qt.QSettings().remove(projects.ROOT_KEY)
             qt.QSettings().remove(projects.ROOT_CHOSEN_KEY)
             os.environ[projects.ROOT_ENVIRONMENT] = self.root

@@ -155,6 +155,17 @@ def saveNow(reason="save", progress=True):
     return _service.saveNow(reason, progress=progress) if _service is not None else False
 
 
+def _relocateSavedLesions(oldFolder, newFolder):
+    """Draw's Save lesion follows a moved folder (only when Draw was loaded: else it saved nothing in this session)."""
+    draw = sys.modules.get("StudioLib.draw")
+    if draw is None or not hasattr(draw, "relocateSavedLesions"):
+        return
+    try:
+        draw.relocateSavedLesions(oldFolder, newFolder)
+    except Exception:
+        logging.error("Slicer Studio: following the moved folder for Save lesion failed:\n" + traceback.format_exc())
+
+
 def _io():
     from StudioLib import autosave_io
 
@@ -1883,6 +1894,7 @@ class AutosaveService:
                     storageNode.AddFileName(moved(name))
         scene.SetURL(project.scenePath)
         scene.SetRootDirectory(project.path)
+        _relocateSavedLesions(oldNorm, project.path)
         if self.projectWriter is not None:
             self.projectWriter.relocate(oldPath, project.path)
         project.writeJson(state="open", executor=_io().backgroundWriter())
@@ -1927,6 +1939,8 @@ class AutosaveService:
                 function = lambda: projects.moveContent(oldRoot, newRoot)  # noqa: E731
                 moved = run(function) if run is not None else function()
                 succeeded = True
+                for name in moved:  # lesions saved in this session in a moved folder (outside the open project too)
+                    _relocateSavedLesions(os.path.join(oldRoot, name), os.path.join(newRoot, name))
             finally:
                 self._suspendCount -= 1
                 for timer in timers:
