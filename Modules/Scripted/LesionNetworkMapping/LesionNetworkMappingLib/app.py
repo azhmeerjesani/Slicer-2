@@ -387,7 +387,14 @@ def build_config(args, study_path, emit=None):
         "parent_pid": None,
     })
     values.pop("out", None)
-    return pipeline.PipelineConfig.from_json(values)
+    try:
+        return pipeline.PipelineConfig.from_json(values)
+    except ValueError as exc:
+        if "--no-volume-covariate" not in str(exc):
+            raise
+        # The shared pipeline message names the 'pipeline run' option, which slicer-lnm does not have.
+        where = "volume_off_reason in the design file" if args.design else "volume_off_reason in the pipeline configuration"
+        raise ValueError(f"Turning the lesion-volume covariate off needs a reason: set {where}, or keep volume_ml among the covariates") from None
 
 
 # Level runs

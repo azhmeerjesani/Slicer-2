@@ -187,6 +187,23 @@ class AppHelpersTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "block_column"):
                 app.design_options(path)
 
+    def test_design_without_volume_names_a_slicer_lnm_remedy(self):
+        """A design that leaves out volume_ml must not send slicer-lnm users to 'pipeline run --no-volume-covariate'."""
+        from LesionNetworkMappingLib import design
+
+        parser = app._parser()
+        with tempfile.TemporaryDirectory() as tmp:
+            base = ["in", "out", "group", "--connectome", "c", "--accept-terms"]
+            path = os.path.join(tmp, "noage.json")
+            design.DesignSpec(test="two_group", covariates=["age"]).save(path)
+            with self.assertRaises(ValueError) as caught:
+                app.build_config(parser.parse_args(base + ["--design", path]), tmp)
+            self.assertIn("volume_off_reason", str(caught.exception))
+            self.assertNotIn("--no-volume-covariate", str(caught.exception))
+            design.DesignSpec(test="two_group", covariates=["age"], volume_off_reason="age-matched cohort").save(path)
+            config = app.build_config(parser.parse_args(base + ["--design", path]), tmp)
+            self.assertEqual((config.covariates, config.volume_off_reason), (["age"], "age-matched cohort"))
+
     def test_usage_errors(self):
         with tempfile.TemporaryDirectory() as tmp:
             code, events, _out, _err = cli(tmp, os.path.join(tmp, "out"), "group", "--connectome", tmp, "--subject-list", "a,b", "--events", "json")
