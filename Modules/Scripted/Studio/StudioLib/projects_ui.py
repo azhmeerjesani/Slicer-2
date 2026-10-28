@@ -226,6 +226,7 @@ class FolderChooserDialog(qt.QDialog):
         insideLayout.setSpacing(8)
         insideLayout.addWidget(ui.overline(_("Inside this folder"), "StudioProjectsFolderInsideTitle"))
         self._insideIcons = []
+        nameLabels = []
         for iconName, name, what in (
                 ("folder", _("Projects"), _("one folder per project: scans, lesions, maps, exports")),
                 ("folder", _("Studies"), _("lesion network mapping cohorts")),
@@ -239,10 +240,14 @@ class FolderChooserDialog(qt.QDialog):
             self._insideIcons.append(icon)
             row.addWidget(icon)
             nameLabel = ui.label(name, "name", "text")
-            nameLabel.setFixedWidth(128)
+            nameLabels.append(nameLabel)
             row.addWidget(nameLabel)
             row.addWidget(ui.label(what, "caption", "text3"), 1)
             insideLayout.addLayout(row)
+        # One column of 128 px, wider when the application font is larger (the names are never cut)
+        nameWidth = max([128] + [label.sizeHint.width() for label in nameLabels])
+        for label in nameLabels:
+            label.setFixedWidth(nameWidth)
         layout.addWidget(inside)
         # The footer (VISUAL 4.7): a line on the left, the single primary button on the right
         buttons = qt.QHBoxLayout()

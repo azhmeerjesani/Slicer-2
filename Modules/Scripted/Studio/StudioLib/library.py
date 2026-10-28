@@ -5326,14 +5326,15 @@ class LibraryCanvas(qt.QObject):
         self.dropZoneIcon = ui.iconTile("import", 48, 24, "StudioDropZoneIcon")
         dropZoneLayout.addWidget(self.dropZoneIcon, 0, qt.Qt.AlignHCenter)
         dropZoneLayout.addSpacing(6)
-        dropZoneTitle = ui.label(_("Drop scans, DICOM folders or Slicer scenes"), "title", "text", "StudioDropZoneTitle")
+        dropZoneTitle = ui.label(_("Drop scans, DICOM folders or Slicer scenes"), "title", "text", "StudioDropZoneTitle", wrap=True)
         dropZoneTitle.setAlignment(qt.Qt.AlignCenter)
         dropZoneLayout.addWidget(dropZoneTitle)
         dropZoneHint = ui.label(_("NIfTI, NRRD, DICOM folders, lesion masks and .mrb scenes · or press {shortcut}").format(shortcut=openShortcut),
-                                "caption", "text3", "StudioDropZoneHint")
+                                "caption", "text3", "StudioDropZoneHint", wrap=True)
         dropZoneHint.setAlignment(qt.Qt.AlignCenter)
         dropZoneLayout.addWidget(dropZoneHint)
         dropZoneLayout.addSpacing(10)
+        self.dropFullLayout = dropZoneLayout
         self.dropButtonsSlot = qt.QHBoxLayout()
         self.dropButtonsSlot.setContentsMargins(0, 0, 0, 0)
         dropZoneLayout.addLayout(self.dropButtonsSlot)
@@ -5462,6 +5463,8 @@ class LibraryCanvas(qt.QObject):
         self._setStrip(False)
         ui.bindStyleSheet(self.widget, self._styleSheet)
         ui.addPaletteListener(self._refreshIcons)
+        # A larger application font wraps the headline and the formats line and grows the zone (USABILITY 9.4)
+        ui.addPaletteListener(self._fitDropZone)
         self._refreshIcons()
         self._refreshCaption()
 
@@ -5730,15 +5733,14 @@ class LibraryCanvas(qt.QObject):
             self.dropBottomSlot.addWidget(self.dropFrame)
             self.headerButtons.layout().addWidget(self.buttonRow)
         else:
-            self.dropZone.setFixedSize(COLUMN_WIDTH, DROP_ZONE_HEIGHT)
             self.dropZone.setSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Fixed)
-            self.dropFrame.setFixedHeight(DROP_FRAME_SIZE[1])
             self.dropFrame.setMinimumWidth(min(DROP_FRAME_SIZE[0], COLUMN_WIDTH + 40))
             self.dropFrame.setMaximumWidth(DROP_FRAME_SIZE[0])
             self.dropFrame.layout().removeWidget(self.dropZone)
             self.dropFrame.layout().addWidget(self.dropZone, 0, qt.Qt.AlignCenter)
             self.dropTopSlot.addWidget(self.dropFrame, 0, qt.Qt.AlignHCenter)
             self.dropButtonsSlot.addWidget(self.buttonRow, 0, qt.Qt.AlignHCenter)
+            self._fitDropZone()
         self.dropTopSpacing.setVisible(not strip)
         self.headerButtons.setVisible(strip)
         self.dropFrame.setVisible(not strip)
@@ -5747,6 +5749,17 @@ class LibraryCanvas(qt.QObject):
         style.unpolish(self.dropFrame)
         style.polish(self.dropFrame)
         self.dropZone.setToolTip(_("Drop more files here, or click to open files") if strip else _("Drop files here, or click to open files"))
+
+    def _fitDropZone(self):
+        """The empty-state zone is 480 x 220 (its frame 340 high) at the default font; with a larger application font its
+        text wraps within the 480 px and the zone and its frame grow with the text, so that nothing is cut (USABILITY 9.4).
+        """
+        if self._dataShown:
+            return
+        layout = self.dropFullLayout
+        height = max(DROP_ZONE_HEIGHT, layout.totalHeightForWidth(COLUMN_WIDTH) if layout.hasHeightForWidth() else 0)
+        self.dropZone.setFixedSize(COLUMN_WIDTH, height)
+        self.dropFrame.setFixedHeight(DROP_FRAME_SIZE[1] + height - DROP_ZONE_HEIGHT)
 
     def isStrip(self):
         return bool(self._dataShown)

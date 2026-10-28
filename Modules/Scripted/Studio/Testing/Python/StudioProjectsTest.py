@@ -613,6 +613,34 @@ class StudioProjectsTest(unittest.TestCase):
         items = {item["id"] for item in projects_ui.paletteItems()}
         self.assertTrue({"projects.new", "projects.open", "projects.rename", "projects.showFolder", "projects.changeFolder"} <= items)
 
+    def test_13b_folder_chooser_rows_follow_a_larger_application_font(self):
+        """With a large (18 px) application font the names of "Inside this folder" ("About this folder") are not cut (BB-1)."""
+        from StudioLib import projects_ui
+
+        base = qt.QFont(qt.QApplication.font())
+        large = qt.QFont(base)
+        large.setPixelSize(18)
+        qt.QApplication.setFont(large)
+        dialog = None
+        try:
+            slicer.app.processEvents()
+            dialog = projects_ui.FolderChooserDialog(proposal=os.path.join(self.tempDir, "Slicer Studio"))
+            dialog.show()
+            for _step in range(5):
+                slicer.app.processEvents()
+            card = dialog.findChild("QFrame", "StudioProjectsFolderInsideCard")
+            names = [label for label in card.findChildren("QLabel") if label.text in ("Projects", "Studies", "LNM", "About this folder")]
+            self.assertEqual(len(names), 4)
+            for label in names:
+                needed = qt.QFontMetrics(label.font).horizontalAdvance(label.text)
+                self.assertGreaterEqual(label.width, needed, f"{label.text} is cut")
+        finally:
+            if dialog is not None:
+                dialog.hide()
+                dialog.deleteLater()
+            qt.QApplication.setFont(base)
+            slicer.app.processEvents()
+
     def test_14_closed_surface_segmentation(self):
         """A segmentation written as "<name>.seg.vtm" plus a "<name>.seg/" folder is saved again in place (the folder is
         replaced) and the project reloads with every segment; nothing refers to a temporary folder.

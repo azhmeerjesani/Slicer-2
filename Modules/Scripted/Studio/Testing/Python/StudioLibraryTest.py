@@ -275,6 +275,41 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertFalse(canvas.footerFrame.isVisible())
         self.assertTrue(studioShell._panelDock().isHidden())
 
+    def test_empty_state_text_follows_a_larger_application_font(self):
+        """With a large (18 px) application font the drop zone headline and formats line wrap and the zone grows: nothing is cut
+        (USABILITY 9.4, BB-1). The default font keeps the 480 x 220 zone.
+        """
+        from StudioLib import library
+
+        studioShell = self._applyStudio()
+        canvas = self._library(studioShell)
+        defaultFrameHeight = canvas.dropFrame.height
+        base = qt.QFont(qt.QApplication.font())
+        large = qt.QFont(base)
+        large.setPixelSize(18)
+        try:
+            qt.QApplication.setFont(large)
+            self._wait(300)
+            self._pump(8)
+            self.assertEqual(canvas.dropZone.width, library.COLUMN_WIDTH)
+            self.assertGreaterEqual(canvas.dropZone.height, library.DROP_ZONE_HEIGHT)
+            self.assertGreaterEqual(canvas.dropFrame.height, defaultFrameHeight)
+            for name in ("StudioDropZoneTitle", "StudioDropZoneHint"):
+                label = canvas.dropZone.findChild("QLabel", name)
+                self.assertTrue(label.wordWrap, name)
+                self.assertLessEqual(label.width, library.COLUMN_WIDTH, name)
+                self.assertGreaterEqual(label.height, label.heightForWidth(label.width), f"{name} is cut")
+            # The buttons stay inside the zone
+            frame = canvas.buttonRow
+            bottom = frame.mapTo(canvas.dropZone, qt.QPoint(0, frame.height)).y()
+            self.assertLessEqual(bottom, canvas.dropZone.height)
+        finally:
+            qt.QApplication.setFont(base)
+            self._wait(300)
+            self._pump(8)
+        self.assertEqual((canvas.dropZone.width, canvas.dropZone.height), (library.COLUMN_WIDTH, library.DROP_ZONE_HEIGHT))
+        self.assertEqual(canvas.dropFrame.height, defaultFrameHeight)
+
     def test_stray_segmentation_ignored(self):
         """The empty segmentation that the classic Segment Editor creates keeps the empty state; a figure is not data."""
         from StudioLib import library
