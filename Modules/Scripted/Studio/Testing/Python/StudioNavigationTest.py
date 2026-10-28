@@ -1629,6 +1629,46 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(len(studioShell.recentMessages()), 20)
         self.assertEqual(studioShell.recentMessages()[-1][1], "message 29")
 
+    def test_23b_recent_messages_popover_shows_whole_messages(self):
+        """Recent messages: every message is readable in full (wrapped within the window) and no scroll bar covers a row."""
+        studioShell = self._applyStudio()
+        longText = "Inspector hidden \u00b7 click the Draw tab or the \u2039 handle to show it " * 4
+        studioShell.toast("Saved", 10)
+        studioShell.toast("Inspector hidden \u00b7 click the Draw tab or the \u2039 handle to show it", 10)
+        studioShell.toast(longText.strip(), 10)
+        info = {}
+
+        def inspect():
+            popup = qt.QApplication.activePopupWidget()
+            try:
+                listWidget = self.mainWindow.findChild("QListWidget", "StudioRecentMessagesList")
+                fm = listWidget.fontMetrics()
+                width = fm.horizontalAdvance if hasattr(fm, "horizontalAdvance") else fm.width
+                info["widths"] = [width(part) for i in range(listWidget.count) for part in listWidget.item(i).text().split("\n")]
+                info["items"] = [listWidget.item(i).text() for i in range(listWidget.count)]
+                info["viewport"] = listWidget.viewport().width
+                info["hScroll"] = listWidget.horizontalScrollBar().isVisible()
+                info["vScroll"] = listWidget.verticalScrollBar().isVisible()
+                info["height"] = listWidget.height
+                info["rows"] = sum(listWidget.sizeHintForRow(i) for i in range(listWidget.count))
+                info["listWidth"] = listWidget.width
+                info["windowWidth"] = self.mainWindow.width
+            finally:
+                if popup is not None:
+                    popup.close()
+
+        qt.QTimer.singleShot(600, inspect)
+        studioShell.showRecentMessages()
+        self._pump()
+        self.assertIn("widths", info, "the popover was not shown")
+        self.assertLessEqual(max(info["widths"]), info["viewport"], info)
+        self.assertFalse(info["hScroll"], info)
+        self.assertLessEqual(info["listWidth"], info["windowWidth"], info)
+        if not info["vScroll"]:
+            self.assertGreaterEqual(info["height"], info["rows"], info)
+        words = " ".join(" ".join(item.split()) for item in info["items"])
+        self.assertIn("click the Draw tab or the \u2039 handle to show it", words)
+
     def test_24_module_selection_leaves_startup_layout(self):
         """Draw or Map entered by a module selection replace the startup layout by theirs; a chosen layout is kept (D5)."""
         from StudioLib import workspaces

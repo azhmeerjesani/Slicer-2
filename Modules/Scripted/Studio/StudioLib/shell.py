@@ -3490,13 +3490,42 @@ class Shell:
         listWidget.setFocusPolicy(qt.Qt.NoFocus)
         listWidget.setFrameShape(qt.QFrame.NoFrame)
         messages = self.recentMessages()
+        fontMetrics = listWidget.fontMetrics()
+
+        def textWidth(text):
+            return fontMetrics.horizontalAdvance(text) if hasattr(fontMetrics, "horizontalAdvance") else fontMetrics.width(text)
+
+        # The list is as wide as its longest message, at most 80 % of the window (at least 360 px); a longer message is
+        # wrapped at the word boundaries, so every message is readable in full and no horizontal scroll bar is needed.
+        padding = 24
+        windowWidth = self.mainWindow.width if self.mainWindow is not None else 1200
+        maxWidth = max(360, int(windowWidth * 0.8)) - padding
+        lines = []
         for timestamp, text, level in reversed(messages):
-            item = qt.QListWidgetItem(f"{time.strftime('%H:%M:%S', time.localtime(timestamp))}  {text}")
-            listWidget.addItem(item)
+            prefix = f"{time.strftime('%H:%M:%S', time.localtime(timestamp))}  "
+            wrapped, current, wordsOnLine = [], prefix, 0
+            for word in str(text).split():
+                trial = current + (" " if wordsOnLine else "") + word
+                if wordsOnLine and textWidth(trial) > maxWidth:
+                    wrapped.append(current)
+                    current, wordsOnLine = " " * len(prefix) + word, 1
+                else:
+                    current, wordsOnLine = trial, wordsOnLine + 1
+            wrapped.append(current)
+            lines.append("\n".join(wrapped))
         if not messages:
-            listWidget.addItem(_("No messages yet"))
-        listWidget.setMinimumWidth(360)
-        listWidget.setFixedHeight(min(320, max(40, listWidget.sizeHintForRow(0) * max(1, len(messages)) + 8)))
+            lines.append(_("No messages yet"))
+        for line in lines:
+            listWidget.addItem(qt.QListWidgetItem(line))
+        listWidget.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+        listWidget.setVerticalScrollBarPolicy(qt.Qt.ScrollBarAsNeeded)
+        widest = max(textWidth(part) for line in lines for part in line.split("\n"))
+        rowsHeight = sum(listWidget.sizeHintForRow(i) for i in range(listWidget.count)) + 8
+        height = min(320, max(40, rowsHeight))
+        scrollBarWidth = listWidget.verticalScrollBar().sizeHint.width() if rowsHeight > height else 0
+        listWidth = max(360, min(maxWidth, widest) + padding) + scrollBarWidth
+        listWidget.setMinimumWidth(listWidth)
+        listWidget.setFixedHeight(height)
         action = qt.QWidgetAction(menu)
         action.setDefaultWidget(listWidget)
         menu.addAction(action)
