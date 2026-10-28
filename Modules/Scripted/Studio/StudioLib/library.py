@@ -114,6 +114,12 @@ def _setFont(widget, pixelSize, weight=None, letterSpacing=None):
     widget.setFont(font)
 
 
+#: Logical size of the icons in buttons (VISUAL 3). Buttons set it explicitly: without it they use the style's
+#: PM_ButtonIconSize (24, so that legacy PNGs are not resampled), and at a device pixel ratio above 1 a 16 px icon,
+#: which has a pixmap for that ratio, is then drawn at 24 px instead of 16.
+_BUTTON_ICON_SIZE = 16
+
+
 def _buttonRow():
     """A row of the height of the Library buttons (36 px).
 
@@ -133,6 +139,7 @@ def _secondaryButton(text, objectName, callback):
     button = qt.QPushButton(text)
     button.setObjectName(objectName)
     button.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Expanding)
+    button.setIconSize(qt.QSize(_BUTTON_ICON_SIZE, _BUTTON_ICON_SIZE))
     ui.setRole(button, "secondary")
     button.connect("clicked()", callback)
     return button
@@ -273,6 +280,7 @@ def _roleButton(text, objectName, callback, role):
     button = qt.QPushButton(text)
     button.setObjectName(objectName)
     button.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Expanding)
+    button.setIconSize(qt.QSize(_BUTTON_ICON_SIZE, _BUTTON_ICON_SIZE))
     ui.setRole(button, role)
     button.setAutoDefault(True)
     button.connect("clicked()", callback)
@@ -5266,6 +5274,7 @@ class LibraryCanvas(qt.QObject):
         self.templateMenuButton.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
         self.templateMenuButton.setSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Expanding)
         self.templateMenuButton.setFixedWidth(ui.BUTTON_HEIGHT)
+        self.templateMenuButton.setIconSize(qt.QSize(_BUTTON_ICON_SIZE, _BUTTON_ICON_SIZE))
         ui.setRole(self.templateMenuButton, "secondary")
         self.templateMenu = qt.QMenu(self.templateMenuButton)
         self.templateMenu.setObjectName("studioTemplateMenu")

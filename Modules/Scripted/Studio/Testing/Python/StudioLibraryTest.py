@@ -275,6 +275,19 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertFalse(canvas.footerFrame.isVisible())
         self.assertTrue(studioShell._panelDock().isHidden())
 
+    def test_button_icons_are_16_px_at_every_pixel_ratio(self):
+        """The icons of the Library buttons are 16 logical px (VISUAL 3). Without an icon size a button uses the style's 24 px:
+        a 16 px icon that has a pixmap for a device pixel ratio above 1 is then drawn at 24 px (1.5 times larger than at 1x).
+        """
+        studioShell = self._applyStudio()
+        canvas = self._library(studioShell)
+        for button in (canvas.openButton, canvas.openFolderButton, canvas.templateButton, canvas.templateMenuButton):
+            size = button.iconSize
+            self.assertEqual((size.width(), size.height()), (16, 16), button.objectName)
+            self.assertFalse(button.icon.isNull(), button.objectName)
+            actual = button.icon.actualSize(size)
+            self.assertEqual((actual.width(), actual.height()), (16, 16), button.objectName)
+
     def test_empty_state_text_follows_a_larger_application_font(self):
         """With a large (18 px) application font the drop zone headline and formats line wrap and the zone grows: nothing is cut
         (USABILITY 9.4, BB-1). The default font keeps the 480 x 220 zone.
