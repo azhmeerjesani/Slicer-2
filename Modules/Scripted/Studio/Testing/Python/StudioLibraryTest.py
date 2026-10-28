@@ -1090,6 +1090,16 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         canvas = self._library(studioShell)
         self.assertFalse([frame for frame in canvas.widget.findChildren("QFrame", "StudioCurrentWorkOffer") if frame.isVisible()])
 
+    def test_study_card_template_line_without_a_template(self):
+        """A study made headlessly has "template": null: the STUDY card says 'not set', not 'Tracing template: —  mm'."""
+        from StudioLib import library
+
+        self.assertEqual(library.studyTemplateText(None), "Tracing template: not set")
+        self.assertEqual(library.studyTemplateText({}), "Tracing template: not set")
+        self.assertEqual(library.studyTemplateText({"id": "MNI152NLin6Asym"}), "Tracing template: MNI152NLin6Asym")
+        self.assertEqual(library.studyTemplateText({"id": "MNI152NLin6Asym", "res": 1}), "Tracing template: MNI152NLin6Asym 1 mm")
+        self.assertEqual(library.studyTemplateText({"id": "MNI152NLin6Asym", "res": "2"}), "Tracing template: MNI152NLin6Asym 2 mm")
+
     def test_dialogs(self):
         """The confirmation before a lesion with unsaved changes is closed, and the Rename dialog (answered with timers)."""
         from StudioLib import library

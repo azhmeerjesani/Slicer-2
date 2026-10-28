@@ -4131,6 +4131,17 @@ def _rowButton(text, objectName, callback, role="secondary"):
     return row, button
 
 
+def studyTemplateText(template):
+    """The 'Tracing template' line of the STUDY card; a study made headlessly can have no template (study.json "template": null)."""
+    templateId = (template or {}).get("id")
+    if not templateId:
+        return _("Tracing template: not set")
+    res = (template or {}).get("res")
+    if res in (None, ""):
+        return _("Tracing template: {id}").format(id=templateId)
+    return _("Tracing template: {id} {res} mm").format(id=templateId, res=res)
+
+
 class StudyCard(qt.QObject):
     """STUDY: name, folder, counts, save status, tracing template, grid questions, and the study actions."""
 
@@ -4186,7 +4197,7 @@ class StudyCard(qt.QObject):
         text, when = studySession.saveStatus()
         self.saveLabel.setText(text + (" · " + relativeTime(when) if when else ""))
         template = studyObject.template or {}
-        self.templateLabel.setText(_("Tracing template: {id} {res} mm").format(id=template.get("id", "—"), res=template.get("res", "")))
+        self.templateLabel.setText(studyTemplateText(template))
         studyUi = _studyUi()
         mismatch = studyUi.templateMismatch(studyObject) if studyUi is not None else None
         self.mismatchLabel.setText(mismatch or "")
