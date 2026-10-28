@@ -234,7 +234,7 @@ def prepare_bids_study(input_dir, output_dir, group_column=None, group_map=None,
     others are reported), and only the participants.tsv rows of those subjects are imported.
     """
     from . import pipeline
-    from .study import Study
+    from .study import Study, is_missing
 
     study_path = os.path.join(os.path.abspath(output_dir), *STUDY_RELPATH)
     lesions = find_bids_lesions(input_dir, skip=[output_dir])
@@ -262,6 +262,21 @@ def prepare_bids_study(input_dir, output_dir, group_column=None, group_map=None,
 
     study = Study.open(study_path)
     report = study.add_files(chosen, lesion_rule=LESION_RULE)
+    # A chosen lesion mask that add_files could not read or use (corrupt, not 3D) is named in a warning and kept in the
+    # subject's row, so that the pipeline excludes the subject as "lesion file unreadable", not as "lesion file missing"
+    unusable = []
+    chosen_paths = {os.path.abspath(path) for path in chosen}
+    for item in report["skipped"]:
+        path = os.path.abspath(item["path"])
+        if path in chosen_paths and (item["reason"].startswith("unreadable") or item["reason"].startswith("not a 3D")):
+            entities = bids_entities(path)[0]
+            sid = f"sub-{entities['sub']}"
+            relative = study.relpath(path)
+            if sid not in study:
+                study.add_subject(sid, {"lesion": relative, "status": "traced"})
+            elif is_missing(study.subject(sid).get("lesion")):
+                study.set(sid, lesion=relative)
+            unusable.append({"path": path, "message": f"{os.path.relpath(path, input_dir).replace(os.sep, '/')}: lesion file cannot be used ({item['reason']})", "participant_id": sid})
     for path in chosen:
         # The BIDS space entity is the dataset's statement: a template space (MNI152NLin2009cAsym, ...) is not re-detected from the grid
         entities = bids_entities(path)[0]
@@ -271,10 +286,14 @@ def prepare_bids_study(input_dir, output_dir, group_column=None, group_map=None,
     study.save()
     for item in report["warnings"]:
         summary.setdefault("warnings", []).append(item)
+    for item in unusable:
+        summary.setdefault("warnings", []).append({"path": item["path"], "message": item["message"]})
     summary["lesion_files"] = len(chosen)
     summary["other_lesion_files"] = skipped
     if emit is not None:
         emit("info", code="bids_study", message=f"BIDS input: {len(chosen)} lesion masks; study {os.path.join(*STUDY_RELPATH)} ({len(study)} subjects)")
+        for item in unusable:
+            emit("warning", code="bids_lesion_unreadable", participant_id=item["participant_id"], message=item["message"])
         for item in skipped:
             emit("warning", code="bids_lesion_skipped", participant_id=item["participant_id"], message=f"{item['path']}: {item['reason']}")
     return study_path, summary

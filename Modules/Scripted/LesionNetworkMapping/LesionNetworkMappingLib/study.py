@@ -46,6 +46,7 @@ import os
 import re
 import threading
 import time
+import zlib
 
 from . import schema
 
@@ -1467,7 +1468,7 @@ class Study:
                 continue
             try:
                 header = read_nifti_header(path)
-            except (OSError, ValueError) as exc:
+            except (OSError, EOFError, ValueError, zlib.error) as exc:
                 report["skipped"].append({"path": path, "reason": f"unreadable: {exc}"})
                 continue
             if len(header["shape"]) > 3:

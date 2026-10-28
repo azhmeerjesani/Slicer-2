@@ -70,6 +70,7 @@ if __name__ == "__main__":
 
 import re
 import time
+import zlib
 
 import numpy as np
 
@@ -203,6 +204,17 @@ def _clean_fraction(value, eps=1e-9):
     return 0.0 if value < eps else 1.0 if value > 1.0 - eps else value
 
 
+def _read_lesion_image(path):
+    """(data, affine) of a lesion NIfTI file; an unreadable file (not gzip, truncated, corrupt) raises a ValueError that names it."""
+    try:
+        data, affine, _ = read_nifti(path)
+    except FileNotFoundError:
+        raise
+    except (OSError, EOFError, zlib.error) as exc:
+        raise ValueError(f"{os.fspath(path)}: cannot be read (not a NIfTI file or corrupt): {type(exc).__name__}: {exc}") from exc
+    return data, affine
+
+
 def prepare_lesion(source, bundle, supersample=2, binarize=True, min_weight=MIN_WEIGHT):
     """Resample a lesion image onto the bundle grid as fractional occupancy and return (weights, qc).
 
@@ -211,7 +223,7 @@ def prepare_lesion(source, bundle, supersample=2, binarize=True, min_weight=MIN_
       set False for probabilistic seeds.
     """
     if isinstance(source, (str, os.PathLike)):
-        data, affine, _ = read_nifti(source)
+        data, affine = _read_lesion_image(source)
     else:
         data, affine = source
     data = np.nan_to_num(np.asarray(data, dtype=np.float64))

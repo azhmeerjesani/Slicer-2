@@ -437,6 +437,73 @@ class AppLevelsTest(unittest.TestCase):
         self.assertIn("sub-99", events[-1]["message"])
 
 
+class CorruptLesionMessagesTest(unittest.TestCase):
+    """An unreadable lesion file is named and called unreadable (not "missing") by the engine and the BIDS-App."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="lnm-corrupt-")
+        cls.fx = fixture.make_fixture(os.path.join(cls.tmp, "f"), n_cases=3, n_controls=3, extra_rows=False)
+        cls.bundle = connectome.ConnectomeBundle.open(cls.fx["bundle"])
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def corrupt_file(self, name):
+        path = os.path.join(self.tmp, name)
+        with open(path, "wb") as f:
+            f.write(b"hello\n")
+        return path
+
+    def test_prepare_lesion_names_an_unreadable_file(self):
+        from LesionNetworkMappingLib import engine
+
+        path = self.corrupt_file("not a nifti.nii.gz")
+        with self.assertRaises(ValueError) as context:
+            engine.prepare_lesion(path, self.bundle)
+        message = str(context.exception)
+        self.assertIn(path, message)
+        self.assertIn("cannot be read", message)
+        # a truncated gzip stream is an EOFError, not a bad header
+        truncated = os.path.join(self.tmp, "truncated.nii.gz")
+        study = Study.open(self.fx["study"])
+        with open(study.abspath(study.subject("sub-01")["lesion"]), "rb") as f:
+            blob = f.read()
+        with open(truncated, "wb") as f:
+            f.write(blob[: len(blob) // 2])
+        with self.assertRaises(ValueError) as context:
+            engine.prepare_lesion(truncated, self.bundle)
+        self.assertIn(truncated, str(context.exception))
+
+    def test_engine_error_event_names_the_file(self):
+        path = self.corrupt_file("odd lesion.nii.gz")
+        code, events, _stdout, _stderr = cli("--bundle", self.fx["bundle"], "--lesion", path, "--out", os.path.join(self.tmp, "engine out"), module="engine")
+        self.assertEqual(code, 1)
+        self.assertIn(path, last_event(events)["message"])
+
+    def test_bids_app_reports_an_unreadable_lesion_as_unreadable(self):
+        bids = make_bids(self.tmp, self.fx["study"])
+        target = os.path.join(bids, "sub-03", "anat", f"sub-03_space-{SPACE}_label-lesion_mask.nii.gz")
+        if not os.path.isfile(target):
+            target = next(path for path in app.find_bids_lesions(bids)["sub-03"])
+        with open(target, "wb") as f:
+            f.write(b"hello\n")
+        events = []
+        emit = lambda kind, **fields: events.append({"event": kind, **fields})  # noqa: E731
+        study_path, _summary = app.prepare_bids_study(bids, os.path.join(self.tmp, "bids out"), group_map="patient=case,HC=control", emit=emit)
+        warnings = [event for event in events if event["event"] == "warning" and event.get("code") == "bids_lesion_unreadable"]
+        self.assertEqual([event["participant_id"] for event in warnings], ["sub-03"])
+        self.assertIn(os.path.basename(target), warnings[0]["message"])
+        self.assertNotIn(self.tmp, warnings[0]["message"])
+        study = Study.open(study_path)
+        self.assertTrue(study.subject("sub-03")["lesion"].endswith(os.path.basename(target)))
+        config = pipeline.PipelineConfig(study=study.path, bundle=self.fx["bundle"], accept_terms=True, nulls="off")
+        excluded = pipeline._builtin_row_checks(study, config)
+        self.assertEqual(excluded["sub-03"], "lesion file unreadable")
+        self.assertNotIn("sub-01", excluded)
+
+
 class ReproduceEntryPointTest(unittest.TestCase):
     """reproduce.sh runs ``slicer-lnm engine`` when slicer-lnm is on PATH, else PythonSlicer (export.reproduce_script)."""
 
