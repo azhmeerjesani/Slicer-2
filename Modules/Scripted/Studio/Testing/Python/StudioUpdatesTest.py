@@ -1181,6 +1181,14 @@ fi
         with self.assertRaisesRegex(web.LauncherError, "SHA-256"):
             web.download_update_asset(tampered, "web", web.Path(self.tempDir) / "web-dl2", self.feed)
         self.assertEqual(list((web.Path(self.tempDir) / "web-dl2").iterdir()), [])
+        # A connection that drops during the download (or the manifest) is a LauncherError, not a traceback
+        _Handler.cutChunkedPaths = {"/" + data["assets"]["web"]["name"], "/studio-update.json"}
+        with self.assertRaisesRegex(web.LauncherError, "interrupted"):
+            web.download_update_asset(manifest, "web", web.Path(self.tempDir) / "web-dl3", self.feed)
+        self.assertEqual(list((web.Path(self.tempDir) / "web-dl3").iterdir()), [])
+        with self.assertRaisesRegex(web.LauncherError, "interrupted"):
+            web.fetch_update_manifest(self.feed)
+        _Handler.cutChunkedPaths = set()
         self.assertEqual(web.package_studio_version(os.path.join(self.feedDir, data["assets"]["linux-x86_64"]["name"])), "1.2.0")
 
     #

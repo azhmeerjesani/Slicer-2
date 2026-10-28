@@ -684,13 +684,21 @@ def _update_open(url, feed, timeout):
         raise LauncherError(f"Cannot reach the update server: {getattr(error, 'reason', error)}")
 
 
+def _update_read(response, size, what):
+    """response.read(size); a connection that drops or stalls becomes a LauncherError, not a traceback."""
+    try:
+        return response.read(size)
+    except (http.client.HTTPException, OSError) as error:
+        raise LauncherError(f"{what}: the download was interrupted ({error.__class__.__name__}: {error}).")
+
+
 def fetch_update_manifest(feed=None, timeout=UPDATE_CHECK_TIMEOUT):
     """The validated manifest of the latest release (a dict). Raise LauncherError."""
     feed = feed or update_feed()
     if not feed:
         raise LauncherError(f"Update checks are turned off ({UPDATE_FEED_VARIABLE}=off).")
     with _update_open(feed, feed, timeout) as response:
-        content = response.read(UPDATE_MANIFEST_MAX_BYTES + 1)
+        content = _update_read(response, UPDATE_MANIFEST_MAX_BYTES + 1, "The update manifest")
     if len(content) > UPDATE_MANIFEST_MAX_BYTES:
         raise LauncherError("The update manifest is too large.")
     try:
@@ -772,7 +780,7 @@ def download_update_asset(manifest, key, directory, feed=None):
     info(f"Downloading {name} ({asset['size'] / 1e6:.0f} MB)")
     try:
         with _update_open(url, feed, 60) as response, open(partial, "wb") as stream:
-            for block in iter(lambda: response.read(1024 * 1024), b""):
+            for block in iter(lambda: _update_read(response, 1024 * 1024, name), b""):
                 received += len(block)
                 if received > asset["size"]:
                     raise LauncherError(f"{name} is larger than the release file: refused.")
