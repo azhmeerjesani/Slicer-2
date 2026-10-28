@@ -1653,6 +1653,34 @@ class StudioProjectsTest(unittest.TestCase):
         slicer.mrmlScene.SetRootDirectory(project.path)
 
 
+    def test_34_privacy_check_scans_every_text_member_of_a_bundle(self):
+        import zipfile
+
+        checker = _privacyModule()
+        if checker is None:
+            self.skipTest("StudioPrivacyCheck.py not found")
+        cases = {
+            "Table.csv": "subject,file\nsub-01,/home/alice/data/sub-01_lesion.nii.gz\n",
+            "Notes.txt": "Lesions from /Users/alice/Desktop/patients/\n",
+            "Table.tsv": "participant_id\tlesion\nsub-01\t/scratch/alice/lesions/sub-01.nii.gz\n",
+        }
+        for member, text in cases.items():
+            folder = os.path.join(self.tempDir, "privacy-" + member)
+            os.makedirs(folder)
+            with zipfile.ZipFile(os.path.join(folder, "scene.mrb"), "w") as archive:
+                archive.writestr("scene/scene.mrml", '<MRML version="Slicer4.4.0"></MRML>')
+                archive.writestr("scene/Data/" + member, text)
+            lines = []
+            self.assertEqual(checker.scan([folder], out=lines.append), 1, f"{member} inside a .mrb is flagged: {lines}")
+            # The same bundle with relative paths only passes
+            clean = os.path.join(self.tempDir, "privacy-clean-" + member)
+            os.makedirs(clean)
+            with zipfile.ZipFile(os.path.join(clean, "scene.mrb"), "w") as archive:
+                archive.writestr("scene/scene.mrml", '<MRML version="Slicer4.4.0"></MRML>')
+                archive.writestr("scene/Data/" + member, "sub-01,Data/sub-01_lesion.nii.gz\n")
+            self.assertEqual(checker.scan([clean], out=lambda _line: None), 0)
+
+
 def _sphere(center=(0, 0, 0)):
     import vtk
 
