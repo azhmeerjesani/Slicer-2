@@ -2657,13 +2657,21 @@ class DrawExtension:
         layout.addLayout(self._cardsBefore)
 
         # Brush size (Paint and Erase): a segmented 1 / 3 / 6 / 12 mm and the diameter field (VISUAL 4.4), and the source chip
+        # on a row of its own: the scan name can be long, and sharing the row squeezed the segmented control until its
+        # segments overlapped
         self.chipsRow = qt.QWidget()
         self.chipsRow.setObjectName("StudioDrawChipsRow")
         self.chipsRow.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
-        chipsLayout = qt.QHBoxLayout(self.chipsRow)
+        rowsLayout = qt.QVBoxLayout(self.chipsRow)
+        rowsLayout.setContentsMargins(0, 0, 0, 0)
+        rowsLayout.setSpacing(2)
+        sizeRow = qt.QWidget()
+        sizeRow.setObjectName("StudioDrawSizeRow")
+        chipsLayout = qt.QHBoxLayout(sizeRow)
         # Aligned with the cards and the tool tiles
         chipsLayout.setContentsMargins(8, 2, 10, 2)
         chipsLayout.setSpacing(8)
+        rowsLayout.addWidget(sizeRow)
         self.brushChips = {}
         self.brushLabel = ui.label(_("Size"), "body", "text", "StudioBrushSizeLabel")
         chipsLayout.addWidget(self.brushLabel)
@@ -2708,7 +2716,12 @@ class DrawExtension:
         self.sourceMenu.connect("aboutToShow()", self._fillSourceMenu)
         self.sourceChip.setMenu(self.sourceMenu)
         ui.setRole(self.sourceChip, "ghost")
-        chipsLayout.addWidget(self.sourceChip)
+        # Never wider than the row: the text is elided to the room (_refreshSourceChip)
+        sourceRow = qt.QHBoxLayout()
+        sourceRow.setContentsMargins(8, 0, 10, 2)
+        sourceRow.addWidget(self.sourceChip)
+        sourceRow.addStretch(1)
+        rowsLayout.addLayout(sourceRow)
         # The size row follows the tool tiles (VISUAL 4.4): the Segment Editor puts it there (toolOptionsWidget()); the
         # header owns it until then
         self.chipsRow.setParent(header)
@@ -2770,6 +2783,21 @@ class DrawExtension:
         """The layout that holds "More tools ▾" in the studio presentation: the right of the Tools label."""
         self.headerWidget()
         return self.toolsRowLayout
+
+    def _refreshSourceChip(self, name):
+        """The text of the source chip, elided in the middle to the width of the row (the full name is in the tooltip)."""
+        chip = self.sourceChip
+        width = int(self.chipsRow.width)
+        available = width - 18 if width > 100 else 300
+        metrics = chip.fontMetrics()
+        chip.setText(_("on {name} ▾").format(name=""))
+        # The button's padding and the menu indicator come on top of the text
+        overhead = int(chip.sizeHint.width()) - int(metrics.horizontalAdvance(chip.text))
+        room = max(40, available - overhead - int(metrics.horizontalAdvance(chip.text)))
+        shown = str(metrics.elidedText(name, qt.Qt.ElideMiddle, room))
+        chip.setText(_("on {name} ▾").format(name=shown))
+        body = _("the scan you draw on (and shown in the views)") + f": {name}"
+        chip.setToolTip(ui.tooltip(_("Source scan"), None, body))
 
     def toolOptionsWidget(self):
         """The size row (Brush and Erase), shown by the Segment Editor right after the tool tiles."""
@@ -2980,7 +3008,7 @@ class DrawExtension:
         volumes = _editableVolumes()
         showSource = len(volumes) > 1 and sourceVolumeNode is not None
         if showSource:
-            self.sourceChip.setText(_("on {name} ▾").format(name=sourceVolumeNode.GetName()))
+            self._refreshSourceChip(sourceVolumeNode.GetName())
         self.sourceChip.setVisible(showSource)
         self.chipsRow.setVisible(brushActive or showSource)
         # Lesion card

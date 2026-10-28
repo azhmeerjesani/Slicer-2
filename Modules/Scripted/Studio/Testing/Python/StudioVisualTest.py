@@ -18,7 +18,9 @@ without writing a setting):
   of a flat view is the Studio text only while Studio is shown (Classic keeps the "L:", "F:" and "B:" lines).
 """
 
+import itertools
 import os
+import tempfile
 import time
 
 import numpy as np
@@ -487,6 +489,60 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
             # The stat cells stay inside the readout line that holds them
             readout = card.findChild("QLabel", "StudioLesionReadout")
             self.assertLessEqual(stats.geometry.bottom(), readout.height - 1)
+
+    def test_draw_size_row_keeps_its_size_with_two_images_1366(self):
+        """With a second image the source chip "on <scan> ▾" does not squeeze the Size control (1 / 3 / 6 / 12).
+
+        The chip shared the row of the segmented control and the row (an Ignored size policy) let the control shrink
+        below its size hint: its segments overlapped and "12" was cut. The chip has a row of its own and is elided.
+        """
+        from StudioLib import draw
+
+        studioShell = self._applyStudio()
+        self.mainWindow.showNormal()
+        self.mainWindow.resize(1366, 768)
+        self._wait(lambda: self.mainWindow.width <= 1366, 2000)
+        from StudioLib import importer
+
+        # A scan opened with the importer (it switches to Draw, whose lesion uses it), then a second image
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "sub-0123_ses-baseline_acq-mprage_T1w.nrrd")
+            slicer.util.saveNode(self._addVolume("sub-0123_ses-baseline_acq-mprage_T1w"), path)
+            slicer.mrmlScene.Clear(0)
+            importer.loadFiles([path], studioShell)
+            self._pump(8)
+        self._wait(lambda: studioShell.currentWorkspace() == "draw", 5000)
+        first = draw.lesionNodes()[1]
+        self._addVolume("sub-0123_ses-followup_T1w")
+        studioShell.switchTo("library")
+        self._pump(4)
+        studioShell.switchTo("draw")
+        self._pump(10)
+        draw.session(studioShell).refreshPanel()
+        slicer.modules.SegmentEditorWidget.editor.setActiveEffectByName("Paint")
+        self._pump(10)
+        draw.session(studioShell).refreshPanel()
+        self._pump(6)
+        sizes = self.mainWindow.findChild("QFrame", "StudioBrushSizes")
+        chip = self.mainWindow.findChild("QToolButton", "StudioSourceChip")
+        row = self.mainWindow.findChild("QWidget", "StudioDrawChipsRow")
+        self.assertIsNotNone(sizes)
+        self.assertTrue(sizes.isVisible() and chip.isVisible(), "the size control and the source chip are shown")
+        self.assertGreaterEqual(sizes.width, sizes.sizeHint.width(), "the size control is squeezed below its size hint")
+        buttons = [button for button in sizes.findChildren("QToolButton") if button.isVisible()]
+        self.assertEqual(len(buttons), 4)
+        for left, right in itertools.pairwise(buttons):
+            self.assertLess(left.geometry.right(), right.geometry.left(), "segments of the size control overlap")
+        for button in buttons:
+            self.assertGreaterEqual(button.width, button.sizeHint.width() - 1, f"segment {button.text} is narrower than its hint")
+        self.assertLessEqual(chip.geometry.bottom(), row.height, "the source chip lies inside the size row")
+        self.assertTrue(
+            chip.mapTo(row, qt.QPoint(0, 0)).y() >= sizes.mapTo(row, qt.QPoint(0, 0)).y() + sizes.height - 1,
+            "the source chip lies under the size control, not beside it",
+        )
+        self.assertLessEqual(chip.width, row.width, "the source chip is wider than its row")
+        self.assertTrue(chip.text.startswith("on ") and chip.text.endswith("▾"))
+        self.assertIn(first.GetName(), chip.toolTip, "the tooltip has the full scan name")
 
     def test_tour_offer_in_canvas_1366(self):
         """The first-start tour offer lies whole inside the Library canvas at 1366 x 768, off the content of the page."""
