@@ -191,6 +191,23 @@ def _chipCell(text, level):
     return cell
 
 
+def _availableArea(widget=None):
+    """The available geometry (``QRect``, without panels) of the screen that shows ``widget``, else of the primary screen; None without a screen.
+
+    ``QGuiApplication.primaryScreen`` is a property in PythonQt (Qt 5 and Qt 6) and cannot be called: ``StudioLib.ui``
+    resolves the screen when it can be imported, else the first of ``QGuiApplication.screens()`` is the primary screen.
+    """
+    try:
+        ui = widgets._studioUi()
+        screen = ui.screenOf(widget) if ui is not None else None
+        if screen is None:
+            screens = qt.QGuiApplication.screens()
+            screen = screens[0] if screens else None
+        return screen.availableGeometry if screen is not None else None
+    except Exception:  # noqa: BLE001 (the default size is fine without a screen)
+        return None
+
+
 class CatalogDialog(qt.QDialog):
     """See the module docstring. ``catalogPath`` (a catalog file) and the controller's ``extraArgs`` are for tests."""
 
@@ -210,11 +227,9 @@ class CatalogDialog(qt.QDialog):
         self.setWindowTitle(_("Get a connectome"))
         self.setMinimumSize(860, 600)
         size = qt.QSize(1000, 760)
-        try:  # a real window manager clamps a window that is as high as the screen
-            available = qt.QGuiApplication.primaryScreen().availableGeometry
+        available = _availableArea(self.parentWidget())
+        if available is not None:  # a real window manager clamps a window that is as high as the screen
             size = qt.QSize(min(size.width(), max(860, available.width() - 80)), min(size.height(), max(600, available.height() - 120)))
-        except Exception:  # noqa: S110 (the default size is fine without a screen)
-            pass
         self.resize(size)
         layout = qt.QVBoxLayout(self)
         layout.setSpacing(8)
