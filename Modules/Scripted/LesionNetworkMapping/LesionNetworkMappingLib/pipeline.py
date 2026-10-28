@@ -3310,12 +3310,41 @@ def _read_table(path):
 
 
 def _group_map(text):
+    """Parse ``--group-map 'patient=case,HC=control'`` (keys case-insensitive); an item without '=' is a ValueError."""
     mapping = {}
     for item in (text or "").split(","):
-        if "=" in item:
-            key, value = item.split("=", 1)
-            mapping[key.strip().lower()] = value.strip()
+        if not item.strip():
+            continue
+        if "=" not in item:
+            raise ValueError(f"--group-map item {item.strip()!r} is not 'value=case' or 'value=control'; write it like --group-map 'patient=case,HC=control'")
+        key, value = item.split("=", 1)
+        mapping[key.strip().lower()] = value.strip()
     return mapping
+
+
+def _study_group_values(columns, rows, id_column, group_column, group_map):
+    """Rows of a participants table as study values, the group column mapped to case/control/n/a (a ValueError naming the option when it cannot be)."""
+    from .study import ALLOWED_VALUES, NA
+
+    mapping = _group_map(group_map)
+    source_group = group_column or "group"
+    if group_column and group_column not in columns:
+        raise ValueError(f"--group-column {group_column!r} is not a column of the participants table (columns: {', '.join(columns)})")
+    allowed = tuple(ALLOWED_VALUES.get("group") or ())
+    out_rows = []
+    for row in rows:
+        values = {column: (row[column] if row[column] != "" else NA) for column in columns if column != id_column}
+        values["participant_id"] = row[id_column]
+        if source_group in row:
+            raw = row[source_group]
+            values["group"] = mapping.get(raw.strip().lower(), raw if raw in ("case", "control") else NA) if (mapping or source_group != "group") else (raw or NA)
+            if allowed and values["group"] not in allowed:
+                bad = sorted({r[source_group] for r in rows if r.get(source_group) and r[source_group] not in allowed})
+                listed = ", ".join(repr(v) for v in bad)
+                raise ValueError(f"The group column {source_group!r} has value(s) {listed}, not {' / '.join(allowed)}; say which is which with --group-map "
+                                 f"'value=case,value=control' (one entry per value: {', '.join(f'{v}=case or {v}=control' for v in bad)})")
+        out_rows.append(values)
+    return out_rows
 
 
 def init_study(source, study_path, participants=None, name=None, score_columns=(), group_column=None, group_map=None, lesion_rule=None, id_regex=None):
@@ -3329,6 +3358,12 @@ def init_study(source, study_path, participants=None, name=None, score_columns=(
     from .study import NA, Study, write_tsv
 
     study_path = os.path.abspath(os.fspath(study_path))
+    columns = out_rows = None
+    if participants:
+        # Checked before anything is created: a wrong --group-column or --group-map must not leave a half-made study
+        columns, rows = _read_table(participants)
+        id_column = "participant_id" if "participant_id" in columns else columns[0]
+        out_rows = _study_group_values(columns, rows, id_column, group_column, group_map)
     if Study.is_study(study_path):
         live = _session_live(study_path)
         if live:
@@ -3339,18 +3374,6 @@ def init_study(source, study_path, participants=None, name=None, score_columns=(
     report = study.add_files([source], lesion_rule=lesion_rule, id_regex=id_regex)
     imported = None
     if participants:
-        columns, rows = _read_table(participants)
-        id_column = "participant_id" if "participant_id" in columns else columns[0]
-        mapping = _group_map(group_map)
-        out_rows = []
-        for row in rows:
-            values = {column: (row[column] if row[column] != "" else NA) for column in columns if column != id_column}
-            values["participant_id"] = row[id_column]
-            source_group = group_column or "group"
-            if source_group in row:
-                raw = row[source_group]
-                values["group"] = mapping.get(raw.strip().lower(), raw if raw in ("case", "control") else NA) if (mapping or source_group != "group") else (raw or NA)
-            out_rows.append(values)
         out_columns = ["participant_id"] + [column for column in columns if column != id_column]
         if "group" not in out_columns and any("group" in row for row in out_rows):
             out_columns.append("group")

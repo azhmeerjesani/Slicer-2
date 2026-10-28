@@ -826,6 +826,34 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         self.assertEqual(code, 75)
         self.assertIn("study open in Slicer", done_event(events)["message"])
 
+    def test_init_group_options_are_checked_and_named(self):
+        # A participants group column that is not case/control, a --group-column that is no column and a --group-map that is not
+        # 'value=case,...' each say so (and name the option) and leave no half-made study behind
+        source = os.path.join(self.tmp, "group lesions")
+        os.makedirs(source)
+        study = Study.open(self.fx["study"])
+        lines = ["participant_id\tgroup"]
+        for sid in self.mapped_sids()[:2]:
+            shutil.copyfile(study.abspath(study.subject(sid)["lesion"]), os.path.join(source, f"{sid}_lesion.nii.gz"))
+            lines.append(f"{sid}\t{'patient' if sid == self.mapped_sids()[0] else 'HC'}")
+        table = os.path.join(self.tmp, "group table.tsv")
+        with open(table, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        cases = [({}, "--group-map"),
+                 ({"group_column": "nosuch", "group_map": "patient=case,HC=control"}, "--group-column 'nosuch'"),
+                 ({"group_column": "group", "group_map": "patient:case,HC:control"}, "--group-map item 'patient:case'")]
+        for index, (options, expected) in enumerate(cases):
+            target = os.path.join(self.tmp, f"group study {index}")
+            with self.assertRaises(ValueError) as caught:
+                pipeline.init_study(source, target, participants=table, **options)
+            self.assertIn(expected, str(caught.exception))
+            self.assertFalse(os.path.exists(target), "a refused option must not leave a study behind")
+        code, _events, _stdout, stderr, _wall = cli("init", "--from", source, "--participants", table, "--study", os.path.join(self.tmp, "group cli study"))
+        self.assertNotEqual(code, 0)
+        self.assertIn("--group-map", stderr + str(_events))
+        summary = pipeline.init_study(source, os.path.join(self.tmp, "group ok"), participants=table, group_column="group", group_map="patient=case,HC=control")
+        self.assertEqual(summary["subjects"], 2)
+
     # Events and speed
 
     def test_text_events_and_help(self):
