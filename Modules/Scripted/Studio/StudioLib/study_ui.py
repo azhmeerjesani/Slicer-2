@@ -977,8 +977,18 @@ def openStudyDialog(shell=None):
     if not isAvailable():
         _toast(shell, _("Studies are not available in this build"))
         return None
-    start = (recentStudies() or [{}])[0].get("path") or _importer()._lastDirectory()
-    folder = qt.QFileDialog.getExistingDirectory(slicer.util.mainWindow(), _("Open study"), os.path.dirname(start) if start else "")
+    # Starts where the studies are: the parent of the newest recent study (so that it is listed), else Studies/ of the
+    # Slicer Studio folder (as New study… does), else the last open folder itself (a folder: no dirname of it)
+    recent = (recentStudies() or [{}])[0].get("path")
+    created = None
+    if recent:
+        start = os.path.dirname(recent)
+    else:
+        start, created = _studiesFolder()
+        start = start or _importer()._lastDirectory()
+    folder = qt.QFileDialog.getExistingDirectory(slicer.util.mainWindow(), _("Open study"), start or "")
+    if created and os.path.isdir(created) and not os.listdir(created):
+        os.rmdir(created)  # created for the dialog only: never leave an empty folder
     if not folder:
         return None
     studyModule = _lnm("study")

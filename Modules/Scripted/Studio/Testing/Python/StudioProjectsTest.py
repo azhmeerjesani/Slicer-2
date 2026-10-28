@@ -1742,6 +1742,56 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertTrue(service.saveNow("test", progress=False), service._projectPausedReason)
         self.io.backgroundWriter().drain(30.0)
 
+    def test_37_open_study_starts_in_studies_not_above_the_last_folder(self):
+        """Open study… without a recent study starts in Studies/ (as New study… does), else in the last open folder itself
+        (not its parent: in the web build that was "/"); with a recent study it starts in the folder that holds it.
+        """
+        from unittest import mock
+
+        from StudioLib import study_ui
+
+        if not study_ui.isAvailable():
+            self.skipTest("studies are not part of this build")
+        projects = self.projects
+        projects.ensureRoot()
+        starts = []
+
+        class FileDialog:
+            @staticmethod
+            def getExistingDirectory(parent, title, start, *args):
+                starts.append(start)
+                return ""
+
+        class FakeQt:
+            QFileDialog = FileDialog
+
+            def __getattr__(self, name):
+                return getattr(qt, name)
+
+        settings = qt.QSettings()
+        saved = {key: settings.value(key) for key in ("Studio/LastOpenDirectory", study_ui.RECENT_STUDIES_KEY)}
+        lastFolder = os.path.join(self.tempDir, "last", "scans")
+        os.makedirs(lastFolder)
+        settings.setValue("Studio/LastOpenDirectory", lastFolder)
+        settings.setValue(study_ui.RECENT_STUDIES_KEY, "")
+        study_ui.qt = FakeQt()
+        try:
+            study_ui.openStudyDialog()
+            with mock.patch.object(study_ui, "_studiesFolder", return_value=(None, None)):
+                study_ui.openStudyDialog()
+            recentFolder = os.path.join(self.tempDir, "recent", "Stroke")
+            os.makedirs(recentFolder)
+            study_ui.createStudy([], folder=recentFolder, openIt=False)
+            study_ui.recordRecentStudy(recentFolder, "Stroke")
+            study_ui.openStudyDialog()
+        finally:
+            study_ui.qt = qt
+            for key, value in saved.items():
+                settings.setValue(key, value if value is not None else "")
+        self.assertEqual(os.path.normpath(starts[0]), os.path.normpath(projects.studiesFolder()))
+        self.assertEqual(os.path.normpath(starts[1]), os.path.normpath(lastFolder))
+        self.assertEqual(os.path.normpath(starts[2]), os.path.normpath(os.path.dirname(recentFolder)))
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk
