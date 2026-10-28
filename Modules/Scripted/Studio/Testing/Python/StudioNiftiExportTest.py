@@ -728,6 +728,29 @@ class StudioNiftiExportTest(unittest.TestCase):
             slicer.mrmlScene.RemoveNode(node)
         self._assertNoAbsolutePaths(self.out)
 
+    def test_08b_message_names_the_skipped_segments_and_other_notes(self):
+        """The message after an export carries the notes (empty segments skipped, empty threshold mask, transform), not only the log."""
+        from StudioLib import niftiexport_ui
+
+        result = self.export.Result(self.out)
+        result.images = [os.path.join(self.out, "Lesions_label-Lesion_mask.nii.gz")]
+        result.notes = ["Lesions: empty segments were skipped: Edema"]
+        shown = []
+        original = niftiexport_ui.message
+        niftiexport_ui.message = lambda text, **kwargs: shown.append(text)
+        try:
+            niftiexport_ui.announce(result)
+            result.notes += ["No voxel of T passes the threshold: the mask is empty", "T: its transform was applied to the exported copy"]
+            niftiexport_ui.announce(result)
+        finally:
+            niftiexport_ui.message = original
+        self.assertIn("Exported 1 NIfTI image", shown[0])
+        self.assertIn("Edema", shown[0])
+        self.assertIn("empty segments were skipped", shown[0])
+        self.assertIn("Edema", shown[1])
+        self.assertIn("No voxel of T passes", shown[1])
+        self.assertIn("1 more note", shown[1])
+
     def test_09_project_export(self):
         """Export project as NIfTI: images, lesions as masks and maps into <project>/Exports/nifti with BIDS-like names and a README."""
         from StudioLib import autosave_io, niftiexport_ui, projects, projects_ui, templates

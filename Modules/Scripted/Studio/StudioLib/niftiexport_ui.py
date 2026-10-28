@@ -223,8 +223,25 @@ def resultText(result):
     return text
 
 
+NOTES_IN_MESSAGE = 2
+
+
+def notesText(notes):
+    """The notes of an export ("Lesions: empty segments were skipped: Edema") for the message: the first
+    ``NOTES_IN_MESSAGE`` of them, and how many more are in the README and the log.
+    """
+    unique = list(dict.fromkeys(str(note) for note in notes if note))
+    text = " · ".join(unique[:NOTES_IN_MESSAGE])
+    more = len(unique) - NOTES_IN_MESSAGE
+    if more > 0:
+        text += " · " + (_("1 more note") if more == 1 else _("{count} more notes").format(count=more))
+    return text
+
+
 def announce(result):
-    """The toast after an export: what was written and "Show in Finder/Explorer/Files"."""
+    """The toast after an export: what was written, the notes (empty segments that were skipped, an empty threshold
+    mask, a transform applied to the copy) and "Show in Finder/Explorer/Files".
+    """
     if not result.images and result.errors:
         message(_("Nothing was exported: {error}").format(error=result.errors[0]), level="warning", ms=8000)
         return
@@ -233,9 +250,12 @@ def announce(result):
     def show():
         showInFileManager(folder)
 
-    message(resultText(result), level="warning" if result.errors else "info", action=show,
-            actionText=_("Show in {manager}").format(manager=fileManagerName()), ms=6000, toolTip=shortPath(folder))
-    for note in result.notes[:1]:
+    text = resultText(result)
+    if result.notes:
+        text += " · " + notesText(result.notes)
+    message(text, level="warning" if result.errors else "info", action=show,
+            actionText=_("Show in {manager}").format(manager=fileManagerName()), ms=10000 if result.notes else 6000, toolTip=shortPath(folder))
+    for note in result.notes:
         logging.info(f"Slicer Studio NIfTI export: {note}")
 
 
