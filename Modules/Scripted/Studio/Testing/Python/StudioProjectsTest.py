@@ -1976,6 +1976,100 @@ class StudioProjectsTest(unittest.TestCase):
             thumbnails._writeAtomic(blocked, b"png")
         self.assertEqual(sorted(os.listdir(os.path.dirname(blocked))), ["blocked.png"])
 
+    def test_40_root_move_is_refused_while_another_studio_has_a_project_open(self):
+        """Moving the Slicer Studio folder while another running Slicer Studio has one of its projects open (BB-1) is
+        refused before anything is saved or moved, with a message that names the project, as rename and Move to Trash
+        already are. The folder used to move with that project and its lock: the other window went on saving into the old
+        folder, outside the Slicer Studio folder, and its later work dropped out of the Library.
+        """
+        from unittest import mock
+
+        from StudioLib import projects_ui
+
+        projects = self.projects
+        service = self._service()
+        self._userVolume()
+        project = self._projectFor(service)
+        self._save(service)
+        oldRoot = projects.root()
+        # Another Slicer Studio has "Busy" open (its lock is held; the same process stands for the other one)
+        busy = projects.createProject("Busy")
+        self.assertTrue(busy.lock())
+        self.assertTrue(projects.isLockedByOther(busy.path))
+        self.assertEqual(projects.projectsOpenElsewhere(oldRoot), ["Busy"], "the own open project is not listed")
+        newRoot = os.path.join(self.tempDir, "moved", "Slicer Studio")
+        os.environ.pop(projects.ROOT_ENVIRONMENT)
+        qt.QSettings().setValue(projects.ROOT_KEY, self.root)
+        running = self.autosave._service
+        self.autosave._service = service
+
+        def unchanged():
+            self.assertFalse(os.path.exists(newRoot), "nothing is made in the new folder")
+            self.assertTrue(os.path.isfile(os.path.join(busy.path, ".studio", "lock")), "the other project keeps its lock")
+            self.assertEqual(projects.root(), os.path.normpath(self.root), "the setting is unchanged")
+            self.assertIs(service.project, project)
+            self.assertTrue(os.path.isdir(project.path))
+            self.assertTrue(project.isLocked(), "the own project stays locked")
+
+        try:
+            with self.assertRaises(projects.OpenElsewhereError) as context:
+                service.moveRoot(newRoot, moveContent=True)
+            self.assertIn("Busy is open in another Slicer Studio", str(context.exception))
+            unchanged()
+            # The Change… dialog says it before asking anything
+            shown = []
+
+            class FakeChooser:
+                path = newRoot
+                continueButton = mock.Mock()
+                setWindowTitle = mock.Mock()
+                choose = mock.Mock()
+                exec = mock.Mock()
+                exec_ = mock.Mock()
+                deleteLater = mock.Mock()
+
+                def __init__(self, *args, **kwargs):
+                    pass
+
+            def fail(*args, **kwargs):
+                raise AssertionError("the question is not asked")
+
+            with mock.patch.object(projects_ui, "FolderChooserDialog", FakeChooser), \
+                    mock.patch.object(projects_ui, "_question", fail), \
+                    mock.patch.object(slicer.util, "infoDisplay", lambda text, *a, **k: shown.append(text)), \
+                    mock.patch.object(slicer.util, "errorDisplay", lambda text, *a, **k: shown.append(text)):
+                self.assertIsNone(projects_ui.changeRootDialog(None))
+            self.assertEqual(len(shown), 1, shown)
+            self.assertIn("Busy is open in another Slicer Studio", shown[0])
+            unchanged()
+            # Once the other window has closed it, the folder moves
+            busy.unlock()
+            self.assertEqual(projects.projectsOpenElsewhere(oldRoot), [])
+            # A project opened elsewhere while the own project saves before the move: still refused, nothing moved
+            realSaveNow = service.saveNow
+
+            def saveThenOpenElsewhere(*args, **kwargs):
+                result = realSaveNow(*args, **kwargs)
+                self.assertTrue(busy.lock())
+                return result
+
+            with mock.patch.object(service, "saveNow", saveThenOpenElsewhere):
+                with self.assertRaises(projects.OpenElsewhereError):
+                    service.moveRoot(newRoot, moveContent=True)
+            unchanged()
+            self.assertEqual(service._suspendCount, 0, "autosave runs again")
+            busy.unlock()
+            moved = service.moveRoot(newRoot, moveContent=True)
+            self.assertIn("Projects", moved)
+            self.assertEqual(projects.root(), os.path.normpath(newRoot))
+            self.assertTrue(service.project.path.startswith(os.path.normpath(newRoot) + os.sep))
+        finally:
+            busy.unlock()
+            self.autosave._service = running
+            qt.QSettings().remove(projects.ROOT_KEY)
+            qt.QSettings().remove(projects.ROOT_CHOSEN_KEY)
+            os.environ[projects.ROOT_ENVIRONMENT] = self.root
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk

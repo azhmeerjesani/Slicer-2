@@ -735,6 +735,12 @@ def changeRootDialog(parent=None):
             slicer.util.infoDisplay(_("Close the open study first: its files are in the Slicer Studio folder."),
                                     windowTitle=_("Change the Slicer Studio folder"))
             return None
+        try:
+            # A project open in another Slicer Studio would move away from under it (and drop out of its Library)
+            projects.checkNotOpenElsewhere(oldRoot)
+        except OSError as error:
+            slicer.util.infoDisplay(str(error), windowTitle=_("Change the Slicer Studio folder"))
+            return None
         answer = _question(parent, _("Change the Slicer Studio folder"),
                            _("Move your projects and studies to the new folder?\n\n{old}\n→ {new}").format(old=oldRoot, new=newRoot),
                            [_("Move"), _("Keep them where they are"), _("Cancel")])
@@ -750,6 +756,11 @@ def changeRootDialog(parent=None):
             moved = _runWithProgress(lambda: projects.moveContent(oldRoot, newRoot), _("Moving your projects and studies…"), parent) if move else []
             projects.setRoot(newRoot)
         projects.ensureRoot(newRoot)
+    except projects.OpenElsewhereError as error:
+        # Refused before anything was moved (opened elsewhere after the check above)
+        slicer.util.infoDisplay(str(error), windowTitle=_("Change the Slicer Studio folder"))
+        projects.notifyChanged()
+        return None
     except OSError as error:
         slicer.util.errorDisplay(_("Your projects could not all be moved: {error}\nWhat was moved is in the new folder; the folder setting is "
                                    "unchanged.").format(error=error))

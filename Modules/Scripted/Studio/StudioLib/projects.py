@@ -1134,6 +1134,34 @@ def checkMoveTarget(oldRoot, newRoot):
                         "Choose a folder outside {folder}.").format(folder=oldRoot))
 
 
+class OpenElsewhereError(OSError):
+    """The folder cannot be moved: another running Slicer Studio has one of its projects open."""
+
+
+def projectsOpenElsewhere(rootPath=None):
+    """The names of the projects of the folder that another running Slicer Studio has open (main thread: Qt lock files)."""
+    folder = projectsFolder(rootPath)
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return []
+    return [name for name in names
+            if not name.startswith(".") and os.path.isdir(os.path.join(folder, name)) and isLockedByOther(os.path.join(folder, name))]
+
+
+def checkNotOpenElsewhere(rootPath):
+    """Raise OpenElsewhereError (a plain message that names them) when another running Slicer Studio has a project of
+    the folder open: moving Projects/ would move that project, lock included, away from under it, and that window would
+    go on saving into the old folder.
+    """
+    names = projectsOpenElsewhere(rootPath)
+    if len(names) == 1:
+        raise OpenElsewhereError(_("{name} is open in another Slicer Studio. Close it there first, then change the folder.").format(name=names[0]))
+    if names:
+        raise OpenElsewhereError(_("{names} are open in another Slicer Studio. Close them there first, then change the folder.").format(
+            names=", ".join(names)))
+
+
 def moveContent(oldRoot, newRoot, progress=None):
     """Move Projects/, Studies/, LNM/ and "About this folder.txt" from ``oldRoot`` to ``newRoot``. Worker-safe.
 

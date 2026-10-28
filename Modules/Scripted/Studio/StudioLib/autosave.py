@@ -1897,7 +1897,8 @@ class AutosaveService:
 
         The open project is saved first and followed. ``run(function)`` runs the move (for example in a thread with a
         progress dialog); by default it runs here. Return the list of moved items. Raise OSError when moving fails (what was
-        moved stays moved; the setting is then not changed).
+        moved stays moved; the setting is then not changed), and ``projects.OpenElsewhereError`` before anything is moved
+        when another running Slicer Studio has a project of the folder open.
         """
         projects = self._projects()
         oldRoot = projects.root()
@@ -1905,6 +1906,8 @@ class AutosaveService:
         moved = []
         if moveContent and os.path.normcase(os.path.realpath(oldRoot)) != os.path.normcase(os.path.realpath(newRoot)):
             projects.checkMoveTarget(oldRoot, newRoot)  # before the open project is saved and unlocked
+            # A project that another Slicer Studio has open would move away from under it (it would go on saving there)
+            projects.checkNotOpenElsewhere(oldRoot)
             if self._studyOpen():
                 # The open study writes its journal and participants into Studies/ while it is open
                 raise OSError(_("Close the open study first."))
@@ -1920,6 +1923,7 @@ class AutosaveService:
             self._suspendCount += 1
             succeeded = False
             try:
+                projects.checkNotOpenElsewhere(oldRoot)  # again: one may have been opened elsewhere while this one saved
                 function = lambda: projects.moveContent(oldRoot, newRoot)  # noqa: E731
                 moved = run(function) if run is not None else function()
                 succeeded = True
