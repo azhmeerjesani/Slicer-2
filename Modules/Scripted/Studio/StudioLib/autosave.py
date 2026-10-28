@@ -1905,7 +1905,7 @@ class AutosaveService:
         self._updateStatus()
 
     def moveRoot(self, newRoot, moveContent=True, run=None):
-        """Change the Slicer Studio folder; with ``moveContent``, move Projects/, Studies/ and LNM/ there first.
+        """Change the Slicer Studio folder; with ``moveContent``, move Projects/, Studies/, LNM/ and Templates/ there first.
 
         The open project is saved first and followed. ``run(function)`` runs the move (for example in a thread with a
         progress dialog); by default it runs here. Return the list of moved items. Raise OSError when moving fails (what was

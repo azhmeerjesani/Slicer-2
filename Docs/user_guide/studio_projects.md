@@ -104,7 +104,7 @@ When you close something in a project (a scan, a point list), its file goes to
 
 The pause and the interval are set in **Settings › Saving**. The same panel
 shows the Slicer Studio folder, with **Change…** and **Show**. When you change
-the folder, Slicer Studio offers to move your projects and studies there.
+the folder, Slicer Studio offers to move your projects, studies and templates there.
 
 ## Open a project in official 3D Slicer
 

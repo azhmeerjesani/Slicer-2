@@ -2148,6 +2148,57 @@ class StudioProjectsTest(unittest.TestCase):
             qt.QSettings().remove(projects.ROOT_CHOSEN_KEY)
             os.environ[projects.ROOT_ENVIRONMENT] = self.root
 
+    def test_42_root_move_takes_your_templates_along(self):
+        """Change folder > Move moves Templates/ with Projects/ and Studies/ (BB-1): your templates stay listed and the default
+        stays yours. It used to leave Templates/ in the old folder, so your templates vanished from every list, the default fell
+        back to the bundled brain and studies that use a template of yours reported it as not registered. A folder that holds
+        only templates is offered the move too.
+        """
+        from StudioLib import templates
+
+        projects = self.projects
+        self.assertEqual(projects.TEMPLATES_DIR, templates.TEMPLATES_DIR)
+        settings = qt.QSettings()
+        previousDefault = settings.value(templates.DEFAULT_KEY)
+        try:
+            image = templates.builtinTemplates()[0].imagePath
+            mine = templates.addTemplate(image, name="My lab template", makeDefault=True)
+            self.assertEqual([t.id for t in templates.userTemplates()], [mine.id])
+            self.assertEqual(templates.defaultTemplateId(), mine.id)
+            self.assertTrue(projects.hasContent(self.root), "a folder with only your templates is offered the move")
+            self.assertIn(projects.TEMPLATES_DIR, projects.movableItems(self.root))
+            slicer.mrmlScene.Clear(0)
+            service = self._service()
+            self._userVolume()
+            self._projectFor(service)
+            self._save(service)
+            os.environ.pop(projects.ROOT_ENVIRONMENT)
+            settings.setValue(projects.ROOT_KEY, self.root)
+            newRoot = os.path.join(self.tempDir, "moved", "Slicer Studio")
+            moved = service.moveRoot(newRoot, moveContent=True)
+            self.assertIn(projects.TEMPLATES_DIR, moved)
+            self.assertEqual(projects.root(), os.path.normpath(newRoot))
+            self.assertFalse(os.path.exists(os.path.join(self.root, projects.TEMPLATES_DIR)), "nothing stays in the old folder")
+            self.assertEqual([t.id for t in templates.userTemplates()], [mine.id], "your template is still listed")
+            self.assertTrue(templates.userTemplates()[0].folder.startswith(os.path.normpath(newRoot) + os.sep))
+            self.assertEqual(templates.defaultTemplateId(), mine.id, "and still the default")
+            # Into a folder that already has templates: the two Templates/ folders are merged
+            third = os.path.join(self.tempDir, "third", "Slicer Studio")
+            theirs = templates.addTemplate(image, name="Their template", rootPath=third)
+            moved = service.moveRoot(third, moveContent=True)
+            self.assertIn(projects.TEMPLATES_DIR, moved)
+            self.assertEqual(sorted(t.id for t in templates.userTemplates()), sorted([mine.id, theirs.id]))
+            self.assertEqual(templates.defaultTemplateId(), mine.id)
+        finally:
+            settings.remove(projects.ROOT_KEY)
+            settings.remove(projects.ROOT_CHOSEN_KEY)
+            if previousDefault is None:
+                settings.remove(templates.DEFAULT_KEY)
+            else:
+                settings.setValue(templates.DEFAULT_KEY, previousDefault)
+            os.environ[projects.ROOT_ENVIRONMENT] = self.root
+            templates.registerGrids(force=True)
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk

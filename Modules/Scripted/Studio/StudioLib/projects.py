@@ -50,6 +50,8 @@ WEB_ROOT = "/data/Slicer Studio"
 PROJECTS_DIR = "Projects"
 STUDIES_DIR = "Studies"
 LNM_DIR = "LNM"
+#: Your templates (A-10): the same name as ``templates.TEMPLATES_DIR`` (not imported here: templates imports this module)
+TEMPLATES_DIR = "Templates"
 ABOUT_FILE = "About this folder.txt"
 #: Hidden folder of a project
 PRIVATE_DIR = ".studio"
@@ -124,6 +126,7 @@ Projects/<name>/        One folder per project. Each one is a 3D Slicer scene:
 
 Studies/<name>/         Lesion network mapping studies (study.json, participants.tsv, lesions/, ...).
 LNM/                    Normalization outputs, control sets and recipes that belong to no study.
+Templates/<name>/       Your own templates (Settings > Templates), each with a template.json.
 
 Back up or share a project by copying its whole folder (or use "Save a copy as..." in Slicer Studio
 to make a single .mrb file). Scans can contain patient data: keep this folder private.
@@ -1029,15 +1032,28 @@ def treeSize(path):
 #
 
 
+#: The folders of a Slicer Studio folder that a move takes along (merged into the same folder of the new one)
+_MOVABLE_FOLDERS = (PROJECTS_DIR, STUDIES_DIR, LNM_DIR, TEMPLATES_DIR)
+
+
 def movableItems(rootPath):
-    """The items of a Slicer Studio folder that "Move your projects and studies" moves (those that exist)."""
-    items = [name for name in (PROJECTS_DIR, STUDIES_DIR, LNM_DIR, ABOUT_FILE) if os.path.exists(os.path.join(rootPath, name))]
+    """The items of a Slicer Studio folder that "Move your projects, studies and templates" moves (those that exist)."""
+    items = [name for name in (*_MOVABLE_FOLDERS, ABOUT_FILE) if os.path.exists(os.path.join(rootPath, name))]
     return items
 
 
+def _hasVisibleEntries(folder):
+    try:
+        return any(not name.startswith(".") for name in os.listdir(folder))
+    except OSError:
+        return False
+
+
 def hasContent(rootPath):
-    """True if the folder holds projects or studies."""
-    return bool(listProjects(rootPath)) or bool(listStudies(rootPath))
+    """True if the folder holds projects, studies, templates or LNM/ files (what a move would take along)."""
+    if listProjects(rootPath) or listStudies(rootPath):
+        return True
+    return any(_hasVisibleEntries(os.path.join(rootPath, name)) for name in (LNM_DIR, TEMPLATES_DIR))
 
 
 def _sameVolume(first, second):
@@ -1163,7 +1179,7 @@ def checkNotOpenElsewhere(rootPath):
 
 
 def moveContent(oldRoot, newRoot, progress=None):
-    """Move Projects/, Studies/, LNM/ and "About this folder.txt" from ``oldRoot`` to ``newRoot``. Worker-safe.
+    """Move Projects/, Studies/, LNM/, Templates/ and "About this folder.txt" from ``oldRoot`` to ``newRoot``. Worker-safe.
 
     Return the list of moved items. Raise OSError on failure (what was moved stays moved; nothing is deleted before it was
     copied and checked), and before anything is created when ``newRoot`` is inside ``oldRoot``.

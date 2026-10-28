@@ -709,7 +709,7 @@ def _studyOpen():
 
 
 def changeRootDialog(parent=None):
-    """Change… of Settings › Saving: choose another folder; offer to move the projects and studies there."""  # noqa: RUF002
+    """Change… of Settings › Saving: choose another folder; offer to move the projects, studies and templates there."""  # noqa: RUF002
     if projects.isRootFromEnvironment():
         slicer.util.errorDisplay(_("The folder is set by the {variable} environment variable.").format(variable=projects.ROOT_ENVIRONMENT))
         return None
@@ -742,7 +742,7 @@ def changeRootDialog(parent=None):
             slicer.util.infoDisplay(str(error), windowTitle=_("Change the Slicer Studio folder"))
             return None
         answer = _question(parent, _("Change the Slicer Studio folder"),
-                           _("Move your projects and studies to the new folder?\n\n{old}\n→ {new}").format(old=oldRoot, new=newRoot),
+                           _("Move your projects, studies and templates to the new folder?\n\n{old}\n→ {new}").format(old=oldRoot, new=newRoot),
                            [_("Move"), _("Keep them where they are"), _("Cancel")])
         if answer in (-1, 2):
             return None

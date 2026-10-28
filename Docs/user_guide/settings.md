@@ -136,7 +136,7 @@ the top bar of Studio also leads to it) controls where and how often your work i
 
 The pause and the interval apply to projects and to recovery copies; **Location**, **Keep**, **Max size** and **Delete
 after** apply to the recovery copies of scenes that are not projects (Classic, studies). **Change…** offers to move the
-projects and studies to the new folder. The buttons **Recover autosaved work…**, **Autosave now** and **Delete all
+projects, studies and templates to the new folder. The buttons **Recover autosaved work…**, **Autosave now** and **Delete all
 autosaves…** (permanent, for closed sessions) are in the panel too. The environment variable
 `SLICER_STUDIO_PROJECTS_ROOT` sets the Slicer Studio folder (the first-start question is then not asked),
 `SLICER_STUDIO_PROJECTS=0` turns projects off, `SLICER_STUDIO_AUTOSAVE_DIR` overrides the recovery location and
