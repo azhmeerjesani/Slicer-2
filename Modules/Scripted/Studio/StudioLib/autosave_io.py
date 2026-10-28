@@ -1710,6 +1710,9 @@ DETACHED_EXTENSIONS = (".nhdr", ".seg.nhdr", ".seq.nhdr", ".mhd", ".hdr", ".vtm"
 #: files only: a .nhdr, a table and its schema or a DICOM series stay where they are)
 MOVABLE_EXTENSIONS = (".nrrd", ".nii", ".nii.gz", ".mha", ".seg.nrrd", ".mrk.json", ".vtk", ".vtp", ".stl", ".obj", ".ply", ".h5", ".tfm",
                       ".ctbl", ".txt")
+#: Files of a 4D image (a volume sequence) that official 3D Slicer 5.12 reads: its vtkMRMLVolumeSequenceStorageNode reads
+#: NRRD only (a 4D NIfTI is read since 5.13). A sequence read from another file is written into the project as .seq.nrrd
+PORTABLE_SEQUENCE_EXTENSIONS = (".seq.nrrd", ".seq.nhdr", ".nrrd", ".nhdr")
 #: File of the project's .studio folder (app state, never shared, never read by official Slicer) that remembers, for the files
 #: of the project that Studio took over from files outside it, the outside file each one came from: a file the user opens
 #: again is then "already open", also after the project saved it (and after a restart)
@@ -2026,6 +2029,8 @@ class ProjectWriter(SlotWriter):
             exists = bool(files) and os.path.isfile(files[0]) and (len(files) == 1 or all(os.path.exists(path) for path in files[1:2]))
             inside = bool(files) and all(_isUnder(_canonical(path), projectCanonical) for path in files)
             self._rememberSource(nodeId, files, projectCanonical)
+            if files and self._needsPortableFile(storageNode, files[0]):
+                modified = True  # a 4D NIfTI: written as .seq.nrrd, never copied (official 3D Slicer 5.12 reads NRRD only)
             if inside and any(self._isTemporaryFile(path) for path in files):
                 modified = True  # left in a temporary folder by an interrupted generation: written into its kind folder
             if not modified and exists and inside:
@@ -2064,6 +2069,16 @@ class ProjectWriter(SlotWriter):
         """
         _base, extension = _projects().splitExtension(os.path.basename(path))
         return extension.lower() in DETACHED_EXTENSIONS
+
+    @staticmethod
+    def _needsPortableFile(storageNode, path):
+        """True for the file of a 4D image that official 3D Slicer 5.12 cannot read as a sequence (a 4D NIfTI): the project
+        writes the sequence through its storage node (.seq.nrrd) instead of keeping or copying that file.
+        """
+        if storageNode is None or not storageNode.IsA("vtkMRMLVolumeSequenceStorageNode"):
+            return False
+        _base, extension = _projects().splitExtension(os.path.basename(path))
+        return extension.lower() not in PORTABLE_SEQUENCE_EXTENSIONS
 
     @staticmethod
     def _movable(path, node):

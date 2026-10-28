@@ -29,7 +29,9 @@ folder "Slicer Studio tést" (spaces and non-ASCII characters). The tests cover:
 - a file from outside that the project took over is "already open" when it is opened again, also after a restart;
 - Studio's own folders (Studies/, Projects/, a project, the Slicer Studio folder) never become a study;
 - moving the Slicer Studio folder into a folder inside it is refused before anything is made;
-- "Save a copy as…" leaves the project as it is: the next save writes nothing again and leaves no stale copy of the scan.
+- "Save a copy as…" leaves the project as it is: the next save writes nothing again and leaves no stale copy of the scan;
+- a 4D NIfTI image is saved as .seq.nrrd (official 3D Slicer 5.12 reads volume sequences from NRRD only), also in a
+  project saved before with a copy of the NIfTI.
 """
 
 import contextlib
@@ -1837,6 +1839,73 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertEqual(os.path.normpath(starts[0]), os.path.normpath(projects.studiesFolder()))
         self.assertEqual(os.path.normpath(starts[1]), os.path.normpath(lastFolder))
         self.assertEqual(os.path.normpath(starts[2]), os.path.normpath(os.path.dirname(recentFolder)))
+
+    def test_38_4d_nifti_is_saved_as_a_sequence_official_5_12_reads(self):
+        """A 4D NIfTI image (fMRI) is saved into the project as .seq.nrrd, never as a copy of the NIfTI: official 3D Slicer
+        5.12 reads volume sequences from NRRD only. A project saved before with Other/<name>.nii.gz is rewritten as well.
+        """
+        import SimpleITK as sitk
+
+        from StudioLib import importer
+
+        frames = []
+        for index in range(4):
+            frame = sitk.GetImageFromArray(np.full((6, 7, 8), (index + 1) * 10.0, np.float32))
+            frame.SetSpacing((2.0, 2.0, 2.0))
+            frames.append(frame)
+        image = sitk.JoinSeries(frames)
+        image.SetSpacing((2.0, 2.0, 2.0, 1.5))
+        source = os.path.join(self.userDir, "sub-02_task-motor_bold.nii.gz")
+        sitk.WriteImage(image, source)
+        sourceMd5 = _md5File(source)
+        service = self._service()
+        importer.loadSequence(source)
+        project = self._projectFor(service)
+        self._save(service)
+        projectPath, scenePath = project.path, project.scenePath
+        files = self._projectFiles(project)
+        self.assertFalse([name for name in files if name.endswith(".nii.gz")], files)
+        sequenceFile = "Other/sub-02_task-motor_bold.seq.nrrd"
+        self.assertIn(sequenceFile, files)
+        with open(os.path.join(projectPath, sequenceFile), "rb") as f:
+            self.assertTrue(f.read(4) == b"NRRD", "official 3D Slicer 5.12 reads it")
+        with open(scenePath, encoding="utf-8") as f:
+            sceneText = f.read()
+        self.assertIn(f'fileName="{sequenceFile}"', sceneText)
+        self.assertNotIn('.nii.gz"', sceneText)
+        sequence = slicer.util.getNodesByClass("vtkMRMLSequenceNode")[0]
+        self.assertFalse(sequence.GetModifiedSinceRead())
+        self.assertEqual(_md5File(source), sourceMd5, "the original is untouched")
+
+        def reopenedFrames():
+            slicer.mrmlScene.Clear(0)
+            self.io.backgroundWriter().drain(10.0)
+            self.assertTrue(service.openProject(projectPath))
+            sequences = slicer.util.getNodesByClass("vtkMRMLSequenceNode")
+            self.assertEqual(len(sequences), 1)
+            values = []
+            for index in range(sequences[0].GetNumberOfDataNodes()):
+                array = slicer.util.arrayFromVolume(sequences[0].GetNthDataNode(index))
+                self.assertEqual(array.shape, (6, 7, 8))
+                values.append(float(array.min()) if array.min() == array.max() else None)
+            return values
+
+        self.assertEqual(reopenedFrames(), [10.0, 20.0, 30.0, 40.0])
+        # A project saved by an earlier version (the sequence kept as Other/<name>.nii.gz) is rewritten on the next save
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        os.remove(os.path.join(projectPath, sequenceFile))
+        shutil.copy2(source, os.path.join(projectPath, "Other", "sub-02_task-motor_bold.nii.gz"))
+        with open(scenePath, "w", encoding="utf-8") as f:
+            f.write(sceneText.replace(f'fileName="{sequenceFile}"', 'fileName="Other/sub-02_task-motor_bold.nii.gz"'))
+        self.assertTrue(service.openProject(projectPath))
+        self._save(service)
+        with open(scenePath, encoding="utf-8") as f:
+            sceneText = f.read()
+        self.assertIn(f'fileName="{sequenceFile}"', sceneText)
+        self.assertNotIn('.nii.gz"', sceneText)
+        self.assertIn(sequenceFile, self._projectFiles(service.project))
+        self.assertEqual(reopenedFrames(), [10.0, 20.0, 30.0, 40.0])
 
 
 def _sphere(center=(0, 0, 0)):
