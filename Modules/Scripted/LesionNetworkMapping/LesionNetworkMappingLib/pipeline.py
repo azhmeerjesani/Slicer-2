@@ -1405,6 +1405,9 @@ class Runner:
         self.started = time.monotonic()
         self.created = _now_iso()
         self.current_outputs = []
+        self.previous = {}  # stage name -> the top-level outputs its saved state listed before this run ran it
+        self.inputs = {}  # stage name -> the fingerprints of its input stages (saved in its state)
+        self.dropped = set()  # stages whose earlier outputs were removed in this run
         self.lock = None
         self.keep_awake = None
         self.plan = None
@@ -1510,12 +1513,14 @@ class Runner:
                     except OSError:
                         pass
             self.stage_records.setdefault(self.current, {}).update({"status": "cancelled"})
+            self._drop_invalidated()
             self._write_pipeline_json("cancelled")
             self._update_run("cancelled")
             self.emit("cancelled", stage=self.current, kept=self.kept, done=exc.done, reason=exc.reason or self.cancel.reason)
             return EXIT_CANCELLED
         except PipelineError as exc:
             if self.run_id:
+                self._drop_invalidated()
                 self._write_pipeline_json("error", error={"code": exc.code, "message": exc.message, "stage": self.current})
                 self._update_run("failed")
             self.emit("error", code=exc.code, message=exc.message, stage=self.current, **exc.fields)
@@ -1525,6 +1530,7 @@ class Runner:
 
             tail = [line for line in traceback.format_exc().splitlines() if line.strip()][-5:]
             if self.run_id:
+                self._drop_invalidated()
                 self._write_pipeline_json("error", error={"code": "exception", "message": f"{type(exc).__name__}: {exc}", "stage": self.current})
                 self._update_run("failed")
             self.emit("error", code="exception", message=f"{type(exc).__name__}: {exc}", stage=self.current, traceback=tail)
@@ -1629,9 +1635,11 @@ class Runner:
         method = getattr(self, f"_stage_{name}")
         started, start_iso = time.monotonic(), _now_iso()
         record = {"name": name, "label": STAGE_LABELS[name], "provider": provider.module, "provider_kind": provider.kind, "provider_sha256": provider.sha256, "mode": _stage_mode(name), "start": start_iso}
+        self.previous[name] = self._saved_outputs(name)
         if not provider.available:
             record.update({"status": "unavailable", "reason": provider.reason, "reused": False})
             self.stage_records[name] = record
+            self._drop_stale(name, None)
             self.fps[name] = f"unavailable:{name}"
             self.stage_event(name, "unavailable", provider.reason)
             if name == "report":
@@ -1653,6 +1661,8 @@ class Runner:
         })
         self.stage_records[name] = record
         self.results[name] = outcome.get("result") or {}
+        self._drop_stale(name, record["outputs"] if status in ("done", "reused") else None)
+        self.current_outputs = []  # a stop between stages must not delete the outputs of this completed stage
         if status in ("done", "reused"):
             self.kept.append(name)
         if status in ("failed", "blocked", "error"):
@@ -1677,7 +1687,8 @@ class Runner:
     def _cached(self, name, params, deps=()):
         """(fingerprint, reusable outcome or None) of a stage."""
         provider = self.providers[name]
-        fp = fingerprint({"stage": name, "provider": provider.module, "provider_sha256": provider.sha256, "parameters": params, "inputs": {dep: self.fps.get(dep) for dep in deps}})
+        self.inputs[name] = {dep: self.fps.get(dep) for dep in deps}
+        fp = fingerprint({"stage": name, "provider": provider.module, "provider_sha256": provider.sha256, "parameters": params, "inputs": self.inputs[name]})
         self.fps[name] = fp
         state = self._reusable(name, fp)
         if state is None:
@@ -1694,7 +1705,7 @@ class Runner:
             if path and os.path.isfile(path):
                 sizes[self.rel(path)] = os.path.getsize(path)
         provider = self.providers[name]
-        state = {"fingerprint": fp, "provider": provider.module, "provider_sha256": provider.sha256, "status": "done", "outputs": sizes, "start": start, "end": _now_iso(), "result": result,
+        state = {"fingerprint": fp, "provider": provider.module, "provider_sha256": provider.sha256, "status": "done", "outputs": sizes, "inputs": self.inputs.get(name), "start": start, "end": _now_iso(), "result": result,
                  "child_run_id": child_run_id, "events_tail": [self._portable(jobs.to_json(event)) for event in (events or [])[-10:]]}
         jobs.write_json_atomic(self._state_path(name), state)
         return {"status": "done", "fingerprint": fp, "result": result, "outputs_rel": sizes, "child_run_id": child_run_id}
@@ -1702,6 +1713,68 @@ class Runner:
     def _skip(self, name, reason, status="skipped"):
         self.fps[name] = f"{status}:{reason}"
         return {"status": status, "reason": reason, "result": {"reason": reason}}
+
+    # Stale outputs: files of an earlier run that this run did not make must never pass for its results
+
+    def _saved_outputs(self, name):
+        """The files directly in the output folder that the saved state of a stage lists (its group maps, tables, report...)."""
+        state = _read_json(self._state_path(name)) or {}
+        if state.get("status") != "done":
+            return []
+        return [path for path in state.get("outputs") or {} if isinstance(path, str) and path and "/" not in path and "\\" not in path and path not in (".", "..")]
+
+    def _drop_stale(self, name, keep):
+        """Remove the outputs of a stage's earlier run that this run neither wrote nor reused: all of them for a skipped,
+        unavailable, failed or stopped stage (``keep`` None; its saved state goes too), else those it no longer makes (``keep``:
+        this run's outputs; a map or a table of another design). Only files directly in the output folder: stage folders and
+        caches stay.
+        """
+        kept = set()
+        if keep is not None:
+            kept = {os.path.normcase(self.absp(path)) for path in keep} | {os.path.normcase(os.path.abspath(path)) for path in self.current_outputs}
+        else:
+            try:
+                os.remove(self._state_path(name))  # it would list outputs that are gone
+            except OSError:
+                pass
+        for path in self.previous.pop(name, None) or ():
+            full = self.absp(path)
+            if os.path.normcase(full) in kept:
+                continue
+            try:
+                os.remove(full)
+                self.dropped.add(name)
+            except OSError:
+                pass
+
+    def _drop_invalidated(self):
+        """After a stop or an error: drop the earlier outputs of the stopped stage and of the stages after it whose inputs changed
+        in this run (their saved fingerprints no longer match: a later run recomputes them). The other completed stages stay.
+        """
+        known = {name: fp for name, fp in self.fps.items() if name in self.stage_records}  # the fingerprints of this run
+        changed = any(not record.get("reused") and (record.get("status") not in ("skipped", "unavailable") or name in self.dropped)
+                      for name, record in self.stage_records.items() if name != "prepare")
+        for name, _label in STAGES[1:-1]:
+            if name in self.stage_records and name != self.current:
+                continue  # it ran in this run (stale outputs were dropped then)
+            state = _read_json(self._state_path(name)) or {}
+            if state.get("status") != "done":
+                if name == self.current:
+                    self._drop_stale(name, None)  # stopped while it computed: its saved state was not reusable
+                    changed = True
+                continue
+            inputs = state.get("inputs")
+            if isinstance(inputs, dict):
+                valid = all(dep not in known or known[dep] == fp for dep, fp in inputs.items())
+            else:
+                valid = not changed  # a state saved before the input fingerprints were kept: stale once anything earlier changed
+            if valid:
+                known[name] = state.get("fingerprint")
+                continue
+            known[name] = None
+            changed = True
+            self.previous[name] = self._saved_outputs(name)
+            self._drop_stale(name, None)
 
     # Child jobs
 
@@ -3090,6 +3163,22 @@ class Runner:
 
     # pipeline.json
 
+    def _current_outputs(self, status):
+        """Relative paths of the outputs of the stages that ran (or were reused) in this run; once the run has stopped or failed,
+        also those of the later stages whose saved results are still valid (:meth:`_drop_invalidated`). Never files of earlier
+        runs that this run made stale.
+        """
+        out = set()
+        for record in self.stage_records.values():
+            if record.get("status") in ("done", "reused"):
+                out |= set(record.get("outputs") or {})
+        if status in ("cancelled", "error"):
+            for name, _label in STAGES[1:-1]:
+                state = _read_json(self._state_path(name)) or {}
+                if state.get("status") == "done":
+                    out |= set(state.get("outputs") or {})
+        return out
+
     def _write_pipeline_json(self, status, error=None):
         if not getattr(self, "plan", None):
             return
@@ -3110,9 +3199,9 @@ class Runner:
         groups = collections.Counter(row["group"] for row in mapped)
         overlap = self.results.get("overlap") or {}
         group_outputs = []
-        for name in sorted(os.listdir(self.out)) if os.path.isdir(self.out) else []:
+        for name in sorted(self._current_outputs(status)):
             match = re.match(r"group_conn-[A-Za-z0-9]+_desc-([A-Za-z0-9]+)_map\.nii\.gz$", name)
-            if not match:
+            if not match or not os.path.isfile(self.path(name)):
                 continue
             sidecar = _read_json(self.path(name[: -len(".nii.gz")] + ".json")) or {}
             group_outputs.append({"desc": match.group(1), "path": name, "sidecar": name[: -len(".nii.gz")] + ".json", "kind": sidecar.get("kind"), "sign": sidecar.get("sign"), "rule_tag": sidecar.get("rule_tag"),
@@ -3136,8 +3225,9 @@ class Runner:
             record.setdefault("reason", planned.get("reason"))
             record.setdefault("estimate_s", planned.get("estimate_s"))
             stages.append(record)
-        specificity = self.results.get("specificity") or {}
-        conj = self.results.get("conjunction") or {}
+        kept = {name for name, record in self.stage_records.items() if record.get("status") in ("done", "reused")}
+        specificity = (self.results.get("specificity") or {}) if "specificity" in kept else {}  # a skipped stage's result is only its reason
+        conj = (self.results.get("conjunction") or {}) if "conjunction" in kept else {}
         export_result = self.results.get("export") or {}
         package = export_result.get("package") or {}
         content = {

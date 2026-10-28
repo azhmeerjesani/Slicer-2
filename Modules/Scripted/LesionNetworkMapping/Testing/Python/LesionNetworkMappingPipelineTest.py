@@ -681,6 +681,62 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         self.assertEqual(code, 3, stderr[-2000:])
         self.assertGreaterEqual(resumed["first"], cursor - 1, "the GLM resumes from its cursor")
 
+    def test_no_stale_group_maps_after_skip_or_stop(self):
+        """GLM and conjunction maps of an earlier run never pass for the results of a run that skipped or stopped those stages."""
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f-stale"))
+        out = fx["out"]
+        stale = ("caseVsControl", "conj")
+
+        def check(label, status):
+            data = read_json(os.path.join(out, pipeline.PIPELINE_JSON))
+            self.assertEqual(data["status"], status, label)
+            listed = [item["desc"] for item in data["outputs"]["group"]]
+            self.assertIn("overlapPctPos", listed, label)
+            self.assertFalse([desc for desc in listed if desc.startswith(stale)], f"{label}: pipeline.json lists maps of an earlier run")
+            self.assertFalse([name for name in os.listdir(out) if name.startswith(("group_conn-", "clusters_")) and any(word in name for word in stale)], f"{label}: stale maps or tables left")
+            self.assertFalse([key for key in data["outputs"]["clusters"] or {} if key.startswith(stale)], label)
+            self.assertIsNone(data["cohort"]["conjunction"], label)
+            for item in data["outputs"]["group"]:
+                self.assertTrue(os.path.isfile(os.path.join(out, item["path"])), item)
+            return data
+
+        full = run_args(fx, *FAST, "--scores", "none", "--no-report")
+        code, _events, _stdout, stderr, _wall = cli(*full)
+        self.assertEqual(code, 0, stderr[-2000:])
+        self.assertTrue({"conjPos", "conjNeg"} <= {item["desc"] for item in read_json(os.path.join(out, pipeline.PIPELINE_JSON))["outputs"]["group"]})
+        self.assertTrue(os.path.isfile(os.path.join(out, "clusters_conjPos.tsv")))
+        # Specificity off: the GLM and the conjunction are skipped, and their earlier maps and cluster tables go
+        code, events, _stdout, stderr, _wall = cli(*full, "--specificity", "off")
+        self.assertEqual(code, 0, stderr[-2000:])
+        self.assertEqual((stage_status(events)["specificity"], stage_status(events)["conjunction"]), ("skipped", "skipped"))
+        data = check("specificity off", "done")
+        self.assertIsNone(data["cohort"]["specificity"])
+        self.assertIn("meanT", data["outputs"]["clusters"])
+        # Stopped while the GLM recomputes (another permutation count): its earlier maps and the stages built on them go,
+        # the overlap maps of this run stay listed, and the next run recomputes everything that went
+        code, _events, _stdout, stderr, _wall = cli(*full)
+        self.assertEqual(code, 0, stderr[-2000:])
+        self.assertTrue(os.path.isfile(os.path.join(out, "group_conn-Synthetic_desc-conjPos_map.nii.gz")))
+        stopped = {}
+
+        def on_event(event, process):
+            if "at" not in stopped and event["event"] == "progress" and event.get("stage") == "specificity" and event.get("child_stage") == "permutations":
+                open(os.path.join(out, pipeline.PRIVATE_DIR, pipeline.STOP_NAME), "w").close()
+                stopped["at"] = True
+
+        slow = [arg if arg != "1000" else "60000" for arg in full]
+        code, _events, _stdout, stderr, _wall = cli(*slow, on_event=on_event)
+        self.assertIn("at", stopped)
+        self.assertEqual(code, 3, stderr[-2000:])
+        check("stopped during the GLM", "cancelled")
+        self.assertFalse(os.path.exists(os.path.join(out, "qa.json")), "the quality checks of the earlier GLM are stale")
+        code, events, _stdout, stderr, _wall = cli(*full)
+        self.assertEqual(code, 0, stderr[-2000:])
+        status = stage_status(events)
+        self.assertEqual([status[name] for name in ("overlap", "specificity", "conjunction", "clusters")], ["reused", "done", "done", "done"])
+        listed = {item["desc"] for item in read_json(os.path.join(out, pipeline.PIPELINE_JSON))["outputs"]["group"]}
+        self.assertTrue({"conjPos", "caseVsControlTstat"} <= listed, listed)
+
     def test_parent_pid_watchdog(self):
         out = os.path.join(self.tmp, "parent")
         per_lesion = cohortmaps.lesion_pass_bytes(self.bundle.n_voxels, 50, engine_null_voxels(self.bundle))
