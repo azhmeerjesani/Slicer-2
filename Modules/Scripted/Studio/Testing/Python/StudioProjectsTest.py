@@ -28,7 +28,8 @@ folder "Slicer Studio tést" (spaces and non-ASCII characters). The tests cover:
 - a scene file that another program changed is kept: Studio writes "<project> (Slicer Studio).mrml" next to it;
 - a file from outside that the project took over is "already open" when it is opened again, also after a restart;
 - Studio's own folders (Studies/, Projects/, a project, the Slicer Studio folder) never become a study;
-- moving the Slicer Studio folder into a folder inside it is refused before anything is made.
+- moving the Slicer Studio folder into a folder inside it is refused before anything is made;
+- "Save a copy as…" leaves the project as it is: the next save writes nothing again and leaves no stale copy of the scan.
 """
 
 import contextlib
@@ -1589,6 +1590,67 @@ class StudioProjectsTest(unittest.TestCase):
             qt.QSettings().remove(projects.ROOT_CHOSEN_KEY)
             os.environ[projects.ROOT_ENVIRONMENT] = self.root
 
+
+
+    def test_33_save_a_copy_leaves_the_project_unchanged(self):
+        """"Save a copy as…" writes the .mrb without marking the data "modified since read": the next project save does not
+        write every node again (the scan opened as .nii.gz was written as a second .nrrd and the scene pointed at it, the
+        .nii.gz stayed in Images/ unreferenced), and the scan stays the byte-for-byte copy. Data that was not saved yet stays
+        modified. The copy is a bundle that official Slicer loads.
+        """
+        from StudioLib import projects_ui
+
+        service = self._service()
+        volume, scanPath = self._userVolume()
+        segmentation, _segmentId, _array = self._lesion(volume)
+        project = self._projectFor(service)
+        self._save(service)
+        scan = os.path.join(project.path, "Images", "sub-012_T1w.nii.gz")
+        self.assertEqual(_md5File(scan), _md5File(scanPath), "Images/ holds a byte-for-byte copy of the scan")
+        before = self._projectFiles(project)
+        copyPath = os.path.join(self.tempDir, "A copy.mrb")
+        running = self.autosave._service
+        self.autosave._service = service
+        try:
+            self.assertEqual(projects_ui.saveCopyAs(copyPath), copyPath)
+        finally:
+            self.autosave._service = running
+        self.assertTrue(os.path.isfile(copyPath))
+        self.assertEqual(slicer.mrmlScene.GetURL(), project.scenePath, "the scene stays in its project")
+        self.assertFalse(slicer.mrmlScene.GetStorableNodesModifiedSinceRead(), "the copy does not mark the data as unsaved")
+        self._save(service)
+        self.assertEqual(self._projectFiles(project), before, "nothing new, nothing stale in the project")
+        self.assertEqual(_md5File(scan), _md5File(scanPath), "the scan stays the copy that was made when it was opened")
+        with open(project.scenePath, encoding="utf-8") as f:
+            sceneText = f.read()
+        self.assertIn('fileName="Images/sub-012_T1w.nii.gz"', sceneText, "the scene still points at the scan that was copied")
+        self.assertNotIn("sub-012_T1w.nrrd", sceneText)
+        self.assertFalse([path for path in _relativeFiles(project.path) if path.startswith(".studio/removed/")])
+        # The copy has the data and the scene (a bundle of the official writer: a scene file and a Data folder)
+        import zipfile
+
+        with zipfile.ZipFile(copyPath) as archive:
+            names = archive.namelist()
+        self.assertTrue(any(name.endswith(".mrml") for name in names), names)
+        self.assertTrue(any(name.endswith(".seg.nrrd") for name in names), names)
+        self.assertTrue(any("sub-012_T1w" in name for name in names), names)
+        # Not saved yet stays modified: written by the next save, as before
+        segmentation.GetSegmentation().GetNthSegment(0).SetName("Renamed")
+        segmentation.StorableModified()
+        self.assertTrue(segmentation.GetModifiedSinceRead())
+        self.assertTrue(projects_ui.writeBundleKeepingState(slicer.mrmlScene, os.path.join(self.tempDir, "Second copy.mrb")))
+        self.assertTrue(segmentation.GetModifiedSinceRead(), "data that was not saved yet is still to be saved")
+        self.assertFalse(volume.GetModifiedSinceRead())
+        self.assertEqual(slicer.mrmlScene.GetURL(), os.path.join(self.tempDir, "Second copy.mrb"))  # (saveCopyAs restores it)
+        slicer.mrmlScene.SetURL(project.scenePath)
+        slicer.mrmlScene.SetRootDirectory(project.path)
+        self._save(service)
+        self.assertEqual([path for path in self._projectFiles(project) if path.endswith(".nrrd") and "sub-012_T1w" in path], [])
+        self.assertTrue(os.path.isfile(scan))
+        # An unwritable folder is an error, not a crash
+        self.assertFalse(projects_ui.writeBundleKeepingState(slicer.mrmlScene, os.path.join(self.tempDir, "missing folder", "x.mrb")))
+        slicer.mrmlScene.SetURL(project.scenePath)
+        slicer.mrmlScene.SetRootDirectory(project.path)
 
 
 def _sphere(center=(0, 0, 0)):

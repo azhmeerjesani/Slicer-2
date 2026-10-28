@@ -416,6 +416,49 @@ def saveCopyStartFolder():
     return qt.QDir.homePath()
 
 
+def writeBundleKeepingState(scene, path):
+    """Write the whole scene as one .mrb file like ``slicer.util.saveScene`` does, but without marking the data "modified".
+
+    The official scene writer (``vtkSlicerSceneWriter::WriteToMRB``) marks every storable node "modified since read" after the
+    bundle is written, because it restores the old file names while the bundle holds the data. For a project that is wrong:
+    the files of the project are unchanged, and the next project save would write every node again (a scan opened as
+    .nii.gz became a second, unreferenced .nrrd file in Images/). This calls ``vtkMRMLScene::WriteToMRB`` directly (what the
+    writer calls, with no screenshot, as ``slicer.util.saveScene`` does) and marks only the nodes that were already modified.
+    Returns True if the bundle was written; failures are logged as ``slicer.util.saveScene`` logs them.
+    """
+    import logging
+
+    import vtk
+
+    path = os.path.abspath(path)
+    folder = os.path.dirname(path)
+    messages = slicer.vtkMRMLMessageCollection()
+    modified = vtk.vtkCollection()
+    scene.GetStorableNodesModifiedSinceRead(modified)
+    modifiedIds = [modified.GetItemAsObject(i).GetID() for i in range(modified.GetNumberOfItems())]
+    success = False
+    if not os.access(folder, os.W_OK):
+        messages.AddMessage(vtk.vtkCommand.ErrorEvent, f"Failed to save scene as {path} (path {folder} is not writeable)")
+    else:
+        # The scene file name of the bundle is the copy's (the caller restores the project's)
+        scene.SetURL(path)
+        scene.SetRootDirectory(folder)
+        try:
+            success = bool(scene.WriteToMRB(path, None, messages))
+        finally:
+            # Writing the data bundle made the nodes look written: the ones that were not saved yet are still to be saved
+            for nodeId in modifiedIds:
+                node = scene.GetNodeByID(nodeId)
+                if node is not None:
+                    node.StorableModified()
+    if not success:
+        text = f"Failed to save scene to file: {path}"
+        if messages.GetNumberOfMessages() > 0:
+            text += "\n" + messages.GetAllMessagesAsString()
+        logging.error(text)
+    return success
+
+
 def saveCopyAs(path=None):
     """Save a copy as… (Export): the whole scene as one .mrb file anywhere. The project stays where it is."""
     service = _service()
@@ -434,7 +477,7 @@ def saveCopyAs(path=None):
     url, rootDirectory = scene.GetURL(), scene.GetRootDirectory()
     try:
         with slicer.util.WaitCursor():
-            slicer.util.saveScene(path)
+            writeBundleKeepingState(scene, path)
     finally:
         # Writing a .mrb points the scene at the bundle: the scene stays in its project
         scene.SetURL(url)
