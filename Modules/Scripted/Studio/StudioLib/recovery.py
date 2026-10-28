@@ -24,6 +24,7 @@ import slicer
 from slicer.i18n import tr as _
 
 from . import autosave_io as io
+from . import ui
 
 #: A locked session whose heartbeat is older than this is "possibly crashed" (its PID was reused)
 STALE_HEARTBEAT_S = 2 * 3600
@@ -680,12 +681,14 @@ class RecoveryDialog(qt.QDialog):
         self.setObjectName("StudioRecoveryDialog")
         self.setWindowTitle(_("Recover unsaved work"))
         self.setModal(False)
-        self.resize(760, 360)
+        self.resize(760, 460)
         self._slots = {}
         layout = qt.QVBoxLayout(self)
-        self.textLabel = qt.QLabel()
-        self.textLabel.setWordWrap(True)
-        layout.addWidget(self.textLabel)
+        layout.setContentsMargins(24, 24, 24, 22)
+        layout.setSpacing(14)
+        # Header (VISUAL 4.7): the icon tile beside the title and the body text, which says why the dialog is shown
+        header, self.titleLabel, self.textLabel = ui.dialogHeader("archive-restore", _("Recover unsaved work"), " ", "StudioRecovery")
+        layout.addLayout(header)
         self.list = qt.QTreeWidget()
         self.list.setObjectName("StudioRecoveryList")
         self.list.setColumnCount(4)
@@ -698,39 +701,55 @@ class RecoveryDialog(qt.QDialog):
         self.list.connect("itemSelectionChanged()", self._updateButtons)
         self.list.connect("itemDoubleClicked(QTreeWidgetItem*,int)", lambda item, column: self.onRecover())
         layout.addWidget(self.list, 1)
-        self.missingLabel = qt.QLabel()
-        self.missingLabel.setWordWrap(True)
+        # Shown instead of the list when nothing was autosaved
+        self.emptyLabel = ui.label(_("Nothing was autosaved yet. Slicer Studio saves your open work in the background."), "body", "text3",
+                                   "StudioRecoveryEmpty", wrap=True)
+        self.emptyLabel.setAlignment(qt.Qt.AlignCenter)
+        self.emptyLabel.hide()
+        layout.addWidget(self.emptyLabel, 1)
+        self.missingLabel = ui.label("", "caption", "text3", "StudioRecoveryMissing", wrap=True)
         self.missingLabel.hide()
         layout.addWidget(self.missingLabel)
+        # Footer (VISUAL 4.7): the links on the left, the single primary button on the right
         buttons = qt.QHBoxLayout()
-        self.settingsLink = qt.QLabel(f"<a href='settings'>{_('Autosave settings…')}</a>")
-        self.settingsLink.connect("linkActivated(QString)", lambda link: self.onSettings())
+        buttons.setSpacing(10)
+        self.settingsLink = ui.linkButtonWidget(_("Autosave settings…"), self.onSettings, "StudioRecoverySettingsLink")
         buttons.addWidget(self.settingsLink)
-        self.openFolderButton = qt.QPushButton(_("Open autosave folder"))
-        self.openFolderButton.connect("clicked()", self.onOpenFolder)
+        buttons.addSpacing(6)
+        self.openFolderButton = ui.linkButtonWidget(_("Open autosave folder"), self.onOpenFolder, "StudioRecoveryOpenFolderLink")
         buttons.addWidget(self.openFolderButton)
         buttons.addStretch(1)
         self.discardButton = qt.QPushButton(_("Discard…"))
         self.discardButton.setObjectName("StudioRecoveryDiscardButton")
+        self.discardButton.setMinimumHeight(36)
+        ui.setRole(self.discardButton, "secondary")
         self.discardButton.connect("clicked()", self.onDiscard)
         buttons.addWidget(self.discardButton)
         self.laterButton = qt.QPushButton(_("Later"))
         self.laterButton.setObjectName("StudioRecoveryLaterButton")
+        self.laterButton.setMinimumHeight(36)
+        ui.setRole(self.laterButton, "secondary")
         self.laterButton.connect("clicked()", self.close)
         buttons.addWidget(self.laterButton)
         self.recoverButton = qt.QPushButton(_("Recover"))
         self.recoverButton.setObjectName("StudioRecoveryRecoverButton")
         self.recoverButton.setDefault(True)
+        self.recoverButton.setMinimumHeight(36)
+        self.recoverButton.setMinimumWidth(96)
+        ui.setRole(self.recoverButton, "primary")
         self.recoverButton.connect("clicked()", self.onRecover)
         buttons.addWidget(self.recoverButton)
         layout.addLayout(buttons)
+        # Dialog chrome (VISUAL 4.7). Non-modal, so without the backdrop: the main window stays usable behind it
+        ui.dialogChrome(self, backdrop=False, styleSheet=self._styleSheet)
         self.startup = False
         self.root = None
 
     def setSessions(self, sessions, startup=False, root=None):
         self.startup = startup
         self.root = root
-        self.textLabel.setText(_("Slicer did not close normally. Work from these sessions was autosaved:") if startup else _("Autosaved work"))
+        self.textLabel.setText(_("Slicer did not close normally. Work from these sessions was autosaved:") if startup
+                               else _("Work that Slicer Studio autosaved. Recover what you need and discard the rest."))
         self.laterButton.setText(_("Later") if startup else _("Close"))
         self.list.clear()
         self._slots = {}
@@ -758,7 +777,15 @@ class RecoveryDialog(qt.QDialog):
         self.list.header().setSectionResizeMode(1, qt.QHeaderView.Stretch)
         if self.list.topLevelItemCount > 0:
             self.list.setCurrentItem(self.list.topLevelItem(0))
+        empty = self.list.topLevelItemCount == 0
+        self.list.setVisible(not empty)
+        self.emptyLabel.setVisible(empty)
         self._updateButtons()
+
+    @staticmethod
+    def _styleSheet():
+        return (f"QTreeWidget#StudioRecoveryList {{ background-color: {ui.token('card-low').name()}; border: 1px solid {ui.token('hairline').name()};"
+                " border-radius: 10px; padding: 2px; }")
 
     def currentSlot(self):
         item = self.list.currentItem()

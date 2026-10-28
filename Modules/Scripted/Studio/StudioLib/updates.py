@@ -1713,10 +1713,39 @@ def _notesBrowser(notes, maximumHeight=220):
     browser.setOpenExternalLinks(True)
     if notes and hasattr(browser, "setMarkdown"):
         browser.setMarkdown(notes)
+        _flattenHeadings(browser)
     else:
         browser.setPlainText(notes or _("No release notes."))
     browser.setMaximumHeight(maximumHeight)
     return browser
+
+
+def _flattenHeadings(browser):
+    """Show the headings of Markdown release notes at the body size in the semibold weight: the default sizes (up to twice the
+    body) would make "What's new" larger than the title of the dialog.
+    """
+    import qt
+
+    document = browser.document
+    block = document.begin()
+    while block.isValid():
+        if block.blockFormat().headingLevel() > 0:
+            cursor = qt.QTextCursor(block)
+            cursor.movePosition(qt.QTextCursor.EndOfBlock, qt.QTextCursor.KeepAnchor)
+            charFormat = qt.QTextCharFormat()
+            charFormat.setProperty(qt.QTextFormat.FontSizeAdjustment, 0)
+            charFormat.setFontWeight(qt.QFont.DemiBold)
+            cursor.mergeCharFormat(charFormat)
+        block = block.next()
+
+
+def _dialogStyleSheet():
+    """The rules of the update dialogs inside the dialog chrome."""
+    from StudioLib import ui
+
+    return (f"QTextBrowser#StudioUpdateNotes {{ background-color: {ui.token('card-low').name()}; border: 1px solid {ui.token('hairline').name()};"
+            " border-radius: 10px; padding: 6px 8px; }"
+            f"QLabel#StudioUpdateStatus {{ color: {ui.token('text2').name()}; }}")
 
 
 def _progressText(received, total):
@@ -1742,20 +1771,18 @@ class RequiredUpdateDialog:
         self.dialog.setModal(True)
         self.dialog.setMinimumWidth(480)
         layout = qt.QVBoxLayout(self.dialog)
-        layout.setContentsMargins(20, 18, 20, 16)
-        layout.setSpacing(10)
-        title = qt.QLabel(_("Update to Slicer Studio {version}").format(version=status.version))
-        title.setObjectName("StudioRequiredUpdateTitle")
-        ui._font(title, ui.fontPx(16), qt.QFont.DemiBold)
-        layout.addWidget(title)
+        layout.setContentsMargins(24, 24, 24, 22)
+        layout.setSpacing(14)
         if status.belowMinimum:
             text = _("This version ({current}) is no longer supported. Slicer Studio {version} is required to continue.")
         else:
             text = _("Slicer Studio {version} is a required update (you have {current}).")
-        self.text = qt.QLabel(text.format(version=status.version, current=status.currentVersion) + " "
-                              + _("Slicer Studio downloads it, checks it and restarts. Your settings and autosaved work are kept."))
-        self.text.setWordWrap(True)
-        layout.addWidget(self.text)
+        body = text.format(version=status.version, current=status.currentVersion) + " " + _(
+            "Slicer Studio downloads it, checks it and restarts. Your settings and autosaved work are kept.")
+        # Header (VISUAL 4.7): the icon tile beside the title and the body text
+        header, self.titleLabel, self.text = ui.dialogHeader(
+            "download", _("Update to Slicer Studio {version}").format(version=status.version), body, "StudioRequiredUpdate")
+        layout.addLayout(header)
         layout.addWidget(_notesBrowser(status.manifest.notes))
         self.progress = qt.QProgressBar()
         self.progress.setObjectName("StudioUpdateProgress")
@@ -1767,19 +1794,23 @@ class RequiredUpdateDialog:
         self.statusLabel.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
         self.statusLabel.setVisible(False)
         layout.addWidget(self.statusLabel)
+        # Footer (VISUAL 4.7): the link on the left, the single primary button on the right
         buttons = qt.QHBoxLayout()
-        buttons.addStretch(1)
-        self.quitButton = qt.QPushButton(_("Quit"))
-        self.quitButton.setObjectName("StudioRequiredUpdateQuitButton")
-        self.quitButton.connect("clicked()", self.quit)
+        buttons.setSpacing(10)
+        self.quitButton = ui.linkButtonWidget(_("Quit"), self.quit, "StudioRequiredUpdateQuitButton")
         buttons.addWidget(self.quitButton)
+        buttons.addStretch(1)
         self.updateButton = qt.QPushButton(_("Update now"))
         self.updateButton.setObjectName("StudioRequiredUpdateNowButton")
         self.updateButton.setDefault(True)
+        self.updateButton.setMinimumHeight(36)
+        self.updateButton.setMinimumWidth(96)
         ui.setRole(self.updateButton, "primary")
         self.updateButton.connect("clicked()", self.onUpdateClicked)
         buttons.addWidget(self.updateButton)
         layout.addLayout(buttons)
+        # Dialog chrome (VISUAL 4.7): frameless, rounded, bordered, over a backdrop
+        ui.dialogChrome(self.dialog, styleSheet=_dialogStyleSheet)
         self._filter = _EscapeCloseFilter.create()
         self.dialog.installEventFilter(self._filter)
         # Esc and the close button are filtered; anything else that ends the dialog (reject(), done()) shows it again
@@ -1923,31 +1954,35 @@ class UpdateDialog:
         self.dialog.setWindowTitle(_("Update Slicer Studio"))
         self.dialog.setMinimumWidth(460)
         layout = qt.QVBoxLayout(self.dialog)
-        layout.setContentsMargins(20, 18, 20, 16)
-        layout.setSpacing(10)
-        self.title = qt.QLabel(_("Slicer Studio {version}").format(version=status.version if status else "?"))
-        ui._font(self.title, ui.fontPx(16), qt.QFont.DemiBold)
-        layout.addWidget(self.title)
-        self.text = qt.QLabel()
+        layout.setContentsMargins(24, 24, 24, 22)
+        layout.setSpacing(14)
+        header, self.title, self.text = ui.dialogHeader(
+            "download", _("Slicer Studio {version}").format(version=status.version if status else "?"), " ", "StudioUpdate")
         self.text.setObjectName("StudioUpdateStatus")
-        self.text.setWordWrap(True)
         self.text.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
-        layout.addWidget(self.text)
+        layout.addLayout(header)
         self.progress = qt.QProgressBar()
         self.progress.setObjectName("StudioUpdateProgress")
         layout.addWidget(self.progress)
         buttons = qt.QHBoxLayout()
+        buttons.setSpacing(10)
         buttons.addStretch(1)
         self.secondaryButton = qt.QPushButton(_("Cancel"))
         self.secondaryButton.setObjectName("StudioUpdateSecondaryButton")
+        self.secondaryButton.setMinimumHeight(36)
+        ui.setRole(self.secondaryButton, "secondary")
         self.secondaryButton.connect("clicked()", self.onSecondary)
         buttons.addWidget(self.secondaryButton)
         self.primaryButton = qt.QPushButton(_("Restart now"))
         self.primaryButton.setObjectName("StudioUpdatePrimaryButton")
+        self.primaryButton.setMinimumHeight(36)
+        self.primaryButton.setMinimumWidth(96)
         ui.setRole(self.primaryButton, "primary")
         self.primaryButton.connect("clicked()", self.onPrimary)
         buttons.addWidget(self.primaryButton)
         layout.addLayout(buttons)
+        # Dialog chrome (VISUAL 4.7). Non-modal, so without the backdrop: the main window stays usable behind it
+        ui.dialogChrome(self.dialog, backdrop=False, styleSheet=_dialogStyleSheet)
 
     def show(self):
         self.dialog.show()

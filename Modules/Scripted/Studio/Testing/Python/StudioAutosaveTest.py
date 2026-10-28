@@ -1170,6 +1170,32 @@ class StudioAutosaveTest(unittest.TestCase):
             else:
                 os.environ[projects.ROOT_ENVIRONMENT] = environment
 
+    def test_z_recoveryDialogChrome(self):
+        """VISUAL 4.7: the recovery dialog has the Studio dialog chrome, the header with the icon tile, a link on the left, one
+        primary button on the right, and an empty state instead of an empty list.
+        """
+        from StudioLib import recovery
+
+        dialog = recovery.RecoveryDialog()
+        try:
+            self.assertTrue(dialog.property("studioDialogChrome"))
+            self.assertTrue(dialog.windowFlags() & qt.Qt.FramelessWindowHint)
+            self.assertFalse(dialog.isModal())
+            tile = dialog.findChild(qt.QLabel, "StudioRecoveryIcon")
+            self.assertEqual((tile.width, tile.height), (40, 40))
+            self.assertEqual(dialog.titleLabel.text, "Recover unsaved work")
+            self.assertEqual(dialog.recoverButton.property("slicerRole"), "primary")
+            self.assertEqual(dialog.settingsLink.property("studioLink"), True)
+            self.assertIn("Autosave settings", dialog.settingsLink.text)
+            dialog.setSessions([], startup=False, root=self.root)
+            dialog.show()
+            self.assertTrue(dialog.emptyLabel.isVisible())
+            self.assertFalse(dialog.list.isVisible())
+            self.assertFalse(dialog.recoverButton.enabled)
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+
     def test_y_removedNodesAreFreed(self):
         """BB-1: every helper that lists scene nodes (private autosave poll and generation, project save, recovery,
         projects and Lesion Network Mapping helpers) must release the collection that GetNodesByClass returns;

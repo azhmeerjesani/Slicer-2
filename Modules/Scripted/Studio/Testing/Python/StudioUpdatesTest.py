@@ -766,6 +766,50 @@ fi
         self.assertEqual(closes, [True])
         self.assertIsNone(service.prepared)
 
+    def test_DialogChrome(self):
+        """VISUAL 4.7: the required-update dialog and the update progress dialog have the Studio dialog chrome, a 40 px icon
+        tile beside an 18/600 title, one primary button, and Markdown headings of the notes do not outgrow the title.
+        """
+        from StudioLib import ui
+
+        self._publish("1.2.1", required=True, notes="# Release\n\n## What's new\n\n- Fix.")
+        self.updates._installableOverride = True
+        service = self._service()
+        called = self._startup(service)
+        self.assertTrue(self._waitFor(lambda: service.requiredDialog is not None and service.requiredDialog.isVisible(), 10))
+        dialog = service.requiredDialog
+        qd = dialog.dialog
+        optional = self.updates.UpdateDialog(service, qd.parentWidget())
+        self.addCleanup(optional.dispose)
+        for chromed in (qd, optional.dialog):
+            self.assertTrue(chromed.property("studioDialogChrome"), chromed.objectName)
+            self.assertTrue(chromed.windowFlags() & qt.Qt.FramelessWindowHint, chromed.objectName)
+            tile = [w for w in chromed.findChildren("QLabel") if w.objectName.endswith("Icon")]
+            self.assertEqual(len(tile), 1, chromed.objectName)
+            self.assertEqual((tile[0].width, tile[0].height), (40, 40))
+            self.assertEqual(tile[0].property("slicerRole"), "iconTile")
+        title = qd.findChild(qt.QLabel, "StudioRequiredUpdateTitle")
+        self.assertEqual(title.font.pixelSize(), ui.fontPx(18))
+        self.assertEqual(dialog.updateButton.property("slicerRole"), "primary")
+        # The notes: no heading is larger than the title of the dialog
+        notes = qd.findChild(qt.QTextBrowser, "StudioUpdateNotes")
+        block = notes.document.begin()
+        headings = 0
+        while block.isValid():
+            if block.blockFormat().headingLevel() > 0:
+                headings += 1
+                cursor = qt.QTextCursor(block)
+                cursor.movePosition(qt.QTextCursor.NextCharacter)
+                self.assertLessEqual(cursor.charFormat().font().pointSizeF(), notes.font.pointSizeF() + 0.01, block.text())
+            block = block.next()
+        self.assertEqual(headings, 2)
+        # Esc and close stay filtered with the frameless window, and it comes back
+        qt.QApplication.sendEvent(qd, qt.QKeyEvent(qt.QEvent.KeyPress, qt.Qt.Key_Escape, qt.Qt.NoModifier))
+        qd.close()
+        self._pump(0.2)
+        self.assertTrue(dialog.isVisible())
+        self.assertEqual(called, [])
+
     def test_StartupMinimumSupported(self):
         self._publish("1.3.0", minimum="1.0.0")
         self.updates._installableOverride = True
