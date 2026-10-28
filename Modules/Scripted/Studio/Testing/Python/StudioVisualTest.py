@@ -525,6 +525,41 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
             readout = card.findChild("QLabel", "StudioLesionReadout")
             self.assertLessEqual(stats.geometry.bottom(), readout.height - 1)
 
+    def test_lesion_stat_caption_is_elided_when_cut(self):
+        """A stat caption that does not fit its cell ("Side · scanner space") ends with an ellipsis (VISUAL 6: no clipped
+        text); the whole caption is its tool tip, and it shows whole again in a wide cell.
+        """
+        from StudioLib import draw, importer
+
+        studioShell = self._applyStudio()
+        self.mainWindow.showNormal()
+        self.mainWindow.resize(1366, 768)
+        self._wait(lambda: self.mainWindow.width <= 1366, 2000)
+        importer.startOnTemplate(shell=studioShell)
+        self._restores.append(importer._closeTemplateBanner)
+        self._pump(10)
+        self._paintLesion((-30.0, -10.0, 20.0), 10.0)
+        draw.session(studioShell).refreshPanel(computeMetrics=True)
+        self._pump(10)
+        card = draw.lesionCard()
+        card._setStats({"ml": 1.2, "parts": 1, "gaps": 0, "side": None, "sideNote": "scanner space", "sideLevel": "warn"})
+        caption = card.statValues["side"][1]
+        whole = "Side · scanner space"
+        self.assertEqual(str(caption.property("studioFullText")), whole)
+        card.statsFrame.setFixedWidth(600)
+        self._pump(6)
+        self.assertEqual(str(caption.text), whole)
+        card.statsFrame.setFixedWidth(180)
+        self._pump(6)
+        shown = str(caption.text)
+        self.assertTrue(shown.endswith("…"), f"the cut caption has no ellipsis: {shown!r}")
+        self.assertLessEqual(self._textWidth(caption, shown), caption.width)
+        self.assertIn(whole, str(caption.toolTip))
+        card.statsFrame.setMaximumWidth(16777215)
+        card.statsFrame.setMinimumWidth(0)
+        self._pump(4)
+        draw.session(studioShell).refreshPanel(computeMetrics=True)
+
     def test_draw_size_row_keeps_its_size_with_two_images_1366(self):
         """With a second image the source chip "on <scan> ▾" does not squeeze the Size control (1 / 3 / 6 / 12).
 

@@ -719,6 +719,32 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertNotIn("hemisphere", self._plain(metrics[0]))
         self.assertEqual(self._plain(self._labels(canvas, "StudioCurrentWorkScanName")[0]), "patient_T1")
 
+    def test_lesion_metrics_are_elided_when_cut(self):
+        """The metrics of the Continue card ("Left · 4.22 mL · 1 part") end with an ellipsis when the row is too narrow for
+        them, instead of being cut off mid-word at the state chip; the whole line is the tool tip and ``plainText``.
+        """
+        studioShell = self._applyStudio()
+        self._template(studioShell, fill=True, rasCenter=(-40.0, -20.0, 10.0))
+        canvas = self._library(studioShell)
+        label = self._labels(canvas, "StudioCurrentWorkLesionMetrics")[0]
+        whole = self._plain(label)
+        self.assertTrue(whole.endswith("1 part"), whole)
+        label.setFixedWidth(400)
+        self._pump(6)
+        self.assertEqual(str(label.text), whole)
+        label.setFixedWidth(90)
+        self._pump(6)
+        shown = str(label.text)
+        self.assertTrue(shown.endswith("…"), f"the cut metrics have no ellipsis: {shown!r}")
+        self.assertLessEqual(qt.QFontMetrics(label.font).horizontalAdvance(shown), label.width)
+        self.assertEqual(self._plain(label), whole)
+        self.assertIn(whole, str(label.toolTip))
+        # The row refresh keeps the elision
+        canvas.refreshData()
+        self._pump(4)
+        label = self._labels(canvas, "StudioCurrentWorkLesionMetrics")[0]
+        self.assertEqual(self._plain(label), whole)
+
     def test_metrics_cold_cache(self):
         """A cold metrics cache reads "…" and is computed after the switch (one timer tick), not in it."""
         from StudioLib import draw, library

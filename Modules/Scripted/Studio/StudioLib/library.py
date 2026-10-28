@@ -192,8 +192,8 @@ class _Elider(qt.QObject):
     """Keeps the text of labels elided to their width.
 
     A label with an Ignored horizontal size policy never widens its container; its full text is the ``fullText`` property
-    and its elide mode the ``elideMode`` property ("middle" or "left"; with "left" the last ``keepTail`` characters stay
-    visible, so that the entities at the end of a file name remain readable).
+    and its elide mode the ``elideMode`` property ("middle", "right" or "left"; with "left" the last ``keepTail`` characters
+    stay visible, so that the entities at the end of a file name remain readable).
     """
 
     def eventFilter(self, obj, event):
@@ -216,6 +216,8 @@ class _Elider(qt.QObject):
             keepTail = int(label.property("keepTail") or 0)
             width = max(width, metrics.horizontalAdvance(text[-keepTail:]) if keepTail else 0)
             label.setText(metrics.elidedText(text, qt.Qt.ElideLeft, width))
+        elif label.property("elideMode") == "right":
+            label.setText(metrics.elidedText(text, qt.Qt.ElideRight, width))
         else:
             label.setText(metrics.elidedText(text, qt.Qt.ElideMiddle, width))
 
@@ -1351,15 +1353,15 @@ class _LesionBlock:
         self.nameLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
         self.nameLabel.setMinimumWidth(40)
         self.nameLabel.setMaximumWidth(220)
-        self.metricsLabel = qt.QLabel()
-        self.metricsLabel.setObjectName("StudioCurrentWorkLesionMetrics")
+        # The metrics ("Left · 4.22 mL · 1 part") are elided to the width the row leaves them (a rich-text label cannot
+        # be elided by Qt and was cut off mid-word next to the state chip); "Both hemispheres" is colored by the card's
+        # stylesheet (property ``studioWarn``)
+        self.metricsLabel = _elidedLabel("", 12, "StudioCurrentWorkLesionMetrics", mode="right")
         self.stateLabel = qt.QLabel()
         self.stateLabel.setObjectName("StudioCurrentWorkLesionState")
-        for label in (self.metricsLabel, self.stateLabel):
-            label.setTextFormat(qt.Qt.RichText)
-            label.setWordWrap(False)
-            _setFont(label, 12)
-        self.metricsLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+        self.stateLabel.setTextFormat(qt.Qt.RichText)
+        self.stateLabel.setWordWrap(False)
+        _setFont(self.stateLabel, 12)
         self.stateLabel.setSizePolicy(qt.QSizePolicy.Maximum, qt.QSizePolicy.Fixed)
         self.stateLabel.setFixedHeight(20)
         layout.addWidget(self.nameLabel, 3)
@@ -1538,6 +1540,7 @@ class CurrentWorkCard(qt.QObject):
             "QLabel#StudioCurrentWorkThumbnail, QLabel#StudioCurrentWorkThumbnailSide { background-color: #000000; border: none; border-radius: 8px; }"
             f"QLabel#StudioCurrentWorkScanFolder, QLabel#StudioCurrentWorkMeta, QLabel#StudioCurrentWorkMore {{ color: {t['text3']}; }}"
             f"QLabel#StudioCurrentWorkLesionMetrics {{ color: {t['text2']}; }}"
+            f'QLabel#StudioCurrentWorkLesionMetrics[studioWarn="true"] {{ color: {t["warning"]}; }}'
             f"QLabel#StudioCurrentWorkLesionState {{ color: {t['text2']}; background-color: {t['control-hover']}; border-radius: 10px; padding: 0px 8px; }}"
             f'QLabel#StudioCurrentWorkLesionState[saveState="saved"] {{ color: {t["success"]}; background-color: {tint["success"]}; }}'
             f'QLabel#StudioCurrentWorkLesionState[saveState="unsaved"] {{ color: {t["warning"]}; background-color: {tint["warning"]}; }}'
@@ -1646,7 +1649,6 @@ class CurrentWorkCard(qt.QObject):
         model = self._model
         if model is None:
             return
-        warning = ui.token("warning").name()
         for scanId, folderLabel in self._scanRows:
             scan = slicer.mrmlScene.GetNodeByID(scanId)
             if scan is None:
@@ -1683,11 +1685,13 @@ class CurrentWorkCard(qt.QObject):
             summary = lesionSummary(lesion)
             plain = summary["text"]
             block.metricsLabel.setProperty("plainText", plain)
-            block.metricsLabel.setToolTip(self._metricsToolTip(summary))
-            if summary["side"] == "Both hemispheres":
-                block.metricsLabel.setText(f'<span style="color:{warning}">{html.escape(plain)}</span>')
-            else:
-                block.metricsLabel.setText(html.escape(plain))
+            warn = summary["side"] == "Both hemispheres"
+            if bool(block.metricsLabel.property("studioWarn")) != warn:
+                block.metricsLabel.setProperty("studioWarn", warn)
+                block.metricsLabel.style().unpolish(block.metricsLabel)
+                block.metricsLabel.style().polish(block.metricsLabel)
+            # The tool tip: the whole text (it may be elided) and the counts
+            setElidedText(block.metricsLabel, plain, "\n".join(part for part in (plain, self._metricsToolTip(summary)) if part))
             if queue and summary["metrics"] is None and lesion.GetSegmentation().GetNumberOfSegments() and lesionId not in self._pendingMetrics:
                 self._pendingMetrics.append(lesionId)
             state, text = lesionSaveInfo(lesion)

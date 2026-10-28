@@ -385,7 +385,10 @@ class LesionCard:
             cellLayout.setContentsMargins(10, 6, 8, 6)
             cellLayout.setSpacing(0)
             value = ui.label("", "number", "text", "StudioLesionStatValue")
-            caption = ui.label(caption, "small", "text3", "StudioLesionStatCaption")
+            # Elided ("Side · scanner sp…") when the cell is too narrow for its caption: never cut off mid-letter
+            captionText = caption
+            caption = ui.elideLabel(ui.label("", "small", "text3", "StudioLesionStatCaption"))
+            ui.setElidedText(caption, captionText)
             cellLayout.addWidget(value)
             cellLayout.addWidget(caption)
             statsLayout.addWidget(cell, 1)
@@ -700,8 +703,8 @@ class LesionCard:
             value, caption = self.statValues[key]
             if str(value.text) != valueText:
                 value.setText(valueText)
-            if str(caption.text) != captionText:
-                caption.setText(captionText)
+            if str(caption.property("studioFullText") or "") != captionText:
+                ui.setElidedText(caption, captionText)
             styleSheet = f"QLabel {{ color: {ui.token('warning').name()}; }}" if warn else ""
             if value.styleSheet != styleSheet:
                 value.setStyleSheet(styleSheet)
