@@ -1178,6 +1178,10 @@ class SegmentEditorTest(ScriptedLoadableModuleTest):
     def test_SegmentEditorPresentation(self):
         """The studio presentation and back restores every property of the classic table (SPEC 5.1)."""
         self.delayDisplay("Segment Editor presentations")
+        # The *Visible getters of the editor use isVisible(), which is False until the widget has been shown, so the
+        # module is entered first (a self-test run on its own, as ctest does, never shows it).
+        slicer.util.selectModule("SegmentEditor")
+        slicer.app.processEvents()
         widget = slicer.modules.segmenteditor.widgetRepresentation().self()
         editor = widget.editor
         self.assertEqual(widget.presentation(), "classic")
