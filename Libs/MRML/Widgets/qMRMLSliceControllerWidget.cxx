@@ -84,8 +84,9 @@
 
 namespace
 {
-/// Minimum width of the offset slider in the flat bar
-const int FlatSliderMinimumWidth = 48;
+/// Minimum width of the offset slider in the flat bar (10 px less than before: the room of the chevron that the
+/// application style draws beside the name of the orientation menu, so that the narrowest bar does not get wider)
+const int FlatSliderMinimumWidth = 38;
 /// Fixed space at the end of the bar layout (qMRMLViewControllerBarPrivate::init)
 const int FlatBarTrailingSpace = 5;
 /// Stretch of the optional parts of the flat bar (readout, fit button): they get the room they need before the

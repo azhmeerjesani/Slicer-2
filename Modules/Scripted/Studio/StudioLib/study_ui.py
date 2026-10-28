@@ -3499,10 +3499,12 @@ class SubjectSwitcher:
         layout = qt.QVBoxLayout(self.widget)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
+        from . import ui
+
         self.search = qt.QLineEdit()
         self.search.setObjectName("StudioSubjectSwitcherSearch")
         self.search.setPlaceholderText(_("Search subjects"))
-        self.search.setClearButtonEnabled(True)
+        ui.setClearButton(self.search)
         self.search.connect("textChanged(QString)", self._fill)
         self.search.connect("returnPressed()", self._openCurrent)
         layout.addWidget(self.search)
@@ -3519,8 +3521,6 @@ class SubjectSwitcher:
         if anchor is not None:
             point = anchor.mapToGlobal(qt.QPoint(0, anchor.height))
             self.widget.move(point)
-        from . import ui
-
         ui.bindStyleSheet(self.widget, lambda: (
             f"QFrame#StudioSubjectSwitcher {{ background-color: {ui.token('card').name()}; border: 1px solid {ui.token('border').name()}; "
             "border-radius: 8px; }"))

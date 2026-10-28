@@ -763,6 +763,20 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         pixmap = pixmap() if callable(pixmap) else pixmap  # a property in PythonQt
         self.assertFalse(pixmap.isNull())
         self.assertIs(overlay.legend.parent(), self.mainWindow.centralWidget())
+        # The "Lesion outline" chip: a lesion-coloured outline square drawn as a swatch, not a text glyph (VISUAL 3, 4.5)
+        lesionChip = overlay.chipLabels["lesion"]
+        lesionChip.setText("Lesion outline")
+        overlay._paintLesionSwatch()
+        self.assertNotIn("\u25a1", lesionChip.text)
+        swatch = overlay.lesionSwatch
+        self.assertIs(swatch.parent(), lesionChip)
+        pixmap = swatch.pixmap
+        image = (pixmap() if callable(pixmap) else pixmap).toImage()
+        lesionColor = qt.QColor(255, 90, 95)
+        opaque = [(x, y) for x in range(image.width()) for y in range(image.height()) if image.pixelColor(x, y).alpha() > 200]
+        self.assertGreater(len(opaque), 10)
+        self.assertTrue(all(abs(image.pixelColor(x, y).red() - lesionColor.red()) < 8 for x, y in opaque))
+        self.assertEqual(image.pixelColor(image.width() // 2, image.height() // 2).alpha(), 0, "an outline, not a filled square")
         studioShell.switchTo("library")
         self._pump(4)
         self.assertIsNone(mappage.overlay())
@@ -843,6 +857,48 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
     #
     # Lesions without a scan
     #
+
+    def test_line_icons_not_platform_icons(self):
+        """VISUAL 3 (Lucide line icons throughout): the clear button of a search field and the folder button of the Saving
+        settings carry Lucide icons, and the menu chevron of a text tool button sits vertically centered at its right
+        side (not in the bottom-right corner under the text).
+        """
+        import ctk
+        from StudioLib import ui
+
+        edit = qt.QLineEdit()
+        ui.setClearButton(edit)
+        buttons = [b for b in edit.findChildren("QToolButton") if b.inherits("QLineEditIconButton")]
+        self.assertEqual(len(buttons), 1)
+        self.assertEqual(buttons[0].icon.cacheKey(), ui.icon("x", 14).cacheKey())
+
+        directoryButton = ctk.ctkDirectoryButton()
+        directoryButton.icon = ui.icon("folder", 16)
+        self.assertEqual(directoryButton.icon.cacheKey(), ui.icon("folder", 16).cacheKey())
+
+        button = qt.QToolButton()
+        button.setText("Axial")
+        button.setPopupMode(qt.QToolButton.InstantPopup)
+        button.setMenu(qt.QMenu(button))
+        button.setFixedHeight(32)
+        button.setAutoRaise(True)
+        width = button.sizeHint.width()
+        plain = qt.QToolButton()
+        plain.setText("Axial")
+        self.assertGreater(width, plain.sizeHint.width() + 8, "room is reserved for the chevron")
+        button.resize(width, 32)
+        image = button.grab().toImage()
+        background = image.pixelColor(1, 1)
+
+        def differs(x, y):
+            return abs(image.pixelColor(x, y).lightness() - background.lightness()) > 40
+
+        rows = [y for y in range(image.height()) if any(differs(x, y) for x in range(image.width() - 10, image.width()))]
+        self.assertTrue(rows, "the chevron is drawn in the strip at the right")
+        center = image.height() / 2.0
+        self.assertLess(abs((min(rows) + max(rows)) / 2.0 - center), 3.0, f"chevron rows {min(rows)}-{max(rows)} in {image.height()}")
+        textColumns = [x for x in range(image.width() - 10) if any(differs(x, y) for y in range(image.height()))]
+        self.assertTrue(textColumns and max(textColumns) < image.width() - 10, "the text stays left of the chevron strip")
 
     def test_lesion_only_mni2009(self):
         """A lesion on the bundled template grid alone: the template is loaded and bound as the source, no space line."""

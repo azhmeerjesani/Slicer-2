@@ -1612,7 +1612,7 @@ class Palette:
         field = qt.QLineEdit()
         field.setObjectName("StudioPaletteSearch")
         field.setFixedHeight(FIELD_HEIGHT - 2)
-        field.setClearButtonEnabled(True)
+        ui.setClearButton(field)
         field.setAccessibleName(_("Search"))
         fieldLayout.addWidget(field, 1)
         self.escKey = ui.kbd(_("Esc"))

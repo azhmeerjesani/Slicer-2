@@ -358,6 +358,8 @@ def _restoreActionShortcuts():
 
 #: Size of the legend card and the margin from the edges of the view
 LEGEND_WIDTH = 220
+#: Size (px) of the lesion-coloured outline swatch on the "Lesion outline" chip
+LESION_SWATCH_SIZE = 10
 OVERLAY_MARGIN = 10
 #: Height of the colour bar of the legend
 LEGEND_BAR_HEIGHT = 8
@@ -441,6 +443,7 @@ class MapOverlay:
             ui.setText(chip, "caption")
             chipsLayout.addWidget(chip)
             self.chipLabels[key] = chip
+        self.lesionSwatch = self._makeLesionSwatch(self.chipLabels["lesion"])
         for widget in (self.legend, self.chips):
             widget.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
             ui.bindStyleSheet(widget, self._styleSheet)
@@ -457,6 +460,41 @@ class MapOverlay:
         self._layoutManager = slicer.app.layoutManager()
         if self._layoutManager is not None:
             self._layoutManager.connect("layoutChanged(int)", self._onLayoutChanged)
+
+    def _makeLesionSwatch(self, chip):
+        """The lesion-coloured outline square at the left of the "Lesion outline" chip (a painted swatch, not a text
+        glyph, so that it keeps the line-icon look of the other icons); the chip's text indent leaves room for it.
+        """
+        swatch = qt.QLabel(chip)
+        swatch.setObjectName("StudioMapLayerChipSwatch")
+        swatch.setFixedSize(LESION_SWATCH_SIZE, LESION_SWATCH_SIZE)
+        swatch.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
+        chipLayout = qt.QHBoxLayout(chip)
+        chipLayout.setContentsMargins(0, 0, 0, 0)  # the chip's own padding (8 px) is the left margin
+        chip.setIndent(LESION_SWATCH_SIZE + 5)
+        chipLayout.addWidget(swatch, 0, qt.Qt.AlignLeft | qt.Qt.AlignVCenter)
+        self._paintLesionSwatch(swatch)
+        return swatch
+
+    def _paintLesionSwatch(self, swatch=None):
+        """Draw the swatch: a 1.75 px rounded outline square in the lesion colour (VISUAL 3, Lucide stroke)."""
+        swatch = swatch if swatch is not None else self.lesionSwatch
+        size = LESION_SWATCH_SIZE
+        ratio = swatch.devicePixelRatioF() if hasattr(swatch, "devicePixelRatioF") else 1.0
+        pixmap = qt.QPixmap(int(size * ratio), int(size * ratio))
+        pixmap.setDevicePixelRatio(ratio)
+        pixmap.fill(qt.Qt.transparent)
+        pen = qt.QPen(qt.QColor(self.ui.token("lesion")))
+        pen.setWidthF(1.75)
+        painter = qt.QPainter(pixmap)
+        try:
+            painter.setRenderHint(qt.QPainter.Antialiasing, True)
+            painter.setPen(pen)
+            inset = 1.75 / 2 + 0.5
+            painter.drawRoundedRect(qt.QRectF(inset, inset, size - 2 * inset, size - 2 * inset), 2.0, 2.0)
+        finally:
+            painter.end()
+        swatch.setPixmap(pixmap)
 
     def _styleSheet(self):
         ui = self.ui
@@ -511,7 +549,8 @@ class MapOverlay:
         self.chipLabels["network"].setText(_("Network {statistic} · {pct}%").format(statistic=statistic, pct=opacity))
         self._updateTemplateChip(_mainSliceWidget())
         lesion = self.chipLabels["lesion"]
-        lesion.setText("\u25a1 " + _("Lesion outline"))
+        lesion.setText(_("Lesion outline"))
+        self._paintLesionSwatch()
         lesion.setVisible(bool(state["outline"]))
         self.place()
 

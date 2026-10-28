@@ -114,6 +114,9 @@ class AutosaveSettingsPanel(ctk.ctkSettingsPanel):
         self.directoryButton.setMaximumWidth(420)
         self.directoryButton.toolTip = _("Folder of new autosaves. It should be a private folder, not a synchronized or shared one.")
         self.directoryButton.connect("directoryChanged(QString)", self.onDirectoryChanged)
+        # The Lucide folder line icon (not the platform's coloured bitmap), re-tinted with the palette
+        self._refreshFolderIcon()
+        ui.addPaletteListener(self._refreshFolderIcon)
         self.resetDirectoryButton = qt.QPushButton(_("Reset"))
         self.resetDirectoryButton.toolTip = _("Use the default folder (in the application data folder)")
         self.resetDirectoryButton.connect("clicked()", self.onResetDirectory)
@@ -240,6 +243,16 @@ class AutosaveSettingsPanel(ctk.ctkSettingsPanel):
             self.locationNote.text = _("Set by the SLICER_STUDIO_AUTOSAVE_DIR environment variable.")
         else:
             self.locationNote.text = _("A new location applies to new autosaves.")
+
+    def _refreshFolderIcon(self):
+        button = getattr(self, "directoryButton", None)
+        if button is None:
+            return
+        try:
+            button.icon = ui.icon("folder", 16)
+        except RuntimeError:
+            # The settings dialog (and the button with it) was deleted
+            ui.removePaletteListener(self._refreshFolderIcon)
 
     def onDirectoryChanged(self, directory):
         if self._updatingDirectory:

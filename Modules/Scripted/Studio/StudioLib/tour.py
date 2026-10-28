@@ -1336,7 +1336,7 @@ class WhereMap:
         self.searchField = qt.QLineEdit()
         self.searchField.setObjectName("StudioWhereSearch")
         self.searchField.setPlaceholderText(_("Search: add data, layout, python, window level…"))
-        self.searchField.setClearButtonEnabled(True)
+        ui.setClearButton(self.searchField)
         self.searchField.setMinimumHeight(30)
         self.searchField.connect("textChanged(QString)", self._filter)
         layout.addWidget(self.searchField)

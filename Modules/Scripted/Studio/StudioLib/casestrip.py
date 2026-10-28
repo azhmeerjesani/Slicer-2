@@ -730,7 +730,7 @@ class CaseStrip:
         edit.setObjectName("StudioCaseStripEditorInput")
         edit.setProperty("caseColumn", column)
         edit.setPlaceholderText(placeholder)
-        edit.setClearButtonEnabled(True)
+        ui.setClearButton(edit)
         if width:
             edit.setFixedWidth(width)
         edit.installEventFilter(self._keys)

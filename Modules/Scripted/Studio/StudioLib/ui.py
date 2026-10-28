@@ -285,6 +285,7 @@ def _refresh():
     _lastApplicationFontPx = fontPixelSize
     _refreshFonts()
     _refreshIconTiles()
+    _refreshClearIcons()
     for entry in list(_boundStyleSheets):
         widget, function = entry
         if not _isAlive(widget):
@@ -762,6 +763,37 @@ def _refreshIconTiles():
         alive.append(widget)
         widget.setPixmap(pixmap(str(widget.property("studioIconName")), int(widget.property("studioIconSize")), "accent-fg"))
     _iconTiles[:] = alive
+
+
+#: Line edits whose clear button shows the Lucide "x" icon (``setClearButton()``)
+_clearEdits = []
+
+
+def _paintClearIcon(lineEdit):
+    """Qt's clear button is a private ``QLineEditIconButton`` child (a tool button); its icon is replaced."""
+    for button in lineEdit.findChildren("QToolButton"):
+        if button.inherits("QLineEditIconButton"):
+            button.setIcon(icon("x", 14))
+
+
+def setClearButton(lineEdit):
+    """Enable the clear button of ``lineEdit`` with the Lucide "x" line icon (text2, text on hover) instead of the
+    platform's filled circle-x icon (VISUAL 3: Lucide line icons throughout). The icon follows the palette.
+    """
+    lineEdit.setClearButtonEnabled(True)
+    _paintClearIcon(lineEdit)
+    _ensureWatcher()
+    _clearEdits.append(lineEdit)
+
+
+def _refreshClearIcons():
+    alive = []
+    for lineEdit in _clearEdits:
+        if not _isAlive(lineEdit):
+            continue
+        alive.append(lineEdit)
+        _paintClearIcon(lineEdit)
+    _clearEdits[:] = alive
 
 
 def switch(text="", objectName=None):

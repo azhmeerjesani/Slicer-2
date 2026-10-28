@@ -190,7 +190,7 @@ class SourcesCard:
         self.filter = qt.QLineEdit()
         self.filter.setObjectName("StudioSourcesFilter")
         self.filter.setPlaceholderText(_("Filter the records (/)"))
-        self.filter.setClearButtonEnabled(True)
+        ui.setClearButton(self.filter)
         self.filter.setToolTip(_("Filter by record, title, author, DOI, PMID or stage. Esc clears the filter."))
         self.filter.connect("textChanged(QString)", self._applyFilter)
         library._installEventFilter(self.filter, self._escapeFilter())

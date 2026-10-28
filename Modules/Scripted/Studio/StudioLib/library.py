@@ -2752,7 +2752,7 @@ class StudyList(qt.QObject):
         self.search = qt.QLineEdit()
         self.search.setObjectName("StudioStudySearch")
         self.search.setPlaceholderText(_("Search subjects"))
-        self.search.setClearButtonEnabled(True)
+        ui.setClearButton(self.search)
         self.search.setToolTip(ui.tooltip(_("Search subjects"), "/", _("filter the list by id, group, status or notes")))
         self.search.connect("textChanged(QString)", lambda text: self.refresh())
         self.search.setMinimumWidth(140)

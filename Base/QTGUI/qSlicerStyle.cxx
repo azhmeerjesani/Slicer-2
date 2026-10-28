@@ -1271,6 +1271,35 @@ void drawChevron(QStyle::PrimitiveElement element, const QRectF& rect, const QCo
 }
 
 //------------------------------------------------------------------------------
+/// Width (px) reserved at the right of a text tool button for the menu chevron
+const int MenuIndicatorWidth = 10;
+
+//------------------------------------------------------------------------------
+/// Return true if \a toolButton opens its menu on a click (InstantPopup) and has a text label: Qt draws the indicator
+/// of such a button in its bottom-right corner, touching the text like a subscript, so qSlicerStyle reserves a strip
+/// at the right of the label and draws the chevron vertically centered in it. Buttons with an icon only keep the
+/// indicator of the base style.
+bool hasInlineMenuIndicator(const QStyleOptionToolButton* toolButton, const QWidget* widget)
+{
+  const QByteArray role = widgetRole(widget);
+  // The roles with their own menu indicator rules (none for most, see drawComplexControl()) and the compact buttons keep their layout
+  if (role == "ghost" || role == "toolTile" || role == "secondary" || role == "compact" || isSegment(widget))
+  {
+    return false;
+  }
+  if (widget && widget->styleSheet().contains(QLatin1String("menu-indicator")))
+  {
+    // The button styles its own indicator (e.g. "QToolButton::menu-indicator { image: none; }")
+    return false;
+  }
+  return toolButton && (toolButton->features & QStyleOptionToolButton::HasMenu) //
+         && !(toolButton->features & QStyleOptionToolButton::MenuButtonPopup)   //
+         && !(toolButton->features & QStyleOptionToolButton::Arrow)             //
+         && !toolButton->text.isEmpty()                                         //
+         && (toolButton->toolButtonStyle != Qt::ToolButtonIconOnly || toolButton->icon.isNull());
+}
+
+//------------------------------------------------------------------------------
 /// Color of the arrows (chevrons) drawn for \a option
 QColor arrowColor(const QStyleOption* option)
 {
@@ -2617,6 +2646,28 @@ void qSlicerStyle::drawComplexControl(ComplexControl control, const QStyleOption
       this->Superclass::drawComplexControl(control, &withoutIndicator, painter, widget);
       return;
     }
+    if (painter && widget && hasInlineMenuIndicator(toolButton, widget) //
+        && toolButton->rect.width() >= toolButton->fontMetrics.horizontalAdvance(toolButton->text) + MenuIndicatorWidth + 6)
+    {
+      // The panel without label (and without the base style's corner indicator), then the label in the rect left of
+      // the chevron, then the chevron centered vertically in the strip at the right
+      QStyleOptionToolButton panel(*toolButton);
+      panel.features &= ~QStyleOptionToolButton::HasMenu;
+      panel.text.clear();
+      panel.icon = QIcon();
+      this->Superclass::drawComplexControl(control, &panel, painter, widget);
+      const int frame = this->pixelMetric(QStyle::PM_DefaultFrameWidth, option, widget);
+      QStyleOptionToolButton label(*toolButton);
+      label.features &= ~QStyleOptionToolButton::HasMenu;
+      const QRect inner = toolButton->rect.adjusted(frame, frame, -frame, -frame);
+      label.rect = this->visualRect(toolButton->direction, toolButton->rect, inner.adjusted(0, 0, -MenuIndicatorWidth, 0));
+      this->drawControl(QStyle::CE_ToolButtonLabel, &label, painter, widget);
+      const QRect strip = this->visualRect(toolButton->direction,
+                                           toolButton->rect,
+                                           QRect(toolButton->rect.right() + 1 - MenuIndicatorWidth - frame, toolButton->rect.top(), MenuIndicatorWidth, toolButton->rect.height()));
+      drawChevron(QStyle::PE_IndicatorArrowDown, QRectF(strip), arrowColor(option), painter);
+      return;
+    }
     const QString key = (role == "toolTile" && widget && painter) ? widget->property("studioKey").toString() : QString();
     if (!key.isEmpty())
     {
@@ -2794,6 +2845,11 @@ QSize qSlicerStyle::sizeFromContents(ContentsType type, const QStyleOption* opti
       }
       break;
     case QStyle::CT_ToolButton:
+      if (hasInlineMenuIndicator(qstyleoption_cast<const QStyleOptionToolButton*>(option), widget))
+      {
+        // The chevron beside the label of an InstantPopup button (see hasInlineMenuIndicator())
+        size.setWidth(size.width() + MenuIndicatorWidth);
+      }
       if (role == "compact")
       {
         // No padding around the icon (QToolButton { padding: 0px; })

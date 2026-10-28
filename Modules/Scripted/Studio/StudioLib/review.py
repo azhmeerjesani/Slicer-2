@@ -372,7 +372,7 @@ class ReviewActions:
         formLayout.addWidget(self.reasonCombo)
         self.commentEdit = qt.QLineEdit()
         self.commentEdit.setObjectName(f"{prefix}Comment")
-        self.commentEdit.setClearButtonEnabled(True)
+        ui.setClearButton(self.commentEdit)
         self.commentEdit.connect("returnPressed()", self.send)
         self.commentEdit.connect("textChanged(QString)", lambda _text: self.errorLabel.hide())
         self.reasonCombo.connect("currentIndexChanged(int)", lambda _index: self.errorLabel.hide())

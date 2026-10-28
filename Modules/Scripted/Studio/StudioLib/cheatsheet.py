@@ -448,7 +448,7 @@ class CheatSheet:
         field = qt.QLineEdit()
         field.setObjectName("StudioCheatSheetSearch")
         field.setPlaceholderText(_("Search keys"))
-        field.setClearButtonEnabled(True)
+        ui.setClearButton(field)
         # 240 px when there is room, narrower (down to 120) in a narrow window (USABILITY 9.4)
         field.setMinimumWidth(SEARCH_MIN_WIDTH)
         field.setMaximumWidth(SEARCH_WIDTH)
