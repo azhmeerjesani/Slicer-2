@@ -1054,6 +1054,39 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
     # Footer line
     #
 
+    def test_caption_folder_no_leading_separator(self):
+        """The caption "Saved automatically in ..." never starts with a separator, inside or outside the home folder."""
+        from StudioLib import library, projects
+
+        sep = " \u203a "
+        self.assertEqual(library._captionFolder("/tmp/claude-0/Root"), "tmp" + sep + "claude-0" + sep + "Root")
+        self.assertEqual(library._captionFolder("/Volumes/Data/Slicer Studio/"), "Volumes" + sep + "Data" + sep + "Slicer Studio")
+        self.assertEqual(library._captionFolder("~/Documents/Slicer Studio"), "Documents" + sep + "Slicer Studio")
+        self.assertEqual(library._captionFolder("~"), "~")
+        # On the page: a projects folder outside the home folder
+        saved = os.environ.get("SLICER_STUDIO_PROJECTS_ROOT")
+
+        def restore():
+            if saved is None:
+                os.environ.pop("SLICER_STUDIO_PROJECTS_ROOT", None)
+            else:
+                os.environ["SLICER_STUDIO_PROJECTS_ROOT"] = saved
+
+        self.cleanup.append(restore)
+        root = os.path.join(self.directory, "Projects Outside")
+        os.makedirs(root, exist_ok=True)
+        os.environ["SLICER_STUDIO_PROJECTS_ROOT"] = root
+        self.assertTrue(projects.isEnabled())
+        studioShell = self._applyStudio()
+        canvas = self._library(studioShell)
+        canvas._refreshCaption()
+        text = canvas._captionText
+        self.assertTrue(text.startswith("Saved automatically in "), text)
+        self.assertNotIn("  ", text)
+        self.assertFalse(text.startswith("Saved automatically in " + sep.strip()), text)
+        self.assertFalse(text.startswith("Saved automatically in " + sep), text)
+        self.assertIn(root, str(canvas.captionLabel.toolTip))
+
     def test_footer_line(self):
         """One 32 px text2 line at the bottom of the canvas, with link-style actions; it survives a new canvas."""
         from StudioLib import library

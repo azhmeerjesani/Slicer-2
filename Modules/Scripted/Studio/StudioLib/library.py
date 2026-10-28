@@ -5108,6 +5108,17 @@ def _showRootFolder():
         logging.error(f"Studio Library: the folder could not be shown:\n{traceback.format_exc()}")
 
 
+def _captionFolder(folder):
+    """A folder path for the Library caption, its parts joined by " \u203a ": no leading separator for an absolute path
+    (a folder outside the home folder, a disk such as /Volumes/Data), none for "~" or a trailing slash.
+    """
+    folder = str(folder or "").replace("\\", "/")
+    parts = [part for part in folder.split("/") if part]
+    if parts and parts[0] == "~" and len(parts) > 1:
+        parts = parts[1:]
+    return " \u203a ".join(parts)
+
+
 class LibraryCanvas(qt.QObject):
     """The Library page shown over the views (SPEC 3.1, VISUAL 4.2): a full-width page (at most ``PAGE_MAX_WIDTH`` px of
     content) with the "Projects" header and its buttons, the Continue card of what is open, the projects of the Slicer
@@ -5529,9 +5540,7 @@ class LibraryCanvas(qt.QObject):
             from . import projects
 
             enabled = projects.isEnabled()
-            folder = projects.shortPath(projects.root())
-            folder = folder[2:] if folder.startswith("~/") else folder
-            text = _("Saved automatically in {folder}").format(folder=folder.replace("/", " \u203a ")) if enabled else ""
+            text = _("Saved automatically in {folder}").format(folder=_captionFolder(projects.shortPath(projects.root()))) if enabled else ""
             toolTip = projects.root() if enabled else ""
         except Exception:
             enabled, text, toolTip = False, "", ""
