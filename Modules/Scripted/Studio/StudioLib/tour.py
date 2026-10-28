@@ -36,7 +36,7 @@ import qt
 import slicer
 from slicer.i18n import tr as _
 
-from . import ui
+from . import hud, ui
 
 OFFERED_KEY = "Studio/Tour/Offered"
 COMPLETED_KEY = "Studio/Tour/Completed"
@@ -1663,7 +1663,7 @@ class _OfferCard:
         self.frame.setFixedHeight(height)
 
     def updatePosition(self):
-        """Bottom right of the canvas, away from what the Library page shows; always inside the canvas.
+        """Bottom right of the canvas, above the toasts and away from what the Library page shows; always inside the canvas.
 
         The page column is up to 1100 px wide (VISUAL 4.2) and mostly empty on its right side, so the card is kept off
         what the column paints (``_pageContentItems()``), not off the column box. When the bottom right corner covers
@@ -1676,7 +1676,8 @@ class _OfferCard:
         rect = self.canvas.rect
         margin = 24
         right = rect.width() - width - margin
-        bottom = rect.height() - height - margin
+        # Above the band of the toasts (a long toast reaches the card's edge or covers its link; it stays until the next input)
+        bottom = rect.height() - height - hud.toastBandHeight() - 8
         candidates = [(right, bottom)]
         column = self.canvas.findChild("QWidget", "StudioLibraryColumn")
         content = []

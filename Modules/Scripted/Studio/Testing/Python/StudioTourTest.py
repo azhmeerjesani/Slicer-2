@@ -551,6 +551,39 @@ class StudioTourTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             tour.plugin().offerWidget().findChild("QPushButton", "StudioTourOfferNotNowButton").click()
             self._pump()
 
+    def test_09c_offer_keeps_clear_of_toasts(self):
+        """A long toast (centred at the bottom, up to the canvas width) does not cover the offer card or its link (BB-1)."""
+        from StudioLib import tour
+
+        studioShell = self._applyStudio()
+        settings = qt.QSettings()
+        text = "Study cohortC created in place: 6 subjects (participants.tsv kept, backup in .studio)"
+        # 1229x691 is the window of a 1366x768 screen, where the toast reaches the card's left end
+        for width, height in SIZES + ((1229, 691), (1000, 700)):
+            self._resize(width, height)
+            settings.remove("Studio/Tour")
+            studioShell.switchTo("library")
+            self._pump()
+            self.assertTrue(tour.offerTour(), (width, height))
+            self._pump()
+            card = tour.plugin().offerWidget()
+            self.assertIsNotNone(card)
+            try:
+                studioShell.toast(text, sticky=True, action=lambda: None, actionText="Show folder")
+                self._wait(200)
+                toast = self.mainWindow.findChild("QFrame", "StudioStickyToast")
+                self.assertTrue(toast is not None and toast.isVisible(), (width, height))
+                offerRect = tour._rectIn(card, self.mainWindow)
+                toastRect = tour._rectIn(toast, self.mainWindow)
+                self.assertFalse(offerRect.intersects(toastRect), (width, height, offerRect, toastRect))
+                link = card.findChild("QPushButton", "StudioTourOfferMovedLink")
+                self.assertTrue(link.isVisible())
+                self.assertFalse(toastRect.intersects(tour._rectIn(link, self.mainWindow)), (width, height))
+            finally:
+                studioShell._stickyToast.hide()
+            tour.plugin().offerWidget().findChild("QPushButton", "StudioTourOfferNotNowButton").click()
+            self._pump()
+
     def test_09_first_start_offer(self):
         """The first-start offer is a non-modal card shown once; any answer (or opening a file) is remembered."""
         from StudioLib import tour

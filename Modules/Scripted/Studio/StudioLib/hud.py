@@ -109,6 +109,15 @@ def toastSpan(parentWidget):
     return span if span is not None else (0, parentWidget.width)
 
 
+def toastBandHeight():
+    """The height of the band at the bottom of a canvas in which toasts appear (their height and bottom margin).
+
+    Floating cards that stay on the canvas (the first-start offer) keep above this band, so that a toast, which can
+    be as wide as the canvas, never covers them.
+    """
+    return TOAST_HEIGHT + TOAST_BOTTOM_MARGIN
+
+
 def toastGeometry(parentWidget, preferredWidth):
     """The geometry (x, y, width) of a toast of ``preferredWidth`` near the bottom of ``parentWidget``.
 
