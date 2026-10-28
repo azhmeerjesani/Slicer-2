@@ -31,7 +31,9 @@ folder "Slicer Studio tést" (spaces and non-ASCII characters). The tests cover:
 - moving the Slicer Studio folder into a folder inside it is refused before anything is made;
 - "Save a copy as…" leaves the project as it is: the next save writes nothing again and leaves no stale copy of the scan;
 - a 4D NIfTI image is saved as .seq.nrrd (official 3D Slicer 5.12 reads volume sequences from NRRD only), also in a
-  project saved before with a copy of the NIfTI.
+  project saved before with a copy of the NIfTI;
+- a disk that fills up during a save: the save fails with the reason, the saved scene and lesion files stay as they were,
+  and the next save once space is free writes everything again.
 """
 
 import contextlib
@@ -1906,6 +1908,73 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertNotIn('.nii.gz"', sceneText)
         self.assertIn(sequenceFile, self._projectFiles(service.project))
         self.assertEqual(reopenedFrames(), [10.0, 20.0, 30.0, 40.0])
+
+    def test_39_disk_full_during_a_save_keeps_the_saved_files(self):
+        """The disk fills up while a save runs (BB-1): the C++ writers (vtkMRMLScene::Commit, teem's nrrdSave) then
+        leave a truncated or empty file that they report as written. The save fails ("Not saved" with the reason),
+        the project's scene and lesion files stay as they were, quitting is not told that everything is saved, and the
+        next save once space is free writes everything again.
+        """
+        import shutil as shutilModule
+        import xml.etree.ElementTree as ET
+        from unittest import mock
+
+        from StudioLib import thumbnails
+
+        service = self._service()
+        volume, _path = self._userVolume("Disk full", shape=(20, 24, 28))
+        project = self._projectFor(service)
+        segmentation, segmentId, array = self._lesion(volume, name="Lesion")
+        self._save(service)
+        lesionPath = os.path.join(project.path, "Segmentations", "Lesion.seg.nrrd")
+        saved = {path: _md5File(path) for path in (project.scenePath, lesionPath)}
+        # The lesion is edited again; the disk is full from the moment the save started (after its free-space check)
+        array[12:16, 12:16, 12:16] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentation, segmentId, volume)
+        realDiskUsage = shutilModule.disk_usage
+
+        def diskUsage(path):
+            return realDiskUsage(path)._replace(free=0 if service.plan is not None else 1 << 30)
+
+        with mock.patch.object(shutilModule, "disk_usage", side_effect=diskUsage):
+            self.assertTrue(service.autosaveNow("test"))
+            self.assertTrue(service.waitForIdle(120.0))
+            status = service.status()
+            self.assertEqual(status.state, "error", status.message)
+            self.assertIn("Not saved", status.message)
+            self.assertEqual(service._projectPausedReason, os.strerror(28))
+            self.assertEqual({path: _md5File(path) for path in saved}, saved, "the saved files are kept")
+            ET.parse(project.scenePath)
+            self.assertTrue(segmentation.GetModifiedSinceRead(), "the lesion stays unsaved")
+            self.assertEqual([name for name in _relativeFiles(project.path) if ".studio-tmp" in name or name.endswith((".tmp", ".part"))], [])
+            # Quitting is not told that everything is saved (the disk is still full during the quit save)
+            self.assertFalse(service.flushForClose())
+        # Space is free again: Ctrl+S writes the lesion and the scene
+        self.assertTrue(service.saveNow("test", progress=False), service._projectPausedReason)
+        self.io.backgroundWriter().drain(30.0)
+        self.assertNotEqual(_md5File(lesionPath), saved[lesionPath])
+        ET.parse(project.scenePath)
+        self.assertFalse(segmentation.GetModifiedSinceRead())
+        self.assertEqual(service.status().state, "idle")
+        # A scene file that cannot be written completely is reported as not written (vtkMRMLScene::Commit)
+        self.assertFalse(self.io.sceneFileComplete(os.path.join(self.tempDir, "missing.mrml")))
+        truncated = os.path.join(self.tempDir, "truncated.mrml")
+        with open(project.scenePath, "rb") as f:
+            content = f.read()
+        with open(truncated, "wb") as f:
+            f.write(content[: len(content) // 2])
+        self.assertFalse(self.io.sceneFileComplete(truncated))
+        self.assertTrue(self.io.sceneFileComplete(project.scenePath))
+        if os.path.exists("/dev/full"):
+            scene = slicer.vtkMRMLScene()
+            scene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "Volume")
+            self.assertEqual(scene.Commit("/dev/full"), 0)
+        # A thumbnail that cannot be written leaves no temporary file behind
+        blocked = os.path.join(self.tempDir, "thumbnails", "blocked.png")
+        os.makedirs(os.path.join(blocked, "not empty"))
+        with self.assertRaises(OSError):
+            thumbnails._writeAtomic(blocked, b"png")
+        self.assertEqual(sorted(os.listdir(os.path.dirname(blocked))), ["blocked.png"])
 
 
 def _sphere(center=(0, 0, 0)):

@@ -22,6 +22,7 @@ single ``BackgroundWriter`` thread (``backgroundWriter()``), which other feature
 """
 
 import collections
+import errno
 import json
 import logging
 import os
@@ -609,6 +610,34 @@ def fsyncFile(path):
             os.fsync(f.fileno())
     except OSError:
         pass
+
+
+#: Some C++ writers report success when the disk filled up during the write (teem's ``nrrdSave``, used by the NRRD
+#: and segmentation storage nodes, ignores the error of the final flush; so did ``vtkMRMLScene::Commit`` before
+#: 2026-10): their file is then truncated or empty. While less than this is free on the disk after such a write, the
+#: file is not trusted, and it never replaces a file of a project.
+DISK_FULL_MARGIN_BYTES = 1024 * 1024
+
+
+def checkDiskNotFull(folder):
+    """Raise OSError(ENOSPC) if the disk of ``folder`` is (nearly) full after a write by a C++ writer. Worker-safe."""
+    try:
+        free = shutil.disk_usage(folder).free
+    except OSError:
+        return
+    if free < DISK_FULL_MARGIN_BYTES:
+        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+
+def sceneFileComplete(path):
+    """True if the scene file at ``path`` ends with the closing MRML tag (a truncated scene file does not)."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 64))
+            return f.read().rstrip().endswith(b"</MRML>")
+    except OSError:
+        return False
 
 
 def treeSize(path):
@@ -1431,6 +1460,9 @@ class _WriteJob:
         storageNode.SetFileName(path)
         start = time.perf_counter()
         ok = storageNode.WriteData(node)
+        if ok:
+            # A full disk: the file may be truncated although it is reported as written (the generation is aborted)
+            checkDiskNotFull(absolute)
         elapsed = (time.perf_counter() - start) * 1000.0
         entry["lastWriteMs"] = round(elapsed, 2)
         entry["writtenAt"] = time.time()
@@ -2275,7 +2307,10 @@ class ProjectWriter(SlotWriter):
         start = time.perf_counter()
         try:
             written = scene.Commit(temporary)
-            if not written or not os.path.isfile(temporary):
+            # A disk that filled up during the write leaves a truncated file (and the hidden nodes' files): the scene
+            # file of the project is kept
+            checkDiskNotFull(projectDir)
+            if not written or not sceneFileComplete(temporary):
                 raise OSError(_tr("The scene file could not be written."))
             fsyncFile(temporary)
             replaceWithRetry(temporary, target)
@@ -2463,13 +2498,20 @@ class _ProjectWriteJob:
             written = False
         elapsed = (time.perf_counter() - start) * 1000.0
         produced = os.listdir(temporary) if os.path.isdir(temporary) else []
-        error = None
-        if written and os.path.basename(destination) in produced:
+        error = diskFull = None
+        if written:
+            # A disk that filled up during the write leaves a truncated (or empty) file that the writer reports as
+            # written: it never replaces the node's file, and the whole save fails
+            try:
+                checkDiskNotFull(folder)
+            except OSError as fullError:
+                error = diskFull = fullError
+        if error is None and written and os.path.basename(destination) in produced:
             try:
                 size = self._moveIntoPlace(temporary, folder, produced, os.path.basename(destination))
             except OSError as moveError:
                 error = moveError
-        else:
+        elif error is None:
             error = "write failed"
         if error is not None:
             # The node keeps its previous file and stays modified (WriteData marked it stored): the next generation
@@ -2486,6 +2528,8 @@ class _ProjectWriteJob:
             if self.nodeId not in writer._reportedFailures:
                 writer._reportedFailures.add(self.nodeId)
                 logging.warning(f"Slicer Studio: {entry.get('name') or self.nodeId} could not be saved in the project: {error}")
+            if diskFull is not None:
+                raise diskFull
             return True
         removeTree(temporary)
         _setSingleFile(storageNode, destination)

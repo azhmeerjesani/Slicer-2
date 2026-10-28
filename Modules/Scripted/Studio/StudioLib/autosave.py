@@ -723,7 +723,11 @@ class AutosaveService:
             return
         except OSError as error:
             self._abortGeneration(str(error))
-            self._pause(_("Autosave paused: {error}").format(error=error))
+            if isinstance(plan, io.ProjectPlan):
+                # A project that could not be saved (a full disk): "Not saved" with the reason, as for Save now
+                self._projectFailed(plainOSError(error))
+            else:
+                self._pause(_("Autosave paused: {error}").format(error=error))
             return
         except Exception:
             logging.error("Autosave: writing failed:\n" + traceback.format_exc())

@@ -277,9 +277,17 @@ def decodePngSize(data):
 def _writeAtomic(path, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     temporary = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
-    with open(temporary, "wb") as f:
-        f.write(data)
-    os.replace(temporary, path)
+    try:
+        with open(temporary, "wb") as f:
+            f.write(data)
+        os.replace(temporary, path)
+    except BaseException:
+        # A full disk: no partial file is left behind
+        try:
+            os.remove(temporary)
+        except OSError:
+            pass
+        raise
 
 
 _STALE_MIDDLE = re.compile(r"\d+(-[0-9a-f]{12})?\Z")
