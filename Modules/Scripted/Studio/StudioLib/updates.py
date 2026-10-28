@@ -495,6 +495,20 @@ def downloadAsset(manifest, key, directory, feed=None, progress=None, cancelled=
     return path
 
 
+#: Written when an update is prepared: which run staged it (the staging folder is removed by the next start if that run died)
+STAGED_MARKER = "staged.json"
+
+
+def _processAlive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # exists, but belongs to another user
+    return True
+
+
 def _removeQuietly(path):
     try:
         os.remove(path)
@@ -728,6 +742,7 @@ class UpdateService:
         self._tourHoldTimer = None
         self._tourHeld = None
         self._quitConnected = False
+        self._discardConnected = False
         self._relaunch = True
         self._finishedMessage = None
         self._startTime = time.monotonic()
@@ -1327,6 +1342,7 @@ class UpdateService:
             self.job = None
             if error is None:
                 self.prepared = prepared
+                self._registerStaged(prepared)
             onUpdate(prepared, error)
             self._notify()
 
@@ -1352,8 +1368,83 @@ class UpdateService:
             self._quitConnected = True
         return True
 
+    #
+    # A prepared update that is not installed
+    #
+
+    def _registerStaged(self, prepared):
+        """Remember the staged copy (for the cleanup of a run that dies) and remove it at exit unless the user chose to
+        install it (Restart now, Install when I quit).
+        """
+        import slicer
+
+        try:
+            os.makedirs(stateDirectory(), exist_ok=True)
+            with open(os.path.join(stateDirectory(), STAGED_MARKER), "w", encoding="utf-8") as f:
+                json.dump({"pid": os.getpid(), "root": os.path.dirname(prepared.staged)}, f)
+        except OSError:
+            logging.warning("Updates: could not write the staging marker:\n" + traceback.format_exc())
+        if not self._discardConnected:
+            slicer.app.connect("aboutToQuit()", self._onQuitDiscard)
+            self._discardConnected = True
+
+    def _onQuitDiscard(self):
+        prepared = self.prepared
+        if prepared is None or prepared.launched or self._quitConnected:
+            return  # nothing prepared, or the install is chosen: the helper (or the next start) takes over
+        try:
+            root = os.path.dirname(prepared.staged)
+            if os.path.isdir(root) and os.path.basename(root).endswith(updates_install.STAGING_SUFFIX):
+                updates_install._removeTree(root)
+            package = prepared.package
+            if package and os.path.isfile(package) and os.path.dirname(os.path.abspath(package)) == os.path.abspath(downloadDirectory()):
+                _removeQuietly(package)
+            _removeQuietly(os.path.join(stateDirectory(), STAGED_MARKER))
+        except Exception:
+            logging.error("Updates: removing the unused update failed:\n" + traceback.format_exc())
+
+    def _removeAbandonedStaging(self):
+        """At start, when no install record exists: remove what a run that did not install its prepared update (crash,
+        killed) left: the staged copy next to the installation (or in the temporary folder) and the downloaded package.
+        """
+        stateDir = stateDirectory()
+        markerPath = os.path.join(stateDir, STAGED_MARKER)
+        roots = []
+        target = self.installTarget()
+        if target:
+            roots.append(updates_install.stagingRoot(target))
+        try:
+            with open(markerPath, encoding="utf-8") as f:
+                marker = json.load(f)
+        except (OSError, ValueError):
+            marker = None
+        if isinstance(marker, dict):
+            pid = marker.get("pid")
+            if isinstance(pid, int) and pid != os.getpid() and _processAlive(pid):
+                return  # another running Slicer Studio prepared it and may still install it
+            root = marker.get("root")
+            if isinstance(root, str) and os.path.basename(root).endswith(updates_install.STAGING_SUFFIX):
+                roots.append(root)
+        elif not target:
+            return
+        for root in dict.fromkeys(roots):
+            if os.path.isdir(root):
+                updates_install.removeInBackground(root)
+        downloads = downloadDirectory()
+        if os.path.isdir(downloads):
+            for name in os.listdir(downloads):
+                updates_install.removeInBackground(os.path.join(downloads, name))
+        _removeQuietly(markerPath)
+
     def _disconnectQuit(self):
         import slicer
+
+        if self._discardConnected:
+            try:
+                slicer.app.disconnect("aboutToQuit()", self._onQuitDiscard)
+            except Exception:
+                pass
+            self._discardConnected = False
 
         if self._quitConnected:
             try:
@@ -1431,6 +1522,8 @@ class UpdateService:
         """
         stateDir = stateDirectory()
         if not os.path.exists(os.path.join(stateDir, "install.json")):  # updates_install.RECORD_FILE, without importing it
+            # No update was installed: a prepared update that the previous run did not install is of no use any more
+            self._removeAbandonedStaging()
             return None
         record, result = updates_install.readRecord(stateDir)
         if record is None:

@@ -808,6 +808,80 @@ fi
         self.assertFalse(service.prepared.launched)
         self.assertFalse(service._relaunch)
 
+    def _prepareStaged(self, target):
+        """A prepared update as the service leaves it: the staged copy next to the installation and the package in the
+        download folder (nothing is installed).
+        """
+        downloads = self.updates.downloadDirectory()
+        os.makedirs(downloads, exist_ok=True)
+        package = os.path.join(downloads, "new.tar.gz")
+        _fakeLinuxPackage(package, "1.2.0")
+        return self.install.prepareLinux(package, target, "1.2.0")
+
+    def test_AbandonedPreparedUpdateRemovedAtStart(self):
+        updates, install = self.updates, self.install
+        target = self._fakeLinuxInstall("0.9.0")
+        updates._installableOverride = True
+        updates.installTargetOverride = target
+        prepared = self._prepareStaged(target)
+        root = install.stagingRoot(target)
+        downloads = updates.downloadDirectory()
+        self.assertTrue(os.path.isdir(root))
+        self.assertEqual(os.listdir(downloads), ["new.tar.gz"])
+        # The previous run quit (or crashed) while the update was ready and not chosen: no install record exists.
+        # Another Slicer Studio that is still running may install what it prepared: it is left alone
+        other = self._sleeper(30)
+        self.addCleanup(other.kill)
+        with open(os.path.join(self.stateDir, updates.STAGED_MARKER), "w") as f:
+            json.dump({"pid": other.pid, "root": root}, f)
+        service = self._service()
+        self.assertIsNone(service.finishInstall())
+        self._pump(0.5)
+        self.assertTrue(os.path.isdir(root))
+        self.assertEqual(os.listdir(downloads), ["new.tar.gz"])
+        other.kill()
+        other.wait()
+        self.assertIsNone(service.finishInstall())
+        self.assertTrue(self._waitFor(lambda: not os.path.exists(root) and not os.listdir(downloads), 10), os.listdir(os.path.dirname(target)))
+        self.assertFalse(os.path.exists(os.path.join(self.stateDir, updates.STAGED_MARKER)))
+        self.assertEqual(install.linuxPackageVersion(target), "0.9.0", "the installation is untouched")
+        self.assertEqual(sorted(os.listdir(os.path.dirname(target))), [os.path.basename(target)], "nothing is left next to the installation")
+        # Without a marker (the run died before writing it, or an older version) the same cleanup applies
+        prepared = self._prepareStaged(target)
+        self.assertIsNone(service.finishInstall())
+        self.assertTrue(self._waitFor(lambda: not os.path.exists(root) and not os.listdir(downloads), 10))
+
+    def test_AbandonedPreparedUpdateRemovedAtQuit(self):
+        updates, install = self.updates, self.install
+        if updates.platformKey() != "linux-x86_64":
+            self.skipTest("the Linux package path is tested on Linux")
+        self._publish("1.2.0")
+        target = self._fakeLinuxInstall("0.9.0")
+        updates._installableOverride = True
+        updates.installTargetOverride = target
+        root = install.stagingRoot(target)
+        for chosen in (False, True):
+            service = self._service()
+            service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+            dialog = service.updateNow()
+            self.assertTrue(self._waitFor(lambda dialog=dialog: dialog.state in ("ready", "failed"), 30), dialog.state)
+            self.assertEqual(dialog.state, "ready", dialog.text.text)
+            self.assertTrue(os.path.isdir(root))
+            self.assertTrue(os.listdir(updates.downloadDirectory()))
+            if chosen:
+                dialog.secondaryButton.click()  # Install when I quit
+            # Esc on the dialog only hides it; the application quits
+            service._onQuitDiscard()
+            if chosen:
+                self.assertTrue(os.path.isdir(root), "the update chosen for the exit is kept for the helper")
+                self.assertTrue(os.listdir(updates.downloadDirectory()))
+            else:
+                self.assertFalse(os.path.exists(root))
+                self.assertEqual(os.listdir(updates.downloadDirectory()), [])
+                self.assertFalse(os.path.exists(os.path.join(self.stateDir, updates.STAGED_MARKER)))
+            service.dispose()
+            self.services.remove(service)
+
     def test_UpdateNowTamperedRefused(self):
         updates = self.updates
         self._publish("1.2.0", tamper="sha256")
