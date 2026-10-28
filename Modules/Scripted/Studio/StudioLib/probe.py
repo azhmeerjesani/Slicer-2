@@ -24,7 +24,7 @@ cursor position becomes invalid). Wheel steps under a still mouse refresh it thr
 
 Placement: bottom-right, on the bottom row of the view when it fits there. The bottom row also holds the view's own
 texts: the corner annotations (layer names at the bottom left, ``B: <volume>``), the orientation letter at the bottom
-centre (``StudioLib.orientation``) and the ruler. When the line would run into one of them (narrow views, for example
+centre and the display statement ("Radiological · L on right") at the bottom right (``StudioLib.orientation``) and the ruler. When the line would run into one of them (narrow views, for example
 the side views of the Focus layout or Four-Up at 1366x768), it is raised above them (``probePlacement()``); a line
 wider than the view drops its last parts (value, then segment names) until it fits.
 
@@ -477,7 +477,9 @@ class _ViewText:
         orientation = _orientation()
         letters = orientation.viewLetters(sliceNode.GetLayoutName()) if orientation is not None and sliceNode is not None else None
         bottomLetter = letters[3] if letters else ""
-        key = (lowerLeft, lowerRight, cornerFontSize, rulerType, bottomLetter)
+        # The display statement ("Radiological · L on right") of an axial or coronal view, at the bottom right
+        statementBox = orientation.viewStatementBox(sliceNode.GetLayoutName()) if orientation is not None and sliceNode is not None else None
+        key = (lowerLeft, lowerRight, cornerFontSize, rulerType, bottomLetter, statementBox)
 
         def boxes(viewWidth, viewHeight, lineHeight):
             result = []
@@ -487,6 +489,9 @@ class _ViewText:
             if lowerRight.strip():
                 width, height = self._measure(lowerRight, cornerAnnotation.GetTextProperty(), cornerFontSize)
                 result.append((viewWidth - CORNER_ANNOTATION_MARGIN - width, viewWidth, CORNER_ANNOTATION_MARGIN + height))
+            if statementBox is not None:
+                width, bottom, height = statementBox
+                result.append((viewWidth - CORNER_ANNOTATION_MARGIN - width, viewWidth, bottom + height))
             if bottomLetter:
                 width, height = self._measure(bottomLetter, self.actor.GetTextProperty(), orientation.FONT_SIZE, bold=True)
                 letterBottom = orientation.bottomReference(rulerType)[1] * viewHeight + orientation.EDGE_MARGIN

@@ -706,6 +706,20 @@ def viewShownStatement(sliceViewName):
     return view.shownStatement if view is not None else None
 
 
+def viewStatementBox(sliceViewName):
+    """``(width, bottom, height)`` in pixels of the statement drawn in a slice view: its width, the height of its bottom
+    above the view bottom edge and its height; it is right-aligned at ``CORNER_ANNOTATION_MARGIN`` from the right edge.
+    None if the view shows no statement (the probe keeps clear of it).
+    """
+    if _controller is None:
+        return None
+    view = _controller.views.get(sliceViewName)
+    if view is None or not view.shownStatement:
+        return None
+    width, height = view._textSize(view.statementActor, view.shownStatement)
+    return width, view.statementActor.GetPositionCoordinate().GetValue()[1], height
+
+
 def viewTag(sliceViewName):
     """The figure tag shown in a slice view ("Figure · side unknown"), "" if it is not a figure, None without letters."""
     if _controller is None:

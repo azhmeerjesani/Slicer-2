@@ -789,7 +789,12 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                     self.assertFalse(overlaps, f"{viewName} ({viewWidth} px): {box} overlaps {(left, right, top)}")
                 self.assertGreaterEqual(box[0], 0, f"{viewName}: the line is inside the view")
                 if viewWidth > 600:
-                    self.assertEqual(view.bottom, probe.MARGIN, f"{viewName}: a wide view keeps the bottom row")
+                    # A wide view keeps the bottom row, except under the display statement of an axial or coronal view
+                    from StudioLib import orientation
+
+                    statementBox = orientation.viewStatementBox(viewName)
+                    expected = probe.MARGIN if statementBox is None else statementBox[1] + statementBox[2] + probe.VERTICAL_GAP
+                    self.assertEqual(view.bottom, expected, f"{viewName}: a wide view keeps the bottom row")
                 elif viewWidth < 360:
                     self.assertGreater(view.bottom, probe.MARGIN, f"{viewName}: a narrow view raises the line")
                     # Raised above the bottom-centre letter
@@ -802,6 +807,40 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                 self.mainWindow.showMaximized()
             else:
                 self.mainWindow.setGeometry(geometry)
+
+    def test_12b_probe_clear_of_orientation_statement(self):
+        """The probe line does not overlap the orientation statement ("Radiological · L on right") at the bottom right of
+        an axial or coronal view: it is raised above it. A sagittal view has no statement.
+        """
+        from StudioLib import importer, orientation, probe
+
+        studioShell = self._applyStudio()
+        importer.startOnTemplate(shell=studioShell)
+        orientation.update()
+        live = probe.instance()
+        for viewName, hasStatement in (("Red", True), ("Green", True), ("Yellow", False)):
+            text = self._cursorAt(viewName, (-13.9, -19.3, 17.5))
+            self.assertTrue(text.startswith("Left 13.9"), text)
+            view = live.views[viewName]
+            viewWidth, _viewHeight = view.renderer.GetSize()
+            statementBox = orientation.viewStatementBox(viewName)
+            if not hasStatement:
+                self.assertIsNone(statementBox, viewName)
+                continue
+            self.assertIsNotNone(statementBox, f"{viewName}: the statement is shown")
+            # Both boxes as drawn: the actors' own bounding boxes, relative to their anchors at the right edge
+            statementActor = orientation._controller.views[viewName].statementActor
+            relative = [0.0] * 4
+            statementActor.GetBoundingBox(view.renderer, relative)
+            statementY = statementActor.GetPositionCoordinate().GetValue()[1]
+            statement = (viewWidth - orientation.CORNER_ANNOTATION_MARGIN + relative[0], viewWidth - orientation.CORNER_ANNOTATION_MARGIN + relative[1],
+                         statementY + relative[2], statementY + relative[3])
+            view.actor.GetBoundingBox(view.renderer, relative)
+            probeBox = (viewWidth - probe.MARGIN + relative[0], viewWidth - probe.MARGIN + relative[1],
+                        view.bottom + relative[2], view.bottom + relative[3])
+            horizontal = probeBox[0] < statement[1] and probeBox[1] > statement[0]
+            vertical = probeBox[2] < statement[3] and probeBox[3] > statement[2]
+            self.assertFalse(horizontal and vertical, f"{viewName}: the probe {probeBox} overlaps the statement {statement}")
 
     def test_13_more_tools_in_search(self):
         """Every Draw tool is in Search, also the ones under "More tools" (no key while they are hidden): "th" is
