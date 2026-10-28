@@ -382,7 +382,7 @@ class CaseStrip:
         font.setWeight(qt.QFont.DemiBold)
         self.fieldButtons["case"].setFont(font)
         font = qt.QFont(self.editorTitle.font)
-        font.setPixelSize(ui.fontPx(11))
+        font.setPixelSize(ui.fontPx(12))
         font.setWeight(qt.QFont.DemiBold)
         self.editorTitle.setFont(font)
 
@@ -674,7 +674,7 @@ class CaseStrip:
         self._editing, self._editSid, self._confirmed = key, self._sid, None
         self._inputs = {}
         titles = {k: t for k, _c, t in FIELDS}
-        self.editorTitle.setText(titles[key].upper())
+        self.editorTitle.setText(titles[key])
         self.messageLabel.hide()
         readOnly = key == "review"
         if readOnly:

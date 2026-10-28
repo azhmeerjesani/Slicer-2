@@ -1307,3 +1307,17 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self._library(studioShell)
         after = {key: qt.QSettings().value(key) for key in before}
         self.assertEqual(json.dumps(before, default=str), json.dumps(after, default=str))
+
+    def test_inspector_labels_are_sentence_case(self):
+        """The Sources card title and the headers of the tutorials dialog are sentence case, 12 px (VISUAL 2.4): all-caps is only for
+        "CONTINUE" and the group headers of Search and the folder chooser.
+        """
+        from StudioLib import libcard_sources, libcard_tutorials
+
+        card = libcard_sources.SourcesCard(None)
+        title = card.widget.findChild("QLabel", "StudioSourcesLibraryTitle")
+        header = libcard_tutorials.TutorialsDialog._header("What you will learn")
+        for label, text in ((title, "Sources"), (header, "What you will learn")):
+            self.assertEqual(label.text, text)
+            self.assertNotEqual(label.font.capitalization(), qt.QFont.AllUppercase, text)
+            self.assertEqual(label.font.letterSpacing(), 0.0, text)

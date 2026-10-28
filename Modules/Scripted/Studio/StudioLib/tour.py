@@ -681,7 +681,7 @@ class _Card:
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(8)
         self.counterLabel = _label("", "StudioTourStepCounter", 11, qt.QFont.DemiBold, wrap=False)
-        ui._font(self.counterLabel, ui.fontPx(11), qt.QFont.DemiBold, 0.6)
+        ui._font(self.counterLabel, ui.fontPx(11), qt.QFont.DemiBold)
         header.addWidget(self.counterLabel)
         header.addStretch(1)
         self.dots = _Dots()
@@ -701,8 +701,8 @@ class _Card:
         slicerLayout = qt.QVBoxLayout(self.slicerBox)
         slicerLayout.setContentsMargins(12, 9, 12, 10)
         slicerLayout.setSpacing(3)
-        self.slicerCaption = _label(_("In 3D Slicer").upper(), "StudioTourInSlicerCaption", 11, qt.QFont.DemiBold, wrap=False)
-        ui._font(self.slicerCaption, ui.fontPx(10.5), qt.QFont.DemiBold, 0.6)
+        self.slicerCaption = _label(_("In 3D Slicer"), "StudioTourInSlicerCaption", 11, qt.QFont.DemiBold, wrap=False)
+        ui._font(self.slicerCaption, ui.fontPx(11), qt.QFont.DemiBold)
         slicerLayout.addWidget(self.slicerCaption)
         self.slicerLabel = _label("", "StudioTourInSlicerText", 12.5)
         slicerLayout.addWidget(self.slicerLabel)
@@ -827,9 +827,9 @@ class _Card:
 
     def setStep(self, step, shell, index, count, first, last, finishText=None, single=False):
         if single:
-            self.counterLabel.setText(_("Where did it go?").upper())
+            self.counterLabel.setText(_("Where did it go?"))
         else:
-            self.counterLabel.setText(_("Step {index} of {count}").format(index=index + 1, count=count).upper())
+            self.counterLabel.setText(_("Step {index} of {count}").format(index=index + 1, count=count))
         self.titleLabel.setText(step.title)
         self.bodyLabel.setText(step.bodyText(shell))
         inSlicer = step.inSlicerText()

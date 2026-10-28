@@ -931,3 +931,22 @@ class StudioTourTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self._checkStep(player, "below-the-fold")
         tour.stopTour()
         self._pump()
+
+    def test_16_card_labels_are_sentence_case(self):
+        """The step counter and the "In 3D Slicer" caption of the card are sentence case, not capitals (VISUAL 2.4)."""
+        from StudioLib import tour
+
+        self._applyStudio()
+        self._resize(1366, 768)
+        self.assertTrue(tour.startTour("studio"))
+        try:
+            self._pump()
+            card = tour.activePlayer().card()
+            self.assertRegex(card.counterLabel.text, r"^Step 1 of \d+$")
+            self.assertEqual(card.slicerCaption.text, "In 3D Slicer")
+            for label in (card.counterLabel, card.slicerCaption):
+                self.assertNotEqual(label.font.capitalization(), qt.QFont.AllUppercase, label.objectName)
+                self.assertFalse(label.text.isupper(), label.objectName)
+        finally:
+            tour.stopTour()
+            self._pump()

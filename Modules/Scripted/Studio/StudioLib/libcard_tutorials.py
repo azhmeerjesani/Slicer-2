@@ -304,9 +304,9 @@ class TutorialsDialog:
 
     @staticmethod
     def _header(text):
-        label = qt.QLabel(text.upper())
+        label = qt.QLabel(text)
         label.setProperty("slicerRole", "sectionHeader")
-        library._setFont(label, 11, qt.QFont.DemiBold, 0.6)
+        library._setFont(label, 12, qt.QFont.DemiBold)
         return label
 
     def _sizeLine(self, entry):
