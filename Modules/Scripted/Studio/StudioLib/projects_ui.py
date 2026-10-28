@@ -294,6 +294,10 @@ class FolderChooserDialog(qt.QDialog):
             self.syncedLabel.setText("")
             self.syncedLabel.hide()
             self.syncedNotice.hide()
+        # The notice appears or disappears while the dialog is open: a dialog keeps its size otherwise, and the rows of
+        # "Inside this folder" would be squeezed and clipped (VISUAL 4.7)
+        if self.isVisible():
+            self.adjustSize()
 
     def setPath(self, path):
         self.path = os.path.normpath(str(path))

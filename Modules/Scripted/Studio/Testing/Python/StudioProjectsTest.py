@@ -587,6 +587,24 @@ class StudioProjectsTest(unittest.TestCase):
             self.assertEqual(dialog.result(), qt.QDialog.Accepted)
         finally:
             dialog.deleteLater()
+        # The warning appears while the dialog is open (Choose… on a synced folder): the dialog grows with it and the rows of
+        # "Inside this folder" keep their size
+        dialog = projects_ui.FolderChooserDialog(proposal=os.path.join(self.tempDir, "Slicer Studio"))
+        try:
+            dialog.show()
+            slicer.app.processEvents()
+            plainHeight = dialog.height
+            dialog.setPath(os.path.join(self.tempDir, "Dropbox", "Lab"))
+            slicer.app.processEvents()
+            self.assertFalse(dialog.syncedNotice.isHidden())
+            self.assertGreaterEqual(dialog.height, plainHeight + dialog.syncedNotice.height)
+            card = dialog.findChild("QFrame", "StudioProjectsFolderInsideCard")
+            squeezed = [(label.text, label.height, label.sizeHint.height()) for label in card.findChildren("QLabel")
+                        if label.text and label.height < label.sizeHint.height()]
+            self.assertEqual(squeezed, [])
+        finally:
+            dialog.hide()
+            dialog.deleteLater()
         status = service.status()
         self.assertEqual(status.projectName, "sub-012 T1w")
         text, level, toolTip, _icon = projects_ui.projectStatus(status)
