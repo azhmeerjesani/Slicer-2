@@ -778,3 +778,38 @@ class StudioTemplatesTest(unittest.TestCase):
         self.assertTrue(slicer.util.saveNode(models[0], path))
         self.assertTrue(-56.0 < templates._readSurfaceBounds(path)[1] < -24.0)
         shutil.rmtree(folder, ignore_errors=True)
+
+    @staticmethod
+    def _width(size):
+        size = size() if callable(size) else size
+        return size.width()
+
+    def test_14_long_names_are_elided(self):
+        """A long template name or file name is elided ("…", the whole text as tooltip) and does not widen the Settings list or the add dialog."""
+        templates, ui = self.templates, self.ui
+        longName = "MNI152 ICBM 2009c Nonlinear Asymmetric 0.5 mm T1-weighted skull-stripped from the McGill BIC website " * 2
+        panel = ui.TemplatesSettingsPanel()
+        panel.refresh()
+        before = self._width(panel.rowFor(templates.BUILTIN_DEFAULT).minimumSizeHint)
+        template = self._add(name=longName)
+        panel.refresh()
+        row = panel.rowFor(template.id)
+        nameLabel = row.findChild(qt.QLabel, "studioTemplateName")
+        self.assertIn("…", nameLabel.text)
+        self.assertIn(longName.strip(), nameLabel.toolTip.replace("</p>", ""))  # Studio wraps tool tips in rich text
+        self.assertLessEqual(self._width(nameLabel.sizeHint), ui.NAME_WIDTH + 2)
+        self.assertLessEqual(self._width(row.minimumSizeHint), before + ui.NAME_WIDTH)
+        shortRow = panel.rowFor(templates.BUILTIN_DEFAULT)
+        self.assertNotIn("…", shortRow.findChild(qt.QLabel, "studioTemplateName").text)
+        self.assertEqual(shortRow.findChild(qt.QLabel, "studioTemplateName").toolTip, "")
+        panel.deleteLater()
+        dialog = ui.AddTemplateDialog()
+        longFile = os.path.join(self.tempDir, "mni_icbm152_t1_tal_nlin_asym_09c_0.5mm_skull_stripped_brain_extracted_version_2009_final.nii.gz")
+        shutil.copy(self.image15, longFile)
+        dialog.setImage(longFile)
+        self.assertIn("…", dialog.fileLabel.text)
+        self.assertTrue(dialog.fileLabel.text.endswith(".nii.gz"))
+        self.assertIn(longFile, dialog.fileLabel.toolTip)
+        self.assertLessEqual(self._width(dialog.fileLabel.sizeHint), ui.FILE_NAME_WIDTH + 2)
+        dialog.deleteLater()
+        os.remove(longFile)

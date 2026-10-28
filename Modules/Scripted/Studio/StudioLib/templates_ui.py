@@ -37,6 +37,8 @@ ROW_THUMBNAIL = 48
 CARD_THUMBNAIL = 72
 #: Widest file list of an "Optional" row (px; longer lists are elided in the middle, the tooltip has them all)
 VALUE_WIDTH = 230
+NAME_WIDTH = 420  # a template name in the Settings list is elided to this width
+FILE_NAME_WIDTH = 330  # the file name in the add dialog is elided to this width
 CONTRAST_LABELS = (("T1w", "T1w"), ("T2w", "T2w"), ("PD", "PD"), ("FLAIR", "FLAIR"), ("CT", "CT"), ("other", "Other"))
 IMAGE_FILTER = "Images (*.nii *.nii.gz *.nrrd);;All files (*)"
 SURFACE_FILTER = "Surfaces (*.vtk *.vtp *.stl *.obj *.ply *.gii);;All files (*)"
@@ -78,6 +80,17 @@ def _label(text, objectName, pixelSize=13, weight=None, color=None, wrap=False):
     if color:
         ui.bindStyleSheet(label, lambda: f"QLabel {{ color: {ui.token(color).name()}; background: transparent; border: none; }}")
     return label
+
+
+def _setElidedText(label, text, maxWidth, mode=None):
+    """Show ``text`` in a one-line ``label``, elided to ``maxWidth`` px (the whole text is its tool tip when elided).
+
+    A plain QLabel asks for its whole text width, so a long name would widen the dialog that holds it.
+    """
+    metrics = qt.QFontMetrics(label.font)
+    shown = metrics.elidedText(text or "", mode if mode is not None else qt.Qt.ElideRight, maxWidth)
+    label.setText(shown)
+    label.setToolTip(text if shown != text else "")
 
 
 def _button(text, objectName, callback, role="secondary"):
@@ -442,7 +455,7 @@ class AddTemplateDialog(qt.QDialog):
         """Check an image (header only) and show what was detected."""
         self.imagePath = path
         self.detection = templates.identify(path)
-        self.fileLabel.setText(os.path.basename(path))
+        _setElidedText(self.fileLabel, os.path.basename(path), FILE_NAME_WIDTH, qt.Qt.ElideMiddle)
         self.fileLabel.setToolTip(path)
         self.changeButton.setText(_("Change…"))
         detection = self.detection
@@ -792,7 +805,8 @@ class TemplatesSettingsPanel(ctk.ctkSettingsPanel):
         texts.setSpacing(2)
         nameRow = qt.QHBoxLayout()
         nameRow.setSpacing(8)
-        nameLabel = _label(template.name, "studioTemplateName", 13, qt.QFont.Medium)
+        nameLabel = _label("", "studioTemplateName", 13, qt.QFont.Medium)
+        _setElidedText(nameLabel, template.name, NAME_WIDTH)
         nameRow.addWidget(nameLabel)
         chip = ui.chip(_("Built-in") if template.builtin else _("Yours"), "neutral" if template.builtin else "busy")
         chip.setObjectName("studioTemplateKindChip")
