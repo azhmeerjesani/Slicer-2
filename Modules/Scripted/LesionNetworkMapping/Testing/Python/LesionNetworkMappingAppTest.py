@@ -214,6 +214,12 @@ class AppHelpersTest(unittest.TestCase):
             self.assertIn("poster", events[-1]["message"])
             code, events, _out, _err = cli(tmp, os.path.join(tmp, "out"), "group", "--connectome", os.path.join(tmp, "missing.lnmc"), "--events", "json")
             self.assertEqual(code, 2)
+            # An explicit file option that names nothing is a usage error, not a silent fallback (black report background)
+            for option in ("--template", "--atlas", "--atlas-labels"):
+                code, events, _out, _err = cli(tmp, os.path.join(tmp, "out"), "group", "--connectome", tmp, option, os.path.join(tmp, "nosuch.nii.gz"), "--events", "json")
+                self.assertEqual(code, 2, option)
+                self.assertIn(option, events[-1]["message"])
+                self.assertIn("nosuch.nii.gz", events[-1]["message"])
             code, _events, _out, err = cli(tmp, os.path.join(tmp, "out"), "sideways", "--connectome", tmp)
             self.assertEqual(code, 2)
             code, _events, out, _err = cli("--version")

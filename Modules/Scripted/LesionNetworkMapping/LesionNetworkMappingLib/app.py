@@ -628,6 +628,11 @@ def _main(argv):
     if not os.path.isdir(args.connectome):
         emit("error", code="usage", message=f"The connectome bundle does not exist: {args.connectome}")
         return jobs.EXIT_USAGE
+    for option in ("template", "atlas", "atlas_labels"):
+        path = getattr(args, option)
+        if path is not None and not os.path.isfile(path):
+            emit("error", code="usage", message=f"The file of --{option.replace('_', '-')} does not exist: {path}")
+            return jobs.EXIT_USAGE
     from .connectome import ConnectomeBundle
     from .export import run_dir_name
     from .study import Study
