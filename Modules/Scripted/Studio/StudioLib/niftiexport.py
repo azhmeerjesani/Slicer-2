@@ -839,6 +839,9 @@ class Job:
         if empty:
             self.notes.append(_("{name}: empty segments were skipped: {segments}").format(name=self.nodeName, segments=", ".join(empty)))
         tasks = []
+        # Segments that have voxels on their own grid but none on the chosen grid (a thin lesion resampled onto a coarser image)
+        lostOnGrid = []
+        transformNote = None
         with _temporaryNodes():
             referenceNode, resampled = self._referenceVolume(node)
             if mode == SEGMENTATION_MASKS:
@@ -846,6 +849,10 @@ class Job:
                     labelmapNode = self._exportLabelmap(node, [segmentId], referenceNode)
                     data, affine, transformNote = volumeData(labelmapNode)
                     data = (data != 0).astype(np.uint8)
+                    if not np.any(data):
+                        # An all-zero mask would be a lesion silently lost: it is skipped, with a note
+                        lostOnGrid.append(segmentation.GetSegment(segmentId).GetName())
+                        continue
                     sidecar, code = self._segmentationSidecar(node, data, affine, transformNote, referenceNode, resampled)
                     segment = segmentation.GetSegment(segmentId)
                     sidecar.update({"Kind": "mask", "Units": "binary", "Segment": segment.GetName(), "SegmentColor": _hexColor(segment.GetColor()),
@@ -862,12 +869,20 @@ class Job:
                 for value, segmentId in enumerate(ids, start=1):
                     segment = segmentation.GetSegment(segmentId)
                     labels.append({"Value": value, "Name": segment.GetName(), "Color": _hexColor(segment.GetColor()), "VoxelCount": int(counts[value])})
+                    if not counts[value]:
+                        lostOnGrid.append(segment.GetName())
                 sidecar.update({"Kind": "labelmap", "Units": "label", "Labels": labels})
                 if len(ids) > 1:
                     sidecar["Overlap"] = "Where segments overlap, a voxel has the value of the later segment"
                 base = splitExtension(self.path)[0]
                 tasks.append(WriteTask(self.path, data, affine, code, sidecar, textFiles={base + ".tsv": labelTableTsv(labels),
                                                                                          base + ".txt": labelTableItkSnap(labels)}))
+            if lostOnGrid:
+                if mode == SEGMENTATION_MASKS:
+                    message = _("{name}: no voxel of these segments remains on the chosen grid, so no mask was written: {segments}")
+                else:
+                    message = _("{name}: no voxel of these segments remains on the chosen grid (VoxelCount 0): {segments}")
+                self.notes.append(message.format(name=self.nodeName, segments=", ".join(lostOnGrid)))
             if transformNote is not None:
                 self.notes.append(_("{name}: its transform was applied to the exported copy (the scene is unchanged)").format(name=self.nodeName))
         return tasks

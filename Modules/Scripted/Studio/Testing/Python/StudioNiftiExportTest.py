@@ -435,6 +435,39 @@ class StudioNiftiExportTest(unittest.TestCase):
         self.assertIn("Resampled", self._sidecar(result.images[0]))
         self._assertNoAbsolutePaths(self.out)
 
+    def test_04b_segment_lost_on_chosen_grid(self):
+        """A segment with no voxel left on the chosen (coarser) grid is reported, never written as a silent all-zero mask."""
+        scan = self._volume("scan 1 mm", np.zeros((60, 60, 60), np.int16), np.diag([-1.0, -1.0, 1.0, 1.0]))
+        reference = self._volume("FLAIR 3 mm", np.zeros((20, 20, 20), np.int16),
+                                 np.array([[-3.0, 0, 0, 28.5], [0, -3.0, 0, 28.5], [0, 0, 3.0, -28.5], [0, 0, 0, 1]]))
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "lesion")
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(scan)
+        thin = segmentation.GetSegmentation().AddEmptySegment("", "Thin")
+        big = segmentation.GetSegmentation().AddEmptySegment("", "Big")
+        thinArray = np.zeros((60, 60, 60), np.uint8)
+        thinArray[30, 25:35, 15:19] = 1  # 1 mm thick, between two 3 mm slices
+        bigArray = np.zeros((60, 60, 60), np.uint8)
+        bigArray[10:40, 10:40, 10:40] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(thinArray, segmentation, thin, scan)
+        slicer.util.updateSegmentBinaryLabelmapFromArray(bigArray, segmentation, big, scan)
+
+        masks = self.export.exportSegmentation(segmentation, os.path.join(self.out, "masks.nii.gz"), mode=self.export.SEGMENTATION_MASKS,
+                                               reference=reference)
+        self.assertEqual(masks.errors, [])
+        self.assertEqual(len(masks.images), 1, masks.images)
+        self.assertIn("Big", masks.images[0])
+        self.assertGreater(int(self._read(masks.images[0])[0].sum()), 0)
+        self.assertTrue(any("Thin" in note and "chosen grid" in note for note in masks.notes), masks.notes)
+
+        labelmap = self.export.exportSegmentation(segmentation, os.path.join(self.out, "labels.nii.gz"), reference=reference)
+        self.assertEqual(labelmap.errors, [])
+        counts = {entry["Name"]: entry["VoxelCount"] for entry in self._sidecar(labelmap.images[0])["Labels"]}
+        self.assertEqual(counts["Thin"], 0)
+        self.assertGreater(counts["Big"], 0)
+        self.assertTrue(any("Thin" in note and "chosen grid" in note for note in labelmap.notes), labelmap.notes)
+        self.assertFalse(any("Big" in note for note in masks.notes + labelmap.notes), masks.notes + labelmap.notes)
+
     def test_05_template_codes(self):
         """sform/qform code 4 on a recognised MNI grid (the bundled template) and on the user's own template (A-10)."""
         from LesionNetworkMappingLib import geometry, nifti
