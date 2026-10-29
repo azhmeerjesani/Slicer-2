@@ -2614,6 +2614,16 @@ def loadTemplateVolume(template):
     path = template.imagePath
     if not path or not os.path.isfile(path):
         raise RuntimeError(_("The image of the template {name} is missing").format(name=template.name))
+    if templates is not None:
+        # A template added before the check (or a folder put into Templates/ by hand) whose sform and qform disagree: Slicer
+        # would load it at the qform, away from the grid that was checked and registered as its space (the sform)
+        try:
+            distance = templates.readHeader(path).get("xformMm", 0.0)
+        except Exception:
+            distance = 0.0
+        if distance > templates.XFORM_REFUSAL_MM:
+            raise RuntimeError(_("The template {name} cannot be used.").format(name=template.name) + " "
+                               + _(templates.XFORM_REFUSAL).format(distance=distance))
     with _ownLoad():
         # Tagged before it enters the scene (the Draw cards and space checks that react to the new node see a template), and
         # read by its storage node: a template is not a recently loaded file of the user (no RecentlyLoadedFiles entry)

@@ -813,3 +813,52 @@ class StudioTemplatesTest(unittest.TestCase):
         self.assertLessEqual(self._width(dialog.fileLabel.sizeHint), ui.FILE_NAME_WIDTH + 2)
         dialog.deleteLater()
         os.remove(longFile)
+
+    def test_15_sform_qform_disagreement_is_refused(self):
+        """A NIfTI file whose sform (MNI) and qform disagree is refused: the check reads the sform, while Slicer loads the
+        qform, so lesions drawn on it would be treated as MNI at the wrong place. A template added before the check (its
+        image changed afterwards) is not loaded either.
+        """
+        import struct
+
+        from LesionNetworkMappingLib import nifti
+
+        from StudioLib import importer
+
+        templates = self.templates
+        data, affine, _header = nifti.read_nifti(self.image15)
+        agreeing = os.path.join(self.tempDir, "agreeing_1.5mm.nii")
+        nifti.write_nifti(agreeing, data, affine)
+        disagreeing = os.path.join(self.tempDir, "disagreeing_1.5mm.nii")
+        shutil.copy(agreeing, disagreeing)
+        header = nifti.read_nifti_header(disagreeing)
+        endian = header["byteorder"]
+        with open(disagreeing, "r+b") as f:
+            f.seek(268)  # qoffset_x: the qform moves 40 mm to the right, the sform (MNI, code 4) stays
+            (qoffsetX,) = struct.unpack(endian + "f", f.read(4))
+            f.seek(268)
+            f.write(struct.pack(endian + "f", qoffsetX + 40.0))
+        header = nifti.read_nifti_header(disagreeing)
+        self.assertEqual((header["sform_code"], header["qform_code"]), (4, 4))
+        self.assertAlmostEqual(nifti.xform_disagreement(header), 40.0, places=3)
+        detection = templates.identify(disagreeing)
+        self.assertFalse(detection.ok)
+        self.assertEqual(detection.status, "refused")
+        self.assertIn("sform and qform", detection.message)
+        self.assertAlmostEqual(templates.readHeader(agreeing)["xformMm"], 0.0, places=3)
+        with self.assertRaises(templates.TemplateError):
+            self._add(disagreeing, name="Disagreeing")
+        self.assertFalse(os.path.exists(templates.templatesFolder()) and os.listdir(templates.templatesFolder()), "a refused add leaves nothing")
+        # As a brain mask of an agreeing template
+        ok, reason = templates.checkCompanion(templates.identify(agreeing), disagreeing)
+        self.assertFalse(ok)
+        self.assertIn("sform and qform", reason)
+        # A template added from an agreeing file whose image was replaced by the disagreeing one is not loaded at the qform
+        template = self._add(agreeing, name="Agreeing")
+        shutil.copy(disagreeing, template.imagePath)
+        with self.assertRaises(RuntimeError) as context:
+            importer.startOnTemplate(shell=self._shell(), templateId=template.id)
+        self.assertIn("sform and qform", str(context.exception))
+        self.assertFalse([node for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode") if node.GetAttribute("Studio.TemplateId") == template.id])
+        for path in (agreeing, disagreeing):
+            os.remove(path)

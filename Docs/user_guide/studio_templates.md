@@ -27,6 +27,11 @@ only:
   scan instead.
 - **Anything else is refused**: "This image is not in MNI space. Open it as a scan
   instead, or normalize it to MNI first."
+- **A NIfTI file whose sform and qform disagree** (by more than 0.1 mm) is refused
+  too, whatever they say: Slicer would show it at the qform while the check reads the
+  sform, so lesions drawn on it would not be at the MNI positions. Make the two agree
+  (for example with `fslorient -copysform2qform`) and add the file again. A template
+  of yours whose image disagrees this way is not opened either.
 
 A file with several volumes (4D) is added with its first volume only. Voxels that
 are not cubic are accepted with a warning: drawing and maps work best on

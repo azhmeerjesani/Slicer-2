@@ -90,6 +90,12 @@ ANISOTROPY_WARNING = 1.5
 GRID_TOLERANCE_MM = 0.01
 COPY_CHUNK = 1 << 20
 REFUSAL = "This image is not in MNI space. Open it as a scan instead, or normalize it to MNI first."
+#: A NIfTI file whose sform and qform disagree by more than this (mm) is refused: the check reads the sform, while
+#: Slicer (ITK) loads such a file at the qform, so drawn lesions would not be where the template says
+XFORM_REFUSAL_MM = 0.1
+XFORM_REFUSAL = ("The sform and qform of this image disagree by up to {distance:.3g} mm, so programs place it differently "
+                 "(Slicer uses the qform, FSL the sform). Make them agree (for example with fslorient -copysform2qform) "
+                 "and add it again.")
 #: Node attribute: the template id of a template volume ("user:<slug>" or "builtin:<name>"); a portable id, never a path
 TEMPLATE_ID_ATTRIBUTE = "Studio.TemplateId"
 #: ``Studio.Role`` of the 3D brain surfaces of a template
@@ -246,10 +252,10 @@ def readNrrdHeader(path):
 
 
 def readHeader(path):
-    """``{"shape" (3 voxel counts), "frames", "affine" (RAS 4x4), "codes" ((sform, qform) or None), "format"}``.
+    """``{"shape" (3 voxel counts), "frames", "affine" (RAS 4x4), "codes" ((sform, qform) or None), "format", "xformMm"}``.
 
     NIfTI-1 through ``LesionNetworkMappingLib.nifti`` (header only), NRRD with a small reader. Raises ValueError for
-    other files.
+    other files. ``xformMm`` is how far (mm) the sform and qform of a NIfTI file disagree (0.0 for NRRD).
     """
     extension = _lowerExtension(path)
     if extension in (".nii", ".nii.gz"):
@@ -261,9 +267,9 @@ def readHeader(path):
         for value in shape[3:]:
             frames *= int(value)
         return {"shape": shape[:3], "frames": frames, "affine": header["affine"], "codes": (header["sform_code"], header["qform_code"]),
-                "format": "NIfTI"}
+                "format": "NIfTI", "xformMm": float(nifti.xform_disagreement(header))}
     if extension == ".nrrd":
-        return readNrrdHeader(path)
+        return dict(readNrrdHeader(path), xformMm=0.0)
     raise ValueError(_("Use a NIfTI (.nii, .nii.gz) or NRRD (.nrrd) file"))
 
 
@@ -421,6 +427,11 @@ def identify(path):
             detection.status, detection.message = "refused", _("A NRRD file with several volumes cannot be used: save its first volume as NIfTI.")
             detection.facts = " · ".join(facts)
             return detection
+    if header.get("xformMm", 0.0) > XFORM_REFUSAL_MM:
+        # The checked matrix (the sform) would not be the one the scene uses (Slicer loads the qform)
+        detection.status, detection.message = "refused", _(XFORM_REFUSAL).format(distance=header["xformMm"])
+        detection.facts = " · ".join(facts)
+        return detection
     match = None
     try:
         from LesionNetworkMappingLib import geometry
@@ -462,6 +473,8 @@ def checkCompanion(detection, path):
         return False, _("This file cannot be read as an image: {error}").format(error=error)
     if detection is None or detection.shape is None:
         return False, _("Choose the template image first.")
+    if header.get("xformMm", 0.0) > XFORM_REFUSAL_MM:
+        return False, os.path.basename(path) + ": " + _(XFORM_REFUSAL).format(distance=header["xformMm"])
     if not sameGrid(header["shape"], header["affine"], detection.shape, detection.affine):
         return False, _("{name} is not on the grid of the template image ({size}).").format(
             name=os.path.basename(path), size=" × ".join(str(n) for n in detection.shape))  # noqa: RUF001
