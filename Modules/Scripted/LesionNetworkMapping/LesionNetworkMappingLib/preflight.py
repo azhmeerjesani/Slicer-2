@@ -662,6 +662,17 @@ def run_preflight(
             fractional_sum = estimate if fractional_sum is None else min(fractional_sum, estimate)
 
         # Empty and sub-voxel lesions
+        # A lesion with volume that fills no connectome voxel at all lies outside the connectome grid (wrong
+        # header or space): it is not empty, so the message names that cause (as the engine does).
+        outside_grid = fractional_sum is not None and fractional_sum <= 0 and volume_ml is not None and volume_ml > 0 and "empty" not in flags
+        if outside_grid:
+            subject_block(
+                "lesion_outside_grid",
+                sid,
+                lambda sids, _d: f"{_count(len(sids), 'lesion')} {'lies' if len(sids) == 1 else 'lie'} outside the template or connectome and {'does' if len(sids) == 1 else 'do'} not overlap it: {_listed(sids)}. Check {'its' if len(sids) == 1 else 'their'} header or space.",
+                "lesion outside the connectome",
+            )
+            continue
         if (volume_ml is not None and volume_ml <= 0) or (fractional_sum is not None and fractional_sum <= 0) or "empty" in flags:
             subject_block("lesion_empty", sid, lambda sids, _d: f"{_count(len(sids), 'lesion')} {'is' if len(sids) == 1 else 'are'} empty: {_listed(sids)}.", "empty lesion")
             continue

@@ -219,6 +219,26 @@ class SubjectLevelBlockTest(_Fixture):
         self.assertEqual(_check(self.preflight(), "lesion_subvoxel")["subjects"], ["sub-small"])
 
 
+    def test_lesion_outside_the_grid_is_not_called_empty(self):
+        # 451-like voxels that lie 480 mm away from the connectome grid: excluded, but named by the real cause
+        affine = np.array(self.bundle.affine, dtype=float)
+        affine[:3, 3] += 480.0
+        self.add_many(3)
+        self.add("sub-far", data=self.lesion_array(), affine=affine, fresh=False)
+        report = self.preflight()
+        self.assertNotIn("lesion_empty", _ids(report))
+        self.assertNotIn("lesion_subvoxel", _ids(report))
+        check = _check(report, "lesion_outside_grid")
+        self.assertEqual(check["level"], "block")
+        self.assertEqual(check["subjects"], ["sub-far"])
+        self.assertIn("outside the template or connectome", check["message"])
+        self.assertNotIn("empty", check["message"])
+        self.assertEqual(report["excluded"]["sub-far"], "lesion outside the connectome")
+        # A truly empty lesion is still called empty
+        self.add("sub-empty", data=np.zeros(self.bundle.shape, np.uint8))
+        self.assertEqual(_check(self.preflight(), "lesion_empty")["subjects"], ["sub-empty"])
+
+
 class RunLevelBlockTest(_Fixture):
     def test_terms_not_accepted(self):
         self.add_many(3)
