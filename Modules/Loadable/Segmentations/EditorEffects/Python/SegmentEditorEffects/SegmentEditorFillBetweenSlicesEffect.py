@@ -161,3 +161,77 @@ The effect uses  <a href="https://insight-journal.org/browse/publication/977">mo
         imageToWorld = vtk.vtkMatrix4x4()
         mergedImage.GetImageToWorldMatrix(imageToWorld)
         outputLabelmap.SetImageToWorldMatrix(imageToWorld)
+        self.fillGapsBetweenThickParts(mergedImage, outputLabelmap)
+
+    @staticmethod
+    def fillGapsBetweenThickParts(mergedImage, outputLabelmap):
+        """Also fill empty slices between parts that are several slices thick.
+
+        The contour interpolator only interpolates from a slice whose direct neighbors are empty, so a gap
+        between two parts that span several slices is left open. Along each axis, the interpolation is repeated
+        on a copy that keeps, for each segment, only the slices that face a gap (the last slice before and the
+        first slice after each run of empty slices), and only the voxels it adds inside those empty slices are
+        added to the output. Nothing that the plain interpolation produced is removed.
+        """
+        import numpy as np
+        import vtkITK
+        from vtk.util import numpy_support
+
+        inputScalars = mergedImage.GetPointData().GetScalars()
+        outputScalars = outputLabelmap.GetPointData().GetScalars()
+        if inputScalars is None or outputScalars is None or inputScalars.GetNumberOfComponents() != 1:
+            return
+        dims = mergedImage.GetDimensions()
+        shape = (dims[2], dims[1], dims[0])
+        if tuple(outputLabelmap.GetDimensions()) != tuple(dims):
+            return
+        source = numpy_support.vtk_to_numpy(inputScalars).reshape(shape)
+        result = numpy_support.vtk_to_numpy(outputScalars).reshape(shape)
+        labels = [int(label) for label in np.unique(source) if label != 0]
+        changed = False
+        for axis in range(3):
+            otherAxes = tuple(other for other in range(3) if other != axis)
+            reduced = np.zeros_like(source)
+            gapSlicesByLabel = {}
+            needed = False
+            sourceView = np.moveaxis(source, axis, 0)
+            reducedView = np.moveaxis(reduced, axis, 0)
+            for label in labels:
+                occupied = np.flatnonzero((source == label).any(axis=otherAxes))
+                if occupied.size < 2:
+                    continue
+                jumps = np.diff(occupied) > 1
+                if not jumps.any():
+                    continue
+                before, after = occupied[:-1][jumps], occupied[1:][jumps]
+                facing = np.union1d(before, after)
+                # Without a part that is thicker than one slice, the plain interpolation has already filled the gaps
+                if occupied.size > facing.size:
+                    needed = True
+                gaps = np.zeros(shape[axis], dtype=bool)
+                for first, last in zip(before, after, strict=True):
+                    gaps[first + 1:last] = True
+                gapSlicesByLabel[label] = gaps
+                reducedView[facing] = np.where(sourceView[facing] == label, label, reducedView[facing])
+            if not needed:
+                continue
+            image = vtk.vtkImageData()
+            image.SetDimensions(dims)
+            image.SetSpacing(mergedImage.GetSpacing())
+            image.GetPointData().SetScalars(numpy_support.numpy_to_vtk(
+                reduced.ravel(), deep=True, array_type=inputScalars.GetDataType()))
+            interpolator = vtkITK.vtkITKMorphologicalContourInterpolator()
+            interpolator.SetInputData(image)
+            interpolator.SetAxis(2 - axis)  # ITK axes are x, y, z; the array axes are z, y, x
+            interpolator.Update()
+            interpolated = numpy_support.vtk_to_numpy(interpolator.GetOutput().GetPointData().GetScalars()).reshape(shape)
+            for label, gaps in gapSlicesByLabel.items():
+                inGaps = np.zeros(shape, dtype=bool)
+                np.moveaxis(inGaps, axis, 0)[gaps] = True
+                added = inGaps & (interpolated == label) & (source == 0) & (result == 0)
+                if added.any():
+                    result[added] = label
+                    changed = True
+        if changed:
+            outputScalars.Modified()
+            outputLabelmap.Modified()

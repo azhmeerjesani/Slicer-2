@@ -1774,6 +1774,51 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertFalse(studioShell.toastText().startswith("Nothing to fill"), studioShell.toastText())
         editor.setActiveEffect(None)
 
+    def test_29c_draw_fill_gaps_closes_gaps_between_thick_parts(self):
+        """The card's "Fill" link and the Fill gaps tile close gaps between parts that are several slices thick."""
+        from StudioLib import draw
+
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        segmentationNode, segmentId, source = editor.segmentationNode(), editor.currentSegmentID(), editor.sourceVolumeNode()
+
+        def setLesion(slabs):
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, source)
+            array[:] = 0
+            for k0, k1 in slabs:
+                array[k0:k1, 50:58, 30:38] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, source)
+            self._pump()
+
+        def gapCount():
+            return len(draw.lesionMetrics(segmentationNode, compute=True)["gaps"])
+
+        for slabs, gaps in (([(34, 40), (42, 48)], 2), ([(34, 40), (41, 47)], 1), ([(34, 38), (40, 44), (46, 50)], 4)):
+            for viaTile in (False, True):
+                editor.setActiveEffect(None)
+                setLesion(slabs)
+                before = self._voxels(editor)
+                self.assertEqual(gapCount(), gaps, slabs)
+                studioShell.toast("")
+                if viaTile:
+                    editor.setActiveEffectByName("Fill between slices")
+                    self._pump()
+                    editor.activeEffect().self().fillButton.click()
+                else:
+                    draw.fillGaps(studioShell)
+                self._pump()
+                self.assertGreater(self._voxels(editor), before, (slabs, viaTile))
+                self.assertEqual(gapCount(), 0, (slabs, viaTile))
+                self.assertFalse(studioShell.toastText().startswith("Nothing to fill"), studioShell.toastText())
+        # The voxels of the parts themselves are kept
+        setLesion([(34, 40), (42, 48)])
+        before = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, source).copy()
+        draw.fillGaps(studioShell)
+        self._pump()
+        after = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, source)
+        self.assertTrue(((after > 0) | (before == 0)).all())
+        editor.setActiveEffect(None)
+
     def test_30_draw_extension_points(self):
         """Inspector cards, card rows and ⋯ items of other work packages; network maps leave Draw; assisted counts (LNM addendum)."""
         import numpy as np
