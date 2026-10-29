@@ -1795,6 +1795,37 @@ class StudioProjectsTest(unittest.TestCase):
                 self.assertIn(status, (0, None), f"{name} {flag} exits with 0")
                 self.assertIn("usage:", printed, f"{name} {flag} prints its usage text")
 
+    def test_35b_utilities_scripts_report_bad_arguments_without_a_traceback(self):
+        """Bad arguments end with a one-line error and exit status 2, not a Python traceback (BB-1)."""
+        import subprocess
+        import sys
+
+        source = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))))
+        scripts = os.path.join(source, "Utilities", "Scripts")
+        if not os.path.isdir(os.path.join(scripts, "StudioSettingsCheck")):
+            self.skipTest("Utilities/Scripts not found")
+        missing = os.path.join(self.tempDir, "does-not-exist")
+        base = os.path.join(self.tempDir, "base.ini")
+        with open(base, "w") as stream:
+            stream.write("[General]\nkey=1\n")
+        cases = [
+            ([os.path.join("StudioSettingsCheck", "inidiff.py"), base, base], "expected three ini files"),
+            ([os.path.join("StudioSettingsCheck", "inidiff.py")], "expected three ini files"),
+            ([os.path.join("StudioSettingsCheck", "inidiff.py"), "--keys"], "--keys needs exactly one ini file"),
+            ([os.path.join("StudioSettingsCheck", "analyse.py"), missing], "not the output folder"),
+            ([os.path.join("StudioSettingsCheck", "analyse.py")], "expected one argument"),
+            (["StudioReadmeCheck.py", "--readme", missing], "README file not found"),
+            (["StudioReadmeCheck.py", "--state", missing], "state file not found"),
+        ]
+        for arguments, message in cases:
+            # a plain Python interpreter (never the Slicer launcher): the scripts only need the standard library
+            result = subprocess.run([sys.executable if os.path.basename(sys.executable).lower().startswith("python") else "python3", "-I",
+                                     os.path.join(scripts, arguments[0])] + arguments[1:], capture_output=True, text=True, timeout=120, check=False)
+            label = " ".join(arguments)
+            self.assertEqual(result.returncode, 2, f"{label}: {result.stderr}")
+            self.assertNotIn("Traceback", result.stderr, label)
+            self.assertIn(message, result.stderr, label)
+
     def test_36_unwritable_project_folder_is_a_warning_in_plain_words(self):
         """A project folder that cannot be written (Ctrl+S) is anticipated: a warning without a traceback, and a reason
         without the error number and the temporary file path (BB-1).

@@ -31,6 +31,12 @@ def parse(path):
     return out
 
 
+def usageError(message):
+    """One-line error plus the usage text on stderr, exit status 2 (like argparse)."""
+    sys.stderr.write(f"inidiff.py: error: {message}\n{__doc__}")
+    sys.exit(2)
+
+
 def isFork(key):
     return key.startswith(FORK_PREFIXES)
 
@@ -39,10 +45,14 @@ if __name__ == "__main__":
     if sys.argv[1:2] in (["-h"], ["--help"]):
         print(__doc__)
         sys.exit(0)
-    if sys.argv[1] == "--keys":
+    if sys.argv[1:2] == ["--keys"]:
+        if len(sys.argv) != 3:
+            usageError("--keys needs exactly one ini file")
         d = parse(sys.argv[2])
         print(json.dumps({"official_keys": sorted(k for k in d if not isFork(k)), "fork_keys": sorted(k for k in d if isFork(k))}, indent=1))
         sys.exit(0)
+    if len(sys.argv) != 4:
+        usageError(f"expected three ini files (base, control, fork), got {len(sys.argv) - 1}")
     base, control, fork = (parse(p) for p in sys.argv[1:4])
     churn = {k for k in set(base) | set(control) if base.get(k) != control.get(k)}
     report = {"churn_in_official_control": sorted(churn), "rewritten_official_keys": [], "new_official_keys_not_written_by_official": [], "removed_official_keys": [],

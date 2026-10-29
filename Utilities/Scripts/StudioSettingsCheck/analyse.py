@@ -12,7 +12,15 @@ if sys.argv[1:2] in (["-h"], ["--help"]):
     print(__doc__)
     sys.exit(0)
 
+if len(sys.argv) != 2:
+    sys.stderr.write(f"analyse.py: error: expected one argument, the output folder of run_settings.sh\n{__doc__}")
+    sys.exit(2)
 D = sys.argv[1]
+_required = [os.path.join("out", "ini"), os.path.join("out", "s1-before-tests.md5"), os.path.join("out", "s1-after-tests.md5")]
+_missing = [name for name in _required if not os.path.exists(os.path.join(D, name))]
+if _missing:
+    sys.stderr.write(f"analyse.py: error: {D} is not the output folder of run_settings.sh (missing {_missing[0]}" + (f" and {len(_missing) - 1} more" if len(_missing) > 1 else "") + ")\n")
+    sys.exit(2)
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import inidiff  # noqa: E402

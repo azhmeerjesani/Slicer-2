@@ -1147,6 +1147,10 @@ def main(argv=None):
             print("self-test passed")
         return 1 if problems else 0
 
+    if not os.path.isfile(arguments.readme):
+        parser.error(f"README file not found: {arguments.readme}")
+    if arguments.state and not os.path.isfile(arguments.state):
+        parser.error(f"state file not found: {arguments.state}")
     pythonSlicer = arguments.pythonslicer
     if pythonSlicer is None:
         default = "/opt/S-r/python-install/bin/PythonSlicer"

@@ -740,4 +740,7 @@ if __name__ == "__main__":
         exitCode = 2
     finally:
         sys.stdout.flush()
-        slicer.app.exit(exitCode)
+        if hasattr(slicer, "app"):  # outside Slicer (for example PythonSlicer --help) there is no application to exit
+            slicer.app.exit(exitCode)
+        else:
+            sys.exit(exitCode)
