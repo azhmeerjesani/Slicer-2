@@ -709,10 +709,14 @@ def fetch_update_manifest(feed=None, timeout=UPDATE_CHECK_TIMEOUT):
         if not isinstance(manifest.get("required", False), bool):
             raise ValueError("required")
         assets = manifest.get("assets") or {}
+        if not isinstance(assets, dict):
+            raise ValueError("assets")
         for key in ("web", "linux-x86_64"):
             asset = assets.get(key)
             if asset is None:
                 continue
+            if not isinstance(asset, dict):
+                raise ValueError(f"assets.{key}")
             if (not _ASSET_NAME_PATTERN.match(str(asset.get("name"))) or ".." in asset["name"] or not isinstance(asset.get("size"), int)
                     or asset["size"] <= 0 or not re.match(r"^[0-9a-f]{64}$", str(asset.get("sha256", "")).lower())):
                 raise ValueError(f"assets.{key}")

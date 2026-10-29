@@ -1294,6 +1294,16 @@ fi
         with self.assertRaisesRegex(web.LauncherError, "interrupted"):
             web.fetch_update_manifest(self.feed)
         _Handler.cutChunkedPaths = set()
+        # A manifest whose assets (or one asset) is not an object is "not valid", not an AttributeError traceback
+        # (also at the start of 'run': the check stays quiet and the launcher starts)
+        for badAssets in ([1, 2], "abc", {"linux-x86_64": "x"}, {"web": 5}, {"web": [1]}):
+            with open(os.path.join(self.feedDir, "studio-update.json"), "w") as f:
+                json.dump(dict(data, assets=badAssets), f)
+            with self.assertRaisesRegex(web.LauncherError, "not valid", msg=repr(badAssets)):
+                web.fetch_update_manifest(self.feed)
+            self.assertEqual(web.check_for_updates("0.9.0"), "unknown", repr(badAssets))
+        with open(os.path.join(self.feedDir, "studio-update.json"), "w") as f:
+            json.dump(data, f)
         self.assertEqual(web.package_studio_version(os.path.join(self.feedDir, data["assets"]["linux-x86_64"]["name"])), "1.2.0")
         # --port outside 1-65535 (or not a number) is an argument error, not a traceback or a 60 s wait
         parser = web.build_parser()
