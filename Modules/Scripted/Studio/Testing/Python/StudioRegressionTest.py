@@ -59,6 +59,8 @@ Run with the main window and testing enabled::
 - ``test_21_share_dialog_shows_success_after_export`` (BB-1): after a successful "Export study for sharing" the dialog shows
   "Exported N files to ..." and Close with no failure mark in the checklist (the folder just written is not reported as "It
   already exists"); Export stays disabled for that output and is enabled again for another one.
+- ``test_22_study_card_save_line_follows_the_save`` (BB-1): the STUDY card's save line says "Saving…" while the save of
+  participants.tsv is pending and "All changes saved" once it has run (it stayed at "Saving…").
 - ``test_10_scripted_module_ui_widgets`` (BB-1): the build has the Qt Designer plugins of CTK and MRML, so that
   ``slicer.util.loadUI`` creates the CTK and qMRML widgets of a scripted module's ``.ui`` file (a ``qMRMLWidget`` root, a
   ``qMRMLNodeComboBox``, a ``ctkCollapsibleButton``), and Line Profile, Vector to Scalar Volume and Surface Toolbox set up
@@ -1782,6 +1784,59 @@ class StudioRegressionTest(unittest.TestCase):
         finally:
             if dialog is not None:
                 dialog.dialog.close()
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
+
+    def test_22_study_card_save_line_follows_the_save(self):
+        """The STUDY card says "Saving…" while the 400 ms save of participants.tsv is pending and "All changes saved" once it has
+        run (the card was not refreshed when the save finished and kept "Saving…" for good) (BB-1).
+        """
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import library, shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Save line study")
+        os.makedirs(folder)
+        paths = []
+        for index in range(1, 3):
+            paths.append(os.path.join(folder, f"sub-0{index}_T1w.nii.gz"))
+            nifti.write_nifti(paths[-1], np.zeros(grid.shape, np.uint8), grid.affine)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        cards = None
+        try:
+            session = study_ui.createStudy(paths, studioShell, folder=folder)
+            self.assertIsNotNone(session)
+            cards = library.StudyCards()
+            cards.widget.show()
+            cards.refresh()
+            label = cards.studyCard.saveLabel
+            session.flush()
+            cards.refresh()
+            self.assertTrue(str(label.text).startswith("All changes saved"), label.text)
+            session.study.set("sub-01", {"qc": "pass"})
+            session.scheduleSave()
+            cards.refresh()
+            self.assertTrue(str(label.text).startswith("Saving"), label.text)
+            deadline = time.time() + 10
+            while time.time() < deadline and session._saveTimer.isActive():
+                slicer.app.processEvents()
+            for _ in range(4):
+                slicer.app.processEvents()
+            self.assertFalse(session._saveTimer.isActive())
+            self.assertEqual(session.saveStatus()[0], "All changes saved")
+            self.assertTrue(str(label.text).startswith("All changes saved"), label.text)
+        finally:
+            if cards is not None:
+                cards.dispose()
+                cards.widget.hide()
             study_ui.closeStudy()
             studioShell.dispose()
             for _ in range(4):

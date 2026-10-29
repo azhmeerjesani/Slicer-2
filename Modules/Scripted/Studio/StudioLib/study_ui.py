@@ -907,6 +907,30 @@ def removeListener(callback):
         _listeners.remove(callback)
 
 
+_saveListeners = []
+
+
+def addSaveListener(callback):
+    """``callback(session)`` when a save of participants.tsv has finished (saved or failed), so a view that shows
+    ``saveStatus()`` can refresh just that line; ``addListener`` callbacks are not called for it.
+    """
+    if callback not in _saveListeners:
+        _saveListeners.append(callback)
+
+
+def removeSaveListener(callback):
+    while callback in _saveListeners:
+        _saveListeners.remove(callback)
+
+
+def _notifySaved(studySession):
+    for callback in list(_saveListeners):
+        try:
+            callback(studySession)
+        except Exception:
+            logging.error(f"Studio: study save listener failed:\n{traceback.format_exc()}")
+
+
 def _notify(studySession=None):
     for callback in list(_listeners):
         try:
@@ -2036,9 +2060,11 @@ class StudySession:
             self._lastSaveError = str(e)
             logging.error(f"Studio: cannot save the study {self.study.path}:\n{traceback.format_exc()}")
             _toast(self._shell, _("The study could not be saved: {error}").format(error=e), ms=6000, level="warning")
+            _notifySaved(self)
             return False
         self._lastSaveTime = time.time()
         self._lastSaveError = None
+        _notifySaved(self)  # the view drew "Saving…" while the save timer was active
         return True
 
     def saveStatus(self):

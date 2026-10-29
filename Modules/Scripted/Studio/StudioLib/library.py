@@ -2723,6 +2723,7 @@ def _listenToStudies():
     studyUi = _studyUi()
     if studyUi is not None:
         studyUi.addListener(_onStudyChanged)
+        studyUi.addSaveListener(_onStudySaved)
         _studyListening[0] = True
 
 
@@ -2733,6 +2734,19 @@ def _onStudyChanged(studySession):
     else:
         _studySelection[:] = [sid for sid in _studySelection if sid in studySession.study]
     refreshStudy()
+
+
+def _onStudySaved(studySession):
+    """participants.tsv was saved (or the save failed): the STUDY card's save line no longer says "Saving…"."""
+    if studySession is not _studySession():
+        return
+    for view in list(_studyViews):
+        cards = getattr(view, "cards", None)
+        if cards is not None and _isAlive(view.widget):
+            try:
+                cards.studyCard.refreshSaveStatus()
+            except Exception:
+                logging.error(f"Studio Library: save status update failed:\n{traceback.format_exc()}")
 
 
 def refreshStudy():
@@ -4259,6 +4273,13 @@ class StudyCard(qt.QObject):
         self._extras = []
         self._questionsSignature = None
 
+    def refreshSaveStatus(self):
+        studySession = _studySession()
+        if studySession is None:
+            return
+        text, when = studySession.saveStatus()
+        self.saveLabel.setText(text + (" · " + relativeTime(when) if when else ""))
+
     def refresh(self):
         studySession = _studySession()
         if studySession is None:
@@ -4268,8 +4289,7 @@ class StudyCard(qt.QObject):
         self.folderLink.setText(_elideMiddle(studyObject.path, 46))
         self.folderLink.setToolTip(studyObject.path)
         self.countsLabel.setText(studyCounts(studyObject))
-        text, when = studySession.saveStatus()
-        self.saveLabel.setText(text + (" · " + relativeTime(when) if when else ""))
+        self.refreshSaveStatus()
         template = studyObject.template or {}
         self.templateLabel.setText(studyTemplateText(template))
         studyUi = _studyUi()
