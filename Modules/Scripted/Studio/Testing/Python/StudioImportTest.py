@@ -104,15 +104,17 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             matrix.SetElement(axis, 3, origin[axis])
         return matrix
 
-    def _writeVolume(self, name, grid, array=None, labelmap=False, subdirectory=None):
-        """Write a NIfTI volume on ``grid`` (voxels of ``array``, z-y-x order) and return its path."""
-        dims = grid[0]
+    def _writeVolume(self, name, grid, array=None, labelmap=False, subdirectory=None, ijkToRas=None):
+        """Write a NIfTI volume on ``grid`` (voxels of ``array``, z-y-x order) and return its path. ``ijkToRas`` (a
+        vtkMatrix4x4) replaces the matrix of ``grid`` (then None), for an oblique or non-axial acquisition.
+        """
         if array is None:
+            dims = grid[0]
             array = np.zeros((dims[2], dims[1], dims[0]), np.uint8 if labelmap else np.int16)
         className = "vtkMRMLLabelMapVolumeNode" if labelmap else "vtkMRMLScalarVolumeNode"
         node = slicer.mrmlScene.AddNewNodeByClass(className, "StudioImportTestVolume")
         slicer.util.updateVolumeFromArray(node, array)
-        node.SetIJKToRASMatrix(self._ijkToRas(grid))
+        node.SetIJKToRASMatrix(ijkToRas if ijkToRas is not None else self._ijkToRas(grid))
         directory = os.path.join(self.directory, subdirectory) if subdirectory else self.directory
         os.makedirs(directory, exist_ok=True)
         path = os.path.join(directory, name)
@@ -1121,6 +1123,57 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self._pump(8)
         self.assertEqual(reference("sub-01_lesion"), "sub-01_T1w")
         self.assertIsNone(reference("sub-03_lesion"))
+
+    def test_sagittal_scan_lesion_gaps_along_view_axis(self):
+        """A sagittal 3D acquisition (k = left-right): the Lesion card and participants.tsv count the gap slices along
+        the view's slicing axis (S for the axial Red view), not along k, and N jumps to the slices the card counts
+        (SPEC 5.6).
+        """
+        from StudioLib import draw, importer, lesioncard, study_ui
+
+        studioShell = self._applyStudio()
+        # i = A, j = S, k = R; 1 mm voxels
+        matrix = vtk.vtkMatrix4x4()
+        for row, column in ((0, 0), (1, 1), (2, 2)):
+            matrix.SetElement(row, column, 0.0)
+        for row, column in ((0, 2), (1, 0), (2, 1)):
+            matrix.SetElement(row, column, 1.0)
+        for row, origin in enumerate((-15.0, -20.0, -20.0)):
+            matrix.SetElement(row, 3, origin)
+        ijkToRas = np.array([[matrix.GetElement(row, column) for column in range(4)] for row in range(4)])
+        # Two slabs, two empty axial slices between them (j = 16 and 17: S = -4 and -3 mm)
+        mask = np.zeros((30, 40, 40), np.uint8)
+        mask[5:12, 10:16, 15:22] = 1
+        mask[5:12, 18:24, 15:22] = 1
+        # participants.tsv: along S
+        self.assertEqual(study_ui.metricsValues(mask, ijkToRas)["gaps"], 2)
+
+        scan = np.full(mask.shape, 300, np.int16)
+        scan[mask != 0] = 120
+        paths = [self._writeVolume("sub-31_T1w.nii.gz", None, scan, ijkToRas=matrix),
+                 self._writeVolume("sub-31_lesion.nii.gz", None, mask, labelmap=True, ijkToRas=matrix)]
+        importer.loadFiles(paths, studioShell)
+        self._pump(8)
+        editor = self._editor()
+        segmentationNode = editor.segmentationNode()
+        self.assertEqual(segmentationNode.GetName(), "sub-31_lesion")
+        self.assertEqual(editor.sourceVolumeNode().GetName(), "sub-31_T1w")
+        self._wait(800)
+        self._pump()
+        self.assertEqual(self._sliceNode("Red").GetOrientation(), "Axial")
+        self.assertEqual(len(draw.viewGaps(draw.lesionMetrics(segmentationNode, compute=True))), 2)
+        card = draw.extension().card
+        self.assertEqual(card._state["stats"]["gaps"], 2)
+        self.assertIn("2 gaps", card.fixesLabel.text)
+        self.assertIn("Fill", card.fixesLabel.text)
+        # N in the Red view goes to a slice the card counts: S = -4 or -3 mm
+        self.assertIsNotNone(draw.jumpToGap(1, studioShell, "Red"))
+        self.assertIn(round(self._sliceNode("Red").GetSliceOffset()), (-4, -3))
+        # The metrics give the gaps along every array axis; the view picks its own
+        self.assertEqual(lesioncard.nearestArrayAxis(ijkToRas, (0.0, 0.0, 1.0)), (1, 1.0))
+        metrics = lesioncard.computeLesionMetrics(mask, None, ijkToRas)
+        self.assertEqual(metrics["gaps"], [])  # along k (left-right): none
+        self.assertEqual(metrics["gaps_by_axis"], ([], [16, 17], []))
 
     #
     # Scans from the Sample Data module, the 1 mm offer, re-opening, new lesions

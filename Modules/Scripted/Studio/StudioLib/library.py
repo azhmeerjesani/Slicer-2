@@ -1755,7 +1755,7 @@ class CurrentWorkCard(qt.QObject):
         metrics = summary["metrics"]
         if not metrics or not metrics["voxels"]:
             return ""
-        return _("{voxels} voxels · {parts} parts · {gaps} gaps").format(voxels=metrics["voxels"], parts=metrics["parts"], gaps=len(metrics["gaps"]))
+        return _("{voxels} voxels · {parts} parts · {gaps} gaps").format(voxels=metrics["voxels"], parts=metrics["parts"], gaps=len(_draw().viewGaps(metrics)))
 
     def _computeNext(self):
         """Compute the metrics of the next lesion with a cold cache (one per event loop iteration)."""

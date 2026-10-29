@@ -1454,15 +1454,24 @@ def _gapAxis(sliceNode, ijkToRAS):
     """``(array axis, aligned)`` of the labelmap axis closest to the slice normal of ``sliceNode``."""
     sliceToRas = sliceNode.GetSliceToRAS()
     normal = np.array([sliceToRas.GetElement(row, 2) for row in range(3)])
-    normal /= np.linalg.norm(normal) or 1.0
-    best, bestCos = 0, -1.0
-    # Array axis 0 is k (matrix column 2), 1 is j (column 1), 2 is i (column 0)
-    for axis, column in ((0, 2), (1, 1), (2, 0)):
-        direction = ijkToRAS[:3, column]
-        cos = abs(float(np.dot(direction, normal))) / (float(np.linalg.norm(direction)) or 1.0)
-        if cos > bestCos:
-            best, bestCos = axis, cos
+    best, bestCos = lesioncard.nearestArrayAxis(ijkToRAS, normal)
     return best, bestCos > 0.999
+
+
+def viewGaps(metrics, viewName="Red"):
+    """The gap slices of ``lesionMetrics()`` counted along the slicing axis of the view ``viewName`` (SPEC 5.6), the
+    slices N jumps to; along S (the lesion z-extent) without that view. The k axis of the labelmap is only right for an
+    axial acquisition: a sagittal 3D T1 has k = left-right.
+    """
+    if metrics is None or metrics.get("ijkToRAS") is None or not metrics.get("gaps_by_axis"):
+        return metrics["gaps"] if metrics is not None else []
+    layoutManager = slicer.app.layoutManager()
+    sliceWidget = layoutManager.sliceWidget(viewName) if layoutManager is not None else None
+    if sliceWidget is not None:
+        axis = _gapAxis(sliceWidget.mrmlSliceNode(), metrics["ijkToRAS"])[0]
+    else:
+        axis = lesioncard.nearestArrayAxis(metrics["ijkToRAS"], (0.0, 0.0, 1.0))[0]
+    return metrics["gaps_by_axis"][axis]
 
 
 def jumpToGap(step=1, shell=None, viewName="Red"):
@@ -3101,6 +3110,8 @@ class DrawExtension:
         readoutKey = (segmentationNode.GetID(), segmentId)
         metrics = lesionMetrics(segmentationNode, compute=computeMetrics or self._lastReadout is None or self._lastReadoutKey != readoutKey)
         if metrics is not None:
+            # Gaps along the Red view's slicing axis, as N counts them (not along the k axis of the scan)
+            metrics = dict(metrics, gaps=viewGaps(metrics))
             self._lastReadoutKey = readoutKey
             sideWord = metrics.get("sides") if _isMniLesion(segmentationNode) else None
             self._lastReadout = lesioncard.readoutHtml(metrics, sideWord, "warn" if sideWord == "Both hemispheres" else "neutral")
@@ -3378,9 +3389,9 @@ class _EmptyState:
         if not visible:
             self.widget.hide()
             return
-        key = id(offer) if offer is not None else None
-        if key != self._offer:
-            self._offer = key
+        # The offer itself, not its id(): a new offer may get the id of a freed one, and then kept the old buttons
+        if offer is not self._offer:
+            self._offer = offer
             while self.buttons.count():
                 item = self.buttons.takeAt(0)
                 if item.widget() is not None:

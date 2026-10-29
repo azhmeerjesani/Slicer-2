@@ -1224,7 +1224,9 @@ def metricsValues(maskKji, ijkToRas, lesionSpace=None, brainMask=None):
     """participants.tsv values of a lesion mask (worker-safe): volume_ml, n_parts, gaps, centroid, outside_brain_pct."""
     from . import lesioncard
 
-    metrics = lesioncard.computeLesionMetrics(maskKji, None, ijkToRas)
+    # Gaps along S (the lesion z-extent): the k axis of a sagittal or coronal acquisition is R or A
+    axis = lesioncard.nearestArrayAxis(ijkToRas, (0.0, 0.0, 1.0))[0] if ijkToRas is not None else 0
+    metrics = lesioncard.computeLesionMetrics(maskKji, None, ijkToRas, axis=axis)
     values = {"volume_ml": round(metrics["ml"], 6), "n_parts": metrics["parts"], "gaps": len(metrics["gaps"])}
     centroid = metrics["centroid_ras"] or (None, None, None)
     for axis, value in zip(("x", "y", "z"), centroid, strict=True):

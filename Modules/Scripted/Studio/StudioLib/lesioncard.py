@@ -88,6 +88,24 @@ def _boundingBox(mask):
     return k0, k1, int(jIndices[0]), int(jIndices[-1]), int(iIndices[0]), int(iIndices[-1])
 
 
+def nearestArrayAxis(ijkToRAS, direction):
+    """``(array axis, |cos|)`` of the axis of a (k, j, i) array whose RAS direction is closest to ``direction`` (RAS).
+
+    Array axis 0 is k (matrix column 2), 1 is j (column 1), 2 is i (column 0). The k axis of a sagittal or coronal
+    acquisition is left-right or anterior-posterior: the slicing axis of an axial view (S) is then another axis.
+    """
+    matrix = np.asarray(ijkToRAS, dtype=float)
+    vector = np.asarray(direction, dtype=float)[:3]
+    vector = vector / (float(np.linalg.norm(vector)) or 1.0)
+    best, bestCos = 0, -1.0
+    for axis, column in ((0, 2), (1, 1), (2, 0)):
+        columnVector = matrix[:3, column]
+        cos = abs(float(np.dot(columnVector, vector))) / (float(np.linalg.norm(columnVector)) or 1.0)
+        if cos > bestCos:
+            best, bestCos = axis, cos
+    return best, bestCos
+
+
 def computeLesionMetrics(array_kji, spacing, ijkToRAS, axis=0, brainMask=None):
     """Metrics of a lesion mask.
 
@@ -99,6 +117,7 @@ def computeLesionMetrics(array_kji, spacing, ijkToRAS, axis=0, brainMask=None):
     :return: ``{voxels, ml, parts, gaps, centroid_ras, outside_pct, bbox, x_min, x_max, spans_both}``:
 
       - ``gaps``: array indices along ``axis``, inside the lesion extent, of the slices without any lesion voxel;
+        ``gaps_by_axis``: the same along each array axis (0 = k, 1 = j, 2 = i), see ``nearestArrayAxis()``;
       - ``centroid_ras``: (R, A, S) of the centre of mass, None for an empty lesion;
       - ``x_min``/``x_max``: RAS x extent of the voxel centres; ``spans_both``: voxels lie more than one voxel on both
         sides of x = 0 (the midline on an MNI grid only);
@@ -108,7 +127,7 @@ def computeLesionMetrics(array_kji, spacing, ijkToRAS, axis=0, brainMask=None):
     mask = array if array.dtype == bool else array != 0
     matrix = np.asarray(ijkToRAS, dtype=float) if ijkToRAS is not None else np.diag([*(float(s) for s in spacing), 1.0])
     voxelVolume = abs(float(np.linalg.det(matrix[:3, :3])))
-    empty = {"voxels": 0, "ml": 0.0, "parts": 0, "gaps": [], "centroid_ras": None, "outside_pct": None, "bbox": None,
+    empty = {"voxels": 0, "ml": 0.0, "parts": 0, "gaps": [], "gaps_by_axis": ([], [], []), "centroid_ras": None, "outside_pct": None, "bbox": None,
              "x_min": None, "x_max": None, "spans_both": False}
     if mask.ndim != 3 or mask.size == 0:
         return empty
@@ -123,11 +142,14 @@ def computeLesionMetrics(array_kji, spacing, ijkToRAS, axis=0, brainMask=None):
 
     _labels, parts = ndimage.label(crop, structure=partsStructure())
 
-    # Gap slices: empty slices between the first and the last slice of the lesion along the axis
-    otherAxes = tuple(index for index in range(3) if index != axis)
-    occupied = crop.any(axis=otherAxes)
-    offset = (k0, j0, i0)[axis]
-    gaps = [int(index) + offset for index in np.flatnonzero(~occupied)]
+    # Gap slices: empty slices between the first and the last slice of the lesion, along each array axis (the
+    # caller picks the axis of a view, which depends on how the scan was acquired)
+    gapsByAxis = []
+    for gapAxis in range(3):
+        occupied = crop.any(axis=tuple(index for index in range(3) if index != gapAxis))
+        offset = (k0, j0, i0)[gapAxis]
+        gapsByAxis.append([int(index) + offset for index in np.flatnonzero(~occupied)])
+    gaps = gapsByAxis[axis]
 
     kk, jj, ii = np.nonzero(crop)
     indices = np.vstack((ii + i0, jj + j0, kk + k0, np.ones(ii.size))).astype(float)
@@ -147,6 +169,7 @@ def computeLesionMetrics(array_kji, spacing, ijkToRAS, axis=0, brainMask=None):
         "ml": voxels * voxelVolume / 1000.0,
         "parts": int(parts),
         "gaps": gaps,
+        "gaps_by_axis": tuple(gapsByAxis),
         "centroid_ras": (float(centroid[0]), float(centroid[1]), float(centroid[2])),
         "outside_pct": outside,
         "bbox": bbox,
