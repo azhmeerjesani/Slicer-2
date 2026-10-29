@@ -11,6 +11,9 @@ Every image that Studio shows can be written as a standard single-file NIfTI-1 i
   a non-linear one is hardened into a temporary copy (resampled). The scene is never changed; the sidecar says so.
 - **Codes.** sform and qform codes are 4 (MNI152) on a recognised MNI grid or one of the user's templates (A-10),
   2 (aligned) for an image whose transform was applied, 1 (scanner) otherwise; units are mm and seconds.
+- **4D images.** A 4D image opened as a sequence (fMRI, a 4D mask: ``importer.loadSequence``) is written whole, as one 4D
+  file with every time point (``dim[4]``) and the time step of the sequence index in ``pixdim[4]``; not only the time point
+  on screen.
 - **Values.** The data type is kept (uint8, int16, float32...) and window/level is never applied to the data. Maps are
   written as float32 with an optional thresholded binary mask.
 - **Segmentations** are written as one label map (values 1..N in segment order, with ``<name>.tsv`` and an ITK-SNAP
@@ -223,6 +226,53 @@ def isDicomNode(node):
     return node is not None and node.IsA("vtkMRMLVolumeNode") and bool(node.GetAttribute(DICOM_UIDS_ATTRIBUTE))
 
 
+def sequenceOf(node):
+    """The sequence of a 4D image (fMRI, a 4D mask) whose current time point ``node`` shows, else None.
+
+    A 4D image is loaded as a sequence of 3D volumes and the views show the sequence browser's proxy node; that node is what
+    the Library and the export list name. ``node`` is such a proxy when a browser has it as the proxy of a sequence of two or
+    more scalar volumes.
+    """
+    if node is None or not node.IsA("vtkMRMLScalarVolumeNode") or not hasattr(slicer.modules, "sequences"):
+        return None
+    try:
+        browserNode = slicer.modules.sequences.logic().GetFirstBrowserNodeForProxyNode(node)
+        sequenceNode = browserNode.GetSequenceNode(node) if browserNode is not None else None
+    except Exception:
+        logging.debug("Slicer Studio: the sequence of a volume could not be read", exc_info=True)
+        return None
+    if sequenceNode is None or sequenceNode.GetNumberOfDataNodes() < 2:
+        return None
+    for index in range(sequenceNode.GetNumberOfDataNodes()):
+        dataNode = sequenceNode.GetNthDataNode(index)
+        if dataNode is None or not dataNode.IsA("vtkMRMLScalarVolumeNode") or dataNode.IsA("vtkMRMLVectorVolumeNode"):
+            return None
+    return sequenceNode
+
+
+def timePoints(node):
+    """The number of time points of the image ``node`` shows: the items of its sequence for a 4D image, else 1."""
+    sequenceNode = sequenceOf(node)
+    return sequenceNode.GetNumberOfDataNodes() if sequenceNode is not None else 1
+
+
+def timeStep(sequenceNode):
+    """The time between two items of a sequence in seconds (``pixdim[4]``), or None when the index is not evenly spaced time."""
+    unit = (sequenceNode.GetIndexUnit() or "").strip().lower()
+    scale = {"s": 1.0, "sec": 1.0, "second": 1.0, "seconds": 1.0, "ms": 0.001, "msec": 0.001}.get(unit)
+    count = sequenceNode.GetNumberOfDataNodes()
+    if scale is None or count < 2 or sequenceNode.GetIndexType() != slicer.vtkMRMLSequenceNode.NumericIndex:
+        return None
+    try:
+        values = np.array([float(sequenceNode.GetNthIndexValue(index)) for index in range(count)])
+    except ValueError:
+        return None
+    steps = np.diff(values)
+    if not np.all(np.isfinite(steps)) or steps[0] <= 0 or not np.allclose(steps, steps[0], rtol=1e-3, atol=1e-6):
+        return None
+    return float(steps[0]) * scale
+
+
 def kindOf(node):
     """"scan", "template", "labelmap", "segmentation" or "map" (None when ``node`` cannot be exported as NIfTI)."""
     if node is None:
@@ -382,8 +432,11 @@ def xformCode(spaceName, transformed=False):
     return XFORM_SCANNER
 
 
-def _cloneVolume(volumeNode):
-    """A temporary copy of a volume with its own image data and the same parent transform (removed by ``_temporaryNodes``)."""
+def _cloneVolume(volumeNode, transformNode=None):
+    """A temporary copy of a volume with its own image data and the same parent transform (removed by ``_temporaryNodes``).
+
+    ``transformNode`` (if given) is the parent transform of the copy instead of the volume's own.
+    """
     scene = slicer.mrmlScene
     clone = scene.AddNewNodeByClass(volumeNode.GetClassName(), scene.GenerateUniqueName("StudioNiftiExport"))
     clone.SetHideFromEditors(True)
@@ -394,7 +447,8 @@ def _cloneVolume(volumeNode):
     matrix = vtk.vtkMatrix4x4()
     volumeNode.GetIJKToRASMatrix(matrix)
     clone.SetIJKToRASMatrix(matrix)
-    transformNode = volumeNode.GetParentTransformNode()
+    if transformNode is None:
+        transformNode = volumeNode.GetParentTransformNode()
     clone.SetAndObserveTransformNodeID(transformNode.GetID() if transformNode is not None else None)
     return clone
 
@@ -434,6 +488,32 @@ def volumeData(volumeNode):
     return np.array(array, copy=True).transpose(2, 1, 0), affine, note
 
 
+def sequenceData(proxyNode, sequenceNode):
+    """``(data_ijkt, affine, transformNote)`` of every time point of a 4D image, as ``volumeData`` gives them for one.
+
+    The time points are the volumes of ``sequenceNode``; the parent transform of ``proxyNode`` (the volume shown) applies to
+    each of them, as the views show it. Raise ``ExportError`` when the time points are not on one grid.
+    """
+    transformNode = proxyNode.GetParentTransformNode()
+    data = affine = note = None
+    count = sequenceNode.GetNumberOfDataNodes()
+    for index in range(count):
+        dataNode = sequenceNode.GetNthDataNode(index)
+        with _temporaryNodes():
+            if transformNode is None and dataNode.GetParentTransformNode() is None:
+                frame, frameAffine, note = volumeData(dataNode)
+            else:
+                frame, frameAffine, note = volumeData(_cloneVolume(dataNode, transformNode))
+        if data is None:
+            data = np.empty(frame.shape + (count,), dtype=frame.dtype)
+            affine = frameAffine
+        elif frame.shape != data.shape[:3] or frame.dtype != data.dtype or not np.allclose(frameAffine, affine, atol=1e-4):
+            raise ExportError(_("The time points of {name} are not on one grid: it cannot be written as one 4D NIfTI image").format(
+                name=proxyNode.GetName()))
+        data[..., index] = frame
+    return data, affine, note
+
+
 #
 # Write tasks
 #
@@ -442,7 +522,7 @@ def volumeData(volumeNode):
 class WriteTask:
     """One NIfTI image and its side files, ready to be written (all arrays are owned copies: safe in another thread)."""
 
-    def __init__(self, path, data, affine, code, sidecar=None, textFiles=None, dtype=None, node=None):
+    def __init__(self, path, data, affine, code, sidecar=None, textFiles=None, dtype=None, node=None, timeStep=None):
         self.path = path
         self.data = data
         self.affine = np.asarray(affine, dtype=np.float64)
@@ -452,6 +532,8 @@ class WriteTask:
         self.dtype = dtype
         #: Fallback without LesionNetworkMappingLib: the node written by 3D Slicer's writer on the main thread
         self.node = node
+        #: pixdim[4] of a 4D image (seconds), None for a 3D one
+        self.timeStep = timeStep
 
     def files(self):
         return [self.path] + ([sidecarPath(self.path)] if self.sidecar is not None else []) + list(self.textFiles)
@@ -468,7 +550,7 @@ class WriteTask:
         if self.dtype is not None and data.dtype != np.dtype(self.dtype):
             data = data.astype(self.dtype)
         nifti.write_nifti(self.path, data, self.affine, sform_code=self.code, qform_code=self.code, descrip=DESCRIPTION,
-                          xyzt_units=XYZT_UNITS_MM_SEC)
+                          xyzt_units=XYZT_UNITS_MM_SEC, time_step=self.timeStep)
         self._writeSideFiles()
         return self.files()
 
@@ -638,9 +720,14 @@ class Job:
         return self._prepareVolume(node)
 
     def _prepareVolume(self, node):
-        with _temporaryNodes():
-            data, affine, transformNote = volumeData(node)
-        grid = (data.shape, affine)
+        # A 4D image (its sequence browser's proxy node) is written whole: every time point, not only the one on screen
+        sequenceNode = sequenceOf(node)
+        if sequenceNode is not None:
+            data, affine, transformNote = sequenceData(node, sequenceNode)
+        else:
+            with _temporaryNodes():
+                data, affine, transformNote = volumeData(node)
+        grid = (data.shape[:3], affine)
         spaceName, resolution, template = spaceInfo(node, grid, transformed=transformNote is not None)
         code = xformCode(spaceName, transformNote is not None)
         dtype = None
@@ -654,6 +741,14 @@ class Job:
             sidecar["Labels"] = _labelmapLabels(node, data)
         if isDicomNode(node):
             sidecar.update(dicomInfo(node))
+        step = None
+        if sequenceNode is not None:
+            step = timeStep(sequenceNode)
+            sidecar["TimePoints"] = int(data.shape[3])
+            if step is not None:
+                sidecar["RepetitionTime"] = step
+            if "SourceFile" not in sidecar and _storageFile(sequenceNode):
+                sidecar["SourceFile"] = os.path.basename(_storageFile(sequenceNode))
         tasks = []
         if self.kind == KIND_MAP:
             statistic = node.GetAttribute("LNM.Statistic") or ""
@@ -675,9 +770,11 @@ class Job:
             else:
                 sidecar["Threshold"] = None
         if _niftiLib() is None:
+            if sequenceNode is not None:
+                raise ExportError(_("This build cannot write 4D NIfTI images (use File > Save Data)"))
             task = WriteTask(self.path, None, affine, XFORM_SCANNER, sidecar, node=node)
         else:
-            task = WriteTask(self.path, data, affine, code, sidecar, dtype=dtype)
+            task = WriteTask(self.path, data, affine, code, sidecar, dtype=dtype, timeStep=step)
         if transformNote is not None:
             self.notes.append(_("{name}: its transform was applied to the exported copy (the scene is unchanged)").format(name=self.nodeName))
         return [task] + tasks

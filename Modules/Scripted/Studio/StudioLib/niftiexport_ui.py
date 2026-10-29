@@ -315,12 +315,17 @@ class ExportDialog(qt.QDialog):
         self.list.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
         for node in nodes:
             kind = niftiexport.kindOf(node)
-            item = qt.QListWidgetItem(f"{node.GetName()}  ·  {niftiexport.kindText(kind)}")
+            kindText = niftiexport.kindText(kind)
+            # A 4D image is written whole (every time point): the row says how many
+            count = niftiexport.timePoints(node)
+            if count > 1:
+                kindText = _("{kind}, {count} time points").format(kind=kindText, count=count)
+            item = qt.QListWidgetItem(f"{node.GetName()}  ·  {kindText}")
             item.setFlags(qt.Qt.ItemIsEnabled | qt.Qt.ItemIsUserCheckable)
             item.setCheckState(qt.Qt.Checked if node.GetID() in checkedIds else qt.Qt.Unchecked)
             item.setData(qt.Qt.UserRole, node.GetID())
             item.setSizeHint(qt.QSize(0, LIST_ROW_HEIGHT))
-            item.setToolTip(_("{name} ({kind})").format(name=node.GetName(), kind=niftiexport.kindText(kind)))
+            item.setToolTip(_("{name} ({kind})").format(name=node.GetName(), kind=kindText))
             self.list.addItem(item)
         rows = max(1, min(LIST_ROWS, len(nodes)))
         self.list.setFixedHeight(rows * LIST_ROW_HEIGHT + 6)

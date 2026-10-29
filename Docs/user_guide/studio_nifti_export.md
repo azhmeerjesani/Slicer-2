@@ -42,6 +42,7 @@ with the `.nii.gz` format is 3D Slicer's own NIfTI export and is unchanged.
 | Export | Files |
 | --- | --- |
 | A scan or other image | `<name>.nii.gz` with the image's own data type (int16, float32, uint8…). Window and level are display settings and are never applied to the voxels. |
+| A 4D image (fMRI, a 4D mask) | `<name>.nii.gz` with every time point, not only the one on screen: a 4D file whose fourth dimension is the time points, with the time step of the sequence in `pixdim[4]` (seconds). The export list says how many time points it has, and the sidecar has `TimePoints` and `RepetitionTime`. |
 | A label map | `<name>.nii.gz` with the same values, and their names and colours in the sidecar. |
 | A segmentation as one label map | `<name>_dseg.nii.gz` (values 1…N), `<name>_dseg.tsv` (a BIDS look-up table: index, name, colour) and `<name>_dseg.txt` (an ITK-SNAP label description file). Where segments overlap, a voxel has the value of the later segment. |
 | A segmentation as one mask per segment | `<name>_label-<segment>_mask.nii.gz` for each segment (uint8, 0 and 1). Empty segments are skipped, and the message says which. Letters and digits only: "Left lesion" gives `label-Leftlesion`. If two names give the same label ("Lesion 1" and "Lesion-1"), the later one gets `dup2` after it (`label-Lesion1dup2`), so a file name is never another segment's name. |

@@ -590,6 +590,56 @@ class StudioNiftiExportTest(unittest.TestCase):
             "Lesions_label-Cyst2_mask.nii.gz": "Cyst2",
         })
 
+    def test_06e_4d_image_is_written_whole(self):
+        """A 4D image (fMRI) opened as a sequence is written with every time point and its TR, not only the one on screen."""
+        from LesionNetworkMappingLib import nifti
+        from StudioLib import autosave_io, importer, niftiexport_ui
+
+        shape, count = (9, 11, 7), 6
+        series = np.zeros((*shape, count), np.int16)
+        for t in range(count):
+            series[1, 5, 3, t] = 10 * (t + 1)
+            series[..., t] += np.int16(t)
+        affine = np.array([[2.0, 0, 0, -9], [0, 2.0, 0, -11], [0, 0, 2.0, -7], [0, 0, 0, 1]])
+        source = os.path.join(self.tempDir, "sub-07_task-motor_bold.nii.gz")
+        nifti.write_nifti(source, series, affine, sform_code=1, qform_code=1, time_step=2.0)
+        proxy = importer.loadSequence(source)
+        # The views show time point 3: the export still writes all of them
+        slicer.modules.sequences.logic().GetFirstBrowserNodeForProxyNode(proxy).SetSelectedItemNumber(3)
+        result = self.export.exportNodes([proxy], self.out)
+        self.assertEqual(result.errors, [])
+        self.assertEqual([os.path.basename(path) for path in result.images], ["sub-07_task-motor_bold.nii.gz"])
+        data, written, header = self._read(result.images[0])
+        self.assertEqual(data.shape, (*shape, count))
+        np.testing.assert_array_equal(data, series)
+        np.testing.assert_allclose(written, affine, atol=1e-6)
+        self.assertEqual(header["dim"][0], 4)
+        self.assertAlmostEqual(float(header["pixdim"][4]), 2.0)
+        sidecar = self._sidecar(result.images[0])
+        self.assertEqual(sidecar["Shape"], [*shape, count])
+        self.assertEqual(sidecar["TimePoints"], count)
+        self.assertAlmostEqual(sidecar["RepetitionTime"], 2.0)
+        self.assertEqual(sidecar["SourceFile"], "sub-07_task-motor_bold.nii.gz")
+        sequenceNode = self.export.sequenceOf(proxy)
+        self.assertIsNotNone(sequenceNode)
+        self.assertEqual(self.export.timePoints(proxy), count)
+        self.assertAlmostEqual(self.export.timeStep(sequenceNode), 2.0)
+        # A linear transform of the shown volume applies to every time point (folded into the affine)
+        transformNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", "shift")
+        shift = np.eye(4)
+        shift[:3, 3] = (-5.0, 0.0, 0.0)
+        transformNode.SetMatrixTransformToParent(_matrix(shift))
+        proxy.SetAndObserveTransformNodeID(transformNode.GetID())
+        result = self.export.exportVolume(proxy, os.path.join(self.out, "moved_bold.nii.gz"))
+        self.assertEqual(result.errors, [])
+        data, written, _header = self._read(result.images[0])
+        np.testing.assert_array_equal(data, series)
+        np.testing.assert_allclose(written, shift @ affine, atol=1e-6)
+        # The dialog says the image has 6 time points
+        dialog = niftiexport_ui.exportNodesDialog([proxy], show=False, executor=autosave_io.InlineExecutor())
+        self.assertIn("6 time points", dialog.list.item(0).text())
+        dialog.close()
+
     def test_07_map_with_threshold_mask(self):
         """A map is written as float32 with a thresholded binary mask (|T| >= t, or one sign) and the threshold in the sidecar."""
         ijkToRas = np.array([[-2.0, 0, 0, 90], [0, 2.0, 0, -126], [0, 0, 2.0, -72], [0, 0, 0, 1]])
