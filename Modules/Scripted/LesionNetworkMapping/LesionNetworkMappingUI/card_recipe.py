@@ -8,9 +8,11 @@ A header strip above the Seed card (every seed mode, Studio and Classic):
   settings stay as they are until a recipe is picked. Picking one sets the primary threshold rule (Result card) and the
   options of Run everything (``Studio/LNM/Pipeline/Options`` through card_pipeline): steps that are not in the recipe
   are turned off there, so the Run everything pipeline (A-04) runs the recipe's steps. The study remembers the choice
-  (``derivatives/lnm/recipe.json``). Opening a study whose plan is locked sets the rule, the Run everything options and
-  the Cohort analyses' settings to the plan's (with its recorded deviations), as **Use the plan's settings** does;
-  nothing is recorded.
+  (``derivatives/lnm/recipe.json``). The rule and the options are not kept per study, so opening a study with a
+  remembered recipe and an open plan sets them to that recipe's again (not to another study's), and a study without a
+  remembered recipe shows none (a recipe picked before any study was open carries over to the first one). Opening a
+  study whose plan is locked sets the rule, the Run everything options and the Cohort analyses' settings to the plan's
+  (with its recorded deviations), as **Use the plan's settings** does; nothing is recorded.
 - **Status line** (``LNMRecipeStatus``): the status tag, "Custom (based on X) · 2 changes" when the Map settings differ
   from the recipe, and the partial-recipe badge "1 step not available in this build: Coordinate seeds".
 - **Plan chip** (``LNMPlanChip``): "Plan: open" or "Plan: locked 2026-10-18 · 3f2a1b9c" ("modified after lock" in red
@@ -32,7 +34,8 @@ Search entries (``StudioLib.palette.registerProvider``): "Choose an analysis rec
 
 Settings: reads and extends ``Studio/LNM/RecipeFolders`` (a list of folders; only when the user adds one); writes
 ``Studio/LNM/Pipeline/Options`` through ``card_pipeline.saveOptions`` only when a recipe is picked, a plan is locked or
-restored, or a study with a locked plan is opened. No prompt, setting or file is written at start or under ``--testing``.
+restored, or a study with a locked plan or a remembered recipe is opened. No prompt, setting or file is written at start
+or under ``--testing``.
 """
 
 import html
@@ -489,17 +492,32 @@ class RecipeHeader:
             logging.exception("Lesion network mapping: the recipes could not be read")
             self.recipes = []
         path = self.studyPath()
-        opened = bool(path) and path != self._lastStudyPath
+        previous = self._lastStudyPath
+        opened = bool(path) and path != previous
         self._lastStudyPath = path
         chosen = self.recipe.id if self.recipe is not None else None
+        selected = None
         if path:
-            chosen = (recipes.selected_recipe(path) or {}).get("id") or chosen  # the study's choice (its locked plan's recipe first)
+            selected = (recipes.selected_recipe(path) or {}).get("id")  # the study's choice (its locked plan's recipe first)
+            # Another study's recipe is not this study's choice; one picked before any study was open carries over
+            if selected or (opened and previous):
+                chosen = selected
         self.recipe = next((recipe for recipe in self.recipes if recipe.id == chosen), None)
         self._fillCombo()
         # A study with a locked plan was opened: Map starts from the plan's settings (with its recorded deviations), not
         # from the defaults of a new session or another study's options, so only the user's later changes ask for a reason
-        if opened and self._planLocked(path) and self.restorePlanSettings():
-            return
+        if opened and self._planLocked(path):
+            if self.restorePlanSettings():
+                return
+        elif opened and selected and self.recipe is not None:
+            # An open plan with a remembered recipe: the rule and the Run everything options are not kept per study, so
+            # they are set to this recipe's again (Run everything runs its steps, not those another study left)
+            try:
+                params = recipes.apply(self.recipe)
+            except (ValueError, TypeError):
+                logging.exception("Lesion network mapping: the study's recipe parameters are not valid")
+            else:
+                self._setMapSettings(params, self.recipe.steps, "recipe")
         self.refresh()
 
     def _planLocked(self, path):
@@ -546,25 +564,8 @@ class RecipeHeader:
         if self.plan() is not None:
             self.refresh()  # the combo is disabled while a plan is locked; nothing changes
             return False
-        params = recipes.apply(recipe)
         self.recipe = recipe
-        widget = _mapWidget()
-        try:
-            if widget is not None and hasattr(widget, "setRule"):
-                widget.setRule(params["rule"])
-            else:
-                self.ctx.setRule(params["rule"])
-        except Exception:
-            logging.exception("Lesion network mapping: the recipe's threshold rule could not be set")
-        module = _pipelineCard()
-        if module is not None:
-            try:
-                module.saveOptions(recipes.pipeline_options(params, recipe.steps, module.loadOptions()))
-                card = self.ctx.card("pipeline")
-                if card is not None and hasattr(card, "onRunSettingsChanged"):
-                    card.onRunSettingsChanged()
-            except Exception:
-                logging.exception("Lesion network mapping: the Run everything options could not be set from the recipe")
+        self._setMapSettings(recipes.apply(recipe), recipe.steps, "recipe")
         path = self.studyPath()
         if path:
             try:
@@ -576,6 +577,27 @@ class RecipeHeader:
             self.combo.setCurrentIndex(index)
         self.refresh()
         return True
+
+    def _setMapSettings(self, params, steps, source):
+        """Set the threshold rule and the Run everything options to ``params`` and ``steps`` (a recipe's or the plan's)."""
+        recipes = _recipes()
+        widget = _mapWidget()
+        try:
+            if widget is not None and hasattr(widget, "setRule"):
+                widget.setRule(params["rule"])
+            else:
+                self.ctx.setRule(params["rule"])
+        except Exception:
+            logging.exception(f"Lesion network mapping: the {source}'s threshold rule could not be set")
+        module = _pipelineCard()
+        if module is not None:
+            try:
+                module.saveOptions(recipes.pipeline_options(params, steps, module.loadOptions()))
+                card = self.ctx.card("pipeline")
+                if card is not None and hasattr(card, "onRunSettingsChanged"):
+                    card.onRunSettingsChanged()
+            except Exception:
+                logging.exception(f"Lesion network mapping: the Run everything options could not follow the {source}")
 
     #
     # Refresh
@@ -775,23 +797,7 @@ class RecipeHeader:
             return False
         if params is None:
             return False
-        widget = _mapWidget()
-        try:
-            if widget is not None and hasattr(widget, "setRule"):
-                widget.setRule(params["rule"])
-            else:
-                self.ctx.setRule(params["rule"])
-        except Exception:
-            logging.exception("Lesion network mapping: the plan's threshold rule could not be set")
-        module = _pipelineCard()
-        if module is not None:
-            try:
-                module.saveOptions(recipes.pipeline_options(params, steps, module.loadOptions()))
-                card = self.ctx.card("pipeline")
-                if card is not None and hasattr(card, "onRunSettingsChanged"):
-                    card.onRunSettingsChanged()
-            except Exception:
-                logging.exception("Lesion network mapping: the Run everything options could not follow the locked plan")
+        self._setMapSettings(params, steps, "locked plan")
         for tab in self.analysisTabs():
             try:
                 values = recipes.analysis_parameters(path, tab.PLAN_SCOPE)
