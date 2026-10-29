@@ -2454,6 +2454,72 @@ class StudioProjectsTest(unittest.TestCase):
             qt.QSettings().remove(projects.ROOT_CHOSEN_KEY)
             os.environ[projects.ROOT_ENVIRONMENT] = self.root
 
+    def test_47_change_folder_dialog_cancels_on_escape_close_and_cancel(self):
+        """Settings > Saving > Change…: Escape, closing the window or Cancel leaves the folder unchanged (BB-1). The dialog
+        reused the first-start chooser, whose Escape accepts the proposal, so Escape after picking a folder in an empty
+        Slicer Studio folder silently made it the new folder. Only the first-start chooser accepts on Escape.
+        """
+        from unittest import mock
+
+        from StudioLib import projects_ui
+
+        projects = self.projects
+        os.environ.pop(projects.ROOT_ENVIRONMENT)
+        oldRoot = os.path.normpath(self.root)
+        qt.QSettings().setValue(projects.ROOT_KEY, oldRoot)
+        os.makedirs(oldRoot, exist_ok=True)
+        self.assertFalse(projects.hasContent(oldRoot))
+
+        def run(name, closer):
+            pick = os.path.join(self.tempDir, "picked " + name)
+            os.makedirs(pick, exist_ok=True)
+            seen = []
+
+            def tick():
+                for widget in qt.QApplication.topLevelWidgets():
+                    if widget.isVisible() and widget.objectName == "StudioProjectsFolderDialog":
+                        seen.append(widget.windowTitle)
+                        timer.stop()
+                        closer(widget)
+                        return
+
+            timer = qt.QTimer()
+            timer.setInterval(100)
+            timer.connect("timeout()", tick)
+            timer.start()
+            try:
+                with mock.patch.object(qt.QFileDialog, "getExistingDirectory", return_value=pick):
+                    result = projects_ui.changeRootDialog(None)
+            finally:
+                timer.stop()
+            self.assertEqual(seen, ["Change the Slicer Studio folder"], name)
+            return pick, result
+
+        try:
+            escape = lambda w: qt.QApplication.sendEvent(w, qt.QKeyEvent(qt.QEvent.KeyPress, qt.Qt.Key_Escape, qt.Qt.NoModifier))
+            for name, closer in (("escape", escape), ("close", lambda w: w.close()),
+                                 ("cancel", lambda w: w.findChild("QPushButton", "StudioProjectsFolderCancelButton").click())):
+                pick, result = run(name, closer)
+                self.assertIsNone(result, name)
+                self.assertEqual(projects.root(), oldRoot, name)
+            # Use this folder still changes it
+            pick, result = run("use", lambda w: w.continueButton.click())
+            self.assertEqual(result, os.path.normpath(pick))
+            self.assertEqual(projects.root(), os.path.normpath(pick))
+        finally:
+            qt.QSettings().remove(projects.ROOT_KEY)
+            qt.QSettings().remove(projects.ROOT_CHOSEN_KEY)
+            os.environ[projects.ROOT_ENVIRONMENT] = self.root
+        # The first-start chooser has no Cancel and still accepts on Escape
+        dialog = projects_ui.FolderChooserDialog(proposal=oldRoot)
+        try:
+            self.assertIsNone(dialog.cancelButton)
+            dialog.reject()
+            self.assertEqual(dialog.result(), qt.QDialog.Accepted)
+            self.assertFalse(dialog.cancelled)
+        finally:
+            dialog.deleteLater()
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk

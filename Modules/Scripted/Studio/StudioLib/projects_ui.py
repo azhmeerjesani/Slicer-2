@@ -156,10 +156,16 @@ def _question(parent, title, text, buttons, default=0):
 
 
 class FolderChooserDialog(qt.QDialog):
-    """"Where should Slicer Studio keep your work?" (``StudioProjectsFolderDialog``). Closing it accepts the proposal."""
+    """"Where should Slicer Studio keep your work?" (``StudioProjectsFolderDialog``).
 
-    def __init__(self, parent=None, proposal=None):
+    First start (``cancellable=False``): closing it accepts the proposal, the application is never blocked. Change… of
+    Settings, Saving (``cancellable=True``): it has a Cancel button, and Escape or closing the window cancels (``cancelled``).
+    """
+
+    def __init__(self, parent=None, proposal=None, cancellable=False):
         qt.QDialog.__init__(self, parent or slicer.util.mainWindow())
+        self.cancellable = bool(cancellable)
+        self.cancelled = False
         self.setObjectName("StudioProjectsFolderDialog")
         self.setWindowTitle(_("Slicer Studio folder"))
         self.setModal(True)
@@ -257,6 +263,16 @@ class FolderChooserDialog(qt.QDialog):
         self.insideLabel.setWordWrap(True)
         ui.setText(self.insideLabel, "caption")
         buttons.addWidget(self.insideLabel, 1)
+        self.cancelButton = None
+        if self.cancellable:
+            self.cancelButton = qt.QPushButton(_("Cancel"))
+            self.cancelButton.setObjectName("StudioProjectsFolderCancelButton")
+            self.cancelButton.setAutoDefault(False)
+            self.cancelButton.setMinimumHeight(36)
+            self.cancelButton.setMinimumWidth(96)
+            ui.setRole(self.cancelButton, "secondary")
+            self.cancelButton.connect("clicked()", self.reject)
+            buttons.addWidget(self.cancelButton)
         self.continueButton = qt.QPushButton(_("Continue"))
         self.continueButton.setObjectName("StudioProjectsFolderContinueButton")
         self.continueButton.setDefault(True)
@@ -330,7 +346,12 @@ class FolderChooserDialog(qt.QDialog):
             self.setPath(folder)
 
     def reject(self):
-        # Escape or closing the window accepts the proposal (the application is never blocked)
+        if self.cancellable:
+            # Change…: Escape, closing the window or Cancel leaves the folder unchanged
+            self.cancelled = True
+            qt.QDialog.reject(self)
+            return
+        # First start: Escape or closing the window accepts the proposal (the application is never blocked)
         self.accept()
 
 
@@ -737,14 +758,17 @@ def changeRootDialog(parent=None):
         slicer.util.errorDisplay(_("The folder is set by the {variable} environment variable.").format(variable=projects.ROOT_ENVIRONMENT))
         return None
     oldRoot = projects.root()
-    dialog = FolderChooserDialog(parent, proposal=oldRoot)
+    dialog = FolderChooserDialog(parent, proposal=oldRoot, cancellable=True)
     dialog.setWindowTitle(_("Change the Slicer Studio folder"))
     dialog.continueButton.setText(_("Use this folder"))
     dialog.choose()
     run = getattr(dialog, "exec", None) or dialog.exec_
     run()
     newRoot = dialog.path
+    cancelled = getattr(dialog, "cancelled", False) is True
     dialog.deleteLater()
+    if cancelled:
+        return None
     if os.path.normcase(os.path.realpath(newRoot)) == os.path.normcase(os.path.realpath(oldRoot)):
         return None
     move = False
