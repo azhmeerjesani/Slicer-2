@@ -297,20 +297,24 @@ class AutosaveService:
         qt.QTimer.singleShot(SCAN_DELAY_MS, self.scanAtStartup)
         slicer.app.connect("aboutToQuit()", self._onAboutToQuit)
 
+    def _installSettingsPanel(self):
+        from StudioLib import autosave_settings
+
+        autosave_settings.install(self)
+
+    def _attachProjectsUI(self):
+        from StudioLib import projects_ui
+
+        projects_ui.attachService(self)
+
     def _install(self):
-        try:
-            self.reloadSettings()
-            self.installActions()
-            self.registerPaletteProvider()
-            from StudioLib import autosave_settings
-
-            autosave_settings.install(self)
-            self.connectCloseSummary()
-            from StudioLib import projects_ui
-
-            projects_ui.attachService(self)
-        except Exception:
-            logging.error("Autosave: installing the user interface failed:\n" + traceback.format_exc())
+        # Each step on its own: one that fails (for example a Qt 6 binding difference) does not skip the others
+        for step in (self.reloadSettings, self.installActions, self.registerPaletteProvider, self._installSettingsPanel,
+                     self.connectCloseSummary, self._attachProjectsUI):
+            try:
+                step()
+            except Exception:
+                logging.error(f"Autosave: installing the user interface failed ({step.__name__}):\n" + traceback.format_exc())
         # Changes before the first poll are counted from now
         self._lastPollTime = time.time()
         self._pollTimer.start()

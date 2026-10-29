@@ -38,6 +38,8 @@ Studio surfaces (StudioLib/autosave_ui.py, A-01b), with ``Shell(force=True).appl
 - (x) A-09: while the scene is a project it is saved there and no private session is written; when the project is
   released (a study opens) the private recovery autosave runs again.
 - (y) a node removed after the autosave and project helpers listed it is freed (no leaked GetNodesByClass collection).
+- (za) Qt 6 (QAction without menu()): the File menu actions are installed, and a failing install step does not skip the
+  later ones.
 """
 
 import hashlib
@@ -1261,3 +1263,106 @@ class StudioAutosaveTest(unittest.TestCase):
                 os.environ.pop(projects.ROOT_ENVIRONMENT, None)
             else:
                 os.environ[projects.ROOT_ENVIRONMENT] = environment
+
+    def test_za_installWithoutQActionMenu(self):
+        """BB-1, Qt 6: QAction.menu() is a template that PythonQt does not wrap, so File menu actions have no menu
+        attribute. installActions() still puts 'Recover Autosaved Work…' after the Recent submenu and adds 'Autosave
+        now', and when one install step fails the later ones (Search entries, settings panel, close summary, project
+        File menu items) are still installed.
+        """
+        from StudioLib import autosave_settings, projects_ui
+
+        class Qt6Action:
+            """A QAction as PythonQt wraps it with Qt 6: every attribute except menu."""
+
+            def __init__(self, action):
+                object.__setattr__(self, "_action", action)
+
+            def __getattr__(self, name):
+                if name in ("menu", "setMenu"):
+                    raise AttributeError(f"QAction has no attribute named '{name}'")
+                return getattr(self._action, name)
+
+            def __eq__(self, other):
+                return self._action == getattr(other, "_action", other)
+
+            __hash__ = None
+
+        def unwrap(action):
+            return getattr(action, "_action", action)
+
+        class Qt6FileMenu:
+            def __init__(self, menu):
+                self.menu = menu
+
+            def actions(self):
+                return [Qt6Action(action) for action in self.menu.actions()]
+
+            def insertAction(self, before, action):
+                self.menu.insertAction(unwrap(before), unwrap(action))
+
+            def addAction(self, action):
+                self.menu.addAction(unwrap(action))
+
+        window = qt.QMainWindow()
+        fileMenu = window.menuBar().addMenu("File")
+        fileMenu.setObjectName("FileMenu")
+        for text in ("Add Data", "Add DICOM Data"):
+            fileMenu.addAction(text)
+        fileMenu.addMenu("Recent").addAction("scan.nrrd")
+        fileMenu.addAction("Save")
+        fileMenu.addSeparator()
+        fileMenu.addAction("Exit")
+
+        class Qt6Window:
+            """The main window, whose File menu actions have no menu() (the QActions are parented to the real window)."""
+
+            def __getattr__(self, name):
+                return getattr(window, name)
+
+            def findChild(self, className, name):
+                return Qt6FileMenu(fileMenu) if name == "FileMenu" else window.findChild(className, name)
+
+        realMainWindow = slicer.util.mainWindow
+        realQAction = qt.QAction
+        slicer.util.mainWindow = lambda *args, **kwargs: Qt6Window()
+        # PythonQt needs a real QObject parent: give it the real window behind the stand-in
+        qt.QAction = lambda text, parent=None: realQAction(text, window if isinstance(parent, Qt6Window) else parent)
+        try:
+            service = self._service()
+            service.installActions()
+        finally:
+            slicer.util.mainWindow = realMainWindow
+            qt.QAction = realQAction
+        try:
+            self.assertEqual([str(action.text) for action in fileMenu.actions() if not action.isSeparator()],
+                             ["Add Data", "Add DICOM Data", "Recent", "Recover Autosaved Work…", "Save", "Exit"])
+            self.assertEqual(service.recoverAction.objectName, "StudioRecoverAutosaveAction")
+            self.assertEqual(service.autosaveNowAction.objectName, "StudioAutosaveNowAction")
+            self.assertIn("StudioAutosaveNowAction", [action.objectName for action in window.actions()])
+        finally:
+            window.deleteLater()
+
+        # A failing step does not skip the steps after it
+        service = self._service()
+        ran = []
+
+        def qt6InstallActions():
+            ran.append("installActions")
+            raise AttributeError("QAction has no attribute named 'menu'")
+
+        service.installActions = qt6InstallActions
+        service.registerPaletteProvider = lambda: ran.append("registerPaletteProvider")
+        service.connectCloseSummary = lambda: ran.append("connectCloseSummary")
+        realSettingsInstall = autosave_settings.install
+        realAttachService = projects_ui.attachService
+        autosave_settings.install = lambda svc=None: ran.append("autosave_settings.install")
+        projects_ui.attachService = lambda svc: ran.append("projects_ui.attachService")
+        try:
+            service._install()
+        finally:
+            autosave_settings.install = realSettingsInstall
+            projects_ui.attachService = realAttachService
+        self.assertEqual(ran, ["installActions", "registerPaletteProvider", "autosave_settings.install", "connectCloseSummary",
+                               "projects_ui.attachService"])
+        self.assertTrue(service._pollTimer.isActive())
