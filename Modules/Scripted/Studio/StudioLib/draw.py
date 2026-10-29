@@ -1576,7 +1576,9 @@ def _writeMask(segmentationNode, segmentId, mask, imageToWorldArray, extent):
 
 def _editLesion(transform, title, shell=None):
     """Apply ``transform(maskCrop, spacing) -> newCrop`` to the edited segment around its extent (2 voxel margin
-    plus the kernel), as one undo step. Return (voxels before, voxels after), or None when there is nothing to edit.
+    plus the kernel), as one undo step. Return (voxels before, voxels after, changed), or None when there is nothing
+    to edit. A transform that changes nothing adds no undo step (``changed`` is False): the caller must then not
+    offer an Undo, which would undo the user's previous, unrelated edit.
     """
     editor = segmentEditor()
     segmentationNode = editor.segmentationNode() if editor is not None else None
@@ -1599,7 +1601,7 @@ def _editLesion(transform, title, shell=None):
     result = transform(crop.copy(), spacing)
     before, after = int(np.count_nonzero(crop)), int(np.count_nonzero(result))
     if before == after and np.array_equal(crop, result):
-        return before, after
+        return before, after, False
     editor.saveStateForUndo()
     labelmap = segmentationNode.GetBinaryLabelmapInternalRepresentation(segmentId)
     extent = labelmap.GetExtent()
@@ -1608,7 +1610,7 @@ def _editLesion(transform, title, shell=None):
     offset = np.eye(4)
     offset[:3, 3] = (-extent[0], -extent[2], -extent[4])
     _writeMask(segmentationNode, segmentId, result, matrix @ offset, cropExtent)
-    return before, after
+    return before, after, True
 
 
 def _ellipsoid(spacing, radiusMm):
@@ -1652,20 +1654,33 @@ def keepLargestPart(shell=None):
     """Keep the largest part of the lesion (26-connectivity), one undo step."""
     shell = _currentShell(shell)
     result = _editLesion(_keepLargest, _("Keep largest"), shell)
-    if result is not None and shell is not None:
-        shell.toast(_("Kept the largest part: {removed} voxels removed").format(removed=result[0] - result[1]),
-                    action=_undo, actionText=_("Undo"))
-    return result
+    if result is None:
+        return None
+    before, after, changed = result
+    if shell is not None:
+        if changed:
+            shell.toast(_("Kept the largest part: {removed} voxels removed").format(removed=before - after),
+                        action=_undo, actionText=_("Undo"))
+        else:
+            # No undo step was added: an Undo here would undo the user's previous edit
+            shell.toast(_("The lesion is one part: nothing to remove"))
+    return before, after
 
 
 def fillGapsAndSpecks(shell=None):
     """"Fill gaps and specks": closes gaps up to 2 mm and removes islands under 10 mm³, one undo step."""
     shell = _currentShell(shell)
     result = _editLesion(_fillGapsAndSpecks, _("Fill gaps and specks"), shell)
-    if result is not None and shell is not None:
-        before, after = result
-        shell.toast(_("Fill gaps and specks: {before} → {after} voxels").format(before=before, after=after), action=_undo, actionText=_("Undo"))
-    return result
+    if result is None:
+        return None
+    before, after, changed = result
+    if shell is not None:
+        if changed:
+            shell.toast(_("Fill gaps and specks: {before} → {after} voxels").format(before=before, after=after), action=_undo, actionText=_("Undo"))
+        else:
+            # No undo step was added: an Undo here would undo the user's previous edit
+            shell.toast(_("Fill gaps and specks: no gaps or specks to clean up"))
+    return before, after
 
 
 def fillGaps(shell=None):

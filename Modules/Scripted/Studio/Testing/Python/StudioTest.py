@@ -1819,6 +1819,49 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertTrue(((after > 0) | (before == 0)).all())
         editor.setActiveEffect(None)
 
+    def test_29d_draw_cleanup_that_changes_nothing_offers_no_undo(self):
+        """A Keep largest part or Fill gaps and specks that changes nothing adds no undo step, so its toast has no
+        Undo: that Undo would undo the user's previous, unrelated stroke.
+        """
+        from StudioLib import draw
+
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        segmentationNode, segmentId, source = editor.segmentationNode(), editor.currentSegmentID(), editor.sourceVolumeNode()
+        array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, source)
+        array[:] = 0
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, source)
+        # "Stroke 1" then "stroke 2" touching it, each its own undo step: one solid part without gaps or specks
+        editor.saveStateForUndo()
+        array[40:46, 50:56, 30:36] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, source)
+        editor.saveStateForUndo()
+        array[40:46, 50:56, 36:40] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, source)
+        voxels = self._voxels(editor)
+        actionButton = studioShell._stickyToast.actionButton
+        for cleanup in (draw.keepLargestPart, draw.fillGapsAndSpecks):
+            studioShell._stickyToast.hide()
+            result = cleanup(studioShell)
+            self._pump()
+            self.assertEqual(result, (voxels, voxels), cleanup.__name__)
+            self.assertEqual(self._voxels(editor), voxels, cleanup.__name__)
+            self.assertTrue(studioShell.toastText(), cleanup.__name__)
+            if actionButton.isVisible():
+                actionButton.click()
+                self._pump()
+            self.assertEqual(self._voxels(editor), voxels, f"{cleanup.__name__}: the toast's Undo undid an earlier stroke")
+        # A cleanup that changes something is still one undo step with an Undo in its toast
+        array[60, 70, 60] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, source)
+        studioShell._stickyToast.hide()
+        self.assertEqual(draw.keepLargestPart(studioShell), (voxels + 1, voxels))
+        self._pump()
+        self.assertTrue(actionButton.isVisible())
+        actionButton.click()
+        self._pump()
+        self.assertEqual(self._voxels(editor), voxels + 1)
+
     def test_30_draw_extension_points(self):
         """Inspector cards, card rows and ⋯ items of other work packages; network maps leave Draw; assisted counts (LNM addendum)."""
         import numpy as np
