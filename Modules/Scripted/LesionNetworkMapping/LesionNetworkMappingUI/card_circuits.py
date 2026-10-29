@@ -239,6 +239,10 @@ class CircuitsCard:
         self.circuitCombo = qt.QComboBox()
         self.circuitCombo.setObjectName("LNMCircuitsCircuitCombo")
         self.circuitCombo.setToolTip(_("The circuits made here (in the study's derivatives/lnm/circuits), or a circuit map opened from a file"))
+        # Circuit names may be long: the combo shares the row with two buttons and never widens the inspector (its size
+        # hint is the width of its longest item)
+        self.circuitCombo.setSizeAdjustPolicy(qt.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.circuitCombo.setMinimumContentsLength(8)
         self.circuitCombo.connect("currentIndexChanged(int)", self._onCircuitChanged)
         circuitRow.addWidget(self.circuitCombo, 1)
         self.openButton = _button(_("Open…"), "LNMCircuitsOpenButton", "ghost", _("Open a circuit map (a NIfTI on the connectome grid)"))

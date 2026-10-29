@@ -39,6 +39,8 @@ Run with the main window and testing enabled::
   is fixed the study is created and .studio/participants.orig.tsv is the table that was adopted, not the broken one.
 - ``test_15_inspector_keeps_width_with_a_study`` (BB-1): with a study open (Library cards, Map cohort tabs) the inspector stays at its
   stored width in every workspace, and no workspace module's stored width (``Studio/WorkspacePanelWidths/*``) is wider than it.
+- ``test_23_map_cards_keep_inspector_width`` (BB-1): expanding any Map card (Circuits with a long circuit name, Compare with its results
+  shown) keeps the inspector at its stored width, and it stays there after the card is collapsed and in every workspace.
 - ``test_17_job_result_waits_for_open_subject_edits`` (BB-1): a job result (a normalization) that repoints the open subject's
   scan, lesion and space while it has unsaved edits stays in the inbox when the inbox is merged (Library shown, "Merge job
   results", Search): Done writes the native tracing as the native lesion (never as template space) and the result is merged
@@ -1842,6 +1844,78 @@ class StudioRegressionTest(unittest.TestCase):
             for _ in range(4):
                 slicer.app.processEvents()
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
+
+    def test_23_map_cards_keep_inspector_width(self):
+        """Opening a Map card (Circuits, Compare, any other) neither widens the inspector nor leaves it wide (BB-1).
+
+        The Circuits card (a combo of circuits next to two buttons) and the Compare card (a check box next to two menu
+        buttons, the three result buttons) had a layout minimum of 525 and 476 px, and the widest minimum a workspace
+        module needed stays for good (``Shell._workspacePanelWidths``): the inspector went from 340 px to 535 px at the
+        first expansion and stayed there after the card was collapsed and in every workspace.
+        """
+        from StudioLib import shell
+
+        mainWindow = slicer.util.mainWindow()
+        if mainWindow is None or not hasattr(slicer.modules, "lesionnetworkmapping"):
+            self.skipTest("needs the main window and the Map module")
+        settings = qt.QSettings()
+        keys = [f"{shell._WORKSPACE_PANEL_WIDTHS_GROUP}/{name}" for name in ("Studio", "SegmentEditor", "LesionNetworkMapping")]
+        saved = {key: settings.value(key) for key in keys}
+        for key in keys:
+            settings.remove(key)
+        savedGeometry = mainWindow.saveGeometry()
+        studioShell = None
+        try:
+            mainWindow.resize(1366, 768)
+            studioShell = shell.Shell(force=True)
+            studioShell.apply()
+            dock = mainWindow.findChild("QDockWidget", "PanelDockWidget")
+
+            def pump(count=10):
+                for _ in range(count):
+                    slicer.app.processEvents()
+
+            studioShell.switchTo("map")
+            pump()
+            widget = slicer.modules.LesionNetworkMappingWidget
+            cards = {cardId: card for cardId, (_spec, card) in widget._cardWidgets.items() if card is not None and card.inherits("ctkCollapsibleButton")}
+            for cardId in ("circuits", "compare"):
+                self.assertIn(cardId, cards)
+            for card in cards.values():
+                card.collapsed = True
+            pump()
+            collapsedWidth = dock.width
+            self.assertLessEqual(collapsedWidth, studioShell.panelWidth + 2)
+            # Long circuit names (the combo's size hint is its longest item) and the results of the Compare card
+            circuits = cards["circuits"].findChild("QComboBox", "LNMCircuitsCircuitCombo")
+            self.assertIsNotNone(circuits)
+            circuits.addItem("circuit-a-very-long-name-of-a-circuit-made-from-a-cohort_conn-A-very-long-label")
+            compare = cards["compare"].findChild("QWidget", "LNMCompareResults")
+            self.assertIsNotNone(compare)
+            compare.show()
+            for cardId, card in cards.items():
+                card.collapsed = False
+                pump()
+                self.assertEqual(dock.width, collapsedWidth, f"the {cardId} card widens the inspector")
+                card.collapsed = True
+                pump()
+                self.assertEqual(dock.width, collapsedWidth, f"the inspector stays wide after the {cardId} card is collapsed")
+            for workspace in ("draw", "library", "map"):
+                studioShell.switchTo(workspace)
+                pump()
+                self.assertEqual(dock.width, collapsedWidth, f"the inspector is {dock.width} px in {workspace}")
+            wide = {name: width for name, width in studioShell._workspacePanelWidths.items() if width > studioShell.panelWidth + 2}
+            self.assertEqual(wide, {}, "a workspace module asks for more than the stored width")
+        finally:
+            if studioShell is not None:
+                studioShell.dispose()
+            mainWindow.restoreGeometry(savedGeometry)
+            for key, value in saved.items():
+                if value is None:
+                    settings.remove(key)
+                else:
+                    settings.setValue(key, value)
             slicer.mrmlScene.Clear(0)
 
     @staticmethod

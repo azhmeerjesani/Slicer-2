@@ -176,7 +176,7 @@ class CompareCard:
         self.lesionCheck = qt.QCheckBox(_("List per-lesion maps"))
         self.lesionCheck.setObjectName("LNMCompareLesionCheck")
         self.lesionCheck.connect("toggled(bool)", lambda *args: self.refreshSources())
-        optionsRow.addWidget(self.lesionCheck)
+        # The check box has a row of its own: with the two buttons it is wider than the inspector
         optionsRow.addStretch(1)
         self.addMapButton = qt.QToolButton()
         self.addMapButton.setObjectName("LNMCompareAddMapButton")
@@ -210,6 +210,7 @@ class CompareCard:
         self.libraryButton.setMenu(menu)
         self.libraryMenu = menu
         optionsRow.addWidget(self.libraryButton)
+        layout.addWidget(self.lesionCheck)
         layout.addLayout(optionsRow)
 
         form = qt.QFormLayout()
@@ -291,6 +292,10 @@ class CompareCard:
         self.exportButton.setProperty("slicerRole", "ghost")
         self.exportButton.connect("clicked()", self.export)
         actions.addWidget(self.exportButton)
+        actions.addStretch(1)
+        results.addLayout(actions)
+        # Two rows: the three buttons side by side are wider than the inspector
+        actions = qt.QHBoxLayout()
         self.folderButton = qt.QPushButton(_("Show folder"))
         self.folderButton.setObjectName("LNMCompareFolderButton")
         self.folderButton.setProperty("slicerRole", "ghost")
