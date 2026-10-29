@@ -45,6 +45,10 @@ Run with the main window and testing enabled::
   after it, with the edited file as ``lesion_native`` (also when Done wrote it to another file than the one the result was
   made from: the result is then Stale). For an open subject without edits the subject is closed, the result
   merged and the subject opened again on the new files.
+- ``test_18_blind_tracing_hides_subject_and_cohort_cards`` (BB-1): with ``blind_tracing`` the SUBJECT card hides the group
+  (Case / Control / —) and the score line, its Case section hides the symptom and domain fields (and writes neither), and the
+  Cohort diagnostics card shows the number of lesions without the case/control split or the balance; without blinding they
+  are all shown again.
 - ``test_10_scripted_module_ui_widgets`` (BB-1): the build has the Qt Designer plugins of CTK and MRML, so that
   ``slicer.util.loadUI`` creates the CTK and qMRML widgets of a scripted module's ``.ui`` file (a ``qMRMLWidget`` root, a
   ``qMRMLNodeComboBox``, a ``ctkCollapsibleButton``), and Line Profile, Vector to Scalar Volume and Surface Toolbox set up
@@ -1298,6 +1302,110 @@ class StudioRegressionTest(unittest.TestCase):
                     settings.remove(key)
                 else:
                     settings.setValue(key, value)
+            slicer.mrmlScene.Clear(0)
+
+    # Blind tracing hides group, scores and symptoms in the SUBJECT and Cohort diagnostics cards (BB-1)
+
+    def test_18_blind_tracing_hides_subject_and_cohort_cards(self):
+        from LesionNetworkMappingLib import review as rules
+
+        from StudioLib import libcard_cohort, libcard_columns, library, study_ui
+
+        if not study_ui.isAvailable():
+            self.skipTest("needs the lesion network mapping library")
+        rows = [(f"sub-0{index}", {"group": "case" if index <= 3 else "control", "NIHSS": str(index + 4)}, False) for index in range(1, 6)]
+        study = self._study(rows)
+        study.set_column_role("NIHSS", "score")
+        study.set("sub-02", {"symptom": "neglect", "domain": "attention"})
+        study.save()
+        subjectCard = section = cohortCard = None
+
+        def pump():
+            for _ in range(4):
+                slicer.app.processEvents()
+
+        def shown(widget):
+            return widget is not None and not widget.isHidden() and widget.isVisibleTo(widget.window())
+
+        try:
+            session = study_ui.openStudy(study.path, showLibrary=False)
+            self.assertIsNotNone(session)
+            subjectCard = library.SubjectCard()
+            sectionWidget = libcard_columns._createSection(session)
+            section = libcard_columns._sections[sectionWidget]
+            subjectCard.widget.show()
+            sectionWidget.show()
+            cohortCard = libcard_cohort.CohortCard(session)
+            cohortCard.widget.show()
+            cohortCard.refresh()
+            cohortCard.result = libcard_cohort.checkLesionSet(session.study.path)
+            self.assertIsNotNone(cohortCard.result.get("summary"))
+
+            def render():
+                subjectCard.refresh("sub-02")
+                section.refresh("sub-02")
+                cohortCard.refresh()
+                pump()
+
+            # Without blinding: the group, the score, the symptom and the case/control split are shown
+            render()
+            self.assertTrue(shown(subjectCard.groupFrame))
+            self.assertTrue(subjectCard.groupButtons.button(0).isChecked(), "sub-02 is a case")
+            self.assertIn("NIHSS: 6", str(subjectCard.scoresLabel.text))
+            self.assertTrue(shown(subjectCard.scoresLabel))
+            self.assertTrue(shown(section.editors["symptom"]))
+            self.assertEqual(str(section.editors["symptom"].text), "neglect")
+            groups = str(cohortCard.rows["groups"][1].text)
+            self.assertIn("3 cases", groups)
+            self.assertTrue(shown(cohortCard.balanceTable))
+
+            # Blind tracing: none of them is shown (L-43, LNM addendum 3.10)
+            rules.set_study_setting(session.study, "blind_tracing", True, "Tester")
+            self.assertEqual(set(rules.blinded_columns(session.study)), {"group", "NIHSS", "symptom", "domain"})
+            self.assertTrue(set(rules.blinded_columns(session.study)) <= library._hiddenColumns(session.study))
+            render()
+            self.assertFalse(shown(subjectCard.groupFrame), "the group of the subject is shown while tracing blind")
+            self.assertFalse(shown(subjectCard.groupLabel))
+            self.assertFalse(shown(subjectCard.scoresLabel), f"the scores are shown while tracing blind: {subjectCard.scoresLabel.text}")
+            self.assertNotIn("NIHSS", str(subjectCard.scoresLabel.text))
+            for column in ("symptom", "domain"):
+                editor = section.editors[column]
+                self.assertFalse(shown(editor), f"the {column} field is shown while tracing blind")
+                self.assertFalse(shown(section.rows[column][0]), f"the {column} label is shown while tracing blind")
+                self.assertEqual(str(editor.currentText if hasattr(editor, "itemData") else editor.text).strip("—"), "", f"{column} kept a value")
+            self.assertFalse(section._write("symptom", "aphasia"), "a blinded field is not written")
+            self.assertEqual(session.study.subject("sub-02")["symptom"], "neglect")
+            groups = str(cohortCard.rows["groups"][1].text)
+            self.assertNotIn("case", groups)
+            self.assertNotIn("control", groups)
+            self.assertIn("5 lesions", groups)
+            self.assertFalse(shown(cohortCard.balanceTable))
+            self.assertFalse(shown(cohortCard.matchRow))
+            self.assertIsNone(cohortCard.createSubset())
+            # The group control does not write while hidden
+            subjectCard._onGroup(1)
+            self.assertEqual(session.study.subject("sub-02")["group"], "case")
+
+            # Blinding off: everything is back
+            rules.set_study_setting(session.study, "blind_tracing", False, "Tester")
+            render()
+            self.assertTrue(shown(subjectCard.groupFrame))
+            self.assertTrue(subjectCard.groupButtons.button(0).isChecked())
+            self.assertIn("NIHSS: 6", str(subjectCard.scoresLabel.text))
+            self.assertTrue(shown(section.editors["symptom"]))
+            self.assertEqual(str(section.editors["symptom"].text), "neglect")
+            self.assertIn("3 cases", str(cohortCard.rows["groups"][1].text))
+            self.assertTrue(shown(cohortCard.balanceTable))
+        finally:
+            if cohortCard is not None:
+                cohortCard.dispose()
+                cohortCard.widget.deleteLater()
+            for widget in (subjectCard.widget if subjectCard is not None else None, section.widget if section is not None else None):
+                if widget is not None:
+                    widget.deleteLater()
+            study_ui.closeStudy()
+            pump()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
 
     @staticmethod

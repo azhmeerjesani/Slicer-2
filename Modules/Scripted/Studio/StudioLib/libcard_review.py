@@ -7,7 +7,8 @@
 - **STUDY card** "Review": the counts, **Review N →** (the review state of Draw, Studio only), **Resume review**, and
   the study settings *Require review before analyses* (``review_required``) and *Blind tracing* (``blind_tracing``),
   each change audited in ``.studio/audit.jsonl``. With blind tracing, the group column of the subject list is hidden
-  (the grid cards already hide the blinded columns).
+  (the grid cards, the SUBJECT card and its Case section hide the blinded columns, and Cohort diagnostics the case/control
+  split, through ``library._hiddenColumns``).
 - **SUBJECT section** "Review" (Studio Library and the Classic Studio module panel): the state, who traced and who
   reviewed, the comment, the chips, **Review in Draw** (Studio), and the same three decisions as Draw's review footer:
   Approve, Request changes… and Reject… (inline forms); **Reopen review** for a decided lesion.

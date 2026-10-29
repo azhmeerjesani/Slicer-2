@@ -672,6 +672,7 @@ class CaseSection:
         self.sid = None
         self._loading = False
         self.editors = {}  # column: widget
+        self.rows = {}  # column: (label, field widget) of the form, hidden for a blinded column
         self.groups = {}  # key: (button, container, columns)
         self.widget = qt.QWidget()
         self.widget.setObjectName("StudioCaseSection")
@@ -752,8 +753,10 @@ class CaseSection:
                 self.doiButton.setToolTip(_("Open https://doi.org/<doi> in the browser"))
                 rowLayout.addWidget(self.doiButton)
                 form.addRow(label, row)
+                self.rows[column] = (label, row)
             else:
                 form.addRow(label, editor)
+                self.rows[column] = (label, editor)
         container.setVisible(button.isChecked())
         layout.addWidget(container)
         self.groups[key] = (button, container, columns)
@@ -801,10 +804,19 @@ class CaseSection:
         self.widget.show()
         study = session.study
         row = study.subject(sid)
+        # Blind tracing (L-43): the fields of blinded columns (symptom, domain) are not shown
+        hidden = library._hiddenColumns(study)
         self._loading = True
         try:
             warnings = []
             for column, editor in self.editors.items():
+                label, field = self.rows.get(column, (None, editor))
+                for widget in (label, field):
+                    if widget is not None and widget.isHidden() != (column in hidden):
+                        widget.setHidden(column in hidden)
+                if column in hidden:
+                    self._show(column, editor, None)  # no value of the subject stays in a hidden editor
+                    continue
                 value = row.get(column)
                 self._show(column, editor, value)
                 warning = self._warningOf(column, value)
@@ -812,8 +824,9 @@ class CaseSection:
                     warnings.append(warning)
             for key, (button, _container, columns) in self.groups.items():
                 title = next(title for groupKey, title, _columns in CASE_GROUPS if groupKey == key)
-                filled = sum(1 for column in columns if column in self.editors and not _missing(row.get(column)))
-                button.setText(f"{_(title)}  ·  {filled}/{len([c for c in columns if c in self.editors])}")
+                shown = [column for column in columns if column in self.editors and column not in hidden]
+                filled = sum(1 for column in shown if not _missing(row.get(column)))
+                button.setText(f"{_(title)}  ·  {filled}/{len(shown)}")
         finally:
             self._loading = False
         self.warningLabel.setText("  ".join(warnings))
@@ -952,6 +965,8 @@ class CaseSection:
         session = _session()
         if session is None or self.sid is None or self.sid not in session.study or self._loading:
             return False
+        if column in library._hiddenColumns(session.study):
+            return False  # a blinded field is not shown, so it is not written either
         current = session.study.subject(self.sid).get(column)
         text = str(text).strip()
         if column == "doi" and doiOf(text):

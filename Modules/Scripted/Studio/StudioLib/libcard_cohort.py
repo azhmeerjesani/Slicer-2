@@ -349,8 +349,9 @@ def createMatchedSubset(session, summary, name=None, covariates=("volume_ml",), 
 #
 
 
-def groupsText(summary):
-    groups = summary.get("groups") or {}
+def groupsText(summary, blind=False):
+    """"7 cases · 5 controls"; with ``blind`` (blind tracing, L-43) only the number of lesions, without the group split."""
+    groups = (summary.get("groups") or {}) if not blind else {}
     parts = []
     for key, singular, plural in (("case", "case", "cases"), ("control", "control", "controls")):
         if key in groups:
@@ -1002,7 +1003,7 @@ class CohortCard:
     def createSubset(self):
         """Create a volume-matched control subset in study.json. Return its name, or None."""
         session = _session()
-        if session is None or not self.result or not self.result.get("summary"):
+        if session is None or not self.result or not self.result.get("summary") or "group" in library._hiddenColumns(session.study):
             return None
         made = createMatchedSubset(session, self.result["summary"])
         if made is None:
@@ -1136,7 +1137,9 @@ class CohortCard:
 
     def _renderResults(self, result):
         summary = result["summary"]
-        groups = groupsText(summary)
+        # Blind tracing (L-43): the case/control split and balance are not shown, as in the subject list counts
+        blind = "group" in library._hiddenColumns(self.session.study) if self.session is not None else False
+        groups = groupsText(summary, blind=blind)
         excluded = excludedText(result.get("excluded") or summary.get("excluded") or {})
         review = result.get("review") or {}
         if review.get("required") and self.includeUnreviewed and review.get("approved", 0) < review.get("included", 0):
@@ -1168,7 +1171,7 @@ class CohortCard:
         self._setRow("duplicates", (listText(flagged) if flagged else _("none found")) if result.get("source") == "thread" or flagged else "")
         flags = lesionFlags(summary)
         self._setRow("flags", listText([f"{sid}: {text}" for sid, text in flags]) if flags else (_("none") if summary.get("tissue") else ""))
-        rows = balanceRows(summary)
+        rows = balanceRows(summary) if not blind else None
         self.balanceTitle.setVisible(bool(rows))
         self.balanceTable.setVisible(bool(rows))
         self.matchRow.setVisible(bool(rows))

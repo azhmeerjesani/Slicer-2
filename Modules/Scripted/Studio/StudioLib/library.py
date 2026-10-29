@@ -3501,10 +3501,22 @@ def _studyTemplateFile(studySession):
 
 
 def _hiddenColumns(studyObject):
-    """Columns hidden from tracers when the study sets ``blind_tracing``: group, scores and symptoms (LNM addendum 7.1)."""
+    """Columns hidden from tracers when the study sets ``blind_tracing``: group, scores and symptoms (LNM addendum 7.1).
+
+    The blinded columns of ``review.blinded_columns`` and the symptom columns (``review.SYMPTOM_COLUMNS``) also when the
+    table has none yet, so the SUBJECT card does not offer them while tracing blind. An empty set without blinding.
+    """
     if not getattr(studyObject, "blind_tracing", False):
         return set()
     hidden = {"group"}
+    try:
+        import importlib
+
+        rules = importlib.import_module("LesionNetworkMappingLib.review")
+        hidden.update(rules.blinded_columns(studyObject))
+        hidden.update(rules.SYMPTOM_COLUMNS)
+    except Exception:
+        logging.error(f"Studio Library: the blinded columns could not be read:\n{traceback.format_exc()}")
     try:
         hidden.update(name for name, _confirmed in studyObject.score_columns())
     except Exception:
@@ -4425,7 +4437,7 @@ class SubjectCard(qt.QObject):
         self.metricsLabel = _cardLabel("StudioSubjectCardMetrics", 12, "text")
         layout.addWidget(self.metricsLabel)
         groupRow = qt.QHBoxLayout()
-        groupLabel = _cardLabel("StudioSubjectCardGroupLabel")
+        self.groupLabel = groupLabel = _cardLabel("StudioSubjectCardGroupLabel")
         groupLabel.setText(_("Group"))
         groupRow.addWidget(groupLabel)
         self.groupFrame, self.groupButtons = ui.segmented([_("Case"), _("Control"), "—"])
@@ -4489,7 +4501,11 @@ class SubjectCard(qt.QObject):
                 metrics.insert(0, lesion["sides"])
         metrics.append(studyCell(row, "status")[0])
         self.metricsLabel.setText(" · ".join(metrics))
-        group = row.get("group")
+        # Blind tracing (L-43): the group, the scores and the symptoms of the subject are not shown
+        hidden = _hiddenColumns(studySession.study)
+        self.groupFrame.setVisible("group" not in hidden)
+        self.groupLabel.setVisible("group" not in hidden)
+        group = row.get("group") if "group" not in hidden else None
         index = {"case": 0, "control": 1}.get(group, 2)
         button = self.groupButtons.button(index)
         if button is not None and not button.isChecked():
@@ -4497,6 +4513,8 @@ class SubjectCard(qt.QObject):
         scores = []
         for column, confirmed in studySession.study.score_columns():
             value = row.get(column)
+            if column in hidden:
+                continue
             if not _missing(value):
                 scores.append(f"{column}: {value}" + ("" if confirmed else " ?"))
         self.scoresLabel.setText("  ·  ".join(scores))
@@ -4535,7 +4553,7 @@ class SubjectCard(qt.QObject):
 
     def _onGroup(self, index):
         studySession = _studySession()
-        if studySession is None or self.sid is None:
+        if studySession is None or self.sid is None or "group" in _hiddenColumns(studySession.study):
             return
         group = ("case", "control", "n/a")[index]
         if studySession.study.subject(self.sid).get("group") != group:
