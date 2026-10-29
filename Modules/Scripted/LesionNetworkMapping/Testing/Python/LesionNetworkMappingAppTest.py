@@ -510,6 +510,71 @@ class CorruptLesionMessagesTest(unittest.TestCase):
         self.assertNotIn("sub-01", excluded)
 
 
+class UserTemplateSpaceTest(unittest.TestCase):
+    """BIDS lesions on a user template (space-user<Id>, as ``normalize --template user:<id>`` names them, on the
+    template's own grid, which header detection does not know) are template-space lesions, not native ones.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="lnm-user-space-")
+        cls.fx = fixture.make_fixture(os.path.join(cls.tmp, "f"), n_cases=3, n_controls=3, extra_rows=False)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def make_user_bids(self, name, sidecar):
+        """A BIDS dataset whose lesions are named like normalize's user-template outputs; ``sidecar``: JSON content or None."""
+        from LesionNetworkMappingLib import normalize
+
+        study = Study.open(self.fx["study"])
+        bids = os.path.join(self.tmp, name)
+        lines = ["participant_id\tgroup\taphasia_score"]
+        for row in study.subjects:
+            sid = row["participant_id"]
+            lesion_name = normalize.output_names(sid, "T1w", "user:icbm-2009b-0-5-mm")["lesion"]
+            self.assertIn("_space-userIcbm2009b05Mm_", lesion_name)
+            target = os.path.join(bids, "derivatives", "normalize", sid, "anat", lesion_name)
+            os.makedirs(os.path.dirname(target))
+            shutil.copyfile(study.abspath(row["lesion"]), target)
+            if sidecar is not None:
+                with open(target[: -len(".nii.gz")] + ".json", "w", encoding="utf-8") as f:
+                    json.dump(sidecar, f)
+            lines.append(f"{sid}\t{'patient' if row['group'] == 'case' else 'HC'}\t{row['aphasia_score']}")
+            # the subject's native lesion (the input of normalize), in the raw data: the template one is chosen
+            native = os.path.join(bids, sid, "anat", f"{sid}_label-lesion_mask.nii.gz")
+            os.makedirs(os.path.dirname(native))
+            shutil.copyfile(study.abspath(row["lesion"]), native)
+        with open(os.path.join(bids, "participants.tsv"), "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        return bids
+
+    def check_study(self, bids, expected_space):
+        study_path, _summary = app.prepare_bids_study(bids, os.path.join(self.tmp, os.path.basename(bids) + " out"), group_map="patient=case,HC=control")
+        study = Study.open(study_path)
+        self.assertEqual(len(study), 6)
+        for row in study.subjects:
+            self.assertIn("_space-userIcbm2009b05Mm_", row["lesion"])
+            self.assertEqual(row["space"], expected_space)
+        config = pipeline.PipelineConfig(study=study.path, bundle=self.fx["bundle"], accept_terms=True, nulls="off")
+        self.assertEqual(pipeline._builtin_row_checks(study, config), {})
+
+    def test_sidecar_names_the_template_space(self):
+        sidecar = {"Type": "Lesion", "SpatialReference": "MNI152NLin2009bAsym", "Resolution": "0.5 mm", "SlicerStudio": {"space": "MNI152NLin2009bAsym"}}
+        self.check_study(self.make_user_bids("bids sidecar", sidecar), "MNI152NLin2009bAsym")
+
+    def test_without_sidecar_the_label_is_the_space(self):
+        self.check_study(self.make_user_bids("bids bare", None), "userIcbm2009b05Mm")
+
+    def test_bids_lesion_space(self):
+        self.assertEqual(app.bids_lesion_space("sub-01_space-MNI152NLin6Asym_desc-lesion_mask.nii.gz"), "MNI152NLin6Asym")
+        self.assertIsNone(app.bids_lesion_space("sub-01_space-T1w_desc-lesion_mask.nii.gz"))
+        self.assertIsNone(app.bids_lesion_space("sub-01_desc-lesion_mask.nii.gz"))
+        self.assertIsNone(app.bids_lesion_space(os.path.join(self.tmp, "sub-01_space-custom_desc-lesion_mask.nii.gz")))
+        self.assertEqual(app.bids_lesion_space(os.path.join(self.tmp, "sub-01_space-userMyBrain_desc-lesion_mask.nii.gz")), "userMyBrain")
+
+
 class ReproduceEntryPointTest(unittest.TestCase):
     """reproduce.sh runs ``slicer-lnm engine`` when slicer-lnm is on PATH, else PythonSlicer (export.reproduce_script)."""
 

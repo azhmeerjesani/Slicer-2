@@ -87,6 +87,8 @@ FIGURE_MAP_DESC = "meanT"
 LOCK_POLL_S = 5.0
 _ENTITY = re.compile(r"^([a-zA-Z0-9]+)-([a-zA-Z0-9]+)$")
 _NIFTI = re.compile(r"\.nii(?:\.gz)?$", re.IGNORECASE)
+#: BIDS space label of a user template ("user:<id>" -> "user<Id>", normalize.template_label)
+_USER_SPACE = re.compile(r"^user[A-Z0-9][A-Za-z0-9]*$")
 
 
 # Version
@@ -199,7 +201,47 @@ def _choice_key(path):
     entities = bids_entities(path)[0]
     space = entities.get("space", "")
     # template-space masks first (they need no normalization), then the shortest path (raw data before derivatives)
-    return (not space.upper().startswith("MNI"), path.count(os.sep), path)
+    return (not (space.upper().startswith("MNI") or _USER_SPACE.match(space)), path.count(os.sep), path)
+
+
+def _sidecar_space(path):
+    """The template space that the JSON sidecar of a BIDS file names (``SlicerStudio.space``, then ``SpatialReference``,
+    as normalize and Study.write_lesion_sidecar write them), or None when it names no template of a known family.
+    """
+    from .geometry import space_family
+
+    try:
+        with open(_NIFTI.sub("", path) + ".json", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    studio = data.get("SlicerStudio")
+    for value in ((studio or {}).get("space") if isinstance(studio, dict) else None, data.get("SpatialReference")):
+        if isinstance(value, str) and space_family(value) not in ("native", "unknown"):
+            return value
+    return None
+
+
+def bids_lesion_space(path):
+    """The template space of a BIDS lesion mask, or None when its grid decides (no space entity, or a subject space).
+
+    A ``space`` entity of a known template family (MNI152NLin2009cAsym, ...) is the dataset's statement. Another label
+    (e.g. "user<Id>" of a user template, as ``normalize --template user:<id>`` names its outputs) is resolved through
+    the file's sidecar; a user-template label without one keeps the label: the lesion is on that template's own grid.
+    """
+    from .geometry import space_family
+
+    space = (bids_entities(path) or ({}, None))[0].get("space")
+    if not space:
+        return None
+    family = space_family(space)
+    if family == "native":
+        return None
+    if family != "unknown":
+        return space
+    return _sidecar_space(path) or (space if _USER_SPACE.match(space) else None)
 
 
 def find_bids_lesions(input_dir, skip=()):
@@ -258,7 +300,6 @@ def prepare_bids_study(input_dir, output_dir, group_column=None, group_map=None,
                         f.write("\t".join(row.get(column, "") for column in columns) + "\n")
         summary = pipeline.init_study(chosen[0], study_path, participants=table, name=STUDY_NAME, score_columns=list(score_columns or ()), group_column=group_column, group_map=group_map,
                                       lesion_rule=LESION_RULE)
-    from .geometry import space_family
 
     study = Study.open(study_path)
     report = study.add_files(chosen, lesion_rule=LESION_RULE)
@@ -278,10 +319,10 @@ def prepare_bids_study(input_dir, output_dir, group_column=None, group_map=None,
                 study.set(sid, lesion=relative)
             unusable.append({"path": path, "message": f"{os.path.relpath(path, input_dir).replace(os.sep, '/')}: lesion file cannot be used ({item['reason']})", "participant_id": sid})
     for path in chosen:
-        # The BIDS space entity is the dataset's statement: a template space (MNI152NLin2009cAsym, ...) is not re-detected from the grid
-        entities = bids_entities(path)[0]
-        sid, space = f"sub-{entities['sub']}", entities.get("space")
-        if space and space_family(space) not in ("native", "unknown") and study.subject(sid).get("space") != space:
+        # The BIDS space entity is the dataset's statement: a template space (MNI152NLin2009cAsym, ...) is not re-detected
+        # from the grid, and a user template's space (space-user<Id>, whose grid is not a standard one) is not read as native
+        sid, space = f"sub-{bids_entities(path)[0]['sub']}", bids_lesion_space(path)
+        if space and study.subject(sid).get("space") != space:
             study.set(sid, space=space)
     study.save()
     for item in report["warnings"]:
