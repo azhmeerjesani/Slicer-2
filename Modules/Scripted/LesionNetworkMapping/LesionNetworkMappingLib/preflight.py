@@ -819,8 +819,21 @@ def run_preflight(
     for column, confirmed in study.score_columns():
         if not confirmed:
             continue
+        numeric = study.column_spec(column).type == "numeric"
         for row in included_rows:
-            if schema.is_missing(row.get(column)):
+            value = row.get(column)
+            if numeric and not schema.is_missing(value) and schema._number(value) is None:
+                # Present but not a number (a typo, a decimal comma such as "8,5"): the score analyses drop it too
+                collector.add(
+                    "nonnumeric_scores",
+                    "warn",
+                    row["participant_id"],
+                    lambda sids, d: f"{_count(len(sids), 'subject')} {'has' if len(sids) == 1 else 'have'} a value of {', '.join(sorted(set(d.values())))} that is not a number ({_listed(sids)}); score analyses exclude them. Fix the value, for example a decimal comma to a point.",
+                    _library_fix(),
+                    "run",
+                    detail=column,
+                )
+            elif schema.is_missing(value):
                 collector.add(
                     "missing_scores",
                     "warn",
