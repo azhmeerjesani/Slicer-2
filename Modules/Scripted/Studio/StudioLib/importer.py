@@ -2324,17 +2324,26 @@ def newLesionSegmentation(volumeNode=None, name=None, shell=None):
         previousSourceId = previousSource.GetID() if previousSource is not None else None
 
         def undo():
-            undoNewLesion(segmentationNode.GetID(), previousId, previousSourceId, hidden)
+            undoNewLesion(segmentationNode.GetID(), previousId, previousSourceId, hidden, shell=shell)
 
         shell.toast(_("New lesion {name}; the previous one is hidden").format(name=name), action=undo, actionText=_("Undo"), level="consequence")
     return segmentationNode
 
 
-def undoNewLesion(newId, previousId=None, previousSourceId=None, hiddenId=None):
-    """Undo ``newLesionSegmentation()``: remove the new lesion and edit (and show) the previous one again."""
+def undoNewLesion(newId, previousId=None, previousSourceId=None, hiddenId=None, shell=None):
+    """Undo ``newLesionSegmentation()``: remove the new lesion and edit (and show) the previous one again.
+
+    Refused (False, with a warning toast) once the new lesion has strokes: Undo never deletes work silently (the toast
+    stays for a minimum time, so strokes can be painted while it is still offered). Return True when it was undone.
+    """
     scene = slicer.mrmlScene
     node = scene.GetNodeByID(newId) if newId else None
     if node is not None:
+        if not isSegmentationEmpty(node):
+            shell = _currentShell(shell)
+            if shell is not None:
+                shell.toast(_("{name} has strokes now, so Undo keeps it").format(name=node.GetName()), level="warning")
+            return False
         scene.RemoveNode(node)
     hidden = scene.GetNodeByID(hiddenId) if hiddenId else None
     if hidden is not None and hidden.GetDisplayNode() is not None:
@@ -2342,6 +2351,7 @@ def undoNewLesion(newId, previousId=None, previousSourceId=None, hiddenId=None):
     previous = scene.GetNodeByID(previousId) if previousId else None
     if previous is not None:
         selectInSegmentEditor(previous, scene.GetNodeByID(previousSourceId) if previousSourceId else None)
+    return True
 
 
 #

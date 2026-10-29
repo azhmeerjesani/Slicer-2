@@ -1563,6 +1563,40 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         _volume, again = importer.startOnTemplate(shell=studioShell)
         self.assertEqual(again.GetID(), first.GetID())
 
+    def test_new_lesion_undo_keeps_painted_strokes(self):
+        """The "New lesion" toast's Undo never deletes strokes painted in the new lesion meanwhile: it is refused with a
+        warning and the lesion stays; an untouched new lesion is still removed.
+        """
+        from StudioLib import importer
+
+        studioShell = self._applyStudio()
+        volume, first = importer.startOnTemplate(shell=studioShell)
+        self._pump(6)
+        second = importer.newLesionSegmentation(shell=studioShell)
+        self._pump()
+        segmentId = second.GetSegmentation().GetNthSegmentID(0)
+        array = slicer.util.arrayFromSegmentBinaryLabelmap(second, segmentId, volume)
+        array[10:12, 10:12, 10:12] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, second, segmentId, volume)
+        self._pump()
+        self.assertFalse(importer.isSegmentationEmpty(second))
+        # The toast's own Undo button, as the user clicks it
+        undoButton = self.mainWindow.findChild("QToolButton", "StudioStickyToastAction")
+        self.assertIsNotNone(undoButton)
+        undoButton.click()
+        self._pump(4)
+        self.assertTrue(slicer.mrmlScene.IsNodePresent(second))
+        self.assertFalse(importer.isSegmentationEmpty(second))
+        self.assertIn("Lesion 2", studioShell.toastText())
+        self.assertIn("strokes", studioShell.toastText())
+        self.assertFalse(first.GetDisplayNode().GetVisibility2D())
+        self.assertFalse(importer.undoNewLesion(second.GetID(), first.GetID(), volume.GetID(), first.GetID(), shell=studioShell))
+        self.assertTrue(slicer.mrmlScene.IsNodePresent(second))
+        # Untouched: removed, the previous lesion is shown again
+        third = importer.newLesionSegmentation(shell=studioShell)
+        self.assertTrue(importer.undoNewLesion(third.GetID(), second.GetID(), volume.GetID(), None, shell=studioShell))
+        self.assertFalse(slicer.mrmlScene.IsNodePresent(third))
+
     def test_template_again_after_save_never_overwrites(self):
         """Start on template after a saved, unchanged lesion starts a new lesion: Save never re-saves it silently to
         the previous case's file. A lesion with unsaved changes is reused as it is (never hidden or re-targeted).
