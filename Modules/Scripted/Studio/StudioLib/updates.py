@@ -1413,6 +1413,9 @@ class UpdateService:
         if target is None and key in ("macos-arm64", "macos-x86_64", "linux-x86_64"):
             raise updates_install.InstallError(_("The installed application was not found."))
         unavailable = _("This computer cannot install the update.")
+        # From now on this run owns the download and staging folders: another Slicer Studio that starts with the same
+        # state folder must not clean them up (the marker names this run until it ends or its update is registered)
+        self._writeStagedMarker(None)
 
         def run(task):
             task.phase = "download"
@@ -1431,6 +1434,8 @@ class UpdateService:
             if error is None:
                 self.prepared = prepared
                 self._registerStaged(prepared)
+            else:
+                self._removeOwnStagedMarker()
             onUpdate(prepared, error)
             self._notify()
 
@@ -1460,18 +1465,35 @@ class UpdateService:
     # A prepared update that is not installed
     #
 
+    def _writeStagedMarker(self, root):
+        """Write the marker that names this run as the owner of the download and the staged copy (``root``, or None
+        while the update is still downloading or being prepared).
+        """
+        try:
+            os.makedirs(stateDirectory(), exist_ok=True)
+            with open(os.path.join(stateDirectory(), STAGED_MARKER), "w", encoding="utf-8") as f:
+                json.dump({"pid": os.getpid(), "root": root}, f)
+        except OSError:
+            logging.warning("Updates: could not write the staging marker:\n" + traceback.format_exc())
+
+    def _removeOwnStagedMarker(self):
+        """The download or the preparation failed or was cancelled: this run no longer owns anything."""
+        path = os.path.join(stateDirectory(), STAGED_MARKER)
+        try:
+            with open(path, encoding="utf-8") as f:
+                marker = json.load(f)
+            if isinstance(marker, dict) and marker.get("pid") == os.getpid():
+                _removeQuietly(path)
+        except (OSError, ValueError):
+            pass
+
     def _registerStaged(self, prepared):
         """Remember the staged copy (for the cleanup of a run that dies) and remove it at exit unless the user chose to
         install it (Restart now, Install when I quit).
         """
         import slicer
 
-        try:
-            os.makedirs(stateDirectory(), exist_ok=True)
-            with open(os.path.join(stateDirectory(), STAGED_MARKER), "w", encoding="utf-8") as f:
-                json.dump({"pid": os.getpid(), "root": os.path.dirname(prepared.staged)}, f)
-        except OSError:
-            logging.warning("Updates: could not write the staging marker:\n" + traceback.format_exc())
+        self._writeStagedMarker(os.path.dirname(prepared.staged))
         if not self._discardConnected:
             slicer.app.connect("aboutToQuit()", self._onQuitDiscard)
             self._discardConnected = True

@@ -1048,6 +1048,65 @@ fi
         self.assertIsNone(service.finishInstall())
         self.assertTrue(self._waitFor(lambda: not os.path.exists(root) and not os.listdir(downloads), 10))
 
+    def test_SecondInstanceLeavesRunningDownloadAlone(self):
+        """A second Slicer Studio that starts (same state folder) while the first one downloads must not delete the
+        download (the first run would fail with a missing file).
+        """
+        updates, install = self.updates, self.install
+        if updates.platformKey() != "linux-x86_64":
+            self.skipTest("the Linux package path is tested on Linux")
+        data = self._publish("1.2.0")
+        _Handler.stallPaths = {"/" + data["assets"]["linux-x86_64"]["name"]}
+        target = self._fakeLinuxInstall("0.9.0")
+        updates._installableOverride = True
+        updates.installTargetOverride = target
+        service = self._service()
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        dialog = service.updateNow()
+        downloads = updates.downloadDirectory()
+        part = os.path.join(downloads, data["assets"]["linux-x86_64"]["name"] + ".part")
+        self.assertTrue(self._waitFor(lambda: os.path.isfile(part), 10), "the download is running")
+        markerPath = os.path.join(self.stateDir, updates.STAGED_MARKER)
+        self.assertTrue(os.path.isfile(markerPath), "the running download is marked with the pid of its run")
+        # The marker as the other (first) instance wrote it: a live process that is not this one
+        other = self._sleeper(60)
+        self.addCleanup(other.kill)
+        with open(markerPath) as f:
+            marker = json.load(f)
+        self.assertEqual(marker["pid"], os.getpid())
+        marker["pid"] = other.pid
+        with open(markerPath, "w") as f:
+            json.dump(marker, f)
+        second = self._service()
+        self.assertIsNone(second.finishInstall())
+        self._pump(0.5)
+        self.assertTrue(os.path.isfile(part), "the second instance left the running download alone")
+        marker["pid"] = os.getpid()
+        with open(markerPath, "w") as f:
+            json.dump(marker, f)
+        # The stalled server then ends its short reply: the download is refused for its size, not for a missing file
+        _Handler.stallRelease.set()
+        self.assertTrue(self._waitFor(lambda: dialog.state in ("ready", "failed"), 30), dialog.state)
+        self.assertEqual(dialog.state, "failed")
+        self.assertIn("wrong size", dialog.text.text)
+        self.assertNotIn("No such file", dialog.text.text)
+        other.kill()
+
+    def test_FailedDownloadReleasesStagedMarker(self):
+        updates = self.updates
+        if updates.platformKey() != "linux-x86_64":
+            self.skipTest("the Linux package path is tested on Linux")
+        self._publish("1.2.0", tamper="sha256")
+        target = self._fakeLinuxInstall("0.9.0")
+        updates._installableOverride = True
+        updates.installTargetOverride = target
+        service = self._service()
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        dialog = service.updateNow()
+        self.assertTrue(self._waitFor(lambda: dialog.state in ("ready", "failed"), 30))
+        self.assertEqual(dialog.state, "failed")
+        self.assertFalse(os.path.exists(os.path.join(self.stateDir, updates.STAGED_MARKER)))
+
     def test_AbandonedPreparedUpdateRemovedAtQuit(self):
         updates, install = self.updates, self.install
         if updates.platformKey() != "linux-x86_64":
