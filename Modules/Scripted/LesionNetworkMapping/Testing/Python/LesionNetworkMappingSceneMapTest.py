@@ -40,14 +40,14 @@ class LesionNetworkMappingSceneMapTest(unittest.TestCase):
     def tearDown(self):
         slicer.mrmlScene.Clear(0)
 
-    def _sceneMap(self):
+    def _sceneMap(self, statistic="T", scale=1.0):
         data = np.zeros((19, 19, 19), np.float32)
         for i, j, k, value in PEAKS:
-            data[k, j, i] = value
+            data[k, j, i] = value * scale
         affine = np.diag([4.0, 4.0, 4.0, 1.0])
-        volume = slicer.util.addVolumeFromArray(data, ijkToRAS=affine, name="Lesion T", nodeClassName="vtkMRMLScalarVolumeNode")
+        volume = slicer.util.addVolumeFromArray(data, ijkToRAS=affine, name=f"Lesion {statistic}", nodeClassName="vtkMRMLScalarVolumeNode")
         volume.SetAttribute("LNM.Result", "1")
-        volume.SetAttribute("LNM.Statistic", "T")
+        volume.SetAttribute("LNM.Statistic", statistic)
         volume.SetAttribute("LNM.N", "120")
         return volume
 
@@ -93,6 +93,46 @@ class LesionNetworkMappingSceneMapTest(unittest.TestCase):
         _pump(300)
         self.assertEqual(len(widget._peaks), 5, widget._peaks)
         self.assertEqual(widget.peaksTable.rowCount, 5)
+
+    def test_legend_and_export_rule_state_the_threshold_of_the_derived_line(self):
+        """An Fz map: the legend and the NIfTI sidecar Rule name the threshold as the derived line does (BB-1), never
+        rounded to one decimal ("|Fz| ≥ 0.05", not "≥ 0.1"; a top-10% cut of 0.0x, not "≥ 0.0").
+        """
+        from LesionNetworkMappingLib import thresholds
+        from StudioLib import niftiexport
+
+        widget = self.widget
+        widget.exit()
+        volume = self._sceneMap("Fz", scale=0.01)
+        widget.loadedMap = None
+        widget.runOutputs = {}
+        widget._peaks = []
+        widget.initializeParameterNode()
+        widget._parameterNode.resultVolume = volume
+        widget._parameterNode.sign = "both"
+        widget._parameterNode.statistic = "Fz"  # as the parameter node of a reopened project showing its Fz map
+        widget.enter()
+        _pump(300)
+        self.assertEqual(widget.currentStatistic(), "Fz")
+        for rule, expected in (({"kind": "fz_abs", "value": 0.05}, "|Fz| ≥ 0.05"), ({"kind": "fz_abs", "value": 0.12}, "|Fz| ≥ 0.12")):
+            widget.setRule(rule)
+            _pump(100)
+            state = widget.resultLegendState()
+            self.assertEqual(state["threshold"], rule["value"])
+            self.assertTrue(state["thresholdText"].endswith(expected), state["thresholdText"])
+            self.assertIn(f"≥ {thresholds.format_value(widget.resolved)} ", str(widget.derivedLabel.text))
+            options = niftiexport.mapOptionsFromMapModule()[volume.GetID()]
+            self.assertEqual(options["threshold"], rule["value"])
+            self.assertTrue(options["rule"].endswith(expected), options)
+        widget.setRule({"kind": "top_pct", "value": 10.0, "statistic": "Fz", "sign": "both"})
+        _pump(100)
+        state = widget.resultLegendState()
+        cut = thresholds.format_value(widget.resolved)
+        self.assertGreater(state["threshold"], 0.0)
+        self.assertLess(state["threshold"], 0.1)
+        self.assertNotEqual(float(cut), 0.0)
+        self.assertTrue(state["thresholdText"].endswith(f"|Fz| ≥ {cut}"), state["thresholdText"])
+        self.assertIn(f"(≥ {cut})", str(widget.derivedLabel.text))
 
     def test_nifti_export_options_without_a_map_in_the_scene_change_nothing(self):
         from StudioLib import niftiexport

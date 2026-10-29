@@ -424,6 +424,21 @@ def _format_fraction(fraction):
     return f"{percent:.2g}%"
 
 
+def format_value(resolved):
+    """The threshold value of a resolved rule as the derived line (:func:`describe`) writes it: two decimals for T
+    ("5.27"), as typed for an Fz effect size ("0.05") and three significant digits for a top-x% cut ("0.0304", "3.7").
+    The Map legend and the Threshold.Rule of exported sidecars use it too, so they state the same threshold.
+    """
+    value = resolved.value
+    if not math.isfinite(value):
+        return f"{value:g}"
+    if resolved.rule.get("kind") == "top_pct":
+        return f"{value:.3g}"
+    if resolved.statistic == "Fz":
+        return f"{value:g}"
+    return f"{value:.2f}"
+
+
 def describe(resolved, fraction=None):
     """The derived line shown under the threshold controls, e.g.
     "⇒ |T| ≥ 5.27 at N=1000 (df=999), V=292,019 · p_unc ≤ 1.7e-7".
@@ -435,15 +450,15 @@ def describe(resolved, fraction=None):
     unknown_n = N_UNKNOWN_NOTE in resolved.notes
     at_n = "N unknown" if unknown_n else f"N={resolved.n}"
     if unknown_n and resolved.rule.get("kind") == "custom_t" and math.isfinite(resolved.value):
-        return f"⇒ |T| ≥ {resolved.value:.2f} at {at_n}, V={resolved.v:,} · as typed (no p-value)" + suffix
+        return f"⇒ |T| ≥ {format_value(resolved)} at {at_n}, V={resolved.v:,} · as typed (no p-value)" + suffix
     if resolved.rule.get("kind") == "top_pct":
         sign = resolved.rule.get("sign", "both")
         quantity = {"both": f"|{resolved.statistic}|", "pos": resolved.statistic, "neg": f"-{resolved.statistic}"}[sign]
-        cut = f" (≥ {resolved.value:.3g})" if math.isfinite(resolved.value) else ""
+        cut = f" (≥ {format_value(resolved)})" if math.isfinite(resolved.value) else ""
         line = f"⇒ top {resolved.rule['value']:g}% of {quantity}{cut} at {at_n}, V={resolved.v:,} · rank rule (no p-value)"
         return line + suffix
     if resolved.statistic == "Fz":
-        return f"⇒ |Fz| ≥ {resolved.value:g} at {at_n}, V={resolved.v:,} · effect size (no p-value)" + suffix
+        return f"⇒ |Fz| ≥ {format_value(resolved)} at {at_n}, V={resolved.v:,} · effect size (no p-value)" + suffix
     if not math.isfinite(resolved.value):
         return f"⇒ no T threshold at N={resolved.n} (at least 2 subjects are needed)"
-    return f"⇒ |T| ≥ {resolved.value:.2f} at N={resolved.n} (df={resolved.df}), V={resolved.v:,} · p_unc ≤ {format_p(resolved.p_unc)}" + suffix
+    return f"⇒ |T| ≥ {format_value(resolved)} at N={resolved.n} (df={resolved.df}), V={resolved.v:,} · p_unc ≤ {format_p(resolved.p_unc)}" + suffix

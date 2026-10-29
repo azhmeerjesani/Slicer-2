@@ -245,6 +245,23 @@ class GsrAndReadoutTest(unittest.TestCase):
         self.assertEqual(thresholds.describe(top, fraction=top.fraction), "⇒ top 10% of T (≥ 3.7) at N=312, V=4 · rank rule (no p-value) · 25% of in-mask voxels")
 
 
+class FormatValueTest(unittest.TestCase):
+    """The threshold value as the derived line, the Map legend and the sidecar Rule write it (BB-1: never one decimal)."""
+
+    def test_format_value(self):
+        self.assertEqual(thresholds.format_value(thresholds.resolve({"kind": "fz_abs", "value": 0.05}, 120, 6360)), "0.05")
+        self.assertEqual(thresholds.format_value(thresholds.resolve({"kind": "fz_abs", "value": 0.12}, 120, 6360)), "0.12")
+        self.assertEqual(thresholds.format_value(thresholds.resolve({"kind": "fz_abs", "value": 0.3}, 120, 6360)), "0.3")
+        fwe = thresholds.resolve({"kind": "fwe_bonferroni"}, 1000, 292_019)
+        self.assertEqual(thresholds.format_value(fwe), "5.27")
+        top = thresholds.resolve({"kind": "top_pct", "value": 10, "statistic": "Fz", "sign": "both"}, 120, 4, values=[0.01, 0.02, 0.0304, 0.0305])
+        self.assertEqual(thresholds.format_value(top), f"{top.value:.3g}")
+        self.assertNotEqual(float(thresholds.format_value(top)), 0.0)
+        # The derived line writes the same text
+        for resolved in (fwe, top, thresholds.resolve({"kind": "fz_abs", "value": 0.05}, 120, 6360)):
+            self.assertIn(f"≥ {thresholds.format_value(resolved)}", thresholds.describe(resolved))
+
+
 class ResolvedCompatibilityTest(unittest.TestCase):
     def test_from_dict_on_an_old_dict(self):
         # A resolved threshold as written by the first version (no kind, fraction or notes)

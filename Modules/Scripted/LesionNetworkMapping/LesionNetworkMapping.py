@@ -2348,7 +2348,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             threshold = float(resolved.value)
             quantity = {"both": f"|{statistic}|", "pos": statistic, "neg": f"−{statistic}"}.get(self._sign(), statistic)  # noqa: RUF001
             label = thresholds.RULE_LABELS.get(rule["kind"], rule["kind"])
-            thresholdText = f"{label} · {quantity} ≥ {threshold:.1f}"
+            # The value as the derived line writes it (never rounded to one decimal: Fz 0.05 is not 0.1, a 0.0304 cut not 0.0)
+            thresholdText = f"{label} · {quantity} ≥ {thresholds.format_value(resolved)}"
         return {"statistic": statistic, "window": window, "level": level, "threshold": threshold, "thresholdText": thresholdText, "sign": self._sign(),
                 "opacity": float(node.opacity) if node is not None else 0.8, "outline": self._outlineState is not None}
 
