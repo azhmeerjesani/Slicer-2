@@ -4067,8 +4067,24 @@ class _DropHandler(qt.QObject):
     def _load(self, paths, addData):
         try:
             handleDrop(paths, addData, self.shell)
-        except Exception:
+        except Exception as error:
             logging.error(f"Studio: cannot load the dropped files:\n{traceback.format_exc()}")
+            self._reportFailure(error)
+
+    def _reportFailure(self, error):
+        """Tell the user that the drop did nothing, in plain words (a damaged study.json says so), without a traceback."""
+        shell = _currentShell(self.shell)
+        if shell is None:
+            return
+        studyUi = _studyUiModule()
+        if studyUi is not None and isinstance(error, studyUi.StudyFileError):
+            text = str(error)
+        else:
+            text = _("The dropped files could not be loaded. The reason is in the log.")
+        try:
+            shell.toast(text, ms=12000, level="consequence")
+        except Exception:
+            logging.error(f"Studio: cannot show the drop failure:\n{traceback.format_exc()}")
 
 
 def _setDropHighlight(active):

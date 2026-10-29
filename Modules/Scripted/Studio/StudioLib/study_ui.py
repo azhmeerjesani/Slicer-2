@@ -160,6 +160,12 @@ class Blocking(Exception):
     """Raised by a Done hook (``StudySession.addDoneHook()``) to stop Done → next; the message is shown inline."""
 
 
+class StudyFileError(ValueError):
+    """A study cannot be opened because its study.json is missing, unreadable or damaged; the message is plain words that
+    can be shown to the user as they are (no parser message, no traceback).
+    """
+
+
 #
 # Library access
 #
@@ -908,6 +914,30 @@ def _notify(studySession=None):
             logging.error(f"Studio: study listener failed:\n{traceback.format_exc()}")
 
 
+def _readStudy(studyModule, path):
+    """``Study.open(path)``; a damaged or unreadable study.json raises ``StudyFileError`` with a plain message."""
+    try:
+        return studyModule.Study.open(path)
+    except OSError as error:
+        raise StudyFileError(_("The study in {folder} cannot be opened: study.json cannot be read ({reason}). Check that the "
+                               "folder and its study.json are still there and that you may read them.").format(
+            folder=_studyFolder(path), reason=_plainOSError(error))) from error
+    except ValueError as error:
+        # json.JSONDecodeError and UnicodeDecodeError are ValueErrors; "Not a study" is a study.json of another kind
+        if isinstance(error, (json.JSONDecodeError, UnicodeDecodeError)) or str(error).startswith("Not a study"):
+            raise StudyFileError(_("The study in {folder} cannot be opened: its study.json is damaged or is not a study "
+                                   "file. Restore study.json from a backup or from a copy of the study folder (your "
+                                   "subjects' images and lesion masks in the folder are not touched), then open the study "
+                                   "again.").format(folder=_studyFolder(path))) from error
+        raise StudyFileError(_("The study in {folder} cannot be opened: {reason}").format(
+            folder=_studyFolder(path), reason=error)) from error
+
+
+def _studyFolder(path):
+    path = os.path.abspath(path)
+    return os.path.dirname(path) if os.path.basename(path) == "study.json" else path
+
+
 def openStudy(pathOrStudy, shell=None, subject=None, showLibrary=True):
     """Open a study (a folder, its study.json or a ``Study``) as the current session and return it.
 
@@ -916,7 +946,7 @@ def openStudy(pathOrStudy, shell=None, subject=None, showLibrary=True):
     """
     global _session
     studyModule = _lnm("study")
-    studyObject = pathOrStudy if isinstance(pathOrStudy, studyModule.Study) else studyModule.Study.open(str(pathOrStudy))
+    studyObject = pathOrStudy if isinstance(pathOrStudy, studyModule.Study) else _readStudy(studyModule, str(pathOrStudy))
     if _session is not None:
         if os.path.normcase(_session.study.path) == os.path.normcase(studyObject.path):
             # The study is already open: its session (with its in-memory changes) is kept

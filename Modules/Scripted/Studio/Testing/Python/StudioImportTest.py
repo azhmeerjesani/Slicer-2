@@ -421,6 +421,43 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             f.write(bytes(header))
         self.assertFalse(importer.isNifti4D(vector))
 
+    def test_damaged_study_json_is_reported_in_plain_words(self):
+        """A study folder whose study.json is damaged (cut short, empty, not a study) that is dropped on the window or opened
+        shows a plain message that study.json cannot be read, never a traceback or a parser message, and opens no study.
+        """
+        from StudioLib import importer, study_ui
+
+        studioShell = self._applyStudio()
+        if not study_ui.isAvailable():
+            self.skipTest("studies are not available in this build")
+        cases = {
+            "truncated": '{"format": "slicer-studio-study", "name": "My stu',
+            "empty": "",
+            "list": "[1, 2, 3]",
+            "garbage": "\x00\xff not json",
+        }
+        for label, content in cases.items():
+            folder = os.path.join(self.directory, f"damaged_{label}")
+            os.makedirs(folder)
+            with open(os.path.join(folder, "study.json"), "wb") as f:
+                f.write(content.encode("latin-1"))
+            with self.assertRaises(study_ui.StudyFileError, msg=label) as raised:
+                importer.loadFolder(folder, studioShell)
+            message = str(raised.exception)
+            self.assertIn("study.json", message, label)
+            self.assertIn("damaged", message, label)
+            self.assertNotIn("Expecting", message, label)
+            self.assertNotIn("char ", message, label)
+            # The window's drop handler tells the user (a toast), instead of failing silently in the log
+            before = len(studioShell.recentMessages())
+            importer._DropHandler(studioShell)._load([folder], False)
+            self._pump(2)
+            messages = studioShell.recentMessages()[before:]
+            self.assertEqual(len(messages), 1, label)
+            self.assertIn("study.json", messages[0][1], label)
+            self.assertIn("damaged", messages[0][1], label)
+            self.assertIsNone(study_ui.session(), label)
+
     def test_damaged_nifti_gz_is_sorted_without_an_exception(self):
         """A ``.nii.gz`` that cannot be decompressed (corrupt deflate stream, truncated, not gzip, empty) is sorted by its name
         and reported by the volume reader: the header readers return None and never raise (gzip raises ``zlib.error``, not an
