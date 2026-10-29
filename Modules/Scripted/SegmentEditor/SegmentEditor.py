@@ -70,6 +70,11 @@ STUDIO_PROPERTIES = {
 #: Properties shown again by "Show all controls" (the classic controls inside the studio presentation)
 SHOW_ALL_CONTROLS_PROPERTIES = ("segmentationNodeSelectorVisible", "sourceVolumeNodeSelectorVisible", "addRemoveSegmentButtonsVisible",
                                 "show3DButtonVisible", "switchToSegmentationsButtonVisible")
+#: Properties whose getter returns ``isVisible()`` of a widget (False while the module panel is hidden, whatever was set),
+#: not the stored value: they are always written, else hiding a control while the panel is hidden (the Studio shell
+#: leaves Classic for another module) would be skipped as "already False" and the classic control would stay shown
+EFFECTIVE_VISIBILITY_PROPERTIES = ("segmentationNodeSelectorVisible", "sourceVolumeNodeSelectorVisible", "addRemoveSegmentButtonsVisible",
+                                   "show3DButtonVisible", "switchToSegmentationsButtonVisible")
 #: Effect parameters of each presentation: {(effect name, parameter): value}. Set only when the effect defines the
 #: parameter (Outline: lasso on release; Fill gaps: the selected segment only).
 CLASSIC_EFFECT_PARAMETERS = {("Draw", "ApplyOnRelease"): 0, ("Fill between slices", "SelectedSegmentOnly"): 0}
@@ -361,7 +366,7 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             if not hasattr(self.editor, propertyName):
                 # A qMRMLSegmentEditorWidget without this property (older build)
                 continue
-            if getattr(self.editor, propertyName) != value:
+            if propertyName in EFFECTIVE_VISIBILITY_PROPERTIES or getattr(self.editor, propertyName) != value:
                 setattr(self.editor, propertyName, value)
 
     def _setEffectParameters(self, parameters):

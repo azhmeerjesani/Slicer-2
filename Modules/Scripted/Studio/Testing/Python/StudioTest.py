@@ -1377,6 +1377,33 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                       [portableKey(key) for key in previousModule.shortcuts()])
         self.assertEqual(widget.parent.sizePolicy.horizontalPolicy(), qt.QSizePolicy.Minimum)
 
+    def test_18b_draw_keeps_studio_controls_after_classic_round_trip(self):
+        """Classic entered from another page than Draw and left again: Draw hides the classic selectors and buttons.
+
+        The panel of the Segment Editor is hidden there, and its visibility getters read False whatever was set; the
+        studio table must still be written (bug: the selectors and the Add/Remove/Show 3D row stayed shown).
+        """
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        studioShell.switchTo("draw")
+        self._pump()
+        widget = slicer.modules.SegmentEditorWidget
+        hiddenNames = ("SegmentationNodeComboBox", "SourceVolumeNodeComboBox", "AddSegmentButton", "RemoveSegmentButton", "Show3DButton")
+        for round_ in range(2):
+            studioShell.switchTo("library")
+            self._pump()
+            studioShell.classic(persist=False)
+            self._pump()
+            self.assertEqual(widget.presentation(), "classic")
+            studioShell.studio()
+            self._pump()
+            studioShell.switchTo("draw")
+            self._pump()
+            self.assertEqual(widget.presentation(), "studio")
+            for objectName in hiddenNames:
+                child = editor.findChild("QWidget", objectName)
+                self.assertFalse(child.isVisible(), f"{objectName} shown after classic round trip {round_}")
+
     def test_19_draw_first_click_paints(self):
         """Start on MNI template: Brush armed at 3 mm, and a first drag in the axial view paints into "Lesion" (SPEC 5.3)."""
         from StudioLib import draw
