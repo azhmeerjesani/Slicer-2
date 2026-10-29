@@ -2359,6 +2359,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         resolved = self.resolved
         threshold = None
         thresholdText = _("Unthresholded")
+        if self._ruleHidesShownMap():
+            # The colours show nothing (the Result card says so): the legend must not claim the whole map is shown
+            thresholdText = _("Rule not applied")
         if self._ruleAppliesToShownMap():
             threshold = float(resolved.value)
             quantity = {"both": f"|{statistic}|", "pos": statistic, "neg": f"−{statistic}"}.get(self._sign(), statistic)  # noqa: RUF001
@@ -4917,6 +4920,19 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         rule = self.currentRule()
         statistic = self.currentStatistic()
         return bool(resolved.allowed or rule.get("override")) and statistic != "r" and statistic == self._ruleStatistic(rule)
+
+    def _ruleHidesShownMap(self):
+        """True when the rule is on the statistic shown but is not applied to this map (or has no finite value): the colours
+        then show nothing ("Nothing is shown: the rule is not applied to this map"; refreshResult).
+        """
+        resolved = self.resolved
+        if resolved is None:
+            return False
+        rule = self.currentRule()
+        statistic = self.currentStatistic()
+        if statistic == "r" or statistic != self._ruleStatistic(rule):
+            return False
+        return not (resolved.allowed or rule.get("override")) or not math.isfinite(resolved.value)
 
     def _ruleStatistic(self, rule):
         if rule["kind"] == "top_pct":

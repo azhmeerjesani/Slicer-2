@@ -134,6 +134,47 @@ class LesionNetworkMappingSceneMapTest(unittest.TestCase):
         self.assertTrue(state["thresholdText"].endswith(f"|Fz| ≥ {cut}"), state["thresholdText"])
         self.assertIn(f"(≥ {cut})", str(widget.derivedLabel.text))
 
+    def test_legend_does_not_claim_an_unthresholded_map_while_the_rule_hides_it(self):
+        """A rule on the shown statistic that is not applied (the |T| >= 7 convention at N=120, before Keep) shows nothing
+        (the Result card says so): the legend says "Rule not applied", not "Unthresholded". A rule on another statistic really shows the
+        whole map, which stays "Unthresholded". The NIfTI export still sees no threshold.
+        """
+        import types
+
+        widget = self.widget
+        widget.exit()
+        volume = self._sceneMap("T")
+        widget.loadedMap = None
+        widget.runOutputs = {}
+        widget._peaks = []
+        widget.initializeParameterNode()
+        widget._parameterNode.resultVolume = volume
+        widget._parameterNode.statistic = "T"
+        widget.enter()
+        _pump(300)
+        self.assertEqual(widget.currentStatistic(), "T")
+        rule = {"kind": "t_convention", "value": 7.0, "reference_n": 1000}
+        widget.currentRule = lambda: rule  # the rule as chosen; the resolution below is what it gives at N=120
+        try:
+            widget.resolved = types.SimpleNamespace(value=7.0, allowed=False, rule=rule, statistic="T")
+            state = widget.resultLegendState()
+            self.assertIsNone(state["threshold"])
+            self.assertNotEqual(state["thresholdText"], "Unthresholded")
+            self.assertIn("Rule not applied", state["thresholdText"])
+            # Kept with Keep: the rule is applied
+            rule = {"kind": "t_convention", "value": 7.0, "reference_n": 1000, "override": True}
+            widget.resolved.rule = rule
+            state = widget.resultLegendState()
+            self.assertEqual(state["threshold"], 7.0)
+            # A rule on another statistic: the whole map is shown
+            rule = {"kind": "fz_abs", "value": 0.05}
+            widget.resolved = types.SimpleNamespace(value=0.05, allowed=False, rule=rule, statistic="Fz")
+            state = widget.resultLegendState()
+            self.assertIsNone(state["threshold"])
+            self.assertEqual(state["thresholdText"], "Unthresholded")
+        finally:
+            del widget.currentRule
+
     def test_nifti_export_options_without_a_map_in_the_scene_change_nothing(self):
         from StudioLib import niftiexport
 
