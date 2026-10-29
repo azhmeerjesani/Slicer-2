@@ -2533,6 +2533,49 @@ class StudioProjectsTest(unittest.TestCase):
         finally:
             dialog.deleteLater()
 
+    def test_48_project_folder_renamed_outside_keeps_one_scene_file(self):
+        """A project folder renamed in the file manager (or copied and renamed) is opened, saved and keeps ONE scene file
+        (BB-1). Its old-named scene was loaded as it was, every save wrote "<new folder name>.mrml" next to it, and the
+        old-named file stayed behind without the later work (official 3D Slicer opened the outdated one). The scene (and
+        its _Private folder) follows the folder name as an in-app rename does, and project.json gets the new name.
+        """
+        projects = self.projects
+        service = self._service()
+        volume, _path = self._userVolume()
+        self._lesion(volume)
+        project = self._projectFor(service)
+        self._save(service)
+        oldPath, oldName = project.path, os.path.basename(project.path)
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertIsNone(service.project)
+        newPath = os.path.join(os.path.dirname(oldPath), "Renamed outside")
+        os.rename(oldPath, newPath)
+        self.assertTrue(os.path.isfile(os.path.join(newPath, oldName + ".mrml")))
+
+        self.assertTrue(service.openProject(newPath))
+        self.assertEqual(service.project.path, newPath)
+        self.assertEqual(sorted(name for name in os.listdir(newPath) if name.endswith(".mrml")), ["Renamed outside.mrml"])
+        self.assertEqual(slicer.mrmlScene.GetURL(), os.path.join(newPath, "Renamed outside.mrml"))
+        self.assertEqual(projects.readJson(projects.projectFile(newPath))["name"], "Renamed outside")
+        self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("Lesions"))
+        slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "After the rename").AddControlPoint(1, 2, 3)
+        self._save(service)
+        self.assertEqual(sorted(name for name in os.listdir(newPath) if name.endswith(".mrml")), ["Renamed outside.mrml"])
+        with open(os.path.join(newPath, "Renamed outside.mrml"), encoding="utf-8") as scene:
+            self.assertIn("After the rename", scene.read())
+        self.assertEqual([info.name for info in projects.listProjects()], ["Renamed outside"])
+
+        # A folder with several scene files is left alone (which one is the project's is not known)
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        twoPath = os.path.join(os.path.dirname(newPath), "Two scenes")
+        os.rename(newPath, twoPath)
+        shutil.copy(os.path.join(twoPath, "Renamed outside.mrml"), os.path.join(twoPath, "Other.mrml"))
+        os.rename(os.path.join(twoPath, "Renamed outside.mrml"), os.path.join(twoPath, "First.mrml"))
+        self.assertEqual(projects.adoptRenamedScene(twoPath), projects.sceneFile(twoPath))
+        self.assertEqual(sorted(name for name in os.listdir(twoPath) if name.endswith(".mrml")), ["First.mrml", "Other.mrml"])
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk

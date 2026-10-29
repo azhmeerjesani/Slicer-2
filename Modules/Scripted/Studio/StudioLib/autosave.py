@@ -1732,6 +1732,8 @@ class AutosaveService:
         if projects.isLockedByOther(path):
             self._announce("locked", projects.Project(path))
             return False
+        # A folder renamed outside Slicer Studio: its scene follows the name (saves write "<folder name>.mrml")
+        scenePath = projects.adoptRenamedScene(path) or scenePath
         try:
             if _io().repairBareAmpersands(scenePath):
                 logging.warning(f"Slicer Studio: escaped the bare '&' of the file names in {os.path.basename(scenePath)}")
@@ -1770,6 +1772,14 @@ class AutosaveService:
         path = os.path.abspath(str(path))
         projectPath = projects.projectOfPath(path)
         scenePath = projects.sceneFile(projectPath) if projectPath is not None else None
+        if scenePath is not None and os.path.normcase(os.path.realpath(scenePath)) != os.path.normcase(os.path.realpath(path)):
+            # The file opened is the old-named scene of a project folder renamed outside Slicer Studio
+            current = self.project
+            if current is None or os.path.normcase(os.path.realpath(current.path)) != os.path.normcase(os.path.realpath(projectPath)):
+                renamed = projects.adoptRenamedScene(projectPath)
+                if renamed is not None and os.path.dirname(renamed) == os.path.dirname(scenePath) and not os.path.exists(path):
+                    scenePath = renamed
+                    path = renamed
         if scenePath is not None and os.path.normcase(os.path.realpath(scenePath)) == os.path.normcase(os.path.realpath(path)):
             current = self.project
             if current is not None and os.path.normcase(os.path.realpath(current.path)) == os.path.normcase(os.path.realpath(projectPath)):

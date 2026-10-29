@@ -956,6 +956,35 @@ def renameSceneFile(projectPath, oldScene):
     return newPath
 
 
+def adoptRenamedScene(projectPath):
+    """Follow a project folder that was renamed outside Slicer Studio (file manager, copy and rename).
+
+    A Studio project folder (it has ``.studio/project.json``) without "<folder name>.mrml" but with exactly one other scene
+    file gets that scene renamed like ``renameFolder`` does, and its ``project.json`` name updated. Otherwise the old-named
+    scene would stay next to the one that every save writes, and official 3D Slicer would open the outdated one. A folder with
+    several scenes is left alone (which one is the project's is not known). Return the scene file of the project (as
+    ``sceneFile``); it never raises.
+    """
+    projectPath = os.path.normpath(str(projectPath))
+    try:
+        expected = os.path.join(projectPath, os.path.basename(projectPath) + SCENE_EXTENSION)
+        if not os.path.isfile(expected) and os.path.isfile(projectFile(projectPath)) and not isLockedByOther(projectPath):
+            scenes = [name for name in os.listdir(projectPath)
+                      if name.lower().endswith(SCENE_EXTENSION) and ".studio-tmp" not in name
+                      and os.path.isfile(os.path.join(projectPath, name))]
+            if len(scenes) == 1:
+                renameSceneFile(projectPath, os.path.join(projectPath, scenes[0]))
+                data = readJson(projectFile(projectPath))
+                if data is not None and data.get("name") != os.path.basename(projectPath):
+                    from . import autosave_io
+
+                    data["name"] = os.path.basename(projectPath)
+                    autosave_io.atomicWriteJson(projectFile(projectPath), data)
+    except Exception:
+        logging.warning(f"Slicer Studio: cannot rename the scene of {projectPath} to the folder name", exc_info=True)
+    return sceneFile(projectPath)
+
+
 def _rewritePrivatePaths(scenePath, oldFolder, newFolder):
     """Replace the folder of hidden nodes in the file names of a scene file (relative paths only)."""
     from . import autosave_io
