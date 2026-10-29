@@ -56,6 +56,9 @@ Run with the main window and testing enabled::
   volumes that no longer existed). A new check is current again.
 - ``test_20_quit_with_case_strip_editor_open`` (BB-1): a child process opens a literature-study case in Draw, opens the case
   strip's inline editor ("+ DOI") and quits with ``slicer.app.exit`` (no window close): no traceback, exit code 0.
+- ``test_21_share_dialog_shows_success_after_export`` (BB-1): after a successful "Export study for sharing" the dialog shows
+  "Exported N files to ..." and Close with no failure mark in the checklist (the folder just written is not reported as "It
+  already exists"); Export stays disabled for that output and is enabled again for another one.
 - ``test_10_scripted_module_ui_widgets`` (BB-1): the build has the Qt Designer plugins of CTK and MRML, so that
   ``slicer.util.loadUI`` creates the CTK and qMRML widgets of a scripted module's ``.ui`` file (a ``qMRMLWidget`` root, a
   ``qMRMLNodeComboBox``, a ``ctkCollapsibleButton``), and Line Profile, Vector to Scalar Volume and Surface Toolbox set up
@@ -1719,6 +1722,70 @@ class StudioRegressionTest(unittest.TestCase):
                     widget.widget.deleteLater()
             study_ui.closeStudy()
             pump()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
+
+    def test_21_share_dialog_shows_success_after_export(self):
+        """After a successful "Export study for sharing" the dialog shows the success ("Exported N files to ...") and Close, and
+        its checklist has no failure mark: the folder that was just written is not reported as "It already exists" and Export
+        stays disabled for it. Another output, or a failed or stopped export, behaves as before (BB-1).
+        """
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import libcard_share, shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Share study")
+        os.makedirs(folder)
+        paths = []
+        for index in range(1, 3):
+            paths.append(os.path.join(folder, f"sub-0{index}_T1w.nii.gz"))
+            nifti.write_nifti(paths[-1], np.zeros(grid.shape, np.uint8), grid.affine)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        dialog = None
+        try:
+            session = study_ui.createStudy(paths, studioShell, folder=folder)
+            self.assertIsNotNone(session)
+            dialog = libcard_share.ShareDialog(session)
+            dialog.dialog.show()
+            output = dialog.output()
+            self.assertFalse(os.path.exists(output))
+            self.assertTrue(dialog.exportButton.enabled, dialog.checklistLabel.text)
+            dialog.exportButton.click()
+            deadline = time.time() + 90
+            while time.time() < deadline and dialog.result is None and dialog.error is None:
+                slicer.app.processEvents()
+                qt.QThread.msleep(30)
+            slicer.app.processEvents()
+            self.assertIsNone(dialog.error)
+            self.assertIsNotNone(dialog.result)
+            self.assertTrue(os.path.isdir(output))
+            self.assertTrue(dialog.progressLabel.text.startswith("Exported "), dialog.progressLabel.text)
+            self.assertEqual(list(dialog.blocking()), [], dialog.items)
+            self.assertNotIn("Output chosen", dialog.checklistLabel.text)
+            self.assertNotIn("already exists", dialog.checklistLabel.text)
+            self.assertFalse(dialog.exportButton.enabled, "exporting again onto the folder just written")
+            self.assertEqual(dialog.cancelButton.text, "Close")
+            # Another output: the dialog is ready to export again
+            dialog.outputEdit.setText(output + "-second")
+            dialog.preview()
+            self.assertTrue(dialog.exportButton.enabled, dialog.checklistLabel.text)
+            # Back to the written folder after other edits: the plain "already exists" blocker is back for a new export
+            dialog._exportedTo = None
+            dialog.outputEdit.setText(output)
+            dialog.preview()
+            self.assertFalse(dialog.exportButton.enabled)
+            self.assertIn("already exists", dialog.checklistLabel.text)
+        finally:
+            if dialog is not None:
+                dialog.dialog.close()
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
 

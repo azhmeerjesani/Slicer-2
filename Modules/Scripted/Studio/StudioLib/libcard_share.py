@@ -159,6 +159,8 @@ class ShareDialog:
         self.result = None
         self.error = None
         self.plan = None
+        self._exportOutput = None  # the output when Export was pressed
+        self._exportedTo = None  # the output that the last export wrote successfully
         share = _share()
         self._mapped = share.map_plan(self.study.path)
         self._gspMaps = any(entry["gsp"] for entry in self._mapped)
@@ -516,6 +518,8 @@ class ShareDialog:
         output = self.output()
         if not output:
             items.append({"id": "output", "label": _("Output chosen"), "status": "blocker", "detail": _("Choose a folder or a .zip file.")})
+        elif output == self._exportedTo:
+            pass  # the output this dialog just wrote: the success line says so; the exists-blocker would read as a failure
         elif os.path.exists(output) and (not os.path.isdir(output) or os.listdir(output)):
             items.append({"id": "output", "label": _("Output chosen"), "status": "blocker", "detail": _("It already exists; choose a new name or an empty folder.")})
         self.items = items
@@ -542,8 +546,9 @@ class ShareDialog:
 
     def _updateButtons(self):
         busy = self.worker.isBusy()
-        self.exportButton.setEnabled(not busy and not self.blocking())
-        self.exportButton.setToolTip("" if not self.blocking() else _("Resolve the checklist items marked ✕ first"))
+        done = bool(self._exportedTo) and self.output() == self._exportedTo  # exported already: change the output to export again
+        self.exportButton.setEnabled(not busy and not self.blocking() and not done)
+        self.exportButton.setToolTip(_("Resolve the checklist items marked ✕ first") if self.blocking() else _("Already exported; choose another output to export again") if done else "")
         self.cancelButton.setText(_("Stop") if busy else _("Close") if self.result else _("Cancel"))
 
     # Export
@@ -559,6 +564,8 @@ class ShareDialog:
         stages = {"participants": _("Participants…"), "lesions": _("Lesion masks"), "maps": _("Maps"), "neurovault": _("NeuroVault folder"),
                   "template": _("Template file"), "verify": _("Checking the files…")}
         self.result, self.error = None, None
+        self._exportedTo = None
+        self._exportOutput = self.output()
         self.progressLabel.setText(_("Exporting…"))
         started = self.worker.start(exportWork, studyPath=self.study.path, out=self.output(), options=self.options(), stages=stages)
         self._updateButtons()
@@ -591,6 +598,7 @@ class ShareDialog:
             self.progressLabel.setText(_("Not exported: {error}").format(error=error))
         else:
             path = result["path"]
+            self._exportedTo = self._exportOutput
             self.progressLabel.setText(_("Exported {n} files to {name}").format(n=len(result["files"]), name=os.path.basename(path)))
             _toast(_("Study exported for sharing · {n} files").format(n=len(result["files"])), 6000, action=lambda: showPath(path), actionText=_("Show"))
             refreshCards()
