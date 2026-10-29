@@ -2565,6 +2565,27 @@ def _inbox_values(study, row, result):
 # Command line
 
 
+def _check_lines(report):
+    """The readable lines of a ``check`` report for the text output: one per tool (found or not, version, path or
+    reason), one per template (usable or not, with the reason when not) and the folders searched.
+    """
+    lines = []
+    for name, info in (report.get("executables") or {}).items():
+        if info.get("found"):
+            lines.append(f"  {name}: found, version {info.get('version') or 'unknown'} ({info.get('path')})")
+        else:
+            lines.append(f"  {name}: not found" + (f" ({info['message']})" if info.get("message") else ""))
+    for template_id, info in (report.get("templates") or {}).items():
+        if info.get("usable"):
+            lines.append(f"  template {template_id}: usable" + (f" ({info['name']})" if info.get("name") else ""))
+        else:
+            reason = info.get("message") or "; ".join(f"{role} file missing" for role, item in (info.get("files") or {}).items() if not item.get("found"))
+            lines.append(f"  template {template_id}: not usable" + (f": {reason}" if reason else ""))
+    if report.get("search_dirs"):
+        lines.append("  template folders searched: " + ", ".join(str(folder) for folder in report["search_dirs"]))
+    return lines
+
+
 class _EventStream:
     """Standard output filter: JSON event lines as ASCII (non-ASCII characters as JSON unicode escapes) or as readable text."""
 
@@ -2598,7 +2619,10 @@ class _EventStream:
         if name in ("warning", "error"):
             return f"{head} [{event.get('code')}] {event.get('message')}"
         if name == "result":
-            return f"{head} {event.get('kind')} {event.get('status') or ''} {event.get('path') or event.get('reason') or ''}".rstrip()
+            first = f"{head} {event.get('kind')} {event.get('status') or ''} {event.get('path') or event.get('reason') or ''}".rstrip()
+            if event.get("kind") == "check":
+                return "\n".join([first] + _check_lines(event))
+            return first
         return f"{head} " + " ".join(f"{key}={value}" for key, value in event.items() if key not in ("event", "t") and not isinstance(value, (dict, list)))
 
     def flush(self):
@@ -2745,8 +2769,10 @@ def main(argv):
         jobs.emit("result", kind="check", **report)
         if not ok:
             missing = [name for name in ("BRAINSFit", "BRAINSResample") if not report["executables"][name]["found"]]
+            wanted = DEFAULT_TEMPLATE if args.template in (None, "", "auto") else args.template
+            reason = (report["templates"].get(wanted) or {}).get("message")
             raise jobs.JobError(
-                "Normalization is not available: " + (f"{', '.join(missing)} not found" if missing else "the template files are missing"),
+                "Normalization is not available: " + (f"{', '.join(missing)} not found" if missing else (reason or "the template files are missing")),
                 code="executable_missing" if missing else "template_missing",
             )
         jobs.emit("done", outputs=[], elapsed=round(jobs.elapsed(), 3), run_id=None)

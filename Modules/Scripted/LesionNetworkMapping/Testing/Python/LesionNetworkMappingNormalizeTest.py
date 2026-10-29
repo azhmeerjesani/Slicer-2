@@ -683,5 +683,49 @@ class NormalizeTest(unittest.TestCase):
         self.assertEqual(record["qc"]["suggestion"], "review")  # more than one attempt
 
 
+class CheckTextTest(unittest.TestCase):
+    """'normalize check' with the text output (a terminal) lists the tools, the templates and why a user template is unusable."""
+
+    def test_text_output_lists_tools_templates_and_the_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "Missing mask")
+            os.makedirs(folder)
+            image = "tpl-MNI152NLin2009cAsym_res-02_desc-brain_T1w.nii.gz"
+            source = normalize.find_template(TEMPLATE)["files"]["fixed"]
+            self.assertTrue(source, "the bundled template image")
+            shutil.copy(source, os.path.join(folder, image))
+            grid = {"shape": [97, 115, 97], "affine": [[2.0, 0.0, 0.0, -96.5], [0.0, 2.0, 0.0, -132.5], [0.0, 0.0, 2.0, -78.5], [0.0, 0.0, 0.0, 1.0]]}
+            record = {"schema": "slicer-studio-template", "version": 1, "id": "missing-mask", "name": "Missing mask", "space": "MNI", "resolution_mm": 2, "shape": grid["shape"], "contrast": "T1w",
+                      "files": {"surfaces": [], "image": image, "mask": "my_brain_mask.nii.gz"}, "sha256": {}, "grid": grid, "notes": "", "added": "2026-10-29", "default": False}
+            with open(os.path.join(folder, "template.json"), "w", encoding="utf-8") as handle:
+                json.dump(record, handle)
+            process = subprocess.run(_command("check", "--template", "user:missing-mask", "--template-dir", tmp, "--events", "text"), check=False, capture_output=True, text=True, encoding="utf-8",
+                                     errors="replace", env=_env(), cwd=MODULE_DIR, timeout=120)
+        out = process.stdout
+        for name in ("BRAINSFit", "BRAINSResample", "BRAINSROIAuto"):
+            self.assertIn(f"  {name}: ", out)
+        self.assertIn("  template user:missing-mask: not usable: Template user:missing-mask", out)
+        self.assertIn("my_brain_mask.nii.gz", out)
+        self.assertIn("is missing from", out)
+        self.assertEqual(process.returncode, jobs.EXIT_ERROR)
+        error = [line for line in out.splitlines() if "[template_missing]" in line]
+        if error:  # the tools are installed: the error names the template problem, not a generic one
+            self.assertIn("my_brain_mask.nii.gz", error[0])
+
+    def test_text_format_of_a_check_result(self):
+        import io
+
+        sink = io.StringIO()
+        stream = normalize._EventStream(sink, text=True)
+        stream.write(json.dumps({"event": "result", "t": 0.1, "kind": "check", "ok": True,
+                                 "executables": {"BRAINSFit": {"found": True, "path": "/x/BRAINSFit", "version": "5.8.0"}, "BRAINSROIAuto": {"found": False, "message": "BRAINSROIAuto not found"}},
+                                 "templates": {"A": {"usable": True}, "B": {"usable": False, "files": {"fixed": {"found": False}}}}}) + "\n")
+        text = sink.getvalue()
+        self.assertIn("BRAINSFit: found, version 5.8.0 (/x/BRAINSFit)", text)
+        self.assertIn("BRAINSROIAuto: not found (BRAINSROIAuto not found)", text)
+        self.assertIn("template A: usable", text)
+        self.assertIn("template B: not usable: fixed file missing", text)
+
+
 if __name__ == "__main__":
     unittest.main()
