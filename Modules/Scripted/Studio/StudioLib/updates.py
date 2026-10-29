@@ -817,6 +817,7 @@ class UpdateService:
         self.requiredDialog = None
         self.updateDialog = None
         self.notice = None
+        self.noticeVersion = None
         self.noticeWhere = None
         self.banner = None
         self.helpAction = None
@@ -1163,9 +1164,15 @@ class UpdateService:
         if status.kind == "required":
             # Not installable here (development build, web version, no file for this computer), offline (cached
             # manifest), checks off (cached manifest) or found after the startup
+            self.hideNotice()
             self.showBanner(offline=offline)
         elif not status.skipped:
+            if self.notice is not None and self.noticeVersion != status.version:
+                # A later check found another version: the notice names the version that Update now and Skip act on
+                self.hideNotice()
             self.scheduleNotice()
+        else:
+            self.hideNotice()
 
     #
     # Optional update: the notice
@@ -1234,7 +1241,7 @@ class UpdateService:
         if where is None:
             widget.deleteLater()
             return None
-        self.notice, self.noticeWhere = widget, where
+        self.notice, self.noticeWhere, self.noticeVersion = widget, where, status.version
         return widget
 
     def _placeNotice(self, shell, widget, key):
@@ -1255,7 +1262,7 @@ class UpdateService:
 
     def hideNotice(self):
         widget, where = self.notice, self.noticeWhere
-        self.notice = self.noticeWhere = None
+        self.notice = self.noticeWhere = self.noticeVersion = None
         if widget is None:
             return
         self._removePlaced(widget, where, NOTICE_KEY)

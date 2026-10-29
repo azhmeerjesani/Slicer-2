@@ -1265,6 +1265,55 @@ fi
         self.assertIn("releases/tag/v1.2.0", panel.latestLabel.text)
         self.assertEqual(panel.objectName, "StudioUpdatesSettingsPanel")
 
+    def test_NoticeFollowsLaterChecks(self):
+        """The notice names the version that Update now and Skip act on: a later check replaces or removes it."""
+        from StudioLib import library, shell
+
+        updates = self.updates
+        self._publish("1.2.0")
+        mainWindow = slicer.util.mainWindow()
+        geometry = mainWindow.saveGeometry()
+
+        def restore():
+            live = shell._shell
+            if live is not None:
+                live.dispose()
+            mainWindow.restoreGeometry(geometry)
+            self._pump(0.3)
+
+        self.addCleanup(restore)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        self._pump(0.5)
+        studioShell.switchTo("library")
+        updates._installableOverride = False
+        self.addCleanup(lambda: setattr(updates, "_installableOverride", None))
+        service = self._service()
+        previous = updates._service
+        updates._service = service
+        self.addCleanup(lambda: setattr(updates, "_service", previous))
+        service._startTime = time.monotonic() - 1000  # long after the startup: no delay for the notice
+
+        def noticeText():
+            return service.notice.findChild("QLabel", "StudioNoticeText").text if service.notice is not None else None
+
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        service._showAvailability()
+        self.assertTrue(self._waitFor(lambda: service.notice is not None, 5))
+        self.assertEqual(noticeText(), "Update 1.2.0 available")
+        # A later check finds 1.3.0: the notice is replaced
+        self._publish("1.3.0")
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        service._showAvailability()
+        self.assertTrue(self._waitFor(lambda: noticeText() == "Update 1.3.0 available", 5), noticeText())
+        self.assertIn("1.3.0", service.notice.toolTip)
+        self.assertEqual(len(library.notices()), 1)
+        # A later check finds nothing newer: the notice goes
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "1.3.0")
+        service._showAvailability()
+        self.assertIsNone(service.notice)
+        self.assertNotIn(updates.NOTICE_KEY, library.notices())
+
     def test_ClassicHelpAction(self):
         service = self._service()
         service._installHelpAction()
