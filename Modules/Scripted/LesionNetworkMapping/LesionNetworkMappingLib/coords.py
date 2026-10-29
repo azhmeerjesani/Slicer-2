@@ -237,7 +237,9 @@ def read_table(path):
     """(columns, rows) of a CSV/TSV/whitespace table; columns are lower-case; rows are dicts of text.
 
     A table without a header (its first field is a number) gets the positional columns x, y, z, radius, study, space.
-    Lines starting with "#" are comments.
+    Lines starting with "#" are comments. A row with more (non-empty) fields than the header is an error rather than
+    being cut to the header: in a comma-separated table it usually means decimal commas ("-33,5"), which would otherwise
+    be read silently as other numbers.
     """
     with open(path, encoding="utf-8-sig") as f:
         text = f.read()
@@ -257,7 +259,16 @@ def read_table(path):
     except ValueError:
         header = [cell.lower() for cell in records[0]]
         body = records[1:]
-    rows = [dict(zip(header, record + [""] * (len(header) - len(record)), strict=False)) for record in body]
+    first_row = len(records) - len(body) + 1  # row numbers count the header as row 1, like foci_from_rows
+    rows = []
+    for number, record in enumerate(body, start=first_row):
+        while len(record) > len(header) and not record[-1]:
+            record = record[:-1]  # trailing empty fields ("1,2,3,") are harmless
+        if len(record) > len(header):
+            hint = " Decimal commas? Write numbers with '.' (for example -33.5)." if delimiter == "," else ""
+            raise ValueError(f"{os.path.basename(os.fspath(path))}, row {number} has {len(record)} values for {len(header)} columns "
+                             f"({', '.join(header)}).{hint}")
+        rows.append(dict(zip(header, record + [""] * (len(header) - len(record)), strict=True)))
     return header, rows
 
 

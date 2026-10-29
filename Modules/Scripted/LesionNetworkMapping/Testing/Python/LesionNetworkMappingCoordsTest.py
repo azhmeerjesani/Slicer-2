@@ -88,6 +88,22 @@ class ParserTest(CoordsTestCase):
         with self.assertRaisesRegex(ValueError, "Unknown coordinate space"):
             coords.read_csv(self.write("bad.csv", "x,y,z,space\n1,2,3,Colin\n"))
 
+    def test_csv_row_with_more_fields_than_header(self):
+        # Decimal commas split each number in two: the row must not be cut to the header and read as other numbers
+        # (it was read as (-33, 5, -57), and with a radius column the 25 became the sphere radius).
+        with self.assertRaisesRegex(ValueError, r"row 2 has 7 values for 4 columns.*Decimal commas"):
+            coords.read_foci(self.write("de.csv", "study,x,y,z\nMüller 2020,-33,5,-57,25,11,75\n"))
+        with self.assertRaisesRegex(ValueError, "row 3 has 7 values for 4 columns"):
+            coords.read_csv(self.write("de_r.csv", "x,y,z,radius\n1,2,3,4\n-33,5,-57,25,11,75,4\n"))
+        with self.assertRaisesRegex(ValueError, "row 2 has 5 values for 4 columns"):
+            coords.read_csv(self.write("extra.csv", "study,x,y,z\nA,10,20,30,99\n"))
+        with self.assertRaisesRegex(ValueError, "row 2 has 4 values for 3 columns"):
+            coords.read_csv(self.write("plain_extra.txt", "1 2 3\n4 5 6 7\n"))  # header-less: row 1 sets the columns
+        # Trailing empty fields (a spreadsheet's "1,2,3,") and short rows stay accepted.
+        foci = coords.read_csv(self.write("trailing.csv", "study,x,y,z\nA,-33.5,-57.25,11.75,,\nB,1,2,3\n"))
+        self.assertEqual([f.xyz for f in foci], [(-33.5, -57.25, 11.75), (1.0, 2.0, 3.0)])
+        self.assertEqual(coords.read_csv(self.write("short.csv", "x,y,z,radius\n1,2,3\n"))[0].radius_mm, None)
+
     def test_sleuth(self):
         text = ("// Reference=Talairach\n// Smith et al., 2001: Delusions\n// Subjects=12\n-44 31 27\n20\t-32\t14\n\n"
                 "// Jones, 2005\n// Subjects=10\n1 2 3\n\n// Reference=MNI\n// Smith et al., 2001: Delusions\n// Subjects=9\n4,5,6\n")
