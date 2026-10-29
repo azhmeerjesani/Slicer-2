@@ -468,6 +468,56 @@ class StudioNiftiExportTest(unittest.TestCase):
         self.assertTrue(any("Thin" in note and "chosen grid" in note for note in labelmap.notes), labelmap.notes)
         self.assertFalse(any("Big" in note for note in masks.notes + labelmap.notes), masks.notes + labelmap.notes)
 
+    def test_04c_transform_note_with_a_reference_grid(self):
+        """On a reference grid the sidecar names the lesion's own transform, and the reference's one separately."""
+        scan = self._volume("scan", np.zeros((40, 40, 40), np.int16), np.array([[1.0, 0, 0, -20], [0, 1.0, 0, -20], [0, 0, 1.0, -20], [0, 0, 0, 1]]))
+        shifted = np.array([[1.0, 0, 0, -30], [0, 1.0, 0, -20], [0, 0, 1.0, -20], [0, 0, 0, 1]])
+        reference = self._volume("reference", np.zeros((40, 40, 40), np.int16), shifted)
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "lesion")
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(scan)
+        segmentId = segmentation.GetSegmentation().AddEmptySegment("", "Lesion")
+        array = np.zeros((40, 40, 40), np.uint8)
+        array[19:22, 19:22, 4:7] = 1  # world x = -15
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentation, segmentId, scan)
+        transformNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", "move10")
+        move = np.eye(4)
+        move[0, 3] = 10.0
+        transformNode.SetMatrixTransformToParent(_matrix(move))
+
+        def exported(name):
+            result = self.export.exportSegmentation(segmentation, os.path.join(self.out, name + ".nii.gz"), mode=self.export.SEGMENTATION_MASKS,
+                                                    reference=reference if name.startswith("b") else scan, overwrite=True)
+            self.assertEqual(result.errors, [])
+            data, affine, header = self._read(result.images[0])
+            centre = (affine @ np.append(np.argwhere(data > 0).mean(0), 1.0))[0]
+            return self._sidecar(result.images[0]), result.notes, header["sform_code"], centre
+
+        # A) the lesion is transformed, the reference is not: the transform moves the mask and the sidecar says so
+        segmentation.SetAndObserveTransformNodeID(transformNode.GetID())
+        sidecar, notes, code, centre = exported("a_lesion_transformed")
+        self.assertAlmostEqual(centre, -5.0, delta=1.0)
+        self.assertEqual(sidecar["TransformApplied"]["Name"], "move10")
+        self.assertEqual(sidecar["Space"], "aligned")
+        self.assertEqual(code, 2)
+        self.assertNotIn("ReferenceTransformApplied", sidecar)
+        self.assertTrue(any("its transform was applied" in note for note in notes), notes)
+        # B) only the reference is transformed: the lesion's transform is not claimed, the reference's one is named apart
+        segmentation.SetAndObserveTransformNodeID(None)
+        reference.SetAndObserveTransformNodeID(transformNode.GetID())
+        sidecar, notes, code, centre = exported("b_reference_transformed")
+        self.assertAlmostEqual(centre, -15.0, delta=1.0)
+        self.assertNotIn("TransformApplied", sidecar)
+        self.assertEqual(sidecar["ReferenceTransformApplied"]["Name"], "move10")
+        self.assertEqual(code, 2)
+        self.assertFalse(any("its transform was applied" in note for note in notes), notes)
+        # C) both share the transform: it is applied once, to the affine
+        segmentation.SetAndObserveTransformNodeID(transformNode.GetID())
+        sidecar, notes, code, centre = exported("b_both_transformed")
+        self.assertEqual(sidecar["TransformApplied"]["Name"], "move10")
+        self.assertNotIn("ReferenceTransformApplied", sidecar)
+        self.assertEqual(code, 2)
+
     def test_05_template_codes(self):
         """sform/qform code 4 on a recognised MNI grid (the bundled template) and on the user's own template (A-10)."""
         from LesionNetworkMappingLib import geometry, nifti

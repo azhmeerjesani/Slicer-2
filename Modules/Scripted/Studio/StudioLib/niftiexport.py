@@ -816,13 +816,39 @@ class Job:
             raise ExportError(_("Failed to export the segments of {name}").format(name=node.GetName()))
         return labelmapNode
 
-    def _segmentationSidecar(self, node, data, affine, transformNote, referenceNode, resampled):
+    @staticmethod
+    def _segmentationTransformNotes(node, labelmapNode, labelmapNote, referenceNode):
+        """``(lesion's transform note, reference's transform note)`` of a segmentation exported as ``labelmapNode``.
+
+        Without a reference grid the temporary label map carries the segmentation's own transform (``labelmapNote``). On a
+        reference grid it carries the *reference's* transform instead, and the segmentation's own transform is applied by
+        resampling (so it leaves no trace on the label map): the two are told apart here.
+        """
+        if referenceNode is None:
+            return labelmapNote, None
+        lesionTransform = node.GetParentTransformNode()
+        if lesionTransform is None:
+            return None, labelmapNote
+        if labelmapNote is not None and lesionTransform.GetID() == labelmapNode.GetTransformNodeID():
+            # The lesion and the reference share the transform: it is applied to the affine, once
+            return labelmapNote, None
+        linear = lesionTransform.IsTransformToWorldLinear()
+        description = ("The linear transform was applied to the exported copy (resampled onto the reference grid, nearest neighbour)" if linear
+                       else "A non-linear transform was applied to the exported copy (resampled onto the reference grid, nearest neighbour)")
+        return {"Name": lesionTransform.GetName(), "Linear": bool(linear), "Description": description}, labelmapNote
+
+    def _segmentationSidecar(self, node, data, affine, transformNote, referenceNode, resampled, referenceTransformNote=None):
         grid = (data.shape, affine)
-        spaceName, resolution, template = spaceInfo(node, grid, transformed=transformNote is not None)
-        if spaceName is None and referenceNode is not None and not transformNote:
+        transformed = transformNote is not None or referenceTransformNote is not None
+        spaceName, resolution, template = spaceInfo(node, grid, transformed=transformed)
+        if spaceName is None and referenceNode is not None and not transformed:
             spaceName, resolution, template = spaceInfo(referenceNode, grid)
-        code = xformCode(spaceName, transformNote is not None)
+        code = xformCode(spaceName, transformed)
         sidecar = baseSidecar(node, KIND_SEGMENTATION, spaceName, resolution, template, code, data, affine, transformNote)
+        if spaceName is None and transformed:
+            sidecar["Space"] = "aligned"
+        if referenceTransformNote is not None:
+            sidecar["ReferenceTransformApplied"] = referenceTransformNote
         # The fields of a saved lesion (Save lesion's sidecar, D-U3): the scan relative to the sidecar, notes, source reference
         lesion = _lesionFields(node, self.path)
         sidecar.update(lesion)
@@ -847,23 +873,25 @@ class Job:
             if mode == SEGMENTATION_MASKS:
                 for segmentId, path in self._maskPaths(node):
                     labelmapNode = self._exportLabelmap(node, [segmentId], referenceNode)
-                    data, affine, transformNote = volumeData(labelmapNode)
+                    data, affine, labelmapNote = volumeData(labelmapNode)
+                    transformNote, referenceNote = self._segmentationTransformNotes(node, labelmapNode, labelmapNote, referenceNode)
                     data = (data != 0).astype(np.uint8)
                     if not np.any(data):
                         # An all-zero mask would be a lesion silently lost: it is skipped, with a note
                         lostOnGrid.append(segmentation.GetSegment(segmentId).GetName())
                         continue
-                    sidecar, code = self._segmentationSidecar(node, data, affine, transformNote, referenceNode, resampled)
+                    sidecar, code = self._segmentationSidecar(node, data, affine, transformNote, referenceNode, resampled, referenceNote)
                     segment = segmentation.GetSegment(segmentId)
                     sidecar.update({"Kind": "mask", "Units": "binary", "Segment": segment.GetName(), "SegmentColor": _hexColor(segment.GetColor()),
                                     "VoxelCount": int(np.count_nonzero(data))})
                     tasks.append(WriteTask(path, data, affine, code, sidecar))
             else:
                 labelmapNode = self._exportLabelmap(node, ids, referenceNode)
-                data, affine, transformNote = volumeData(labelmapNode)
+                data, affine, labelmapNote = volumeData(labelmapNode)
+                transformNote, referenceNote = self._segmentationTransformNotes(node, labelmapNode, labelmapNote, referenceNode)
                 if data.max(initial=0) <= 255 and data.min(initial=0) >= 0:
                     data = data.astype(np.uint8)
-                sidecar, code = self._segmentationSidecar(node, data, affine, transformNote, referenceNode, resampled)
+                sidecar, code = self._segmentationSidecar(node, data, affine, transformNote, referenceNode, resampled, referenceNote)
                 labels = []
                 counts = np.bincount(data.ravel().astype(np.int64), minlength=len(ids) + 1) if data.size else np.zeros(len(ids) + 1, int)
                 for value, segmentId in enumerate(ids, start=1):
