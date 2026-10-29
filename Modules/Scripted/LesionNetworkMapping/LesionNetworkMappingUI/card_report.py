@@ -7,7 +7,8 @@ Two plug-ins in one file, both built from the run registry and the files of the 
   or only partly run) for Degree/PC1 QA, Null reference, Specificity, Validation vs baselines, Robustness and Provenance &
   sharing. Each dot has a glyph as well as a colour (check mark, exclamation mark, nothing). Clicking a dot scrolls to
   and expands the card the check belongs to (QA, Nulls, Cohort, Validate, Robust, Report). The strip refreshes on
-  ``ctx.runChanged``, ``ctx.studyChanged`` and when a run finishes. It never blocks anything.
+  ``ctx.runChanged``, ``ctx.studyChanged`` and when a run or a job of the runner (Run everything, Maps only...) finishes.
+  It never blocks anything.
 - **Report card** (``CARD``, id "report", ``LNMReportCard``):
 
   - the 15-item checklist table (done / not run / N/A / flagged, each with a glyph, the value and the evidence run links
@@ -349,6 +350,23 @@ class _Debounce:
         self.timer.stop()
 
 
+def _hookJobFinished(ctx, callback):
+    """Call ``callback(job)`` when any job of the context's runner ends (Run everything, Maps only, Nulls, Robust...).
+
+    Those jobs end outside the single-map run path that delivers ``onRunEvent``, and they do not notify
+    ``ctx.runChanged``, yet they add runs to the registry the checklist reads.
+    """
+    finished = getattr(getattr(ctx, "runner", None), "jobFinished", None)
+    if finished is not None and callback not in finished:
+        finished.append(callback)
+
+
+def _unhookJobFinished(ctx, callback):
+    finished = getattr(getattr(ctx, "runner", None), "jobFinished", None)
+    if finished is not None and callback in finished:
+        finished.remove(callback)
+
+
 def _cardAvailable(ctx, cardId):
     """Whether card ``cardId`` exists and is offered in the current seed mode and interface."""
     widget = _mapWidget()
@@ -411,6 +429,7 @@ class BatteryStrip:
         self._debounce = _Debounce(self.refresh)
         for name in ("runChanged", "studyChanged"):
             getattr(ctx, name).append(self._debounce.trigger)
+        _hookJobFinished(ctx, self._onJobFinished)
         self._paint()
         qt.QTimer.singleShot(0, self.refresh)
 
@@ -485,6 +504,10 @@ class BatteryStrip:
         if event.get("event") in ("done", "error", "cancelled", "failed"):
             self._debounce.trigger()
 
+    def _onJobFinished(self, job):
+        if not self._cleanedUp:
+            self._debounce.trigger()
+
     def onStudyChanged(self):
         self._debounce.trigger()
 
@@ -498,6 +521,7 @@ class BatteryStrip:
             callbacks = getattr(self.ctx, name, [])
             if self._debounce.trigger in callbacks:
                 callbacks.remove(self._debounce.trigger)
+        _unhookJobFinished(self.ctx, self._onJobFinished)
 
 
 #
@@ -600,6 +624,7 @@ class ReportCard:
         self._debounce = _Debounce(self.refresh)
         for name in ("runChanged", "studyChanged"):
             getattr(ctx, name).append(self._debounce.trigger)
+        _hookJobFinished(ctx, self._onJobFinished)
         self._fillTable()
         self._renderState()
         qt.QTimer.singleShot(0, self.refresh)
@@ -777,6 +802,10 @@ class ReportCard:
         if event.get("event") in ("done", "error", "cancelled", "failed"):
             self._debounce.trigger()
 
+    def _onJobFinished(self, job):
+        if not self._cleanedUp:
+            self._debounce.trigger()
+
     def onStudyChanged(self):
         self._debounce.trigger()
 
@@ -790,6 +819,7 @@ class ReportCard:
             callbacks = getattr(self.ctx, name, [])
             if self._debounce.trigger in callbacks:
                 callbacks.remove(self._debounce.trigger)
+        _unhookJobFinished(self.ctx, self._onJobFinished)
 
 
 HEADER = {

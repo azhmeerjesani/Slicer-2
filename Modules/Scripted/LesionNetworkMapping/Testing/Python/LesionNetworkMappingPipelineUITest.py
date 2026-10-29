@@ -190,6 +190,12 @@ class LesionNetworkMappingPipelineUITest(unittest.TestCase):
         self.assertEqual(widget.computeButton.text, "Run everything · 12 lesions")
         self.assertTrue(widget.mapsOnlyButton.visible and widget.mapsOnlyButton.enabled)
         self.assertTrue(card.runButton.enabled, card.runButton.toolTip)
+        # The Report card and the battery strip before the run: no pipeline report, the null reference not run
+        report, battery = widget.ctx.card("report"), widget.ctx.card("battery")
+        _pump(200)
+        self.assertFalse(report.reportButton.enabled)
+        self.assertEqual({item["id"]: item["status"] for item in report.state.items}.get("E7"), "not_run")
+        self.assertEqual({dot["id"]: dot["colour"] for dot in battery.state.dots}.get("null_reference"), "grey")
         probe = _GapProbe()
         probe.start()
         card.applyMaxSeconds = 0.0
@@ -237,6 +243,11 @@ class LesionNetworkMappingPipelineUITest(unittest.TestCase):
             self.assertEqual(f.read(), self.participantsBytes, "participants.tsv was changed")
         self.assertEqual(card.noteLabel.text, "Statuses will update when the study is opened in Library.")
         self.assertEqual(self.cp.modelFor(job).statusText(), "Cohort · Report 100%")
+        # The Report card and the battery strip follow the end of the run by themselves (no refresh() call)
+        self.assertTrue(_wait(lambda: report.reportButton.enabled, 5), "the Report card did not refresh when Run everything finished")
+        self.assertEqual({item["id"]: item["status"] for item in report.state.items}.get("E7"), "done")
+        self.assertNotIn("Pipeline: not recorded", report.methodsView.toPlainText())
+        self.assertEqual({dot["id"]: dot["colour"] for dot in battery.state.dots}.get("null_reference"), "green", "the battery strip did not refresh when Run everything finished")
 
     def test_2_open_report_fallbacks(self):
         """Open report: the URL opener with report.html; when it refuses (or SLICER_STUDIO_WEB=1), the in-app viewer, else the path."""
