@@ -899,13 +899,19 @@ def reproduce_script(run_meta, info, lesions, preview_n=None):
     """reproduce.sh: the engine command line that recomputes the run's maps into $OUT.
 
     The script runs ``slicer-lnm engine`` when the ``slicer-lnm`` command (the wheel, the container image or
-    ``Slicer Studio.app/Contents/bin/slicer-lnm``) is on PATH or named by $SLICER_LNM, otherwise
-    ``PythonSlicer -m LesionNetworkMappingLib.engine`` with the library folder on PYTHONPATH. $PYTHONSLICER
-    forces the PythonSlicer route. Both run the same engine with the same arguments.
+    ``Slicer Studio.app/Contents/bin/slicer-lnm``) is named by $SLICER_LNM, is on PATH or is the one that wrote
+    the script, otherwise ``PythonSlicer -m LesionNetworkMappingLib.engine`` with the library folder on
+    PYTHONPATH: the PythonSlicer on PATH, else the PythonSlicer (or Python interpreter) that wrote the script.
+    $PYTHONSLICER forces the PythonSlicer route. Both run the same engine with the same arguments. The writing
+    commands are baked in so that ``sh reproduce.sh`` works from a plain terminal (a venv that is not activated,
+    or an export of the application, whose PythonSlicer is not on PATH).
     """
     from .connectome import MANIFEST_NAME
+    from .pipeline import _python_executable, _slicer_lnm_executable
 
     library_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    default_pythonslicer = shutil.which("PythonSlicer") or _python_executable()
+    default_slicer_lnm = _slicer_lnm_executable()
     arguments = _engine_arguments(run_meta or {}, info, lesions, preview_n)
     lines = [
         "#!/bin/sh",
@@ -913,13 +919,28 @@ def reproduce_script(run_meta, info, lesions, preview_n=None):
         "# Usage: [OUT=output_folder] [SLICER_LNM=/path/to/slicer-lnm | PYTHONSLICER=/path/to/Slicer/bin/PythonSlicer] sh reproduce.sh",
         f"# The connectome bundle and the lesion files must be available at the paths below; their sha256 are in provenance.json ({MANIFEST_NAME} sha256 {info.get('manifest_sha256') or 'n/a'}).",
         f"# {DISCLAIMER}",
-        "# Entry point: 'slicer-lnm engine' when slicer-lnm is on PATH (pip wheel, container image, Slicer Studio.app/Contents/bin) or $SLICER_LNM is set,",
-        "# otherwise 'PythonSlicer -m LesionNetworkMappingLib.engine' with LNM_LIBRARY_DIR on PYTHONPATH; setting $PYTHONSLICER forces PythonSlicer.",
+        "# Entry point: 'slicer-lnm engine' when slicer-lnm is $SLICER_LNM, is on PATH (pip wheel, container image, Slicer Studio.app/Contents/bin) or is the one that wrote this script,",
+        "# otherwise 'PythonSlicer -m LesionNetworkMappingLib.engine' with LNM_LIBRARY_DIR on PYTHONPATH (the PythonSlicer on PATH, else the one that wrote this script);",
+        "# setting $PYTHONSLICER forces PythonSlicer (a Python interpreter with numpy works too).",
         "# Both run the same engine; compare its library version with provenance.json when the maps differ.",
         "set -e",
+        f"DEFAULT_SLICER_LNM={shlex.quote(default_slicer_lnm or '')}",
+        f"DEFAULT_PYTHONSLICER={shlex.quote(default_pythonslicer or '')}",
         'OUT="${OUT:-reproduced}"',
-        'if [ -z "${PYTHONSLICER:-}" ] && { [ -n "${SLICER_LNM:-}" ] || command -v slicer-lnm >/dev/null 2>&1; }; then',
-        '  set -- "${SLICER_LNM:-slicer-lnm}" engine',
+        'LNM_ENTRY=""',
+        'if [ -z "${PYTHONSLICER:-}" ]; then',
+        '  if [ -n "${SLICER_LNM:-}" ]; then',
+        '    LNM_ENTRY="$SLICER_LNM"',
+        "  elif command -v slicer-lnm >/dev/null 2>&1; then",
+        '    LNM_ENTRY="slicer-lnm"',
+        '  elif [ -n "$DEFAULT_SLICER_LNM" ] && [ -x "$DEFAULT_SLICER_LNM" ]; then',
+        '    LNM_ENTRY="$DEFAULT_SLICER_LNM"',
+        '  elif ! command -v PythonSlicer >/dev/null 2>&1 && [ -n "$DEFAULT_PYTHONSLICER" ] && [ -x "$DEFAULT_PYTHONSLICER" ]; then',
+        '    PYTHONSLICER="$DEFAULT_PYTHONSLICER"',
+        "  fi",
+        "fi",
+        'if [ -n "$LNM_ENTRY" ]; then',
+        '  set -- "$LNM_ENTRY" engine',
         "else",
         '  PYTHONSLICER="${PYTHONSLICER:-PythonSlicer}"',
         f'  LNM_LIBRARY_DIR="${{LNM_LIBRARY_DIR:-{library_dir}}}"',

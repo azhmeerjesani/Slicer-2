@@ -526,6 +526,7 @@ class ReproduceEntryPointTest(unittest.TestCase):
         run_dir = os.path.join(cls.tmp, "run")
         code, _events, _out, err = cli("--bundle", syn["path"], "--lesion", cls.lesion, "--out", run_dir, "--run-json", os.path.join(run_dir, "run.json"), "--threads", "1", module="engine")
         assert code == 0, err
+        cls.run_dir = run_dir
         cls.files = export.export_run(run_dir, os.path.join(cls.tmp, "export"))
         cls.script = cls.files["reproduce"]
         cls.original = {os.path.basename(path): volume(path) for path in cls.files["maps"]}
@@ -596,6 +597,29 @@ class ReproduceEntryPointTest(unittest.TestCase):
     def test_slicer_lnm_variable(self):
         self.reproduce("named slicer-lnm", PATH=self.bin_python, SLICER_LNM=os.path.join(self.bin_lnm, "slicer-lnm"))
         self.assertEqual(list(self.logged()), ["slicer-lnm"])
+
+    def test_writer_commands_without_path(self):
+        """Neither command on PATH (a venv that is not activated, a Studio export): the commands that wrote the script run."""
+        system_path = os.pathsep.join(path for path in ("/usr/bin", "/bin") if os.path.isdir(path))
+        cases = (("baked slicer-lnm", os.path.join(self.bin_lnm, "slicer-lnm"), "slicer-lnm"), ("baked pythonslicer", "", "PythonSlicer"))
+        for name, slicer_lnm, expected in cases:
+            with self.subTest(name):
+                for path in (os.path.join(self.bin_lnm, "slicer-lnm.log"), os.path.join(self.bin_python, "PythonSlicer.log")):
+                    if os.path.exists(path):
+                        os.remove(path)
+                with (
+                    mock.patch.object(pipeline, "_slicer_lnm_executable", return_value=slicer_lnm),
+                    mock.patch.object(pipeline, "_python_executable", return_value=os.path.join(self.bin_python, "PythonSlicer")),
+                    mock.patch.object(export.shutil, "which", return_value=None),
+                ):
+                    script = export.export_run(self.run_dir, os.path.join(self.tmp, f"export {name}"))["reproduce"]
+                environment = {key: value for key, value in os.environ.items() if key not in ("PYTHONPATH", "PYTHONSLICER", "SLICER_LNM")}
+                environment.update({"OUT": os.path.join(self.tmp, name), "SLICER_LNM_OFFLINE": "1", "PATH": system_path})
+                result = subprocess.run([shutil.which("sh"), script], env=environment, capture_output=True, text=True, timeout=300, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+                self.assertEqual(list(self.logged()), [expected])
+                for name_, original in self.original.items():
+                    np.testing.assert_allclose(volume(os.path.join(self.tmp, name, name_)), original, rtol=0, atol=TOLERANCE, err_msg=name_)
 
 
 class PackagingTest(unittest.TestCase):
