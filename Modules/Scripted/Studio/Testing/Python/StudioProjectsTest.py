@@ -2368,6 +2368,67 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("Keep"))
         self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("New points"))
 
+    def test_46_root_move_across_two_mounts_of_one_disk_copies(self):
+        """Change folder > Move from a bind mount (the web build's /data, a Docker volume) to a folder of the same disk
+        (BB-1). Both have one st_dev, so the move took the rename path only, and rename(2) refuses to cross mount points
+        (EXDEV): nothing moved, "[Errno 18] Invalid cross-device link" and an empty new folder were left. It now copies,
+        checks and deletes, as between two disks. Here rename refuses EXDEV between the two folders, as two mounts do.
+        """
+        import errno
+        from unittest import mock
+
+        projects = self.projects
+        service = self._service()
+        volume, _path = self._userVolume()
+        project = self._projectFor(service)
+        self._save(service)
+        os.makedirs(os.path.join(self.root, "Studies", "Study A"))
+        with open(os.path.join(self.root, "Studies", "Study A", "study.json"), "w") as f:
+            json.dump({"name": "Study A"}, f)
+        os.environ.pop(projects.ROOT_ENVIRONMENT)
+        qt.QSettings().setValue(projects.ROOT_KEY, self.root)
+        newRoot = os.path.join(self.tempDir, "other mount", "Slicer Studio")
+        oldPrefix = os.path.normpath(self.root) + os.sep
+        newPrefix = os.path.normpath(newRoot) + os.sep
+        realRename = os.rename
+        refused = []
+
+        def crossMount(source, destination, *args, **kwargs):
+            if os.path.normpath(os.fspath(source)).startswith(oldPrefix) and os.path.normpath(os.fspath(destination)).startswith(newPrefix):
+                refused.append(os.fspath(source))
+                raise OSError(errno.EXDEV, "Invalid cross-device link", os.fspath(source), None, os.fspath(destination))
+            return realRename(source, destination, *args, **kwargs)
+
+        try:
+            with mock.patch.object(projects, "_sameVolume", return_value=True), mock.patch.object(projects.os, "rename", side_effect=crossMount):
+                moved = service.moveRoot(newRoot, moveContent=True)
+            self.assertTrue(refused, "the rename across the two mounts was tried and refused")
+            self.assertEqual(sorted(moved), sorted(["Projects", "Studies", projects.ABOUT_FILE]))
+            self.assertEqual(projects.root(), os.path.normpath(newRoot))
+            self.assertTrue(os.path.isfile(os.path.join(newRoot, "Studies", "Study A", "study.json")))
+            self.assertFalse(os.path.exists(os.path.join(self.root, "Projects")), "the originals are deleted after the copy")
+            self.assertFalse(os.path.exists(os.path.join(self.root, "Studies")))
+            self.assertIs(service.project, project)
+            self.assertTrue(project.path.startswith(newPrefix))
+            self.assertTrue(volume.GetStorageNode().GetFileName().startswith(newPrefix))
+            self._save(service)
+            self.assertTrue(os.path.isfile(project.scenePath))
+            # Another failure of the move leaves no empty new folder behind
+            failed = os.path.join(self.tempDir, "failed", "Slicer Studio")
+
+            def denied(source, destination, *args, **kwargs):
+                raise OSError(errno.EACCES, "Permission denied", os.fspath(source))
+
+            with mock.patch.object(projects, "_sameVolume", return_value=True), mock.patch.object(projects.os, "rename", side_effect=denied):
+                with self.assertRaises(OSError):
+                    projects.moveContent(newRoot, failed)
+            self.assertFalse(os.path.exists(failed), "no empty folder is left when nothing was moved")
+            self.assertTrue(os.path.isdir(os.path.join(newRoot, "Projects")), "the originals stay")
+        finally:
+            qt.QSettings().remove(projects.ROOT_KEY)
+            qt.QSettings().remove(projects.ROOT_CHOSEN_KEY)
+            os.environ[projects.ROOT_ENVIRONMENT] = self.root
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk

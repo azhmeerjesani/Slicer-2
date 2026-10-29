@@ -26,6 +26,8 @@ environment variable ``SLICER_STUDIO_PROJECTS_ROOT`` overrides both and skips th
 No function here imports numpy or runs at startup. Worker-safe functions (only the standard library) are marked so.
 """
 
+import contextlib
+import errno
 import json
 import logging
 import os
@@ -1108,10 +1110,17 @@ def _mergeMove(source, destination, sameVolume, progress=None):
         destination = os.path.join(os.path.dirname(destination), uniqueName(os.path.dirname(destination), os.path.basename(destination),
                                                                             isFile=os.path.isfile(source)))
     if sameVolume:
-        os.rename(source, destination)
-        if progress:
-            progress(os.path.basename(source))
-        return
+        try:
+            os.rename(source, destination)
+        except OSError as error:
+            # The same file system under two mount points (a bind mount, a Docker volume and a "-v" folder) has one
+            # st_dev, but rename(2) refuses to cross mount points: copy, check and delete instead
+            if error.errno != errno.EXDEV:
+                raise
+        else:
+            if progress:
+                progress(os.path.basename(source))
+            return
     if os.path.isdir(source):
         try:
             shutil.copytree(source, destination)
@@ -1185,12 +1194,19 @@ def moveContent(oldRoot, newRoot, progress=None):
     copied and checked), and before anything is created when ``newRoot`` is inside ``oldRoot``.
     """
     checkMoveTarget(oldRoot, newRoot)
+    created = not os.path.isdir(newRoot)
     os.makedirs(newRoot, exist_ok=True)
     sameVolume = _sameVolume(oldRoot, newRoot)
     moved = []
-    for name in movableItems(oldRoot):
-        _mergeMove(os.path.join(oldRoot, name), os.path.join(newRoot, name), sameVolume, progress)
-        moved.append(name)
+    try:
+        for name in movableItems(oldRoot):
+            _mergeMove(os.path.join(oldRoot, name), os.path.join(newRoot, name), sameVolume, progress)
+            moved.append(name)
+    except OSError:
+        if created and not moved:
+            with contextlib.suppress(OSError):
+                os.rmdir(newRoot)  # nothing was moved: leave no empty folder behind
+        raise
     return moved
 
 
