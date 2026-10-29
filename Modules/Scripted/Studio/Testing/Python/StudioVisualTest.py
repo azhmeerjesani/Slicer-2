@@ -603,6 +603,89 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
         self._pump()
         self.assertEqual(frame.frameShape, qt.QFrame.StyledPanel, "the classic presentation lost the frame of the tool grid")
 
+    def test_draw_inspector_padding_with_qt6_layout_margins(self):
+        """Qt 6: QLayout declares the ``contentsMargins`` property, so PythonQt gives a QMargins value and not the getter.
+
+        The tile grid inset called ``layout.contentsMargins()``, which raised "'QMargins' object is not callable" in the
+        middle of the studio presentation: Draw showed the classic Segment Editor (no Lesion card, no Save lesion, two
+        tile columns). Here the module layout behaves as with Qt 6 and Draw still gets the Studio presentation.
+        """
+        import SegmentEditor
+        from StudioLib import draw, importer
+
+        class Qt6Layout:
+            """A QLayout as PythonQt wraps it with Qt 6: ``contentsMargins`` is the property value."""
+
+            def __init__(self, layout):
+                object.__setattr__(self, "_layout", layout)
+
+            def __getattr__(self, name):
+                if name == "contentsMargins":
+                    return self._layout.contentsMargins()
+                return getattr(self._layout, name)
+
+        class Qt6LayoutOwner:
+            """A widget whose ``layout()`` is a ``Qt6Layout``."""
+
+            def __init__(self, widget):
+                object.__setattr__(self, "_widget", widget)
+
+            def __getattr__(self, name):
+                if name == "layout":
+                    return lambda: Qt6Layout(self._widget.layout())
+                return getattr(self._widget, name)
+
+        widget = slicer.modules.segmenteditor.widgetRepresentation().self()
+        realLayout = widget.layout
+        widget.layout = Qt6Layout(realLayout)
+
+        def restoreLayout():
+            widget.layout = realLayout
+
+        self._restores.append(restoreLayout)
+        studioShell = self._applyStudio()
+        self.mainWindow.showNormal()
+        self.mainWindow.resize(1366, 768)
+        self._wait(lambda: self.mainWindow.width <= 1366, 2000)
+        importer.startOnTemplate(shell=studioShell)
+        self._restores.append(importer._closeTemplateBanner)
+        self._pump(10)
+        self.assertEqual(studioShell.currentWorkspace(), "draw")
+        self.assertEqual(widget._appliedPresentation, "studio", "Draw shows the classic Segment Editor")
+        readout = self.mainWindow.findChild("QLabel", "StudioLesionReadout")
+        self.assertTrue(readout is not None and readout.isVisible(), "the Lesion card is not shown")
+        saveButtons = [button for button in self.mainWindow.findChildren("QPushButton") if "Save lesion" in str(button.text) and button.isVisible()]
+        self.assertTrue(saveButtons, "no Save lesion button")
+        self.assertEqual(widget.editor.effectColumnCount, widget.studioColumnCount(widget.parent.width))
+
+        # Every layout of the inset (module, editor, tile grid) with the Qt 6 behaviour
+        editor = widget.editor
+        frame = editor.findChild("QFrame", "EffectsGroupBox")
+        grid = frame.layout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        realChild = widget._child
+        widget.editor = Qt6LayoutOwner(editor)
+        widget._child = lambda className, name: Qt6LayoutOwner(frame) if name == "EffectsGroupBox" else realChild(className, name)
+        try:
+            widget._updateTileGridInset()
+        finally:
+            widget.editor = editor
+            del widget._child
+        outer = realLayout.contentsMargins()
+        inner = editor.layout().contentsMargins()
+        margins = grid.contentsMargins()
+        padding = SegmentEditor.STUDIO_INSPECTOR_PADDING
+        expected = (max(0, padding - outer.left() - inner.left()), 0, max(0, padding - outer.right() - inner.right()), 0)
+        self.assertEqual((margins.left(), margins.top(), margins.right(), margins.bottom()), expected)
+        self.assertIsNotNone(draw.lesionCard())
+
+        # The helper reads the margins with Qt 5 (method) and Qt 6 (property value)
+        layout = qt.QVBoxLayout()
+        layout.setContentsMargins(3, 4, 5, 6)
+        for candidate in (layout, Qt6Layout(layout)):
+            margins = SegmentEditor._layoutContentsMargins(candidate)
+            self.assertEqual((margins.left(), margins.top(), margins.right(), margins.bottom()), (3, 4, 5, 6))
+
     def test_draw_size_row_keeps_its_size_with_two_images_1366(self):
         """With a second image the source chip "on <scan> ▾" does not squeeze the Size control (1 / 3 / 6 / 12).
 

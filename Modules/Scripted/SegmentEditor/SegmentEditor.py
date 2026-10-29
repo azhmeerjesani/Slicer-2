@@ -122,6 +122,14 @@ def positionalKeyText(layoutIndex):
     return ""
 
 
+def _layoutContentsMargins(layout):
+    """The contents margins of ``layout`` (a QMargins) with Qt 5 and Qt 6: Qt 6 declares the ``contentsMargins`` property
+    on QLayout, and PythonQt then gives the property value instead of the getter method.
+    """
+    margins = layout.contentsMargins
+    return margins() if callable(margins) else margins
+
+
 def isEditableSourceVolume(node):
     """True if ``node`` may be a source volume of the studio presentation: a scalar volume that is not a
     reference image (Studio.Role figure or statmap), not a colour (vector) image and not a single slice.
@@ -795,12 +803,12 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         effectsGroupBox = self._child("QFrame", "EffectsGroupBox")
         if effectsGroupBox is None:
             return
-        outer = self.layout.contentsMargins()
-        inner = self.editor.layout().contentsMargins()
+        outer = _layoutContentsMargins(self.layout)
+        inner = _layoutContentsMargins(self.editor.layout())
         left = max(0, STUDIO_INSPECTOR_PADDING - outer.left() - inner.left())
         right = max(0, STUDIO_INSPECTOR_PADDING - outer.right() - inner.right())
         gridLayout = effectsGroupBox.layout()
-        margins = gridLayout.contentsMargins()
+        margins = _layoutContentsMargins(gridLayout)
         if (margins.left(), margins.top(), margins.right(), margins.bottom()) != (left, 0, right, 0):
             gridLayout.setContentsMargins(left, 0, right, 0)
 
