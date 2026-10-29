@@ -891,6 +891,85 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
         self.assertTrue(self._wait(overlay.legend.isVisible, 2000))
         self.assertTrue(overlay.chips.isVisible())
 
+    def test_map_legend_threshold_text_never_clips(self):
+        """A long threshold text in the 220 px map legend is elided with an ellipsis (rule name first, the value stays) and
+        the label's tooltip holds the whole text; a text that fits the label is shown whole, with no tooltip, even when it
+        fits by a pixel (the default FWE rule); the text is fitted again when the label's width changes.
+        """
+        from StudioLib import mappage
+
+        studioShell = self._applyStudio()
+        studioShell.switchTo("map")
+        self._pump(10)
+        overlay = mappage.overlay()
+        if overlay is None:
+            self.skipTest("the Map overlay is not available")
+        state = {"statistic": "T", "window": 4.0, "level": 0.0, "threshold": None, "thresholdText": "", "sign": "both", "opacity": 0.8, "outline": False}
+        label = overlay.thresholdLabel
+
+        def show(statistic, text):
+            state.update({"statistic": statistic, "thresholdText": text})
+            overlay.statisticLabel.setText(statistic)
+            overlay._showThreshold(text)
+            overlay.legend.layout().activate()
+            self._pump(3)
+            return str(label.text)
+
+        def fitsLabel(text):
+            return mappage._textWidth(label.font, text) <= label.width
+
+        overlay._state = state
+        overlay.place()
+        self.assertTrue(self._wait(overlay.legend.isVisible, 2000))
+        short = "FWE 5% · T ≥ 4.20"
+        self.assertEqual(show("T", short), short)
+        self.assertEqual(str(label.toolTip), "")
+        # The default rule's text fits the label by a pixel or so: it must not be elided (it was, with 12 px of slack)
+        fwe = "FWE (Bonferroni) · |T| ≥ 4.67"
+        seen = {}
+        for statistic, text, value in (("T", fwe, "|T| ≥ 4.67"),
+                                       ("T", "Top x% (N-independent) · T ≥ 2.28", "T ≥ 2.28"),
+                                       ("T", "|T| ≥ 7 convention (N≈1000) · |T| ≥ 7.00", "|T| ≥ 7.00"),
+                                       ("Fz", "Top x% (N-independent) · |Fz| ≥ 0.0304", "|Fz| ≥ 0.0304")):
+            shown = show(statistic, text)
+            seen[text] = fits = fitsLabel(text)
+            self.assertTrue(shown.endswith(value), shown)
+            self.assertTrue(fitsLabel(shown), (shown, label.width))
+            self.assertLessEqual(label.x + label.width, overlay.legend.width)
+            if fits:
+                # Shown whole, no ellipsis, no tooltip: a text that fits is never shortened
+                self.assertEqual(shown, text)
+                self.assertEqual(str(label.toolTip), "")
+            else:
+                self.assertIn("…", shown)
+                self.assertIn(text, str(label.toolTip))
+        # The long texts never fit a 220 px legend, so the elision branch was exercised
+        self.assertFalse(all(seen.values()), seen)
+        # In any font: a text that fits the label by less than one narrow glyph is shown whole (no slack, and the card's
+        # 1 px border counted)
+        show("T", short)
+        tight = fwe
+        while True:
+            candidate = tight.replace(")", "i)", 1)
+            if not fitsLabel(candidate):
+                break
+            tight = candidate
+        self.assertEqual(show("T", tight), tight)
+        self.assertEqual(str(label.toolTip), "")
+        # A wider statistic shrinks the label: the text is fitted again to the new width without a new threshold text
+        text = "|T| ≥ 7 convention (N≈1000) · |T| ≥ 7.00"
+        shown = show("T", text)
+        widthBefore = label.width
+        overlay.statisticLabel.setText("|Fz|")
+        overlay.legend.layout().activate()
+        self._pump(3)
+        self.assertLess(label.width, widthBefore)
+        refitted = str(label.text)
+        self.assertNotEqual(refitted, shown)
+        self.assertTrue(refitted.endswith("|T| ≥ 7.00"), refitted)
+        self.assertTrue(fitsLabel(refitted), (refitted, label.width))
+        self.assertIn(text, str(label.toolTip))
+
     def test_map_overlay_follows_one_up_sagittal_coronal(self):
         """The map legend and layer chips follow the only slice view of a one-up Sagittal or Coronal layout, not Red only."""
         from StudioLib import mappage

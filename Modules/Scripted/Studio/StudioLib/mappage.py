@@ -358,6 +358,8 @@ def _restoreActionShortcuts():
 
 #: Size of the legend card and the margin from the edges of the view
 LEGEND_WIDTH = 220
+#: Gap (px) between the statistic and the threshold text in the top row of the legend
+LEGEND_ROW_SPACING = 8
 #: Size (px) of the lesion-coloured outline swatch on the "Lesion outline" chip
 LESION_SWATCH_SIZE = 10
 OVERLAY_MARGIN = 10
@@ -367,6 +369,41 @@ LEGEND_BAR_HEIGHT = 8
 OVERLAY_VIEW = "Red"
 #: Height reserved at the bottom of the view for its corner text (the image name) under the layer chips
 CORNER_TEXT_HEIGHT = 22
+
+
+def _textWidth(font, text):
+    metrics = qt.QFontMetrics(font)
+    return metrics.horizontalAdvance(text) if hasattr(metrics, "horizontalAdvance") else metrics.width(text)
+
+
+def _elideRule(text, font, width):
+    """``text`` shortened to fit ``width`` px: when it does not fit, the rule name before the last " · " is elided (ellipsis at
+    its end) and the value after it is kept; a text without that separator, or a value that alone is too wide, is elided in the
+    middle.
+    """
+    if _textWidth(font, text) <= width:
+        return text
+    metrics = qt.QFontMetrics(font)
+    head, separator, tail = text.rpartition(" · ")
+    if separator:
+        tail = separator + tail
+        room = width - _textWidth(font, tail)
+        if room >= _textWidth(font, "…") * 3:
+            return str(metrics.elidedText(head, qt.Qt.ElideRight, room)) + tail
+    return str(metrics.elidedText(text, qt.Qt.ElideMiddle, width))
+
+
+class _ThresholdFilter(qt.QObject):
+    """Fits the threshold text of the legend to the width the layout really gives its label (``MapOverlay._fitThreshold``)."""
+
+    def __init__(self, overlay):
+        qt.QObject.__init__(self)
+        self.overlay = overlay
+
+    def eventFilter(self, obj, event):
+        if event.type() == qt.QEvent.Resize:
+            self.overlay._fitThreshold()
+        return False
 
 
 class _OverlayFilter(qt.QObject):
@@ -407,14 +444,20 @@ class MapOverlay:
         layout.setContentsMargins(12, 9, 12, 8)
         layout.setSpacing(6)
         top = qt.QHBoxLayout()
-        top.setSpacing(8)
+        top.setSpacing(LEGEND_ROW_SPACING)
         self.statisticLabel = ui.label("T", "caption", "text", "StudioMapLegendStatistic")
         ui.setText(self.statisticLabel, "label")
         top.addWidget(self.statisticLabel)
-        top.addStretch(1)
         self.thresholdLabel = ui.label("", "caption", "text2", "StudioMapLegendThreshold")
         ui.tabular(self.thresholdLabel)
-        top.addWidget(self.thresholdLabel)
+        # The text is elided by hand (``_showThreshold``) so that it never clips: let the layout give it what is left, and
+        # fit the text again to that width whenever it changes (the label's resize events)
+        self.thresholdLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+        self.thresholdLabel.setAlignment(qt.Qt.AlignRight | qt.Qt.AlignVCenter)
+        self._thresholdText = ""
+        self._thresholdFilter = _ThresholdFilter(self)
+        self.thresholdLabel.installEventFilter(self._thresholdFilter)
+        top.addWidget(self.thresholdLabel, 1)
         layout.addLayout(top)
         self.bar = qt.QLabel()
         self.bar.setObjectName("StudioMapLegendBar")
@@ -539,7 +582,7 @@ class MapOverlay:
             return
         statistic = str(state["statistic"])
         self.statisticLabel.setText(statistic)
-        self.thresholdLabel.setText(str(state["thresholdText"]))
+        self._showThreshold(str(state["thresholdText"]))
         window = float(state["window"] or 0.0)
         level = float(state.get("level") or 0.0)
         for tick, value in zip(self.tickLabels, (level - window, level, level + window), strict=True):
@@ -553,6 +596,37 @@ class MapOverlay:
         self._paintLesionSwatch()
         lesion.setVisible(bool(state["outline"]))
         self.place()
+
+    def _showThreshold(self, text):
+        """The threshold text in the 220 px legend, never clipped: a text that does not fit next to the statistic is shortened
+        with an ellipsis in its rule name (the part before the last " · ") so that the value stays readable, and the label's
+        tooltip holds the whole text. A text that fits is shown whole.
+        """
+        self._thresholdText = str(text)
+        label = self.thresholdLabel
+        # The style sheet sets the fonts and the card's border: measure polished, also before the legend was first shown
+        for widget in (self.legend, self.statisticLabel, label):
+            widget.ensurePolished()
+        # What the layout will leave to the label (the statistic keeps its size hint, the gap is the row's spacing, the card's
+        # border and margins are off the contents rect) with no slack, so a text that fits is shown whole; the label's resize
+        # fits the text again to the width it really gets (``_fitThreshold``)
+        margins = self.legend.layout().contentsMargins()
+        available = (self.legend.contentsRect().width() - margins.left() - margins.right()
+                     - self.statisticLabel.sizeHint.width() - LEGEND_ROW_SPACING)
+        self._fitThreshold(available)
+
+    def _fitThreshold(self, width=None):
+        """Show the threshold text elided to ``width`` px (by default the width the layout gave the label)."""
+        label = self.thresholdLabel
+        if not self.ui._isAlive(label):
+            return
+        if width is None:
+            width = label.contentsRect().width()
+        text = self._thresholdText
+        shown = _elideRule(text, label.font, max(0, width))
+        if str(label.text) != shown:
+            label.setText(shown)
+        label.setToolTip(text if shown != text else "")
 
     def _updateTemplateChip(self, sliceWidget):
         """The template chip names the image under the map in the main view."""
