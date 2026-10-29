@@ -1520,6 +1520,33 @@ class NormalizeController(VTKObservationMixin):
                         segmentation = node
         return volume, segmentation
 
+    @staticmethod
+    def _previousNodes(request, result):
+        """The volume and segmentation of an earlier result of the same native lesion in the same space, or (None, None).
+
+        A new registration of an edited lesion (Normalize again, Re-register, ⋯ Redo) replaces their voxels instead of
+        adding a second MNI lesion: the Map seed and every other reference keep following the lesion (one MNI lesion per
+        native lesion and template). A segmentation that holds the run's own lesion before an "Update MNI lesion" comes
+        first; else the most recent one. The volume is the one made with that segmentation (same reference and run).
+        """
+        native = request.segmentationNode if request is not None else None
+        if native is None:
+            return None, None
+        origin = f"{native.GetID()}|{request.segmentId or ''}"
+        space = spaceAttributeValue(result.templateId, result.record)
+        candidates = [node for node in slicer.util.getNodesByClass("vtkMRMLSegmentationNode")
+                      if node.GetAttribute(NORMALIZED_FROM_ATTRIBUTE) == origin and node.GetAttribute(SPACE_ATTRIBUTE) == space
+                      and node.GetAttribute(NORMALIZATION_ATTRIBUTE)]
+        if not candidates:
+            return None, None
+        runOf = lambda node: (node.GetAttribute(FINGERPRINT_ATTRIBUTE) or "").split("+edit-")[0]  # noqa: E731
+        own = [node for node in candidates if runOf(node) == (result.fingerprint or "")]
+        segmentation = own[0] if own else candidates[-1]
+        reference, fingerprint = segmentation.GetAttribute(NORMALIZATION_ATTRIBUTE), runOf(segmentation)
+        volume = next((node for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")
+                       if node.GetAttribute(NORMALIZATION_ATTRIBUTE) == reference and node.GetAttribute(FINGERPRINT_ATTRIBUTE) == fingerprint), None)
+        return volume, segmentation
+
     def createNodes(self, loaded, status, request):
         """Main thread: the warped scan volume and the template-space lesion segmentation of a loaded result."""
         result = NormalizeResult(loaded["outDir"], loaded["record"], loaded["outputs"], status)
@@ -1534,8 +1561,13 @@ class NormalizeController(VTKObservationMixin):
             result.nativeSegmentId = request.segmentId
         provenance = result.provenancePath
         volume, segmentation = self._existingNodes(provenance, result.fingerprint)
+        # A new registration of the same native lesion (edited, or other options) replaces the earlier result's nodes
+        previousVolume, previousSegmentation = self._previousNodes(request, result) if segmentation is None else (None, None)
         scanName = scanNode.GetName() if scanNode is not None else (result.record.get("subject") or "scan")
-        if volume is None and "scan" in loaded:
+        if volume is None and previousVolume is not None and "scan" in loaded:
+            volume = previousVolume
+            self._replaceScan(volume, loaded["scan"], result)
+        elif volume is None and "scan" in loaded:
             scan = loaded["scan"]
             # The display node comes first, with AutoWindowLevel off: no histogram of the 8.5 M voxels on the main thread
             display = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeDisplayNode")
@@ -1551,6 +1583,9 @@ class NormalizeController(VTKObservationMixin):
             image.GetPointData().SetScalars(scan["scalars"])
             volume.SetIJKToRASMatrix(_arrayToMatrix(scan["affine"]))
             volume.SetAndObserveImageData(image)
+        if previousSegmentation is not None:
+            segmentation = previousSegmentation
+            self._replaceLesion(segmentation, loaded.get("lesion"), result, volume)
         if segmentation is None:
             segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", slicer.mrmlScene.GenerateUniqueName(f"Lesion ({templateName(templateId)})"))
             segmentation.CreateDefaultDisplayNodes()
@@ -1570,6 +1605,38 @@ class NormalizeController(VTKObservationMixin):
         segmentIds = segmentation.GetSegmentation().GetSegmentIDs()
         result.segmentId = LESION_SEGMENT if segmentation.GetSegmentation().GetSegment(LESION_SEGMENT) is not None else (segmentIds[0] if segmentIds else None)
         return result
+
+    @staticmethod
+    def _replaceScan(volume, scan, result):
+        """Replace the warped scan of an earlier result in place (``createNodes()``: same node, the new run's voxels)."""
+        display = volume.GetDisplayNode()
+        if display is not None:
+            display.AutoWindowLevelOff()
+            display.SetWindowLevelMinMax(*scan["window"])
+        image = vtk.vtkImageData()
+        shape = scan["shape"]
+        image.SetDimensions(int(shape[0]), int(shape[1]), int(shape[2]))
+        image.GetPointData().SetScalars(scan["scalars"])
+        volume.SetIJKToRASMatrix(_arrayToMatrix(scan["affine"]))
+        volume.SetAndObserveImageData(image)
+        NormalizeController._tag(volume, result)
+
+    @staticmethod
+    def _replaceLesion(segmentation, mask, result, volume=None):
+        """Replace the MNI lesion of an earlier result in place (``createNodes()``): the run's lesion, the run's tags."""
+        if volume is not None:
+            segmentation.SetReferenceImageGeometryParameterFromVolumeNode(volume)
+        if segmentation.GetSegmentation().GetSegment(LESION_SEGMENT) is None:
+            segmentation.GetSegmentation().AddEmptySegment(LESION_SEGMENT, LESION_SEGMENT, LESION_COLOR)
+        if mask is not None and mask.get("kji") is not None:
+            labelmap = _orientedLabelmap(mask)
+        else:
+            labelmap = slicer.vtkOrientedImageData()
+            labelmap.SetExtent(0, -1, 0, -1, 0, -1)
+            labelmap.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 1)
+        slicer.vtkSlicerSegmentationsModuleLogic.SetBinaryLabelmapToSegment(labelmap, segmentation, LESION_SEGMENT)
+        NormalizeController._tag(segmentation, result)
+        segmentation.RemoveAttribute(LESION_WARP_ATTRIBUTE)  # the warp of an "Update MNI lesion" of the earlier run
 
     @staticmethod
     def _tag(node, result):
@@ -1896,7 +1963,7 @@ class NormalizeController(VTKObservationMixin):
         """Replace the voxels of the MNI lesion segment in one step.
 
         The segmentation then no longer holds the run's lesion: its fingerprint is changed so that a later reuse
-        of the run (same fingerprint) makes a new segmentation from the run's lesion instead of returning this one.
+        of the run (same fingerprint) does not return it as it is but puts the run's lesion back (``_previousNodes()``).
         """
         segmentation = result.segmentationNode
         if segmentation is None or not slicer.mrmlScene.IsNodePresent(segmentation) or result.segmentId is None:

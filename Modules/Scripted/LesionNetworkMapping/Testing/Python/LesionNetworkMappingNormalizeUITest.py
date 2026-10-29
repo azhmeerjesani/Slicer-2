@@ -447,11 +447,69 @@ class LesionNetworkMappingNormalizeUITest(unittest.TestCase):
         self.assertTrue(self._cardVisible())
         result = self._runAndWait(timeoutS=30.0)
         self.assertEqual(result.status, "reused")
-        self.assertIsNot(result.segmentationNode, edited)
+        # The same MNI lesion node (the Map seed keeps following it) holds the run's lesion again, tagged with the run
+        self.assertIs(result.segmentationNode, edited)
+        self.assertEqual(edited.GetAttribute(self.nc.FINGERPRINT_ATTRIBUTE), result.fingerprint or "")
+        self.assertFalse(edited.GetAttribute(self.nc.LESION_WARP_ATTRIBUTE))
         self.assertIs(result.volumeNode, self.result.volumeNode)  # the warped scan is unchanged and reused
         voxels = int(np.count_nonzero(slicer.util.arrayFromSegmentBinaryLabelmap(result.segmentationNode, "Lesion", result.volumeNode)))
         self.assertLessEqual(abs(voxels - self.mniVoxels), 0.02 * self.mniVoxels)
         self.assertFalse(controller.edited)
+
+    def test_07c_reregister_replaces_previous_result(self):
+        """A new registration of the edited lesion (Normalize again / Re-register) replaces the earlier MNI lesion and scan in place.
+
+        Regression (bug bash BB-1): it added "Lesion (…)_1" and a second warped scan, and the Map seed chosen with
+        Use for Map stayed on the outdated MNI lesion.
+        """
+        import numpy as np
+
+        nc = self.nc
+        controller = self.card.controller
+        previous = controller.result
+        self.assertIsNotNone(previous)
+        segmentation, volume = previous.segmentationNode, previous.volumeNode
+        self.ctx.setSeed(segmentation, "Lesion")  # what Use for Map does
+        before = int(np.count_nonzero(slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, "Lesion", volume)))
+        nodesBefore = (self._segmentationNodes(), self._volumeNodes())
+        # An edit far outside the normalized lesion: a new registration (new fingerprint), not an update
+        array = slicer.util.arrayFromSegmentBinaryLabelmap(self.native, self.nativeSegmentId, self.scan)
+        nz = np.argwhere(array > 0)
+        low = nz.min(axis=0)
+        k, j, _i = (int(value) for value in nz.mean(axis=0))
+        i0 = max(2, int(low[2]) - 14)
+        array[k - 3:k + 3, j - 3:j + 3, i0:i0 + 6] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, self.native, self.nativeSegmentId, self.scan)
+        self.assertTrue(_wait(lambda: controller.needsReregister, 5.0))
+        done, failed = [], []
+        controller.resultReady.append(done.append)
+        controller.failed.append(failed.append)
+        try:
+            self.assertTrue(controller.start(previous.request.copy(quality="affine")))
+            self.assertTrue(_wait(lambda: done or failed or controller.state in ("cancelled", "failed"), 90.0), controller.state)
+        finally:
+            controller.resultReady.remove(done.append)
+            controller.failed.remove(failed.append)
+        _pump(300)
+        try:
+            self.assertFalse(failed, failed[0]["message"] if failed else "")
+            result = done[0]
+            self.assertNotEqual(result.fingerprint, previous.fingerprint)
+            # One MNI lesion and one warped scan per native lesion and template: the same nodes, no new ones
+            self.assertIs(result.segmentationNode, segmentation)
+            self.assertIs(result.volumeNode, volume)
+            self.assertEqual((self._segmentationNodes(), self._volumeNodes()), nodesBefore)
+            for node in (segmentation, volume):
+                self.assertEqual(node.GetAttribute(nc.FINGERPRINT_ATTRIBUTE), result.fingerprint or "")
+                self.assertEqual(node.GetAttribute(nc.NORMALIZATION_ATTRIBUTE), result.reference)
+            self.assertEqual(segmentation.GetAttribute(nc.NORMALIZED_FROM_ATTRIBUTE), f"{self.native.GetID()}|{self.nativeSegmentId}")
+            after = int(np.count_nonzero(slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, "Lesion", volume)))
+            self.assertGreater(after, before)  # the seed holds the new registration's lesion (with the added voxels)
+            self.assertEqual(self.ctx.seed(), (segmentation, "Lesion"))
+        finally:
+            # Later tests use the original native lesion
+            slicer.util.updateSegmentBinaryLabelmapFromArray(self.nativeOriginal, self.native, self.nativeSegmentId, self.scan)
+            _pump(800)
 
     #
     # Draw card (Studio)
