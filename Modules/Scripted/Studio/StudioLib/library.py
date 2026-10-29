@@ -1109,15 +1109,43 @@ def continueInDraw(shell=None, segmentationNode=None, volumeNode=None):
     return lesion
 
 
+def templateToDrawOn():
+    """The template that "New lesion on template" starts the lesion on (None without a template).
+
+    With several templates in the scene this is the one the user draws on: the template that Draw edits, else the template
+    of a template lesion with strokes (what offers the button; the current lesion first), and only then the first template
+    of the scene.
+    """
+    templates = [node for node in scanNodes() if isTemplateNode(node)]
+    if not templates:
+        return None
+
+    def listed(node):
+        return next((template for template in templates if _sameNode(template, node)), None)
+
+    editor = _segmentEditor()
+    template = listed(editor.sourceVolumeNode() if editor is not None else None)
+    if template is not None:
+        return template
+    model = _Model()
+    current = model.currentLesion()
+    importer = _importer()
+    for lesion in ([current] if current is not None else []) + model.templateLesions():
+        template = listed(model.scanOf.get(lesion.GetID()))
+        if template is not None and not importer.isSegmentationEmpty(lesion):
+            return template
+    return templates[0]
+
+
 def newLesionOnTemplate(shell=None):
     """"New lesion on template": a new empty lesion on the template (the plain "Start on MNI template" continues the existing
     one), shown in Draw. Return it (None without a template).
     """
     shell = shell if shell is not None else _shell()
-    templates = [node for node in scanNodes() if isTemplateNode(node)]
-    if not templates:
+    template = templateToDrawOn()
+    if template is None:
         return None
-    lesion = _importer().newLesionSegmentation(templates[0], shell=shell)
+    lesion = _importer().newLesionSegmentation(template, shell=shell)
     if lesion is not None:
         _switchToDraw(shell)
     return lesion

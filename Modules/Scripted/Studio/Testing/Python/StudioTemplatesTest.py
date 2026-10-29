@@ -945,3 +945,38 @@ class StudioTemplatesTest(unittest.TestCase):
         self.assertEqual(sorted(volume.GetImageData().GetDimensions()), sorted(self.bundledShape[:3]))
         self.assertIsNone(oldVolume.GetAttribute("Studio.TemplateId"), "the stale volume no longer carries the id")
         self.assertEqual(templates.templateOfNode(volume).id, second.id)
+
+    def test_18_new_lesion_on_template_uses_the_drawn_template(self):
+        """Two templates in the scene: Library's "New lesion on template" starts the lesion on the template that the user draws
+        on, whatever the scene order (it took the first template of the scene), also when Draw no longer edits it.
+        """
+        from StudioLib import importer, library
+
+        templates = self.templates
+        shell = self._shell()
+        user = self._add(name="Lab ICBM")
+        role = slicer.vtkMRMLSegmentationNode.GetReferenceImageGeometryReferenceRole()
+        for order in ((templates.BUILTIN_DEFAULT, user.id), (user.id, templates.BUILTIN_DEFAULT)):
+            for editorCleared in (False, True):
+                slicer.mrmlScene.Clear(0)
+                started = [importer.startOnTemplate(shell=shell, templateId=templateId) for templateId in order]
+                self.assertEqual(len({volume.GetID() for volume, _segmentation in started}), 2, order)
+                # Strokes on the lesion of the last template started: the one Draw edits
+                volume, segmentation = started[-1]
+                array = np.zeros(slicer.util.arrayFromVolume(volume).shape, np.uint8)
+                k, j, i = (n // 2 for n in array.shape)
+                array[k - 3:k + 3, j - 3:j + 3, i - 3:i + 3] = 1
+                slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentation, segmentation.GetSegmentation().GetNthSegmentID(0), volume)
+                editor = slicer.modules.SegmentEditorWidget.editor
+                self.assertEqual(editor.sourceVolumeNode().GetID(), volume.GetID())
+                if editorCleared:
+                    editor.setSegmentationNode(None)
+                    editor.setSourceVolumeNode(None)
+                lesion = library.newLesionOnTemplate(shell)
+                self.assertIsNotNone(lesion)
+                reference = lesion.GetNodeReference(role)
+                self.assertIsNotNone(reference)
+                self.assertEqual(reference.GetName(), volume.GetName(), (order, editorCleared))
+                self.assertEqual(reference.GetID(), volume.GetID(), (order, editorCleared))
+                # Draw now edits the new (empty) lesion on that template: the next one goes there too
+                self.assertEqual(library.templateToDrawOn().GetID(), volume.GetID(), (order, editorCleared))
