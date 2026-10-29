@@ -30,7 +30,7 @@ participants.tsv)::
 
     <study>/derivatives/lesions/group_space-<sp>_desc-overlapCount_map.nii.gz   int16 counts (+ .json)
     <study>/derivatives/lesions/group_space-<sp>_desc-overlapPct_map.nii.gz     float32 percent (+ .json)
-    <study>/derivatives/lnm/lesionset.json     {"format": "slicer-lnm-lesionset", "version": 1, ...}
+    <study>/derivatives/lnm/lesionset.json     {"format": "slicer-lnm-lesionset", "version": 1, "inputs", ...}
     inbox (source "lesionset"): gm_frac, wm_frac, csf_frac, hemisphere, and dimensionality for rows
                                 that have none
 
@@ -56,6 +56,8 @@ if __name__ == "__main__":
     set_blas_threads(sys.argv[1:])  # before numpy is imported: BLAS reads these variables once
 
 import datetime
+import hashlib
+import json
 import math
 import re
 import time
@@ -66,7 +68,7 @@ import numpy as np
 from . import jobs, lesionops
 from .geometry import GRID_BY_ID, Grid, GridSpec, detect_grid_candidates, resample_to_grid, space_family
 from .nifti import read_nifti, read_nifti_header, write_like, write_nifti
-from .study import Study, is_missing
+from .study import Study, is_included, is_missing
 
 FORMAT = "slicer-lnm-lesionset"
 VERSION = 1
@@ -1200,6 +1202,36 @@ def posted_values(occ, summary):
     return rows
 
 
+#: Row cells that decide which lesions a check uses and how it groups them (the fingerprint of :func:`input_fingerprint`)
+INPUT_COLUMNS = ("include", "qc", "review_status", "trace_method", "norm_method", "norm_qc", "group", "source_type", "lesion")
+
+
+def input_fingerprint(study):
+    """A digest of what a lesion-set check reads: the rows' :data:`INPUT_COLUMNS` and the size and time of each included lesion file.
+
+    Stored in lesionset.json (``inputs``): a recorded summary whose fingerprint differs from the study's current one is out of
+    date (a lesion was edited, replaced, included or excluded, or a group changed). Only a digest is stored, never a path.
+    The columns that the check itself posts (:data:`POSTED_COLUMNS`) are not part of it.
+    """
+    if not isinstance(study, Study):
+        study = Study.open(study)
+    items = []
+    for row in study.subjects:
+        cells = [str(row.get("participant_id") or "")]
+        cells += ["" if is_missing(row.get(column)) else str(row.get(column)).strip() for column in INPUT_COLUMNS]
+        cells[1] = "1" if is_included(row) else "0"
+        stamp = None
+        if cells[1] == "1" and not is_missing(row.get("lesion")):
+            try:
+                stat = os.stat(study.abspath(row["lesion"]))
+                stamp = [int(stat.st_size), int(stat.st_mtime_ns // 1_000_000)]
+            except (OSError, TypeError, ValueError):
+                stamp = None
+        items.append([cells, stamp])
+    payload = json.dumps({"review_required": bool(study.review_required), "rows": items}, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+
 def lesionset_path(study, out_dir=None):
     root = study.path if isinstance(study, Study) else os.fspath(study)
     return os.path.join(out_dir or os.path.join(root, "derivatives", "lnm"), LESIONSET_JSON)
@@ -1239,6 +1271,7 @@ def run(study, grid=None, priors=None, out_dir=None, groups=None, binarize_at=BI
     """
     if not isinstance(study, Study):
         study = Study.open(study)
+    inputs = input_fingerprint(study)  # before loading: an edit made while the check runs makes the result out of date
     occ = load_occupancies(study, grid, groups=groups, probabilistic=probabilistic, space=space, template_dirs=template_dirs, cancel=cancel, progress=progress)
     if isinstance(priors, (str, os.PathLike)):
         folder = priors
@@ -1255,7 +1288,7 @@ def run(study, grid=None, priors=None, out_dir=None, groups=None, binarize_at=BI
         controls = {sid: covariates[sid] for sid, group in zip(occ.sids, occ.groups, strict=True) if group == "control"}
         matched = {"name": match["name"], **matched_subsample(cases, controls, match["covariates"], seed=match.get("seed", 0), ratio=match.get("ratio", 1))}
     outputs = {"overlap_count": _out_rel(study.path, count_path), "overlap_pct": _out_rel(study.path, percent_path)}
-    path, inbox = write_lesionset_json(study, summary, occ, out_dir=out_dir, post=post, outputs=outputs, extra={"matched": matched} if matched else None)
+    path, inbox = write_lesionset_json(study, summary, occ, out_dir=out_dir, post=post, outputs=outputs, extra={"inputs": inputs, **({"matched": matched} if matched else {})})
     return {"summary": summary, "lesionset": path, "inbox": inbox, "overlap": [count_path, percent_path], "matched": matched, "lesions": occ}
 
 

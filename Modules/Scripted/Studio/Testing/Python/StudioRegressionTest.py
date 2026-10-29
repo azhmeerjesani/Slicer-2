@@ -49,6 +49,11 @@ Run with the main window and testing enabled::
   (Case / Control / —) and the score line, its Case section hides the symptom and domain fields (and writes neither), and the
   Cohort diagnostics card shows the number of lesions without the case/control split or the balance; without blinding they
   are all shown again.
+- ``test_19_cohort_diagnostics_out_of_date_after_lesion_edit`` (BB-1): after a lesion of the study is edited, the Cohort
+  diagnostics card says that its result (and the overlap maps, gallery and case table of the Lesion overview) is out of date,
+  also when the recorded lesionset.json is shown again by a new card; the overlap volumes in the views are renamed
+  "(out of date)"; "Create volume-matched control subset" stores nothing until the lesion set is checked again (it matched on
+  volumes that no longer existed). A new check is current again.
 - ``test_10_scripted_module_ui_widgets`` (BB-1): the build has the Qt Designer plugins of CTK and MRML, so that
   ``slicer.util.loadUI`` creates the CTK and qMRML widgets of a scripted module's ``.ui`` file (a ``qMRMLWidget`` root, a
   ``qMRMLNodeComboBox``, a ``ctkCollapsibleButton``), and Line Profile, Vector to Scalar Volume and Surface Toolbox set up
@@ -1403,6 +1408,116 @@ class StudioRegressionTest(unittest.TestCase):
             for widget in (subjectCard.widget if subjectCard is not None else None, section.widget if section is not None else None):
                 if widget is not None:
                     widget.deleteLater()
+            study_ui.closeStudy()
+            pump()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
+
+    # Cohort diagnostics after a lesion edit (BB-1)
+
+    def test_19_cohort_diagnostics_out_of_date_after_lesion_edit(self):
+        from LesionNetworkMappingLib import nifti
+
+        from StudioLib import libcard_cohort, study_ui
+
+        if not study_ui.isAvailable():
+            self.skipTest("needs the lesion network mapping library")
+        rows = [(f"sub-0{index}", {"group": "case" if index <= 3 else "control"}, False) for index in range(1, 7)]
+        study = self._study(rows)
+        card = second = None
+
+        def pump():
+            for _ in range(4):
+                slicer.app.processEvents()
+
+        def stale(widget):
+            return not widget.staleLabel.isHidden() and "out of date" in str(widget.statusLabel.text)
+
+        try:
+            session = study_ui.openStudy(study.path, showLibrary=False)
+            self.assertIsNotNone(session)
+            card = libcard_cohort.CohortCard(session)
+            card.widget.show()
+            card.refresh()
+            self.assertTrue(card.overview(), "the Lesion overview did not start")
+            self.assertTrue(card.worker.waitForIdle(120))
+            pump()
+            self.assertIsNotNone(card.result and card.result.get("summary"))
+            self.assertFalse(card.stale)
+            self.assertFalse(card.overviewStale)
+            self.assertFalse(stale(card), card.statusLabel.text)
+            def countNode():
+                found = [node for node in libcard_cohort.overlapNodes() if node.GetAttribute(libcard_cohort.OVERLAP_ATTRIBUTE) == "count"]
+                return found[0] if len(found) == 1 else None
+
+            count = countNode()
+            self.assertIsNotNone(count, "the overlap count is not in the views")
+            self.assertEqual(count.GetName(), libcard_cohort.COUNT_NODE)
+            recorded = json.load(open(os.path.join(study.path, "derivatives", "lnm", "lesionset.json"), encoding="utf-8"))
+            self.assertEqual(recorded.get("inputs"), card.result["inputs"])
+            self.assertEqual(recorded["gallery"].get("inputs"), card.result["inputs"])
+            card.refresh()
+            self.assertFalse(card.stale, "a result is out of date although no lesion changed")
+
+            # Edit sub-02's lesion (as Done in Draw writes it): a larger lesion
+            path = session.study.abspath(session.study.subject("sub-02")["lesion"])
+            affine = np.diag([2.0, 2.0, 2.0, 1.0])
+            affine[:3, 3] = [-20.0, -20.0, -20.0]
+            block = np.zeros((20, 20, 20), np.uint8)
+            block[4:14, 4:14, 4:14] = 1
+            nifti.write_nifti(path, block, affine)
+            later = time.time() + 2.0
+            os.utime(path, (later, later))
+            card.refresh()
+            pump()
+            self.assertTrue(card.stale, "the card shows the result from before the lesion edit as current")
+            self.assertTrue(stale(card), card.statusLabel.text)
+            self.assertTrue(card.overviewStale)
+            self.assertIn("out of date", str(card.overviewLabel.text))
+            self.assertFalse(card.matchButton.enabled)
+            self.assertTrue(count.GetName().endswith(libcard_cohort.OUT_OF_DATE_SUFFIX), count.GetName())
+            self.assertEqual(count.GetAttribute(libcard_cohort.OUT_OF_DATE_ATTRIBUTE), "1")
+            card.refresh()
+            self.assertEqual(count.GetName().count(libcard_cohort.OUT_OF_DATE_SUFFIX.strip()), 1, "marked twice")
+            # No subset is matched on the volumes from before the edit
+            self.assertIsNone(card.createSubset())
+            self.assertNotIn("volume_matched", session.study.subsets)
+            self.assertIn("Check again", str(card.matchLabel.text))
+
+            # The recorded lesionset.json, shown again (a reopened study), is out of date too
+            second = libcard_cohort.CohortCard(session)
+            second.refresh()
+            self.assertEqual(second.result.get("source"), "file")
+            self.assertTrue(second.stale, "the recorded result is shown as current after the lesion edit")
+            self.assertTrue(stale(second), second.statusLabel.text)
+            self.assertTrue(second.overviewStale)
+            # A lesionset.json written without a fingerprint: a lesion file newer than the file is out of date
+            self.assertTrue(libcard_cohort.isOutOfDate(session.study, None, since=later - 10.0))
+            self.assertFalse(libcard_cohort.isOutOfDate(session.study, None, since=later + 10.0))
+
+            # Check again: current; the overview stays out of date until it is run again
+            self.assertTrue(card.run())
+            self.assertTrue(card.worker.waitForIdle(120))
+            pump()
+            self.assertFalse(card.stale)
+            self.assertFalse(stale(card), card.statusLabel.text)
+            self.assertTrue(card.overviewStale)
+            self.assertTrue(card.matchButton.enabled)
+            volumes = {lesion["participant_id"]: lesion["volume_ml"] for lesion in card.result["summary"]["lesions"]}
+            self.assertGreater(volumes["sub-02"], 4.0, "the new check did not read the edited lesion")
+            self.assertEqual(card.createSubset(), "volume_matched")
+            self.assertIn("volume_matched", session.study.subsets)
+            self.assertTrue(card.overview())
+            self.assertTrue(card.worker.waitForIdle(120))
+            pump()
+            self.assertFalse(card.overviewStale)
+            self.assertNotIn(libcard_cohort.OUT_OF_DATE_SUFFIX.strip(), countNode().GetName())
+            self.assertEqual(len(libcard_cohort.overlapNodes()), 2, "the out-of-date overlap volumes were not replaced")
+        finally:
+            for widget in (card, second):
+                if widget is not None:
+                    widget.dispose()
+                    widget.widget.deleteLater()
             study_ui.closeStudy()
             pump()
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)

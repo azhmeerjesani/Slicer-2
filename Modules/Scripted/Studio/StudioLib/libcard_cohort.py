@@ -19,7 +19,10 @@ to it by a timer, as the cohort analysis card does. Studies of more than ``CLI_M
 command line through the job runner instead (Stop works the same). The per-subject values (hemisphere, dimensionality and,
 with priors, the tissue fractions) go through the study inbox and are merged by the StudySession, the single writer of
 participants.tsv; ``derivatives/lnm/lesionset.json`` keeps the last summary, which the card shows again when the study is
-reopened.
+reopened. The summary records a fingerprint of what it read (``lesionset.input_fingerprint``: the rows that decide which lesions
+are used, and the size and time of each lesion file); when a lesion is edited, replaced, included or excluded afterwards, the
+card says that the result is out of date, "Create volume-matched control subset" waits for a new check, and the overlap maps of
+an earlier Lesion overview are marked out of date in the card and in the views.
 
 **Lesion overview** writes the exact overlap count and percent maps (``derivatives/lesions``) and opens them in the slice views
 with a discrete standard ``vtkMRMLColorTableNode`` (one entry per count, transparent at zero, saved with the scene; the nodes
@@ -73,6 +76,11 @@ COUNT_NODE = "Lesion overlap (count)"
 PERCENT_NODE = "Lesion overlap (percent)"
 COUNT_LUT = "Lesion overlap count"
 PERCENT_LUT = "Lesion overlap percent"
+#: Node attributes of the overlap volumes: which map, the fingerprint of the lesion set they show, and "1" once it changed
+OVERLAP_ATTRIBUTE = "Studio.LesionOverlap"
+INPUTS_ATTRIBUTE = "Studio.LesionInputs"
+OUT_OF_DATE_ATTRIBUTE = "Studio.OutOfDate"
+OUT_OF_DATE_SUFFIX = " (out of date)"
 #: |SMD| above this is amber (lesionset.SMD_FLAG)
 SMD_FLAG = 0.25
 #: Height of the Dice histogram in pixels
@@ -250,11 +258,13 @@ def checkLesionSet(studyPath, includeUnreviewed=False, priors=None, overview=Fal
             raise jobs.Cancelled()
 
     study = Study.open(studyPath)
+    inputs = lesionset.input_fingerprint(study)  # before loading: an edit made while the check runs makes the result out of date
     included = [row for row in study.subjects if _lnm("study").is_included(row)]
     review = {"required": bool(study.review_required), "included": len(included), "approved": sum(1 for row in included if row.get("review_status") == "approved")}
     note("load", 0, len(included))
     occ = lesionset.load_occupancies(study, require_review=False if includeUnreviewed else None, cancel=cancel, progress=lambda done, total: note("load", done, total))
-    result = {"n": len(occ), "excluded": occ.excluded, "summary": None, "duplicates": [], "review": review, "path": None, "inbox": None, "overview": None, "source": "thread"}
+    result = {"n": len(occ), "excluded": occ.excluded, "summary": None, "duplicates": [], "review": review, "path": None, "inbox": None, "overview": None, "source": "thread",
+              "inputs": inputs}
     if len(occ) == 0:
         result["seconds"] = round(time.monotonic() - started, 3)
         return result
@@ -272,15 +282,19 @@ def checkLesionSet(studyPath, includeUnreviewed=False, priors=None, overview=Fal
     outputs = dict(old.get("outputs") or {})
     extra = {"gallery": old["gallery"]} if isinstance(old.get("gallery"), dict) else {}
     if overview:
-        result["overview"] = overviewWork(study, occ, maps, template, note, stop, outputs, extra)
+        result["overview"] = overviewWork(study, occ, maps, template, note, stop, outputs, extra, inputs)
+    extra["inputs"] = inputs
     path, inbox = lesionset.write_lesionset_json(study, summary, occ, post=True, outputs=outputs, extra=extra)
-    result.update({"summary": summary, "path": path, "inbox": inbox, "excluded": summary["excluded"]})
+    result.update({"summary": summary, "path": path, "inbox": inbox, "excluded": summary["excluded"], "gallery": extra.get("gallery")})
     result["seconds"] = round(time.monotonic() - started, 3)
     return result
 
 
-def overviewWork(study, occ, maps, template, note, stop, outputs, extra):
-    """The files of the Lesion overview (see the module docstring). Return their paths; ``outputs`` and ``extra`` are updated for lesionset.json."""
+def overviewWork(study, occ, maps, template, note, stop, outputs, extra, inputs=None):
+    """The files of the Lesion overview (see the module docstring). Return their paths; ``outputs`` and ``extra`` are updated for lesionset.json.
+
+    ``inputs`` is the fingerprint of the lesion set they were made from (``lesionset.input_fingerprint``).
+    """
     lesionset, figures, export = _lnm("lesionset"), _lnm("figures"), _lnm("export")
     out = os.path.join(study.path, "derivatives", "lesions")
     note("maps")
@@ -302,9 +316,9 @@ def overviewWork(study, occ, maps, template, note, stop, outputs, extra):
     outputs.update({"overlap_count": _rel(study.path, countPath), "overlap_pct": _rel(study.path, percentPath), "gallery": _rel(study.path, gallery["dir"]),
                     "overlap_figure": _rel(study.path, overlap["dir"]), "supplementary_table": _rel(study.path, table)})
     extra["gallery"] = {"sids": order, "dir": _rel(study.path, gallery["dir"]), "table": _rel(study.path, table), "dpi": GALLERY_DPI, "pages": len(pages),
-                        "created": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds")}
+                        "created": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"), "inputs": inputs}
     return {"count": countPath, "percent": percentPath, "gallery": gallery["dir"], "overlap": overlap["dir"], "table": table, "order": order,
-            "pages": len(pages), "max_count": maps.max_count, "n": len(occ), "legend": maps.legend, "files": gallery["files"]}
+            "pages": len(pages), "max_count": maps.max_count, "n": len(occ), "legend": maps.legend, "files": gallery["files"], "inputs": inputs}
 
 
 def recordedResult(studyPath):
@@ -314,9 +328,49 @@ def recordedResult(studyPath):
     if not data or data.get("format") != lesionset.FORMAT or not isinstance(data.get("summary"), dict):
         return None
     summary = data["summary"]
+    path = os.path.join(studyPath, "derivatives", "lnm", lesionset.LESIONSET_JSON)
+    try:
+        written = os.path.getmtime(path)
+    except OSError:
+        written = None
     return {"n": summary.get("n", 0), "excluded": summary.get("excluded") or {}, "summary": summary, "duplicates": [], "review": None,
-            "path": os.path.join(studyPath, "derivatives", "lnm", lesionset.LESIONSET_JSON), "inbox": None, "overview": None, "source": "file",
-            "created": data.get("created"), "gallery": data.get("gallery") if isinstance(data.get("gallery"), dict) else None}
+            "path": path, "inbox": None, "overview": None, "source": "file", "created": data.get("created"),
+            "gallery": data.get("gallery") if isinstance(data.get("gallery"), dict) else None,
+            "inputs": data.get("inputs") if isinstance(data.get("inputs"), str) else None, "written": written}
+
+
+def _epoch(isoText):
+    """Seconds since the epoch of an ISO time, or None."""
+    try:
+        when = datetime.datetime.fromisoformat(str(isoText).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=datetime.UTC)
+    return when.timestamp()
+
+
+def isOutOfDate(study, inputs, since=None, fingerprint=None):
+    """True when what a check read (its fingerprint ``inputs``) is no longer the study's lesion set.
+
+    Without a recorded fingerprint (a lesionset.json written before fingerprints were recorded), a used lesion file modified
+    after ``since`` (seconds since the epoch) makes it out of date; without either, it is taken as current.
+    :param fingerprint: the study's current ``lesionset.input_fingerprint``, when the caller has it already.
+    """
+    if inputs:
+        return inputs != (fingerprint or _lnm("lesionset").input_fingerprint(study))
+    if since is None:
+        return False
+    isIncluded = _lnm("study").is_included
+    for row in study.subjects:
+        if not isIncluded(row) or _lnm("study").is_missing(row.get("lesion")):
+            continue
+        try:
+            if os.path.getmtime(study.abspath(row["lesion"])) > since + 1.0:
+                return True
+        except (OSError, TypeError, ValueError):
+            continue
+    return False
 
 
 def createMatchedSubset(session, summary, name=None, covariates=("volume_ml",), seed=0):
@@ -523,11 +577,38 @@ def _nodesNamed(name, className):
     return found
 
 
+def overlapNodes():
+    """The overlap volumes of the Lesion overview in the scene (also those renamed as out of date)."""
+    found = []
+    for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
+        if node.GetAttribute(OVERLAP_ATTRIBUTE) or node.GetName() in (COUNT_NODE, PERCENT_NODE):
+            found.append(node)
+    return found
+
+
 def removeOverlapNodes():
     """Remove the overlap volumes of an earlier overview and their colour tables."""
-    for name, className in ((COUNT_NODE, "vtkMRMLScalarVolumeNode"), (PERCENT_NODE, "vtkMRMLScalarVolumeNode"), (COUNT_LUT, "vtkMRMLColorTableNode"), (PERCENT_LUT, "vtkMRMLColorTableNode")):
-        for node in _nodesNamed(name, className):
+    for node in overlapNodes():
+        slicer.mrmlScene.RemoveNode(node)
+    for name in (COUNT_LUT, PERCENT_LUT):
+        for node in _nodesNamed(name, "vtkMRMLColorTableNode"):
             slicer.mrmlScene.RemoveNode(node)
+
+
+def markOverlapNodesOutOfDate(fingerprint):
+    """Rename the overlap volumes in the scene that show another lesion set than ``fingerprint`` "... (out of date)".
+
+    Volumes without a recorded fingerprint are left alone. Return the volumes marked now.
+    """
+    marked = []
+    for node in overlapNodes():
+        inputs = node.GetAttribute(INPUTS_ATTRIBUTE)
+        if not inputs or inputs == fingerprint or node.GetAttribute(OUT_OF_DATE_ATTRIBUTE) == "1":
+            continue
+        node.SetAttribute(OUT_OF_DATE_ATTRIBUTE, "1")
+        node.SetName(node.GetName() + OUT_OF_DATE_SUFFIX)
+        marked.append(node)
+    return marked
 
 
 def overlapColorTable(name, entries, maximum):
@@ -564,6 +645,9 @@ def showOverlapInViews(overview, show=True):
                                                         ("percent", overview["percent"], PERCENT_NODE, PERCENT_LUT, 101, 100)):
         volume = slicer.util.loadVolume(path, {"name": name, "show": False})
         volume.SetAttribute("Studio.Role", "statmap")
+        volume.SetAttribute(OVERLAP_ATTRIBUTE, key)
+        if overview.get("inputs"):
+            volume.SetAttribute(INPUTS_ATTRIBUTE, str(overview["inputs"]))
         volume.CreateDefaultDisplayNodes()
         table = overlapColorTable(lutName, entries, maximum)
         display = volume.GetDisplayNode()
@@ -757,6 +841,8 @@ class CohortCard:
         self._wantOverview = False
         self._runPath = None  # the study the running (or last) check belongs to
         self._fetching = False
+        self.stale = False  # the shown result was made from lesions that changed since
+        self.overviewStale = False  # the overlap maps, gallery and case table were made from lesions that changed since
         self.widget = qt.QWidget()
         self.widget.setObjectName("StudioCohortCard")
         layout = qt.QVBoxLayout(self.widget)
@@ -769,6 +855,10 @@ class CohortCard:
         layout.addWidget(title)
         self.statusLabel = library._cardLabel("StudioCohortStatus", 12, "text")
         layout.addWidget(self.statusLabel)
+        self.staleLabel = library._cardLabel("StudioCohortStale", 12, "warning")
+        self.staleLabel.setText(_("Out of date: lesions changed after this check. Check again to update the numbers."))
+        self.staleLabel.setVisible(False)
+        layout.addWidget(self.staleLabel)
         self.includeCheck = qt.QCheckBox(_("Include lesions that are not approved yet"))
         self.includeCheck.setObjectName("StudioCohortIncludeUnreviewed")
         self.includeCheck.setToolTip(_("This study requires review: analyses use approved lesions only. Check the others too."))
@@ -838,8 +928,9 @@ class CohortCard:
         self.balanceTable.setAccessibleName(_("Case/control balance"))
         resultLayout.addWidget(self.balanceTable)
         self.matchRow, self.matchButton = library._rowButton(_("Create volume-matched control subset"), "StudioCohortMatchButton", self.createSubset, "secondary")
-        self.matchButton.setToolTip(_("Each case gets the control with the nearest volume (no replacement). Stored as a named subset in study.json; "
-                                      "no lesion is excluded."))
+        self._matchTip = _("Each case gets the control with the nearest volume (no replacement). Stored as a named subset in study.json; "
+                           "no lesion is excluded.")
+        self.matchButton.setToolTip(self._matchTip)
         resultLayout.addWidget(self.matchRow)
         self.matchLabel = library._cardLabel("StudioCohortMatched", 12, "text")
         resultLayout.addWidget(self.matchLabel)
@@ -894,7 +985,33 @@ class CohortCard:
         included = [row for row in study.subjects if _lnm("study").is_included(row)]
         pending = study.review_required and any(row.get("review_status") != "approved" for row in included)
         self.includeCheck.setVisible(bool(pending))
+        self._updateStale()
         self._renderStatus()
+
+    def _updateStale(self):
+        """Compare the shown result and the last overview with the study's lesion set (``stale``, ``overviewStale``); mark old overlap maps in the views."""
+        self.stale = self.overviewStale = False
+        session = self.session
+        if session is None or self.studyPath is None or session.study.path != self.studyPath:
+            return
+        study = session.study
+        try:
+            fingerprint = _lnm("lesionset").input_fingerprint(study)
+        except Exception:
+            logging.debug(f"Studio cohort diagnostics: the lesion set could not be compared:\n{traceback.format_exc()}")
+            return
+        result = self.result
+        if result and result.get("summary"):
+            self.stale = isOutOfDate(study, result.get("inputs"), result.get("written"), fingerprint)
+        overview = self._lastOverview or {}
+        gallery = (result or {}).get("gallery") or {}
+        if overview or gallery:
+            inputs = overview.get("inputs") or gallery.get("inputs")
+            self.overviewStale = isOutOfDate(study, inputs, None if inputs else _epoch(gallery.get("created")), fingerprint)
+        try:
+            markOverlapNodesOutOfDate(fingerprint)
+        except Exception:
+            logging.debug(f"Studio cohort diagnostics: the overlap maps could not be marked:\n{traceback.format_exc()}")
 
     def isBusy(self):
         return self.worker.isBusy() or (self.cliJob is not None and not self.cliJob.isFinished()) or self._fetching
@@ -1005,6 +1122,13 @@ class CohortCard:
         session = _session()
         if session is None or not self.result or not self.result.get("summary") or "group" in library._hiddenColumns(session.study):
             return None
+        self.session = session
+        self._updateStale()
+        if self.stale:
+            # The summary's volumes and groups are no longer the study's: never match on them
+            self.matchLabel.setText(_("The lesions changed after this check. Check again, then create the subset."))
+            self._renderStatus()
+            return None
         made = createMatchedSubset(session, self.result["summary"])
         if made is None:
             return None
@@ -1062,6 +1186,8 @@ class CohortCard:
         if overview:
             self._lastOverview = overview
             self._afterOverview(overview)
+        self.session = session
+        self._updateStale()
         self._renderStatus()
 
     def _afterOverview(self, overview):
@@ -1100,6 +1226,8 @@ class CohortCard:
         self.emptyLabel.setVisible(False)
         self.checkAnywayLink.setVisible(False)
         self.results.setVisible(False)
+        stale = bool(self.stale and result and result.get("summary") and not busy)
+        self.staleLabel.setVisible(stale)
         self.runButton.setText(_("Check again") if result and result.get("summary") else _("Check the lesion set"))
         if busy:
             if not keepStatus:
@@ -1126,12 +1254,22 @@ class CohortCard:
                     status = (_("1 lesion · checked in {seconds} s") if one else _("{n} lesions · checked in {seconds} s")).format(n=summary["n"], seconds=f"{seconds:.1f}")
                 else:
                     status = _("1 lesion") if one else _("{n} lesions").format(n=summary["n"])
+                if stale:
+                    status += " · " + _("out of date")
                 self.statusLabel.setText(status)
             self.results.setVisible(True)
             self._renderResults(result)
+            if stale:
+                self.matchButton.setEnabled(False)
+                self.matchButton.setToolTip(_("The lesions changed after this check: check again first."))
+            else:
+                self.matchButton.setToolTip(self._matchTip)
         gallery = (result or {}).get("gallery") if result else None
         overviewDone = bool(self._lastOverview) or bool(gallery)
-        self.overviewLabel.setText(_("Overlap maps, gallery and case table are in derivatives/lesions.") if overviewDone else "")
+        if overviewDone and self.overviewStale and not busy:
+            self.overviewLabel.setText(_("The overlap maps, gallery and case table in derivatives/lesions are out of date: lesions changed. Run Lesion overview again."))
+        else:
+            self.overviewLabel.setText(_("Overlap maps, gallery and case table are in derivatives/lesions.") if overviewDone else "")
         self.overviewLabel.setVisible(overviewDone)
         self.folderLink.setVisible(overviewDone)
 
