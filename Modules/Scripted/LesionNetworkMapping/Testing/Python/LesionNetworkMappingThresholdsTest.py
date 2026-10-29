@@ -19,7 +19,7 @@ if MODULE_DIR not in sys.path:
 
 import numpy as np
 
-from LesionNetworkMappingLib import robustness, thresholds
+from LesionNetworkMappingLib import nulls, robustness, thresholds
 from LesionNetworkMappingLib.geometry import Grid
 
 
@@ -99,7 +99,14 @@ class TopPercentRuleTest(unittest.TestCase):
                         rule = {"kind": "top_pct", "value": x, "statistic": statistic, "sign": sign}
                         resolved = thresholds.resolve(rule, 312, finite.size, values=self.values)
                         self.assertEqual(resolved.statistic, statistic)
-                        self.assertEqual(resolved.value, float(np.percentile(scores, 100.0 - x)))
+                        percentile = float(np.percentile(scores, 100.0 - x))
+                        if percentile <= 0.0:
+                            # Fewer than x% of the voxels have this sign (x = 50 here): the cut never goes below 0
+                            self.assertEqual(resolved.value, float(scores[scores > 0].min()))
+                            self.assertEqual(len(resolved.notes), 1)
+                            self.assertAlmostEqual(resolved.fraction, float((scores > 0).mean()))
+                            continue
+                        self.assertEqual(resolved.value, percentile)
                         self.assertIsNone(resolved.p_unc)
                         self.assertIsNone(resolved.p_fwe)
                         self.assertTrue(resolved.allowed)
@@ -108,6 +115,45 @@ class TopPercentRuleTest(unittest.TestCase):
                         kept = int((scores >= resolved.value).sum())
                         self.assertLessEqual(abs(kept - x / 100.0 * finite.size), 1.0)
                         self.assertAlmostEqual(resolved.fraction, kept / finite.size)
+
+    def test_one_sign_cut_never_takes_the_other_sign(self):
+        # Regression (BB-1 toppct-negative-cut-binarize-outside-brain): T, sign +, top 80% when only about
+        # half of the in-mask voxels are positive resolved to a negative cut (T >= -0.88), so the count took
+        # negative voxels the views do not show, Binarize marked the zeros outside the brain and the NIfTI
+        # export mask (|cut|) was yet another set of voxels.
+        rng = np.random.default_rng(11)
+        inside = rng.standard_normal(2000)
+        positive, negative = int((inside > 0).sum()), int((inside < 0).sum())
+        box = np.zeros(5000)  # the map's box: 0 outside the brain mask
+        box[:inside.size] = inside
+        for sign, count, word in (("pos", positive, "positive"), ("neg", negative, "negative")):
+            for x in (80.0, 95.0):
+                with self.subTest(sign=sign, x=x):
+                    rule = {"kind": "top_pct", "value": x, "statistic": "T", "sign": sign}
+                    resolved = thresholds.resolve(rule, 120, inside.size, values=inside)
+                    self.assertTrue(resolved.allowed)
+                    self.assertGreater(resolved.value, 0.0)
+                    # The count (fraction) is the voxels of that sign: what the colour table shows
+                    self.assertAlmostEqual(resolved.fraction, count / inside.size)
+                    share = f"{100.0 * count / inside.size:.0f}%"
+                    self.assertIn(f"Only {share} of the in-mask voxels are {word}", " ".join(resolved.notes))
+                    self.assertIn(f"{share} of in-mask voxels", thresholds.describe(resolved, resolved.fraction))
+                    # Binarize over the whole box (and the NIfTI export mask, which uses |cut| = cut): the same voxels, none outside the brain
+                    passing = box >= resolved.value if sign == "pos" else box <= -resolved.value
+                    self.assertEqual(int(passing.sum()), count)
+                    self.assertFalse(passing[inside.size:].any())
+                    # The null fast path gives the same cut (cohort maps, nulls)
+                    self.assertEqual(float(nulls.rule_values(inside[None, :], rule, 120, inside.size)[0]), resolved.value)
+
+        # A sign with no voxel at all: nothing passes, the rule is not applied
+        none = thresholds.resolve({"kind": "top_pct", "value": 10, "statistic": "Fz", "sign": "neg"}, 120, 3, values=[0.0, 1.0, 2.0])
+        self.assertFalse(none.allowed)
+        self.assertTrue(math.isnan(none.value))
+        self.assertIn("no negative values", none.banner)
+        # x below the share of that sign: unchanged percentile cut, no note
+        top = thresholds.resolve({"kind": "top_pct", "value": 30, "statistic": "T", "sign": "pos"}, 120, inside.size, values=inside)
+        self.assertEqual(top.value, float(np.percentile(inside, 70.0)))
+        self.assertEqual(top.notes, ())
 
     def test_n_independent(self):
         rule = {"kind": "top_pct", "value": 10}

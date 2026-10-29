@@ -690,7 +690,10 @@ def rule_values(rows, rule, n, n_voxels, gsr=None):
         elif sign == "neg":
             np.negative(scores, out=scores)
         if np.all(np.isfinite(scores)):
-            out[row] = np.percentile(scores, 100.0 - rule["value"], overwrite_input=True)
+            above = scores[scores > 0.0]
+            cut = np.percentile(scores, 100.0 - rule["value"], overwrite_input=True)
+            # As thresholds.resolve: the cut never goes below 0 (only voxels of the sign pass), NaN without any
+            out[row] = (cut if cut > 0.0 else above.min()) if above.size else np.nan
         else:
             out[row] = thresholds.resolve(rule, max(int(n), 1), n_voxels, values=values).value
     return out

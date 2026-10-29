@@ -24,7 +24,8 @@ Rules that carry a ``reference_n`` get a banner when N differs from it by more t
 ``fz_abs`` and ``top_pct`` are N-independent *alternatives* to the T rules, never their
 "equivalents": T = mean Fz / (sd / sqrt(N)) and sd varies by voxel, so no Fz value corresponds to a T
 threshold, and this module never converts one into the other. ``top_pct`` needs the map values to
-resolve (the threshold is the |value| that leaves x% of the finite in-mask voxels above it).
+resolve (the threshold is the |value| that leaves x% of the finite in-mask voxels above it; only voxels
+of the chosen sign can pass, so when fewer than x% have that sign, all of them pass and a note says so).
 
 Symmetric |T| rules on connectomes preprocessed without global signal regression get the GSR banner
 (addendum §3.2, Cohen & Fox 2021); with GSR, negative peaks get the Murphy & Fox 2017 note.
@@ -59,6 +60,16 @@ NEGATIVE_PEAKS_NOTE = "The magnitude and extent of negative correlations are inf
 TOP_PCT_NEEDS_VALUES = "The top-x% rule needs the map values."
 N_FREE_KINDS = ("custom_t", "fz_abs", "top_pct")  # rules that can be applied to a map whose N is unknown
 N_UNKNOWN_NOTE = "The N of this map is unknown: no p-value."
+TOP_PCT_SHARE_NOTE = {
+    "both": "Only {share} of the in-mask voxels are non-zero: all of them pass (fewer than the top {x}%).",
+    "pos": "Only {share} of the in-mask voxels are positive: all of them pass (fewer than the top {x}%).",
+    "neg": "Only {share} of the in-mask voxels are negative: all of them pass (fewer than the top {x}%).",
+}
+_NO_VOXEL_OF_SIGN = {
+    "both": "The map has no non-zero values.",
+    "pos": "The map has no positive values: nothing passes.",
+    "neg": "The map has no negative values: nothing passes.",
+}
 
 
 @dataclass(frozen=True)
@@ -333,8 +344,22 @@ def _resolve(rule, n, v, note, values):
             return Resolved(rule["statistic"], math.nan, df, None, None, "The map has no finite values.", False, n, v, rule, kind)
         import numpy as np
 
+        # A voxel passes only when its score is above 0 (a value of the chosen sign; the colour table shows
+        # nothing else). When fewer than x% of the voxels are of that sign (or non-zero for "both"), the
+        # percentile is 0 or below: the cut becomes the smallest score above 0, so all those voxels pass and
+        # a note says so, rather than a cut of the other sign that would count opposite-sign voxels (and,
+        # for Binarize, the zeros outside the brain).
+        above = scores[scores > 0.0]
+        if above.size == 0:
+            return Resolved(rule["statistic"], math.nan, df, None, None, _NO_VOXEL_OF_SIGN[rule["sign"]], False, n, v, rule, kind)
         value = float(np.percentile(scores, 100.0 - rule["value"]))
-        return Resolved(rule["statistic"], value, df, None, None, None, True, n, v, rule, kind)
+        notes = ()
+        if value <= 0.0:
+            value = float(above.min())
+        share = above.size / scores.size
+        if share < rule["value"] / 100.0:
+            notes = (TOP_PCT_SHARE_NOTE[rule["sign"]].format(share=_format_fraction(share), x=f"{rule['value']:g}"),)
+        return Resolved(rule["statistic"], value, df, None, None, None, True, n, v, rule, kind, notes=notes)
     if kind == "fz_abs":
         # An effect-size threshold on the mean Fz map: no p-value, valid for any N >= 1
         return Resolved("Fz", rule["value"], df, None, None, None if n >= 1 else "The map has no subjects.", n >= 1, n, v, rule, kind)
