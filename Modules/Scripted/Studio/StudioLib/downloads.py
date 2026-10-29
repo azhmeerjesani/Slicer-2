@@ -246,6 +246,10 @@ class Download:
             self._file = None
         if error != qt.QNetworkReply.NoError:
             self._closeAndRemovePartFile()
+            if error in (qt.QNetworkReply.OperationCanceledError, qt.QNetworkReply.TimeoutError):
+                # cancel() disconnects finished() before it aborts, so the only way to get here is the transfer timeout
+                # (Qt reports that as "Operation canceled", which reads as if the user had cancelled).
+                errorString = _("the server did not answer (timed out)")
             self._fail(_("Download failed: {reason}").format(reason=errorString))
             return
         if status is not None and int(status) >= 400:

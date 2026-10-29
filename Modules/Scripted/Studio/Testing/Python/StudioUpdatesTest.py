@@ -490,6 +490,37 @@ class StudioUpdatesTest(unittest.TestCase):
         self.assertEqual(os.listdir(downloads), [], "the partial file is deleted")
         thread.join(5)
 
+    def test_DownloadTimeoutMessage(self):
+        """A download that stalls until the transfer timeout says so, not 'Operation canceled' (the user cancelled nothing)."""
+        from StudioLib import downloads
+
+        data = self._publish("1.2.0")
+        name = data["assets"]["linux-x86_64"]["name"]
+        _Handler.stallPaths = {"/" + name}
+        savedTimeout = downloads.TRANSFER_TIMEOUT_MS
+        downloads.TRANSFER_TIMEOUT_MS = 1500
+        download = downloads.Download(self.root + name, None, os.path.join(self.tempDir, "downloads", name))
+        messages = []
+        download.failed.connect(messages.append)
+        try:
+            download.start()
+            self.assertTrue(self._waitFor(lambda: messages, 20), "the stalled download ends at the transfer timeout")
+        finally:
+            downloads.TRANSFER_TIMEOUT_MS = savedTimeout
+            download.cancel()
+        self.assertEqual(download.state, "failed")
+        self.assertIn("did not answer", messages[0])
+        self.assertNotIn("canceled", messages[0].lower())
+        self.assertFalse(os.path.exists(download.partPath), "the partial file is deleted")
+        # A real cancel keeps its own text
+        _Handler.stallPaths = {"/" + name}
+        other = downloads.Download(self.root + name, None, os.path.join(self.tempDir, "downloads", "b-" + name))
+        canceled = []
+        other.failed.connect(canceled.append)
+        other.start()
+        other.cancel()
+        self.assertEqual(canceled, ["Download canceled"])
+
     #
     # (e) Linux swap
     #
