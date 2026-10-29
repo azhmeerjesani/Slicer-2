@@ -677,9 +677,13 @@ def pipeline_section(records):
         return section.paragraph(f"Pipeline: {NOT_RECORDED} (no {PIPELINE_JSON}).")
     head = f"The analysis ran as one pipeline (run {run_id or NOT_RECORDED}"
     recipe = data.get("recipe")
+    outside = []
     if isinstance(recipe, dict):
+        outside = [str(step) for step in recipe.get("outside_pipeline") or []]
         recipe = recipe.get("name") or recipe.get("id")
     head += f"; recipe {recipe})." if recipe else ")."
+    if outside:
+        head += f" Recipe steps outside the pipeline (not part of this run): {', '.join(outside)}."
     section.paragraph(head)
     stages = data.get("stages")
     if isinstance(stages, dict):

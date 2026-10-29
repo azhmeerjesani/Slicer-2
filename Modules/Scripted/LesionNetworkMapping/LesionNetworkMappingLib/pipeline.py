@@ -567,9 +567,11 @@ class PipelineConfig:
     events: str = "auto"
     slicer: str | None = None
     accept_terms: bool = False
+    #: The recipe record the settings came from (``recipes.to_pipeline_config`` "recipe"); pipeline.json "recipe"
+    recipe: dict | None = None
 
     #: Keys that are about this invocation, not about the analysis (not stored in pipeline.json "config")
-    RUN_KEYS = ("out", "recompute", "parent_pid", "parent_run", "events", "accept_terms", "slicer", "nice", "keep_awake", "threads", "memory_budget_gb")
+    RUN_KEYS = ("out", "recompute", "parent_pid", "parent_run", "events", "accept_terms", "slicer", "nice", "keep_awake", "threads", "memory_budget_gb", "recipe")
     #: Path keys (stored relative to pipeline.json's folder)
     PATH_KEYS = ("study", "bundle", "out", "atlas", "atlas_labels", "template")
 
@@ -615,6 +617,8 @@ class PipelineConfig:
             raise ValueError("--threads must be at least 1")
         if not isinstance(self.software, dict):
             raise ValueError("--software must be a JSON object")
+        if self.recipe is not None and not isinstance(self.recipe, dict):
+            raise ValueError("recipe must be a JSON object (a recipe record)")
         if isinstance(self.parent_run, str):
             self.parent_run = [self.parent_run]
         self.parent_run = [str(run_id) for run_id in (self.parent_run or []) if run_id]
@@ -634,6 +638,8 @@ class PipelineConfig:
                 continue
             if field.name == "contrast" and value == "two_sided":
                 continue  # the default is left out, so configurations and stage fingerprints of earlier runs are unchanged
+            if field.name == "recipe" and value is None:
+                continue
             if base is not None and field.name in self.PATH_KEYS and isinstance(value, str) and os.path.isabs(value):
                 value = relpath(value, base)
             out[field.name] = value
@@ -643,7 +649,10 @@ class PipelineConfig:
     def from_json(cls, data, base=None):
         """A config from :meth:`to_json` content, or from a pipeline.json (its "config"); relative paths are resolved against ``base``."""
         if isinstance(data, dict) and data.get("format") == FORMAT_NAME:
+            recipe = data.get("recipe")
             data = data.get("config") or {}
+            if isinstance(recipe, dict) and "recipe" not in data:
+                data = {**data, "recipe": recipe}  # a rerun of a recipe run records the same recipe
         if not isinstance(data, dict):
             raise ValueError("A pipeline configuration must be a JSON object")
         names = {field.name for field in dataclasses.fields(cls)}
@@ -3277,6 +3286,7 @@ class Runner:
             "study": relpath(self.study.path, self.out),
             "bundle": relpath(self.bundle.path, self.out),
             "config": config.to_json(base=self.out, analysis_only=True),
+            **({"recipe": config.recipe} if config.recipe else {}),
             "inputs": {
                 "participants_tsv_sha256": _lesion_sha(os.path.join(self.study.path, "participants.tsv")),
                 "study_json_sha256": _lesion_sha(os.path.join(self.study.path, "study.json")),

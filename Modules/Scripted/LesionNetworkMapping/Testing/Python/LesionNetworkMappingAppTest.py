@@ -204,6 +204,33 @@ class AppHelpersTest(unittest.TestCase):
             config = app.build_config(parser.parse_args(base + ["--design", path]), tmp)
             self.assertEqual((config.covariates, config.volume_off_reason), (["age"], "age-matched cohort"))
 
+    def test_recipe_is_recorded_and_outside_steps_reported(self):
+        """--recipe records the recipe for pipeline.json and methods, and names the steps the pipeline does not run (BB-1)."""
+        from LesionNetworkMappingLib import methods
+
+        parser = app._parser()
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            args = parser.parse_args(["in", "out", "group", "--connectome", "c", "--accept-terms", "--recipe", "comprehensive_battery"])
+            config = app.build_config(args, tmp, emit=lambda event, **fields: events.append((event, fields)))
+        self.assertEqual((config.recipe["id"], config.recipe["outside_pipeline"]), ("comprehensive_battery", ["validation", "robustness"]))
+        outside = [fields for event, fields in events if fields.get("code") == "recipe_step_outside"]
+        self.assertEqual([fields["step"] for fields in outside], ["validation", "robustness"])
+        self.assertIn("Map ▸ Validate", outside[0]["message"])
+        # A run option: not in pipeline.json "config" (stage fingerprints unchanged), but kept by a rerun of pipeline.json
+        self.assertNotIn("recipe", config.to_json(analysis_only=True))
+        self.assertNotIn("recipe", pipeline.PipelineConfig().to_json())
+        content = {"format": pipeline.FORMAT_NAME, "config": config.to_json(analysis_only=True), "recipe": config.recipe}
+        self.assertEqual(pipeline.PipelineConfig.from_json(content).recipe, config.recipe)
+
+        class Records:
+            def pipeline(self):
+                return {"recipe": config.recipe, "stages": []}, "pipeline-1"
+
+        text = methods.pipeline_section(Records()).text()
+        self.assertIn("(run pipeline-1; recipe comprehensive_battery).", text)
+        self.assertIn("Recipe steps outside the pipeline (not part of this run): validation, robustness.", text)
+
     def test_usage_errors(self):
         with tempfile.TemporaryDirectory() as tmp:
             code, events, _out, _err = cli(tmp, os.path.join(tmp, "out"), "group", "--connectome", tmp, "--subject-list", "a,b", "--events", "json")

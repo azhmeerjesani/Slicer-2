@@ -415,8 +415,14 @@ def build_config(args, study_path, emit=None):
             raise ValueError(f"Unknown recipe {args.recipe!r}")
         converted = recipes.to_pipeline_config(recipe, study_path)
         values.update(converted["config"])
+        outside = converted.get("outside_pipeline") or []
+        # pipeline.json "recipe" (read by methods and the report), with the steps this run does not do
+        values["recipe"] = {**converted["recipe"], "outside_pipeline": [step["id"] for step in outside]}
         if emit is not None and converted.get("unavailable"):
             emit("info", code="recipe_steps", message=f"Recipe {recipe.id}: not available in this build: {', '.join(converted['unavailable'])}")
+        if emit is not None:
+            for step in outside:  # never skipped silently (as 'slicer-lnm recipes config' says)
+                emit("info", code="recipe_step_outside", step=step["id"], message=f"Recipe {recipe.id}: step {step['id']} ({step['label']}) is not part of the pipeline: run it from {step['where']}")
     if args.pipeline_config:
         values.update(pipeline.PipelineConfig.load(args.pipeline_config).to_json())
     if args.design:
