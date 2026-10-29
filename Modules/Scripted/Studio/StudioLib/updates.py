@@ -1954,6 +1954,7 @@ class UpdateDialog:
         self.dialog.setWindowTitle(_("Update Slicer Studio"))
         self.dialog.setMinimumWidth(460)
         layout = qt.QVBoxLayout(self.dialog)
+        self._layout = layout
         layout.setContentsMargins(24, 24, 24, 22)
         layout.setSpacing(14)
         header, self.title, self.text = ui.dialogHeader(
@@ -1986,8 +1987,28 @@ class UpdateDialog:
 
     def show(self):
         self.dialog.show()
+        self._fitToText()
         self.dialog.raise_()
         self.dialog.activateWindow()
+
+    def _setText(self, text):
+        if self.text.text != text:
+            self.text.setText(text)
+            self._fitToText()
+
+    def _fitToText(self):
+        """Give the shown dialog the height its wrapped status text needs at the dialog's width. A window's layout keeps
+        only its minimum size, which ignores height-for-width, so the dialog would otherwise keep the height it got for
+        its first, one-line text and cut a longer status (a failure reason with the manual steps) under the buttons.
+        """
+        dialog = self.dialog
+        if not _isAlive(dialog) or not dialog.isVisible():
+            # Showing the window sizes it for its text (QWidget::adjustSize() includes height-for-width)
+            return
+        self._layout.activate()
+        needed = max(self._layout.totalHeightForWidth(dialog.width), self._layout.totalMinimumSize().height())
+        if needed > 0 and needed != dialog.height:
+            dialog.resize(dialog.width, needed)
 
     def begin(self):
         reason = self.service.unavailableReason()
@@ -2011,6 +2032,7 @@ class UpdateDialog:
         self.secondaryButton.setText({"downloading": _("Cancel"), "ready": _("Install when I quit")}.get(state, _("Close")))
         if state == "ready":
             self.primaryButton.setDefault(True)
+        self._fitToText()
 
     def _updateProgress(self):
         task = self.task
@@ -2019,11 +2041,11 @@ class UpdateDialog:
         received, total = task.progress
         if getattr(task, "phase", "") == "prepare":
             self.progress.setRange(0, 0)
-            self.text.setText(_("Checked. Preparing the new version…"))
+            self._setText(_("Checked. Preparing the new version…"))
         elif total:
             self.progress.setRange(0, 1000)
             self.progress.setValue(int(received * 1000 / total))
-            self.text.setText(_progressText(received, total))
+            self._setText(_progressText(received, total))
 
     def _onJobDone(self, prepared, error):
         self.task = None

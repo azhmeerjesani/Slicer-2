@@ -810,6 +810,44 @@ fi
         self.assertTrue(dialog.isVisible())
         self.assertEqual(called, [])
 
+    def test_UpdateDialogFitsStatusText(self):
+        """The update progress dialog grows with its status text: the ready text, a failure reason and the manual-install
+        steps are not cut under the buttons (the dialog is created with a one-line text).
+        """
+        import types
+
+        service = types.SimpleNamespace(status=types.SimpleNamespace(version="1.2.0"), unavailableReason=lambda: None)
+        dialog = self.updates.UpdateDialog(service, slicer.util.mainWindow())
+        self.addCleanup(dialog.dispose)
+        dialog.show()
+        self._pump(0.3)
+        cases = {
+            "ready": (types.SimpleNamespace(version="1.2.0"), None),
+            "missing file": (None, self.install.InstallError(
+                "The release 1.2.0 has no downloadable file Slicer-5.13.0-studio1.2.0-linux-amd64.tar.gz yet "
+                "(404: http://127.0.0.1:18811/missingasset/Slicer-5.13.0-studio1.2.0-linux-amd64.tar.gz).")),
+            "manual steps": (None, self.install.InstallError(
+                "The downloaded package is Slicer Studio 1.1.0, not 1.2.0 as the release says.",
+                manualSteps="To install it by hand, extract Slicer-5.13.0-studio1.2.0-linux-amd64.tar.gz and replace the folder "
+                            "/opt/some place/Slicer-5.13.0-linux-amd64 with the extracted folder.")),
+            "downloading": None,
+        }
+        for name, case in cases.items():
+            if case is None:
+                dialog._setState("downloading", "Downloading…")
+            else:
+                dialog._onJobDone(*case)
+            self._pump(0.3)
+            text = dialog.text
+            needed = text.heightForWidth(text.width)
+            self.assertGreaterEqual(text.height, needed, f"{name}: the status text is cut ({text.height} px of {needed} px)")
+            textBottom = text.mapTo(dialog.dialog, qt.QPoint(0, 0)).y() + needed
+            buttonTop = dialog.secondaryButton.mapTo(dialog.dialog, qt.QPoint(0, 0)).y()
+            self.assertLessEqual(textBottom, buttonTop, f"{name}: the status text runs under the buttons")
+            self.assertGreaterEqual(dialog.dialog.width, 460, name)
+        # Back to a short text: the dialog does not keep the empty space of a long failure
+        self.assertLess(dialog.dialog.height, 240, "the dialog shrinks again for a one-line status")
+
     def test_StartupMinimumSupported(self):
         self._publish("1.3.0", minimum="1.0.0")
         self.updates._installableOverride = True
