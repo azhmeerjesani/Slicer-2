@@ -410,7 +410,9 @@ class DrawNormalizeCard:
                     libcard_normalize.normalizeSubjects([sid])
                     return True
         scanOnly = scanOnly or self._lesionEmpty
-        request = self.nc.NormalizeRequest(scanNode=source, segmentationNode=None if scanOnly else segmentationNode, segmentId=None if scanOnly else segmentId)
+        # The options remembered in the Map card (template incl. the user's own, quality, modality, margin) apply here too
+        request = self.nc.NormalizeRequest(scanNode=source, segmentationNode=None if scanOnly else segmentationNode, segmentId=None if scanOnly else segmentId,
+                                           **self.nc.rememberedRequestOptions())
         self._clearMessage()
         self._clearQc()
         try:

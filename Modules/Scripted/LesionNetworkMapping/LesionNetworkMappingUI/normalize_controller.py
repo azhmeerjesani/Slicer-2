@@ -366,6 +366,51 @@ def templateAvailable(templateId):
     return all(templateFile(templateId, role) for role in ("fixed", "mask"))
 
 
+def rememberedOptions():
+    """Normalization options remembered with "Remember these options" (``Studio/LNM/Normalize/LastOptions``, read only here).
+
+    Always a full dict: ``templateId`` (None: automatic), ``quality``, ``modality``, ``dilateMm`` (1 to 10 mm) and ``remember``
+    (whether anything was stored). Shared by the Map card and Draw's one-click Normalize to MNI.
+    """
+    options = {"templateId": None, "quality": "standard", "modality": "auto", "dilateMm": DEFAULT_DILATE_MM, "remember": False}
+    try:
+        stored = json.loads(str(qt.QSettings().value(LAST_OPTIONS_SETTING) or "{}"))
+    except ValueError:
+        stored = {}
+    if isinstance(stored, dict):
+        for key in ("templateId", "quality", "modality", "dilateMm"):
+            if key in stored:
+                options[key] = stored[key]
+        options["remember"] = bool(stored)
+    if options["quality"] not in QUALITIES:
+        options["quality"] = "standard"
+    try:
+        options["dilateMm"] = min(max(float(options["dilateMm"]), 1.0), 10.0)
+    except (TypeError, ValueError):
+        options["dilateMm"] = DEFAULT_DILATE_MM
+    return options
+
+
+def rememberedRequestOptions():
+    """Keyword arguments for ``NormalizeRequest`` from the remembered options (empty when nothing was remembered).
+
+    A remembered template is used only when it is still usable (built-in, or one of the user's with image and mask in the
+    Templates folder); otherwise the request keeps the default template.
+    """
+    options = rememberedOptions()
+    if not options["remember"]:
+        return {}
+    chosen = options["templateId"]
+    templateId = DEFAULT_TEMPLATE
+    if isinstance(chosen, str) and chosen and (chosen in TEMPLATE_IDS or isUserTemplate(chosen)):
+        try:
+            if templateAvailable(chosen):
+                templateId = chosen
+        except Exception:
+            logging.exception("Studio: the remembered normalization template could not be checked")
+    return {"templateId": templateId, "quality": options["quality"], "modality": options["modality"] or "auto", "dilateMm": options["dilateMm"]}
+
+
 def headTemplateAvailable(templateId=DEFAULT_TEMPLATE):
     return templateFile(templateId, "head") is not None
 

@@ -353,23 +353,7 @@ class NormalizeCard:
 
     def _loadOptions(self):
         """Options of the last run when they were remembered (``Studio/LNM/Normalize/LastOptions``, read only here)."""
-        options = {"templateId": None, "quality": "standard", "modality": "auto", "dilateMm": nc.DEFAULT_DILATE_MM, "remember": False}
-        try:
-            stored = json.loads(str(qt.QSettings().value(nc.LAST_OPTIONS_SETTING) or "{}"))
-        except ValueError:
-            stored = {}
-        if isinstance(stored, dict):
-            for key in ("templateId", "quality", "modality", "dilateMm"):
-                if key in stored:
-                    options[key] = stored[key]
-            options["remember"] = bool(stored)
-        if options["quality"] not in nc.QUALITIES:
-            options["quality"] = "standard"
-        try:
-            options["dilateMm"] = min(max(float(options["dilateMm"]), 1.0), 10.0)
-        except (TypeError, ValueError):
-            options["dilateMm"] = nc.DEFAULT_DILATE_MM
-        return options
+        return nc.rememberedOptions()
 
     def rememberOptions(self):
         """Write the options to ``Studio/LNM/Normalize/LastOptions`` (only when "Remember these options" is ticked; unticking forgets them)."""

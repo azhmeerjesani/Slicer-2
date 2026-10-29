@@ -8,6 +8,7 @@ native subject of ``lnm_normalize_fixture.py`` (no network)::
 Under a plain PythonSlicer (the library test glob) the module is skipped.
 """
 
+import json
 import os
 import shutil
 import sys
@@ -628,6 +629,64 @@ class LesionNetworkMappingNormalizeUITest(unittest.TestCase):
             studioShell.switchTo("map")
             self.ctx.setSeed(self.native, self.nativeSegmentId)
             self.assertTrue(self._cardVisible())
+        finally:
+            studioShell.dispose()
+            _pump(200)
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+
+    def test_08b_draw_uses_remembered_options(self):
+        """Draw's Normalize to MNI builds its request from the remembered Map options (the user's own template included)."""
+        from StudioLib import draw, drawcard_normalize, shell
+
+        nc = self.nc
+        settings = qt.QSettings()
+        originalAvailable = nc.templateAvailable
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        _pump(200)
+        try:
+            studioShell.switchTo("draw")
+            _pump(300)
+            editor = slicer.modules.SegmentEditorWidget.editor
+            editor.setSegmentationNode(self.native)
+            editor.setSourceVolumeNode(self.scan)
+            editor.setCurrentSegmentID(self.nativeSegmentId)
+            draw.extension().refreshCards()
+            _pump(500)
+            card = drawcard_normalize.active()
+            self.assertIsNotNone(card)
+            started = []
+            card.controller.start = lambda request: started.append(request) or True
+            try:
+                # Nothing remembered: the defaults
+                settings.remove(nc.LAST_OPTIONS_SETTING)
+                self.assertTrue(card.start())
+                self.assertEqual(started[-1].templateId, nc.DEFAULT_TEMPLATE)
+                self.assertEqual(started[-1].quality, "standard")
+                # Remembered user template (image and mask present), quality and margin
+                settings.setValue(nc.LAST_OPTIONS_SETTING, json.dumps({"templateId": "user:lab-mni-1-5-mm", "quality": "affine", "modality": "t1", "dilateMm": 5}))
+                nc.templateAvailable = lambda templateId: True
+                self.assertTrue(card.start())
+                self.assertEqual(started[-1].templateId, "user:lab-mni-1-5-mm")
+                self.assertEqual(started[-1].quality, "affine")
+                self.assertEqual(started[-1].modality, "t1")
+                self.assertEqual(started[-1].dilateMm, 5.0)
+                self.assertTrue(card.start(scanOnly=True))
+                self.assertEqual(started[-1].templateId, "user:lab-mni-1-5-mm")
+                # The remembered template is gone (or has no mask): the default template, the other options stay
+                nc.templateAvailable = lambda templateId: not nc.isUserTemplate(templateId)
+                self.assertTrue(card.start())
+                self.assertEqual(started[-1].templateId, nc.DEFAULT_TEMPLATE)
+                self.assertEqual(started[-1].quality, "affine")
+                # "Automatic" (no template stored) is the default template here
+                settings.setValue(nc.LAST_OPTIONS_SETTING, json.dumps({"templateId": None, "quality": "fine"}))
+                self.assertTrue(card.start())
+                self.assertEqual(started[-1].templateId, nc.DEFAULT_TEMPLATE)
+                self.assertEqual(started[-1].quality, "fine")
+            finally:
+                nc.templateAvailable = originalAvailable
+                settings.remove(nc.LAST_OPTIONS_SETTING)
+                del card.controller.start
         finally:
             studioShell.dispose()
             _pump(200)
