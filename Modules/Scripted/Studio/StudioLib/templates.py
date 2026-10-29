@@ -1140,7 +1140,7 @@ def removeTemplate(templateId, confirmDelete=None):
     if str(qt.QSettings().value(DEFAULT_KEY) or "") == template.id:
         qt.QSettings().remove(DEFAULT_KEY)
     registerGrids(force=True)
-    _thumbnails.pop(template.id, None)
+    forgetThumbnails(template.id)
     # Its volume and surfaces stay in the scene (lesions drawn on it keep working) but no longer carry its id: a template
     # added later under the same name (the same id) is loaded from its own image, not taken from them
     forgetTemplateNodes(template.id)
@@ -1223,6 +1223,14 @@ def thumbnailArray(path, size=96):
     scaled = np.clip((image - low) / max(high - low, 1e-6), 0, 1)
     step = max(1, int(max(scaled.shape) / size))
     return (scaled[::step, ::step] * 255).astype(np.uint8)
+
+
+def forgetThumbnails(templateId):
+    """Drop the in-memory thumbnails of a template at every size (the cache keys are ``(id, size)``): a template added later
+    under the same name has the same id and must not show the removed one's picture.
+    """
+    for key in [key for key in _thumbnails if key[0] == templateId]:
+        del _thumbnails[key]
 
 
 def rememberThumbnail(template, size, pixmap):

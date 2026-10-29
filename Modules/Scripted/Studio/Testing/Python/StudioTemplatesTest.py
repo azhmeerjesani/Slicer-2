@@ -980,3 +980,34 @@ class StudioTemplatesTest(unittest.TestCase):
                 self.assertEqual(reference.GetID(), volume.GetID(), (order, editorCleared))
                 # Draw now edits the new (empty) lesion on that template: the next one goes there too
                 self.assertEqual(library.templateToDrawOn().GetID(), volume.GetID(), (order, editorCleared))
+
+    def test_19_readded_same_name_gets_its_own_thumbnail(self):
+        """A template removed and another image added under the same name (the same id): the thumbnail is computed from the new
+        image at every size, not taken from the in-memory cache of the removed one.
+        """
+        from LesionNetworkMappingLib import nifti
+
+        templates = self.templates
+        first = self._add(name="Swap")
+        for size in (48, 96):
+            self.assertIsNotNone(templates.thumbnailPixmap(first, size))
+        self.assertEqual({key[1] for key in templates._thumbnails if key[0] == first.id}, {48, 96})
+        self.assertTrue(templates.removeTemplate(first.id, confirmDelete=lambda: True))
+        self.assertFalse([key for key in templates._thumbnails if key[0] == first.id], "no thumbnail of the removed template is kept")
+        data, affine, _header = nifti.read_nifti(self.image15)
+        ii, jj, _kk = np.indices(data.shape[:3])
+        checker = os.path.join(self.inputs, "checker_1.5mm.nii.gz")
+        nifti.write_nifti(checker, (((ii // 10 + jj // 10) % 2) * 1000).astype(np.float32), affine)
+        self.inputMd5[checker] = None
+        try:
+            second = self._add(checker, name="Swap")
+            self.assertEqual(second.id, first.id)
+            expected = templates.arrayToImage(templates.thumbnailArray(checker))
+            for size in (48, 96):
+                pixmap = templates.thumbnailPixmap(second, size)
+                self.assertIsNotNone(pixmap)
+                want = expected.scaled(size, size, qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation)
+                self.assertTrue(pixmap.toImage() == want, f"thumbnail at {size} is the new image's")
+        finally:
+            self.inputMd5.pop(checker, None)
+            os.remove(checker)
