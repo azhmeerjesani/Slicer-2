@@ -3027,6 +3027,8 @@ class DrawExtension:
         if studio and editor.visible == empty:
             editor.setVisible(not empty)
         self.card.widget.setVisible(not empty)
+        # The "Tools" label and "More tools ▾" belong to the tool tiles, which the hidden editor holds
+        self.toolsRow.setVisible(not empty)
         if self._trailing is not None:
             self._trailing.setVisible(not empty)
         if empty:

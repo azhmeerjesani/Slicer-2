@@ -208,7 +208,7 @@ ROWS = (
         category="editor"),
     Row("segment-editor-masking", _("Segment Editor > Masking (Editable area, Editable intensity range, Modify other segments)"),
         _("Draw > More tools ▾: the overwrite options appear under the tool options; they also stay shown while they limit where you paint"),
-        target=("MaskingGroupBox", "SegmentEditorMoreToolsButton", "EffectsGroupBox"), workspace="draw",
+        target=("MaskingGroupBox", "SegmentEditorMoreToolsButton", "EffectsGroupBox", "StudioDrawEmptyState"), workspace="draw",
         keywords="masking mask editable area intensity range overwrite modify other segments paint everywhere overlap",
         category="editor"),
     Row("segment-editor-display", _("Segmentations > Display (opacity, outline, Show 3D) and Volumes > window/level"),

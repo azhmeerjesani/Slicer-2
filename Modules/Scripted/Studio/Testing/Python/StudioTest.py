@@ -1653,6 +1653,10 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         for name in ("StudioDrawOpenButton", "StudioDrawStartOnTemplateButton", "StudioDrawLibraryButton"):
             self.assertTrue(self.mainWindow.findChild("QPushButton", name).isVisible(), name)
         self.assertFalse(slicer.modules.SegmentEditorWidget.editor.isVisible())
+        # No orphan "Tools" header or "More tools" button without the tool tiles (bug bash: draw-empty-state-orphan-tools-header)
+        toolsRow = self.mainWindow.findChild("QWidget", "StudioDrawToolsRow")
+        self.assertIsNotNone(toolsRow)
+        self.assertFalse(toolsRow.isVisible())
         # A figure (Studio.Role) shown in the views is never the source volume
         studioShell.switchTo("library")
         self._pump()
@@ -1666,6 +1670,7 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertIsNone(editor.sourceVolumeNode())
         self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLSegmentationNode")), 0)
         self.assertTrue(emptyState.isVisible())
+        self.assertFalse(toolsRow.isVisible())
 
     def test_27_draw_follow_and_center(self):
         """After a stroke in Red the other views move to it (Follow); Center on lesion moves every view to the lesion (U9, U10)."""

@@ -1044,3 +1044,35 @@ class StudioTourTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                 self._pump()
             self.assertFalse(player.active, other)
             self.assertIsNone(self.mainWindow.findChild("QWidget", "StudioTourOverlay"), other)
+
+    def test_19_show_me_editor_rows_with_draw_empty(self):
+        """With nothing open, Draw shows only its empty state (no "Tools" header, no "More tools"), and "Show me" of the
+        editor rows of the map spotlights that empty state instead of finding nothing (bug bash:
+        draw-empty-state-orphan-tools-header).
+        """
+        from StudioLib import migration, tour
+
+        studioShell = self._applyStudio()
+        self._resize(1366, 768)
+        self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")), 0)
+        studioShell.switchTo("draw")
+        self._pump()
+        emptyState = self.mainWindow.findChild("QWidget", "StudioDrawEmptyState")
+        self.assertIsNotNone(emptyState)
+        self.assertTrue(emptyState.isVisible())
+        toolsRow = self.mainWindow.findChild("QWidget", "StudioDrawToolsRow")
+        self.assertIsNotNone(toolsRow)
+        self.assertFalse(toolsRow.isVisible())
+        self.assertIsNone(tour.resolveTarget("SegmentEditorMoreToolsButton", studioShell))
+        for rowId in ("segment-editor-tools", "segment-editor-masking", "segment-editor-controls"):
+            row = migration.row(rowId)
+            self.assertIsNotNone(row, rowId)
+            self.assertTrue(tour.showMe(rowId), f"{rowId}: Show me found no control for {row.target}")
+            self.assertIn("StudioDrawEmptyState", row.target, rowId)
+            player = tour.activePlayer()
+            self.assertIsNotNone(player, rowId)
+            self.assertEqual(player.target.objectName, "StudioDrawEmptyState", rowId)
+            self._checkStep(player, f"empty-{rowId}")
+            player.stop()
+            self._pump()
+            self.assertIsNone(tour.activePlayer(), rowId)
