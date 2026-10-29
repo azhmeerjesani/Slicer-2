@@ -1451,6 +1451,34 @@ fi
         self.assertEqual(makeRelease.main([other, "--out-dir", out]), 1)
         self.assertEqual(makeRelease.main([os.path.join(built, "unknown.bin"), "--out-dir", out]), 1)
 
+    def test_MakeReleaseUnreadableNotes(self):
+        """An unreadable --notes file is an 'Error: ...' line and exit 1, never a traceback."""
+        makeRelease = self._importScript(os.path.join("Utilities", "Scripts", "SlicerStudioRelease", "make_release.py"), "make_release_test3")
+        linux = os.path.join(self.feedDir, "Slicer-5.13.0-linux-amd64.tar.gz")
+        _fakeLinuxPackage(linux, makeRelease.read_studio_version())
+        cp1252 = os.path.join(self.tempDir, "notes-cp1252.md")
+        with open(cp1252, "wb") as f:
+            f.write(b"Caf\xe9 \x93q\x94\n")
+        utf8 = os.path.join(self.tempDir, "notes-utf8.md")
+        with open(utf8, "wb") as f:
+            f.write("Café ok\n".encode())
+        folder = os.path.join(self.tempDir, "notes-folder")
+        os.makedirs(folder, exist_ok=True)
+        out = os.path.join(self.tempDir, "release-notes")
+        for notes, expected in ((cp1252, "UTF-8"), (os.path.join(self.tempDir, "missing.md"), "Cannot read the notes file"),
+                                (folder, "Cannot read the notes file")):
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                code = makeRelease.main([linux, "--notes", notes, "--no-web", "--out-dir", out])
+            self.assertEqual(code, 1, notes)
+            self.assertTrue(stderr.getvalue().startswith("Error: "), stderr.getvalue())
+            self.assertIn(expected, stderr.getvalue())
+            self.assertNotIn("Traceback", stderr.getvalue())
+        self.assertFalse(os.path.exists(os.path.join(out, "studio-update.json")))
+        self.assertEqual(makeRelease.main([linux, "--notes", utf8, "--no-web", "--out-dir", out]), 0)
+        with open(os.path.join(out, "studio-update.json"), encoding="utf-8") as f:
+            self.assertIn("Café ok", json.load(f)["notes"])
+
     def test_WebLauncher(self):
         web = self._importScript(os.path.join("Utilities", "SlicerStudioWeb", "slicer_studio_web.py"), "slicer_studio_web_test")
         makeRelease = self._importScript(os.path.join("Utilities", "Scripts", "SlicerStudioRelease", "make_release.py"), "make_release_test2")

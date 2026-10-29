@@ -253,7 +253,13 @@ def main(argv=None):
                   "release, and upload the manifest, before or together with them.", file=sys.stderr)
         notes_text = ""
         if args.notes:
-            notes_text = Path(args.notes).read_text(encoding="utf-8")
+            try:
+                notes_text = Path(args.notes).read_text(encoding="utf-8")
+            except UnicodeDecodeError as error:
+                raise ReleaseError(f"The notes file {args.notes} is not UTF-8 text ({error.reason} at byte {error.start}): "
+                                   "save it as UTF-8.") from None
+            except OSError as error:
+                raise ReleaseError(f"Cannot read the notes file {args.notes}: {error.strerror or error}.") from None
         elif args.notes_text:
             notes_text = args.notes_text
         out_dir = Path(args.out_dir or f"release-v{version}").resolve()
