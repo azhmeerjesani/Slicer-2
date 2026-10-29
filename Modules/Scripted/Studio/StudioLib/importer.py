@@ -2602,10 +2602,18 @@ def loadTemplateVolume(template):
     ``Studio.Space`` and ``Studio.TemplateId``; the 3D brain surfaces of your template are loaded with it.
     """
     templates = _templatesModule()
+    stale = []
     for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
         if node.GetAttribute(_TEMPLATE_ID_ATTRIBUTE) == template.id and not node.IsA("vtkMRMLLabelMapVolumeNode"):
+            if templates is not None and not templates.isNodeOnTemplateGrid(node, template):
+                # The volume of a removed template with the same id (added again under the same name, another image; for
+                # example in a project reopened after the change): never drawn on as the new one
+                stale.append(node)
+                continue
             _loadTemplateSurfaces(template)
             return node
+    if stale and templates is not None:
+        templates.forgetTemplateNodes(template.id, stale + list(slicer.util.getNodesByClass("vtkMRMLModelNode")))
     sampleName = templates.sampleNameOf(template) if templates is not None else None
     if sampleName in (TEMPLATE_SAMPLE_2MM, TEMPLATE_SAMPLE_1MM):
         volumeNode = _templateVolume(sampleName, (cachedTemplatePath(sampleName) or template.imagePath) if sampleName == TEMPLATE_SAMPLE_1MM else None)

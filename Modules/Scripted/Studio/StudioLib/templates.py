@@ -747,11 +747,57 @@ def templateForGrid(shape, affine, rootPath=None):
 
 
 def templateOfNode(node):
-    """The template of a volume tagged ``Studio.TemplateId`` (yours or built-in), or None."""
+    """The template of a volume tagged ``Studio.TemplateId`` (yours or built-in), or None (also when the volume is not on
+    the grid of your template with that id: the volume of a template you removed, then added again under the same name).
+    """
     if node is None or not hasattr(node, "GetAttribute"):
         return None
     templateId = node.GetAttribute(TEMPLATE_ID_ATTRIBUTE)
-    return templateById(templateId) if templateId else None
+    template = templateById(templateId) if templateId else None
+    return template if template is not None and isNodeOnTemplateGrid(node, template) else None
+
+
+def isNodeOnTemplateGrid(node, template):
+    """True when the volume ``node`` holds the grid recorded for your template ``template`` (always True for a built-in
+    template, a template without a recorded grid, and a node that is not a volume with an image).
+
+    The id of your template is the slug of its name, so a template removed and added again under the same name has the
+    same id: the grid tells its volume apart from the volume of the removed one. The tolerance allows the sform and qform
+    disagreement that an added template may have (Slicer places the image at the qform, the recorded grid is the sform).
+    """
+    if template is None or template.builtin or node is None or not hasattr(node, "IsA") or not node.IsA("vtkMRMLVolumeNode"):
+        return True
+    grid = template.grid
+    imageData = node.GetImageData()
+    if not grid.get("shape") or not grid.get("affine") or imageData is None:
+        return True
+    import vtk
+
+    matrix = vtk.vtkMatrix4x4()
+    node.GetIJKToRASMatrix(matrix)
+    affine = [[matrix.GetElement(row, column) for column in range(4)] for row in range(4)]
+    try:
+        return sameGrid(grid["shape"], grid["affine"], imageData.GetDimensions(), affine, tolerance=XFORM_REFUSAL_MM + GRID_TOLERANCE_MM)
+    except Exception:
+        logging.debug("Slicer Studio: template grid comparison failed", exc_info=True)
+        return True
+
+
+def forgetTemplateNodes(templateId, nodes=None):
+    """Remove the ``Studio.TemplateId`` = ``templateId`` tag of scene volumes and template surfaces (or of ``nodes``): they no
+    longer show that template (it was removed, or a template added again under the same name has another image). Their
+    ``Studio.Role`` and ``Studio.Space`` stay, so lesions drawn on them keep their space. Return the nodes untagged.
+    """
+    if not templateId:
+        return []
+    if nodes is None:
+        nodes = list(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")) + list(slicer.util.getNodesByClass("vtkMRMLModelNode"))
+    forgotten = []
+    for node in nodes:
+        if node is not None and node.GetAttribute(TEMPLATE_ID_ATTRIBUTE) == templateId:
+            node.RemoveAttribute(TEMPLATE_ID_ATTRIBUTE)
+            forgotten.append(node)
+    return forgotten
 
 
 def userTemplateOfNode(node):
@@ -1095,6 +1141,9 @@ def removeTemplate(templateId, confirmDelete=None):
         qt.QSettings().remove(DEFAULT_KEY)
     registerGrids(force=True)
     _thumbnails.pop(template.id, None)
+    # Its volume and surfaces stay in the scene (lesions drawn on it keep working) but no longer carry its id: a template
+    # added later under the same name (the same id) is loaded from its own image, not taken from them
+    forgetTemplateNodes(template.id)
     _notify()
     return not os.path.exists(folder)
 

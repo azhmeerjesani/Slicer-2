@@ -904,3 +904,44 @@ class StudioTemplatesTest(unittest.TestCase):
         slicer.mrmlScene.RemoveNode(volume)
         self.assertEqual(space.spaceOf(segmentation), ("MNI152NLin2009cAsym", 2))
         self.assertIsNone(space.sharedGridSpace(segmentation))
+
+    def test_17_readded_same_name_loads_its_own_image(self):
+        """A template removed in Settings and another image added under the same name (the same id "user:<slug>"): Start on
+        template loads the new image, never the removed template's volume that is still in the scene (also when that volume
+        carries the id again, as in a project reopened after the change).
+        """
+        from StudioLib import draw, importer, space
+
+        templates = self.templates
+        shell = self._shell()
+        first = self._add(name="Swap", surfaces=(self.surface,))
+        oldVolume, _segmentation = importer.startOnTemplate(shell=shell, templateId=first.id)
+        self.assertEqual(tuple(oldVolume.GetImageData().GetDimensions()), self.shape15)
+        oldSpace = oldVolume.GetAttribute("Studio.Space")
+        surfaces = [node for node in slicer.util.getNodesByClass("vtkMRMLModelNode") if node.GetAttribute("Studio.TemplateId") == first.id]
+        self.assertEqual(len(surfaces), 1)
+        self.assertTrue(templates.removeTemplate(first.id, confirmDelete=lambda: True))
+        self.assertIsNotNone(slicer.mrmlScene.GetNodeByID(oldVolume.GetID()), "the removed template's volume stays in the scene")
+        self.assertEqual(oldVolume.GetAttribute("Studio.Space"), oldSpace, "and keeps its space")
+        self.assertEqual(oldVolume.GetAttribute("Studio.Role"), "template")
+        self.assertIsNone(surfaces[0].GetAttribute("Studio.TemplateId"))
+        second = self._add(self.las, name="Swap", space="MNI152NLin6Asym")
+        self.assertEqual(second.id, first.id)
+        volume, segmentation = importer.startOnTemplate(shell=shell, templateId=second.id)
+        self.assertNotEqual(volume.GetID(), oldVolume.GetID())
+        self.assertEqual(sorted(volume.GetImageData().GetDimensions()), sorted(self.bundledShape[:3]))
+        self.assertEqual(volume.GetAttribute("Studio.TemplateId"), second.id)
+        self.assertEqual(space.spaceOf(volume), ("MNI152NLin6Asym", 2))
+        self.assertIsNone(templates.templateOfNode(oldVolume))
+        line, _level = draw.DrawExtension._spaceLine(None, segmentation, volume)
+        self.assertEqual(line, f"On {second.name} · MNI152NLin6Asym 2 mm")
+        self.assertEqual(importer.loadTemplateVolume(second).GetID(), volume.GetID(), "the new volume is reused")
+        # The removed template's volume tagged with the id again (a project reopened after the change): not the new template
+        slicer.mrmlScene.RemoveNode(volume)
+        oldVolume.SetAttribute("Studio.TemplateId", second.id)
+        self.assertIsNone(templates.templateOfNode(oldVolume))
+        volume = importer.loadTemplateVolume(second)
+        self.assertNotEqual(volume.GetID(), oldVolume.GetID())
+        self.assertEqual(sorted(volume.GetImageData().GetDimensions()), sorted(self.bundledShape[:3]))
+        self.assertIsNone(oldVolume.GetAttribute("Studio.TemplateId"), "the stale volume no longer carries the id")
+        self.assertEqual(templates.templateOfNode(volume).id, second.id)
