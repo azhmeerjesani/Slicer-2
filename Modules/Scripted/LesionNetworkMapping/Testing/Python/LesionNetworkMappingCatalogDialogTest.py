@@ -73,6 +73,21 @@ class LesionNetworkMappingCatalogDialogTest(unittest.TestCase):
         dialog = self.makeDialog(None)
         self.assertEqual((dialog.width, dialog.height), (1000, 760))
 
+    def test_failed_terms_fetch_keeps_the_failure_text(self):
+        dialog = self.makeDialog(None)
+        dialog.entry = {"id": "demo-entry"}
+        job = mock.Mock(results=[], failureReason="the network is unreachable")
+        job.succeeded.return_value = False
+        with mock.patch.object(dialog, "updateState"):
+            dialog.onTermsDone(job, "demo-entry")
+        text = dialog.termsView.toPlainText()
+        self.assertIn("could not be fetched", text)
+        self.assertIn("the network is unreachable", text)
+        self.assertFalse(dialog.acceptCheck.checked)
+        self.assertFalse(dialog.acceptCheck.enabled)
+        self.assertEqual(dialog.shaLabel.text, "")
+        self.assertTrue(dialog.loadTermsButton.enabled)
+
 
 if __name__ == "__main__":
     unittest.main()

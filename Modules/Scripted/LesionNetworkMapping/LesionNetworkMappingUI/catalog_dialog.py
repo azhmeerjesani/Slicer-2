@@ -612,13 +612,16 @@ class CatalogDialog(qt.QDialog):
     def onTermsDone(self, job, entryId):
         self.loadTermsButton.setEnabled(True)
         event = next((e for e in job.results if e.get("kind") == "terms"), None)
+        failure = None
         if job.succeeded() and event is not None:
             self.terms[entryId] = {"text": event.get("text") or "", "display": event.get("display") or event.get("text") or "", "sha": event.get("sha256"), "url": event.get("url")}
         else:
             self.terms.pop(entryId, None)
-            self.termsView.setPlainText(_("The terms could not be fetched ({reason}). They must be shown before anything is downloaded: check the connection and click Load terms again.").format(reason=job.failureReason))
+            failure = _("The terms could not be fetched ({reason}). They must be shown before anything is downloaded: check the connection and click Load terms again.").format(reason=job.failureReason)
         if self.entry is not None and self.entry["id"] == entryId:
             self.setTermsView(self.terms.get(entryId))
+            if failure is not None:  # setTermsView shows the click-to-load prompt for missing terms: the failure replaces it
+                self.termsView.setPlainText(failure)
         self.updateState()
 
     def setTermsView(self, terms):
