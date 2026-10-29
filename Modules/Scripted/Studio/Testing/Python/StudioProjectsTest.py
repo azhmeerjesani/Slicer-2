@@ -1429,10 +1429,12 @@ class StudioProjectsTest(unittest.TestCase):
         elsewhere = os.path.join(self.tempDir, "working directory")
         os.makedirs(elsewhere)
         starts = []
+        startExisted = []
         realGetSaveFileName = qt.QFileDialog.getSaveFileName
 
         def fakeGetSaveFileName(parent, caption, start, *args):
             starts.append(start)
+            startExisted.append(os.path.isdir(os.path.dirname(start)))  # what Qt sees when the dialog opens
             return ""  # Cancel
 
         workingDirectory = os.getcwd()
@@ -1459,9 +1461,20 @@ class StudioProjectsTest(unittest.TestCase):
             self.assertFalse(os.path.isdir(exports), "a new project has no Exports/ folder yet")
             self.assertIsNone(projects_ui.saveCopyAs())
             start = starts[-1]
-            self.assertTrue(os.path.isdir(os.path.dirname(start)), f"the dialog starts in an existing folder: {start}")
+            self.assertTrue(startExisted[-1], f"the dialog starts in an existing folder: {start}")
             self.assertEqual(os.path.realpath(os.path.dirname(start)), os.path.realpath(exports))
             self.assertEqual(os.path.basename(start), project.name + ".mrb")
+            # Cancelled: the folder made for the dialog is removed again (A-09: a subfolder only when something is written)
+            self.assertFalse(os.path.isdir(exports), "a cancelled 'Save a copy as' leaves no empty Exports/ folder")
+            # A folder that existed (with content) is never removed
+            os.makedirs(exports)
+            open(os.path.join(exports, "keep.txt"), "w").close()
+            self.assertIsNone(projects_ui.saveCopyAs())
+            self.assertTrue(os.path.isfile(os.path.join(exports, "keep.txt")))
+            os.remove(os.path.join(exports, "keep.txt"))
+            self.assertIsNone(projects_ui.saveCopyAs())
+            self.assertTrue(os.path.isdir(exports), "an Exports/ folder that existed stays")
+            os.rmdir(exports)
         finally:
             qt.QFileDialog.getSaveFileName = realGetSaveFileName
             self.autosave._service = running

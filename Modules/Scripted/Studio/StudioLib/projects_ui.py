@@ -500,8 +500,15 @@ def saveCopyAs(path=None):
     mainWindow = slicer.util.mainWindow()
     project = service.currentProject() if service is not None else None
     if path is None:
+        exports = os.path.join(project.path, projects.EXPORTS) if project is not None else None
+        exportsExisted = exports is None or os.path.isdir(exports)
         start = os.path.join(saveCopyStartFolder(), (project.name if project is not None else "Scene") + ".mrb")
         path = qt.QFileDialog.getSaveFileName(mainWindow, _("Save a copy as"), start, _("Slicer data bundle") + " (*.mrb)")
+        if not exportsExisted and (not path or os.path.realpath(os.path.dirname(os.path.abspath(path))) != os.path.realpath(exports)):
+            try:
+                os.rmdir(exports)  # created for the dialog and not used: never leave an empty folder in a project (A-09)
+            except OSError:
+                pass
         if not path:
             return None
     if not path.lower().endswith(".mrb"):
