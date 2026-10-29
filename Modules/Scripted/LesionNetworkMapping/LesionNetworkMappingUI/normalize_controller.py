@@ -1766,6 +1766,12 @@ class NormalizeController(VTKObservationMixin):
         for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
             if node.GetAttribute(REVIEW_TEMPLATE_ATTRIBUTE) == templateId:
                 return node, False
+        if isUserTemplate(templateId):
+            # The open volume of the user's template carries its id in Studio.TemplateId (its Studio.Space is the space, never "user:<slug>")
+            for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
+                if (node.GetAttribute("Studio.TemplateId") == templateId and not node.IsA("vtkMRMLLabelMapVolumeNode")
+                        and not isNormalizationResult(node) and self._isTemplateVolume(node)):
+                    return node, False
         for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
             if node.GetAttribute("Studio.Role") == "template" and not isNormalizationResult(node):
                 found = spaceOf(node)
@@ -1774,12 +1780,21 @@ class NormalizeController(VTKObservationMixin):
         path = templateFile(templateId, "reference") or (templateFile(templateId, "fixed") if templateId == DEFAULT_TEMPLATE else templateFile(templateId, "head"))
         if not path:
             return None, False
-        node = self._readTemplateVolume(path, f"{templateId} template")
+        node = self._readTemplateVolume(path, f"{templateName(templateId)} template")
         if node is None:
             return None, False
         node.SetAttribute(REVIEW_TEMPLATE_ATTRIBUTE, templateId)
         node.SetAttribute(SPACE_ATTRIBUTE, spaceAttributeValue(templateId))
         return node, True
+
+    @staticmethod
+    def _isTemplateVolume(node):
+        """False for the volume of a removed template with the same id that was added again with another image."""
+        try:
+            from StudioLib import templates
+            return templates.templateOfNode(node) is not None
+        except Exception:
+            return True
 
     @staticmethod
     def _readTemplateVolume(path, name):

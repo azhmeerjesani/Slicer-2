@@ -396,6 +396,50 @@ class LesionNetworkMappingNormalizeUITest(unittest.TestCase):
         self.assertEqual(self._volumeNodes(), volumesBefore)
         self.assertTrue(display.GetVisibility2DFill())
 
+    def test_06b_review_uses_open_user_template(self):
+        """The review shows the open volume of the user's template (no second copy), and names a copy it must read by the template name."""
+        from StudioLib import importer, projects, templates
+
+        controller = self.card.controller
+        root = os.path.join(self.tmp, "studio-root")
+        environment = os.environ.get(projects.ROOT_ENVIRONMENT)
+        os.environ[projects.ROOT_ENVIRONMENT] = root
+        opened = []
+        volumesBefore = self._volumeNodes()
+        try:
+            template = templates.addTemplate(self.nc.templateFile(TEMPLATE, "fixed"), mask=self.nc.templateFile(TEMPLATE, "mask"),
+                                             name="Lab review brain", space=TEMPLATE)
+            self.assertTrue(template.id.startswith("user:"), template.id)
+            node = importer.loadTemplateVolume(template)
+            opened.append(node)
+            self.assertEqual(node.GetAttribute("Studio.TemplateId"), template.id)
+            volumesOpen = self._volumeNodes()
+            found, created = controller._reviewTemplate(template.id)
+            self.assertIs(found, node)
+            self.assertFalse(created)
+            self.assertEqual(self._volumeNodes(), volumesOpen)
+            # Without the open volume the template file is read, named by the template name and never by its raw id
+            slicer.mrmlScene.RemoveNode(node)
+            opened.clear()
+            found, created = controller._reviewTemplate(template.id)
+            self.assertTrue(created)
+            opened.append(found)
+            self.assertEqual(found.GetName(), "Lab review brain template")
+            self.assertNotIn("user:", found.GetName())
+        finally:
+            for node in opened:
+                if slicer.mrmlScene.IsNodePresent(node):
+                    controller._removeWithHelpers(node)
+            for node in list(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")):
+                if node.GetID() not in volumesBefore:
+                    controller._removeWithHelpers(node)
+            if environment is None:
+                os.environ.pop(projects.ROOT_ENVIRONMENT, None)
+            else:
+                os.environ[projects.ROOT_ENVIRONMENT] = environment
+            templates.registerGrids(force=True)
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_07_edit_then_update(self):
         """An edit of the native lesion offers Update MNI lesion, which re-warps it within 5 s."""
         import numpy as np
