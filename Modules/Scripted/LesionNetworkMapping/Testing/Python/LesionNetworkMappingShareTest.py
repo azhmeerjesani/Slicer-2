@@ -539,5 +539,98 @@ class NeuroVaultTest(ShareTestBase):
             self.assertNotIn(f"from {module}", source)
 
 
+class UserTemplateTest(unittest.TestCase):
+    """A study drawn on a template the user added (Slicer Studio A-10): the export names the template (id, name, space,
+    sha256) and includes its file only with ``include_template`` (off by default), byte for byte so its checksum matches.
+    """
+
+    def setUp(self):
+        import hashlib
+
+        self.tmp = tempfile.mkdtemp(prefix="lnm_share_tpl_")
+        templates = os.path.join(self.tmp, "Templates")
+        folder = os.path.join(templates, "Lab ICBM 1.5")
+        os.makedirs(folder)
+        self.template_image = os.path.join(folder, "lab_icbm_T1w.nii.gz")
+        nifti.write_nifti(self.template_image, np.arange(int(np.prod(SHAPE)), dtype=np.int16).reshape(SHAPE), AFFINE, descrip="ICBM lab template")
+        with open(self.template_image, "rb") as f:
+            self.sha = hashlib.sha256(f.read()).hexdigest()
+        with open(os.path.join(folder, "template.json"), "w", encoding="utf-8") as f:
+            json.dump({"schema": "slicer-studio-template", "id": "lab-icbm-1-5", "name": "Lab ICBM 1.5 mm", "space": "MNI (other)",
+                       "files": {"image": "lab_icbm_T1w.nii.gz"}, "sha256": {"image": self.sha}}, f)
+        self.templates = templates
+        self.root = os.path.join(self.tmp, "study")
+        template = {"id": "MNI (other)", "source": "user:lab-icbm-1-5", "name": "Lab ICBM 1.5 mm", "space": "MNI (other)", "sha256": self.sha}
+        study = Study.create(self.root, name="Template study", template=template, space=SPACE)
+        nifti.write_nifti(os.path.join(self.root, "lesions", f"sub-01_space-{SPACE}_desc-lesion_mask.nii.gz"), _sphere((5, 6, 5)), AFFINE)
+        study.add_subject("sub-01", {"group": "case", "status": "traced", "lesion": f"lesions/sub-01_space-{SPACE}_desc-lesion_mask.nii.gz",
+                                     "space": SPACE, "source_type": "case_report"})
+        study.save()
+        self.study = Study.open(self.root)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def export(self, name, **options):
+        return share.export_dataset(self.study, os.path.join(self.tmp, name), {"licence": "CC0-1.0", "lesions": True, **options})
+
+    def test_template_identity_in_metadata_without_the_file(self):
+        self.assertIn("include_template", share.DEFAULT_OPTIONS)
+        self.assertFalse(share.DEFAULT_OPTIONS["include_template"])  # off by default
+        result = self.export("share", template_dirs=[self.templates])
+        out = result["path"]
+        self.assertIsNone(result["template"])
+        self.assertFalse(any(relpath.startswith("template/") for relpath in result["files"]), result["files"])
+        with open(os.path.join(out, "dataset_description.json"), encoding="utf-8") as f:
+            description = json.load(f)
+        self.assertEqual(description["SlicerStudio"]["template"],
+                         {"id": "user:lab-icbm-1-5", "name": "Lab ICBM 1.5 mm", "space": "MNI (other)", "sha256": self.sha})
+        with open(os.path.join(out, "README.md"), encoding="utf-8") as f:
+            readme = f.read()
+        for text in ("Lab ICBM 1.5 mm", "user:lab-icbm-1-5", self.sha, "MNI (other)"):
+            self.assertIn(text, readme)
+        self.assertEqual(share.find_absolute_paths(out), [])
+
+    def test_include_template_file_copies_it_unchanged(self):
+        import hashlib
+
+        result = self.export("share", include_template=True, template_dirs=[self.templates])
+        out = result["path"]
+        self.assertEqual(result["template"], "template/tpl-LabIcbm15.nii.gz")
+        self.assertIn(result["template"], result["files"])
+        with open(os.path.join(out, *result["template"].split("/")), "rb") as f:
+            self.assertEqual(hashlib.sha256(f.read()).hexdigest(), self.sha)  # byte for byte: a recipient adds it by checksum
+        with open(os.path.join(out, "dataset_description.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["SlicerStudio"]["template"]["file"], result["template"])
+        with open(os.path.join(out, ".bidsignore"), encoding="utf-8") as f:
+            self.assertIn("template/", f.read().split())
+        self.assertEqual(share.validate_dataset(out), {})
+        statuses = {item["id"]: item["status"] for item in result["checklist"]}
+        self.assertEqual(statuses["template"], "warn")  # the licence note
+        self.assertTrue(all(item["status"] == "ok" for item in result["checklist"] if item["id"] in ("headers", "exclusions", "paths")))
+
+    def test_include_template_needs_the_file(self):
+        items = share.checklist(self.study, {"licence": "CC0-1.0", "include_template": True, "template_dirs": [os.path.join(self.tmp, "elsewhere")]})
+        self.assertEqual({item["id"]: item["status"] for item in items}["template"], "blocker")
+        with self.assertRaises(share.ShareError):
+            self.export("share", include_template=True)
+        # Another file under the same id is never taken (its checksum differs)
+        with open(os.path.join(self.templates, "Lab ICBM 1.5", "template.json"), encoding="utf-8") as f:
+            record = json.load(f)
+        record["sha256"]["image"] = "0" * 64
+        with open(os.path.join(self.templates, "Lab ICBM 1.5", "template.json"), "w", encoding="utf-8") as f:
+            json.dump(record, f)
+        self.assertIsNone(share.find_template_file(self.study, [self.templates]))
+
+    def test_builtin_template_study_unchanged(self):
+        root = os.path.join(self.tmp, "builtin")
+        study = Study.create(root, name="Built-in", template={"id": SPACE, "res": 2, "source": "builtin"}, space=SPACE)
+        self.assertIsNone(share.template_identity(study))
+        result = share.export_dataset(study, os.path.join(self.tmp, "builtin-share"), {"licence": "CC0-1.0", "include_template": True})
+        with open(os.path.join(result["path"], "dataset_description.json"), encoding="utf-8") as f:
+            self.assertNotIn("SlicerStudio", json.load(f))
+        self.assertIsNone(result["template"])
+
+
 if __name__ == "__main__":
     unittest.main()

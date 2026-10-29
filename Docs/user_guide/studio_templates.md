@@ -127,6 +127,13 @@ shared files.
   2009c brain and says so. With a study open, *Start on template* (or choosing the
   default or the study's template in its ▾ menu) adds a case to the study; another
   template starts a case outside it.
+- **Sharing a study**: *Export study for sharing…* names your template (id, name,
+  space and image checksum) in the export's `dataset_description.json`
+  (`SlicerStudio.template`) and README, so the recipient can tell which template
+  the masks are on and add the same file. The template file itself is included only
+  when you tick **Include the template file** (off by default). It is then copied
+  unchanged into `template/` so that its checksum still matches, and checking its
+  licence is up to you.
 
 ## Projects and official 3D Slicer
 

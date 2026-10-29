@@ -14,12 +14,19 @@ whose data use terms say otherwise. :func:`export_dataset` writes a copy of a st
       group/<map>.nii.gz + .json   opt-in unthresholded group maps, each with its data use terms
       neurovault/                  opt-in NeuroVault-ready folder (:func:`neurovault_folder`)
       sources/records.tsv          citation columns only
+      template/tpl-<label>.<ext>   opt-in: the study's own template image (Slicer Studio A-10), copied unchanged (listed in .bidsignore)
       README.md, CITATION.cff, CHANGES, LICENSE, .bidsignore
 
 **Never exported**: ``sources/<record>/`` figures and PDFs, scans, native-space data, lesions linked from control sets
 (their own licence governs them), ``.studio/`` and the autosave folder (nothing is ever walked: every file is chosen by
 name). NIfTI files are copied with ``descrip``, ``aux_file``, ``db_name`` and header extensions removed; voxels and
 geometry are unchanged.
+
+**Template.** When the study's lesions were drawn on a template the user added (Slicer Studio A-10, ``study.user_template()``),
+its id, name, space and image sha256 are written to ``dataset_description.json`` (``SlicerStudio.template``) and the README,
+so a recipient can tell which template the masks are on and add it by checksum. The template file itself is included only
+with ``include_template`` (off by default; found by its sha256 in ``template_dirs``); it is copied byte for byte so that its
+checksum matches, and its licence is the user's responsibility (:data:`TEMPLATE_LICENCE_NOTE`).
 
 **Pseudonyms.** With ``pseudonymise`` the participant ids become ``sub-P001``... in a random order (another letter when
 the study's own ids already use that series); the mapping is kept only in ``<study>/.studio/share/<time>.json`` (never in
@@ -104,7 +111,16 @@ DEFAULT_OPTIONS = {
     "terms_acknowledged": False,  # the GSP data use terms note was read (required when GSP-derived maps are included)
     "zip": False,  # write <out> as a .zip archive
     "software": None,  # {"version", "code_url", "container": {"Type", "Tag", "URI"}} of the exporting application
+    "include_template": False,  # also copy the study's own template image (A-10) under template/ (its licence is the user's responsibility)
+    "template_dirs": (),  # Templates folders (or template folders) searched for that image, e.g. "<Slicer Studio folder>/Templates"
 }
+#: Folder of the optional template image (listed in .bidsignore)
+TEMPLATE_FOLDER = "template"
+TEMPLATE_EXTENSIONS = (".nii.gz", ".nii", ".nrrd")
+TEMPLATE_LICENCE_NOTE = (
+    "The template image is copied unchanged so that its checksum matches. Its licence is your responsibility and may differ "
+    "from the licence you choose for this dataset."
+)
 
 #: Columns never offered (paths of the study's own files)
 NEVER_EXPORTED_TYPES = ("path",)
@@ -194,6 +210,8 @@ def _options(options):
     if any(alias not in ALIASES for alias in aliases):
         raise ValueError(f"Unknown alias(es) {aliases}; expected some of {', '.join(ALIASES)}")
     merged["aliases"] = aliases
+    dirs = merged["template_dirs"] or ()
+    merged["template_dirs"] = (os.fspath(dirs),) if isinstance(dirs, (str, os.PathLike)) else tuple(os.fspath(folder) for folder in dirs if folder)
     if merged["own_patient"] not in (None, "share", "exclude"):
         raise ValueError("own_patient must be None, 'share' or 'exclude'")
     return merged
@@ -407,6 +425,79 @@ def pseudonyms(sids, rng=None):
 
 
 #
+# Template
+#
+
+
+def template_identity(study):
+    """{"id", "name", "space", "sha256"} of the template the user added that the study's lesions are drawn on (Slicer Studio
+    A-10, ``study.user_template()``), or None for a built-in template. Empty values, and values that look like local paths,
+    are left out.
+    """
+    study = _open(study)
+    user = study.user_template() if hasattr(study, "user_template") else None
+    if not user:
+        return None
+    identity = {}
+    for key in ("id", "name", "space", "sha256"):
+        value = user.get(key)
+        if value is not None and str(value).strip() and not ABSOLUTE_PATH.search(" " + str(value)):
+            identity[key] = str(value).strip()
+    return identity or None
+
+
+def _template_extension(path):
+    lower = path.lower()
+    return next((extension for extension in TEMPLATE_EXTENSIONS if lower.endswith(extension)), None)
+
+
+def find_template_file(study, template_dirs=()):
+    """The image of the study's own template in ``template_dirs`` (Templates folders or template folders), or None.
+
+    Found by the image sha256 that study.json records (ids are chosen on each computer), else by id when the study records
+    no checksum; a file with another checksum is never taken.
+    """
+    identity = template_identity(study)
+    if not identity:
+        return None
+    from . import normalize
+
+    if isinstance(template_dirs, (str, os.PathLike)):
+        template_dirs = (template_dirs,)
+    records = [record for record in (normalize.read_user_template(folder) for folder in normalize.user_template_folders(template_dirs or ())) if record]
+    if identity.get("sha256"):
+        matches = [record for record in records if (record.get("sha256") or {}).get("image") == identity["sha256"]]
+        matches.sort(key=lambda record: f"{normalize.USER_TEMPLATE_PREFIX}{record['id']}" != identity.get("id"))
+    else:
+        matches = [record for record in records if f"{normalize.USER_TEMPLATE_PREFIX}{record['id']}" == identity.get("id")]
+    for record in matches:
+        name = (record.get("files") or {}).get("image")
+        if not name:
+            continue
+        path = os.path.join(record["folder"], *str(name).split("/"))
+        if os.path.isfile(path) and _template_extension(path):
+            return path
+    return None
+
+
+def _template_target(identity, path):
+    """Relative path of the exported template image: template/tpl-<label>.<ext> (letters and digits only)."""
+    words = re.split(r"[^A-Za-z0-9]+", str(identity.get("id") or "").split(":", 1)[-1])
+    label = "".join(word[:1].upper() + word[1:] for word in words if word) or "User"
+    return f"{TEMPLATE_FOLDER}/tpl-{label}{_template_extension(path)}"
+
+
+def _sha256(path):
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+#
 # The plan and its checklist
 #
 
@@ -416,7 +507,8 @@ def plan(study, options=None, maps=None, mapped=None):
 
     :param maps: the group maps to consider (default: :func:`study_group_maps`; used only with ``options["maps"]``).
     :param mapped: a :func:`map_plan` result to reuse instead of reading the maps' metadata again (dialogs).
-    :return: {"rows", "columns", "lesions", "skipped", "own_patient", "maps", "gsp", "suggested_licence", "checklist"}.
+    :return: {"rows", "columns", "lesions", "skipped", "own_patient", "maps", "gsp", "suggested_licence", "template" (see
+      :func:`template_identity`), "template_file" (the image copied with ``include_template``, else None), "checklist"}.
     """
     study = _open(study)
     options = _options(options)
@@ -477,6 +569,17 @@ def plan(study, options=None, maps=None, mapped=None):
         checklist.append(_item("licence", "Licence chosen", "ok", LICENCES[licence][0]))
     if gsp:
         checklist.append(_item("gsp_terms", "GSP data use terms read", "ok" if options["terms_acknowledged"] else "blocker", GSP_TERMS_NOTE))
+    template = template_identity(study)
+    template_file = None
+    if template and options["include_template"]:
+        template_file = find_template_file(study, options["template_dirs"])
+        if template_file is None:
+            checksum = f" (sha256 {template['sha256'][:12]}…)" if template.get("sha256") else ""
+            checklist.append(_item("template", "Template file found", "blocker",
+                                   f"The image of the template {template.get('name') or template.get('id')}{checksum} is not on this computer: "
+                                   "add the template, or untick 'Include the template file'."))
+        else:
+            checklist.append(_item("template", "Template file included", "warn", TEMPLATE_LICENCE_NOTE))
     return {
         "rows": rows,
         "columns": columns,
@@ -486,6 +589,8 @@ def plan(study, options=None, maps=None, mapped=None):
         "maps": mapped if options["maps"] or options["neurovault"] else [],
         "gsp": gsp,
         "suggested_licence": suggested_licence(gsp or unknown_terms),
+        "template": template,
+        "template_file": template_file,
         "checklist": checklist,
     }
 
@@ -632,6 +737,16 @@ def _readme(name, options, plan_result, written, pseudonymised):
         lines.append(f"- neurovault/: the maps with images.json and images.csv for NeuroVault. {NOTHING_UPLOADED}")
     if written["records"]:
         lines.append("- sources/records.tsv: the publications the cases come from (citation columns only).")
+    template = plan_result.get("template")
+    if template:
+        about = ", ".join(f"{label} {template[key]}" for key, label in (("space", "space"), ("id", "Slicer Studio id"), ("sha256", "image sha256"))
+                          if template.get(key))
+        lines.append(f"- Template: the lesions were drawn on the user-added template \"{template.get('name') or template.get('id')}\" ({about}); "
+                     "dataset_description.json lists it under SlicerStudio.template.")
+        if written.get("template"):
+            lines.append(f"- {written['template']}: the template image, unchanged (its sha256 matches). {TEMPLATE_LICENCE_NOTE}")
+        else:
+            lines.append("- The template file is not included: add the same file in Slicer Studio (it is recognized by its checksum).")
     lines += ["", ("Not included: figures and PDFs of publications, scans, native-space data, lesions from control sets "
                    "(governed by their own licence) and application files."), "", "## Licence", "", LICENCES[options["licence"]][0]]
     if plan_result["gsp"]:
@@ -839,21 +954,25 @@ def _json_strings(value):
             yield from _json_strings(item)
 
 
-def verify_export(root, private_names=()):
+def verify_export(root, private_names=(), template_files=()):
     """Check a written export: [checklist items] (status "ok" or "fail").
 
     Exclusions (no figure, document or scan file, nothing hidden but .bidsignore, nothing from sources/ but records.tsv, no
     native-space NIfTI), scrubbed NIfTI headers, no absolute paths, no private id (``private_names``: the original ids
-    when pseudonymised) in any file name or text, and valid JSON sidecars.
+    when pseudonymised) in any file name or text, and valid JSON sidecars. ``template_files``: relative paths of the
+    template image copied unchanged on request (exempt from the format and header checks: its checksum must match).
     """
     from . import nifti
 
     files = _files(root)
+    template_files = {str(relpath).replace(os.sep, "/") for relpath in template_files or ()}
     items = []
     bad = []
     for relpath in files:
         lower = relpath.lower()
         parts = relpath.split("/")
+        if relpath in template_files:
+            continue
         if any(part.startswith(".") for part in parts) and relpath != ".bidsignore":
             bad.append(f"{relpath} (hidden)")
         elif lower.endswith(FORBIDDEN_EXTENSIONS):
@@ -865,7 +984,7 @@ def verify_export(root, private_names=()):
     items.append(_item("exclusions", "No figures, PDFs, scans, native data or .studio", "fail" if bad else "ok", "; ".join(bad[:5])))
     unscrubbed = []
     for relpath in files:
-        if relpath.lower().endswith((".nii", ".nii.gz")):
+        if relpath.lower().endswith((".nii", ".nii.gz")) and relpath not in template_files:
             try:
                 header = nifti.read_nifti_header(os.path.join(root, relpath))
                 raw = nifti.read_raw_header(os.path.join(root, relpath))
@@ -946,7 +1065,8 @@ def export_dataset(study, out, options=None, progress=None, cancel=None, maps=No
     :param options: see :data:`DEFAULT_OPTIONS`; ``licence`` is required (an explicit choice).
     :param progress: optional ``progress(stage, done, total)``; ``cancel``: optional callable, True stops (``jobs.Cancelled``).
     :param maps: group maps to consider instead of :func:`study_group_maps` (with ``options["maps"]``).
-    :return: {"path", "files", "lesions", "maps", "skipped", "checklist", "record", "validation"}; the pseudonym
+    :return: {"path", "files", "lesions", "maps", "neurovault", "template" (relative path of the template image, or None),
+      "skipped", "checklist", "record", "validation"}; the pseudonym
       mapping is only in the private record (``record``, in the study's .studio folder).
     :raises ShareError: while a checklist blocker is open, for an unsafe output, or when the written files fail
       :func:`verify_export` (nothing is left at ``out`` then).
@@ -963,7 +1083,7 @@ def export_dataset(study, out, options=None, progress=None, cancel=None, maps=No
     created = _now().isoformat(timespec="seconds")
     name = str(options["name"] or study.name).strip() or "Lesion study"
     staging = (out[:-4] if options["zip"] else out.rstrip(os.sep)) + f".partial-{os.getpid()}-{secrets.token_hex(3)}"
-    written = {"lesions": 0, "maps": 0, "neurovault": 0, "records": False}
+    written = {"lesions": 0, "maps": 0, "neurovault": 0, "records": False, "template": None}
     try:
         os.makedirs(staging)
         _progress(progress, "participants")
@@ -1019,6 +1139,17 @@ def export_dataset(study, out, options=None, progress=None, cancel=None, maps=No
                                        licence=licence)
             written["neurovault"] = len(folder["images"])
             ignore.append("neurovault/")
+        template = result_plan["template"]
+        if result_plan["template_file"]:
+            _cancelled(cancel)
+            _progress(progress, "template")
+            target = _template_target(template, result_plan["template_file"])
+            os.makedirs(os.path.join(staging, TEMPLATE_FOLDER), exist_ok=True)
+            shutil.copyfile(result_plan["template_file"], os.path.join(staging, *target.split("/")))
+            if template.get("sha256") and _sha256(os.path.join(staging, *target.split("/"))) != template["sha256"]:
+                raise ShareError("The template file changed: its checksum no longer matches the study's template. Add the template again.")
+            written["template"] = target
+            ignore.append(f"{TEMPLATE_FOLDER}/")
         records = _records(study)
         if records is not None:
             _write_text(os.path.join(staging, "sources", "records.tsv"), _tsv(*records))
@@ -1039,6 +1170,9 @@ def export_dataset(study, out, options=None, progress=None, cancel=None, maps=No
             description["SourceDatasets"] = sources
         if result_plan["gsp"]:
             description["HowToAcknowledge"] = export.GSP_ACKNOWLEDGEMENT
+        if template:
+            # Which template the masks are drawn on (never a path): a recipient adds the same file by its checksum
+            description[schema.FORK_KEY] = {"template": {**template, **({"file": written["template"]} if written["template"] else {})}}
         _write_json(os.path.join(staging, "dataset_description.json"), description)
         _write_text(os.path.join(staging, "README.md"), _readme(name, options, result_plan, written, options["pseudonymise"]))
         _write_text(os.path.join(staging, "CITATION.cff"), _citation_cff(name, authors, licence, created))
@@ -1048,7 +1182,7 @@ def export_dataset(study, out, options=None, progress=None, cancel=None, maps=No
             _write_text(os.path.join(staging, ".bidsignore"), "\n".join(dict.fromkeys(ignore)) + "\n")
         _progress(progress, "verify")
         private = [sid for sid, new in id_map.items() if sid != new]
-        verification = verify_export(staging, private_names=private)
+        verification = verify_export(staging, private_names=private, template_files=[written["template"]] if written["template"] else ())
         failed = blockers(verification)
         if failed:
             raise ShareError("; ".join(f"{item['label']}: {item['detail']}" for item in failed), verification)
@@ -1077,6 +1211,7 @@ def export_dataset(study, out, options=None, progress=None, cancel=None, maps=No
         "files": len(files),
         "lesions": written["lesions"],
         "maps": written["maps"],
+        "template": written["template"],
     }
     record_path = _record(study, record)
     checklist_items = [item for item in result_plan["checklist"] if item["id"] not in {entry["id"] for entry in verification}] + verification
@@ -1086,6 +1221,7 @@ def export_dataset(study, out, options=None, progress=None, cancel=None, maps=No
         "lesions": written["lesions"],
         "maps": written["maps"],
         "neurovault": written["neurovault"],
+        "template": written["template"],
         "skipped": result_plan["skipped"],
         "checklist": checklist_items,
         "record": record_path,

@@ -213,7 +213,9 @@ chooses each file by name and never walks the study folder.
   `aux_file`, `db_name`, header extensions); voxels and geometry are unchanged.
 - **Chosen by you:** the columns of `participants.tsv` (free text, tracer names and dates are off by default); the lesion
   masks (template space only; optional fMRIPrep and lacuna aliases); unthresholded group maps; a NeuroVault-ready folder
-  (nothing is uploaded); a zip.
+  (nothing is uploaded); a zip; for a study drawn on a template you added, the template file (off by default; copied
+  unchanged so its checksum matches; its licence is yours to check). The template's id, name, space and checksum are
+  always written in `dataset_description.json` (`SlicerStudio.template`) and the README.
 - **Pseudonyms.** Ids can be replaced by `sub-P001`, … in a random order; the key stays in the study's `.studio/share/` and
   is never in the export.
 - **Licence is always an explicit choice.** CC0 is suggested for your own masks. GSP-derived maps carry

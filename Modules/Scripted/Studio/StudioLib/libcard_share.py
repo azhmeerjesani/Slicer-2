@@ -7,6 +7,9 @@ The STUDY card "Share" says when the study was last exported for sharing (from t
   per column. Free text, tracer and reviewer names and dates are off by default and marked; paths are never offered.
 - **Lesion masks** (opt-in, template space only) with the identifiability warning; own-patient masks need an explicit
   choice (share them or leave them out), which is recorded; optional fMRIPrep and lacuna aliases.
+- **Template**: a study drawn on a template the user added (A-10) always names it (id, name, space, sha256) in the
+  export's metadata; **Include the template file** (off by default) also copies the image, unchanged (its licence is the
+  user's responsibility).
 - **Maps** (opt-in): the study's unthresholded group maps, and a NeuroVault-ready folder (nothing is uploaded).
 - **Licence**: an explicit choice. CC0 is pre-selected for the user's own masks only; with GSP-derived maps there is no
   default, the GSP data use terms note is shown and must be acknowledged.
@@ -111,8 +114,19 @@ def exportWork(progress, cancel, studyPath, out, options, stages):
                                 cancel=cancel)
 
 
+def templateDirs():
+    """The Templates folder of the Slicer Studio folder (where the templates the user added live), as a tuple; () when unknown."""
+    try:
+        from . import templates
+
+        return (templates.templatesFolder(),)
+    except Exception:
+        logging.debug(f"Studio share: no Templates folder:\n{traceback.format_exc()}")
+        return ()
+
+
 def _importForWorker():
-    for name in ("share", "export", "nifti", "study", "schema", "jobs"):
+    for name in ("share", "export", "nifti", "study", "schema", "jobs", "normalize"):
         _lnm(name)
 
 
@@ -246,6 +260,24 @@ class ShareDialog:
         aliasRow.addStretch(1)
         layout.addLayout(aliasRow)
 
+        # The template the user added (A-10): always named in the metadata; the file only on request (off by default)
+        self._template = share.template_identity(self.study)
+        self._templateDirs = templateDirs()
+        self.templateHeader = self._header(_("Template"))
+        layout.addWidget(self.templateHeader)
+        self.templateLabel = library._cardLabel("StudioShareTemplateNote", 12, "text2")
+        if self._template:
+            self.templateLabel.setText(_("Drawn on your template {name} ({space}). Its id, name, space and checksum are written in the "
+                                         "export's metadata.").format(name=self._template.get("name") or self._template.get("id"),
+                                                                      space=self._template.get("space") or _("MNI")))
+        layout.addWidget(self.templateLabel)
+        self.templateCheck = qt.QCheckBox(_("Include the template file"))
+        self.templateCheck.setObjectName("StudioShareIncludeTemplate")
+        self.templateCheck.setToolTip(_(share.TEMPLATE_LICENCE_NOTE))
+        layout.addWidget(self.templateCheck)
+        for widget in (self.templateHeader, self.templateLabel, self.templateCheck):
+            widget.setVisible(bool(self._template))
+
         layout.addWidget(self._header(_("Maps")))
         count = len(self._mapped)
         self.mapsCheck = qt.QCheckBox((_("Include {n} unthresholded group map") if count == 1 else _("Include {n} unthresholded group maps")).format(n=count))
@@ -324,7 +356,7 @@ class ShareDialog:
         self._timer.setInterval(PREVIEW_DELAY_MS)
         self._timer.connect("timeout()", self.preview)
         for check in (self.pseudonymCheck, self.includeExcludedCheck, self.lesionsCheck, self.fmriprepCheck, self.lacunaCheck, self.mapsCheck,
-                      self.neurovaultCheck, self.gspCheck, self.zipCheck):
+                      self.neurovaultCheck, self.gspCheck, self.zipCheck, self.templateCheck):
             check.connect("toggled(bool)", lambda _checked: self.schedulePreview())
         self.ownCombo.connect("currentIndexChanged(int)", lambda _index: self.schedulePreview())
         self.licenceCombo.connect("currentIndexChanged(int)", lambda _index: self.schedulePreview())
@@ -421,6 +453,8 @@ class ShareDialog:
             "licence_text": str(self.licenceEdit.toPlainText()) or None,
             "terms_acknowledged": bool(self.gspCheck.checked),
             "zip": bool(self.zipCheck.checked),
+            "include_template": bool(self._template) and bool(self.templateCheck.checked),
+            "template_dirs": self._templateDirs,
             "software": {"version": _studioVersion(), "code_url": _share().CODE_URL},
         }
 
@@ -523,7 +557,7 @@ class ShareDialog:
             self.session.flush()  # the worker reads the saved study
         _importForWorker()
         stages = {"participants": _("Participants…"), "lesions": _("Lesion masks"), "maps": _("Maps"), "neurovault": _("NeuroVault folder"),
-                  "verify": _("Checking the files…")}
+                  "template": _("Template file"), "verify": _("Checking the files…")}
         self.result, self.error = None, None
         self.progressLabel.setText(_("Exporting…"))
         started = self.worker.start(exportWork, studyPath=self.study.path, out=self.output(), options=self.options(), stages=stages)
