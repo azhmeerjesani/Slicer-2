@@ -1011,3 +1011,36 @@ class StudioTemplatesTest(unittest.TestCase):
         finally:
             self.inputMd5.pop(checker, None)
             os.remove(checker)
+
+    def test_20_add_dialog_shows_every_warning_line(self):
+        """With several warnings (not cubic voxels, 4D, "does not say MNI") the wrapped warning label is as tall as its text needs:
+        the dialog has a fixed width, and its height used to come from the unwrapped label, which cut the privacy note.
+        """
+        from LesionNetworkMappingLib import nifti
+
+        data, affine, _header = nifti.read_nifti(self.image15)
+        stretched = affine.copy()
+        stretched[2, 2] = 3.0
+        path = os.path.join(self.tempDir, "several_warnings.nii.gz")
+        half = data[:, :, ::2].astype(np.float32)
+        nifti.write_nifti(path, np.stack([half, half], axis=-1), stretched)
+        dialog = self.ui.AddTemplateDialog()
+        try:
+            dialog.setImage(path)
+            lines = self.templates.identify(path).warnings
+            self.assertGreaterEqual(len(lines), 2, lines)
+            dialog.show()
+            slicer.app.processEvents()
+            for label in dialog.findChildren(qt.QLabel):
+                if label.isVisible() and label.wordWrap:
+                    self.assertGreaterEqual(label.height, label.heightForWidth(label.width), f"{label.objectName} is cut off: {label.text[:50]}")
+            warnings = dialog.warningLabel
+            self.assertTrue(warnings.isVisible())
+            self.assertGreaterEqual(warnings.height, warnings.heightForWidth(warnings.width))
+            dialog._setError("The mask is on another grid than the template image, so it cannot be used for normalizing scans to this template." * 2)
+            slicer.app.processEvents()
+            self.assertGreaterEqual(dialog.errorLabel.height, dialog.errorLabel.heightForWidth(dialog.errorLabel.width))
+            self.assertGreaterEqual(warnings.height, warnings.heightForWidth(warnings.width))
+        finally:
+            dialog.deleteLater()
+            os.remove(path)

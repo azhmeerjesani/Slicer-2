@@ -470,6 +470,7 @@ class AddTemplateDialog(qt.QDialog):
         lines = list(detection.warnings) + ([detection.privacyNote] if detection.privacyNote else [])
         self.warningLabel.setText("\n".join(lines))
         self.warningLabel.setVisible(bool(lines))
+        self._fitWrappedLabels()
         if detection.ok:
             if not self._nameEdited:
                 self.nameEdit.setText(templates.proposedName(path))
@@ -566,6 +567,26 @@ class AddTemplateDialog(qt.QDialog):
     def _setError(self, text):
         self.errorLabel.setText(text or "")
         self.errorLabel.setVisible(bool(text))
+        self._fitWrappedLabels()
+
+    def _fitWrappedLabels(self):
+        """Reserve the full height of the word-wrapped labels.
+
+        The dialog has a fixed width, but a layout works out its height from the width a wrapped label would take
+        when it is not wrapped: the dialog is then too short and the last lines (the privacy note) are cut. The width
+        each label gets is known here, so its height for that width becomes its minimum height.
+        """
+        margins = self.layout().contentsMargins()
+        cardMargins = self.fileCard.layout().contentsMargins()
+        cardWidth = DIALOG_WIDTH - margins.left() - margins.right()
+        detailsWidth = cardWidth - cardMargins.left() - cardMargins.right() - self.fileCard.layout().spacing - CARD_THUMBNAIL
+        for label, width in ((self.detectionLabel, detailsWidth), (self.factsLabel, detailsWidth), (self.warningLabel, detailsWidth),
+                             (self.errorLabel, cardWidth)):
+            label.setMinimumHeight(label.heightForWidth(width) if label.text else 0)
+        self.layout().invalidate()
+        self.layout().activate()
+        if self.isVisible():
+            self.resize(self.width, max(self.height, self.sizeHint.height()))
 
     def _update(self, *args):
         if getattr(self, "addButton", None) is None:
