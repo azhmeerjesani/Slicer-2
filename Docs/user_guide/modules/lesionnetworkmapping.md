@@ -364,6 +364,23 @@ files as the module, prints one JSON event per line, and uses the exit codes 0 d
 | `manager`, `fetchconnectome`, `fetch`, `leaddbs`, `refmaps`, `tutorials` | connectome conversion and download, resources, Lead-DBS, reference maps, tutorial cohorts |
 | `recipes`, `transforms`, `coords`, `lesionset`, `preflight`, `app` | recipes, transform tools, coordinate seeds, lesion-set summary, preflight, the BIDS App |
 
+### Atrophy seeds (command line)
+
+Atrophy network mapping (Tetreault 2020) is a command-line feature: the Seed card of the Map workspace offers Lesion,
+Cohort, Coordinates and Stimulation, but not atrophy maps. The `coords atrophy` command thresholds one per-patient
+w-map (or z-map; negative means atrophy) for each participant, writes the seeds and `lesions.tsv` to a run folder,
+and `cohortmaps` then maps them like lesions:
+
+```
+PythonSlicer -m LesionNetworkMappingLib.coords atrophy --bundle CONNECTOME.lnmc --out RUNFOLDER \
+    --wmap sub-01=sub-01_wmap.nii.gz --wmap sub-02=sub-02_wmap.nii.gz [--rule w<-2] [--weighted]
+```
+
+`--rule` is `w<-2` (the default), `w<-1.5`, `w<-2.5` or `top5%`; `--weighted` weights the seed voxels by -w instead of
+using a binary seed. The command does not check the space of a w-map: each w-map must already be in the MNI space of
+the connectome (it is placed where its own header says), and a w-map in another space gives a wrong map without a
+notice.
+
 ## Citations
 
 - Boes AD, Prasad S, Liu H, et al. Network localization of neurological symptoms from focal brain lesions. *Brain*.

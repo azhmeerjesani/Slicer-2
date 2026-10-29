@@ -39,7 +39,7 @@ your own computer; no package has been published yet, so the in-app update check
 > folder (projects that save as you go), your own MNI templates, a redesign of Library, Draw, Map and the slice
 > views, and the research tools of lesion network mapping ([Research tools of wave 5](#research-tools-of-wave-5)):
 > *Get a connectome…*, the Validate, Robust, Nulls, Circuits, Compare, Calibrate and Report cards, analysis recipes
-> with a plan lock, coordinate, atrophy and stimulation seeds, voxelwise lesion-symptom mapping, a review workflow
+> with a plan lock, coordinate and stimulation seeds (atrophy seeds on the command line), voxelwise lesion-symptom mapping, a review workflow
 > with blind second tracing, a case strip and trace queues, literature sources with PRISMA counts, control-lesion
 > sets, a share-safe export, tutorial cohorts and the `slicer-lnm` command. Everything was written and checked on
 > Linux with Qt 5.15; nothing of waves 2 to 5 has been run on macOS (Qt 6) or Windows, and no real connectome has
@@ -769,8 +769,12 @@ data, small fixtures and local test servers (see [Known limitations](#status-and
 **Seeds and plans**
 
 - **Coordinate, atrophy and stimulation seeds.** The seed modes Coords and Stim map spheres from CSV, Sleuth or NiMARE
-  foci (Talairach is converted to MNI; radius or diameter is explicit), atrophy maps and stimulation sites (points,
-  E-field or VTA files) with the same engine as lesions. An optional random-coordinate control compares the observed
+  foci (Talairach is converted to MNI; radius or diameter is explicit) and stimulation sites (points, E-field or VTA
+  files) with the same engine as lesions. Atrophy seeds (a per-patient w-map thresholded with a rule such as
+  `w<-2`) are a command-line feature, not a seed mode of the Map workspace: run
+  `PythonSlicer -m LesionNetworkMappingLib.coords atrophy` (see
+  [Atrophy seeds](Docs/user_guide/modules/lesionnetworkmapping.md#atrophy-seeds-command-line)); the w-maps must
+  already be in the MNI space of the connectome. An optional random-coordinate control compares the observed
   overlap with grey-matter null sets of the same size and radii.
 - **Recipes, plan lock and ROI.** Eight built-in analysis recipes with status tags and citations, lab recipes that record
   their differences from a base recipe, and a *Lock plan* that writes the plan with a checksum; later changes to the

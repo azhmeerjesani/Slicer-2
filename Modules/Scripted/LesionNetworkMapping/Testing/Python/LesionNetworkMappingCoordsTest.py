@@ -511,5 +511,36 @@ class SeedSetTest(CoordsTestCase):
         self.assertEqual(tuple(header["shape"])[3], 4)
 
 
+class AtrophyDocsTest(unittest.TestCase):
+    """Atrophy seeds exist only as ``coords atrophy`` on the command line: the README and the module page say so."""
+
+    @staticmethod
+    def _read(*parts):
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(MODULE_DIR))), *parts)
+        if not os.path.isfile(path):
+            return None  # not run from a source tree
+        with open(path, encoding="utf-8") as f:
+            return " ".join(f.read().split())
+
+    def test_readme_does_not_claim_an_atrophy_seed_mode(self):
+        readme = self._read("README.md")
+        if readme is None:
+            self.skipTest("no source tree")
+        self.assertIn("Coordinate, atrophy and stimulation seeds.", readme)
+        self.assertNotIn("foci (Talairach is converted to MNI; radius or diameter is explicit), atrophy maps", readme)
+        self.assertIn("atrophy seeds on the command line", readme)
+        self.assertIn("command-line feature, not a seed mode of the Map workspace", readme)
+
+    def test_module_page_documents_the_atrophy_command(self):
+        page = self._read("Docs", "user_guide", "modules", "lesionnetworkmapping.md")
+        if page is None:
+            self.skipTest("no source tree")
+        self.assertIn("### Atrophy seeds (command line)", page)
+        self.assertIn("-m LesionNetworkMappingLib.coords atrophy", page)
+        for rule in coords.ATROPHY_RULES:
+            self.assertIn(rule, page)
+        self.assertIn("does not check the space of a w-map", page)
+
+
 if __name__ == "__main__":
     unittest.main()
