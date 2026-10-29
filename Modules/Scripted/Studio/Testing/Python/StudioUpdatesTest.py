@@ -707,7 +707,7 @@ fi
     def _startup(self, service, timeoutS=5):
         called = []
         service._then = lambda: called.append(time.monotonic())
-        service.check(onDone=service._onStartupCheck, timeoutS=timeoutS)
+        service._startupCheck(timeoutS)
         return called
 
     def test_StartupNoUpdate(self):
@@ -909,6 +909,39 @@ fi
         self.assertIn("Connect to the internet", self._bannerText(service))
         service.hideBanner()
 
+    def test_RequiredBannerUpdatedByCheckAgain(self):
+        """The offline banner of a cached required release ("Connect to the internet and check again") is rebuilt by
+        a successful check (Check again): "is required (you have X)" with Update now. A release that is no longer
+        required takes the banner away.
+        """
+        updates = self.updates
+        cached = updates.parseManifest(self._publish("1.2.1", required=True))
+        updates.setSettingsValue("LastManifest", cached.toJson())
+        os.environ[updates.FEED_ENVIRONMENT_VARIABLE] = "http://127.0.0.1:9/studio-update.json"  # nothing listens
+        updates._installableOverride = True
+        service = self._service()
+        called = self._startup(service)
+        self.assertTrue(self._waitFor(lambda: called, 10))
+        self.assertIn("Connect to the internet", self._bannerText(service))
+        # The feed answers now: Check again
+        os.environ[updates.FEED_ENVIRONMENT_VARIABLE] = self.feed
+        done = []
+        self.assertTrue(service.check(onDone=lambda status, error: done.append(error)))
+        self.assertTrue(self._waitFor(lambda: done, 10))
+        self.assertIsNone(service.lastError)
+        self.assertIsNotNone(service.banner)
+        text = self._bannerText(service)
+        self.assertNotIn("Connect to the internet", text)
+        self.assertIn("is required (you have", text)
+        self.assertIsNone(service.requiredDialog, "found after the startup: a warning, not a blocking dialog")
+        self.assertIn("Update now", [b.text for b in service.banner[0].findChildren("QAbstractButton")])
+        # The release is not required any more: no banner that says "required"
+        self._publish("0.9.0")
+        service.checkNow()
+        self.assertTrue(self._waitFor(lambda: not service.checking, 10))
+        self.assertEqual(service.status.kind, "none")
+        self.assertIsNone(service.banner)
+
     def _bannerText(self, service):
         widget = service.banner[0]
         if widget.metaObject().className() == "QMessageBox":
@@ -940,7 +973,7 @@ fi
             called = []
             service._then = lambda: called.append(True)
             service._holdTourOffer()
-            service.check(onDone=service._onStartupCheck, timeoutS=5)
+            service._startupCheck(5)
             self._pump(0.3)
             self.assertFalse(fake._offerTimer.isActive(), "held while the check runs")
             self.assertEqual(scheduled, [])

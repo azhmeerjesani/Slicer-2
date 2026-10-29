@@ -823,6 +823,8 @@ class UpdateService:
         self._then = None
         self._checkTask = None
         self._checkCallbacks = []
+        #: True from the startup check until the startup decision is made: the startup shows the result itself
+        self._startupPending = False
         self._listeners = []
         self._noticeRetries = 0
         self._noticeTimer = None
@@ -858,7 +860,7 @@ class UpdateService:
         qt.QTimer.singleShot(1200, self.installUserInterface)
         if self.automaticChecksEnabled():
             self._holdTourOffer()
-            self.check(onDone=self._onStartupCheck, timeoutS=STARTUP_WAIT_S)
+            self._startupCheck(STARTUP_WAIT_S)
         else:
             # No check: a cached required release is shown with Update now (only a failed check means offline)
             self._continueStartup()
@@ -1028,11 +1030,17 @@ class UpdateService:
         self._checkTask = _Task(lambda task: fetchManifest(feed), self._onChecked, timeoutS=timeoutS, onTimeout=self._onCheckTimeout).start()
         return True
 
+    def _startupCheck(self, timeoutS):
+        """The check of the startup: its result is shown by the startup decision (_onStartupCheck), not by _onChecked."""
+        self._startupPending = True
+        return self.check(onDone=self._onStartupCheck, timeoutS=timeoutS)
+
     def checkNow(self):
         """Check now (Settings, Search, menus), whatever the channel and the AutoCheck setting."""
         return self.check()
 
     def _onChecked(self, manifest, error):
+        startup = self._startupPending  # the startup decision shows the result of the startup check itself
         self.checking = False
         self._checkTask = None
         if error is None:
@@ -1044,6 +1052,12 @@ class UpdateService:
             logging.info(f"Updates: check failed: {error}")
             self.lastError = error
         self._reportCheck(self.status if error is None else None, error)
+        if error is None and not startup:
+            # A check after the startup (Check again on the banner, Settings, Search, the daily check, a late answer):
+            # bring the banner and the notice up to date, for example "Connect to the internet and check again"
+            # becomes "is required (you have X)" with Update now, and the banner of a release that is no longer
+            # required goes
+            self._showAvailability(startup=False)
 
     def _onCheckTimeout(self, manifest, error, late):
         if not late:
@@ -1053,8 +1067,6 @@ class UpdateService:
                 callback(None, error)
             return
         self._onChecked(manifest, error)
-        if error is None:
-            self._showAvailability(startup=False)
 
     def _reportCheck(self, status, error):
         callbacks, self._checkCallbacks = self._checkCallbacks, []
@@ -1074,13 +1086,14 @@ class UpdateService:
         except ValueError:
             lastTime = 0
         if time.time() - lastTime >= RECHECK_INTERVAL_S:
-            self.check(onDone=lambda status, error: self._showAvailability(startup=False) if error is None else None)
+            self.check()
 
     #
     # Startup decision
     #
 
     def _onStartupCheck(self, status, error):
+        self._startupPending = False
         if error is None and status is not None and status.kind == "required" and self.canInstallRelease(status):
             self.showRequiredDialog()
             return
