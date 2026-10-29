@@ -950,19 +950,40 @@ class _ElideFilter(qt.QObject):
 _elideFilter = None
 
 
+def _elidedPath(metrics, text, width):
+    """``text`` (a folder path) elided to ``width``: the middle is replaced by "…", the last two folders stay visible."""
+    if metrics.horizontalAdvance(text) <= width:
+        return text
+    parts = text.rstrip("/\\").rsplit("/", 2)
+    if len(parts) < 3:
+        return metrics.elidedText(text, qt.Qt.ElideMiddle, width)
+    head, tail = parts[0], "/" + parts[1] + "/" + parts[2]
+    tailWidth = metrics.horizontalAdvance(tail)
+    if tailWidth + metrics.horizontalAdvance("…") * 2 > width:
+        return metrics.elidedText(text, qt.Qt.ElideLeft, width)
+    return metrics.elidedText(head, qt.Qt.ElideMiddle, width - tailWidth) + tail
+
+
 def _showElided(label):
     text = str(label.property("studioFullText") or "")
     width = int(label.width) - int(label.contentsMargins().left()) - int(label.contentsMargins().right())
     # Before the label is laid out its width says nothing: the whole text is shown
-    shown = label.fontMetrics().elidedText(text, qt.Qt.ElideRight, width) if width > 40 else text
+    shown = text
+    if width > 40:
+        if label.property("studioElideMode") == "path":
+            shown = _elidedPath(label.fontMetrics(), text, width)
+        else:
+            shown = label.fontMetrics().elidedText(text, qt.Qt.ElideRight, width)
     if str(label.text) != shown:
         label.setText(shown)
-    label.setToolTip(text if shown != text else "")
+    fullToolTip = str(label.property("studioFullToolTip") or "")
+    label.setToolTip(fullToolTip or (text if shown != text else ""))
 
 
-def elideLabel(label):
+def elideLabel(label, mode="right"):
     """Make ``label`` a one-line label whose text is elided ("…") to its width; set its text with ``setElidedText()``.
     The whole text is the tooltip while it is elided. The label never widens its container (Ignored width).
+    ``mode`` "path" is for folder paths: the middle is elided and the last two folders stay visible.
     """
     global _elideFilter
     if _elideFilter is None:
@@ -971,13 +992,15 @@ def elideLabel(label):
     label.setTextFormat(qt.Qt.PlainText)
     label.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
     label.setProperty("studioElided", True)
+    label.setProperty("studioElideMode", mode)
     label.installEventFilter(_elideFilter)
     return label
 
 
-def setElidedText(label, text):
-    """Set the text of an ``elideLabel()``."""
+def setElidedText(label, text, toolTip=None):
+    """Set the text of an ``elideLabel()``. ``toolTip`` is the tooltip to show always (default: the whole text while elided)."""
     label.setProperty("studioFullText", text or "")
+    label.setProperty("studioFullToolTip", toolTip or "")
     _showElided(label)
 
 
@@ -1647,7 +1670,7 @@ def folderCard(iconName="folder", objectName="StudioFolderCard"):
     column.setSpacing(2)
     pathLabel = label("", "name", "text", f"{objectName}Path")
     pathLabel.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
-    pathLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+    elideLabel(pathLabel, "path")
     column.addWidget(pathLabel)
     metaLabel = label("", "caption", "text3", f"{objectName}Meta", wrap=True)
     metaLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)

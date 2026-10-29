@@ -941,6 +941,32 @@ class StudioNiftiExportTest(unittest.TestCase):
         self.assertEqual(dialog.list.height, dialog.list.minimumHeight)
         dialog.close()
 
+    def test_08ab_long_folder_path_is_elided_and_keeps_the_end(self):
+        """A destination path wider than the folder card is elided with an ellipsis that keeps 'Exports/nifti'; the tooltip has it all."""
+        from StudioLib import autosave_io, niftiexport_ui
+
+        node = self._volume("sub-07_T1w", np.zeros((3, 3, 3), np.int16), np.eye(4))
+        dialog = niftiexport_ui.exportNodesDialog([node], show=False, executor=autosave_io.InlineExecutor())
+        folder = os.path.join(self.out, "Projects", "sub-07 T1w and a rather long project name for this scan", "Exports", "nifti")
+        dialog.setFolder(folder)
+        dialog.show()
+        for _ in range(5):
+            slicer.app.processEvents()
+        label = dialog.folderLabel
+        metrics = qt.QFontMetrics(label.font)
+        shown = str(label.text)
+        self.assertLessEqual(metrics.horizontalAdvance(shown), label.width, "the path fits the label")
+        self.assertIn("\u2026", shown, "the path is elided with an ellipsis")
+        self.assertTrue(shown.endswith("Exports/nifti"), shown)
+        self.assertIn(folder, label.toolTip, "the whole path is the tooltip")
+        # Resizing keeps the path elided to the new width and the tooltip complete
+        dialog.resize(dialog.width + 300, dialog.height)
+        for _ in range(5):
+            slicer.app.processEvents()
+        self.assertLessEqual(metrics.horizontalAdvance(str(label.text)), label.width)
+        self.assertIn(folder, label.toolTip)
+        dialog.close()
+
     def test_08b_message_names_the_skipped_segments_and_other_notes(self):
         """The message after an export carries the notes (empty segments skipped, empty threshold mask, transform), not only the log."""
         from StudioLib import niftiexport_ui

@@ -192,8 +192,7 @@ class AutosaveSettingsPanel(ctk.ctkSettingsPanel):
 
         root = projects.root()
         # The home folder is written "~" (the full path is the tooltip)
-        self.rootLabel.setText(projects.shortPath(root))
-        self.rootLabel.setToolTip(root)
+        ui.setElidedText(self.rootLabel, projects.shortPath(root), root)
         fromEnvironment = projects.isRootFromEnvironment()
         self.changeRootButton.enabled = not fromEnvironment and projects.isEnabled()
         if fromEnvironment:

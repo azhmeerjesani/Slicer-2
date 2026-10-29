@@ -518,8 +518,7 @@ class ExportDialog(qt.QDialog):
         resize = self.segmentationFrame.isVisibleTo(self) != hasSegmentation
         for widget in (self.segmentationLabel, self.segmentationFrame, self.referenceLabel, self.referenceCombo):
             widget.setVisible(hasSegmentation)
-        self.folderLabel.setText(shortPath(self.folder))
-        self.folderLabel.setToolTip(self.folder)
+        ui.setElidedText(self.folderLabel, shortPath(self.folder), self.folder)
         try:
             jobs = self.plan()
         except Exception as e:
