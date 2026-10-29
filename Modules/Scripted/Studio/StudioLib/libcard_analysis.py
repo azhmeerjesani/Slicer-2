@@ -34,6 +34,10 @@ REFRESH_MS = 5000
 DONE_HOOK_ORDER = 900
 #: The "all traced" check runs this long after Done (the row is updated by then)
 ALL_TRACED_DELAY_MS = 300
+#: While a consequence toast (with its action) is on screen the "all traced" toast waits: it is asked again this
+#: often, at most ``ALL_TRACED_MAX_WAITS`` times (the consequence goes at the next input)
+ALL_TRACED_WAIT_MS = 1000
+ALL_TRACED_MAX_WAITS = 300
 #: The staleness plan runs this long after the last change (Done, study opened)
 PLAN_DELAY_MS = 1500
 #: Height of the card (SPEC 3.1 card rhythm)
@@ -345,17 +349,25 @@ def allTraced(study):
     return len(rows), bool(rows) and all(row.get("status") in TRACED for row in rows)
 
 
-def _checkAllTraced(session):
+def _checkAllTraced(session, waits=0):
     studyUi = library._studyUi()
     if studyUi is None or session is not studyUi.session():
         return
-    for card in list(_cards):
-        card.schedulePlan()
+    if waits == 0:
+        for card in list(_cards):
+            card.schedulePlan()
     n, traced = allTraced(session.study)
     if not traced or n < 2 or id(session) in _toastedSessions:
         return
-    _toastedSessions.add(id(session))
     shell = library._shell()
+    # A consequence of an automatic action that carries an action ("No more cases of <paper> · New case from this
+    # paper") stays until the next input: this confirmation must not replace it, so it waits for the input
+    # (the study is checked again then: the action may have made a lesion untraced)
+    visible = getattr(shell, "consequenceVisible", None)
+    if visible is not None and visible() and waits < ALL_TRACED_MAX_WAITS:
+        qt.QTimer.singleShot(ALL_TRACED_WAIT_MS, lambda: _checkAllTraced(session, waits + 1))
+        return
+    _toastedSessions.add(id(session))
     text = (_("The lesion is traced · run the cohort analysis in Map") if n == 1 else _("All {n} lesions traced · run the cohort analysis in Map").format(n=n))
     if shell is None:
         logging.info(f"Studio: {text}")

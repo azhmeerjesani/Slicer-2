@@ -3375,6 +3375,13 @@ class Shell:
         sticky = self._stickyToast
         return sticky is not None and sticky.isVisible() and sticky.isSticky() and sticky.minimumTimer.isActive()
 
+    def consequenceVisible(self):
+        """True while a consequence toast is on screen (it stays until the next input, so this outlasts the minimum
+        time of ``consequenceHeld()``). A later confirmation that carries an action waits for it to go.
+        """
+        sticky = self._stickyToast
+        return sticky is not None and sticky.isVisible() and sticky.isSticky()
+
     def _hidePlainToast(self):
         toast = self._toast
         if toast is None:

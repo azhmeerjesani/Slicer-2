@@ -877,6 +877,66 @@ class StudioRegressionTest(unittest.TestCase):
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
 
+    def test_9c_all_traced_toast_waits_for_a_consequence_with_its_action(self):
+        """The "All N lesions traced" confirmation does not replace the consequence "No more cases of <paper> to
+        trace" with its "New case from this paper" action: it waits for the next input (BB-1).
+        """
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import libcard_analysis, shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "All traced study")
+        os.makedirs(folder)
+        paths = []
+        for index in range(1, 3):
+            paths.append(os.path.join(folder, f"sub-0{index}_T1w.nii.gz"))
+            nifti.write_nifti(paths[-1], np.zeros(grid.shape, np.uint8), grid.affine)
+        self.addCleanup(setattr, libcard_analysis, "ALL_TRACED_WAIT_MS", libcard_analysis.ALL_TRACED_WAIT_MS)
+        libcard_analysis.ALL_TRACED_WAIT_MS = 50
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        session = None
+        try:
+            session = study_ui.createStudy(paths, studioShell, folder=folder)
+            self.assertIsNotNone(session)
+            self.addCleanup(libcard_analysis._toastedSessions.discard, id(session))
+            for sid in session.study.subject_ids:
+                session.study.set(sid, status="traced")
+            consequence = "No more cases of Smith 2020 to trace"
+            studioShell.toast(consequence, sticky=True, action=lambda: None, actionText="New case from this paper", level="consequence")
+            self.assertTrue(studioShell.consequenceVisible())
+            libcard_analysis._checkAllTraced(session)
+            # Even after the minimum time of the consequence (the minimum timer is not what holds it back)
+            studioShell._stickyToast.minimumTimer.stop()
+            self.assertFalse(studioShell.consequenceHeld())
+            for _ in range(6):
+                slicer.app.processEvents()
+                qt.QThread.msleep(30)
+            self.assertEqual(studioShell._stickyToast.text(), consequence)
+            self.assertEqual(studioShell._stickyToast.actionButton.text, "New case from this paper")
+            self.assertFalse([text for _t, text, _l in studioShell.recentMessages() if "lesions traced" in text])
+            # The next input dismisses the consequence: the confirmation follows
+            studioShell._stickyToast.hide()
+            deadline = time.time() + 5
+            while time.time() < deadline and not [m for m in studioShell.recentMessages() if "lesions traced" in m[1]]:
+                slicer.app.processEvents()
+                qt.QThread.msleep(30)
+            self.assertTrue([m for m in studioShell.recentMessages() if "All 2 lesions traced" in m[1]], studioShell.recentMessages())
+            # And it is said once
+            libcard_analysis._checkAllTraced(session)
+            self.assertEqual(len([m for m in studioShell.recentMessages() if "lesions traced" in m[1]]), 1)
+        finally:
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
+
     def test_9b_done_staying_on_the_case_leaves_the_lesion_saved(self):
         from LesionNetworkMappingLib import geometry, nifti
 
