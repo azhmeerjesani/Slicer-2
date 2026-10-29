@@ -56,6 +56,7 @@ The session works in Studio and in Classic (the Studio module panel lists the su
 """
 
 import contextlib
+import datetime
 import importlib
 import json
 import logging
@@ -3215,6 +3216,7 @@ class StudySession:
         # The written file now defines the grid; the edits are written
         self._gridReference = target
         self._openStamp = _contentStamp(segmentationNode)
+        self._recordSaved(segmentationNode, target)
         self._dirty = False
         self._markedDirty = False
         self._activeSeconds = 0.0
@@ -3223,6 +3225,22 @@ class StudySession:
             self._journal.discard(sid)
         _notify(self)
         return {"sid": sid, "path": target, "values": updates, "conflict": conflict}
+
+    @staticmethod
+    def _recordSaved(segmentationNode, path):
+        """Draw's save record of the lesion: it was just written to ``path`` (so the Lesion card reads "Saved · <file>"
+        and the close prompt does not report changes, also when the subject stays open after Done).
+        """
+        draw = _draw()
+        records = getattr(draw, "_savedRecords", None) if draw is not None else None
+        if not isinstance(records, dict):
+            return
+        savedTime = datetime.datetime.now(datetime.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        reference = vtk.vtkWeakReference()
+        reference.Set(segmentationNode)
+        records[segmentationNode.GetID()] = (reference, path, _contentStamp(segmentationNode), savedTime)
+        segmentationNode.SetAttribute(getattr(draw, "SAVED_FILE_ATTRIBUTE", "Studio.LesionSavedFile"), os.path.basename(path))
+        segmentationNode.SetAttribute(getattr(draw, "SAVED_TIME_ATTRIBUTE", "Studio.LesionSavedTime"), savedTime)
 
     @staticmethod
     def _sidecarTextKeys():

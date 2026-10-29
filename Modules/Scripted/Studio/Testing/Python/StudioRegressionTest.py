@@ -877,6 +877,53 @@ class StudioRegressionTest(unittest.TestCase):
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
 
+    def test_9b_done_staying_on_the_case_leaves_the_lesion_saved(self):
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import draw, shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Stay study")
+        os.makedirs(folder)
+        scan = os.path.join(folder, "sub-01_T1w.nii.gz")
+        nifti.write_nifti(scan, np.zeros(grid.shape, np.uint8), grid.affine)
+        originalToast = study_ui._toast
+        study_ui._toast = lambda shell, text, **kwargs: None
+        self.addCleanup(setattr, study_ui, "_toast", originalToast)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        try:
+            session = study_ui.createStudy([scan], studioShell, folder=folder)
+            self.assertIsNotNone(session)
+            session.open("sub-01", switchToDraw=False)
+            segmentationNode, volumeNode = session.segmentationNode(), session.volumeNode()
+            segmentId = segmentationNode.GetSegmentation().GetNthSegmentID(0)
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, volumeNode)
+            array[20:23, 30:33, 20:23] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, volumeNode)
+            for _ in range(4):
+                slicer.app.processEvents()
+            self.assertNotEqual(draw.lesionSaveState(session.segmentationNode())[0], "saved")
+            result = session.done()
+            self.assertIsNotNone(result)
+            # Nothing is left to trace: the subject stays open, and its lesion is the file that Done wrote
+            self.assertEqual(session.current(), "sub-01")
+            state, path, savedTime = draw.lesionSaveState(session.segmentationNode())
+            self.assertEqual(state, "saved")
+            self.assertEqual(os.path.normcase(path), os.path.normcase(result["path"]))
+            self.assertTrue(savedTime)
+            self.assertEqual(session.segmentationNode().GetAttribute(draw.SAVED_FILE_ATTRIBUTE), os.path.basename(result["path"]))
+        finally:
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
+
     def test_16_unwritable_lesion_folder_is_a_warning_in_plain_words(self):
         """A study folder that cannot be written (Done) is anticipated: a warning without a traceback, and a toast
         without the error number and the temporary file path; the subject stays open (BB-1).
