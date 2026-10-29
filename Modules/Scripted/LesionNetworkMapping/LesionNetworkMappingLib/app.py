@@ -680,6 +680,10 @@ def _main(argv):
         if path is not None and not os.path.isfile(path):
             emit("error", code="usage", message=f"The file of --{option.replace('_', '-')} does not exist: {path}")
             return jobs.EXIT_USAGE
+    problem = pipeline.figure_option_error(args.template, args.figure_convention)
+    if problem:
+        emit("error", code="usage", message=problem)
+        return jobs.EXIT_USAGE
     from .connectome import ConnectomeBundle
     from .export import run_dir_name
     from .study import Study

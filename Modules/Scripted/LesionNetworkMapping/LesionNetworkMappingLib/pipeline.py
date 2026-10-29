@@ -3598,6 +3598,27 @@ def _add_run_arguments(parser):
     jobs.add_common_arguments(parser, threads_default=None)
 
 
+FIGURE_CONVENTIONS = ("neurological", "radiological")
+
+
+def figure_option_error(template=None, convention=None):
+    """The usage error of a figure/report option the report would only reject at its last stage, or None.
+
+    :param template: path of the display template NIfTI (an existing file is opened; a path that is no file is left to the caller).
+    :param convention: "neurological" or "radiological" (None or empty: the default).
+    """
+    if convention and convention not in FIGURE_CONVENTIONS:
+        return f"--figure-convention must be {' or '.join(FIGURE_CONVENTIONS)}, got {convention!r}"
+    if template and os.path.isfile(template):
+        from . import nifti
+
+        try:
+            nifti.read_nifti_header(template)
+        except Exception as exc:  # unreadable, not gzip, not NIfTI, wrong extension
+            return f"The file of --template cannot be read as a NIfTI image: {template} ({type(exc).__name__}: {exc})"
+    return None
+
+
 def _parser():
     parser = jobs.JsonArgumentParser(prog="python -m LesionNetworkMappingLib.pipeline", description="Automated lesion network mapping cohort pipeline.")
     commands = parser.add_subparsers(dest="command", required=True, parser_class=jobs.JsonArgumentParser)
@@ -3686,6 +3707,13 @@ def _main(argv):
         if importlib.util.find_spec(f"{PACKAGE}.report") is None:
             jobs.emit("error", code="unavailable", message="report not available in this build")
             return EXIT_ERROR
+        if args.template and not os.path.isfile(args.template):
+            jobs.emit("error", code="usage", message=f"The file of --template does not exist: {args.template}")
+            return EXIT_USAGE
+        problem = figure_option_error(args.template, args.figure_convention)
+        if problem:
+            jobs.emit("error", code="usage", message=problem)
+            return EXIT_USAGE
         report = importlib.import_module(f"{PACKAGE}.report")
         path = report.render_report(os.path.abspath(args.out), jobs.emit, None, atlas=args.atlas, atlas_labels=args.atlas_labels, template=args.template, convention=args.figure_convention)
         jobs.emit("done", outputs=[path] if path else [], elapsed=round(jobs.elapsed(), 3))
@@ -3707,6 +3735,10 @@ def _main(argv):
         config = config_from_args(args)
     except (OSError, ValueError, TypeError) as exc:
         jobs.emit("error", code="usage", message=f"Invalid configuration: {exc}")
+        return EXIT_USAGE
+    problem = figure_option_error(config.template, config.figure_convention)
+    if problem:
+        jobs.emit("error", code="usage", message=problem)
         return EXIT_USAGE
     if args.command == "plan":
         try:
