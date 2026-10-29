@@ -1340,16 +1340,28 @@ def _forgetLoadedSetFor(segmentationNode):
 
 def _showLoaded(result, shell, scans, openScans, openLesions):
     """Studio part of ``_afterLoad()``: the scans and lesions of a load in Draw."""
+    for lesion in result.segmentations:
+        recordLesionGrid(lesion)
+    lesions = result.segmentations or openLesions
+    if result.pairedLesion is not None and not lesions and slicer.mrmlScene.IsNodePresent(result.pairedLesion):
+        lesions = [result.pairedLesion]
+    # Every lesion of the load is bound to the scan whose grid it is on (several subjects may be opened at once), and
+    # Draw shows the first lesion on its own scan
+    _bindLoadedLesions(result.segmentations, scans + [node for node in openScans if not any(_sameNode(node, scan) for scan in scans)])
+    if lesions and (scans or openScans):
+        shownScans = scans or openScans
+        own = next((scan for scan in shownScans if _isBoundTo(lesions[0], scan)), None)
+        if own is not None and not _sameNode(own, shownScans[0]):
+            shownScans = [own] + [scan for scan in shownScans if not _sameNode(scan, own)]
+            if scans:
+                scans = shownScans
+            else:
+                openScans = shownScans
     if scans:
         setViewLayers(background=scans[0], fit=True)
     elif openScans and not _sameNode(_backgroundVolume(), openScans[0]):
         setViewLayers(background=openScans[0], fit=True)
-    for lesion in result.segmentations:
-        recordLesionGrid(lesion)
     editedSegmentation, editedSource = _editedNodes()
-    lesions = result.segmentations or openLesions
-    if result.pairedLesion is not None and not lesions and slicer.mrmlScene.IsNodePresent(result.pairedLesion):
-        lesions = [result.pairedLesion]
     if not scans and not openScans and lesions and _userScanShown() is None and not (
             _sameNode(lesions[0], editedSegmentation) and editedSource is not None and not _isTemplate(editedSource)):
         # A lesion without a scan of its own: shown on the template only when it is on an MNI grid
@@ -1397,6 +1409,28 @@ def _showLoaded(result, shell, scans, openScans, openLesions):
         # The Library page covers the views: Draw shows the scene, in the scene's own layout
         shell.switchTo("draw", keepLayout=True)
     _loadToast(result, shell)
+
+
+def _bindLoadedLesions(lesions, scans):
+    """Bind each loaded lesion that is not bound to a scan yet to the scan of ``scans`` whose grid it is on.
+
+    A scan of the lesion's own BIDS subject is tried first, and a scan of another BIDS subject is never chosen (scans of
+    different subjects may share a grid). A lesion on none of the grids stays unbound.
+    """
+    role = slicer.vtkMRMLSegmentationNode.GetReferenceImageGeometryReferenceRole()
+    for lesion in lesions:
+        if lesion is None or lesion.GetNodeReference(role) is not None:
+            continue
+        subject = bidsSubject(os.path.basename(_lesionFilePath(lesion) or "")) or bidsSubject(lesion.GetName())
+        candidates = []
+        for scan in scans:
+            scanSubject = bidsSubject(os.path.basename(_lesionFilePath(scan) or "")) or bidsSubject(scan.GetName())
+            if subject and scanSubject and scanSubject.lower() != subject.lower():
+                continue
+            candidates.append((0 if subject and scanSubject else 1, scan))
+        for _rank, scan in sorted(candidates, key=lambda item: item[0]):
+            if _bindToScanGrid(lesion, scan):
+                break
 
 
 def _bindToScanGrid(segmentationNode, volumeNode, tolerance=1e-3):

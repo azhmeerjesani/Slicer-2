@@ -1073,6 +1073,55 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertFalse(list(slicer.util.getNodesByClass("vtkMRMLSegmentationStorageNode")))
         self.assertGreaterEqual(scene.GetNumberOfNodes(), nodesBefore)
 
+    def test_two_subjects_one_load_each_lesion_on_its_scan(self):
+        """Two subjects opened at once (scan and lesion each): every lesion is bound to its own scan, and Draw edits it there."""
+        from StudioLib import importer, library
+
+        studioShell = self._applyStudio()
+        gridOther = ((80, 96, 60), 1.5, (1, 1, 1), (-60.0, -72.0, -45.0))
+        paths = {
+            "sub-01_T1w": self._writeVolume("sub-01_T1w.nii.gz", GRID_SHIFTED),
+            "sub-01_lesion": self._writeMask("sub-01_lesion.nii.gz", GRID_SHIFTED),
+            "sub-02_T1w": self._writeVolume("sub-02_T1w.nii.gz", gridOther),
+            "sub-02_lesion": self._writeMask("sub-02_lesion.nii.gz", gridOther, center=(30, 40, 20)),
+            "sub-03_lesion": self._writeMask("sub-03_lesion.nii.gz", GRID_SHIFTED, center=(20, 20, 20)),
+        }
+        role = slicer.vtkMRMLSegmentationNode.GetReferenceImageGeometryReferenceRole()
+        node = slicer.util.getNode
+        reference = lambda name: (node(name).GetNodeReference(role).GetName() if node(name).GetNodeReference(role) is not None else None)
+        background = lambda: slicer.mrmlScene.GetNodeByID(self._composite("Red").GetBackgroundVolumeID()).GetName()
+        for order in (("01", "02"), ("02", "01")):
+            slicer.mrmlScene.Clear(0)
+            self._pump()
+            importer.loadFiles([paths[f"sub-{subject}_{kind}"] for subject in order for kind in ("T1w", "lesion")], studioShell)
+            self._pump(8)
+            first, second = order
+            self.assertEqual(reference(f"sub-{first}_lesion"), f"sub-{first}_T1w")
+            self.assertEqual(reference(f"sub-{second}_lesion"), f"sub-{second}_T1w")
+            self.assertEqual(library.lesionScan(node(f"sub-{second}_lesion")).GetName(), f"sub-{second}_T1w")
+            # Open now > Open in Draw on the second subject's lesion: on its own scan
+            library.continueInDraw(studioShell, segmentationNode=node(f"sub-{second}_lesion"))
+            self._pump(8)
+            self.assertEqual(self._editor().segmentationNode().GetName(), f"sub-{second}_lesion")
+            self.assertEqual(self._editor().sourceVolumeNode().GetName(), f"sub-{second}_T1w")
+            self.assertEqual(background(), f"sub-{second}_T1w")
+        # Two scans and only the second subject's lesion: Draw shows the lesion on its own scan at once
+        slicer.mrmlScene.Clear(0)
+        self._pump()
+        importer.loadFiles([paths["sub-01_T1w"], paths["sub-02_T1w"], paths["sub-02_lesion"]], studioShell)
+        self._pump(8)
+        self.assertEqual(reference("sub-02_lesion"), "sub-02_T1w")
+        self.assertEqual(self._editor().segmentationNode().GetName(), "sub-02_lesion")
+        self.assertEqual(self._editor().sourceVolumeNode().GetName(), "sub-02_T1w")
+        self.assertEqual(background(), "sub-02_T1w")
+        # A lesion of another BIDS subject is never bound to a scan just because it shares the scan's grid
+        slicer.mrmlScene.Clear(0)
+        self._pump()
+        importer.loadFiles([paths["sub-01_T1w"], paths["sub-01_lesion"], paths["sub-03_lesion"]], studioShell)
+        self._pump(8)
+        self.assertEqual(reference("sub-01_lesion"), "sub-01_T1w")
+        self.assertIsNone(reference("sub-03_lesion"))
+
     #
     # Scans from the Sample Data module, the 1 mm offer, re-opening, new lesions
     #
