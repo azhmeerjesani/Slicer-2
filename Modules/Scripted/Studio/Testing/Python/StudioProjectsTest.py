@@ -2313,6 +2313,61 @@ class StudioProjectsTest(unittest.TestCase):
             studioShell.dispose()
             slicer.app.processEvents()
 
+    def test_45_missing_data_file_of_a_project_is_named_and_the_rest_keeps_saving(self):
+        """A project whose data file was deleted or damaged outside Slicer Studio (Finder, a partial copy) opens with the rest
+        and names what could not be loaded (BB-1). Opening it raised an uncaught RuntimeError, no file was named, the node
+        without data stayed in the scene so every save failed ("write failed") and quitting asked "Save before exit?".
+        The damaged file itself is left where it is.
+        """
+        service = self._service()
+        for name in ("Keep", "Gone", "Broken"):
+            self._userVolume(name, shape=(12, 14, 16), extension=".nrrd")
+        project = self._projectFor(service)
+        self._save(service)
+        projectPath = project.path
+        files = self._projectFiles(project)
+        gonePath = os.path.join(projectPath, next(path for path in files if os.path.basename(path).startswith("Gone.")))
+        brokenPath = os.path.join(projectPath, next(path for path in files if os.path.basename(path).startswith("Broken.")))
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertIsNone(service.project)
+        os.remove(gonePath)
+        with open(brokenPath, "r+b") as file:
+            file.truncate(300)
+        with open(brokenPath, "rb") as file:
+            brokenBytes = file.read()
+        announced = []
+        service.setProjectAnnouncer(lambda event, project, **info: announced.append((event, info)))
+
+        self.assertTrue(service.openProject(projectPath), "the project opens with the data that could be read")
+        self.assertEqual(service.project.path, projectPath)
+        self.assertEqual([event for event, _info in announced], ["opened"])
+        self.assertEqual(sorted(announced[0][1].get("unread") or []), ["Broken", "Gone"], "the files that could not be read are named")
+        self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("Keep"))
+        self.assertIsNone(slicer.mrmlScene.GetFirstNodeByName("Gone"), "a node without data is not kept")
+        self.assertIsNone(slicer.mrmlScene.GetFirstNodeByName("Broken"), "a node without data is not kept")
+        points = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "New points")
+        points.AddControlPoint(1, 2, 3)
+        self.assertTrue(service.saveNow("test", progress=False), "the rest of the project keeps saving")
+        self.io.backgroundWriter().drain(30.0)
+        self.assertTrue(service.lastSaveComplete())
+        modified = vtk.vtkCollection()
+        slicer.mrmlScene.GetStorableNodesModifiedSinceRead(modified)
+        names = [modified.GetItemAsObject(index).GetName() for index in range(modified.GetNumberOfItems())]
+        self.assertEqual(names, [], "nothing is left unsaved (quitting does not ask about it)")
+        self.assertTrue(any(path.startswith("Markups/") for path in self._projectFiles(service.project)))
+        with open(brokenPath, "rb") as file:
+            self.assertEqual(file.read(), brokenBytes, "the damaged file is left as it is")
+
+        # Opened again: the saved project has only the data that loads, nothing is named any more
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        del announced[:]
+        self.assertTrue(service.openProject(projectPath))
+        self.assertEqual(announced, [("opened", {})])
+        self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("Keep"))
+        self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("New points"))
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk

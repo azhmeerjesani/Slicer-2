@@ -1868,7 +1868,13 @@ def announce(event, project, **info):
                 project=name, names=", ".join(unread)), level="warning", action=lambda *_args: renameDialog(), actionText=_("Rename"),
                 toolTip=project.path if project is not None else None)
     elif event == "opened":
-        message(_("Continuing {project}").format(project=name), ms=2500)
+        unread = info.get("unread") or []
+        if unread:
+            message(_("Some data of {project} could not be loaded ({names}): their files are missing or damaged. The rest is open.").format(
+                    project=name, names=", ".join(unread)), level="warning", action=showProjectFolder, actionText=_("Show"),
+                    toolTip=project.path if project is not None else None)
+        else:
+            message(_("Continuing {project}").format(project=name), ms=2500)
     elif event == "locked":
         message(_("{name} is open in another Slicer Studio: changes made here are not saved to it.").format(name=project.name if project else ""),
                 level="warning", ms=8000)

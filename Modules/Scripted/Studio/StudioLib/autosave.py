@@ -1735,6 +1735,12 @@ class AutosaveService:
         try:
             # The scene is replaced (Load Scene): the open project is saved and closed first (StartCloseEvent)
             slicer.util.loadScene(scenePath, {"clear": True})
+        except RuntimeError as error:
+            if self.project is None:
+                raise
+            # Some data files of the project could not be read (missing or damaged): the project opened with the rest, and
+            # _afterSceneImport left their nodes out and named them
+            logging.warning(f"Slicer Studio: {error}")
         finally:
             self._forceProjectOpen = False
         return self.project is not None
@@ -1783,10 +1789,17 @@ class AutosaveService:
             if not (self._studioActive() or getattr(self, "_forceProjectOpen", False)) or not self.enabled():
                 return  # Classic loads a project like any scene (official behavior)
             project = projects.Project(projectPath)
+            # A data file of the project is missing or damaged (deleted in Finder, a partial copy): its node holds no data,
+            # could never be saved and would make quitting ask about it. It is left out before the project's files are
+            # recorded, so its file stays where it is (the scene file keeps naming it until the project is saved again).
+            unread = self._removeUnreadNodes(scene)
             if not self.attachProject(project, inPlace=True):
                 self._announce("locked", project)
                 return
-            self._announce("opened", project)
+            if unread:
+                self._announce("opened", project, unread=unread)
+            else:
+                self._announce("opened", project)
             if self.dirty:
                 qt.QTimer.singleShot(0, lambda: self.autosaveNow("open"))
             return
@@ -1806,7 +1819,7 @@ class AutosaveService:
     @staticmethod
     def _removeUnreadNodes(scene):
         """Remove the nodes whose file could not be read by the scene load that just ended (a missing or broken file) and
-        return their names. They hold no data, so a copy cannot save them and closing the scene would ask about them.
+        return their names. They hold no data, so a project cannot save them and closing the scene would ask about them.
         """
         unread = []
         nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
@@ -1832,7 +1845,7 @@ class AutosaveService:
                 if other is not None and other.GetScene() is not None:
                     scene.RemoveNode(other)
         if names:
-            logging.warning("Slicer Studio: not copied (their files could not be read): " + ", ".join(names))
+            logging.warning("Slicer Studio: left out (their files could not be read): " + ", ".join(names))
         return names
 
     def renameProject(self, newName):
