@@ -3,7 +3,8 @@
 This module is the single source of truth for two questions that several Studio pages ask:
 
 - **Is this image on an MNI grid?** ``spaceOf(node)`` answers with ``(spaceName, resolutionMm)`` or None:
-  the node attribute ``Studio.Space`` first (written by normalization), else an exact table of the known template
+  the node attribute ``Studio.Space`` first (written by normalization), else (for a segmentation) the ``Studio.Space``
+  of a volume on exactly its grid (a lesion drawn on a template is in the template's space), else an exact table of the known template
   grids (``KNOWN_GRIDS``, ±0.01 mm), else ``LesionNetworkMappingLib.geometry.detect_space`` with the same tolerance
   when that library is importable, which also knows the grids of the user's own templates (A-10: ``templates`` registers
   them; an anisotropic one is matched by its exact grid). A grid is compared through the RAS positions of its voxel
@@ -228,6 +229,17 @@ def _sharedGridSpace(segmentationNode, grid):
     return None
 
 
+def sharedGridSpace(segmentationNode):
+    """The space of a volume tagged ``Studio.Space`` that is on exactly the grid of ``segmentationNode`` (its reference
+    volume first), else None (also for a segmentation under a parent transform). A lesion drawn on one of your templates
+    is in the space you chose for the template, also when the template's grid is a built-in grid (Map's seed space).
+    """
+    if segmentationNode is None or not segmentationNode.IsA("vtkMRMLSegmentationNode") or segmentationNode.GetParentTransformNode() is not None:
+        return None
+    grid = gridOf(segmentationNode)
+    return _sharedGridSpace(segmentationNode, grid) if grid is not None else None
+
+
 def _userTemplateGridSpace(dims, ijkToRas):
     templates = _templatesModule()
     if templates is None:
@@ -251,9 +263,10 @@ def spaceOf(nodeOrGeometry):
     """``(spaceName, resolutionMm)`` of an image on an MNI grid, None otherwise (scanner space, figures, unknown grids).
 
     The node attribute ``Studio.Space`` ("MNI152NLin6Asym", optionally with the resolution: "MNI152NLin6Asym 2") wins;
-    else the built-in ``KNOWN_GRIDS``; else ``LesionNetworkMappingLib.geometry.detect_space`` when it is importable (more
-    spaces and resolutions, with the same ±0.01 mm origin tolerance); else, for a segmentation, the ``Studio.Space`` of a
-    volume on exactly its grid (``_sharedGridSpace``).
+    else, for a segmentation, the ``Studio.Space`` of a volume on exactly its grid (``_sharedGridSpace``: a lesion drawn
+    on one of your templates is in the space you chose for it, even on a built-in grid); else the built-in
+    ``KNOWN_GRIDS``; else ``LesionNetworkMappingLib.geometry.detect_space`` when it is importable (more spaces and
+    resolutions, with the same ±0.01 mm origin tolerance); else your templates' unregistered grids.
     A node under a parent transform is only recognized by its attribute (its grid is not where the file put it).
     """
     node = nodeOrGeometry if hasattr(nodeOrGeometry, "GetAttribute") else None
@@ -278,14 +291,18 @@ def spaceOf(nodeOrGeometry):
     if grid is None:
         return None
     dims, ijkToRas = grid
-    detected = tableSpace(dims, ijkToRas)
+    detected = None
+    if node is not None and node.IsA("vtkMRMLSegmentationNode"):
+        # A lesion on the grid of a volume whose space is known is in that volume's space: a lesion drawn on one of your
+        # templates whose grid is also a built-in grid (the 91x109x91 FSL grid added as MNI152Lin) is in the space you
+        # chose for the template, not the grid's built-in space; and a template not registered on this computer
+        detected = _sharedGridSpace(node, grid)
+    if detected is None:
+        detected = tableSpace(dims, ijkToRas)
     if detected is None:
         detected = _detectSpace((dims, ijkToRas)) or None
     if detected is None:
         detected = _userTemplateGridSpace(dims, ijkToRas)
-    if detected is None and node is not None and node.IsA("vtkMRMLSegmentationNode"):
-        # A lesion on the grid of a volume whose space is known (a template that is not registered on this computer)
-        detected = _sharedGridSpace(node, grid)
     if detected is None and node is not None and node.GetAttribute(ROLE_ATTRIBUTE) == ROLE_TEMPLATE:
         # A template volume is in its template's space, whatever grid it was resampled on
         spacing = worldBox(dims, ijkToRas)

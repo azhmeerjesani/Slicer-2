@@ -813,6 +813,11 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
             for node in (segNode, segNode.GetNodeReference(slicer.vtkMRMLSegmentationNode.GetReferenceImageGeometryReferenceRole())):
                 if node is not None and node.GetAttribute(studioSpace.SPACE_ATTRIBUTE):
                     return studioSpace.spaceOf(node)
+            # A lesion on the grid of a volume whose space is known (one of your templates, also on a built-in grid such
+            # as the FSL 2 mm grid added as MNI152Lin) is in that volume's space, not the grid's built-in space
+            shared = studioSpace.sharedGridSpace(segNode)
+            if shared is not None:
+                return shared
         except Exception:
             pass
         from LesionNetworkMappingLib import geometry

@@ -862,3 +862,45 @@ class StudioTemplatesTest(unittest.TestCase):
         self.assertFalse([node for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode") if node.GetAttribute("Studio.TemplateId") == template.id])
         for path in (agreeing, disagreeing):
             os.remove(path)
+
+    def test_16_known_grid_template_space_wins_for_lesions(self):
+        """A template on a built-in grid (the bundled 2 mm grid, stored LAS) added with another space: a lesion drawn on
+        it is in the space chosen for the template (Draw's notice, the sidecar, Map's seed space and family check), not
+        in the grid's built-in space. A lesion on that grid with no tagged volume keeps the built-in space.
+        """
+        import LesionNetworkMapping
+
+        from StudioLib import draw, importer, space
+
+        self.assertEqual(self.templates.identify(self.las).status, "known")
+        template = self._add(self.las, name="SPM-like 2 mm", space="MNI152Lin")
+        expected = ("MNI152Lin", 2)
+        volume, segmentation = importer.startOnTemplate(shell=self._shell(), templateId=template.id)
+        self.assertEqual(space.spaceOf(volume), expected)
+        self.assertEqual(space.spaceOf(space.gridOf(segmentation)), ("MNI152NLin2009cAsym", 2), "the grid alone is the built-in grid")
+        segmentId = segmentation.GetSegmentation().GetNthSegmentID(0)
+        lesion = np.zeros(slicer.util.arrayFromVolume(volume).shape, np.uint8)
+        lesion[30:40, 50:60, 25:35] = 1  # k, j, i
+        slicer.util.updateSegmentBinaryLabelmapFromArray(lesion, segmentation, segmentId, volume)
+        self.assertEqual(space.spaceOf(segmentation), expected)
+        self.assertEqual(space.sharedGridSpace(segmentation), expected)
+        line, level = draw.DrawExtension._spaceLine(None, segmentation, volume)
+        self.assertEqual((line, level), (f"On {template.name} · MNI152Lin 2 mm", "neutral"))
+        sidecar = draw.writeSidecar(os.path.join(self.tempDir, "lesion_known_grid.nii.gz"), segmentation, volume)
+        with open(sidecar, encoding="utf-8") as f:
+            content = json.load(f)
+        os.remove(sidecar)
+        self.assertEqual(content["Space"], "MNI152Lin")
+        self.assertEqual(content["Template"]["space"], "MNI152Lin")
+        logic = LesionNetworkMapping.LesionNetworkMappingLogic()
+        role = slicer.vtkMRMLSegmentationNode.GetReferenceImageGeometryReferenceRole()
+        for label in ("drawn on the template", "no node reference (a reopened project)"):
+            check = logic.checkSeed(segmentation, segmentId)
+            self.assertEqual(tuple(check["space"] or ()), expected, f"{label}: Map's seed space")
+            self.assertIn("a few millimetres", logic.familyNotice(check["space"], "MNI152NLin2009cAsym"), label)
+            segmentation.RemoveNodeReferenceIDs(role)
+        self.assertEqual(space.spaceOf(segmentation), expected)
+        # Without the tagged template volume, a lesion on the grid is in the grid's built-in space
+        slicer.mrmlScene.RemoveNode(volume)
+        self.assertEqual(space.spaceOf(segmentation), ("MNI152NLin2009cAsym", 2))
+        self.assertIsNone(space.sharedGridSpace(segmentation))
