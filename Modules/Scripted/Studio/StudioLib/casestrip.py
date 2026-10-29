@@ -877,6 +877,11 @@ class CaseStrip:
     def _close(self):
         if self._editing is None:
             return
+        if not _isAlive(self.editor):
+            # The application is quitting and Qt has already deleted the editor with its widgets: nothing is left to close
+            self._editing = self._editSid = self._confirmed = None
+            self._inputs = {}
+            return
         focus = slicer.app.focusWidget()
         hadFocus = focus is not None and self.editor.isAncestorOf(focus)
         self._editing = self._editSid = self._confirmed = None
@@ -899,10 +904,12 @@ class CaseStrip:
 
     def removeEventFilters(self):
         """Python event filters must not run while Python is finalized (the application quits)."""
-        self._close()
-        self._pin.detach()
-        if _isAlive(self.lines):
-            self.lines.removeEventFilter(self._linesFilter)
+        try:
+            self._close()
+        finally:
+            self._pin.detach()
+            if _isAlive(self.lines):
+                self.lines.removeEventFilter(self._linesFilter)
 
     def dispose(self):
         self.removeEventFilters()

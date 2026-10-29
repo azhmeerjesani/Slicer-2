@@ -54,6 +54,8 @@ Run with the main window and testing enabled::
   also when the recorded lesionset.json is shown again by a new card; the overlap volumes in the views are renamed
   "(out of date)"; "Create volume-matched control subset" stores nothing until the lesion set is checked again (it matched on
   volumes that no longer existed). A new check is current again.
+- ``test_20_quit_with_case_strip_editor_open`` (BB-1): a child process opens a literature-study case in Draw, opens the case
+  strip's inline editor ("+ DOI") and quits with ``slicer.app.exit`` (no window close): no traceback, exit code 0.
 - ``test_10_scripted_module_ui_widgets`` (BB-1): the build has the Qt Designer plugins of CTK and MRML, so that
   ``slicer.util.loadUI`` creates the CTK and qMRML widgets of a scripted module's ``.ui`` file (a ``qMRMLWidget`` root, a
   ``qMRMLNodeComboBox``, a ``ctkCollapsibleButton``), and Line Profile, Vector to Scalar Volume and Surface Toolbox set up
@@ -192,6 +194,68 @@ except Exception:
 """
 
 
+QUIT_STRIP_SCRIPT = r"""
+import os
+import sys
+import time
+
+import numpy as np
+import qt
+import slicer
+
+
+def pump(ms):
+    end = time.monotonic() + ms / 1000.0
+    while time.monotonic() < end:
+        slicer.app.processEvents()
+        time.sleep(0.005)
+
+
+def main():
+    from LesionNetworkMappingLib import geometry, nifti
+
+    from StudioLib import shell, study_ui
+
+    folder = os.environ["QUITTEST_FOLDER"]
+    studioShell = shell.Shell(force=True)
+    studioShell.apply()
+    pump(200)
+    grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+    mask = np.zeros(grid.shape, np.uint8)
+    mask[30:34, 60:64, 50:53] = 1
+    files = []
+    for sid in ("sub-01", "sub-02"):
+        path = os.path.join(folder, sid + "_lesion.nii.gz")
+        nifti.write_nifti(path, mask, grid.affine, dtype=np.uint8)
+        files.append(path)
+    session = study_ui.createStudy(files, studioShell, folder=folder)
+    pump(500)
+    session.study.set("sub-01", record_id="smith2020", citation="Smith 2020")
+    session.flush()
+    session.open("sub-01", switchToDraw=True)
+    pump(800)
+    from StudioLib import casestrip
+
+    strip = casestrip.strip()
+    strip.startEdit("doi")
+    pump(300)
+    if not strip.isEditing():
+        raise RuntimeError("the case strip editor did not open")
+    print("QUITTEST READY", flush=True)
+    slicer.app.exit(0)
+
+
+try:
+    main()
+except Exception:
+    import traceback
+
+    traceback.print_exc()
+    sys.stdout.flush()
+    slicer.app.exit(3)
+"""
+
+
 class _MoveRecorder(qt.QObject):
     """Event filter that appends the global y of ``widget`` to ``positions`` at each of its moves."""
 
@@ -315,6 +379,34 @@ class StudioRegressionTest(unittest.TestCase):
         environment = dict(os.environ)
         environment.update({"HOME": home, "XDG_CONFIG_HOME": os.path.join(home, ".config"), "QUITTEST_FOLDER": folder,
                             "SLICER_STUDIO_PROJECTS_ROOT": os.path.join(self.directory, "quit_projects")})
+        for key in ("SLICERRC", "SLICER_STUDIO_WEB"):
+            environment.pop(key, None)
+        process = subprocess.run([launcher, "--no-splash", "--testing", "--python-script", script], env=environment, stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, timeout=QUIT_TIMEOUT_S, check=False)
+        output = process.stdout.decode("utf-8", "replace")
+        self.assertIn("QUITTEST READY", output, output[-3000:])
+        self.assertNotIn("Traceback", output, output[-3000:])
+        self.assertNotIn("exit abnormally", output, output[-3000:])
+        self.assertEqual(process.returncode, 0, json.dumps(output[-3000:]))
+
+    def test_20_quit_with_case_strip_editor_open(self):
+        """Quitting (``slicer.app.exit``, no window close) while the case strip's inline editor is open is clean: the strip's
+        ``aboutToQuit`` clean-up does not call ``isAncestorOf`` on the editor that Qt already deleted.
+        """
+        launcher = slicer.app.launcherExecutableFilePath
+        launcher = launcher() if callable(launcher) else launcher
+        if not launcher or not os.path.isfile(launcher):
+            self.skipTest("no Slicer launcher")
+        script = os.path.join(self.directory, "quit_with_strip.py")
+        with open(script, "w") as stream:
+            stream.write(QUIT_STRIP_SCRIPT)
+        home = os.path.join(self.directory, "quit_strip_home")
+        folder = os.path.join(self.directory, "quit_strip_study")
+        os.makedirs(home)
+        os.makedirs(folder)
+        environment = dict(os.environ)
+        environment.update({"HOME": home, "XDG_CONFIG_HOME": os.path.join(home, ".config"), "QUITTEST_FOLDER": folder,
+                            "SLICER_STUDIO_PROJECTS_ROOT": os.path.join(self.directory, "quit_strip_projects")})
         for key in ("SLICERRC", "SLICER_STUDIO_WEB"):
             environment.pop(key, None)
         process = subprocess.run([launcher, "--no-splash", "--testing", "--python-script", script], env=environment, stdout=subprocess.PIPE,
