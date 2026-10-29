@@ -884,6 +884,47 @@ class FetchCommandLineTest(FetchConnectomeBase):
             self.assertEqual(proc.returncode, jobs.EXIT_CANCELLED, (wait, proc.stderr.read(), events[-1]))
             self.assertEqual(events[-1]["event"], "cancelled")
 
+    def test_the_command_stops_when_its_parent_process_is_gone(self):
+        """--parent-pid: the application passes its pid; when it crashes the job stops (resumable) instead of downloading on unseen.
+
+        The application starts the job through the PythonSlicer launcher, which outlives a crashed application, so the job's
+        own orphan watchdog never fires; only the parent watchdog stops it.
+        """
+        self.server.delay_s = 0.03
+        catalog_path = os.path.join(self.dest, "catalog.json")
+        data = copy.deepcopy(catalog.load_catalog().data)
+        data["entries"] = [self.entry]
+        with open(catalog_path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        out = os.path.join(self.dest, "out")
+        parent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+        self.addCleanup(parent.wait)
+        self.addCleanup(parent.kill)
+        env = {**os.environ, "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost", "PYTHONPATH": MODULE_DIR}
+        args = [sys.executable, "-m", "LesionNetworkMappingLib.fetchconnectome", "--entry", "fake-gsp", "--dest", out, "--terms-sha", TERMS_SHA, "--catalog", catalog_path,
+                "--server", self.server.url, "--streams", "1", "--parent-pid", str(parent.pid)]
+        proc = subprocess.Popen(args, cwd=MODULE_DIR, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        events = []
+        for line in proc.stdout:
+            if not line.startswith("{"):
+                continue
+            events.append(json.loads(line))
+            if events[-1]["event"] == "progress" and parent.poll() is None:
+                parent.kill()  # the application crashed
+                parent.wait()
+        proc.wait(timeout=120)
+        self.assertEqual(proc.returncode, jobs.EXIT_CANCELLED, (proc.stderr.read(), events[-1:]))
+        self.assertEqual(events[-1]["event"], "cancelled")
+        self.assertIsNone(fetchconnectome.running_fetch(self.entry, out))  # the lock is released: Resume can start
+        self.assertFalse(os.path.exists(fetchconnectome.lock_path(self.entry, out)))
+        self.assertIsNotNone(fetchconnectome.unfinished_fetch(self.entry, out))
+        self.assertIsNone(fetchconnectome.finished_fetch(self.entry, out))
+        self.server.delay_s = 0
+        proc, events = self._run("--entry", "fake-gsp", "--dest", out, "--terms-sha", TERMS_SHA, "--resume", "--parent-pid", str(os.getpid()))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(fetchconnectome.finished_fetch(self.entry, out), fetchconnectome.bundle_path(self.entry, out))
+        self.assertEqual(len(connectome.ConnectomeBundle.open(events[-1]["outputs"][0]).subject_ids), 5)
+
 
 if __name__ == "__main__":
     unittest.main()

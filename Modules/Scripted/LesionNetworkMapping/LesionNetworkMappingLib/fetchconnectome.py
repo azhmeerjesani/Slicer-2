@@ -44,14 +44,17 @@ Command line (one JSON event per line, see ``jobs``; exit codes 0 done, 1 error,
 
     python -m LesionNetworkMappingLib.fetchconnectome --entry ID --dest DIR --terms-sha SHA256
         [--subset all|archives:00-01|subjects:N|NAME] [--streams 2] [--keep-archives] [--cancel-file F] [--resume]
-        [--accept-checksum-mismatch] [--catalog connectomes|FILE] [--prefetch-mb 32] [--run-root DIR]
+        [--accept-checksum-mismatch] [--catalog connectomes|FILE] [--prefetch-mb 32] [--run-root DIR] [--parent-pid PID]
     python -m LesionNetworkMappingLib.fetchconnectome terms --entry ID [--catalog connectomes|FILE]
         (shows the live terms text and its sha256; downloads nothing else)
     python -m LesionNetworkMappingLib.fetchconnectome check --entry ID [--catalog ...]
         (compares the live listing with the catalog)
 
 ``--server URL`` replaces the scheme, host and port of the catalog's API URLs (a mirror, or the fake Dataverse of the
-tests); the terms text must still match. The graphical interface never passes it.
+tests); the terms text must still match. The graphical interface never passes it. ``--parent-pid PID`` stops the job
+(cancelled, resumable) when that process is gone: the application passes its own pid, so that a fetch never keeps
+downloading after the application crashed (the PythonSlicer launcher outlives it, so the orphan watchdog alone does not
+notice).
 """
 
 import os
@@ -683,6 +686,27 @@ def bundle_path(entry, dest):
     return os.path.join(os.path.abspath(os.fspath(dest)), f"{_entry_slug(entry)}.lnmc")
 
 
+def lock_path(entry, dest):
+    """``<dest>/.<entry id>.lock``: the output lock a running fetch holds (``jobs.OutputLock``)."""
+    return os.path.join(os.path.abspath(os.fspath(dest)), f".{_entry_slug(entry)}.lock")
+
+
+def running_fetch(entry, dest):
+    """The lock holder (``{pid, host, started}``) of a fetch of ``entry`` into ``dest`` that a live process is running, or None."""
+    lock = jobs.OutputLock(lock_path(entry, dest))
+    holder = lock.read()
+    return holder if holder is not None and not lock.is_stale(holder) else None
+
+
+def finished_fetch(entry, dest):
+    """The bundle path of a fetch of ``entry`` into ``dest`` that has finished (its state is complete), or None."""
+    data = read_state(entry, dest)
+    bundle = bundle_path(entry, dest)
+    if data and data.get("complete") and os.path.isfile(os.path.join(bundle, "connectome.json")):
+        return bundle
+    return None
+
+
 def work_dir(entry, dest):
     """``<dest>/<entry id>.fetch``: the state of a fetch, the accepted terms text, small files and kept archives."""
     return os.path.join(os.path.abspath(os.fspath(dest)), f"{_entry_slug(entry)}.fetch")
@@ -903,11 +927,11 @@ def fetch_connectome(entry, dest, terms_sha, subset=None, streams=2, keep_archiv
     os.makedirs(dest, exist_ok=True)
     bundle = bundle_path(entry, dest)
     work = work_dir(entry, dest)
-    lock_path = os.path.join(dest, f".{_entry_slug(entry)}.lock")
-    lock = jobs.OutputLock(lock_path)
+    locked = lock_path(entry, dest)
+    lock = jobs.OutputLock(locked)
     holder = lock.read()
     if holder is not None and not lock.is_stale(holder):  # a live job is fetching it: say so before the "partly downloaded" refusals below
-        raise jobs.Locked(f"{lock_path} is locked by process {holder.get('pid')} on {holder.get('host')} since {holder.get('started')}", holder=holder)
+        raise jobs.Locked(f"{locked} is locked by process {holder.get('pid')} on {holder.get('host')} since {holder.get('started')}", holder=holder)
     state = FetchState(os.path.join(work, "state.json"))
     if not resume and (state.exists or os.path.exists(os.path.join(bundle, "connectome.partial.json"))):
         raise jobs.JobError(f"{os.path.basename(bundle)} is partly downloaded here: resume it (--resume) or choose another folder", code="exists")
@@ -1170,9 +1194,12 @@ def _fetch_main(argv):
     parser.add_argument("--keep-archives", action="store_true", help="also keep the downloaded tar archives (about the size of the download)")
     parser.add_argument("--accept-checksum-mismatch", action="store_true", help="keep an archive whose checksum does not match (recorded as checksum_override)")
     parser.add_argument("--prefetch-mb", type=jobs.positive_int, default=DEFAULT_PREFETCH_MB, help="buffer per stream in MB")
+    parser.add_argument("--parent-pid", type=int, default=None, help="stop (cancelled, resumable) when this process is gone (the application that started the job)")
     jobs.add_common_arguments(parser)
     args = parser.parse_args(argv)
     cancel = jobs.CancelToken(args.cancel_file)
+    if args.parent_pid:
+        jobs.start_watchdogs(cancel, parent_pid=args.parent_pid, orphan=False)
     jobs.emit("start", job="fetchconnectome", argv=argv, threads=args.threads)
     entry = _load_entry(args)
     summary = fetch_connectome(entry, args.dest, args.terms_sha, subset=args.subset, streams=args.streams, keep_archives=args.keep_archives, cancel=cancel, resume=args.resume,

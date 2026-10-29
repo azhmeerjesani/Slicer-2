@@ -10,8 +10,12 @@ Download. This module holds what outlives the dialog:
   "Fetching GSP1000 · 41% · 2 h 10 min". **Pause** stops the job (its state, with the member offset of the next
   unconverted subject, is kept next to the bundle); **Resume** starts it again with ``--resume``, and the Range of the
   download restarts at that offset. The finished bundle is registered like any other connectome.
+- The job gets ``--parent-pid`` (this application): when the application ends without stopping it (a crash), the job
+  stops by itself within a second, keeps its state and can be resumed; it never downloads on unseen.
 - An unfinished job is offered for resuming the next time the Map module loads (:func:`offerResume`: a non-modal
   question, one click to resume; never under ``--testing`` and never without a main window; nothing resumes by itself).
+  A job that finished without this application seeing it (it ended after the application did) is registered then, and
+  the user is told; a job that another process is still running (its lock is live) is reported instead of offered.
 - ``ACTIONS`` registers the action in the manager's Manage… menu.
 
 Settings (fork-only, D-S1): ``Studio/LNM/EnableConnectomeFetch`` (read only; absent or true means on, "false" switches
@@ -162,6 +166,8 @@ class FetchController:
             args.append("--accept-checksum-mismatch")
         if self.catalogPath:
             args += ["--catalog", self.catalogPath]
+        # Stop with this application: the PythonSlicer launcher outlives a crashed application, so the job's own orphan watchdog does not notice
+        args += ["--parent-pid", str(os.getpid())]
         return args + list(self.extraArgs)
 
     def start(self, request, resume=False, acceptChecksumMismatch=False):
@@ -216,7 +222,11 @@ class FetchController:
         return request if isinstance(request, dict) and request.get("entry") and request.get("dest") else None
 
     def unfinished(self):
-        """``(request, summary)`` of an interrupted job that can be resumed, or None (a finished or missing one is forgotten)."""
+        """``(request, summary)`` of an interrupted job that can be resumed, or None (a finished or missing one is forgotten).
+
+        A saved job whose bundle is finished (the job ended after the application that started it) is registered first
+        (:meth:`adoptFinished`); a saved job that another live process is running (:meth:`runningElsewhere`) is not offered.
+        """
         from LesionNetworkMappingLib import fetchconnectome
 
         request = self.request if self.state in ("paused", "failed") else self.savedRequest()
@@ -225,13 +235,56 @@ class FetchController:
         entry = self.entry(request)
         if entry is None:
             return None
+        if self.runningElsewhere(request) is not None:
+            return None  # Resume would fail on its lock; the saved request stays until that job ends
         summary = fetchconnectome.unfinished_fetch(entry, request["dest"])
         if summary is None:
+            self.adoptFinished(request)
             # Forget the saved request only when the folder is reachable and holds no unfinished state (an unmounted drive does not forget it)
             if _settingText(ACTIVE_FETCH_SETTING) and not self.isRunning() and os.path.isdir(request["dest"]):
                 qt.QSettings().remove(ACTIVE_FETCH_SETTING)
             return None
         return request, summary
+
+    def runningElsewhere(self, request=None):
+        """The lock holder (``{pid, host, started}``) of the saved job when another live process is running it, else None."""
+        from LesionNetworkMappingLib import fetchconnectome
+
+        request = request or self.savedRequest()
+        if not request or self.isRunning():
+            return None
+        entry = self.entry(request)
+        if entry is None:
+            return None
+        try:
+            return fetchconnectome.running_fetch(entry, request["dest"])
+        except OSError:
+            return None
+
+    def adoptFinished(self, request=None):
+        """Register the bundle of the saved job when the job finished without this application seeing it; return its path or None.
+
+        That happens when the job ended after the application that started it (for example while it was closing); the bundle
+        is registered like the one of a job this application ran, and the saved request is forgotten.
+        """
+        from LesionNetworkMappingLib import fetchconnectome
+
+        request = request or self.savedRequest()
+        if not request or self.isRunning() or request != self.savedRequest():
+            return None
+        entry = self.entry(request)
+        if entry is None:
+            return None
+        bundle = fetchconnectome.finished_fetch(entry, request["dest"])
+        if bundle is None or not self._register(bundle):
+            return None
+        qt.QSettings().remove(ACTIVE_FETCH_SETTING)
+        self.request = dict(request)
+        self.state = "done"
+        self.error = self.errorEvent = None
+        self.resultPath = bundle
+        self._notify()
+        return bundle
 
     # Events
 
@@ -275,7 +328,7 @@ class FetchController:
             LesionNetworkMappingLogic.registerConnectome(path)
         except Exception:
             logging.exception("Lesion network mapping: the fetched connectome could not be registered")
-            return
+            return False
         try:
             module = getattr(slicer.modules, "lesionnetworkmapping", None)
             widget = module.widgetRepresentation().self() if module is not None else None
@@ -283,6 +336,7 @@ class FetchController:
                 widget.refreshConnectomes(select=path)
         except Exception:
             logging.exception("Lesion network mapping: the connectome list could not be refreshed")
+        return True
 
     def status(self):
         """A dict for the interface: ``state``, ``fraction`` (0..1 or None), ``eta`` (text), ``archive``, ``subjects``, ``name``,
@@ -346,8 +400,22 @@ def openCatalog(ctx=None, bundlePath=None):
     return dialog
 
 
+def _showInformation(objectName, title, text):
+    """A non-modal information box over the main window (kept in ``_dialogs``)."""
+    box = qt.QMessageBox(qt.QMessageBox.Information, title, text, qt.QMessageBox.Ok, slicer.util.mainWindow())
+    box.setObjectName(objectName)
+    box.setModal(False)
+    _dialogs[objectName] = box
+    box.show()
+    return box
+
+
 def offerResume():
-    """Offer to resume an unfinished fetch (a non-modal question; one click). Never automatic, never under ``--testing``."""
+    """Offer to resume an unfinished fetch (a non-modal question; one click). Never automatic, never under ``--testing``.
+
+    A saved fetch that finished after the application ended is registered and reported instead; one that another live
+    process is still running is reported (where it writes, and which process) instead of offered.
+    """
     if _offered["done"]:
         return False
     app = getattr(slicer, "app", None)
@@ -355,8 +423,20 @@ def offerResume():
         return False
     _offered["done"] = True
     current = controller()
+    saved = current.savedRequest()
+    holder = current.runningElsewhere(saved) if saved else None
+    if holder is not None:
+        _showInformation("LNMFetchRunningElsewhere", _("Download still running"),
+                         _("Fetching {name} into {dest} is still running in another process (process {pid} on {host}, since {started}). It continues there; "
+                           "this application does not show its progress.").format(name=current.shortName(saved), dest=saved["dest"], pid=holder.get("pid"), host=holder.get("host"),
+                                                                                  started=holder.get("started")))
+        return True
     found = current.unfinished()
     if found is None:
+        if saved and current.state == "done" and current.resultPath:
+            _showInformation("LNMFetchFinishedNotice", _("Download finished"),
+                             _("Fetching {name} finished after Slicer was closed. The connectome is registered and ready in the Connectome card.").format(name=current.shortName(saved)))
+            return True
         return False
     request, summary = found
     percent = f" ({int(summary['fraction'] * 100)}%)" if summary.get("fraction") is not None else ""
