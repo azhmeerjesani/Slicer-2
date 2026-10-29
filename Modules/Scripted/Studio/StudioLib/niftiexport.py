@@ -1105,13 +1105,21 @@ def planExport(nodes, folder, extension=".nii.gz", segmentationMode=SEGMENTATION
         base = (names or {}).get(node.GetID()) or defaultBaseName(node, kind, bids=bids)
         if kind == KIND_SEGMENTATION and segmentationMode == SEGMENTATION_LABELMAP:
             base = f"{base}_dseg"
-        path = uniquePath(os.path.join(folder, base + extension), reserved)
         options = {}
         if kind == KIND_SEGMENTATION:
             options = {"mode": segmentationMode, "reference": reference}
         elif kind == KIND_MAP and mapOptions and node.GetID() in mapOptions:
             options = dict(mapOptions[node.GetID()])
-        job = Job(node, kind, path, options)
+        # Every file of the job must be free, not only its main image: also a map's threshold mask and a segmentation's
+        # per-segment masks (an earlier scan may be named like one of them). Bump the base name (_2, _3...) until none is taken.
+        index = 1
+        while True:
+            suffix = "" if index == 1 else f"_{index}"
+            path = os.path.join(folder, f"{base}{suffix}{extension}")
+            job = Job(node, kind, path, options)
+            if not any(os.path.normcase(other).lower() in reserved for other in job.files()):
+                break
+            index += 1
         for other in job.files():
             reserved.add(os.path.normcase(other).lower())
         jobs.append(job)

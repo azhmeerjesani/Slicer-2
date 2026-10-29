@@ -665,6 +665,32 @@ class StudioNiftiExportTest(unittest.TestCase):
         positive = self.export.thresholdMask(values.transpose(2, 1, 0), 4.5, "pos")
         self.assertEqual(int(positive.sum()), 1)
 
+    def test_07a_derived_file_names_never_collide_across_jobs(self):
+        """A map's threshold mask and a segment's mask never get the name of another job's file (scans named like them)."""
+        ijkToRas = np.array([[-2.0, 0, 0, 20], [0, 2.0, 0, -20], [0, 0, 2.0, -20], [0, 0, 0, 1]])
+        scan1 = self._volume("Lesions_label-Lesion_mask", np.full((10, 10, 10), 5, np.int16), ijkToRas)
+        scan2 = self._volume("T_desc-thresholded_mask", np.full((10, 10, 10), 6, np.int16), ijkToRas)
+        values = np.zeros((10, 10, 10), np.float32)
+        values[5, 5, 5] = 9
+        tmap = self._volume("T", values, ijkToRas)
+        tmap.SetAttribute("LNM.Statistic", "T")
+        tmap.SetAttribute("LNM.Result", "1")
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesions")
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(scan1)
+        segmentId = segmentation.GetSegmentation().AddEmptySegment("", "Lesion")
+        mask = np.zeros((10, 10, 10), np.uint8)
+        mask[3, 3, 3] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(mask, segmentation, segmentId, scan1)
+        jobs = self.export.planExport(self.export.exportableNodes(), self.out, segmentationMode=self.export.SEGMENTATION_MASKS,
+                                      mapOptions={tmap.GetID(): {"threshold": 3.0, "sign": "both"}})
+        planned = [os.path.normcase(path).lower() for path in self.export.plannedFiles(jobs)]
+        self.assertEqual(len(planned), len(set(planned)), "every planned file has its own path")
+        result = self.export.runJobs(jobs)
+        written = sorted(name for name in os.listdir(self.out) if name.endswith(".nii.gz"))
+        self.assertEqual(len(written), len(result.images), "one file on disk per image reported")
+        data, _affine, _header = self._read(os.path.join(self.out, "Lesions_label-Lesion_mask.nii.gz"))
+        self.assertTrue((data == 5).all(), "the scan is not overwritten by the segment mask")
+
     def test_07b_map_on_a_declared_connectome_space_is_mni(self):
         """A Map result of a connectome on a grid that is not a built-in one (the demo, the user's conversions) is in the
         connectome's declared space: code 4 and that space in the sidecar, as the engine's own file of the map.
