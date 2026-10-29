@@ -239,6 +239,18 @@ def syncedService(path):
     return None
 
 
+def webFolderNotice(path, web=None):
+    """A warning for a Slicer Studio folder outside ``/data`` in the web build (it is lost with the container), else ""."""
+    web = isWebBuild() if web is None else web
+    if not web or not path:
+        return ""
+    normalized = os.path.normpath(os.path.abspath(os.path.expanduser(str(path))))
+    if normalized == WEB_DATA_FOLDER or normalized.startswith(WEB_DATA_FOLDER + "/"):
+        return ""
+    return _("{path} is inside the container but outside {data}: projects saved there are lost when the container is removed. "
+             "Use a folder under {data}.").format(path=normalized, data=WEB_DATA_FOLDER)
+
+
 def ensureRoot(rootPath=None):
     """Create the folder and its "About this folder.txt" (written once: never overwritten). Return the folder."""
     rootPath = rootPath or root()

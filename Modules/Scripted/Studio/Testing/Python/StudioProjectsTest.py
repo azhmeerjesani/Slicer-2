@@ -593,6 +593,31 @@ class StudioProjectsTest(unittest.TestCase):
             self.assertEqual(dialog.result(), qt.QDialog.Accepted)
         finally:
             dialog.deleteLater()
+        # Web build: a folder outside /data is warned about in the chooser (lost when the container is removed); /data is not
+        projects = self.projects
+        webValue = os.environ.get("SLICER_STUDIO_WEB")
+        os.environ["SLICER_STUDIO_WEB"] = "1"
+        try:
+            self.assertEqual(projects.webFolderNotice("/data/Slicer Studio"), "")
+            self.assertEqual(projects.webFolderNotice("/data"), "")
+            self.assertNotEqual(projects.webFolderNotice("/database/Slicer Studio"), "")
+            dialog = projects_ui.FolderChooserDialog(proposal="/tmp/Slicer Studio")
+            try:
+                self.assertFalse(dialog.syncedNotice.isHidden())
+                self.assertIn("outside /data", dialog.syncedLabel.text)
+                self.assertIn("lost when the container is removed", dialog.syncedLabel.text)
+                dialog.setPath("/data/Slicer Studio")
+                self.assertTrue(dialog.syncedNotice.isHidden())
+            finally:
+                dialog.deleteLater()
+            os.environ.pop("SLICER_STUDIO_WEB")
+            if not os.path.exists("/.dockerenv"):
+                self.assertEqual(projects.webFolderNotice("/tmp/Slicer Studio"), "", "no web warning on the desktop")
+        finally:
+            if webValue is None:
+                os.environ.pop("SLICER_STUDIO_WEB", None)
+            else:
+                os.environ["SLICER_STUDIO_WEB"] = webValue
         # The warning appears while the dialog is open (Choose… on a synced folder): the dialog grows with it and the rows of
         # "Inside this folder" keep their size
         dialog = projects_ui.FolderChooserDialog(proposal=os.path.join(self.tempDir, "Slicer Studio"))

@@ -290,9 +290,14 @@ class FolderChooserDialog(qt.QDialog):
         self.pathLabel.setText(projects.shortPath(self.path))
         self.pathLabel.setToolTip(self.path)
         service = projects.syncedService(self.path)
+        # Web build: a folder outside /data is lost when the container is removed (same warning as the connectome destination)
+        notices = [projects.webFolderNotice(self.path)]
         if service:
-            self.syncedLabel.setText(_("This folder is synced to {service}. Scans can contain patient data: if they do, choose a folder that "
-                                       "is not synced.").format(service=service))
+            notices.append(_("This folder is synced to {service}. Scans can contain patient data: if they do, choose a folder that "
+                             "is not synced.").format(service=service))
+        notices = [text for text in notices if text]
+        if notices:
+            self.syncedLabel.setText(" ".join(notices))
             self.syncedLabel.show()
             self.syncedNotice.show()
         else:
