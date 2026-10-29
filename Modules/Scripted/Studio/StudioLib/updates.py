@@ -1703,14 +1703,16 @@ class UpdateService:
         return succeeded
 
     def _offerSessionForRecovery(self, sessionDir):
-        """The session closed for the update with unsaved work is offered for recovery like a crashed one."""
+        """The session closed for the update with unsaved work is offered for recovery like a crashed one (it is marked
+        as closed for the update, so that the recovery dialog does not say that Slicer crashed).
+        """
         try:
             from StudioLib import recovery
 
             root = os.path.dirname(os.path.normpath(sessionDir))
             for session in recovery.scan(root):
                 if os.path.normpath(session.path) == os.path.normpath(sessionDir) and session.status == "closed-unsaved":
-                    recovery.markSession(session, "running", synchronous=True)
+                    recovery.markSession(session, "running", synchronous=True, closedForUpdate=True)
                     return True
         except Exception:
             logging.error("Updates: " + traceback.format_exc())

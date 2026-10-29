@@ -597,6 +597,26 @@ class StudioUpdatesTest(unittest.TestCase):
         after = next(s for s in recovery.scan(root) if s.path == sessionDir)
         self.assertEqual(after.status, "crashed")
         self.assertTrue(after.presentable())
+        # The recovery dialog does not say that Slicer crashed: the user chose to close it for the update
+        self.assertTrue(after.closedForUpdate)
+        self.assertEqual(after.slots[0].status(), "closed-for-update")
+        dialog = recovery.RecoveryDialog()
+        try:
+            dialog.setSessions([after], startup=True, root=root)
+            self.assertIn("closed to install an update", dialog.textLabel.text)
+            self.assertNotIn("did not close normally", dialog.textLabel.text)
+            self.assertEqual(dialog.list.topLevelItem(0).text(3), "closed for the update")
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+        # A crashed session (no update) keeps the old wording
+        data = dict(after.data)
+        data.pop("closedForUpdate", None)
+        autosave_io.atomicWriteJson(os.path.join(sessionDir, autosave_io.SESSION_FILE), data)
+        crashed = next(s for s in recovery.scan(root) if s.path == sessionDir)
+        self.assertFalse(crashed.closedForUpdate)
+        self.assertEqual(crashed.slots[0].status(), "crashed")
+        self.assertIn("did not close normally", recovery.RecoveryDialog._introText([crashed], True))
 
     #
     # (f) macOS helper with fake tools

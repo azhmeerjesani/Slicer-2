@@ -38,6 +38,7 @@ THUMBNAIL_ICON_SIZE = 96
 
 _STATUS_TEXT = {
     "crashed": "closed unexpectedly",
+    "closed-for-update": "closed for the update",
     "possibly-crashed": "possibly closed unexpectedly",
     "closed-unsaved": "closed without saving",
     "running": "open in another Slicer",
@@ -92,6 +93,8 @@ class SlotInfo:
             return "own-current" if self.state == "current" else "own-closed"
         if self.state == "closed-unsaved":
             return "closed-unsaved"
+        if self.session.status == "crashed" and self.session.closedForUpdate:
+            return "closed-for-update"
         return self.session.status
 
     def contentsText(self):
@@ -111,6 +114,8 @@ class SessionInfo:
         self.updated = self.data.get("updated") or self.data.get("heartbeat")
         self.heartbeat = self.data.get("heartbeat") or self.updated
         self.presentedCount = int(self.data.get("presentedCount") or 0)
+        #: Closed by Slicer Studio itself to install an update (offered like a crashed session, but not described as one)
+        self.closedForUpdate = bool(self.data.get("closedForUpdate"))
         self.lockInfo = ""
         self.slots = [SlotInfo(self, slot) for slot in self.data.get("slots") or [] if slot.get("name")]
         self.slots = [slot for slot in self.slots if slot.hasContent()]
@@ -536,14 +541,19 @@ def recover(slot, mode=None, parent=None):
     return report
 
 
-def markSession(session, state, synchronous=False):
+def markSession(session, state, synchronous=False, closedForUpdate=None):
     """Record the state of a session (recovered, discarded) in its session.json.
+
+    ``closedForUpdate=True`` also records that Slicer Studio closed the session to install an update.
 
     The write goes through the background writer, after the other writes of that file (``incrementPresented``).
     """
     data = dict(session.data)
     data["state"] = state
     data["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    if closedForUpdate is not None:
+        data["closedForUpdate"] = bool(closedForUpdate)
+        session.closedForUpdate = bool(closedForUpdate)
     session.data = data
     session.status = state
     path = os.path.join(session.path, io.SESSION_FILE)
@@ -748,8 +758,7 @@ class RecoveryDialog(qt.QDialog):
     def setSessions(self, sessions, startup=False, root=None):
         self.startup = startup
         self.root = root
-        self.textLabel.setText(_("Slicer did not close normally. Work from these sessions was autosaved:") if startup
-                               else _("Work that Slicer Studio autosaved. Recover what you need and discard the rest."))
+        self.textLabel.setText(self._introText(sessions, startup))
         self.laterButton.setText(_("Later") if startup else _("Close"))
         self.list.clear()
         self._slots = {}
@@ -781,6 +790,17 @@ class RecoveryDialog(qt.QDialog):
         self.list.setVisible(not empty)
         self.emptyLabel.setVisible(empty)
         self._updateButtons()
+
+    @staticmethod
+    def _introText(sessions, startup):
+        if not startup:
+            return _("Work that Slicer Studio autosaved. Recover what you need and discard the rest.")
+        crashed = [s for s in sessions if s.status in ("crashed", "possibly-crashed")]
+        if crashed and all(s.status == "crashed" and s.closedForUpdate for s in crashed):
+            return _("Slicer Studio closed to install an update. Work from these sessions was autosaved:")
+        if any(s.closedForUpdate for s in crashed):
+            return _("Slicer did not close normally, or closed to install an update. Work from these sessions was autosaved:")
+        return _("Slicer did not close normally. Work from these sessions was autosaved:")
 
     @staticmethod
     def _styleSheet():
