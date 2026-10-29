@@ -1189,6 +1189,19 @@ class UpdateService:
         elapsedMs = (time.monotonic() - self._startTime) * 1000.0
         self._noticeTimer.start(int(max(0, NOTICE_DELAY_MS - elapsedMs)))
 
+    def studioEntered(self):
+        """Studio was applied in the middle of the session (from Classic): announce an optional update that is waiting.
+
+        The notice is scheduled once at startup and gives up when there is no Studio shell then (a start in Classic),
+        so the switch to Studio schedules it again, under the same conditions as ``_showAvailability()``.
+        """
+        status = self.status
+        if status is None or not status.available or status.kind != "optional" or status.skipped or self.notice is not None:
+            return
+        if channel() != "release" and feedOverride() is None and _installableOverride is None:
+            return
+        self.scheduleNotice()
+
     def _otherPromptShown(self):
         import slicer
 

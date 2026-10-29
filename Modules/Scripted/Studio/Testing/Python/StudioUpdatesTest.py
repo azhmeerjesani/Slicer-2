@@ -1314,6 +1314,49 @@ fi
         self.assertIsNone(service.notice)
         self.assertNotIn(updates.NOTICE_KEY, library.notices())
 
+    def test_NoticeAfterSwitchFromClassic(self):
+        """A start in Classic gives up the notice (no Studio shell); entering Studio later announces the update."""
+        from StudioLib import library, shell
+
+        updates = self.updates
+        self._publish("1.2.0")
+        mainWindow = slicer.util.mainWindow()
+        geometry = mainWindow.saveGeometry()
+
+        def restore():
+            live = shell._shell
+            if live is not None:
+                live.dispose()
+            mainWindow.restoreGeometry(geometry)
+            self._pump(0.3)
+
+        self.addCleanup(restore)
+        updates._installableOverride = False
+        self.addCleanup(lambda: setattr(updates, "_installableOverride", None))
+        service = self._service()
+        previous = updates._service
+        updates._service = service
+        self.addCleanup(lambda: setattr(updates, "_service", previous))
+        service._startTime = time.monotonic() - 1000  # long after the startup: no delay for the notice
+        studioShell = shell.Shell(force=True)  # Classic: the shell exists but is not applied
+        self.assertIsNone(shell.instance())
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        service._showAvailability(startup=True)
+        self._pump(1.0)
+        self.assertIsNone(service.notice, "Classic has no Studio notice")
+        self.assertFalse(service._noticeTimer.isActive())
+        # Switching to Studio schedules the notice again
+        studioShell.apply(midSession=True)
+        self.assertTrue(self._waitFor(lambda: service.notice is not None, 10))
+        self.assertEqual(service.notice.findChild("QLabel", "StudioNoticeText").text, "Update 1.2.0 available")
+        self.assertIn(updates.NOTICE_KEY, library.notices())
+        # A skipped version is not announced when Studio is entered again
+        service.skip()
+        studioShell.classic()
+        studioShell.apply(midSession=True)
+        self._pump(1.0)
+        self.assertIsNone(service.notice)
+
     def test_ClassicHelpAction(self):
         service = self._service()
         service._installHelpAction()

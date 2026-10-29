@@ -1787,6 +1787,19 @@ class Shell:
         self._updateClassicSwitchAction()
         self.applyDurationMs = (time.perf_counter() - startTime) * 1000.0
         logging.debug(f"Studio applied in {self.applyDurationMs:.1f} ms")
+        if midSession:
+            self._announceUpdate()
+
+    def _announceUpdate(self):
+        """After a switch from Classic: an optional update found meanwhile is announced in Studio (A-08)."""
+        try:
+            from StudioLib import updates
+
+            service = updates.instance()
+            if service is not None:
+                service.studioEntered()
+        except Exception:
+            logging.error(f"Studio: announcing the update failed:\n{traceback.format_exc()}")
 
     def _apply(self, midSession=False):
         mainWindow = self.mainWindow
