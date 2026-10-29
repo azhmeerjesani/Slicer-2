@@ -423,7 +423,8 @@ class Study:
     ``dictionary`` is the participants.json data dictionary ({column: entry}). ``validation_warnings``
     collects (participant_id, column, value, message) for values of lenient registry columns that
     were kept although unknown (for example ``sex`` = "unknown"). ``inbox_errors`` lists
-    (file, participant_id, message) for inbox values that :meth:`apply_inbox` rejected.
+    (file, participant_id, message) for inbox values that :meth:`apply_inbox` rejected, and
+    ``inbox_held`` (file, [participant ids]) for the files that the last :meth:`apply_inbox` held back.
     """
 
     #: Registry folder of the control sets (<Studio/LNM/DataDirectory>/ControlSets) that ``controlset:`` paths resolve
@@ -436,6 +437,7 @@ class Study:
         self.dictionary = dict(dictionary or {})
         self.validation_warnings = []
         self.inbox_errors = []
+        self.inbox_held = []
         self._columns = list(columns)
         self._rows = []
         self._index = {}
@@ -1266,11 +1268,13 @@ class Study:
         schema.write_text_atomic(path, json.dumps(content, ensure_ascii=False) + "\n")
         return path
 
-    def apply_inbox(self, save=True):
+    def apply_inbox(self, save=True, hold=None):
         """Merge the values that jobs posted (:meth:`post_result`), oldest first.
 
         Each subject's values are validated together (all or nothing). Unknown subjects and invalid
-        values are listed in :attr:`inbox_errors`. With ``save``, the study is then saved (with merge);
+        values are listed in :attr:`inbox_errors`. ``hold(participant_id, values)`` (optional) returns
+        True for values that must wait: a file with such values is left in the inbox, untouched, for a
+        later merge, and is listed in :attr:`inbox_held`. With ``save``, the study is then saved (with merge);
         otherwise the next :meth:`save` finishes the inbox. After the save, the audit records of the
         files are appended to ``.studio/audit.jsonl`` (a record {"event": "inbox", ...} for files
         without one), applied files are deleted, and files with rejected values move to
@@ -1285,6 +1289,7 @@ class Study:
             return []
         pending = {item["path"] for item in self._pending_inbox}
         applied = []
+        self.inbox_held = []
         for name in names:
             path = os.path.join(folder, name)
             if path in pending:
@@ -1300,6 +1305,11 @@ class Study:
             rows = data.get("rows")
             if not errors and (data.get("format") != INBOX_FORMAT or not isinstance(data.get("version"), int) or data["version"] > INBOX_VERSION or not isinstance(rows, dict)):
                 errors.append((None, f"not a {INBOX_FORMAT} file of version {INBOX_VERSION}"))
+            if not errors and hold is not None:
+                held = [sid for sid, values in rows.items() if sid in self._index and isinstance(values, dict) and hold(sid, values)]
+                if held:
+                    self.inbox_held.append((path, held))
+                    continue
             for sid, values in rows.items() if not errors else ():
                 if sid not in self._index:
                     errors.append((sid, "unknown subject"))

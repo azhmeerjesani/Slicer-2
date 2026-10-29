@@ -42,7 +42,9 @@ A study is a plain folder (``LesionNetworkMappingLib.study``): ``study.json``, `
   (``throughputText``, from ``trace_seconds``).
 - Nothing is written outside the study folder; ``participants.tsv`` is written only on the main thread, through
   ``Study.save()`` (lock and merge). Jobs post to ``.studio/inbox``; the session merges the inbox when a study is
-  opened, when Library is shown and on request. ``.studio/session.json`` holds a heartbeat (every 15 s) while the
+  opened, when Library is shown and on request. A job result that repoints the open subject (its scan, lesion or space)
+  never applies under its open scene: it waits while the subject has edits that are not written (retried), else the
+  subject is left, the result merged and the subject opened again (BB-1). ``.studio/session.json`` holds a heartbeat (every 15 s) while the
   study is open, and the trace queue; it is kept with ``heartbeat_epoch`` 0 when the study is closed.
 - **Two windows on one study**: opening a study whose ``session.json`` is the live heartbeat of another process says so
   (a warning toast; the other window is told at its next heartbeat), and closing never marks that other session closed.
@@ -91,6 +93,10 @@ SAVE_DELAY_MS = 400
 #: How long a save waits for .studio/participants.lock on the main thread before it is retried from a timer
 SAVE_LOCK_TIMEOUT_S = 0.5
 SAVE_RETRY_MS = 2000
+#: A job result for the open subject's scan, lesion or space waits while its edits are not written; the merge is retried this often
+INBOX_RETRY_MS = 1500
+#: The row columns that say which files (and grid) the open subject's scene shows
+INBOX_SCENE_COLUMNS = ("scan", "lesion", "space")
 #: Tracing time stops counting after this long without an edit (SPEC 5.5)
 IDLE_PAUSE_S = 120.0
 #: Backup of an adopted participants table (written once)
@@ -264,6 +270,19 @@ def _commitCaseStripEdit(studySession):
     except Exception:
         logging.error(f"Studio: the case strip edit could not be saved:\n{traceback.format_exc()}")
         return True, ""
+
+
+def _caseStripEditing():
+    """True while a case strip field is being edited (its value is saved when the case is left)."""
+    try:
+        from . import casestrip
+    except ImportError:
+        return False
+    strip = getattr(casestrip, "_strip", None)
+    try:
+        return strip is not None and casestrip._isAlive(strip.widget) and bool(strip.isEditing())
+    except Exception:
+        return False
 
 
 def _toast(shell, text, **kwargs):
@@ -1731,6 +1750,12 @@ class StudySession:
         self._lastSaveTime = None
         self._lastSaveError = None
         self.lastInboxRejected = []  # [(file, participant id or None, message)] that the last applyInbox() rejected
+        self.lastInboxHeld = []  # [(file, [participant ids])] that the last applyInbox() held back (the open subject's edits)
+        self._inboxReloading = False
+        self._inboxRetryTimer = qt.QTimer()
+        self._inboxRetryTimer.setSingleShot(True)
+        self._inboxRetryTimer.setInterval(INBOX_RETRY_MS)
+        self._inboxRetryTimer.connect("timeout()", self._onInboxRetry)
         self._removed = []  # undo records of "Remove from study"
         self.creationReport = None
         self._gridRows = {}
@@ -1832,6 +1857,7 @@ class StudySession:
         self._closed = True
         self._saveTimer.stop()
         self._heartbeatTimer.stop()
+        self._inboxRetryTimer.stop()
         for tag in (self._sceneCloseTag, self._sceneClosingTag):
             if tag is not None:
                 slicer.mrmlScene.RemoveObserver(tag)
@@ -2001,14 +2027,35 @@ class StudySession:
         Files that the merge rejects (unknown subject, invalid value, unreadable file) are moved to
         ``.studio/inbox/rejected/``; ``lastInboxRejected`` lists them and, with ``report``, a toast says that
         they were not merged and why (``inboxRejectedText()``).
+
+        A result that changes the open subject's scan, lesion or space (a normalization, a warp) never applies under the
+        open scene, which Done would then write with the new row's name and space: while the subject has edits that are
+        not written (or a case strip field is being edited), its file stays in the inbox (``lastInboxHeld``) and the merge is
+        retried every ``INBOX_RETRY_MS``; otherwise the subject is left (its notes written), the result merged and the
+        subject opened again.
         """
         jobs = _lnm("jobs")
         known = len(self.study.inbox_errors)
+        current = self._current
+        # The rows of the subjects whose results waited: a lesion written meanwhile is kept as their native lesion
+        waited = {sid: dict(self.study.subject(sid)) for _path, sids in self.lastInboxHeld for sid in sids if sid in self.study}
         try:
-            applied = self.study.apply_inbox(save=False)
+            applied = self.study.apply_inbox(save=False, hold=self._inboxHold(current))
+            held = list(self.study.inbox_held)
+            if held and not self._inboxReloading and not self.isDirty() and not _caseStripEditing() and self._leaveForInbox():
+                # The subject is closed: nothing of its scene can be written with the new row
+                try:
+                    applied += self.study.apply_inbox(save=False)
+                    held = list(self.study.inbox_held)
+                finally:
+                    self._reopenAfterInbox(current)
+            applied += self._keepWrittenLesions(waited, applied)
         except Exception:
             logging.error(f"Studio: the study inbox could not be merged:\n{traceback.format_exc()}")
             return []
+        self.lastInboxHeld = held
+        if held and not self._closed:
+            self._inboxRetryTimer.start()
         self.lastInboxRejected = list(self.study.inbox_errors[known:])
         if applied:
             try:
@@ -2020,6 +2067,78 @@ class StudySession:
         if self.lastInboxRejected and report:
             _toast(self._shell, self.inboxRejectedText(), ms=9000, level="warning")
         return applied
+
+    def _inboxHold(self, current):
+        """``hold`` of ``Study.apply_inbox``: values that change the scan, lesion or space of the open subject ``current``."""
+        if current is None or current not in self.study:
+            return None
+        isMissing = _lnm("study").is_missing
+
+        def hold(sid, values):
+            if sid != current:
+                return False
+            row = self.study.subject(sid)
+            for column in INBOX_SCENE_COLUMNS:
+                if column not in values:
+                    continue
+                new, old = values[column], row.get(column)
+                if (isMissing(new) and isMissing(old)) or (not isMissing(new) and not isMissing(old) and str(new) == str(old)):
+                    continue
+                return True
+            return False
+
+        return hold
+
+    def _keepWrittenLesions(self, waited, applied):
+        """A result that waited for its subject's edits moved the row off a native lesion that is not the one it was made
+        from (Done wrote the tracing to another file meanwhile): that lesion becomes the row's ``lesion_native`` (the result
+        is then Stale), as the normalization manager keeps a lesion edited during its job. Return the files applied.
+        """
+        studyModule = _lnm("study")
+        isMissing = studyModule.is_missing
+        merged = {sid for _path, sids in applied for sid in sids}
+        kept = {}
+        for sid, before in waited.items():
+            lesion = before.get("lesion")
+            if sid not in merged or sid not in self.study or isMissing(lesion) or not (isMissing(before.get("space")) or before.get("space") == "native"):
+                continue
+            row = self.study.subject(sid)
+            if row.get("lesion") == lesion or row.get("lesion_native") == lesion or isMissing(row.get("space")) or row.get("space") == "native":
+                continue
+            kept[sid] = lesion
+        if not kept:
+            return []
+        audit = [{"event": "norm_lesion_edited", "sid": sid, "lesion_native": path, "by": "studio", "at": _now()} for sid, path in kept.items()]
+        studyModule.Study.post_results(self.study.path, {sid: {"lesion_native": path} for sid, path in kept.items()}, "inbox-edited", audit=audit)
+        _toast(self._shell, _("The lesion of {sids} was edited while it was normalized: it is marked Stale (Redo or Re-warp)").format(
+            sids=", ".join(sorted(kept))), ms=8000, level="consequence")
+        return self.study.apply_inbox(save=False, hold=self._inboxHold(self._current))
+
+    def _leaveForInbox(self):
+        """Close the open subject (its notes and case strip are written) before a result repoints its row. Return True if closed."""
+        if self._current is None:
+            return False
+        if not self._leave(write=True):
+            return False
+        self._removeSubjectNodes()
+        self._current = None
+        self._inboxReloading = True
+        return True
+
+    def _reopenAfterInbox(self, sid):
+        """Open ``sid`` again after the merge, with the files its row points at now (the workspace stays)."""
+        try:
+            if sid is not None and sid in self.study and self._current is None and not self.open(sid, switchToDraw=False):
+                shell = _currentShell(self._shell)
+                if shell is not None:
+                    # The breadcrumb never names a subject that is not open
+                    shell.setBreadcrumb(self.study.name, None, onClick=lambda: showSubjectSwitcher(shell))
+        finally:
+            self._inboxReloading = False
+
+    def _onInboxRetry(self):
+        if not self._closed and self.lastInboxHeld:
+            self.applyInbox()
 
     def inboxRejectedText(self, rejected=None):
         """Sentence for the job results that the last merge rejected ("" when none): how many files and why."""
@@ -3463,12 +3582,17 @@ def warpToConnectomeSpace(sid, transformPath=None, referencePath=None, shell=Non
                                       "warp", audit)
         if _session is studySession:
             studySession.applyInbox()
-            try:
-                studyObject.write_lesion_sidecar(sid, studio={"warped_from": row["lesion"], "trace_template": sourceSpace,
-                                                              "transform": os.path.basename(str(transformPath)),
-                                                              "transform_sha256": provenance.get("transform_sha256")})
-            except Exception:
-                logging.warning(f"Studio: the sidecar of the warped lesion of {sid} could not be written:\n{traceback.format_exc()}")
+            if sid in studyObject and studyObject.subject(sid).get("lesion") != studyObject.relpath(binary):
+                # Held back while the subject's edits are not written (StudySession.applyInbox): the sidecar of the lesion that is
+                # still open is not changed; the audit record keeps the warp's provenance
+                logging.info(f"Studio: the warp of {sid} is merged when its edits are written")
+            else:
+                try:
+                    studyObject.write_lesion_sidecar(sid, studio={"warped_from": row["lesion"], "trace_template": sourceSpace,
+                                                                  "transform": os.path.basename(str(transformPath)),
+                                                                  "transform_sha256": provenance.get("transform_sha256")})
+                except Exception:
+                    logging.warning(f"Studio: the sidecar of the warped lesion of {sid} could not be written:\n{traceback.format_exc()}")
         _toast(shell, _("{sid} warped to {space} (the original is kept)").format(sid=sid, space=target), ms=4000, level="consequence")
 
     def binarize(job):

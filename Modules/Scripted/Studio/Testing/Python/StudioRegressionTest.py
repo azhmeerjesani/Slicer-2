@@ -39,6 +39,12 @@ Run with the main window and testing enabled::
   is fixed the study is created and .studio/participants.orig.tsv is the table that was adopted, not the broken one.
 - ``test_15_inspector_keeps_width_with_a_study`` (BB-1): with a study open (Library cards, Map cohort tabs) the inspector stays at its
   stored width in every workspace, and no workspace module's stored width (``Studio/WorkspacePanelWidths/*``) is wider than it.
+- ``test_17_job_result_waits_for_open_subject_edits`` (BB-1): a job result (a normalization) that repoints the open subject's
+  scan, lesion and space while it has unsaved edits stays in the inbox when the inbox is merged (Library shown, "Merge job
+  results", Search): Done writes the native tracing as the native lesion (never as template space) and the result is merged
+  after it, with the edited file as ``lesion_native`` (also when Done wrote it to another file than the one the result was
+  made from: the result is then Stale). For an open subject without edits the subject is closed, the result
+  merged and the subject opened again on the new files.
 - ``test_10_scripted_module_ui_widgets`` (BB-1): the build has the Qt Designer plugins of CTK and MRML, so that
   ``slicer.util.loadUI`` creates the CTK and qMRML widgets of a scripted module's ``.ui`` file (a ``qMRMLWidget`` root, a
   ``qMRMLNodeComboBox``, a ``ctkCollapsibleButton``), and Line Profile, Vector to Scalar Volume and Surface Toolbox set up
@@ -924,6 +930,117 @@ class StudioRegressionTest(unittest.TestCase):
             slicer.mrmlScene.Clear(0)
 
     # Scripted module .ui files need the Qt Designer plugins (BB-1)
+
+    def test_17_job_result_waits_for_open_subject_edits(self):
+        from LesionNetworkMappingLib import nifti
+        from LesionNetworkMappingLib.study import Study, is_missing
+
+        from StudioLib import shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        folder = os.path.join(self.directory, "Inbox open subject")
+        os.makedirs(folder)
+        nativeAffine = np.array([[1.2, 0, 0, -36], [0, 1.2, 0, -42], [0, 0, 1.2, -30], [0, 0, 0, 1]], float)
+        nativeShape = (60, 70, 50)
+        rng = np.random.default_rng(3)
+        paths = []
+        for index in range(1, 4):
+            paths.append(os.path.join(folder, f"sub-0{index}_T1w.nii.gz"))
+            nifti.write_nifti(paths[-1], rng.normal(300, 8, nativeShape).astype(np.int16), nativeAffine, sform_code=1, qform_code=1)
+        templateAffine = np.array([[2, 0, 0, -96.5], [0, 2, 0, -132.5], [0, 0, 2, -78.5], [0, 0, 0, 1]], float)
+        templateShape = (97, 115, 97)
+
+        def postNormalization(session, sid):
+            """The result of a normalization of ``sid`` as normalize.py posts it (files in derivatives/normalization)."""
+            row = session.study.subject(sid)
+            out = os.path.join(folder, "derivatives", "normalization", sid)
+            os.makedirs(out, exist_ok=True)
+            mask = np.zeros(templateShape, np.uint8)
+            mask[40:44, 50:54, 40:44] = 1
+            prefix = f"derivatives/normalization/{sid}/{sid}_space-MNI152NLin2009cAsym"
+            nifti.write_nifti(os.path.join(folder, prefix + "_desc-lesion_mask.nii.gz"), mask, templateAffine)
+            nifti.write_nifti(os.path.join(folder, prefix + "_T1w.nii.gz"), mask.astype(np.int16) * 300, templateAffine)
+            Study.post_result(folder, sid, {"scan_native": row["scan"], "lesion_native": None if is_missing(row.get("lesion")) else row["lesion"],
+                                            "scan": prefix + "_T1w.nii.gz", "lesion": prefix + "_desc-lesion_mask.nii.gz", "space": "MNI152NLin2009cAsym",
+                                            "norm_method": "test", "norm_qc": "unreviewed"}, source="normalize")
+
+        def paint(session, box):
+            segmentation, volume = session.segmentationNode(), session.volumeNode()
+            segmentId = segmentation.GetSegmentation().GetNthSegmentID(0)
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, segmentId, volume)
+            array[box] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentation, segmentId, volume)
+            slicer.app.processEvents()
+
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        try:
+            session = study_ui.createStudy(paths, studioShell, folder=folder)
+            study = session.study
+            # sub-02 is traced and written (a native lesion), then edited again without Done while its normalization finishes
+            session.open("sub-02", switchToDraw=False)
+            paint(session, np.s_[20:23, 30:33, 20:23])
+            session.done()
+            nativeLesion = study.subject("sub-02")["lesion"]
+            self.assertEqual(study.subject("sub-02")["space"], "native")
+            session.open("sub-02", switchToDraw=False)
+            paint(session, np.s_[30:34, 30:33, 20:23])
+            self.assertTrue(session.isDirty())
+            postNormalization(session, "sub-02")
+            # Every merge (Library shown, "Merge job results", Search) holds the result back: the row keeps the files of the scene
+            session.applyInbox()
+            row = study.subject("sub-02")
+            self.assertEqual((row["lesion"], row["space"]), (nativeLesion, "native"))
+            self.assertEqual([sids for _path, sids in session.lastInboxHeld], [["sub-02"]])
+            self.assertEqual(len([name for name in os.listdir(os.path.join(folder, ".studio", "inbox")) if name.endswith(".json")]), 1)
+            # Done writes the native tracing as the native lesion (on the native grid), then the result is merged
+            result = session.done()
+            self.assertEqual(study.relpath(result["path"]), nativeLesion)
+            self.assertEqual(tuple(nifti.read_nifti_header(result["path"])["shape"][:3]), nativeShape)
+            self.assertEqual(sorted(name for name in os.listdir(os.path.join(folder, "lesions")) if name.endswith(".nii.gz")),
+                             ["sub-02_space-native_desc-lesion_mask.nii.gz"])
+            self.assertNotEqual(session.current(), "sub-02")
+            session.applyInbox()
+            self.assertEqual(session.lastInboxHeld, [])
+            row = study.subject("sub-02")
+            self.assertEqual(row["space"], "MNI152NLin2009cAsym")
+            self.assertTrue(row["lesion"].startswith("derivatives/normalization/sub-02/"), row["lesion"])
+            self.assertEqual(row["lesion_native"], nativeLesion)
+            edited = np.asarray(nifti.read_nifti(study.abspath(row["lesion_native"]))[0])
+            self.assertEqual(int((edited > 0).sum()), 27 + 36)
+            # A result made without the lesion that Done wrote meanwhile (another file): that lesion is kept as the native lesion
+            untraced = session.current()
+            self.assertIn(untraced, ("sub-01", "sub-03"))
+            paint(session, np.s_[20:22, 20:22, 20:22])
+            postNormalization(session, untraced)
+            session.applyInbox()
+            self.assertEqual(study.subject(untraced)["space"], "native")
+            written = study.relpath(session.done()["path"])
+            session.applyInbox()
+            row = study.subject(untraced)
+            self.assertEqual(row["space"], "MNI152NLin2009cAsym")
+            self.assertEqual(row["lesion_native"], written)
+            with open(os.path.join(folder, ".studio", "audit.jsonl"), encoding="utf-8") as f:
+                self.assertIn("norm_lesion_edited", f.read())
+            # An open subject without edits: closed, merged and opened again on the files of its new row
+            clean = "sub-03" if untraced == "sub-01" else "sub-01"
+            session.open(clean, switchToDraw=False)
+            self.assertFalse(session.isDirty())
+            postNormalization(session, clean)
+            session.applyInbox()
+            self.assertEqual(session.lastInboxHeld, [])
+            self.assertEqual(session.current(), clean)
+            self.assertEqual(study.subject(clean)["space"], "MNI152NLin2009cAsym")
+            self.assertEqual(tuple(session.volumeNode().GetImageData().GetDimensions()), templateShape)
+        finally:
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
 
     def test_10_scripted_module_ui_widgets(self):
         import sys

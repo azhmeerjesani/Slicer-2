@@ -828,7 +828,8 @@ class _Manager:
             applied = session.applyInbox()
         merged = {sid for _path, sids in applied for sid in sids}
         self.unmerged -= merged
-        kept = {sid: path for sid, path in edited.items() if sid in merged}
+        # The session keeps a lesion written while its result waited (StudySession.applyInbox) itself: not twice
+        kept = {sid: path for sid, path in edited.items() if sid in merged and session.study.subject(sid).get("lesion_native") != path}
         if kept:
             self._keepEditedLesions(kept)
         self._snapshotQc()

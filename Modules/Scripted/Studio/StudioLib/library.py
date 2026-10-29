@@ -4328,10 +4328,14 @@ class StudyCard(qt.QObject):
             rejected = studySession.inboxRejectedText()
             # Only the files with values that were merged count; a rejected file is said apart, with why
             merged = sum(1 for _path, sids in applied if sids)
-            text = _("Merged {n} job results").format(n=merged) if merged else ("" if rejected else _("No job results to merge"))
+            heldSids = sorted({sid for _path, sids in studySession.lastInboxHeld for sid in sids})
+            # A result that repoints the open subject waits until its edits are written (StudySession.applyInbox)
+            held = _("The results for {sids} wait until its edits are written").format(sids=", ".join(heldSids)) if heldSids else ""
+            text = _("Merged {n} job results").format(n=merged) if merged else ("" if rejected or held else _("No job results to merge"))
             shell = _shell()
             if shell is not None:
-                shell.toast(" · ".join(part for part in (text, rejected) if part), ms=9000 if rejected else 1600, level="warning" if rejected else "info")
+                shell.toast(" · ".join(part for part in (text, held, rejected) if part), ms=9000 if rejected else 4000 if held else 1600,
+                            level="warning" if rejected else "info")
 
     def _close(self):
         studyUi = _studyUi()
