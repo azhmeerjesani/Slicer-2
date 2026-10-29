@@ -1029,6 +1029,45 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLSegmentationNode")), 0)
         self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLSegmentationDisplayNode")), 0)
 
+    def _write4D(self, name, timePoints=3):
+        """Write a 4D NIfTI image (16 x 12 x 8 voxels, ``timePoints`` time points) and return its path."""
+        import SimpleITK as sitk
+
+        rng = np.random.default_rng(4)
+        frames = []
+        for _index in range(timePoints):
+            frame = sitk.GetImageFromArray((rng.random((8, 12, 16)) * 100).astype(np.int16))
+            frame.SetSpacing((2.0, 2.0, 3.0))
+            frames.append(frame)
+        image = sitk.JoinSeries(frames)
+        image.SetSpacing((2.0, 2.0, 3.0, 2.0))
+        path = os.path.join(self.directory, name)
+        sitk.WriteImage(image, path)
+        return path
+
+    def test_close_4d_image_row(self):
+        """Close on a 4D image row (a sequence) removes its proxy volume, sequence and browser: the row does not come back."""
+        from StudioLib import importer
+
+        studioShell = self._applyStudio()
+        proxyNode = importer.loadSequence(self._write4D("bold_4d.nii.gz"))
+        self._library(studioShell)
+        card = self._panel().openNowCard
+        card.refresh()
+        self.assertIn("bold_4d", card.rowNames())
+        row = next(row for row in card._rows if row[2]["name"] == "bold_4d")
+        actions = {str(action.objectName): action for action in row[0].findChild("QMenu", "StudioOpenNowMenu").actions()}
+        actions["StudioOpenNowClose"].trigger()
+        self._pump(6)
+        self._wait(300)
+        card.refresh()
+        self.assertNotIn("bold_4d", card.rowNames())
+        self.assertFalse(slicer.mrmlScene.IsNodePresent(proxyNode))
+        self.assertEqual(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"), [])
+        self.assertEqual(slicer.util.getNodesByClass("vtkMRMLSequenceNode"), [])
+        self.assertEqual(slicer.util.getNodesByClass("vtkMRMLSequenceBrowserNode"), [])
+        self.assertEqual(slicer.util.getNodesByClass("vtkMRMLSequenceStorageNode"), [])
+
     def test_close_row_asks_for_unsaved_lesion(self):
         from StudioLib import library
 

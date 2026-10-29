@@ -1156,19 +1156,53 @@ def showInDataModule(node=None):
     slicer.util.selectModule("Data")
 
 
+def _removeSequenceOf(proxyNode):
+    """When ``proxyNode`` shows the current item of a sequence (a 4D image, ``importer.loadSequence()``), remove that sequence
+    and its browser, the browser first: a browser left in the scene makes the proxy again as soon as it is removed.
+
+    A browser that also plays other sequences only lets go of this one; a sequence that another browser plays stays.
+    """
+    try:
+        logic = slicer.modules.sequences.logic()
+    except AttributeError:
+        return
+    if logic is None:
+        return
+    browsers = vtk.vtkCollection()
+    logic.GetBrowserNodesForProxyNode(proxyNode, browsers)
+    sequences = []
+    for index in range(browsers.GetNumberOfItems()):
+        browserNode = browsers.GetItemAsObject(index)
+        sequenceNode = browserNode.GetSequenceNode(proxyNode)
+        if sequenceNode is None:
+            continue
+        sequences.append(sequenceNode)
+        if browserNode.GetNumberOfSynchronizedSequenceNodes(True) <= 1:
+            _removeWithRelated(browserNode)
+        else:
+            browserNode.RemoveSynchronizedSequenceNode(sequenceNode.GetID())
+    for sequenceNode in sequences:
+        if slicer.mrmlScene.IsNodePresent(sequenceNode) and logic.GetFirstBrowserNodeForSequenceNode(sequenceNode) is None:
+            _removeWithRelated(sequenceNode)
+
+
 def _removeWithRelated(node):
     scene = slicer.mrmlScene
     related = [node.GetNthDisplayNode(i) for i in range(node.GetNumberOfDisplayNodes())] if hasattr(node, "GetNumberOfDisplayNodes") else []
     if hasattr(node, "GetNumberOfStorageNodes"):
         related.extend(node.GetNthStorageNode(i) for i in range(node.GetNumberOfStorageNodes()))
-    scene.RemoveNode(node)
+    if not node.IsA("vtkMRMLSequenceBrowserNode") and not node.IsA("vtkMRMLSequenceNode"):
+        _removeSequenceOf(node)
+    if scene.IsNodePresent(node):
+        scene.RemoveNode(node)
     for other in related:
         if other is not None and scene.IsNodePresent(other):
             scene.RemoveNode(other)
 
 
 def closeNode(node, confirm=True):
-    """Close one row: remove the node with its display and storage nodes. Return False when the user kept it.
+    """Close one row: remove the node with its display and storage nodes, and for a 4D image also its sequence and sequence
+    browser. Return False when the user kept it.
 
     A lesion with unsaved voxels asks first (``confirm``). The Segment Editor lets go of the node before it is removed.
     """
