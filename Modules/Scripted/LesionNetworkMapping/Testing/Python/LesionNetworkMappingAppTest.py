@@ -493,6 +493,16 @@ class AppLevelsTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("sub-99", events[-1]["message"])
 
+    def test_output_folder_is_not_the_input_folder(self):
+        # The BIDS input is never written: output == input would put conn-<label>/ and sourcedata/ into the dataset,
+        # and the next run would scan the snapshots there as competing lesion masks
+        before = file_set(self.bids)
+        for output in (self.bids, os.path.join(self.bids, "derivatives", "..")):
+            code, events, _stdout, _stderr = cli(self.bids, output, "participant", "--connectome", self.fx["bundle"], *COMMON, *BIDS_OPTIONS)
+            self.assertEqual((code, events[-1]["code"]), (2, "usage"))
+            self.assertIn("output folder", events[-1]["message"])
+        self.assertEqual(file_set(self.bids), before)
+
 
 class CorruptLesionMessagesTest(unittest.TestCase):
     """An unreadable lesion file is named and called unreadable (not "missing") by the engine and the BIDS-App."""

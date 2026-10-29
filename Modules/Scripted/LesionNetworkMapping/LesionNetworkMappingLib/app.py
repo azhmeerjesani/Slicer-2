@@ -688,6 +688,11 @@ def _main(argv):
     from .export import run_dir_name
     from .study import Study
 
+    # A BIDS input is never written (docs: "nothing in the input folder is written"): conn-<label>/ and sourcedata/ in
+    # the dataset itself would be scanned as competing lesion masks by the next run
+    if os.path.realpath(input_dir) == os.path.realpath(output_dir) and not Study.is_study(input_dir):
+        emit("error", code="usage", message="The output folder must not be the BIDS input folder (nothing in the input folder is written); use a subfolder such as derivatives/slicer-lnm")
+        return jobs.EXIT_USAGE
     try:
         bundle = ConnectomeBundle.open(args.connectome)
     except (OSError, ValueError) as exc:
