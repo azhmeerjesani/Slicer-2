@@ -136,6 +136,18 @@ def git_commit():
     return result.stdout.strip() if result.returncode == 0 else None
 
 
+def check_published(text):
+    """--published must be a real calendar date written YYYY-MM-DD."""
+    match = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", text)
+    try:
+        if not match:
+            raise ValueError(text)
+        datetime.date(*(int(part) for part in match.groups()))
+    except ValueError:
+        raise ReleaseError(f"--published {text!r} is not a date YYYY-MM-DD (for example 2026-10-22).") from None
+    return text
+
+
 def build_manifest(version, assets, required=False, minimum_supported=None, notes="", published=None):
     manifest = {
         "version": version,
@@ -230,6 +242,8 @@ def main(argv=None):
         if source_version and version != source_version:
             raise ReleaseError(f"--version {version} differs from STUDIO_VERSION {source_version} in {VERSION_FILE}: "
                                "raise STUDIO_VERSION and build the packages again.")
+        if args.published is not None:
+            check_published(args.published)
         if args.minimum_supported:
             version_key(args.minimum_supported)
             if version_key(args.minimum_supported) > version_key(version):

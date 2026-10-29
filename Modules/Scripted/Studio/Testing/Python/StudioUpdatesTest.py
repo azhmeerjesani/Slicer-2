@@ -1479,6 +1479,24 @@ fi
         with open(os.path.join(out, "studio-update.json"), encoding="utf-8") as f:
             self.assertIn("Café ok", json.load(f)["notes"])
 
+    def test_MakeReleasePublishedDate(self):
+        """--published is checked as a real YYYY-MM-DD date: an impossible one is an 'Error: ...' line and exit 1."""
+        makeRelease = self._importScript(os.path.join("Utilities", "Scripts", "SlicerStudioRelease", "make_release.py"), "make_release_test4")
+        linux = os.path.join(self.feedDir, "Slicer-5.13.0-linux-amd64.tar.gz")
+        _fakeLinuxPackage(linux, makeRelease.read_studio_version())
+        out = os.path.join(self.tempDir, "release-published")
+        for bad in ("2026-13-45", "2026-02-30", "banana", "20261022", "2026-1-5", ""):
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                code = makeRelease.main([linux, "--published", bad, "--no-web", "--out-dir", out])
+            self.assertEqual(code, 1, bad)
+            self.assertTrue(stderr.getvalue().startswith("Error: "), stderr.getvalue())
+            self.assertIn("YYYY-MM-DD", stderr.getvalue())
+            self.assertFalse(os.path.exists(os.path.join(out, "studio-update.json")), bad)
+        self.assertEqual(makeRelease.main([linux, "--published", "2024-02-29", "--no-web", "--out-dir", out]), 0)
+        with open(os.path.join(out, "studio-update.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["published"], "2024-02-29")
+
     def test_WebLauncher(self):
         web = self._importScript(os.path.join("Utilities", "SlicerStudioWeb", "slicer_studio_web.py"), "slicer_studio_web_test")
         makeRelease = self._importScript(os.path.join("Utilities", "Scripts", "SlicerStudioRelease", "make_release.py"), "make_release_test2")
