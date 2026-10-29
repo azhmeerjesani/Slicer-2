@@ -952,6 +952,7 @@ class Plan:
     preflight: dict | None
     budget_bytes: int
     elapsed: float = 0.0
+    design_sha256: str = ""  # design_fingerprint() of the rows to be mapped (pipeline.json "inputs"; the cards' "Design changed")
 
     @property
     def n_subjects(self):
@@ -1004,6 +1005,7 @@ class Plan:
             "null_relocations": self.null_k,
             "specificity": {"mode": self.specificity, "reason": self.specificity_reason},
             "scores": self.scores,
+            "design_sha256": self.design_sha256,
             "estimate_s": round(self.estimate_s, 1),
             "elapsed": round(self.elapsed, 4),
         }
@@ -1089,6 +1091,33 @@ def _builtin_row_checks(study, config):
         if review and row.get("review_status") != "approved":
             excluded[sid] = EXCLUDED_REVIEW
     return excluded
+
+
+#: Covariates left out of the design fingerprint: the pipeline itself fills the missing lesion volumes from the lesion
+#: files (cohortmaps posts them to the study's inbox), and a changed lesion is already counted as a changed lesion.
+DESIGN_FINGERPRINT_SKIP = ("volume_ml",)
+#: Row statuses of a plan whose subjects make the design (mapped now or reused). A native lesion still to be normalized
+#: is not part of it: the cards count it as a new lesion, and a run adds it only when it maps it (--native include-unreviewed).
+ANALYSED_STATUSES = ("compute", "reuse")
+
+
+def design_fingerprint(study, rows, scores=(), covariates=()):
+    """sha256 of what the group statistics read from the study besides the lesions: the analysed subjects, their groups
+    and their values of the score and covariate columns (``rows``: plan rows with ``participant_id`` and ``group``).
+
+    A run records it in pipeline.json ("inputs"/"design_sha256"); a later plan that gives another value means that the
+    report and the group maps describe another design (a group, include flag, score or covariate changed).
+    """
+    columns = sorted({str(name) for name in [*(scores or ()), *(covariates or ())]} - set(DESIGN_FINGERPRINT_SKIP))
+    subjects = []
+    for row in sorted(rows, key=lambda item: item["participant_id"]):
+        sid = row["participant_id"]
+        try:
+            values = study.subject(sid)
+        except KeyError:
+            values = {}
+        subjects.append([sid, row.get("group") or "n/a", [values.get(column) for column in columns]])
+    return fingerprint({"columns": columns, "subjects": subjects})
 
 
 def _specificity_decision(config, groups):
@@ -1317,6 +1346,7 @@ def plan(config, hash_lesions=True, providers=None):
     result = Plan(config, out, study, bundle, providers, subject_ids, subjects_sha, manifest_sha, rows, stages, blocks, warnings, infos, overrides, total, null_k, specificity, specificity_reason,
                   score_columns, report, budget)
     result.nulls_mode = nulls_mode  # "exact" | "fast" | "skip" | "unavailable"
+    result.design_sha256 = design_fingerprint(study, [row for row in rows if row["status"] in ANALYSED_STATUSES], score_columns, config.covariates)
     result.elapsed = time.perf_counter() - started
     return result
 
@@ -1394,6 +1424,7 @@ class Runner:
         self.providers = resolve_providers()
         self.results = {}
         self.fps = {}
+        self.design_rows = []  # [{participant_id, group}] of the analysed subjects (design_fingerprint)
         self.stage_records = {}
         self.warnings = []
         self.overrides = []
@@ -1542,6 +1573,8 @@ class Runner:
         self.plan = plan_result = plan(config, providers=self.providers)
         self.bundle, self.study = plan_result.bundle, plan_result.study
         self.rows = plan_result.rows
+        # The design this run analyses (design_fingerprint): the planned rows, and the native rows its normalization maps
+        self.design_rows = [{"participant_id": row["participant_id"], "group": row["group"]} for row in self.rows if row["status"] in ANALYSED_STATUSES]
         self.overrides = [{"what": what, "reason": "requested on the command line"} for what in plan_result.overrides]
         if config.volume_off_reason and "volume_ml" not in config.covariates:
             self.overrides.append({"what": "no_volume_covariate", "reason": config.volume_off_reason})
@@ -1993,6 +2026,7 @@ class Runner:
                     self._exclude(row, NORM_NEEDS_REVIEW)
             else:
                 self._exclude(row, f"normalization {status or 'failed'}: {entry.get('reason') or 'no lesion'}")
+        self.design_rows += [{"participant_id": row["participant_id"], "group": row["group"]} for row in normalized]
         if normalized:
             self._snapshot(normalized)
         return outcome
@@ -3246,6 +3280,7 @@ class Runner:
             "inputs": {
                 "participants_tsv_sha256": _lesion_sha(os.path.join(self.study.path, "participants.tsv")),
                 "study_json_sha256": _lesion_sha(os.path.join(self.study.path, "study.json")),
+                "design_sha256": design_fingerprint(self.study, self.design_rows, self.plan.scores, config.covariates),
                 "rows": rows,
             },
             "subjects": {"n": len(self.subject_ids), "subject_ids_sha256": self.plan.subjects_sha256, "preview": config.preview_n, "seed": config.preview_seed},

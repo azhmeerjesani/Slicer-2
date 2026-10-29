@@ -337,6 +337,39 @@ class LesionNetworkMappingPipelineUITest(unittest.TestCase):
         self.assertEqual(start["n_compute"], 1, start)
         self.assertEqual(start["n_reuse"], 11, start)
 
+    def test_4b_design_change_is_not_up_to_date(self):
+        """A group or include change after a run: the card and the Library card say the design changed, never 'Up to date'."""
+        from LesionNetworkMappingLib.study import read_tsv, write_tsv
+
+        card = self.card
+        self._settle()
+        self.assertTrue(card.stateLabel.text.startswith("Up to date"), card.stateLabel.text)
+        with open(self.participants, "rb") as f:
+            before = f.read()
+        columns, rows = read_tsv(self.participants)
+        columns = columns if "include" in columns else [*columns, "include"]
+        cases = [row for row in rows if row["group"] == "case"]
+        cases[0]["group"] = "control"
+        cases[1]["include"] = "0"
+        try:
+            write_tsv(self.participants, columns, rows)
+            self._settle()
+            self.assertIn("11 lesions", card.summaryLabel.text)
+            self.assertIn("6 cases / 5 controls", card.summaryLabel.text)
+            self.assertEqual(card.stateLabel.text, "Design changed since the last run")
+            try:
+                from StudioLib import libcard_analysis
+            except ImportError:
+                libcard_analysis = None
+            if libcard_analysis is not None:
+                text, level = libcard_analysis.stateLine(libcard_analysis.latestAnalysis(self.fx["study"]), card.plan)
+                self.assertEqual((text, level), ("Cohort analysis: design changed since the last run", "warning"))
+        finally:
+            with open(self.participants, "wb") as f:
+                f.write(before)
+        self._settle()
+        self.assertTrue(card.stateLabel.text.startswith("Up to date"), card.stateLabel.text)
+
     def test_5_stop_and_resume(self):
         """With one lesion per pass: Stop shows 'Stopped · k of 12 maps kept' within 3 s; the next run reuses at least k and completes."""
         card = self.card

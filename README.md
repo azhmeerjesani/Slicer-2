@@ -469,7 +469,8 @@ order are kept, a backup is written once to `.studio/participants.orig.tsv`, and
   and `supplementary_lesions.tsv` under `derivatives/lesions`, with the same numbering in all three. These are
   descriptive checks of the lesion set, not tests.
 - **Analysis.** A small *Analysis* card says in one line where the cohort analysis of the study stands ("Never run",
-  "Running · Network maps 34%", "up to date · finished 2 h ago", "3 new or changed lesions", "Stopped" or "Failed")
+  "Running · Network maps 34%", "up to date · finished 2 h ago", "3 new or changed lesions", "design changed since the last run" (a group,
+  include flag, score or covariate changed), "Stopped" or "Failed")
   and has *Open in Map* and *Open report*. When every included subject is traced, a toast points to it once per
   session. It never starts a run by itself (see [Automate a cohort analysis](#automate-a-cohort-analysis)).
 - **One subject at a time** is in the scene. Opening a subject replaces the previous subject's scan and lesion

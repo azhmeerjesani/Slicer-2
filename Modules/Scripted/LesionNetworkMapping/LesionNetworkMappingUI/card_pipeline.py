@@ -19,7 +19,8 @@ connectome of the Seed and Connectome cards, as one heavy job of the application
   STOP file of the output folder is written when the application quits. Completed work is kept: the next run resumes.
 - **Staleness and re-attach.** ``pipeline.plan(…, hash_lesions=True)`` runs in a worker thread (file reads and hashing;
   no MRML or Qt) when the card is shown, the study, connectome, rule or options change; the card then says "3 new or
-  changed lesions · 37 up to date". A run of another process (the command line, a restarted Slicer) is found by the
+  changed lesions · 37 up to date", or "Design changed since the last run" when the analysed subjects, their groups,
+  scores or covariates are not those of the last run (``pipeline.design_fingerprint``). A run of another process (the command line, a restarted Slicer) is found by the
   heartbeat of ``.pipeline/lock.json`` and followed through ``.pipeline/progress.json`` every 2 s.
 - **Results.** Open report and Show folder (the system browser, else an in-app web viewer, else a message with the
   path), Load maps (at most 6 group maps, one per 30 ms tick, over the template), Warnings (a non-modal list).
@@ -530,8 +531,19 @@ def summarizePlan(result):
         "stages": [dict(stage) for stage in result.stages],
         "exit_code": result.exit_code,
         "scores": list(result.scores),
+        "design_sha256": getattr(result, "design_sha256", "") or "",
         "elapsed": float(result.elapsed),
     }
+
+
+def designChanged(plan, record):
+    """True when the design of the study (the analysed subjects, their groups, scores and covariates) is not the one the
+    last run analysed: the plan's ``design_sha256`` differs from the one of pipeline.json. False when either has none
+    (a run of an earlier build records none).
+    """
+    recorded = ((record or {}).get("inputs") or {}).get("design_sha256")
+    current = (plan or {}).get("design_sha256")
+    return bool(recorded and current and recorded != current)
 
 
 class PlanWorker:
@@ -1436,15 +1448,19 @@ class PipelineCard:
             return _("Failed: {message}").format(message=error.get("message") or _("see pipeline.log")), "danger"
         stale = 0
         upToDate = 0
+        designStale = False
         if self.plan is not None and self.planKey == self._currentPlanKey():
             stale = int(self.plan["counts"].get("compute", 0)) + int(self.plan["counts"].get("normalize", 0))
             upToDate = int(self.plan["counts"].get("reuse", 0))
+            designStale = designChanged(self.plan, self.record)
         if self.record is None and model is None:
             if self.plan is not None and self.plan.get("review"):
                 return self._reviewLine(), "warn"
             return _("Never run"), "text2"
         if stale and status in ("done", "done_with_failures", None):
             return _plural(stale, "{n} new or changed lesion", "{n} new or changed lesions") + " · " + _("{n} up to date").format(n=upToDate), "warn"
+        if designStale and status in ("done", "done_with_failures"):
+            return _("Design changed since the last run"), "warn"
         if failedStages:
             return _plural(len(failedStages), "Finished with {n} failed stage", "Finished with {n} failed stages"), "warn"
         if self.plan is not None and self.plan.get("review"):

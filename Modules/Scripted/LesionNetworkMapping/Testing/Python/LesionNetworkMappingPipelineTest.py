@@ -483,6 +483,34 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         status = stage_status(events)
         self.assertEqual((status["slnm"], status["nulls"]), ("done", "reused"))
 
+    def test_design_fingerprint_follows_the_design(self):
+        """pipeline.json records the design it analysed; a plan after a group, include or score change gives another one
+        (the cards then say "Design changed since the last run"), a status or a filled lesion volume does not.
+        """
+        recorded = self.pipeline_json["inputs"]["design_sha256"]
+        self.assertRegex(recorded or "", r"^[0-9a-f]{64}$")
+        study_copy = os.path.join(self.tmp, "design copy", fixture.STUDY_NAME)
+        shutil.copytree(self.fx["study"], study_copy, ignore=shutil.ignore_patterns("derivatives", ".studio"))
+        config = pipeline.PipelineConfig.from_json(self.pipeline_json, base=self.out)
+        config.study, config.out, config.accept_terms = study_copy, os.path.join(self.tmp, "design out"), True
+
+        def design(**changes):
+            study = Study.open(study_copy)
+            for sid, values in changes.items():
+                study.set(sid, **values)
+            study.save()
+            return pipeline.plan(config).design_sha256
+
+        self.assertEqual(design(), recorded, "an unchanged study is the design of the last run")
+        self.assertEqual(design(**{"sub-01": {"status": "mapped"}, "sub-02": {"volume_ml": "n/a"}}), recorded, "statuses and lesion volumes are not the design")
+        self.assertNotEqual(design(**{"sub-05": {"group": "control"}}), recorded, "a case that becomes a control")
+        self.assertEqual(design(**{"sub-05": {"group": "case"}}), recorded)
+        self.assertNotEqual(design(**{"sub-06": {"include": "0"}}), recorded, "a subject that is no longer included")
+        self.assertEqual(design(**{"sub-06": {"include": "1"}}), recorded)
+        score = Study.open(study_copy).subject("sub-03")["aphasia_score"]
+        self.assertNotEqual(design(**{"sub-03": {"aphasia_score": "99"}}), recorded, "a changed score")
+        self.assertEqual(design(**{"sub-03": {"aphasia_score": score}}), recorded)
+
     def test_top_pct_primary_rule(self):
         fx = fixture.make_fixture(os.path.join(self.tmp, "f9"))
         rule = {"kind": "top_pct", "value": 10}

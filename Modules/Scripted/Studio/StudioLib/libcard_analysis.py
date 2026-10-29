@@ -4,8 +4,9 @@ The card says where the cohort analysis of the open study stands, in one line, f
 ``derivatives/lnm/conn-*/pipeline.json`` and ``.pipeline/progress.json`` (on study open and every 5 s while it is
 visible):
 
-- "Cohort analysis: up to date · finished 2 h ago", "3 new or changed lesions" (the staleness plan of the last run's
-  settings, ``pipeline.plan`` in a worker thread: file reads and hashing only), "Never run",
+- "Cohort analysis: up to date · finished 2 h ago", "3 new or changed lesions", "Cohort analysis: design changed since
+  the last run" (the staleness plan of the last run's settings, ``pipeline.plan`` in a worker thread: file reads and
+  hashing only; the design is the analysed subjects with their groups, scores and covariates), "Never run",
   "Running · Network maps 34%" (a run of this application or of another process), "Stopped", "Failed".
 - [Open in Map] shows Map with Seed = Cohort and the Run everything card; [Open report] opens the last report.
 
@@ -132,6 +133,8 @@ def stateLine(analysis, plan=None, liveModel=None):
         return _("Cohort analysis: stopped"), "text2"
     if stale:
         return (_("{n} new or changed lesion") if stale == 1 else _("{n} new or changed lesions")).format(n=stale), "warning"
+    if plan is not None and cardPipeline is not None and record.get("status") in ("done", "done_with_failures") and cardPipeline.designChanged(plan, record):
+        return _("Cohort analysis: design changed since the last run"), "warning"
     if record.get("status") == "done_with_failures":
         failed = len(record.get("failed_stages") or [])
         return (_("Cohort analysis: finished with {n} failed stage") if failed == 1 else _("Cohort analysis: finished with {n} failed stages")).format(n=failed), "warning"
