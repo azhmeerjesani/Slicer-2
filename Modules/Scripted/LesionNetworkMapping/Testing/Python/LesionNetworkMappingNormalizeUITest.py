@@ -538,6 +538,16 @@ class LesionNetworkMappingNormalizeUITest(unittest.TestCase):
             self.assertLessEqual(card.widget.height, 56)  # compact idle state (laid out in the Draw inspector)
             self.assertTrue(self.nc.offerNormalize(self.native, self.nativeSegmentId, studioShell))
             self.assertEqual(card.controller.state, "idle")
+            self.assertEqual(studioShell.currentWorkspace(), "draw")  # Draw's call to action stays in Draw
+            # "Options in Map…" (the ⋯ menu and the failure banner) shows the Map card, not this Draw card again
+            self.assertTrue(card.openInMap())
+            _pump(300)
+            self.assertEqual(studioShell.currentWorkspace(), "map")
+            self.assertTrue(self._cardVisible())
+            self.assertIs(self.card.scanSelector.currentNode(), self.scan)
+            self.assertEqual(card.controller.state, "idle")  # no job is started
+            studioShell.switchTo("draw")
+            _pump(300)
             # A template source hides the card
             editor.setSegmentationNode(self.mniSegmentation)
             editor.setSourceVolumeNode(self.template)

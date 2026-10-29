@@ -428,7 +428,9 @@ class DrawNormalizeCard:
         """Show the Map card (options: template, quality, modality, margin, rough alignment)."""
         ctx = self._context()
         if self.nc is not None:
-            self.nc.offerNormalize(ctx.get("segmentationNode"), ctx.get("segmentId"), None)
+            # preferMap: from Draw, offerNormalize() would otherwise just focus this Draw card again
+            return bool(self.nc.offerNormalize(ctx.get("segmentationNode"), ctx.get("segmentId"), self.shell, preferMap=True))
+        return False
 
     def useForMap(self):
         """Make the MNI lesion the Map seed, then switch to Map."""

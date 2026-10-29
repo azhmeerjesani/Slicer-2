@@ -639,6 +639,7 @@ def offerNormalize(*args, **kwargs):
     Accepted forms: ``offerNormalize(segmentationNode, segmentId, shell=None)`` (Draw's call to action) and
     ``offerNormalize(mapContext, segmentationNode, segmentId)`` (the Map seed refusal). In Studio's Draw the
     Draw card is focused; otherwise the Map card is expanded (Studio switches to Map) with the scan preselected.
+    ``preferMap=True`` always shows the Map card, also from Draw (the Draw card's "Options in Map…").
     Returns True when a card was shown.
     """
     ctx = None
@@ -649,9 +650,10 @@ def offerNormalize(*args, **kwargs):
     segmentationNode = args.pop(0) if args else kwargs.pop("segmentationNode", None)
     segmentId = args.pop(0) if args else kwargs.pop("segmentId", None)
     shell = args.pop(0) if args else kwargs.pop("shell", None)
+    preferMap = bool(kwargs.pop("preferMap", False))
     if shell is None and ctx is None:
         shell = _studioShell()
-    if ctx is None and shell is not None:
+    if ctx is None and shell is not None and not preferMap:
         current = None
         try:
             current = shell.currentWorkspace()
