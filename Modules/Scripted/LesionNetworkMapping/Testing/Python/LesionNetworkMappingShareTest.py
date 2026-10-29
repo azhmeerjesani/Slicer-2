@@ -229,6 +229,44 @@ class ExclusionTest(ShareTestBase):
         self.assertFalse([name for name in os.listdir(self.tmp) if ".partial-" in name])
 
 
+class OfficialValidatorTest(ShareTestBase):
+    """The folder names in .bidsignore are bare (bids-validator 3.0.2 does not honour "group/"); a table without folders is ignored."""
+
+    def ignore_lines(self, out):
+        with open(os.path.join(out, ".bidsignore"), encoding="utf-8") as f:
+            return f.read().split()
+
+    def test_default_export_lists_the_participants_table_in_bidsignore(self):
+        result = share.export_dataset(self.study, os.path.join(self.tmp, "default"), {"licence": "CC0-1.0"})
+        out = result["path"]
+        self.assertEqual(result["lesions"], 0)
+        self.assertFalse(any(path.startswith("sub-") for path in result["files"]))
+        self.assertTrue(os.path.exists(os.path.join(out, "participants.tsv")))
+        self.assertEqual(sorted(self.ignore_lines(out)), ["participants.json", "participants.tsv", "sources"])  # sources/records.tsv is in the fixture
+        self.assertEqual(result["validation"], {})
+        with open(os.path.join(out, "README.md"), encoding="utf-8") as f:
+            self.assertIn("listed in .bidsignore", f.read())
+        # Without the .bidsignore entry the validator would report PARTICIPANT_ID_MISMATCH, and Studio's check says so too
+        os.remove(os.path.join(out, ".bidsignore"))
+        self.assertIn("participants.tsv", share.validate_dataset(out))
+
+    def test_lesions_keep_the_participants_table_visible(self):
+        result, out = self.export("lesions")
+        self.assertGreater(result["lesions"], 0)
+        self.assertEqual(self.ignore_lines(out), ["sources"])  # the table is checked against the sub-<id> folders
+        self.assertEqual(result["validation"], {})
+
+    def test_extra_folders_are_listed_without_a_trailing_slash(self):
+        self.add_gsp_maps()
+        result, out = self.export("maps", maps=True, neurovault=True, terms_acknowledged=True, licence=export.GSP_LICENCE)
+        lines = self.ignore_lines(out)
+        for folder in ("group", "neurovault", "sources"):
+            self.assertIn(folder, lines)
+        self.assertFalse([line for line in lines if line.endswith("/")], lines)
+        self.assertEqual(result["validation"], {})
+        self.assertEqual(share.validate_dataset(out), {})
+
+
 class ScrubTest(ShareTestBase):
     def test_descrip_aux_file_and_extensions_scrubbed(self):
         source = os.path.join(self.root, "lesions", f"sub-02_space-{SPACE}_desc-lesion_mask.nii.gz")
@@ -494,9 +532,29 @@ class ValidatorTest(unittest.TestCase):
             open(os.path.join(tmp, "group", "anything.nii.gz"), "wb").close()
             open(os.path.join(tmp, "stray.txt"), "wb").close()
             self.assertEqual(set(share.validate_dataset(tmp)), {"group/anything.nii.gz", "stray.txt"})
+            # bids-validator 3.0.2 does not honour a trailing slash ("group/" gives NOT_INCLUDED): Studio's check does not either
             with open(os.path.join(tmp, ".bidsignore"), "w", encoding="utf-8") as f:
                 f.write("group/\n")
+            self.assertEqual(set(share.validate_dataset(tmp)), {"group/anything.nii.gz", "stray.txt"})
+            with open(os.path.join(tmp, ".bidsignore"), "w", encoding="utf-8") as f:
+                f.write("group\n")
             self.assertEqual(set(share.validate_dataset(tmp)), {"stray.txt"})
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_participants_without_subject_folders(self):
+        tmp = tempfile.mkdtemp(prefix="lnm_share_v_")
+        try:
+            with open(os.path.join(tmp, "participants.tsv"), "w", encoding="utf-8") as f:
+                f.write("participant_id\tgroup\nsub-P001\tcase\n")
+            self.assertEqual(list(share.validate_dataset(tmp)), ["participants.tsv"])  # the official validator: PARTICIPANT_ID_MISMATCH
+            os.makedirs(os.path.join(tmp, "sub-P002", "anat"))
+            open(os.path.join(tmp, "sub-P002", "anat", "sub-P002_space-MNI152NLin2009cAsym_desc-lesion_mask.nii.gz"), "wb").close()
+            self.assertEqual(share.validate_dataset(tmp), {})  # a folder for only some of the participants is accepted
+            shutil.rmtree(os.path.join(tmp, "sub-P002"))
+            with open(os.path.join(tmp, ".bidsignore"), "w", encoding="utf-8") as f:
+                f.write("participants.tsv\n")
+            self.assertEqual(share.validate_dataset(tmp), {})
         finally:
             shutil.rmtree(tmp)
 
@@ -603,7 +661,7 @@ class UserTemplateTest(unittest.TestCase):
         with open(os.path.join(out, "dataset_description.json"), encoding="utf-8") as f:
             self.assertEqual(json.load(f)["SlicerStudio"]["template"]["file"], result["template"])
         with open(os.path.join(out, ".bidsignore"), encoding="utf-8") as f:
-            self.assertIn("template/", f.read().split())
+            self.assertIn("template", f.read().split())
         self.assertEqual(share.validate_dataset(out), {})
         statuses = {item["id"]: item["status"] for item in result["checklist"]}
         self.assertEqual(statuses["template"], "warn")  # the licence note

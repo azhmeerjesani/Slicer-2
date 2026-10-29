@@ -8,6 +8,7 @@ whose data use terms say otherwise. :func:`export_dataset` writes a copy of a st
       dataset_description.json   DatasetType "derivative", GeneratedBy [{Name: "Slicer Studio", Version, CodeURL, Container}],
                                  SourceDatasets (connectome DOIs of the exported maps, OpenNeuro/DOI source datasets), License
       participants.tsv / .json   the chosen columns only (free text, tracer names and dates are off by default); ids pseudonymised
+                                 (listed in .bidsignore when no sub-<id> folder is written: the BIDS validator needs one per table)
       sub-<id>/anat/sub-<id>_space-<sp>_desc-lesion_mask.nii.gz + .json      opt-in (template space only; headers scrubbed)
       sub-<id>/anat/sub-<id>_label-lesion_roi.nii.gz                         optional fMRIPrep alias (listed in .bidsignore)
       sub-<id>/anat/sub-<id>_label-lesion_space-<sp>_mask.nii.gz             optional lacuna alias (listed in .bidsignore)
@@ -724,6 +725,8 @@ def _licence_text(options, gsp):
 def _readme(name, options, plan_result, written, pseudonymised):
     lines = [f"# {name}", "", "Lesion study exported for sharing by Slicer Studio (BIDS derivatives).", "", f"_{export.DISCLAIMER}_", "", "## Contents", ""]
     lines.append(f"- participants.tsv: {len(plan_result['rows'])} participant(s); columns: {', '.join(['participant_id', *plan_result['columns']])}")
+    if not written["lesions"]:
+        lines.append("- participants.tsv and participants.json are listed in .bidsignore: the dataset has no sub-<id> folder, and BIDS validators expect one for the participants of the table.")
     if pseudonymised:
         lines.append("- Participant ids are pseudonyms in a random order; the key is not part of this dataset.")
     if written["lesions"]:
@@ -888,10 +891,10 @@ def _ignored_patterns(root):
 
 def _is_ignored(relpath, patterns):
     for pattern in patterns:
-        if pattern.endswith("/") and (relpath.startswith(pattern) or ("/" + pattern) in ("/" + relpath)):
-            return True
-        if fnmatch.fnmatch(relpath, pattern) or fnmatch.fnmatch(os.path.basename(relpath), pattern):
-            return True
+        if pattern.endswith("/"):
+            continue  # the official validator (3.0.2) does not honour a trailing slash: write the bare folder name
+        if fnmatch.fnmatch(relpath, pattern) or any(fnmatch.fnmatch(part, pattern) for part in relpath.split("/")):
+            return True  # a path, a file name or a folder name (everything below an ignored folder is ignored)
     return False
 
 
@@ -899,12 +902,23 @@ def validate_dataset(root):
     """{relative path: [problems]} of the files of an exported folder that break the naming rules (.bidsignore honoured)."""
     patterns = _ignored_patterns(root)
     out = {}
-    for relpath in _files(root):
+    files = _files(root)
+    for relpath in files:
         if _is_ignored(relpath, patterns):
             continue
         problems = validate_name(relpath)
         if problems:
             out[relpath] = problems
+    # The validator expects the subjects of a participants table to be folders of the dataset (it does accept folders
+    # for only some of the participants, but none at all is an error)
+    if "participants.tsv" in files and not _is_ignored("participants.tsv", patterns) and not any(path.startswith("sub-") for path in files):
+        try:
+            with open(os.path.join(root, "participants.tsv"), encoding="utf-8") as f:
+                listed = [line for line in f.read().splitlines()[1:] if line.strip()]
+        except (OSError, UnicodeDecodeError):
+            listed = []
+        if listed:
+            out["participants.tsv"] = [f"lists {len(listed)} participant(s) but the dataset has no sub-<id> folder (list participants.tsv in .bidsignore)"]
     return out
 
 
@@ -1131,14 +1145,14 @@ def export_dataset(study, out, options=None, progress=None, cancel=None, maps=No
             _write_json(os.path.join(staging, "group", re.sub(r"\.nii(\.gz)?$", ".json", target)), _map_sidecar(entry, licence))
             written["maps"] += 1
         if mapped:
-            ignore.append("group/")
+            ignore.append("group")
         if options["neurovault"] and result_plan["maps"]:
             _cancelled(cancel)
             _progress(progress, "neurovault")
             folder = neurovault_folder(study.path, os.path.join(staging, "neurovault"), maps=[entry["path"] for entry in result_plan["maps"]], id_map=id_map,
                                        licence=licence)
             written["neurovault"] = len(folder["images"])
-            ignore.append("neurovault/")
+            ignore.append("neurovault")
         template = result_plan["template"]
         if result_plan["template_file"]:
             _cancelled(cancel)
@@ -1149,12 +1163,12 @@ def export_dataset(study, out, options=None, progress=None, cancel=None, maps=No
             if template.get("sha256") and _sha256(os.path.join(staging, *target.split("/"))) != template["sha256"]:
                 raise ShareError("The template file changed: its checksum no longer matches the study's template. Add the template again.")
             written["template"] = target
-            ignore.append(f"{TEMPLATE_FOLDER}/")
+            ignore.append(TEMPLATE_FOLDER)
         records = _records(study)
         if records is not None:
             _write_text(os.path.join(staging, "sources", "records.tsv"), _tsv(*records))
             written["records"] = True
-            ignore.append("sources/")
+            ignore.append("sources")
         description = {
             "Name": name,
             "BIDSVersion": BIDS_VERSION,
@@ -1178,6 +1192,9 @@ def export_dataset(study, out, options=None, progress=None, cancel=None, maps=No
         _write_text(os.path.join(staging, "CITATION.cff"), _citation_cff(name, authors, licence, created))
         _write_text(os.path.join(staging, "CHANGES"), f"1.0.0 {created[:10]}\n  - Exported from a Slicer Studio lesion study.\n")
         _write_text(os.path.join(staging, "LICENSE"), _licence_text(options, result_plan["gsp"]))
+        if not written["lesions"]:
+            # No sub-<id> folder: the official validator reports every row of participants.tsv as a participant without a folder
+            ignore.extend(["participants.tsv", "participants.json"])
         if ignore:
             _write_text(os.path.join(staging, ".bidsignore"), "\n".join(dict.fromkeys(ignore)) + "\n")
         _progress(progress, "verify")

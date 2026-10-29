@@ -226,7 +226,9 @@ chooses each file by name and never walks the study folder.
   verifies the written files again before it moves them into place.
 
 The result is a BIDS-derivatives dataset (`dataset_description.json`, `participants.tsv/.json`, `sub-<id>/anat/…`,
-`group/…`, `sources/records.tsv`, a README, `CITATION.cff` and a `LICENSE`) that passes a local validator.
+`group/…`, `sources/records.tsv`, a README, `CITATION.cff` and a `LICENSE`) that passes the official BIDS validator.
+The extra folders are listed in `.bidsignore` by their bare names (the validator does not honour `group/`), and so is
+`participants.tsv` when no lesion masks are exported, because the validator expects a `sub-<id>` folder for the table.
 
 ## Command lines of this page
 
