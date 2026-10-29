@@ -4745,8 +4745,11 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         except ValueError:
             return thresholds.normalize_rule(None)
 
-    def setRule(self, rule):
-        """Set the threshold rule (dict), store it in the parameter node and re-resolve it."""
+    def setRule(self, rule, peaks=None):
+        """Set the threshold rule (dict), store it in the parameter node and re-resolve it.
+
+        ``peaks`` also recomputes the peak table (a rule change that comes with a new sign).
+        """
         from LesionNetworkMappingLib import thresholds
 
         rule = thresholds.normalize_rule(rule)
@@ -4754,7 +4757,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             self._parameterNode.thresholdRule = thresholds.rule_to_json(rule)
         self.ctx.setRule(rule)
         self._showRuleControls(rule)
-        self.refreshResult(reloadMaps=False)
+        self.refreshResult(reloadMaps=False, peaks=peaks)
 
     def _showRuleControls(self, rule):
         self._updatingGui = True
@@ -4837,7 +4840,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         rule = self.currentRule()
         if rule["kind"] == "top_pct" and rule.get("sign") != SIGNS[index]:
             rule = dict(rule, sign=SIGNS[index])
-            self.setRule(rule)
+            self.setRule(rule, peaks=True)  # the peak table follows the sign, as for the other rules
             return
         self.refreshResult(reloadMaps=False, peaks=True)
 
@@ -5931,6 +5934,9 @@ class LesionNetworkMappingTest(ScriptedLoadableModuleTest):
             self.test_LesionNetworkMapping_binarizeRule()
             self.tearDown()
             self.setUp()
+            self.test_LesionNetworkMapping_topPctSignPeaks()
+            self.tearDown()
+            self.setUp()
             self.test_LesionNetworkMapping_debiasedLegend()
         finally:
             self.tearDown()
@@ -6242,6 +6248,63 @@ class LesionNetworkMappingTest(ScriptedLoadableModuleTest):
         mask = widget.onBinarize()
         self.assertIsNotNone(mask)
         self.assertEqual(int(np.count_nonzero(slicer.util.arrayFromVolume(mask))), widget.lastPassing)
+        widget.onSwitchToFwe()
+
+    def test_LesionNetworkMapping_topPctSignPeaks(self):
+        """With the Top x% rule, the sign buttons (which also change the rule's sign) refresh the peak table: it lists
+        the peaks of the sign chosen, as with the other rules, never those of the previous sign.
+        """
+        from LesionNetworkMappingLib import connectome, stats, thresholds
+
+        def settle():
+            self._waitFor(lambda: False, 0.3)  # the refresh of the Result card (rule, colours, peaks)
+
+        def shown():
+            return [float(widget.peaksTable.item(row, 2).text()) for row in range(widget.peaksTable.rowCount)]
+
+        def expected():
+            peaks = stats.peak_table(widget._mapValues(widget.currentStatistic()), widget.bundle.grid, top_k=5, min_distance_mm=10.0,
+                                     mask_indices=widget.bundle.mask_indices, sign=widget._sign())
+            return [round(peak["value"], 2) for peak in peaks]
+
+        self.delayDisplay("Top x% rule: the peak table follows the sign buttons")
+        widget = slicer.modules.lesionnetworkmapping.widgetRepresentation().self()
+        widget.initializeParameterNode()
+        meta = connectome.make_synthetic(os.path.join(self.tempDir, "toppct.lnmc"), shape=(20, 24, 20), n_subjects=30, runs=(20,), seed=0, name="Top pct test")
+        segNode, segmentId, _voxels = self._sphereLesion(meta)
+        widget.refreshConnectomes(select=os.path.abspath(meta["path"]))
+        widget.ctx.setSeed(segNode, segmentId)
+        widget.updateGUIFromParameterNode()
+        widget.updateSeed()
+        widget.acceptTermsCheckBox.setChecked(True)
+        widget.subjectsGroup.button(0).click()
+        widget.setRule(thresholds.DEFAULT_RULE)
+        self.assertTrue(widget.computeButton.enabled, widget.computeReasonLabel.text)
+        job = widget.compute()
+        self.assertTrue(self._waitFor(job.isFinished, 300), "the engine did not finish")
+        self.assertEqual(job.state, "done", f"{job.failureReason} {list(job.logTail)}")
+        self.assertTrue(self._waitFor(lambda: widget.resolved is not None and widget._hasResult() and widget.ctx.currentRun is not None, 30))
+
+        widget.statisticGroup.button(STATISTICS.index("T")).click()
+        widget.signGroup.button(SIGNS.index("pos")).click()
+        settle()
+        widget.ruleCombo.setCurrentIndex(widget.ruleCombo.findData("top_pct"))
+        widget.ruleCombo.activated(widget.ruleCombo.currentIndex)
+        settle()
+        self.assertEqual(widget.currentRule()["kind"], "top_pct")
+        self.assertEqual(widget.currentRule()["sign"], "pos")
+        self.assertEqual(shown(), expected())
+        self.assertTrue(shown() and all(value > 0 for value in shown()), shown())
+        for sign in ("neg", "pos", "both", "neg"):
+            widget.signGroup.button(SIGNS.index(sign)).click()
+            settle()
+            self.assertEqual(widget.currentRule()["sign"], sign)
+            self.assertEqual(shown(), expected(), sign)
+            if sign == "neg":
+                self.assertTrue(all(value < 0 for value in shown()), shown())
+            elif sign == "pos":
+                self.assertTrue(all(value > 0 for value in shown()), shown())
+        widget.signGroup.button(SIGNS.index("both")).click()
         widget.onSwitchToFwe()
 
     def test_LesionNetworkMapping_debiasedLegend(self):
