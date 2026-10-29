@@ -348,6 +348,27 @@ class SourcesTest(unittest.TestCase):
         records.exclude("novak2021", "<b>&\"")
         ET.fromstring(sources.prisma_flow_svg(sources.prisma_counts(self.study, records)))
 
+    def test_prisma_svg_wraps_long_reasons_and_uses_singular(self):
+        counts = {"identified": 10, "fulltext_excluded": 90, "fulltext_excluded_reasons": {
+            "No lesion masks or coordinates available from the authors": 30,
+            "Non-focal or multifocal lesions (e.g. traumatic brain injury)": 12,
+            "Lesion location not reported in sufficient detail": 40, "a": 5, "b": 4, "c": 3}}
+        root = ET.fromstring(sources.prisma_flow_svg(counts))
+        width = float(root.get("width"))
+        texts = [element for element in root.iter() if element.tag.endswith("text") and element.get("x")]
+        for element in texts:
+            # a line is no wider than its 250 px box (estimate), and its centre plus half the width stays inside the figure
+            half = sources._text_width(element.text or "", 12) / 2
+            self.assertLessEqual(2 * half, sources._BOX_W - 16, element.text)
+            self.assertLessEqual(float(element.get("x")) + half, width, element.text)
+        shown = " ".join(element.text for element in texts)
+        for needle in ("authors: 30", "injury): 12", "detail: 40", "2 other reasons"):
+            self.assertIn(needle, shown)
+        counts["fulltext_excluded_reasons"].pop("c")
+        shown = " ".join(element.text for element in ET.fromstring(sources.prisma_flow_svg(counts)).iter() if element.tag.endswith("text"))
+        self.assertIn("1 other reason", shown)
+        self.assertNotIn("1 other reasons", shown)
+
     def test_empty_study_svg(self):
         counts = sources.prisma_counts(self.study)
         self.assertEqual((counts["identified"], counts["included"]), (0, 0))

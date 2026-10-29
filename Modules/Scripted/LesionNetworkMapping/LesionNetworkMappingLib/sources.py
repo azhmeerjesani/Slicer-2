@@ -906,12 +906,66 @@ def prisma_counts(study, records=None):
 _BOX_W, _BOX_H, _GAP = 250, 64, 44
 
 
+_NARROW_CHARS = frozenset("iljtfI.,:;'!|() -/[]")
+_WIDE_CHARS = frozenset("mwMW@%")
+
+
+def _text_width(text, size=12, bold=False):
+    """Estimated width in px of ``text`` in a Helvetica/Arial-like font (no font library needed; slightly generous)."""
+    em = 0.0
+    for char in text:
+        if char in _WIDE_CHARS:
+            em += 0.85
+        elif char in _NARROW_CHARS:
+            em += 0.31
+        elif char.isupper():
+            em += 0.70
+        elif char.isdigit():
+            em += 0.56
+        else:
+            em += 0.54
+    return em * size * (1.08 if bold else 1.0)
+
+
+def _wrap_text(text, max_width, size=12, bold=False):
+    """Split ``text`` into lines that fit ``max_width`` px (break at spaces, inside a word only when it is too long alone)."""
+    lines, current = [], ""
+    for word in text.split():
+        candidate = f"{current} {word}" if current else word
+        if _text_width(candidate, size, bold) <= max_width:
+            current = candidate
+            continue
+        if current:
+            lines.append(current)
+            current = ""
+        while _text_width(word, size, bold) > max_width and len(word) > 1:
+            cut = len(word) - 1
+            while cut > 1 and _text_width(word[:cut], size, bold) > max_width:
+                cut -= 1
+            lines.append(word[:cut])
+            word = word[cut:]
+        current = word
+    if current or not lines:
+        lines.append(current)
+    return lines
+
+
+def _wrap_box_lines(lines, w, bold_first=True, size=12):
+    """Wrap every line of a box so that it fits the box width (8 px padding each side)."""
+    wrapped = []
+    for index, text in enumerate(lines):
+        wrapped += _wrap_text(text, w - 16, size, bold_first and index == 0)
+    return wrapped
+
+
 def _box(x, y, w, h, lines, bold_first=True, fill="#f4f6f8"):
     out = [f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="4" fill="{fill}" stroke="#4a5560" stroke-width="1.2"/>']
     size, line_h = 12, 16
+    first_wrapped = len(_wrap_text(lines[0], w - 16, size, bold_first)) if lines else 0
+    lines = _wrap_box_lines(lines, w, bold_first, size)
     top = y + (h - line_h * len(lines)) / 2 + 12
     for index, text in enumerate(lines):
-        weight = ' font-weight="600"' if bold_first and index == 0 else ""
+        weight = ' font-weight="600"' if bold_first and index < first_wrapped else ""
         out.append(f'<text x="{x + w / 2}" y="{top + index * line_h:.0f}" text-anchor="middle" font-size="{size}"{weight}>{escape(text)}</text>')
     return out
 
@@ -933,8 +987,13 @@ def prisma_flow_svg(counts):
     left, right = 70, 70 + _BOX_W + _GAP
     width = right + _BOX_W + 20
     rows_y = [20, 20 + (_BOX_H + _GAP), 20 + 2 * (_BOX_H + _GAP), 20 + 3 * (_BOX_H + _GAP)]
-    side_h = _BOX_H + 16 * (len(shown) + (1 if len(reasons) > len(shown) else 0))
-    height = rows_y[3] + _BOX_H + 30
+    side = [f"Full texts excluded (n = {n['fulltext_excluded']})"] + [f"{reason}: {count}" for reason, count in shown]
+    if len(reasons) > len(shown):
+        hidden = len(reasons) - len(shown)
+        side.append(f"{hidden} other reason{'' if hidden == 1 else 's'}")
+    side = _wrap_box_lines(side, _BOX_W)  # long reasons wrap inside the box instead of running past the figure's edge
+    side_h = max(_BOX_H, 16 * len(side) + 24)
+    height = max(rows_y[3] + _BOX_H, rows_y[2] + side_h) + 30
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" font-family="Helvetica, Arial, sans-serif" fill="#1f2933">',
         "<title>PRISMA 2020 flow diagram</title>",
@@ -957,10 +1016,7 @@ def prisma_flow_svg(counts):
     parts += _arrow(left + _BOX_W, rows_y[1] + _BOX_H / 2, right, rows_y[1] + _BOX_H / 2)
     parts += _box(left, rows_y[2], _BOX_W, _BOX_H, [f"Full texts assessed (n = {n['fulltext_sought']})"])
     parts += _arrow(left + _BOX_W / 2, rows_y[1] + _BOX_H, left + _BOX_W / 2, rows_y[2])
-    side = [f"Full texts excluded (n = {n['fulltext_excluded']})"] + [f"{reason}: {count}" for reason, count in shown]
-    if len(reasons) > len(shown):
-        side.append(f"{len(reasons) - len(shown)} other reasons")
-    parts += _box(right, rows_y[2], _BOX_W, max(side_h, _BOX_H), side)
+    parts += _box(right, rows_y[2], _BOX_W, side_h, side)
     parts += _arrow(left + _BOX_W, rows_y[2] + _BOX_H / 2, right, rows_y[2] + _BOX_H / 2)
     parts += _box(left, rows_y[3], _BOX_W, _BOX_H, [f"Studies included (n = {n['included']})", f"{n['cases']} cases"], fill="#e8f3ec")
     parts += _arrow(left + _BOX_W / 2, rows_y[2] + _BOX_H, left + _BOX_W / 2, rows_y[3])
