@@ -582,9 +582,15 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
 
     @staticmethod
     def unregisterConnectome(path):
-        """Remove a bundle from the registered list (its files are kept)."""
+        """Remove a bundle from the registered list (its files are kept).
+
+        The folder is also forgotten among the bundles opened in this session, so ``resolveConnectome`` no longer finds it.
+        """
         paths = [item for item in LesionNetworkMappingLogic.registeredConnectomes() if os.path.normpath(item) != os.path.normpath(path)]
         qt.QSettings().setValue(CONNECTOMES_SETTING, paths)
+        known = LesionNetworkMappingLogic._knownConnectomes
+        for identifier in [key for key, value in known.items() if os.path.normpath(value) == os.path.normpath(path)]:
+            del known[identifier]
 
     @staticmethod
     def connectomeIdentifier(bundle):
@@ -1879,12 +1885,16 @@ class ConnectomeManagerDialog(qt.QDialog):
         path = self.selectedPath()
         if not path:
             return
+        inUse = False
         if os.path.normpath(path) == os.path.normpath(self.widget.connectomePath() or ""):
-            self.widget.onRemoveBundle()
+            inUse = self.widget.onRemoveBundle()
         else:
             self.logic.unregisterConnectome(path)
             self.widget.refreshConnectomes()
-        self.statusLabel.setText(_("Removed from the list (the files are kept): {path}").format(path=path))
+        text = _("Removed from the list (the files are kept): {path}").format(path=path)
+        if inUse:
+            text += " " + _("The open project uses this connectome: it keeps naming it (shown as not registered) until you add its folder again with Add bundle…")
+        self.statusLabel.setText(text)
         self.refresh()
 
     def runPluginAction(self, spec):
@@ -3958,14 +3968,21 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.refreshConnectomes(select=bundle.path)
 
     def onRemoveBundle(self):
+        """Remove the selected connectome from the registered list (its files are kept).
+
+        The open project keeps naming that connectome (it is shown as not registered, like a scene opened on a computer
+        without it) and no other bundle is chosen silently. Return True when the project names it.
+        """
         path = self._connectomePath
         if not path:
-            return
+            return False
         self.logic.unregisterConnectome(path)
-        if self._parameterNode is not None:
-            self._parameterNode.connectome = ""
-            self._parameterNode.connectomePath = ""
+        node = self._parameterNode
+        named = node is not None and bool(node.connectome)
+        if node is not None and node.connectomePath:
+            node.connectomePath = ""
         self.refreshConnectomes()
+        return named
 
     def onCreateDemo(self):
         """Write and register the synthetic demo connectome (SYNTHETIC — not real data) in a job, with progress."""
