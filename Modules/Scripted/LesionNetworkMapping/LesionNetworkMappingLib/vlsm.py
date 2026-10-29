@@ -150,7 +150,7 @@ def min_lesion_rule(min_lesions=DEFAULT_MIN_LESIONS, min_percent=DEFAULT_MIN_PER
     if len(parts) == 2:
         return f"max({parts[0]}, {parts[1]})"
     if parts:
-        return parts[0] + (" lesions" if min_lesions else "")
+        return parts[0] + ((" lesion" if int(min_lesions) == 1 else " lesions") if min_lesions else "")
     return "1 lesion"
 
 

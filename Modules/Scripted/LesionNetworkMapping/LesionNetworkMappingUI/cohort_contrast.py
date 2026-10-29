@@ -942,10 +942,11 @@ class CohortTab:
 
     def onDone(self, job):
         self._updateProgress(force=True)
+        self.showState()
         if job.state == "failed":
+            # After showState(), which writes the run reason (empty once the job is over) and would hide this label
             self.reasonLabel.setText(_("{title} failed: {reason}").format(title=self.TITLE, reason=job.failureReason))
             self.reasonLabel.show()
-        self.showState()
         if job.succeeded():
             folder = self.jobFolder
             self.loadResult(folder, show=True)

@@ -99,6 +99,7 @@ class MinimumOverlapTest(unittest.TestCase):
         self.assertEqual(vlsm.min_lesion_count(4, min_lesions=0, min_percent=0), 1)
         self.assertEqual(vlsm.min_lesion_rule(), "max(5, 10%)")
         self.assertEqual(vlsm.min_lesion_rule(3, 0), "3 lesions")
+        self.assertEqual(vlsm.min_lesion_rule(1, 0), "1 lesion")
 
     def test_mask_is_exact(self):
         grid = Grid((10, 4, 4), np.diag([2.0, 2.0, 2.0, 1.0]))

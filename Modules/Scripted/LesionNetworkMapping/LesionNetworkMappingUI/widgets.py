@@ -372,6 +372,7 @@ class ProgressRow:
 
     def __init__(self, stopText="Stop", objectNamePrefix="LNM"):
         self.job = None
+        self._wrapSaved = None
         self.widget = qt.QWidget()
         self.widget.setObjectName(f"{objectNamePrefix}ProgressRow")
         layout = qt.QVBoxLayout(self.widget)
@@ -432,10 +433,25 @@ class ProgressRow:
         elif job.state == "cancelled":
             self.setProgress(job.progress, text="Stopped")
         else:
-            self.setProgress(job.progress, text=f"Failed: {job.failureReason or 'unknown error'}")
+            self.setProgress(job.progress, text=f"Failed: {job.failureReason or 'unknown error'}", failed=True)
 
-    def setProgress(self, fraction, text=None):
-        """``fraction`` in 0..1, or None for a busy bar; ``text`` replaces the status line when given."""
+    def _setFailureWrap(self, on):
+        """A failure line is read in full (it wraps, whatever the owner chose for the progress line); other lines get the owner's choice back."""
+        label = self.label
+        if on:
+            if self._wrapSaved is None:
+                self._wrapSaved = (label.wordWrap, label.sizePolicy)
+            label.setWordWrap(True)
+            label.setSizePolicy(qt.QSizePolicy.Preferred, qt.QSizePolicy.Preferred)
+        elif self._wrapSaved is not None:
+            wrap, policy = self._wrapSaved
+            self._wrapSaved = None
+            label.setWordWrap(wrap)
+            label.setSizePolicy(policy)
+
+    def setProgress(self, fraction, text=None, failed=False):
+        """``fraction`` in 0..1, or None for a busy bar; ``text`` replaces the status line when given; ``failed``: the line is a failure (it wraps and is the tooltip)."""
+        self._setFailureWrap(failed)
         if fraction is None:
             self.bar.setRange(0, 0)
         else:
@@ -443,8 +459,11 @@ class ProgressRow:
             self.bar.setValue(round(min(max(float(fraction), 0.0), 1.0) * 1000))
         if text is not None:
             self.label.setText(text)
+            self.label.setToolTip(text if failed else "")
 
     def reset(self, text=""):
+        self._setFailureWrap(False)
+        self.label.setToolTip("")
         self.bar.setRange(0, 1000)
         self.bar.setValue(0)
         self.label.setText(text)

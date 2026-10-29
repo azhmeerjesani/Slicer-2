@@ -345,6 +345,12 @@ class VlsmTab(CohortTab):
             reasons.append(_("Choose two different levels A and B."))
         if not self.volumeOn() and not self.volumeReasonEdit.text.strip():
             reasons.append(_("Give the reason for turning lesion volume off (it is recorded in the methods)."))
+        if self.design is not None and self.design.n:
+            from LesionNetworkMappingLib import vlsm
+
+            count = vlsm.min_lesion_count(self.design.n, *self.minimumOverlap())
+            if count > self.design.n:
+                reasons.append(_("Lower the minimum overlap: no voxel can be lesioned in {k} of the {n} lesions.").format(k=count, n=self.design.n))
         return reasons
 
     def onSettingsChanged(self):
