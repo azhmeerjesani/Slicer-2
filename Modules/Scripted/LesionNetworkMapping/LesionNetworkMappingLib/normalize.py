@@ -1425,6 +1425,7 @@ def _run(ctx, force, batch_progress, started):
     ctx.grid1 = template_grid(ctx.template_id)
     status = "error"
     error = None
+    failure = None
     try:
         ctx.cancel.raise_if_cancelled(done=0)
         _stage_costmask(ctx)
@@ -1444,24 +1445,52 @@ def _run(ctx, force, batch_progress, started):
         raise
     except jobs.JobError as exc:
         error = {"message": exc.message, "code": exc.code}
+        failure = exc
         raise
     except Exception as exc:
         error = {"message": str(exc) or type(exc).__name__, "code": "exception"}
         raise
     finally:
         if status != "done":
-            _record_failure(ctx, status, error, started)
+            _record_failure(ctx, status, error, started, failure)
         if not ctx.keep_work:
             shutil.rmtree(ctx.work, ignore_errors=True)
 
 
-def _record_failure(ctx, status, error, started):
-    """Keep the logs of a failed run and record its status without touching a previous complete result."""
+def _point_error_to_kept_log(ctx, exc, error, logs_out):
+    """Make a child failure name the log that was kept (``<out>/logs/last-error``), not the one in the work folder."""
+    log = exc.fields.get("log")
+    if not log or os.path.dirname(os.path.abspath(log)) != os.path.abspath(ctx.logs):
+        return
+    name = os.path.basename(log)
+    kept = os.path.join(logs_out, name)
+    if not os.path.isfile(kept):
+        return
+    relative = "/".join(os.path.relpath(kept, ctx.out).split(os.sep))
+    exc.fields["log"] = kept
+    for holder, key in ((exc, "message"), (error, "message")):
+        text = holder.get(key) if isinstance(holder, dict) else getattr(holder, key, None)
+        if isinstance(text, str) and text.endswith(f"see {name}"):
+            text = text[: -len(name)] + relative
+            if isinstance(holder, dict):
+                holder[key] = text
+            else:
+                setattr(holder, key, text)
+                holder.args = (text,)
+
+
+def _record_failure(ctx, status, error, started, exc=None):
+    """Keep the logs of a failed run and record its status without touching a previous complete result.
+
+    The logs of an error are copied to ``<out>/logs/last-error`` and ``exc`` (a JobError) is made to name them there.
+    """
     try:
         logs_out = os.path.join(ctx.out, "logs", f"last-{status}")
         if status == "error" and os.path.isdir(ctx.logs):
             shutil.rmtree(logs_out, ignore_errors=True)
             shutil.copytree(ctx.logs, logs_out)
+            if exc is not None and error is not None:
+                _point_error_to_kept_log(ctx, exc, error, logs_out)
         record = {
             "format": FORMAT,
             "version": NORMALIZE_VERSION,

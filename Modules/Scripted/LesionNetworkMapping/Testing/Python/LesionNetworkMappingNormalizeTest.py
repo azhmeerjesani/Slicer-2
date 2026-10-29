@@ -543,6 +543,23 @@ class NormalizeTest(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.path("misaligned"), "sub-01_space-MNI152NLin2009cAsym_res-1_desc-lesion_mask.nii.gz")))
         self.assertEqual(self.record({"out": self.path("misaligned")})["status"], "error")
 
+    def test_37_child_failure_names_the_kept_log(self):
+        # a binary mask as the scan: BRAINSFit fails; the work folder is deleted but the logs are kept
+        lesion = self.subject["lesion"]
+        out = self.path("child_failed")
+        code, events, _, _ = _run("run", "--scan", lesion, "--lesion", lesion, "--out", out, "--quality", "affine", *TEMPLATE_DIR_ARGS)
+        self.assertEqual(code, jobs.EXIT_ERROR)
+        error = _first(events, "error")
+        self.assertEqual(error["code"], "child_failed")
+        kept = os.path.join(out, "logs", "last-error")
+        self.assertEqual(os.path.dirname(error["log"]), kept)
+        self.assertTrue(os.path.isfile(error["log"]), error["log"])
+        self.assertTrue(error["message"].endswith("see logs/last-error/" + os.path.basename(error["log"])), error["message"])
+        self.assertFalse([name for name in os.listdir(out) if name.startswith(".work-")])
+        record = self.record({"out": out})
+        self.assertEqual(record["status"], "error")
+        self.assertEqual(record["error"]["message"], error["message"])
+
     # Two-step, warp, batch, tilt
 
     def test_40_two_step(self):
