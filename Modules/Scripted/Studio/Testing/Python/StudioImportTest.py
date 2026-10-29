@@ -459,6 +459,47 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(len(result.errors), 1)
         self.assertEqual(result.volumes, [])
 
+    def test_damaged_seg_nrrd_leaves_nothing_in_the_scene(self):
+        """BB-1: a ``.seg.nrrd`` that the reader only partly reads (truncated, header only) is a load error like a damaged
+        ``.nii.gz``: the segmentation reader raises but leaves a half-created segmentation node and its storage node, which
+        made autosave start an empty "Untitled project". Nothing of the failed file stays in the scene.
+        """
+        from StudioLib import importer
+
+        dims = GRID_2009C_2MM[0]
+        array = np.zeros((dims[2], dims[1], dims[0]), np.uint8)
+        array[38:43, 48:53, 43:48] = 1
+        labelmap = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "StudioImportTestLabels")
+        slicer.util.updateVolumeFromArray(labelmap, array)
+        labelmap.SetIJKToRASMatrix(self._ijkToRas(GRID_2009C_2MM))
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Tumor")
+        self.assertTrue(slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(labelmap, segmentation))
+        good = os.path.join(self.directory, "Tumor.seg.nrrd")
+        self.assertTrue(slicer.util.saveNode(segmentation, good))
+        slicer.mrmlScene.Clear(0)
+        with open(good, "rb") as f:
+            content = f.read()
+        headerEnd = content.find(b"\n\n") + 2
+        self.assertGreater(headerEnd, 2)
+        variants = {"quarter.seg.nrrd": content[: len(content) // 4], "headeronly.seg.nrrd": content[:headerEnd]}
+        studioShell = self._applyStudio()
+        for name, damaged in variants.items():
+            path = os.path.join(self.directory, name)
+            with open(path, "wb") as f:
+                f.write(damaged)
+            for load in (lambda path=path: importer.loadFiles([path], studioShell), lambda path=path: importer.loadFiles([path])):
+                result = load()
+                self._pump()
+                self.assertEqual(len(result.errors), 1, name)
+                self.assertEqual(result.segmentations, [], name)
+                for className in ("vtkMRMLSegmentationNode", "vtkMRMLSegmentationStorageNode", "vtkMRMLSegmentationDisplayNode"):
+                    self.assertEqual(slicer.mrmlScene.GetNumberOfNodesByClass(className), 0, f"{name}: {className} left behind")
+        # The same file, whole, still loads
+        result = importer.loadFiles([good], studioShell)
+        self._pump()
+        self.assertEqual(result.errors, [])
+        self.assertEqual(len(result.segmentations), 1)
+
     #
     # Figures
     #

@@ -549,6 +549,24 @@ def _nameSegmentationAfterFile(segmentationNode, path):
         segmentationNode.SetName(slicer.mrmlScene.GenerateUniqueName(baseName))
 
 
+def _sceneNodeIds(className):
+    collection = slicer.mrmlScene.GetNodesByClass(className)
+    return {collection.GetItemAsObject(index).GetID() for index in range(collection.GetNumberOfItems())}
+
+
+def _removeNodesNotIn(existingIds, classNames):
+    """Remove the nodes of ``classNames`` whose IDs are not in ``existingIds`` (what a failed load left behind)."""
+    for className in classNames:
+        collection = slicer.mrmlScene.GetNodesByClass(className)
+        for index in range(collection.GetNumberOfItems()):
+            node = collection.GetItemAsObject(index)
+            if node.GetID() not in existingIds:
+                displayNode = node.GetDisplayNode() if node.IsA("vtkMRMLDisplayableNode") else None
+                slicer.mrmlScene.RemoveNode(node)
+                if displayNode is not None:
+                    slicer.mrmlScene.RemoveNode(displayNode)
+
+
 def loadLesion(path):
     """Load a lesion file as a segmentation (see ``_applyLesionNaming()`` for the "Lesion" segment).
 
@@ -556,9 +574,13 @@ def loadLesion(path):
     with fractional values (a probabilistic mask, ``desc-lesionProb``) is shown with every voxel above 0 as the lesion,
     not truncated to integers by the reader; the node gets ``LESION_FRACTIONAL_ATTRIBUTE`` and the file is unchanged.
     """
+    existing = _sceneNodeIds("vtkMRMLSegmentationNode") | _sceneNodeIds("vtkMRMLSegmentationStorageNode")
     try:
         segmentationNode = slicer.util.loadSegmentation(path, {})
     except RuntimeError:
+        # The reader of a damaged file (truncated, header only) raises but leaves a half-created node and its storage
+        # node in the scene: they would count as data (an empty "Untitled project" would be started for them)
+        _removeNodesNotIn(existing, ("vtkMRMLSegmentationNode", "vtkMRMLSegmentationStorageNode"))
         if _extension(path) not in VOLUME_EXTENSIONS:
             raise
         logging.info(f"Studio: {path} is not readable as a segmentation, loading it as a labelmap volume")
