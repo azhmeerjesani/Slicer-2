@@ -1178,13 +1178,15 @@ def _slug(text):
 
 def _menuActions(menu, path=()):
     """``[(submenu path, action)]`` of the leaf actions of a menu (not separators)."""
+    from . import shell as shellModule
+
     result = []
     if menu is None:
         return result
     for action in menu.actions():
         if action.isSeparator():
             continue
-        submenu = action.menu()
+        submenu = shellModule.actionMenu(action)
         if submenu is not None:
             result += _menuActions(submenu, path + (str(action.text).replace("&", ""),))
         elif action.text:

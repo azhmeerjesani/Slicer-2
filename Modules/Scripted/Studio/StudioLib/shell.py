@@ -293,6 +293,20 @@ def associatedWidgets(action):
     return [obj for obj in action.associatedObjects() if obj.isWidgetType()]
 
 
+def actionMenu(action):
+    """The submenu of ``action``, or None (Qt 5 has QAction.menu(); in Qt 6 it is a template that PythonQt does not wrap).
+
+    Without menu(), the submenu is found as the menu that owns ``action`` as its menuAction(): QMenu.addMenu(),
+    menu.menuAction() and Designer menus all give that action, whose parent is the submenu.
+    """
+    if hasattr(action, "menu"):
+        return action.menu()
+    parent = action.parent()
+    if parent is not None and parent.inherits("QMenu") and action == parent.menuAction():
+        return parent
+    return None
+
+
 def onStartupCompleted(startTime=None):
     """Apply Studio after the application started (connected by the Studio module).
 
@@ -592,7 +606,7 @@ class PanelHeader:
         # Items of the workspace hooks, above the panel items
         for action in self._hookActions:
             self.moreMenu.removeAction(action)
-            submenu = action.menu()
+            submenu = actionMenu(action)
             (submenu if submenu is not None else action).deleteLater()
         self._hookActions = []
         items = workspaces.callHook(self._currentHooksWorkspace(), "moreMenuActions", self.shell) or []

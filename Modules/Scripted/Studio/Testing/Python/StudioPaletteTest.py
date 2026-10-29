@@ -939,3 +939,65 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             dialog.hide()
             tree.setMaximumHeight(16777215)
             self._pump()
+
+    def test_16_search_index_without_qaction_menu(self):
+        """Qt 6: QAction.menu() is a template that PythonQt does not wrap, so actions have no menu attribute. The submenus
+        of the Layout menu are still found (shell.actionMenu) and Search opens and lists the layouts, as with Qt 5.
+        """
+        from StudioLib import palette, shell
+
+        class Qt6Action:
+            """A QAction as PythonQt wraps it with Qt 6: every attribute except menu."""
+
+            def __init__(self, action):
+                object.__setattr__(self, "_action", action)
+
+            def __getattr__(self, name):
+                if name in ("menu", "setMenu"):
+                    raise AttributeError(f"QAction has no attribute named '{name}'")
+                return getattr(self._action, name)
+
+            def __eq__(self, other):
+                return self._action == getattr(other, "_action", other)
+
+            __hash__ = None
+
+        class Qt6Menu:
+            def __init__(self, menu):
+                self._menu = menu
+
+            def actions(self):
+                return [Qt6Action(action) for action in self._menu.actions()]
+
+        # The helper, on a plain action, a submenu (QMenu.addMenu) and a separator
+        menu = qt.QMenu("Layout")
+        plain = menu.addAction("Plain")
+        submenu = menu.addMenu("Compare")
+        submenu.addAction("2 viewers")
+        separator = menu.addSeparator()
+        for action, expectedMenu in ((plain, None), (submenu.menuAction(), submenu), (separator, None)):
+            self.assertEqual(shell.actionMenu(Qt6Action(action)), expectedMenu, str(action.text))
+            self.assertEqual(shell.actionMenu(action), expectedMenu, str(action.text))
+        expected = [(path, str(action.text)) for path, action in palette._menuActions(menu)]
+        self.assertEqual(expected, [((), "Plain"), (("Compare",), "2 viewers")])
+        self.assertEqual([(path, str(action.text)) for path, action in palette._menuActions(Qt6Menu(menu))], expected)
+
+        # Search opens and finds a layout when the Layout menu's actions have no menu()
+        realMenuActions = palette._menuActions
+        palette._menuActions = lambda menu, path=(): realMenuActions(Qt6Menu(menu) if menu is not None else None, path)
+        try:
+            studioShell = self._applyStudio()
+            layoutMenu = self.mainWindow.findChild("QMenu", "LayoutMenu")
+            self.assertIsNotNone(layoutMenu)
+            self.assertTrue(palette._menuActions(layoutMenu), "the Layout menu has actions")
+            studioShell.openPalette()
+            live = palette.instance()
+            self.assertIsNotNone(live)
+            self.assertTrue(live.isOpen(), "Search did not open")
+            live.close()
+            self._pump()
+            titles = [entry.title for entry in palette.search(studioShell, "conventional")]
+            self.assertTrue([title for title in titles if "Conventional" in title], titles)
+        finally:
+            palette._menuActions = realMenuActions
+        menu.deleteLater()

@@ -348,8 +348,10 @@ class AutosaveService:
         recoverAction.connect("triggered()", self.showRecoveryDialog)
         fileMenu = mainWindow.findChild(qt.QMenu, "FileMenu")
         if fileMenu is not None:
+            from . import shell as shellModule
+
             actions = list(fileMenu.actions())
-            recent = [action for action in actions if action.menu() is not None]
+            recent = [action for action in actions if shellModule.actionMenu(action) is not None]
             # After the "Recent" submenu (Add Data, Add DICOM Data, Recent, ...)
             before = None
             if recent:
