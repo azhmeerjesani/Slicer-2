@@ -2137,7 +2137,8 @@ def _canonicalPath(path):
 
 
 def _isoTime(seconds=None):
-    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(seconds if seconds is not None else time.time()))
+    """UTC ("...Z"): the heartbeat and session times stay right after a time zone change (``recovery._parseTime`` reads them)."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(seconds if seconds is not None else time.time()))
 
 
 def _requiredFreeBytes(estimatedBytes, project=False):

@@ -14,6 +14,7 @@ The autosave folder holds one folder per application session (``<date>-<time>-<p
 presenter (``autosave.instance().setRecoveryPresenter()``, A-01b), which reuses these functions.
 """
 
+import calendar
 import logging
 import os
 import time
@@ -56,9 +57,12 @@ def _statusText(status):
 
 
 def _parseTime(text):
+    """Seconds since the epoch of a session time: UTC ("...Z", as written now) or local time (no "Z", earlier versions); 0.0 if unreadable."""
     try:
+        if text.endswith("Z"):
+            return float(calendar.timegm(time.strptime(text[:-1], "%Y-%m-%dT%H:%M:%S")))
         return time.mktime(time.strptime(text, "%Y-%m-%dT%H:%M:%S"))
-    except (TypeError, ValueError, OverflowError):
+    except (AttributeError, TypeError, ValueError, OverflowError):
         return 0.0
 
 
@@ -550,7 +554,7 @@ def markSession(session, state, synchronous=False, closedForUpdate=None):
     """
     data = dict(session.data)
     data["state"] = state
-    data["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    data["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     if closedForUpdate is not None:
         data["closedForUpdate"] = bool(closedForUpdate)
         session.closedForUpdate = bool(closedForUpdate)

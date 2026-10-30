@@ -2678,6 +2678,59 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertEqual(projects.adoptRenamedScene(twoPath), projects.sceneFile(twoPath))
         self.assertEqual(sorted(name for name in os.listdir(twoPath) if name.endswith(".mrml")), ["First.mrml", "Other.mrml"])
 
+    def test_49_project_times_survive_a_time_zone_change_and_the_dst_hour(self):
+        """project.json times carry a UTC marker: a project saved in Tokyo is not dated in the future when read in Los Angeles."""
+        projects = self.projects
+        from StudioLib import recovery
+
+        savedZone = os.environ.get("TZ")
+
+        def setZone(zone):
+            os.environ["TZ"] = zone
+            time.tzset()
+
+        try:
+            now = time.time()
+            setZone("Asia/Tokyo")
+            east = projects._isoTime(now)
+            self.assertTrue(east.endswith("Z"), east)
+            eastSession = self.autosave._isoTime(now)
+            setZone("America/Los_Angeles")
+            self.assertAlmostEqual(projects.parseTime(east), now, delta=1.0)
+            self.assertAlmostEqual(recovery._parseTime(eastSession), now, delta=1.0)
+            # The repeated hour of the DST fall-back (2026-11-01 01:30 EDT and EST) round-trips
+            setZone("America/New_York")
+            for epoch in (1793511000.0, 1793514600.0):  # 05:30Z (01:30 EDT) and 06:30Z (01:30 EST)
+                self.assertEqual(projects.parseTime(projects._isoTime(epoch)), epoch)
+                self.assertEqual(recovery._parseTime(self.autosave._isoTime(epoch)), epoch)
+            # Offsets are honoured; a time without a marker (an earlier version) is local time
+            self.assertEqual(projects.parseTime("2026-11-01T05:30:00Z"), 1793511000.0)
+            self.assertEqual(projects.parseTime("2026-11-01T14:30:00+09:00"), 1793511000.0)
+            self.assertEqual(projects.parseTime("2026-11-01T00:00:00-05:30"), 1793511000.0)
+            self.assertEqual(projects.parseTime("2026-06-01T12:00:00"), time.mktime(time.strptime("2026-06-01T12:00:00", "%Y-%m-%dT%H:%M:%S")))
+            self.assertIsNone(projects.parseTime("yesterday"))
+            self.assertIsNone(projects.parseTime(None))
+            # Library order: the project saved last comes first, whatever the zone of each save
+            setZone("Asia/Tokyo")
+            first = projects.createProject("Saved in east")
+            second = projects.createProject("Saved in west")
+            self.io.atomicWriteJson(projects.projectFile(first.path), {"name": first.name, "modified": projects._isoTime(now - 120)})
+            setZone("America/Los_Angeles")
+            self.io.atomicWriteJson(projects.projectFile(second.path), {"name": second.name, "modified": projects._isoTime(now - 60)})
+            for project in (first, second):  # the file times of the folder and the scene must not decide
+                for path in (project.path, project.scenePath):
+                    if os.path.exists(path):
+                        os.utime(path, (1.0, 1.0))
+            infos = {info.name: info for info in projects.listProjects()}
+            self.assertLess(infos["Saved in east"].modified, now - 100)
+            self.assertAlmostEqual(infos["Saved in west"].modified, now - 60, delta=2.0)
+        finally:
+            if savedZone is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = savedZone
+            time.tzset()
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk

@@ -26,6 +26,7 @@ environment variable ``SLICER_STUDIO_PROJECTS_ROOT`` overrides both and skips th
 No function here imports numpy or runs at startup. Worker-safe functions (only the standard library) are marked so.
 """
 
+import calendar
 import contextlib
 import errno
 import json
@@ -574,13 +575,30 @@ def isProjectFolder(path):
 
 
 def _isoTime(seconds=None):
-    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(seconds if seconds is not None else time.time()))
+    """An ISO 8601 time in UTC ("2026-11-01T05:30:00Z"): unambiguous after a time zone change and in the repeated DST hour."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(seconds if seconds is not None else time.time()))
+
+
+_ISO_TIME = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?")
 
 
 def parseTime(text):
-    """Seconds since the epoch of an ISO time written by ``_isoTime`` (local time), or None."""
+    """Seconds since the epoch of an ISO time written by ``_isoTime`` (UTC, "Z"), or of one with a UTC offset; a time
+    without either (written by earlier versions) is local time. None when ``text`` is not a time.
+    """
     try:
-        return time.mktime(time.strptime(str(text)[:19], "%Y-%m-%dT%H:%M:%S"))
+        match = _ISO_TIME.match(str(text))
+        if match is None:
+            return None
+        stamp, zone = match.groups()
+        parsed = time.strptime(stamp, "%Y-%m-%dT%H:%M:%S")
+        if zone is None:
+            return time.mktime(parsed)
+        seconds = calendar.timegm(parsed)
+        if zone != "Z":
+            offset = int(zone[1:3]) * 3600 + int(zone[-2:]) * 60
+            seconds -= offset if zone[0] == "+" else -offset
+        return float(seconds)
     except (TypeError, ValueError, OverflowError):
         return None
 
