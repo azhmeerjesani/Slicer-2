@@ -418,6 +418,34 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertNotIn("Saved ·", text)
         self.assertNotIn("Unsaved", text)
 
+    def test_lesion_row_narrow_keeps_name_readable(self):
+        """In a narrow Continue card (220 px for the row, as at 1366 x 768) the state chip and the metrics give way
+        before the lesion name: the name keeps room for its start and end ("sub-PC…lesion", not "s…n").
+        """
+        studioShell = self._applyStudio()
+        _volumeNode, segmentationNode = self._template(studioShell, fill=True)
+        name = "sub-PCS0042_ses-followup12months_lesion"
+        segmentationNode.SetName(name)
+        canvas = self._library(studioShell)
+        card = canvas.currentWork
+        block = next(iter(card._blocks.values()))
+        block.widget.setFixedWidth(220)
+        self._pump(6)
+        card.refresh()
+        self._pump(4)
+        self.assertEqual(str(block.nameLabel.property("fullText")), name)
+        self.assertGreaterEqual(block.nameLabel.width, 100, block.nameLabel.text)
+        shown = block.nameLabel.text.replace("\u2026", "")
+        self.assertGreaterEqual(len(shown), 10, block.nameLabel.text)
+        self.assertTrue(shown.startswith("sub-PC") and shown.endswith("lesion"), block.nameLabel.text)
+        # The chip is squeezed (elided), its whole text stays in the tool tip
+        self.assertLess(block.stateLabel.width, qt.QFontMetrics(block.stateLabel.font).horizontalAdvance(self._plain(block.stateLabel).split(" · ")[0]) + 16)
+        self.assertIn("Not saved yet", block.stateLabel.toolTip)
+        # A wide row shows the whole chip text again
+        block.widget.setFixedWidth(700)
+        self._pump(6)
+        self.assertEqual(block.stateLabel.text, "Not saved yet")
+
     #
     # Recent
     #

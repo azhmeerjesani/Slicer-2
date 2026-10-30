@@ -23,7 +23,6 @@
 the Data module. Files are loaded by ``StudioLib.importer``.
 """
 
-import html
 import logging
 import os
 import re
@@ -215,9 +214,12 @@ class _Elider(qt.QObject):
         text = str(label.property("fullText") or "")
         width = label.width
         if width <= 8:
-            # Not laid out yet: the Resize event comes
-            label.setText(text)
+            # Not laid out yet (the Resize event comes), or squeezed to nothing: a label that is marked ``hideWhenTiny`` then
+            # shows no sliver of its text
+            label.setText("" if label.property("hideWhenTiny") and label.isVisible() else text)
             return
+        # The padding of the label's stylesheet (a chip) is not room for text
+        width -= int(label.property("elidePadding") or 0)
         metrics = qt.QFontMetrics(label.font)
         if label.property("elideMode") == "left":
             keepTail = int(label.property("keepTail") or 0)
@@ -1402,6 +1404,11 @@ class _OfferLine:
 class _LesionBlock:
     """Widgets of the lesion rows of the Current work card: name, metrics and save state."""
 
+    #: Narrowest name (about 16 characters), and narrowest save state chip; the chip's stylesheet padding is 2 x 8 px
+    NAME_MIN_WIDTH = 110
+    CHIP_MIN_WIDTH = 56
+    CHIP_PADDING = 16
+
     def __init__(self, segmentationNode, indent):
         self.nodeId = segmentationNode.GetID()
         self.widget = qt.QWidget()
@@ -1421,22 +1428,24 @@ class _LesionBlock:
         # An Ignored label as wide as its whole text (at most 220 px; ``refresh()`` sets the maximum) and as the row allows: a
         # Preferred label would take the width of its elided text and never grow back ("L...n" in a wide row)
         self.nameLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
-        self.nameLabel.setMinimumWidth(40)
+        # Its minimum is wide enough for the start and the end of a name ("sub-PCS0…e_lesion"): in a narrow row the state chip
+        # and the metrics give way first (a 40 px name read "s…n" next to a 146 px chip)
+        self.nameLabel.setMinimumWidth(self.NAME_MIN_WIDTH)
         self.nameLabel.setMaximumWidth(220)
         # The metrics ("Left · 4.22 mL · 1 part") are elided to the width the row leaves them (a rich-text label cannot
         # be elided by Qt and was cut off mid-word next to the state chip); "Both hemispheres" is colored by the card's
         # stylesheet (property ``studioWarn``)
         self.metricsLabel = _elidedLabel("", 12, "StudioCurrentWorkLesionMetrics", mode="right")
-        self.stateLabel = qt.QLabel()
-        self.stateLabel.setObjectName("StudioCurrentWorkLesionState")
-        self.stateLabel.setTextFormat(qt.Qt.RichText)
-        self.stateLabel.setWordWrap(False)
-        _setFont(self.stateLabel, 12)
-        self.stateLabel.setSizePolicy(qt.QSizePolicy.Maximum, qt.QSizePolicy.Fixed)
+        self.metricsLabel.setProperty("hideWhenTiny", True)
+        # The chip is elided too ("Saved in…"; its full text is the tool tip), between a minimum and its whole text
+        # (``refresh()`` sets the maximum), so that a narrow row squeezes it instead of the name
+        self.stateLabel = _elidedLabel("", 12, "StudioCurrentWorkLesionState", mode="right")
+        self.stateLabel.setProperty("elidePadding", self.CHIP_PADDING)
+        self.stateLabel.setMinimumWidth(self.CHIP_MIN_WIDTH)
         self.stateLabel.setFixedHeight(20)
         layout.addWidget(self.nameLabel, 3)
         layout.addWidget(self.metricsLabel, 1)
-        layout.addWidget(self.stateLabel)
+        layout.addWidget(self.stateLabel, 1)
 
     def node(self):
         node = slicer.mrmlScene.GetNodeByID(self.nodeId)
@@ -1774,7 +1783,8 @@ class CurrentWorkCard(qt.QObject):
             block.stateLabel.setToolTip(" · ".join(part for part in (text, _draw().saveStateText(lesion)[1] or "") if part))
             # The chip says the state; the full text (file, time) is its tooltip
             chipText = text.split(" · ")[0] if text else ""
-            block.stateLabel.setText(html.escape(chipText))
+            setElidedText(block.stateLabel, chipText, block.stateLabel.toolTip)
+            block.stateLabel.setMaximumWidth(qt.QFontMetrics(block.stateLabel.font).horizontalAdvance(chipText) + _LesionBlock.CHIP_PADDING + 4)
         if queue and self._pendingMetrics:
             self._metricsTimer.start()
 
