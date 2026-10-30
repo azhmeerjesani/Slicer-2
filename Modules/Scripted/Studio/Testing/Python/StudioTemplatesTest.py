@@ -1044,3 +1044,28 @@ class StudioTemplatesTest(unittest.TestCase):
         finally:
             dialog.deleteLater()
             os.remove(path)
+
+    def test_21_settings_panel_is_scheduled_by_the_classic_startup(self):
+        """Settings > Templates is also in a Classic launch (the Map and Normalize messages point to it): the Studio module's
+        startup hook, which runs in Classic and in Studio, schedules it (before: only the Studio plug-in did).
+        """
+        import Studio
+
+        ui = self.ui
+        installed = []
+        saved = (ui._installTimer, ui.installSettingsPanel, ui.DEFERRED_INSTALL_MS)
+        ui._installTimer = None  # as in a Classic launch: no Studio plug-in has run
+        ui.installSettingsPanel = lambda force=False: installed.append(True)
+        ui.DEFERRED_INSTALL_MS = 50
+        try:
+            Studio._onStartupCompleted()
+            self.assertIsNotNone(ui._installTimer)
+            self.assertTrue(ui._installTimer.isActive())
+            deadline = qt.QDateTime.currentMSecsSinceEpoch() + 5000
+            while not installed and qt.QDateTime.currentMSecsSinceEpoch() < deadline:
+                slicer.app.processEvents()
+            self.assertEqual(installed, [True])
+        finally:
+            if ui._installTimer is not None:
+                ui._installTimer.stop()
+            ui._installTimer, ui.installSettingsPanel, ui.DEFERRED_INSTALL_MS = saved

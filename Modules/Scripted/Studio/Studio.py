@@ -54,6 +54,17 @@ def _onStartupCompleted():
 
         logging.error("Updates could not be started:\n" + traceback.format_exc())
         startAutosave()
+    # Settings > Templates is also there in Classic: the Normalize and Map messages of the Lesion Network Mapping module
+    # (which works in Classic) point to it. In Studio the templates plug-in installs it.
+    try:
+        from StudioLib import templates_ui
+
+        templates_ui.installSettingsPanelDeferred()
+    except Exception:
+        import logging
+        import traceback
+
+        logging.error("Settings > Templates could not be scheduled:\n" + traceback.format_exc())
 
 
 def _startAutosave():

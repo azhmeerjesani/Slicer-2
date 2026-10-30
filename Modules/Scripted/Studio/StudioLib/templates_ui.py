@@ -1085,17 +1085,27 @@ def install(shell):
     """Studio plug-in entry point (``shell.OPTIONAL_PLUGINS``): Search entries now; Settings > Templates and the grids of
     your templates shortly after.
     """
-    global _installTimer
     registerPaletteProvider()
+    installSettingsPanelDeferred()
+
+
+def installSettingsPanelDeferred():
+    """Schedule Settings > Templates and the template grids (idempotent), also without the Studio interface.
+
+    Called at startup in Classic and in Studio, so that the settings panels are the same in both modes (the Lesion
+    Network Mapping messages "Settings > Templates" are for Classic users too). The Studio plug-in does the same.
+    """
+    global _installTimer
     if _installTimer is None:
         _installTimer = qt.QTimer()
         _installTimer.setSingleShot(True)
         _installTimer.setInterval(DEFERRED_INSTALL_MS)
         _installTimer.connect("timeout()", _deferredInstall)
-    _installTimer.start()
+    if not _installTimer.isActive():
+        _installTimer.start()
 
 
 def uninstall(shell):
-    if _installTimer is not None:
-        _installTimer.stop()  # a Studio -> Classic switch within DEFERRED_INSTALL_MS adds no Settings > Templates
+    # No timer stop: Settings > Templates is part of Classic as well (a Studio -> Classic switch within
+    # DEFERRED_INSTALL_MS still adds it)
     unregisterPaletteProvider()
