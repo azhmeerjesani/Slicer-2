@@ -192,7 +192,10 @@ class SegmentEditorSmartFillTest(unittest.TestCase):
             names.append(effect.name if effect else None)
         self.assertEqual(names[:len(BUILT_IN_EFFECT_ORDER)], BUILT_IN_EFFECT_ORDER)
         self.assertEqual(names[len(BUILT_IN_EFFECT_ORDER)], "Smart fill")
-        self.assertTrue(self.effect.helpText().startswith("<html>Click inside a lesion to fill it automatically."))
+        # The first help line (shown collapsed, followed by an ellipsis) has no trailing period, like the built-in effects.
+        helpText = self.effect.helpText()
+        self.assertTrue(helpText.startswith("<html>Click inside a lesion to fill it automatically<br>"))
+        self.assertNotIn("automatically.", helpText.split("<br>")[0])
         for objectName in ("SmartFillMode2DRadioButton", "SmartFillMode3DRadioButton", "SmartFillToleranceSlider",
                            "SmartFillAutoToleranceCheckBox", "SmartFillToleranceLabel", "SmartFillLeakageGroupBox",
                            "SmartFillMaxRadiusSpinBox", "SmartFillLeakGuardSpinBox", "SmartFillFillHolesCheckBox",

@@ -211,7 +211,7 @@ class SegmentEditorSmartFillEffect(AbstractScriptedSegmentEditorEffect):
 
     def helpText(self):
         ctrl = _nativeControlKeyName()
-        return "<html>" + _("Click inside a lesion to fill it automatically.") + _("""<br>
+        return "<html>" + _("Click inside a lesion to fill it automatically") + _("""<br>
         The lesion is grown from the clicked point; the intensity tolerance is chosen from the contrast of its boundary.
         A preview is shown until it is applied.
         <p><ul style="margin: 0">
