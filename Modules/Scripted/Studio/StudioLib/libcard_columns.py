@@ -244,7 +244,7 @@ def applyChanges(session, changes, confirm=None):
     """Confirm the roles (and types, units, levels, descriptions) of columns of the open study.
 
     :param changes: ``{column: {"role", and optionally "type", "units", "levels" (dict), "description"}}``; an empty text of
-      units or description removes it.
+      units or description removes it (the description of a registered column goes back to the registry's, which the dialog shows).
     :param confirm: ``confirm(names, reasons) -> accepted names`` for the columns that would become scores from bookkeeping
       or metadata (default :func:`confirmScore`); a column that is not accepted keeps its role and is listed in ``declined``.
     :return: ``{"applied": [names], "declined": [names], "errors": {name: message}}``. The study is saved when something was applied.
@@ -261,9 +261,16 @@ def applyChanges(session, changes, confirm=None):
             result["declined"].append(name)
             continue
         clear = [key for key in ("units", "description") if key in change and change[key] == ""]
+        registered = schema.registered(name)
+        description = change.get("description") or None
+        if "description" in clear and registered is not None and registered.description:
+            # Study.column_spec() falls back to the registry's description, so a cleared one would come back in the dialog
+            # without being in participants.json: write the registry's, so that the file holds what the dialog shows.
+            description = registered.description
+            clear.remove("description")
         try:
             study.set_column_role(name, change["role"], type=change.get("type"), levels=change.get("levels"),
-                                  units=change.get("units") or None, description=change.get("description") or None)
+                                  units=change.get("units") or None, description=description)
         except (KeyError, ValueError) as e:
             result["errors"][name] = str(e)
             continue
@@ -401,6 +408,8 @@ class ColumnsDialog:
                 elif column == COL_UNITS and info["registered"] and schema.registered(name).units:
                     _readOnly(item)  # the registry's units show through: they cannot be removed
                     item.setToolTip(_("The units of a registered column are the registry's"))
+                elif column == COL_DESCRIPTION and info["registered"] and schema.registered(name).description:
+                    item.setToolTip(_("Clearing the description of a registered column restores the registry's"))
                 self.table.setItem(row, column, item)
             self.original[name] = {"role": spec.role, "type": spec.type, "units": units, "levels": levels, "description": description, "standard": info["standard"]}
         self.table.resizeColumnToContents(COL_NAME)

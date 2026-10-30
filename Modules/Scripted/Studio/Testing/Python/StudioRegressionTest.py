@@ -1976,3 +1976,44 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertNotEqual(row["centroid_x"], before["centroid_x"])
         self.assertNotEqual(row["lesion_mtime"], before["lesion_mtime"])
         self.assertAlmostEqual(float(row["volume_ml"]), 1.0, places=2)
+
+    def test_25_cleared_description_of_a_registered_column_is_what_the_dialog_shows(self):
+        """Columns...: clearing the description of a registered column (age) removed it from participants.json, but
+        ``column_spec`` fell back to the registry's, so the reopened dialog showed "Age" again (BB-1). The file now holds
+        what the dialog shows: the registry's description is written back, and a description of one's own stays.
+        """
+        from StudioLib import libcard_columns as lc
+        from StudioLib import study_ui
+
+        study = self._study([("sub-01", {"age": "60"}, False), ("sub-02", {"age": "70"}, False)])
+        folder = study.path
+        session = study_ui.openStudy(folder, None, showLibrary=False)
+        self.addCleanup(study_ui.closeStudy)
+        slicer.app.processEvents()
+
+        def shown(name):
+            dialog = lc.ColumnsDialog(session)
+            self.addCleanup(dialog.widget.deleteLater)
+            return dialog, dialog.table.item(dialog.rowOf(name), lc.COL_DESCRIPTION).text()
+
+        def saved():
+            with open(os.path.join(folder, "participants.json"), encoding="utf-8") as f:
+                return json.load(f)["age"].get("Description")
+
+        registry = session.study.column_spec("age").description
+        self.assertTrue(registry)
+        dialog, _text = shown("age")
+        dialog.setText("age", lc.COL_DESCRIPTION, "")
+        result = dialog.confirm()
+        self.assertEqual(result["applied"], ["age"], result)
+        self.assertEqual(saved(), registry, "the file holds the description that the dialog shows")
+        self.assertEqual(shown("age")[1], registry)
+        # An own text is kept, in the file and in the dialog; a second clear goes back to the registry's
+        dialog, _text = shown("age")
+        dialog.setText("age", lc.COL_DESCRIPTION, "Age at stroke")
+        dialog.confirm()
+        self.assertEqual((saved(), shown("age")[1]), ("Age at stroke", "Age at stroke"))
+        dialog, _text = shown("age")
+        dialog.setText("age", lc.COL_DESCRIPTION, "")
+        dialog.confirm()
+        self.assertEqual((saved(), shown("age")[1]), (registry, registry))
