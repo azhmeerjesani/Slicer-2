@@ -278,20 +278,91 @@ def _iconButton(iconName, toolTip, objectName, checkable=False):
     return button
 
 
+class _NameEditFilter(qt.QObject):
+    """Event filter of ``_NameEdit``: focus in and out switch between the whole name and the elided name, a resize re-elides."""
+
+    def __init__(self, edit):
+        qt.QObject.__init__(self, edit)
+        self._edit = edit
+
+    def eventFilter(self, obj, event):
+        eventType = event.type()
+        if eventType == qt.QEvent.FocusIn:
+            self._edit.beginEdit()
+        elif eventType == qt.QEvent.FocusOut:
+            # A context menu of the field (Paste...) is part of the edit. The field emits editingFinished with the
+            # whole text while it handles this event, so the name is elided after that.
+            if event.reason() != qt.Qt.PopupFocusReason:
+                qt.QTimer.singleShot(0, self._edit.endEdit)
+        elif eventType in (qt.QEvent.Resize, qt.QEvent.Show):
+            self._edit.showElided()
+        return False
+
+
 class _NameEdit(qt.QLineEdit):
-    """Flat line edit of the lesion name: Enter commits, Esc (with unsent edits) restores the name."""
+    """Flat line edit of the lesion name: Enter commits, Esc (with unsent edits) restores the name.
+
+    While it is not edited the field shows the name elided with an ellipsis to its width (the whole name is the tool tip),
+    so a long name is never cut in the middle of a letter; while it is edited it holds the whole name.
+    """
+
+    # What the frame, the 3 px padding and the text margin of the field take from its width
+    TEXT_MARGINS = 12
 
     def __init__(self, commit):
         qt.QLineEdit.__init__(self)
         self._commit = commit
         self._shown = ""
+        self._editing = False
+        self._toolTip = ""
+        self._toolTipFor = None
+        self._filter = _NameEditFilter(self)
+        self.installEventFilter(self._filter)
         self.connect("editingFinished()", self._onEditingFinished)
+
+    def setBaseToolTip(self, toolTip, toolTipFor):
+        """``toolTip``: the tool tip of the field; ``toolTipFor(name)``: its tool tip while the name is elided."""
+        self._toolTip = toolTip
+        self._toolTipFor = toolTipFor
+        self.showElided()
+
+    def name(self):
+        """The whole name of the lesion (``text`` is the elided name while the field is not edited)."""
+        return self._shown
 
     def setName(self, name):
         self._shown = name
-        if not self.hasFocus() and self.text != name:
-            self.setText(name)
+        self.showElided()
+
+    def isEditing(self):
+        return self._editing or self.hasFocus()
+
+    def beginEdit(self):
+        """Show the whole name for editing."""
+        self._editing = True
+        if str(self.text) != self._shown:
+            self.setText(self._shown)
+
+    def endEdit(self):
+        """Show the elided name again (unless the field has the focus)."""
+        if self.hasFocus():
+            return
+        self._editing = False
+        self.showElided()
+
+    def showElided(self):
+        if self.isEditing():
+            return
+        name = self._shown
+        width = int(self.width) - self.TEXT_MARGINS
+        shown = name
+        # Before the field is laid out its width says nothing: the whole name is shown
+        if width > 40:
+            shown = self.fontMetrics().elidedText(name, qt.Qt.ElideRight, width)
+        if str(self.text) != shown:
+            self.setText(shown)
             self.setCursorPosition(0)
+        self.setToolTip(self._toolTipFor(name) if shown != name and callable(self._toolTipFor) else self._toolTip)
 
     def _onEditingFinished(self):
         text = str(self.text).strip()
@@ -299,6 +370,21 @@ class _NameEdit(qt.QLineEdit):
             self._commit(text)
         elif not text:
             self.setText(self._shown)
+        if not self.hasFocus():
+            self.endEdit()
+
+
+class _SwitcherFilter(qt.QObject):
+    """Elides the lesion name on the switcher button to its width when it is resized."""
+
+    def __init__(self, card):
+        qt.QObject.__init__(self, card.switcher)
+        self._card = card
+
+    def eventFilter(self, obj, event):
+        if event.type() in (qt.QEvent.Resize, qt.QEvent.Show):
+            self._card._showSwitcherText()
+        return False
 
 
 class LesionCard:
@@ -346,7 +432,9 @@ class LesionCard:
         self.nameEdit.setFrame(False)
         self.nameEdit.setMinimumWidth(60)
         self.nameEdit.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
-        self.nameEdit.setToolTip(ui.tooltip(_("Lesion name"), "Enter", _("Rename the lesion (the file name follows)")))
+        self.nameEdit.setBaseToolTip(
+            ui.tooltip(_("Lesion name"), "Enter", _("Rename the lesion (the file name follows)")),
+            lambda name: ui.tooltip(name, "Enter", _("Rename the lesion (the file name follows)")))
         self.nameEdit.setAccessibleName(_("Lesion name"))
         ui.setText(self.nameEdit, "section")
         # The name reads as a title on the card; the field shows only while it is edited (focus)
@@ -366,6 +454,8 @@ class LesionCard:
         self.switcher.setToolTip(ui.tooltip(_("Lesions"), None, _("Choose the lesion to edit; the others keep their files")))
         self.switcher.setFocusPolicy(qt.Qt.TabFocus)
         ui.setText(self.switcher, "section")
+        self._switcherFilter = _SwitcherFilter(self)
+        self.switcher.installEventFilter(self._switcherFilter)
         self.switcherMenu = qt.QMenu(self.switcher)
         self.switcherMenu.setObjectName("StudioLesionSwitcherMenu")
         self.switcherMenu.connect("aboutToShow()", self._fillSwitcherMenu)
@@ -594,7 +684,7 @@ class LesionCard:
         self.nameEdit.setVisible(not multiple)
         self.switcher.setVisible(multiple)
         self.nameEdit.setName(name)
-        self.switcher.setText(f"{name} ▾")
+        self._showSwitcherText()
         self.switcher.setAccessibleName(_("Lesion {name}, {count} lesions").format(name=name, count=len(lesions)))
         # Without a segment yet (an empty lesion) the swatch is an empty outline: never an invisible button
         self._setSwatchColor(state.get("color"))
@@ -788,6 +878,7 @@ class LesionCard:
             # Several lesions: rename in a dialog-free way by showing the edit for this lesion
             self.switcher.hide()
             self.nameEdit.show()
+        self.nameEdit.beginEdit()
         self.nameEdit.setFocus(qt.Qt.OtherFocusReason)
         self.nameEdit.selectAll()
 
@@ -823,6 +914,20 @@ class LesionCard:
 
     def _onSwatchClicked(self):
         self.controller.chooseColor()
+
+    def _showSwitcherText(self):
+        """The lesion name on the switcher button, elided ("Left MCA inf… ▾") when it does not fit; the whole name is its tool tip."""
+        name = self._state.get("name") or ""
+        width = int(self.switcher.width) - 36  # the padding of the button and the " ▾" after the name
+        shown = name
+        if width > 40:
+            shown = self.switcher.fontMetrics().elidedText(name, qt.Qt.ElideRight, width)
+        text = f"{shown} ▾"
+        if str(self.switcher.text) != text:
+            self.switcher.setText(text)
+        self.switcher.setToolTip(
+            ui.tooltip(name, None, _("Choose the lesion to edit; the others keep their files")) if shown != name
+            else ui.tooltip(_("Lesions"), None, _("Choose the lesion to edit; the others keep their files")))
 
     def _onRename(self, name):
         self.controller.renameLesion(name)

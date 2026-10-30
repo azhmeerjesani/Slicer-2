@@ -569,6 +569,60 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
         self._pump(4)
         draw.session(studioShell).refreshPanel(computeMetrics=True)
 
+    def test_lesion_name_is_elided_when_long(self):
+        """A lesion name that does not fit the name field of the Lesion card ends with an ellipsis (VISUAL 6: no clipped text);
+        it never starts in a half letter after a rename, the whole name is the tool tip, and it is whole while it is edited.
+        """
+        from StudioLib import draw, importer
+
+        studioShell = self._applyStudio()
+        self.mainWindow.showNormal()
+        self.mainWindow.resize(1366, 768)
+        self._wait(lambda: self.mainWindow.width <= 1366, 2000)
+        importer.startOnTemplate(shell=studioShell)
+        self._restores.append(importer._closeTemplateBanner)
+        self._pump(10)
+        self._paintLesion((-30.0, -10.0, 20.0), 10.0)
+        draw.session(studioShell).refreshPanel(computeMetrics=True)
+        self._pump(10)
+        card = draw.lesionCard()
+        edit = card.nameEdit
+        self.assertTrue(edit.isVisible())
+        long = "Left MCA infarct sub-patient042 acute"
+        edit.beginEdit()
+        edit.setText(long)
+        edit.editingFinished()
+        self._pump(4)
+        draw.session(studioShell).refreshPanel(computeMetrics=True)
+        self._pump(6)
+        edit.endEdit()
+        self.assertEqual(draw.lesionNodes()[0].GetName(), long, "the rename was not committed")
+        self.assertEqual(edit.name(), long, "the card does not show the renamed lesion")
+        shown = str(edit.text)
+        self.assertTrue(shown.endswith("…"), f"the long name has no ellipsis: {shown!r}")
+        self.assertTrue(shown.startswith("Left MCA"), f"the name does not start at its beginning: {shown!r}")
+        self.assertLessEqual(self._textWidth(edit, shown), edit.width - edit.TEXT_MARGINS)
+        self.assertEqual(edit.cursorPosition, 0)
+        self.assertIn(long, str(edit.toolTip))
+        # A short name shows whole, with the usual tool tip
+        edit.setName("Lesion")
+        self.assertEqual(str(edit.text), "Lesion")
+        # Edited: the whole name
+        edit.setName(long)
+        edit.beginEdit()
+        self.assertEqual(str(edit.text), long)
+        edit.endEdit()
+        self.assertTrue(str(edit.text).endswith("…"))
+        # With several lesions the switcher button elides the name the same way
+        card.refresh({"name": long, "lesions": [("a", long, True), ("b", "Second", True)]})
+        self._pump(6)
+        self.assertTrue(card.switcher.isVisible())
+        buttonText = str(card.switcher.text)
+        self.assertTrue(buttonText.endswith("… ▾"), f"the switcher shows the name clipped: {buttonText!r}")
+        self.assertIn(long, str(card.switcher.toolTip))
+        card.refresh({"name": "Lesion", "lesions": []})
+        draw.session(studioShell).refreshPanel(computeMetrics=True)
+
     def test_draw_inspector_padding(self):
         """The Lesion card, the section label and the tool tiles of Draw sit on one 16 px inspector padding (VISUAL 2.7, 4.4).
 
