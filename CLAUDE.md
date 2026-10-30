@@ -38,10 +38,11 @@ The user pays for any usage beyond their plans, so even an accidental use costs 
 
 ## Agent concurrency
 
-- Run at most two agents at any time, day and night (the user raised the limit from one to two on
-  2026-10-28): for example one workflow with at most two agents running at once. Agents that run at
-  the same time never edit the same working tree or build tree at once, run Slicer with their own
-  throwaway HOME and `xvfb-run -a`, and never kill processes they did not start.
+- Run at most three agents at any time, day and night (the user raised the limit to two on 2026-10-28
+  and to three on 2026-10-30): for example one workflow with two agents running at once plus one
+  separate agent. Agents that run at the same time never edit the same working tree or build tree at
+  once, run Slicer with their own throwaway HOME and `xvfb-run -a`, and never kill processes they did
+  not start.
 - Use the cheapest model that does the job well: Haiku for mechanical edits, Sonnet for routine
   implementation, docs, tests and walkthroughs, Opus for design, C++, numerics, file compatibility
   and adversarial review. Use Fable when it is really needed: a second fix after a fix failed its
