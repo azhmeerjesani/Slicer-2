@@ -1138,6 +1138,8 @@ class NormalizeController(VTKObservationMixin):
         self._reviewDisplayState = None
         self._exportedLesion = None
         self._observedNative = None
+        #: What start() set aside of the previous result: a run that is stopped gives it back (nothing was changed)
+        self._previousRun = None
         self._editGeneration = 0
         #: Counts scene closes: work started before a close never adds nodes to the next scene
         self._sceneGeneration = 0
@@ -1191,6 +1193,7 @@ class NormalizeController(VTKObservationMixin):
         if request.scanNode is None and not request.scanPath:
             raise ValueError("A normalization needs a scan")
         self.restoreViews()
+        self._previousRun = self._setAsideRun()
         self.request = request
         self.result = None
         self.failure = None
@@ -1206,15 +1209,20 @@ class NormalizeController(VTKObservationMixin):
         self._setEdited(False, False)
         self._tmpDir = os.path.join(slicer.app.temporaryPath, "LNMNormalize", uuid.uuid4().hex)
         writes = []
-        scanPath = self._scanSource(request, writes)
-        lesionPath = self._lesionSource(request, writes)
-        anatPath = self._anatSource(request, writes)
-        initialTransform = None
-        if request.initialTransformNode is not None:
-            os.makedirs(self._tmpDir, exist_ok=True)
-            initialTransform = os.path.join(self._tmpDir, "initial_transform.h5")
-            if not slicer.util.saveNode(request.initialTransformNode, initialTransform):
-                raise RuntimeError("The rough alignment could not be saved")
+        try:
+            scanPath = self._scanSource(request, writes)
+            lesionPath = self._lesionSource(request, writes)
+            anatPath = self._anatSource(request, writes)
+            initialTransform = None
+            if request.initialTransformNode is not None:
+                os.makedirs(self._tmpDir, exist_ok=True)
+                initialTransform = os.path.join(self._tmpDir, "initial_transform.h5")
+                if not slicer.util.saveNode(request.initialTransformNode, initialTransform):
+                    raise RuntimeError("The rough alignment could not be saved")
+        except Exception:
+            self._cleanupTmp()
+            self._restoreRun()  # nothing was started: the previous result stays
+            raise
         self.outDir = request.outDir or defaultOutputDirectory(request.scanNode, request.scanPath, request.subject, request.studyPath, request.sid)
         self._jobRunRoot = os.path.join(os.fspath(request.studyPath), ".studio", "jobs") if request.studyPath else None
         self.args = self.arguments(request, scanPath, lesionPath, anatPath, initialTransform, self.outDir)
@@ -1229,6 +1237,44 @@ class NormalizeController(VTKObservationMixin):
             self._submit()
         self.timings["start_ms"] = round((time.perf_counter() - started) * 1000.0, 2)
         return True
+
+    def _setAsideRun(self):
+        """What a new run replaces of the previous result (``None`` without one): ``_restoreRun()`` puts it back."""
+        if self.result is None:
+            return None
+        return {"result": self.result, "request": self.request, "outDir": getattr(self, "outDir", None), "args": getattr(self, "args", None),
+                "warnings": self.warnings, "stage": self.stage, "exportedLesion": self._exportedLesion, "edited": (self.edited, self.needsReregister),
+                "generation": self._sceneGeneration}
+
+    def _restoreRun(self):
+        """Give back the result that ``start()`` set aside, when the new run ended without a change (stopped, or never started).
+
+        Not when the scene was closed meanwhile, or when a node of that result is gone. Returns True when it was restored.
+        """
+        previous, self._previousRun = self._previousRun, None
+        if previous is None or previous["generation"] != self._sceneGeneration:
+            return False
+        result = previous["result"]
+        if not all(node is None or slicer.mrmlScene.IsNodePresent(node) for node in (result.volumeNode, result.segmentationNode)):
+            return False
+        self.result = result
+        self.request = previous["request"]
+        self.outDir = previous["outDir"]
+        self.args = previous["args"]
+        self.warnings = previous["warnings"]
+        self.stage = previous["stage"]
+        self.fraction = 1.0
+        self.eta = None
+        self._exportedLesion = previous["exportedLesion"]
+        self._trackEdits(result)
+        self._setEdited(*previous["edited"])
+        self._editTimer.start()  # the native lesion may have been edited since: compare it again
+        return True
+
+    def _setCancelled(self):
+        """The run ended without a result: the previous one (if any) is back before the state changes."""
+        self._restoreRun()
+        self._setState(CANCELLED)
 
     def _scanSource(self, request, writes):
         """The scan file, or a NIfTI that a worker writes from a copy of the voxels (no gzip on the main thread)."""
@@ -1344,7 +1390,7 @@ class NormalizeController(VTKObservationMixin):
         self._worker = None
         if self._stopRequested:
             self._cleanupTmp()
-            self._setState(CANCELLED)
+            self._setCancelled()
             return
         if error is not None:
             self._fail(_("The scan or the lesion could not be exported: {error}").format(error=error), "export_failed")
@@ -1440,7 +1486,7 @@ class NormalizeController(VTKObservationMixin):
         elif self.state == LOADING and self._worker is not None:
             self._worker.cancelled = True
             self._worker = None
-            self._setState(CANCELLED)
+            self._setCancelled()
 
     #
     # Done
@@ -1453,6 +1499,7 @@ class NormalizeController(VTKObservationMixin):
 
     def _fail(self, message, code=None, event=None, job=None):
         self.failure = {"message": message, "code": code, "event": event or {}, "job": job}
+        self._previousRun = None
         self._setState(FAILED)
         self._notify("failed", self.failure)
 
@@ -1460,14 +1507,14 @@ class NormalizeController(VTKObservationMixin):
         self._progressTimer.stop()
         self._cleanupTmp()
         if job.state == _jobrunner.CANCELLED:
-            self._setState(CANCELLED)
+            self._setCancelled()
             return
         if job.state != _jobrunner.DONE:
             event = job.errorEvent or {}
             self._fail(job.failureReason or _("the normalization failed"), event.get("code"), event, job)
             return
         if self._stopRequested:
-            self._setState(CANCELLED)
+            self._setCancelled()
             return
         self._setState(LOADING)
         status = (job.doneEvent or {}).get("status") or "done"
@@ -1480,7 +1527,7 @@ class NormalizeController(VTKObservationMixin):
             self._fail(_("The result could not be read: {error}").format(error=error), "read_failed")
             return
         if self._stopRequested or self._runGeneration != self._sceneGeneration or not self._requestNodesPresent(self.request):
-            self._setState(CANCELLED)  # stopped, or the scene was closed: no node of another scene's lesion
+            self._setCancelled()  # stopped, or the scene was closed: no node of another scene's lesion
             return
         started = time.perf_counter()
         collecting = gc.isenabled()
@@ -1496,6 +1543,7 @@ class NormalizeController(VTKObservationMixin):
                 gc.enable()
         self.timings["nodes_ms"] = round((time.perf_counter() - started) * 1000.0, 2)
         result.commandLine = self.commandLine()
+        self._previousRun = None
         self.result = result
         self.fraction = 1.0
         self._setState(DONE)
@@ -1527,6 +1575,7 @@ class NormalizeController(VTKObservationMixin):
             self.warpJob.stop()
         self.warpJob = None
         self.result = None
+        self._previousRun = None
         self._setEdited(False, False)
         if self.isBusy():
             self.stop()  # the job ends as cancelled (_onJobDone / _onOutputsLoaded create no node)
@@ -1535,13 +1584,22 @@ class NormalizeController(VTKObservationMixin):
             self._setState(IDLE)
 
     def loadResult(self, outDir, request=None):
-        """Load an existing result folder (no job): the worker reads it, then the nodes are made. Returns False when busy."""
+        """Load an existing result folder (no job): the worker reads it, then the nodes are made. Returns False when busy.
+
+        The native lesion as it is now is the original of the edit checks (as the exported lesion is for a run of
+        ``start()``): without it, every later check would report an edit outside the mask.
+        """
         if self.isBusy():
             return False
         self.request = request or self.request
         self.outDir = outDir
         self._stopRequested = False
         self._runGeneration = self._sceneGeneration
+        request = self.request
+        if request is not None and request.segmentationNode is not None and request.segmentId:
+            self._exportedLesion = self.exportLesion(request.segmentationNode, request.segmentId)
+        else:
+            self._exportedLesion = None
         self._setState(LOADING)
         self._worker = _Worker(lambda: _loadOutputs(outDir), lambda loaded, error: self._onOutputsLoaded(loaded, error, "reused")).start()
         return True

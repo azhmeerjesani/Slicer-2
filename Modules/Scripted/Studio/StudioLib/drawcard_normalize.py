@@ -263,7 +263,7 @@ class DrawNormalizeCard:
         busy = controller.isBusy()
         result = controller.result
         segmentationNode = self.ctx.get("segmentationNode")
-        showingResult = controller.state == "done" and self._ownsResult(result, segmentationNode, self.ctx.get("sourceVolumeNode"))
+        showingResult = controller.state in ("done", "cancelled") and self._ownsResult(result, segmentationNode, self.ctx.get("sourceVolumeNode"))
         if self._lesionEmpty and not showingResult:
             self.button.setText(_("Normalize scan only"))
         else:
@@ -500,6 +500,11 @@ class DrawNormalizeCard:
                 self.nc.setRowProgress(self.progress, 1.0, _("Loading the result…"))
         if state == nc.CANCELLED:
             self._showMessage(_("Normalization stopped. Nothing was changed."), (), level="neutral")
+            if self.controller.result is not None:  # a stopped "Normalize again" gives the previous result back, with its QC
+                self._clearQc()
+                self._buildQc(self.controller.result)
+                if self.controller.edited:
+                    self._showEditState()
         elif state == nc.IDLE:  # the scene was closed: its result is gone
             self._origin = None
             self._clearMessage()
@@ -513,9 +518,7 @@ class DrawNormalizeCard:
     def _onResult(self, result):
         self._clearMessage()
         self._clearQc()
-        width = self.widget.width - 24 if self.widget.width > 100 else 260
-        self._qcPanel = self.controller.buildQcWidget(result, width=min(width, 360), onRedo=self._redo, maxHeight=110)
-        self.qcHost.addWidget(self._qcPanel)
+        self._buildQc(result)
         qt.QTimer.singleShot(0, self._revealDoneRow)
         if self.shell is not None:
             try:
@@ -527,6 +530,11 @@ class DrawNormalizeCard:
             except Exception:
                 pass
         self.refresh(None, checkEmpty=False)
+
+    def _buildQc(self, result):
+        width = self.widget.width - 24 if self.widget.width > 100 else 260
+        self._qcPanel = self.controller.buildQcWidget(result, width=min(width, 360), onRedo=self._redo, maxHeight=110)
+        self.qcHost.addWidget(self._qcPanel)
 
     def _revealDoneRow(self):
         """Scroll the inspector so that Use for Map is visible (without moving the focus)."""

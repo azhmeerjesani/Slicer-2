@@ -687,6 +687,14 @@ class NormalizeCard:
             nc.setRowProgress(self.progress, 1.0, _("Loading the result…"))
         elif state == nc.CANCELLED:
             self._showMessage(_("Normalization stopped. Nothing was changed."), (), level="neutral")
+            result = self.controller.result
+            if result is not None:  # a stopped "Normalize again" gives the previous result back, with its QC
+                self._clearQc()
+                width = max(160, self.widget.width - 40) if self.widget.width > 0 else 280
+                self._qcPanel = self.controller.buildQcWidget(result, width=min(width, 420), onRedo=self.redo, maxHeight=240)
+                self.qcHost.addWidget(self._qcPanel)
+                if self.controller.edited:
+                    self._showEditState()
         elif state == nc.IDLE:  # the scene was closed: its result is gone
             self._clearMessage()
             self._clearQc()

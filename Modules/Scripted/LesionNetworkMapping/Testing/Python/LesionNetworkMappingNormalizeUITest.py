@@ -354,6 +354,8 @@ class LesionNetworkMappingNormalizeUITest(unittest.TestCase):
         self._setOptions(quality="standard")
         controller = self.card.controller
         nodesBefore = (self._segmentationNodes(), self._volumeNodes())
+        previous = controller.result
+        self.assertIsNotNone(previous)
         stages = []
 
         def onProgress(fraction, text, eta):
@@ -373,6 +375,12 @@ class LesionNetworkMappingNormalizeUITest(unittest.TestCase):
         print(f"stop: cancelled after {seconds:.2f} s")
         self.assertLessEqual(seconds, 3.0)
         self.assertEqual((self._segmentationNodes(), self._volumeNodes()), nodesBefore)
+        # "Nothing was changed": the previous result is still the card's result, with its QC and its folder (and no edit)
+        _pump(self.nc.EDIT_DEBOUNCE_MS + 700)
+        self.assertIs(controller.result, previous)
+        self.assertEqual(controller.outDir, previous.outDir)
+        self.assertFalse(controller.edited)
+        self.assertIsNotNone(self.card._qcPanel)
         self._setOptions(quality="affine")
 
     def test_06_review_restore(self):
@@ -673,6 +681,64 @@ class LesionNetworkMappingNormalizeUITest(unittest.TestCase):
             studioShell.switchTo("map")
             self.ctx.setSeed(self.native, self.nativeSegmentId)
             self.assertTrue(self._cardVisible())
+        finally:
+            studioShell.dispose()
+            _pump(200)
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+
+    def test_08a_draw_stopped_again_keeps_result(self):
+        """Stopping a "Normalize again" run gives the Draw card its previous result back (QC, Use for Map, Trace on the MNI scan)."""
+        from StudioLib import draw, drawcard_normalize, shell
+
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        _pump(200)
+        try:
+            studioShell.switchTo("draw")
+            _pump(300)
+            editor = slicer.modules.SegmentEditorWidget.editor
+            editor.setSegmentationNode(self.native)
+            editor.setSourceVolumeNode(self.scan)
+            editor.setCurrentSegmentID(self.nativeSegmentId)
+            draw.extension().refreshCards()
+            _pump(500)
+            card = drawcard_normalize.active()
+            self.assertIsNotNone(card)
+            controller = card.controller
+            request = self.nc.NormalizeRequest(scanNode=self.scan, segmentationNode=self.native, segmentId=self.nativeSegmentId)
+            self.assertTrue(controller.loadResult(self.result.outDir, request))
+            self.assertTrue(_wait(lambda: controller.state == "done", 30.0), controller.state)
+            _pump(400)
+            previous = controller.result
+            self.assertFalse(card.doneRow.isHidden())
+            self.assertIsNotNone(card._qcPanel)
+            useForMapBefore = card.useForMapButton.enabled
+            # Normalize again as a real run (not reused), then Stop during the registration
+            controllerStart = controller.start
+            controller.start = lambda request: controllerStart(request.copy(quality="standard", reuse=False, outDir=os.path.join(self.tmp, "draw-stop-run")))
+            try:
+                self.assertTrue(card.start())
+                self.assertTrue(_wait(lambda: controller.stage == "affine", 60.0), f"no affine stage (state {controller.state})")
+            finally:
+                del controller.start
+            self.assertIsNone(controller.result)  # while it runs
+            card.progress.stopButton.click()
+            self.assertTrue(_wait(lambda: controller.state == "cancelled", 10.0), controller.state)
+            # The restored result compares the native lesion again (debounced): the untouched lesion of a loaded result is no edit
+            _pump(self.nc.EDIT_DEBOUNCE_MS + 700)
+            self.assertIs(controller.result, previous)
+            self.assertEqual(controller.outDir, previous.outDir)
+            self.assertFalse(controller.edited)
+            self.assertFalse(card.doneRow.isHidden())
+            self.assertEqual(card.useForMapButton.enabled, useForMapBefore)
+            self.assertIsNotNone(card._qcPanel)
+            self.assertFalse(card._qcPanel.isHidden())
+            self.assertEqual(card.button.text, "Normalize again")
+            self.assertIn("Normalized", card.label.text)
+            self.assertIsNotNone(card.message)
+            self.assertIn("Nothing was changed", card.message.findChild("QLabel", "LNMBannerText").text)
+            self.assertTrue(card.traceOnMni())
+            self.assertIs(editor.sourceVolumeNode(), previous.volumeNode)
         finally:
             studioShell.dispose()
             _pump(200)
