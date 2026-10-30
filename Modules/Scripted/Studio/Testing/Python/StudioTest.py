@@ -2103,6 +2103,63 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertTrue(displayNode.GetVisibility2DOutline())
         self.assertTrue(card.outlineSwitch.checked)
 
+    def test_32c_draw_tool_options_radio_columns_fit_the_inspector(self):
+        """The radio buttons of Islands and Scissors (columns in Classic) are one column in Draw, so that the narrow inspector
+        does not cut their labels mid-letter; Classic puts them back in their cells.
+        """
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        widget = slicer.modules.SegmentEditorWidget
+        widget.setMoreToolsShown(True)
+        self._pump()
+
+        def radioCells(frame):
+            """{text: (row, column)} of the radio buttons in the grid layouts of the options frame."""
+            found = {}
+            for layout in frame.findChildren("QGridLayout"):
+                for row in range(layout.rowCount()):
+                    for column in range(layout.columnCount()):
+                        item = layout.itemAtPosition(row, column)
+                        if item is not None and item.widget() is not None and item.widget().inherits("QRadioButton"):
+                            found[item.widget().text] = (row, column)
+            return found
+
+        def cutButtons(effectName):
+            editor.setActiveEffectByName(effectName)
+            self._wait(300)
+            frame = editor.activeEffect().optionsFrame()
+            self.assertTrue(frame.isVisible(), effectName)
+            buttons = [button for button in frame.findChildren("QAbstractButton") if button.isVisible() and button.text]
+            self.assertGreaterEqual(len(buttons), 6, effectName)
+            return frame, [(button.text, button.width, button.sizeHint.width()) for button in buttons if button.width < button.sizeHint.width()]
+
+        for effectName in ("Islands", "Scissors"):
+            frame, cut = cutButtons(effectName)
+            self.assertEqual(cut, [], effectName)
+            self.assertEqual({cell[1] for cell in radioCells(frame).values()}, {0}, effectName)
+        # Scissors: the operation, the shape and the slice cut one under the other; "Apply to visible segments" with its check box last
+        editor.setActiveEffectByName("Scissors")
+        self._pump()
+        frame = editor.activeEffect().optionsFrame()
+        tops = {button.text: button.mapTo(frame, qt.QPoint(0, 0)).y() for button in frame.findChildren("QRadioButton") if button.isVisible()}
+        self.assertLess(tops["Erase inside"], tops["Fill outside"])
+        self.assertLess(tops["Fill outside"], tops["Free-form"])
+        self.assertLess(tops["Rectangle"], tops["Unlimited"])
+        editor.setActiveEffectByName("")
+
+        studioShell.classic(persist=False)
+        self._pump()
+        for effectName, cells in (("Islands", {"Keep largest island": (0, 0), "Keep selected island": (0, 1), "Split islands to segments": (2, 0)}),
+                                  ("Scissors", {"Erase inside": (1, 0), "Free-form": (1, 1), "Unlimited": (1, 2)})):
+            editor.setActiveEffectByName(effectName)
+            self._pump()
+            frame = editor.activeEffect().optionsFrame()
+            self.assertEqual([layout for layout in frame.findChildren("QGridLayout") if layout.property("studioStackedGridCells")], [], effectName)
+            found = radioCells(frame)
+            for text, cell in cells.items():
+                self.assertEqual(found.get(text), cell, (effectName, text))
+        editor.setActiveEffectByName("")
+
     def test_33_figure_round_trip(self):
         """A synthetic figure and 5 landmark pairs: RMS < 0.5 mm; the crop and fit file are saved; Show source rebuilds the
         overlay in <= 300 ms with the same fit; Ctrl+V follows the clipboard; the trace views are restored on close.

@@ -552,6 +552,90 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 continue
             if layout.direction() != direction:
                 layout.setDirection(direction)
+        self._stackRadioGrids(optionsFrame, stacked)
+
+    #: Dynamic property of a grid layout that the studio presentation stacked: the cells ("row,column;...") of its widgets, in
+    #: the order in which they were put back into the layout
+    _STACKED_GRID_PROPERTY = "studioStackedGridCells"
+
+    def _stackRadioGrids(self, optionsFrame, stacked):
+        """Studio presentation: the tool options laid out as columns of radio buttons (Islands, Scissors, Mask volume) become
+        one column, so that the narrow inspector does not cut the labels of the buttons (the options never widen the inspector,
+        ``_applyStudio()``). The classic presentation puts every widget back in its cell.
+        """
+        for layout in optionsFrame.findChildren("QGridLayout"):
+            saved = layout.property(self._STACKED_GRID_PROPERTY)
+            if not stacked:
+                if saved:
+                    positions = [[int(number) for number in cell.split(",")] for cell in str(saved).split(";")]
+                    self._setGridCells(layout, [(widget, row, column) for widget, (row, column) in zip(self._gridWidgets(layout), positions, strict=True)])
+                    layout.setProperty(self._STACKED_GRID_PROPERTY, None)
+                continue
+            if saved:
+                continue
+            cells = self._radioGridCells(layout)
+            if cells is None:
+                continue
+            stackedCells = self._stackedCells(cells)
+            layout.setProperty(self._STACKED_GRID_PROPERTY, ";".join(f"{row},{column}" for _widget, row, column, _newRow, _newColumn in stackedCells))
+            self._setGridCells(layout, [(widget, newRow, newColumn) for widget, _row, _column, newRow, newColumn in stackedCells])
+
+    @staticmethod
+    def _stackedCells(cells):
+        """(widget, row, column, new row, new column) for the cells of a grid in one column: the first column of the grid first
+        (Scissors: the operation, then the shape). A label with a check box on its right at the end of its column (Scissors:
+        "Apply to visible segments:") stays one row, below the columns.
+        """
+        indexAt = {(row, column): index for index, (_widget, row, column) in enumerate(cells)}
+        pairs = []
+        for index, (widget, row, column) in enumerate(cells):
+            other = indexAt.get((row, column + 1))
+            lowest = not any(rowBelow > row and columnBelow == column for rowBelow, columnBelow in indexAt)
+            if widget.inherits("QLabel") and other is not None and cells[other][0].inherits("QCheckBox") and lowest:
+                pairs.append((index, other))
+        paired = {index for pair in pairs for index in pair}
+        order = sorted((index for index in range(len(cells)) if index not in paired), key=lambda index: (cells[index][2], cells[index][1]))
+        stackedCells = []
+        for index in order:
+            stackedCells.append((*cells[index], len(stackedCells), 0))
+        for label, checkBox in pairs:
+            stackedCells.append((*cells[label], len(stackedCells), 0))
+            stackedCells.append((*cells[checkBox], stackedCells[-1][3], 1))
+        return stackedCells
+
+    @staticmethod
+    def _gridWidgets(layout):
+        return [layout.itemAt(index).widget() for index in range(layout.count())]
+
+    @staticmethod
+    def _setGridCells(layout, cells):
+        """Put the widgets of ``layout`` in the given (widget, row, column) cells."""
+        while layout.count():
+            layout.takeAt(0)
+        for widget, row, column in cells:
+            layout.addWidget(widget, row, column)
+        layout.invalidate()
+
+    @staticmethod
+    def _radioGridCells(layout):
+        """The (widget, row, column) cells of a grid of labels, check boxes, spin boxes and at least two radio buttons in two or
+        more columns, or None for any other grid (spans, layouts in cells, other widgets).
+        """
+        cells = []
+        for row in range(layout.rowCount()):
+            for column in range(layout.columnCount()):
+                item = layout.itemAtPosition(row, column)
+                if item is None:
+                    continue
+                widget = item.widget()
+                if widget is None or any(widget is known for known, _row, _column in cells):
+                    return None
+                if not any(widget.inherits(className) for className in ("QRadioButton", "QCheckBox", "QLabel", "QAbstractSpinBox", "ctkDoubleSpinBox")):
+                    return None
+                cells.append((widget, row, column))
+        radioColumns = {column for widget, _row, column in cells if widget.inherits("QRadioButton")}
+        radioCount = sum(1 for widget, _row, _column in cells if widget.inherits("QRadioButton"))
+        return cells if radioCount >= 2 and len(radioColumns) >= 2 else None
 
     def _setModuleWidthPolicy(self, policy):
         """Horizontal size policy of the module widget. The module panel gives it Minimum (qSlicerModulePanel.cxx:163),
