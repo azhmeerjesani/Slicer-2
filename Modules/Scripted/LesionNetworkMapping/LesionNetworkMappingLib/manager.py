@@ -56,11 +56,29 @@ LOCK_NAME = ".manager-convert.lock"
 #
 
 
-def _format_bytes(count):
-    for unit, size in (("TB", 1e12), ("GB", 1e9), ("MB", 1e6), ("kB", 1e3)):
+_BYTE_UNITS = (("TB", 1e12), ("GB", 1e9), ("MB", 1e6), ("kB", 1e3))
+
+
+def format_bytes(count):
+    """"236 GB", "1.2 GB", "9 kB", "512 B": decimal units with three significant digits, as the providers state sizes.
+
+    Three significant digits would print 999.7 GB as "1e+03 GB" (exponent notation); a value that rounds to 1000 is
+    stated in the next larger unit ("1 TB") instead. Every size text of the module uses this one function.
+    """
+    for index, (unit, size) in enumerate(_BYTE_UNITS):
         if count >= size:
-            return f"{count / size:.3g} {unit}"
+            text = f"{count / size:.3g}"
+            if "e" in text:  # 999.5 <= value < 1000 (or beyond the largest unit): no exponent notation
+                if index:
+                    unit, size = _BYTE_UNITS[index - 1]
+                    text = f"{count / size:.3g}"
+                else:
+                    text = f"{count / size:.0f}"
+            return f"{text} {unit}"
     return f"{int(count)} B"
+
+
+_format_bytes = format_bytes
 
 
 def bundle_summary(path):

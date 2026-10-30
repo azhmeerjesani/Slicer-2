@@ -52,10 +52,9 @@ def formatBytes(count):
     """"236 GB", "1.2 GB", "9 kB": decimal units, as the providers state sizes."""
     if count is None:
         return "—"
-    for unit, size in (("TB", 1e12), ("GB", 1e9), ("MB", 1e6), ("kB", 1e3)):
-        if count >= size:
-            return f"{count / size:.3g} {unit}"
-    return f"{int(count)} B"
+    from LesionNetworkMappingLib.manager import format_bytes
+
+    return format_bytes(count)
 
 
 def licenceText(entry):

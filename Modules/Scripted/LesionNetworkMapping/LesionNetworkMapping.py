@@ -1286,10 +1286,9 @@ def _ownRadiusText(foci):
 
 
 def _formatBytes(count):
-    for unit, size in (("TB", 1e12), ("GB", 1e9), ("MB", 1e6), ("kB", 1e3)):
-        if count >= size:
-            return f"{count / size:.3g} {unit}"
-    return f"{count} B"
+    from LesionNetworkMappingLib.manager import format_bytes
+
+    return format_bytes(count)
 
 
 def cohortExcludedText(excluded):
