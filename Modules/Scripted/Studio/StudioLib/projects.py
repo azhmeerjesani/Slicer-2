@@ -1157,16 +1157,21 @@ def _copyError(source, error):
     return result
 
 
-def _mergeMove(source, destination, sameVolume, progress=None):
+def _mergeMove(source, destination, sameVolume, progress=None, renamed=None):
     """Move ``source`` (a file or folder) to ``destination``: a rename on the same volume, else copy, check the sizes and
     delete the original. Folders that exist on both sides are merged; names that exist are kept (" 2"). Worker-safe.
+
+    ``renamed`` (a dict) receives ``{source: destination}`` for each item that moved under another name (" 2") because
+    its name was taken there.
     """
     if os.path.isdir(source) and os.path.isdir(destination):
         for name in os.listdir(source):
             target = os.path.join(destination, name)
             if os.path.exists(target) and not (os.path.isdir(target) and os.path.isdir(os.path.join(source, name)) and name in (PROJECTS_DIR, STUDIES_DIR, LNM_DIR)):
                 target = os.path.join(destination, uniqueName(destination, name, isFile=os.path.isfile(os.path.join(source, name))))
-            _mergeMove(os.path.join(source, name), target, sameVolume, progress)
+                if renamed is not None:
+                    renamed[os.path.join(source, name)] = target
+            _mergeMove(os.path.join(source, name), target, sameVolume, progress, renamed)
         try:
             os.rmdir(source)
         except OSError:
@@ -1178,6 +1183,8 @@ def _mergeMove(source, destination, sameVolume, progress=None):
             return
         destination = os.path.join(os.path.dirname(destination), uniqueName(os.path.dirname(destination), os.path.basename(destination),
                                                                             isFile=os.path.isfile(source)))
+        if renamed is not None:
+            renamed[source] = destination  # where it really goes (replaces what the caller may have recorded)
     if sameVolume:
         try:
             os.rename(source, destination)
@@ -1256,34 +1263,52 @@ def checkNotOpenElsewhere(rootPath):
             names=", ".join(names)))
 
 
-def moveContent(oldRoot, newRoot, progress=None):
+def moveContent(oldRoot, newRoot, progress=None, renamed=None):
     """Move Projects/, Studies/, LNM/, Templates/ and "About this folder.txt" from ``oldRoot`` to ``newRoot``. Worker-safe.
 
     Return the list of moved items. Raise OSError on failure (what was moved stays moved; nothing is deleted before it was
     copied and checked), and before anything is created when ``newRoot`` is inside ``oldRoot``.
+
+    ``renamed`` (a dict) receives the items that moved under another name because ``newRoot`` already had one with that
+    name (a project "MRHead" lands as "MRHead 2"): ``{path relative to oldRoot: path relative to newRoot}``. Pass it to
+    ``pathAfterMove`` so a path follows the item, never the other one that kept the name.
     """
     checkMoveTarget(oldRoot, newRoot)
     created = not os.path.isdir(newRoot)
     os.makedirs(newRoot, exist_ok=True)
     sameVolume = _sameVolume(oldRoot, newRoot)
     moved = []
+    absoluteRenames = {}
     try:
         for name in movableItems(oldRoot):
-            _mergeMove(os.path.join(oldRoot, name), os.path.join(newRoot, name), sameVolume, progress)
+            _mergeMove(os.path.join(oldRoot, name), os.path.join(newRoot, name), sameVolume, progress, absoluteRenames)
             moved.append(name)
     except OSError:
         if created and not moved:
             with contextlib.suppress(OSError):
                 os.rmdir(newRoot)  # nothing was moved: leave no empty folder behind
         raise
+    finally:
+        if renamed is not None:
+            for source, destination in absoluteRenames.items():
+                renamed[os.path.normpath(os.path.relpath(source, oldRoot))] = os.path.normpath(os.path.relpath(destination, newRoot))
     return moved
 
 
-def pathAfterMove(path, oldRoot, newRoot):
-    """``path`` inside ``oldRoot`` mapped into ``newRoot`` (unchanged when it is not inside)."""
+def pathAfterMove(path, oldRoot, newRoot, renamed=None):
+    """``path`` inside ``oldRoot`` mapped into ``newRoot`` (unchanged when it is not inside).
+
+    ``renamed`` is what ``moveContent`` recorded: an item that moved under another name (" 2") is followed there.
+    """
     if not path or not isInside(path, oldRoot):
         return path
-    relative = os.path.relpath(os.path.realpath(path), os.path.realpath(oldRoot))
+    relative = os.path.normpath(os.path.relpath(os.path.realpath(path), os.path.realpath(oldRoot)))
+    if renamed:
+        # The deepest renamed item that holds ``path`` (an item inside a renamed folder moved with it, unrenamed)
+        for source in sorted(renamed, key=len, reverse=True):
+            if relative == source or relative.startswith(source + os.sep):
+                relative = renamed[source] + relative[len(source):]
+                break
     return os.path.normpath(os.path.join(newRoot, relative))
 
 

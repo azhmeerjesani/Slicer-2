@@ -2900,6 +2900,68 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertEqual(projects_ui._question(None, "Title", "Text", ["Move", "Keep", "Cancel"]), 0)
         timer.stop()
 
+    def test_53_root_move_into_a_folder_with_a_project_of_the_same_name_follows_its_own_project(self):
+        """Change folder > Move into a Slicer Studio folder that already has a project with the open project's name (BB-1):
+        the moved project lands as "<name> 2" and the open project follows it there, scene file named after the folder.
+        The other project keeps its files. It used to map the open project to the other project's folder: the next save
+        wrote the lesion and a scene into that project (next to its own, other scan) and rewrote its project.json, while
+        the moved project no longer received the edits. A recent study that moved as "<name> 2" follows it too.
+        """
+        from StudioLib import study_ui
+
+        projects = self.projects
+        service = self._service()
+        volume, _path = self._userVolume()
+        segmentation, segmentId, array = self._lesion(volume)
+        project = self._projectFor(service)
+        self._save(service)
+        name = project.name
+        os.makedirs(os.path.join(self.root, projects.STUDIES_DIR, "Study A"))
+        oldStudy = os.path.join(self.root, projects.STUDIES_DIR, "Study A")
+        # The other Slicer Studio folder: a project and a study with the same names
+        newRoot = os.path.join(self.tempDir, "other", "Slicer Studio")
+        theirs = projects.createProject(name, rootPath=newRoot)
+        self.assertEqual(theirs.name, name)
+        with open(os.path.join(theirs.path, name + projects.SCENE_EXTENSION), "w") as f:
+            f.write("<MRML></MRML>\n")
+        os.makedirs(os.path.join(newRoot, projects.STUDIES_DIR, "Study A"))
+        theirsBefore = {path: _md5File(os.path.join(theirs.path, path)) for path in _relativeFiles(theirs.path)}
+        settings = qt.QSettings()
+        previousRecent = settings.value(study_ui.RECENT_STUDIES_KEY)
+        settings.setValue(study_ui.RECENT_STUDIES_KEY, json.dumps([{"path": oldStudy, "name": "Study A"}]))
+        os.environ.pop(projects.ROOT_ENVIRONMENT)
+        settings.setValue(projects.ROOT_KEY, self.root)
+        try:
+            service.moveRoot(newRoot, moveContent=True)
+            ours = os.path.join(os.path.normpath(newRoot), projects.PROJECTS_DIR, name + " 2")
+            self.assertTrue(os.path.isdir(ours))
+            self.assertIs(service.project, project)
+            self.assertEqual(os.path.normpath(service.project.path), ours, "the open project follows its own moved folder")
+            self.assertEqual(service.project.name, name + " 2")
+            self.assertTrue(os.path.isfile(os.path.join(ours, name + " 2" + projects.SCENE_EXTENSION)), "the scene follows the folder name")
+            self.assertTrue(volume.GetStorageNode().GetFileName().startswith(ours + os.sep))
+            array[12:16, 14:20, 16:22] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentation, segmentId, volume)
+            self._save(service)
+            scenes = sorted(entry for entry in os.listdir(ours) if entry.endswith(projects.SCENE_EXTENSION))
+            self.assertEqual(scenes, [name + " 2" + projects.SCENE_EXTENSION], "one scene file")
+            self.assertEqual(projects.readJson(projects.projectFile(ours)).get("name"), name + " 2")
+            theirsAfter = {path: _md5File(os.path.join(theirs.path, path)) for path in _relativeFiles(theirs.path)
+                           if not path.startswith(".studio/")}
+            self.assertEqual(theirsAfter, {path: digest for path, digest in theirsBefore.items() if not path.startswith(".studio/")},
+                             "the other project is not touched")
+            self.assertEqual(projects.readJson(projects.projectFile(theirs.path)).get("name"), name)
+            recent = json.loads(settings.value(study_ui.RECENT_STUDIES_KEY))
+            self.assertEqual(os.path.normpath(recent[0]["path"]), os.path.join(os.path.normpath(newRoot), projects.STUDIES_DIR, "Study A 2"))
+        finally:
+            settings.remove(projects.ROOT_KEY)
+            settings.remove(projects.ROOT_CHOSEN_KEY)
+            if previousRecent is None:
+                settings.remove(study_ui.RECENT_STUDIES_KEY)
+            else:
+                settings.setValue(study_ui.RECENT_STUDIES_KEY, previousRecent)
+            os.environ[projects.ROOT_ENVIRONMENT] = self.root
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk

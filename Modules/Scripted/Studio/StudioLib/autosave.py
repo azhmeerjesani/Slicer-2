@@ -1983,11 +1983,16 @@ class AutosaveService:
                 timer.stop()
             self._suspendCount += 1
             succeeded = False
+            # Items that landed under another name (" 2") because the new folder already had one with that name: paths
+            # follow them there, never the other item that kept the name (a project of the new folder)
+            renamed = {}
             try:
                 projects.checkNotOpenElsewhere(oldRoot)  # again: one may have been opened elsewhere while this one saved
-                function = lambda: projects.moveContent(oldRoot, newRoot)  # noqa: E731
+                function = lambda: projects.moveContent(oldRoot, newRoot, renamed=renamed)  # noqa: E731
                 moved = run(function) if run is not None else function()
                 succeeded = True
+                for relative in sorted(renamed, key=len, reverse=True):
+                    _relocateSavedLesions(os.path.join(oldRoot, relative), os.path.join(newRoot, renamed[relative]))
                 for name in moved:  # lesions saved in this session in a moved folder (outside the open project too)
                     _relocateSavedLesions(os.path.join(oldRoot, name), os.path.join(newRoot, name))
             finally:
@@ -1995,15 +2000,18 @@ class AutosaveService:
                 for timer in timers:
                     timer.start()
                 if project is not None:
-                    newPath = projects.pathAfterMove(project.path, oldRoot, newRoot)
+                    newPath = projects.pathAfterMove(project.path, oldRoot, newRoot, renamed)
                     # Follow the project only when it really moved: after a failed move its folder may still be in the
                     # old folder (where Library lists it), whatever exists in the new one
                     hasMoved = succeeded or not os.path.isdir(project.path)
                     if hasMoved and os.path.isdir(newPath) and os.path.normpath(newPath) != os.path.normpath(project.path):
+                        if os.path.basename(os.path.normpath(newPath)) != project.name:
+                            # Moved as "<name> 2": its scene file follows the folder name, as Rename does
+                            projects.renameSceneFile(newPath, project.scenePath)
                         self._relocateProject(project.path, newPath)
                     else:
                         project.lock()
-            _updateRecentStudies(oldRoot, newRoot)
+            _updateRecentStudies(oldRoot, newRoot, renamed)
         projects.setRoot(newRoot)
         return moved
 
@@ -2119,7 +2127,7 @@ def showAutosaveSettings():
         action.trigger()
 
 
-def _updateRecentStudies(oldRoot, newRoot):
+def _updateRecentStudies(oldRoot, newRoot, renamed=None):
     """Recent studies that moved with the Slicer Studio folder point at their new place (fork-only key)."""
     try:
         from StudioLib import projects, study_ui
@@ -2136,7 +2144,7 @@ def _updateRecentStudies(oldRoot, newRoot):
     changed = False
     for record in records:
         path = record.get("path") if isinstance(record, dict) else None
-        newPath = projects.pathAfterMove(path, oldRoot, newRoot) if path else path
+        newPath = projects.pathAfterMove(path, oldRoot, newRoot, renamed) if path else path
         if newPath != path:
             record["path"] = newPath
             changed = True
