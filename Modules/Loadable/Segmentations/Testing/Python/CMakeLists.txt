@@ -1,6 +1,7 @@
 #-----------------------------------------------------------------------------
 set(EXTENSION_TEST_PYTHON_SCRIPTS
   SegmentationsModuleTest1.py
+  SegmentationsClosedSurfaceTest.py
   SegmentationsModuleTest2.py
   SegmentationWidgetsTest1.py
   SegmentEditorLogicTest.py
