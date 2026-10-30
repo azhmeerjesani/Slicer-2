@@ -1076,3 +1076,35 @@ class StudioTourTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             player.stop()
             self._pump()
             self.assertIsNone(tour.activePlayer(), rowId)
+
+    def test_20_counter_total_is_the_same_all_tour(self):
+        """The counter keeps one total through a tour: steps whose control exists only hidden (the Loaded set and Studies
+        cards with none) are not counted, so 'Step 5 of 11' is not followed by 'Step 6 of 10' (bug bash).
+        """
+        from StudioLib import tour
+
+        studioShell = self._applyStudio()
+        self._resize(1366, 768)
+        for withData in (False, True):
+            if withData:
+                self._loadVolume()
+            studioShell.switchTo("library")
+            self._pump()
+            self.assertTrue(tour.startTour("library"))
+            player = tour.activePlayer()
+            self.assertIsNotNone(player)
+            counters = []
+            try:
+                for index in range(40):
+                    if not player.active:
+                        break
+                    self._pump()
+                    counters.append(str(player._card.counterLabel.text))
+                    player.next()
+            finally:
+                tour.stopTour()
+                self._pump()
+            label = f"library tour, data={withData}: {counters}"
+            totals = {text.rsplit(" ", 1)[-1] for text in counters}
+            self.assertEqual(len(totals), 1, label)
+            self.assertEqual(counters[-1], f"Step {len(counters)} of {len(counters)}", label)

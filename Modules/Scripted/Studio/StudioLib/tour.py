@@ -319,9 +319,21 @@ def _existsAnywhere(target, shell):
     return False
 
 
+def _existsVisible(target, shell):
+    """True if a widget of the target is visible now (a function target counts as there)."""
+    alternatives = target if isinstance(target, (tuple, list)) else (target,)
+    for alternative in alternatives:
+        if callable(alternative) or _migration().resolveTarget(str(alternative), shell.mainWindow) is not None:
+            return True
+    return False
+
+
 def _stepMayShow(step, shell):
-    """Whether a step will probably be shown (for the step counter): its feature is there and its control exists or
-    appears with its workspace.
+    """Whether a step will probably be shown (for the step counter): its feature is there and its control is visible
+    or appears with its workspace.
+
+    A control that exists but is hidden in the workspace that is shown (the Loaded set and Studies cards when there is
+    none) is not counted: the step would be skipped when reached, and the total of the counter would shrink mid-tour.
     """
     if step.when is not None:
         try:
@@ -338,7 +350,10 @@ def _stepMayShow(step, shell):
             return False
         if shell.currentWorkspace() != ws.key:
             return True
-    return _existsAnywhere(step.target, shell)
+    if step.inspector and not shell.isInspectorVisible():
+        # The inspector is shown when the step is reached: its controls are hidden until then
+        return _existsAnywhere(step.target, shell)
+    return _existsVisible(step.target, shell)
 
 
 #
