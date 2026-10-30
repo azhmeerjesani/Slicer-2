@@ -730,7 +730,7 @@ class NormalizeCard:
         shell = self.ctx.shell()
         if shell is not None:
             try:
-                shell.toast(_("Lesion normalized ({template}) · review the alignment").format(template=result.templateId), 3000)
+                shell.toast(_("Lesion normalized ({template}) · review the alignment").format(template=nc.templateName(result.templateId)), 3000)
             except Exception:
                 pass
         self.refresh()

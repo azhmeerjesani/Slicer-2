@@ -448,6 +448,54 @@ class LesionNetworkMappingNormalizeUITest(unittest.TestCase):
             templates.registerGrids(force=True)
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_06c_done_toast_names_user_template(self):
+        """The 'Lesion normalized' toast names the user's template by its name, never by its raw id (as the Draw card does)."""
+        from StudioLib import projects, templates
+
+        root = os.path.join(self.tmp, "studio-root-toast")
+        environment = os.environ.get(projects.ROOT_ENVIRONMENT)
+        os.environ[projects.ROOT_ENVIRONMENT] = root
+        controller = self.card.controller
+        resultBefore = controller.result
+
+        class _Shell:
+            toasts = []
+
+            def toast(self, text, _ms=0):
+                self.toasts.append(text)
+
+        class _Result:
+            segmentationNode = None
+            nativeSegmentationNode = None
+            segmentId = None
+
+            def __init__(self, templateId):
+                self.templateId = templateId
+
+        fake = _Shell()
+        try:
+            template = templates.addTemplate(self.nc.templateFile(TEMPLATE, "fixed"), mask=self.nc.templateFile(TEMPLATE, "mask"),
+                                             name="Lab toast brain", space=TEMPLATE)
+            self.assertTrue(template.id.startswith("user:"), template.id)
+            self.ctx.shell = lambda: fake
+            for templateId, expected in ((template.id, "Lab toast brain"), (TEMPLATE, TEMPLATE)):
+                result = _Result(templateId)
+                controller.result = result
+                self.card._useResult(result)
+                controller.result = None  # the deferred showInViews must not run on the stand-in
+                self.assertIn(expected, fake.toasts[-1])
+                self.assertNotIn("user:", fake.toasts[-1])
+            _pump(50)
+        finally:
+            self.ctx.__dict__.pop("shell", None)  # back to the class method
+            controller.result = resultBefore
+            if environment is None:
+                os.environ.pop(projects.ROOT_ENVIRONMENT, None)
+            else:
+                os.environ[projects.ROOT_ENVIRONMENT] = environment
+            templates.registerGrids(force=True)
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_07_edit_then_update(self):
         """An edit of the native lesion offers Update MNI lesion, which re-warps it within 5 s."""
         import numpy as np
