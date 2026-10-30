@@ -153,6 +153,27 @@ class LesionNetworkMappingCatalogDialogTest(unittest.TestCase):
         dialog.onControllerChanged()
         self.assertTrue(dialog.resumeButton.isVisibleTo(dialog))
 
+    def test_licence_chips_fit_their_column(self):
+        """The Licence column is sized from the chip cell widgets (the shipped catalog, nothing is fetched): no chip is narrower than its size hint."""
+        from LesionNetworkMappingUI import catalog_dialog
+
+        dialog = catalog_dialog.CatalogDialog()
+        self.addCleanup(dialog.deleteLater)
+        previous = dialog.controller.catalogPath  # the controller is shared: other tests point it at their own catalog
+        self.addCleanup(setattr, dialog.controller, "catalogPath", previous)
+        dialog.controller.catalogPath = None
+        dialog.refresh()
+        dialog.show()
+        for _ in range(10):
+            slicer.app.processEvents()
+        table = dialog.table
+        self.assertGreater(table.rowCount, 0)
+        for row in range(table.rowCount):
+            cell = table.cellWidget(row, 1)
+            chip = cell.findChildren("QLabel")[0]
+            self.assertGreaterEqual(chip.width, chip.sizeHint.width(), "row %d: chip '%s' is clipped" % (row, chip.text))
+            self.assertGreaterEqual(table.columnWidth(1), cell.sizeHint.width())
+
     def test_failed_terms_fetch_keeps_the_failure_text(self):
         dialog = self.makeDialog(None)
         dialog.entry = {"id": "demo-entry"}

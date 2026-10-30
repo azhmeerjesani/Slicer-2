@@ -182,10 +182,14 @@ def _button(text, objectName, primary=False):
     return button
 
 
+#: Left and right margin (px) of the chip inside its table cell
+CHIP_CELL_MARGIN = 4
+
+
 def _chipCell(text, level):
     cell = qt.QWidget()
     layout = qt.QHBoxLayout(cell)
-    layout.setContentsMargins(4, 0, 4, 0)
+    layout.setContentsMargins(CHIP_CELL_MARGIN, 0, CHIP_CELL_MARGIN, 0)
     layout.addWidget(widgets.chip(text, level), 0, qt.Qt.AlignVCenter)
     layout.addStretch(1)
     return cell
@@ -466,8 +470,11 @@ class CatalogDialog(qt.QDialog):
             cells = entryRow(entry)
             for column, value in enumerate(cells):
                 if column == 1:
-                    table.setCellWidget(row, column, _chipCell(value, licenceLevel(entry)))
+                    cell = _chipCell(value, licenceLevel(entry))
+                    table.setCellWidget(row, column, cell)
                     item = qt.QTableWidgetItem("")
+                    # ResizeToContents measures the item, not the cell widget (and the widget lies inside the item's padding): ask for the chip's whole width
+                    item.setSizeHint(qt.QSize(cell.sizeHint.width() + 2 * widgets.TABLE_ITEM_PADDING, widgets.TABLE_ROW_HEIGHT))
                 else:
                     item = qt.QTableWidgetItem(str(value))
                 item.setToolTip(entry["title"] if column == 0 else str(value))

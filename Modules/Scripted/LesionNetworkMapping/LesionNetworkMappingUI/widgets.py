@@ -513,6 +513,9 @@ def segmented(labels):
 #: Height of the rows of a ``tableView()`` (VISUAL 4.5: 28 px)
 TABLE_ROW_HEIGHT = 28
 
+#: Left and right padding (px) of the items of a ``tableView()`` (the ``::item`` rule of its style sheet)
+TABLE_ITEM_PADDING = 6
+
 
 def _tableStyleSheet():
     """Rows separated by hairlines on the card, a caption-colored header (VISUAL 4.5)."""
@@ -523,7 +526,7 @@ def _tableStyleSheet():
     table = 'QTableWidget[lnmTable="true"]'
     return (
         f"{table} {{ background: transparent; border: none; gridline-color: {hairline}; }}"
-        f"{table}::item {{ border: none; border-bottom: 1px solid {hairline}; padding: 0px 6px; }}"
+        f"{table}::item {{ border: none; border-bottom: 1px solid {hairline}; padding: 0px {TABLE_ITEM_PADDING}px; }}"
         f"{table}::item:selected {{ background-color: {ui.token('selected').name()}; color: {ui.token('text').name()}; }}"
         f"{table} QHeaderView::section {{ background: transparent; color: {ui.token('text3').name()}; border: none;"
         f" border-bottom: 1px solid {hairline}; padding: 2px 6px; font-size: {ui.fontPx(11)}px; }}")
