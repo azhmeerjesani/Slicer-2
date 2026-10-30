@@ -225,6 +225,15 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
     # (b) cards and constants
     #
 
+    def test_draw_tool_tile_icons_all_vendored(self):
+        """Every icon of draw.EFFECT_APPEARANCE is a vendored Lucide file (a missing one, formerly spline.svg of Auto outline,
+        makes effectAppearance() fall back to the effect's own coloured raster icon).
+        """
+        from StudioLib import draw, ui
+
+        missing = [f"{name}: {icon}" for name, (_text, icon) in draw.EFFECT_APPEARANCE.items() if not os.path.isfile(ui.iconPath(icon))]
+        self.assertEqual(missing, [], "Lucide icons of the Draw tool tiles are missing")
+
     def test_cards(self):
         from StudioLib import ui
 
