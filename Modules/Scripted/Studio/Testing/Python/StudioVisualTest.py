@@ -612,6 +612,71 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
         self._pump()
         self.assertEqual(frame.frameShape, qt.QFrame.StyledPanel, "the classic presentation lost the frame of the tool grid")
 
+    def test_tile_label_text_wraps_at_a_space(self):
+        """``SegmentEditor.tileLabelText()`` keeps a label that fits, breaks one that does not at a space (the shortest wider
+        line) and shortens at its end a word that is too wide, never in the middle of a word ("Aut...ine").
+        """
+        import SegmentEditor
+
+        font = qt.QFont()
+        font.setPixelSize(11)
+        metrics = qt.QFontMetrics(font)
+        wide = metrics.horizontalAdvance("Auto outline") + 4
+        self.assertEqual(SegmentEditor.tileLabelText("Auto outline", metrics, wide), "Auto outline")
+        narrow = metrics.horizontalAdvance("Auto outline") - 10
+        self.assertEqual(SegmentEditor.tileLabelText("Auto outline", metrics, narrow), "Auto\noutline")
+        self.assertEqual(SegmentEditor.tileLabelText("Mask  volume", metrics, narrow), "Mask\nvolume")
+        # The break that makes the wider line shortest
+        width = max(metrics.horizontalAdvance("Go go go"), metrics.horizontalAdvance("gogogogogo")) + SegmentEditor.TILE_TEXT_MARGIN
+        self.assertEqual(SegmentEditor.tileLabelText("Go go go gogogogogo", metrics, width), "Go go go\ngogogogogo")
+        # One long word is shortened at its end, a short one stays whole
+        self.assertEqual(SegmentEditor.tileLabelText("Brush", metrics, 100), "Brush")
+        cut = SegmentEditor.tileLabelText("Extraordinarily", metrics, 40)
+        self.assertTrue(cut.endswith("\u2026") and cut.startswith("Extra") and metrics.horizontalAdvance(cut) <= 40 - SegmentEditor.TILE_TEXT_MARGIN, cut)
+
+    def test_draw_more_tools_tile_labels_not_elided_1366(self):
+        """The tiles of Draw > More tools show their names whole: "Auto outline", "Grow seeds" and "Mask volume" are wrapped at the
+        space, "Threshold" fits a 56 px tile; the style used to elide them in the middle of the word ("Aut...ine", "Thr...old",
+        "Gro...eds", "Ma...me"). The tool grid has equal columns and the tiles keep their 60 px height.
+        """
+        import SegmentEditor
+        from StudioLib import draw, importer
+
+        studioShell = self._applyStudio()
+        self.mainWindow.showNormal()
+        self.mainWindow.resize(1366, 768)
+        self._wait(lambda: self.mainWindow.width <= 1366, 2000)
+        importer.startOnTemplate(shell=studioShell)
+        self._restores.append(importer._closeTemplateBanner)
+        self._pump(10)
+        widget = slicer.modules.SegmentEditorWidget
+        self.assertEqual(widget._appliedPresentation, "studio")
+        widget.setMoreToolsShown(True)
+        self._pump(6)
+        tiles = [button for button in widget._effectButtons() if button.isVisibleTo(widget.editor)]
+        self.assertGreaterEqual(len(tiles), 10, "More tools shows every tool")
+        widths = set()
+        for tile in tiles:
+            effect = widget._buttonEffect(tile)
+            title = draw.EFFECT_APPEARANCE.get(effect.name, (effect.title,))[0]
+            text = str(tile.text)
+            self.assertNotIn("\u2026", text, f"{title}: shortened")
+            self.assertEqual(" ".join(text.split()), title, f"{title}: not the tool name, or broken inside a word")
+            metrics = qt.QFontMetrics(tile.font)
+            for line in text.split("\n"):
+                self.assertLessEqual(metrics.horizontalAdvance(line) + SegmentEditor.TILE_TEXT_MARGIN, tile.width, f"{title}: {line!r} is wider than its {tile.width} px tile")
+            self.assertEqual(tile.height, SegmentEditor.TILE_MINIMUM_SIZE[1], f"{title}: the tile is not 60 px tall")
+            self.assertEqual(str(tile.accessibleName), title)
+            widths.add(tile.width)
+        self.assertLessEqual(max(widths) - min(widths), 1, f"the tile columns differ: {sorted(widths)}")
+        self.assertEqual(next(str(tile.text) for tile in tiles if widget._buttonEffect(tile).name == "Level tracing"), "Auto\noutline")
+        # Back to the classic presentation: plain titles, no column stretch
+        studioShell.classic(persist=False)
+        self._pump(4)
+        classicTexts = [str(button.text) for button in widget._effectButtons(allButtons=True) if widget._buttonEffect(button) is not None]
+        self.assertNotIn("Auto\noutline", classicTexts)
+        self.assertTrue(all("\n" not in text for text in classicTexts), classicTexts)
+
     def test_draw_inspector_padding_with_qt6_layout_margins(self):
         """Qt 6: QLayout declares the ``contentsMargins`` property, so PythonQt gives a QMargins value and not the getter.
 

@@ -94,6 +94,9 @@ STUDIO_TERMINOLOGY_SETTINGS_KEY = "Studio/Draw/UseTerminologySelector"
 TILE_MINIMUM_SIZE = (56, 60)
 TILE_ICON_SIZE = 20
 TILE_SPACING = 4
+#: Pixels of a tile's width that its label cannot use (the style elides a text wider than the tile minus this in the middle of the
+#: word: "Thr...old"); measured with Qt 5.15, a 59 px tile shows the 57 px "Threshold" and a 58 px one does not
+TILE_TEXT_MARGIN = 2
 #: Padding of the inspector in the studio presentation (VISUAL 2.7): the tiles start and end this far from its edges, on
 #: the edges of the section labels and cards. The tile grid has no frame there; ``_updateTileGridInset()`` makes up what the
 #: margins of the editor (they follow the density of the style) leave of it.
@@ -133,6 +136,23 @@ def _layoutContentsMargins(layout):
     """
     margins = layout.contentsMargins
     return margins() if callable(margins) else margins
+
+
+def tileLabelText(text, metrics, width):
+    """The label of a tool tile ``width`` px wide: ``text`` if it fits on one line, else broken in two lines at the space that
+    makes the wider line shortest, so that the style does not elide it in the middle of a word ("Aut...ine"). A line that is
+    still too wide (a long word, an extension's long title) is shortened at its end ("Thresh…"); ``metrics`` is the
+    ``QFontMetrics`` of the tile.
+    """
+    available = max(1, width - TILE_TEXT_MARGIN)
+    text = " ".join(str(text).split())
+    if metrics.horizontalAdvance(text) <= available:
+        return text
+    words = text.split(" ")
+    candidates = [(" ".join(words[:index]), " ".join(words[index:])) for index in range(1, len(words))]
+    lines = min(candidates, key=lambda pair: max(metrics.horizontalAdvance(line) for line in pair)) if candidates else (text,)
+    return "\n".join(line if metrics.horizontalAdvance(line) <= available else metrics.elidedText(line, qt.Qt.ElideRight, available)
+                     for line in lines)
 
 
 def isEditableSourceVolume(node):
@@ -429,7 +449,12 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             button.setMinimumSize(0, 0)
             button.setSizePolicy(qt.QSizePolicy.Minimum, qt.QSizePolicy.Preferred)
             button.setProperty("slicerRole", None)
+            button.setProperty("studioTileText", None)
+            button.setAccessibleName("")
             self._repolish(button)
+        effectsLayout = effectsGroupBox.layout() if effectsGroupBox is not None else None
+        for column in range(effectsLayout.columnCount() if effectsLayout is not None else 0):
+            effectsLayout.setColumnStretch(column, 0)
         self._removeTileOutlines()
         # Tooltips of the classic presentation (the editor writes them when its effect list is rebuilt)
         self.editor.updateEffectList()
@@ -753,20 +778,37 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             if button.property("segmentEditorEffectIcon") is None:
                 # The effect's own icon, for the classic presentation if the effect does not give it to Python
                 button.setProperty("segmentEditorEffectIcon", button.icon)
-            button.setText(text or effect.title)
+            button.setProperty("studioTileText", text or effect.title)
+            button.setAccessibleName(text or effect.title)
             if icon is not None and not icon.isNull():
                 button.setIcon(icon)
             button.setIconSize(qt.QSize(TILE_ICON_SIZE, TILE_ICON_SIZE))
             button.setMinimumSize(*TILE_MINIMUM_SIZE)
-            button.setSizePolicy(qt.QSizePolicy.Preferred, qt.QSizePolicy.Fixed)
+            # Equal columns: the width of a tile does not depend on its label, which is wrapped to the width (_updateTileLabel)
+            button.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
             if button.property("slicerRole") != "toolTile":
                 button.setProperty("slicerRole", "toolTile")
                 self._repolish(button)
+            # After the role: the label is wrapped to the tile with the font of the role
+            self._updateTileLabel(button)
             toolTip = self._callExtension(self._extension, "effectToolTip", effect.name, positionalKeyText(index))
             if toolTip:
                 button.setToolTip(toolTip)
+        for column in range(max(layout.columnCount(), columns)):
+            layout.setColumnStretch(column, 1 if column < columns else 0)
         for effectName in list(self._tileOutlines):
             self._updateTileOutline(effectName)
+
+    def _updateTileLabel(self, button):
+        """The label of a tile of the studio presentation, wrapped at a space to the width of the tile; the text of the
+        tile is set only when it changes (a resize of the tile calls this).
+        """
+        plainText = button.property("studioTileText")
+        if not plainText or button.property("slicerRole") != "toolTile":
+            return
+        text = tileLabelText(plainText, qt.QFontMetrics(button.font), button.width)
+        if button.text != text:
+            button.setText(text)
 
     def _installTileFilter(self):
         if self._tileFilter is None:
@@ -787,6 +829,7 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if obj == self._child("QFrame", "EffectsGroupBox"):
             self._scheduleColumnUpdate()
         else:
+            self._updateTileLabel(obj)
             self._updateTileOutlines()
 
     def _scheduleColumnUpdate(self):

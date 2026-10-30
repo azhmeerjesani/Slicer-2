@@ -126,7 +126,7 @@ EFFECT_APPEARANCE = {
     "Fill between slices": (_("Fill gaps"), "between-horizontal-start"),
     "Level tracing": (_("Auto outline"), "spline"),
     "Threshold": (_("Threshold"), "contrast"),
-    "Grow from seeds": (_("Grow from seeds"), "sprout"),
+    "Grow from seeds": (_("Grow seeds"), "sprout"),
     "Smoothing": (_("Smooth"), "waves"),
     "Islands": (_("Islands"), "split"),
     "Margin": (_("Margin"), "scaling"),

@@ -2964,9 +2964,15 @@ void qSlicerStyle::polish(QWidget* widget)
     {
       widget->setFont(scaledFont(widget->font(), 0.92));
     }
-    else if (role == "kbd" || role == "toolTile")
+    else if (role == "kbd")
     {
       widget->setFont(scaledFont(widget->font(), 0.85));
+    }
+    else if (role == "toolTile")
+    {
+      // 10.5 px (at a 13 px body): the 57 px "Threshold" is not elided in a 56 px tile (the style elides a text wider than
+      // the tile minus 2 px in the middle of a word)
+      widget->setFont(scaledFont(widget->font(), 0.8));
     }
   }
   // Horizontal padding of the label roles
