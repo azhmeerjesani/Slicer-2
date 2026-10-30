@@ -924,20 +924,78 @@ def _writeJsonAtomic(path, data):
     os.replace(tmpPath, path)
 
 
+class _RowElider(qt.QObject):
+    """Keeps the one-line status text of a ``ProgressRow`` that does not wrap ("Normalizing · nonlinear · 26% · ~28 s left") inside
+    its label. The label has an Ignored width, so Qt would cut the last glyphs without an ellipsis: the text is shortened with
+    an ellipsis (and the full text is the tooltip) when it is set and when the label is resized.
+    """
+
+    def __init__(self, label):
+        qt.QObject.__init__(self, label)
+        self.label = label
+        self.full = None  # the text that was set
+        self.shown = None  # what the label displays for it
+        label.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if event.type() == qt.QEvent.Resize and self.full is not None:
+            self.refresh()
+        return False
+
+    def setText(self, text):
+        self.full = str(text)
+        self.shown = None
+        self.refresh()
+
+    def refresh(self):
+        label = self.label
+        if self.shown is not None and str(label.text) != self.shown:
+            self.full = self.shown = None  # another text was set (Stopping..., a failure): it is not ours any more
+            return
+        text = self.full
+        if text is None:
+            return
+        width = label.width - 2 * label.margin - 2 * label.frameWidth
+        if label.wordWrap or width < 40:  # a wrapped text is read in full; an unplaced label gets its width with the resize event
+            shown = text
+        else:
+            shown = str(label.fontMetrics().elidedText(text, qt.Qt.ElideRight, width))
+        if str(label.text) != shown:
+            label.setText(shown)
+        self.shown = shown
+        if shown != text:
+            label.setToolTip(text)
+        elif not label.wordWrap:
+            label.setToolTip("")
+
+
+def _elider(progressRow):
+    elider = getattr(progressRow, "_rowElider", None)
+    if elider is None:
+        elider = progressRow._rowElider = _RowElider(progressRow.label)
+    return elider
+
+
 def setRowProgress(progressRow, fraction, text=None):
     """``ProgressRow.setProgress()`` without the progress bar's synchronous repaint (measured 20-35 ms per value in
     the Map panel): the bar is repainted with the next paint of the window instead.
+
+    A one-line status text that is wider than its label ends with an ellipsis (the full text is the tooltip).
     """
     bar = progressRow.bar
-    if text is not None and str(progressRow.label.text) == str(text):
+    elider = _elider(progressRow)
+    if text is not None and elider.full == str(text) and elider.shown == str(progressRow.label.text):
         text = None  # an unchanged text costs nothing
     if fraction is not None and bar.maximum == 1000 and bar.value == round(min(max(float(fraction), 0.0), 1.0) * 1000):
         if text is not None:
             progressRow.label.setText(text)
+            elider.setText(text)
         return
     bar.setUpdatesEnabled(False)
     try:
         progressRow.setProgress(fraction, text)
+        if text is not None:
+            elider.setText(text)
     finally:
         bar.setUpdatesEnabled(True)
     bar.update()

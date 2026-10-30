@@ -854,6 +854,53 @@ class StudioNormalizeTest(unittest.TestCase):
         self.assertFalse([key for key in _settingsKeys() - self.keysBefore if "ormaliz" in key], _settingsKeys() - self.keysBefore)
         study_ui.closeStudy()
 
+    def test_11_progress_text_elided(self):
+        """A one-line progress text that is wider than its label ends with an ellipsis and is the tooltip (the label used to cut
+        "~28 s left" to "~28 s lef" without a sign), and it is the full text again in a wider label.
+        """
+        from LesionNetworkMappingUI import normalize_controller as nc
+        from LesionNetworkMappingUI import widgets
+
+        host = qt.QWidget()
+        layout = qt.QVBoxLayout(host)
+        row = widgets.ProgressRow(objectNamePrefix="StudioNormalizeDrawTest")
+        row.label.setWordWrap(False)
+        row.label.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
+        layout.addWidget(row.widget)
+        host.resize(260, 60)
+        host.show()
+        try:
+            text = "Normalizing · nonlinear · 26% · ~28 s left"
+            _pump(100)
+            nc.setRowProgress(row, 0.26, text)
+            _pump(100)
+            width = row.label.width
+            metrics = row.label.fontMetrics()
+            advance = getattr(metrics, "horizontalAdvance", None) or metrics.width
+            self.assertGreater(advance(text), width, "the test needs a label that is narrower than the text")
+            shown = str(row.label.text)
+            self.assertTrue(shown.endswith("…"), shown)
+            self.assertLessEqual(advance(shown), width)
+            self.assertIn(text, str(row.label.toolTip))
+            # The same text again changes nothing; a wider label shows it in full
+            nc.setRowProgress(row, 0.27, text)
+            self.assertEqual(str(row.label.text), shown)
+            host.resize(520, 60)
+            _pump(100)
+            self.assertEqual(str(row.label.text), text)
+            self.assertEqual(str(row.label.toolTip), "")
+            host.resize(260, 60)
+            _pump(100)
+            self.assertTrue(str(row.label.text).endswith("…"))
+            # Another text, set by the row itself, is not replaced by an old one on the next resize
+            row.setProgress(0.5, "Stopping…")
+            host.resize(300, 60)
+            _pump(100)
+            self.assertEqual(str(row.label.text), "Stopping…")
+        finally:
+            host.hide()
+            host.deleteLater()
+
 
 #: How long to let events run after Done so that the deferred automatic start has happened (ms)
 AUTO_WAIT_MS = 600
