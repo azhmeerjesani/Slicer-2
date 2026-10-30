@@ -288,6 +288,29 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             actual = button.icon.actualSize(size)
             self.assertEqual((actual.width(), actual.height()), (16, 16), button.objectName)
 
+    def test_open_now_row_icons_are_16_px_at_every_pixel_ratio(self):
+        """The eye and the more button of the Open now rows draw their 16 px icons at 16 logical px, as the header buttons do:
+        without an icon size they use the style's 24 px and, at a device pixel ratio of 2, draw the icons at 24 px (BB-1).
+        """
+        studioShell = self._applyStudio()
+        self._template(studioShell)
+        self._library(studioShell)
+        card = self._panel().openNowCard
+        checked = []
+        for row, eye, _item in card._rows:
+            more = row.findChild("QToolButton", "StudioOpenNowMenuButton")
+            for button in (eye, more):
+                if button is None:
+                    continue
+                size = button.iconSize
+                self.assertEqual((size.width(), size.height()), (16, 16), button.objectName)
+                self.assertFalse(button.icon.isNull(), button.objectName)
+                actual = button.icon.actualSize(size)
+                self.assertEqual((actual.width(), actual.height()), (16, 16), button.objectName)
+                checked.append(str(button.objectName))
+        self.assertIn("StudioOpenNowEye", checked)
+        self.assertIn("StudioOpenNowMenuButton", checked)
+
     def test_empty_state_text_follows_a_larger_application_font(self):
         """With a large (18 px) application font the drop zone headline and formats line wrap and the zone grows: nothing is cut
         (USABILITY 9.4, BB-1). The default font keeps the 480 x 220 zone.
