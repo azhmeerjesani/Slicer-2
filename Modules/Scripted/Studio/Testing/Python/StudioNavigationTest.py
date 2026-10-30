@@ -461,6 +461,43 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             else:
                 settings.setValue("Studio/Mode", savedMode)
 
+    def test_4b_classic_round_trip_restores_classic_module(self):
+        """Classic -> Studio -> Classic shows the Classic module again (USABILITY P4), also when it has no workspace."""
+        studioShell = self._applyStudio()
+        settings = qt.QSettings()
+        savedMode = settings.value("Studio/Mode")
+        try:
+            studioShell.classic(persist=False)
+            slicer.util.selectModule("Volumes")
+            self._pump()
+            studioShell.studio()
+            self._pump()
+            self.assertTrue(studioShell.isActive())
+            studioShell.classic(persist=False)
+            self._pump()
+            self.assertEqual(studioShell.currentModuleName(), "Volumes")
+
+            # A module that the user opened on purpose in Studio stays
+            studioShell.studio()
+            self._pump()
+            studioShell.switchTo("draw")
+            self._pump()
+            studioShell.classic(persist=False)
+            self._pump()
+            self.assertEqual(studioShell.currentModuleName(), "SegmentEditor")
+
+            # Leaving Studio does not carry a stale module into the next round trip
+            studioShell.studio()
+            self._pump()
+            studioShell.classic(persist=False)
+            self._pump()
+            self.assertEqual(studioShell.currentModuleName(), "SegmentEditor")
+        finally:
+            if savedMode is None:
+                settings.remove("Studio/Mode")
+            else:
+                settings.setValue("Studio/Mode", savedMode)
+
     def test_5_toolbar_toggle_honoured(self):
         """View > Toolbars shows a toolbar in Studio and remembers it; Classic is unchanged (NAV-03, CM-08)."""
         mainWindow = self.mainWindow

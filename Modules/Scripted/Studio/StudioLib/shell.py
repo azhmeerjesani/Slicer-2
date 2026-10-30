@@ -1392,6 +1392,8 @@ class Shell:
         self.panelHeader = None
         self._active = False
         self._classicState = None
+        self._classicModule = None
+        self._moduleOnEntry = None
         self._classicSwitchAction = None
         self._classicSwitchSeparator = None
         self._canvas = None
@@ -1758,6 +1760,25 @@ class Shell:
         sequences = getattr(slicer.modules, "sequences", None)
         if sequences is not None and self._classicVisibility.get("sequencesAutoShowToolBar") is not None:
             sequences.autoShowToolBar = self._classicVisibility["sequencesAutoShowToolBar"]
+        self._restoreClassicModule()
+
+    def _restoreClassicModule(self):
+        """Classic shows the module it had before Studio was applied (USABILITY P4: navigation never destroys state).
+
+        Only while Studio is still on the module that apply() selected or on the Library page: a module that the
+        user opened on purpose in Studio (Draw for the Segment Editor) stays.
+        """
+        module, onEntry = self._classicModule, self._moduleOnEntry
+        self._classicModule = None
+        self._moduleOnEntry = None
+        if not module:
+            return
+        try:
+            current = str(self.currentModuleName())
+            if current in ("Studio", onEntry) and current != module and slicer.app.moduleManager().module(module) is not None:
+                slicer.util.selectModule(module)
+        except Exception:
+            logging.error(f"Studio: showing the Classic module again failed:\n{traceback.format_exc()}")
 
     #
     # Apply
@@ -1816,6 +1837,9 @@ class Shell:
             mainWindow.resizeDocks([dock], [width], qt.Qt.Horizontal)
         self._classicState = mainWindow.saveState()
         settings.setValue("Studio/ClassicWindowState", self._classicState)
+        # The module that Classic showed (not part of the window state): Classic shows it again after a round trip
+        self._classicModule = str(self.currentModuleName()) if midSession else None
+        self._moduleOnEntry = None
         self._classicToolBarNames = {toolBar.objectName for toolBar in self._mainWindowToolBars() if toolBar.objectName}
         self._unsavedToolBars = []
         self._classicTitleBar = dock.titleBarWidget()
@@ -1978,6 +2002,7 @@ class Shell:
 
         # 8. Start workspace
         self.switchTo(self._midSessionWorkspace() if midSession else self._startWorkspace())
+        self._moduleOnEntry = str(self.currentModuleName())
 
         # 9. Navigation behaviours of the views that only Studio uses
         self._applyNavigationBehaviours(True)
