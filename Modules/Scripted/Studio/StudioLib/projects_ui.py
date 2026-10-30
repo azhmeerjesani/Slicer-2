@@ -1029,6 +1029,10 @@ class ProjectsSection(qt.QObject):
         self._timer.setInterval(REFRESH_DELAY_MS)
         self._timer.connect("timeout()", self.refresh)
         projects.addListener(self.scheduleRefresh)
+        # Projects that another window (or a file manager, a sync service) creates, renames or removes in the folder
+        self._watcher = qt.QFileSystemWatcher()
+        self._watcher.connect("directoryChanged(QString)", self._folderChanged)
+        self._watchedFolder = None
         ui.bindStyleSheet(self.widget, self._styleSheet)
         ui.addPaletteListener(self._refreshIcons)
         self._refreshIcons()
@@ -1111,6 +1115,23 @@ class ProjectsSection(qt.QObject):
         if _isAlive(self.widget):
             self._timer.start()
 
+    def _folderChanged(self, *_args):
+        self.scheduleRefresh()
+
+    def _watchFolder(self):
+        """Watch the Projects folder (the Slicer Studio folder while Projects/ does not exist yet)."""
+        folder = projects.projectsFolder()
+        if not os.path.isdir(folder):
+            folder = projects.root()
+        if folder == self._watchedFolder and list(self._watcher.directories()):
+            return
+        old = list(self._watcher.directories())
+        if old:
+            self._watcher.removePaths(old)
+        self._watchedFolder = folder
+        if os.path.isdir(folder):
+            self._watcher.addPath(folder)
+
     def toggleAll(self):
         self._showAll = not self._showAll
         self._signature = None
@@ -1142,6 +1163,7 @@ class ProjectsSection(qt.QObject):
             return
         self.caption.setText(self.captionText())
         self.caption.setToolTip(projects.root())
+        self._watchFolder()
         infos = sortProjects(projects.listProjects(), self.sortOrder)
         self._infos = infos
         if self.onRefreshed is not None:
@@ -1364,6 +1386,11 @@ class ProjectsSection(qt.QObject):
         projects.removeListener(self.scheduleRefresh)
         ui.removePaletteListener(self._refreshIcons)
         self._timer.stop()
+        try:
+            self._watcher.disconnect("directoryChanged(QString)", self._folderChanged)
+            self._watcher.removePaths(list(self._watcher.directories()))
+        except Exception:
+            pass
         try:
             slicer.app.disconnect("aboutToQuit()", self._removeEventFilters)
         except Exception:
@@ -1921,6 +1948,11 @@ def announce(event, project, **info):
                     level="consequence", action=showProjectFolder, actionText=_("Show"))
     elif event == "failed":
         message(_("Not saved: {reason}").format(reason=info.get("reason") or ""), level="warning", action=saveNow, actionText=_("Retry"), ms=8000)
+    elif event == "not-opened":
+        # A project that could not be opened (not a failed save: no Retry that saves the open scene)
+        message(info.get("reason") or "", level="warning", ms=8000)
+        if info.get("missing"):
+            projects.notifyChanged()  # the Library lists the folder again
 
 
 #

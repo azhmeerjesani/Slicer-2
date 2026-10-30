@@ -1247,7 +1247,7 @@ class AutosaveService:
 
     def setProjectAnnouncer(self, announcer):
         """``announcer(event, project, **info)``: "created", "copy", "copy-incomplete", "opened", "locked", "conflict", "failed",
-        "saved".
+        "not-opened", "saved".
         """
         self._projectAnnouncer = announcer
 
@@ -1727,7 +1727,13 @@ class AutosaveService:
         projects = self._projects()
         scenePath = projects.sceneFile(path)
         if scenePath is None:
-            self._announce("failed", None, reason=_("{name} has no scene file").format(name=os.path.basename(path)))
+            # Not a failed save: the folder is gone (renamed, moved or trashed by another window) or has no scene
+            name = os.path.basename(os.path.normpath(path))
+            if not os.path.isdir(path):
+                self._announce("not-opened", None, name=name, missing=True,
+                               reason=_("{name} was renamed or moved; the list is refreshed").format(name=name))
+            else:
+                self._announce("not-opened", None, name=name, missing=False, reason=_("{name} has no scene file").format(name=name))
             return False
         if projects.isLockedByOther(path):
             self._announce("locked", projects.Project(path))

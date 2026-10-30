@@ -2731,6 +2731,62 @@ class StudioProjectsTest(unittest.TestCase):
                 os.environ["TZ"] = savedZone
             time.tzset()
 
+    def test_50_library_follows_other_windows_and_a_vanished_project_is_not_a_failed_save(self):
+        """Another window creates and renames projects in the folder: the Library lists them without a workspace switch
+        (a folder watcher), and opening a card whose folder is gone says it was renamed or moved (no "Not saved", no Retry)
+        and lists the folder again.
+        """
+        from StudioLib import projects_ui
+
+        projects = self.projects
+        projects.createProject("First")
+        section = projects_ui.ProjectsSection()
+
+        def names():
+            return sorted(os.path.basename(str(card.property("studioProjectPath"))) for card in section.cards())
+
+        def waitFor(predicate, seconds=10.0):
+            end = time.time() + seconds
+            while time.time() < end and not predicate():
+                slicer.app.processEvents()
+                time.sleep(0.02)
+            return predicate()
+
+        service = self._service()
+        announced = []
+        service.setProjectAnnouncer(lambda event, project, **info: announced.append((event, info)))
+        messages = []
+        original = projects_ui.message
+        try:
+            section.refresh()
+            self.assertEqual(names(), ["First"])
+            # What another process does: a folder appears in Projects/ (no notification of this process)
+            other = os.path.join(projects.projectsFolder(), "Other")
+            os.makedirs(other)
+            self.assertTrue(waitFor(lambda: names() == ["First", "Other"]), names())
+            renamed = os.path.join(projects.projectsFolder(), "Other renamed")
+            os.rename(other, renamed)
+            self.assertTrue(waitFor(lambda: names() == ["First", "Other renamed"]), names())
+            # A stale card: its folder is gone
+            self.assertFalse(service.openProject(other))
+            self.assertEqual([event for event, _info in announced], ["not-opened"])
+            self.assertTrue(announced[0][1]["missing"])
+            self.assertEqual(announced[0][1]["reason"], "Other was renamed or moved; the list is refreshed")
+            # The message is a warning without the Retry of a failed save
+            projects_ui.message = lambda text, **kwargs: messages.append((text, kwargs))
+            projects_ui.announce("not-opened", None, **announced[0][1])
+            self.assertEqual(messages[0][0], "Other was renamed or moved; the list is refreshed")
+            self.assertNotIn("action", messages[0][1])
+            # A folder that exists without a scene file keeps its own reason
+            announced.clear()
+            self.assertFalse(service.openProject(renamed))
+            self.assertFalse(announced[0][1]["missing"])
+            self.assertEqual(announced[0][1]["reason"], "Other renamed has no scene file")
+        finally:
+            projects_ui.message = original
+            section.dispose()
+            section.widget.deleteLater()
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk
