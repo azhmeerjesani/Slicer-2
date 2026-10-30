@@ -466,7 +466,9 @@ class MapOverlay:
         ticks = qt.QHBoxLayout()
         self.tickLabels = []
         for index, alignment in enumerate((qt.Qt.AlignLeft, qt.Qt.AlignHCenter, qt.Qt.AlignRight)):
-            tick = ui.label("", "caption", "text3", f"StudioMapLegendTick{index}")
+            # text2, not text3: the legend fill is the Window colour at 86% over the black view (#dbdbdb in the light
+            # theme), where text3 is only 3.8:1
+            tick = ui.label("", "caption", "text2", f"StudioMapLegendTick{index}")
             ui.tabular(tick)
             tick.setAlignment(alignment | qt.Qt.AlignVCenter)
             ticks.addWidget(tick, 1)

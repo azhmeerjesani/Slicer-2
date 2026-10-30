@@ -1098,6 +1098,39 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
         self.assertTrue(fitsLabel(refitted), (refitted, label.width))
         self.assertIn(text, str(label.toolTip))
 
+    def test_map_legend_tick_values_readable_in_both_themes(self):
+        """The legend's tick values (-3.6, 0, 3.6) are painted with at least 4.5:1 contrast on the legend fill (the Window
+        colour at 86% over the black view), in the dark and in the light theme: text3 is only 3.8:1 on the light fill.
+        """
+        from collections import Counter
+
+        from StudioLib import mappage, ui
+
+        studioShell = self._applyStudio()
+        for theme in ("dark", "light"):
+            self._setTheme(theme)
+            studioShell.switchTo("map")
+            self._pump(10)
+            overlay = mappage.overlay()
+            if overlay is None:
+                self.skipTest("the Map overlay is not available")
+            overlay._state = {"statistic": "T", "window": 7.2, "level": 0.0, "threshold": None, "thresholdText": "", "sign": "both", "opacity": 0.8, "outline": False}
+            overlay.place()
+            self.assertTrue(self._wait(overlay.legend.isVisible, 2000), theme)
+            window = qt.QColor(ui.token("window"))
+            fill = qt.QColor(round(window.red() * 0.86), round(window.green() * 0.86), round(window.blue() * 0.86))
+            self.assertEqual(len(overlay.tickLabels), 3)
+            for tick in overlay.tickLabels:
+                tick.setText("-3.6")
+                self._pump(3)
+                image = tick.grab().toImage()
+                pixels = [(qt.QColor(image.pixel(x, y)).red(), qt.QColor(image.pixel(x, y)).green(), qt.QColor(image.pixel(x, y)).blue())
+                          for y in range(image.height()) for x in range(image.width())]
+                background = Counter(pixels).most_common(1)[0][0]
+                foreground = max(pixels, key=lambda p: sum(abs(p[i] - background[i]) for i in range(3)))
+                ratio = ui.contrastRatio(qt.QColor(*foreground), fill)
+                self.assertGreaterEqual(ratio, 4.5, f"{theme} {tick.objectName}: tick text {qt.QColor(*foreground).name()} on the legend fill {fill.name()} is {ratio:.2f}:1")
+
     def test_closed_combo_text_is_elided_with_an_ellipsis(self):
         """The current text of a closed combo box that does not fit is drawn elided ("…"), not clipped in the middle of a word
         (VISUAL.md section 6): the combo looks the same as one that holds a shorter text ending in an "…" that is visible. The
