@@ -74,9 +74,15 @@ modality, never the patient's name, identifier or dates.
   DICOM-derived volumes keep their full direction matrix. A left-handed grid is
   stored with `qfac = -1`, as 3D Slicer does.
 - **Transforms.** If a transform is applied to an image in the scene, the
-  exported copy is moved by it (a linear transform only changes the affine; a
-  non-linear one is resampled). The scene itself is not changed, and the sidecar
-  says which transform was applied.
+  exported copy is moved by it. A rigid transform, or one that only adds a
+  scale, only changes the affine. A non-linear transform is resampled. A linear
+  transform with shear (for example a 12-parameter affine registration with
+  different scales along rotated axes) is resampled too: a NIfTI affine cannot
+  hold shear in both sform and qform, so writing it unchanged would put the
+  image in different places in 3D Slicer (qform) and in FSL or nibabel (sform).
+  Scans are resampled with linear interpolation, label maps and lesions with
+  nearest neighbour. The scene itself is not changed, and the sidecar says which
+  transform was applied and whether the copy was resampled.
 - **Codes.** sform and qform are both written and equal:
 
   | Code | Meaning | When |

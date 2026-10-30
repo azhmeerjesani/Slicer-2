@@ -631,6 +631,87 @@ class StudioNiftiExportTest(unittest.TestCase):
         result = self.export.exportVolume(labels, os.path.join(self.out, "labels_warped.nii.gz"))
         self.assertIn("nearest neighbour", self._sidecar(result.images[0])["TransformApplied"]["Description"])
 
+    def test_06aa_sheared_linear_transform_is_resampled(self):
+        """A linear transform with shear (a 12-DOF affine registration with non-uniform scaling) cannot be folded into a
+        NIfTI affine: its qform (rotation and zooms only) would differ from its sform, and 3D Slicer (qform) would place the
+        voxels several mm away from FSL and nibabel (sform). The copy is resampled instead: sform equals qform, and both put
+        the marker where the views show it. Scans, label maps and segmentations alike.
+        """
+        angle = np.deg2rad(30.0)
+        rotation = np.eye(4)
+        rotation[:2, :2] = [[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]]
+        sheared = np.diag([2.0, 1.0, 1.0, 1.0]) @ rotation
+        sheared[:3, 3] = (1.5, -2.0, 0.5)
+        self.assertTrue(self.export.hasShear(sheared))
+        self.assertFalse(self.export.hasShear(rotation))
+        self.assertFalse(self.export.hasShear(np.diag([2.0, 1.0, 3.0, 1.0])), "a non-uniform scale alone has no shear")
+        transformNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", "affine")
+        transformNode.SetMatrixTransformToParent(_matrix(sheared))
+        ijkToRas = np.array([[-1.0, 0, 0, 10], [0, -1.0, 0, 10], [0, 0, 1.0, -10], [0, 0, 0, 1]])
+        marker = np.array([-6.0, 2.0, 4.0, 1.0])
+        shown = (sheared @ marker)[:3]
+
+        def assertWhereShown(path, sidecarInterpolation):
+            from LesionNetworkMappingLib import nifti
+
+            _data, affine, header = self._read(path)
+            # Every reader agrees: the qform (what 3D Slicer and ITK read) equals the sform (FSL, nibabel)
+            self.assertFalse(self.export.hasShear(affine), "the written affine has no shear")
+            np.testing.assert_allclose(header["qform"], header["sform"], atol=1e-5)
+            self.assertLess(nifti.xform_disagreement(header), 1e-3)
+            self.assertEqual((header["sform_code"], header["qform_code"]), (2, 2))
+            np.testing.assert_allclose(self._markerRas(path), shown, atol=1.0)
+            # 3D Slicer reopens the file with the marker where the views showed it
+            reopened = slicer.util.loadVolume(path)
+            array = slicer.util.arrayFromVolume(reopened)
+            k, j, i = np.unravel_index(int(np.argmax(array)), array.shape)
+            np.testing.assert_allclose((_ijkToRas(reopened) @ [i, j, k, 1.0])[:3], shown, atol=1.0)
+            slicer.mrmlScene.RemoveNode(reopened)
+            transformApplied = self._sidecar(path)["TransformApplied"]
+            self.assertTrue(transformApplied["Linear"])
+            self.assertIn(f"resampled, {sidecarInterpolation}", transformApplied["Description"])
+
+        scan = self._phantom("sheared scan", ijkToRas, markerRas=marker[:3])
+        scan.SetAndObserveTransformNodeID(transformNode.GetID())
+        nodesBefore = slicer.mrmlScene.GetNumberOfNodes()
+        result = self.export.exportVolume(scan, os.path.join(self.out, "sheared.nii.gz"))
+        self.assertEqual(result.errors, [])
+        assertWhereShown(result.images[0], "linear interpolation")
+        # The scene is unchanged and no temporary node is left
+        self.assertEqual(slicer.mrmlScene.GetNumberOfNodes(), nodesBefore)
+        np.testing.assert_allclose(_ijkToRas(scan), ijkToRas)
+        self.assertIs(scan.GetParentTransformNode(), transformNode)
+
+        labels = np.zeros((21, 21, 21), np.uint8)
+        i, j, k = (round(value) for value in np.linalg.solve(ijkToRas, marker)[:3])
+        labels[k, j, i] = 5
+        labelmap = self._volume("sheared labels", labels, ijkToRas, className="vtkMRMLLabelMapVolumeNode")
+        labelmap.SetAndObserveTransformNodeID(transformNode.GetID())
+        result = self.export.exportVolume(labelmap, os.path.join(self.out, "sheared_labels.nii.gz"))
+        assertWhereShown(result.images[0], "nearest neighbour")
+        self.assertEqual(set(np.unique(self._read(result.images[0])[0]).tolist()), {0, 5}, "label values are kept")
+
+        # A segmentation is exported on its own cropped extent: a block lesion fills it to the corners, and the voxels
+        # outside the moved block must stay 0 (the resampled mask is not its whole bounding box)
+        grid = self._volume("grid", np.zeros((21, 21, 21), np.int16), ijkToRas)
+        block = np.zeros((21, 21, 21), np.uint8)
+        block[k - 1 : k + 2, j - 1 : j + 2, i - 1 : i + 2] = 1
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesions (sheared scan)")
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(grid)
+        segmentId = segmentation.GetSegmentation().AddEmptySegment("", "Lesion")
+        slicer.util.updateSegmentBinaryLabelmapFromArray(block, segmentation, segmentId, grid)
+        segmentation.SetAndObserveTransformNodeID(transformNode.GetID())
+        result = self.export.exportSegmentation(segmentation, os.path.join(self.out, "sheared_lesion.nii.gz"), mode=self.export.SEGMENTATION_MASKS)
+        self.assertEqual(result.errors, [])
+        data, affine, _header = self._read(result.images[0])
+        self.assertFalse(self.export.hasShear(affine))
+        # The transform doubles the volume: 27 voxels of 1 mm become about 54 (nearest neighbour)
+        self.assertTrue(40 <= int(data.sum()) <= 70, int(data.sum()))
+        centre = (affine @ np.array([*np.argwhere(data > 0).mean(axis=0), 1.0]))[:3]
+        np.testing.assert_allclose(centre, shown, atol=0.75)
+        self.assertIn("resampled, nearest neighbour", self._sidecar(result.images[0])["TransformApplied"]["Description"])
+
     def test_06b_fallback_writer_keeps_the_scene(self):
         """3D Slicer's writer (the fallback without LesionNetworkMappingLib) does not re-point the node's storage node."""
         node = self._phantom("fallback", np.array([[1.0, 0, 0, -10], [0, 1.0, 0, -10], [0, 0, 1.0, -10], [0, 0, 0, 1]]))

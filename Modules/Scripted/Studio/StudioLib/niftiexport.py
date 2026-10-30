@@ -7,8 +7,11 @@ Every image that Studio shows can be written as a standard single-file NIfTI-1 i
   (sform = qform = IJK to RAS; the qform has qfac = -1 for a left-handed grid). Oblique and DICOM-derived volumes keep
   their full direction matrix: nothing is resampled unless the user asks for a reference image. Voxels are written in
   the volume's own (i, j, k) order, so a voxel at negative RAS x (the subject's left) stays at negative x in every reader.
-- **Transforms.** A linear transform applied to a node is folded into the affine of the exported copy (no resampling);
-  a non-linear one is hardened into a temporary copy (resampled). The scene is never changed; the sidecar says so.
+- **Transforms.** A linear transform applied to a node is folded into the affine of the exported copy (no resampling)
+  when the result is still a rotation times a scale; a non-linear one, or a linear one with shear (a 12-DOF affine
+  registration with non-uniform scaling), is hardened into a temporary copy (resampled), because a NIfTI qform cannot
+  hold shear and readers that use the qform (3D Slicer, ITK) would place the voxels elsewhere than those that use the
+  sform (FSL, nibabel). The scene is never changed; the sidecar says so.
 - **Codes.** sform and qform codes are 4 (MNI152) on a recognised MNI grid or one of the user's templates (A-10),
   2 (aligned) for an image whose transform was applied, 1 (scanner) otherwise; units are mm and seconds.
 - **4D images.** A 4D image opened as a sequence (fMRI, a 4D mask: ``importer.loadSequence``) is written whole, as one 4D
@@ -453,21 +456,118 @@ def _cloneVolume(volumeNode, transformNode=None):
     return clone
 
 
+#: Largest cosine between two axes of an affine that still counts as orthogonal (no shear): 1e-5 moves a voxel 256 mm
+#: from the origin by less than 0.003 mm, while the 12-DOF affines of registrations are far above it
+SHEAR_TOLERANCE = 1e-5
+
+
+def hasShear(affine):
+    """True when the axes of the 4x4 (or 3x3) ``affine`` are not orthogonal: it is not a rotation times a scale.
+
+    A NIfTI qform holds only a rotation, zooms and an offset: the sform of such an affine could not equal its qform, and
+    3D Slicer (which reads the qform) would place the voxels elsewhere than FSL or nibabel (which read the sform).
+    """
+    matrix = np.asarray(affine, dtype=np.float64)[:3, :3]
+    norms = np.linalg.norm(matrix, axis=0)
+    if np.any(norms == 0):
+        return False
+    directions = matrix / norms[np.newaxis, :]
+    cosines = directions.T @ directions - np.eye(3)
+    return bool(np.abs(cosines).max() > SHEAR_TOLERANCE)
+
+
+def _withoutShear(affine):
+    """``affine`` itself when it has no shear, else the closest rotation (polar decomposition) times its axis lengths."""
+    affine = np.asarray(affine, dtype=np.float64)
+    if not hasShear(affine):
+        return affine
+    norms = np.linalg.norm(affine[:3, :3], axis=0)
+    u, _s, vt = np.linalg.svd(affine[:3, :3] / norms[np.newaxis, :])
+    result = affine.copy()
+    result[:3, :3] = (u @ vt) * norms[np.newaxis, :]
+    return result
+
+
+def _withZeroBorder(labelmapNode):
+    """Add one voxel of 0 around the image of a temporary label map whose corners are mostly labelled, in place (its
+    voxels stay where they are).
+
+    Resampling (``vtkMRMLVolumeNode::ApplyNonLinearTransform``) fills the voxels outside the input with the median of the
+    8 corner voxels: for a segment exported on its own cropped extent (a lesion touching the corners) that is the label
+    itself, and the whole bounding box of the moved lesion would be filled. A label map with background corners is left
+    as it is, so that it is resampled onto the same grid as a scan of the same geometry.
+    """
+    imageData = labelmapNode.GetImageData()
+    if imageData is None or imageData.GetNumberOfPoints() == 0:
+        return
+    array = slicer.util.arrayFromVolume(labelmapNode)
+    # The background that vtkMRMLVolumeNode::GetImageBackgroundScalarComponentAsDouble takes (4th smallest corner)
+    corners = sorted(float(array[k, j, i]) for k in (0, -1) for j in (0, -1) for i in (0, -1))
+    if corners[3] == 0.0:
+        return
+    extent = imageData.GetExtent()
+    pad = vtk.vtkImageConstantPad()
+    pad.SetInputData(imageData)
+    pad.SetConstant(0)
+    pad.SetOutputWholeExtent(extent[0] - 1, extent[1] + 1, extent[2] - 1, extent[3] + 1, extent[4] - 1, extent[5] + 1)
+    pad.Update()
+    padded = vtk.vtkImageData()
+    padded.DeepCopy(pad.GetOutput())
+    padded.SetExtent(extent[0], extent[1] + 2, extent[2], extent[3] + 2, extent[4], extent[5] + 2)
+    matrix = vtk.vtkMatrix4x4()
+    labelmapNode.GetIJKToRASMatrix(matrix)
+    ijkToRas = _matrixToArray(matrix)
+    shift = np.eye(4)
+    shift[:3, 3] = -1.0
+    labelmapNode.SetAndObserveImageData(padded)
+    labelmapNode.SetIJKToRASMatrix(_arrayToMatrix(ijkToRas @ shift))
+
+
+def _resampledThroughLinear(volumeNode, toWorld):
+    """A temporary copy of ``volumeNode`` moved by the 4x4 ``toWorld`` (its transform to world), resampled on a grid
+    without shear: the volume's own axes, as when a non-linear transform is hardened (``_temporaryNodes`` removes it).
+    """
+    matrix = vtk.vtkMatrix4x4()
+    volumeNode.GetIJKToRASMatrix(matrix)
+    ijkToRas = _matrixToArray(matrix)
+    grid = _withoutShear(ijkToRas)
+    # The copy is placed on ``grid``; this transform takes it to where the views show the volume (toWorld @ ijkToRas)
+    scene = slicer.mrmlScene
+    gridToWorld = scene.AddNewNodeByClass("vtkMRMLLinearTransformNode", scene.GenerateUniqueName("StudioNiftiExport"))
+    gridToWorld.SetHideFromEditors(True)
+    gridToWorld.SetSaveWithScene(False)
+    gridToWorld.SetMatrixTransformToParent(_arrayToMatrix(toWorld @ ijkToRas @ np.linalg.inv(grid)))
+    clone = _cloneVolume(volumeNode, gridToWorld)
+    clone.SetIJKToRASMatrix(_arrayToMatrix(grid))
+    if clone.IsA("vtkMRMLLabelMapVolumeNode"):
+        _withZeroBorder(clone)
+    transform = vtk.vtkGeneralTransform()
+    gridToWorld.GetTransformToWorld(transform)
+    # ApplyNonLinearTransform resamples (vtkImageReslice) whatever the transform is: hardening a linear transform would
+    # only change the IJK to RAS matrix, which keeps the shear
+    clone.ApplyNonLinearTransform(transform)
+    clone.SetAndObserveTransformNodeID(None)
+    return clone
+
+
 def volumeData(volumeNode):
     """``(data_ijk, affine, transformNote)`` of a scalar volume as it is shown in the views.
 
     ``data_ijk`` is a copy of the voxels indexed [i, j, k] (file order), ``affine`` the 4x4 IJK to RAS matrix in world
-    coordinates. A linear parent transform is folded into the affine; a non-linear one is hardened into a temporary copy
-    (resampled). ``transformNote`` describes what was applied (None without a transform). Call it inside
-    ``_temporaryNodes()``. The scene is never changed.
+    coordinates. A linear parent transform is folded into the affine when the result has no shear; a non-linear one, or a
+    linear one that would give the affine shear (``hasShear``: a NIfTI file cannot store it consistently), is hardened
+    into a temporary copy (resampled). ``transformNote`` describes what was applied (None without a transform). Call it
+    inside ``_temporaryNodes()``. The scene is never changed.
     """
     transformNode = volumeNode.GetParentTransformNode()
     note = None
+    # Label maps (also the temporary ones of segmentations) are resampled nearest neighbour, other volumes linearly
+    interpolation = "nearest neighbour" if volumeNode.IsA("vtkMRMLLabelMapVolumeNode") else "linear interpolation"
     if transformNode is not None and not transformNode.IsTransformToWorldLinear():
         clone = _cloneVolume(volumeNode)
+        if clone.IsA("vtkMRMLLabelMapVolumeNode"):
+            _withZeroBorder(clone)
         slicer.vtkSlicerTransformLogic().hardenTransform(clone)
-        # Label maps (also the temporary ones of segmentations) are resampled nearest neighbour, other volumes linearly
-        interpolation = "nearest neighbour" if volumeNode.IsA("vtkMRMLLabelMapVolumeNode") else "linear interpolation"
         note = {"Name": transformNode.GetName(), "Linear": False,
                 "Description": f"A non-linear transform was applied to the exported copy (resampled, {interpolation})"}
         volumeNode = clone
@@ -478,9 +578,18 @@ def volumeData(volumeNode):
     if transformNode is not None:
         toWorld = vtk.vtkMatrix4x4()
         transformNode.GetMatrixTransformToWorld(toWorld)
-        affine = _matrixToArray(toWorld) @ affine
-        note = {"Name": transformNode.GetName(), "Linear": True,
-                "Description": "The linear transform was applied to the exported copy's affine (no resampling)"}
+        toWorld = _matrixToArray(toWorld)
+        if hasShear(toWorld @ affine):
+            volumeNode = _resampledThroughLinear(volumeNode, toWorld)
+            volumeNode.GetIJKToRASMatrix(matrix)
+            affine = _matrixToArray(matrix)
+            note = {"Name": transformNode.GetName(), "Linear": True,
+                    "Description": f"The linear transform has shear, which a NIfTI affine cannot hold: it was applied to the exported copy "
+                                   f"(resampled, {interpolation})"}
+        else:
+            affine = toWorld @ affine
+            note = {"Name": transformNode.GetName(), "Linear": True,
+                    "Description": "The linear transform was applied to the exported copy's affine (no resampling)"}
     array = slicer.util.arrayFromVolume(volumeNode)
     if array is None or array.ndim != 3:
         raise ExportError(_("{name} is not a 3D image").format(name=volumeNode.GetName()))
