@@ -457,6 +457,10 @@ class ExportDialog(qt.QDialog):
         qt.QDialog.showEvent(self, event)
         # Before the dialog is shown the list's viewport has no final height yet
         self._scrollToFirstChecked()
+        # The first show sizes the dialog with QDialog's adjustSize, which Qt caps at 2/3 of the screen height (512 px at 1366x768):
+        # the wrapped texts need more, so the squeezed layout would draw the list under the folder card and clip the controls.
+        # A resize has no such cap.
+        self._fitHeight()
 
     def setChecked(self, nodeIds):
         nodeIds = set(nodeIds)
@@ -567,7 +571,12 @@ class ExportDialog(qt.QDialog):
         layout.activate()
         # The height the wrapped texts need at the dialog's width (sizeHint() would assume a narrower dialog)
         height = layout.totalHeightForWidth(self.width) if layout.hasHeightForWidth() else layout.totalSizeHint().height()
-        self.resize(self.width, max(height, layout.totalMinimumSize().height()))
+        height = max(height, layout.totalMinimumSize().height())
+        screen = ui.screenOf(self)
+        if screen is not None:
+            # Never taller than the screen's usable area (the window frame takes a few pixels)
+            height = min(height, max(screen.availableGeometry.height() - 40, layout.totalMinimumSize().height()))
+        self.resize(self.width, height)
 
     #
     # Export

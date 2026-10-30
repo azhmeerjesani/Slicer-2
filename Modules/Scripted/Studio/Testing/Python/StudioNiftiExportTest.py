@@ -941,6 +941,35 @@ class StudioNiftiExportTest(unittest.TestCase):
         self.assertEqual(dialog.list.height, dialog.list.minimumHeight)
         dialog.close()
 
+    def test_08ac_dialog_opens_at_the_height_its_content_needs(self):
+        """With a segmentation listed (the tall layout) the first show is not capped at 2/3 of the screen height (Qt's adjustSize
+        limit, 512 px at 1366x768): the list stays above the folder card and the segmented controls keep their size.
+        """
+        from StudioLib import autosave_io, niftiexport_ui, ui
+
+        first = self._volume("scan", np.ones((3, 3, 3), np.int16), np.eye(4))
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesions (sub-03_ses-01_acq-highres_T1w_with_a_rather_long_descriptive_name)")
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(first)
+        segmentId = segmentation.GetSegmentation().AddEmptySegment("Lesion", "Lesion")
+        slicer.util.updateSegmentBinaryLabelmapFromArray(np.ones((3, 3, 3), np.uint8), segmentation, segmentId, first)
+        others = [self._volume(f"sub-03_{name}_resampled_onto_a_coarse_grid_for_the_test", np.ones((3, 3, 3), np.int16), np.eye(4)) for name in ("FLAIR", "T2w")]
+        dialog = niftiexport_ui.exportNodesDialog([segmentation] + others, show=False, executor=autosave_io.InlineExecutor())
+        dialog.setFolder(self.out)
+        dialog.show()
+        for _ in range(5):
+            slicer.app.processEvents()
+        layout = dialog.layout()
+        screenHeight = ui.screenOf(dialog).availableGeometry.height()
+        needed = layout.totalHeightForWidth(dialog.width) if layout.hasHeightForWidth() else layout.totalSizeHint().height()
+        self.assertGreaterEqual(dialog.height, min(needed, screenHeight - 40), "the dialog opens at the height its content needs")
+        card = dialog.findChild(qt.QWidget, "StudioNiftiExportFolderCard")
+        listBottom = dialog.list.geometry.y() + dialog.list.geometry.height()
+        self.assertLessEqual(listBottom, card.geometry.y(), "the image list is not drawn under the folder card")
+        for name in ("StudioNiftiExportFormat",):
+            control = dialog.findChild(qt.QWidget, name)
+            self.assertGreaterEqual(control.height, control.sizeHint.height(), f"{name} is not clipped")
+        dialog.close()
+
     def test_08ab_long_folder_path_is_elided_and_keeps_the_end(self):
         """A destination path wider than the folder card is elided with an ellipsis that keeps 'Exports/nifti'; the tooltip has it all."""
         from StudioLib import autosave_io, niftiexport_ui
