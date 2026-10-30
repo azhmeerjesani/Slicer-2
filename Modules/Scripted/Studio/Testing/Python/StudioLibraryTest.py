@@ -1402,3 +1402,30 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertEqual(label.text, text)
             self.assertNotEqual(label.font.capitalization(), qt.QFont.AllUppercase, text)
             self.assertEqual(label.font.letterSpacing(), 0.0, text)
+
+    def test_assign_button_returns_when_the_form_closes(self):
+        """The "Assign second tracing…" row of the Agreement card and of the BATCH card is shown again when the form closes (Cancel,
+        Assign, Escape). Assign saves and refreshes the card while the form is still open, so the row stayed hidden afterwards.
+        """
+        from StudioLib import libcard_agreement
+
+        card = libcard_agreement.AgreementCard(None)
+        batch = libcard_agreement.BatchSection(None)
+        host = qt.QWidget()
+        layout = qt.QVBoxLayout(host)
+        layout.addWidget(card.widget)
+        layout.addWidget(batch.widget)
+        host.show()
+        self.cleanup.append(host.deleteLater)
+        for form, row, open_ in ((card.form, card.assignRow, card._showForm), (batch.form, batch.row, batch._showForm)):
+            for close in (form.hide, form.cancelButton.click):
+                open_()
+                self.assertTrue(form.isOpen())
+                self.assertTrue(row.isHidden())
+                # a refresh while the form is open keeps the row hidden, as Assign does
+                if form is batch.form:
+                    batch.refresh(["sub-01"])
+                    self.assertTrue(row.isHidden())
+                close()
+                self.assertFalse(form.isOpen())
+                self.assertFalse(row.isHidden(), form.widget.objectName)

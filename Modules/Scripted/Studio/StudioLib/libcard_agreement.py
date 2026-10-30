@@ -104,8 +104,10 @@ def counts(studyObject):
 class AssignForm:
     """Inline form of "Assign second tracing…" (nothing modal). ``selected()`` gives the BATCH subjects (None: a fraction)."""
 
-    def __init__(self, prefix, selected=None):
+    def __init__(self, prefix, selected=None, onClosed=None):
         self.selected = selected
+        #: Called after the form closed (Assign, Cancel, Escape): the card shows its "Assign second tracing…" row again
+        self.onClosed = onClosed
         self.widget = qt.QFrame()
         self.widget.setObjectName(f"{prefix}AssignForm")
         layout = qt.QFormLayout(self.widget)
@@ -185,6 +187,9 @@ class AssignForm:
         if shell is not None and hasattr(shell, "unregisterEscapeOverlay"):
             with contextlib.suppress(Exception):
                 shell.unregisterEscapeOverlay(self.widget)
+        # A refresh while the form was open (assign() saves and refreshes the card first) left the row hidden
+        if self.onClosed is not None:
+            self.onClosed()
 
     def isOpen(self):
         return not self.widget.isHidden()
@@ -295,7 +300,7 @@ class AgreementCard:
         self.assignRow, self.assignButton = library._rowButton(_("Assign second tracing…"), "StudioAgreementAssignButton", self._showForm)
         self.assignButton.setToolTip(_("A seeded random share of the traced subjects is traced a second time, blind (the seed is recorded)"))
         layout.addWidget(self.assignRow)
-        self.form = AssignForm("StudioAgreement")
+        self.form = AssignForm("StudioAgreement", onClosed=self._formClosed)
         layout.addWidget(self.form.widget)
 
     def refresh(self, selectedIds=None):
@@ -376,6 +381,13 @@ class AgreementCard:
     def _showForm(self):
         self.assignRow.hide()
         self.form.show()
+        self.relayout()
+        qt.QTimer.singleShot(0, self.relayout)
+
+    def _formClosed(self):
+        if not library._isAlive(self.widget):
+            return
+        self.assignRow.setVisible(True)
         self.relayout()
         qt.QTimer.singleShot(0, self.relayout)
 
@@ -484,7 +496,7 @@ class BatchSection:
         self.row, self.button = library._rowButton(_("Assign second tracing…"), "StudioAgreementBatchAssignButton", self._showForm)
         self.button.setToolTip(_("The selected subjects are traced a second time, blind"))
         layout.addWidget(self.row)
-        self.form = AssignForm("StudioAgreementBatch", selected=lambda: list(self.sids))
+        self.form = AssignForm("StudioAgreementBatch", selected=lambda: list(self.sids), onClosed=self._formClosed)
         layout.addWidget(self.form.widget)
 
     def refresh(self, sids):
@@ -496,6 +508,10 @@ class BatchSection:
     def _showForm(self):
         self.row.hide()
         self.form.show()
+
+    def _formClosed(self):
+        if library._isAlive(self.widget):
+            self.row.setVisible(True)
 
 
 _batches = {}
