@@ -2028,7 +2028,7 @@ def _stage_qc(ctx):
     method = {
         "stage": ctx.stage_used,
         "dilate_mm": ctx.dilate_mm,
-        "masking": not ctx.scan_only and ctx.dilate_mm >= 0,
+        "masking": ctx.dilate_mm >= 0,
         "cross_modality": ctx.cross_modality,
         "two_step": ctx.two_step,
         "scan_only": ctx.scan_only,

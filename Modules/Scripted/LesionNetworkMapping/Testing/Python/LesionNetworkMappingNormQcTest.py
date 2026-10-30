@@ -305,6 +305,14 @@ class NormQcRulesTest(unittest.TestCase):
         self.assertEqual(normqc.evaluate(self.GOOD, {"cross_modality": True, "two_step": True, "attempts": 1, "dilate_mm": 3})["suggestion"], normqc.SUGGEST_OK)
         self.assertEqual(normqc.evaluate({**self.GOOD, "folding_pct": float("nan")})["levels"]["folding_pct"], normqc.LEVEL_NA)
 
+    def test_scan_only_reason_is_not_masking(self):
+        # Scan-only runs have no lesion mask: the first reason (shown on the card) is the scan-only one.
+        for method in ({"scan_only": True, "dilate_mm": 3.0, "masking": False}, {"scan_only": True, "dilate_mm": 3.0}):
+            result = normqc.evaluate(self.GOOD, method)
+            self.assertEqual(result["suggestion"], normqc.SUGGEST_REVIEW)
+            self.assertEqual(len(result["reasons"]), 1, result["reasons"])
+            self.assertTrue(result["reasons"][0].startswith("scan-only mode"), result["reasons"])
+
     def test_normqc_json(self):
         metrics = {**self.GOOD, "ncc_xl": np.float32(0.3), "folding_pct": float("nan"), "centroid_mni": np.array([-20.0, 6.0, 8.0]), "side": "L", "n": np.int64(3)}
         result = normqc.evaluate(metrics)
