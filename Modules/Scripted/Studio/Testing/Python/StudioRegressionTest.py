@@ -67,6 +67,8 @@ Run with the main window and testing enabled::
   ``slicer.util.loadUI`` creates the CTK and qMRML widgets of a scripted module's ``.ui`` file (a ``qMRMLWidget`` root, a
   ``qMRMLNodeComboBox``, a ``ctkCollapsibleButton``), and Line Profile, Vector to Scalar Volume and Surface Toolbox set up
   their panel and logic. Without the plugins every such widget was a plain QWidget and ``setup()`` raised AttributeError.
+- ``test_24_lesion_metrics_follow_a_result_that_repoints_the_lesion`` (BB-1): a merged result that repoints the lesion
+  (a normalization) recomputes the row's centroid, outside-brain share and lesion size from the new file at once.
 """
 
 import json
@@ -1935,3 +1937,42 @@ class StudioRegressionTest(unittest.TestCase):
                 return current
             current = current.parentWidget()
         return None
+
+    def test_24_lesion_metrics_follow_a_result_that_repoints_the_lesion(self):
+        """A merged result that repoints the lesion (a normalization) recomputes the row's metrics from the new file (BB-1).
+
+        The centroid, outside-brain share and size of the native lesion stayed on a row that already read MNI until the
+        study was opened again: ``StudySession.computeMissingMetrics`` ran only on open and on import.
+        """
+        from LesionNetworkMappingLib import nifti
+        from LesionNetworkMappingLib.study import Study
+
+        from StudioLib import study_ui
+
+        study = self._study([("sub-01", {}, False)])
+        folder = study.path
+        session = study_ui.openStudy(folder, None, showLibrary=False)
+        self.addCleanup(study_ui.closeStudy)
+        self.assertTrue(session.waitForMetrics(60))
+        slicer.app.processEvents()
+        before = dict(session.study.subject("sub-01"))
+        self.assertFalse(study_ui._missing(before.get("centroid_x")), before)
+        # The result of a normalization: a lesion on another grid, at another place and of another size
+        affine = np.diag([1.0, 1.0, 1.0, 1.0])
+        affine[:3, 3] = [-40.0, -60.0, -10.0]
+        mask = np.zeros((60, 70, 40), np.uint8)
+        mask[30:40, 35:45, 20:30] = 1
+        relative = "derivatives/normalization/sub-01/sub-01_space-MNI152NLin2009cAsym_desc-lesion_mask.nii.gz"
+        os.makedirs(os.path.dirname(os.path.join(folder, relative)))
+        nifti.write_nifti(os.path.join(folder, relative), mask, affine)
+        Study.post_result(folder, "sub-01", {"lesion": relative, "space": "MNI152NLin2009cAsym"}, source="normalize")
+        self.assertEqual(len(session.applyInbox()), 1)
+        self.assertTrue(session.waitForMetrics(60))
+        slicer.app.processEvents()
+        row = session.study.subject("sub-01")
+        self.assertEqual(row["lesion"], relative)
+        self.assertEqual(row["lesion_size"], str(os.stat(os.path.join(folder, relative)).st_size))
+        self.assertNotEqual(row["lesion_size"], before["lesion_size"])
+        self.assertNotEqual(row["centroid_x"], before["centroid_x"])
+        self.assertNotEqual(row["lesion_mtime"], before["lesion_mtime"])
+        self.assertAlmostEqual(float(row["volume_ml"]), 1.0, places=2)

@@ -2121,6 +2121,9 @@ class StudySession:
             except jobs.Locked:
                 self.scheduleSave()
             _notify(self)
+            if not self._closed:
+                # A result that repoints the lesion or space (normalization, warp) leaves the metrics of the native file on the row
+                self.computeMissingMetrics()
         if self.lastInboxRejected and report:
             _toast(self._shell, self.inboxRejectedText(), ms=9000, level="warning")
         return applied
