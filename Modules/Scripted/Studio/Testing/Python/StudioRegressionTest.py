@@ -2017,3 +2017,71 @@ class StudioRegressionTest(unittest.TestCase):
         dialog.setText("age", lc.COL_DESCRIPTION, "")
         dialog.confirm()
         self.assertEqual((saved(), shown("age")[1]), (registry, registry))
+
+    def test_26_study_card_folder_link_is_elided_to_its_pixel_width(self):
+        """The folder link of the STUDY card shows the path elided to the pixel width of the link, the study folder name kept, and
+        elides it again when the card is resized (it was shortened by characters and cut at the card edge without an ellipsis) (BB-1).
+        """
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import library, shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Folder link study")
+        os.makedirs(folder)
+        paths = []
+        for index in range(1, 3):
+            paths.append(os.path.join(folder, f"sub-0{index}_T1w.nii.gz"))
+            nifti.write_nifti(paths[-1], np.zeros(grid.shape, np.uint8), grid.affine)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        cards = None
+        try:
+            session = study_ui.createStudy(paths, studioShell, folder=folder)
+            self.assertIsNotNone(session)
+            cards = library.StudyCards()
+            cards.widget.resize(278, 400)
+            cards.widget.show()
+            link = cards.studyCard.folderLink
+            metrics = qt.QFontMetrics(link.font)
+            realPath = session.study.path
+            for path in (
+                "/Users/azhmeer/Documents/Slicer Studio/Studies/Stroke-LNM-cohort-2024",
+                "/tmp/claude-0/bb1-study-work/r2s6l1366/ado",
+                "/home/u/Stroke-LNM-cohort-2024",
+                realPath,
+            ):
+                session.study.path = path
+                cards.refresh()
+                slicer.app.processEvents()
+                text = str(link.text)
+                self.assertLessEqual(metrics.horizontalAdvance(text), link.width, (path, text, link.width))
+                self.assertTrue(text.endswith(path.rsplit("/", 1)[-1]), (path, text))
+                self.assertIn(path, str(link.toolTip))
+                if metrics.horizontalAdvance(path) > link.width:
+                    self.assertIn("…", text)
+                else:
+                    self.assertEqual(text, path)
+            session.study.path = "/Users/azhmeer/Documents/Slicer Studio/Studies/Stroke-LNM-cohort-2024"
+            cards.refresh()
+            slicer.app.processEvents()
+            before = str(link.text)
+            cards.widget.resize(520, 400)
+            for _ in range(4):
+                slicer.app.processEvents()
+            after = str(link.text)
+            self.assertGreater(len(after), len(before), (before, after))
+            self.assertLessEqual(metrics.horizontalAdvance(after), link.width)
+            session.study.path = realPath
+        finally:
+            if cards is not None:
+                cards.widget.hide()
+                cards.widget.deleteLater()
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)

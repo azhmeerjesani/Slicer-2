@@ -227,8 +227,22 @@ class _Elider(qt.QObject):
             label.setText(metrics.elidedText(text, qt.Qt.ElideLeft, width))
         elif label.property("elideMode") == "right":
             label.setText(metrics.elidedText(text, qt.Qt.ElideRight, width))
+        elif label.property("elideMode") == "path":
+            label.setText(_elidePath(metrics, text, width))
         else:
             label.setText(metrics.elidedText(text, qt.Qt.ElideMiddle, width))
+
+
+def _elidePath(metrics, text, width):
+    """``text`` (a path) elided to ``width`` pixels in the middle of its parent folders, the last folder name kept whole when it fits."""
+    if metrics.horizontalAdvance(text) <= width:
+        return text
+    cut = text.rstrip("/\\").rfind("/") + 1
+    head, tail = text[:cut], text[cut:]
+    room = width - metrics.horizontalAdvance(tail)
+    if not head or room < metrics.horizontalAdvance("…/"):
+        return metrics.elidedText(text, qt.Qt.ElideMiddle, width)
+    return metrics.elidedText(head, qt.Qt.ElideMiddle, room) + tail
 
 
 _elider = None
@@ -4252,6 +4266,9 @@ class StudyCard(qt.QObject):
         layout.addWidget(self.nameLabel)
         self.folderLink = _linkButton("", "StudioStudyCardFolder", self._showFolder)
         self.folderLink.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+        # The path is elided to the pixel width of the link (the study folder name kept), again whenever the card is resized
+        self.folderLink.setProperty("elideMode", "path")
+        _installEventFilter(self.folderLink, _elidedLabelFilter())
         ui.bindStyleSheet(self.folderLink, lambda: (
             f"QPushButton#StudioStudyCardFolder {{ background: transparent; border: none; color: {ui.token('accent-fg').name()}; "
             "padding: 0px; text-align: left; }"))
@@ -4296,8 +4313,7 @@ class StudyCard(qt.QObject):
             return
         studyObject = studySession.study
         self.nameLabel.setText(studyObject.name)
-        self.folderLink.setText(_elideMiddle(studyObject.path, 46))
-        self.folderLink.setToolTip(studyObject.path)
+        setElidedText(self.folderLink, studyObject.path)
         self.countsLabel.setText(studyCounts(studyObject))
         self.refreshSaveStatus()
         template = studyObject.template or {}
@@ -4435,14 +4451,6 @@ def _gridResolution(path):
         except Exception:
             _resolutions[key] = None
     return _resolutions[key]
-
-
-def _elideMiddle(text, length):
-    text = str(text)
-    if len(text) <= length:
-        return text
-    half = (length - 1) // 2
-    return text[:half] + "…" + text[-(length - 1 - half):]
 
 
 class SubjectCard(qt.QObject):
