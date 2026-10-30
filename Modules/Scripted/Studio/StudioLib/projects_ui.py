@@ -129,25 +129,114 @@ def message(text, level="info", action=None, actionText=None, ms=3000, toolTip=N
         logging.warning(str(text))
 
 
+class _ChromeDialog(qt.QDialog):
+    """A small Studio confirmation or input dialog (VISUAL 4.7): the dialog chrome (card fill, radius 14, backdrop), the icon
+    tile beside the title and the body text, an optional content widget, and a footer with the primary button on the right
+    and the other buttons (secondary) before it. ``buttons`` are the button texts, the primary first and the last one is
+    the cancel button (Escape, closing the window). ``answer`` is the index of the clicked button (-1: not answered).
+    """
+
+    def __init__(self, parent, objectName, iconName, title, body, buttons, default=0, content=None):
+        qt.QDialog.__init__(self, parent or slicer.util.mainWindow())
+        self.setObjectName(objectName)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setMinimumWidth(420)
+        self.answer = -1
+        self.buttonWidgets = []
+        layout = qt.QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 22)
+        layout.setSpacing(16)
+        header, self.titleLabel, self.bodyLabel = ui.dialogHeader(iconName, title, body, objectName)
+        layout.addLayout(header)
+        if content is not None:
+            layout.addWidget(content)
+        footer = qt.QHBoxLayout()
+        footer.setSpacing(12)
+        footer.addStretch(1)
+        count = len(buttons)
+        # The primary button is on the right: the other buttons come before it, the cancel button first of them
+        order = ([count - 1] if count > 1 else []) + list(range(1, count - 1)) + [0]
+        for index in order:
+            button = qt.QPushButton(buttons[index])
+            button.setObjectName(f"{objectName}Button{index}")
+            button.setMinimumHeight(36)
+            button.setMinimumWidth(96)
+            primary = index == 0
+            button.setDefault(index == default)
+            button.setAutoDefault(index == default)
+            ui.setRole(button, "primary" if primary else "secondary")
+            button.connect("clicked()", lambda index=index: self._answer(index))
+            footer.addWidget(button)
+            self.buttonWidgets.append((index, button))
+        layout.addLayout(footer)
+        self._cancelIndex = count - 1
+        ui.dialogChrome(self)
+
+    def button(self, index):
+        for buttonIndex, button in self.buttonWidgets:
+            if buttonIndex == index:
+                return button
+        return None
+
+    def _answer(self, index):
+        self.answer = index
+        if index == self._cancelIndex:
+            self.reject()
+        else:
+            self.accept()
+
+    def reject(self):
+        # Escape and closing the window answer with the cancel button
+        if self.answer < 0:
+            self.answer = self._cancelIndex
+        qt.QDialog.reject(self)
+
+    def run(self):
+        run = getattr(self, "exec", None) or self.exec_
+        run()
+        return self.answer
+
+
 def _question(parent, title, text, buttons, default=0):
-    """A message box with the button texts ``buttons``; return the index of the clicked one (-1: closed)."""
-    box = qt.QMessageBox(parent or slicer.util.mainWindow())
-    box.setWindowTitle(title)
-    box.setText(text)
-    box.setIcon(qt.QMessageBox.Question)
-    created = []
-    for index, buttonText in enumerate(buttons):
-        role = qt.QMessageBox.RejectRole if index == len(buttons) - 1 else qt.QMessageBox.AcceptRole
-        created.append(box.addButton(buttonText, role))
-    box.setDefaultButton(created[default])
-    box.setEscapeButton(created[-1])
-    run = getattr(box, "exec", None) or box.exec_
-    run()
-    clicked = box.clickedButton()
-    for index, button in enumerate(created):
-        if clicked == button:
-            return index
-    return -1
+    """A confirmation with the button texts ``buttons`` (the first is the primary one, the last cancels); return the index of the
+    clicked one (-1: closed).
+    """
+    dialog = _ChromeDialog(parent, "StudioProjectsQuestion", "circle-help", title, text, buttons, default)
+    try:
+        return dialog.run()
+    finally:
+        dialog.deleteLater()
+
+
+class RenameDialog(_ChromeDialog):
+    """"Rename project": the name field, Rename (primary) and Cancel (``StudioProjectsRenameDialog``). ``name`` is the text
+    when accepted, None otherwise.
+    """
+
+    def __init__(self, name, parent=None):
+        content = qt.QWidget()
+        content.setObjectName("StudioProjectsRenameContent")
+        column = qt.QVBoxLayout(content)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(6)
+        column.addWidget(ui.label(_("Name:"), "caption", "text3", "StudioProjectsRenameLabel"))
+        self.edit = qt.QLineEdit(name)
+        self.edit.setObjectName("StudioProjectsRenameEdit")
+        self.edit.setMinimumHeight(36)
+        self.edit.selectAll()
+        column.addWidget(self.edit)
+        _ChromeDialog.__init__(self, parent, "StudioProjectsRenameDialog", "pencil", _("Rename project"), None,
+                               [_("Rename"), _("Cancel")], 0, content)
+
+    @property
+    def name(self):
+        return str(self.edit.text) if self.answer == 0 else None
+
+    def run(self):
+        self.edit.setFocus()
+        _ChromeDialog.run(self)
+        return self.name
 
 
 #
@@ -647,9 +736,11 @@ def renameDialog(path=None, parent=None):
         path = project.path
     current = project is not None and os.path.normcase(os.path.realpath(project.path)) == os.path.normcase(os.path.realpath(path))
     name = os.path.basename(os.path.normpath(path))
-    newName = qt.QInputDialog.getText(parent or slicer.util.mainWindow(), _("Rename project"), _("Name:"), qt.QLineEdit.Normal, name)
-    if isinstance(newName, tuple):
-        newName = newName[0]
+    dialog = RenameDialog(name, parent)
+    try:
+        newName = dialog.run()
+    finally:
+        dialog.deleteLater()
     newName = projects.sanitizeName(newName) if newName and str(newName).strip() else ""
     if not newName or newName == name:
         return None

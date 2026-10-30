@@ -2830,6 +2830,76 @@ class StudioProjectsTest(unittest.TestCase):
         finally:
             other.unlock()
 
+    def _answerDialog(self, objectName, buttonName, seen, fill=None):
+        """Poll for the visible dialog ``objectName``, record how it looks in ``seen`` and click its button ``buttonName``."""
+        timer = qt.QTimer()
+        timer.setInterval(50)
+
+        def poll():
+            for widget in qt.QApplication.topLevelWidgets():
+                if widget.isVisible() and widget.objectName == objectName:
+                    seen.update(
+                        className=widget.className(),
+                        frameless=bool(int(widget.windowFlags()) & int(qt.Qt.FramelessWindowHint)),
+                        chrome=widget.property("studioDialogChrome"),
+                        iconTile=widget.findChild("QLabel", objectName + "Icon") is not None,
+                        buttons=[child.text for child in widget.findChildren("QPushButton")])
+                    if fill is not None:
+                        widget.findChild("QLineEdit", "StudioProjectsRenameEdit").setText(fill)
+                    widget.findChild("QPushButton", buttonName).click()
+                    timer.stop()
+                    return
+
+        timer.connect("timeout()", poll)
+        timer.start()
+        return timer
+
+    def test_52_rename_and_trash_dialogs_have_the_dialog_chrome(self):
+        """Rename project and Move to Trash use the Studio dialog chrome (VISUAL 4.7: frameless card, icon tile, one primary
+        button), not the stock QInputDialog and QMessageBox with their legacy OK/Cancel and question-mark icons.
+        """
+        from StudioLib import projects_ui
+
+        projects = self.projects
+        projects.ensureRoot()
+        first = projects.createProject("First project")
+        other = projects.createProject("Second project")
+        # Rename: the chrome, the new name is used; Cancel changes nothing
+        seen = {}
+        timer = self._answerDialog("StudioProjectsRenameDialog", "StudioProjectsRenameDialogButton0", seen, fill="Renamed project")
+        newPath = projects_ui.renameDialog(first.path)
+        timer.stop()
+        self.assertEqual(seen.get("className"), "RenameDialog", seen)
+        self.assertTrue(seen["frameless"], seen)
+        self.assertTrue(seen["chrome"], seen)
+        self.assertTrue(seen["iconTile"], seen)
+        self.assertEqual(sorted(seen["buttons"]), ["Cancel", "Rename"])
+        self.assertEqual(os.path.basename(newPath), "Renamed project")
+        self.assertTrue(os.path.isdir(newPath))
+        seen = {}
+        timer = self._answerDialog("StudioProjectsRenameDialog", "StudioProjectsRenameDialogButton1", seen, fill="Never used")
+        self.assertIsNone(projects_ui.renameDialog(newPath))
+        timer.stop()
+        self.assertTrue(os.path.isdir(newPath))
+        # Move to Trash: the chrome; Cancel keeps the project, Move to Trash removes it
+        seen = {}
+        timer = self._answerDialog("StudioProjectsQuestion", "StudioProjectsQuestionButton1", seen)
+        self.assertFalse(projects_ui.moveToTrash(other.path))
+        timer.stop()
+        self.assertEqual(seen.get("className"), "_ChromeDialog", seen)
+        self.assertTrue(seen["frameless"], seen)
+        self.assertTrue(seen["chrome"], seen)
+        self.assertTrue(seen["iconTile"], seen)
+        self.assertEqual(sorted(seen["buttons"]), ["Cancel", "Move to Trash"])
+        self.assertTrue(os.path.isdir(other.path))
+        # The answer of a three-button question is the index of the clicked button
+        timer = self._answerDialog("StudioProjectsQuestion", "StudioProjectsQuestionButton2", {})
+        self.assertEqual(projects_ui._question(None, "Title", "Text", ["Move", "Keep", "Cancel"]), 2)
+        timer.stop()
+        timer = self._answerDialog("StudioProjectsQuestion", "StudioProjectsQuestionButton0", {})
+        self.assertEqual(projects_ui._question(None, "Title", "Text", ["Move", "Keep", "Cancel"]), 0)
+        timer.stop()
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk
