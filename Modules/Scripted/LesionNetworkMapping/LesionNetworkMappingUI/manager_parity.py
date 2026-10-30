@@ -164,7 +164,8 @@ class ImportDialog(qt.QDialog):
             label = leaddbs._alnum(conn)
             counts[label] = counts.get(label, 0) + 1
         for label in sorted(counts):
-            self.labelCombo.addItem(_("{label} ({n} lesions)").format(label=label, n=counts[label]), label)
+            text = _("{label} ({n} lesion)") if counts[label] == 1 else _("{label} ({n} lesions)")
+            self.labelCombo.addItem(text.format(label=label, n=counts[label]), label)
         if not counts:
             self.statusLabel.setText(_("No Lead-DBS maps in this folder (…_conn-…_desc-T_funcmap.nii[.gz])."))
         else:

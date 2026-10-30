@@ -120,5 +120,27 @@ class LesionNetworkMappingConnectomeManagerTest(unittest.TestCase):
         self.assertNotIn("open project", str(manager.statusLabel.text))
 
 
+    def test_import_dialog_label_count_uses_the_singular_for_one_lesion(self):
+        from LesionNetworkMappingUI import manager_parity
+
+        folders = {}
+        for name, lesions in (("one", ["sub-a"]), ("two", ["sub-a", "sub-b"])):
+            folders[name] = os.path.join(self.tmp, f"maps {name}")
+            os.makedirs(folders[name])
+            for lesion in lesions:
+                open(os.path.join(folders[name], f"{lesion}_conn-GSP1000v2xFullSet_desc-T_funcmap.nii.gz"), "wb").close()
+        dialog = manager_parity.openImport(self.widget.ctx)
+        try:
+            labels = {}
+            for name, folder in folders.items():
+                dialog.folderEdit.setText(folder)
+                dialog.scan()
+                labels[name] = [dialog.labelCombo.itemText(i) for i in range(dialog.labelCombo.count)]
+            self.assertEqual(labels["one"], ["GSP1000v2xFullSet (1 lesion)"])
+            self.assertEqual(labels["two"], ["GSP1000v2xFullSet (2 lesions)"])
+        finally:
+            dialog.hide()
+
+
 if __name__ == "__main__":
     unittest.main()
