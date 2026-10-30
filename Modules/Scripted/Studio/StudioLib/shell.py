@@ -923,7 +923,7 @@ class SettingsDialogLook:
         layout = dialog.layout()
         if layout is not None:
             if "margins" not in self._saved:
-                margins = layout.contentsMargins()
+                margins = _propertyValue(layout, "contentsMargins")
                 self._saved["margins"] = (margins.left(), margins.top(), margins.right(), margins.bottom(), _propertyValue(layout, "horizontalSpacing"),
                                           _propertyValue(layout, "verticalSpacing"))
             layout.setContentsMargins(16, 16, 16, 16)
@@ -959,7 +959,7 @@ class SettingsDialogLook:
         if form is None or "appearance" in self._saved:
             return
         saved = {"labels": {}, "boxes": {}, "margins": None, "spacing": _propertyValue(form, "verticalSpacing"), "header": None}
-        margins = form.contentsMargins()
+        margins = _propertyValue(form, "contentsMargins")
         saved["margins"] = (margins.left(), margins.top(), margins.right(), margins.bottom())
         for name in self.APPEARANCE_LABELS:
             label = panel.findChild("QLabel", name)

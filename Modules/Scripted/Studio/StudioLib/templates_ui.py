@@ -576,8 +576,8 @@ class AddTemplateDialog(qt.QDialog):
         when it is not wrapped: the dialog is then too short and the last lines (the privacy note) are cut. The width
         each label gets is known here, so its height for that width becomes its minimum height.
         """
-        margins = self.layout().contentsMargins()
-        cardMargins = self.fileCard.layout().contentsMargins()
+        margins = ui.layoutContentsMargins(self.layout())
+        cardMargins = ui.layoutContentsMargins(self.fileCard.layout())
         cardWidth = DIALOG_WIDTH - margins.left() - margins.right()
         detailsWidth = cardWidth - cardMargins.left() - cardMargins.right() - self.fileCard.layout().spacing - CARD_THUMBNAIL
         for label, width in ((self.detectionLabel, detailsWidth), (self.factsLabel, detailsWidth), (self.warningLabel, detailsWidth),

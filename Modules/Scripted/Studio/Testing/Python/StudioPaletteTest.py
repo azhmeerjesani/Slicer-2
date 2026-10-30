@@ -940,6 +940,78 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             tree.setMaximumHeight(16777215)
             self._pump()
 
+    def test_15b_settings_dialog_look_with_qt6_layout_margins(self):
+        """Qt 6: QLayout declares the ``contentsMargins`` property, so PythonQt gives a QMargins value and not the getter.
+
+        ``SettingsDialogLook.apply`` called ``layout.contentsMargins()``, which raised "'QMargins' object is not callable"
+        each time Settings was shown: the Appearance page and the 16 px dialog margins kept the official look and the panel
+        list was not scrolled. Here the layouts behave as with Qt 6 and the look is still applied.
+        """
+        from StudioLib import shell, ui
+
+        class Qt6Layout:
+            """A QLayout as PythonQt wraps it with Qt 6: ``contentsMargins`` is the property value."""
+
+            def __init__(self, layout):
+                object.__setattr__(self, "_layout", layout)
+
+            def __getattr__(self, name):
+                if name == "contentsMargins":
+                    return self._layout.contentsMargins()
+                return getattr(self._layout, name)
+
+        class Qt6Owner:
+            """A widget whose ``layout()`` is a ``Qt6Layout``, and whose Appearance panel is one too."""
+
+            def __init__(self, widget):
+                object.__setattr__(self, "_widget", widget)
+
+            def __getattr__(self, name):
+                if name == "layout":
+                    return lambda: Qt6Layout(self._widget.layout())
+                if name == "findChild":
+                    return lambda *args: self._wrapped(self._widget.findChild(*args))
+                return getattr(self._widget, name)
+
+            @staticmethod
+            def _wrapped(child):
+                return Qt6Owner(child) if child is not None and child.objectName == "qSlicerSettingsStylesPanel" else child
+
+        # The helper reads the margins with Qt 5 (method) and Qt 6 (property value)
+        probe = qt.QVBoxLayout()
+        probe.setContentsMargins(3, 4, 5, 6)
+        for candidate in (probe, Qt6Layout(probe)):
+            margins = ui.layoutContentsMargins(candidate)
+            self.assertEqual((margins.left(), margins.top(), margins.right(), margins.bottom()), (3, 4, 5, 6))
+
+        dialog = qt.QDialog()
+        dialogLayout = qt.QGridLayout(dialog)
+        panel = qt.QWidget()
+        panel.setObjectName("qSlicerSettingsStylesPanel")
+        form = qt.QFormLayout(panel)
+        label = qt.QLabel("Theme:")
+        label.setObjectName("ThemeLabel")
+        form.addRow(label, qt.QComboBox())
+        dialogLayout.addWidget(panel, 0, 0)
+        look = shell.SettingsDialogLook.__new__(shell.SettingsDialogLook)
+        look.dialog = Qt6Owner(dialog)
+        look.applied = False
+        look._saved = {}
+        scrolled = []
+        look._scrollToCurrentPanel = lambda: scrolled.append(True)
+        try:
+            look.apply()
+            self.assertTrue(look.applied, "the settings dialog look failed on the layout margins")
+            self.assertIn("appearance", look._saved, "the Appearance page keeps the official look")
+            self.assertIn("margins", look._saved)
+            margins = dialogLayout.contentsMargins()
+            self.assertEqual((margins.left(), margins.top(), margins.right(), margins.bottom()), (16, 16, 16, 16))
+            self.assertEqual(label.minimumHeight, ui.SETTINGS_ROW_HEIGHT)
+            self._wait(0.2)
+            self.assertTrue(scrolled, "the panel list is not scrolled to the selected panel")
+        finally:
+            dialog.deleteLater()
+
     def test_16_search_index_without_qaction_menu(self):
         """Qt 6: QAction.menu() is a template that PythonQt does not wrap, so actions have no menu attribute. The submenus
         of the Layout menu are still found (shell.actionMenu) and Search opens and lists the layouts, as with Qt 5.

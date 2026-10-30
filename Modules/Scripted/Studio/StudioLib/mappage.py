@@ -610,7 +610,9 @@ class MapOverlay:
         # What the layout will leave to the label (the statistic keeps its size hint, the gap is the row's spacing, the card's
         # border and margins are off the contents rect) with no slack, so a text that fits is shown whole; the label's resize
         # fits the text again to the width it really gets (``_fitThreshold``)
-        margins = self.legend.layout().contentsMargins()
+        from . import ui
+
+        margins = ui.layoutContentsMargins(self.legend.layout())
         available = (self.legend.contentsRect().width() - margins.left() - margins.right()
                      - self.statisticLabel.sizeHint.width() - LEGEND_ROW_SPACING)
         self._fitThreshold(available)

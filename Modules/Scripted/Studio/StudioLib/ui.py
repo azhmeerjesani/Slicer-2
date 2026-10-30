@@ -268,6 +268,14 @@ def removePaletteListener(callback):
         _listeners.remove(callback)
 
 
+def layoutContentsMargins(layout):
+    """The contents margins of ``layout`` (a QMargins) with Qt 5 and Qt 6: Qt 6 declares the ``contentsMargins`` property
+    on QLayout, and PythonQt then gives the property value instead of the getter method.
+    """
+    margins = layout.contentsMargins
+    return margins() if callable(margins) else margins
+
+
 def _isAlive(widget):
     try:
         widget.objectName

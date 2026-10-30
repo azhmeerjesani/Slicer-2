@@ -249,7 +249,7 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
             self._pump()
             try:
                 self.assertEqual(frame.property("slicerRole"), "card")
-                margins = cardLayout.contentsMargins()
+                margins = ui.layoutContentsMargins(cardLayout)
                 self.assertEqual((margins.left(), margins.right(), margins.bottom()), (ui.CARD_PADDING,) * 3)
                 title = frame.findChild("QLabel", "StudioCardTitle")
                 self.assertIsNotNone(title)
