@@ -2817,8 +2817,15 @@ def main(argv):
             return jobs.EXIT_OK
         subjects = [item.strip() for item in args.subjects.split(",") if item.strip()] if args.subjects else None
         result = batch(args.study, subjects=subjects, force=args.force, cancel=cancel, **_run_options(args))
+        failed = result["counts"].get("failed", 0)
+        if failed:
+            # The exit code stays 1 (a script sees the failure); this event gives the runner the reason instead of "exit code 1"
+            ok = sum(result["counts"].get(status, 0) for status in ("done", "reused"))
+            reason = next((entry.get("reason") for entry in result["subjects"] if entry["status"] == "failed" and entry.get("reason")), None)
+            message = f"{ok} of {len(result['subjects'])} normalized, {failed} failed" if ok else f"No subject was normalized ({failed} failed)"
+            jobs.emit("error", code="subjects_failed", message=message + (f": {reason}" if reason else ""), partial=bool(ok), counts=result["counts"])
         jobs.emit("done", outputs=[entry.get("out") for entry in result["subjects"] if entry.get("out")], elapsed=round(jobs.elapsed(), 3), run_id=None, counts=result["counts"], template=result["template"])
-        return jobs.EXIT_ERROR if result["counts"].get("failed") else jobs.EXIT_OK
+        return jobs.EXIT_ERROR if failed else jobs.EXIT_OK
 
 
 def _events_mode(argv):

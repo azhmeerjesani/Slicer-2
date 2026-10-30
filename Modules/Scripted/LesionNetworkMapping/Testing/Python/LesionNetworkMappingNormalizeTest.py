@@ -675,6 +675,31 @@ class NormalizeTest(unittest.TestCase):
         code, events, _, _ = _run("batch", "--study", study_path, "--subjects", "sub-03", "--quality", "affine")
         self.assertEqual(code, normalize.EXIT_NOTHING_TO_DO)
 
+    def test_43_batch_partial_failure(self):
+        """One subject fails (its scan file is missing): the exit code stays 1 and an error event says how many were normalized."""
+        study_path = self.path("partial-study")
+        study = Study.create(study_path, name="Partial batch", space=TEMPLATE)
+        for sid, name in (("sub-01", "a"), ("sub-02", "b")):
+            folder = os.path.join(study_path, "native", name)
+            os.makedirs(folder)
+            scan = os.path.join(folder, f"{sid}_T1w.nii.gz")
+            lesion = os.path.join(folder, f"{sid}_desc-lesion_mask.nii.gz")
+            if sid == "sub-01":
+                shutil.copyfile(self.subject["scan"], scan)
+            shutil.copyfile(self.subject["lesion"], lesion)
+            study.add_subject(sid, scan=study.relpath(scan), lesion=study.relpath(lesion), space="native")
+        study.save()
+        code, events, stderr, _ = _run("batch", "--study", study_path, "--quality", "affine", "--template", "auto")
+        self.assertEqual(code, 1, stderr[-2000:])
+        statuses = {e["subject"]: e["status"] for e in events if e["event"] == "result" and e.get("kind") == "subject"}
+        self.assertEqual(statuses, {"sub-01": "done", "sub-02": "failed"})
+        error = _first(events, "error", code="subjects_failed")
+        self.assertIsNotNone(error, events[-3:])
+        self.assertTrue(error["partial"])
+        self.assertTrue(error["message"].startswith("1 of 2 normalized, 1 failed"), error["message"])
+        self.assertEqual(events[-1]["event"], "done")
+        self.assertEqual(events[-1]["counts"], {"done": 1, "failed": 1})
+
     def test_50_tilt(self):
         dirs = EXTRA_TEMPLATE_DIRS
         if normalize.find_template(TEMPLATE, dirs=dirs)["files"]["head"] is None:

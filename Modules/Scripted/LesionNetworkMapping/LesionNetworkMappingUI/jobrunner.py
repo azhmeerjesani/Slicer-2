@@ -683,6 +683,10 @@ class Job:
                 return line.strip()
         return f"exit code {self.exitCode}"
 
+    def isPartial(self):
+        """Whether a failed job reported a partial result (an error event with ``partial``: some of its items were done)."""
+        return self.state == FAILED and bool(self.errorEvent) and bool(self.errorEvent.get("partial")) and bool(self.failures)
+
     def _onCompleted(self, returnCode):
         """Main thread: the process ended (every output line was delivered before)."""
         if self.isFinished():
@@ -714,7 +718,7 @@ class Job:
         self._closeLog()
         _removeFile(self.cancelPath)
         if state == FAILED:
-            logging.warning(f"Lesion network mapping: {self.title} failed: {'; '.join(self.failures)}" + (f" (log: {self.logPath})" if self.logPath else ""))
+            logging.warning(f"Lesion network mapping: {self.title} {'finished with failures' if self.isPartial() else 'failed'}: {'; '.join(self.failures)}" + (f" (log: {self.logPath})" if self.logPath else ""))
         self.runner._jobFinished(self)
         if callable(self.spec.onDone):
             _callSafely(self.spec.onDone, self, what=f"onDone of {self.title}")
@@ -996,7 +1000,7 @@ class JobRunner:
             if len(reason) > CHIP_REASON_CHARS:
                 reason = reason[: CHIP_REASON_CHARS - 1] + "…"
             self._statusShown = True
-            self._setChip(finished, f"Run failed: {reason}", "warn")  # stays until the next job: never a silent failure
+            self._setChip(finished, reason if finished.isPartial() else f"Run failed: {reason}", "warn")  # stays until the next job: never a silent failure
             return
         self._statusShown = True
         self._setChip(finished, "Done" if finished.state == DONE else "Stopped", "ok" if finished.state == DONE else "neutral")
