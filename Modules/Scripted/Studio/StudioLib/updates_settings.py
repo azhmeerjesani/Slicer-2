@@ -154,6 +154,7 @@ class UpdatesSettingsPanel(ctk.ctkSettingsPanel):
             self.latestLabel.text = " · ".join(parts) + " · " + link
             if manifest.notes and hasattr(self.notesBrowser, "setMarkdown"):
                 self.notesBrowser.setMarkdown(manifest.notes)
+                updates._flattenHeadings(self.notesBrowser)
             else:
                 self.notesBrowser.setPlainText(manifest.notes)
             self.notesBrowser.setVisible(bool(manifest.notes) and status.available)

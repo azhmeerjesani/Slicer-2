@@ -1316,6 +1316,42 @@ fi
         self.assertIn("releases/tag/v1.2.0", panel.latestLabel.text)
         self.assertEqual(panel.objectName, "StudioUpdatesSettingsPanel")
 
+    def test_SettingsNotesHeadingsFlattened(self):
+        """The release notes in Settings > Updates show Markdown headings at the body size, like the update dialogs: the
+        default heading sizes would make "What's new" larger than the title of the page.
+        """
+        import types
+
+        from StudioLib import updates_settings
+
+        updates = self.updates
+        notes = "## Slicer Studio 1.2.0\n\nBody text\n\n### Fixes\n\n- one\n"
+        manifest = types.SimpleNamespace(notes=notes, version="1.2.0", published="2026-10-01", releasePageUrl=lambda: "https://example.invalid/r")
+        status = types.SimpleNamespace(manifest=manifest, kind="optional", skipped=False, available=True, version="1.2.0")
+        service = types.SimpleNamespace(status=status, checking=False, lastError=None, addListener=lambda listener: None,
+                                        unavailableReason=lambda: None)
+
+        def headingAdjustments(browser):
+            found = []
+            block = browser.document.begin()
+            while block.isValid():
+                if block.blockFormat().headingLevel() > 0:
+                    adjustment = qt.QTextCursor(block).charFormat().property(qt.QTextFormat.FontSizeAdjustment)
+                    found.append((block.text(), adjustment))
+                block = block.next()
+            return found
+
+        panel = updates_settings.UpdatesSettingsPanel(service)
+        self.addCleanup(panel.deleteLater)
+        panel.refresh()
+        settingsHeadings = headingAdjustments(panel.notesBrowser)
+        self.assertEqual([text for text, _adjustment in settingsHeadings], ["Slicer Studio 1.2.0", "Fixes"])
+        for text, adjustment in settingsHeadings:
+            self.assertFalse(adjustment, f"the heading {text!r} is larger than the body text in Settings")
+        dialogBrowser = updates._notesBrowser(notes)
+        self.addCleanup(dialogBrowser.deleteLater)
+        self.assertEqual(settingsHeadings, headingAdjustments(dialogBrowser))
+
     def test_NoticeFollowsLaterChecks(self):
         """The notice names the version that Update now and Skip act on: a later check replaces or removes it."""
         from StudioLib import library, shell
