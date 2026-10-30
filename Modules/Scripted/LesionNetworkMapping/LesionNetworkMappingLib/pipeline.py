@@ -352,9 +352,10 @@ def rule_tag(rule):
 
 
 def score_label(column):
-    """CamelCase letters and digits of a column: "aphasia_score" gives "AphasiaScore"."""
-    words = [word for word in re.split(r"[^A-Za-z0-9]+", str(column)) if word]
-    return "".join(word[:1].upper() + word[1:] for word in words) or "Score"
+    """CamelCase letters and digits of a column: "aphasia_score" gives "AphasiaScore" (a name with other letters gets a tag of it, see glm._unicode_tag)."""
+    from . import glm
+
+    return glm._upper_first(glm._camel(column)) or "Score"
 
 
 def unique_labels(names, make=score_label):
@@ -362,9 +363,9 @@ def unique_labels(names, make=score_label):
     for name in names:
         label = make(name)
         base, counter = label, 2
-        while label in seen:
+        while label.casefold() in seen:  # file names: NIHSS and nihss are one folder on macOS
             label, counter = f"{base}{counter}", counter + 1
-        seen.add(label)
+        seen.add(label.casefold())
         out.append(label)
     return out
 
@@ -2695,7 +2696,7 @@ class Runner:
             if self.config.slnm_method == "spearman":
                 args.append("--spearman")
             args += ["--perm", str(self.config.perm), "--seed", str(self.config.perm_seed), "--bundle", self.bundle.path, "--mask", self.mask_path, "--out", folder, "--conn-label", self.bundle.name,
-                     "--input", "Fz" if self.config.input == "AvgFz" else "T"]
+                     "--input", "Fz" if self.config.input == "AvgFz" else "T", "--desc", "slnm" + label]  # one desc per score: the group maps of all scores are copied to one folder
             args += self._common_child_args()
             child = self._child("slnm", "slnm", args, folder)
             if child.status != "done":

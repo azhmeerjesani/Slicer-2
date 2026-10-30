@@ -68,11 +68,13 @@ if __name__ == "__main__":
     set_blas_threads(sys.argv[1:])  # before numpy is imported: BLAS reads these variables once
 
 import dataclasses
+import hashlib
 import itertools
 import json
 import math
 import re
 import time
+import unicodedata
 
 import numpy as np
 from scipy import linalg as scipy_linalg
@@ -857,8 +859,25 @@ def effect_size(kind, result):
     return out * hedges_correction(df)
 
 
+def _unicode_tag(text):
+    """A stable tag ("u" + 8 hex digits) of a name with letters or digits outside ASCII, else "".
+
+    Output labels keep only ASCII letters and digits (BIDS), so names such as "失語スコア" and "運動スコア"
+    would otherwise all get the same label (and share one output folder or file name).
+    """
+    text = unicodedata.normalize("NFC", str(text))
+    if not any(char.isalnum() and not char.isascii() for char in text):
+        return ""
+    return "u" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
+
+
 def _camel(text):
-    words = [word for word in re.split(r"[^A-Za-z0-9]+", str(text)) if word]
+    """camelCase of the ASCII letters and digits of a name, plus :func:`_unicode_tag` when it has other letters."""
+    text = unicodedata.normalize("NFC", str(text))
+    words = [word for word in re.split(r"[^A-Za-z0-9]+", text) if word]
+    tag = _unicode_tag(text)
+    if tag:
+        words.append(tag)
     if not words:
         return ""
     return words[0] + "".join(word[:1].upper() + word[1:] for word in words[1:])

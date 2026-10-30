@@ -122,7 +122,10 @@ def _percent(value):
 
 
 def _safeName(text):
-    return re.sub(r"[^A-Za-z0-9]+", "", str(text)) or "x"
+    """The ASCII letters and digits of a name, plus a tag of it when it has other letters (glm._unicode_tag), so that "失語" and "運動" get different folders."""
+    from LesionNetworkMappingLib import glm
+
+    return (re.sub(r"[^A-Za-z0-9]+", "", str(text)) + glm._unicode_tag(text)) or "x"
 
 
 def _text(editor):

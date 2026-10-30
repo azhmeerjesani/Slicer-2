@@ -423,10 +423,25 @@ class SymptomTab(CohortTab):
         return name
 
     def outputDir(self):
+        """conn-X/slnm/<outputName>, with a number added while that folder holds the result of another score.
+
+        Labels keep only ASCII letters and digits, so two columns can share one ("aphasia_score_1" and
+        "aphasia_score1"; "NIHSS" and "nihss" on a case-insensitive disk): a run must not replace the other's result.
+        """
+        from LesionNetworkMappingLib import slnm
+
         connDir = self.connectomeDir()
-        if not connDir or not self.score():
+        score = self.score()
+        if not connDir or not score:
             return None
-        return os.path.join(connDir, "slnm", self.outputName())
+        base = self.outputName()
+        name, counter = base, 2
+        while True:
+            folder = os.path.join(connDir, "slnm", name)
+            record = _readJson(os.path.join(folder, slnm.SLNM_JSON)) if os.path.isdir(folder) else None
+            if not isinstance(record, dict) or record.get("score") in (None, score):
+                return folder
+            name, counter = f"{base}{counter}", counter + 1
 
     def resultFolders(self):
         connDir = self.connectomeDir()
