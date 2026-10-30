@@ -333,6 +333,17 @@ class StudioAutosaveTest(unittest.TestCase):
             self.assertIsNone(node.GetStorageNode(), name)
         self.assertTrue(scene.GetStorableNodesModifiedSinceRead())
 
+    def test_e2_recoveredMessagePlural(self):
+        from StudioLib import recovery
+
+        one = recovery.recoveredText(1, "15:53")
+        self.assertIn("Recovered 1 item from", one)
+        self.assertNotIn("1 items", one)
+        self.assertIn("Save to keep it.", one)
+        many = recovery.recoveredText(3, "15:53")
+        self.assertIn("Recovered 3 items from the autosave of 15:53", many)
+        self.assertIn("Save to keep them.", many)
+
     def test_f_largeVolume(self):
         scene = slicer.mrmlScene
         service = self._service()

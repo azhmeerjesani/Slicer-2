@@ -502,6 +502,13 @@ def _service():
     return autosave.instance()
 
 
+def recoveredText(count, time):
+    """The confirmation after a recovery, singular for one restored item."""
+    if count == 1:
+        return _("Recovered 1 item from the autosave of {time}. Use File › Save to keep it.").format(time=time)  # noqa: RUF001
+    return _("Recovered {count} items from the autosave of {time}. Use File › Save to keep them.").format(count=count, time=time)  # noqa: RUF001
+
+
 def recover(slot, mode=None, parent=None):
     """Load an autosaved slot and re-link its data to the original files. Return the report, or None if cancelled."""
     scene = slicer.mrmlScene
@@ -540,7 +547,7 @@ def recover(slot, mode=None, parent=None):
     if not slot.session.own:
         markSession(slot.session, "recovered")
     updated = _shortTime(slot.updated, timeOnlyToday=True)
-    text = _("Recovered {count} items from the autosave of {time}. Use File › Save to keep them.").format(count=report["restored"], time=updated)  # noqa: RUF001
+    text = recoveredText(report["restored"], updated)
     notify(text, report)
     return report
 
