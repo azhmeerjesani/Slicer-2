@@ -713,6 +713,43 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         self.assertEqual(code, 3, stderr[-2000:])
         self.assertGreaterEqual(resumed["first"], cursor - 1, "the GLM resumes from its cursor")
 
+    def test_resumed_run_methods_cite_the_run_that_finished(self):
+        """A run stopped while the report is made has already written the export; the run that resumes it writes it again, so the
+        methods, the sidecars and the report name the run that finished (not the cancelled one), and a finished run's export is reused.
+        """
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f-cancel-report"))
+        out = fx["out"]
+        stopped = {}
+
+        def on_event(event, process):
+            if "at" not in stopped and event["event"] == "stage" and event.get("name") == "report" and event.get("status") == "running":
+                open(os.path.join(out, pipeline.PRIVATE_DIR, pipeline.STOP_NAME), "w").close()
+                stopped["at"] = event["_wall"]
+
+        code, events, _stdout, stderr, _wall = cli(*run_args(fx, *FAST), on_event=on_event)
+        self.assertIn("at", stopped, "the report stage was reached")
+        self.assertEqual(code, 3, stderr[-2000:])
+        cancelled = read_json(os.path.join(out, "pipeline.json"))["run_id"]
+        self.assertEqual(done_event(events)["event"], "cancelled")
+        code, events, _stdout, stderr, _wall = cli(*run_args(fx, *FAST))
+        self.assertEqual(code, 0, stderr[-2000:])
+        finished = read_json(os.path.join(out, "pipeline.json"))["run_id"]
+        self.assertNotEqual(finished, cancelled)
+        status = {record["id"]: record.get("status") for record in runs.list_runs(fx["study"])}
+        self.assertEqual((status[cancelled], status[finished]), ("cancelled", "done"))
+        self.assertEqual(stage_status(events)["export"], "done", "the export of the stopped run is written again")
+        with open(os.path.join(out, "methods.md"), encoding="utf-8") as f:
+            methods = f.read()
+        self.assertIn(f"The analysis ran as one pipeline (run {finished}", methods)
+        self.assertNotIn(cancelled, methods)
+        with open(os.path.join(out, "report.html"), encoding="utf-8") as f:
+            self.assertNotIn(cancelled, f.read())
+        self.assertEqual(read_json(export.sidecar_path(out, "sub-01", self.bundle.name))["pipeline"]["run_id"], finished)
+        # An unchanged run after a finished one reuses the export (and the report)
+        code, events, calls, _seconds = run_in_process(fx, *FAST)
+        self.assertEqual((code, calls), (0, []))
+        self.assertEqual((stage_status(events).get("export"), stage_status(events).get("report")), ("reused", "reused"))
+
     def test_no_stale_group_maps_after_skip_or_stop(self):
         """GLM and conjunction maps of an earlier run never pass for the results of a run that skipped or stopped those stages."""
         fx = fixture.make_fixture(os.path.join(self.tmp, "f-stale"))

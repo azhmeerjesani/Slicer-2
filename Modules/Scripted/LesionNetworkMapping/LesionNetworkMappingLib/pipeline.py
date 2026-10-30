@@ -1741,13 +1741,22 @@ class Runner:
             return fp, None
         return fp, {"status": "done", "reused": True, "fingerprint": fp, "result": state.get("result") or {}, "outputs_rel": state.get("outputs") or {}, "child_run_id": state.get("child_run_id")}
 
+    def _run_done(self, run_id):
+        """Whether the registry records the pipeline run ``run_id`` as finished (status "done")."""
+        from . import runs
+
+        try:
+            return (runs.load(self.study.path).get(run_id) or {}).get("status") == "done"
+        except (OSError, ValueError):
+            return False
+
     def _save(self, name, fp, result, outputs, child_run_id=None, events=None, start=None):
         sizes = {}
         for path in outputs:
             if path and os.path.isfile(path):
                 sizes[self.rel(path)] = os.path.getsize(path)
         provider = self.providers[name]
-        state = {"fingerprint": fp, "provider": provider.module, "provider_sha256": provider.sha256, "status": "done", "outputs": sizes, "inputs": self.inputs.get(name), "start": start, "end": _now_iso(), "result": result,
+        state = {"fingerprint": fp, "provider": provider.module, "provider_sha256": provider.sha256, "status": "done", "pipeline_run": self.run_id, "outputs": sizes, "inputs": self.inputs.get(name), "start": start, "end": _now_iso(), "result": result,
                  "child_run_id": child_run_id, "events_tail": [self._portable(jobs.to_json(event)) for event in (events or [])[-10:]]}
         jobs.write_json_atomic(self._state_path(name), state)
         return {"status": "done", "fingerprint": fp, "result": result, "outputs_rel": sizes, "child_run_id": child_run_id}
@@ -2972,7 +2981,15 @@ class Runner:
         rows = self.mapped_rows
         sids = [row["participant_id"] for row in rows]
         params = {"config": self.config.to_json(analysis_only=True, base=self.out), "software": self.config.software, "rows": [(row["participant_id"], row["sha256"], row.get("lesion")) for row in rows]}
-        fp, reused = self._cached("export", params, tuple(name for name, _ in STAGES[1:13]))
+        # The methods, sidecars and provenance of the export name the pipeline run that wrote them. A saved export is reused
+        # only when that run finished ("done"); one made by a stopped (cancelled) or failed run is written again by this run,
+        # and the report that embeds its methods follows (its fingerprint depends on this one).
+        deps = tuple(name for name, _ in STAGES[1:13])
+        saved_run = (_read_json(self._state_path("export")) or {}).get("pipeline_run")
+        keep_run = saved_run if saved_run and saved_run != self.run_id and self._run_done(saved_run) else self.run_id
+        fp, reused = self._cached("export", {**params, "pipeline_run": keep_run}, deps)
+        if reused is None and keep_run != self.run_id:
+            fp, reused = self._cached("export", {**params, "pipeline_run": self.run_id}, deps)
         if reused:
             return reused
         start = _now_iso()
