@@ -76,9 +76,12 @@ SHOW_ALL_CONTROLS_PROPERTIES = ("segmentationNodeSelectorVisible", "sourceVolume
 EFFECTIVE_VISIBILITY_PROPERTIES = ("segmentationNodeSelectorVisible", "sourceVolumeNodeSelectorVisible", "addRemoveSegmentButtonsVisible",
                                    "show3DButtonVisible", "switchToSegmentationsButtonVisible")
 #: Effect parameters of each presentation: {(effect name, parameter): value}. Set only when the effect defines the
-#: parameter (Outline: lasso on release; Fill gaps: the selected segment only).
-CLASSIC_EFFECT_PARAMETERS = {("Draw", "ApplyOnRelease"): 0, ("Fill between slices", "SelectedSegmentOnly"): 0}
-STUDIO_EFFECT_PARAMETERS = {("Draw", "ApplyOnRelease"): 1, ("Fill between slices", "SelectedSegmentOnly"): 1}
+#: parameter (Outline: lasso on release; Fill gaps: the selected segment only, and the gaps between parts that are
+#: several slices thick along the Red view's slicing axis; Classic gives the result of official 3D Slicer).
+CLASSIC_EFFECT_PARAMETERS = {("Draw", "ApplyOnRelease"): 0, ("Fill between slices", "SelectedSegmentOnly"): 0,
+                             ("Fill between slices", "FillGapsBetweenThickParts"): 0}
+STUDIO_EFFECT_PARAMETERS = {("Draw", "ApplyOnRelease"): 1, ("Fill between slices", "SelectedSegmentOnly"): 1,
+                            ("Fill between slices", "FillGapsBetweenThickParts"): 1}
 
 #: Widgets of the editor hidden in the studio presentation (the top bar and z/y undo; the hint line and the "?" help)
 STUDIO_HIDDEN_WIDGETS = ("UndoRedoGroupBox", "EffectHelpBrowser")

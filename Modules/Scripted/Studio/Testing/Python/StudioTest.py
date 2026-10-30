@@ -1854,6 +1854,77 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertTrue(((after > 0) | (before == 0)).all())
         editor.setActiveEffect(None)
 
+    def test_29e_fill_gaps_never_joins_parts_side_by_side_and_classic_is_official(self):
+        """Fill gaps fills only slices that are empty for the lesion along the slicing axis: two parts side by side
+        within the slices are never joined. Classic Fill between slices gives the result of official 3D Slicer (the
+        plain contour interpolation), also for parts that are several slices thick.
+        """
+        import numpy as np
+        from StudioLib import draw
+
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        segmentationNode, segmentId, source = editor.segmentationNode(), editor.currentSegmentID(), editor.sourceVolumeNode()
+
+        def setLesion(boxes):
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, source)
+            array[:] = 0
+            for k0, k1, j0, j1, i0, i1 in boxes:
+                array[k0:k1, j0:j1, i0:i1] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, source)
+            self._pump()
+            return array.copy()
+
+        def lesion():
+            return slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, source).copy()
+
+        def fillWithTile():
+            editor.setActiveEffectByName("Fill between slices")
+            self._pump()
+            editor.activeEffect().self().fillButton.click()
+            self._pump()
+            editor.setActiveEffect(None)
+
+        sideBySide = [(34, 46, 50, 58, 20, 28), (34, 46, 50, 58, 34, 42)]
+        aboveBelow = [(34, 46, 44, 50, 26, 34), (34, 46, 56, 62, 26, 34)]
+        # Left part with a gap between thick parts, right part on every slice: the lesion has no empty slice
+        gapOnOneSide = [(34, 38, 50, 58, 20, 28), (42, 46, 50, 58, 20, 28), (34, 46, 50, 58, 34, 42)]
+        for boxes in (sideBySide, aboveBelow, gapOnOneSide):
+            for viaTile in (False, True):
+                editor.setActiveEffect(None)
+                before = setLesion(boxes)
+                if viaTile:
+                    fillWithTile()
+                else:
+                    draw.fillGaps(studioShell)
+                    self._pump()
+                    editor.setActiveEffect(None)
+                after = lesion()
+                self.assertEqual(int(np.count_nonzero(after)), int(np.count_nonzero(before)), (boxes, viaTile))
+                self.assertTrue(((after > 0) == (before > 0)).all(), (boxes, viaTile))
+
+        # Classic: the result of the plain interpolation, as in official 3D Slicer
+        import vtk
+        import vtkITK
+        from vtk.util import numpy_support
+
+        studioShell.classic(persist=False)
+        self._pump()
+        self.assertEqual(slicer.modules.SegmentEditorWidget.presentation(), "classic")
+        for boxes in (sideBySide, [(34, 40, 50, 58, 30, 38), (42, 48, 50, 58, 30, 38)]):
+            before = setLesion(boxes)
+            image = vtk.vtkImageData()
+            image.SetDimensions(before.shape[2], before.shape[1], before.shape[0])
+            image.GetPointData().SetScalars(numpy_support.numpy_to_vtk(before.astype(np.uint8).ravel(), deep=True))
+            interpolator = vtkITK.vtkITKMorphologicalContourInterpolator()
+            interpolator.SetInputData(image)
+            interpolator.Update()
+            official = numpy_support.vtk_to_numpy(interpolator.GetOutput().GetPointData().GetScalars()).reshape(before.shape)
+            fillWithTile()
+            after = lesion()
+            self.assertTrue(((after > 0) == ((official > 0) | (before > 0))).all(), boxes)
+        editor.setActiveEffect(None)
+
     def test_29d_draw_cleanup_that_changes_nothing_offers_no_undo(self):
         """A Keep largest part or Fill gaps and specks that changes nothing adds no undo step, so its toast has no
         Undo: that Undo would undo the user's previous, unrelated stroke.
