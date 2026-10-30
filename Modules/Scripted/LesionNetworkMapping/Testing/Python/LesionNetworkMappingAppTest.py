@@ -493,6 +493,34 @@ class AppLevelsTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("sub-99", events[-1]["message"])
 
+    def test_refused_run_writes_nothing(self):
+        """A run refused with exit code 75 (another run holds the output folder) writes nothing there: it used to rewrite
+        the shared study of the BIDS input with its own --group-map first, and the running run then analysed those groups (BB-1).
+        """
+        from LesionNetworkMappingLib import jobs
+
+        output = os.path.join(self.tmp, "locked out")
+        lock_path = os.path.join(output, self.run_name, pipeline.PRIVATE_DIR, pipeline.LOCK_NAME)
+        lock = jobs.OutputLock(lock_path).acquire()  # the run that writes there
+        try:
+            code, events, _stdout, stderr = cli(self.bids, output, "group", "--connectome", self.fx["bundle"], *COMMON, "--group-map", "patient=control,HC=case", "--lock-wait", "0")
+            written = file_set(output)
+        finally:
+            lock.release()
+        self.assertEqual((code, last_event(events)["code"]), (jobs.EXIT_LOCKED, "locked"), stderr[-2000:])
+        self.assertEqual(written, {os.path.relpath(lock_path, output).replace(os.sep, "/")})
+        # the study of a finished run is left as it is by a refused run (the lock of a running one is held)
+        study_tsv = os.path.join(self.output, *app.STUDY_RELPATH, "participants.tsv")
+        before = tree_digest(self.output)
+        lock = jobs.OutputLock(os.path.join(self.out, pipeline.PRIVATE_DIR, pipeline.LOCK_NAME)).acquire()
+        try:
+            code, _events, _stdout, _stderr = cli(self.bids, self.output, "group", "--connectome", self.fx["bundle"], *COMMON, "--group-map", "patient=control,HC=case", "--lock-wait", "0")
+        finally:
+            lock.release()
+        self.assertEqual(code, jobs.EXIT_LOCKED)
+        self.assertEqual(tree_digest(self.output), before)
+        self.assertEqual(read_tsv(study_tsv)[1][0]["group"], "case")
+
     def test_output_folder_is_not_the_input_folder(self):
         # The BIDS input is never written: output == input would put conn-<label>/ and sourcedata/ into the dataset,
         # and the next run would scan the snapshots there as competing lesion masks

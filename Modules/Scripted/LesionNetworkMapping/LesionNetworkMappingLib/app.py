@@ -472,8 +472,8 @@ def _runner_class():
     class LevelRunner(pipeline.Runner):
         """A pipeline run restricted to a BIDS-App level and to the selected participants."""
 
-        def __init__(self, config, emit, cancel, argv, level, labels):
-            super().__init__(config, emit, cancel, argv)
+        def __init__(self, config, emit, cancel, argv, level, labels, lock=None):
+            super().__init__(config, emit, cancel, argv, lock=lock)
             self.level = level
             self.labels = set(labels) if labels else None
             self._selected = False
@@ -511,11 +511,14 @@ def _runner_class():
     return LevelRunner
 
 
-def run_level(config, level, labels=None, emit=None, cancel=None, argv=None):
-    """Run one BIDS-App level of the pipeline; return the exit code (see the module docstring)."""
+def run_level(config, level, labels=None, emit=None, cancel=None, argv=None, lock=None):
+    """Run one BIDS-App level of the pipeline; return the exit code (see the module docstring).
+
+    :param lock: the output lock of the run folder when the caller holds it already (:func:`_take_lock`).
+    """
     from . import pipeline
 
-    runner = _runner_class()(config, emit if emit is not None else pipeline.Emitter(config.events), cancel, argv, level, labels)
+    runner = _runner_class()(config, emit if emit is not None else pipeline.Emitter(config.events), cancel, argv, level, labels, lock=lock)
     try:
         return runner.run()
     except pipeline.PipelineError as exc:
@@ -581,19 +584,25 @@ def render_figures(presets, out, config, emit):
     return written
 
 
-def _wait_for_lock(out, wait_s, emit):
-    """Wait until no pipeline run holds ``out`` (at most ``wait_s`` seconds); return True when it is free."""
+def _take_lock(out, wait_s, emit):
+    """Take the output lock of the run folder ``out``, waiting at most ``wait_s`` seconds while another run holds it.
+
+    Return the held :class:`jobs.OutputLock` (the run uses it and releases it), or None when another run still holds
+    the folder. The lock is taken before anything is written to the output folder (the study of a BIDS input is shared
+    by the runs that write there), so that a run refused with exit code 75 changes nothing.
+    """
     from . import jobs, pipeline
 
     lock = jobs.OutputLock(os.path.join(out, pipeline.PRIVATE_DIR, pipeline.LOCK_NAME))
     deadline = time.monotonic() + max(float(wait_s or 0), 0.0)
     told = False
     while True:
-        holder = lock.read()
-        if not os.path.exists(lock.path) or lock.is_stale(holder):
-            return True
+        try:
+            return lock.acquire()
+        except jobs.Locked as exc:
+            holder = exc.holder
         if time.monotonic() >= deadline:
-            return False
+            return None
         if not told:
             emit("info", code="waiting_for_lock", message=f"Another run (process {(holder or {}).get('pid')}) writes to {os.path.basename(out)}: waiting")
             told = True
@@ -698,34 +707,54 @@ def _main(argv):
     except (OSError, ValueError) as exc:
         emit("error", code="bundle", message=f"The connectome cannot be opened: {exc}")
         return jobs.EXIT_ERROR
-    os.makedirs(output_dir, exist_ok=True)
+    bids = not Study.is_study(input_dir)
+    if bids:
+        study_path = os.path.join(output_dir, *STUDY_RELPATH)  # written by prepare_bids_study once the run holds its output lock
+    else:
+        study_path = input_dir
+        for option in ("group_column", "group_map"):
+            if getattr(args, option):
+                emit("warning", code="study_input", message=f"--{option.replace('_', '-')} applies to a BIDS input; the study's own columns are used")
     try:
-        if Study.is_study(input_dir):
-            study_path = input_dir
-            for option in ("group_column", "group_map"):
-                if getattr(args, option):
-                    emit("warning", code="study_input", message=f"--{option.replace('_', '-')} applies to a BIDS input; the study's own columns are used")
-        else:
-            study_path, _summary = prepare_bids_study(input_dir, output_dir, args.group_column, args.group_map, [name.strip() for name in args.score_columns.split(",") if name.strip()], emit)
-        labels = normalize_labels(args.participant_label)
-        if labels:
-            missing = sorted(set(labels) - set(Study.open(study_path).subject_ids))
-            if missing:
-                emit("error", code="usage", message=f"Participant label(s) not in the input: {', '.join(missing)}")
-                return jobs.EXIT_USAGE
         config = build_config(args, study_path, emit)
-    except jobs.Locked as exc:
-        emit("error", code="locked", message=exc.message)
-        return jobs.EXIT_LOCKED
     except (OSError, ValueError, TypeError, KeyError) as exc:
         emit("error", code="usage", message=f"{type(exc).__name__}: {exc}")
         return jobs.EXIT_USAGE
     out = os.path.join(output_dir, run_dir_name(bundle.name, config.preview_n))
     config.out = out
-    if not _wait_for_lock(out, args.lock_wait, emit):
+    # The output lock comes first: the study of a BIDS input is shared by every run writing to this output folder, and a
+    # run refused with exit code 75 must not rewrite it (the run holding the folder would read another run's groups)
+    created = [path for path in (output_dir, out, os.path.join(out, pipeline.PRIVATE_DIR)) if not os.path.isdir(path)]
+    lock = _take_lock(out, args.lock_wait, emit)
+    if lock is None:
         emit("error", code="locked", message=f"Another run still writes to {os.path.basename(out)} after {args.lock_wait:g} s")
         return jobs.EXIT_LOCKED
-    code = run_level(config, args.analysis_level, labels, emit=emit, cancel=args.cancel_file, argv=argv)
+    ran = False
+    try:
+        try:
+            if bids:
+                prepare_bids_study(input_dir, output_dir, args.group_column, args.group_map, [name.strip() for name in args.score_columns.split(",") if name.strip()], emit)
+            labels = normalize_labels(args.participant_label)
+            if labels:
+                missing = sorted(set(labels) - set(Study.open(study_path).subject_ids))
+                if missing:
+                    emit("error", code="usage", message=f"Participant label(s) not in the input: {', '.join(missing)}")
+                    return jobs.EXIT_USAGE
+        except jobs.Locked as exc:
+            emit("error", code="locked", message=exc.message)
+            return jobs.EXIT_LOCKED
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            emit("error", code="usage", message=f"{type(exc).__name__}: {exc}")
+            return jobs.EXIT_USAGE
+        ran = True
+        code = run_level(config, args.analysis_level, labels, emit=emit, cancel=args.cancel_file, argv=argv, lock=lock)
+    finally:
+        lock.release()
+        for path in [] if ran else reversed(created):  # the empty folders of a run that stopped before its first stage
+            try:
+                os.rmdir(path)
+            except OSError:
+                pass
     if code == jobs.EXIT_OK:
         write_dataset_description(study_path, output_dir)
         if presets and args.analysis_level == "group":

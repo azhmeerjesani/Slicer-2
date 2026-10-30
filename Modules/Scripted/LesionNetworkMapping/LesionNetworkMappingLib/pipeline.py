@@ -122,6 +122,10 @@ STOP_NAME = "STOP"
 LOCK_NAME = "lock.json"
 PROGRESS_JSON = "progress.json"
 PLAN_JSON = "plan.json"
+#: the study's participants table as the run planned it (``.pipeline/participants/``): the GLM, sLNM and null-model
+#: jobs read the groups, scores and covariates there, so that another writer of the study (a slicer-lnm run with
+#: another --group-map, an edit in the application) cannot change them in the middle of the run
+PARTICIPANTS_DIR = "participants"
 LESIONS_TSV = "lesions.tsv"
 #: maps.tsv of the kept lesions, written next to the cohortmaps maps.tsv when some lesions are excluded after mapping
 PIPELINE_MAPS_TSV = "maps_kept.tsv"
@@ -1426,9 +1430,13 @@ def _read_log_tail(path, lines=20):
 class Runner:
     """One pipeline run (:func:`run`)."""
 
-    def __init__(self, config, emit=None, cancel=None, argv=None):
+    def __init__(self, config, emit=None, cancel=None, argv=None, lock=None):
+        """:param lock: the output lock of the run folder, when the caller took it already (``slicer-lnm`` takes it before it
+        prepares the study of a BIDS input); the run then uses it instead of taking its own, and releases it.
+        """
         self.config = config
         self.emit = emit if emit is not None else Emitter(config.events)
+        self.held_lock = lock
         self.argv = list(argv or [])
         self.cancel_extra = cancel
         self.providers = resolve_providers()
@@ -1452,6 +1460,7 @@ class Runner:
         self.lock = None
         self.keep_awake = None
         self.plan = None
+        self.participants_tsv = None  # the frozen participants table of the child jobs (_freeze_participants)
 
     # Paths
 
@@ -1512,12 +1521,16 @@ class Runner:
             return EXIT_TERMS
         self.out = default_out(config, bundle.name)
         os.makedirs(self.private(STAGES_DIR), exist_ok=True)
-        self.lock = jobs.OutputLock(self.private(LOCK_NAME))
-        try:
-            self.lock.acquire()
-        except jobs.Locked as exc:
-            self.emit("error", code="locked", message=f"Another pipeline run writes to this folder: {exc.message}", holder=exc.holder)
-            return EXIT_LOCKED
+        held = self.held_lock
+        if held is not None and held.acquired and os.path.abspath(held.path) == os.path.abspath(self.private(LOCK_NAME)):
+            self.lock = held
+        else:
+            self.lock = jobs.OutputLock(self.private(LOCK_NAME))
+            try:
+                self.lock.acquire()
+            except jobs.Locked as exc:
+                self.emit("error", code="locked", message=f"Another pipeline run writes to this folder: {exc.message}", holder=exc.holder)
+                return EXIT_LOCKED
         try:
             return self._run_locked(bundle)
         finally:
@@ -1607,6 +1620,7 @@ class Runner:
         self.threads = jobs.budget_threads(config.threads)
         self.label = self.bundle.name
         jobs.write_json_atomic(self.private(PLAN_JSON), plan_result.to_json())
+        self.participants_tsv = self._freeze_participants()
         if isinstance(self.emit, Emitter):
             self.emit.weights = {stage["name"]: max(stage["estimate_s"], 0.1) for stage in plan_result.stages}
 
@@ -1934,6 +1948,27 @@ class Runner:
         return args
 
     # Snapshots
+
+    def _freeze_participants(self):
+        """Write the participants table (and its data dictionary) of the planned study to ``.pipeline/participants/``; return its path.
+
+        The plan, pipeline.json and the stage fingerprints use the study as it was read when the run started; the child
+        jobs (GLM, sLNM, null models) read the groups, scores and covariates from this copy, not from the study, which
+        another writer may change while the run works. The folder holds no study.json: the jobs read it as a table.
+        """
+        from . import schema
+        from .study import PARTICIPANTS_JSON, PARTICIPANTS_TSV, _tsv_text
+
+        folder = self.private(PARTICIPANTS_DIR)
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, PARTICIPANTS_TSV)
+        schema.write_text_atomic(path, _tsv_text(self.study.columns, self.study.subjects))
+        dictionary = os.path.join(folder, PARTICIPANTS_JSON)
+        if self.study.dictionary:
+            schema.write_text_atomic(dictionary, schema.dictionary_text(self.study.dictionary))
+        elif os.path.exists(dictionary):
+            os.remove(dictionary)
+        return path
 
     def _snapshot(self, rows):
         """Byte copies of the analysed lesions in inputs/lesions/ (verified against the planned sha256)."""
@@ -2390,7 +2425,7 @@ class Runner:
         start = _now_iso()
         folder = self.stage_dir("nulls")
         args = ["--maps", self.maps_tsv, "--bundle", self.bundle.path, "--kind", "rl_independent", "--mode", mode, "--k", "1000", "--rule", thresholds.rule_to_json(self.config.rule),
-                "--overlap", f"{self.config.sensitivity:g}", "--seed", str(self.config.null_seed), "--participants", os.path.join(self.study.path, "participants.tsv"), "--out", folder]
+                "--overlap", f"{self.config.sensitivity:g}", "--seed", str(self.config.null_seed), "--participants", self.participants_tsv, "--out", folder]
         if self.config.memory_budget_gb:
             args += ["--budget-gb", f"{float(self.config.memory_budget_gb):g}"]
         args += self._common_child_args()
@@ -2614,7 +2649,7 @@ class Runner:
         design_json, _matrix = designlib.save_design(design, folder)
         if design.blocking:
             return {"status": "blocked", "reason": "The design is blocked: " + " | ".join(check.message for check in design.blocking), "fingerprint": fp, "result": {"design_type": design.design_type}}
-        args = ["--maps", self.maps_tsv, "--participants", os.path.join(self.study.path, "participants.tsv"), "--design", design_json, "--mask", self.mask_path, "--out", folder, "--perm", str(self.config.perm),
+        args = ["--maps", self.maps_tsv, "--participants", self.participants_tsv, "--design", design_json, "--mask", self.mask_path, "--out", folder, "--perm", str(self.config.perm),
                 "--seed", str(self.config.perm_seed), "--conn-label", self.bundle.name]
         if self.config.tfce:
             args.append("--tfce")
@@ -2690,7 +2725,7 @@ class Runner:
                 results[label] = {"column": column, "n": len(scored), "skipped": f"fewer than {self.config.min_slnm_n} values"}
                 continue
             folder = self.stage_dir(f"slnm-{label}")
-            args = ["--maps", self.maps_tsv, "--participants", os.path.join(self.study.path, "participants.tsv"), "--score", column, "--covariates", ",".join(self.config.covariates)]
+            args = ["--maps", self.maps_tsv, "--participants", self.participants_tsv, "--score", column, "--covariates", ",".join(self.config.covariates)]
             if self.config.volume_off_reason and "volume_ml" not in self.config.covariates:
                 args += ["--volume-off-reason", self.config.volume_off_reason]
             if self.config.slnm_method == "spearman":

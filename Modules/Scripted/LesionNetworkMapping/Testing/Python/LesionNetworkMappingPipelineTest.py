@@ -551,6 +551,40 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         self.assertTrue(os.path.isfile(self.group_path("caseGtControlTstat", fx["out"])))
         self.assertEqual(recipes.read_deviations(fx["study"]), [])  # the plan was followed
 
+    def test_study_edited_during_run_keeps_the_planned_groups(self):
+        """The GLM analyses the groups the run planned with (pipeline.json), even when another writer changes the study's
+        participants.tsv during the run: a slicer-lnm run refused with exit code 75 used to rewrite it with its own
+        --group-map, and the running run's case-vs-control T map came out sign-flipped (BB-1).
+        """
+        if self.baseline:
+            self.skipTest("The GLM is not available with the wave-1 providers")
+        from LesionNetworkMappingLib import glm
+
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f13"))
+        snapshot = pipeline.Runner._snapshot
+
+        def swap_groups_then_snapshot(runner, rows):
+            # after the plan (pipeline.json "inputs"), before the maps and the GLM: another writer swaps case and control
+            study = Study.open(fx["study"])
+            for sid in study.subject_ids:
+                group = study.subject(sid).get("group")
+                if group in ("case", "control"):
+                    study.set(sid, group="control" if group == "case" else "case")
+            study.save()
+            snapshot(runner, rows)
+
+        with mock.patch.object(pipeline.Runner, "_snapshot", swap_groups_then_snapshot):
+            code, events, _calls, _seconds = run_in_process(fx, *FAST)
+        self.assertEqual(code, 0, done_event(events))
+        planned = {row["participant_id"]: row["group"] for row in read_json(os.path.join(fx["out"], pipeline.PIPELINE_JSON))["inputs"]["rows"] if row["status"] != "excluded"}
+        self.assertEqual(sorted(planned.values()).count("case"), fixture.N_CASES)
+        self.assertEqual(Study.open(fx["study"]).subject("sub-01")["group"], "control")  # the study was changed
+        record = read_json(os.path.join(fx["out"], "stages", "glm", glm.GLM_JSON))
+        self.assertEqual(record["n_per_level"], {"case": fixture.N_CASES, "control": fixture.N_CONTROLS})
+        ours = nifti.read_nifti(self.group_path("caseVsControlTstat", fx["out"]))[0]
+        reference = nifti.read_nifti(self.group_path("caseVsControlTstat"))[0]  # the class run on the unchanged study
+        np.testing.assert_allclose(np.asarray(ours, np.float64), np.asarray(reference, np.float64), atol=1e-4)
+
     def test_lesion_outside_mask_is_excluded(self):
         fx = fixture.make_fixture(os.path.join(self.tmp, "f10"))
         study = Study.open(fx["study"])
