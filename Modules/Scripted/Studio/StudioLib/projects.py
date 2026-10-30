@@ -911,6 +911,16 @@ class ProjectError(Exception):
     """A project operation that cannot be done (the message is shown to the user)."""
 
 
+def isSamePath(first, second):
+    """True when both paths are the same folder or file, also when only the letter case differs on a case-insensitive file system
+    (APFS and HFS+ on macOS: ``normcase`` does not fold case there, so only the file system can tell).
+    """
+    try:
+        return os.path.samefile(first, second)
+    except OSError:
+        return os.path.normcase(os.path.realpath(first)) == os.path.normcase(os.path.realpath(second))
+
+
 def renameFolder(path, newName):
     """Rename a project folder (not the open one: see ``AutosaveService.renameProject``) and its scene file.
 
@@ -923,7 +933,7 @@ def renameFolder(path, newName):
     if isLockedByOther(path):
         raise ProjectError(_("{name} is open in another Slicer Studio.").format(name=os.path.basename(path)))
     newPath = os.path.join(parent, newName)
-    if os.path.exists(newPath) and os.path.normcase(newPath) != os.path.normcase(path):
+    if os.path.exists(newPath) and not isSamePath(newPath, path):
         raise ProjectError(_("A project named {name} already exists.").format(name=newName))
     scene = sceneFile(path)
     os.rename(path, newPath)
@@ -945,12 +955,12 @@ def renameSceneFile(projectPath, oldScene):
     oldBase = os.path.basename(oldScene)
     oldPath = os.path.join(projectPath, oldBase)
     newPath = os.path.join(projectPath, name + SCENE_EXTENSION)
-    if os.path.isfile(oldPath) and os.path.normcase(oldPath) != os.path.normcase(newPath) and not os.path.exists(newPath):
+    if os.path.isfile(oldPath) and oldPath != newPath and (not os.path.exists(newPath) or isSamePath(oldPath, newPath)):
         os.rename(oldPath, newPath)
         # vtkMRMLScene keeps hidden nodes in "<scene file name up to the first dot>_Private": follow the new name
         oldPrivate = os.path.join(projectPath, oldBase.split(".")[0] + "_Private")
         newPrivate = os.path.join(projectPath, name.split(".")[0] + "_Private")
-        if os.path.isdir(oldPrivate) and not os.path.exists(newPrivate):
+        if os.path.isdir(oldPrivate) and oldPrivate != newPrivate and (not os.path.exists(newPrivate) or isSamePath(oldPrivate, newPrivate)):
             os.rename(oldPrivate, newPrivate)
             _rewritePrivatePaths(newPath, os.path.basename(oldPrivate), os.path.basename(newPrivate))
     return newPath

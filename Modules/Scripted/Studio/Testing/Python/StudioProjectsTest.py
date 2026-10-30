@@ -415,6 +415,77 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("Lesions"))
         self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("sub-012_T1w"))
 
+    @contextlib.contextmanager
+    def _caseInsensitiveFileSystem(self):
+        """Simulate APFS/HFS+ (macOS default): a name matches an entry that differs only in letter case.
+
+        ``os.path.normcase`` does not fold case there, so only the file system calls ``exists`` and ``samefile`` tell.
+        """
+        realExists, realSamefile = os.path.exists, os.path.samefile
+
+        def resolve(path):
+            path = os.path.normpath(str(path))
+            if realExists(path):
+                return path
+            parent, name = os.path.split(path)
+            if not parent or parent == path:
+                return None
+            parent = resolve(parent)
+            if parent is None or not os.path.isdir(parent):
+                return None
+            for entry in os.listdir(parent):
+                if entry.lower() == name.lower():
+                    return os.path.join(parent, entry)
+            return None
+
+        def exists(path):
+            return resolve(path) is not None
+
+        def samefile(first, second):
+            return realSamefile(resolve(first) or first, resolve(second) or second)
+
+        os.path.exists, os.path.samefile = exists, samefile
+        try:
+            yield
+        finally:
+            os.path.exists, os.path.samefile = realExists, realSamefile
+
+    def test_07b_case_only_rename(self):
+        """Renaming a project by its letter case only ("Study" to "study") works on a case-insensitive file system."""
+        projects = self.projects
+        service = self._service()
+        volume, _path = self._userVolume()
+        self._lesion(volume)
+        project = self._projectFor(service)
+        self._save(service)
+        studyPath = service.renameProject("Study")
+        self.assertEqual(os.path.basename(studyPath), "Study")
+        otherPath = projects.duplicateFolder(studyPath)
+        self.io.backgroundWriter().drain(30.0)
+        otherPath = projects.renameFolder(otherPath, "Other")
+        with self._caseInsensitiveFileSystem():
+            # A closed project
+            closedPath = projects.renameFolder(otherPath, "other")
+            self.assertEqual(os.path.basename(closedPath), "other")
+            self.assertTrue(os.path.isfile(os.path.join(closedPath, "other.mrml")))
+            self.assertEqual(projects.readJson(projects.projectFile(closedPath))["name"], "other")
+            # Another project with the same name apart from the case is still refused
+            with self.assertRaises(projects.ProjectError):
+                projects.renameFolder(closedPath, "STUDY")
+            with self.assertRaises(projects.ProjectError):
+                service.renameProject("OTHER")
+            # The open project
+            lowerPath = service.renameProject("study")
+            self.assertEqual(os.path.basename(lowerPath), "study")
+            self.assertEqual(project.name, "study")
+            self.assertTrue(os.path.isfile(os.path.join(lowerPath, "study.mrml")))
+            self._save(service)
+            self.assertEqual(projects.readJson(projects.projectFile(lowerPath))["name"], "study")
+        self.assertIn("study", os.listdir(os.path.dirname(lowerPath)))
+        self.assertNotIn("Study", os.listdir(os.path.dirname(lowerPath)))
+        # Case-sensitive file system: two projects whose names differ only in case stay two projects
+        self.assertFalse(projects.isSamePath(lowerPath, closedPath))
+
     def test_08_move_root(self):
         projects = self.projects
         service = self._service()
