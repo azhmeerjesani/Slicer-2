@@ -570,6 +570,22 @@ def projectOfPath(path, rootPath=None):
     return None
 
 
+def projectOfSceneFile(path, rootPath=None):
+    """The project folder whose own scene file (``sceneFile``) is ``path``, or None.
+
+    Only that scene continues the project in place. Another scene inside a project folder (one saved into a subfolder such
+    as Exports/, or a second .mrml next to the project's) is not the project: it opens as a copy like a scene from
+    elsewhere, or loading it would replace the project's scene.
+    """
+    projectPath = projectOfPath(path, rootPath)
+    if projectPath is None:
+        return None
+    scenePath = sceneFile(projectPath)
+    if scenePath is None or os.path.normcase(os.path.realpath(scenePath)) != os.path.normcase(os.path.realpath(str(path))):
+        return None
+    return projectPath
+
+
 def isProjectFolder(path):
     return bool(path) and os.path.isdir(path) and (os.path.isdir(privateFolder(path)) or sceneFile(path) is not None)
 

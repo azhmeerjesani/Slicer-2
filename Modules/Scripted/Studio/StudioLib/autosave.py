@@ -1318,7 +1318,8 @@ class AutosaveService:
         if not projects.sceneHasUserData(scene):
             return
         url = scene.GetURL()
-        projectPath = projects.projectOfPath(url) if url and os.path.isfile(url) else None
+        # Only the project's own scene file: another scene saved inside a project folder is not that project
+        projectPath = projects.projectOfSceneFile(url) if url and os.path.isfile(url) else None
         if projectPath is not None and self._sceneReadFrom(scene, projectPath):
             # A project of the folder that was loaded in Classic (official Load Scene): it continues in place, never as
             # a copy
@@ -1791,6 +1792,8 @@ class AutosaveService:
         projects = self._projects()
         path = os.path.abspath(str(path))
         projectPath = projects.projectOfPath(path)
+        if projectPath is not None and os.path.normcase(os.path.realpath(os.path.dirname(path))) != os.path.normcase(os.path.realpath(projectPath)):
+            projectPath = None  # a scene in a subfolder of a project (Exports/...) is not the project: it opens as a copy
         scenePath = projects.sceneFile(projectPath) if projectPath is not None else None
         if scenePath is not None and os.path.normcase(os.path.realpath(scenePath)) != os.path.normcase(os.path.realpath(path)):
             # The file opened is the old-named scene of a project folder renamed outside Slicer Studio
@@ -1820,7 +1823,10 @@ class AutosaveService:
         url = scene.GetURL()
         if not url or self.project is not None:
             return
-        projectPath = projects.projectOfPath(url)
+        # The project's own scene file continues the project in place. Any other scene, also one saved inside a project
+        # folder (a subfolder such as Exports/, a second .mrml next to the project's), is not that project: attaching it
+        # would make the next save replace the project's scene with it.
+        projectPath = projects.projectOfSceneFile(url)
         if projectPath is not None:
             if not (self._studioActive() or getattr(self, "_forceProjectOpen", False)) or not self.enabled():
                 return  # Classic loads a project like any scene (official behavior)

@@ -35,7 +35,9 @@ folder "Slicer Studio tést" (spaces and non-ASCII characters). The tests cover:
 - a disk that fills up during a save: the save fails with the reason, the saved scene and lesion files stay as they were,
   and the next save once space is free writes everything again;
 - Save lesion after the open project was renamed or the folder moved writes into the project where it is now (no ghost
-  folder of the old name).
+  folder of the old name);
+- a scene saved inside a project folder (a subfolder such as Exports/) opens as a copy: only the project's own scene file
+  continues the project in place.
 """
 
 import contextlib
@@ -2961,6 +2963,92 @@ class StudioProjectsTest(unittest.TestCase):
             else:
                 settings.setValue(study_ui.RECENT_STUDIES_KEY, previousRecent)
             os.environ[projects.ROOT_ENVIRONMENT] = self.root
+
+
+    def test_54_scene_saved_inside_a_project_folder_opens_as_a_copy(self):
+        """A scene that official 3D Slicer saved into a subfolder of a project (Projects/<name>/Exports/variant/) is not the
+        project (BB-1): opening it (Open…/drop with or without a project open, or Load Scene in Classic followed by Studio)
+        opens it as its own project that starts as a copy. It used to continue as the enclosing project, so the next save
+        rewrote "<name>.mrml" with the other scene and the project's scan and lesion were no longer in it.
+        """
+        projects = self.projects
+        service = self._service()
+        volume, _path = self._userVolume("MRHead", shape=(12, 14, 16), extension=".nrrd")
+        self._lesion(volume, "Lesion")
+        project = self._projectFor(service)
+        self._save(service)
+        projectPath, scenePath = project.path, project.scenePath
+        with open(scenePath, encoding="utf-8") as f:
+            sceneText = f.read()
+        self.assertIn("Lesion", sceneText)
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertIsNone(service.project)
+        # Another scene, with its own scan, saved by 3D Slicer inside the project folder
+        variantDir = os.path.join(projectPath, "Exports", "variant")
+        os.makedirs(variantDir)
+        k, j, i = np.indices((10, 11, 12))
+        variantScan = slicer.util.addVolumeFromArray(((i + j + k) % 50).astype(np.int16), name="Variant scan")
+        self.assertTrue(slicer.util.saveNode(variantScan, os.path.join(variantDir, "Variant scan.nrrd")))
+        variantPath = os.path.join(variantDir, "variant.mrml")
+        service.dispose()
+        self.services.remove(service)
+        self.assertTrue(slicer.util.saveScene(variantPath))
+        slicer.mrmlScene.Clear(0)
+        self.assertIsNone(projects.projectOfSceneFile(variantPath))
+        self.assertEqual(os.path.normpath(projects.projectOfSceneFile(scenePath)), os.path.normpath(projectPath))
+
+        def assertProjectKept():
+            self.io.backgroundWriter().drain(30.0)
+            with open(scenePath, encoding="utf-8") as f:
+                self.assertEqual(f.read(), sceneText, "the project's own scene file is not changed")
+
+        service = self._service()
+        announced = []
+        service.setProjectAnnouncer(lambda event, project, **info: announced.append(event))
+        # No project open: Open… / drop loads the scene and it opens as a copy
+        service.setPendingSceneSource(variantPath)
+        slicer.util.loadScene(variantPath)
+        self.assertIsNotNone(service.project, "the scene opens as its own project")
+        self.assertNotEqual(os.path.normpath(service.project.path), os.path.normpath(projectPath))
+        self.assertEqual(service.project.name, "variant")
+        self.assertIn("copy", announced)
+        self.assertNotIn("opened", announced)
+        slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "Edit").AddControlPoint(1, 2, 3)
+        self._save(service)
+        assertProjectKept()
+        self.assertIn("Images/Variant scan.nrrd", self._projectFiles(service.project), "the copy holds the scene's own scan")
+        # Another project open: Open… replaces it with the scene, which again opens as a copy
+        copyPath = service.project.path
+        del announced[:]
+        self.assertTrue(service.openSceneFile(variantPath))
+        self.assertIsNotNone(service.project)
+        self.assertNotIn(os.path.normpath(service.project.path), (os.path.normpath(projectPath), os.path.normpath(copyPath)))
+        self.assertIn("copy", announced)
+        self._save(service)
+        assertProjectKept()
+        # Loaded in Classic (official Load Scene), then Studio is shown: a copy as well, never the enclosing project
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        service.dispose()
+        self.services.remove(service)
+        classic = self._service(studio=False)
+        slicer.util.loadScene(variantPath)
+        classic.poll()
+        self.assertIsNone(classic.project)
+        classic.studioActiveOverride = True
+        classic._lastProjectCheck = None
+        classic.poll()
+        self.assertIsNotNone(classic.project)
+        self.assertNotEqual(os.path.normpath(classic.project.path), os.path.normpath(projectPath))
+        self._save(classic)
+        assertProjectKept()
+        # The project's own scene still continues in place
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertTrue(classic.openProject(projectPath))
+        self.assertEqual(os.path.normpath(classic.project.path), os.path.normpath(projectPath))
+        self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("Lesion"))
 
 
 def _sphere(center=(0, 0, 0)):
