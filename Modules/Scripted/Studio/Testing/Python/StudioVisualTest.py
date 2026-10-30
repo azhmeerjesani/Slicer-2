@@ -1044,6 +1044,44 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
         self.assertTrue(fitsLabel(refitted), (refitted, label.width))
         self.assertIn(text, str(label.toolTip))
 
+    def test_closed_combo_text_is_elided_with_an_ellipsis(self):
+        """The current text of a closed combo box that does not fit is drawn elided ("…"), not clipped in the middle of a word
+        (VISUAL.md section 6): the combo looks the same as one that holds a shorter text ending in an "…" that is visible. The
+        base style clips, so for it no such text looks the same.
+        """
+        long = "Quick look: lesion network overlap (Boes 2015) · adapted from a long study title"
+        width = 170
+        holder = qt.QWidget()
+        holder.resize(300, 60)
+        holder.show()
+
+        def look(text, style=None):
+            combo = qt.QComboBox(holder)
+            combo.addItem(text)
+            if style is not None:
+                combo.setStyle(style)
+            combo.setGeometry(4, 4, width, combo.sizeHint.height())
+            combo.show()
+            self._pump(3)
+            image = combo.grab().toImage()
+            combo.hide()
+            combo.setParent(None)
+            return image
+
+        try:
+            metrics = qt.QFontMetrics(qt.QComboBox().font)
+            self.assertGreater(metrics.horizontalAdvance(long), width, "the text must not fit the combo")
+            # Texts whose "…" is inside the field (24 px are the arrow and the padding)
+            visible = sorted({metrics.elidedText(long, qt.Qt.ElideRight, room) for room in range(40, width - 24)})
+            self.assertTrue(all(form.endswith("…") for form in visible))
+            shown = look(long)
+            self.assertTrue(any(shown == look(form) for form in visible), "a combo text that does not fit is drawn elided with an ellipsis")
+            clipped = look(long, qt.QStyleFactory.create("Fusion"))
+            self.assertFalse(any(clipped == look(form, qt.QStyleFactory.create("Fusion")) for form in visible),
+                             "the base style clips the text (the comparison sees the difference)")
+        finally:
+            holder.deleteLater()
+
     def test_map_overlay_follows_one_up_sagittal_coronal(self):
         """The map legend and layer chips follow the only slice view of a one-up Sagittal or Coronal layout, not Red only."""
         from StudioLib import mappage

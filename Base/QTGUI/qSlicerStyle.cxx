@@ -2623,6 +2623,30 @@ void qSlicerStyle::drawControl(ControlElement element, const QStyleOption* optio
           return;
         }
         break;
+      case QStyle::CE_ComboBoxLabel:
+        if (const QStyleOptionComboBox* comboBox = qstyleoption_cast<const QStyleOptionComboBox*>(option))
+        {
+          // The base style draws the current text of a closed combo box clipped at the edge of the field, in the middle of
+          // a word. A text that does not fit keeps its beginning and ends with an ellipsis (the pop-up list has the whole text).
+          if (!comboBox->editable && !comboBox->currentText.isEmpty())
+          {
+            QRect textRect = this->proxy()->subControlRect(QStyle::CC_ComboBox, comboBox, QStyle::SC_ComboBoxEditField, widget);
+            int room = textRect.width() - 2; // the base style draws the text in the field adjusted by 1 px on both sides
+            if (!comboBox->currentIcon.isNull())
+            {
+              room -= comboBox->iconSize.width() + 4;
+            }
+            const QFontMetrics& metrics = comboBox->fontMetrics;
+            if (room > 0 && metrics.horizontalAdvance(comboBox->currentText) > room)
+            {
+              QStyleOptionComboBox elided(*comboBox);
+              elided.currentText = metrics.elidedText(comboBox->currentText, Qt::ElideRight, room);
+              this->Superclass::drawControl(element, &elided, painter, widget);
+              return;
+            }
+          }
+        }
+        break;
       case QStyle::CE_Splitter: drawSplitterHandle(option, painter); return;
       default: break;
     }
