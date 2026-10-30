@@ -540,6 +540,21 @@ class FetchStreamingTest(FetchConnectomeBase):
         self.assertNotEqual(resolver.url(file), second)
         self.assertEqual(fetchconnectome.RESIGN_AFTER_S, 3500.0)
 
+    def test_a_missing_archive_is_reported_as_missing_not_as_refused(self):
+        for status, refused in ((404, False), (410, False), (401, True), (403, True)):
+            session = mock.Mock()
+            session.get.return_value = mock.Mock(status_code=status, headers={})
+            resolver = fetchconnectome.SignedUrlResolver(session, "https://dataverse.invalid")
+            with self.assertRaises(jobs.JobError) as ctx:
+                resolver.url({"id": 5001, "name": "x.tar"})
+            self.assertEqual(ctx.exception.code, "http")
+            self.assertEqual(ctx.exception.fields["status"], status)
+            message = str(ctx.exception)
+            self.assertEqual("does not allow" in message, refused, message)
+            if not refused:
+                self.assertIn("no longer at the provider", message)
+                self.assertIn("check the catalog for updates", message)
+
     def test_a_server_that_always_answers_403_gives_up(self):
         self.server.token_budget = 0
         with self.assertRaises(jobs.JobError) as ctx:

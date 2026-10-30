@@ -388,6 +388,8 @@ class SignedUrlResolver:
                 return access
             if status >= 500 or status in (408, 429):
                 raise _Transient(f"HTTP {status} from {access}")
+            if status in (404, 410):  # the file is gone, which is not a refusal: the dataset probably changed
+                raise jobs.JobError(f"HTTP {status} for {access}: the file is no longer at the provider; the dataset probably changed, check the catalog for updates", code="http", status=status)
             raise jobs.JobError(f"HTTP {status} for {access}: the provider does not allow this download", code="http", status=status)
         finally:
             response.close()
