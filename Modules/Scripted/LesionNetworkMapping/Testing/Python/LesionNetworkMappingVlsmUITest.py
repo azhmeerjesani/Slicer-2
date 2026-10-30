@@ -158,5 +158,64 @@ class LesionNetworkMappingVlsmUITest(unittest.TestCase):
         self.assertEqual(str(tab.reasonLabel.text), "")
 
 
+class LesionNetworkMappingSingleLevelUITest(unittest.TestCase):
+    """A cases-only study has one group level: the Contrast and VLSM tabs do not offer "case vs case"."""
+
+    @classmethod
+    def setUpClass(cls):
+        import lnm_pipeline_fixture as fixture
+
+        from LesionNetworkMapping import LesionNetworkMappingLogic
+        from LesionNetworkMappingUI import card_pipeline
+
+        cls.tmp = tempfile.mkdtemp(prefix="lnm single level ui ")
+        cls.fx = fixture.make_fixture(os.path.join(cls.tmp, "f1"), n_cases=12, n_controls=0, extra_rows=False)
+        slicer.util.selectModule("LesionNetworkMapping")
+        cls.widget = slicer.modules.LesionNetworkMappingWidget
+        cls.bundle = LesionNetworkMappingLogic.registerConnectome(cls.fx["bundle"])
+        LesionNetworkMappingLogic.setTermsAccepted(cls.bundle, True)
+        cls.widget.refreshConnectomes(select=cls.bundle.path)
+        cls.widget.openCohortStudy(cls.fx["study"])
+        card_pipeline.setCohortSeed(cls.widget)
+        cls.card = cls.widget.ctx.card("cohort")
+        _pump(100)
+
+    @classmethod
+    def tearDownClass(cls):
+        try:
+            from StudioLib import study_ui
+
+            study_ui.closeStudy()
+        except Exception:
+            pass
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _check(self, tab):
+        tab.refresh()
+        _pump(100)
+        a, b = str(tab.levelACombo.currentText), str(tab.levelBCombo.currentText)
+        self.assertNotEqual(a, b, "the Levels combos read the same level twice")
+        self.assertEqual(tab.levelBCombo.count, 0)
+        self.assertFalse(tab.levelACombo.enabled)
+        self.assertFalse(tab.levelBCombo.enabled)
+        self.assertEqual([str(tab.contrastGroup.button(i).text) for i in (0, 1)], ["A > B", "B > A"], "a button reads 'case > case'")
+        self.assertFalse(tab.contrastGroup.button(0).enabled)
+        self.assertFalse(tab.contrastGroup.button(1).enabled)
+        self.assertTrue(tab.contrastGroup.button(2).enabled)  # the other contrasts stay as they are
+        enabled, reason = tab.runState()
+        self.assertFalse(enabled)
+        checks = str(tab.checksLabel.text)
+        self.assertIn("1 level(s)", checks)  # the blocking reason is the red line under the controls ...
+        self.assertNotIn("1 level(s)", reason)  # ... and is not repeated under Run
+        self.assertIn("design checks", reason)
+        self.assertEqual(str(tab.reasonLabel.text), reason)
+
+    def test_contrast_tab(self):
+        self._check(self.card.tab("contrast"))
+
+    def test_vlsm_tab(self):
+        self._check(self.card.tab("vlsm"))
+
+
 if __name__ == "__main__":
     unittest.main()

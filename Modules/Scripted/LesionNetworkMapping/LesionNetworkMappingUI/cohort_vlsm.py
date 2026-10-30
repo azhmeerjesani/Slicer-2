@@ -363,8 +363,14 @@ class VlsmTab(CohortTab):
         self.volumeReasonEdit.setVisible(not volumeOn)
         self.logVolumeCheckBox.setVisible(volumeOn and designlib.VOLUME_COLUMN in self.covariates.buttons)
         twoGroup = self.contrast() != "F"
-        self.levelACombo.setEnabled(twoGroup)
-        self.levelBCombo.setEnabled(twoGroup)
+        pair = len(self._levels) >= 2  # a one-sided contrast compares two different levels of the group column
+        self.levelACombo.setEnabled(twoGroup and pair)
+        self.levelBCombo.setEnabled(twoGroup and pair)
+        for index in (0, 1):
+            self.contrastGroup.button(index).setEnabled(pair)
+        tip = "" if pair else _("The group column has fewer than two levels among the subjects: there is nothing to contrast")
+        self.levelACombo.setToolTip(tip or _("Level A"))
+        self.levelBCombo.setToolTip(tip or _("Level B"))
         tested = self.score() if score else self.groupColumn()
         for name, button in self.covariates.buttons.items():
             button.setVisible(name != tested)
@@ -376,7 +382,7 @@ class VlsmTab(CohortTab):
         self.onSettingsChanged()
 
     def onLevelsChanged(self):
-        a, b = self.levelACombo.currentText or "A", self.levelBCombo.currentText or "B"
+        a, b = (self.levelACombo.currentText or "A", self.levelBCombo.currentText or "B") if len(self._levels) >= 2 else ("A", "B")
         for index, text in enumerate([f"{a} > {b}", f"{b} > {a}"]):
             self.contrastGroup.button(index).setText(text)
         self.onSettingsChanged()
@@ -432,7 +438,7 @@ class VlsmTab(CohortTab):
         a = a if a in levels else (levels[0] if levels else "")
         b = b if b in levels and b != a else next((level for level in levels if level != a), "")
         _fill(self.levelACombo, [(level, level) for level in levels], a)
-        _fill(self.levelBCombo, [(level, level) for level in levels], b)
+        _fill(self.levelBCombo, [(level, level) for level in levels] if len(levels) >= 2 else [], b)  # one level: no "A vs A"
         self.onLevelsChanged()
 
     #
@@ -533,7 +539,8 @@ class VlsmTab(CohortTab):
         if self.running():
             return False, _("{title} running…").format(title=self.TITLE)
         if self.design is None:
-            return False, self.designError or _("No design.")
+            # the error itself is the red line under the controls (showDesignState): say it once
+            return False, _("Blocked by the design checks (in red above).") if self.designError else _("No design.")
         settings = self.blockingSettings()
         if settings:
             return False, settings[0]
