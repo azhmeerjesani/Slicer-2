@@ -37,7 +37,7 @@ if MODULE_DIR not in sys.path:
 import numpy as np
 from scipy import io as sio
 
-from LesionNetworkMappingLib import catalog, connectome, fetchconnectome, jobs, nifti, runs
+from LesionNetworkMappingLib import catalog, connectome, fetchconnectome, jobs, manager, nifti, runs
 
 GSP_RUN = "GSP1000/sub-{s}/func/sub-{s}_bld00{r}_rest_skip4_stc_mc_bp_0.0001_0.08_resid_FS1mm_MNI1mm_MNI2mm_sm7_finalmask.nii.gz"
 TERMS_TEXT = "<p>GSP Open Access Data Use Terms (2014-Apr-22)</p><p>1. I will not attempt to identify any participant.<br>2. I will acknowledge the project in publications. See <a href=\"https://example.org/terms\">the terms</a>.</p>"
@@ -355,6 +355,9 @@ class FetchRunTest(FetchConnectomeBase):
         self.assertIs(provenance["preprocessing"]["gsr"], True)
         self.assertEqual(provenance["trS"], 3.0)
         self.assertEqual(provenance["kind"], "timeseries")
+        self.assertEqual(self.entry["space"], "MNI152NLin6Asym")
+        self.assertEqual(bundle.metadata.get("space"), "MNI152NLin6Asym")  # a fetched bundle records the catalog's space
+        self.assertEqual(manager.bundle_summary(summary["path"])["space"], "MNI152NLin6Asym")  # the manager's Space column
         self.assertEqual(provenance["participants"], "participants.tsv")
         self.assertNotIn("checksumOverride", provenance["source"])
         with open(os.path.join(summary["path"], "participants.tsv"), "rb") as f:

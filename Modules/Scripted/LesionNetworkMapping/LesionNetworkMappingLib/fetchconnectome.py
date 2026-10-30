@@ -807,6 +807,8 @@ def _provenance(entry, live, plan, terms_sha, results, full_set, participants, s
     }
     if entry.get("tr_s"):
         provenance["trS"] = entry["tr_s"]
+    if entry.get("space"):
+        provenance["space"] = entry["space"]  # the catalog states the space: the manager, circuits and the study card read it from connectome.json
     if participants:
         provenance["participants"] = participants
     return {k: v for k, v in provenance.items() if v not in (None, {})}
