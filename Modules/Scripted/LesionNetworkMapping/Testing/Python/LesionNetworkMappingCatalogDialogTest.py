@@ -73,6 +73,86 @@ class LesionNetworkMappingCatalogDialogTest(unittest.TestCase):
         dialog = self.makeDialog(None)
         self.assertEqual((dialog.width, dialog.height), (1000, 760))
 
+    def test_primary_button_does_not_offer_resume_while_running_or_after_a_mismatch(self):
+        from LesionNetworkMappingLib import catalog, fetchconnectome, jobs
+        from LesionNetworkMappingUI import catalog_dialog, manager_catalog
+
+        dialog = self.makeDialog(None)
+        entry = catalog.load_catalog().get("gsp1000-ilxiks")
+        dest = os.path.join(self.tmp, "dest")
+        work = fetchconnectome.work_dir(entry, dest)
+
+        def writeMismatchState():
+            os.makedirs(work, exist_ok=True)
+            jobs.write_json_atomic(os.path.join(work, "state.json"), {"format": fetchconnectome.STATE_FORMAT, "version": 1, "entry": entry["id"], "sizes": {"a.tar": 100},
+                                                                      "archives": {"a.tar": {"status": "mismatch", "bytes": 100}}, "files": {}, "complete": False})
+
+        writeMismatchState()
+        dialog.entry = entry
+        dialog.destEdit.setText(dest)
+        # The terms are read and accepted and the plan fits, so that only the fetch state decides whether the button is enabled
+        dialog.terms[entry["id"]] = {"text": "terms", "display": "terms", "sha": "a" * 64}
+        wasBlocked = dialog.acceptCheck.blockSignals(True)  # the tick is not stored in the settings
+        dialog.acceptCheck.setChecked(True)
+        dialog.acceptCheck.blockSignals(wasBlocked)
+        for patcher in (mock.patch.object(manager_catalog, "termsAccepted", return_value=True), mock.patch.object(catalog_dialog, "planSummary", return_value=("", None))):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        controller = dialog.controller
+        saved = (controller.state, controller.request, controller.errorEvent, controller.job)
+        self.addCleanup(lambda: (setattr(controller, "state", saved[0]), setattr(controller, "request", saved[1]), setattr(controller, "errorEvent", saved[2]),
+                                 setattr(controller, "job", saved[3])))
+        controller.job = None
+        controller.state = "idle"
+        controller.errorEvent = None
+        dialog.updateState()
+        self.assertEqual(dialog.downloadButton.text, "Resume this download")  # an interrupted fetch is resumable
+        self.assertTrue(dialog.downloadButton.enabled)
+        # A failed fetch on a checksum mismatch: nothing to resume, the same archive would fail again
+        controller.request = {"entry": entry["id"], "dest": dest}
+        controller.state = "failed"
+        controller.errorEvent = {"code": "checksum"}
+        self.assertTrue(dialog.mismatchHere())
+        dialog.updateState()
+        self.assertEqual(dialog.downloadButton.text, "Download and convert")
+        self.assertFalse(dialog.downloadButton.enabled)
+        self.assertIn("Keep this data anyway", dialog.hintLabel.text)
+        with mock.patch.object(controller, "start") as start:
+            self.assertIsNone(dialog.onDownload())
+            start.assert_not_called()
+        # Another folder is not affected
+        dialog.destEdit.setText(os.path.join(self.tmp, "elsewhere"))
+        self.assertFalse(dialog.mismatchHere())
+        dialog.destEdit.setText(dest)
+        self.assertTrue(dialog.mismatchHere())
+        # Deleting the folder (what the failure text suggests) clears it in the same session: a new download may start
+        shutil.rmtree(dest)
+        self.assertFalse(dialog.mismatchHere())
+        dialog.updateState()
+        self.assertEqual(dialog.downloadButton.text, "Download and convert")
+        self.assertTrue(dialog.downloadButton.enabled, dialog.hintLabel.text)
+        writeMismatchState()  # the folder holds the failed download again
+        self.assertTrue(dialog.mismatchHere())
+        # While the job runs the button is not a Resume button either
+        controller.state = "running"
+        controller.errorEvent = None
+        controller.job = mock.Mock()
+        controller.job.isFinished.return_value = False
+        dialog.updateState()
+        self.assertEqual(dialog.downloadButton.text, "Download and convert")
+        self.assertFalse(dialog.downloadButton.enabled)
+        # The failed job's own Resume button is hidden for a mismatch and for a changed terms text
+        controller.job = None
+        for code in ("checksum", "terms_mismatch"):
+            controller.state = "failed"
+            controller.errorEvent = {"code": code}
+            controller.error = "x"
+            dialog.onControllerChanged()
+            self.assertFalse(dialog.resumeButton.visible, code)
+        controller.errorEvent = {"code": "network"}
+        dialog.onControllerChanged()
+        self.assertTrue(dialog.resumeButton.isVisibleTo(dialog))
+
     def test_failed_terms_fetch_keeps_the_failure_text(self):
         dialog = self.makeDialog(None)
         dialog.entry = {"id": "demo-entry"}

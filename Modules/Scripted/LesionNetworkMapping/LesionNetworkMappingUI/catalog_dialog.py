@@ -694,10 +694,13 @@ class CatalogDialog(qt.QDialog):
             hint = problem
         elif running:
             hint = _("A connectome is being fetched.")
+        elif self.mismatchHere():
+            hint = _("The checksum of an archive does not match: use Keep this data anyway…, or choose another folder. Reading the archive again would fail the same way.")
         elif self.completeHere():
             hint = _("{name} is already in this folder: choose another folder.").format(name=os.path.basename(fetchconnectome.bundle_path(entry, destination)))
         self.hintLabel.setText(hint or "")
-        self.downloadButton.setText(_("Resume this download") if self.unfinishedHere() else _("Download and convert"))
+        resumable = not running and not self.mismatchHere() and self.unfinishedHere()
+        self.downloadButton.setText(_("Resume this download") if resumable else _("Download and convert"))
         self.downloadButton.setEnabled(hint is None)
         self.loadTermsButton.setEnabled(self.termsJob is None or self.termsJob.isFinished())
 
@@ -709,6 +712,25 @@ class CatalogDialog(qt.QDialog):
         if self.entry is None or not destination or self.unfinishedHere():
             return False
         return os.path.exists(os.path.join(fetchconnectome.bundle_path(self.entry, destination), "connectome.json"))
+
+    def mismatchHere(self):
+        """True when the last fetch ended on a checksum mismatch in the selected entry and folder, and the folder still holds that
+        download: starting it again would read the whole archive again. Deleting the folder (what the failure text suggests) clears it.
+        """
+        from LesionNetworkMappingLib import fetchconnectome
+
+        controller = self.controller
+        request = controller.request
+        if controller.state != "failed" or not request or self.entry is None or not controller.status()["mismatch"]:
+            return False
+        destination = self.destEdit.text.strip()
+        if request.get("entry") != self.entry.get("id") or not destination or os.path.normpath(request.get("dest") or "") != os.path.normpath(destination):
+            return False
+        try:
+            data = fetchconnectome.read_state(self.entry, destination) or {}
+        except Exception:
+            return False
+        return any((info or {}).get("status") == "mismatch" for info in (data.get("archives") or {}).values())
 
     def unfinishedHere(self):
         """A summary of an interrupted download of the selected entry in the chosen folder (it is continued, not started again)."""
@@ -723,7 +745,7 @@ class CatalogDialog(qt.QDialog):
             return None
 
     def onDownload(self):
-        if self.entry is None:
+        if self.entry is None or self.mismatchHere():
             return None
         request = self.request()
         job = self.controller.start(request, resume=self.unfinishedHere() is not None)
@@ -773,7 +795,7 @@ class CatalogDialog(qt.QDialog):
         else:
             self.progress.setProgress(1.0, text=_("Done: the connectome is registered and ready in the Connectome card."))
             self.progress.stopButton.setEnabled(False)
-        self.resumeButton.setVisible(state in ("paused", "failed") and not status["mismatch"])
+        self.resumeButton.setVisible(state in ("paused", "failed") and not status["mismatch"] and not status["termsChanged"])
         self.acceptMismatchButton.setVisible(state == "failed" and status["mismatch"])
         self.openFolderButton.setVisible(state == "done" and bool(status["path"]))
         notes = [w for w in status["warnings"] if w][-3:]

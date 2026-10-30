@@ -316,6 +316,11 @@ class FetchController:
             code = self.errorEvent.get("code")
             if code == "terms_mismatch":
                 self.error = _("The provider's terms text is not the text you accepted (it has changed). Open Get a connectome…, read the live text and accept it to continue. Nothing more was downloaded.")
+            elif code == "checksum":
+                # The job's own text names its command-line flag; the interface offers the same choice as a button
+                self.error = _("{name}: the checksum does not match the one the provider lists, also after reading it twice. "
+                               "Every file that was converted from it passed its integrity check. Choose Keep this data anyway… to keep it "
+                               "(recorded as checksum_override), or delete the folder and start again.").format(name=self.errorEvent.get("file") or self.shortName())
             else:
                 self.error = job.failureReason or _("The download failed.")
         self._notify()
@@ -340,7 +345,7 @@ class FetchController:
 
     def status(self):
         """A dict for the interface: ``state``, ``fraction`` (0..1 or None), ``eta`` (text), ``archive``, ``subjects``, ``name``,
-        ``error``, ``mismatch`` (the failure is a checksum mismatch the user may accept) and ``path`` of a finished bundle.
+        ``error``, ``mismatch`` (the failure is a checksum mismatch the user may accept), ``termsChanged`` (the provider's terms text changed: only accepting the live text helps) and ``path`` of a finished bundle.
         """
         job = self.job
         event = (job.lastEvent or {}) if job is not None else {}
@@ -359,6 +364,7 @@ class FetchController:
             "name": self.shortName() if self.request else "",
             "error": self.error,
             "mismatch": bool(self.errorEvent and self.errorEvent.get("code") == "checksum"),
+            "termsChanged": bool(self.errorEvent and self.errorEvent.get("code") == "terms_mismatch"),
             "path": self.resultPath,
             "warnings": [w.get("message") for w in (job.warnings if job is not None else [])],
         }

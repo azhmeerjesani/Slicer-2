@@ -106,6 +106,28 @@ class LesionNetworkMappingFetchControllerTest(unittest.TestCase):
             json.dump({"pid": pid, "host": jobs._host(), "token": "t", "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, f)
         return path
 
+    def test_a_failed_job_explains_itself_without_command_line_flags(self):
+        from LesionNetworkMappingLib import jobs
+
+        controller = self.controller
+        controller.request = dict(self.request)
+        cli = "x.tar: the MD5 is wrong. Run again with --accept-checksum-mismatch to keep them, or delete the folder."
+        job = jobs.JobError(cli, code="checksum", override="--accept-checksum-mismatch", file="x.tar")
+        fake = type("FakeJob", (), {"succeeded": lambda self: False, "state": "failed", "failureReason": cli,
+                                    "errorEvent": {"code": "checksum", "file": "x.tar", **job.fields}, "lastEvent": {}, "progress": None, "eta": None, "warnings": []})()
+        controller._onDone(fake)
+        status = controller.status()
+        self.assertTrue(status["mismatch"])
+        self.assertFalse(status["termsChanged"])
+        self.assertNotIn("--", status["error"])
+        self.assertIn("x.tar", status["error"])
+        self.assertIn("Keep this data anyway", status["error"])
+        fake.errorEvent = {"code": "terms_mismatch"}
+        controller._onDone(fake)
+        status = controller.status()
+        self.assertTrue(status["termsChanged"])
+        self.assertFalse(status["mismatch"])
+
     def test_the_fetch_job_stops_with_the_application(self):
         args = self.controller.arguments(self.request)
         self.assertIn("--parent-pid", args)
