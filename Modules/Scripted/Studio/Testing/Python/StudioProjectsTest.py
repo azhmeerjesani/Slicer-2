@@ -2787,6 +2787,49 @@ class StudioProjectsTest(unittest.TestCase):
             section.dispose()
             section.widget.deleteLater()
 
+    def test_51_locked_project_warning_is_shown_once_while_the_scene_names_it(self):
+        """A window that holds the data of a project another Slicer Studio has open (it lost the race to open it) retries
+        to attach on every new scene fingerprint, but says "open in another Slicer Studio" once, not after every edit; it
+        attaches silently once the other window lets go, and says it again if the project is lost again.
+        """
+        projects = self.projects
+        service = self._service()
+        announced = []
+        service.setProjectAnnouncer(lambda event, project, **info: announced.append(event))
+        self._userVolume()
+        project = self._projectFor(service)
+        self._save(service)
+        # The scene keeps the project's files and its URL, but another window now holds the project
+        service.releaseProject()
+        other = projects.Project(project.path)
+        self.assertTrue(other.lock())
+        announced.clear()
+        try:
+            service.poll()
+            self.assertIsNone(service.project, "the project is held by the other window")
+            self.assertEqual(announced, ["locked"])
+            for edit in range(4):
+                markups = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", f"F{edit}")
+                markups.AddControlPoint([edit, 0, 0])
+                service.poll()
+                self.assertIsNone(service.project)
+            self.assertEqual(announced, ["locked"], "no new warning after each edit")
+            # The other window lets go: the retry attaches, quietly except for the "opened" message
+            other.unlock()
+            slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "After")
+            service.poll()
+            self.assertIsNotNone(service.project)
+            self.assertEqual(announced, ["locked", "opened"])
+            # Lost again later: the warning is news again
+            service.releaseProject()
+            self.assertTrue(other.lock())
+            slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "Again")
+            service.poll()
+            self.assertIsNone(service.project)
+            self.assertEqual(announced, ["locked", "opened", "locked"])
+        finally:
+            other.unlock()
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk

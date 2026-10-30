@@ -260,6 +260,8 @@ class AutosaveService:
         self._projectPresenter = None
         self._pendingProjectRecoveries = []
         self._lastProjectCheck = None
+        #: projects (normalized paths) whose "open in another Slicer Studio" warning was shown while retrying to attach
+        self._lockedAnnounced = set()
         self._projectPausedReason = ""
         #: tests: True/False replaces the "Studio is shown" condition of creating projects (None: ask the shell)
         self.studioActiveOverride = None
@@ -1266,6 +1268,17 @@ class AutosaveService:
         except Exception:
             logging.error("Slicer Studio: project message failed:\n" + traceback.format_exc())
 
+    def _announceLockedOnce(self, project):
+        """The warning that another Slicer Studio has ``project`` open, once per project. The scene still names it, so
+        every new scene fingerprint retries to attach it (it is taken as soon as the other window lets go); the retries
+        stay silent, or each edit would show the warning again.
+        """
+        key = os.path.normcase(os.path.realpath(project.path))
+        if key in self._lockedAnnounced:
+            return
+        self._lockedAnnounced.add(key)
+        self._announce("locked", project)
+
     def _studioActive(self):
         if self.studioActiveOverride is not None:
             return bool(self.studioActiveOverride)
@@ -1311,7 +1324,7 @@ class AutosaveService:
             # a copy
             project = projects.Project(projectPath)
             if not self.attachProject(project, inPlace=True):
-                self._announce("locked", project)
+                self._announceLockedOnce(project)
                 return
             self._announce("opened", project)
             if self.dirty:
@@ -1388,6 +1401,7 @@ class AutosaveService:
             self.releaseProject()
         if not project.lock():
             return False
+        self._lockedAnnounced.clear()  # a later loss of the lock is news again
         if self.plan is not None:
             self._abortGeneration("a project was opened")
         if self.writer is not None:
@@ -1816,7 +1830,7 @@ class AutosaveService:
             # recorded, so its file stays where it is (the scene file keeps naming it until the project is saved again).
             unread = self._removeUnreadNodes(scene)
             if not self.attachProject(project, inPlace=True):
-                self._announce("locked", project)
+                self._announceLockedOnce(project)
                 return
             if unread:
                 self._announce("opened", project, unread=unread)
