@@ -14,10 +14,12 @@ Run without Slicer's GUI:
 import datetime
 import json
 import os
+import random
 import shutil
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 MODULE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if MODULE_DIR not in sys.path:
@@ -256,9 +258,32 @@ class AssignTest(StudyTestBase):
         record = agreement.assign(self.study, fraction=0.2)
         self.assertIsInstance(record["seed"], int)
         self.assertEqual(len(record["sids"]), 2)  # ceil(0.2 * 6)
-        chosen = agreement.assign(self.study, sids=["sub-05", "sub-06", "sub-99"], rater="Ana Bell")
+        # Carl Diaz traced sub-05 and sub-06, so sub-01..sub-04 are eligible for him; the unseeded draw above takes at most two of them
+        wanted = ["sub-01", "sub-02", "sub-03", "sub-04", "sub-99"]
+        chosen = agreement.assign(self.study, sids=wanted, rater="Carl Diaz")
         self.assertIsNone(chosen["seed"])
-        self.assertEqual(chosen["skipped"], [sid for sid in ["sub-05", "sub-06", "sub-99"] if sid not in chosen["sids"]])
+        self.assertTrue(chosen["sids"])
+        self.assertEqual(chosen["skipped"], [sid for sid in wanted if sid not in chosen["sids"]])
+        self.assertIn("sub-99", chosen["skipped"])
+
+    def test_selected_subjects_do_not_depend_on_the_unseeded_draw(self):
+        # The unseeded draw of 2 of the 6 subjects is random: the follow-up assignment must work for every possible draw
+        pool = sorted(self.centers)
+        draws = {}
+        for seed in range(2000):
+            draws.setdefault(frozenset(random.Random(seed).sample(pool, 2)), seed)
+            if len(draws) == 15:
+                break
+        self.assertEqual(len(draws), 15)  # all pairs of the six subjects
+        for pair, seed in draws.items():
+            with unittest.mock.patch.object(agreement.secrets, "randbelow", return_value=seed):
+                record = agreement.assign(self.study, fraction=0.2)
+            self.assertEqual((record["seed"], set(record["sids"])), (seed, set(pair)))
+            wanted = ["sub-01", "sub-02", "sub-03", "sub-04", "sub-99"]
+            chosen = agreement.assign(self.study, sids=wanted, rater="Carl Diaz")
+            self.assertEqual(chosen["sids"], [sid for sid in wanted[:4] if sid not in pair])
+            self.assertEqual(chosen["skipped"], [sid for sid in wanted if sid not in chosen["sids"]])
+            agreement.unassign(self.study, [*record["sids"], *chosen["sids"]])
 
     def test_inter_mode_leaves_out_the_raters_own_lesions(self):
         pool = agreement.eligible(self.study, rater="Ana Bell", mode="inter")
