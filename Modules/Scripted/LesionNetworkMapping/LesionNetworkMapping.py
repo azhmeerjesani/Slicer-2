@@ -1292,6 +1292,14 @@ def _formatBytes(count):
     return f"{count} B"
 
 
+def cohortExcludedText(excluded):
+    """"Not mapped: missing lesion (3) · include=0 (1)" from {reason: [participant ids]} ("" when none): the count follows
+    the reason, so that no reason needs a plural ("3 missing lesion" was wrong), as in the Library card's "3 not used: ...".
+    """
+    parts = [f"{reason} ({len(sids)})" for reason, sids in excluded.items() if sids]
+    return _("Not mapped: {parts}").format(parts=" · ".join(parts)) if parts else ""
+
+
 def _mappingStatusText(job):
     """Status chip text of an engine job: "Mapping 34% · 2 min left"."""
     from LesionNetworkMappingUI import jobrunner
@@ -3347,8 +3355,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.cohortStudyLabel.setText((_("Study “{name}” · 1 lesion to map") if info and info["n"] == 1 else _("Study “{name}” · {n} lesions to map")).format(name=study.name, n=info["n"] if info else 0) + groupText)
         excluded = (info or {}).get("excluded") or {}
         if excluded or (info or {}).get("error"):
-            parts = [f"{len(sids)} {reason}" for reason, sids in excluded.items() if sids]
-            text = _("Not mapped: {parts}").format(parts=" · ".join(parts)) if parts else ""
+            text = cohortExcludedText(excluded)
             if info.get("error"):
                 text = _("The study cannot be read: {error}").format(error=info["error"])
             self.cohortExcludedLabel.setText(text)
