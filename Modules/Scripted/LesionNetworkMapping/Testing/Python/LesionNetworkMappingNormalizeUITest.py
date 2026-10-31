@@ -916,6 +916,71 @@ class LesionNetworkMappingNormalizeUITest(unittest.TestCase):
             _pump(200)
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
 
+    def test_08d_draw_normalize_again_on_mni_scan(self):
+        """After "Trace on the MNI scan", Normalize again redoes the native scan and lesion of the result (not the warped scan).
+
+        Regression (bug bash BB-1): the request used the editor's MNI scan and MNI lesion, the engine refused it
+        (already on the template grid) and the failed run dropped the card's result (QC, Use for Map, Trace on the MNI scan).
+        """
+        from StudioLib import draw, drawcard_normalize, shell
+
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        _pump(200)
+        try:
+            studioShell.switchTo("draw")
+            _pump(300)
+            editor = slicer.modules.SegmentEditorWidget.editor
+            editor.setSegmentationNode(self.native)
+            editor.setSourceVolumeNode(self.scan)
+            editor.setCurrentSegmentID(self.nativeSegmentId)
+            draw.extension().refreshCards()
+            _pump(500)
+            card = drawcard_normalize.active()
+            self.assertIsNotNone(card)
+            controller = card.controller
+            request = self.nc.NormalizeRequest(scanNode=self.scan, segmentationNode=self.native, segmentId=self.nativeSegmentId)
+            self.assertTrue(controller.loadResult(self.result.outDir, request))
+            self.assertTrue(_wait(lambda: controller.state == "done", 30.0), controller.state)
+            _pump(400)
+            previous = controller.result
+            self.assertTrue(card.traceOnMni())
+            self.assertIs(editor.sourceVolumeNode(), previous.volumeNode)
+            self.assertIs(editor.segmentationNode(), previous.segmentationNode)
+            self.assertEqual(card.button.text, "Normalize again")
+            started = []
+            controller.start = lambda request: started.append(request) or True
+            try:
+                self.assertTrue(card.start())
+            finally:
+                del controller.start
+            self.assertEqual(len(started), 1)
+            self.assertIs(started[0].scanNode, self.scan)
+            self.assertIs(started[0].segmentationNode, self.native)
+            self.assertEqual(started[0].segmentId, self.nativeSegmentId)
+            # Nothing was started for real: the result and its card stay
+            self.assertIs(controller.result, previous)
+            self.assertFalse(card.doneRow.isHidden())
+            # The native scan of the result is gone: no request, a readable message, the result stays
+            originalRequest = previous.request
+            gone = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "closed native scan")
+            previous.request = originalRequest.copy(scanNode=gone)
+            slicer.mrmlScene.RemoveNode(gone)
+            started.clear()
+            controller.start = lambda request: started.append(request) or True
+            try:
+                self.assertFalse(card.start())
+            finally:
+                del controller.start
+                previous.request = originalRequest
+            self.assertEqual(started, [])
+            self.assertIn("no longer open", card.message.findChild("QLabel", "LNMBannerText").text)
+            self.assertIs(controller.result, previous)
+        finally:
+            studioShell.dispose()
+            _pump(200)
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+
     #
     # Settings
     #

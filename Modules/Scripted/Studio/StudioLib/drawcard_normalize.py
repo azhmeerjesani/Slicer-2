@@ -253,6 +253,26 @@ class DrawNormalizeCard:
         return (result.nativeSegmentationNode is None and self._origin is not None and self._origin == (segmentationNode, sourceVolumeNode)
                 and sourceVolumeNode is result.scanNode)
 
+    @staticmethod
+    def _showsMniResult(result, segmentationNode, sourceVolumeNode):
+        """True when the editor shows the result's warped scan or MNI lesion (after "Trace on the MNI scan"), not the native ones."""
+        if result is None:
+            return False
+        return ((sourceVolumeNode is not None and sourceVolumeNode is result.volumeNode)
+                or (segmentationNode is not None and segmentationNode is result.segmentationNode))
+
+    @staticmethod
+    def _nativeSources(result):
+        """(native scan, native lesion, segment id) the result came from, or None when the request's nodes are not in the scene."""
+        request = result.request
+        scan = request.scanNode if request is not None else None
+        if scan is None or not slicer.mrmlScene.IsNodePresent(scan):
+            return None
+        lesion = request.segmentationNode
+        if lesion is not None and not slicer.mrmlScene.IsNodePresent(lesion):
+            return None
+        return scan, lesion, request.segmentId
+
     def _templateName(self, templateId):
         """The name of the target template: the user's name of their own template (A-10), else its id."""
         nameOf = getattr(self.nc, "templateName", None) if self.nc is not None else None
@@ -421,7 +441,18 @@ class DrawNormalizeCard:
                 if sid:
                     libcard_normalize.normalizeSubjects([sid])
                     return True
-        scanOnly = scanOnly or self._lesionEmpty
+        result = self.controller.result
+        if self._showsMniResult(result, segmentationNode, source):
+            # "Trace on the MNI scan" put the result's warped scan and MNI lesion in the editor: Normalize again redoes the
+            # native scan and lesion the result came from (the engine refuses a scan that is already on the template grid)
+            native = self._nativeSources(result)
+            if native is None:
+                self._showMessage(_("The native scan of this result is no longer open: open it to normalize again."), ())
+                return False
+            source, segmentationNode, segmentId = native
+            scanOnly = scanOnly or segmentationNode is None or self.nc.lesionIsEmpty(segmentationNode, segmentId)
+        else:
+            scanOnly = scanOnly or self._lesionEmpty
         # The options remembered in the Map card (template incl. the user's own, quality, modality, margin) apply here too
         request = self.nc.NormalizeRequest(scanNode=source, segmentationNode=None if scanOnly else segmentationNode, segmentId=None if scanOnly else segmentId,
                                            **self.nc.rememberedRequestOptions())
