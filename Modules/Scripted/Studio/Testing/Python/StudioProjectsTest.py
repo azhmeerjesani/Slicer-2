@@ -517,6 +517,88 @@ class StudioProjectsTest(unittest.TestCase):
             qt.QSettings().remove(projects.ROOT_CHOSEN_KEY)
             os.environ[projects.ROOT_ENVIRONMENT] = self.root
 
+    def test_08b_move_root_registered_paths(self):
+        """Move: a connectome registered in LNM/ (where Convert and "Get a connectome…" put it) and other path settings
+        inside the moved items follow the folder; paths outside the moved items stay as they are.
+        """
+        import LesionNetworkMapping as lnm
+
+        projects = self.projects
+        service = self._service()
+        keys = self.autosave.MOVED_PATH_KEYS
+        settings = qt.QSettings()
+        saved = {key: settings.value(key) for key in keys}
+        known = dict(lnm.LesionNetworkMappingLogic._knownConnectomes)
+        os.environ.pop(projects.ROOT_ENVIRONMENT)
+        settings.setValue(projects.ROOT_KEY, self.root)
+        try:
+            for key in keys:
+                settings.remove(key)
+            logic = lnm.LesionNetworkMappingLogic()
+            bundlePath = os.path.join(self.root, "LNM", "connectomes", "Demo.lnmc")
+            logic.createDemoConnectome(bundlePath, nSubjects=2, register=True, shape=(8, 9, 8), runs=(12,), affine=None)
+            identifier = logic.rememberConnectome(logic.openBundle(bundlePath))
+            outside = os.path.join(self.tempDir, "elsewhere", "Other.lnmc")
+            notMoved = os.path.join(self.root, "Mine", "Kept.lnmc")  # in the folder, but not in an item that moves
+            settings.setValue(lnm.CONNECTOMES_SETTING, logic.registeredConnectomes() + [outside, notMoved])
+            os.makedirs(os.path.join(self.root, "Studies", "Study A"))
+            with open(os.path.join(self.root, "Studies", "Study A", "study.json"), "w") as f:
+                json.dump({"name": "Study A"}, f)
+            settings.setValue(lnm.COHORT_STUDY_SETTING, os.path.join(self.root, "Studies", "Study A"))
+            settings.setValue("Studio/LNM/FetchDestination", os.path.join(self.root, "LNM", "Connectomes"))
+            newRoot = os.path.join(self.tempDir, "moved", "Slicer Studio")
+            moved = service.moveRoot(newRoot, moveContent=True)
+            self.assertIn("LNM", moved)
+            newBundle = os.path.join(os.path.normpath(newRoot), "LNM", "connectomes", "Demo.lnmc")
+            self.assertTrue(os.path.isfile(os.path.join(newBundle, "connectome.json")))
+            self.assertEqual(lnm.LesionNetworkMappingLogic.registeredConnectomes(), [newBundle, outside, notMoved])
+            self.assertEqual(lnm.LesionNetworkMappingLogic._knownConnectomes[identifier], newBundle)
+            self.assertEqual(logic.resolveConnectome(identifier), newBundle)
+            # A later session (nothing remembered): the registered bundle is found at its new place
+            lnm.LesionNetworkMappingLogic._knownConnectomes.clear()
+            self.assertEqual(lnm.LesionNetworkMappingLogic().resolveConnectome(identifier), newBundle)
+            self.assertEqual(str(settings.value(lnm.COHORT_STUDY_SETTING)), os.path.join(os.path.normpath(newRoot), "Studies", "Study A"))
+            self.assertEqual(str(settings.value("Studio/LNM/FetchDestination")), os.path.join(os.path.normpath(newRoot), "LNM", "Connectomes"))
+            # Settings > Change… > Move without the autosave service (it moves the folder itself): the paths follow too
+            from unittest import mock
+
+            from StudioLib import projects_ui
+
+            thirdRoot = os.path.join(self.tempDir, "third", "Slicer Studio")
+
+            class FakeChooser:
+                path = thirdRoot
+                continueButton = mock.Mock()
+                setWindowTitle = mock.Mock()
+                choose = mock.Mock()
+                exec = mock.Mock()
+                exec_ = mock.Mock()
+                deleteLater = mock.Mock()
+
+                def __init__(self, *args, **kwargs):
+                    pass
+
+            with mock.patch.object(self.autosave, "_service", None), \
+                    mock.patch.object(projects_ui, "FolderChooserDialog", FakeChooser), \
+                    mock.patch.object(projects_ui, "_question", lambda *args, **kwargs: 0), \
+                    mock.patch.object(projects_ui, "_runWithProgress", lambda function, *args, **kwargs: function()):
+                self.assertEqual(projects_ui.changeRootDialog(None), thirdRoot)
+            thirdBundle = os.path.join(os.path.normpath(thirdRoot), "LNM", "connectomes", "Demo.lnmc")
+            self.assertTrue(os.path.isfile(os.path.join(thirdBundle, "connectome.json")))
+            self.assertEqual(lnm.LesionNetworkMappingLogic.registeredConnectomes(), [thirdBundle, outside, notMoved])
+            self.assertEqual(lnm.LesionNetworkMappingLogic().resolveConnectome(identifier), thirdBundle)
+        finally:
+            lnm.LesionNetworkMappingLogic._knownConnectomes.clear()
+            lnm.LesionNetworkMappingLogic._knownConnectomes.update(known)
+            for key, value in saved.items():
+                if value is None:
+                    settings.remove(key)
+                else:
+                    settings.setValue(key, value)
+            settings.remove(projects.ROOT_KEY)
+            settings.remove(projects.ROOT_CHOSEN_KEY)
+            os.environ[projects.ROOT_ENVIRONMENT] = self.root
+
     def test_09_crash_offer(self):
         projects = self.projects
         service = self._service()

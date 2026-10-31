@@ -503,6 +503,20 @@ class LesionNetworkMappingParameterNode:
 #
 
 
+def followMovedPaths(movedPath):
+    """The Slicer Studio folder moved with its content: what this session opened follows (``StudioLib.autosave``).
+
+    ``movedPath(path)`` is the new path of ``path`` (``path`` itself when it did not move). The registered bundles
+    (``CONNECTOMES_SETTING``) were already rewritten; here the bundles remembered in this session and the Map panel follow.
+    """
+    known = LesionNetworkMappingLogic._knownConnectomes
+    for identifier, path in list(known.items()):
+        known[identifier] = movedPath(path)
+    widget = getattr(slicer.modules, "LesionNetworkMappingWidget", None)
+    if widget is not None and hasattr(widget, "followMovedPaths"):
+        widget.followMovedPaths(movedPath)
+
+
 def _settingList(key):
     value = qt.QSettings().value(key)
     if value is None or value == "":
@@ -3825,6 +3839,44 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         else:
             named = bool(self._connectomePath)
         self.refreshConnectomes(select=None if named else path)
+
+    def followMovedPaths(self, movedPath):
+        """The Slicer Studio folder moved with its content (``StudioLib.autosave.moveRoot``; it already rewrote the path
+        settings): the selected connectome, the connectome of the shown and parked runs and the Cohort study follow their
+        folders. ``movedPath(path)`` is the new path of ``path`` (``path`` itself when it did not move).
+
+        The connectome stays the same one, so the shown map stays: its run is not parked as one of another connectome.
+        """
+
+        def follow(bundle):
+            newPath = movedPath(bundle.path) if bundle is not None else ""
+            if not newPath or self._connectomeKey(newPath) == self._connectomeKey(bundle.path):
+                return bundle
+            try:
+                return self.logic.openBundle(newPath)
+            except Exception:
+                return bundle
+
+        currentMoved = bool(self._connectomePath) and movedPath(self._connectomePath) != self._connectomePath
+        if currentMoved:
+            self.bundle = follow(self.bundle)
+            self._connectomePath = movedPath(self._connectomePath)
+        self._runBundle = follow(self._runBundle)
+        if isinstance(self._previousRun, dict) and self._previousRun.get("runBundle") is not None:
+            self._previousRun["runBundle"] = follow(self._previousRun["runBundle"])
+        parkedRuns = {}
+        for key, parked in self._parkedRuns.items():
+            bundle = follow(parked.get("runBundle"))
+            parked["runBundle"] = bundle
+            parkedRuns[self._connectomeKey(bundle.path) if bundle is not None else key] = parked
+        self._parkedRuns = parkedRuns
+        if self.cohortStudy is not None and movedPath(self.cohortStudy.path) != self.cohortStudy.path:
+            self.cohortStudy = None  # opened again from its new place (the rewritten setting) by refreshCohort()
+        if self._entered:
+            # The combo lists the registered bundles at their new paths and keeps the same connectome selected
+            self.refreshConnectomes(select=self._connectomePath or None)
+            if self.seedMode() == "cohort":
+                self.refreshCohort()
 
     def onConnectomeActivated(self, index):
         self._selectConnectome(self.connectomeCombo.itemData(index) if index >= 0 else "")

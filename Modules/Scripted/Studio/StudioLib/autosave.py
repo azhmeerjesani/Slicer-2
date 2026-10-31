@@ -2050,6 +2050,7 @@ class AutosaveService:
                     else:
                         project.lock()
             _updateRecentStudies(oldRoot, newRoot, renamed)
+            _updateMovedPathSettings(oldRoot, newRoot, moved, renamed)
         projects.setRoot(newRoot)
         return moved
 
@@ -2188,6 +2189,59 @@ def _updateRecentStudies(oldRoot, newRoot, renamed=None):
             changed = True
     if changed:
         qt.QSettings().setValue(study_ui.RECENT_STUDIES_KEY, json.dumps(records))
+
+
+#: Fork-only settings that hold local paths the user registered or chose (one path or a list). Those inside an item that
+#: moved with the Slicer Studio folder follow it: a connectome kept in LNM/ (where Convert and "Get a connectome…" put
+#: it), the Cohort study in Studies/, the download and data folders, recipe folders (keys of LesionNetworkMapping)
+MOVED_PATH_KEYS = (
+    "Studio/LNM/Connectomes",
+    "Studio/LNM/CohortStudy",
+    "Studio/LNM/FetchDestination",
+    "Studio/LNM/DataDirectory",
+    "Studio/LNM/RecipeFolders",
+)
+
+
+def _updateMovedPathSettings(oldRoot, newRoot, moved, renamed=None):
+    """Paths of ``MOVED_PATH_KEYS`` inside the moved items point at their new place; the open Map follows them too.
+
+    Only paths inside an item that moved (``moved``, as ``projects.moveContent`` returns it) change: anything else in
+    the old folder stayed there.
+    """
+    from StudioLib import projects
+
+    movedNames = {os.path.normcase(name) for name in moved or ()}
+
+    def movedPath(path):
+        if not path or not movedNames or not projects.isInside(path, oldRoot):
+            return path
+        relative = os.path.relpath(os.path.realpath(path), os.path.realpath(oldRoot))
+        if os.path.normcase(relative.split(os.sep)[0]) not in movedNames:
+            return path
+        return projects.pathAfterMove(path, oldRoot, newRoot, renamed)
+
+    settings = qt.QSettings()
+    for key in MOVED_PATH_KEYS:
+        value = settings.value(key)
+        if value is None or value == "":
+            continue
+        if isinstance(value, str):
+            newValue = movedPath(value)
+        else:
+            newValue = [movedPath(str(item)) for item in value if item]
+            if newValue == [str(item) for item in value if item]:
+                continue
+        if newValue != value:
+            settings.setValue(key, newValue)
+    # What is already open in this session (the Map module's remembered bundles, its connectome, run and Cohort study)
+    module = sys.modules.get("LesionNetworkMapping")
+    follow = getattr(module, "followMovedPaths", None) if module is not None else None
+    if follow is not None:
+        try:
+            follow(movedPath)
+        except Exception:
+            logging.exception("Slicer Studio: Map could not follow the moved folder")
 
 
 def _mouseButtonsPressed():

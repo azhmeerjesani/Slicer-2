@@ -905,7 +905,15 @@ def changeRootDialog(parent=None):
             moved = service.moveRoot(newRoot, moveContent=move,
                                      run=lambda function: _runWithProgress(function, _("Moving your projects and studies…"), parent))
         else:
-            moved = _runWithProgress(lambda: projects.moveContent(oldRoot, newRoot), _("Moving your projects and studies…"), parent) if move else []
+            renamed = {}
+            moved = _runWithProgress(lambda: projects.moveContent(oldRoot, newRoot, renamed=renamed), _("Moving your projects and studies…"),
+                                     parent) if move else []
+            if moved:
+                # Paths kept in the settings follow what moved, as moveRoot does (recent studies, registered connectomes...)
+                from . import autosave
+
+                autosave._updateRecentStudies(oldRoot, newRoot, renamed)
+                autosave._updateMovedPathSettings(oldRoot, newRoot, moved, renamed)
             projects.setRoot(newRoot)
         projects.ensureRoot(newRoot)
     except projects.OpenElsewhereError as error:
