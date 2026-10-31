@@ -67,6 +67,10 @@ Run with the main window and testing enabled::
   ``slicer.util.loadUI`` creates the CTK and qMRML widgets of a scripted module's ``.ui`` file (a ``qMRMLWidget`` root, a
   ``qMRMLNodeComboBox``, a ``ctkCollapsibleButton``), and Line Profile, Vector to Scalar Volume and Surface Toolbox set up
   their panel and logic. Without the plugins every such widget was a plain QWidget and ``setup()`` raised AttributeError.
+- ``test_33_extensions_manager_asks_for_the_official_build`` (BB-1): the Extensions Manager asks the extensions server for
+  revision 35389 (official 5.13.0, the upstream build the fork is based on), not the fork's own commit count that matches no
+  official build (empty catalog, install by name failed); extensions are still installed in the build's own
+  ``Extensions-<revision>`` folder and their scripted modules are loaded as extensions (folder added to ``sys.path``).
 - ``test_24_lesion_metrics_follow_a_result_that_repoints_the_lesion`` (BB-1): a merged result that repoints the lesion
   (a normalization) recomputes the row's centroid, outside-brain share and lesion size from the new file at once.
 - ``test_27_sources_undo_reverts_the_change_just_made`` (BB-1): in the Sources card, U right after P or X undoes that change
@@ -1306,6 +1310,56 @@ class StudioRegressionTest(unittest.TestCase):
             self.assertIsNotNone(widget, name)
             self.assertIsNotNone(getattr(widget, "logic", None), f"{name}: no logic after setup()")
             self.assertEqual(errors, [], name)
+
+    def test_33_extensions_manager_asks_for_the_official_build(self):
+        """The Extensions Manager asks the server for the extensions of the official build the fork is based on."""
+        import sys
+        import textwrap
+
+        # The server matches the revision exactly and has extensions only for official builds: the fork's own
+        # revision (a commit count of the clone) matches none, so the catalog was empty ("All (0)") and install by
+        # name failed. Official 5.13.0-2026-10-16 is revision 35389, built from upstream commit bccfb40, the commit the
+        # fork is based on (update both when a newer upstream is merged: Slicer_UPSTREAM_REVISION in SlicerVersion.cmake).
+        em = slicer.app.extensionsManagerModel()
+        self.assertEqual(em.slicerRevision, "35389")
+        url = em.extensionsListUrl().toString()
+        if url:  # empty only if the frontend server is not set
+            self.assertIn("/catalog/All/35389/", url)
+        # The build keeps its own revision: it names its settings file and its extensions folder
+        installPath = slicer.app.extensionsInstallPath
+        self.assertTrue(installPath.replace("\\", "/").rstrip("/").endswith(f"Extensions-{slicer.app.revision}"), installPath)
+        # A scripted module of an installed extension is loaded as an extension (its folder is added to sys.path for its
+        # own helper packages), not as a module embedded in the application.
+        name = "StudioBBExtensionProbe"
+        extensionDir = os.path.join(installPath, name)
+        moduleDir = os.path.join(extensionDir, "lib", f"Slicer-{slicer.app.majorVersion}.{slicer.app.minorVersion}", "qt-scripted-modules")
+        os.makedirs(moduleDir, exist_ok=True)
+        self.addCleanup(shutil.rmtree, extensionDir, True)
+        modulePath = os.path.join(moduleDir, f"{name}.py")
+        with open(modulePath, "w", encoding="utf-8") as f:
+            f.write(textwrap.dedent(f"""\
+                from slicer.ScriptedLoadableModule import ScriptedLoadableModule
+
+
+                class {name}(ScriptedLoadableModule):
+                    def __init__(self, parent):
+                        ScriptedLoadableModule.__init__(self, parent)
+                        self.parent.title = "{name}"
+                        self.parent.hidden = True
+                """))
+        factory = slicer.app.moduleManager().factoryManager()
+        factory.registerModule(qt.QFileInfo(modulePath))
+        self.assertTrue(factory.isRegistered(name))
+        self.assertTrue(factory.loadModules([name]))
+
+        def norm(path):
+            return os.path.normcase(os.path.abspath(path))
+
+        def removeFromSysPath():
+            sys.path[:] = [p for p in sys.path if norm(p) != norm(moduleDir)]
+
+        self.addCleanup(removeFromSysPath)
+        self.assertIn(norm(moduleDir), [norm(p) for p in sys.path], "an extension's module was taken for an embedded module")
 
     def test_11_dimensionality_chip_needs_study_to_choose(self):
         """Outside a study the 2D chip is neutral and does not ask for a choice that cannot be made (no Choose... action)."""

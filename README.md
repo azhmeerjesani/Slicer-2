@@ -2148,7 +2148,10 @@ git merge upstream/main
 
 Most fork code is in new files (the Studio module, the LNM library, the scripts). Edits to upstream files
 add behavior without renaming or removing anything, to keep merges manageable. After a merge, rebuild
-and run the tests, StudioBench and the compatibility check. Fixes that help every Slicer user, such as
+and run the tests, StudioBench and the compatibility check. Set `Slicer_UPSTREAM_REVISION` in
+[CMake/SlicerVersion.cmake](CMake/SlicerVersion.cmake) (and the value in `StudioRegressionTest`) to the revision of
+the official build of the merged upstream commit: the Extensions Manager asks the extensions server for the
+extensions of that build, because the fork's own revision matches no official build. Fixes that help every Slicer user, such as
 commit `7fa9dd9` (merge the default settings after the command-line arguments are parsed), can be
 proposed upstream.
 

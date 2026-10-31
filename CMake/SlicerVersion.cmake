@@ -83,6 +83,21 @@ else()
   message(FATAL_ERROR "Invalid Slicer_REVISION_TYPE value: ${Slicer_REVISION_TYPE}")
 endif()
 
+# Slicer Studio fork: the revision the extensions server knows this build by. The server
+# (slicer-packages.kitware.com, extensions.slicer.org) matches the revision exactly and has extensions
+# only for official builds, so the fork's own Slicer_REVISION (the commit count of the clone it was
+# built from) matches none and the Extensions Manager offered no extension. The fork is based on
+# upstream commit bccfb40, the source of the official 5.13.0-2026-10-16 build (revision 35389), so the
+# extensions built for that build are the ones built for this code. Update Slicer_UPSTREAM_REVISION
+# when a newer upstream is merged. Slicer_REVISION itself is unchanged: it names the settings file and
+# the extensions folder of this build. A forced revision is used as it is, as in official Slicer.
+set(Slicer_UPSTREAM_REVISION "35389")
+if(NOT "${Slicer_FORCED_REVISION}" STREQUAL "")
+  set(Slicer_EXTENSIONS_SERVER_REVISION "${Slicer_REVISION}")
+else()
+  set(Slicer_EXTENSIONS_SERVER_REVISION "${Slicer_UPSTREAM_REVISION}")
+endif()
+
 set(Slicer_VERSION      "${Slicer_VERSION_MAJOR}.${Slicer_VERSION_MINOR}")
 set(Slicer_VERSION_FULL "${Slicer_VERSION}.${Slicer_VERSION_PATCH}")
 
@@ -92,6 +107,7 @@ endif()
 
 message(STATUS "Configuring Slicer version [${Slicer_VERSION_FULL}]")
 message(STATUS "Configuring Slicer revision [${Slicer_REVISION}]")
+message(STATUS "Configuring Slicer extensions server revision [${Slicer_EXTENSIONS_SERVER_REVISION}]")
 
 #-----------------------------------------------------------------------------
 # Slicer main application version number

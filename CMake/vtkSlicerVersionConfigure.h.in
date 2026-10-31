@@ -46,6 +46,11 @@
 /// \sa Slicer_WC_REVISION_TYPE
 #define Slicer_REVISION "@Slicer_REVISION@"
 
+/// \def Slicer_EXTENSIONS_SERVER_REVISION
+/// \brief Revision sent to the extensions server (the official build this source is based on).
+/// \sa Slicer_REVISION
+#define Slicer_EXTENSIONS_SERVER_REVISION "@Slicer_EXTENSIONS_SERVER_REVISION@"
+
 /// \def Slicer_REVISION_TYPE
 /// \brief Specifies what is stored in Slicer_REVISION (hash or commit count).
 /// \sa Slicer_REVISION
