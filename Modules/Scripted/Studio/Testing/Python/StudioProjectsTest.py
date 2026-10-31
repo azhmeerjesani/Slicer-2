@@ -3051,6 +3051,108 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("Lesion"))
 
 
+    def test_55_root_move_is_refused_while_another_studio_has_a_study_open(self):
+        """Moving the Slicer Studio folder while another running Slicer Studio has one of its studies open (BB-1) is
+        refused before anything is moved, with a message that names the study, as it is for a project open there. The
+        folder used to move Studies/ from under the other window: its tracing failed to save ("no NIfTI file to write the
+        lesion on"), the moved study kept the old lesion, and its journal and heartbeat re-created a half study in the
+        old folder. An open study is recognised by the live heartbeat in its ``.studio/session.json``.
+        """
+        import socket
+        import subprocess
+        from unittest import mock
+
+        from StudioLib import projects_ui
+
+        projects = self.projects
+        service = self._service()
+        projects.ensureRoot(self.root)
+        oldRoot = projects.root()
+        other = subprocess.Popen(["sleep", "600"])  # the other Slicer Studio (a live process of this host)
+
+        def makeStudy(relative, pid, live=True):
+            path = os.path.join(projects.studiesFolder(oldRoot), *relative.split("/"))
+            os.makedirs(os.path.join(path, ".studio"), exist_ok=True)
+            with open(os.path.join(path, "study.json"), "w", encoding="utf-8") as f:
+                f.write("{}\n")
+            record = {"format": "slicer-studio-session", "pid": pid, "host": socket.gethostname(), "app": "Slicer Studio",
+                      "heartbeat_epoch": time.time() if live else 0}
+            with open(os.path.join(path, ".studio", "session.json"), "w", encoding="utf-8") as f:
+                json.dump(record, f)
+            return path
+
+        newRoot = os.path.join(self.tempDir, "moved", "Slicer Studio")
+        os.environ.pop(projects.ROOT_ENVIRONMENT)
+        qt.QSettings().setValue(projects.ROOT_KEY, self.root)
+        running = self.autosave._service
+        self.autosave._service = service
+        try:
+            makeStudy("RM", other.pid)
+            makeStudy("Lab/Nested", other.pid)
+            makeStudy("Closed", other.pid, live=False)  # closed there: its heartbeat is 0
+            makeStudy("Here", os.getpid())  # this window's own heartbeat (a study open here is refused on its own)
+            gone = subprocess.Popen(["true"])
+            gone.wait()
+            makeStudy("Crashed", gone.pid)  # a fresh heartbeat of a process that no longer exists
+
+            def unchanged():
+                self.assertFalse(os.path.exists(newRoot), "nothing is made in the new folder")
+                self.assertTrue(os.path.isfile(os.path.join(oldRoot, "Studies", "RM", "study.json")), "the study stays")
+                self.assertEqual(projects.root(), os.path.normpath(self.root), "the setting is unchanged")
+
+            with self.assertRaises(projects.OpenElsewhereError) as context:
+                service.moveRoot(newRoot, moveContent=True)
+            self.assertIn("The studies Lab/Nested, RM are open in another Slicer Studio", str(context.exception))
+            unchanged()
+            self.assertEqual(projects.studiesOpenElsewhere(oldRoot), ["Lab/Nested", "RM"])
+            # Only one left open there: named alone
+            makeStudy("Lab/Nested", other.pid, live=False)
+            with self.assertRaises(projects.OpenElsewhereError) as context:
+                service.moveRoot(newRoot, moveContent=True)
+            self.assertIn("The study RM is open in another Slicer Studio", str(context.exception))
+            unchanged()
+            # The Change… dialog says it before asking anything
+            shown = []
+
+            class FakeChooser:
+                path = newRoot
+                continueButton = mock.Mock()
+                setWindowTitle = mock.Mock()
+                choose = mock.Mock()
+                exec = mock.Mock()
+                exec_ = mock.Mock()
+                deleteLater = mock.Mock()
+
+                def __init__(self, *args, **kwargs):
+                    pass
+
+            def fail(*args, **kwargs):
+                raise AssertionError("the question is not asked")
+
+            with mock.patch.object(projects_ui, "FolderChooserDialog", FakeChooser), \
+                    mock.patch.object(projects_ui, "_question", fail), \
+                    mock.patch.object(slicer.util, "infoDisplay", lambda text, *a, **k: shown.append(text)), \
+                    mock.patch.object(slicer.util, "errorDisplay", lambda text, *a, **k: shown.append(text)):
+                self.assertIsNone(projects_ui.changeRootDialog(None))
+            self.assertEqual(len(shown), 1, shown)
+            self.assertIn("The study RM is open in another Slicer Studio", shown[0])
+            unchanged()
+            # Once the other window has closed it (heartbeat 0), the folder moves with the studies
+            makeStudy("RM", other.pid, live=False)
+            self.assertEqual(projects.studiesOpenElsewhere(oldRoot), [])
+            moved = service.moveRoot(newRoot, moveContent=True)
+            self.assertIn("Studies", moved)
+            self.assertEqual(projects.root(), os.path.normpath(newRoot))
+            self.assertTrue(os.path.isfile(os.path.join(newRoot, "Studies", "RM", "study.json")))
+        finally:
+            other.kill()
+            other.wait()
+            self.autosave._service = running
+            qt.QSettings().remove(projects.ROOT_KEY)
+            qt.QSettings().remove(projects.ROOT_CHOSEN_KEY)
+            os.environ[projects.ROOT_ENVIRONMENT] = self.root
+
+
 def _sphere(center=(0, 0, 0)):
     import vtk
 

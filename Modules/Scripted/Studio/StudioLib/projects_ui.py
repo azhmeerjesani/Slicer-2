@@ -881,7 +881,7 @@ def changeRootDialog(parent=None):
                                     windowTitle=_("Change the Slicer Studio folder"))
             return None
         try:
-            # A project open in another Slicer Studio would move away from under it (and drop out of its Library)
+            # A project or study open in another Slicer Studio would move away from under it (and drop out of its Library)
             projects.checkNotOpenElsewhere(oldRoot)
         except OSError as error:
             slicer.util.infoDisplay(str(error), windowTitle=_("Change the Slicer Studio folder"))

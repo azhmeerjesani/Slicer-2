@@ -1252,7 +1252,7 @@ def checkMoveTarget(oldRoot, newRoot):
 
 
 class OpenElsewhereError(OSError):
-    """The folder cannot be moved: another running Slicer Studio has one of its projects open."""
+    """The folder cannot be moved: another running Slicer Studio has one of its projects or studies open."""
 
 
 def projectsOpenElsewhere(rootPath=None):
@@ -1266,10 +1266,48 @@ def projectsOpenElsewhere(rootPath=None):
             if not name.startswith(".") and os.path.isdir(os.path.join(folder, name)) and isLockedByOther(os.path.join(folder, name))]
 
 
+#: How deep below Studies/ a study folder is looked for (a study may be in a subfolder of Studies/)
+_STUDY_SEARCH_DEPTH = 3
+
+
+def studiesOpenElsewhere(rootPath=None):
+    """The studies of the folder (paths relative to Studies/, "/" separated) that another running Slicer Studio has open.
+
+    An open study writes a heartbeat into its ``.studio/session.json`` (``study_ui``); a live heartbeat of another
+    process is what ``study_ui._liveOtherSession`` recognises (the same check that warns about a study open in two
+    windows). Main thread.
+    """
+    folder = studiesFolder(rootPath)
+    if not os.path.isdir(folder):
+        return []
+    try:
+        from . import study_ui
+    except ImportError:
+        return []
+    names = []
+    for current, subfolders, files in os.walk(folder):
+        relative = os.path.relpath(current, folder)
+        depth = 0 if relative == os.curdir else relative.count(os.sep) + 1
+        if depth > 0 and "study.json" in files:
+            subfolders[:] = []  # a study holds no other study
+            try:
+                with open(os.path.join(current, PRIVATE_DIR, study_ui.SESSION_FILE), encoding="utf-8") as f:
+                    record = json.load(f)
+            except (OSError, ValueError):
+                continue
+            if study_ui._liveOtherSession(record) is not None:
+                names.append(relative.replace(os.sep, "/"))
+            continue
+        subfolders[:] = [name for name in subfolders if not name.startswith(".")] if depth < _STUDY_SEARCH_DEPTH else []
+    return sorted(names)
+
+
 def checkNotOpenElsewhere(rootPath):
-    """Raise OpenElsewhereError (a plain message that names them) when another running Slicer Studio has a project of
-    the folder open: moving Projects/ would move that project, lock included, away from under it, and that window would
-    go on saving into the old folder.
+    """Raise OpenElsewhereError (a plain message that names them) when another running Slicer Studio has a project or a
+    study of the folder open: moving Projects/ would move that project, lock included, away from under it, and that
+    window would go on saving into the old folder; moving Studies/ would move a study away from under the window that
+    traces it (its journal, participants and heartbeat would re-create a half study in the old folder, and its lesions
+    could no longer be written).
     """
     names = projectsOpenElsewhere(rootPath)
     if len(names) == 1:
@@ -1277,6 +1315,13 @@ def checkNotOpenElsewhere(rootPath):
     if names:
         raise OpenElsewhereError(_("{names} are open in another Slicer Studio. Close them there first, then change the folder.").format(
             names=", ".join(names)))
+    studies = studiesOpenElsewhere(rootPath)
+    if len(studies) == 1:
+        raise OpenElsewhereError(_("The study {name} is open in another Slicer Studio. Close it there first, then change the folder.").format(
+            name=studies[0]))
+    if studies:
+        raise OpenElsewhereError(_("The studies {names} are open in another Slicer Studio. Close them there first, then change the folder.").format(
+            names=", ".join(studies)))
 
 
 def moveContent(oldRoot, newRoot, progress=None, renamed=None):
