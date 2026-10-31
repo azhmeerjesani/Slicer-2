@@ -370,6 +370,19 @@ def showLayers(template, result, opacity=0.8):
     )
 
 
+def hideForeground(volume):
+    """Take ``volume`` out of the foreground of every slice view that shows it (the other layers stay); return whether one did."""
+    if volume is None:
+        return False
+    volumeId = volume.GetID()
+    hidden = False
+    for compositeNode in slicer.util.getNodesByClass("vtkMRMLSliceCompositeNode"):
+        if volumeId and compositeNode.GetForegroundVolumeID() == volumeId:
+            compositeNode.SetForegroundVolumeID(None)
+            hidden = True
+    return hidden
+
+
 def setForegroundOpacity(opacity):
     """Opacity of the foreground layer (the map) in every slice view."""
     slicer.util.setSliceViewerLayers(foregroundOpacity=float(opacity))

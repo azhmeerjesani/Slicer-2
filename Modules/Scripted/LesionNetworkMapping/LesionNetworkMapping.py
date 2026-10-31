@@ -3896,10 +3896,13 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
     def _parkRunOfOtherConnectome(self):
         """Another connectome was chosen after a run: the Result card, the current run (Export and the cards that read it)
         and the rule no longer use that run, whose V and mask are its own connectome's; it comes back when its connectome
-        is chosen again (``_restoreParkedRun``). The map volume stays in the scene. Return whether a run was parked.
+        is chosen again (``_restoreParkedRun``). The map volume stays in the scene but leaves the views: drawn without its
+        rule and legend, it would read as a map of the chosen connectome. Return whether a run was parked.
         """
         if not self.runOutputs or self._runConnectomeSelected() or (self.job is not None and not self.job.isFinished()):
             return False
+        from LesionNetworkMappingLib import display
+
         node = self._parameterNode
         self._parkedRuns[self._connectomeKey(self._runBundle.path)] = {
             "volume": node.resultVolume if node is not None else None, "ctxVolume": self.ctx.resultVolume, "run": self.ctx.currentRun,
@@ -3910,7 +3913,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self._valuesCache.clear()
         self.resolved = None
         if node is not None:
+            display.hideForeground(node.resultVolume)
             node.resultVolume = None
+        display.hideForeground(self.ctx.resultVolume)
         self.ctx.setResultVolume(None)
         self.ctx.setCurrentRun(None)
         return True
@@ -6162,6 +6167,13 @@ class LesionNetworkMappingTest(ScriptedLoadableModuleTest):
         self.assertAlmostEqual(widget.resolved.value, expectedA, places=6)
         mapVolume = widget._parameterNode.resultVolume
         runA = widget.ctx.currentRun
+        compositeNodes = slicer.util.getNodesByClass("vtkMRMLSliceCompositeNode")
+        self.assertTrue(compositeNodes)
+
+        def foregrounds():
+            return [compositeNode.GetForegroundVolumeID() for compositeNode in compositeNodes]
+
+        self.assertEqual(foregrounds(), [mapVolume.GetID()] * len(compositeNodes))
 
         widget.refreshConnectomes(select=os.path.abspath(metaB["path"]))
         vB = widget.bundle.n_voxels
@@ -6176,6 +6188,8 @@ class LesionNetworkMappingTest(ScriptedLoadableModuleTest):
         with self.assertRaises(RuntimeError):
             widget.ctx.card("export").exportTo(os.path.join(self.tempDir, "export-B"))
         self.assertIsNotNone(mapVolume.GetScene())  # the map stays in the scene
+        # ...but not in the views: drawn without its rule and legend it would read as connectome B's map
+        self.assertNotIn(mapVolume.GetID(), foregrounds())
         self.assertIn("Switch test A", widget.resultTitleLabel.text)
         self.assertTrue(widget.derivedLabel.text.startswith("Planned:"), widget.derivedLabel.text)
         self.assertNotIn(f"V={vA:,}", widget.derivedLabel.text)
@@ -6185,6 +6199,7 @@ class LesionNetworkMappingTest(ScriptedLoadableModuleTest):
         self.assertTrue(widget._hasResult())
         self.assertIs(widget.ctx.currentRun, runA)
         self.assertIs(widget._parameterNode.resultVolume, mapVolume)
+        self.assertEqual(foregrounds(), [mapVolume.GetID()] * len(compositeNodes))
         self.assertAlmostEqual(widget.resolved.value, expectedA, places=6)
         self.assertIn(f"V={vA:,}", widget.derivedLabel.text)
         self.assertTrue(widget.resultExportButton.enabled)
