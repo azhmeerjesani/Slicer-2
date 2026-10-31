@@ -69,6 +69,22 @@ def openLink(url):
     return bool(qt.QDesktopServices.openUrl(qt.QUrl(url)))
 
 
+def routeLinks(widget):
+    """Send the links clicked in a ``QLabel`` or ``QTextBrowser`` through :func:`openLink` (a link window in the web build).
+
+    ``setOpenExternalLinks(True)`` would call ``QDesktopServices::openUrl`` inside Qt, which shows nothing in the web build.
+    Without the Studio module the widget keeps Qt's own opening. Return ``widget``.
+    """
+    try:
+        from StudioLib import projects
+    except Exception:
+        projects = None
+    if projects is not None:
+        return projects.routeLinks(widget)
+    widget.setOpenExternalLinks(True)
+    return widget
+
+
 def _styleSupportsRoles():
     app = getattr(slicer, "app", None)
     return bool(app is not None and app.style().property("supportsSlicerRole"))
@@ -669,6 +685,6 @@ def helpLink(text, url):
     label.setObjectName("LNMHelpLink")
     label.setTextFormat(qt.Qt.RichText)
     label.setTextInteractionFlags(qt.Qt.TextBrowserInteraction)
-    label.setOpenExternalLinks(True)
+    routeLinks(label)
     label.setToolTip(url)
     return label

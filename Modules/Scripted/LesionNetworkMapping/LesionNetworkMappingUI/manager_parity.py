@@ -277,7 +277,7 @@ class ParityDialog(qt.QDialog):
         layout.addWidget(self.sourceLabel)
         self.termsView = qt.QTextBrowser()
         self.termsView.setObjectName("LNMLeadDbsParityTermsText")
-        self.termsView.setOpenExternalLinks(True)
+        widgets.routeLinks(self.termsView)
         self.termsView.setMinimumHeight(80)
         self.termsView.setMaximumHeight(150)
         layout.addWidget(self.termsView)

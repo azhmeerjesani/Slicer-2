@@ -1488,6 +1488,101 @@ class StudioProjectsTest(unittest.TestCase):
             else:
                 os.environ["SLICER_STUDIO_WEB"] = webValue
 
+    def test_27b_clicked_links_in_rich_text_without_a_desktop(self):
+        """Links that a user clicks in rich-text labels and text browsers show the link window in the web build.
+
+        ``setOpenExternalLinks(True)`` made Qt call ``QDesktopServices::openUrl`` itself, which does nothing in the container,
+        so a click on a DOI showed nothing. ``projects.routeLinks`` sends the click to ``projects.openLink`` instead.
+        """
+        from LesionNetworkMappingUI import card_recipe, widgets
+        from StudioLib import updates
+
+        url = "https://doi.org/10.1038/s41467-019-11353-z"
+        opened = []
+        realOpenUrl = qt.QDesktopServices.openUrl
+
+        def fakeOpenUrl(qurl):
+            opened.append(qurl.toString())
+            return True
+
+        def dialog():
+            for found in slicer.util.mainWindow().findChildren("QDialog"):
+                if found.objectName == "StudioLocationDialog" and found.isVisible():
+                    return found
+            return None
+
+        def closeDialog():
+            found = dialog()
+            if found is not None:
+                found.close()
+            slicer.app.processEvents()
+
+        def click(widget, pos):
+            for kind in (qt.QEvent.MouseButtonPress, qt.QEvent.MouseButtonRelease):
+                event = qt.QMouseEvent(kind, qt.QPointF(pos), qt.QPointF(widget.mapToGlobal(pos)), qt.Qt.LeftButton, qt.Qt.LeftButton, qt.Qt.NoModifier)
+                qt.QApplication.sendEvent(widget, event)
+            slicer.app.processEvents()
+
+        def shownLink():
+            found = dialog()
+            self.assertIsNotNone(found, "clicking a link shows the link window")
+            return found.findChild(qt.QLineEdit, "StudioLocationField").text
+
+        webValue = os.environ.get("SLICER_STUDIO_WEB")
+        os.environ["SLICER_STUDIO_WEB"] = "1"
+        qt.QDesktopServices.openUrl = fakeOpenUrl
+        host = None
+        try:
+            # A label with one link (LNM help link) and the recipe popover label
+            helpLink = widgets.helpLink("Open the DOI", url)
+            popover = card_recipe.Popover(slicer.util.mainWindow(), "BBTestPopover")
+            popover.label.setText(f'<a href="{url}">doi link</a>')
+            for label in (helpLink, popover.label):
+                self.assertFalse(label.openExternalLinks, "Qt must not open links itself")
+                host = qt.QWidget()
+                layout = qt.QVBoxLayout(host)
+                layout.setContentsMargins(0, 0, 0, 0)
+                layout.addWidget(label)
+                host.resize(300, 60)
+                host.show()
+                slicer.app.processEvents()
+                click(label, qt.QPoint(20, 18) if label is popover.label else qt.QPoint(10, label.height // 2))
+                self.assertEqual(shownLink(), url)
+                closeDialog()
+                label.setParent(None)
+                host.deleteLater()
+                host = None
+            self.assertEqual(opened, [], "the web build does not call the desktop")
+
+            # A text browser: the clicked anchor goes to the same window; a link inside the text opens nothing
+            browser = updates._notesBrowser("Notes\n\n[Release notes](" + url + ")")
+            self.assertFalse(browser.openLinks)
+            self.assertFalse(browser.openExternalLinks)
+            browser.anchorClicked(qt.QUrl(url))
+            self.assertEqual(shownLink(), url)
+            closeDialog()
+            browser.anchorClicked(qt.QUrl("#top"))
+            self.assertIsNone(dialog(), "a link inside the text opens no window")
+            plain = widgets.routeLinks(qt.QTextBrowser())
+            self.assertFalse(plain.openLinks)
+            self.assertEqual(opened, [])
+
+            # A desktop that opens links: the browser gets it, nothing extra shows
+            os.environ.pop("SLICER_STUDIO_WEB", None)
+            if not os.path.exists("/.dockerenv"):
+                browser.anchorClicked(qt.QUrl(url))
+                self.assertEqual(opened, [url])
+                self.assertIsNone(dialog())
+        finally:
+            qt.QDesktopServices.openUrl = realOpenUrl
+            closeDialog()
+            if host is not None:
+                host.deleteLater()
+            if webValue is None:
+                os.environ.pop("SLICER_STUDIO_WEB", None)
+            else:
+                os.environ["SLICER_STUDIO_WEB"] = webValue
+
     def test_28_save_copy_as_starts_in_an_existing_folder(self):
         """"Save a copy as…" opens in an existing folder, never the current folder that Qt uses for a missing one (HOME in
         the web container, "/" for a Finder-started app): Exports/ of a new project (created), else Studio/LastSaveFolder

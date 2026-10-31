@@ -131,7 +131,7 @@ class Popover:
         self.label.setObjectName(f"{objectName}Text")
         self.label.setWordWrap(True)
         self.label.setTextFormat(qt.Qt.RichText)
-        self.label.setOpenExternalLinks(True)
+        widgets.routeLinks(self.label)
         self.label.setTextInteractionFlags(qt.Qt.TextBrowserInteraction)
         self.label.setContentsMargins(12, 10, 12, 10)
         self.label.setAlignment(qt.Qt.AlignTop | qt.Qt.AlignLeft)

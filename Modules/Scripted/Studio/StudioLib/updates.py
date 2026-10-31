@@ -1827,9 +1827,11 @@ class _EscapeCloseFilter:
 def _notesBrowser(notes, maximumHeight=220):
     import qt
 
+    from . import projects
+
     browser = qt.QTextBrowser()
     browser.setObjectName("StudioUpdateNotes")
-    browser.setOpenExternalLinks(True)
+    projects.routeLinks(browser)
     if notes and hasattr(browser, "setMarkdown"):
         browser.setMarkdown(notes)
         _flattenHeadings(browser)

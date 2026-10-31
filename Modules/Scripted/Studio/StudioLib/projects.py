@@ -1647,6 +1647,33 @@ def openLink(url):
     return True
 
 
+def routeLinks(widget):
+    """Send the links that a user clicks in ``widget`` (a ``QLabel`` or ``QTextBrowser``) through :func:`openLink`.
+
+    ``setOpenExternalLinks(True)`` makes Qt call ``QDesktopServices::openUrl`` itself, which in the web build only logs that
+    it cannot detect a browser and shows nothing. Here the widget does not open anything by itself: a clicked link goes to
+    :func:`openLink`, so the browser opens it, or (web build) a message shows the link and [Copy link]. Links to a place in the same
+    text (``#name``) are ignored. Return ``widget``.
+    """
+    if hasattr(widget, "setOpenLinks"):
+        widget.setOpenLinks(False)
+        widget.setOpenExternalLinks(False)
+
+        def onAnchorClicked(url):
+            qurl = url if hasattr(url, "toString") else qt.QUrl(str(url))
+            text = qurl.toString()
+            # A link to a place in the same text (#name) has nothing to open. The slot must not hold ``widget``: the
+            # widget owns the connection, and a reference back made Slicer exit abnormally.
+            if text and not text.startswith("#"):
+                openLink(qurl)
+
+        widget.connect("anchorClicked(QUrl)", onAnchorClicked)
+    else:
+        widget.setOpenExternalLinks(False)
+        widget.connect("linkActivated(QString)", lambda link: openLink(link) if link else None)
+    return widget
+
+
 def fileManagerName():
     """"Finder", "Explorer" or "Files" (the name in "Show in …")."""
     if sys.platform == "darwin":

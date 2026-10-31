@@ -12,7 +12,7 @@ import qt
 import slicer
 from slicer.i18n import tr as _
 
-from . import ui, updates
+from . import projects, ui, updates
 
 PANEL_OBJECT_NAME = "StudioUpdatesSettingsPanel"
 
@@ -64,7 +64,7 @@ class UpdatesSettingsPanel(ctk.ctkSettingsPanel):
         row(_("This version"), self.versionLabel)
         self.latestLabel = qt.QLabel()
         self.latestLabel.setObjectName("StudioUpdatesLatestLabel")
-        self.latestLabel.setOpenExternalLinks(True)
+        projects.routeLinks(self.latestLabel)
         self.latestLabel.setTextFormat(qt.Qt.RichText)
         row(_("Latest release"), self.latestLabel, last=True)
         # Word-wrapped text outside the rows: a row does not grow for a wrapped label
@@ -77,7 +77,7 @@ class UpdatesSettingsPanel(ctk.ctkSettingsPanel):
 
         self.notesBrowser = qt.QTextBrowser()
         self.notesBrowser.setObjectName("StudioUpdatesNotes")
-        self.notesBrowser.setOpenExternalLinks(True)
+        projects.routeLinks(self.notesBrowser)
         self.notesBrowser.setMaximumHeight(160)
         layout.addWidget(self.notesBrowser)
 
