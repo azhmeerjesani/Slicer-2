@@ -43,6 +43,10 @@ The user pays for any usage beyond their plans, so even an accidental use costs 
   separate agent. Agents that run at the same time never edit the same working tree or build tree at
   once, run Slicer with their own throwaway HOME and `xvfb-run -a`, and never kill processes they did
   not start.
+- Keep at least 5 GB of disk free at all times (the user, 2026-10-31). Each agent deletes its own large outputs,
+  throwaway HOMEs and temporary folders by explicit name when it finishes (run Slicer with TMPDIR inside its throwaway
+  folder so Slicer's temporary files and logs go there too); when free space is under 5 GB, clean up before starting
+  more work, and stop and report if it cannot be freed.
 - Use the cheapest model that does the job well: Haiku for mechanical edits, Sonnet for routine
   implementation, docs, tests and walkthroughs, Opus for design, C++, numerics, file compatibility
   and adversarial review. Use Fable when it is really needed: a second fix after a fix failed its
