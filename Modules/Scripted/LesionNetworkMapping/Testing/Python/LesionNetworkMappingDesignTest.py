@@ -589,6 +589,29 @@ class ChecksTest(_StudyTestCase):
         self.assertIn("volume_off", _codes(reasoned.checks, "info"))
         self.assertNotIn("volume_off", _codes(reasoned.checks, "warn"))
 
+    def test_invalid_transform_of_a_covariate_is_refused_not_raised(self):
+        # log of 0 / a negative value and z of a constant make NaN columns: the design is blocked with the
+        # reason, build_design must not raise numpy's "SVD did not converge" from the collinearity step
+        rows = []
+        for index in range(24):
+            age = float(self.rng.uniform(20, 80)) if index > 1 else (0.0 if index == 0 else -3.0)
+            rows.append((f"sub-{index:02d}", {"group": "case" if index % 2 else "control", "volume_ml": float(self.rng.uniform(5, 40)), "age": age, "const": 5.0, "score": float(self.rng.uniform(1, 9))}))
+        study = self.make_study(rows, "badtransform", roles={"age": "covariate", "const": "covariate"})
+        cases = {
+            "group, log(age) with 0 and -3": (DesignSpec(covariates=["volume_ml", "age"], transforms={"age": "log"}), "log transform of age needs positive values (minimum -3)"),
+            "group, only covariate log(age)": (DesignSpec(covariates=["age"], transforms={"age": "log"}), "log transform of age needs positive values (minimum -3)"),
+            "group, z(const)": (DesignSpec(covariates=["volume_ml", "const"], transforms={"const": "z"}), "z transform of const needs values that vary"),
+            "continuous, log(age)": (DesignSpec(test="continuous", score_column="score", covariates=["volume_ml", "age"], transforms={"age": "log"}), "log transform of age needs positive values (minimum -3)"),
+        }
+        for label, (spec, message) in cases.items():
+            with self.subTest(label):
+                design = designlib.build_design(study, spec)
+                blocks = _codes(design.checks, "block")
+                self.assertIn("invalid_transform", blocks)
+                self.assertIn("non_finite_design", blocks)
+                self.assertNotIn("collinear_covariate", blocks)
+                self.assertIn(message, [check.message for check in design.checks if check.code == "invalid_transform"])
+
     def test_dimensionality_imbalance(self):
         rows = []
         for index in range(30):

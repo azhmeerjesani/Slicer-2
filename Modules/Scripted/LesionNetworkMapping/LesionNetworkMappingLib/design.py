@@ -587,9 +587,12 @@ def variance_inflation(X, columns, skip=(INTERCEPT,)):
     """{column: VIF} = 1 / (1 - R²) of each column regressed on the others plus a constant.
 
     Constant columns and the names in ``skip`` are left out; perfectly collinear columns get inf.
+    A matrix with non-finite values (a refused transform) has no VIFs: the regressions would not converge.
     """
     X = np.asarray(X, dtype=np.float64)
     out = {}
+    if not np.all(np.isfinite(X)):
+        return out
     for index, name in enumerate(columns):
         values = X[:, index]
         total = float(np.sum((values - values.mean()) ** 2))
@@ -834,7 +837,10 @@ def build_design(study, spec=None, run_metas=None, maps=None):
     # Checks
     # The explanation of a collinear covariate comes before the rank and estimability checks it causes
     matrix = matrix_checks(X, C, columns)
-    if group_test:
+    # A column that an invalid transform made NaN has no rank (the SVD fails): matrix_checks and the
+    # invalid_transform check report it, so the collinearity explanation is skipped
+    finite = bool(np.all(np.isfinite(X)))
+    if group_test and finite:
         for column, indices in covariate_index.items():
             if not indices:
                 continue
@@ -854,7 +860,7 @@ def build_design(study, spec=None, run_metas=None, maps=None):
             else:
                 message = f"Covariate {column} is collinear with {spec.group_column} and the other columns; its effect cannot be separated from them. Remove it or change the design"
             checks.append(Check("block", "collinear_covariate", message, {"covariate": column}))
-    elif spec.test == "continuous":
+    elif spec.test == "continuous" and finite:
         for column, indices in covariate_index.items():
             reduced = np.delete(X, [len(effect_names) + index for index in indices], axis=1)
             if indices and _deficiency(X) > _deficiency(reduced):
