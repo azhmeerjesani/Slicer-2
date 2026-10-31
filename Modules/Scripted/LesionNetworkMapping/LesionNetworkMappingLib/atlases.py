@@ -39,6 +39,11 @@ NETWORK_SCHEMES = ("schaefer", "yeo7", "tian")
 UNLABELLED = "unlabelled"
 
 _SCHAEFER_NAME = re.compile(r"^(?:\d+Networks_)?(?:LH|RH)_([A-Za-z]+)(?:_|$)")
+#: Older Schaefer 17-network tables (TemplateFlow) name the two Yeo-17 limbic networks "Limbic_TempPole" (network 9)
+#: and "Limbic_OFC" (network 10); newer CBIG tables call them "LimbicA_TempPole" and "LimbicB_OFC". In 7-network
+#: tables the same suffixes are regions of the one Limbic network.
+_SCHAEFER17_LIMBIC = re.compile(r"^17Networks_(?:LH|RH)_Limbic_(TempPole|OFC)(?:_|$)")
+_SCHAEFER17_LIMBIC_NAMES = {"TempPole": "LimbicA", "OFC": "LimbicB"}
 _TRAILING_NUMBER = re.compile(r"(\d+)\s*$")
 _INTEGER = re.compile(r"[-+]?\d+")
 
@@ -50,7 +55,8 @@ def network_of(name, scheme=None):
     """Network (or structure) a label name belongs to, or None.
 
     Without ``scheme``, Schaefer names are parsed ("7Networks_LH_Vis_1" -> "Vis", "17Networks_RH_DefaultA_PFCd_2"
-    -> "DefaultA") and then Tian names ("aHIP-rh" -> "HIP", "THA-DP-lh" -> "THA", "NAc-shell-rh" -> "NAc").
+    -> "DefaultA"; the 17-network "17Networks_LH_Limbic_TempPole_1" and "17Networks_LH_Limbic_OFC_1" -> "LimbicA" and
+    "LimbicB", two networks, as in newer CBIG tables) and then Tian names ("aHIP-rh" -> "HIP", "THA-DP-lh" -> "THA", "NAc-shell-rh" -> "NAc").
     ``scheme`` "schaefer", "tian" or "yeo7" restricts the parse; "yeo7" takes the number at the end of the name
     ("Network3", "Network_3") as a Yeo 2011 network number (Buckner2011 cerebellum and Yeo2011 labels).
     """
@@ -58,6 +64,9 @@ def network_of(name, scheme=None):
         return None
     text = str(name).strip()
     if scheme in (None, "schaefer"):
+        match = _SCHAEFER17_LIMBIC.match(text)
+        if match:
+            return _SCHAEFER17_LIMBIC_NAMES[match.group(1)]
         match = _SCHAEFER_NAME.match(text)
         if match:
             return match.group(1)

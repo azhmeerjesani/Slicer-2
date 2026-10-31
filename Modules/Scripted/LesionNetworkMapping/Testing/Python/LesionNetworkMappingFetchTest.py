@@ -778,6 +778,23 @@ class NetworkNameTest(unittest.TestCase):
         self.assertIsNone(atlases.network_of(""))
         self.assertIsNone(atlases.network_of(None))
 
+    def test_schaefer17_limbic_is_two_networks(self):
+        # TemplateFlow's 17-network tables name Yeo-17 networks 9 and 10 "Limbic_TempPole" and "Limbic_OFC": two networks
+        self.assertEqual(atlases.network_of("17Networks_LH_Limbic_TempPole_1"), "LimbicA")
+        self.assertEqual(atlases.network_of("17Networks_RH_Limbic_TempPole_6"), "LimbicA")
+        self.assertEqual(atlases.network_of("17Networks_LH_Limbic_OFC_1"), "LimbicB")
+        self.assertEqual(atlases.network_of("17Networks_RH_Limbic_OFC_6", "schaefer"), "LimbicB")
+        self.assertEqual(atlases.network_of("17Networks_LH_LimbicA_TempPole_1"), "LimbicA")  # newer CBIG names
+        self.assertEqual(atlases.network_of("17Networks_LH_LimbicB_OFC_1"), "LimbicB")
+        self.assertEqual(atlases.network_of("7Networks_RH_Limbic_TempPole_1"), "Limbic")  # one network in Yeo-7
+        self.assertEqual(atlases.to_yeo7("LimbicA"), "Limbic")
+        self.assertEqual(atlases.to_yeo7("LimbicB"), "Limbic")
+        names = ["VisCent_ExStr", "VisPeri_StriCal", "SomMotA", "SomMotB_Aud", "DorsAttnA_TempOcc", "DorsAttnB_PostC", "SalVentAttnA_Ins", "SalVentAttnB_PFCl", "Limbic_TempPole", "Limbic_OFC"]
+        names += ["ContA_IPS", "ContB_PFCl", "ContC_pCun", "DefaultA_PFCm", "DefaultB_Temp", "DefaultC_PHC", "TempPar"]
+        labels = {index + 1: f"17Networks_LH_{name}_1" for index, name in enumerate(names)}
+        networks = {atlases.network_of(name) for name in labels.values()}
+        self.assertEqual(len(networks), 17, sorted(networks))
+
     def test_yeo7_of_17_network_names(self):
         self.assertEqual(atlases.to_yeo7("DefaultB"), "Default")
         self.assertEqual(atlases.to_yeo7("TempPar"), "Default")
