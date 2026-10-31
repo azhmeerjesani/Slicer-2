@@ -1789,8 +1789,12 @@ class ConnectomeManagerDialog(qt.QDialog):
                 except Exception as exc:
                     self.statusLabel.setText(_("The bundle was written but cannot be opened: {error}").format(error=exc))
                     return
-                self.statusLabel.setText(_("Converted and registered: {name}. Accept its data use terms in the Connectome card to map.").format(name=bundle.name))
-                self.widget.refreshConnectomes(select=bundle.path)
+                self.widget.refreshConnectomesAfterJob(bundle.path)
+                if os.path.normpath(self.widget.connectomePath() or "") == os.path.normpath(bundle.path):
+                    self.statusLabel.setText(_("Converted and registered: {name}. Accept its data use terms in the Connectome card to map.").format(name=bundle.name))
+                else:
+                    # The open project keeps its connectome (refreshConnectomesAfterJob)
+                    self.statusLabel.setText(_("Converted and registered: {name}. Choose it in the Connectome card and accept its data use terms to map with it.").format(name=bundle.name))
                 self.refresh(select=bundle.path)
             elif job.state == "cancelled":
                 self.statusLabel.setText(_("Stopped: the subjects already written are kept. Convert again with Resume ticked to continue."))
@@ -3807,6 +3811,20 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             self._showMissingConnectome(missing)
             return
         self._selectConnectome(self.connectomeCombo.itemData(index) if index >= 0 else "")
+
+    def refreshConnectomesAfterJob(self, path):
+        """List a bundle that a background job registered (Get a connectome…, Convert…).
+
+        The job can end long after it was started, in the middle of other work: the new bundle is chosen only when the
+        project names no connectome yet. Otherwise the project keeps its connectome (and the map computed with it),
+        and the user picks the new one in the combo when they want it.
+        """
+        node = self._parameterNode
+        if node is not None:
+            named = bool(node.connectome or node.connectomePath)
+        else:
+            named = bool(self._connectomePath)
+        self.refreshConnectomes(select=None if named else path)
 
     def onConnectomeActivated(self, index):
         self._selectConnectome(self.connectomeCombo.itemData(index) if index >= 0 else "")

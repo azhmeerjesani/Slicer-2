@@ -51,7 +51,8 @@ and custom terms; **grey** when the terms are not stated. A grey entry is never 
   ("Resume" or "Not now"); nothing resumes by itself.
 - The computer is kept awake during the download on macOS and Windows.
 - The result is `<destination>/<id>.lnmc`, a normal connectome bundle (see
-  [The connectome bundle](lesionnetworkmapping.md#data)), registered and selected in Map.
+  [The connectome bundle](lesionnetworkmapping.md#data)), registered and listed in Map. It is selected only when the
+  open project has no connectome yet: a project keeps the connectome its map was computed with until you choose another.
 - Command line (a job; the application never passes `--server`, which exists for mirrors and tests):
   `python -m LesionNetworkMappingLib.fetchconnectome --entry ID --dest DIR --terms-sha SHA256 [--subset S] [--streams N]
   [--keep-archives] [--resume]`, with the subcommands `terms` (show the live terms text and its sha256) and `check`

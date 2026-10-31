@@ -2,7 +2,9 @@
 
 The project keeps naming its connectome (shown as not registered, like a scene opened on a computer without it) and
 no other registered bundle is chosen silently; the manager says that the open project uses it. Removing a bundle the
-project does not use changes nothing in the project. It needs the Slicer application (no network)::
+project does not use changes nothing in the project. A bundle that a background job registers when it ends (Get a
+connectome…, Convert…) is listed, and chosen only when the project has no connectome yet. It needs the Slicer
+application (no network)::
 
     python3 Utilities/Scripts/StudioTestRunner.py --home $(mktemp -d) unittest LesionNetworkMapping LesionNetworkMappingConnectomeManagerTest
 
@@ -40,6 +42,11 @@ class LesionNetworkMappingConnectomeManagerTest(unittest.TestCase):
             os.path.abspath(connectome.make_synthetic(os.path.join(cls.tmp, f"{name}.lnmc"), shape=(8, 9, 8), n_subjects=6, runs=(12, 12), name=name)["path"])
             for name in ("Manager one", "Manager two")
         ]
+        # Bundles that a background job (Get a connectome…, Convert…) registers while a project is open
+        cls.later = [
+            os.path.abspath(connectome.make_synthetic(os.path.join(cls.tmp, f"{name}.lnmc"), shape=(8, 9, 8), n_subjects=6, runs=(12, 12), name=name)["path"])
+            for name in ("Manager fetched", "Manager converted")
+        ]
 
     @classmethod
     def tearDownClass(cls):
@@ -62,7 +69,7 @@ class LesionNetworkMappingConnectomeManagerTest(unittest.TestCase):
 
         if self.widget.managerDialog is not None:
             self.widget.managerDialog.hide()
-        paths = [p for p in self.logic.registeredConnectomes() if os.path.abspath(p) not in self.paths]
+        paths = [p for p in self.logic.registeredConnectomes() if os.path.abspath(p) not in self.paths + self.later]
         qt.QSettings().setValue(CONNECTOMES_SETTING, paths)
         slicer.mrmlScene.Clear(0)
 
@@ -119,6 +126,65 @@ class LesionNetworkMappingConnectomeManagerTest(unittest.TestCase):
         self.assertEqual(os.path.abspath(widget.bundle.path), self.paths[0])
         self.assertNotIn("open project", str(manager.statusLabel.text))
 
+    class _FinishedJob:
+        state = "done"
+        failureReason = None
+        errorEvent = None
+
+        @staticmethod
+        def succeeded():
+            return True
+
+        @staticmethod
+        def isFinished():
+            return True
+
+    def _assertProjectKeeps(self, identifier, newPath):
+        widget = self.widget
+        self.assertIn(newPath, [os.path.abspath(p) for p in self.logic.registeredConnectomes()])
+        self.assertGreaterEqual(widget.connectomeCombo.findData(newPath), 0, "the new bundle is listed in the combo")
+        self.assertEqual(widget._parameterNode.connectome, identifier)
+        self.assertIsNotNone(widget.bundle)
+        self.assertEqual(os.path.abspath(widget.bundle.path), self.paths[0])
+        self.assertEqual(os.path.abspath(widget.connectomeCombo.currentData), self.paths[0])
+
+    def test_background_fetch_keeps_the_project_connectome(self):
+        from LesionNetworkMappingUI import manager_catalog
+
+        identifier = self.widget._parameterNode.connectome
+        self.assertTrue(identifier.startswith("Manager one#"), identifier)
+        controller = manager_catalog.FetchController()
+        controller.state = "running"
+        controller.resultPath = self.later[0]
+        controller._onDone(self._FinishedJob())
+        _pump(100)
+        self.assertEqual(controller.state, "done")
+        self._assertProjectKeeps(identifier, self.later[0])
+
+    def test_background_conversion_keeps_the_project_connectome(self):
+        widget = self.widget
+        identifier = widget._parameterNode.connectome
+        manager = widget.openManager()
+        _pump(100)
+        captured = {}
+        manager._submit = lambda spec, done: captured.setdefault("done", done)
+        manager.startConversion(["convert"], self.later[1])
+        captured["done"](self._FinishedJob())
+        _pump(100)
+        self._assertProjectKeeps(identifier, self.later[1])
+        self.assertIn("Choose it in the Connectome card", str(manager.statusLabel.text))
+        self.assertEqual(os.path.abspath(manager.selectedPath()), self.later[1])
+
+    def test_background_job_chooses_the_new_bundle_for_a_project_without_one(self):
+        widget = self.widget
+        node = widget._parameterNode
+        node.connectome = ""
+        node.connectomePath = ""
+        self.logic.registerConnectome(self.later[0])
+        widget.refreshConnectomesAfterJob(self.later[0])
+        _pump(100)
+        self.assertTrue(node.connectome.startswith("Manager fetched#"), node.connectome)
+        self.assertEqual(os.path.abspath(widget.bundle.path), self.later[0])
 
     def test_import_dialog_label_count_uses_the_singular_for_one_lesion(self):
         from LesionNetworkMappingUI import manager_parity

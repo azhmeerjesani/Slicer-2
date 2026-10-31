@@ -175,7 +175,9 @@ output.
 **Converting a connectome.** **Map > Connectome > Manage…** opens the connectome manager, which registers a bundle,
 converts one (a folder of preprocessed 4D NIfTI runs on one brain mask, or a Lead-DBS fMRI connectome folder),
 builds the degree map and the reference maps, and removes a registration (never the files). A conversion shows the
-disk space it needs before it starts and can be resumed. On the command line:
+disk space it needs before it starts and can be resumed. The converted bundle is registered and listed in the
+Connectome card; it is selected only when the open project has no connectome yet, so a conversion that ends while you
+work never changes the connectome of your map. On the command line:
 
 ```
 PythonSlicer -m LesionNetworkMappingLib.manager convert --source nifti --input DIR_OR_GLOB --mask MASK.nii.gz --out NAME.lnmc

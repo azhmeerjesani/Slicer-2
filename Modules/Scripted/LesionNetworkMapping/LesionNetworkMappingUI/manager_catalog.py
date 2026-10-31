@@ -337,8 +337,9 @@ class FetchController:
         try:
             module = getattr(slicer.modules, "lesionnetworkmapping", None)
             widget = module.widgetRepresentation().self() if module is not None else None
-            if widget is not None and hasattr(widget, "refreshConnectomes"):
-                widget.refreshConnectomes(select=path)
+            if widget is not None and hasattr(widget, "refreshConnectomesAfterJob"):
+                # The open project keeps its connectome: the new bundle is chosen only when the project has none
+                widget.refreshConnectomesAfterJob(path)
         except Exception:
             logging.exception("Lesion network mapping: the connectome list could not be refreshed")
         return True
