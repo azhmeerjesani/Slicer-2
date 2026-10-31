@@ -222,6 +222,8 @@ NATIVE_UNAVAILABLE = "native space: normalization not available in this build"
 NATIVE_SKIPPED = "native space: skipped (--native skip)"
 NATIVE_EXCLUDED = "native space: not normalized"
 CHANGED_SNAPSHOT = "changed during snapshot"
+#: Reason of the rows left out by PipelineConfig.participant_label (slicer-lnm --participant-label)
+NOT_SELECTED = "not selected (--participant-label)"
 CHANGED_RUN = "changed during the run"
 OUTSIDE_MASK = "no lesion voxel inside the connectome mask (its maps would be all zero)"
 QC_FAIL = "qc=fail"  # study.EXCLUDED_QC: preflight and Study.analysis_rows exclude these lesions with this reason
@@ -574,6 +576,9 @@ class PipelineConfig:
     accept_terms: bool = False
     #: The recipe record the settings came from (``recipes.to_pipeline_config`` "recipe"); pipeline.json "recipe"
     recipe: dict | None = None
+    #: The participant ids ("sub-<label>") a run is restricted to (slicer-lnm --participant-label); None: every subject.
+    #: Stored in pipeline.json "config" so that reproduce_pipeline.sh analyses the same subjects.
+    participant_label: list | None = None
 
     #: Keys that are about this invocation, not about the analysis (not stored in pipeline.json "config")
     RUN_KEYS = ("out", "recompute", "parent_pid", "parent_run", "events", "accept_terms", "slicer", "nice", "keep_awake", "threads", "memory_budget_gb", "recipe")
@@ -624,6 +629,12 @@ class PipelineConfig:
             raise ValueError("--software must be a JSON object")
         if self.recipe is not None and not isinstance(self.recipe, dict):
             raise ValueError("recipe must be a JSON object (a recipe record)")
+        if self.participant_label is not None:
+            items = self.participant_label.replace(",", " ").split() if isinstance(self.participant_label, str) else list(self.participant_label)
+            ids = {str(item).strip() for item in items if str(item).strip()}
+            self.participant_label = sorted(item if item.startswith("sub-") else f"sub-{item}" for item in ids)
+            if not self.participant_label:
+                raise ValueError("participant_label must name at least one participant")
         if isinstance(self.parent_run, str):
             self.parent_run = [self.parent_run]
         self.parent_run = [str(run_id) for run_id in (self.parent_run or []) if run_id]
@@ -643,8 +654,8 @@ class PipelineConfig:
                 continue
             if field.name == "contrast" and value == "two_sided":
                 continue  # the default is left out, so configurations and stage fingerprints of earlier runs are unchanged
-            if field.name == "recipe" and value is None:
-                continue
+            if field.name in ("recipe", "participant_label") and value is None:
+                continue  # left out by default, as above
             if base is not None and field.name in self.PATH_KEYS and isinstance(value, str) and os.path.isabs(value):
                 value = relpath(value, base)
             out[field.name] = value
@@ -1461,6 +1472,7 @@ class Runner:
         self.keep_awake = None
         self.plan = None
         self.participants_tsv = None  # the frozen participants table of the child jobs (_freeze_participants)
+        self._selected = False  # _select() ran
 
     # Paths
 
@@ -1624,8 +1636,9 @@ class Runner:
         if isinstance(self.emit, Emitter):
             self.emit.weights = {stage["name"]: max(stage["estimate_s"], 0.1) for stage in plan_result.stages}
 
-        # Snapshots of the analysed lesions
+        # Snapshots of the analysed lesions (of the selected participants only)
         self.cancel.raise_if_cancelled()
+        self._select()
         self._snapshot([row for row in self.rows if row["status"] in ("compute", "reuse")])
         mask_path = self.private(MASK_NAME)
         source_mask = os.path.join(self.bundle.path, "mask.nii.gz")
@@ -1969,6 +1982,21 @@ class Runner:
         elif os.path.exists(dictionary):
             os.remove(dictionary)
         return path
+
+    def _select(self):
+        """Exclude the rows of the participants that ``config.participant_label`` leaves out (after the plan, which covers the whole study)."""
+        wanted = self.config.participant_label
+        if wanted is None or self._selected:
+            return
+        self._selected = True
+        wanted = set(wanted)
+        dropped = []
+        for row in self.rows:
+            if row["participant_id"] not in wanted and row["status"] != "excluded":
+                row["status"], row["reason"] = "excluded", NOT_SELECTED
+                dropped.append(row["participant_id"])
+        if dropped:
+            self.info(f"{len(dropped)} subjects not selected by --participant-label", code="not_selected")
 
     def _snapshot(self, rows):
         """Byte copies of the analysed lesions in inputs/lesions/ (verified against the planned sha256)."""

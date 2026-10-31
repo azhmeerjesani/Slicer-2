@@ -493,6 +493,42 @@ class AppLevelsTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("sub-99", events[-1]["message"])
 
+    def test_reproduce_pipeline_keeps_participant_label(self):
+        """reproduce_pipeline.sh of a --participant-label run analyses the same subjects and writes the same group maps: the
+        selection used to live in the level runner only, so 'pipeline run --config pipeline.json' re-ran every subject (BB-1).
+        """
+        self.assertEqual(app.NOT_SELECTED, pipeline.NOT_SELECTED)
+        selected = [sid for index, sid in enumerate(self.sids) if index % 4 != 1]  # cases and controls stay in both groups
+        output = os.path.join(self.tmp, "labels group out")
+        labels = [sid if index % 2 else sid[len("sub-"):] for index, sid in enumerate(selected)]  # with and without "sub-"
+        code, events, _stdout, stderr = cli(self.bids, output, "group", "--connectome", self.fx["bundle"], "--participant-label", *labels, *COMMON, *BIDS_OPTIONS)
+        self.assertEqual(code, 0, stderr[-2000:] + str(last_event(events)))
+        out = os.path.join(output, self.run_name)
+        original = read_json(os.path.join(out, pipeline.PIPELINE_JSON))
+        self.assertEqual(original["config"]["participant_label"], sorted(selected))
+
+        def analysed(data):
+            rows = data["inputs"]["rows"]
+            return sorted(row["participant_id"] for row in rows if row["status"] != "excluded"), sorted(row["participant_id"] for row in rows if row["reason"] == pipeline.NOT_SELECTED)
+
+        self.assertEqual(analysed(original)[1], sorted(set(self.sids) - set(selected)))
+        self.assertTrue(analysed(original)[0] and set(analysed(original)[0]) <= set(selected), analysed(original))
+        reproduced = os.path.join(self.tmp, "labels reproduced")
+        env = _env(ACCEPT_TERMS="1", PYTHONSLICER=sys.executable, LNM_LIBRARY_DIR=MODULE_DIR, OUT=reproduced, SLICER_LNM=None)
+        result = subprocess.run(["sh", os.path.join(out, pipeline.REPRODUCE_PIPELINE)], cwd=out, env=env, capture_output=True, text=True, encoding="utf-8", timeout=600, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+        copy = read_json(os.path.join(reproduced, pipeline.PIPELINE_JSON))
+        self.assertEqual(analysed(copy), analysed(original))
+        self.assertEqual(copy["config"]["participant_label"], sorted(selected))
+        group_maps = sorted(name for name in os.listdir(out) if name.startswith("group_") and name.endswith("_map.nii.gz"))
+        self.assertTrue(group_maps)
+        for name in group_maps:
+            np.testing.assert_allclose(volume(os.path.join(reproduced, name)), volume(os.path.join(out, name)), atol=TOLERANCE, err_msg=name, equal_nan=True)
+        # a run without labels stores none (earlier configurations are unchanged); --pipeline-config does not carry them over
+        self.assertNotIn("participant_label", self.group_json["config"])
+        args = app._parser().parse_args([self.bids, output, "group", "--connectome", self.fx["bundle"], "--pipeline-config", os.path.join(out, pipeline.PIPELINE_JSON), "--accept-terms"])
+        self.assertIsNone(app.build_config(args, os.path.join(output, *app.STUDY_RELPATH)).participant_label)
+
     def test_refused_run_writes_nothing(self):
         """A run refused with exit code 75 (another run holds the output folder) writes nothing there: it used to rewrite
         the shared study of the BIDS input with its own --group-map first, and the running run then analysed those groups (BB-1).

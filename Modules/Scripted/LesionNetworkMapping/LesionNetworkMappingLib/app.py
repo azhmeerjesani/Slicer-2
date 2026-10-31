@@ -77,7 +77,7 @@ LEVELS = ("participant", "group")
 #: Stages of the participant level; the other stages of pipeline.STAGES run at the group level only
 PARTICIPANT_STAGES = ("prepare", "preflight", "normalize", "reference", "maps", "qa", "export", "finish")
 DEFERRED = "deferred to the group level (slicer-lnm ... group)"
-NOT_SELECTED = "not selected (--participant-label)"
+NOT_SELECTED = "not selected (--participant-label)"  # pipeline.NOT_SELECTED
 #: Study written for a BIDS input, relative to the output folder
 STUDY_RELPATH = ("sourcedata", "slicer-lnm-study")
 STUDY_NAME = "slicer-lnm BIDS input"
@@ -425,6 +425,7 @@ def build_config(args, study_path, emit=None):
                 emit("info", code="recipe_step_outside", step=step["id"], message=f"Recipe {recipe.id}: step {step['id']} ({step['label']}) is not part of the pipeline: run it from {step['where']}")
     if args.pipeline_config:
         values.update(pipeline.PipelineConfig.load(args.pipeline_config).to_json())
+        values.pop("participant_label", None)  # the subjects of this run are --participant-label's (default: all)
     if args.design:
         values.update(design_options(args.design))
     for name in _PASSTHROUGH:
@@ -441,6 +442,9 @@ def build_config(args, study_path, emit=None):
         values["report"] = False
     if args.threads:
         values["threads"] = args.threads
+    labels = normalize_labels(getattr(args, "participant_label", None))
+    if labels:
+        values["participant_label"] = labels  # in pipeline.json "config": reproduce_pipeline.sh selects the same subjects
     for key in ("template", "atlas", "atlas_labels"):
         if values.get(key):
             values[key] = os.path.abspath(values[key])
@@ -473,26 +477,14 @@ def _runner_class():
         """A pipeline run restricted to a BIDS-App level and to the selected participants."""
 
         def __init__(self, config, emit, cancel, argv, level, labels, lock=None):
+            if labels:
+                # The selection is part of the configuration (pipeline.json "config"), so that reproduce_pipeline.sh
+                # ('pipeline run --config pipeline.json') analyses the same subjects; pipeline.Runner._select applies it.
+                config.participant_label = sorted(set(labels))
+                config.validate()
             super().__init__(config, emit, cancel, argv, lock=lock)
             self.level = level
-            self.labels = set(labels) if labels else None
-            self._selected = False
-
-        def _select(self):
-            if self.labels is None or self._selected:
-                return
-            self._selected = True
-            dropped = []
-            for row in self.rows:
-                if row["participant_id"] not in self.labels and row["status"] != "excluded":
-                    row["status"], row["reason"] = "excluded", NOT_SELECTED
-                    dropped.append(row["participant_id"])
-            if dropped:
-                self.info(f"{len(dropped)} subjects not selected by --participant-label", code="not_selected")
-
-        def _snapshot(self, rows):
-            self._select()
-            super()._snapshot([row for row in rows if row["status"] in ("compute", "reuse")])
+            self.labels = set(config.participant_label) if config.participant_label else None
 
         def _stage(self, name):
             if self.level == "participant" and name not in PARTICIPANT_STAGES:

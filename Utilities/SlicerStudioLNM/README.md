@@ -89,7 +89,8 @@ The results are in `<output_dir>/conn-<connectome>[_n-<N>]/`, with the names, si
 (DatasetType "derivative"). The group level can run alone; it computes the maps when the participant level
 did not.
 
-Common options: `--participant-label 01 02` (either level), `--rule '{"kind": "fwe_bonferroni", "alpha": 0.05}'`
+Common options: `--participant-label 01 02` (either level; the selection is stored in pipeline.json, so
+`reproduce_pipeline.sh` analyses the same subjects), `--rule '{"kind": "fwe_bonferroni", "alpha": 0.05}'`
 (or a JSON file), `--recipe NAME` (an analysis recipe; options given on the command line win; pipeline.json and the methods
 name it, and the recipe's steps outside the pipeline, such as validation, are listed as info events),
 `--design design.json` (a design of Map ▸ Contrast: two-group case/control or continuous score),
