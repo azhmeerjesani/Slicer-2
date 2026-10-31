@@ -7,6 +7,9 @@ A study is a plain folder (``LesionNetworkMappingLib.study``): ``study.json``, `
   that already has a ``participants.tsv`` is adopted in place: its columns and their order are kept, a backup is
   written once to ``.studio/participants.orig.tsv`` and the values of a group column ("patient", "HC", "1"...) are
   mapped to case / control / exclude (``groupMappingProposal()``); the original text is kept in ``group_original``.
+  A yes / no or 0 / 1 flag column that is not named like a group ("aphasia", "smoker") is never proposed as the groups.
+  The routes without the folder card (New study…, Create study of a participants table or of the loaded set) show the
+  same group-mapping step first (``askGroupMapping()``, L-01).
   Another column named like a study column but holding other values (a "status" of "alive" / "deceased") is kept as
   ``status_original``, so that tracing never overwrites it.
 - ``StudySession`` is ``shell.studySession`` (SPEC 2.10): ``study``, ``current()``, ``open(sid)``, ``next()``,
@@ -156,6 +159,9 @@ GROUP_WORDS = {
 GROUP_COLUMN_CANDIDATES = ("group", "diagnosis", "dx", "cohort", "condition", "patient", "is_patient", "case_control",
                            "casecontrol", "subject_type", "participant_type", "type", "arm")
 GROUP_TARGETS = ("case", "control", "exclude")
+#: Values of a yes / no flag: a column of these that is not named like a group (``GROUP_COLUMN_CANDIDATES``) is a symptom
+#: or other flag ("aphasia", "smoker"), never proposed as the study groups
+FLAG_WORDS = ("0", "1", "yes", "no", "y", "n", "true", "false")
 
 
 class Blocking(Exception):
@@ -475,9 +481,8 @@ def groupMappingProposal(columns, rows):
             continue
         targets = {value: groupTarget(value) for value in columnValues}
         if all(target in ("case", "control", "exclude") for target in targets.values()) and {"case", "control"} & set(targets.values()):
-            if column.lower() not in GROUP_COLUMN_CANDIDATES and set(targets.values()) <= {"case", "control"} and all(
-                    value in ("0", "1") for value in columnValues):
-                continue  # a 0/1 column that is not named like a group (for example "include" or a symptom flag)
+            if column.lower() not in GROUP_COLUMN_CANDIDATES and all(value.lower() in FLAG_WORDS for value in columnValues):
+                continue  # a 0/1, yes/no or true/false column that is not named like a group ("include", a symptom flag)
             return column, targets
     return None
 
@@ -519,6 +524,115 @@ def applyGroupMapping(rows, column, mapping):
             row["group"] = group
             changed += 1
     return changed
+
+
+def _execDialog(dialog):
+    """Run a dialog modally (``exec()`` in Qt 6 PythonQt, ``exec_()`` in Qt 5); True when it was accepted."""
+    run = getattr(dialog, "exec", None) or dialog.exec_
+    return bool(run())
+
+
+class GroupMappingDialog:
+    """The group-mapping step (L-01) of the routes that create a study without the folder card (New study…, Create study
+    of a participants table or of the loaded set): the proposed group column and a combo per value (Case, Control,
+    Exclude, —), as the folder card shows them. Create study accepts, Cancel creates nothing.
+    """
+
+    ROWS_SHOWN = 8  # rows visible at once; more values scroll
+
+    def __init__(self, column, mapping, parent=None):
+        self.column = column
+        self.dialog = qt.QDialog(parent or slicer.util.mainWindow())
+        self.dialog.setObjectName("StudioGroupMappingDialog")
+        self.dialog.setWindowTitle(_("New study: groups"))
+        self.dialog.setMinimumWidth(400)
+        layout = qt.QVBoxLayout(self.dialog)
+        self.titleLabel = qt.QLabel(_("participants.tsv has groups in column '{column}'. Choose the study group of each value:").format(column=column))
+        self.titleLabel.setObjectName("StudioGroupMappingTitle")
+        self.titleLabel.setWordWrap(True)
+        layout.addWidget(self.titleLabel)
+        rowsWidget = qt.QWidget()
+        rowsWidget.setObjectName("StudioGroupMappingRows")
+        rowsLayout = qt.QVBoxLayout(rowsWidget)
+        rowsLayout.setContentsMargins(0, 0, 0, 0)
+        rowsLayout.setSpacing(4)
+        self.combos = {}
+        targets = ((_("Case"), "case"), (_("Control"), "control"), (_("Exclude"), "exclude"), ("—", None))
+        for value, target in mapping.items():
+            row = qt.QHBoxLayout()
+            row.setSpacing(8)
+            valueLabel = qt.QLabel(f"{value}  →")
+            valueLabel.setObjectName("StudioGroupMappingValue")
+            row.addWidget(valueLabel, 1)
+            combo = qt.QComboBox()
+            combo.setObjectName("StudioGroupMappingCombo")
+            for text, data in targets:
+                combo.addItem(text, data)
+            combo.setCurrentIndex(next(index for index, (_text, data) in enumerate(targets) if data == target))
+            row.addWidget(combo)
+            rowsLayout.addLayout(row)
+            self.combos[value] = combo
+        if len(mapping) <= self.ROWS_SHOWN:
+            layout.addWidget(rowsWidget)
+        else:
+            scroll = qt.QScrollArea()
+            scroll.setObjectName("StudioGroupMappingScroll")
+            scroll.setFrameShape(qt.QFrame.NoFrame)
+            scroll.setWidgetResizable(True)
+            scroll.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+            scroll.setWidget(rowsWidget)
+            scroll.setFixedHeight(self.ROWS_SHOWN * (qt.QComboBox().sizeHint.height() + 4))
+            layout.addWidget(scroll)
+        note = qt.QLabel(_("— leaves the group empty. Your participants.tsv keeps its columns; you can change groups later."))
+        note.setObjectName("StudioGroupMappingNote")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        buttons = qt.QHBoxLayout()
+        buttons.addStretch(1)
+        self.cancelButton = qt.QPushButton(_("Cancel"))
+        self.cancelButton.setObjectName("StudioGroupMappingCancelButton")
+        self.cancelButton.connect("clicked()", self.dialog.reject)
+        buttons.addWidget(self.cancelButton)
+        self.createButton = qt.QPushButton(_("Create study"))
+        self.createButton.setObjectName("StudioGroupMappingCreateButton")
+        self.createButton.setDefault(True)
+        self.createButton.connect("clicked()", self.dialog.accept)
+        buttons.addWidget(self.createButton)
+        layout.addLayout(buttons)
+
+    def mapping(self):
+        """{value: "case" | "control" | "exclude" | None} as chosen."""
+        return {value: combo.itemData(combo.currentIndex) for value, combo in self.combos.items()}
+
+
+def askGroupMapping(folder, parent=None):
+    """The group-mapping step (L-01) before a study is made of ``folder`` without the folder card.
+
+    :return: the ``createStudy`` keywords: ``{}`` when there is nothing to map (no participants.tsv to adopt, or no group
+      column proposed), ``{"groupColumn", "groupMapping"}`` as chosen in ``GroupMappingDialog``, or None when the user
+      cancelled (no study is created).
+    """
+    if not folder:
+        return {}
+    studyModule = _lnm("study")
+    folder = os.path.abspath(folder)
+    tablePath = os.path.join(folder, studyModule.PARTICIPANTS_TSV)
+    if not os.path.isfile(tablePath) or studyModule.Study.is_study(folder):
+        return {}
+    try:
+        proposal = groupMappingProposal(*studyModule.read_tsv(tablePath))
+    except (OSError, ValueError):
+        return {}  # createStudy says what is wrong with the table
+    if proposal is None:
+        return {}
+    column, mapping = proposal
+    dialog = GroupMappingDialog(column, mapping, parent)
+    try:
+        if not _execDialog(dialog.dialog):
+            return None
+        return {"groupColumn": column, "groupMapping": dialog.mapping()}
+    finally:
+        dialog.dialog.deleteLater()
 
 
 #
@@ -1114,7 +1228,10 @@ def newStudyDialog(shell=None):
     studyModule = _lnm("study")
     privateDir = os.path.join(folder, studyModule.PRIVATE_DIR)
     niftiFiles = [path for path in niftiFiles if not _isInside(path, privateDir)]
-    return createStudy(niftiFiles, shell, folder=folder)
+    groups = askGroupMapping(folder)
+    if groups is None:
+        return None
+    return createStudy(niftiFiles, shell, folder=folder, **groups)
 
 
 def openParticipantsTable(path, shell=None):
@@ -1134,8 +1251,11 @@ def openParticipantsTable(path, shell=None):
         shell.toast(summary + " · " + problem, ms=8000, level="warning")
     elif shell is not None:
         def create():
+            groups = askGroupMapping(folder)
+            if groups is None:
+                return
             niftiFiles, _isDicom = _importer().scanFolder(folder)
-            createStudy(niftiFiles, shell, folder=folder)
+            createStudy(niftiFiles, shell, folder=folder, **groups)
 
         shell.toast(summary, ms=8000, action=create, actionText=_("Create study"), level="consequence")
     return None

@@ -79,6 +79,11 @@ Run with the main window and testing enabled::
 - ``test_30_missing_scan_or_lesion_is_said`` (BB-1): a subject whose scan file is missing is not opened on the study
   template (open and Done -> next say so, the current subject stays open); a traced subject whose lesion file is missing
   opens on its scan with an empty lesion and says so.
+- ``test_31_symptom_column_is_not_made_the_groups`` (BB-1): a yes / no, Y / N or true / false column that is not named like a
+  group (a symptom such as "aphasia", "smoker") is never proposed as the study groups: New study… and the participants
+  table's "Create study" leave the groups empty and keep the column. A group column ("diagnosis": patient / HC) is shown
+  in the group-mapping step (L-01) before the study is made by these routes, as on the folder card: Cancel makes no
+  study, and the groups are the ones chosen in the step.
 """
 
 import json
@@ -2495,5 +2500,150 @@ class StudioRegressionTest(unittest.TestCase):
             study_ui.closeStudy()
             studioShell.dispose()
             pump()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
+
+    def test_31_symptom_column_is_not_made_the_groups(self):
+        """New study… and the participants table's "Create study" set case / control from any yes / no column (a symptom
+        such as "aphasia") without showing the mapping; the folder card showed it for confirmation (BB-1).
+        """
+        from LesionNetworkMappingLib import geometry, nifti
+        from LesionNetworkMappingLib.study import read_tsv
+
+        from StudioLib import shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+
+        def makeFolder(name, column, values):
+            folder = os.path.join(self.directory, name)
+            os.makedirs(folder)
+            lines = ["participant_id\tage\t" + column + "\tNIHSS"]
+            for index, value in enumerate(values, start=1):
+                nifti.write_nifti(os.path.join(folder, f"sub-0{index}_T1w.nii.gz"), np.zeros(grid.shape, np.uint8), grid.affine)
+                lines.append(f"sub-0{index}\t{50 + index}\t{value}\t{index * 3}")
+            with open(os.path.join(folder, "participants.tsv"), "w", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+            return folder
+
+        # The proposal: flag columns not named like a group are never the groups; group columns still are
+        proposal = study_ui.groupMappingProposal
+        for column, values in (("aphasia", ("yes", "no")), ("smoker", ("true", "false")), ("aphasia", ("Y", "N")),
+                               ("neglect", ("1", "0")), ("include", ("1", "0"))):
+            rows = [{"participant_id": f"sub-0{index}", column: value} for index, value in enumerate(values * 2)]
+            self.assertIsNone(proposal(["participant_id", column], rows), f"{column} {values} was proposed as the groups")
+        rows = [{"participant_id": "sub-01", "diagnosis": "yes"}, {"participant_id": "sub-02", "diagnosis": "no"}]
+        self.assertEqual(proposal(["participant_id", "diagnosis"], rows), ("diagnosis", {"yes": "case", "no": "control"}))
+        rows = [{"participant_id": "sub-01", "cohort": "patient"}, {"participant_id": "sub-02", "cohort": "HC"}]
+        self.assertEqual(proposal(["participant_id", "cohort"], rows), ("cohort", {"patient": "case", "HC": "control"}))
+
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        toasts = []
+        studioShell.toast = lambda text, *args, **kwargs: toasts.append((str(text), kwargs))
+        shown = []
+        answers = []
+
+        def fakeExec(dialog):
+            # The group-mapping step: record what it shows, then answer as the test says
+            combos = [combo for combo in dialog.findChildren("QComboBox") if combo.objectName == "StudioGroupMappingCombo"]
+            values = [str(label.text).replace("→", "").strip() for label in dialog.findChildren("QLabel")
+                      if label.objectName == "StudioGroupMappingValue"]
+            mapping = {value: str(combo.currentText) for value, combo in zip(values, combos, strict=True)}
+            title = [str(label.text) for label in dialog.findChildren("QLabel") if label.objectName == "StudioGroupMappingTitle"]
+            shown.append((title, mapping))
+            accept, choices = answers.pop(0)
+            for value, text in choices.items():
+                combo = combos[values.index(value)]
+                combo.setCurrentIndex(combo.findText(text))
+            return accept
+
+        originalExec = getattr(study_ui, "_execDialog", None)
+        study_ui._execDialog = fakeExec
+        self.addCleanup(setattr, study_ui, "_execDialog", originalExec)
+        realQt = study_ui.qt
+        chosen = []
+
+        class FileDialog:
+            @staticmethod
+            def getExistingDirectory(*args):
+                return chosen[-1]
+
+        class QtProxy:
+            def __getattr__(self, name):
+                return FileDialog if name == "QFileDialog" else getattr(realQt, name)
+
+        def newStudy(folder):
+            chosen.append(folder)
+            study_ui.qt = QtProxy()
+            try:
+                return study_ui.newStudyDialog(studioShell)
+            finally:
+                study_ui.qt = realQt
+
+        def groups(folder):
+            columns, rows = read_tsv(os.path.join(folder, "participants.tsv"))
+            return columns, [(row["participant_id"], row.get("group"), row.get("include")) for row in rows]
+
+        try:
+            # New study… on a folder with a yes / no symptom column: no groups are set, the column is kept as it was
+            for name, column, values in (("Aphasia", "aphasia", ("yes", "yes", "no")), ("Smoker", "smoker", ("true", "false", "false")),
+                                         ("AphasiaYN", "aphasia", ("Y", "N", "N"))):
+                folder = makeFolder(name, column, values)
+                session = newStudy(folder)
+                self.assertIsNotNone(session)
+                _columns, rows = groups(folder)
+                self.assertEqual([group for _sid, group, _include in rows], ["n/a"] * 3, f"{column} became the groups")
+                self.assertEqual([row[column] for row in read_tsv(os.path.join(folder, "participants.tsv"))[1]], list(values))
+                study_ui.closeStudy()
+            self.assertEqual(shown, [], "a step was shown without a group column")
+
+            # The participants table's "Create study" (no study open) on a symptom column: no groups either
+            folder = makeFolder("Table", "aphasia", ("yes", "no", "no"))
+            del toasts[:]
+            study_ui.openParticipantsTable(os.path.join(folder, "participants.tsv"), studioShell)
+            offers = [kwargs for _text, kwargs in toasts if kwargs.get("actionText") == "Create study"]
+            self.assertEqual(len(offers), 1, toasts)
+            offers[0]["action"]()
+            self.assertIsNotNone(study_ui.session())
+            self.assertEqual([group for _sid, group, _include in groups(folder)[1]], ["n/a"] * 3)
+            study_ui.closeStudy()
+
+            # A group column: New study… shows the step first; Cancel makes no study
+            folder = makeFolder("Diagnosis", "diagnosis", ("patient", "HC", "patient"))
+            answers.append((False, {}))
+            self.assertIsNone(newStudy(folder))
+            self.assertEqual(shown[-1], (["participants.tsv has groups in column 'diagnosis'. Choose the study group of each value:"],
+                                         {"patient": "Case", "HC": "Control"}))
+            self.assertFalse(os.path.exists(os.path.join(folder, "study.json")), "Cancel made a study")
+            self.assertFalse(os.path.exists(os.path.join(folder, ".studio")))
+            # Create study with the mapping as chosen in the step (HC excluded)
+            answers.append((True, {"HC": "Exclude"}))
+            self.assertIsNotNone(newStudy(folder))
+            self.assertEqual(groups(folder)[1], [("sub-01", "case", "1"), ("sub-02", "n/a", "0"), ("sub-03", "case", "1")])
+            study_ui.closeStudy()
+
+            # The participants table's "Create study" shows the same step
+            folder = makeFolder("TableDiagnosis", "diagnosis", ("patient", "HC", "HC"))
+            del toasts[:]
+            study_ui.openParticipantsTable(os.path.join(folder, "participants.tsv"), studioShell)
+            offers = [kwargs for _text, kwargs in toasts if kwargs.get("actionText") == "Create study"]
+            answers.append((False, {}))
+            offers[-1]["action"]()
+            self.assertEqual(shown[-1][1], {"patient": "Case", "HC": "Control"})
+            self.assertIsNone(study_ui.session())
+            self.assertFalse(os.path.exists(os.path.join(folder, "study.json")))
+            answers.append((True, {}))
+            offers[-1]["action"]()
+            self.assertIsNotNone(study_ui.session())
+            self.assertEqual([group for _sid, group, _include in groups(folder)[1]], ["case", "control", "control"])
+            self.assertEqual(answers, [])
+        finally:
+            study_ui.qt = realQt
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)

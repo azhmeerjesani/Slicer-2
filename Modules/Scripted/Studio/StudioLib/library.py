@@ -2039,9 +2039,11 @@ class LoadedSetCard(qt.QObject):
             if shell is not None:
                 shell.toast(problem, ms=8000, level="warning")
             return None
-        if not closeLoadedSet(confirm=True):
+        # The group-mapping step (L-01) of a participants.tsv in the study folder, before the set is closed
+        groups = studyUi.askGroupMapping(studyUi._commonFolder(files)) if files else {}
+        if groups is None or not closeLoadedSet(confirm=True):
             return None
-        return _runAction(lambda: studyUi.createStudy(files, _shell()), _("Failed to create the study."))
+        return _runAction(lambda: studyUi.createStudy(files, _shell(), **groups), _("Failed to create the study."))
 
     def refresh(self):
         """Show or hide the card. Return True when it is shown."""
