@@ -1435,12 +1435,15 @@ def _showLoaded(result, shell, scans, openScans, openLesions):
         setViewLayers(background=openScans[0], fit=True)
     editedSegmentation, editedSource = _editedNodes()
     shownScan = _userScanShown()
-    if not scans and not openScans and lesions and (shownScan is None or _mniLesionOffScan(lesions[0], shownScan)) and not (
+    if not scans and not openScans and lesions and (
+            shownScan is None or _mniLesionOffScan(lesions[0], shownScan) or _otherSubjectScan(lesions[0], shownScan)) and not (
             _sameNode(lesions[0], editedSegmentation) and editedSource is not None and not _isTemplate(editedSource)
             and not _mniLesionOffScan(lesions[0], editedSource)):
         # A lesion without a scan of its own: shown on the template only when it is on an MNI grid (also while a scan of
-        # the user in scan space is shown: an MNI lesion drawn over it would be at a wrong place)
+        # the user in scan space is shown: an MNI lesion drawn over it would be at a wrong place). A lesion of another BIDS
+        # subject than the scan in scan space shown has no scan of its own either: never drawn on it, even on its grid
         _showLesionsWithoutScan(lesions, shell, newlyLoaded=bool(result.segmentations))
+        _otherSubjectToast(lesions, shownScan, shell)
         _loadToast(result, shell)
         return
     if scans:
@@ -1451,6 +1454,16 @@ def _showLoaded(result, shell, scans, openScans, openLesions):
         sourceVolume = editedSource
     else:
         sourceVolume = _backgroundVolume()
+    otherSubject = []
+    if sourceVolume is not None and lesions and (scans or openScans):
+        # A lesion of another BIDS subject is never drawn on the scan in scan space shown (scans of different subjects may
+        # share a grid): it stays loaded, unbound and hidden, and Draw edits a lesion of the scan (a lesion that the user
+        # paired with this scan, or that is bound to it, is kept)
+        otherSubject = [lesion for lesion in lesions if _otherSubjectScan(lesion, sourceVolume)
+                        and not _sameNode(lesion, result.pairedLesion) and not _isBoundTo(lesion, sourceVolume)]
+        lesions = [lesion for lesion in lesions if not any(_sameNode(lesion, other) for other in otherSubject)]
+        for lesion in otherSubject:
+            _setLesionVisible(lesion, False)
     if sourceVolume is not None and (scans or lesions or openScans):
         # Draw edits the loaded lesion, else a segmentation bound to the scan (never the segmentation of a previous
         # scan or of the template, which may hold another subject's lesion)
@@ -1473,7 +1486,9 @@ def _showLoaded(result, shell, scans, openScans, openLesions):
                 # A lesion opened with its scan is shown (it may have been hidden while it had no scan), and bound to it
                 # when it is on the scan's grid (its own grid is never changed)
                 _setLesionVisible(lesion, True)
-                _bindToScanGrid(lesion, sourceVolume)
+                if not _otherSubjectLesion(lesion, sourceVolume) or _sameNode(lesion, result.pairedLesion):
+                    # A lesion of another BIDS subject (on a scan on an MNI grid) is shown there but never bound to it
+                    _bindToScanGrid(lesion, sourceVolume)
                 _withdrawNotice("native-lesion", shell)
                 _updateLesionSpaceNotice(lesion, sourceVolume, shell)
             if not (_sameNode(lesion, editedSegmentation) and _sameNode(sourceVolume, editedSource)):
@@ -1487,7 +1502,39 @@ def _showLoaded(result, shell, scans, openScans, openLesions):
     elif result.scenes and shell.currentWorkspace() == "library":
         # The Library page covers the views: Draw shows the scene, in the scene's own layout
         shell.switchTo("draw", keepLayout=True)
+    _otherSubjectToast(otherSubject, sourceVolume, shell)
     _loadToast(result, shell)
+
+
+def _nodeSubject(node):
+    """The BIDS subject of a lesion or scan: in its file name, else in its node name (None if there is none)."""
+    return bidsSubject(os.path.basename(_lesionFilePath(node) or "")) or bidsSubject(node.GetName())
+
+
+def _otherSubjectLesion(segmentationNode, volumeNode):
+    """True when the lesion and the scan both name a BIDS subject, and not the same one."""
+    if segmentationNode is None or volumeNode is None:
+        return False
+    subject, scanSubject = _nodeSubject(segmentationNode), _nodeSubject(volumeNode)
+    return bool(subject and scanSubject and subject.lower() != scanSubject.lower())
+
+
+def _otherSubjectScan(segmentationNode, volumeNode):
+    """True when the scan is of another BIDS subject than the lesion and in scan space: the lesion is never drawn on it.
+
+    A scan on an MNI grid (a normalized scan) is in a common space, as the template: a lesion of any subject is shown there.
+    """
+    return _otherSubjectLesion(segmentationNode, volumeNode) and not space.isMni(volumeNode)
+
+
+def _otherSubjectToast(lesions, volumeNode, shell):
+    """Tell the user that a loaded lesion of another BIDS subject is not drawn on the scan shown."""
+    lesions = [lesion for lesion in lesions if _otherSubjectScan(lesion, volumeNode)]
+    if not lesions or shell is None:
+        return
+    shell.toast(_("{name} is a lesion of {subject}: it is not shown on {scan} ({scanSubject})").format(
+        name=lesions[0].GetName(), subject=_nodeSubject(lesions[0]), scan=volumeNode.GetName(), scanSubject=_nodeSubject(volumeNode)),
+        level="consequence")
 
 
 def _mniLesionOffScan(segmentationNode, volumeNode):
@@ -1509,13 +1556,12 @@ def _bindLoadedLesions(lesions, scans):
     for lesion in lesions:
         if lesion is None or lesion.GetNodeReference(role) is not None:
             continue
-        subject = bidsSubject(os.path.basename(_lesionFilePath(lesion) or "")) or bidsSubject(lesion.GetName())
+        subject = _nodeSubject(lesion)
         candidates = []
         for scan in scans:
-            scanSubject = bidsSubject(os.path.basename(_lesionFilePath(scan) or "")) or bidsSubject(scan.GetName())
-            if subject and scanSubject and scanSubject.lower() != subject.lower():
+            if _otherSubjectLesion(lesion, scan):
                 continue
-            candidates.append((0 if subject and scanSubject else 1, scan))
+            candidates.append((0 if subject and _nodeSubject(scan) else 1, scan))
         for _rank, scan in sorted(candidates, key=lambda item: item[0]):
             if _bindToScanGrid(lesion, scan):
                 break

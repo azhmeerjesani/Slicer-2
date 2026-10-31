@@ -1272,6 +1272,8 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(self._editor().segmentationNode().GetID(), lesion.GetID())
         self.assertEqual(self._editor().sourceVolumeNode().GetID(), normalized.GetID())
         self.assertEqual(self._background("Red").GetID(), normalized.GetID())
+        # ... but a lesion of another BIDS subject (sub-03) is not bound to the scan of sub-04
+        self.assertFalse(importer._isBoundTo(lesion, normalized))
 
     def test_two_subjects_one_load_each_lesion_on_its_scan(self):
         """Two subjects opened at once (scan and lesion each): every lesion is bound to its own scan, and Draw edits it there."""
@@ -1321,6 +1323,25 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self._pump(8)
         self.assertEqual(reference("sub-01_lesion"), "sub-01_T1w")
         self.assertIsNone(reference("sub-03_lesion"))
+        # ... also when it is the only lesion of the load (with the scan, or dropped alone while the scan is open): it is not
+        # edited nor shown on the other subject's scan, and the user is told
+        for together in (True, False):
+            slicer.mrmlScene.Clear(0)
+            self._pump()
+            if together:
+                importer.loadFiles([paths["sub-01_T1w"], paths["sub-03_lesion"]], studioShell)
+            else:
+                importer.loadFiles([paths["sub-01_T1w"]], studioShell)
+                self._pump(8)
+                importer.loadFiles([paths["sub-03_lesion"]], studioShell)
+            self._pump(8)
+            self.assertIsNone(reference("sub-03_lesion"))
+            self.assertIsNone(library.lesionScan(node("sub-03_lesion")))
+            self.assertFalse(self._editor().segmentationNode().GetName() == "sub-03_lesion"
+                             and self._editor().sourceVolumeNode() is not None)
+            self.assertFalse(node("sub-03_lesion").GetDisplayNode().GetVisibility())
+            self.assertEqual(background(), "sub-01_T1w")
+            self.assertIn("sub-03_lesion is a lesion of sub-03", " ".join(text for _time, text, _level in studioShell.recentMessages()[-3:]))
 
     def test_sagittal_scan_lesion_gaps_along_view_axis(self):
         """A sagittal 3D acquisition (k = left-right): the Lesion card and participants.tsv count the gap slices along
