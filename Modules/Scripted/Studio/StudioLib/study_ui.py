@@ -2856,6 +2856,14 @@ class StudySession:
             if switchToDraw:
                 self._showDraw(shell)
             return True
+        # A scan that the table names but that is not on disk (moved, renamed, a drive that is not connected) is never
+        # replaced by the study template: the lesion would be traced on another image and saved as the subject's
+        missingScan = self._missingFile(sid, "scan")
+        if missingScan is not None:
+            logging.warning(f"Studio: the scan of {sid} is missing: {missingScan[1]}")
+            self._sayMissing(shell, sid, "scan", missingScan)
+            return False
+        missingLesion = self._missingFile(sid, "lesion")
         startTime = time.perf_counter()
         try:
             from . import autosave
@@ -2894,7 +2902,37 @@ class StudySession:
             self._showDraw(shell)
         # The next case of the queue is read while this one is traced
         self._schedulePrefetch()
+        if missingLesion is not None:
+            # Last: a traced subject shown with an empty lesion is said, and stays said until the next input
+            self._sayMissing(shell, sid, "lesion", missingLesion)
         return True
+
+    def _missingFile(self, sid, column):
+        """``(table path, absolute path)`` of the ``scan`` or ``lesion`` of ``sid`` when the table names a file that is
+        not on disk, else None (no file named, or the file is there).
+        """
+        value = self.study.subject(sid).get(column)
+        if _lnm("study").is_missing(value):
+            return None
+        path = self.study.abspath(value)
+        if path and os.path.isfile(path):
+            return None
+        return str(value), path or str(value)
+
+    def _sayMissing(self, shell, sid, column, missing):
+        """Tell the user that the scan or lesion file of ``sid`` is missing (a consequence: it stays until the next input)."""
+        tablePath, path = missing
+        if column == "scan":
+            text = _("{sid} was not opened: its scan {file} is missing (moved, renamed, or on a drive that is not connected)")
+        else:
+            text = _("The lesion of {sid} is missing: {file} (moved, renamed, or on a drive that is not connected). "
+                     "An empty lesion is shown; Done saves a new one")
+        text = text.format(sid=sid, file=tablePath)
+        folder = os.path.dirname(path)
+        if not os.path.isdir(folder):
+            folder = self.study.path
+        _toast(shell, text, ms=8000, action=lambda: _showFolder(folder), actionText=_("Show folder"), level="consequence",
+               toolTip=path)
 
     def _showDraw(self, shell):
         if shell is None:
@@ -2911,8 +2949,8 @@ class StudySession:
         scanPath = self.study.abspath(row.get("scan"))
         lesionPath = self.study.abspath(row.get("lesion"))
         if scanPath and not os.path.isfile(scanPath):
-            logging.warning(f"Studio: the scan of {sid} is missing: {scanPath}")
-            scanPath = None
+            # Never the template in its place (``open()`` says so before the current subject is left)
+            raise FileNotFoundError(_("the scan {file} is missing").format(file=row.get("scan")))
         if lesionPath and not os.path.isfile(lesionPath):
             logging.warning(f"Studio: the lesion of {sid} is missing: {lesionPath}")
             lesionPath = None

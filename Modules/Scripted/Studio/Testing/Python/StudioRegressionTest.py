@@ -76,6 +76,9 @@ Run with the main window and testing enabled::
   (``.studio/journal/rater-<label>/<sid>.nii.gz``, 2 s after the last edit); the autosave names the second tracing and
   its subject (never the session's earlier subject); recovering that autosave reopens the second tracing, whose notice
   offers the journal; Recover brings the voxels back and saving removes the journal.
+- ``test_30_missing_scan_or_lesion_is_said`` (BB-1): a subject whose scan file is missing is not opened on the study
+  template (open and Done -> next say so, the current subject stays open); a traced subject whose lesion file is missing
+  opens on its scan with an empty lesion and says so.
 """
 
 import json
@@ -2276,6 +2279,95 @@ class StudioRegressionTest(unittest.TestCase):
             for _ in range(4):
                 slicer.app.processEvents()
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+
+    def test_30_missing_scan_or_lesion_is_said(self):
+        """A subject whose scan file is missing opened silently on the study template (a lesion traced there was saved
+        as the subject's), and a traced subject whose lesion file is missing opened as an empty lesion without a word.
+        The scan is never replaced by the template, and both are said (BB-1).
+        """
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Missing study")
+        os.makedirs(folder)
+        scans = []
+        for index in range(1, 4):
+            scans.append(os.path.join(folder, f"sub-0{index}_T1w.nii.gz"))
+            nifti.write_nifti(scans[-1], np.zeros(grid.shape, np.uint8), grid.affine)
+        toasts = []
+        originalToast = study_ui._toast
+        study_ui._toast = lambda shell, text, **kwargs: toasts.append((str(text), kwargs))
+        self.addCleanup(setattr, study_ui, "_toast", originalToast)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        try:
+            session = study_ui.createStudy(scans, studioShell, folder=folder)
+            self.assertIsNotNone(session)
+            study = session.study
+            # sub-01 is traced (its lesion is written), then sub-02 is open
+            self.assertTrue(session.open("sub-01", switchToDraw=False))
+            segmentationNode, volumeNode = session.segmentationNode(), session.volumeNode()
+            segmentId = segmentationNode.GetSegmentation().GetNthSegmentID(0)
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, volumeNode)
+            array[20:23, 30:33, 20:23] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, volumeNode)
+            for _ in range(4):
+                slicer.app.processEvents()
+            self.assertIsNotNone(session.done())
+            self.assertEqual(session.current(), "sub-02")
+            lesion01 = study.abspath(study.subject("sub-01")["lesion"])
+            self.assertTrue(os.path.isfile(lesion01))
+            # The scan of sub-03 and the lesion of sub-01 are moved away
+            os.remove(scans[2])
+            os.remove(lesion01)
+
+            def missingToasts(sid):
+                return [(text, kwargs) for text, kwargs in toasts if sid in text and "missing" in text]
+
+            # sub-03 is not opened on the template: the user is told, and sub-02 stays open
+            del toasts[:]
+            self.assertFalse(session.open("sub-03", switchToDraw=False))
+            self.assertEqual(session.current(), "sub-02")
+            self.assertEqual(session.volumeNode().GetAttribute(study_ui.SUBJECT_ATTRIBUTE), "sub-02")
+            said = missingToasts("sub-03")
+            self.assertTrue(said, toasts)
+            self.assertIn("sub-03_T1w.nii.gz", said[-1][0])
+            self.assertNotIn(folder, said[-1][0], "the toast names the table path, not the local path")
+            self.assertEqual(said[-1][1].get("level"), "consequence")
+            self.assertEqual(said[-1][1].get("actionText"), "Show folder")
+            # Done on sub-02 does not open sub-03 on the template either, and sub-03 is not traced
+            del toasts[:]
+            self.assertIsNotNone(session.done(writeLesion=False))
+            self.assertEqual(session.current(), "sub-02")
+            self.assertTrue(missingToasts("sub-03"), toasts)
+            self.assertNotEqual(study.subject("sub-03").get("status"), "traced")
+            self.assertTrue(study_ui._lnm("study").is_missing(study.subject("sub-03").get("lesion")))
+            # The traced sub-01 opens on its scan with an empty lesion, and the missing lesion file is said
+            del toasts[:]
+            self.assertTrue(session.open("sub-01", switchToDraw=False))
+            self.assertEqual(session.current(), "sub-01")
+            self.assertEqual(session.volumeNode().GetAttribute(study_ui.SUBJECT_ATTRIBUTE), "sub-01")
+            said = missingToasts("sub-01")
+            self.assertTrue(said, toasts)
+            self.assertIn(os.path.basename(lesion01), said[-1][0])
+            self.assertEqual(said[-1][1].get("level"), "consequence")
+            # Leaving it unchanged does not repoint the row
+            row01 = dict(study.subject("sub-01"))
+            self.assertTrue(session.open("sub-02", switchToDraw=False))
+            self.assertEqual(study.subject("sub-01").get("lesion"), row01.get("lesion"))
+            self.assertEqual(study.subject("sub-01").get("status"), "traced")
+        finally:
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
 
     def test_29_second_tracing_survives_a_crash(self):
         """Slicer stopped during a second tracing: nothing of it was journaled, and the recovery card offered to reopen

@@ -374,6 +374,9 @@ class _AgreementState:
             volume.SetAttribute(NODE_ATTRIBUTE, sid)
             self._nodeIds.append(volume.GetID())
             return volume, scan
+        if scan and not figure:
+            # A scan named but not on disk (moved, renamed, a drive not connected) is never replaced by the template
+            raise FileNotFoundError(_("the scan {file} is missing").format(file=row.get("scan")))
         volume = self.session.templateNode()
         studyUi = _studyUi()
         reference = self.session._templateFiles.get(volume.GetID()) or studyUi._storagePath(volume)
