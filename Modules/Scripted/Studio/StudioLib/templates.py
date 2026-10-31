@@ -461,8 +461,32 @@ def identify(path):
     else:
         detection.status = "refused"
         detection.message = _(REFUSAL)
+    if detection.ok:
+        # Drawing and maps use any MNI grid; Normalize registers to the image's own grid, which needs more
+        problem = normalizeTargetProblem(path, shape, affine)
+        if problem:
+            detection.warnings.append(problem)
     detection.facts = " · ".join(facts)
     return detection
+
+
+def normalizeTargetProblem(imagePath, shape, affine):
+    """Why a template image cannot be a normalization target (a plain sentence), or None when it can: Normalize needs a
+    NIfTI image whose voxels are cubic and aligned with the axes (it registers scans to that grid). Worker-safe.
+    """
+    if _lowerExtension(imagePath) not in (".nii", ".nii.gz"):
+        return _("Normalize cannot use it as a target: save the image as NIfTI (.nii.gz) to normalize scans to this template.")
+    try:
+        from LesionNetworkMappingLib import geometry
+    except ImportError:
+        return None
+    try:
+        spec = geometry.grid_spec_from_affine("check", tuple(int(n) for n in shape)[:3], _np().asarray(affine, dtype=float), OTHER_SPACE)
+    except Exception:
+        spec = None
+    if spec is None:
+        return _("Normalize cannot use it as a target: that needs cubic voxels aligned with the axes. Drawing and maps work.")
+    return None
 
 
 def checkCompanion(detection, path):
@@ -614,9 +638,16 @@ class Template:
         return bool(image) and os.path.isfile(image)
 
     def canNormalize(self):
-        """True when it can be a normalization target (an image and a brain mask, NIfTI)."""
+        """True when it can be a normalization target: a brain mask, and a NIfTI image whose recorded grid has cubic voxels
+        aligned with the axes (``normalizeTargetProblem``; Normalize refuses other grids).
+        """
         image, mask = self.imagePath, self.maskPath
-        return bool(image and mask and os.path.isfile(image) and os.path.isfile(mask) and _lowerExtension(image) in (".nii", ".nii.gz"))
+        if not (image and mask and os.path.isfile(image) and os.path.isfile(mask)):
+            return False
+        grid = self.grid
+        if grid.get("shape") and grid.get("affine"):
+            return normalizeTargetProblem(image, grid["shape"], grid["affine"]) is None
+        return _lowerExtension(image) in (".nii", ".nii.gz")
 
 
 def _sampleFile(sampleName):

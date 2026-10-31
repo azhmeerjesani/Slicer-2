@@ -1118,3 +1118,70 @@ class StudioTemplatesTest(unittest.TestCase):
             if applied:
                 shell.dispose()
             slicer.app.processEvents()
+
+    def test_23_normalize_lists_only_usable_templates(self):
+        """Normalize offers a template only when it can register to it: a NRRD brain mask works (it used to fail after
+        registering with internal text that named the mask's absolute path), while an image with voxels that are not cubic or
+        not aligned with the axes, or a NRRD image, is not offered and the add dialog says why. An unexpected failure shows
+        a plain message without its internal text.
+        """
+        import SimpleITK as sitk
+        from LesionNetworkMappingLib import nifti
+        from LesionNetworkMappingUI import normalize_controller as nc
+
+        templates = self.templates
+        work = os.path.join(self.tempDir, "normalize-targets")
+        os.makedirs(work, exist_ok=True)
+        try:
+            data, affine, _header = nifti.read_nifti(self.image15)
+            # The brain mask saved as NRRD (an LPS header, as Slicer saves it)
+            nrrdMask = os.path.join(work, "mask.nrrd")
+            sitk.WriteImage(sitk.ReadImage(self.mask15), nrrdMask)
+            # Voxels that are not cubic
+            stretched = affine.copy()
+            stretched[2, 2] = 3.0
+            aniso = os.path.join(work, "aniso.nii.gz")
+            nifti.write_nifti(aniso, data[:, :, ::2], stretched)
+            anisoMask = os.path.join(work, "aniso_mask.nii.gz")
+            nifti.write_nifti(anisoMask, (data[:, :, ::2] > 10).astype(np.uint8), stretched)
+            # Cubic voxels, rotated 8 degrees about S around the centre of the image
+            angle = np.radians(8.0)
+            rotation = np.eye(4)
+            rotation[:2, :2] = ((np.cos(angle), -np.sin(angle)), (np.sin(angle), np.cos(angle)))
+            centre = affine @ np.append((np.asarray(data.shape[:3]) - 1) / 2.0, 1.0)
+            shift, back = np.eye(4), np.eye(4)
+            shift[:3, 3], back[:3, 3] = -centre[:3], centre[:3]
+            tilted = back @ rotation @ shift @ affine
+            oblique = os.path.join(work, "oblique.nii.gz")
+            nifti.write_nifti(oblique, data, tilted)
+            obliqueMask = os.path.join(work, "oblique_mask.nii.gz")
+            nifti.write_nifti(obliqueMask, (data > 10).astype(np.uint8), tilted)
+            # A NRRD image
+            nrrdImage = os.path.join(work, "image.nrrd")
+            sitk.WriteImage(sitk.ReadImage(self.image15), nrrdImage)
+
+            usable = self._add(mask=nrrdMask, name="NRRD mask", space="MNI152NLin2009bAsym")
+            self.assertTrue(usable.maskPath.endswith(".nrrd"))
+            self.assertTrue(usable.canNormalize())
+            self.assertFalse(any("Normalize" in line for line in templates.identify(self.image15).warnings))
+            refused = {}
+            for name, image, mask in (("Aniso", aniso, anisoMask), ("Oblique", oblique, obliqueMask), ("NRRD image", nrrdImage, nrrdMask)):
+                lines = templates.identify(image).warnings
+                self.assertTrue(any(line.startswith("Normalize cannot use it as a target") for line in lines), f"{name}: {lines}")
+                template = self._add(image, mask=mask, name=name, space="MNI")
+                self.assertFalse(template.canNormalize(), name)
+                refused[template.id] = name
+            offered = dict(nc.userTemplates())
+            self.assertIn(usable.id, offered)
+            self.assertFalse(set(refused) & set(offered), offered)
+
+            # An unexpected error: a plain message, never its internal text (which may name a local path)
+            secret = os.path.join(self.root, "Templates", "NRRD mask", "mask.nrrd")
+            event = {"code": "exception", "type": "ValueError", "message": f"Only single-file NIfTI-1 images are supported: {secret}"}
+            text, offer = nc.describeFailure({"message": event["message"], "code": "exception", "event": event})
+            self.assertNotIn(secret, text)
+            self.assertNotIn(self.tempDir, text)
+            self.assertIn("ValueError", text)
+            self.assertIsNone(offer)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)

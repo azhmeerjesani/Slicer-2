@@ -784,6 +784,29 @@ class TemplateMaskStorageOrderTest(unittest.TestCase):
                     self._images(tmp, mask_data, mask_affine, image, ras)
                 self.assertEqual(raised.exception.code, "template_mismatch")
 
+    def test_nrrd_mask_is_read(self):
+        """A template you added may have a NRRD brain mask (the add dialog accepts NRRD): it used to fail after registering with
+        a ValueError that named the mask's absolute path (the mask was read as NIfTI only).
+        """
+        sitk = normalize._sitk()
+        mask = np.zeros(self.SHAPE, bool)
+        mask[1:4, 2:7, 0:3] = True
+        image = np.random.default_rng(5).random(self.SHAPE)
+        origin = (-6.0, -8.0, -4.0)
+        for label, affine in (("RAS", self._grid(self.SHAPE, (2.0, 2.0, 2.0), origin)), ("LAS", self._grid(self.SHAPE, (2.0, 2.0, 2.0), origin, flip_x=True))):
+            with tempfile.TemporaryDirectory() as tmp:
+                names = {"fixed": os.path.join(tmp, "fixed.nii.gz"), "mask": os.path.join(tmp, "mask.nrrd")}
+                nifti.write_nifti(names["fixed"], image.astype(np.float32), self._grid(self.SHAPE, (2.0, 2.0, 2.0), origin))
+                staged = os.path.join(tmp, "mask_source.nii.gz")
+                nifti.write_nifti(staged, (mask if label == "RAS" else mask[::-1]).astype(np.uint8), affine)
+                sitk.WriteImage(sitk.ReadImage(staged), names["mask"])  # the same voxels saved as NRRD (LPS header), as Slicer saves a mask
+
+                class Context:
+                    template = {"files": names}
+
+                _, got, _, _ = normalize._template_images(Context())
+                np.testing.assert_array_equal(got, mask, err_msg=label)
+
 
 class CheckTextTest(unittest.TestCase):
     """'normalize check' with the text output (a terminal) lists the tools, the templates and why a user template is unusable."""

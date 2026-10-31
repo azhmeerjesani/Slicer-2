@@ -109,6 +109,9 @@ shared files.
   *MNI (other)* templates get the same note.
 - **Normalize to MNI**: a template with a brain mask can be the target: choose it
   under **Template** in the options of *Normalize to MNI* ("… (yours)"). The
+  template image must be a NIfTI file with cubic voxels aligned with the axes
+  (the mask may be NIfTI or NRRD); the add dialog says when an image cannot be a
+  target, and such a template is not listed there. The
   results are written on the grid of your template, and `normalization.json`
   records the template's id, name, space and checksums. Registration quality
   depends on the template; normalization stays experimental.

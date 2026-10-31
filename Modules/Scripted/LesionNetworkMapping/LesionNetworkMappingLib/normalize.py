@@ -1653,7 +1653,9 @@ def _template_images(ctx):
     """(fixed array, mask bool, affine, SimpleITK fixed image) of the 2 mm template, cached."""
     if getattr(ctx, "_template_images", None) is None:
         fixed, affine = _read_float(ctx.template["files"]["fixed"])
-        mask, mask_affine = _read_float(ctx.template["files"]["mask"])
+        mask_path = ctx.template["files"]["mask"]
+        # a template you added may have a NRRD brain mask (Settings > Templates accepts NIfTI and NRRD, as BRAINSFit does)
+        mask, mask_affine = _read_float(mask_path) if _is_nifti(mask_path) else _read_image(mask_path)
         if mask.shape != fixed.shape or not _np().allclose(mask_affine, affine, atol=1e-3):
             # the same voxel centres stored in another order (a LAS mask of a RAS image) are the same grid
             mask = _mask_in_image_order(mask, mask_affine, fixed.shape, affine)
