@@ -782,7 +782,14 @@ def duplicate(path):
         message(_("Duplicated as {name}").format(name=os.path.basename(newPath)))
 
     def failed(error):
-        message(_("The project could not be duplicated: {error}").format(error=error), level="warning", ms=8000)
+        projects.notifyChanged()
+        if isinstance(error, projects.ProjectError):
+            text = str(error)  # in plain words, without paths
+        else:
+            logging.error(f"Slicer Studio: Duplicate of {path} failed: {error!r}")
+            reason = getattr(error, "strerror", None) or _("see the error log")
+            text = _("The project could not be duplicated: {reason}").format(reason=reason)
+        message(text, level="warning", ms=8000)
 
     return projects.duplicateFolder(path, onDone=done, onError=failed)
 

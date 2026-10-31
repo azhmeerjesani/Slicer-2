@@ -35,6 +35,7 @@ import os
 import re
 import shutil
 import sys
+import threading
 import time
 
 import qt
@@ -663,8 +664,8 @@ def listProjects(rootPath=None):
         return []
     projects = []
     for name in names:
-        if name.startswith("."):
-            continue
+        if name.startswith(".") or COPY_MARKER in name:
+            continue  # hidden folders, and a Duplicate in progress (or one that an earlier version left after a failure)
         path = os.path.join(folder, name)
         if os.path.isdir(path):
             projects.append(ProjectInfo(path))
@@ -895,7 +896,7 @@ def pruneRemoved(projectPath, keepDays=REMOVED_KEEP_DAYS):
 
 
 #: Name part of the temporary folders and files of a save (``autosave_io.PROJECT_TEMPORARY_PREFIX``, copies in progress)
-TEMPORARY_MARKERS = (".studio-tmp-", ".studio-part")
+TEMPORARY_MARKERS = (".studio-tmp-", ".studio-part", ".studio-copy")
 
 
 def temporaryLeftovers(projectPath):
@@ -1112,25 +1113,93 @@ def _rewritePrivatePaths(scenePath, oldFolder, newFolder):
         autosave_io.atomicWriteText(scenePath, updated)
 
 
+#: Name part of the folder that a Duplicate copies into before it gets the name of the copy (never listed as a project)
+COPY_MARKER = ".studio-copy"
+
+#: The copies of Duplicates that are queued or running in this process ({(normcase(parent folder), name)}): their names
+#: are taken, so a second Duplicate before the first one finished makes "<name> copy 2", not a second "<name> copy"
+_pendingCopies = set()
+_pendingCopiesLock = threading.Lock()
+
+
+def _reserveCopyName(parent, name):
+    """A name for a new folder in ``parent`` that neither exists nor is reserved by a Duplicate in progress; reserve it."""
+    key = os.path.normcase(os.path.abspath(parent))
+    with _pendingCopiesLock:
+        reserved = [entry for folder, entry in _pendingCopies if folder == key]
+        newName = uniqueName(parent, name, reserved=reserved, isFile=False)
+        _pendingCopies.add((key, newName))
+    return newName
+
+
+def _releaseCopyName(parent, name):
+    with _pendingCopiesLock:
+        _pendingCopies.discard((os.path.normcase(os.path.abspath(parent)), name))
+
+
+def _firstCopyFailure(error):
+    """(errno, reason without paths) of a failed copy: its first reason (``shutil.Error`` lists every file that failed)."""
+    number = error.errno
+    reason = error.strerror or str(error)
+    if isinstance(error, shutil.Error) and error.args and isinstance(error.args[0], list) and error.args[0]:
+        first = error.args[0][0]
+        if isinstance(first, tuple) and len(first) == 3:
+            reason = str(first[2])  # "[Errno 28] No space left on device: 'source' -> 'destination'"
+            match = re.match(r"\[Errno (\d+)\]", reason)
+            if match:
+                number = int(match.group(1))
+                reason = os.strerror(number)
+    return number, reason
+
+
 def duplicateFolder(path, onDone=None, onError=None):
-    """Copy a project folder to "<name> copy" (in the background writer; the lock is not copied). Return the new folder."""
+    """Copy a project folder to "<name> copy" (in the background writer; the lock is not copied). Return the new folder.
+
+    The copy is made in "<new name>.studio-copy" and renamed when it is complete; a copy that fails is deleted, and
+    ``onError`` gets a ``ProjectError`` that says why in plain words (no paths). ``onDone`` gets the new folder.
+    """
     from . import autosave_io
 
     name = os.path.basename(os.path.normpath(path))
     parent = os.path.dirname(os.path.normpath(path))
-    newName = uniqueName(parent, sanitizeName(_("{name} copy").format(name=name)), isFile=False)
+    newName = _reserveCopyName(parent, sanitizeName(_("{name} copy").format(name=name)))
     newPath = os.path.join(parent, newName)
     scene = sceneFile(path)
+    # Translated here: ``copy`` runs in the background writer
+    notCopied = _("The project could not be duplicated: {reason}")
+    diskFull, gone, missing = _("not enough disk space"), _("{name} is gone").format(name=name), _("a file of the project is missing")
 
     def copy():
-        temporary = newPath + ".studio-copy"
-        shutil.copytree(path, temporary, ignore=shutil.ignore_patterns(LOCK_FILE, "*.studio-tmp*", ".studio-tmp-*", REMOVED_DIR))
-        os.rename(temporary, newPath)
-        renameSceneFile(newPath, scene)
-        data = readJson(projectFile(newPath)) or {}
-        data.update(name=newName, state="closed", created=_isoTime(), modified=_isoTime())
-        autosave_io.atomicWriteJson(projectFile(newPath), data)
-        return newPath
+        target, targetName = newPath, newName
+        temporary = newPath + COPY_MARKER
+        try:
+            # Left by a Duplicate that was interrupted (a crash): the name is reserved by this one now
+            if os.path.lexists(temporary):
+                removePaths([temporary])
+            shutil.copytree(path, temporary, ignore=shutil.ignore_patterns(LOCK_FILE, "*.studio-tmp*", ".studio-tmp-*", REMOVED_DIR))
+            if os.path.lexists(target):
+                # Made meanwhile by another program (another Slicer Studio): take the next free name
+                targetName = uniqueName(parent, newName, isFile=False)
+                target = os.path.join(parent, targetName)
+            os.rename(temporary, target)
+        except OSError as error:
+            removePaths([temporary])
+            number, reason = _firstCopyFailure(error)
+            if number in (errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)):
+                reason = diskFull
+            elif number == errno.ENOENT:
+                reason = missing if os.path.isdir(path) else gone
+            raise ProjectError(notCopied.format(reason=reason)) from error
+        except BaseException:
+            removePaths([temporary])
+            raise
+        finally:
+            _releaseCopyName(parent, newName)
+        renameSceneFile(target, scene)
+        data = readJson(projectFile(target)) or {}
+        data.update(name=targetName, state="closed", created=_isoTime(), modified=_isoTime())
+        autosave_io.atomicWriteJson(projectFile(target), data)
+        return target
 
     autosave_io.backgroundWriter().submit(copy, onDone=onDone, onError=onError)
     return newPath
@@ -1225,16 +1294,7 @@ def _sameVolume(first, second):
 
 def _copyError(source, error):
     """A short OSError for a failed copy of ``source``: its first reason (``shutil.Error`` lists every file that failed)."""
-    number = error.errno
-    reason = error.strerror or str(error)
-    if isinstance(error, shutil.Error) and error.args and isinstance(error.args[0], list) and error.args[0]:
-        first = error.args[0][0]
-        if isinstance(first, tuple) and len(first) == 3:
-            reason = str(first[2])  # "[Errno 28] No space left on device: 'source' -> 'destination'"
-            match = re.match(r"\[Errno (\d+)\]", reason)
-            if match:
-                number = int(match.group(1))
-                reason = os.strerror(number)
+    number, reason = _firstCopyFailure(error)
     result = OSError(_("Copying {name} failed: {reason}").format(name=os.path.basename(source), reason=reason))
     result.errno = number
     return result

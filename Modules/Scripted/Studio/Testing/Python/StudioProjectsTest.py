@@ -3213,6 +3213,84 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertTrue(service.openProject(path))
         self.assertTrue(service.project.isLocked())
 
+    def test_57_failed_or_repeated_duplicate_leaves_no_temporary_project(self):
+        """Library card > Duplicate that fails (a full disk) deletes its partial copy and says why in plain words; two
+        Duplicates in a row make "<name> copy" and "<name> copy 2" (BB-1). A failed copy used to stay in Projects/ as
+        "<name> copy.studio-copy" (listed in the Library as a project), the toast showed the raw list of failed files with
+        their absolute paths, and every later Duplicate of the project failed with "File exists". A second Duplicate before
+        the first one finished took the same name and failed with "Directory not empty", leaving the same folder behind.
+        """
+        import errno
+        import shutil as shutilModule
+        from unittest import mock
+
+        from StudioLib import projects_ui
+
+        projects = self.projects
+        project = projects.createProject("MRHead")
+        os.makedirs(os.path.join(project.path, "Images"))
+        for index in range(3):
+            with open(os.path.join(project.path, "Images", f"scan {index}.nrrd"), "wb") as f:
+                f.write(b"\1" * 4096)
+        with open(os.path.join(project.path, "MRHead.mrml"), "w", encoding="utf-8") as f:
+            f.write("<MRML></MRML>\n")
+        path = project.path
+        parent = os.path.dirname(path)
+
+        def entries():
+            return sorted(os.listdir(parent))
+
+        realCopyfile = shutilModule.copyfile
+
+        def fullDisk(source, destination, *args, **kwargs):
+            if os.path.basename(os.fspath(source)) == "scan 1.nrrd":
+                with open(destination, "wb") as f:
+                    f.write(b"\0" * 16)  # what fitted on the disk
+                raise OSError(errno.ENOSPC, "No space left on device", destination)
+            return realCopyfile(source, destination, *args, **kwargs)
+
+        toasts = []
+        with mock.patch.object(projects_ui, "message", side_effect=lambda text, **kwargs: toasts.append(str(text))):
+            # A full disk: the partial copy is deleted, and the message says why without any path
+            with mock.patch.object(shutilModule, "copyfile", side_effect=fullDisk):
+                projects_ui.duplicate(path)
+                self.assertTrue(self.io.backgroundWriter().drain(30.0))
+            self.assertEqual(entries(), ["MRHead"], "nothing of the failed copy stays")
+            self.assertEqual([info.name for info in projects.listProjects()], ["MRHead"])
+            self.assertEqual(len(toasts), 1, toasts)
+            self.assertIn("not enough disk space", toasts[0])
+            self.assertNotIn(self.tempDir, toasts[0])
+            self.assertNotIn("Errno", toasts[0])
+            # Once space is free, Duplicate works again (no "File exists")
+            toasts.clear()
+            self.assertEqual(os.path.basename(projects_ui.duplicate(path)), "MRHead copy")
+            self.assertTrue(self.io.backgroundWriter().drain(30.0))
+            self.assertEqual(toasts, ["Duplicated as MRHead copy"])
+            expected = sorted(name.replace("MRHead.mrml", "MRHead copy.mrml") for name in _relativeFiles(path) if name != ".studio/lock")
+            self.assertEqual(_relativeFiles(os.path.join(parent, "MRHead copy")), expected)
+            # Two Duplicates in a row, the second before the first one finished: two copies with their own names
+            toasts.clear()
+            first = projects_ui.duplicate(path)
+            second = projects_ui.duplicate(path)
+            self.assertEqual([os.path.basename(first), os.path.basename(second)], ["MRHead copy 2", "MRHead copy 3"])
+            self.assertTrue(self.io.backgroundWriter().drain(30.0))
+            self.assertEqual(sorted(toasts), ["Duplicated as MRHead copy 2", "Duplicated as MRHead copy 3"])
+            self.assertEqual(entries(), ["MRHead", "MRHead copy", "MRHead copy 2", "MRHead copy 3"])
+            for copyPath in (first, second):
+                self.assertTrue(os.path.isfile(os.path.join(copyPath, os.path.basename(copyPath) + ".mrml")))
+                self.assertEqual(projects.readJson(projects.projectFile(copyPath))["name"], os.path.basename(copyPath))
+            # A partial copy left by an earlier version (or a crash) is not a project, and does not block the next copy
+            leftover = os.path.join(parent, "MRHead copy 4.studio-copy")
+            os.makedirs(os.path.join(leftover, "Images"))
+            self.assertNotIn("MRHead copy 4.studio-copy", [info.name for info in projects.listProjects()])
+            toasts.clear()
+            fourth = projects_ui.duplicate(path)
+            self.assertTrue(self.io.backgroundWriter().drain(30.0))
+            self.assertEqual(toasts, ["Duplicated as MRHead copy 4"])
+            self.assertEqual(os.path.basename(fourth), "MRHead copy 4")
+            self.assertFalse(os.path.exists(leftover))
+        self.assertFalse([name for name in entries() if projects.COPY_MARKER in name])
+
 def _sphere(center=(0, 0, 0)):
     import vtk
 
