@@ -1089,6 +1089,54 @@ fi
         self.assertFalse(service.prepared.launched)
         self.assertFalse(service._relaunch)
 
+    def test_UpdateNowAfterNewerReleaseReplacesPrepared(self):
+        """1.2.0 is prepared (Install when I quit), then a later check finds 1.3.0: Update now acts on 1.3.0, never on
+        the prepared 1.2.0 (which is dropped with its Install when I quit).
+        """
+        updates, install = self.updates, self.install
+        if updates.platformKey() != "linux-x86_64":
+            self.skipTest("the Linux package path is tested on Linux")
+        old = self._publish("1.2.0")
+        target = self._fakeLinuxInstall("0.9.0")
+        updates._installableOverride = True
+        updates.installTargetOverride = target
+        service = self._service()
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        dialog = service.updateNow()
+        self.assertTrue(self._waitFor(lambda: dialog.state in ("ready", "failed"), 30), dialog.state)
+        self.assertEqual(dialog.state, "ready", dialog.text.text)
+        dialog.secondaryButton.click()  # Install when I quit
+        self.assertTrue(service._quitConnected)
+        oldPackage = os.path.join(updates.downloadDirectory(), old["assets"]["linux-x86_64"]["name"])
+        self.assertTrue(os.path.isfile(oldPackage))
+        # A later check finds 1.3.0
+        new = self._publish("1.3.0")
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        dialog2 = service.updateNow()
+        self.assertEqual(dialog2.title.text, "Slicer Studio 1.3.0")
+        self.assertNotEqual(dialog2.state, "ready", "the prepared 1.2.0 is not offered for 1.3.0")
+        self.assertIsNotNone(service.job, "1.3.0 is downloaded")
+        self.assertFalse(service._quitConnected, "1.2.0 no longer installs when the application quits")
+        self.assertFalse(os.path.exists(oldPackage), "the download of 1.2.0 is removed")
+        self.assertTrue(self._waitFor(lambda: dialog2.state in ("ready", "failed"), 30), dialog2.state)
+        self.assertEqual(dialog2.state, "ready", dialog2.text.text)
+        self.assertIn("1.3.0", dialog2.text.text)
+        self.assertEqual(service.prepared.version, "1.3.0")
+        self.assertEqual(install.linuxPackageVersion(service.prepared.staged), "1.3.0")
+        self.assertEqual(sorted(os.listdir(updates.downloadDirectory())), [new["assets"]["linux-x86_64"]["name"]])
+        self.assertEqual(install.linuxPackageVersion(target), "0.9.0", "nothing installed before the restart")
+        # Once the install helper of a prepared update runs (administrator rights given) it cannot be taken back:
+        # Update now says which version installs instead of downloading the newer one
+        service.prepared.launched = True
+        self._publish("1.4.0")
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        dialog3 = service.updateNow()
+        self.assertIsNone(service.job)
+        self.assertEqual(service.prepared.version, "1.3.0")
+        self.assertEqual(dialog3.state, "ready")
+        self.assertEqual(dialog3.title.text, "Slicer Studio 1.3.0")
+        self.assertIn("1.4.0", dialog3.text.text)
+
     def _prepareStaged(self, target):
         """A prepared update as the service leaves it: the staged copy next to the installation and the package in the
         download folder (nothing is installed).

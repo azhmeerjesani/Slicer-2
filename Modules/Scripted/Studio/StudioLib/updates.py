@@ -835,6 +835,8 @@ class UpdateService:
         self._quitConnected = False
         self._discardConnected = False
         self._relaunch = True
+        #: Staged copies of dropped updates, removed by the next download (``_discardPrepared()``)
+        self._staleStaging = []
         self._finishedMessage = None
         self._startTime = time.monotonic()
         #: How long the startup waited for the check before going on (ms; None until then, or when a required
@@ -1413,12 +1415,50 @@ class UpdateService:
         if status is None or not status.available:
             self.showUpdates(check=True)
             return None
+        # A later check found another version than the one prepared: Update now acts on the version it names
+        stale = self.prepared is not None and self.prepared.version != status.version
+        if stale and self._discardPrepared():
+            stale = False
         if self.updateDialog is None or not _isAlive(self.updateDialog.dialog):
             self.updateDialog = UpdateDialog(self, _mainWindow())
         self.updateDialog.show()
         if self.job is None and self.prepared is None:
             self.updateDialog.begin()
+        elif stale and self.job is None:
+            # Its install helper already runs (administrator rights given): it cannot be taken back, so say so
+            self.updateDialog.preparedInstead(self.prepared.version, status.version)
         return self.updateDialog
+
+    def _discardPrepared(self):
+        """Drop the prepared update (and its Install when I quit) so that another version can be downloaded. Return
+        False if it cannot be dropped: its install helper already runs (administrator rights given).
+        """
+        import slicer
+
+        prepared = self.prepared
+        if prepared is None:
+            return True
+        if prepared.launched:
+            return False
+        self.prepared = None
+        if self._quitConnected:
+            try:
+                slicer.app.disconnect("aboutToQuit()", self._onAboutToQuit)
+            except Exception:
+                pass
+            self._quitConnected = False
+        self._relaunch = True
+        if self.updateDialog is not None:
+            # Its title and its ready state name the dropped version
+            self.updateDialog.dispose()
+            self.updateDialog = None
+        # The staged copy is removed by the next download before it prepares (same folder), else by the next start
+        self._staleStaging.append(os.path.dirname(prepared.staged))
+        package = prepared.package
+        if package and os.path.isfile(package) and os.path.dirname(os.path.abspath(package)) == os.path.abspath(downloadDirectory()):
+            _removeQuietly(package)
+        self._notify()
+        return True
 
     def unavailableReason(self):
         """Why this installation cannot update itself (shown with the manual way), or None."""
@@ -1446,11 +1486,16 @@ class UpdateService:
         if target is None and key in ("macos-arm64", "macos-x86_64", "linux-x86_64"):
             raise updates_install.InstallError(_("The installed application was not found."))
         unavailable = _("This computer cannot install the update.")
+        stale, self._staleStaging = self._staleStaging, []
         # From now on this run owns the download and staging folders: another Slicer Studio that starts with the same
         # state folder must not clean them up (the marker names this run until it ends or its update is registered)
         self._writeStagedMarker(None)
 
         def run(task):
+            for root in stale:
+                # The staged copy of a dropped update (a later check found another version)
+                if os.path.isdir(root) and os.path.basename(root).endswith(updates_install.STAGING_SUFFIX):
+                    updates_install._removeTree(root)
             task.phase = "download"
             path = downloadAsset(manifest, key, directory, feed=feed, progress=task.setProgress, cancelled=task.cancelled)
             if task.cancelled():
@@ -2113,6 +2158,12 @@ class UpdateDialog:
         self._setState("ready", _("Slicer Studio {version} was downloaded and checked. Slicer Studio restarts to install it; "
                                   "you are asked to save unsaved work, and autosaved work is offered for recovery after the restart.").format(
             version=prepared.version))
+
+    def preparedInstead(self, preparedVersion, version):
+        """The update shown is ready but is not the latest one, and it cannot be taken back."""
+        self.title.setText(_("Slicer Studio {version}").format(version=preparedVersion))
+        self._setState("ready", _("Slicer Studio {prepared} is ready and installs when you quit Slicer Studio; it cannot be taken back "
+                                  "any more. Update again after that to get Slicer Studio {version}.").format(prepared=preparedVersion, version=version))
 
     def onPrimary(self):
         if self.state == "failed":
