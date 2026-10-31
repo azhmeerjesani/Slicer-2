@@ -1449,6 +1449,73 @@ fi
         self.assertIsNone(service.notice)
         self.assertNotIn(updates.NOTICE_KEY, library.notices())
 
+    def test_NoNoticeForUpdateThatInstallsAtQuit(self):
+        """After Install when I quit, a later check does not offer the same version again: its Skip could not take the
+        install back (it said "Update skipped" and the update installed at quit anyway). A newer version is offered.
+        """
+        from StudioLib import library, shell
+
+        updates = self.updates
+        if updates.platformKey() != "linux-x86_64":
+            self.skipTest("the Linux package path is tested on Linux")
+        self._publish("1.2.0")
+        target = self._fakeLinuxInstall("0.9.0")
+        mainWindow = slicer.util.mainWindow()
+        geometry = mainWindow.saveGeometry()
+
+        def restore():
+            live = shell._shell
+            if live is not None:
+                live.dispose()
+            mainWindow.restoreGeometry(geometry)
+            self._pump(0.3)
+
+        self.addCleanup(restore)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        self._pump(0.5)
+        studioShell.switchTo("library")
+        updates._installableOverride = True
+        updates.installTargetOverride = target
+        service = self._service()
+        previous = updates._service
+        updates._service = service
+        self.addCleanup(lambda: setattr(updates, "_service", previous))
+        service._startTime = time.monotonic() - 1000  # long after the startup: no delay for the notice
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        service._showAvailability()
+        self.assertTrue(self._waitFor(lambda: service.notice is not None, 5))
+        dialog = service.updateNow()
+        self.assertIsNone(service.notice)
+        self.assertTrue(self._waitFor(lambda: dialog.state in ("ready", "failed"), 30), dialog.state)
+        self.assertEqual(dialog.state, "ready", dialog.text.text)
+        dialog.secondaryButton.click()  # Install when I quit
+        self.assertTrue(service._quitConnected)
+        self.assertEqual(service.prepared.version, "1.2.0")
+        # A later check (Check now, the daily check) finds 1.2.0 again: no notice, so no Skip that would not hold
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        service._showAvailability()
+        self._pump(1.0)
+        self.assertIsNone(service.notice, "1.2.0 already installs when the application quits")
+        self.assertNotIn(updates.NOTICE_KEY, library.notices())
+        service._tryNotice()
+        self.assertIsNone(service.notice)
+        service.studioEntered()
+        self._pump(0.5)
+        self.assertIsNone(service.notice)
+        self.assertEqual(updates.settingsValue("SkippedVersion"), "")
+        # A notice placed before the install was chosen goes when it is chosen
+        self.assertIsNotNone(service.showNotice())
+        service.installOnQuit(relaunch=False)
+        self.assertIsNone(service.notice)
+        self.assertTrue(service._quitConnected, "the install at quit stays chosen")
+        # A newer release is offered (Update now on it replaces the prepared 1.2.0)
+        self._publish("1.3.0")
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        service._showAvailability()
+        self.assertTrue(self._waitFor(lambda: service.notice is not None, 5))
+        self.assertEqual(service.notice.findChild("QLabel", "StudioNoticeText").text, "Update 1.3.0 available")
+
     def test_NoticeAfterSwitchFromClassic(self):
         """A start in Classic gives up the notice (no Studio shell); entering Studio later announces the update."""
         from StudioLib import library, shell

@@ -1168,7 +1168,7 @@ class UpdateService:
             # manifest), checks off (cached manifest) or found after the startup
             self.hideNotice()
             self.showBanner(offline=offline)
-        elif not status.skipped:
+        elif not status.skipped and not self.installChosen(status.version):
             if self.notice is not None and self.noticeVersion != status.version:
                 # A later check found another version: the notice names the version that Update now and Skip act on
                 self.hideNotice()
@@ -1200,6 +1200,8 @@ class UpdateService:
         status = self.status
         if status is None or not status.available or status.kind != "optional" or status.skipped or self.notice is not None:
             return
+        if self.installChosen(status.version):
+            return
         if channel() != "release" and feedOverride() is None and _installableOverride is None:
             return
         self.scheduleNotice()
@@ -1228,6 +1230,10 @@ class UpdateService:
         shell = _shell()
         status = self.status
         if shell is None or status is None or status.kind != "optional" or status.skipped or self.notice is not None:
+            return
+        if self.installChosen(status.version):
+            # Its install is already chosen (Install when I quit): Skip could not take it back, so there is nothing
+            # to offer
             return
         if self.canInstall() and not self.releaseHasFile(status):
             # The release has no file for this computer yet: Update now could not work (Settings > Updates shows why)
@@ -1296,6 +1302,15 @@ class UpdateService:
         if _isAlive(widget):
             widget.hide()
             widget.deleteLater()
+
+    def installChosen(self, version=None):
+        """True when the prepared update (of ``version``, if given) is set to install: Install when I quit, a restart
+        that waits for the quit, or its install helper already runs (administrator rights given).
+        """
+        prepared = self.prepared
+        if prepared is None or not (self._quitConnected or prepared.launched):
+            return False
+        return version is None or prepared.version == version
 
     def skip(self):
         """Skip of the notice: this version is not offered again (Settings > Updates still shows it)."""
@@ -1533,10 +1548,12 @@ class UpdateService:
         self._relaunch = relaunch
         if prepared.needsAdmin and not prepared.launched:
             prepared.launch(stateDirectory(), relaunch=relaunch, record=self._installRecord())
-            return True
-        if not self._quitConnected:
+        elif not self._quitConnected:
             slicer.app.connect("aboutToQuit()", self._onAboutToQuit)
             self._quitConnected = True
+        if self.notice is not None and self.noticeVersion == prepared.version:
+            # A notice placed meanwhile (another check) would offer Skip of a version that installs anyway
+            self.hideNotice()
         return True
 
     #
