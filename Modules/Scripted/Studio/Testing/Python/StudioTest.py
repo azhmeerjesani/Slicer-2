@@ -1925,6 +1925,103 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertTrue(((after > 0) == ((official > 0) | (before > 0))).all(), boxes)
         editor.setActiveEffect(None)
 
+    def test_29f_fill_between_slices_parameters_follow_the_presentation_after_scene_load(self):
+        """A scene saved in one presentation carries the Fill between slices parameters of the Segment Editor node.
+        Loaded in the other presentation, the parameters are those of the presentation: Classic gives the result of
+        official 3D Slicer (no gap filling between thick parts), and Studio Fill gaps keeps the selected segment only.
+        """
+        widget = slicer.modules.segmenteditor.widgetRepresentation().self()
+        initialPresentation = widget.presentation()
+        try:
+            self._checkFillParametersAfterSceneLoad(widget)
+        finally:
+            widget.editor.setActiveEffect(None)
+            widget.setPresentation(initialPresentation)
+            self._pump()
+
+    def _checkFillParametersAfterSceneLoad(self, widget):
+        import os
+        import shutil
+        import tempfile
+
+        import numpy as np
+
+        slicer.util.selectModule("SegmentEditor")
+        self._pump()
+        editor = widget.editor
+
+        def parameters():
+            effect = editor.effectByName("Fill between slices")
+            return {name: effect.integerParameter(name) if effect.parameterDefined(name) else None
+                    for name in ("SelectedSegmentOnly", "FillGapsBetweenThickParts")}
+
+        def saveBundle():
+            directory = tempfile.mkdtemp(prefix="StudioTestFillScene", dir=slicer.app.temporaryPath)
+            self.addCleanup(shutil.rmtree, directory, True)
+            self.assertTrue(slicer.app.applicationLogic().SaveSceneToSlicerDataBundleDirectory(directory))
+            return f"{directory}/{os.path.basename(directory)}.mrml"
+
+        def loadBundle(path, entered):
+            editor.setActiveEffect(None)
+            slicer.util.selectModule("SegmentEditor" if entered else "Data")
+            self._pump()
+            slicer.mrmlScene.Clear(0)
+            self._pump()
+            self.assertTrue(slicer.util.loadScene(path))
+            slicer.util.selectModule("SegmentEditor")
+            self._pump()
+
+        # Two parts several slices thick, separated by empty slices along k (what Studio Fill gaps fills)
+        widget.setPresentation("studio")
+        self._pump()
+        volume = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "FillSceneVolume")
+        slicer.util.updateVolumeFromArray(volume, np.full((30, 40, 40), 100, np.int16))
+        volume.CreateDefaultDisplayNodes()
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "FillSceneSegmentation")
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(volume)
+        segmentId = segmentation.GetSegmentation().AddEmptySegment("lesion", "Lesion")
+        lesion = np.zeros((30, 40, 40), np.uint8)
+        lesion[5:11, 10:30, 10:30] = 1
+        lesion[18:25, 10:30, 10:30] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(lesion, segmentation, segmentId, volume)
+        editor.setSegmentationNode(segmentation)
+        editor.setSourceVolumeNode(volume)
+        editor.mrmlSegmentEditorNode().SetSelectedSegmentID(segmentId)
+        self._pump()
+        self.assertEqual(parameters(), {"SelectedSegmentOnly": 1, "FillGapsBetweenThickParts": 1})
+        studioScene = saveBundle()
+
+        # Studio scene in Classic, loaded while the Segment Editor is not shown
+        widget.setPresentation("classic")
+        self._pump()
+        loadBundle(studioScene, entered=False)
+        self.assertEqual(parameters(), {"SelectedSegmentOnly": 0, "FillGapsBetweenThickParts": 0})
+        segmentation = slicer.util.getNode("FillSceneSegmentation")
+        volume = slicer.util.getNode("FillSceneVolume")
+        editor.setSegmentationNode(segmentation)
+        editor.setSourceVolumeNode(volume)
+        segmentId = segmentation.GetSegmentation().GetSegmentIdBySegmentName("Lesion")
+        before = slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, segmentId, volume).copy()
+        self.assertEqual(int(np.count_nonzero(before)), int(np.count_nonzero(lesion)))
+        editor.setActiveEffectByName("Fill between slices")
+        effect = editor.activeEffect().self()
+        effect.onPreview()
+        self._pump()
+        effect.onApply()
+        self._pump()
+        editor.setActiveEffect(None)
+        after = slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, segmentId, volume)
+        # Official 3D Slicer leaves the gap between parts that span several slices open
+        self.assertTrue(((after > 0) == (before > 0)).all())
+
+        # Classic scene in Studio, loaded while the Segment Editor is shown
+        classicScene = saveBundle()
+        widget.setPresentation("studio")
+        self._pump()
+        loadBundle(classicScene, entered=True)
+        self.assertEqual(parameters(), {"SelectedSegmentOnly": 1, "FillGapsBetweenThickParts": 1})
+
     def test_29d_draw_cleanup_that_changes_nothing_offers_no_undo(self):
         """A Keep largest part or Fill gaps and specks that changes nothing adds no undo step, so its toast has no
         Undo: that Undo would undo the user's previous, unrelated stroke.

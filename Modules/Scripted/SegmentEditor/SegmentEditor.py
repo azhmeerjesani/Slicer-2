@@ -392,6 +392,12 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             if propertyName in EFFECTIVE_VISIBILITY_PROPERTIES or getattr(self.editor, propertyName) != value:
                 setattr(self.editor, propertyName, value)
 
+    def _applyPresentationEffectParameters(self):
+        """Set the effect parameters of the applied presentation again (after a parameter node change or a scene import)."""
+        if self.editor is None or self._appliedPresentation not in ("classic", "studio"):
+            return
+        self._setEffectParameters(CLASSIC_EFFECT_PARAMETERS if self._appliedPresentation == "classic" else STUDIO_EFFECT_PARAMETERS)
+
     def _setEffectParameters(self, parameters):
         for (effectName, parameterName), value in parameters.items():
             effect = self.editor.effectByName(effectName)
@@ -1225,6 +1231,8 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
         self.parameterSetNode = segmentEditorNode
         self.editor.setMRMLSegmentEditorNode(self.parameterSetNode)
+        # A new node (after a scene close) starts from the effect defaults
+        self._applyPresentationEffectParameters()
 
     def getDefaultSourceVolumeNodeID(self):
         layoutManager = slicer.app.layoutManager()
@@ -1310,6 +1318,11 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def onSceneEndImport(self, caller, event):
         if self.parent.isEntered:
             self.selectParameterNode()
+        # The imported singleton parameter node has the effect parameters of the scene, saved by another presentation
+        # or by official 3D Slicer: the presentation decides them (Classic Fill between slices gives the result of
+        # official 3D Slicer, Studio Fill gaps fills the selected segment only)
+        self._applyPresentationEffectParameters()
+        if self.parent.isEntered:
             self.editor.updateWidgetFromMRML()
 
     def cleanup(self):
