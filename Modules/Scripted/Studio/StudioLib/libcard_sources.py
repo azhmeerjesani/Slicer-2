@@ -6,7 +6,8 @@ paper:
 
 - **Table** of the records (record, title, year, stage, cases). Keys act on the table only (no window-wide shortcut, so
   they never reach the views): **P** include / advance one stage (identified, screened, full text, included), **X** exclude
-  with a reason (a small popover; Enter confirms, Esc closes it), **U** undo the last stage change, **Enter** open the
+  with a reason (a small popover; Enter confirms, Esc closes it), **U** undo the last stage change (the record P or X just
+  changed, although the selection moved on to the next row; otherwise the selected record's last change), **Enter** open the
   record's attachments folder (``sources/<record_id>/``, never exported), **/** filter the table (Esc clears it).
 - **Import…** (inline form): a RIS, PubMed (nbib / MEDLINE), BibTeX or CSV file, or pasted DOIs and PMIDs, with the database
   and the query for the search log (``study.json`` ``search``). Exact DOI / PMID duplicates are merged; records with
@@ -171,6 +172,9 @@ class SourcesCard:
         self._offersKey = None
         self._dismissed = set()
         self._rows = []
+        # (record P or X just changed, record the selection then moved to), so that U undoes that change; cleared when the
+        # user selects another row
+        self._lastChange = None
         self.shortcuts = []
         self.widget = qt.QWidget()
         self.widget.setObjectName("StudioSourcesLibraryCard")
@@ -222,6 +226,7 @@ class SourcesCard:
             _("P: include or advance · X: exclude with a reason · U: undo · Enter: open the attachments folder · /: filter"),
         )
         self.table.connect("itemSelectionChanged()", self._updateButtons)
+        self.table.connect("itemSelectionChanged()", self._forgetLastChange)
         self.table.connect("cellDoubleClicked(int,int)", lambda *args: self.openFolder())
         layout.addWidget(self.table)
         ui.bindStyleSheet(self.table, self._tableStyleSheet)
@@ -424,6 +429,7 @@ class SourcesCard:
                 self.records = sources.Records(studyObject.path)
                 self._showError(str(e))
             self._signature = signature
+            self._lastChange = None
         return self.records
 
     def _save(self):
@@ -560,13 +566,30 @@ class SourcesCard:
             return None
 
         def work():
+            logged = len(records.log)
             stage = records.advance(recordId)
             self._save()
             self.refresh(select=recordId)
             self._moveNext(recordId)
+            self._rememberChange(recordId, len(records.log) != logged)
             return stage
 
         return self._run(work)
+
+    def _rememberChange(self, recordId, changed):
+        """After P or X: U then undoes this change, also from the next row the selection moved to."""
+        self._lastChange = (recordId, self.selectedId()) if changed else None
+
+    def _forgetLastChange(self, *_args):
+        if self._lastChange is not None and self.selectedId() != self._lastChange[1]:
+            self._lastChange = None
+
+    def _undoTarget(self):
+        """The record U acts on: the one P or X just changed while the selection is still where it moved to, else the selected one."""
+        selected = self.selectedId()
+        if self._lastChange is not None and selected == self._lastChange[1] and self._lastChange[0] in self._rows:
+            return self._lastChange[0]
+        return selected
 
     def _moveNext(self, recordId):
         """Select the next visible record, so that P, P, P goes down the list."""
@@ -592,28 +615,33 @@ class SourcesCard:
             return None
 
         def work():
+            logged = len(records.log)
             records.exclude(recordId, reason)
             self._save()
             self.refresh(select=recordId)
             self._moveNext(recordId)
+            self._rememberChange(recordId, len(records.log) != logged)
             self.table.setFocus()
             return True
 
         return self._run(work)
 
     def undoSelected(self):
-        recordId = self.selectedId()
+        """U: undo the last stage change (see :meth:`_undoTarget`), select that record and say what was undone."""
         records = self.load()
+        recordId = self._undoTarget()
         if recordId is None or records is None:
             return None
 
         def work():
             stage = records.undo(recordId)
+            self._lastChange = None
             if stage is None:
                 _toast(_("Nothing to undo for {record}").format(record=recordId))
                 return None
             self._save()
             self.refresh(select=recordId)
+            _toast(_("Undo · {record} back to {stage}").format(record=recordId, stage=stageText(stage)))
             return stage
 
         return self._run(work)

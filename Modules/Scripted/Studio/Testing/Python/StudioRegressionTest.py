@@ -69,6 +69,9 @@ Run with the main window and testing enabled::
   their panel and logic. Without the plugins every such widget was a plain QWidget and ``setup()`` raised AttributeError.
 - ``test_24_lesion_metrics_follow_a_result_that_repoints_the_lesion`` (BB-1): a merged result that repoints the lesion
   (a normalization) recomputes the row's centroid, outside-brain share and lesion size from the new file at once.
+- ``test_27_sources_undo_reverts_the_change_just_made`` (BB-1): in the Sources card, U right after P or X undoes that change
+  (the selection had moved on to the next record, and U reverted that record's earlier decision silently), selects the
+  record and says what was undone; a row selected by the user is undone as before.
 """
 
 import json
@@ -2085,3 +2088,79 @@ class StudioRegressionTest(unittest.TestCase):
                 slicer.app.processEvents()
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
+
+    def test_27_sources_undo_reverts_the_change_just_made(self):
+        """Sources card: P and X move the selection to the next record, and U then undid that record's earlier decision (and
+        deleted it from the search log) instead of the change just made, without a word. U now undoes the change just made,
+        selects its record and toasts it; after the user selects another row, U acts on that row (BB-1).
+        """
+        from LesionNetworkMappingLib.study import Study
+
+        from StudioLib import libcard_sources, study_ui
+
+        if not study_ui.isAvailable():
+            self.skipTest("needs the lesion network mapping library")
+        nbib = "\n\n".join(
+            f"PMID- {pmid}\nTI  - {title}\nAU  - {author}\nDP  - {year}\nTA  - Brain"
+            for pmid, title, author, year in (
+                ("111111", "Lesion network mapping of a rare symptom after a pontine infarct.", "Smith J", "2020"),
+                ("222222", "A second paper about thalamic hallucinations.", "Doe A", "2019"),
+                ("333333", "Akinetic mutism after bilateral cingulate stroke: a case report.", "Ng P", "2018"),
+            )
+        )
+        path = os.path.join(self.directory, "Lit")
+        Study.create(path, name="Lit").save()
+        toasts = []
+        toast = libcard_sources._toast
+        libcard_sources._toast = lambda text, *args, **kwargs: toasts.append(str(text))
+        card = None
+        try:
+            session = study_ui.openStudy(path, showLibrary=False)
+            self.assertIsNotNone(session)
+            card = libcard_sources.SourcesCard(session)
+            card.widget.show()
+            card.importRecords(text=nbib, database="PubMed", query="q")
+            self.assertEqual(card._rows, ["smith2020", "doe2019", "ng2018"])
+
+            def stages():
+                return {row["record_id"]: row["stage"] for row in card.load().rows}
+
+            # P on doe2019 (an earlier decision), then P on smith2020: the selection moves on to doe2019
+            card.table.selectRow(1)
+            self.assertEqual(card.advanceSelected(), "screened")
+            self.assertEqual(card.selectedId(), "ng2018")
+            card.table.selectRow(0)
+            self.assertEqual(card.advanceSelected(), "screened")
+            self.assertEqual(card.selectedId(), "doe2019")
+            self.assertEqual(card.undoSelected(), "identified")
+            self.assertEqual(stages(), {"smith2020": "identified", "doe2019": "screened", "ng2018": "identified"})
+            self.assertEqual(card.selectedId(), "smith2020")
+            self.assertEqual([entry["record_id"] for entry in card.load().log], ["doe2019"])
+            self.assertEqual(toasts[-1], "Undo · smith2020 back to Identified")
+
+            # X on doe2019 moves the selection to ng2018; U restores doe2019, not ng2018
+            card.table.selectRow(2)
+            card.advanceSelected()  # ng2018 screened (the last row: the selection stays)
+            card.table.selectRow(1)
+            self.assertTrue(card.exclude("doe2019", "Not a case report"))
+            self.assertEqual(card.selectedId(), "ng2018")
+            self.assertEqual(card.undoSelected(), "screened")
+            self.assertEqual(stages(), {"smith2020": "identified", "doe2019": "screened", "ng2018": "screened"})
+            self.assertEqual(card.selectedId(), "doe2019")
+
+            # A row selected by the user after P: U undoes that row's last change
+            card.table.selectRow(0)
+            card.advanceSelected()  # smith2020 screened, selection on doe2019
+            card.table.selectRow(2)
+            self.assertEqual(card.undoSelected(), "identified")
+            self.assertEqual(stages(), {"smith2020": "screened", "doe2019": "screened", "ng2018": "identified"})
+            self.assertEqual(toasts[-1], "Undo · ng2018 back to Identified")
+        finally:
+            libcard_sources._toast = toast
+            if card is not None:
+                card.widget.hide()
+                card.widget.deleteLater()
+            study_ui.closeStudy()
+            for _ in range(4):
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
