@@ -22,6 +22,7 @@ A Studio plug-in (``shell.OPTIONAL_PLUGINS``): ``install(shell)`` when Studio is
 ``attachService(service)`` is called by the autosave service in both modes.
 """
 
+import errno
 import logging
 import os
 import sys
@@ -255,6 +256,8 @@ class FolderChooserDialog(qt.QDialog):
         qt.QDialog.__init__(self, parent or slicer.util.mainWindow())
         self.cancellable = bool(cancellable)
         self.cancelled = False
+        #: First start: closed with Escape or the window button, not with Continue
+        self.dismissed = False
         self.setObjectName("StudioProjectsFolderDialog")
         self.setWindowTitle(_("Slicer Studio folder"))
         self.setModal(True)
@@ -441,6 +444,7 @@ class FolderChooserDialog(qt.QDialog):
             qt.QDialog.reject(self)
             return
         # First start: Escape or closing the window accepts the proposal (the application is never blocked)
+        self.dismissed = True
         self.accept()
 
 
@@ -463,13 +467,24 @@ def showChooser(then=None, parent=None):
         global _chooser
         _chooser = None
         path = dialog.path
+        retry = False
         try:
-            projects.setRoot(path, chosen=True)
+            # The folder is stored only once it exists and can be written: otherwise the next start asks again
             projects.ensureRoot(path)
+            if not os.access(path, os.W_OK | os.X_OK):
+                raise PermissionError(errno.EACCES, os.strerror(errno.EACCES))
+            projects.setRoot(path, chosen=True)
         except OSError as error:
-            logging.error(f"Slicer Studio: the folder {path} cannot be created: {error}")
-            message(_("The folder {path} cannot be created: {error}").format(path=path, error=error), level="warning", ms=8000)
+            reason = (getattr(error, "strerror", None) or str(error)).strip()
+            logging.error(f"Slicer Studio: the folder {path} cannot be used: {error}")
+            message(_("The folder {path} cannot be used: {reason}. Choose another folder.").format(path=projects.shortPath(path), reason=reason),
+                    level="warning", ms=8000, toolTip=path)
+            # Continue asks again; Escape or closing the window (never blocks the application) leaves the choice for the next start
+            retry = not getattr(dialog, "dismissed", False)
         dialog.deleteLater()
+        if retry:
+            showChooser(then, parent)
+            return
         if then is not None:
             try:
                 then()
@@ -1245,6 +1260,9 @@ class ProjectsSection(qt.QObject):
 
     def captionText(self):
         root = projects.root()
+        service = _service()
+        if service is not None and service.rootUnwritable():
+            return _("Autosave paused: {folder} cannot be written").format(folder=projects.shortPath(root))
         return _("Saved automatically in {folder}").format(folder=projects.shortPath(root))
 
     def currentInfo(self):
@@ -2068,6 +2086,13 @@ def announce(event, project, **info):
         for theirs, ours in conflicts[:3]:
             message(_("Another program changed {theirs}: Slicer Studio saved its version as {ours}.").format(theirs=theirs, ours=ours),
                     level="consequence", action=showProjectFolder, actionText=_("Show"))
+    elif event == "root-failed":
+        # No project could be created: the Slicer Studio folder cannot be written (a read-only share or medium). Once per
+        # folder; Retry (Save) would open the official Save Scene dialog, so the action changes the folder instead
+        change = None if projects.isRootFromEnvironment() else (lambda *_args: changeRootDialog())
+        message(_("Autosave paused: the Slicer Studio folder cannot be written ({reason}). Changes made now are not saved in it.").format(
+                reason=info.get("reason") or ""), level="warning", action=change, actionText=_("Change folder…") if change else None, ms=8000,
+                toolTip=projects.root())
     elif event == "failed":
         message(_("Not saved: {reason}").format(reason=info.get("reason") or ""), level="warning", action=saveNow, actionText=_("Retry"), ms=8000)
     elif event == "not-opened":

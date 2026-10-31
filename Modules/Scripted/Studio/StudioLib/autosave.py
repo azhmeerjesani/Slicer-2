@@ -262,6 +262,8 @@ class AutosaveService:
         self._lastProjectCheck = None
         #: projects (normalized paths) whose "open in another Slicer Studio" warning was shown while retrying to attach
         self._lockedAnnounced = set()
+        #: Slicer Studio folders (normalized paths) whose "cannot be written" message was shown while projects could not be created
+        self._rootFailedAnnounced = set()
         self._projectPausedReason = ""
         #: tests: True/False replaces the "Studio is shown" condition of creating projects (None: ask the shell)
         self.studioActiveOverride = None
@@ -1279,6 +1281,23 @@ class AutosaveService:
         self._lockedAnnounced.add(key)
         self._announce("locked", project)
 
+    def _announceRootFailedOnce(self, reason):
+        """The message that the Slicer Studio folder cannot be written, once per folder. No project exists then, so every
+        new scene fingerprint tries to create one again (it is created as soon as the folder can be written); the retries
+        stay silent, or every edit would show the message again.
+        """
+        key = os.path.normcase(os.path.abspath(self._projects().root()))
+        if key in self._rootFailedAnnounced:
+            return
+        self._rootFailedAnnounced.add(key)
+        self._announce("root-failed", None, reason=reason)
+        self._projects().notifyChanged()  # the Library caption says that nothing is saved
+
+    def rootUnwritable(self):
+        """True if the Slicer Studio folder could not be written when a project was last created in it."""
+        key = os.path.normcase(os.path.abspath(self._projects().root()))
+        return key in self._rootFailedAnnounced
+
     def _studioActive(self):
         if self.studioActiveOverride is not None:
             return bool(self.studioActiveOverride)
@@ -1377,9 +1396,14 @@ class AutosaveService:
         try:
             project = projects.createProject(name)
         except OSError as error:
-            self._pause(_("Saving paused: the Slicer Studio folder cannot be written ({error}).").format(error=error))
-            self._announce("failed", None, reason=str(error))
+            # Plain words (no error number, no path), and the message only once: see _announceRootFailedOnce
+            reason = plainOSError(error)
+            self._pause(_("Autosave paused: the Slicer Studio folder cannot be written ({reason}).").format(reason=reason))
+            self._announceRootFailedOnce(reason)
             return None
+        if self._rootFailedAnnounced:
+            self._rootFailedAnnounced.clear()  # a later failure is news again
+            projects.notifyChanged()
         if not self.attachProject(project):
             return None
         if announce:

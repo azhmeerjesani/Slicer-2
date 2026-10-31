@@ -3747,6 +3747,125 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertEqual(sorted(fileItems().values()), [1, 1], "the project scene is repaired at the next save")
 
 
+    def test_62_unwritable_studio_folder_is_reported_once_not_after_every_edit(self):
+        """The Slicer Studio folder cannot be created (a read-only volume, BB-1): no project can be made, and every new
+        scene fingerprint tries again. The user is told once, in plain words (no error number, no path, no Retry that would
+        open the official Save Scene dialog), saving is shown as paused, and the first project is made as soon as the folder
+        can be written (the message is news again if it fails again).
+        """
+        from StudioLib import projects_ui
+
+        projects = self.projects
+        blocker = os.path.join(self.tempDir, "a file")
+        with open(blocker, "w") as f:
+            f.write("not a folder")
+        badRoot = os.path.join(blocker, "Slicer Studio")
+        os.environ[projects.ROOT_ENVIRONMENT] = badRoot
+        service = self._service()
+        announced = []
+        service.setProjectAnnouncer(lambda event, project, **info: announced.append((event, info)))
+        self._userVolume()
+        for edit in range(4):
+            slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", f"F{edit}")
+            service.poll()
+        self.assertIsNone(service.project)
+        self.assertEqual([event for event, _info in announced], ["root-failed"], "no new message after each edit")
+        reason = announced[0][1]["reason"]
+        self.assertNotIn("Errno", reason)
+        self.assertNotIn(self.tempDir, reason)
+        status = service.status()
+        self.assertEqual(status.state, "paused")
+        self.assertTrue(status.message.startswith("Autosave paused"), status.message)
+        self.assertNotIn("Errno", status.message)
+        self.assertNotIn(self.tempDir, status.message)
+        self.assertTrue(service.rootUnwritable())
+        # The toast: one warning, no Retry
+        toasts = []
+        original = projects_ui.message
+        projects_ui.message = lambda text, **kwargs: toasts.append((text, kwargs))
+        try:
+            projects_ui.announce("root-failed", None, reason=reason)
+        finally:
+            projects_ui.message = original
+        self.assertEqual(len(toasts), 1)
+        self.assertNotIn("Errno", toasts[0][0])
+        self.assertNotIn(self.tempDir, toasts[0][0])
+        self.assertNotEqual(toasts[0][1].get("actionText"), "Retry")
+        # The folder becomes writable (or another one is set): a project is made, quietly
+        os.environ[projects.ROOT_ENVIRONMENT] = self.root
+        slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "Later")
+        service.poll()
+        self.assertIsNotNone(service.project)
+        self.assertFalse(service.rootUnwritable())
+        self.assertEqual([event for event, _info in announced], ["root-failed", "created"])
+        # A later failure is news again
+        service.releaseProject()
+        os.environ[projects.ROOT_ENVIRONMENT] = badRoot
+        slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "Again")
+        service.poll()
+        self.assertEqual([event for event, _info in announced], ["root-failed", "created", "root-failed"])
+
+    def test_63_first_start_chooser_does_not_keep_a_folder_that_cannot_be_created(self):
+        """Continue on a folder that cannot be created (a read-only volume, BB-1) said "cannot be created" but still stored
+        it as the chosen folder, so the next start did not ask again. The folder is stored only once it exists and can be
+        written: Continue asks again (the toast has no error number), and Escape leaves the choice for the next start.
+        """
+        from StudioLib import projects_ui
+
+        projects = self.projects
+        settings = qt.QSettings()
+        saved = {key: settings.value(key) for key in (projects.ROOT_KEY, projects.ROOT_CHOSEN_KEY)}
+        for key in saved:
+            settings.remove(key)
+        blocker = os.path.join(self.tempDir, "a file")
+        with open(blocker, "w") as f:
+            f.write("not a folder")
+        badRoot = os.path.join(blocker, "Slicer Studio")
+        toasts = []
+        answered = []
+        original = projects_ui.message
+        projects_ui.message = lambda text, **kwargs: toasts.append(str(text))
+        try:
+            dialog = projects_ui.showChooser(lambda: answered.append(True))
+            dialog.setPath(badRoot)
+            dialog.accept()
+            self.assertEqual(len(toasts), 1, toasts)
+            self.assertNotIn("Errno", toasts[0])
+            self.assertIsNone(settings.value(projects.ROOT_KEY), "the unusable folder is not stored")
+            self.assertIsNone(settings.value(projects.ROOT_CHOSEN_KEY), "so the next start asks again")
+            self.assertEqual(answered, [], "the chooser asks again")
+            again = projects_ui._chooser
+            self.assertIsNotNone(again)
+            self.assertIsNot(again, dialog)
+            # Another folder is accepted
+            again.setPath(os.path.join(self.tempDir, "Good folder"))
+            again.accept()
+            self.assertEqual(answered, [True])
+            self.assertTrue(os.path.isdir(os.path.join(self.tempDir, "Good folder")))
+            self.assertTrue(slicer.util.toBool(settings.value(projects.ROOT_CHOSEN_KEY)))
+            # Escape on an unusable folder never blocks the application: nothing is stored, the next start asks again
+            for key in saved:
+                settings.remove(key)
+            toasts.clear()
+            answered.clear()
+            dialog = projects_ui.showChooser(lambda: answered.append(True))
+            dialog.setPath(badRoot)
+            dialog.reject()
+            self.assertEqual(len(toasts), 1, toasts)
+            self.assertEqual(answered, [True])
+            self.assertIsNone(projects_ui._chooser)
+            self.assertIsNone(settings.value(projects.ROOT_CHOSEN_KEY))
+        finally:
+            projects_ui.message = original
+            if projects_ui._chooser is not None:
+                projects_ui._chooser.reject()
+            for key, value in saved.items():
+                if value is None:
+                    settings.remove(key)
+                else:
+                    settings.setValue(key, value)
+
+
 def _sphere(center=(0, 0, 0)):
     import vtk
 
