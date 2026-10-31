@@ -510,6 +510,19 @@ class SidecarTest(ShareTestBase):
         for name in ("README.md", "CHANGES", "LICENSE"):
             self.assertTrue(os.path.isfile(os.path.join(out, name)), name)
 
+    def test_authors_only_in_citation_cff(self):
+        # BIDS (bids-validator 3.0.2: AUTHORS_AND_CITATION_FILE_MUTUALLY_EXCLUSIVE): CITATION.cff is always written, so the
+        # authors must not also be in dataset_description.json
+        result, out = self.export(authors=["Ada Lovelace", " Alan Turing ", " "])
+        with open(os.path.join(out, "dataset_description.json"), encoding="utf-8") as f:
+            self.assertNotIn("Authors", json.load(f))
+        with open(os.path.join(out, "CITATION.cff"), encoding="utf-8") as f:
+            citation = f.read()
+        self.assertIn('  - name: "Ada Lovelace"', citation)
+        self.assertIn('  - name: "Alan Turing"', citation)
+        self.assertEqual(result["validation"], {})
+        self.assertEqual(share.validate_dataset(out), {})
+
 
 class ValidatorTest(unittest.TestCase):
     def test_names(self):
@@ -554,6 +567,21 @@ class ValidatorTest(unittest.TestCase):
             shutil.rmtree(os.path.join(tmp, "sub-P002"))
             with open(os.path.join(tmp, ".bidsignore"), "w", encoding="utf-8") as f:
                 f.write("participants.tsv\n")
+            self.assertEqual(share.validate_dataset(tmp), {})
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_authors_and_citation_file_are_exclusive(self):
+        tmp = tempfile.mkdtemp(prefix="lnm_share_v_")
+        try:
+            with open(os.path.join(tmp, "dataset_description.json"), "w", encoding="utf-8") as f:
+                json.dump({"Name": "x", "BIDSVersion": share.BIDS_VERSION, "Authors": ["Ada Lovelace"]}, f)
+            self.assertEqual(share.validate_dataset(tmp), {})  # Authors alone is fine
+            with open(os.path.join(tmp, "CITATION.cff"), "w", encoding="utf-8") as f:
+                f.write("cff-version: 1.2.0\n")
+            self.assertEqual(list(share.validate_dataset(tmp)), ["CITATION.cff"])  # the official validator's location
+            with open(os.path.join(tmp, "dataset_description.json"), "w", encoding="utf-8") as f:
+                json.dump({"Name": "x", "BIDSVersion": share.BIDS_VERSION}, f)
             self.assertEqual(share.validate_dataset(tmp), {})
         finally:
             shutil.rmtree(tmp)

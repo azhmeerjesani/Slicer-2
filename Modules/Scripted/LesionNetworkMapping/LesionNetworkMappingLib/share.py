@@ -98,7 +98,7 @@ NOTHING_UPLOADED = "Nothing was uploaded. Upload these files yourself at https:/
 ALIASES = ("fmriprep", "lacuna")
 DEFAULT_OPTIONS = {
     "name": None,  # dataset name (default: the study name)
-    "authors": (),  # names for dataset_description.json and CITATION.cff
+    "authors": (),  # names for CITATION.cff (never "Authors" in dataset_description.json: BIDS allows only one of the two)
     "columns": None,  # participants.tsv columns (default: default_columns(study)); participant_id is always first
     "pseudonymise": True,
     "include_excluded": False,  # also rows with include = 0
@@ -919,6 +919,16 @@ def validate_dataset(root):
             listed = []
         if listed:
             out["participants.tsv"] = [f"lists {len(listed)} participant(s) but the dataset has no sub-<id> folder (list participants.tsv in .bidsignore)"]
+    # BIDS: the authors are in CITATION.cff or in the "Authors" of dataset_description.json, never both (the official
+    # validator: AUTHORS_AND_CITATION_FILE_MUTUALLY_EXCLUSIVE at CITATION.cff)
+    if "CITATION.cff" in files and "dataset_description.json" in files:
+        try:
+            with open(os.path.join(root, "dataset_description.json"), encoding="utf-8") as f:
+                description = json.load(f)
+        except (OSError, UnicodeDecodeError, ValueError):
+            description = None
+        if isinstance(description, dict) and "Authors" in description:
+            out["CITATION.cff"] = ['found next to "Authors" in dataset_description.json: BIDS allows the authors in only one of them']
     return out
 
 
@@ -1176,9 +1186,9 @@ def export_dataset(study, out, options=None, progress=None, cancel=None, maps=No
             "License": licence if licence != "other" else "See LICENSE",
             "GeneratedBy": [_software(options)],
         }
+        # The authors go only in CITATION.cff (always written): BIDS forbids "Authors" in dataset_description.json next to
+        # a CITATION.cff (the official validator: AUTHORS_AND_CITATION_FILE_MUTUALLY_EXCLUSIVE)
         authors = [str(author).strip() for author in options["authors"] or () if str(author).strip()]
-        if authors:
-            description["Authors"] = authors
         sources = _source_datasets(rows, mapped or (result_plan["maps"] if options["neurovault"] else []))
         if sources:
             description["SourceDatasets"] = sources
