@@ -2652,8 +2652,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.stimImportButton = qt.QPushButton(_("Import sites…"))
         self.stimImportButton.setObjectName("LNMStimImportButton")
         self.stimImportButton.setProperty("slicerRole", "secondary")
-        self.stimImportButton.setToolTip(_("A table with participant_id and x, y, z (points) or file (an E-field or VTA NIfTI, relative to the table), "
-                                           "and optionally an outcome column"))
+        self.stimImportButton.setToolTip(_("A table with participant_id and x, y, z (points, MNI mm) or file (an E-field or VTA NIfTI in MNI space, "
+                                           "relative to the table), and optionally an outcome column"))
         self.stimImportButton.connect("clicked()", self.onImportStimulation)
         row.addWidget(self.stimImportButton)
         row.addStretch(1)
@@ -2664,6 +2664,11 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         layout.addWidget(self.stimTable)
         self.stimSummaryLabel = self._label("", role="secondaryText", objectName="LNMStimSummary")
         layout.addWidget(self.stimSummaryLabel)
+        # Images not known to be in MNI space (coords.stimulation_image_space): mapped as MNI, so the user is told
+        self.stimSpaceBanner = self.widgets.banner("", (), level="warn")
+        self.stimSpaceBanner.setObjectName("LNMStimSpaceBanner")
+        self.stimSpaceBanner.hide()
+        layout.addWidget(self.stimSpaceBanner)
         form = qt.QFormLayout()
         self.stimOutcomeCombo = qt.QComboBox()
         self.stimOutcomeCombo.setObjectName("LNMStimOutcome")
@@ -2947,6 +2952,12 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         except (OSError, ValueError) as exc:
             slicer.util.errorDisplay(_("The stimulation sites cannot be read: {error}").format(error=exc), windowTitle=_("Import stimulation sites"))
             return None
+        for item in items:
+            if item.get("image") is not None:
+                try:
+                    item["space"] = coords.stimulation_image_space(item["image"])
+                except (OSError, ValueError):
+                    item["space"] = None  # an unreadable file is reported when the seeds are made
         self.stimulationItems, self.stimulationSource, self.stimulationColumns = items, path, columns
         self.stimulationMapsPath = None
         wasUpdating, self._updatingGui = self._updatingGui, True
@@ -2976,6 +2987,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         return {row["participant_id"]: row.get(column) for row in rows if row.get("participant_id")}
 
     def _showStimulation(self):
+        from LesionNetworkMappingLib import coords
+
         if not hasattr(self, "stimTable"):
             return
         kind = self.stimulationKind()
@@ -3005,6 +3018,10 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             if points:
                 text += _ownRadiusText([p for item in self.stimulationItems for p in item.get("points") or ()])
             self.stimSummaryLabel.setText(text)
+        notice = "" if points else coords.stimulation_space_notice(
+            [(os.path.basename(item.get("image") or ""), item.get("space")) for item in self.stimulationItems if item.get("image") is not None])
+        self.widgets.setBannerText(self.stimSpaceBanner, notice)
+        self.stimSpaceBanner.setVisible(bool(notice))
         enabled, reason = self.stimulationRmapState()
         self.stimRmapButton.setEnabled(enabled)
         self.stimRmapReasonLabel.setText(reason)

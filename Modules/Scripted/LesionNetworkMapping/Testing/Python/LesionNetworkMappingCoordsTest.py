@@ -356,6 +356,65 @@ class StimulationTest(CoordsTestCase):
         self.assertAlmostEqual(probabilistic.sum() * 8.0, vta.sum(), delta=1e-3)  # the volume is conserved
         self.assertTrue(set(np.unique(binary)) <= {0.0, 1.0})
 
+    def test_image_space_is_checked_recorded_and_announced(self):
+        """Stimulation images are used as MNI world mm. One not known to be in MNI space (a SimNIBS subject-space
+        magnE on an oblique scanner grid) is told apart from an MNI one (a known template grid, or a NIfTI header
+        marked MNI-152 on its own small grid, as Lead-DBS VTAs are), recorded per seed in seeds.json and named
+        in the notice shown before mapping (it used to be mapped silently, with no space anywhere).
+        """
+        def blob(shape, affine, width):
+            world = np.indices(shape).reshape(3, -1).T @ affine[:3, :3].T + affine[:3, 3]
+            return np.exp(-np.linalg.norm(world, axis=1) ** 2 / width).reshape(shape).astype(np.float32)
+
+        angle = np.deg2rad(15.0)
+        oblique = np.eye(4)
+        oblique[:3, :3] = [[1, 0, 0], [0, np.cos(angle), -np.sin(angle)], [0, np.sin(angle), np.cos(angle)]]
+        oblique[:3, 3] = (oblique[:3, :3] @ -np.array([20.0, 24.0, 20.0]))  # centred on (0, 0, 0)
+        native = os.path.join(self.tmp, "sub-01_magnE.nii.gz")
+        nifti.write_nifti(native, blob((40, 48, 40), oblique, 50.0) * 120, oblique, dtype=np.float32, sform_code=1, qform_code=1)
+        small = np.array([[0.5, 0, 0, -10.0], [0, 0.5, 0, -10.0], [0, 0, 0.5, -10.0], [0, 0, 0, 1.0]])
+        header_mni = os.path.join(self.tmp, "sub-02_vta.nii.gz")
+        nifti.write_nifti(header_mni, blob((41, 41, 41), small, 50.0), small, dtype=np.float32, sform_code=4, qform_code=4)
+        nlin6 = np.array([[-2.0, 0, 0, 90.0], [0, 2.0, 0, -126.0], [0, 0, 2.0, -72.0], [0, 0, 0, 1.0]])
+        template = os.path.join(self.tmp, "sub-03_magnE_MNI.nii.gz")
+        nifti.write_nifti(template, blob((91, 109, 91), nlin6, 50.0) * 120, nlin6, dtype=np.float32, sform_code=2, qform_code=2)
+
+        space = coords.stimulation_image_space(native)
+        self.assertEqual(space, {"mni": False, "space": None, "basis": None, "oblique": True})
+        self.assertEqual(coords.stimulation_image_space(header_mni), {"mni": True, "space": "MNI152 (NIfTI header)", "basis": "header", "oblique": False})
+        space = coords.stimulation_image_space(template)
+        self.assertTrue(space["mni"])
+        self.assertEqual((space["basis"], space["space"]), ("grid", "MNI152NLin6Asym"))
+        # An (array, affine) image has no header: only its grid can tell
+        self.assertEqual(coords.stimulation_image_space((np.zeros((41, 41, 41)), small))["mni"], False)
+
+        # The record of each seed keeps it; the seed set names the unconfirmed ones (file names only)
+        _seed, record = coords.stimulation_seed("efield", GRID_2MM, image=native)
+        self.assertFalse(record["space"]["mni"])
+        table = self.write("efields.csv", "participant_id,file\nsub-01,sub-01_magnE.nii.gz\nsub-02,sub-02_vta.nii.gz\nsub-03,sub-03_magnE_MNI.nii.gz\n")
+        out = os.path.join(self.tmp, "stim spaces")
+        coords.prepare_stimulation(out, coords.read_stimulation_table(table, "efield"), GRID_2MM, "efield")
+        seeds = coords.read_seed_record(out)
+        self.assertEqual([seed["stimulation"]["space"]["mni"] for seed in seeds["seeds"]], [False, True, True])
+        self.assertEqual(seeds["stimulation"]["space_unconfirmed"], ["sub-01"])
+        self.assertIn("Not confirmed as MNI space: sub-01", seeds["stimulation"]["placement"])
+        self.assertEqual(_absolute_strings(seeds), [])
+
+        # The notice shown before mapping names the file and says it is on an oblique (scanner-like) grid
+        notice = coords.stimulation_space_notice([("sub-01_magnE.nii.gz", coords.stimulation_image_space(native)),
+                                                  ("sub-03_magnE_MNI.nii.gz", coords.stimulation_image_space(template))])
+        self.assertIn("Not confirmed as MNI space: sub-01_magnE.nii.gz", notice)
+        self.assertNotIn("sub-03", notice)
+        self.assertIn("*_MNI", notice)
+        self.assertIn("It is on an oblique grid", notice)
+        several = coords.stimulation_space_notice([("a.nii.gz", coords.stimulation_image_space(native)), ("b.nii.gz", {"mni": False, "oblique": False})])
+        self.assertIn("Not confirmed as MNI space: a.nii.gz, b.nii.gz", several)
+        self.assertIn("1 of 2 are on an oblique grid", several)
+        self.assertEqual(coords.stimulation_space_notice([("sub-02_vta.nii.gz", coords.stimulation_image_space(header_mni))]), "")
+        points = coords.read_stimulation_table(self.write("points.csv", "participant_id,x,y,z\np1,0,0,0\n"), "points")
+        coords.prepare_stimulation(os.path.join(self.tmp, "stim points"), points, GRID_2MM, "points", radius_mm=6)
+        self.assertIn("MNI coordinates", coords.read_seed_record(os.path.join(self.tmp, "stim points"))["stimulation"]["placement"])
+
     def test_rmap_helpers(self):
         rng = np.random.default_rng(3)
         outcome = rng.normal(size=12)

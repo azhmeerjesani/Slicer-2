@@ -801,6 +801,64 @@ def atrophy_seed(wmap, rule=DEFAULT_ATROPHY_RULE, weighted=False, mask=None):
 #
 
 
+#: NIfTI xform code of MNI-152 coordinates (NIFTI_XFORM_MNI_152)
+_XFORM_MNI_152 = 4
+
+
+def stimulation_image_space(image, header=None):
+    """Where a stimulation image (E-field or VTA) is, as far as its file can tell: a dict with ``mni`` (True when the
+    image is on a known template grid (geometry.detect_space) or its NIfTI header marks it MNI-152 (sform or qform code
+    4), else False: subject/scanner space cannot be ruled out), ``space`` (the template label, "MNI152 (NIfTI header)"
+    or None), ``basis`` ("grid", "header" or None) and ``oblique`` (a rotated voxel grid: the usual sign of a
+    scanner-space image; template images are axis-aligned).
+
+    ``image``: a NIfTI path (only its header is read, unless ``header`` is given) or (array, affine). Nothing is
+    refused: an MNI image on its own small grid (a Lead-DBS VTA) also has no known grid, so the caller tells the user
+    (:func:`stimulation_space_notice`) and the seed record keeps the result.
+    """
+    from .geometry import detect_space
+
+    if isinstance(image, (str, os.PathLike)):
+        if header is None:
+            from .nifti import read_nifti_header
+
+            header = read_nifti_header(image)
+        shape, affine = tuple(header["shape"][:3]), np.asarray(header["affine"], dtype=np.float64)
+    else:
+        data, affine = image
+        shape, affine = tuple(np.shape(data)[:3]), np.asarray(affine, dtype=np.float64)
+    columns = affine[:3, :3] / np.maximum(np.linalg.norm(affine[:3, :3], axis=0), 1e-12)
+    oblique = bool(np.any(np.abs(columns).max(axis=0) < 1.0 - 1e-4))  # an axis not along x, y or z (more than ~0.8 degrees)
+    template = detect_space((shape, affine))
+    if template is not None:
+        return {"mni": True, "space": str(template[0]), "basis": "grid", "oblique": oblique}
+    if header is not None:
+        source = header.get("affine_source")
+        code = header.get("sform_code") if source == "sform" else header.get("qform_code") if source == "qform" else 0
+        if code == _XFORM_MNI_152:
+            return {"mni": True, "space": "MNI152 (NIfTI header)", "basis": "header", "oblique": oblique}
+    return {"mni": False, "space": None, "basis": None, "oblique": oblique}
+
+
+def stimulation_space_notice(names_and_spaces):
+    """Amber notice for stimulation images not known to be in MNI space, or "" when all are: ``names_and_spaces`` is
+    [(name, :func:`stimulation_image_space` dict)].
+    """
+    unknown = [name for name, space in names_and_spaces if space is not None and not space.get("mni")]
+    if not unknown:
+        return ""
+    oblique = [name for name, space in names_and_spaces if space is not None and not space.get("mni") and space.get("oblique")]
+    shown = ", ".join(unknown[:4]) + (f" and {len(unknown) - 4} more" if len(unknown) > 4 else "")
+    one = len(unknown) == 1
+    text = (f"Not confirmed as MNI space: {shown} (not on a known MNI grid and not marked MNI in the NIfTI header). "
+            + ("It is mapped as if its world mm were MNI mm" if one else "They are mapped as if their world mm were MNI mm")
+            + "; an image in subject (scanner) space gives a misplaced seed. Use MNI-space files (SimNIBS: the *_MNI field; Lead-DBS: the MNI VTA).")
+    if oblique:
+        text += (" It is on an oblique grid, typical of scanner space." if one
+                 else f" {len(oblique)} of {len(unknown)} are on an oblique grid, typical of scanner space.")
+    return text
+
+
 def stimulation_seed(kind, grid, points=None, image=None, radius_mm=None, diameter_mm=None, weighting=None, threshold=None, supersample=DEFAULT_SUPERSAMPLE):
     """Seed of one stimulation site on ``grid`` (float32 weights in [0, 1]) and its record.
 
@@ -811,7 +869,8 @@ def stimulation_seed(kind, grid, points=None, image=None, radius_mm=None, diamet
     - ``vta``: a VTA NIfTI (Lead-DBS); "binary" (occupancy >= 0.5 after resampling) or "probabilistic" (values in
       [0, 1]).
 
-    Images are resampled onto the grid by the volume-weighted mean (geometry.resample_to_grid "fraction").
+    Images are resampled onto the grid by the volume-weighted mean (geometry.resample_to_grid "fraction"). Their world
+    mm are used as MNI mm; the record's ``space`` (:func:`stimulation_image_space`) says whether that is confirmed.
     """
     from .geometry import resample_to_grid
 
@@ -834,10 +893,12 @@ def stimulation_seed(kind, grid, points=None, image=None, radius_mm=None, diamet
     if isinstance(image, (str, os.PathLike)):
         from .nifti import read_nifti
 
-        data, affine, _header = read_nifti(image)
+        data, affine, header = read_nifti(image)
         record["source"] = {"file": os.path.basename(os.fspath(image)), "sha256": _sha256(image)}
+        record["space"] = stimulation_image_space(image, header)
     else:
         data, affine = image
+        record["space"] = stimulation_image_space((data, affine))
     data = np.nan_to_num(np.asarray(data, dtype=np.float64))
     if data.ndim > 3 and data.shape[-1] == 3 and int(np.prod(data.shape[3:])) == 3:
         if kind != "efield":
@@ -1074,9 +1135,16 @@ def prepare_stimulation(out_dir, items, grid, kind, radius_mm=None, diameter_mm=
         records[pid] = record
         if entry["outcome"] is not None:
             outcomes[pid] = entry["outcome"]
+    unconfirmed = [pid for pid, record in records.items() if record.get("space") is not None and not record["space"].get("mni")]
+    if kind == "points":
+        placement = "MNI coordinates are used as the world mm of the connectome grid; no template-family warp"
+    else:
+        placement = ("Image world mm are used as the world mm of the connectome grid (MNI); no warp. "
+                     + (f"Not confirmed as MNI space: {', '.join(unconfirmed)}" if unconfirmed else "Every image is on a known MNI grid or marked MNI"))
     tsv = write_seed_set(out_dir, seeds, grid, "stimulation", {
         "stimulation": {"kind": kind, "weighting": weighting or STIMULATION_WEIGHTINGS[kind][0],
-                        "sphere": sphere_radius(radius_mm, diameter_mm)[1] if kind == "points" else None},
+                        "sphere": sphere_radius(radius_mm, diameter_mm)[1] if kind == "points" else None,
+                        "placement": placement, "space_unconfirmed": unconfirmed},
         "outcome_column": outcome_column if outcomes else None, "research_use": RESEARCH_ONLY}, mask_indices)
     if outcomes:
         write_outcome_table(os.path.join(os.path.dirname(tsv), OUTCOMES_TSV), outcomes, outcome_column)
