@@ -1098,6 +1098,38 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self._stroke("Red")
         self.assertEqual(lesion.GetSegmentation().GetConversionParameter(geometryName), recorded)
 
+    def test_single_slice_scan_draw_says_why(self):
+        """A one-slice grayscale scan is shown but never a Draw source (a 2D image is not traced): the empty state says so
+        instead of asking for a scan, and "Save lesion" has nothing to save; a 3D scan then traces as usual.
+        """
+        from StudioLib import importer
+
+        studioShell = self._applyStudio()
+        path = self._writeVolume("sub-20_T1w.nii.gz", ((40, 50, 1), 0.8, (1, 1, 1), (0.0, 0.0, 0.0)))
+        importer.loadFiles([path], studioShell)
+        self._pump(8)
+        studioShell.switchTo("draw")
+        self._pump(4)
+        editor = self._editor()
+        self.assertIsNone(editor.sourceVolumeNode())
+        emptyState = self._drawEmptyState()
+        self.assertTrue(emptyState.isVisible())
+        text = str(emptyState.findChild("QLabel", "StudioDrawEmptyStateText").text)
+        self.assertIn("sub-20_T1w", text)
+        self.assertIn("single slice", text)
+        self.assertNotIn("Open a scan in Library", text)
+        saveButton = self.mainWindow.findChild("QPushButton", "StudioSaveLesionButton")
+        self.assertIsNotNone(saveButton)
+        self.assertFalse(saveButton.isEnabled())
+
+        # Without it, the plain empty state comes back
+        slicer.mrmlScene.Clear(0)
+        self._pump(6)
+        studioShell.switchTo("draw")
+        self._pump(4)
+        text = str(self._drawEmptyState().findChild("QLabel", "StudioDrawEmptyStateText").text)
+        self.assertEqual(text, "Open a scan in Library or start on the MNI template")
+
     def test_lesion_only_native(self):
         """A lesion in scan space alone is never shown on the template; its sidecar's scan is offered and opens with it."""
         from StudioLib import importer

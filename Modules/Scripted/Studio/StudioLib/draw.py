@@ -264,6 +264,21 @@ def _editableVolumes():
     return [node for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode") if _isEditableSource(node)]
 
 
+def _singleSliceVolume():
+    """The scan that is open but cannot be traced only because it is a single slice (SPEC 6.7: a 2D image is never a source),
+    or None: a grayscale one-slice image (a figure, map or colour image is not a scan, and has its own route).
+    """
+    for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
+        if node.IsA("vtkMRMLLabelMapVolumeNode") or node.IsA("vtkMRMLVectorVolumeNode"):
+            continue
+        if node.GetAttribute("Studio.Role") in ("figure", "statmap"):
+            continue
+        imageData = node.GetImageData()
+        if imageData is not None and 1 in imageData.GetDimensions():
+            return node
+    return None
+
+
 def _isTemplateVolume(node):
     if node is None:
         return False
@@ -3448,7 +3463,6 @@ class _EmptyState:
             importer = _importer()
             shell = self.ext._shell()
             if offer is None:
-                self.label.setText(_("Open a scan in Library or start on the MNI template"))
                 self._button(_("Open…"), lambda: shell.openFiles() if shell is not None else None, "StudioDrawOpenButton", primary=True)
                 if importer is not None:
                     self._button(_("Start on MNI template"), lambda: importer.startOnTemplate(shell=shell), "StudioDrawStartOnTemplateButton")
@@ -3465,6 +3479,16 @@ class _EmptyState:
                 ui.setRole(link, "ghost")
                 link.connect("clicked()", offer["showOnTemplate"])
                 self.buttons.addWidget(link)
+        if offer is None:
+            # Not part of the cached buttons: a single-slice image may be opened or closed while the offer stays None
+            singleSlice = _singleSliceVolume() if not _editableVolumes() else None
+            if singleSlice is not None:
+                text = _("{name} has a single slice, so it cannot be traced. Open a 3D scan or start on the MNI template.").format(
+                    name=singleSlice.GetName())
+            else:
+                text = _("Open a scan in Library or start on the MNI template")
+            if str(self.label.text) != text:
+                self.label.setText(text)
         self.widget.show()
 
 
@@ -3697,7 +3721,9 @@ class _CtaFooter:
             self.saveButton.setText(label)
         self.saveButton.setToolTip(toolTip)
         self.saveButton.setAccessibleName(label)
-        self.saveButton.setEnabled(segmentationNode is not None)
+        # Nothing to save while the only open image is a single slice: Draw says why it cannot be traced
+        untraceable = _source is None and not _editableVolumes() and _singleSliceVolume() is not None
+        self.saveButton.setEnabled(segmentationNode is not None and not untraceable)
         secondary = self._secondaryAction(segmentationNode, study)
         self._secondary = secondary
         self.secondaryButton.setVisible(secondary is not None)
