@@ -2089,6 +2089,114 @@ class StudioRegressionTest(unittest.TestCase):
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
 
+    def test_28_reviewed_lesion_edited_and_left_is_reviewed_again(self):
+        """An approved (or rejected) lesion edited and then left without Done (Alt+arrows, opening another subject, the close
+        prompt) kept its review and passed the review gate: an approval is for the voxels that were reviewed. Such a write
+        now reopens the review (→ pending, audited ``via`` "leave", in the sidecar too); a write with the same voxels keeps
+        it, and a rejected lesion stays excluded (BB-1).
+        """
+        from LesionNetworkMappingLib import geometry, nifti
+        from LesionNetworkMappingLib import review as rules
+
+        from StudioLib import shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Review study")
+        os.makedirs(folder)
+        scans = []
+        for sid in ("sub-01", "sub-02", "sub-03"):
+            scans.append(os.path.join(folder, f"{sid}_T1w.nii.gz"))
+            nifti.write_nifti(scans[-1], np.zeros(grid.shape, np.uint8), grid.affine)
+        originalToast = study_ui._toast
+        study_ui._toast = lambda shell, text, **kwargs: None
+        self.addCleanup(setattr, study_ui, "_toast", originalToast)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+
+        def pump():
+            for _ in range(4):
+                slicer.app.processEvents()
+
+        def paint(box):
+            segmentationNode, volumeNode = session.segmentationNode(), session.volumeNode()
+            segmentId = segmentationNode.GetSegmentation().GetNthSegmentID(0)
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, volumeNode)
+            array[box] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, volumeNode)
+            pump()
+
+        def reviewed(sid, to, reason=None):
+            """Trace ``sid`` (Done) and record the reviewer's decision ``to``."""
+            session.open(sid, switchToDraw=False)
+            paint(np.s_[20:23, 30:33, 20:23])
+            self.assertIsNotNone(session.done())
+            pump()
+            if rules.status_of(session.study.subject(sid)) == "none":
+                rules.apply_transition(session.study, sid, "pending", "Tracer")
+            rules.apply_transition(session.study, sid, to, "Rita Reviewer", reason=reason)
+            session.flush()
+
+        def gate():
+            return [row["participant_id"] for row in session.study.analysis_rows(require_review=True)[0]]
+
+        def sidecarReview(sid):
+            with open(session.study.lesion_sidecar_path(sid), encoding="utf-8") as f:
+                return json.load(f).get("SlicerStudio", {}).get("review", {}).get("status")
+
+        try:
+            session = study_ui.createStudy(scans, studioShell, folder=folder)
+            self.assertIsNotNone(session)
+            session.study.review_required = True
+            session.flush()
+            reviewed("sub-01", "approved")
+            reviewed("sub-02", "approved")
+            reviewed("sub-03", "rejected", reason="image quality")
+            self.assertEqual(gate(), ["sub-01", "sub-02"])
+
+            # Reopened and rewritten with the same voxels: the approval stands
+            session.open("sub-02", switchToDraw=False)
+            session.markDirty()
+            self.assertTrue(session.writeCurrent())
+            self.assertEqual(session.study.subject("sub-02")["review_status"], "approved")
+
+            # Edited and left by opening another subject: pending again, audited, out of the gate, a later Done keeps it
+            session.open("sub-01", switchToDraw=False)
+            paint(np.s_[30:33, 40:43, 30:33])
+            session.open("sub-02", switchToDraw=False)
+            row = session.study.subject("sub-01")
+            self.assertEqual(row["review_status"], "pending", "an approved lesion changed after the approval is still approved")
+            self.assertEqual(gate(), ["sub-02"])
+            last = rules.history(session.study, "sub-01")[-1]
+            self.assertEqual((last["from"], last["to"], last["via"]), ("approved", "pending", "leave"))
+            self.assertEqual(sidecarReview("sub-01"), "pending")
+            session.open("sub-01", switchToDraw=False)
+            self.assertIsNotNone(session.done())
+            pump()
+            self.assertEqual(session.study.subject("sub-01")["review_status"], "pending")
+
+            # Edited and written by the close prompt (writeCurrent)
+            session.open("sub-02", switchToDraw=False)
+            paint(np.s_[30:33, 40:43, 30:33])
+            self.assertTrue(session.writeCurrent())
+            self.assertEqual(session.study.subject("sub-02")["review_status"], "pending")
+            self.assertEqual(gate(), [])
+
+            # A rejected lesion edited and left: pending, and still excluded until a reviewer approves it
+            session.open("sub-03", switchToDraw=False)
+            paint(np.s_[30:33, 40:43, 30:33])
+            self.assertEqual(session.previous(), "sub-02")
+            row = session.study.subject("sub-03")
+            self.assertEqual(row["review_status"], "pending")
+            self.assertEqual(str(row["include"]), "0")
+        finally:
+            study_ui.closeStudy()
+            studioShell.dispose()
+            pump()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
+
     def test_27_sources_undo_reverts_the_change_just_made(self):
         """Sources card: P and X move the selection to the next record, and U then undid that record's earlier decision (and
         deleted it from the search log) instead of the change just made, without a word. U now undoes the change just made,

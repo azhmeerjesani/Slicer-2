@@ -21,7 +21,8 @@ A study is a plain folder (``LesionNetworkMappingLib.study``): ``study.json``, `
   ``lesions/<sid>_space-<space>_desc-lesion_mask.nii.gz`` (a lesion already under ``lesions/`` is overwritten; one
   anywhere else, including ``derivatives/`` and the files of an adopted folder, is never modified: the row is
   repointed), with its BIDS sidecar, updates ``participants.tsv`` (status traced, volume, parts, gaps, centroid,
-  trace time) and opens the next untraced subject. ``Alt+←/→`` write the same way without marking the subject traced.
+  trace time) and opens the next untraced subject. ``Alt+←/→`` write the same way without marking the subject traced;
+  such a write that changes the voxels of an approved or rejected lesion reopens its review (→ pending, audited).
   Leaving a subject never fails because of its lesion's content: an erased lesion writes nothing (its file is kept,
   a toast says so) and edits that cancel out (paint, then undo) leave the file and the row untouched.
 - A subject switch pauses the rendering of the views (one render when it ends) instead of showing a wait cursor that
@@ -3179,6 +3180,9 @@ class StudySession:
         brainMask = _loadBrainMask() if spaceName == "MNI152NLin2009cAsym" else None
         values = metricsValues(array, ijkToRas, spaceName, brainMask)
         target, reviewEdit = self._lesionTarget(sid, row, spaceName)
+        # An approval (or rejection) is for the voxels that were reviewed: a write without Done (leaving the subject, the
+        # close prompt) that changes them reopens the review (→ pending, audited); on Done the review Done hook does it
+        reopenReview = None if runHooks else self._reviewAfterEdit(row, mask)
         extras = {}
         if runHooks:
             ctx = self._context(sid)
@@ -3240,7 +3244,8 @@ class StudySession:
         self.study.set(sid, updates)
         stat = os.stat(target)
         self.study.set(sid, lesion_mtime=round(stat.st_mtime, 3), lesion_size=stat.st_size)
-        self._writeSidecar(sid, segmentationNode)
+        reviewValues = self._reopenReview(sid, reopenReview) if reopenReview else None
+        self._writeSidecar(sid, segmentationNode, studio=reviewValues)
         self.flush(lockTimeout=SAVE_LOCK_TIMEOUT_S)
         # The written file now defines the grid; the edits are written
         self._gridReference = target
@@ -3254,6 +3259,33 @@ class StudySession:
             self._journal.discard(sid)
         _notify(self)
         return {"sid": sid, "path": target, "values": updates, "conflict": conflict}
+
+    def _reviewAfterEdit(self, row, mask):
+        """The review state of the current subject after its lesion is written with ``mask`` without Done: "pending" when
+        an approved or rejected lesion gets other voxels (``review.status_after_done``, edited), else None (kept).
+        """
+        rules = _reviewRules()
+        if rules is None or rules.status_of(row) not in ("approved", "rejected") or self._sameAsLesionFile(mask):
+            return None
+        return rules.status_after_done(self.study, row, edited=True)
+
+    def _reopenReview(self, sid, target):
+        """Move the review of ``sid`` to ``target`` after its reviewed lesion was rewritten without Done (audited, ``via``
+        "leave"). Return the ``SlicerStudio`` sidecar values of the new review state, or None when it was not recorded.
+        """
+        rules = _lnm("review")
+        try:
+            from . import review as studioReview
+
+            who = studioReview.storedRaterName() or studioReview.UNNAMED
+        except Exception:
+            who = "unnamed"
+        try:
+            rules.apply_transition(self.study, sid, target, who, extra={"via": "leave", "edited": True})
+        except Exception:
+            logging.error(f"Studio: the review of {sid} could not be reopened after its lesion changed:\n{traceback.format_exc()}")
+            return None
+        return {"review": rules.sidecar_values(self.study, self.study.subject(sid))["review"]}
 
     @staticmethod
     def _recordSaved(segmentationNode, path):
@@ -3300,12 +3332,13 @@ class StudySession:
         current = tuple(segmentationNode.GetAttribute(attribute) or "" for _key, attribute in self._sidecarTextKeys())
         return current != tuple(self._sidecarText)
 
-    def _writeSidecar(self, sid, segmentationNode):
+    def _writeSidecar(self, sid, segmentationNode, studio=None):
         """The BIDS sidecar of the lesion (``Study.write_lesion_sidecar``) with Draw's Notes and source reference (W2-05).
-        A value cleared on the lesion is removed from the sidecar. Return None, or the error when it was not written.
+        A value cleared on the lesion is removed from the sidecar. ``studio``: more ``SlicerStudio`` values. Return None,
+        or the error when it was not written.
         """
         try:
-            path = self.study.write_lesion_sidecar(sid, studio={"generated_by": f"Slicer Studio {slicer.app.applicationVersion}"})
+            path = self.study.write_lesion_sidecar(sid, studio={"generated_by": f"Slicer Studio {slicer.app.applicationVersion}", **(studio or {})})
             with open(path, encoding="utf-8") as f:
                 content = json.load(f)
             changed = False
