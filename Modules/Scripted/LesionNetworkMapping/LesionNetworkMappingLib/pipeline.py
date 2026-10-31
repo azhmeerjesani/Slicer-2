@@ -2178,8 +2178,11 @@ class Runner:
     def _stage_maps(self, planned):
         rows = self.mapped_rows
         provider = self.providers["maps"]
+        # --recompute is not a parameter: it makes this run compute (``_reusable``) but the maps are the same, so a later run
+        # without it (the next "Run everything", or the resume after a Stop) reuses them and every stage built on them. The key
+        # stays, always False, so that the stages saved by earlier versions keep their fingerprints.
         params = {"lesions": sorted((row["participant_id"], row["sha256"]) for row in rows), "manifest": self.plan.manifest_sha256, "subjects": self.plan.subjects_sha256, "null_k": self.null_k,
-                  "null_seed": self.config.null_seed, "preview": self.config.preview_n, "recompute": bool(self.config.recompute)}
+                  "null_seed": self.config.null_seed, "preview": self.config.preview_n, "recompute": False}
         fp, reused = self._cached("maps", params, ("normalize",))
         if reused is not None:
             self._apply_maps(reused["result"])

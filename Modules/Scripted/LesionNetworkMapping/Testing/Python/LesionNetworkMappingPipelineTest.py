@@ -784,6 +784,39 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         self.assertEqual((code, calls), (0, []))
         self.assertEqual((stage_status(events).get("export"), stage_status(events).get("report")), ("reused", "reused"))
 
+    def test_recompute_run_is_reused_by_the_next_run(self):
+        """--recompute ("Recompute everything") forces its own run only: the stages it completed are reused by the next run without
+        it, after a stop in the report (A-04c: completed work is kept and resumed on the next click) and after a finished run.
+        """
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f-recompute"))
+        out = fx["out"]
+        stopped = {}
+
+        def on_event(event, process):
+            if "at" not in stopped and event["event"] == "stage" and event.get("name") == "report" and event.get("status") == "running":
+                open(os.path.join(out, pipeline.PRIVATE_DIR, pipeline.STOP_NAME), "w").close()
+                stopped["at"] = event["_wall"]
+
+        code, events, _stdout, stderr, _wall = cli(*run_args(fx, *FAST, "--recompute"), on_event=on_event)
+        self.assertIn("at", stopped, "the report stage was reached")
+        self.assertEqual(code, 3, stderr[-2000:])
+        completed = [name for name, status in stage_status(events).items() if status == "done" and name not in ("prepare", "preflight", "export", "report")]
+        self.assertIn("maps", completed)
+        self.assertIn("specificity", completed)
+        # The resume without --recompute computes only what the stop left (the export is written again for the finished run)
+        code, events, _stdout, stderr, _wall = cli(*run_args(fx, *FAST))
+        self.assertEqual(code, 0, stderr[-2000:])
+        status = stage_status(events)
+        self.assertEqual({name: status.get(name) for name in completed}, dict.fromkeys(completed, "reused"))
+        self.assertEqual(status.get("report"), "done")
+        # A finished --recompute run, then a run without it: nothing is computed and no process starts
+        code, events, _stdout, stderr, _wall = cli(*run_args(fx, *FAST, "--recompute"))
+        self.assertEqual(code, 0, stderr[-2000:])
+        self.assertEqual(stage_status(events)["maps"], "done")
+        code, events, calls, _seconds = run_in_process(fx, *FAST)
+        self.assertEqual((code, calls), (0, []))
+        self.assertEqual(stage_status(events)["maps"], "reused")
+
     def test_no_stale_group_maps_after_skip_or_stop(self):
         """GLM and conjunction maps of an earlier run never pass for the results of a run that skipped or stopped those stages."""
         fx = fixture.make_fixture(os.path.join(self.tmp, "f-stale"))
