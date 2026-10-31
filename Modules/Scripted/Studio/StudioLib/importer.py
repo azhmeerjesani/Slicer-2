@@ -11,7 +11,9 @@ Unambiguous files load directly, without the Add Data dialog:
   opened in Studio has the same content);
 - other NIfTI, NRRD and MetaImage files are loaded as scalar volumes and shown in all slice views;
 - a 4D NIfTI image (fMRI, a 4D mask: ``isNifti4D()``), which the volume reader refuses, is loaded as a sequence (as
-  3D Slicer's Add Data does), whatever its name; the volume that shows its current time point is the scan;
+  3D Slicer's Add Data does), whatever its name; the volume that shows its current time point is the scan. So is a
+  NRRD volume sequence (``.seq.nrrd`` as 3D Slicer saves it, or a 4D NRRD with a list or time axis:
+  ``isNrrdSequence()``), which the volume reader would read as one colour (vector) volume;
 - ``.mrb`` and ``.mrml`` files are loaded as scenes. They keep their own layout and views; a scene opened in
   Library is shown in Draw (the Library page covers the views). In Studio with a project open, a scene opens as its
   own project instead of being added to the open one (A-09: the open project is saved and closed first).
@@ -91,6 +93,10 @@ STATMAP_INTENT_CODES = (2, 3, 5)
 BIDS_SUBJECT_PATTERN = re.compile(r"(?i)(?:^|[_\-./\\])(sub-[a-z0-9]+)")
 #: Segmentation files that store segment names and colors: they are kept as they are
 SEGMENTATION_FILE_EXTENSIONS = (".seg.nrrd", ".seg.nhdr", ".seg.vtm")
+#: Volume sequences as 3D Slicer saves them (the Sequences reader's own extensions)
+SEQUENCE_FILE_EXTENSIONS = (".seq.nrrd", ".seq.nhdr")
+#: NRRD extensions, of a volume or of a volume sequence
+NRRD_EXTENSIONS = (".nrrd", ".nhdr")
 #: Field of a segment in the header of a NRRD file written by Slicer ("Segment0_Name:=Tumor")
 SEGMENT_FIELD_PATTERN = re.compile(rb"^Segment\d+_(ID|Name|Color|Tags|LabelValue):=", re.MULTILINE)
 #: At most this many bytes of a NRRD file are read to find segment fields
@@ -192,9 +198,9 @@ def _currentShell(shell=None):
 
 
 def _extension(path):
-    """Lowercase extension of a file, including the compound extensions .nii.gz and .seg.nrrd."""
+    """Lowercase extension of a file, including the compound extensions .nii.gz, .seg.nrrd and .seq.nrrd."""
     name = os.path.basename(path).lower()
-    for compound in (".nii.gz", *SEGMENTATION_FILE_EXTENSIONS):
+    for compound in (".nii.gz", *SEGMENTATION_FILE_EXTENSIONS, *SEQUENCE_FILE_EXTENSIONS):
         if name.endswith(compound):
             return compound
     return os.path.splitext(name)[1]
@@ -216,8 +222,9 @@ def fileKind(path):
     """How a dropped or opened path is loaded: "folder", "scene", "sequence", "lesion", "statmap", "volume", "figure", "table"
     or "other".
 
-    A 4D NIfTI image (fMRI, a 4D mask) is a "sequence" whatever its name: the volume reader cannot read it. Lesion names
-    have priority over statistical map names.
+    A 4D NIfTI image (fMRI, a 4D mask) is a "sequence" whatever its name: the volume reader cannot read it. So is a NRRD
+    volume sequence (``isNrrdSequence()``), which the volume reader would read as one vector volume. Lesion names have
+    priority over statistical map names.
     """
     if os.path.isdir(path):
         return "folder"
@@ -227,6 +234,8 @@ def fileKind(path):
     if extension in SEGMENTATION_FILE_EXTENSIONS:
         return "lesion"
     if extension in NIFTI_EXTENSIONS and isNifti4D(path):
+        return "sequence"
+    if isNrrdSequence(path):
         return "sequence"
     if extension in VOLUME_EXTENSIONS:
         if isLesionName(path):
@@ -279,6 +288,24 @@ def isNifti4D(path):
         return False
     dims = niftiDimensions(path)
     return dims is not None and 4 <= dims[0] <= 7 and dims[4] > 1
+
+
+def isNrrdSequence(path):
+    """True for a NRRD volume sequence, which 3D Slicer loads with its Sequences reader ("SequenceFile").
+
+    A ``.seq.nrrd`` or ``.seq.nhdr`` file (as 3D Slicer saves a sequence) is one by its name. For another NRRD file, 3D
+    Slicer's choice of reader decides (``coreIOManager().fileType()``): a 4D NRRD with a list or time axis is a sequence,
+    while a segmentation or a diffusion (DWI) NRRD keeps its own reader.
+    """
+    extension = _extension(path)
+    if extension in SEQUENCE_FILE_EXTENSIONS:
+        return True
+    if extension not in NRRD_EXTENSIONS or not os.path.isfile(path):
+        return False
+    try:
+        return slicer.app.coreIOManager().fileType(str(path)) == "SequenceFile"
+    except Exception:
+        return False
 
 
 def niftiIntentCode(path):

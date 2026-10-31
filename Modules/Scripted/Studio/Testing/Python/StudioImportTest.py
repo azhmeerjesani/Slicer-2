@@ -421,6 +421,73 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             f.write(bytes(header))
         self.assertFalse(importer.isNifti4D(vector))
 
+    def test_nrrd_sequence_opens_as_sequence(self):
+        """BB-1: a NRRD volume sequence (``.seq.nrrd`` as 3D Slicer saves it, or a 4D NRRD with a list axis) opens as a
+        sequence, as in 3D Slicer, and its current frame is the scan of Draw: the volume reader would read its frames as one
+        vector volume (a colour image) and Draw would have no scan.
+        """
+        from StudioLib import importer
+
+        # A sequence of 3 frames saved by 3D Slicer's own writer
+        sequenceNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSequenceNode", "StudioImportTestSequence")
+        rng = np.random.default_rng(5)
+        for index in range(3):
+            frame = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", f"StudioImportTestFrame{index}")
+            slicer.util.updateVolumeFromArray(frame, (rng.random((8, 12, 16)) * 100).astype(np.int16))
+            frame.SetSpacing(2.0, 2.0, 3.0)
+            sequenceNode.SetDataNodeAtValue(frame, str(index))
+            slicer.mrmlScene.RemoveNode(frame)
+        seqPath = os.path.join(self.directory, "fmri_run.seq.nrrd")
+        self.assertTrue(slicer.util.saveNode(sequenceNode, seqPath))
+        slicer.mrmlScene.RemoveNode(sequenceNode)
+        # A 4D NRRD with a list axis and a generic extension, written by hand
+        listPath = os.path.join(self.directory, "task_bold.nrrd")
+        data = (rng.random((3, 8, 12, 16)) * 100).astype("<i2")
+        with open(listPath, "wb") as f:
+            f.write(b"NRRD0004\ntype: short\ndimension: 4\nspace: left-posterior-superior\nsizes: 16 12 8 3\n"
+                    b"space directions: (2,0,0) (0,2,0) (0,0,3) none\nkinds: domain domain domain list\n"
+                    b"endian: little\nencoding: raw\nspace origin: (0,0,0)\n\n")
+            f.write(data.tobytes())
+        plain = os.path.join(self.directory, "sub-31_T1w.nrrd")
+        self.assertTrue(slicer.util.saveNode(self._volumeNode(), plain))
+
+        # Detection: as 3D Slicer chooses its reader
+        for path in (seqPath, listPath):
+            self.assertEqual(slicer.app.coreIOManager().fileType(path), "SequenceFile", path)
+            self.assertEqual(importer.fileKind(path), "sequence", path)
+            self.assertTrue(importer.isNrrdSequence(path), path)
+        self.assertFalse(importer.isNrrdSequence(plain))
+        self.assertEqual(importer.fileKind(plain), "volume")
+        self.assertEqual(importer.fileKind(os.path.join(self.directory, "brain.seg.nrrd")), "lesion")
+        self.assertEqual(importer._baseName(seqPath), "fmri_run")
+
+        # Studio: Open... and drop load it as a sequence, and its current frame is the scan of Draw
+        studioShell = self._applyStudio()
+        for path, name in ((seqPath, "fmri_run"), (listPath, "task_bold")):
+            slicer.mrmlScene.Clear(0)
+            self._pump()
+            result = importer.handleDrop([path], shell=studioShell) if name == "fmri_run" else importer.loadFiles([path], studioShell)
+            self._pump()
+            self.assertEqual(result.errors, [], path)
+            self.assertEqual(len(result.volumes), 1, path)
+            proxy = result.volumes[0]
+            self.assertTrue(proxy.IsA("vtkMRMLScalarVolumeNode"), proxy.GetClassName())
+            self.assertFalse(proxy.IsA("vtkMRMLVectorVolumeNode"), proxy.GetClassName())
+            self.assertEqual(proxy.GetImageData().GetNumberOfScalarComponents(), 1)
+            self.assertEqual(slicer.util.getNodesByClass("vtkMRMLVectorVolumeNode"), [])
+            sequences = slicer.util.getNodesByClass("vtkMRMLSequenceNode")
+            self.assertEqual(len(sequences), 1, path)
+            self.assertEqual(sequences[0].GetNumberOfDataNodes(), 3)
+            self.assertEqual(importer._backgroundVolume().GetID(), proxy.GetID())
+            _segmentationNode, sourceVolume = importer._editedNodes()
+            self.assertIsNotNone(sourceVolume, path)
+            self.assertEqual(sourceVolume.GetID(), proxy.GetID())
+
+    def _volumeNode(self):
+        node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "StudioImportTestPlain")
+        slicer.util.updateVolumeFromArray(node, np.zeros((8, 12, 16), np.int16))
+        return node
+
     def test_damaged_study_json_is_reported_in_plain_words(self):
         """A study folder whose study.json is damaged (cut short, empty, not a study) that is dropped on the window or opened
         shows a plain message that study.json cannot be read, never a traceback or a parser message, and opens no study.
