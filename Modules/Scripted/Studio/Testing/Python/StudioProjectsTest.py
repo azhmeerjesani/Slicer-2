@@ -3495,6 +3495,80 @@ class StudioProjectsTest(unittest.TestCase):
         conflicts = sorted(conflict for event, info in announced if event == "conflict" for conflict in info["conflicts"])
         self.assertEqual(conflicts, [("Derived.nrrd", "Derived (Slicer Studio).nrrd"), ("Scan.nrrd", "Scan (Slicer Studio).nrrd")])
 
+    def test_61_reopening_a_project_keeps_one_data_tree_item_per_node(self):
+        """Opening a project loads its scene with clearing the scene first. That used to give every image and lesion one
+        more subject hierarchy item at each open, which the next save wrote into the project scene (official 3D Slicer
+        then listed each node several times in the Data module). A project scene that already has repeated items is
+        repaired when it is opened: one item per node, the lesion keeps its segment.
+        """
+        import re
+        import xml.etree.ElementTree as ET
+
+        service = self._service()
+        volume, _path = self._userVolume("Scan", shape=(12, 14, 16), extension=".nrrd")
+        self._lesion(volume)
+        project = self._projectFor(service)
+        self._save(service)
+        projectPath = project.path
+        scenePath = self.projects.sceneFile(projectPath)
+
+        def runtimeItems():
+            shNode = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(slicer.mrmlScene)
+            ids = vtk.vtkIdList()
+            shNode.GetItemChildren(shNode.GetSceneItemID(), ids, True)
+            counts = {}
+            for index in range(ids.GetNumberOfIds()):
+                node = shNode.GetItemDataNode(ids.GetId(index))
+                name = node.GetName() if node else shNode.GetItemName(ids.GetId(index))
+                counts[name] = counts.get(name, 0) + 1
+            return counts
+
+        def fileItems():
+            with open(scenePath, encoding="utf-8") as f:
+                dataNodes = re.findall(r'<SubjectHierarchyItem id="\d+" dataNode="([^"]+)"', f.read())
+            return {dataNode: dataNodes.count(dataNode) for dataNode in dataNodes}
+
+        expected = runtimeItems()  # the image, the lesion and its segment
+        self.assertEqual(sorted(expected.values()), [1, 1, 1], expected)
+        self.assertEqual(sorted(fileItems().values()), [1, 1])
+        for cycle in range(3):
+            with self.subTest(cycle=cycle):
+                slicer.mrmlScene.Clear(0)
+                self.io.backgroundWriter().drain(10.0)
+                self.assertIsNone(service.project)
+                self.assertTrue(service.openProject(projectPath))
+                self.assertEqual(runtimeItems(), expected, "one item per node after opening the project")
+                lesions = slicer.mrmlScene.GetFirstNodeByName("Lesions")
+                lesions.GetSegmentation().GetNthSegment(0).SetColor(0.2 * cycle, 0.5, 0.9)  # an edit: the project is saved
+                self._save(service)
+                self.assertEqual(sorted(fileItems().values()), [1, 1], "one item per node in the saved project scene")
+
+        # A project scene saved before the fix: every data node item (with its segment branch) is there four times
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        tree = ET.parse(scenePath)
+        sceneItem = tree.getroot().find("SubjectHierarchy/SubjectHierarchyItem")
+        dataItems = [item for item in sceneItem.findall("SubjectHierarchyItem") if item.get("dataNode")]
+        nextId = max(int(item.get("id")) for item in tree.getroot().iter("SubjectHierarchyItem")) + 1
+        for _copy in range(3):
+            for dataItem in dataItems:
+                copied = ET.fromstring(ET.tostring(dataItem))
+                for item in copied.iter("SubjectHierarchyItem"):  # parents come before their children
+                    item.set("id", str(nextId))
+                    for child in item.findall("SubjectHierarchyItem"):
+                        child.set("parent", str(nextId))
+                    nextId += 1
+                sceneItem.append(copied)
+        tree.write(scenePath, encoding="utf-8", xml_declaration=True)
+        self.assertEqual(sorted(fileItems().values()), [4, 4])
+        self.assertTrue(service.openProject(projectPath))
+        self.assertEqual(runtimeItems(), expected, "the repeated items are not loaded")
+        lesions = slicer.mrmlScene.GetFirstNodeByName("Lesions")
+        self.assertEqual(lesions.GetSegmentation().GetNumberOfSegments(), 1, "the lesion keeps its segment")
+        lesions.GetSegmentation().GetNthSegment(0).SetColor(0.9, 0.1, 0.1)
+        self._save(service)
+        self.assertEqual(sorted(fileItems().values()), [1, 1], "the project scene is repaired at the next save")
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk

@@ -356,6 +356,14 @@ void qSlicerSubjectHierarchyPluginLogic::onSceneImportEnded(vtkObject* sceneObje
   {
     return;
   }
+  if (scene->IsBatchProcessing())
+  {
+    // The import is part of a batch process (vtkMRMLScene::Connect, used when loading a scene with clearing
+    // the current scene). The imported subject hierarchy node cannot be merged now (ResolveSubjectHierarchy
+    // does not merge during batch processing), so adding the supported data nodes here would give each data
+    // node of the imported hierarchy a second item. Both are done when the batch process ends.
+    return;
+  }
 
   // This call is needed to trigger merging the imported subject hierarchy node containing the
   // unresolved items into the singleton subject hierarchy node in the current scene. This would
@@ -413,6 +421,9 @@ void qSlicerSubjectHierarchyPluginLogic::onSceneBatchProcessEnded(vtkObject* sce
   {
     return;
   }
+  // Merge a subject hierarchy node imported during the batch process (see onSceneImportEnded) into the
+  // singleton subject hierarchy node first, so that only the data nodes missing from it are added below
+  vtkMRMLSubjectHierarchyNode::ResolveSubjectHierarchy(scene);
   vtkMRMLSubjectHierarchyNode* shNode = scene->GetSubjectHierarchyNode();
   if (!shNode)
   {
