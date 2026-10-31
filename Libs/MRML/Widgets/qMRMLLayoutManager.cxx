@@ -586,7 +586,11 @@ void qMRMLLayoutManagerPrivate::onSceneAboutToBeClosedEvent()
     return;
   }
   // remove the layout during closing.
-  q->clearLayout();
+  // The layout document is reset too (clearLayout() alone keeps it): when the scene is closed for loading a
+  // scene (batch processing), the layout is set again only after the load, and ctkLayoutManager::setLayout()
+  // does not set up the views when the new layout has the same content as the current document. Views of
+  // a scene loaded with the layout shown before closing would be left outside the layout, on top of each other.
+  q->setLayout(QDomDocument());
 }
 
 //------------------------------------------------------------------------------
