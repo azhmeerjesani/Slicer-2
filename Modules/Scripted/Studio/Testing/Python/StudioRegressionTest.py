@@ -2647,3 +2647,92 @@ class StudioRegressionTest(unittest.TestCase):
                 slicer.app.processEvents()
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
+
+    # A QC key in a QC filter leaves no hidden selection (BB-1)
+
+    def test_32_qc_key_in_a_qc_filter_moves_to_the_next_row(self):
+        """P / X in a filter of the QC column (QC fail, Normalization to review) took the row out of the list but kept it in
+        the shared selection: nothing was visibly selected, the next key did nothing, and the cards ("Redo N selected",
+        BATCH) acted on the hidden row. The selection now goes on to the row that takes its place (BB-1).
+        """
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import library, shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Queue study")
+        os.makedirs(folder)
+        paths = []
+        for index in range(1, 6):
+            paths.append(os.path.join(folder, f"sub-0{index}_T1w.nii.gz"))
+            nifti.write_nifti(paths[-1], np.zeros(grid.shape, np.uint8), grid.affine)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+
+        def pump():
+            for _ in range(6):
+                slicer.app.processEvents()
+
+        try:
+            session = study_ui.createStudy(paths, studioShell, folder=folder)
+            self.assertIsNotNone(session)
+            session.setQc(["sub-01", "sub-02", "sub-03", "sub-04"], "fail")
+            # The subject list of the Library canvas (the only list in Studio: the selection is pruned to the rows it shows)
+            studioShell.switchTo("library")
+            pump()
+            library.canvas().refreshData()
+            studyList = library.canvas().studyPage.list
+            studyList.setFilter("qcfail")
+            pump()
+            table, model = studyList.table, studyList.model
+            self.assertEqual([model.sid(row) for row in range(model.rowCount())], ["sub-01", "sub-02", "sub-03", "sub-04"])
+            table.selectionModel().setCurrentIndex(model.index(0, 0), qt.QItemSelectionModel.ClearAndSelect | qt.QItemSelectionModel.Rows)
+            pump()
+            self.assertEqual(library.studySelection(), ["sub-01"])
+            # P passes sub-01, which leaves the list: sub-02 is selected (and the keyboard cursor is on it)
+            studyList.setQc("pass")
+            pump()
+            self.assertEqual(session.study.subject("sub-01")["qc"], "pass")
+            self.assertEqual(studyList.selectedIds(), ["sub-02"])
+            self.assertEqual(library.studySelection(), ["sub-02"])
+            self.assertEqual(model.sid(table.currentIndex().row()), "sub-02")
+            # The next P marks sub-02 (it did nothing before)
+            studyList.setQc("pass")
+            pump()
+            self.assertEqual(session.study.subject("sub-02")["qc"], "pass")
+            self.assertEqual(library.studySelection(), ["sub-03"])
+            # Two rows at once: the row after them is selected; the last row of the list leaves nothing hidden selected
+            studyList.selectIds(["sub-03", "sub-04"])
+            pump()
+            studyList.setQc("pass")
+            pump()
+            self.assertEqual([session.study.subject(sid)["qc"] for sid in ("sub-03", "sub-04")], ["pass", "pass"])
+            self.assertEqual(model.rowCount(), 0)
+            self.assertEqual(library.studySelection(), [])
+            self.assertEqual(session.study.subject("sub-05")["qc"], "unreviewed")
+            # A chip that hides the selected rows takes them out of the selection too
+            studyList.setFilter("all")
+            studyList.selectIds(["sub-01", "sub-05"])
+            pump()
+            session.setQc(["sub-05"], "fail")
+            studyList.setFilter("qcfail")
+            pump()
+            self.assertEqual(studyList.selectedIds(), ["sub-05"])
+            self.assertEqual(library.studySelection(), ["sub-05"])
+            # In All, a QC key keeps the selection where it is (the row stays)
+            studyList.setFilter("all")
+            studyList.selectIds(["sub-05"])
+            pump()
+            studyList.setQc("pass")
+            pump()
+            self.assertEqual(library.studySelection(), ["sub-05"])
+            studyList.setFilter("all")
+        finally:
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)

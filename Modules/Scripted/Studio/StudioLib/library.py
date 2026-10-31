@@ -3195,6 +3195,7 @@ class StudyList(qt.QObject):
             self._restoreCurrent(currentId)
         finally:
             self._settingSelection = False
+        self._pruneHiddenSelection(selected)
         self._sizeColumns()
         if self.grid is not None and self.viewMode() == "grid":
             self.grid.prepare(studySession, rows)
@@ -3245,6 +3246,16 @@ class StudyList(qt.QObject):
             self._settingSelection = False
         if self.onSelection is not None:
             self.onSelection()
+
+    def _pruneHiddenSelection(self, selected):
+        """Drop from the shared selection the subjects that the filter or the search no longer shows (in no live list):
+        a P / X in a QC filter, a chip or a search hides them, and the cards (Redo N selected, BATCH) must not act on rows
+        that no list shows as selected (BB-1).
+        """
+        others = [view for view in _studyViews if view is not self and isinstance(view, StudyList) and _isAlive(view.widget)]
+        hidden = {sid for sid in selected if self.model.rowOf(sid) < 0 and not any(view.model.rowOf(sid) >= 0 for view in others)}
+        if hidden:
+            _setStudySelection([sid for sid in studySelection() if sid not in hidden], source=self)
 
     def _restoreCurrent(self, sid):
         """Put the keyboard cursor (the current index, shared by the list and the grid) on ``sid`` when it is selected or
@@ -3401,7 +3412,12 @@ class StudyList(qt.QObject):
         if studySession is None or not sids:
             return
         column = self.qcColumn()
+        first = min((self.model.rowOf(sid) for sid in sids), default=-1)
         studySession.setQc(sids, value, column)
+        # In a QC filter (QC fail, Normalization to review) the marked rows leave the list: go on with the row that takes
+        # their place, so that the next P / X marks the next subject of the queue (BB-1)
+        if first >= 0 and not self.selectedIds() and all(self.model.rowOf(sid) < 0 for sid in sids) and self.model.rowCount() > 0:
+            self.selectIds([self.model.sid(min(first, self.model.rowCount() - 1))])
         shell = _shell()
         if shell is not None:
             label = {"pass": _("pass"), "fail": _("fail"), "unreviewed": _("not reviewed")}.get(value, value)
