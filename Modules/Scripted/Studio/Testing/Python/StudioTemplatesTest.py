@@ -1246,3 +1246,45 @@ class StudioTemplatesTest(unittest.TestCase):
             else:
                 settings.setValue(study_ui.RECENT_STUDIES_KEY, recent)
             shutil.rmtree(study.path, ignore_errors=True)
+
+    def test_25_nrrd_template_gets_the_mid_axial_thumbnail(self):
+        """BB-1: a NRRD template (an accepted format) shows the same mid-axial slice as the NIfTI of the same grid, in the
+        Settings > Templates row and the add dialog (both take thumbnailPixmap/thumbnailArray), instead of the placeholder icon:
+        thumbnailArray had no NRRD reader.
+        """
+        import SimpleITK as sitk
+        from LesionNetworkMappingLib import nifti
+
+        templates = self.templates
+        work = os.path.join(self.tempDir, "nrrd-thumbnail")
+        os.makedirs(work, exist_ok=True)
+        try:
+            data, affine, _header = nifti.read_nifti(self.image15)
+            asymmetric = data.astype(np.float32).copy()
+            asymmetric[: data.shape[0] // 2] *= 0.5  # left-right and front-back differences show up in the slice
+            niftiPath = os.path.join(work, "asymmetric.nii.gz")
+            nifti.write_nifti(niftiPath, asymmetric, affine)
+            expected = templates.thumbnailArray(niftiPath)
+            self.assertIsNotNone(expected)
+            # gzip, an LPS header, as Slicer and SimpleITK save it
+            gzipPath = os.path.join(work, "asymmetric_lps.nrrd")
+            sitk.WriteImage(sitk.ReadImage(niftiPath), gzipPath)
+            # raw, an RAS header, written by hand
+            rawPath = os.path.join(work, "asymmetric_ras.nrrd")
+            header = ("NRRD0004\ntype: float\ndimension: 3\nspace: right-anterior-superior\nsizes: %d %d %d\n"
+                      "space directions: (%r,0,0) (0,%r,0) (0,0,%r)\nkinds: domain domain domain\nendian: little\nencoding: raw\n"
+                      "space origin: (%r,%r,%r)\n\n") % ((*data.shape[:3],) + tuple(float(affine[i, i]) for i in range(3)) + tuple(float(affine[i, 3]) for i in range(3)))
+            with open(rawPath, "wb") as handle:
+                handle.write(header.encode("ascii"))
+                handle.write(np.ascontiguousarray(asymmetric.transpose(2, 1, 0)).tobytes())
+            for path in (gzipPath, rawPath):
+                got = templates.thumbnailArray(path)
+                self.assertIsNotNone(got, path)
+                self.assertEqual(got.shape, expected.shape, path)
+                self.assertLessEqual(int(np.abs(got.astype(int) - expected.astype(int)).max()), 1, os.path.basename(path))
+                template = self._add(path, name="NRRD " + os.path.basename(path), space="MNI152NLin6Asym")
+                self.assertIsNotNone(templates.thumbnailPixmap(template, 48), path)
+            with self.assertRaises(ValueError):  # a file that is not a NRRD image has no thumbnail (never a wrong one)
+                templates.readNrrdData(niftiPath)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)

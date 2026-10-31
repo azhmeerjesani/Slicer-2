@@ -209,23 +209,31 @@ def _nrrdVector(text):
     return [float(value) for value in text.strip("()").split(",")]
 
 
-def readNrrdHeader(path):
-    """``{"shape", "affine" (RAS), "codes": None}`` of a NRRD file (header only); raises ValueError."""
-    np = _np()
+def _readNrrdFields(f):
+    """The ``{lowercase key: value}`` header fields of an open NRRD file, left positioned at the first data byte; raises
+    ValueError.
+    """
     fields = {}
-    with open(path, "rb") as f:
-        magic = f.readline()
-        if not magic.startswith(b"NRRD"):
-            raise ValueError(_("Not a NRRD file"))
-        for _line in range(200):
-            line = f.readline()
-            if not line or not line.strip():
-                break
-            text = line.decode("latin-1").rstrip("\r\n")
-            if text.startswith("#") or ":" not in text:
-                continue
-            key, _separator, value = text.partition(":")
-            fields[key.strip().lower()] = value.lstrip("=").strip()
+    magic = f.readline()
+    if not magic.startswith(b"NRRD"):
+        raise ValueError(_("Not a NRRD file"))
+    for _line in range(200):
+        line = f.readline()
+        if not line or not line.strip():
+            break
+        text = line.decode("latin-1").rstrip("\r\n")
+        if text.startswith("#") or ":" not in text:
+            continue
+        key, _separator, value = text.partition(":")
+        fields[key.strip().lower()] = value.lstrip("=").strip()
+    return fields
+
+
+def _nrrdGeometry(fields):
+    """``(sizes, vectors, spatial, affine)`` from NRRD header fields: the axis sizes, the space direction of every axis (None
+    for a non-spatial one), the indices of the three spatial axes and the RAS affine of their voxel grid; raises ValueError.
+    """
+    np = _np()
     sizes = [int(value) for value in fields.get("sizes", "").split()]
     directions = re.findall(r"\([^)]*\)|none", fields.get("space directions", ""))
     if not sizes or not directions:
@@ -240,6 +248,14 @@ def readNrrdHeader(path):
         affine[:3, column] = np.array(vectors[index]) * signs
     origin = _nrrdVector(fields.get("space origin", "(0,0,0)")) or [0.0, 0.0, 0.0]
     affine[:3, 3] = np.array(origin) * signs
+    return sizes, vectors, spatial, affine
+
+
+def readNrrdHeader(path):
+    """``{"shape", "affine" (RAS), "codes": None}`` of a NRRD file (header only); raises ValueError."""
+    with open(path, "rb") as f:
+        fields = _readNrrdFields(f)
+    sizes, vectors, spatial, affine = _nrrdGeometry(fields)
     shape = tuple(sizes[index] for index in spatial)
     frames = 1
     for index, vector in enumerate(vectors):
@@ -249,6 +265,59 @@ def readNrrdHeader(path):
         for size in sizes[: len(sizes) - len(vectors)]:
             frames *= size
     return {"shape": shape, "frames": frames, "affine": affine, "codes": None, "format": "NRRD"}
+
+
+_NRRD_TYPES = {
+    "int8": "i1", "signed char": "i1", "uint8": "u1", "uchar": "u1", "unsigned char": "u1",
+    "int16": "i2", "short": "i2", "short int": "i2", "signed short": "i2", "signed short int": "i2",
+    "uint16": "u2", "ushort": "u2", "unsigned short": "u2", "unsigned short int": "u2",
+    "int32": "i4", "int": "i4", "signed int": "i4", "uint32": "u4", "uint": "u4", "unsigned int": "u4",
+    "int64": "i8", "longlong": "i8", "long long": "i8", "signed long long": "i8",
+    "uint64": "u8", "ulonglong": "u8", "unsigned long long": "u8",
+    "float": "f4", "float32": "f4", "double": "f8", "float64": "f8",
+}
+
+
+def readNrrdData(path):
+    """``(data, affine)`` of a NRRD file: the voxels of its first frame as an array indexed by the three spatial axes in header
+    order (the columns of the RAS ``affine``). Attached raw, gzip and ascii data only; raises ValueError. Worker-safe.
+    """
+    np = _np()
+    with open(path, "rb") as f:
+        fields = _readNrrdFields(f)
+        body = f.read()
+    sizes, vectors, spatial, affine = _nrrdGeometry(fields)
+    if len(sizes) != len(vectors) or "data file" in fields or "datafile" in fields:
+        raise ValueError(_("Unsupported NRRD layout"))
+    typeName = fields.get("type", "").lower()
+    if typeName not in _NRRD_TYPES:
+        raise ValueError(_("Unsupported NRRD voxel type"))
+    dtype = np.dtype(_NRRD_TYPES[typeName])
+    encoding = fields.get("encoding", "raw").lower()
+    count = int(np.prod(sizes))
+    if encoding in ("gzip", "gz"):
+        import zlib
+
+        body = zlib.decompress(body, 16 + zlib.MAX_WBITS)
+    elif encoding in ("ascii", "text", "txt"):
+        values = np.array(body.split(), dtype=np.float64)
+        if values.size != count:
+            raise ValueError(_("The NRRD data is incomplete"))
+        data = values.reshape(sizes[::-1])
+        encoding = None
+    elif encoding != "raw":
+        raise ValueError(_("Unsupported NRRD encoding"))
+    if encoding is not None:
+        if fields.get("endian", "little").lower() == "big":
+            dtype = dtype.newbyteorder(">")
+        if len(body) < count * dtype.itemsize:
+            raise ValueError(_("The NRRD data is incomplete"))
+        # raw data may carry trailing bytes; the voxels are the last ones when "byte skip: -1"
+        start = len(body) - count * dtype.itemsize if fields.get("byte skip", "0").strip() == "-1" else int(fields.get("byte skip", "0"))
+        data = np.frombuffer(body, dtype=dtype, count=count, offset=start).reshape(sizes[::-1])
+    data = data.transpose(range(data.ndim)[::-1])  # axes in header order (the first one varies fastest in the file)
+    index = tuple(slice(None) if axis in spatial else 0 for axis in range(data.ndim))
+    return data[index], affine
 
 
 def readHeader(path):
@@ -1229,12 +1298,16 @@ def thumbnailArray(path, size=96):
     radiological axial views), windowed at the 1st-99th percentiles. Worker-safe; None when it cannot be read.
     """
     np = _np()
-    if _lowerExtension(path) not in (".nii", ".nii.gz"):
-        return None
-    from LesionNetworkMappingLib import nifti
+    extension = _lowerExtension(path)
+    if extension == ".nrrd":
+        data, affine = readNrrdData(path)
+    elif extension in (".nii", ".nii.gz"):
+        from LesionNetworkMappingLib import nifti
 
-    data, affine, _header = nifti.read_nifti(path, apply_scaling=True)
-    data = data.reshape(data.shape[:3] + (-1,))[..., 0] if data.ndim > 3 else data
+        data, affine, _header = nifti.read_nifti(path, apply_scaling=True)
+        data = data.reshape(data.shape[:3] + (-1,))[..., 0] if data.ndim > 3 else data
+    else:
+        return None
     linear = np.asarray(affine, dtype=float)[:3, :3]
     axes = np.argmax(np.abs(linear), axis=1)  # voxel axis of world x, y, z
     if len(set(axes.tolist())) != 3:
