@@ -494,6 +494,7 @@ class SymptomTab(CohortTab):
         self.lodoTable = qt.QTableWidget(0, 0)
         self.lodoTable.setObjectName("LNMSymptomLodoTable")
         self.lodoTable.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
+        self.lodoTable.setTabKeyNavigation(False)  # Tab leaves the table, arrows move (SPEC 2.9)
         self.lodoTable.setToolTip(_("Cross-dataset spatial r of the per-dataset partial r maps; LODO r: each dataset against the combination of the others (one-sided block-permutation p)"))
         self.lodoTable.horizontalHeader().setSectionResizeMode(qt.QHeaderView.Stretch)
         layout.addWidget(self.lodoTable)

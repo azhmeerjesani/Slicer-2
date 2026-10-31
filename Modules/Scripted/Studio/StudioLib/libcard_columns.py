@@ -326,6 +326,7 @@ class ColumnsDialog:
         self.table.setHorizontalHeaderLabels([_("Column"), _("Type"), _("Role"), _("Units"), _("Levels"), _("Description")])
         self.table.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
         self.table.setSelectionMode(qt.QAbstractItemView.SingleSelection)
+        self.table.setTabKeyNavigation(False)  # Tab leaves the table, arrows move (SPEC 2.9)
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         self.table.setWordWrap(False)

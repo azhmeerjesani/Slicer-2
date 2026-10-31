@@ -556,6 +556,9 @@ def tableView(columns):
     table.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
     table.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
     table.setSelectionMode(qt.QAbstractItemView.SingleSelection)
+    # Tab and Shift+Tab leave the table (SPEC 2.9); the arrow keys move between the rows. Qt's default moves Tab from
+    # cell to cell and wraps from the last cell to the first: the focus could never leave the table
+    table.setTabKeyNavigation(False)
     table.setAlternatingRowColors(False)
     table.setShowGrid(False)
     table.setFrameShape(qt.QFrame.NoFrame)

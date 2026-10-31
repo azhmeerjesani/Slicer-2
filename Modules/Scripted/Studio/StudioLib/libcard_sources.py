@@ -207,6 +207,7 @@ class SourcesCard:
         self.table.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
         self.table.setSelectionMode(qt.QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
+        self.table.setTabKeyNavigation(False)  # Tab leaves the table, arrows move (SPEC 2.9)
         self.table.setShowGrid(False)
         self.table.setWordWrap(False)
         self.table.setAlternatingRowColors(False)

@@ -21,7 +21,8 @@ always restore the Classic interface. They cover:
   behaviours, the error log docking, the names and platform keys, F10 / Alt menus, F6 regions, Space and
   Enter on focused buttons, no invisible Tab stop over the Library canvas, the inspector edge handle and the
   consequence toasts;
-- PageUp and PageDown stepping the slice view under the pointer when the focus is on the inspector.
+- PageUp and PageDown stepping the slice view under the pointer when the focus is on the inspector;
+- Tab and Shift+Tab leaving the Studio and Map tables (no keyboard trap), the arrow keys moving between the rows.
 """
 
 import os
@@ -1757,6 +1758,70 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         slicer.util.selectModule(ws.moduleName)
         self._pump()
         self.assertEqual(self.layoutManager.layout, conventional)
+
+    def test_26_tables_do_not_trap_tab(self):
+        """Tab and Shift+Tab leave the Studio and Map tables in one press (SPEC 2.9: Tab is focus traversal, always);
+        the arrow keys still move between the rows. Qt's default (tabKeyNavigation) moves Tab from cell to cell and wraps
+        from the last cell to the first, so the focus never left the Report checklist, the peaks table or the study table.
+        """
+        from LesionNetworkMappingUI import widgets
+        from StudioLib import library
+
+        studioShell = self._applyStudio()
+        studioShell.switchTo("map")
+        self._pump(6)
+        studioShell.switchTo("library")
+        self._pump(6)
+        # Every table of Studio and of Map (LNM*) that exists now, plus the study table and the shared table helper
+        studyList = library.StudyList()
+        _keepAlive.append(studyList)
+        # (the Map module widget leaves the main window when another workspace is shown)
+        mapWidget = slicer.modules.lesionnetworkmapping.widgetRepresentation()
+        tables = [table for parent in (self.mainWindow, mapWidget) for table in parent.findChildren("QTableView")
+                  if table.objectName.startswith(("Studio", "LNM"))]
+        names = {table.objectName for table in tables}
+        for name in ("LNMReportChecklist", "LNMPeaksTable"):
+            self.assertIn(name, names)
+        helperTable = widgets.tableView(["a", "b", "c"])
+        tables += [studyList.table, helperTable]
+        trapping = sorted({table.objectName for table in tables if table.tabKeyNavigation})
+        self.assertEqual(trapping, [], "tables that keep Tab inside")
+
+        # Behaviour: a filled table between two buttons gives the focus away on one Tab and one Shift+Tab
+        window = qt.QWidget()
+        _keepAlive.append(window)
+        layout = qt.QVBoxLayout(window)
+        before = qt.QPushButton("before")
+        after = qt.QPushButton("after")
+        helperTable.setRowCount(4)
+        for row in range(4):
+            for column in range(3):
+                helperTable.setItem(row, column, qt.QTableWidgetItem(f"{row},{column}"))
+        layout.addWidget(before)
+        layout.addWidget(helperTable)
+        layout.addWidget(after)
+        window.show()
+        window.activateWindow()
+        self._pump(6)
+        try:
+            helperTable.setFocus(qt.Qt.TabFocusReason)
+            self._pump()
+            if slicer.app.focusWidget() != helperTable:
+                self.skipTest("the test window cannot take the keyboard focus here")
+            helperTable.setCurrentCell(0, 0)
+            self._sendKey(helperTable, qt.Qt.Key_Down)
+            self._pump()
+            self.assertEqual(helperTable.currentRow(), 1, "the Down arrow does not move to the next row")
+            self._sendKey(helperTable, qt.Qt.Key_Tab)
+            self._pump()
+            self.assertEqual(slicer.app.focusWidget(), after, "Tab stayed in the table")
+            helperTable.setFocus(qt.Qt.TabFocusReason)
+            self._pump()
+            self._sendKey(helperTable, qt.Qt.Key_Backtab, qt.Qt.ShiftModifier)
+            self._pump()
+            self.assertEqual(slicer.app.focusWidget(), before, "Shift+Tab stayed in the table")
+        finally:
+            window.hide()
 
     def test_25_page_keys_step_the_hovered_view(self):
         """PageUp and PageDown step the slice view under the pointer also when the focus is on a tool tile of Draw (they

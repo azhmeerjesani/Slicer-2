@@ -797,6 +797,7 @@ class NetworksCard:
         self.table.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
         self.table.setSelectionMode(qt.QAbstractItemView.SingleSelection)
+        self.table.setTabKeyNavigation(False)  # Tab leaves the table, arrows move (SPEC 2.9)
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(ROW_HEIGHT)

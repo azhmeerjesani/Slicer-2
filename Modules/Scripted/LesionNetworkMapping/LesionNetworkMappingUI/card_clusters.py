@@ -1001,6 +1001,7 @@ class ClustersCard:
         self.view.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
         self.view.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
         self.view.setSelectionMode(qt.QAbstractItemView.SingleSelection)
+        self.view.setTabKeyNavigation(False)  # Tab leaves the table, arrows move (SPEC 2.9)
         self.view.setAlternatingRowColors(True)
         self.view.setWordWrap(False)
         self.view.verticalHeader().setVisible(False)

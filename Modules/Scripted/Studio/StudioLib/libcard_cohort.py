@@ -919,6 +919,7 @@ class CohortCard:
         self.balanceTable.setHorizontalHeaderLabels([_("Covariate"), _("Cases"), _("Controls"), _("SMD")])
         self.balanceTable.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
         self.balanceTable.setSelectionMode(qt.QAbstractItemView.NoSelection)
+        self.balanceTable.setTabKeyNavigation(False)  # Tab leaves the table, arrows move (SPEC 2.9)
         self.balanceTable.verticalHeader().setVisible(False)
         header = self.balanceTable.horizontalHeader()
         header.setSectionResizeMode(qt.QHeaderView.ResizeToContents)

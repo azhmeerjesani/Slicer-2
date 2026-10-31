@@ -2928,6 +2928,9 @@ class StudyList(qt.QObject):
         self.table.setShowGrid(False)
         self.table.setWordWrap(False)
         self.table.setFocusPolicy(qt.Qt.StrongFocus)
+        # Tab and Shift+Tab leave the table, the arrow keys move (SPEC 2.9). Qt's default moves Tab from cell to cell and
+        # wraps from the last cell to the first: the focus could never reach the inspector cards
+        self.table.setTabKeyNavigation(False)
         self.table.verticalHeader().hide()
         self.table.verticalHeader().setDefaultSectionSize(STUDY_ROW_HEIGHT)
         self.table.verticalHeader().setMinimumSectionSize(STUDY_ROW_HEIGHT)
