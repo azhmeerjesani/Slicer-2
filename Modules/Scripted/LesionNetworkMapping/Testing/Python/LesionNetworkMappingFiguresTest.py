@@ -39,6 +39,7 @@ from LesionNetworkMappingLib import figures, jobs, nifti, runs
 SHAPE = (30, 36, 30)
 SPACING = 2.0
 SMALL = {"width_mm": 89.0, "dpi": 150}
+MINUS = chr(0x2212)  # the minus sign figures write in negative values
 
 
 def ras_affine(shape=SHAPE, spacing=SPACING):
@@ -332,6 +333,33 @@ class FiguresTest(unittest.TestCase):
         labels = [item.text for item in explicit.annotations if item.role == "threshold value"]
         self.assertEqual(len(labels), 2)
         self.assertTrue(all(label[0] in "≤≥" for label in labels), labels)
+
+    def test_colorbar_label_and_caption_state_the_displayed_sign(self):
+        # --sign neg shows T <= -t: the bar must not read "T >= t", and the caption must say which tail is shown
+        rule = {"kind": "custom_t", "value": 4.0}
+        figures_by_sign = {sign: figures.montage(self.tmap, self.template, "A 0", rule=rule, n=100, sign=sign, **SMALL) for sign in ("both", "pos", "neg")}
+        labels = {sign: figure.meta["colorbars"][0]["label"] for sign, figure in figures_by_sign.items()}
+        self.assertIn("threshold |T| ≥ 4", labels["both"])
+        self.assertIn("threshold T ≥ 4", labels["pos"])
+        self.assertIn(f"threshold T ≤ {MINUS}4", labels["neg"])
+        self.assertNotIn("≥", labels["neg"])
+        self.assertNotIn("show only", figures_by_sign["both"].caption)
+        pos, neg = figures_by_sign["pos"].caption, figures_by_sign["neg"].caption
+        self.assertIn("Thresholded panels show only positive values (T ≥ 4,", pos)
+        self.assertIn("negative values are hidden", pos)
+        self.assertIn(f"Thresholded panels show only negative values (T ≤ {MINUS}4,", neg)
+        self.assertIn("positive values are hidden", neg)
+        # The shown-tail share is one-tailed: the blob map has both tails above 4, so each is below the |T| share
+        values = self.tmap[0][self.tmap[0] != 0]
+        for caption, tail in ((pos, values >= 4.0), (neg, values <= -4.0)):
+            self.assertTrue(tail.any())
+            self.assertIn(f"{figures.thresholds._format_fraction(tail.mean())} of in-mask voxels); ", caption)
+        # Every map preset carries the sign sentence; an unthresholded figure has none
+        glass = figures.glass(self.tmap, template=self.template, rule=rule, n=100, sign="neg", **SMALL)
+        self.assertIn("show only negative values", glass.caption)
+        self.assertIn(f"T ≤ {MINUS}4", glass.meta["colorbars"][0]["label"])
+        plain = figures.montage(self.tmap, self.template, "A 0", sign="neg", **SMALL)
+        self.assertNotIn("show only", plain.caption)
 
     def test_glass_projection_follows_sign(self):
         values = np.zeros(SHAPE, dtype=np.float32)

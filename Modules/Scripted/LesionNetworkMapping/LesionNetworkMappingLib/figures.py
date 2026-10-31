@@ -936,6 +936,7 @@ class MapInfo:
     fraction: float | None = None
     v: int = 0
     key: str = ""  # unique within a figure (the role, else the name, de-duplicated)
+    values: object = None  # finite in-mask values of the native map (for the shown-sign share)
 
 
 def _in_mask_values(volume, mask):
@@ -954,6 +955,7 @@ def _in_mask_values(volume, mask):
 def _resolve(info, options):
     """Resolve the threshold of one map (None when the figure is unthresholded)."""
     values = _in_mask_values(info.volume, options.mask)
+    info.values = values
     info.v = int(options.v or values.size or 1)
     rule = options.rule
     if rule is None and options.threshold is not None:
@@ -1310,6 +1312,36 @@ def _mode_sentence(mode, companion):
     return text
 
 
+def _threshold_condition(statistic, sign, threshold):
+    """The displayed threshold condition: "|T| ≥ 5.15", "T ≥ 5.15" or "T ≤ -5.15" for ``sign`` both/pos/neg (negative values in the Unicode minus sign, as :func:`_fmt` writes them)."""
+    if sign == "neg":
+        return f"{statistic} ≤ {_fmt(-threshold)}"
+    if sign == "pos":
+        return f"{statistic} ≥ {_fmt(threshold)}"
+    return f"|{statistic}| ≥ {_fmt(threshold)}"
+
+
+def _sign_sentence(infos, sign, mode, statistic):
+    """Which tail the thresholded panels show when ``sign`` is "pos" or "neg" (empty for "both" or when
+    nothing is thresholded): the other tail is hidden there, so the caption must say so, with the share of
+    in-mask voxels of the shown tail (the rule line gives the two-sided |value| share).
+    """
+    if sign not in ("pos", "neg") or mode == "unthresholded":
+        return ""
+    shown, hidden = ("positive", "negative") if sign == "pos" else ("negative", "positive")
+    parts = []
+    resolved_infos = [info for info in infos if info.resolved is not None and math.isfinite(info.resolved.value)]
+    for info in resolved_infos:
+        text = _threshold_condition(statistic, sign, info.resolved.value)
+        if info.values is not None:
+            share = thresholds.fraction_connected(info.values, info.resolved, sign)
+            if math.isfinite(share):
+                text += f", {thresholds._format_fraction(share)} of in-mask voxels"
+        parts.append(text if len(resolved_infos) == 1 else f"{info.title}: {text}")
+    detail = f" ({'; '.join(parts)})" if parts else ""
+    return f"Thresholded panels show only {shown} values{detail}; {hidden} values are hidden there."
+
+
 def _slices_sentence(plane, coordinates):
     axis = AXIS_NAMES[PLANE_AXIS[plane]]
     values = ", ".join(_signed(c) for c in coordinates)
@@ -1424,7 +1456,7 @@ def _map_bar(infos, window, sign, options, statistic):
     threshold = next((info.resolved.value for info in infos if info.resolved is not None and math.isfinite(info.resolved.value)), None)
     label = f"{_units(options, statistic)} (shared range ±{_fmt(window)}"
     if threshold is not None:
-        label += f"; threshold {'|' + statistic + '|' if sign == 'both' else statistic} ≥ {_fmt(threshold)}"
+        label += f"; threshold {_threshold_condition(statistic, sign, threshold)}"
     label += ")"
     return {"kind": "diverging", "window": float(window), "threshold": threshold, "sign": sign, "label": label}
 
@@ -1503,6 +1535,7 @@ def _montage(preset, maps, template, slices, kwargs):
         _orientation_sentence(options.convention, [plane]),
         *(_threshold_sentence(info, statistic) for info in infos),
         _mode_sentence(mode, options.companion),
+        _sign_sentence(infos, sign, mode, statistic),
         f"Colour range symmetric ±{_fmt(window)} shared by all panels; warm colours are positive, cool colours negative.",
         _slices_sentence(plane, [c for _, c, _ in planes]),
         *ctx.notes,
@@ -1551,6 +1584,7 @@ def triptych(sensitivity, specificity, conjunction, template=None, slices="A aut
         _orientation_sentence(options.convention, [plane]),
         *(_threshold_sentence(info, statistic) for info in infos),
         _mode_sentence(mode, options.companion),
+        _sign_sentence(infos, sign, mode, statistic),
         f"Colour range symmetric ±{_fmt(window)} shared by all panels; warm colours are positive, cool colours negative.",
         _slices_sentence(plane, [c for _, c, _ in planes]),
         *ctx.notes,
@@ -1619,6 +1653,7 @@ def replication(first, second, template=None, slices="auto", titles=("Discovery"
         _orientation_sentence(options.convention, [plane]),
         *(_threshold_sentence(info, statistic) for info in infos if info.resolved is not None),
         _mode_sentence(mode, options.companion),
+        _sign_sentence(infos, sign, mode, statistic),
         f"Colour range symmetric ±{_fmt(window)} shared by both maps; warm colours are positive, cool colours negative.",
         _slices_sentence(plane, [c for _, c, _ in planes]),
         *ctx.notes,
@@ -1665,6 +1700,7 @@ def glass(map, mask=None, template=None, **kwargs):  # noqa: A002
         _orientation_sentence(options.convention, PLANES),
         *(_threshold_sentence(info, statistic) for info in infos),
         _mode_sentence(mode, options.companion),
+        _sign_sentence(infos, sign, mode, statistic),
         f"Colour range symmetric ±{_fmt(window)} shared by all panels; warm colours are positive, cool colours negative.",
         *ctx.notes,
         *_context_sentences(ctx),
@@ -1703,6 +1739,7 @@ def ortho(map, point=None, template=None, **kwargs):  # noqa: A002
         _orientation_sentence(options.convention, PLANES),
         *(_threshold_sentence(info, statistic) for info in infos),
         _mode_sentence(mode, options.companion),
+        _sign_sentence(infos, sign, mode, statistic),
         f"Colour range symmetric ±{_fmt(window)} shared by all panels; warm colours are positive, cool colours negative.",
         *ctx.notes,
         *_context_sentences(ctx),
