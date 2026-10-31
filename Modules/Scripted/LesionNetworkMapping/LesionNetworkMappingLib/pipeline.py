@@ -2709,7 +2709,7 @@ class Runner:
         fwe = {}
         if t is not None and p is not None:
             for sign, test in (("pos", t > 0), ("neg", t < 0)):
-                count = int(np.count_nonzero(test & (p < self.config.alpha)))
+                count = int(np.count_nonzero(test & glm.passes_alpha(p, self.config.alpha)))
                 fwe[sign] = {"voxels": count, "ml": round(count * voxel_ml, 3)}
         result = {"label": label, "descs": descs, "design_type": record.get("design_type"), "limitations": record.get("limitations"), "fwe": fwe, "min_p": record.get("min_attainable_p"),
                   "fdr_floor": (record.get("fdr") or {}).get("floor_voxels"), "n": record.get("n"), "n_per_level": record.get("n_per_level"), "excluded": record.get("excluded"), "run_id": record.get("run_id")}
@@ -2736,6 +2736,8 @@ class Runner:
         if not columns or planned["status"] in ("skip", "unavailable"):
             return self._skip("slnm", planned["reason"] or _slnm_skip_reason(self.config), "skipped")
         import numpy as np
+
+        from . import glm
 
         rows = self.mapped_rows
         params = {"scores": columns, "values": self._participant_values([*columns, *self.config.covariates], rows), "perm": self.config.perm, "seed": self.config.perm_seed, "method": self.config.slnm_method,
@@ -2790,7 +2792,7 @@ class Runner:
                 r_map = self._load_vector(self.path(os.path.basename(record["outputs"]["r"])))
                 if "p_fwe" in descs:
                     p_map = self._load_vector(self.path(os.path.basename(record["outputs"]["p_fwe"])))
-                    fwe_voxels = int(np.count_nonzero(p_map < self.config.alpha))
+                    fwe_voxels = int(np.count_nonzero(glm.passes_alpha(p_map, self.config.alpha)))
             results[label] = {"column": column, "n": record.get("n"), "method": self.config.slnm_method, "covariates": self.config.covariates, "max_abs_r": None if r_map is None else float(np.nanmax(np.abs(r_map))),
                               "fwe_voxels": fwe_voxels, "r_with_volume": None if r_volume is None or not math.isfinite(r_volume) else round(r_volume, 4), "descs": descs, "stem": desc_stem,
                               "folder": self.rel(folder), "run_id": record.get("run_id")}
@@ -2816,6 +2818,8 @@ class Runner:
             return self._skip("conjunction", "specificity did not run: the conjunction needs the GLM maps")
         import numpy as np
 
+        from . import glm
+
         params = {"alpha": self.config.alpha, "k": overlap.get("k")}
         fp, reused = self._cached("conjunction", params, ("overlap", "specificity"))
         if reused:
@@ -2826,7 +2830,7 @@ class Runner:
         k = overlap.get("k", round(self.config.sensitivity))
         t = self._load_vector(group_map_path(self.out, self.bundle.name, spec["descs"]["stat"]))
         p = self._load_vector(group_map_path(self.out, self.bundle.name, spec["descs"]["p_fwe"]))
-        significant = (p < self.config.alpha).astype(np.uint8)
+        significant = glm.passes_alpha(p, self.config.alpha).astype(np.uint8)
         voxel_ml = float(abs(np.linalg.det(self.bundle.affine[:3, :3]))) / 1000.0
         outputs, result = [], {"alpha": self.config.alpha, "sensitivity": k}
         for sign, suffix in (("pos", "Pos"), ("neg", "Neg")):
@@ -2842,7 +2846,7 @@ class Runner:
             count = int(np.count_nonzero(conj))
             result[f"{sign}_voxels"] = count
             result[f"{sign}_ml"] = round(count * voxel_ml, 3)
-            path, side = self._write_group(f"conj{suffix}", conj, "binary", "uint8", statistic=f"sens{k}{suffix} AND sign(t) AND PFwe < {self.config.alpha:g}", sign=sign, alpha=self.config.alpha,
+            path, side = self._write_group(f"conj{suffix}", conj, "binary", "uint8", statistic=f"sens{k}{suffix} AND sign(t) AND PFwe <= {self.config.alpha:g}", sign=sign, alpha=self.config.alpha,
                                            provider=self.providers["conjunction"].module, note="Conjunction of the classic sensitivity map with the GLM specificity map (sign-specific).")
             outputs += [path, side]
         return self._save("conjunction", fp, result, outputs, start=start)
@@ -2948,7 +2952,7 @@ class Runner:
     def _stage_clusters(self, planned):
         import numpy as np
 
-        from . import stats, thresholds
+        from . import glm, stats, thresholds
         from .export import group_map_path, write_peaks_tsv
 
         atlas_key = None if not self.config.atlas else (file_sha256(self.config.atlas) if os.path.isfile(self.config.atlas) else self.config.atlas)
@@ -2989,9 +2993,9 @@ class Runner:
             self.cancel.raise_if_cancelled()
             values = self._load_vector(group_map_path(self.out, self.bundle.name, desc)).astype(np.float64)
             p = self._load_vector(group_map_path(self.out, self.bundle.name, p_desc))
-            significant = p < self.config.alpha
+            significant = glm.passes_alpha(p, self.config.alpha)
             if not significant.any():
-                tables[desc] = {"clusters": 0, "note": f"no voxel with PFwe < {self.config.alpha:g}"}
+                tables[desc] = {"clusters": 0, "note": f"no voxel with PFwe <= {self.config.alpha:g}"}
                 continue
             masked = np.where(significant, values, np.nan)
             threshold = float(np.nanmin(np.abs(masked)))

@@ -502,6 +502,21 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(png, reportfigs.encode_png(result.image), "deterministic bytes")
         self.assertLessEqual(len(reportfigs.encode_png(result.image, 128)), len(png) + 64)
 
+    def test_masked_keeps_p_exactly_alpha(self):
+        """A voxel with p = 50/1000 (stored as float32 0.0500000007) is kept at alpha 0.05: the rule is p <= alpha everywhere."""
+        from types import SimpleNamespace
+
+        affine = np.eye(4)
+        values = np.full((2, 2, 1), 3.0, dtype=np.float32)
+        p = np.array([50 / 1000, 0.049, 0.051, np.nan], dtype=np.float32).reshape(2, 2, 1)
+        with tempfile.TemporaryDirectory() as folder:
+            value_path, p_path = os.path.join(folder, "t.nii.gz"), os.path.join(folder, "p.nii.gz")
+            nifti.write_nifti(value_path, values, affine, dtype="float32")
+            nifti.write_nifti(p_path, p, affine, dtype="float32")
+            data, _affine, kept = report._Report.masked(SimpleNamespace(alpha=0.05), value_path, p_path)
+        self.assertEqual(kept, 2)
+        self.assertEqual(data.reshape(-1).tolist(), [3.0, 3.0, 0.0, 0.0])
+
     def test_find_template(self):
         explicit = os.path.join(self.tmp, "explicit_T1w.nii.gz")
         shape, affine = ras_grid()

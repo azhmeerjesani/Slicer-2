@@ -673,11 +673,8 @@ def _world(ijk, affine):
 
 
 def _passing(p, alpha):
-    """p <= alpha, also for p stored in float32: a permutation p of exactly alpha (for example 50/1000) is read back as
-    float32(0.05), slightly above the float64 0.05.
-    """
-    p = np.asarray(p, dtype=np.float64)
-    return np.isfinite(p) & (p <= float(alpha) * (1.0 + 1e-6))
+    """p <= alpha, also for p stored in float32 (see :func:`glm.passes_alpha`, the one rule of the cohort pipeline)."""
+    return glm.passes_alpha(p, alpha)
 
 
 def _cluster_list(stat3d, p3d, affine, alpha, sign, voxel_ml, min_voxels=1, masks=False):

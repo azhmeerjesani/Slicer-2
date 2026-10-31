@@ -9,7 +9,7 @@ connectome itself is not read).
 The report assembles and computes no statistics: maps and their thresholds come from the pipeline's outputs and
 sidecars, figures from :mod:`reportfigs` (over the L-23 renderer :mod:`figures`), labels from :mod:`atlases`
 (L-15), methods and checklist from :mod:`methods`/:mod:`checklist` (L-18), cluster tables from :mod:`clusters`
-(L-19) and QA chips from :mod:`qa` (L-10). Significance masks only hide voxels whose recorded p is not below alpha.
+(L-19) and QA chips from :mod:`qa` (L-10). Significance masks only hide voxels whose recorded p is not at most alpha.
 
 Sections, by id and in this order: header, summary, preflight, lesions, network-<tag> (one per rule), nulls,
 specificity, conjunction, slnm-<Label> (one per score; "slnm" when none), qa, clusters, gallery, methods,
@@ -778,15 +778,15 @@ class _Report:
         return f'<p class="mut">{_e(prefix)}: {_e(reason)}{_e(estimate)}</p>'
 
     def masked(self, values_path, p_path, sign=None):
-        """(data, affine) of a map with the voxels whose recorded p is not below alpha (and of the other sign) set to 0."""
+        """(data, affine) of a map with the voxels whose recorded p is not at most alpha (and of the other sign) set to 0."""
         import numpy as np
 
-        from . import nifti
+        from . import glm, nifti
 
         data, affine, _header = nifti.read_nifti(values_path)
         p, _p_affine, _p_header = nifti.read_nifti(p_path)
         data = np.asarray(data, dtype=np.float32)
-        keep = np.isfinite(p) & (np.asarray(p) < self.alpha)
+        keep = glm.passes_alpha(p, self.alpha)
         if sign == "pos":
             keep &= data > 0
         elif sign == "neg":
@@ -811,10 +811,10 @@ class _Report:
         if excess and pfwe:
             values, affine, kept = self.masked(excess, pfwe)
             if kept:
-                parts.append(self.montage_html((values, affine, "sensNullExcess"), "diverging", (f"Null-referenced sensitivity: observed minus null overlap (percentage points), shown where PFWE < {self.alpha:g} ({kept} voxels). {info.get('caption') or methods.NULL_CAPTION}"),
+                parts.append(self.montage_html((values, affine, "sensNullExcess"), "diverging", (f"Null-referenced sensitivity: observed minus null overlap (percentage points), shown where PFWE ≤ {self.alpha:g} ({kept} voxels). {info.get('caption') or methods.NULL_CAPTION}"),
                                                threshold=None, alt="Null-referenced sensitivity montage"))
             else:
-                parts.append(f"<p>No voxel of the null-referenced sensitivity reaches PFWE &lt; {self.alpha:g}.</p>")
+                parts.append(f"<p>No voxel of the null-referenced sensitivity reaches PFWE &le; {self.alpha:g}.</p>")
         group_qa = info.get("group_qa") or {}
         if group_qa.get("text"):
             parts.append(f"<p>Group QA against null cohorts: {_e(group_qa.get('text'))}</p>")
@@ -851,14 +851,14 @@ class _Report:
                 values, affine, kept = self.masked(tstat, pfwe, sign)
                 count = fwe.get(sign) or {}
                 if kept:
-                    caption = f"GLM {label} T statistic, {role}: voxels with PFWE < {self.alpha:g} ({_num(count.get('voxels', kept))} voxels, {_num(count.get('ml'))} mL; permutation max-statistic FWE)."
+                    caption = f"GLM {label} T statistic, {role}: voxels with PFWE ≤ {self.alpha:g} ({_num(count.get('voxels', kept))} voxels, {_num(count.get('ml'))} mL; permutation max-statistic FWE)."
                     parts.append(self.montage_html((values, affine, f"{label}Tstat{sign}"), "diverging", caption, sign=sign, alt=f"GLM T {sign} montage"))
                 else:
-                    parts.append(f"<p>{_e(role.capitalize())}: no voxel survives FWE (PFWE &lt; {self.alpha:g}).</p>")
+                    parts.append(f"<p>{_e(role.capitalize())}: no voxel survives FWE (PFWE &le; {self.alpha:g}).</p>")
         pfdr = self.group_path(f"{label}PFdr")
         secondary = []
         if fdr:
-            secondary.append(f"FDR (secondary): {_num(fdr.get('n_significant'))} voxels with q < {self.alpha:g}. {fdr.get('note') or ''}")
+            secondary.append(f"FDR (secondary): {_num(fdr.get('n_significant'))} voxels with q ≤ {self.alpha:g}. {fdr.get('note') or ''}")
         effect = self.group_path(f"{label}HedgesG")
         if effect:
             secondary.append("Hedges g map: " + self.rel_link(os.path.basename(effect)))
@@ -876,7 +876,7 @@ class _Report:
             return self.section("conjunction", "Conjunction", self.not_run("conjunction", "not computed"))
         from . import colormaps
 
-        parts = [(f"<p>Conjunction of sensitivity and specificity (sens AND sign(t) AND PFWE &lt; {self.alpha:g}): positive {_num(conj.get('pos_voxels'))} voxels ({_num(conj.get('pos_ml'))} mL), "
+        parts = [(f"<p>Conjunction of sensitivity and specificity (sens AND sign(t) AND PFWE &le; {self.alpha:g}): positive {_num(conj.get('pos_voxels'))} voxels ({_num(conj.get('pos_ml'))} mL), "
                  f"negative {_num(conj.get('neg_voxels'))} voxels ({_num(conj.get('neg_ml'))} mL).</p>")]
         base = pos or neg
         overlays = [(neg, "binary", colormaps.NEGATIVE_COLORS[0])] if pos and neg else []
@@ -923,10 +923,10 @@ class _Report:
             if r_path and p_path:
                 values, affine, kept = self.masked(r_path, p_path)
                 if kept:
-                    caption = f"Partial r of {info.get('column')} with the network maps, shown where PFWE < {self.alpha:g} ({kept} voxels): a network associated with the score."
+                    caption = f"Partial r of {info.get('column')} with the network maps, shown where PFWE ≤ {self.alpha:g} ({kept} voxels): a network associated with the score."
                     parts.append(self.montage_html((values, affine, f"slnm{label}R"), "diverging", caption, alt=f"sLNM {label} montage"))
                 else:
-                    parts.append(f"<p>No voxel survives FWE (PFWE &lt; {self.alpha:g}); uncorrected maps are not shown as results.</p>")
+                    parts.append(f"<p>No voxel survives FWE (PFWE &le; {self.alpha:g}); uncorrected maps are not shown as results.</p>")
             out.append(self.section(f"slnm-{label}", f"sLNM: {label}", "".join(parts)))
         return out
 

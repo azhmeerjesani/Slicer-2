@@ -347,6 +347,28 @@ class DesignRunTest(_StudyTestCase):
         self.assertTrue(np.array_equal(result.p_fwe, p_fwe))
         self.assertEqual(result.label, "caseVsControl")
 
+    def test_alpha_rule_is_one_rule_for_card_map_and_float32(self):
+        """glm.json (the card), the written float32 PFwe map and the p <= alpha rule of the pipeline give the same count."""
+        rows = [(f"sub-{level[:2]}{index}", {"group": level, "volume_ml": 10.0 + index}) for level in ("case", "control") for index in range(5)]
+        design = designlib.build_design(self.make_study(rows), DesignSpec(covariates=[], volume_off_reason="alpha rule test"))
+        glm_result = glm.run(design, self.rng.standard_normal((design.n, 8)), dtype=np.float64)
+        p_exact = np.array([50 / 1000, 0.049, 0.051, 0.05, 1.0, np.nan, 0.0, 51 / 1000])
+        stored = p_exact.astype(np.float32)  # what the NIfTI holds: 50/1000 reads back as 0.0500000007
+        self.assertGreater(float(stored[0]), 0.05)
+        expected = [True, True, False, True, False, False, True, False]
+        self.assertEqual(glm.passes_alpha(p_exact, 0.05).tolist(), expected)
+        self.assertEqual(glm.passes_alpha(stored, 0.05).tolist(), expected)
+        glm_result.result.p_fwe = p_exact.copy()
+        glm_result.result.q_fdr = p_exact.copy()
+        summary = glm.summary(glm_result, alpha=0.05)
+        self.assertEqual(summary["fwe"]["n_significant"], 4)
+        self.assertEqual(summary["fdr"]["n_significant"], 4)
+        self.assertEqual(int(np.count_nonzero(glm.passes_alpha(stored, 0.05))), summary["fwe"]["n_significant"])
+        # The same rule serves the VLSM clusters
+        from LesionNetworkMappingLib import vlsm
+
+        self.assertEqual(vlsm._passing(stored, 0.05).tolist(), expected)
+
     def test_exhaustive_p_is_exact(self):
         rows = [(f"sub-{level[:2]}{index}", {"group": level, "volume_ml": 10.0 + index}) for level in ("case", "control") for index in range(5)]
         study = self.make_study(rows)

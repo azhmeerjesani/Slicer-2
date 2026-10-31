@@ -1068,6 +1068,16 @@ def write_maps(glm_result, mask_path, out_dir, label, desc=None, fwe=True, fdr=T
     return paths
 
 
+def passes_alpha(p, alpha=FWE_ALPHA):
+    """Boolean array: p <= alpha, the one significance rule of the cohort pipeline (card, glm.json, maps, conjunction, clusters, report).
+
+    A permutation p such as 50/1000 equals alpha exactly, and a p map written as float32 reads back as 0.0500000007; the
+    relative tolerance of 1e-6 keeps both the float64 and the float32 value on the same side. NaN never passes.
+    """
+    p = np.asarray(p, dtype=np.float64)
+    return np.isfinite(p) & (p <= float(alpha) * (1.0 + 1e-6))
+
+
 def summary(glm_result, alpha=FWE_ALPHA):
     """JSON-compatible numbers of a :class:`GlmResult` for glm.json (inference, discreteness and effect sizes)."""
     result = glm_result.result
@@ -1087,7 +1097,7 @@ def summary(glm_result, alpha=FWE_ALPHA):
         "stat_range": [float(finite.min()), float(finite.max())] if finite.size else None,
         "fwe": {
             "alpha": alpha,
-            "n_significant": int(np.count_nonzero(result.p_fwe <= alpha)),
+            "n_significant": int(np.count_nonzero(passes_alpha(result.p_fwe, alpha))),
             "min_p": float(result.p_fwe.min()) if result.p_fwe.size else None,
             "critical_value": float(np.quantile(result.max_null, 1.0 - alpha)) if result.max_null.size else None,
         },
@@ -1097,7 +1107,7 @@ def summary(glm_result, alpha=FWE_ALPHA):
             "voxels_at_floor": at_floor,
             "min_attainable_q": float(result.min_p),
             "min_q": float(result.q_fdr.min()) if result.q_fdr.size else None,
-            "n_significant": int(np.count_nonzero(result.q_fdr <= result.fdr_alpha)),
+            "n_significant": int(np.count_nonzero(passes_alpha(result.q_fdr, result.fdr_alpha))),
             "note": (
                 f"The smallest attainable p is 1/(K+1) = {result.min_p:.3g} (K = {K}); BH-FDR reaches q <= {result.fdr_alpha:g} only when at least "
                 f"{result.fdr_floor_voxels} voxels reach it. Use 10,000 permutations, or Export for PALM (tail acceleration), for smaller p-values."
@@ -1116,7 +1126,7 @@ def summary(glm_result, alpha=FWE_ALPHA):
         },
     }
     if result.tfce_p_fwe is not None:
-        out["tfce_fwe"] = {"n_significant": int(np.count_nonzero(result.tfce_p_fwe <= alpha)), "min_p": float(result.tfce_p_fwe.min()) if result.tfce_p_fwe.size else None}
+        out["tfce_fwe"] = {"n_significant": int(np.count_nonzero(passes_alpha(result.tfce_p_fwe, alpha))), "min_p": float(result.tfce_p_fwe.min()) if result.tfce_p_fwe.size else None}
     return out
 
 

@@ -355,12 +355,12 @@ class PipelineChecks:
         occ = lesionset.load_occupancies(subset, lesionset.resolve_grid(subset, self.bundle, space=fixture.SPACE), space=fixture.SPACE)
         expected = lesionset.overlap_maps(occ).count.reshape(-1)[self.bundle.mask_indices]
         np.testing.assert_array_equal(masked(self.group_path("lesionCount"), self.bundle), expected)
-        # Conjunction = sens AND sign(t) AND PFwe < alpha
+        # Conjunction = sens AND sign(t) AND PFwe <= alpha
         t = masked(self.group_path("caseVsControlTstat"), self.bundle)
         p = masked(self.group_path("caseVsControlPFwe"), self.bundle)
         for suffix, sign in (("Pos", t > 0), ("Neg", t < 0)):
             sens = masked(self.group_path(f"sens90{suffix}"), self.bundle) != 0
-            np.testing.assert_array_equal(masked(self.group_path(f"conj{suffix}"), self.bundle) != 0, sens & sign & (p < 0.05))
+            np.testing.assert_array_equal(masked(self.group_path(f"conj{suffix}"), self.bundle) != 0, sens & sign & (p <= 0.05 * (1 + 1e-6)))
 
     # Study files
 
