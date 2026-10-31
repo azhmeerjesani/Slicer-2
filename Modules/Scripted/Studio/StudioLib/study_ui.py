@@ -3840,10 +3840,28 @@ def showSubjectSwitcher(shell=None):
 #
 
 
+def _agreementContext():
+    """``{"queue", "subject"}`` of the active second tracing or adjudication (``adjudicate.state()``), or None.
+
+    The study session has no subject then (the state released it, L-44): the autosave names the state's subject apart, so
+    that recovery reopens the state, never the first tracing of a blind second tracing.
+    """
+    adjudicate = sys.modules.get("StudioLib.adjudicate")
+    state = adjudicate.state() if adjudicate is not None else None
+    if state is None or state.session is not _session or not state.current:
+        return None
+    return {"queue": state.queue, "subject": state.current}
+
+
 def _autosaveContext():
     if _session is None:
         return {}
-    return {"study": {"path": _session.study.path, "name": _session.study.name, "subject": _session.current()}}
+    study = {"path": _session.study.path, "name": _session.study.name, "subject": _session.current()}
+    agreementContext = _agreementContext()
+    if agreementContext is not None:
+        study["subject"] = None
+        study["agreement"] = agreementContext
+    return {"study": study}
 
 
 def _slotStudy(slot):
@@ -3860,7 +3878,30 @@ def _canRecover(slot):
 
 def _recover(slot):
     record = _slotStudy(slot)
+    agreementRecord = record.get("agreement") if isinstance(record.get("agreement"), dict) else None
+    if agreementRecord and agreementRecord.get("subject"):
+        # A second tracing or an adjudication: the study opens and the state reopens its subject (a second tracing then
+        # offers its journal); the subject itself is never opened by the session (blinding)
+        session = openStudy(record["path"])
+        _reopenAgreement(session, agreementRecord.get("queue"), agreementRecord["subject"])
+        return
     openStudy(record["path"], subject=record.get("subject") or None)
+
+
+def _reopenAgreement(session, queue, sid):
+    """Start the second tracing or adjudication of an autosave at ``sid`` when it still waits in its queue."""
+    if session is None or sid not in session.study:
+        return False
+    try:
+        from . import adjudicate
+    except ImportError:
+        return False
+    row = session.study.subject(sid)
+    if queue == adjudicate.QUEUE_SECOND and adjudicate.secondTodo(row):
+        return adjudicate.startSecondTracing(sid=sid) is not None
+    if queue == adjudicate.QUEUE_ADJUDICATE and adjudicate.needsAdjudication(row):
+        return adjudicate.startAdjudication(sid=sid) is not None
+    return False
 
 
 #

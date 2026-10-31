@@ -72,6 +72,10 @@ Run with the main window and testing enabled::
 - ``test_27_sources_undo_reverts_the_change_just_made`` (BB-1): in the Sources card, U right after P or X undoes that change
   (the selection had moved on to the next record, and U reverted that record's earlier decision silently), selects the
   record and says what was undone; a row selected by the user is undone as before.
+- ``test_29_second_tracing_survives_a_crash`` (BB-1): a blind second tracing is journaled like a first tracing
+  (``.studio/journal/rater-<label>/<sid>.nii.gz``, 2 s after the last edit); the autosave names the second tracing and
+  its subject (never the session's earlier subject); recovering that autosave reopens the second tracing, whose notice
+  offers the journal; Recover brings the voxels back and saving removes the journal.
 """
 
 import json
@@ -2272,3 +2276,132 @@ class StudioRegressionTest(unittest.TestCase):
             for _ in range(4):
                 slicer.app.processEvents()
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+
+    def test_29_second_tracing_survives_a_crash(self):
+        """Slicer stopped during a second tracing: nothing of it was journaled, and the recovery card offered to reopen
+        the session's earlier subject (an empty second tracing then). The second tracing now has its own journal, the
+        autosave names it, and recovery reopens it with the journal offered (BB-1).
+        """
+        import types
+
+        from LesionNetworkMappingLib import agreement, geometry, nifti
+        from LesionNetworkMappingLib.study import Study
+
+        from StudioLib import adjudicate, autosave_io, autosave_ui, journal, review, shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Second study")
+        os.makedirs(folder)
+        scans = []
+        for sid in ("sub-01", "sub-02"):
+            scans.append(os.path.join(folder, f"{sid}_T1w.nii.gz"))
+            nifti.write_nifti(scans[-1], np.zeros(grid.shape, np.uint8), grid.affine)
+        originalToast = study_ui._toast
+        study_ui._toast = lambda shell, text, **kwargs: None
+        self.addCleanup(setattr, study_ui, "_toast", originalToast)
+        originalAdjudicateToast = adjudicate._toast
+        adjudicate._toast = lambda text, ms=3000, **kwargs: None
+        self.addCleanup(setattr, adjudicate, "_toast", originalAdjudicateToast)
+        self.addCleanup(review.setRaterName, review.storedRaterName())
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+
+        def pump(seconds=0.0):
+            deadline = time.time() + seconds
+            while True:
+                for _ in range(4):
+                    slicer.app.processEvents()
+                if time.time() >= deadline:
+                    return
+                time.sleep(0.02)
+
+        def tracing(state):
+            segmentationNode = state.segmentationNode()
+            volumeNode = slicer.mrmlScene.GetNodeByID(state._nodeIds[0])
+            segmentId = segmentationNode.GetSegmentation().GetNthSegmentID(0)
+            return segmentationNode, segmentId, volumeNode
+
+        try:
+            session = study_ui.createStudy(scans, studioShell, folder=folder)
+            self.assertIsNotNone(session)
+            review.setRaterName("Alice")
+            session.open("sub-01", switchToDraw=False)
+            segmentationNode, volumeNode = session.segmentationNode(), session.volumeNode()
+            segmentId = segmentationNode.GetSegmentation().GetNthSegmentID(0)
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, volumeNode)
+            array[20:23, 30:33, 20:23] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, volumeNode)
+            pump()
+            self.assertIsNotNone(session.done())
+            pump()
+            agreement.assign(session.study, sids=["sub-01"], rater="Bob", who="Alice")
+            session.flush()
+            review.setRaterName("Bob")
+            state = adjudicate.startSecondTracing(sid="sub-01", shell=studioShell)
+            self.assertIsNotNone(state)
+            pump()
+
+            # The autosave names the second tracing, not a subject of the session (which would show the first tracing)
+            context = study_ui._autosaveContext()["study"]
+            self.assertIsNone(context["subject"])
+            self.assertEqual(context.get("agreement"), {"queue": adjudicate.QUEUE_SECOND, "subject": "sub-01"})
+            self.assertEqual(autosave_ui._agreementText(context), "Reopen second tracing of sub-01")
+
+            # Bob traces; 2 s later the journal is written
+            segmentationNode, segmentId, volumeNode = tracing(state)
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, volumeNode)
+            array[10:20, 10:20, 10:20] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, volumeNode)
+            painted = int(array.sum())
+            pump(journal.JOURNAL_DELAY_MS / 1000.0 + 0.5)
+            autosave_io.backgroundWriter().drain(5.0)
+            pump()
+            journalPath = os.path.join(folder, ".studio", "journal", "rater-Bob", "sub-01.nii.gz")
+            self.assertTrue(os.path.isfile(journalPath), "the second tracing was not journaled")
+            self.assertFalse(os.path.exists(os.path.join(folder, ".studio", "journal", "sub-01.nii.gz")),
+                             "the second tracing must never be offered as the first tracing")
+
+            # "Crash": the state ends without saving and the study closes (nothing of the second tracing is written)
+            state.exit(quiet=True, keepScene=True)
+            study_ui.closeStudy()
+            pump()
+            self.assertTrue(os.path.isfile(journalPath))
+            self.assertTrue(adjudicate.secondTodo(Study.open(folder).subject("sub-01")))
+
+            # Recovering the autosave reopens the second tracing, whose notice offers the journal
+            study_ui._recover(types.SimpleNamespace(study=context))
+            pump()
+            state = adjudicate.state()
+            self.assertIsNotNone(state, "recovery did not reopen the second tracing")
+            self.assertEqual((type(state).__name__, state.current), ("SecondTracingState", "sub-01"))
+            self.assertIsNone(study_ui.session().current(), "the first tracing was opened for the second rater")
+            segmentationNode, segmentId, volumeNode = tracing(state)
+            self.assertEqual(int(slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, volumeNode).sum()), 0)
+            offer = state.journal().noticeWidget()
+            self.assertIsNotNone(offer, "the journal of the second tracing was not offered")
+            self.assertIs(studioShell.inspectorNotice(), state.notice, "the second tracing's own notice must stay")
+            self.assertTrue(state.notice.isAncestorOf(offer))
+            recoverButtons = [button for button in offer.findChildren("QToolButton") if str(button.text) == "Recover"]
+            self.assertEqual(len(recoverButtons), 1)
+            recoverButtons[0].click()
+            pump()
+            self.assertEqual(int(slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, volumeNode).sum()), painted)
+            self.assertIsNone(state.journal().noticeWidget())
+            self.assertTrue(state.isDirty())
+
+            # Saving the second tracing removes its journal
+            self.assertTrue(state.saveNext())
+            pump()
+            self.assertFalse(os.path.exists(journalPath))
+            row = study_ui.session().study.subject("sub-01")
+            self.assertTrue(row.get("rater2_lesion"))
+        finally:
+            if adjudicate.state() is not None:
+                adjudicate.state().exit(quiet=True, keepScene=True)
+            study_ui.closeStudy()
+            studioShell.dispose()
+            pump()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)

@@ -470,11 +470,25 @@ def recoverText(slot):
     if recoveryHandler(slot) is None:
         return _("Recover")
     study = slot.study if isinstance(slot.study, dict) else {}
+    agreementText = _agreementText(study)
+    if agreementText:
+        return agreementText
     if study.get("subject"):
         return _("Reopen study at {subject}").format(subject=study["subject"])
     if study.get("name"):
         return _("Reopen study {name}").format(name=study["name"])
     return _("Recover")
+
+
+def _agreementText(study):
+    """'Reopen second tracing of sub-04' (or adjudication) when the autosave was made in that state of Draw, else ''."""
+    record = study.get("agreement") if isinstance(study, dict) else None
+    subject = record.get("subject") if isinstance(record, dict) else None
+    if not subject:
+        return ""
+    if record.get("queue") == "adjudicate":
+        return _("Reopen adjudication of {subject}").format(subject=subject)
+    return _("Reopen second tracing of {subject}").format(subject=subject)
 
 
 def _label(text, objectName, pixelSize, color=None, weight=None):

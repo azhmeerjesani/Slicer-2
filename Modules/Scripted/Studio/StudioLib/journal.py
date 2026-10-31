@@ -11,6 +11,11 @@ When a subject is opened and its journal is newer than its lesion file (Slicer s
 written), a non-modal notice offers "Recover unsaved tracing (<age>)": Recover replaces the lesion with the journaled
 voxels (one undo step), Discard removes the journal. Writing the lesion (Done, or leaving the subject) removes it.
 
+The blind second tracing (``adjudicate.SecondTracingState``, L-44) has a journal of its own,
+``SecondTracingJournal``: ``<study>/.studio/journal/rater-<label>/<sid>.nii.gz``, compared with the second rater's own
+tracing file, and offered in the second tracing's notice when the subject is opened in it again (the first tracing is
+never loaded for it). Saving the second tracing removes it.
+
 The scene autosave (A-01) runs as well (D-A7): it covers the scene, the journal covers the subject's lesion inside the
 study. ``install(shell)`` / ``uninstall(shell)`` make this module a Studio plug-in; the journal itself is created by
 the study session (``study_ui.StudySession``) and also works in Classic.
@@ -152,8 +157,7 @@ class Journal:
             journalTime = os.path.getmtime(path)
         except OSError:
             return None
-        study = self.session.study
-        lesion = study.abspath(study.subject(sid).get("lesion")) if sid in study else None
+        lesion = self.lesionFile(sid)
         lesionTime = None
         if lesion:
             with contextlib.suppress(OSError):
@@ -163,6 +167,13 @@ class Journal:
                 os.remove(path)
             return None
         return sid, path, time.time() - journalTime
+
+    def lesionFile(self, sid):
+        """The file that the journal of ``sid`` is compared with (the subject's lesion), or None."""
+        study = self.session.study
+        if sid not in study:
+            return None
+        return study.abspath(study.subject(sid).get("lesion"))
 
     # Writing (main thread: extraction; worker: file)
 
@@ -247,11 +258,15 @@ class Journal:
                 if node is not None and slicer.mrmlScene.IsNodePresent(node):
                     slicer.mrmlScene.RemoveNode(node)
         self._withdrawNotice()
-        self.session.markDirty()
+        self._afterRecover()
         shell = _currentShell()
         if shell is not None:
             shell.toast(_("Recovered the unsaved tracing of {sid}").format(sid=self.sid), ms=3000)
         return True
+
+    def _afterRecover(self):
+        """The lesion was replaced by the journal: it has edits to write."""
+        self.session.markDirty()
 
     def _recoverOffer(self):
         self.recover()
@@ -295,6 +310,66 @@ class Journal:
 
     def dispose(self):
         self.detach()
+
+
+class SecondTracingJournal(Journal):
+    """The journal of a blind second tracing (``adjudicate.SecondTracingState``; L-44).
+
+    One file per rater and subject, ``.studio/journal/rater-<label>/<sid>.nii.gz``, compared with the rater's own
+    second tracing file (``rater2_lesion`` when it is this rater's). The offer is not a notice of its own: the second
+    tracing's notice holds it (``noticeWidget()``; ``onNoticeChanged`` is called when it comes or goes), because the
+    inspector notice slot holds one notice and the state's notice ("where am I", Exit) must stay.
+    """
+
+    def __init__(self, session, rater, onNoticeChanged=None):
+        Journal.__init__(self, session)
+        self.rater = rater
+        self.label = _lnm("agreement").rater_label(rater)
+        self.onNoticeChanged = onNoticeChanged
+
+    def path(self, sid):
+        return os.path.join(self.folder(), f"rater-{self.label}", f"{sid}.nii.gz")
+
+    def lesionFile(self, sid):
+        study = self.session.study
+        if sid not in study:
+            return None
+        row = study.subject(sid)
+        if not _lnm("agreement")._same_rater(row.get("rater2"), self.rater):
+            return None
+        return study.abspath(row.get("rater2_lesion"))
+
+    def _afterRecover(self):
+        """The state compares the tracing with its content stamp: the recovered voxels are unsaved edits already."""
+
+    def _showNotice(self, offer):
+        from . import ui
+
+        sid, _path, age = offer
+        text = _("Recover unsaved second tracing of {sid} ({age})").format(sid=sid, age=ageText(age))
+        frame = ui.noticeLine(text, [(_("Recover"), self._recoverOffer), (_("Discard"), self._discardOffer)])
+        frame.setObjectName("StudioSecondTracingRecoveryNotice")
+        self._notice = frame
+        self._noticeChanged()
+
+    def _withdrawNotice(self):
+        if self._notice is None:
+            return
+        notice, self._notice = self._notice, None
+        self._noticeChanged()
+        try:
+            from . import importer
+
+            importer.releaseWidget(notice)
+        except Exception:
+            logging.debug(f"Studio: second tracing journal notice release failed:\n{traceback.format_exc()}")
+
+    def _noticeChanged(self):
+        if self.onNoticeChanged is not None:
+            try:
+                self.onNoticeChanged()
+            except Exception:
+                logging.error(f"Studio: the second tracing notice could not be updated:\n{traceback.format_exc()}")
 
 
 #

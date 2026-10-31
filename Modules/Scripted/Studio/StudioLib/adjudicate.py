@@ -15,7 +15,11 @@ queue): the subjects assigned a second tracing (``LesionNetworkMappingLib.agreem
   hidden in the same event and its nodes removed;
 - **Save second tracing → next** (Ctrl+Enter) writes ``lesions/rater-<initials>/<sub>_space-<sp>_desc-lesion_mask.nii.gz``
   and its sidecar (``agreement.save_second_tracing``: blinding and the intra-rater interval of 7 days are checked there);
-  the agreement is not shown to the second rater.
+  the agreement is not shown to the second rater;
+- the tracing in progress is journaled 2 s after the last edit (``journal.SecondTracingJournal``,
+  ``.studio/journal/rater-<initials>/<sub>.nii.gz``): after a crash, the subject reopened in this state offers it in the
+  state's notice (Recover | Discard), and the autosave names the state and its subject, so that the recovery card
+  reopens this second tracing (``study_ui._recover``), never the first tracing.
 
 **Adjudication** (``startAdjudication()``; Library "Adjudicate N →", Search, the case strip's "Adjudicate" queue): the
 pairs whose Dice is below the study's threshold (0.5 by default) show both tracings as outlines in two colours, A (the
@@ -315,6 +319,7 @@ class _AgreementState:
             if self.shell.currentWorkspace() != "draw":
                 self.shell.switchTo("draw")
         self.install()
+        _autosaveSoon(self.title())
         return True
 
     def openNext(self, message):
@@ -526,6 +531,17 @@ class _AgreementState:
             _toast(_("{title} ended").format(title=self.title()), ms=2000)
 
 
+def _autosaveSoon(reason):
+    """Autosave once the state's subject is shown, so that the newest autosave names this state and its subject (the
+    study's context, ``study_ui._autosaveContext``), not the subject the study session had before (A-01).
+    """
+    try:
+        from . import autosave
+    except ImportError:
+        return
+    qt.QTimer.singleShot(0, lambda: autosave.autosaveNow(reason))
+
+
 @contextlib.contextmanager
 def _renderPaused():
     pause = getattr(slicer.app, "pauseRender", None)
@@ -557,9 +573,72 @@ class SecondTracingState(_AgreementState):
         self.segmentationId = None
         self._stamp = None
         self._figureFit = None
+        # Crash safety (SPEC 5.5, D-A7): the second tracing's own journal, written 2 s after the last edit
+        self._journal = None
+        self._edited = False
+        self._placedJournalNotice = None
+        studyUi = _studyUi()
+        self._observer = studyUi._SegmentObserver(self._onSegmentModified) if studyUi is not None else None
 
     def title(self):
         return _("Second tracing")
+
+    # Journal
+
+    def journal(self):
+        """The journal of this rater's second tracings (``journal.SecondTracingJournal``), or None."""
+        if self._journal is None:
+            try:
+                from . import journal
+
+                self._journal = journal.SecondTracingJournal(self.session, self.rater, onNoticeChanged=self._placeJournalNotice)
+            except (ImportError, ValueError):
+                logging.warning(f"Studio agreement: the second tracing cannot be journaled:\n{traceback.format_exc()}")
+                self._journal = None
+        return self._journal
+
+    def _onSegmentModified(self):
+        if not self.active or self.current is None or self._journal is None:
+            return
+        if not self._edited:
+            node = self.segmentationNode()
+            if node is None or _studyUi()._contentStamp(node) == self._stamp:
+                return
+            self._edited = True
+        self._journal.schedule()
+
+    def _placeJournalNotice(self):
+        """The journal's "Recover unsaved second tracing" line goes in this state's notice (the slot holds one notice)."""
+        widget = self._journal.noticeWidget() if self._journal is not None else None
+        if widget is not None and not _isAlive(widget):
+            widget = None
+        placed = self._placedJournalNotice
+        if placed is not None and placed is not widget:
+            self._placedJournalNotice = None
+            if _isAlive(placed):
+                if self.notice is not None and _isAlive(self.notice):
+                    self.notice.layout().removeWidget(placed)
+                placed.hide()
+        if widget is None or self.notice is None or not _isAlive(self.notice) or self._placedJournalNotice is widget:
+            return
+        layout = widget.layout()
+        if layout is not None:
+            layout.setContentsMargins(0, 2, 0, 0)
+        self.notice.layout().addWidget(widget)
+        widget.show()
+        self._placedJournalNotice = widget
+
+    def refreshNotice(self):
+        _AgreementState.refreshNotice(self)
+        self._placeJournalNotice()
+
+    def _clearNodes(self):
+        if self._observer is not None:
+            self._observer.dispose()
+        if self._journal is not None:
+            # Saved (the journal was removed then), skipped or left: a journal on disk is offered when the subject comes back
+            self._journal.detach()
+        _AgreementState._clearNodes(self)
 
     def load(self, sid):
         rules = _rules()
@@ -590,6 +669,13 @@ class SecondTracingState(_AgreementState):
         if fits:
             figureText = self._showFigure(fits[0], level)
         self._stamp = studyUi._contentStamp(segmentationNode)
+        self._edited = False
+        if self._observer is not None:
+            self._observer.observe(segmentationNode)
+        journal = self.journal()
+        if journal is not None:
+            # A journal newer than the rater's own tracing file (Slicer stopped before it was saved) is offered
+            journal.attach(sid, segmentationNode)
         lines = [_("Blind: the first tracing is not loaded, and the agreement is shown only in the Library"),
                  _("Rater: {rater} · {mode}").format(rater=self.rater, mode=_("intra-rater (same rater, 7 days later)") if mode == "intra" else _("inter-rater"))]
         if figureText:
@@ -687,6 +773,10 @@ class SecondTracingState(_AgreementState):
             _toast(str(e), ms=6000, level="warning")
             return False
         self._stamp = _studyUi()._contentStamp(node)
+        self._edited = False
+        if self._journal is not None:
+            # The tracing is written: its journal is out of date
+            self._journal.discard(sid)
         self.session.setValues([], {})
         self.session.flush()
         if not quiet:
