@@ -1735,10 +1735,12 @@ def max_area_index(mask3d, axis=2):
     return int(np.argmax(areas)), int(areas.max())
 
 
-def gallery(lesions, template=None, labels=None, per_page=30, binarize_at=0.5, **kwargs):
+def gallery(lesions, template=None, labels=None, per_page=30, binarize_at=0.5, cancel=None, **kwargs):
     """One axial tile per lesion at its maximum-area slice: red fill on the template, the case number
     (supplementary-table order: ``labels`` or 1..N) at the top right, z at the top left, L/R stamps.
 
+    :param cancel: optional :class:`jobs.CancelToken` (or any callable); checked between lesions and pages,
+        it raises :class:`jobs.Cancelled` when the job is stopped.
     :return: a list of :class:`Figure` pages of ``per_page`` tiles (``columns`` per row, default 6).
     """
     options = _options(kwargs)
@@ -1753,6 +1755,7 @@ def gallery(lesions, template=None, labels=None, per_page=30, binarize_at=0.5, *
     ctx_all = _Context("gallery", options, template, volumes)
     entries = []
     for volume, label in zip(volumes, labels, strict=False):
+        _check_cancel(cancel, len(entries))
         on_grid = reslice(volume, ctx_all.grid, order=0) >= binarize_at
         index, area = max_area_index(on_grid, 2)
         # Keep only the chosen axial section (a tile renders that plane alone): a read-only 3D view of it
@@ -1762,6 +1765,7 @@ def gallery(lesions, template=None, labels=None, per_page=30, binarize_at=0.5, *
         del on_grid
     total_pages = (len(entries) + per_page - 1) // per_page
     for page in range(total_pages):
+        _check_cancel(cancel, page)
         chunk = entries[page * per_page:(page + 1) * per_page]
         ctx = ctx_all.page() if page else ctx_all
         tiles = []
@@ -1885,45 +1889,71 @@ def _write_bytes(path, data):
     os.replace(tmp, path)
 
 
-def write_figure(figure, out_root, name, formats=FORMATS):
+_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+RESUME_NAME = ".figure-resume.json"  # in the figure folder: --resume skips a figure that is complete for the same inputs and options
+_RESUME_IGNORED = ("cancel_file", "resume", "threads", "parent_run", "run_root")
+
+
+def _check_cancel(cancel, done=None):
+    """Raise ``jobs.Cancelled`` when ``cancel`` (a CancelToken or any callable) says the job was stopped."""
+    if cancel is not None and cancel():
+        raise jobs.Cancelled(done=done, reason=getattr(cancel, "reason", None))
+
+
+def _sha256_file(path, block=1 << 20):
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(block):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_figure(figure, out_root, name, formats=FORMATS, cancel=None):
     """Write a figure (or a list of gallery pages) to ``<out_root>/figures/<name>/``.
 
     Files: ``<name>.png/.tiff/.svg/.pdf`` (pages: ``<name>_p01.png`` ... and one multi-page PDF),
     ``figure.json``, ``caption.txt`` and ``<name>_sourcedata.csv``.
 
+    ``cancel`` (a :class:`jobs.CancelToken` or any callable) is checked while the files are encoded; a stopped
+    job raises :class:`jobs.Cancelled` before the first file of this call is written (no partial figure).
+
     :return: dict {"dir": folder, "files": [file names], "figure_json": path}.
     """
-    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*$", name or ""):
+    if not _NAME_PATTERN.match(name or ""):
         raise ValueError(f"Figure names use letters, digits, '.', '_' and '-': {name!r}")
     unknown = sorted(set(formats) - set(FORMATS))
     if unknown:
         raise ValueError(f"Unknown format(s): {', '.join(unknown)}")
     pages = list(figure) if isinstance(figure, (list, tuple)) else [figure]
     folder = os.path.join(os.fspath(out_root), "figures", name)
-    os.makedirs(folder, exist_ok=True)
     files = []
+    payloads = []  # (file name, bytes): everything is encoded before the first write, so a stop leaves no partial figure
     stems = [name] if len(pages) == 1 else [f"{name}_p{index + 1:02d}" for index in range(len(pages))]
     for page, stem in zip(pages, stems, strict=False):
+        _check_cancel(cancel, len(files))
         image = page.image()
         if "png" in formats:
-            _write_bytes(os.path.join(folder, stem + ".png"), page.png_bytes())
+            payloads.append((stem + ".png", page.png_bytes()))
             files.append(stem + ".png")
+            _check_cancel(cancel, len(files))
         if "tiff" in formats:
             buffer = io.BytesIO()
             image.save(buffer, "TIFF", dpi=(page.dpi, page.dpi), compression="tiff_lzw")
-            _write_bytes(os.path.join(folder, stem + ".tiff"), buffer.getvalue())
+            payloads.append((stem + ".tiff", buffer.getvalue()))
             files.append(stem + ".tiff")
+            _check_cancel(cancel, len(files))
         if "svg" in formats:
-            _write_bytes(os.path.join(folder, stem + ".svg"), page.svg().encode("utf-8"))
+            payloads.append((stem + ".svg", page.svg().encode("utf-8")))
             files.append(stem + ".svg")
     if "pdf" in formats:
+        _check_cancel(cancel, len(files))
         buffer = io.BytesIO()
         images = [page.image() for page in pages]
         images[0].save(buffer, "PDF", resolution=float(pages[0].dpi), save_all=len(images) > 1, append_images=images[1:], title=name, creator="Slicer Studio LNM figures")
-        _write_bytes(os.path.join(folder, name + ".pdf"), buffer.getvalue())
+        payloads.append((name + ".pdf", buffer.getvalue()))
         files.append(name + ".pdf")
     caption = "\n".join(page.caption.strip() for page in pages) + "\n"
-    _write_bytes(os.path.join(folder, "caption.txt"), caption.encode("utf-8"))
+    payloads.append(("caption.txt", caption.encode("utf-8")))
     files.append("caption.txt")
     rows = [row for page in pages for row in (page.sourcedata or [])]
     csv_name = f"{name}_sourcedata.csv"
@@ -1935,7 +1965,7 @@ def write_figure(figure, out_root, name, formats=FORMATS):
     writer.writeheader()
     for row in rows:
         writer.writerow({key: ("" if value is None else value) for key, value in row.items()})
-    _write_bytes(os.path.join(folder, csv_name), buffer.getvalue().encode("utf-8"))
+    payloads.append((csv_name, buffer.getvalue().encode("utf-8")))
     files.append(csv_name)
     first = pages[0].meta
     record = dict(first)
@@ -1947,7 +1977,11 @@ def write_figure(figure, out_root, name, formats=FORMATS):
     record["files"] = files + ["figure.json"]
     record["software"] = _versions()
     record["created"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    _write_bytes(os.path.join(folder, "figure.json"), (json.dumps(_json_ready(record), indent=1, ensure_ascii=False) + "\n").encode("utf-8"))
+    payloads.append(("figure.json", (json.dumps(_json_ready(record), indent=1, ensure_ascii=False) + "\n").encode("utf-8")))
+    _check_cancel(cancel, len(files))
+    os.makedirs(folder, exist_ok=True)
+    for file_name, data in payloads:
+        _write_bytes(os.path.join(folder, file_name), data)
     return {"dir": folder, "files": record["files"], "figure_json": os.path.join(folder, "figure.json")}
 
 
@@ -2015,10 +2049,28 @@ def _relative(root, path):
     return os.path.basename(path) if rel.startswith("..") else rel.replace(os.sep, "/")
 
 
-def main(argv=None):
-    """Command-line entry point (see the module docstring); returns the exit code."""
+def _resume_hash(args, formats):
+    """Hash of everything that decides the figure (options and the bytes of the input files); no path is stored."""
+    from . import runs
+
+    values = {key: value for key, value in vars(args).items() if key not in _RESUME_IGNORED}
+    values["formats"] = formats
+    inputs = [*args.map, *args.lesion, args.count, args.template, args.mask]
+    values["inputs_sha256"] = [_sha256_file(path) if path and os.path.isfile(path) else None for path in inputs]
+    values["library"] = _versions()["library"]
+    return runs.params_sha256(values)
+
+
+def main(argv=None, cancel=None):
+    """Command-line entry point (see the module docstring); returns the exit code.
+
+    ``--cancel-file`` (or a ``cancel`` token given by an in-process caller) stops the job with exit code 3 before
+    any file of the figure is written; ``--resume`` skips a figure that a previous run completed for the same
+    inputs and options (its files are reported again and no run is registered a second time).
+    """
     argv = list(sys.argv[1:] if argv is None else argv)
     args = _parser().parse_args(argv)
+    cancel = cancel or jobs.CancelToken(args.cancel_file)
     jobs.emit("start", job=JOB, argv=argv)
     if args.out is None and args.study is None:
         raise jobs.JobError("Give --out or --study", code="usage", exit_code=jobs.EXIT_USAGE)
@@ -2057,7 +2109,23 @@ def main(argv=None):
     if args.mode:
         options["mode"] = args.mode
     preset = args.preset
+    cancel.raise_if_cancelled(done=0)
+    state = None
+    if _NAME_PATTERN.match(name or ""):
+        state = jobs.ResumeState(os.path.join(out_root, "figures", name, RESUME_NAME))
+        if not args.resume:
+            state.clear()
     try:
+        if args.resume and state is not None and state.done:
+            key = _resume_hash(args, formats)
+            folder = os.path.join(out_root, "figures", name)
+            files = state.data.get("files") or []
+            if state.data.get("params_sha256") == key and files and all(os.path.isfile(os.path.join(folder, item)) for item in files):
+                for file_name in files:
+                    jobs.emit("result", kind="figure", path=os.path.join(folder, file_name))
+                jobs.emit("done", outputs=[os.path.join(folder, f) for f in files], elapsed=round(jobs.elapsed(), 3), run_id=state.data.get("run_id"), resumed=True)
+                return 0
+            state.clear()
         needs = {"montage": 1, "pair": 1, "glass": 1, "ortho": 1, "replication": 2, "triptych": 3}
         if preset in needs and len(args.map) != needs[preset]:
             raise ValueError(f"The {preset} preset needs {needs[preset]} --map")
@@ -2083,8 +2151,8 @@ def main(argv=None):
         else:
             for key in ("rule", "n", "v", "threshold", "sign", "statistic", "units", "companion", "window", "mask"):
                 options.pop(key)
-            figure = gallery(args.lesion, args.template, args.label, args.per_page, **options)
-        written = write_figure(figure, out_root, name, formats)
+            figure = gallery(args.lesion, args.template, args.label, args.per_page, cancel=cancel, **options)
+        written = write_figure(figure, out_root, name, formats, cancel=cancel)
     except (ValueError, TypeError, OSError) as exc:
         raise jobs.JobError(str(exc), code="input") from None
     from . import runs
@@ -2102,6 +2170,12 @@ def main(argv=None):
         "name": name,
     }
     run_id = runs.register(run_root, "figure", written["dir"], parents=args.parent_run, params=params, status="done", summary={"files": written["files"]})
+    if state is not None:
+        try:
+            state.data = {"params_sha256": _resume_hash(args, formats), "files": written["files"], "run_id": run_id}
+            state.mark_done("figure")
+        except OSError:
+            pass  # only --resume loses its shortcut
     for file_name in written["files"]:
         jobs.emit("result", kind="figure", path=os.path.join(written["dir"], file_name))
     jobs.emit("done", outputs=[os.path.join(written["dir"], f) for f in written["files"]], elapsed=round(jobs.elapsed(), 3), run_id=run_id)

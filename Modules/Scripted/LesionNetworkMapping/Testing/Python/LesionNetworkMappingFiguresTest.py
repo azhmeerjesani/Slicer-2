@@ -34,7 +34,7 @@ try:
 except ImportError:  # pragma: no cover
     Image = None
 
-from LesionNetworkMappingLib import figures, nifti, runs
+from LesionNetworkMappingLib import figures, jobs, nifti, runs
 
 SHAPE = (30, 36, 30)
 SPACING = 2.0
@@ -444,6 +444,105 @@ class FiguresTest(unittest.TestCase):
         self.assertEqual(params["maps"], ["meanT.nii.gz"])
         self.assertEqual(params["template"], "tpl.nii.gz")  # outside the study: the file name only
         with open(runs.registry_path(study), encoding="utf-8") as f:
+            self.assertNotIn(self.tmp, f.read())
+
+
+    # Job protocol of the command line: --cancel-file and --resume
+
+    def _cli(self, argv):
+        """Run the figure CLI as a job in this process; return (exit code, events)."""
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = jobs.run_job(figures.main, argv, job=figures.JOB, exit=False, signals=False, orphan=False)
+        return code, [json.loads(line) for line in stdout.getvalue().splitlines() if line.strip()]
+
+    def _cli_inputs(self):
+        out = os.path.join(self.tmp, "cli")
+        os.makedirs(out)
+        tpl = os.path.join(self.tmp, "tpl.nii.gz")
+        nifti.write_nifti(tpl, brain(), self.affine)
+        lesions = []
+        for index in range(5):
+            path = os.path.join(self.tmp, f"les{index}.nii.gz")
+            nifti.write_nifti(path, ball((-20 + 8 * index, 0, 0), 6), self.affine)
+            lesions.append(path)
+        argv = ["--preset", "gallery", "--template", tpl, "--out", out, "--per-page", "2", "--width-mm", "89", "--dpi", "150", "--formats", "png"]
+        for path in lesions:
+            argv += ["--lesion", path]
+        return out, argv
+
+    def test_command_line_cancel_file_stops_before_any_output(self):
+        out, argv = self._cli_inputs()
+        stop = os.path.join(self.tmp, "STOP")
+        with open(stop, "w", encoding="utf-8"):
+            pass
+        code, events = self._cli(argv + ["--cancel-file", stop])
+        self.assertEqual(code, jobs.EXIT_CANCELLED)
+        self.assertEqual(events[-1]["event"], "cancelled")
+        self.assertNotIn("done", [event["event"] for event in events])
+        self.assertFalse(os.path.exists(os.path.join(out, "figures")))
+        self.assertFalse(os.path.exists(runs.registry_path(out)))
+
+    def test_command_line_cancel_between_gallery_pages_leaves_no_partial_figure(self):
+        out, argv = self._cli_inputs()
+        stop = os.path.join(self.tmp, "STOP")
+        pages = []
+        original = figures._finish_gallery
+
+        def finish_then_stop(*args, **kwargs):
+            pages.append(1)
+            if len(pages) == 1:  # the stop request arrives after page 1 is composed
+                with open(stop, "w", encoding="utf-8"):
+                    pass
+            return original(*args, **kwargs)
+
+        figures._finish_gallery = finish_then_stop
+        try:
+            code, events = self._cli(argv + ["--cancel-file", stop])
+        finally:
+            figures._finish_gallery = original
+        self.assertEqual(code, jobs.EXIT_CANCELLED)
+        self.assertEqual(events[-1]["event"], "cancelled")
+        self.assertEqual(len(pages), 1, "page 2 was rendered after the stop")
+        folder = os.path.join(out, "figures", "gallery")
+        self.assertEqual(os.listdir(folder) if os.path.isdir(folder) else [], [])
+        self.assertFalse(os.path.exists(runs.registry_path(out)))
+
+    def test_write_figure_cancel_writes_nothing(self):
+        figure = figures.montage(self.tmap, self.template, "A 0", threshold=4.0, **SMALL)
+        with self.assertRaises(jobs.Cancelled):
+            figures.write_figure(figure, self.tmp, "m", ("png", "svg"), cancel=lambda: True)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "figures")))
+
+    def test_command_line_resume_skips_a_completed_figure(self):
+        out, argv = self._cli_inputs()
+        code, _ = self._cli(argv)
+        self.assertEqual(code, 0)
+        folder = os.path.join(out, "figures", "gallery")
+        page = os.path.join(folder, "gallery_p01.png")
+        stamp = os.stat(page).st_mtime_ns
+        count = len(runs.load(out))
+        self.assertEqual(count, 1)
+        code, events = self._cli(argv + ["--resume"])
+        self.assertEqual(code, 0)
+        self.assertTrue(events[-1].get("resumed"))
+        self.assertEqual(events[-1]["event"], "done")
+        self.assertEqual(os.stat(page).st_mtime_ns, stamp, "a completed figure was rendered again")
+        self.assertEqual(len(runs.load(out)), count, "a completed figure was registered again")
+        self.assertEqual([event["event"] for event in events].count("result"), len(events[-1]["outputs"]))
+        # Other options (or a deleted file) are not a completed figure: it is rendered and registered again
+        code, events = self._cli(argv + ["--resume", "--title", "Other"])
+        self.assertEqual(code, 0)
+        self.assertFalse(events[-1].get("resumed"))
+        self.assertEqual(len(runs.load(out)), count + 1)
+        os.remove(page)
+        code, events = self._cli(argv + ["--resume", "--title", "Other"])
+        self.assertFalse(events[-1].get("resumed"))
+        self.assertTrue(os.path.isfile(page))
+        # Without --resume the figure is always rendered again
+        code, events = self._cli(argv + ["--title", "Other"])
+        self.assertFalse(events[-1].get("resumed"))
+        with open(os.path.join(folder, "figure.json"), encoding="utf-8") as f:
             self.assertNotIn(self.tmp, f.read())
 
 
