@@ -694,11 +694,73 @@ def folderSummary(rootPath=None):
 #
 
 
+#: The project locks that this process holds (``_lockKey``), whichever ``Project`` object holds them
+_heldLocks = set()
+
+
+def _lockPath(projectPath):
+    return os.path.join(projectPath, PRIVATE_DIR, LOCK_FILE)
+
+
+def _lockKey(lockPath):
+    return os.path.normcase(os.path.realpath(lockPath))
+
+
 def _lockFile(projectPath):
-    lock = qt.QLockFile(os.path.join(projectPath, PRIVATE_DIR, LOCK_FILE))
+    lock = qt.QLockFile(_lockPath(projectPath))
     # Never stale by age: a lock is stale only when its process is gone (QLockFile checks the process on this host)
     lock.setStaleLockTime(0)
     return lock
+
+
+def _bytesText(value):
+    """The text of a QByteArray (or str) that PythonQt returns, with Qt 5 and Qt 6."""
+    if isinstance(value, str):
+        return value.strip()
+    try:
+        return bytes(value.data() if hasattr(value, "data") else value).decode("utf-8", "replace").strip()
+    except (TypeError, ValueError):
+        return str(value).strip()
+
+
+def _lockLeftByEarlierProcess(lockPath):
+    """True if the lock file names this process (its PID, on this host as QLockFile sees it) but this process does not hold it.
+
+    Such a lock was left by an earlier Slicer Studio that had the same PID and was stopped or crashed: each start of the
+    web container is a new PID namespace (the same small PID again) with the machine ID of the image, so QLockFile finds
+    a running process with that PID and application name (this one) and never counts the lock as stale.
+    """
+    if _lockKey(lockPath) in _heldLocks:
+        return False
+    try:
+        with open(lockPath, encoding="utf-8", errors="replace") as f:
+            lines = [line.strip() for line in f.read().split("\n")]
+    except OSError:
+        return False
+    try:
+        if int(lines[0]) != os.getpid():
+            return False
+    except (ValueError, IndexError):
+        return False
+    # "This host" as QLockFile decides it: the machine ID when the lock has one, else the host name
+    hostName = lines[2] if len(lines) > 2 else ""
+    hostId = lines[3] if len(lines) > 3 else ""
+    sameHost = not hostName or hostName == str(qt.QSysInfo.machineHostName())
+    ownHostId = _bytesText(qt.QSysInfo.machineUniqueId())
+    if hostId and ownHostId:
+        sameHost = hostId == ownHostId
+    return sameHost
+
+
+def _tryLock(projectPath):
+    """Take the lock of the project: the locked QLockFile, or None if another running Slicer Studio holds it."""
+    lock = _lockFile(projectPath)
+    if lock.tryLock(0):
+        return lock
+    if not _lockLeftByEarlierProcess(_lockPath(projectPath)):
+        return None
+    lock.removeStaleLockFile()
+    return lock if lock.tryLock(0) else None
 
 
 def isLockedByOther(projectPath):
@@ -706,13 +768,13 @@ def isLockedByOther(projectPath):
     current = currentProject()
     if current is not None and os.path.normcase(os.path.realpath(current.path)) == os.path.normcase(os.path.realpath(projectPath)):
         return False
-    if not os.path.exists(os.path.join(projectPath, PRIVATE_DIR, LOCK_FILE)):
+    if not os.path.exists(_lockPath(projectPath)):
         return False
-    lock = _lockFile(projectPath)
-    if lock.tryLock(0):
-        lock.unlock()
-        return False
-    return True
+    lock = _tryLock(projectPath)
+    if lock is None:
+        return True
+    lock.unlock()
+    return False
 
 
 class Project:
@@ -725,6 +787,7 @@ class Project:
         self.lastSaveTime = None
         self.lastError = ""
         self._lock = None
+        self._lockKey = None
         data = readJson(projectFile(self.path)) or {}
         self.created = data.get("created")
 
@@ -745,16 +808,20 @@ class Project:
         if self._lock is not None:
             return True
         os.makedirs(privateFolder(self.path), exist_ok=True)
-        lock = _lockFile(self.path)
-        if not lock.tryLock(0):
+        lock = _tryLock(self.path)
+        if lock is None:
             return False
         self._lock = lock
+        self._lockKey = _lockKey(_lockPath(self.path))
+        _heldLocks.add(self._lockKey)
         return True
 
     def unlock(self):
         if self._lock is not None:
             self._lock.unlock()
             self._lock = None
+            _heldLocks.discard(self._lockKey)
+            self._lockKey = None
 
     def isLocked(self):
         return self._lock is not None

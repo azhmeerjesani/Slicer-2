@@ -3153,6 +3153,66 @@ class StudioProjectsTest(unittest.TestCase):
             os.environ[projects.ROOT_ENVIRONMENT] = self.root
 
 
+    def test_56_lock_left_by_an_earlier_process_with_the_same_pid_is_stale(self):
+        """A lock left by a Slicer Studio that was stopped or crashed, whose PID is the PID of this process, is stale.
+
+        Each start of the web container is a new PID namespace with the machine ID of the image, so the next Slicer Studio
+        often gets the PID of the one that held the lock. QLockFile then found a running process with that PID and name (the
+        new one itself) and the project stayed "open in another Slicer Studio" at every start: no crash offer, and open,
+        rename and Move to Trash were refused until .studio/lock was deleted by hand.
+        """
+        projects = self.projects
+        service = self._service()
+        _volume, _path = self._userVolume()
+        project = self._projectFor(service)
+        self._save(service)
+        path = project.path
+        lockPath = os.path.join(path, ".studio", "lock")
+        with open(lockPath, encoding="utf-8") as f:
+            ownLock = f.read()
+        self.assertEqual(ownLock.split("\n")[0], str(os.getpid()), "QLockFile writes the PID of this process")
+        # The process is gone (killed, no clean quit): its lock and project.json "open" stay; the next one has its PID
+        project.unlock()
+        service.project = None
+        service.projectWriter = None
+        projects.setCurrentProject(None)
+        self.io.backgroundWriter().drain(10.0)
+        data = projects.readJson(projects.projectFile(path))
+        data["state"] = "open"
+        self.io.atomicWriteJson(projects.projectFile(path), data)
+        with open(lockPath, "w", encoding="utf-8") as f:
+            f.write(ownLock)
+        self.assertFalse(projects.isLockedByOther(path), "the process that held the lock is gone")
+        offered = []
+        service.setProjectPresenter(offered.append)
+        self.assertEqual([info.name for info in service.scanProjectsAtStartup()], [project.name], "the crash offer lists it")
+        # The same lock while this process holds the project (another window of the same process stands for it): locked
+        with open(lockPath, "w", encoding="utf-8") as f:
+            f.write(ownLock)
+        holder = projects.Project(path)
+        self.assertTrue(holder.lock())
+        try:
+            self.assertTrue(projects.isLockedByOther(path))
+            self.assertFalse(projects.Project(path).lock())
+        finally:
+            holder.unlock()
+        self.assertFalse(os.path.exists(lockPath))
+        # The same PID written on another computer (a shared folder): QLockFile cannot check it, so it stays locked
+        lines = ownLock.split("\n")
+        while len(lines) < 5:
+            lines.append("")
+        lines[2], lines[3] = "another-computer", "0123456789abcdef0123456789abcdef"
+        with open(lockPath, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+        self.assertTrue(projects.isLockedByOther(path))
+        self.assertFalse(projects.Project(path).lock())
+        self.assertTrue(os.path.exists(lockPath), "the lock of another computer is kept")
+        # Then the project opens at the next start: the stale lock of the same PID is replaced by the lock of this one
+        with open(lockPath, "w", encoding="utf-8") as f:
+            f.write(ownLock)
+        self.assertTrue(service.openProject(path))
+        self.assertTrue(service.project.isLocked())
+
 def _sphere(center=(0, 0, 0)):
     import vtk
 
