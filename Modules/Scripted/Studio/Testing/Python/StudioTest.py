@@ -1430,6 +1430,27 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         draw.extension().brushChips[3.0].click()
         self._pump()
 
+    def test_19b_draw_brush_size_from_keys_is_shown_and_kept(self):
+        """A brush size changed without the panel ([ ], Shift+wheel, a script: only EffectParameterModified fires, never
+        the node's ModifiedEvent) shows in the Size row (chips and field) and is kept in Studio/BrushDiameterMm (SPEC 5.10).
+        """
+        from StudioLib import draw
+
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        self.assertEqual(self._effect(editor), "Paint")
+        paint = editor.effectByName("Paint")
+        extension = draw.extension()
+        previous = qt.QSettings().value(draw.BRUSH_DIAMETER_KEY)
+        self.addCleanup(lambda: qt.QSettings().setValue(draw.BRUSH_DIAMETER_KEY, previous) if previous is not None else qt.QSettings().remove(draw.BRUSH_DIAMETER_KEY))
+        for diameter, chip in ((7.5, None), (6.0, 6.0)):
+            paint.setCommonParameter("BrushAbsoluteDiameter", diameter)
+            self._wait(100)
+            self.assertAlmostEqual(extension.brushField.value, diameter, 1)
+            self.assertAlmostEqual(float(qt.QSettings().value(draw.BRUSH_DIAMETER_KEY)), diameter, 3)
+            for size, button in extension.brushChips.items():
+                self.assertEqual(button.checked, size == chip, f"chip {size} with brush {diameter}")
+
     def test_20_draw_smartfill_tile(self):
         """Smart fill has a labelled tile (third), the key M and a "Smart fill · M · 3" tooltip (D-A10)."""
         studioShell = self._applyStudio()

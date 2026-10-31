@@ -607,6 +607,12 @@ class _DrawSession(VTKObservationMixin):
         self._refreshTimer.setSingleShot(True)
         self._refreshTimer.setInterval(0)
         self._refreshTimer.connect("timeout()", self.refreshPanel)
+        # The brush size is a common effect parameter: changing it ([ ], Shift+wheel, a script) fires only the custom
+        # EffectParameterModified event of the node, never ModifiedEvent
+        self._brushTimer = qt.QTimer()
+        self._brushTimer.setSingleShot(True)
+        self._brushTimer.setInterval(0)
+        self._brushTimer.connect("timeout()", self._onBrushSizeChanged)
         self._adoptTimer = qt.QTimer()
         self._adoptTimer.setSingleShot(True)
         self._adoptTimer.setInterval(0)
@@ -811,12 +817,29 @@ class _DrawSession(VTKObservationMixin):
             return
         if self._observedNode is not None:
             self.removeObserver(self._observedNode, vtk.vtkCommand.ModifiedEvent, self._onParameterNodeModified)
+            self.removeObserver(self._observedNode, slicer.vtkMRMLSegmentEditorNode.EffectParameterModified,
+                                self._onEffectParameterModified)
         self._observedNode = node
         if node is not None:
             self.addObserver(node, vtk.vtkCommand.ModifiedEvent, self._onParameterNodeModified)
+            self.addObserver(node, slicer.vtkMRMLSegmentEditorNode.EffectParameterModified, self._onEffectParameterModified)
 
     def _onParameterNodeModified(self, caller, event):
         self._timer.start()
+
+    def _onEffectParameterModified(self, caller, event):
+        if self.active:
+            self._brushTimer.start()
+
+    def _onBrushSizeChanged(self):
+        """The brush size changed without a ModifiedEvent of the node: keep it and show it in the Size row."""
+        if not self.active:
+            return
+        editor = segmentEditor()
+        if editor is None or not _isModuleEntered() or _effectName(editor) not in ("Paint", "Erase"):
+            return
+        self._persistBrushDiameter(editor)
+        self.refreshPanel()
 
     def _evaluate(self):
         """Follow the effect chosen by the user, and arm the pending effect when the editor can edit."""
