@@ -2595,6 +2595,11 @@ class DrawExtension:
         """A lesion to draw into: the edited segmentation, else one bound to the source volume ("Lesions"), with a
         "Lesion" segment when it has none. Nothing is created while there is no scan (the empty state shows).
         """
+        importer = _importer()
+        pending = importer.takePendingSelection() if importer is not None and hasattr(importer, "takePendingSelection") else None
+        if pending is not None:
+            # The lesion that was chosen while the editor had no Segment Editor node (importer.selectInSegmentEditor())
+            importer.selectInSegmentEditor(*pending)
         segmentationNode = editor.segmentationNode()
         sourceVolumeNode = editor.sourceVolumeNode()
         if sourceVolumeNode is not None and not _isEditableSource(sourceVolumeNode):

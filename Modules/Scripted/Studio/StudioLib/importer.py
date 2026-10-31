@@ -779,6 +779,14 @@ def selectInSegmentEditor(segmentationNode, sourceVolumeNode):
     if widget is None or widget.editor is None:
         return
     editor = widget.editor
+    if segmentationNode is not None and editor.mrmlSegmentEditorNode() is None:
+        # The editor follows no Segment Editor node (a scene was loaded or closed while Draw was not shown; Draw's
+        # SegmentEditor.enter() attaches it again). Selecting now would do nothing and log an error ("SetSegmentationNode:
+        # need to set segment editor node first"), so the selection waits for Draw (takePendingSelection()).
+        _pendingSelection["segmentation"] = segmentationNode
+        _pendingSelection["source"] = sourceVolumeNode
+        return
+    _pendingSelection.clear()
     editor.setSegmentationNode(segmentationNode)
     if sourceVolumeNode is not None and _referenceKind(sourceVolumeNode) is None:
         # A figure or a statistical map is never the source (USABILITY P12)
@@ -786,6 +794,22 @@ def selectInSegmentEditor(segmentationNode, sourceVolumeNode):
     segmentation = segmentationNode.GetSegmentation()
     if segmentation.GetNumberOfSegments() > 0:
         editor.setCurrentSegmentID(segmentation.GetNthSegmentID(0))
+
+
+#: The selection that ``selectInSegmentEditor()`` could not apply because the editor had no Segment Editor node
+_pendingSelection = {}
+
+
+def takePendingSelection():
+    """The ``(segmentationNode, sourceVolumeNode)`` that ``selectInSegmentEditor()`` kept for Draw, or None without one
+    (or when the segmentation left the scene). Draw applies it when it enters, once the editor has its node.
+    """
+    segmentationNode, sourceNode = _pendingSelection.get("segmentation"), _pendingSelection.get("source")
+    _pendingSelection.clear()
+    scene = slicer.mrmlScene
+    if segmentationNode is None or not scene.IsNodePresent(segmentationNode):
+        return None
+    return segmentationNode, (sourceNode if sourceNode is not None and scene.IsNodePresent(sourceNode) else None)
 
 
 def _isReference(node):

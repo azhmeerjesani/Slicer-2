@@ -2849,3 +2849,66 @@ class StudioRegressionTest(unittest.TestCase):
                 slicer.app.processEvents()
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
+
+    def test_35_continue_in_draw_after_a_scene_load_logs_no_error_and_keeps_the_lesion(self):
+        """A project opened from the Library detaches the Segment Editor node (a scene loads while Draw is not shown): Continue
+        in Draw on a lesion selects it without the error "SetSegmentationNode: need to set segment editor node first" (the
+        top-bar error badge), and Draw edits that lesion on its own scan, not the first one found.
+        """
+        import numpy as np
+        from StudioLib import draw, importer, library, shell
+
+        if slicer.util.mainWindow() is None or not hasattr(slicer.modules, "segmenteditor"):
+            self.skipTest("needs the main window and the Segment Editor")
+        slicer.mrmlScene.Clear(0)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+
+        def pump():
+            for _ in range(10):
+                slicer.app.processEvents()
+
+        def errors():
+            model = slicer.app.errorLogModel()
+            levelColumn, descriptionColumn = 2, 4  # ctkErrorLogAbstractModel::LogLevelColumn, DescriptionColumn
+            return [str(model.index(row, descriptionColumn).data()) for row in range(model.rowCount())
+                    if model.index(row, levelColumn).data() in ("Error", "Critical", "Fatal")]
+
+        try:
+            image = np.zeros((20, 24, 28), np.int16)
+            image[5:15, 6:18, 7:21] = 200
+            scans, lesions = [], []
+            for name in ("A", "B"):
+                volumeNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "sub-0%s_T1w" % ("1" if name == "A" else "2"))
+                slicer.util.updateVolumeFromArray(volumeNode, image)
+                volumeNode.CreateDefaultDisplayNodes()
+                segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "lesion" + name)
+                segmentationNode.CreateDefaultDisplayNodes()
+                segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(volumeNode)
+                segmentId = segmentationNode.GetSegmentation().AddEmptySegment("bright")
+                slicer.util.updateSegmentBinaryLabelmapFromArray((image > 100).astype(np.uint8), segmentationNode, segmentId, volumeNode)
+                scans.append(volumeNode)
+                lesions.append(segmentationNode)
+            studioShell.switchTo("draw")
+            pump()
+            editor = slicer.modules.SegmentEditorWidget.editor
+            self.assertIsNotNone(editor.mrmlSegmentEditorNode())
+            studioShell.switchTo("library")
+            pump()
+            # What opening a project from the Library does to the editor
+            draw._onSceneStartImport()
+            self.assertIsNone(editor.mrmlSegmentEditorNode())
+            errorsBefore = len(errors())
+            library.continueInDraw(studioShell, segmentationNode=lesions[1], volumeNode=scans[1])
+            pump()
+            self.assertEqual([text for text in errors()[errorsBefore:] if "SetSegmentationNode" in text], [])
+            self.assertIs(editor.segmentationNode(), lesions[1])
+            self.assertIs(editor.sourceVolumeNode(), scans[1])
+            self.assertEqual(editor.currentSegmentID(), lesions[1].GetSegmentation().GetNthSegmentID(0))
+            self.assertEqual(importer.takePendingSelection(), None)
+        finally:
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
