@@ -631,6 +631,7 @@ def _map_record_from_provenance(provenance, folder, run_id):
         "split_half": qa_json.get("split_half"),
         "versions": provenance.get("versions"),
         "software": provenance.get("software"),
+        "lesions": [lesion for lesion in provenance.get("lesions") or [] if isinstance(lesion, dict) and lesion.get("name")],
     }
 
 
@@ -874,10 +875,13 @@ def seeds_section(records):
         probabilistic = record.get("probabilistic")
         seed = "fractional voxel occupancy (probabilistic lesions)" if probabilistic else "fractional voxel occupancy of the binarized lesion" if probabilistic is False else f"seed weighting {NOT_RECORDED}"
         supersample = record.get("supersample")
+        # The lesions' template spaces and the note for lesions on another template family than the connectome
+        space_text = _lesion_space_text(record.get("lesions") or [], record.get("bundle") or {})
         items.append(
             f"Run {record['id']}: each lesion was resampled onto the connectome grid as {seed} (supersampling {_or_nr(supersample)} per axis); "
             f"the occupancy-weighted mean time course of the lesion was correlated with every voxel (Pearson r), averaged over runs and Fisher z-transformed; "
-            f"stored maps: mean r, mean Fisher z and the voxelwise one-sample t of Fisher z (statistic recorded for pooling: {_or_nr(record.get('statistic'))})",
+            f"stored maps: mean r, mean Fisher z and the voxelwise one-sample t of Fisher z (statistic recorded for pooling: {_or_nr(record.get('statistic'))})"
+            + (f".{space_text}" if space_text else ""),
         )
     section.bullets(items)
     inputs = sorted({str((data.get("inputs") or {}).get("input") or data.get("input")) for _, data in records.group_records("glm.json", "glm") + records.group_records("slnm.json", "slnm") if (data.get("inputs") or {}).get("input") or data.get("input")})
@@ -1235,6 +1239,42 @@ def _top_pct_text(rule, resolved):
     return f"{maps} were thresholded at the top {x}% of {values} ({cut}; rank rule top_pct, no p-value; {df}V = {resolved['v']:,} voxels); maps are stored unthresholded."
 
 
+def _lesion_space(lesion):
+    """(template space or None, family notice or "") of an exported lesion (its sidecar entry, else its QA values)."""
+    qa = lesion.get("qa") or {}
+    return lesion.get("space") or qa.get("lesion_space"), lesion.get("space_notice") or qa.get("space_notice") or ""
+
+
+def _lesion_spaces_value(lesions):
+    """The "Lesion template space" parameter: the distinct template spaces of the lesions, or not recorded."""
+    spaces = []
+    for lesion in lesions:
+        space = _lesion_space(lesion)[0]
+        if space and space not in spaces:
+            spaces.append(space)
+    return ", ".join(spaces) if spaces else NOT_RECORDED
+
+
+def _lesion_space_text(lesions, info):
+    """' Lesion template space: <space> (<lesions>); connectome space: <space>. <notice> (<lesions>; ...).' ("" when none is recorded)."""
+    spaces, notices = {}, {}
+    for lesion in lesions:
+        space, notice = _lesion_space(lesion)
+        if space:
+            spaces.setdefault(space, []).append(lesion["name"])
+        if notice:
+            notices.setdefault(notice, []).append(lesion["name"])
+    if not spaces and not notices:
+        return ""
+    text = ""
+    if spaces:
+        listed = "; ".join(f"{space} ({', '.join(names)})" for space, names in spaces.items())
+        text += f" Lesion template space: {listed}" + (f"; connectome space: {info['space']}." if info.get("space") else ".")
+    for notice, names in notices.items():
+        text += f" {notice.rstrip('.')} ({', '.join(names)}; no template-family transform was applied)."
+    return text
+
+
 def run_sections(info, n, subset, threshold, lesions, run_meta=None, software=None):
     """Sections of one exported network-mapping run (the content of ``export.methods_text``)."""
     run_meta = run_meta or {}
@@ -1286,12 +1326,13 @@ def run_sections(info, n, subset, threshold, lesions, run_meta=None, software=No
         else:
             qa_text += "; the similarity to the relocated-lesion maps is not available for this run (it is computed when a run completes)"
     qa_text += "."
+    space_text = _lesion_space_text(lesions, info)
     paragraph = (
         f"Lesion network maps were computed with the lesion network mapping library of 3D Slicer ({export.LIBRARY_NAME} {export.LIBRARY_VERSION}). "
         f"Each lesion was resampled onto the {spacing_text} grid of the {info.get('name')} normative functional connectome ({info.get('n_voxels', 0):,} voxels{identity_text}) as fractional voxel occupancy. "
         f"For each of N = {n} subjects{subset_text}, the occupancy-weighted time course of the lesion was correlated (Pearson r) with the time course of every voxel, "
         "the correlations were averaged over runs and Fisher z-transformed, and maps of the mean r, the mean Fisher z and the voxelwise one-sample t statistic of Fisher z "
-        f"across subjects (df = {max(n - 1, 0)}) were computed (Boes et al., 2015; Fox, 2018). {threshold_text} {qa_text}"
+        f"across subjects (df = {max(n - 1, 0)}) were computed (Boes et al., 2015; Fox, 2018).{space_text} {threshold_text} {qa_text}"
     )
     sections = [_section("maps").paragraph(paragraph)]
     parameters = _section("parameters").table(
@@ -1308,6 +1349,7 @@ def run_sections(info, n, subset, threshold, lesions, run_meta=None, software=No
             ["Threshold rule", f"`{json.dumps(threshold['rule'], sort_keys=True)}`"],
             ["Resolved threshold", threshold["derived"]],
             ["Relocated-lesion null", f"{null.get('k', 0)} per lesion, seed {null.get('seed', 0)}"],
+            ["Lesion template space", _lesion_spaces_value(lesions)],
         ],
     )
     sections.append(parameters)

@@ -685,6 +685,9 @@ def write_run(out_dir, maps, lesion_names, bundle, rule=None, resolved=None, qa=
             "fractional_sum": meta.get("weight_total"),
             "volume_mm3": meta.get("volume_mm3"),
             "outside_connectome_fraction": meta.get("weight_outside_fraction"),
+            # The lesion's template space and the note for a lesion on another template family than the connectome
+            "space": meta.get("space", ((qa or {}).get(name) or {}).get("lesion_space")),
+            "space_notice": meta.get("space_notice", ((qa or {}).get(name) or {}).get("space_notice")),
         }
         sidecar = {
             "format": SIDECAR_FORMAT,

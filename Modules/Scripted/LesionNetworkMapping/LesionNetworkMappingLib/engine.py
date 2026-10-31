@@ -26,7 +26,7 @@ Command line (JSON events of the job protocol, see jobs.py: start, progress, sna
 error or cancelled; every event has "t", the seconds since the job started)::
 
     python -m LesionNetworkMappingLib.engine --bundle B.lnmc --lesion lesion1.nii.gz [--lesion ...]
-        --out DIR [--subjects N [--random] [--seed S] | --subject-list SPEC] [--threads K] [--snapshot-every K]
+        [--lesion-space SPACE ...] --out DIR [--subjects N [--random] [--seed S] | --subject-list SPEC] [--threads K] [--snapshot-every K]
         [--null-relocations K [--null-seed S] [--brain-mask MASK] [--null-voxels N] [--write-null]]
         [--accumulate welford|mean] [--split-half] [--desc-suffix PreviewN100] [--threshold-rule JSON]
         [--run-json run.json] [--cancel-file F]
@@ -58,6 +58,11 @@ map, the relocated-lesion null when --null-relocations is given (the relocated l
 seed columns of the same pass) and, when the bundle has valid reference maps (reference.py; never
 built here), the reference similarity and calibrated chip. It is reported in the "done" event ("qa")
 and in <out>/qa.json, which also identifies the reference ("reference": definition, sha256).
+
+The template space of each lesion (--lesion-space, one per --lesion or one for all; default: the space of
+the lesion file's grid when it is a known template grid) is recorded with its lesion in run.json ("space",
+"space_notice") and in the QA values ("lesion_space", "space_notice"): the notice says that a lesion on
+another MNI template family than the connectome gives an approximate map (see ``geometry.family_notice``).
 """
 
 import os
@@ -76,7 +81,7 @@ import numpy as np
 
 from . import jobs
 from .connectome import ConnectomeBundle, _is_cancelled
-from .geometry import from_masked_vector, resample_to_grid, to_masked_vector
+from .geometry import detect_space, family_notice, from_masked_vector, resample_to_grid, to_masked_vector
 from .nifti import XFORM_WARNING_MM, read_nifti, read_nifti_header, write_nifti, xform_disagreement
 
 RMAX = 0.999999  # r is clipped to +/-RMAX before the Fisher transform
@@ -798,6 +803,41 @@ _BIDS_LABEL = re.compile(r"^sub-[A-Za-z0-9]+(?:_[A-Za-z0-9]+-[A-Za-z0-9]+)*$")  
 _LESION_IMAGE_ENTITIES = ("space", "res", "den", "label", "desc")
 
 
+def connectome_space(bundle):
+    """Template space of a bundle: the space of its grid when it is a known template grid, else the space its
+    connectome.json declares ("space", e.g. the synthetic demo's), else None.
+    """
+    try:
+        detected = detect_space((tuple(bundle.shape), bundle.affine))
+    except (TypeError, ValueError):
+        detected = None
+    if detected is not None:
+        return detected[0]
+    declared = (getattr(bundle, "metadata", None) or {}).get("space")
+    return str(declared) if declared else None
+
+
+def _lesion_spaces(paths, given, bundle):
+    """[{"space", "space_notice"}] of the lesion files: the --lesion-space values (one per lesion or one for all),
+    else the space of each file's grid when it is a known template grid (None otherwise), with the template-family
+    notice against the connectome's space ("" when the families match or a space is not known).
+    """
+    target = connectome_space(bundle)
+    out = []
+    for index, path in enumerate(paths):
+        if given:
+            space = given[index] if len(given) > 1 else given[0]
+        else:
+            try:
+                detected = detect_space(path)
+            except (OSError, TypeError, ValueError):
+                detected = None
+            space = detected[0] if detected is not None else None
+        space = str(space) if space else None
+        out.append({"space": space, "space_notice": family_notice(space, target)})
+    return out
+
+
 def _lesion_name(path):
     """Output name of a lesion file: its name without extension or, for BIDS-style names, its
     key-value entities except the lesion-image entities space, res, den, label and desc
@@ -1134,6 +1174,7 @@ def main(argv=None):
     parser = jobs.JsonArgumentParser(prog="python -m LesionNetworkMappingLib.engine", description="Compute lesion network maps (or parcel seed maps) from a connectome bundle.")
     parser.add_argument("--bundle", required=True, help="connectome bundle directory (.lnmc)")
     parser.add_argument("--lesion", action="append", default=None, help="lesion NIfTI file (any grid; repeat for several lesions); required unless --parcels is given")
+    parser.add_argument("--lesion-space", action="append", default=None, metavar="SPACE", help="template space of the lesion (e.g. MNI152NLin6Asym; one per --lesion in order, or one for all; default: the space of the lesion file's grid when it is a known template grid), recorded with its template-family notice")
     parser.add_argument("--parcels", default=None, metavar="LABELS", help="parcel run instead of lesions: map every label of this label image (any grid; nearest-neighbour resampling, 0 is background) as a seed and write parcel_fz.f16.npy, parcel_C_fz.npy and parcel_labels.json")
     parser.add_argument("--out", required=True, help="output directory")
     parser.add_argument("--subjects", type=int, default=None, help="use only N subjects (default: all)")
@@ -1170,6 +1211,8 @@ def main(argv=None):
         parser.error("--subject-list cannot be combined with --subjects or --random")
     if (args.lesion is None) == (args.parcels is None):
         parser.error("give one or more --lesion files, or --parcels (not both)")
+    if args.lesion_space is not None and (args.lesion is None or len(args.lesion_space) not in (1, len(args.lesion))):
+        parser.error("give one --lesion-space per --lesion, or one for all lesions")
     if args.parcels is not None:
         for option, given in (("--null-relocations", args.null_relocations > 0), ("--write-null", args.write_null), ("--split-half", args.split_half), ("--snapshot-every", args.snapshot_every > 0), ("--accumulate welford", args.accumulate == "welford")):
             if given:
@@ -1209,6 +1252,7 @@ def main(argv=None):
         if args.parcels is not None:
             return _parcel_run(args, bundle, ids, run, cancel, started)
         names, weights, qc = [], [], []
+        spaces = _lesion_spaces(args.lesion, args.lesion_space, bundle)
         for path in args.lesion:
             cancel.raise_if_cancelled(done=0)
             lesion_weights_vector, lesion_qc_values = prepare_lesion(path, bundle, supersample=args.supersample, binarize=not args.probabilistic)
@@ -1251,8 +1295,8 @@ def main(argv=None):
         if run is not None:
             # Recorded before the computation so that a stopped run still documents its inputs
             run["lesions"] = [
-                {"name": name, "file": os.path.abspath(path), "sha256": file_sha256(path), **{key: value for key, value in values.items() if key != "lesion"}}
-                for name, path, values in zip(names, args.lesion, qc, strict=True)
+                {"name": name, "file": os.path.abspath(path), "sha256": file_sha256(path), **{key: value for key, value in values.items() if key != "lesion"}, **space}
+                for name, path, values, space in zip(names, args.lesion, qc, spaces, strict=True)
             ]
             run["maps"] = {name: {key: os.path.abspath(p) for key, p in output_paths(args.out, name, bundle.name, args.desc_suffix).items() if key in map_keys} for name in names}
             run["null"] = null_settings
@@ -1331,6 +1375,9 @@ def main(argv=None):
                 jobs.emit("warning", code="reference", lesion=name, message=f"The reference QA of this lesion is not available ({exc}).")
                 qa_values[name] = qa_lib.lesion_qa(statistic[index], degree, lesion_nulls, maps.null_voxels)
             start += count
+        for name, space in zip(names, spaces, strict=True):
+            # The template space of the lesion and its family notice are QA values (sidecar and qa.json)
+            qa_values[name] = {**qa_values[name], "lesion_space": space["space"], "space_notice": space["space_notice"]}
         qa_path = os.path.join(args.out, "qa.json")
         degree_info = qa_lib.read_degree_metadata(bundle.path) if degree is not None else None
         qa_record = {

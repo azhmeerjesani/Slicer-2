@@ -1524,7 +1524,7 @@ class ExportTest(_TempDirTestCase):
         self.assertEqual(sidecar["lesion"]["file"], os.path.relpath(lesion_path, out).replace(os.sep, "/"))
         self.assertNotIn(self.tmp, json.dumps(sidecar))
         self.assertGreater(sidecar["lesion"]["voxels_on_connectome_grid"], 0)
-        self.assertEqual(set(sidecar["qa"]), {"degree_r", "degree_rho", "degree_level", "null", "null_level"})
+        self.assertEqual(set(sidecar["qa"]), {"degree_r", "degree_rho", "degree_level", "null", "null_level", "lesion_space", "space_notice"})
         self.assertEqual(sidecar["qa"]["null"]["k"], 4)
         self.assertEqual(sidecar["threshold"]["derived"], thresholds.describe(thresholds.resolve(None, 3, 3752)))
         with open(os.path.join(out, "provenance.json"), encoding="utf-8") as f:

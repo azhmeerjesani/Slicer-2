@@ -939,13 +939,21 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
         return path
 
     @staticmethod
-    def engineArguments(bundlePath, lesionPath, runDir, previewN=None, previewSeed=0, nullRelocations=50, rule=None, snapshotEvery=SNAPSHOT_EVERY):
-        """Arguments of ``LesionNetworkMappingLib.engine`` for one lesion (the job runner adds --threads)."""
+    def engineArguments(bundlePath, lesionPath, runDir, previewN=None, previewSeed=0, nullRelocations=50, rule=None, snapshotEvery=SNAPSHOT_EVERY, lesionSpace=None):
+        """Arguments of ``LesionNetworkMappingLib.engine`` for one lesion (the job runner adds --threads).
+
+        ``lesionSpace`` is the lesion's template space (a name, or ``checkSeed``'s (name, resolution)): the engine
+        records it, with its template-family notice, in run.json and qa.json (and the export in the sidecar).
+        """
         from LesionNetworkMappingLib import thresholds
 
         args = ["--bundle", bundlePath, "--lesion", lesionPath, "--out", runDir, "--snapshot-every", str(int(snapshotEvery)),
                 "--null-relocations", str(int(nullRelocations)), "--run-json", os.path.join(runDir, "run.json"),
                 "--threshold-rule", thresholds.rule_to_json(rule)]
+        if isinstance(lesionSpace, (tuple, list)):
+            lesionSpace = lesionSpace[0] if lesionSpace else None
+        if lesionSpace:
+            args += ["--lesion-space", str(lesionSpace)]
         if previewN:
             args += ["--subjects", str(int(previewN)), "--random", "--seed", str(int(previewSeed)), "--desc-suffix", f"PreviewN{int(previewN)}"]
         return args
@@ -954,12 +962,12 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
         """Start the engine for one lesion through the shared job runner; return the ``jobrunner.Job``.
 
         ``config`` keys: bundlePath, lesionPath, runDir, previewN (None for all subjects), previewSeed,
-        nullRelocations, rule. Stop is ``job.stop()`` (cancel file, then the worker is terminated).
+        nullRelocations, rule, lesionSpace (the lesion's template space, optional). Stop is ``job.stop()`` (cancel file, then the worker is terminated).
         """
         from LesionNetworkMappingUI import jobrunner
 
         args = self.engineArguments(config["bundlePath"], config["lesionPath"], config["runDir"], config.get("previewN"), config.get("previewSeed", 0),
-                                    config.get("nullRelocations", 50), config.get("rule"))
+                                    config.get("nullRelocations", 50), config.get("rule"), lesionSpace=config.get("lesionSpace"))
         os.makedirs(config["runDir"], exist_ok=True)
         spec = jobrunner.JobSpec(
             "LesionNetworkMapping", ["job", "LesionNetworkMappingLib.engine", *args], title=_("Mapping"), heavy=True, kind="engine",
@@ -4341,6 +4349,17 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             return
         self.compute()
 
+    def _lesionFileSpace(self, segNode, lesionPath):
+        """(space, resolution) of the exported seed lesion file, as ``checkSeed`` finds it (None: not a known template grid)."""
+        from LesionNetworkMappingLib import nifti
+
+        try:
+            header = nifti.read_nifti_header(lesionPath)
+            return self.logic.seedSpace(segNode, tuple(int(n) for n in header["shape"][:3]), header["affine"])
+        except Exception:
+            logging.exception("Lesion network mapping: the template space of the lesion could not be found")
+            return None
+
     def _preflight(self):
         """Run the beforeCompute hooks; show failures with their fix actions; return whether Compute may go on."""
         while self.preflightLayout.count():
@@ -4381,7 +4400,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.widgets.setBannerText(self.computeBanner, "")
         self.computeBanner.hide()
         config = {"bundlePath": self.bundle.path, "lesionPath": lesionPath, "runDir": runDir, "previewN": previewN, "previewSeed": node.previewSeed,
-                  "nullRelocations": node.nullRelocations, "rule": thresholds.normalize_rule(rule)}
+                  "nullRelocations": node.nullRelocations, "rule": thresholds.normalize_rule(rule),
+                  # The lesion's template space (also one of the user's templates): run.json, qa.json and the sidecar record it
+                  "lesionSpace": self._lesionFileSpace(segNode, lesionPath)}
         self._prepareResultVolume()
         self.ctx.setCurrentRun(None)
         self.refreshResult()  # the Result card waits for the new map (no title, rule or Export of the previous run)
