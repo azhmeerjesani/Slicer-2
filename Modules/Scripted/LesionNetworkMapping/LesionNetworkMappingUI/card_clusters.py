@@ -51,6 +51,16 @@ LABEL_ATLASES = (
 )
 #: Atlases used when the user has not chosen (those cached are used)
 DEFAULT_LABEL_ATLASES = LABEL_ATLASES
+#: Label atlases of each template family: a map is labelled with the atlases of its own family (families are not mixed).
+#: ``LABEL_ATLASES`` (fsl6) is also the choice for a map whose family has none here; the catalog has no Harvard-Oxford or
+#: Buckner atlas in the 2009 family.
+LABEL_FAMILY = "fsl6"
+LABEL_ATLASES_BY_FAMILY = {
+    "fsl6": LABEL_ATLASES,
+    "2009": ("schaefer2018-400-7n-2mm-2009c", "tian-s1-2mm-2009c"),
+}
+#: The chosen label atlases of each family (a JSON list of catalog ids each; fsl6 keeps the key it always had)
+ATLASES_SETTINGS = {"fsl6": ATLASES_SETTING, "2009": "Studio/LNM/Clusters/Atlases2009"}
 SHORT_NAMES = {
     "harvard-oxford-cortical-th25-2mm": "HO cortical",
     "harvard-oxford-subcortical-th25-2mm": "HO subcortical",
@@ -59,6 +69,9 @@ SHORT_NAMES = {
     "buckner2011-cerebellum-7n-1mm": "Buckner cerebellum (7n)",
     "buckner2011-cerebellum-17n-1mm": "Buckner cerebellum (17n)",
     "tian-s1-2mm": "Tian S1",
+    "schaefer2018-400-7n-2mm-2009c": "Schaefer-400 (7n, 2009c)",
+    "schaefer2018-400-17n-2mm-2009c": "Schaefer-400 (17n, 2009c)",
+    "tian-s1-2mm-2009c": "Tian S1 (2009c)",
 }
 #: Node attribute of the table node and of the group map volume of the Cohort card
 TABLE_ATTRIBUTE = "LNM.ClusterTable"
@@ -172,6 +185,18 @@ class MapSource:
     def stamp(self):
         """What the table of this source depends on: the data, the statistic, the threshold and the sign."""
         return (self.key, self.token, self.statistic, self.value, self.sign, self.space)
+
+
+def labelFamily(source):
+    """Template family whose atlases label ``source`` (a :class:`MapSource` or None): "2009" for a map of the 2009 family
+    (its ``space``, else its grid), else "fsl6" (also when there is no map or its family has no atlases here).
+    """
+    if source is None:
+        return LABEL_FAMILY
+    from LesionNetworkMappingLib import atlases as atlasLib
+
+    family, _space = atlasLib.mask_family(source.grid.shape, source.grid.affine, space=source.space)
+    return family if family in LABEL_ATLASES_BY_FAMILY else LABEL_FAMILY
 
 
 def _templateSpace(space):
@@ -1096,7 +1121,7 @@ class ClustersCard:
 
     def signature(self, source):
         """What the table on show depends on: the map (and its threshold), the minimum extent and the atlases."""
-        return (source.stamp(), self.model.minExtent, tuple(self.usableAtlasIds()), self.atlases.allowCrossFamily)
+        return (source.stamp(), self.model.minExtent, tuple(self.usableAtlasIds(source)), self.atlases.allowCrossFamily)
 
     def _currentSignature(self):
         try:
@@ -1111,6 +1136,7 @@ class ClustersCard:
         """The inputs may have changed: update the out-of-date chip, and make the table now when the card is open."""
         self._observeVolumes()
         self._refreshStatus()
+        self._refreshAtlases()  # the map (and so the family of its atlases) may have changed
         if self.expanded() and self._isStale():
             self.timer.start()
 
@@ -1173,29 +1199,50 @@ class ClustersCard:
     # Atlases
     #
 
-    def selectedAtlasIds(self):
-        """Atlas ids chosen for the labels: the setting, else the defaults."""
+    def _currentSource(self):
+        """The current map source, or None (no map, or it cannot be read: the table says why)."""
         try:
-            stored = json.loads(str(_settings().value(ATLASES_SETTING) or "null"))
+            return self.model.source()
+        except Exception:
+            return None
+
+    def atlasFamily(self, source=None):
+        """Template family of the label atlases offered for ``source`` (default: the current map); see :func:`labelFamily`."""
+        return labelFamily(source if source is not None else self._currentSource())
+
+    def labelAtlasIds(self, source=None):
+        """The label atlases offered for the family of ``source`` (default: the current map)."""
+        return LABEL_ATLASES_BY_FAMILY[self.atlasFamily(source)]
+
+    def selectedAtlasIds(self, source=None):
+        """Atlas ids chosen for the labels of the family of ``source`` (default: the current map): the setting, else the defaults."""
+        family = self.atlasFamily(source)
+        offered = LABEL_ATLASES_BY_FAMILY[family]
+        try:
+            stored = json.loads(str(_settings().value(ATLASES_SETTINGS[family]) or "null"))
         except ValueError:
             stored = None
         if isinstance(stored, list) and all(isinstance(item, str) for item in stored):
-            return [atlasId for atlasId in stored if atlasId in LABEL_ATLASES]
-        return list(DEFAULT_LABEL_ATLASES)
+            return [atlasId for atlasId in stored if atlasId in offered]
+        return list(offered)
 
-    def setSelectedAtlasIds(self, ids):
-        _settings().setValue(ATLASES_SETTING, json.dumps(list(ids)))
+    def setSelectedAtlasIds(self, ids, source=None):
+        """Remember the label atlases of the family of ``source`` (default: the current map); ids of another family are dropped."""
+        offered = self.labelAtlasIds(source)
+        _settings().setValue(ATLASES_SETTINGS[self.atlasFamily(source)], json.dumps([atlasId for atlasId in ids if atlasId in offered]))
         self._refreshAtlases()
         self.schedule()
 
-    def usableAtlasIds(self):
-        return [atlasId for atlasId in self.selectedAtlasIds() if self.atlases.isCached(atlasId)]
+    def usableAtlasIds(self, source=None):
+        return [atlasId for atlasId in self.selectedAtlasIds(source) if self.atlases.isCached(atlasId)]
 
     def _fillAtlasMenu(self):
         menu = self.atlasMenu
         menu.clear()
-        selected = set(self.selectedAtlasIds())
-        for atlasId in LABEL_ATLASES:
+        source = self._currentSource()
+        offered = self.labelAtlasIds(source)
+        selected = set(self.selectedAtlasIds(source))
+        for atlasId in offered:
             cached = self.atlases.isCached(atlasId, refresh=True)
             action = menu.addAction(shortName(atlasId) + ("" if cached else _(" (not downloaded)")))
             action.setCheckable(True)
@@ -1203,7 +1250,7 @@ class ClustersCard:
             action.setEnabled(cached)
             action.connect("toggled(bool)", lambda checked, key=atlasId: self._toggleAtlas(key, checked))
         menu.addSeparator()
-        missing = self.atlases.missing(LABEL_ATLASES)
+        missing = self.atlases.missing(offered)
         fetchAction = menu.addAction(_("Get missing atlases…"))
         fetchAction.setEnabled(bool(missing) and not self.atlases.busy())
         fetchAction.connect("triggered()", self.getAtlases)
@@ -1217,15 +1264,15 @@ class ClustersCard:
         ids = [item for item in self.selectedAtlasIds() if item != atlasId]
         if checked:
             ids.append(atlasId)
-        self.setSelectedAtlasIds([item for item in LABEL_ATLASES if item in ids])
+        self.setSelectedAtlasIds([item for item in self.labelAtlasIds() if item in ids])
 
     def _toggleCrossFamily(self, checked):
         self.atlases.allowCrossFamily = bool(checked)
         self.schedule()
 
     def getAtlases(self):
-        """Download the missing label atlases after the user confirmed (an explicit action; never implicit)."""
-        ids = self.atlases.missing(LABEL_ATLASES)
+        """Download the missing label atlases of the map's family after the user confirmed (an explicit action; never implicit)."""
+        ids = self.atlases.missing(self.labelAtlasIds())
         if ids and confirmFetch(self.atlases, ids):
             self.atlases.fetch(ids)
 
@@ -1235,8 +1282,9 @@ class ClustersCard:
             self.schedule()
 
     def _refreshAtlases(self):
-        usable = self.usableAtlasIds()
-        missing = self.atlases.missing(LABEL_ATLASES)
+        source = self._currentSource()
+        usable = self.usableAtlasIds(source)
+        missing = self.atlases.missing(self.labelAtlasIds(source))
         busy = self.atlases.busy()
         if usable:
             self.atlasLabel.setText(_("Labels: {names}").format(names=", ".join(shortName(atlasId) for atlasId in usable)))
@@ -1334,7 +1382,7 @@ class ClustersCard:
                 if count > MAX_CLUSTERS:
                     self._showMessage(_("{count} clusters pass {threshold}: too many for a table. Raise the threshold or the minimum extent.").format(count=count, threshold=source.thresholdText()))
                     return None
-                atlasList = self.atlases.load(self.usableAtlasIds())
+                atlasList = self.atlases.load(self.usableAtlasIds(source))
                 # The space the app knows for the map (Studio.Space, a sidecar) wins over recognizing its grid
                 labeler = clusters.atlas_labeler(atlasList, top=3, min_pct=5.0, space=source.space, allow_cross_family=self.atlases.allowCrossFamily) if atlasList else None
                 table = clusters.cluster_table(

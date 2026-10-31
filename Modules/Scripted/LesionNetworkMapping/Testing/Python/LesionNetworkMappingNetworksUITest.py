@@ -222,6 +222,113 @@ class LesionNetworkMappingNetworksUITest(unittest.TestCase):
             slicer.app.processEvents()
             shutil.rmtree(folder, ignore_errors=True)
 
+    def test_2009_family_map_uses_the_2009c_atlases(self):
+        """A map of the 2009 template family (the bundled MNI152NLin2009cAsym template's) is labelled and split into
+        networks with the catalog's 2009c atlases (Schaefer, Tian S1), which the Atlases menu and Get atlases offer;
+        the fsl6 atlases are not used for it (families are not mixed), and the catalog has no 2009c Buckner cerebellum.
+        """
+        import json
+        import os
+        import shutil
+        import tempfile
+
+        import numpy as np
+
+        from LesionNetworkMappingLib import atlases, nifti, thresholds
+        from LesionNetworkMappingUI import card_clusters
+
+        widget = slicer.modules.LesionNetworkMappingWidget
+        clustersCard = widget.ctx.card("clusters")
+        card = self.card
+        manager = card.atlases
+        folder = tempfile.mkdtemp(prefix="lnm-2009c-atlases-")
+        storedOverride = dict(manager.override)
+        settings = qt.QSettings()
+        keys = list(card_clusters.ATLASES_SETTINGS.values())
+        storedSettings = {key: settings.value(key) for key in keys}
+        try:
+            affine = np.diag([2.0, 2.0, 2.0, 1.0])
+            affine[:3, 3] = -20.0
+            data = np.full((20, 20, 20), 0.5, dtype=np.float32)  # every voxel in the map (no connectome mask)
+            data[2:6, 8:12, 8:12] = 6.0  # x -16..-10: left
+            data[14:18, 8:12, 8:12] = -6.0  # x 8..14: right
+            path = os.path.join(folder, "synth2009_conn-Fam2009_desc-T_funcmap.nii.gz")
+            nifti.write_nifti(path, data, affine)
+            with open(os.path.join(folder, "synth2009_conn-Fam2009_lnm.json"), "w", encoding="utf-8") as f:
+                json.dump({"N": 30, "connectome": {"label": "Fam2009", "space": "MNI152NLin2009cAsym"}}, f)
+
+            atlasAffine = np.diag([2.0, 2.0, 2.0, 1.0])
+            atlasAffine[:3, 3] = (-60.0, -80.0, -60.0)
+            cortexLabels = np.zeros((61, 81, 61), dtype=np.int32)
+            cortexLabels[:30] = 1
+            cortexLabels[31:] = 2
+            names = {1: "7Networks_LH_Vis_1", 2: "7Networks_RH_Default_PCC_1"}
+            subcortexLabels = np.zeros((61, 81, 61), dtype=np.int32)
+            subcortexLabels[28:32, 36:40, 28:32] = 1  # x -4..2: between the two blobs
+            schaefer2009 = atlases.Atlas("schaefer2018-400-7n-2mm-2009c", cortexLabels, atlasAffine, names, family="2009", space="MNI152NLin2009cAsym", networks="schaefer")
+            tian2009 = atlases.Atlas("tian-s1-2mm-2009c", subcortexLabels, atlasAffine, {1: "aHIP-lh"}, family="2009", space="MNI152NLin2009cAsym", networks="tian")
+            # An fsl6 atlas on this computer too: it must not label a 2009 map
+            schaeferFsl6 = atlases.Atlas("schaefer2018-400-7n-2mm", cortexLabels, atlasAffine, {1: "7Networks_LH_SomMot_1", 2: "7Networks_RH_SomMot_1"}, family="fsl6", space="MNI152NLin6Asym", networks="schaefer")
+            manager.override = {atlas.id: atlas for atlas in (schaefer2009, tian2009, schaeferFsl6)}
+            settings.remove(card_clusters.ATLASES_SETTINGS["2009"])
+            settings.setValue(card_clusters.ATLASES_SETTING, json.dumps(["harvard-oxford-cortical-th25-2mm"]))  # an fsl6 choice
+
+            widget.showMapFile(path)
+            widget.signGroup.button(0).click()  # both signs
+            widget.setRule({"kind": "custom_t", "value": 3.0})
+            card.setScheme("yeo7")
+            slicer.app.processEvents()
+            self.assertEqual(card.model.resultVolume().GetAttribute("Studio.Space"), "MNI152NLin2009cAsym")
+
+            # Clusters: the 2009c atlases are offered, chosen by default and label the clusters
+            self.assertEqual(clustersCard.atlasFamily(), "2009")
+            self.assertEqual(list(clustersCard.labelAtlasIds()), ["schaefer2018-400-7n-2mm-2009c", "tian-s1-2mm-2009c"])
+            self.assertEqual(clustersCard.usableAtlasIds(), ["schaefer2018-400-7n-2mm-2009c", "tian-s1-2mm-2009c"])
+            table = clustersCard.update()
+            self.assertIsNotNone(table)
+            byHemisphere = {row["hemisphere"]: row for row in table.clusters}
+            self.assertEqual(set(byHemisphere), {"L", "R"})
+            self.assertEqual([label for _atlas, label, _pct in byHemisphere["L"]["labels"]][:1], ["7Networks_LH_Vis_1"], clustersCard.noticeLabel.text)
+            self.assertEqual([label for _atlas, label, _pct in byHemisphere["R"]["labels"]][:1], ["7Networks_RH_Default_PCC_1"], clustersCard.noticeLabel.text)
+            self.assertNotIn("SomMot", json.dumps([row["labels"] for row in table.clusters]))
+            self.assertIn("2009c", str(clustersCard.atlasLabel.text))
+            clustersCard._fillAtlasMenu()
+            entries = [str(action.text) for action in clustersCard.atlasMenu.actions() if str(action.text)]
+            self.assertIn(card_clusters.shortName("schaefer2018-400-7n-2mm-2009c"), entries)
+            self.assertIn(card_clusters.shortName("tian-s1-2mm-2009c"), entries)
+            self.assertFalse([entry for entry in entries if entry.startswith(card_clusters.shortName("schaefer2018-400-7n-2mm"))
+                              and "2009c" not in entry], entries)
+            # A choice for the 2009 family is kept apart from the fsl6 one
+            clustersCard.setSelectedAtlasIds(["tian-s1-2mm-2009c", "harvard-oxford-cortical-th25-2mm"])
+            self.assertEqual(json.loads(settings.value(card_clusters.ATLASES_SETTINGS["2009"])), ["tian-s1-2mm-2009c"])
+            self.assertEqual(json.loads(settings.value(card_clusters.ATLASES_SETTING)), ["harvard-oxford-cortical-th25-2mm"])
+            self.assertEqual(clustersCard.usableAtlasIds(), ["tian-s1-2mm-2009c"])
+
+            # Networks: cortex from the 2009c Schaefer, subcortex from the 2009c Tian; no 2009c cerebellum in the catalog
+            self.assertEqual(card.atlasIds(), ["schaefer2018-400-7n-2mm-2009c", "tian-s1-2mm-2009c"])
+            rows = card.update()
+            self.assertTrue(rows, card.noticeLabel.text)
+            self.assertEqual({row["name"] for row in rows if row["system"] == "cortex"}, {"Vis", "Default"})
+            self.assertEqual({row["name"] for row in rows if row["system"] == "subcortex"}, {"HIP"})
+            self.assertEqual({row["atlas"] for row in rows if row["system"] in ("cortex", "subcortex")}, {"schaefer2018-400-7n-2mm-2009c", "tian-s1-2mm-2009c"})
+            self.assertIn("Cerebellum", str(card.noticeLabel.text))
+            card.setScheme("yeo17")
+            self.assertEqual(card.atlasIds(), ["schaefer2018-400-17n-2mm-2009c", "tian-s1-2mm-2009c"])
+        finally:
+            manager.override = storedOverride
+            for key, value in storedSettings.items():
+                if value is None:
+                    settings.remove(key)
+                else:
+                    settings.setValue(key, value)
+            card.setScheme("yeo7")
+            card.widget.collapsed = True
+            widget.signGroup.button(0).click()
+            widget.setRule(thresholds.DEFAULT_RULE)
+            card.schedule()
+            slicer.app.processEvents()
+            shutil.rmtree(folder, ignore_errors=True)
+
     def test_scheme_click_without_buttonClicked_int(self):
         card = self.card
         self.assertIsNotNone(card)

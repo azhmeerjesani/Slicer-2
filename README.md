@@ -962,7 +962,7 @@ classic behavior, so most of these keys have no effect there. The ones you may w
 | `Studio/LNM/MemoryBudgetGB` | (a quarter of the memory, at most 4 GB) | Memory budget of one pass of *Run everything*. Only read: set it yourself |
 | `Studio/LNM/Pipeline/Options` | (the defaults) | The options of *Run everything* (a JSON text), written when you start a run from the options dialog |
 | `Studio/LNM/Clusters/MinExtentMm3` | `100` | Smallest cluster that the Clusters card lists, in mm³ |
-| `Studio/LNM/Clusters/Atlases` | (the cached atlases) | The atlases that label the clusters (a JSON list of catalog ids) |
+| `Studio/LNM/Clusters/Atlases` | (the cached atlases) | The atlases that label the clusters of a map in the FSL (MNI152NLin6Asym) family (a JSON list of catalog ids); `Studio/LNM/Clusters/Atlases2009` holds those of a map in the MNI152NLin2009cAsym family |
 | `Studio/LNM/Networks/Scheme` | `yeo7` | `yeo7` or `yeo17`, the networks of the Networks card |
 | `Studio/LNM/Networks/RoiMinPercent` | `50` | Share of a region of interest that must be suprathreshold for a lesion to count as connected |
 | `Studio/LNM/Normalize/LastOptions` | (none) | Normalization options (template, quality, modality, margin), written when you tick *Remember these options* |

@@ -54,6 +54,7 @@ from .card_clusters import (
     _setAlignment,
     _settings,
     confirmFetch,
+    labelFamily,
     mapWidget,
     shortName,
     sharedAtlases,
@@ -68,6 +69,15 @@ ROI_FRACTION_SETTING = "Studio/LNM/Networks/RoiMinPercent"
 SCHEMES = {
     "yeo7": {"title": "Yeo-7", "cortex": "schaefer2018-400-7n-2mm", "cerebellum": "buckner2011-cerebellum-7n-1mm", "subcortex": "tian-s1-2mm"},
     "yeo17": {"title": "Yeo-17", "cortex": "schaefer2018-400-17n-2mm", "cerebellum": "buckner2011-cerebellum-17n-1mm", "subcortex": "tian-s1-2mm"},
+}
+#: The atlases of each scheme by template family (a map uses those of its own family; families are not mixed). In the 2009
+#: family: TemplateFlow's 2009c Schaefer and Tian's 2009cAsym S1; the catalog has no Buckner cerebellum there (None).
+FAMILY_SCHEMES = {
+    "fsl6": SCHEMES,
+    "2009": {
+        "yeo7": {"title": "Yeo-7", "cortex": "schaefer2018-400-7n-2mm-2009c", "cerebellum": None, "subcortex": "tian-s1-2mm-2009c"},
+        "yeo17": {"title": "Yeo-17", "cortex": "schaefer2018-400-17n-2mm-2009c", "cerebellum": None, "subcortex": "tian-s1-2mm-2009c"},
+    },
 }
 SYSTEMS = ("cortex", "cerebellum", "subcortex")
 SYSTEM_TEXT = {"cortex": _("Cortex"), "cerebellum": _("Cerebellum"), "subcortex": _("Subcortex"), "roi": _("ROI"), "other": _("Other")}
@@ -92,6 +102,19 @@ CAPTION_NOTE = _(
 #
 # Networks of an atlas
 #
+
+
+def schemeAtlasIds(schemeId, family, allowCrossFamily=False):
+    """{system: catalog id or None} of a scheme for a map of the label ``family`` (:func:`card_clusters.labelFamily`).
+
+    A system that has no atlas in that family is None, unless templates may be mixed (``allowCrossFamily``): the fsl6
+    atlas is then used (its labels are approximate).
+    """
+    scheme = FAMILY_SCHEMES.get(family, SCHEMES)[schemeId]
+    ids = {system: scheme[system] for system in SYSTEMS}
+    if allowCrossFamily:
+        ids = {system: atlasId or SCHEMES[schemeId][system] for system, atlasId in ids.items()}
+    return ids
 
 
 def labelVoxels(atlas, grid, indices):
@@ -126,12 +149,15 @@ def buildUnits(schemeId, atlasList, grid, indices, allowCrossFamily=False, space
 
     from LesionNetworkMappingLib import atlases as atlasLib
 
-    scheme = SCHEMES[schemeId]
     byId = {atlas.id: atlas for atlas in atlasList}
     family, _space = atlasLib.mask_family(grid.shape, grid.affine, space=space)
+    scheme = schemeAtlasIds(schemeId, family if family in FAMILY_SCHEMES else "fsl6", allowCrossFamily)
     units, notices = [], []
     for system in SYSTEMS:
         atlasId = scheme[system]
+        if atlasId is None:
+            notices.append(_("{system}: the atlas catalog has none in the {family} template family.").format(system=SYSTEM_TEXT[system], family=family))
+            continue
         atlas = byId.get(atlasId)
         if atlas is None:
             notices.append(_("{system}: {atlas} is not on this computer.").format(system=SYSTEM_TEXT[system], atlas=shortName(atlasId)))
@@ -989,12 +1015,18 @@ class NetworksCard:
         except (ValueError, RuntimeError):
             return False
 
-    def atlasIds(self):
-        scheme = SCHEMES[self.scheme]
-        return [scheme[system] for system in SYSTEMS]
+    def atlasIds(self, source=None):
+        """Catalog ids of the scheme's atlases for the template family of ``source`` (default: the current map)."""
+        if source is None:
+            try:
+                source = self.model.source()
+            except Exception:
+                source = None
+        ids = schemeAtlasIds(self.scheme, labelFamily(source), self.atlases.allowCrossFamily)
+        return [ids[system] for system in SYSTEMS if ids[system]]
 
     def signature(self, source):
-        return (source.stamp(), self.scheme, tuple(self.atlases.isCached(atlasId) for atlasId in self.atlasIds()), self.atlases.allowCrossFamily,
+        return (source.stamp(), self.scheme, tuple(self.atlases.isCached(atlasId) for atlasId in self.atlasIds(source)), self.atlases.allowCrossFamily,
                 tuple((roi["kind"], roi.get("path") or roi.get("node"), roi.get("segment")) for roi in self.rois))
 
     def _currentSignature(self):
@@ -1009,6 +1041,7 @@ class NetworksCard:
     def schedule(self, *args):
         self._refreshRoiVisibility()
         self._refreshStatus()
+        self._refreshAtlasBanner()  # the map (and so the family of its atlases) may have changed
         if self.expanded() and self._isStale():
             self.timer.start()
 
@@ -1129,7 +1162,7 @@ class NetworksCard:
             return None
         try:
             with slicer.util.WaitCursor():
-                atlasList = self.atlases.load(self.atlasIds())
+                atlasList = self.atlases.load(self.atlasIds(source))
                 units, notices = self._unitsFor(source, atlasList)
                 roiUnits, roiNotices = self.roiUnits(source)
                 notices = [*notices, *roiNotices, *source.notes]
@@ -1620,7 +1653,7 @@ class NetworksCard:
             record = {
                 "format": "slicer-lnm-networks", "version": 1, "scheme": self.scheme, "statistic": source.statistic, "threshold": source.value, "sign": source.sign, "n": source.n,
                 "map": source.name,
-                "atlases": [{"id": atlasId, "title": self.atlases.title(atlasId)} for atlasId in self.atlasIds() if any(row.get("atlas") == atlasId for row in self.rows)],
+                "atlases": [{"id": atlasId, "title": self.atlases.title(atlasId)} for atlasId in self.atlasIds(source) if any(row.get("atlas") == atlasId for row in self.rows)],
                 "null": {"status": "tested" if self.null is not None else "not tested", "kind": self.nullInfo.get("kind"), "k": self.nullInfo.get("k"), "description": self.nullInfo.get("description"),
                          "reason": self.nullInfo.get("reason")},
                 "rois": [{"name": roi["name"], "kind": roi["kind"], "voxels": roi.get("voxels")} for roi in self.rois],
