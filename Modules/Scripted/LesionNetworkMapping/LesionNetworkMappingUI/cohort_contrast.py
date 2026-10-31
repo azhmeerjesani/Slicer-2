@@ -483,6 +483,7 @@ class CohortTab:
         self.mapsJob = None  # the cohort maps job a Run waits for
         self.jobFolder = None  # the output folder of the analysis job (its logs go to the parent folder's logs/)
         self._jobFolder = None
+        self.jobScope = None  # (connectomeDir(), study path, study name) when the analysis job started: its result belongs there
         self.design = None
         self.designError = None
         self.designNote = ""
@@ -904,6 +905,8 @@ class CohortTab:
         if not isinstance(spec, jobrunner.JobSpec):
             return None
         self.jobFolder = self._jobFolder
+        study = self.ctx.study
+        self.jobScope = (self.connectomeDir(), self.studyPath(), getattr(study, "name", None) if study is not None else None)
         self.job = self.ctx.submit(spec)
         self.progress.setJob(self.job)
         self.progress.widget.show()
@@ -944,6 +947,22 @@ class CohortTab:
     def onDone(self, job):
         self._updateProgress(force=True)
         self.showState()
+        scope, studyPath, studyName = self.jobScope or (None, None, None)
+        if self.jobScope is not None and scope != self.connectomeDir():
+            # Another study or connectome was opened while the job ran: its result stays in its own folder (shown when
+            # that study is opened again) and is not shown, or its map loaded, as a result of the one open now
+            self.onScopeChanged()
+            if job.succeeded():
+                shell = self.ctx.shell()
+                if shell is not None:
+                    if studyPath and studyPath == self.studyPath():
+                        text = _("{title} done for another connectome: choose it again to see the maps")
+                    elif studyName:
+                        text = _("{title} of study “{study}” done: open that study to see the maps")
+                    else:
+                        text = _("{title} of another study done: open that study to see the maps")
+                    shell.toast(text.format(title=self.TITLE, study=studyName), 3000)
+            return
         if job.state == "failed":
             # After showState(), which writes the run reason (empty once the job is over) and would hide this label
             self.reasonLabel.setText(_("{title} failed: {reason}").format(title=self.TITLE, reason=job.failureReason))
