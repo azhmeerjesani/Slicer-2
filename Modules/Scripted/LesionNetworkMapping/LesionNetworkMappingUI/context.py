@@ -44,7 +44,8 @@ class MapContext:
 
     Observer lists (called with no argument unless stated): ``studyChanged``, ``bundleChanged``,
     ``runChanged``, ``resultChanged``, ``ruleChanged``, ``seedChanged``, ``primaryOverrideChanged(mode)``,
-    ``computeEnabledChanged``.
+    ``computeEnabledChanged``, ``thresholdChanged`` (the Result card's resolved threshold, the statistic it applies to
+    or the sign changed; notified after the widget's ``resolved`` holds the new value).
 
     Hook lists:
 
@@ -55,7 +56,7 @@ class MapContext:
       ``doneEvent``, ``results``, ``spec.kind``, ``runRoot``...). Any failure makes the job fail.
     """
 
-    OBSERVER_LISTS = ("studyChanged", "bundleChanged", "runChanged", "resultChanged", "ruleChanged", "seedChanged", "primaryOverrideChanged", "computeEnabledChanged", "primaryPinnedChanged")
+    OBSERVER_LISTS = ("studyChanged", "bundleChanged", "runChanged", "resultChanged", "ruleChanged", "seedChanged", "primaryOverrideChanged", "computeEnabledChanged", "primaryPinnedChanged", "thresholdChanged")
 
     def __init__(self, parameterNode=None, logic=None, runner=None):
         self.parameterNode = parameterNode
@@ -145,6 +146,10 @@ class MapContext:
     def notifySeedChanged(self):
         """Notify ``seedChanged`` after the seed was changed elsewhere (for example in the Seed card's selectors)."""
         self._notify("seedChanged")
+
+    def notifyThresholdChanged(self):
+        """Notify ``thresholdChanged`` after the Result card re-resolved its rule to another threshold or sign."""
+        self._notify("thresholdChanged")
 
     #
     # Cards

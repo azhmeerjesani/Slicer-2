@@ -236,6 +236,10 @@ class SourceModel:
         self.minExtent = _readFloat(MIN_EXTENT_SETTING, DEFAULT_MIN_EXTENT_MM3)
         self.listeners = []
         self._cache = None
+        # The Result card's rule re-resolved to another threshold or sign: the "Result rule" sources changed
+        thresholdChanged = getattr(ctx, "thresholdChanged", None)
+        if thresholdChanged is not None:
+            thresholdChanged.append(self.notify)
 
     #
     # State

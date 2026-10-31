@@ -1968,6 +1968,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         #: {connectome folder: run state} of runs parked when another connectome was chosen (they come back with their connectome)
         self._parkedRuns = {}
         self.resolved = None
+        #: What the cards that read the Result threshold were last told (``_notifyThresholdChanged``)
+        self._notifiedThreshold = None
         self.lastPassing = None
         self._mapStamp = {}
         self._valuesCache = {}
@@ -5344,6 +5346,25 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         # A map opened or computed changes the steps (Compute "Opened from a file", the N of Result)
         self._updateSteps()
         self._refreshMapOverlay()
+        self._notifyThresholdChanged()
+
+    def _notifyThresholdChanged(self):
+        """Tell the cards that read the Result card's threshold (Clusters, Networks) that it changed: the resolved value,
+        whether it applies, its statistic or the sign. Called once ``self.resolved`` holds the new value: ``ruleChanged`` is
+        notified before the rule is resolved, and a change of sign notifies no rule change at all.
+        """
+        rule = self.currentRule()
+        resolved = self.resolved
+        value = None
+        if resolved is not None:
+            value = (resolved.value if math.isfinite(resolved.value) else None, bool(resolved.allowed or rule.get("override")), self._ruleStatistic(rule))
+        key = (value, self._sign(), self.currentStatistic())
+        if key == self._notifiedThreshold:
+            return
+        self._notifiedThreshold = key
+        notify = getattr(self.ctx, "notifyThresholdChanged", None)
+        if notify is not None:
+            notify()
 
     def _showResultNotice(self):
         """Studio (VISUAL 4.5): the explanations of the Result card (an unknown N, a map shown unthresholded, the rule's notes)
