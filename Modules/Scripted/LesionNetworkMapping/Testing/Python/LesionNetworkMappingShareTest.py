@@ -6,6 +6,7 @@ Run without Slicer's GUI:
     PythonSlicer -m unittest Testing/Python/LesionNetworkMappingShareTest.py -v
 """
 
+import csv
 import gzip
 import json
 import os
@@ -255,6 +256,63 @@ class OfficialValidatorTest(ShareTestBase):
         self.assertGreater(result["lesions"], 0)
         self.assertEqual(self.ignore_lines(out), ["sources"])  # the table is checked against the sub-<id> folders
         self.assertEqual(result["validation"], {})
+
+    def test_participants_values_fit_the_exported_dictionary(self):
+        """A study keeps the values of its source table ("male", "f", text outside the levels typed in Columns…); the
+        exported participants.json never declares Levels or Units those values break (the official validator:
+        TSV_VALUE_INCORRECT_TYPE).
+        """
+        path = os.path.join(self.root, "participants.tsv")
+        with open(path, encoding="utf-8", newline="") as f:
+            rows = list(csv.reader(f, delimiter="\t"))
+        header = rows[0]
+        changes = {
+            "sub-JohnSmith20240102": {"sex": "female", "handedness": "right", "comment": "ok"},
+            "sub-02": {"sex": "male", "handedness": "Left", "comment": "Ümlaut ü"},
+            "sub-03": {"age": "abc", "handedness": "R"},
+            "sub-05": {"sex": "f", "comment": "c"},
+        }
+        header += ["handedness", "comment"]
+        for row in rows[1:]:
+            row += ["n/a", "n/a"]
+            for column, value in changes.get(row[0], {}).items():
+                row[header.index(column)] = value
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write("".join("\t".join(row) + "\n" for row in rows))
+        study = Study.open(self.root)
+        self.assertEqual(study.value("sub-02", "sex"), "male")  # kept as the source table has it
+        study.set_column_role("comment", "metadata", type="categorical", levels={"ok": "fine", "c": "control"})  # Columns…: levels without "Ümlaut ü"
+        study.save()
+        self.study = Study.open(self.root)
+        result, out = self.export("values", columns=["group", "age", "sex", "handedness", "comment"])
+        with open(os.path.join(out, "participants.json"), encoding="utf-8") as f:
+            dictionary = json.load(f)
+        with open(os.path.join(out, "participants.tsv"), encoding="utf-8") as f:
+            table = list(csv.DictReader(f, delimiter="\t"))
+        # Synonyms become the declared levels
+        self.assertEqual(set(dictionary["sex"]["Levels"]), {"M", "F", "O"})
+        self.assertEqual(sorted(row["sex"] for row in table), ["F", "F", "M", "n/a"])
+        self.assertEqual(set(dictionary["handedness"]["Levels"]), {"R", "L", "A"})
+        self.assertEqual(sorted(row["handedness"] for row in table), ["L", "R", "R", "n/a"])
+        # Levels that a value is not one of are left out; the values are kept
+        self.assertEqual(dictionary["comment"], {"Description": "comment"})
+        self.assertEqual(sorted(row["comment"] for row in table), ["c", "n/a", "ok", "Ümlaut ü"])
+        # A non-number age keeps its value; the column is declared a string (the BIDS schema types "age" as a number)
+        self.assertNotIn("Units", dictionary["age"])
+        self.assertEqual(dictionary["age"]["Format"], "string")
+        self.assertIn("abc", [row["age"] for row in table])
+        self.assertEqual(result["validation"], {})
+        # The study itself is unchanged
+        self.assertEqual(Study.open(self.root).value("sub-02", "sex"), "male")
+        # Studio's own check reports values outside the dictionary, as the official validator does
+        dictionary["comment"]["Levels"] = {"ok": "fine", "c": "control"}
+        dictionary["age"] = {"Description": "Age", "Units": "years"}
+        with open(os.path.join(out, "participants.json"), "w", encoding="utf-8") as f:
+            json.dump(dictionary, f)
+        problems = share.validate_dataset(out)["participants.tsv"]
+        self.assertEqual(len(problems), 2)
+        self.assertIn("'abc' is not a number", " ".join(problems))
+        self.assertIn("'Ümlaut ü' is not one of the Levels", " ".join(problems))
 
     def test_extra_folders_are_listed_without_a_trailing_slash(self):
         self.add_gsp_maps()

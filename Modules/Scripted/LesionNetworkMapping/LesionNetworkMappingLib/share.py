@@ -68,6 +68,9 @@ SHARE_VERSION = 1
 #: Private record of each export (pseudonym mapping, options, own-patient decision), in the study's .studio/ only
 SHARE_DIR = "share"
 BIDS_VERSION = "1.10.0"
+# A BIDS number (the official validator's pattern) and the participants.tsv columns that the BIDS schema types as numbers
+_BIDS_NUMBER = re.compile(r"[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?")
+_BIDS_NUMBER_COLUMNS = ("age",)
 GENERATOR_NAME = "Slicer Studio"
 CODE_URL = "https://github.com/azhmeerjesani/Slicer-2"
 PSEUDONYM_PREFIX = "P"
@@ -640,10 +643,15 @@ def _write_text(path, text):
     schema.write_text_atomic(path, text)
 
 
+def _cell(value):
+    """A value as a cell of a written TSV file: one line, no tab, "n/a" when missing."""
+    return re.sub(r"[\t\r\n]+", " ", str(value if not is_missing(value) else NA)).strip() or NA
+
+
 def _tsv(columns, rows):
     lines = ["\t".join(columns)]
     for row in rows:
-        lines.append("\t".join(re.sub(r"[\t\r\n]+", " ", str(row.get(column, NA) if not is_missing(row.get(column)) else NA)).strip() or NA for column in columns))
+        lines.append("\t".join(_cell(row.get(column, NA)) for column in columns))
     return "\n".join(lines) + "\n"
 
 
@@ -771,11 +779,43 @@ def _citation_cff(name, authors, licence, created):
     return "\n".join(lines) + "\n"
 
 
-def _participants_json(study, columns):
+def _is_bids_number(text):
+    return bool(_BIDS_NUMBER.fullmatch(text))
+
+
+def _participants_json(study, columns, table=()):
+    """The BIDS data dictionary (participants.json) of the exported participants.tsv ``table`` (its cells are changed).
+
+    The official validator checks every value against the dictionary (TSV_VALUE_INCORRECT_TYPE), and a study keeps the
+    values of its source table ("male", "f", values outside the levels typed in Columns…). So a column's Levels are
+    written only when every exported value is one of them: a synonym becomes its level ("female" gives "F", as
+    ``schema.normalize_value`` does); when a value still is no level, the Levels are left out and the values are kept
+    as they are. A column with Units (or one the BIDS schema types as a number, "age") holding a value that is not a
+    number loses its Units and is declared ``"Format": "string"``.
+    """
     dictionary = {"participant_id": {"Description": "Participant identifier"}}
     for name in columns:
-        entry = study.column_spec(name).bids_entry()
-        dictionary[name] = entry or {"Description": name}
+        spec = study.column_spec(name)
+        entry = spec.bids_entry()
+        present = [cells for cells in table if _cell(cells.get(name, NA)) != NA]
+        levels = entry.get("Levels")
+        if levels and present:
+            mapped = []
+            for cells in present:
+                try:
+                    value, _warning = schema.normalize_with_spec(spec, _cell(cells[name]))
+                except ValueError:
+                    value = None
+                mapped.append(value if value in levels else None)
+            if None in mapped:
+                del entry["Levels"]
+            else:
+                for cells, value in zip(present, mapped, strict=True):
+                    cells[name] = value
+        if "Levels" not in entry and ("Units" in entry or name in _BIDS_NUMBER_COLUMNS) and not all(_is_bids_number(_cell(cells[name])) for cells in present):
+            entry.pop("Units", None)
+            entry["Format"] = "string"
+        dictionary[name] = entry if entry.get("Description") else {"Description": name, **entry}
     return dictionary
 
 
@@ -898,6 +938,48 @@ def _is_ignored(relpath, patterns):
     return False
 
 
+def _participants_values(root):
+    """Problems of the participants.tsv values with the Levels and Units of participants.json (as the official validator
+    checks them: TSV_VALUE_INCORRECT_TYPE), one per column.
+    """
+    try:
+        with open(os.path.join(root, "participants.tsv"), encoding="utf-8", newline="") as f:
+            lines = f.read().splitlines()
+    except (OSError, UnicodeDecodeError):
+        return []
+    dictionary = {}
+    if os.path.isfile(os.path.join(root, "participants.json")):
+        try:
+            with open(os.path.join(root, "participants.json"), encoding="utf-8") as f:
+                dictionary = json.load(f)
+        except (OSError, UnicodeDecodeError, ValueError):
+            dictionary = {}
+    if not lines or not isinstance(dictionary, dict):
+        return []
+    header = lines[0].split("\t")
+    problems = []
+    for index, column in enumerate(header):
+        entry = dictionary.get(column) if isinstance(dictionary.get(column), dict) else {}
+        levels = entry.get("Levels") if isinstance(entry.get("Levels"), dict) else None
+        number = levels is None and "Format" not in entry and ("Units" in entry or column in _BIDS_NUMBER_COLUMNS)
+        if levels is None and not number:
+            continue
+        for line in lines[1:]:
+            if not line.strip():
+                continue
+            cells = line.split("\t")
+            value = cells[index] if index < len(cells) else NA
+            if value == NA:
+                continue
+            if levels is not None and value not in levels:
+                problems.append(f"{column} value {value!r} is not one of the Levels in participants.json ({', '.join(levels)})")
+                break
+            if number and not _is_bids_number(value):
+                problems.append(f"{column} value {value!r} is not a number")
+                break
+    return problems
+
+
 def validate_dataset(root):
     """{relative path: [problems]} of the files of an exported folder that break the naming rules (.bidsignore honoured)."""
     patterns = _ignored_patterns(root)
@@ -919,6 +1001,10 @@ def validate_dataset(root):
             listed = []
         if listed:
             out["participants.tsv"] = [f"lists {len(listed)} participant(s) but the dataset has no sub-<id> folder (list participants.tsv in .bidsignore)"]
+    if "participants.tsv" in files and not _is_ignored("participants.tsv", patterns):
+        problems = _participants_values(root)
+        if problems:
+            out.setdefault("participants.tsv", []).extend(problems)
     # BIDS: the authors are in CITATION.cff or in the "Authors" of dataset_description.json, never both (the official
     # validator: AUTHORS_AND_CITATION_FILE_MUTUALLY_EXCLUSIVE at CITATION.cff)
     if "CITATION.cff" in files and "dataset_description.json" in files:
@@ -1120,8 +1206,9 @@ def export_dataset(study, out, options=None, progress=None, cancel=None, maps=No
             cells["participant_id"] = id_map[row["participant_id"]]
             table.append(cells)
         table.sort(key=lambda cells: cells["participant_id"])  # pseudonyms in number order, not in the study's order
+        dictionary = _participants_json(study, columns, table)  # first: it maps the cells to the declared levels
         _write_text(os.path.join(staging, "participants.tsv"), _tsv(["participant_id", *columns], table))
-        _write_json(os.path.join(staging, "participants.json"), _participants_json(study, columns))
+        _write_json(os.path.join(staging, "participants.json"), dictionary)
         ignore = []
         lesions = result_plan["lesions"]
         for index, (sid, src, space) in enumerate(lesions):
