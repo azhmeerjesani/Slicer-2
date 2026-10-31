@@ -704,10 +704,12 @@ class RecentList(qt.QObject):
 
     @staticmethod
     def _settingsKey():
-        """What the rows show besides the menu: the times and the folders that Studio recorded."""
+        """What the rows show besides the menu: the times and the folders that Studio recorded, and the Slicer Studio folder
+        (the Library page hides what lies inside it, so a new folder after Change... > Keep shows the old projects as recent files).
+        """
         settings = qt.QSettings()
         return (str(settings.value("Studio/RecentOpenTimes") or ""), str(settings.value("Studio/RecentFolders") or ""),
-                str(settings.value("Studio/RecentStudies") or ""))
+                str(settings.value("Studio/RecentStudies") or ""), _rootFolder() or "")
 
     def refresh(self, force=True):
         """Read the recently loaded files again: the studies first (``Studio/RecentStudies``), then the folders opened in Studio,

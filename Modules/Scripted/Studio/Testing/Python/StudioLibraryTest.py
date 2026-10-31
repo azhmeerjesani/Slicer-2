@@ -552,6 +552,38 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertTrue(all(entry.kind != "folder" for entry in recent.entries))
         recent.dispose()
 
+    def test_recent_rows_follow_the_studio_folder(self):
+        """After Settings > Saving > Change... > "Keep them where they are" the projects of the old folder are files from
+        elsewhere: the Library rows read again without a new recent file (A-09 step 8).
+        """
+        from StudioLib import library
+
+        oldRoot = os.path.join(self.directory, "A", "Slicer Studio")
+        newRoot = os.path.join(self.directory, "B", "Slicer Studio")
+        project = os.path.join(oldRoot, "Projects", "MRHead", "MRHead.mrml")
+        os.makedirs(os.path.dirname(project))
+        os.makedirs(newRoot)
+        with open(project, "w", encoding="utf-8") as f:
+            f.write("x")
+        menu = qt.QMenu()
+        action = menu.addAction("MRHead.mrml")
+        action.setProperty("fileParameters", {"fileName": project, "fileType": "SceneFile"})
+        roots = [os.path.realpath(oldRoot)]
+        originalMenu, originalRoot = library.recentlyLoadedMenu, library._rootFolder
+        library.recentlyLoadedMenu = lambda: menu
+        library._rootFolder = lambda: roots[0]
+        self.cleanup.append(lambda: setattr(library, "recentlyLoadedMenu", originalMenu))
+        self.cleanup.append(lambda: setattr(library, "_rootFolder", originalRoot))
+        recent = library.RecentList(includeStudies=False, outsideRootOnly=True)
+        self.cleanup.append(recent.dispose)
+        recent.refresh(force=False)
+        # Inside the Slicer Studio folder: listed in Projects, not here
+        self.assertEqual([e.path for e in recent.entries if e.kind == "file"], [])
+        # Change... > Keep: the folder is another one, the menu and the recorded times did not change
+        roots[0] = os.path.realpath(newRoot)
+        recent.refresh(force=False)
+        self.assertEqual([e.path for e in recent.entries if e.kind == "file"], [project])
+
     #
     # Folder card
     #
