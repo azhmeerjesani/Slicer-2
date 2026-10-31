@@ -853,21 +853,32 @@ def _figureCompositeNodes():
             if node.GetBackgroundVolumeID() and space.isFigure(slicer.mrmlScene.GetNodeByID(node.GetBackgroundVolumeID()))]
 
 
-def setViewLayers(background=None, foreground=None, foregroundOpacity=None, fit=False):
+def setViewLayers(background=None, foreground=None, foregroundOpacity=None, fit=False, keepAfterMap=True):
     """``slicer.util.setSliceViewerLayers()`` for every slice view except figure views: a figure stays where it is shown.
 
-    Only the given layers change. With ``fit``, the slice views of the layout (not the figure views) are fitted.
+    Only the given layers change. With ``fit``, the slice views of the layout (not the figure views) are fitted. While
+    Map is shown, a new ``background`` is also the background that leaving Map puts back (``keepAfterMap``): the volume
+    shown to draw on (Start on template, an opened scan) stays when the caller then switches to Draw.
     """
     figureIds = {node.GetID() for node in _figureCompositeNodes()}
+    changedIds = set()
     for compositeNode in slicer.util.getNodesByClass("vtkMRMLSliceCompositeNode"):
         if compositeNode.GetID() in figureIds:
             continue
+        changedIds.add(compositeNode.GetID())
         if background is not None:
             compositeNode.SetBackgroundVolumeID(background.GetID())
         if foreground is not None:
             compositeNode.SetForegroundVolumeID(foreground.GetID())
         if foregroundOpacity is not None:
             compositeNode.SetForegroundOpacity(foregroundOpacity)
+    if background is not None and keepAfterMap:
+        try:
+            from . import mappage
+        except ImportError:
+            mappage = None
+        if mappage is not None and callable(getattr(mappage, "setCapturedBackground", None)):
+            mappage.setCapturedBackground(background.GetID(), changedIds)
     if fit:
         layoutManager = slicer.app.layoutManager()
         if layoutManager is not None:
@@ -3254,7 +3265,8 @@ def switchTemplateTo1mm(path, shell=None):
         # The 1 mm volume is not shown when the user's own scan is the background
         volume1mm = _templateVolume(TEMPLATE_SAMPLE_1MM, path, show=shown)
         if shown:
-            setViewLayers(background=volume1mm, fit=True)
+            # Shown in Map, it is not the background that leaving Map puts back (the views seen before Map may hold a scan)
+            setViewLayers(background=volume1mm, fit=True, keepAfterMap=False)
         if segmentationNode is not None:
             segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(volume1mm)
         _trackTemplate(volume1mm, segmentationNode)

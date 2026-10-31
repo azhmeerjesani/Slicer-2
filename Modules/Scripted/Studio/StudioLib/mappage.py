@@ -9,7 +9,9 @@ Map is the Lesion Network Mapping module in the inspector (SPEC D2); these hooks
   else the bundled MNI152NLin2009cAsym 2 mm brain; never a download), foreground = the result (opacity 0.8, the module's
   colour table), no label layer, the lesion as a white outline. ``leave`` puts the saved layers back exactly, also when
   another page (Draw's review views, A-03b) changed them before Map was entered. The module calls ``captureLayers()``
-  before it changes a layer, so the layers seen before Map are the ones that come back.
+  before it changes a layer, so the layers seen before Map are the ones that come back. A volume shown to draw on while
+  Map is shown (Start on template, an opened scan: ``importer.setViewLayers``) replaces the saved background
+  (``setCapturedBackground``), so the views show what the Segment Editor draws on when Draw opens.
 - **Context.** The Draw segment (the current "Lesion" segment of the Segment Editor) becomes the seed of a lesion run,
   and the open study (``shell.studySession``) the cohort of the Cohort seed.
 - **Keys.** ``Ctrl+Enter`` is the inspector's primary button (Map network: the preflight checks, then compute; with
@@ -112,6 +114,22 @@ def captureLayers():
 
 def layersCaptured():
     return _state["layers"] is not None
+
+
+def setCapturedBackground(volumeId, compositeNodeIds=None):
+    """While Map holds the saved layers, make ``volumeId`` the background that leaving Map puts back (in the views of
+    ``compositeNodeIds``, else in all); return whether there were saved layers.
+
+    A page that shows a volume to draw on from Map (Start on template, open a scan) then switches away: the views keep
+    that volume instead of the layers seen before Map. The other saved layers (foreground, label, opacities) come back.
+    """
+    saved = _state["layers"]
+    if saved is None:
+        return False
+    for nodeId, layers in list(saved.items()):
+        if compositeNodeIds is None or nodeId in compositeNodeIds:
+            saved[nodeId] = (volumeId,) + tuple(layers[1:])
+    return True
 
 
 def restoreLayers():

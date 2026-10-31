@@ -1069,3 +1069,52 @@ class StudioTemplatesTest(unittest.TestCase):
             if ui._installTimer is not None:
                 ui._installTimer.stop()
             ui._installTimer, ui.installSettingsPanel, ui.DEFERRED_INSTALL_MS = saved
+
+    def test_22_start_on_template_from_map_shows_it_in_draw(self):
+        """Starting on a template while Map is shown: Draw shows that template in every slice view, the volume the Segment
+        Editor draws on (before: leaving Map put back the layers saved on entering it, so the views were black, or showed
+        the template shown before Map while the lesion was drawn on the new one).
+        """
+        from StudioLib import draw, importer, mappage
+        from StudioLib import shell as shellModule
+
+        if slicer.util.mainWindow() is None:
+            self.skipTest("Studio needs the main window")
+        applied = shellModule.instance() is None
+        if applied:
+            shell = shellModule.Shell(force=True)
+            shell.apply()
+            slicer.app.processEvents()
+        shell = shellModule.instance()
+        self.assertIsNotNone(shell)
+        template = self._add(name="Lab ICBM")
+
+        def backgrounds():
+            layoutManager = slicer.app.layoutManager()
+            return {name: layoutManager.sliceWidget(name).mrmlSliceCompositeNode().GetBackgroundVolumeID()
+                    for name in layoutManager.sliceViewNames()}
+
+        try:
+            for before, chosen in ((None, template.id), (None, self.templates.BUILTIN_DEFAULT),
+                                   (self.templates.BUILTIN_DEFAULT, template.id)):
+                slicer.mrmlScene.Clear(0)
+                shell.switchTo("library")
+                slicer.app.processEvents()
+                if before is not None:
+                    importer.startOnTemplate(shell=shell, templateId=before)
+                    slicer.app.processEvents()
+                shell.switchTo("map")
+                slicer.app.processEvents()
+                self.assertTrue(mappage.layersCaptured())
+                volume, _segmentation = importer.startOnTemplate(shell=shell, templateId=chosen)
+                slicer.app.processEvents()
+                case = f"{before} -> {chosen}"
+                self.assertEqual(shell.currentWorkspace(), "draw", case)
+                self.assertFalse(mappage.layersCaptured(), case)
+                self.assertEqual(set(backgrounds().values()), {volume.GetID()}, case)
+                self.assertEqual(draw.segmentEditor().sourceVolumeNode().GetID(), volume.GetID(), case)
+        finally:
+            shell.switchTo("library")
+            if applied:
+                shell.dispose()
+            slicer.app.processEvents()
