@@ -37,8 +37,10 @@ writes ``.studio/inbox/<utc>-<pid>-<source>.json``, and the session merges them 
 
 import copy
 import contextlib
+import csv
 import datetime
 import hashlib
+import io
 import json
 import logging
 import math
@@ -203,6 +205,9 @@ def detect_file_space(path):
 def read_tsv(path):
     """Read a TSV table: (column names, list of row dicts). Empty values become "n/a".
 
+    A value in double quotes may contain tabs, line breaks and doubled quotes (BIDS escapes a tab
+    that way, and pandas, R and spreadsheets write such values so).
+
     :raises ValueError: for duplicate or empty column names, or a row with more non-empty values
       than there are columns (they would be lost on the next save); extra empty fields are ignored.
     """
@@ -210,18 +215,61 @@ def read_tsv(path):
         return _parse_tsv(f.read(), path)
 
 
+def _tsv_records_plain(text):
+    """Records of a TSV text that has no quoting: [(line number, values)], one per line."""
+    return [(number, line.rstrip("\r").split("\t")) for number, line in enumerate(text.split("\n"), start=1)]
+
+
+def _tsv_records_quoted(text):
+    """Records of a TSV text with double-quoted values ([(first line number, values)]); None when the quoting is broken."""
+    reader = csv.reader(io.StringIO(text, newline=""), delimiter="\t", quotechar='"', doublequote=True, strict=True)
+    records, line = [], 1
+    try:
+        for values in reader:
+            records.append((line, values))
+            line = reader.line_num + 1
+    except csv.Error:
+        return None
+    return records
+
+
+def _tsv_records(text):
+    """Records of a TSV text: [(first line number, values)].
+
+    Values in double quotes are read as CSV readers do. A text whose quoting is broken, or whose
+    quoted reading gives rows of the wrong length while the plain one does not (a file written
+    before quoting, with a value that starts with a lone quote), is read without quoting as before.
+    """
+    plain = _tsv_records_plain(text)
+    if '"' not in text:
+        return plain
+    quoted = _tsv_records_quoted(text)
+    if quoted is None:
+        return plain
+
+    def regular(records):
+        records = [values for _number, values in records if any(value.strip() for value in values)]
+        width = len(records[0]) if records else 0
+        return all(len(values) == width or (len(values) > width and not any(v.strip() for v in values[width:])) for values in records)
+
+    return quoted if regular(quoted) or not regular(plain) else plain
+
+
 def _parse_tsv(text, path):
-    """:func:`read_tsv` of the file text (``path`` is only used in messages)."""
-    lines = [(number, line.rstrip("\r")) for number, line in enumerate(text.split("\n"), start=1)]
-    lines = [(number, line) for number, line in lines if line.strip()]
-    if not lines:
+    """:func:`read_tsv` of the file text (``path`` is only used in messages).
+
+    Tabs and line breaks inside a quoted value become one space, as :func:`format_value` writes them,
+    so that a table read back equals the one written.
+    """
+    records = [(number, [re.sub(r"[\t\r\n]+", " ", value).strip() for value in values]) for number, values in _tsv_records(text)]
+    records = [(number, values) for number, values in records if any(values)]
+    if not records:
         return [], []
-    columns = [name.strip() for name in lines[0][1].split("\t")]
+    columns = records[0][1]
     if len(set(columns)) != len(columns) or not all(columns):
         raise ValueError(f"{path}: duplicate or empty column names")
     rows = []
-    for number, line in lines[1:]:
-        values = [value.strip() for value in line.split("\t")]
+    for number, values in records[1:]:
         if any(values[len(columns):]):
             raise ValueError(f"{path}, line {number}: {len(values)} fields but only {len(columns)} columns; add a column name for the extra values or remove them")
         values += [NA] * (len(columns) - len(values))
@@ -234,9 +282,16 @@ def write_tsv(path, columns, rows):
     _write_text_atomic(path, _tsv_text(columns, rows))
 
 
+def _tsv_field(text):
+    """A TSV cell: in double quotes (inner quotes doubled) when a reader would otherwise take it apart."""
+    if text.startswith('"') or "\t" in text or "\n" in text or "\r" in text:
+        return '"' + text.replace('"', '""') + '"'
+    return text
+
+
 def _tsv_text(columns, rows):
-    lines = ["\t".join(columns)]
-    lines += ["\t".join(format_value(row.get(column)) for column in columns) for row in rows]
+    lines = ["\t".join(_tsv_field(column) for column in columns)]
+    lines += ["\t".join(_tsv_field(format_value(row.get(column))) for column in columns) for row in rows]
     return "\n".join(lines) + "\n"
 
 

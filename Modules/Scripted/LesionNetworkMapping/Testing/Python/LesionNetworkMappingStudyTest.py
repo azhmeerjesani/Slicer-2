@@ -184,6 +184,67 @@ class StudyTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "newer"):
             Study.open(folder)
 
+    def test_quoted_values_written_by_pandas(self):
+        # BIDS escapes a tab in a value with double quotes; pandas, R and Python's csv module also quote line breaks and
+        # quotes. Such a file must open, merge into an open study, and come back intact (it used to make the study unopenable).
+        import csv
+
+        def rewrite(folder, notes):
+            path = os.path.join(folder, study.PARTICIPANTS_TSV)
+            with open(path, encoding="utf-8", newline="") as f:
+                cells = list(csv.reader(f, delimiter="\t"))
+            if "mRS" not in cells[0]:
+                cells[0].append("mRS")
+            notes_column, mrs_column = cells[0].index("notes"), cells[0].index("mRS")
+            for number, row in enumerate(cells[1:]):
+                row += [""] * (len(cells[0]) - len(row))
+                row[notes_column], row[mrs_column] = notes.get(row[0], row[notes_column]), str(number)
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                csv.writer(f, dialect="excel-tab", lineterminator="\n").writerows(cells)
+            with open(path, encoding="utf-8") as f:
+                return f.read()
+
+        notes = {"sub-01": "left MCA\nsecond line", "sub-02": "tab\there", "sub-03": 'size 2" lesion', "sub-04": '"large" infarct'}
+        folder = self.path("quoted")
+        created = Study.create(folder)
+        for number in range(1, 5):
+            created.add_subject(f"sub-0{number}")
+        created.save()
+        text = rewrite(folder, notes)
+        self.assertIn('"tab\there"', text)
+        self.assertIn('"left MCA\nsecond line"', text)
+        opened = Study.open(folder)
+        self.assertEqual(opened.subject_ids, ["sub-01", "sub-02", "sub-03", "sub-04"])
+        # tabs and line breaks become one space, as Studio writes notes
+        expected = ["left MCA second line", "tab here", 'size 2" lesion', '"large" infarct']
+        self.assertEqual([opened.subject(sid)["notes"] for sid in opened.subject_ids], expected)
+        self.assertEqual([opened.subject(sid)["mRS"] for sid in opened.subject_ids], ["0", "1", "2", "3"])
+
+        # The same edit made while the study is open is merged by the next save
+        created.set("sub-01", rater="AB")
+        rewrite(folder, notes)
+        created.save()
+        self.assertEqual([created.subject(sid)["mRS"] for sid in created.subject_ids], ["0", "1", "2", "3"])
+        self.assertEqual(created.subject("sub-01")["rater"], "AB")
+        self.assertEqual(created.subject("sub-04")["notes"], '"large" infarct')
+
+        # What Studio writes stays one row per line and reads back the same in Studio and in a CSV reader
+        reopened = Study.open(folder)
+        self.assertEqual(reopened.subjects, created.subjects)
+        with open(os.path.join(folder, study.PARTICIPANTS_TSV), encoding="utf-8", newline="") as f:
+            cells = list(csv.reader(f, delimiter="\t"))
+        self.assertEqual(len(cells), 5)
+        notes_column = cells[0].index("notes")
+        self.assertEqual([row[notes_column] for row in cells[1:]], expected)
+        self.assertEqual([reopened.subject(sid)["notes"] for sid in reopened.subject_ids], expected)
+
+        # A file written before quoting, with a value that starts with a lone quote, still opens as it did
+        with open(os.path.join(folder, study.PARTICIPANTS_TSV), "w", encoding="utf-8") as f:
+            f.write('participant_id\tnotes\tgroup\nsub-01\t"unclosed note\tcase\nsub-02\tsize 2"\tcontrol\nsub-03\t"a" b\tn/a\n')
+        old = Study.open(folder)
+        self.assertEqual([(row["participant_id"], row["notes"], row["group"]) for row in old.subjects],
+                         [("sub-01", '"unclosed note', "case"), ("sub-02", 'size 2"', "control"), ("sub-03", '"a" b', "n/a")])
+
     def test_tsv_import_export(self):
         created = Study.create(self.path("s"))
         created.add_subject("sub-01", group="case")
