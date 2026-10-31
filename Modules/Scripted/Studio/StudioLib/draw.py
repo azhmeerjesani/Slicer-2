@@ -2610,6 +2610,10 @@ class DrawExtension:
             if sourceVolumeNode is None:
                 return None
             segmentationNode = self._existingSegmentation(sourceVolumeNode)
+            if segmentationNode is not None:
+                # A segmentation that Studio did not create (loaded, or made by a script): the editor edits it, and
+                # it must be set before the source volume (qMRMLSegmentEditorWidget::setSourceVolumeNode needs it)
+                editor.setSegmentationNode(segmentationNode)
         if segmentationNode is None:
             # Without a segment: showing a scan in Draw adds no segment (the guided tours and a look leave the lesion
             # empty); the first tool adds the "Lesion" segment (ensureLesionSegment(), _adoptNewSegment())

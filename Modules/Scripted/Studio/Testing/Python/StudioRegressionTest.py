@@ -83,6 +83,10 @@ Run with the main window and testing enabled::
 - ``test_30_missing_scan_or_lesion_is_said`` (BB-1): a subject whose scan file is missing is not opened on the study
   template (open and Done -> next say so, the current subject stays open); a traced subject whose lesion file is missing
   opens on its scan with an empty lesion and says so.
+- ``test_34_draw_edits_an_existing_segmentation`` (BB-1): Draw edits a segmentation that Studio did not create (made by a
+  script, or loaded from a file) on the scan it is bound to, like the classic Segment Editor: the editor has it and the scan,
+  no "Lesions" segmentation is added, and no "SetSourceVolumeNode" error is logged (Draw said "No lesion" / "Open a scan"
+  with its tools disabled).
 - ``test_31_symptom_column_is_not_made_the_groups`` (BB-1): a yes / no, Y / N or true / false column that is not named like a
   group (a symptom such as "aphasia", "smoker") is never proposed as the study groups: New study… and the participants
   table's "Create study" leave the groups empty and keep the column. A group column ("diagnosis": patient / HC) is shown
@@ -2785,6 +2789,61 @@ class StudioRegressionTest(unittest.TestCase):
             studyList.setFilter("all")
         finally:
             study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
+
+    def test_34_draw_edits_an_existing_segmentation(self):
+        """A segmentation that Studio did not create (made by a script, loaded with slicer.util.loadSegmentation) was found by
+        Draw but never given to the Segment Editor: Draw opened with no segmentation and no source volume ("No lesion",
+        "Open a scan", tools disabled) and logged "SetSourceVolumeNode: need to set segment editor and segmentation nodes
+        first". Draw edits it on its scan, as the classic Segment Editor does (BB-1).
+        """
+        from StudioLib import shell
+
+        if slicer.util.mainWindow() is None or not hasattr(slicer.modules, "segmenteditor"):
+            self.skipTest("needs the main window and the Segment Editor")
+        slicer.mrmlScene.Clear(0)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+
+        def pump():
+            for _ in range(10):
+                slicer.app.processEvents()
+
+        def errors():
+            model = slicer.app.errorLogModel()
+            levelColumn, descriptionColumn = 2, 4  # ctkErrorLogAbstractModel::LogLevelColumn, DescriptionColumn
+            return [str(model.index(row, descriptionColumn).data()) for row in range(model.rowCount())
+                    if model.index(row, levelColumn).data() in ("Error", "Critical", "Fatal")]
+
+        try:
+            studioShell.switchTo("library")
+            pump()
+            volumeNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "Scan")
+            image = np.zeros((20, 24, 28), np.int16)
+            image[5:15, 6:18, 7:21] = 200
+            slicer.util.updateVolumeFromArray(volumeNode, image)
+            volumeNode.CreateDefaultDisplayNodes()
+            slicer.util.setSliceViewerLayers(background=volumeNode, fit=True)
+            segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "MySeg")
+            segmentationNode.CreateDefaultDisplayNodes()
+            segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(volumeNode)
+            segmentId = segmentationNode.GetSegmentation().AddEmptySegment("bright")
+            slicer.util.updateSegmentBinaryLabelmapFromArray((image > 100).astype(np.uint8), segmentationNode, segmentId, volumeNode)
+            pump()
+            errorsBefore = len(errors())
+            studioShell.switchTo("draw")
+            pump()
+            editor = slicer.modules.SegmentEditorWidget.editor
+            self.assertIs(editor.segmentationNode(), segmentationNode)
+            self.assertIs(editor.sourceVolumeNode(), volumeNode)
+            self.assertEqual(editor.currentSegmentID(), segmentId)
+            self.assertEqual([node.GetName() for node in slicer.util.getNodesByClass("vtkMRMLSegmentationNode")], ["MySeg"])
+            self.assertEqual([text for text in errors()[errorsBefore:] if "SetSourceVolumeNode" in text], [])
+        finally:
             studioShell.dispose()
             for _ in range(4):
                 slicer.app.processEvents()
