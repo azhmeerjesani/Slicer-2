@@ -1220,6 +1220,59 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertFalse(list(slicer.util.getNodesByClass("vtkMRMLSegmentationStorageNode")))
         self.assertGreaterEqual(scene.GetNumberOfNodes(), nodesBefore)
 
+    def test_mni_lesion_dropped_on_native_scan_goes_to_template(self):
+        """MNI masks opened while a scan in scan space is shown: never drawn over that scan, but on the template (as in an
+        empty scene: one lesion with its space line, several as a loaded set); on a scan on an MNI grid they stay.
+        """
+        from StudioLib import importer, library
+
+        studioShell = self._applyStudio()
+        scanPath = self._writeVolume("patient_T1.nii.gz", GRID_SHIFTED, subdirectory="anat")
+        lesionPath = self._writeMask("sub-03_lesion.nii.gz", GRID_NLIN6_2MM)
+        importer.loadFiles([scanPath], studioShell)
+        self._pump(8)
+        scan = slicer.util.getNode("patient_T1")
+        self.assertEqual(self._background("Red").GetID(), scan.GetID())
+        result = importer.loadFiles([lesionPath], studioShell)
+        self._pump(8)
+        lesion = result.segmentations[0]
+        editor = self._editor()
+        self.assertEqual(editor.segmentationNode().GetID(), lesion.GetID())
+        source = editor.sourceVolumeNode()
+        self.assertIsNotNone(source)
+        self.assertEqual(source.GetAttribute("Studio.Role"), "template")
+        self.assertEqual(self._background("Red").GetID(), source.GetID())
+        self.assertFalse(importer._isBoundTo(lesion, scan))
+        self.assertNotEqual(library.lesionScan(lesion), scan)
+        self.assertEqual(importer.lesionSpaceLine(lesion), "Lesion grid MNI152NLin6Asym 2 mm, shown on MNI152NLin2009cAsym (a few mm apart)")
+
+        # Several masks: a loaded set on the template, one lesion shown at a time
+        slicer.mrmlScene.Clear(0)
+        importer.loadFiles([scanPath], studioShell)
+        self._pump(8)
+        paths = [self._writeMask(f"sub-{index:02d}_lesion.nii.gz", GRID_NLIN6_2MM, center=(30 + 4 * index, 50, 40), subdirectory="set") for index in range(1, 4)]
+        importer.loadFiles(paths, studioShell)
+        self._pump(8)
+        loaded = importer.loadedSet()
+        self.assertIsNotNone(loaded)
+        nodes = loaded.nodes()
+        self.assertEqual(len(nodes), 3)
+        self.assertEqual([node.GetName() for node in nodes if node.GetDisplayNode().GetVisibility()], ["sub-01 lesion"])
+        self.assertEqual(self._editor().sourceVolumeNode().GetAttribute("Studio.Role"), "template")
+
+        # A scan of the user on an MNI grid (a normalized scan): the MNI lesion is drawn on it, as before
+        slicer.mrmlScene.Clear(0)
+        normalizedPath = self._writeVolume("sub-04_space-MNI152NLin6Asym_T1w.nii.gz", GRID_NLIN6_2MM, subdirectory="anat")
+        importer.loadFiles([normalizedPath], studioShell)
+        self._pump(8)
+        normalized = slicer.util.getNode("sub-04_space-MNI152NLin6Asym_T1w")
+        result = importer.loadFiles([lesionPath], studioShell)
+        self._pump(8)
+        lesion = result.segmentations[0]
+        self.assertEqual(self._editor().segmentationNode().GetID(), lesion.GetID())
+        self.assertEqual(self._editor().sourceVolumeNode().GetID(), normalized.GetID())
+        self.assertEqual(self._background("Red").GetID(), normalized.GetID())
+
     def test_two_subjects_one_load_each_lesion_on_its_scan(self):
         """Two subjects opened at once (scan and lesion each): every lesion is bound to its own scan, and Draw edits it there."""
         from StudioLib import importer, library

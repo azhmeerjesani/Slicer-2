@@ -1411,9 +1411,12 @@ def _showLoaded(result, shell, scans, openScans, openLesions):
     elif openScans and not _sameNode(_backgroundVolume(), openScans[0]):
         setViewLayers(background=openScans[0], fit=True)
     editedSegmentation, editedSource = _editedNodes()
-    if not scans and not openScans and lesions and _userScanShown() is None and not (
-            _sameNode(lesions[0], editedSegmentation) and editedSource is not None and not _isTemplate(editedSource)):
-        # A lesion without a scan of its own: shown on the template only when it is on an MNI grid
+    shownScan = _userScanShown()
+    if not scans and not openScans and lesions and (shownScan is None or _mniLesionOffScan(lesions[0], shownScan)) and not (
+            _sameNode(lesions[0], editedSegmentation) and editedSource is not None and not _isTemplate(editedSource)
+            and not _mniLesionOffScan(lesions[0], editedSource)):
+        # A lesion without a scan of its own: shown on the template only when it is on an MNI grid (also while a scan of
+        # the user in scan space is shown: an MNI lesion drawn over it would be at a wrong place)
         _showLesionsWithoutScan(lesions, shell, newlyLoaded=bool(result.segmentations))
         _loadToast(result, shell)
         return
@@ -1458,6 +1461,15 @@ def _showLoaded(result, shell, scans, openScans, openLesions):
         # The Library page covers the views: Draw shows the scene, in the scene's own layout
         shell.switchTo("draw", keepLayout=True)
     _loadToast(result, shell)
+
+
+def _mniLesionOffScan(segmentationNode, volumeNode):
+    """True when a lesion on an MNI grid would be shown on a scan in scan space (not on an MNI grid, the lesion not
+    bound to it): its MNI coordinates are not the scan's anatomy, so it is shown on the template instead.
+    """
+    if segmentationNode is None or volumeNode is None or _isTemplate(volumeNode):
+        return False
+    return space.isMni(segmentationNode) and not space.isMni(volumeNode) and not _isBoundTo(segmentationNode, volumeNode)
 
 
 def _bindLoadedLesions(lesions, scans):
