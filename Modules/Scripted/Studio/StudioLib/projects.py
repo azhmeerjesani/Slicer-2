@@ -764,6 +764,28 @@ def _tryLock(projectPath):
     return lock if lock.tryLock(0) else None
 
 
+def isWritable(projectPath):
+    """True if Slicer Studio can save into the project folder: it (and its .studio folder, if any) can be written.
+
+    False on a read-only share or medium, or without write permission. Windows does not use the read-only attribute of
+    a folder for writing into it, so a folder there counts as writable (``Project.lock()`` still finds it out).
+    """
+    if os.name == "nt":
+        return True
+    private = privateFolder(projectPath)
+    for folder in (projectPath, private):
+        if os.path.isdir(folder) and not os.access(folder, os.W_OK | os.X_OK):
+            return False
+    return True
+
+
+def _readOnlyFileSystem(path):
+    try:
+        return bool(os.statvfs(path).f_flag & os.ST_RDONLY)
+    except (OSError, AttributeError):
+        return False
+
+
 def isLockedByOther(projectPath):
     """True if another running Slicer Studio has the project open."""
     current = currentProject()
@@ -787,6 +809,8 @@ class Project:
         self.created = None
         self.lastSaveTime = None
         self.lastError = ""
+        #: True when ``lock()`` failed because the folder cannot be written (not because another Slicer Studio holds it)
+        self.readOnly = False
         self._lock = None
         self._lockKey = None
         data = readJson(projectFile(self.path)) or {}
@@ -805,17 +829,33 @@ class Project:
         return f"{PROJECTS_DIR}/{self.name}"
 
     def lock(self):
-        """Take the lock of the project. Return False if another Slicer Studio holds it."""
+        """Take the lock of the project. Return False if another Slicer Studio holds it, or if the folder cannot be
+        written (a read-only share or medium): ``readOnly`` is then True and ``lastError`` names the reason.
+        """
         if self._lock is not None:
             return True
-        os.makedirs(privateFolder(self.path), exist_ok=True)
+        self.readOnly = False
+        if not isWritable(self.path):
+            return self._cannotWrite(os.strerror(errno.EROFS if _readOnlyFileSystem(self.path) else errno.EACCES))
+        try:
+            os.makedirs(privateFolder(self.path), exist_ok=True)
+        except OSError as error:
+            return self._cannotWrite(error.strerror or str(error))
         lock = _tryLock(self.path)
         if lock is None:
+            if not os.path.lexists(_lockPath(self.path)):
+                # No lock file, so nobody holds the lock: the lock file could not be created
+                return self._cannotWrite(os.strerror(errno.EROFS))
             return False
         self._lock = lock
         self._lockKey = _lockKey(_lockPath(self.path))
         _heldLocks.add(self._lockKey)
         return True
+
+    def _cannotWrite(self, reason):
+        self.readOnly = True
+        self.lastError = str(reason)
+        return False
 
     def unlock(self):
         if self._lock is not None:

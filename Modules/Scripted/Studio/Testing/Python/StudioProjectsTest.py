@@ -3330,6 +3330,93 @@ class StudioProjectsTest(unittest.TestCase):
         after = {path: _md5File(os.path.join(outside, path)) for path in _relativeFiles(outside)}
         self.assertEqual(after, before, "the outside folder is not changed (no file renamed, added or rewritten)")
 
+    def test_59_read_only_project_folder_opens_as_a_copy_not_as_open_elsewhere(self):
+        """A project folder in Projects/ that cannot be written (a read-only share or medium) is not "open in another
+        Slicer Studio" and does not fail silently: it continues as a copy in Projects/ that saves, and the original is left
+        unchanged (BB-1). The lock file could not be created, so Project.lock() returned False as for a lock held elsewhere;
+        a folder without .studio (written by official Slicer) raised the OSError of os.makedirs inside the scene load.
+        The tests run as root, so the read-only folder is simulated: os.access (Studio project) or os.makedirs (plain
+        folder) fail for paths inside it as on a read-only file system.
+        """
+        import errno
+        from unittest import mock
+
+        projects = self.projects
+        service = self._service()
+        self._userVolume("MR Head", shape=(12, 14, 16), extension=".nrrd")
+        project = self._projectFor(service)
+        self._save(service)
+        projectPath = project.path
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertIsNone(service.project)
+
+        def copyOf(name, keepStudio):
+            folder = os.path.join(projects.projectsFolder(), name)
+            shutil.copytree(projectPath, folder)
+            lock = os.path.join(folder, ".studio", "lock")
+            if os.path.exists(lock):
+                os.remove(lock)
+            if not keepStudio:
+                shutil.rmtree(os.path.join(folder, ".studio"))
+            os.rename(projects.sceneFile(folder), os.path.join(folder, name + ".mrml"))
+            return folder
+
+        realAccess = os.access
+        realMakedirs = os.makedirs
+
+        def inside(path, folder):
+            real = os.path.normcase(os.path.realpath(str(path)))
+            return real == os.path.normcase(os.path.realpath(folder)) or real.startswith(os.path.normcase(os.path.realpath(folder)) + os.sep)
+
+        announced = []
+        service.setProjectAnnouncer(lambda event, opened, **info: announced.append(
+            (event, opened.name if opened else None, info.get("copy").name if info.get("copy") else None)))
+        cases = [("Shared project", True), ("Shared scene", False)]
+        for name, keepStudio in cases:
+            with self.subTest(name=name):
+                folder = copyOf(name, keepStudio)
+                before = {path: _md5File(os.path.join(folder, path)) for path in _relativeFiles(folder)}
+
+                def access(path, mode, *args, folder=folder, **kwargs):
+                    if mode & os.W_OK and inside(path, folder):
+                        return False
+                    return realAccess(path, mode, *args, **kwargs)
+
+                def makedirs(path, *args, folder=folder, **kwargs):
+                    if inside(path, folder):
+                        raise OSError(errno.EROFS, os.strerror(errno.EROFS), str(path))
+                    return realMakedirs(path, *args, **kwargs)
+
+                # A Studio project: os.access tells; a plain folder: only creating .studio fails (as on NFS, where access
+                # may not know)
+                patch = mock.patch.object(os, "access", access) if keepStudio else mock.patch.object(os, "makedirs", makedirs)
+                announced.clear()
+                with patch:
+                    readOnly = projects.Project(folder)
+                    self.assertFalse(readOnly.lock())
+                    self.assertTrue(readOnly.readOnly, "a folder that cannot be written is told apart from a lock held elsewhere")
+                    self.assertFalse(projects.isLockedByOther(folder))
+                    self.assertTrue(service.openProject(folder))
+                    slicer.app.processEvents()
+                    self.io.backgroundWriter().drain(30.0)
+                    self.assertIsNotNone(service.project, f"{name}: changes are saved to a project")
+                    self.assertEqual(service.project.name, name + " 2", "the copy is named after the folder")
+                    self.assertEqual(os.path.dirname(service.project.path), projects.projectsFolder())
+                    self.assertNotIn("locked", [event for event, *_rest in announced], "not 'open in another Slicer Studio'")
+                    self.assertIn(("read-only", name, name + " 2"), announced)
+                    self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("MR Head"))
+                    points = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "P")
+                    points.AddControlPoint(1, 2, 3)
+                    self._save(service)
+                self.assertTrue(os.path.isfile(os.path.join(service.project.path, name + " 2.mrml")))
+                self.assertTrue(_relativeFiles(os.path.join(service.project.path, "Images")), "the scan is copied into the copy")
+                after = {path: _md5File(os.path.join(folder, path)) for path in _relativeFiles(folder)}
+                self.assertEqual(after, before, "the read-only folder is not changed")
+                service.releaseProject()
+                slicer.mrmlScene.Clear(0)
+                self.io.backgroundWriter().drain(10.0)
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk

@@ -2039,6 +2039,22 @@ def announce(event, project, **info):
     elif event == "locked":
         message(_("{name} is open in another Slicer Studio: changes made here are not saved to it.").format(name=project.name if project else ""),
                 level="warning", ms=8000)
+    elif event == "read-only":
+        # The folder of the project cannot be written (a read-only share or medium): not "open in another Slicer Studio"
+        original = project.name if project else ""
+        copy = info.get("copy")
+        unread = info.get("unread") or []
+        if copy is None:
+            message(_("{name} cannot be saved: its folder is read-only. Changes made here are not saved to it.").format(name=original),
+                    level="warning", ms=8000)
+        elif unread:
+            message(_("{name} is read-only: opened a copy in {project}, without data that could not be loaded ({names}). "
+                      "The original is not changed.").format(name=original, project=copy.relativeName(), names=", ".join(unread)),
+                    level="warning", action=lambda *_args: renameDialog(), actionText=_("Rename"), toolTip=copy.path)
+        else:
+            message(_("{name} is read-only: opened a copy in {project}. The original is not changed.").format(
+                    name=original, project=copy.relativeName()), level="consequence", action=lambda *_args: renameDialog(),
+                    actionText=_("Rename"), toolTip=copy.path)
     elif event == "conflict":
         conflicts = info.get("conflicts") or []
         for theirs, ours in conflicts[:3]:

@@ -1248,8 +1248,8 @@ class AutosaveService:
         self._projectPresenter = presenter
 
     def setProjectAnnouncer(self, announcer):
-        """``announcer(event, project, **info)``: "created", "copy", "copy-incomplete", "opened", "locked", "conflict", "failed",
-        "not-opened", "saved".
+        """``announcer(event, project, **info)``: "created", "copy", "copy-incomplete", "opened", "locked", "read-only",
+        "conflict", "failed", "not-opened", "saved".
         """
         self._projectAnnouncer = announcer
 
@@ -1325,13 +1325,31 @@ class AutosaveService:
             # a copy
             project = projects.Project(projectPath)
             if not self.attachProject(project, inPlace=True):
-                self._announceLockedOnce(project)
+                if project.readOnly:
+                    self._copyReadOnlyProject(project)
+                else:
+                    self._announceLockedOnce(project)
                 return
             self._announce("opened", project)
             if self.dirty:
                 qt.QTimer.singleShot(0, lambda: self.autosaveNow("open"))
             return
         self.createProject(projects.defaultProjectName(scene))
+
+    def _copyReadOnlyProject(self, original, unread=()):
+        """The scene of ``original`` was loaded but its folder cannot be written (a read-only share or medium): it continues
+        as a new project that starts as a copy (as a folder from elsewhere does), so that changes are saved. Return the copy.
+        """
+        if not self.projectsActive():
+            self._announce("read-only", original, copy=None)
+            return None
+        project = self.createProject(original.name, announce=None)
+        if project is None:
+            return None  # the Slicer Studio folder cannot be written either: createProject said so
+        self._announce("read-only", original, copy=project, unread=list(unread))
+        # Copy the files now (in the background): the original cannot be changed
+        qt.QTimer.singleShot(0, lambda: self.autosaveNow("copy"))
+        return project
 
     @staticmethod
     def _sceneReadFrom(scene, projectPath):
@@ -1394,7 +1412,8 @@ class AutosaveService:
 
     def attachProject(self, project, inPlace=False):
         """Save the current scene into ``project`` from now on (its lock is taken). ``inPlace``: the scene was just loaded
-        from the project's own scene file. Return False if another Slicer Studio has the project open.
+        from the project's own scene file. Return False if another Slicer Studio has the project open, or if its folder
+        cannot be written (``project.readOnly``).
         """
         io = _io()
         projects = self._projects()
@@ -1755,7 +1774,7 @@ class AutosaveService:
             return False
         projectPath = projects.projectOfPath(path)
         inRoot = projectPath is not None and os.path.normcase(os.path.realpath(projectPath)) == os.path.normcase(os.path.realpath(path))
-        if inRoot:
+        if inRoot and projects.isWritable(path):
             # A folder renamed outside Slicer Studio: its scene follows the name (saves write "<folder name>.mrml")
             scenePath = projects.adoptRenamedScene(path) or scenePath
             try:
@@ -1766,7 +1785,8 @@ class AutosaveService:
         else:
             # A folder outside the Slicer Studio folder (a colleague's project, a copy on the Desktop) opens as a new project
             # that starts as a copy (A-09): the original is never changed, so its scene is neither renamed nor repaired. The
-            # copy is named after the folder, as the scene would be after a rename.
+            # copy is named after the folder, as the scene would be after a rename. A project folder that cannot be written
+            # (a read-only share or medium) is left as it is too; it continues as a copy (_afterSceneImport).
             self.setPendingSceneSource(os.path.join(path, os.path.basename(os.path.normpath(path)) + projects.SCENE_EXTENSION))
         self._forceProjectOpen = True
         try:
@@ -1845,7 +1865,10 @@ class AutosaveService:
             # recorded, so its file stays where it is (the scene file keeps naming it until the project is saved again).
             unread = self._removeUnreadNodes(scene)
             if not self.attachProject(project, inPlace=True):
-                self._announceLockedOnce(project)
+                if project.readOnly:
+                    self._copyReadOnlyProject(project, unread)
+                else:
+                    self._announceLockedOnce(project)
                 return
             if unread:
                 self._announce("opened", project, unread=unread)

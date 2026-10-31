@@ -67,6 +67,9 @@ you compute. In Slicer Studio:
   copy holds what loaded and a warning names what is missing; if nothing loads
   (for example a damaged scene file), no project is made.
 - Opening a project from **Library › Projects** continues it where you left it.
+  A project folder that cannot be written (a read-only share or medium) is left
+  as it is and continues as a copy: "<name> is read-only: opened a copy in
+  Projects/<name> 2. The original is not changed."
 - While a lesion network mapping **study** is open, the study saves its own
   files (in `Studies/`): no project is made for it.
 
