@@ -125,6 +125,103 @@ class LesionNetworkMappingNetworksUITest(unittest.TestCase):
             slicer.app.processEvents()
             shutil.rmtree(folder, ignore_errors=True)
 
+    def test_declared_template_space_off_the_standard_grids(self):
+        """A map whose template space the app knows (its sidecar's connectome space, the ``Studio.Space`` of its volume)
+        but whose grid is no standard grid (a 4 mm resampled map, the demo connectome's 6 mm grid) gets its Side column,
+        its atlas labels and its networks: the cards read that space instead of recognizing the grid alone.
+        """
+        import json
+        import os
+        import shutil
+        import tempfile
+
+        import numpy as np
+
+        from LesionNetworkMappingLib import atlases, nifti, thresholds
+        from LesionNetworkMappingUI import card_clusters
+
+        widget = slicer.modules.LesionNetworkMappingWidget
+        clustersCard = widget.ctx.card("clusters")
+        card = self.card
+        manager = card.atlases
+        self.assertIs(manager, clustersCard.atlases)
+        folder = tempfile.mkdtemp(prefix="lnm-declared-space-")
+        storedOverride = dict(manager.override)
+        try:
+            # A T map on a 4 mm grid that no registry knows; its sidecar declares the connectome's space
+            affine = np.diag([4.0, 4.0, 4.0, 1.0])
+            affine[:3, 3] = (-42.0, -50.0, -30.0)
+            data = np.zeros((22, 26, 20), dtype=np.float32)
+            data[4:8, 10:14, 8:12] = 6.0  # x -26..-14: left
+            data[14:18, 10:14, 8:12] = -6.0  # x 14..26: right
+            path = os.path.join(folder, "synth4mm_conn-Decl4mm_desc-T_funcmap.nii.gz")
+            nifti.write_nifti(path, data, affine)
+            with open(os.path.join(folder, "synth4mm_conn-Decl4mm_lnm.json"), "w", encoding="utf-8") as f:
+                json.dump({"N": 30, "connectome": {"label": "Decl4mm", "space": "MNI152NLin6Asym"}}, f)
+            self.assertEqual(atlases.mask_family(data.shape, affine), ("unknown", None), "the test grid must not be a known grid")
+
+            # Atlases of the FSL family on their own 2 mm grid: left half one network, right half another
+            atlasAffine = np.diag([2.0, 2.0, 2.0, 1.0])
+            atlasAffine[:3, 3] = (-60.0, -80.0, -60.0)
+            labels = np.zeros((61, 81, 61), dtype=np.int32)
+            labels[:30] = 1
+            labels[31:] = 2
+            names = {1: "7Networks_LH_Vis_1", 2: "7Networks_RH_Default_PCC_1"}
+            cortex = atlases.Atlas(self.cn.SCHEMES["yeo7"]["cortex"], labels, atlasAffine, names, family="fsl6", space="MNI152NLin6Asym", networks="schaefer")
+            labelAtlas = atlases.Atlas(card_clusters.LABEL_ATLASES[0], labels, atlasAffine, names, family="fsl6", space="MNI152NLin6Asym", networks="schaefer")
+            manager.override = {cortex.id: cortex, labelAtlas.id: labelAtlas}
+            settings = qt.QSettings()
+            storedAtlases = settings.value(card_clusters.ATLASES_SETTING)
+            settings.setValue(card_clusters.ATLASES_SETTING, json.dumps([labelAtlas.id]))
+
+            widget.showMapFile(path)
+            widget.signGroup.button(0).click()  # both signs
+            widget.setRule({"kind": "custom_t", "value": 3.0})
+            card.setScheme("yeo7")
+            slicer.app.processEvents()
+            volume = card.model.resultVolume()
+            self.assertEqual(volume.GetAttribute("Studio.Space"), "MNI152NLin6Asym")
+
+            table = clustersCard.update()
+            self.assertIsNotNone(table)
+            self.assertTrue(clustersCard.knownSpace, clustersCard.noticeLabel.text)
+            self.assertNotIn("not recognized", str(clustersCard.noticeLabel.text))
+            self.assertNotIn("could not be told", str(clustersCard.noticeLabel.text))
+            byHemisphere = {row["hemisphere"]: row for row in table.clusters}
+            self.assertEqual(set(byHemisphere), {"L", "R"})
+            self.assertEqual([label for _atlas, label, _pct in byHemisphere["L"]["labels"]][:1], ["7Networks_LH_Vis_1"])
+            self.assertEqual([label for _atlas, label, _pct in byHemisphere["R"]["labels"]][:1], ["7Networks_RH_Default_PCC_1"])
+            self.assertEqual({clustersCard._cell(row, "side")[0] for row in table.clusters}, {"Left", "Right"})
+
+            rows = card.update()
+            self.assertTrue(rows, card.noticeLabel.text)
+            self.assertNotIn("could not be told", str(card.noticeLabel.text))
+            cortexRows = {row["name"]: row for row in rows if row["system"] == "cortex"}
+            self.assertEqual(set(cortexRows), {"Vis", "Default"})
+            self.assertEqual(card.source.space, "MNI152NLin6Asym")
+
+            # A file opened in the cards' own source menu reads the sidecar too
+            key = card.model.addFile(path)
+            self.assertEqual(card.model.source().space, "MNI152NLin6Asym")
+            self.assertTrue(card.update())
+            self.assertNotIn("could not be told", str(card.noticeLabel.text))
+            card.model.files.pop(key, None)
+            card.model.setChoice("auto")
+        finally:
+            manager.override = storedOverride
+            settings = qt.QSettings()
+            if "storedAtlases" in locals():
+                if storedAtlases is None:
+                    settings.remove(card_clusters.ATLASES_SETTING)
+                else:
+                    settings.setValue(card_clusters.ATLASES_SETTING, storedAtlases)
+            card.widget.collapsed = True
+            widget.signGroup.button(0).click()
+            widget.setRule(thresholds.DEFAULT_RULE)
+            card.schedule()
+            slicer.app.processEvents()
+            shutil.rmtree(folder, ignore_errors=True)
+
     def test_scheme_click_without_buttonClicked_int(self):
         card = self.card
         self.assertIsNotNone(card)

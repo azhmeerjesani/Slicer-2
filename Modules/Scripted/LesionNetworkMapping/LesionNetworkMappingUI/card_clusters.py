@@ -133,9 +133,11 @@ class MapSource:
     :ivar sign: "both", "pos" or "neg"; ``fromRule`` tells whether the threshold is the Result card's rule.
     :ivar runDir: folder of the run that made the map (its relocated null maps are looked for there), else None.
     :ivar desc: group map desc ("overlapPct", "meanT"...) for a group map; ``path`` the NIfTI file of a file or group map.
+    :ivar space: template space the app knows for the map (``Studio.Space`` of its volume, a file's sidecar), else None:
+      the space is then recognized from the grid (a map off the standard grids, such as a resampled or demo map, needs it).
     """
 
-    def __init__(self, key, name, statistic, volume, grid, indices, threshold, sign="both", n=None, fromRule=False, runDir=None, desc=None, path=None, notes=(), token=None):
+    def __init__(self, key, name, statistic, volume, grid, indices, threshold, sign="both", n=None, fromRule=False, runDir=None, desc=None, path=None, notes=(), token=None, space=None):
         self.key = key
         self.name = name
         self.statistic = statistic
@@ -151,6 +153,7 @@ class MapSource:
         self.path = path
         self.notes = list(notes)
         self.token = token  # identifies the version of the data (a volume's modification times, a file's)
+        self.space = space
 
     @property
     def value(self):
@@ -168,7 +171,39 @@ class MapSource:
 
     def stamp(self):
         """What the table of this source depends on: the data, the statistic, the threshold and the sign."""
-        return (self.key, self.token, self.statistic, self.value, self.sign)
+        return (self.key, self.token, self.statistic, self.value, self.sign, self.space)
+
+
+def _templateSpace(space):
+    """``space`` when it names a template family the atlases know ("MNI152NLin6Asym"...), else None (native, unknown)."""
+    from LesionNetworkMappingLib.geometry import space_family
+
+    return str(space) if space and space_family(space) not in UNLABELLED_FAMILIES else None
+
+
+def volumeSpace(node):
+    """Template space of a map volume as the app knows it (``StudioLib.space.spaceOf``: its ``Studio.Space`` first, else
+    its grid), or None when that is no template family: the cards then recognize the space from the grid themselves.
+    """
+    try:
+        from . import normalize_controller
+
+        found = normalize_controller.spaceOf(node)
+    except Exception:
+        logging.exception("Lesion network mapping: the template space of a map could not be read")
+        return None
+    return _templateSpace(found[0]) if found else None
+
+
+def fileSpace(path):
+    """Template space declared for a map file (its ``_lnm.json`` sidecar: the connectome's space), or None."""
+    try:
+        from LesionNetworkMapping import LesionNetworkMappingLogic
+
+        return _templateSpace(LesionNetworkMappingLogic.mapFileInfo(path).get("space"))
+    except Exception:
+        logging.exception("Lesion network mapping: the sidecar of a map file could not be read")
+        return None
 
 
 def _volumeValues(node):
@@ -236,6 +271,7 @@ class SourceModel:
         self.minExtent = _readFloat(MIN_EXTENT_SETTING, DEFAULT_MIN_EXTENT_MM3)
         self.listeners = []
         self._cache = None
+        self._fileSpace = None  # (token, space) of the last map file read
         # The Result card's rule re-resolved to another threshold or sign: the "Result rule" sources changed
         thresholdChanged = getattr(ctx, "thresholdChanged", None)
         if thresholdChanged is not None:
@@ -428,7 +464,7 @@ class SourceModel:
                 notes.append(_("The Result rule does not apply to the {statistic} map: type a threshold.").format(statistic=statistic))
         if n is None and resolved is not None:
             n = resolved.n or None
-        return MapSource("result", node.GetName(), statistic, volume, grid, indices, threshold, sign, n, fromRule, runDir, notes=notes, token=token)
+        return MapSource("result", node.GetName(), statistic, volume, grid, indices, threshold, sign, n, fromRule, runDir, notes=notes, token=token, space=volumeSpace(node))
 
     @staticmethod
     def _fallbackThreshold(statistic):
@@ -458,7 +494,7 @@ class SourceModel:
         statistic = "T" if desc in ("meanT", "legacyWelchT") else ("Fz" if desc in ("meanFz",) else (desc or _("value")))
         record = getattr(widget, "cohortInfo", None) if widget is not None else None
         n = record.get("n") if isinstance(record, dict) else None
-        return MapSource("group", node.GetName(), statistic, volume, grid, indices, threshold, sign, n, False, None, desc=desc, path=path, token=token)
+        return MapSource("group", node.GetName(), statistic, volume, grid, indices, threshold, sign, n, False, None, desc=desc, path=path, token=token, space=volumeSpace(node))
 
     def _fileSource(self, key):
         import numpy as np
@@ -502,7 +538,9 @@ class SourceModel:
         threshold = self.custom if self.custom is not None else default
         if self.signChoice != "rule":
             sign = self.signChoice
-        return MapSource(key, name, statistic, volume, grid, indices, threshold, sign, None, False, None, desc=desc, path=path, token=token)
+        if self._fileSpace is None or self._fileSpace[0] != token:
+            self._fileSpace = (token, fileSpace(path))
+        return MapSource(key, name, statistic, volume, grid, indices, threshold, sign, None, False, None, desc=desc, path=path, token=token, space=self._fileSpace[1])
 
 
 def sharedModel(ctx):
@@ -1297,11 +1335,12 @@ class ClustersCard:
                     self._showMessage(_("{count} clusters pass {threshold}: too many for a table. Raise the threshold or the minimum extent.").format(count=count, threshold=source.thresholdText()))
                     return None
                 atlasList = self.atlases.load(self.usableAtlasIds())
-                labeler = clusters.atlas_labeler(atlasList, top=3, min_pct=5.0, allow_cross_family=self.atlases.allowCrossFamily) if atlasList else None
+                # The space the app knows for the map (Studio.Space, a sidecar) wins over recognizing its grid
+                labeler = clusters.atlas_labeler(atlasList, top=3, min_pct=5.0, space=source.space, allow_cross_family=self.atlases.allowCrossFamily) if atlasList else None
                 table = clusters.cluster_table(
                     source.volume, source.grid, None, source.threshold, sign=source.sign, min_extent_mm3=self.model.minExtent, labeler=labeler, extra_maps=self.siblingMaps(source), statistic=source.statistic,
                 )
-                family, _space = atlasLib.mask_family(source.grid.shape, source.grid.affine)
+                family, _space = atlasLib.mask_family(source.grid.shape, source.grid.affine, space=source.space)
         except Exception as exc:
             logging.exception("Lesion network mapping: the cluster table could not be made")
             self._showMessage(_("The cluster table could not be made: {error}").format(error=exc))

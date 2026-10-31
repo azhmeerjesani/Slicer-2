@@ -113,8 +113,11 @@ def networkGroups(atlas):
     return list(groups.items())
 
 
-def buildUnits(schemeId, atlasList, grid, indices, allowCrossFamily=False):
+def buildUnits(schemeId, atlasList, grid, indices, allowCrossFamily=False, space=None):
     """The network units of a scheme for the voxels ``indices`` of ``grid``.
+
+    ``space`` is the template space the app knows for the map (``MapSource.space``); without it the space is recognized
+    from the grid.
 
     :return: ``(units, notices)``: units are dicts ``{"system", "name", "atlas", "positions"}`` (``positions``: positions
       into the in-mask vector); notices say which system is missing and why.
@@ -125,7 +128,7 @@ def buildUnits(schemeId, atlasList, grid, indices, allowCrossFamily=False):
 
     scheme = SCHEMES[schemeId]
     byId = {atlas.id: atlas for atlas in atlasList}
-    family, _space = atlasLib.mask_family(grid.shape, grid.affine)
+    family, _space = atlasLib.mask_family(grid.shape, grid.affine, space=space)
     units, notices = [], []
     for system in SYSTEMS:
         atlasId = scheme[system]
@@ -573,7 +576,7 @@ def nctVolumes(source):
     from LesionNetworkMappingLib.geometry import resample_to_grid
 
     target = nctGrid()
-    family, _space = atlasLib.mask_family(source.grid.shape, source.grid.affine)
+    family, _space = atlasLib.mask_family(source.grid.shape, source.grid.affine, space=getattr(source, "space", None))
     if not target.matches(source.grid):
         if family != "fsl6":
             raise ValueError(_("The Network Correspondence Toolbox takes maps on the FSL MNI 2 mm grid; this map is on another grid ({family} family): warp it to MNI152NLin6Asym first.").format(family=family))
@@ -1075,10 +1078,10 @@ class NetworksCard:
         self.messageLabel.show()
 
     def _unitsFor(self, source, atlasList):
-        key = (self.scheme, source.grid.shape, tuple(source.grid.affine.ravel().round(4)), hash(source.indices.tobytes()), tuple(atlas.id for atlas in atlasList), self.atlases.allowCrossFamily)
+        key = (self.scheme, source.grid.shape, tuple(source.grid.affine.ravel().round(4)), hash(source.indices.tobytes()), tuple(atlas.id for atlas in atlasList), self.atlases.allowCrossFamily, source.space)
         if self._unitsCache is not None and self._unitsCache[0] == key:
             return self._unitsCache[1]
-        result = buildUnits(self.scheme, atlasList, source.grid, source.indices, self.atlases.allowCrossFamily)
+        result = buildUnits(self.scheme, atlasList, source.grid, source.indices, self.atlases.allowCrossFamily, space=source.space)
         self._unitsCache = (key, result)
         return result
 
