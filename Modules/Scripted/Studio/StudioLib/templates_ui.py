@@ -832,6 +832,11 @@ class TemplatesSettingsPanel(ctk.ctkSettingsPanel):
         chip = ui.chip(_("Built-in") if template.builtin else _("Yours"), "neutral" if template.builtin else "busy")
         chip.setObjectName("studioTemplateKindChip")
         nameRow.addWidget(chip)
+        if template.isUser and not template.isAvailable():
+            missing = ui.chip(_("Image missing"), "warn")
+            missing.setObjectName("studioTemplateMissingChip")
+            missing.setToolTip(_("The image file of this template was deleted. Remove the template and add it again."))
+            nameRow.addWidget(missing)
         if template.surfacePaths:
             surfaces = ui.chip(_("{count} surfaces").format(count=len(template.surfacePaths)) if len(template.surfacePaths) != 1 else _("1 surface"), "neutral")
             surfaces.setObjectName("studioTemplateSurfacesChip")
@@ -980,7 +985,8 @@ def populateTemplateMenu(menu, onStart=None):
     onStart = onStart or startOn
     defaultId = templates.defaultTemplateId()
     for template in templates.listTemplates():
-        action = menu.addAction(template.name)
+        missing = template.isUser and not template.isAvailable()
+        action = menu.addAction(_("{name} (image missing)").format(name=template.name) if missing else template.name)
         action.setObjectName("studioTemplateMenuItem")
         action.setData(template.id)
         action.setCheckable(True)

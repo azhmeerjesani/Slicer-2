@@ -2579,6 +2579,9 @@ class StudySession:
 
         importer = _importer()
         template = templates.templateForStudyRecord(record)
+        if template is not None and not template.isAvailable():
+            # Registered, but its image file was deleted: as good as not on this computer (the notice offers to add it again)
+            template = None
         if template is not None:
             with importer._ownLoad():
                 node = importer.loadTemplateVolume(template)

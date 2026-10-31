@@ -1185,3 +1185,64 @@ class StudioTemplatesTest(unittest.TestCase):
             self.assertIsNone(offer)
         finally:
             shutil.rmtree(work, ignore_errors=True)
+
+    def test_24_template_with_deleted_image_counts_as_not_on_this_computer(self):
+        """BB-1: a registered template whose image file was deleted is marked in Settings and the menu, Start names it (never its
+        raw id), and a study on it opens its cases on the built-in template with the "Add it…" notice.
+        """
+        from LesionNetworkMappingLib import nifti
+        from LesionNetworkMappingLib.study import Study
+
+        from StudioLib import importer, study_ui
+
+        templates, ui = self.templates, self.ui
+        template = self._add(name="Lab ICBM 1.5", space="MNI152NLin6Asym")
+        record = templates.studyRecord(template)
+        study = Study.create(os.path.join(self.tempDir, "study deleted image"), name="Study", template=record)
+        sid = "sub-case001"
+        study.add_subject(sid, {"group": "case", "status": "traced", "space": "MNI152NLin6Asym", "trace_template": "MNI152NLin6Asym"})
+        lesionPath = os.path.join(study.path, *study.lesion_relpath(sid).split("/"))
+        os.makedirs(os.path.dirname(lesionPath), exist_ok=True)
+        _data, affine, _header = nifti.read_nifti(template.imagePath)
+        mask = np.zeros(self.shape15, np.uint8)
+        mask[30:40, 70:80, 60:70] = 1
+        nifti.write_nifti(lesionPath, mask, affine)
+        study.set(sid, {"lesion": study.relpath(lesionPath)})
+        study.save()
+        os.remove(template.imagePath)
+        template = templates.templateById(template.id)
+        self.assertIsNotNone(template, "the template.json stays")
+        self.assertFalse(template.isAvailable())
+        # Settings > Templates and the menu say so
+        panel = ui.TemplatesSettingsPanel()
+        panel.refresh()
+        self.assertIsNotNone(panel.rowFor(template.id).findChild(qt.QLabel, "studioTemplateMissingChip"))
+        self.assertIsNone(panel.rowFor(templates.BUILTIN_DEFAULT).findChild(qt.QLabel, "studioTemplateMissingChip"))
+        panel.deleteLater()
+        menu = qt.QMenu()
+        ui.populateTemplateMenu(menu, onStart=lambda templateId: None)
+        texts = {action.data(): action.text for action in menu.actions() if action.objectName == "studioTemplateMenuItem"}
+        self.assertIn("image missing", texts[template.id])
+        self.assertNotIn("missing", texts[templates.BUILTIN_DEFAULT])
+        menu.deleteLater()
+        # Start on it: the message names the template, not its id
+        with self.assertRaises(RuntimeError) as raised:
+            importer.startOnTemplate(shell=self._shell(), templateId=template.id)
+        self.assertIn("Lab ICBM 1.5", str(raised.exception))
+        self.assertNotIn(template.id, str(raised.exception))
+        # The study opens its case on the built-in template, with the notice
+        settings = qt.QSettings()
+        recent = settings.value(study_ui.RECENT_STUDIES_KEY)
+        try:
+            session = study_ui.openStudy(study.path, shell=self._shell(), subject=sid, showLibrary=False)
+            slicer.app.processEvents()
+            self.assertIsNotNone(session.volumeNode(), "the case opened")
+            self.assertIsNone(session.volumeNode().GetAttribute("Studio.TemplateId"), "the built-in template meanwhile")
+            self.assertTrue(session._missingTemplateOffered, "the Add it… notice")
+        finally:
+            study_ui.closeStudy()
+            if recent is None:
+                settings.remove(study_ui.RECENT_STUDIES_KEY)
+            else:
+                settings.setValue(study_ui.RECENT_STUDIES_KEY, recent)
+            shutil.rmtree(study.path, ignore_errors=True)

@@ -2796,6 +2796,9 @@ def _chosenTemplate(templateId):
     template = templates.templateById(templateId)
     if template is None or (template.id != templates.BUILTIN_DEFAULT and not template.isAvailable()):
         # Never the SampleData download of a built-in whose cached file is gone: templates are downloaded only on request
+        if template is not None and template.isUser:
+            raise RuntimeError(_("The image of {name} is missing. Add the template again in Settings > Templates, or remove it.").format(
+                name=template.name))
         raise RuntimeError(_("The template {id} is not on this computer").format(id=templateId))
     return template
 
