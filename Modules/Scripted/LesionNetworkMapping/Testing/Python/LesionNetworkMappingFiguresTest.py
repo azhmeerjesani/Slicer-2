@@ -491,6 +491,35 @@ class FiguresTest(unittest.TestCase):
         self.assertEqual(figure.annotations[0].role, "watermark")
         self.assertEqual(sum(item.role == "watermark" for item in figure.annotations), 1)
 
+    def test_map_with_several_volumes_is_refused_not_cut_to_its_first(self):
+        # A 4D map used to be drawn from its first volume only (here an empty one, the effect being in volume 2),
+        # exit 0 with a normal caption that never said the other volumes were dropped
+        effect = blob_map()
+        four_d = os.path.join(self.tmp, "map4d.nii.gz")
+        nifti.write_nifti(four_d, np.stack([np.zeros_like(effect), effect], axis=-1), self.affine)
+        tpl_path = os.path.join(self.tmp, "tpl.nii.gz")
+        nifti.write_nifti(tpl_path, brain(), self.affine)
+        with self.assertRaises(ValueError) as caught:
+            figures.load_volume(four_d)
+        self.assertIn("map4d.nii.gz holds 2 volumes", str(caught.exception))
+        self.assertNotIn(self.tmp, str(caught.exception))  # the file name only, never a local path
+        for preset in ("montage", "ortho", "glass"):
+            out = os.path.join(self.tmp, f"o-{preset}")
+            code, events = self._cli(["--preset", preset, "--map", four_d, "--template", tpl_path, "--threshold", "3", "--out", out, "--formats", "png"])
+            self.assertNotEqual(code, 0, preset)
+            self.assertEqual(events[-1]["event"], "error", preset)
+            self.assertEqual(events[-1]["code"], "input", preset)
+            self.assertIn("holds 2 volumes", events[-1]["message"], preset)
+            self.assertFalse(os.path.exists(os.path.join(out, "figures")), preset)
+        # a 4D file with a single volume is still read as a 3D image
+        single = os.path.join(self.tmp, "map1.nii.gz")
+        nifti.write_nifti(single, effect[..., np.newaxis], self.affine)
+        volume = figures.load_volume(single)
+        self.assertEqual(volume.data.shape, effect.shape)
+        np.testing.assert_allclose(volume.data, effect)
+        figure = figures.montage(single, tpl_path, "A 0", threshold=3.0, **SMALL)
+        self.assertIn("Montage of map1", figure.caption)
+
     def test_command_line_registers_run(self):
         study = os.path.join(self.tmp, "study")
         os.makedirs(study)

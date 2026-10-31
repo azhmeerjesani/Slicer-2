@@ -165,7 +165,9 @@ def _strip_nii(name):
 def load_volume(source, name=None):
     """A :class:`Volume` from a NIfTI path, a ``(data, affine[, name])`` tuple or a Volume.
 
-    4D images keep their first volume. Non-finite values are kept (they are never shown).
+    A file with several volumes (4D, or a vector image) is refused: a figure shows one 3D volume, and drawing only the
+    first one would silently drop the others. A 4D file with a single volume is read as 3D. Non-finite values are kept
+    (they are never shown).
     """
     if source is None:
         return None
@@ -174,9 +176,12 @@ def load_volume(source, name=None):
     if isinstance(source, (str, os.PathLike)):
         path = os.fspath(source)
         data, affine, _ = nifti.read_nifti(path)
-        if data.ndim > 3:
-            data = data.reshape(*data.shape[:3], -1)[..., 0]
         base = os.path.basename(path)
+        if data.ndim > 3:
+            count = int(np.prod(data.shape[3:]))
+            if count != 1:
+                raise ValueError(f"{base} holds {count} volumes (shape {tuple(int(n) for n in data.shape)}); a figure shows one 3D volume. Save the volume to show as a 3D NIfTI file (for example with fslroi, or Slicer's Volumes module) and give that file.")
+            data = data.reshape(data.shape[:3])
         return Volume(np.asarray(data), np.asarray(affine, dtype=np.float64), name or _strip_nii(base), sha256_file(path), base)
     if isinstance(source, (tuple, list)) and len(source) in (2, 3):
         data = np.asarray(source[0])
