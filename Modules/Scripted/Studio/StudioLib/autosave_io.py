@@ -1765,6 +1765,25 @@ def _statOrNone(path):
         return None
 
 
+def _vtkTimeNow():
+    """The current value of VTK's modification time counter (``vtkTimeStamp::Modified()``): a time stamp taken later in
+    this process, such as a storage node's ``GetStoredTime()`` after it wrote its file, is larger.
+    """
+    import vtk
+
+    stamp = vtk.vtkTimeStamp()
+    stamp.Modified()
+    return stamp.GetMTime()
+
+
+def _storedTime(storageNode):
+    """``storageNode.GetStoredTime()`` as a number (0 when there is none)."""
+    try:
+        return int(storageNode.GetStoredTime().GetMTime()) if storageNode is not None else 0
+    except (AttributeError, TypeError):
+        return 0
+
+
 def _storagePaths(storageNode, rootDirectory):
     if storageNode is None or not storageNode.GetFileName() or storageNode.GetURI():
         return []
@@ -1882,7 +1901,8 @@ class ProjectWriter(SlotWriter):
         self.options = {"snapshotBudgetBytes": snapshotBudgetBytes(), "idleSeconds": None, "maxNodeBytes": 1 << 62}
         self.options.update(options or {})
         self.entries = {}
-        #: canonical path -> {"stat": [size, mtime_ns], "ours": bool}: the files of the project that Studio knows
+        #: canonical path -> {"stat": [size, mtime_ns], "ours": bool, "mark": VTK time counter when it was recorded}: the
+        #: files of the project that Studio knows (``_writtenHereSince()`` compares a storage node's stored time with "mark")
         self.records = {}
         #: node ID -> (canonical source, source stat, destination): copies that finished (reused by a later generation)
         self.importsDone = {}
@@ -1921,7 +1941,17 @@ class ProjectWriter(SlotWriter):
         stat = _statOrNone(path)
         if stat is not None:
             previous = self.records.get(_canonical(path)) or {}
-            self.records[_canonical(path)] = {"stat": stat, "ours": bool(ours or previous.get("ours"))}
+            self.records[_canonical(path)] = {"stat": stat, "ours": bool(ours or previous.get("ours")), "mark": _vtkTimeNow()}
+
+    def _writtenHereSince(self, storageNode, path):
+        """True when ``storageNode`` wrote (or read) its file ``path`` in this Slicer after Studio recorded that file: the
+        official Save Data dialog (Ctrl+S in Classic), ``slicer.util.saveNode()``... A file changed that way is not
+        another program's change (the same rule as ``_sceneStoredTime`` for the scene file).
+        """
+        record = self.records.get(_canonical(path)) if path else None
+        if storageNode is None or record is None:
+            return False
+        return _storedTime(storageNode) > int(record.get("mark") or 0)
 
     def takeConflicts(self):
         conflicts, self.conflicts = self.conflicts, []
@@ -2057,6 +2087,11 @@ class ProjectWriter(SlotWriter):
                      "heavy": bool(old.get("heavy")), "lastWriteMs": old.get("lastWriteMs"), "writtenAt": old.get("writtenAt")}
             plan.entries[nodeId] = entry
             files = _storagePaths(storageNode, plan.rootDirectory)
+            if files and self._writtenHereSince(storageNode, files[0]):
+                # Saved by this Slicer since (the Save Data dialog): its files hold what the node held then
+                for path in files:
+                    if _isUnder(_canonical(path), projectCanonical) and not self._isPrivateFile(path):
+                        self._record(path, ours=False)
             modified = bool(node.GetModifiedSinceRead())
             exists = bool(files) and os.path.isfile(files[0]) and (len(files) == 1 or all(os.path.exists(path) for path in files[1:2]))
             inside = bool(files) and all(_isUnder(_canonical(path), projectCanonical) for path in files)
@@ -2150,7 +2185,7 @@ class ProjectWriter(SlotWriter):
                     # was changed after: it is the node's own file
                     self._record(current, ours=False)
                     record = self.records.get(_canonical(current))
-                if stat is None or (record is not None and record["stat"] == stat):
+                if stat is None or (record is not None and record["stat"] == stat) or self._writtenHereSince(storageNode, current):
                     self._reserve(plan, os.path.dirname(current), os.path.basename(current))
                     return current
                 # Changed by another program since it was read or written: keep it
@@ -2276,14 +2311,16 @@ class ProjectWriter(SlotWriter):
             node = scene.GetNodeByID(nodeId)
             if node is None:
                 continue
-            self._record(destination, ours=True)
             imageData, imageMTime, scalarsMTime, rows = check
             current = node.GetImageData()
             unchanged = current is imageData and current is not None and current.GetMTime() == imageMTime
             if unchanged:
                 scalars = current.GetPointData().GetScalars() if current.GetPointData() is not None else None
                 unchanged = scalars is not None and scalars.GetMTime() == scalarsMTime and _ijkToRasRows(node) == rows
-            if unchanged and markStoredWithFile(scene, node, destination):
+            stored = unchanged and markStoredWithFile(scene, node, destination)
+            # Recorded after markStoredWithFile, whose new storage node is marked as written (not a write of this file)
+            self._record(destination, ours=True)
+            if stored:
                 plan.entries[nodeId].update(kind="stored", files=[destination])
                 continue
             # Changed while it was written: the file holds the snapshot, the node stays modified
@@ -2522,6 +2559,13 @@ class _ProjectWriteJob:
                 if name:
                     storageNode.AddFileName(name)
             node.StorableModified()
+            # WriteData marked the storage node as written, but not to its own file: that file stays as Studio knew it
+            original = originalNames[0]
+            if original and not os.path.isabs(original):
+                original = os.path.join(scene.GetRootDirectory() or writer.project.path, original)
+            record = writer.records.get(_canonical(original)) if original else None
+            if record is not None:
+                record["mark"] = _vtkTimeNow()
             removeTree(temporary)
             plan.incomplete = True
             entry.update(kind="error", reason="write failed")

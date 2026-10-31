@@ -102,7 +102,9 @@ as `<name> (Slicer Studio).<ext>`, and tells you. This includes the scene file:
 if official 3D Slicer saves `<name>.mrml` while the project is open, Slicer
 Studio keeps it and saves its own scene as `<name> (Slicer Studio).mrml` from
 then on. The next time, the project opens `<name>.mrml`; open the
-`(Slicer Studio)` file to continue with Slicer Studio's version.
+`(Slicer Studio)` file to continue with Slicer Studio's version. Files that
+Slicer Studio saves itself, for example with **File › Save Data** in Classic,
+are not another program's change: the project keeps saving them in place.
 
 When you close something in a project (a scan, a point list), its file goes to
 `.studio/removed/` in the project, where it stays for 14 days.

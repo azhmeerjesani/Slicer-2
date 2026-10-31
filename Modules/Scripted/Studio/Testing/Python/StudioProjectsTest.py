@@ -3417,6 +3417,84 @@ class StudioProjectsTest(unittest.TestCase):
                 slicer.mrmlScene.Clear(0)
                 self.io.backgroundWriter().drain(10.0)
 
+    def test_60_save_data_in_this_slicer_is_not_another_programs_change(self):
+        """Classic saves with File > Save Data (Ctrl+S) while the open project keeps saving: the files that this Slicer
+        wrote itself (through the nodes' own storage nodes) are the project's files, not another program's change. The
+        next save writes them again in place, with no "(Slicer Studio)" copy and no notice; a later change by another
+        program is still kept (also for a large volume written in the background).
+        """
+        service = self._service()
+        volume, _path = self._userVolume("Scan", shape=(12, 14, 16), extension=".nrrd")
+        points = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "Pts")
+        points.AddControlPoint((1, 2, 3))
+        big = slicer.util.addVolumeFromArray(np.random.default_rng(3).random((64, 128, 128)).astype(np.float32), name="Derived")
+        project = self._projectFor(service)
+        self._save(service)
+        service.studioActiveOverride = False  # Classic: the open project keeps saving
+        scanFile = os.path.join(project.path, "Images", "Scan.nrrd")
+        pointsFile = os.path.join(project.path, "Markups", "Pts.mrk.json")
+        bigFile = os.path.join(project.path, "Images", "Derived.nrrd")
+        self.assertEqual(volume.GetStorageNode().GetFileName(), scanFile)
+        self.assertEqual(points.GetStorageNode().GetFileName(), pointsFile)
+        self.assertEqual(big.GetStorageNode().GetFileName(), bigFile)
+        announced = []
+        service.setProjectAnnouncer(lambda event, project, **info: announced.append((event, info)))
+
+        def editScan(value):
+            array = slicer.util.arrayFromVolume(volume)
+            array[0, 0, 0] = value
+            slicer.util.arrayFromVolumeModified(volume)
+
+        def editBig(value):
+            array = slicer.util.arrayFromVolume(big)
+            array[0, 0, 0] = value
+            slicer.util.arrayFromVolumeModified(big)
+
+        for value in (101, 102):  # twice: the copies used to appear every other round
+            with self.subTest(round=value):
+                editScan(value)
+                editBig(value)
+                points.SetNthControlPointPosition(0, value, 2, 3)
+                time.sleep(0.02)
+                # Save Data writes each node to its own file (as slicer.util.saveNode does)
+                for node, path in ((volume, scanFile), (points, pointsFile), (big, bigFile)):
+                    self.assertTrue(slicer.util.saveNode(node, path))
+                editScan(value + 100)
+                editBig(value + 100)
+                points.SetNthControlPointPosition(0, value + 100, 2, 3)
+                self._save(service)
+                self.assertEqual([event for event, _info in announced], [], "no 'Another program changed' notice")
+                self.assertEqual(sorted(path for path in self._projectFiles(project) if "Slicer Studio" in path), [])
+                self.assertEqual(volume.GetStorageNode().GetFileName(), scanFile)
+                self.assertEqual(points.GetStorageNode().GetFileName(), pointsFile)
+                self.assertEqual(big.GetStorageNode().GetFileName(), bigFile)
+                self.assertFalse(volume.GetModifiedSinceRead())
+                self.assertFalse(big.GetModifiedSinceRead())
+                loaded = slicer.util.loadVolume(scanFile)
+                self.assertEqual(int(slicer.util.arrayFromVolume(loaded)[0, 0, 0]), value + 100, "the file holds the latest edit")
+                slicer.mrmlScene.RemoveNode(loaded)
+                loaded = slicer.util.loadVolume(bigFile)
+                self.assertAlmostEqual(float(slicer.util.arrayFromVolume(loaded)[0, 0, 0]), value + 100)
+                slicer.mrmlScene.RemoveNode(loaded)
+                with open(pointsFile, encoding="utf-8") as f:
+                    markup = json.load(f)["markups"][0]
+                sign = -1 if markup.get("coordinateSystem") == "LPS" else 1
+                self.assertEqual(sign * markup["controlPoints"][0]["position"][0], value + 100)
+        # Another program changes the files after that: they are kept, Studio writes its own versions next to them
+        time.sleep(0.02)
+        theirs = {}
+        for path in (scanFile, bigFile):
+            with open(path, "ab") as f:
+                f.write(b"\n")
+            theirs[path] = _md5File(path)
+        editScan(7)
+        editBig(7)
+        self._save(service)
+        for path in (scanFile, bigFile):
+            self.assertEqual(_md5File(path), theirs[path], "the other program's file is never overwritten")
+        conflicts = sorted(conflict for event, info in announced if event == "conflict" for conflict in info["conflicts"])
+        self.assertEqual(conflicts, [("Derived.nrrd", "Derived (Slicer Studio).nrrd"), ("Scan.nrrd", "Scan (Slicer Studio).nrrd")])
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk
