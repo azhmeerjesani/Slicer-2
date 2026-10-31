@@ -10,7 +10,7 @@ Studio only) both drive a :class:`NormalizeController`:
   cancel file). Progress events are coalesced by a 100 ms timer into ``progressChanged``.
 - When the job is done a worker thread reads the template-space scan and lesion and the QC mosaic, and the
   main thread creates the volume "<scan> (<template>)" (window/level precomputed, AutoWindowLevel off) and
-  the segmentation "Lesion (<template>)" with the node attributes ``LNM.Normalization``,
+  the segmentation "<lesion> (<template>)" (named after the native segment, "Lesion" by default) with the node attributes ``LNM.Normalization``,
   ``LNM.NormalizedFrom``, ``LNM.NormSuggestion`` and ``Studio.Space`` (official Slicer ignores them).
 - ``buildQcWidget(result)`` shows the mosaic, the suggestion and the metrics, records the reviewer's verdict
   in normalization.json, and offers Review in views (template behind, warped scan at 50 %, lesion outline;
@@ -1084,6 +1084,16 @@ class NormalizeRequest:
         return f"NormalizeRequest(scan={self.scanNode.GetName() if self.scanNode is not None else self.scanPath!r}, template={self.templateId}, quality={self.quality})"
 
 
+def _sourceSegmentName(request):
+    """The name of the native segment a request normalizes, or None (scan only, a lesion file, no such segment)."""
+    node = request.segmentationNode if request is not None else None
+    if node is None or not request.segmentId:
+        return None
+    segment = node.GetSegmentation().GetSegment(request.segmentId)
+    name = segment.GetName() if segment is not None else ""
+    return name.strip() or None
+
+
 class NormalizeResult:
     """A loaded normalization: folder, record, outputs, QC values and the nodes made from it."""
 
@@ -1750,13 +1760,16 @@ class NormalizeController(VTKObservationMixin):
             segmentation = previousSegmentation
             self._replaceLesion(segmentation, loaded.get("lesion"), result, volume)
         if segmentation is None:
-            segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", slicer.mrmlScene.GenerateUniqueName(f"Lesion ({templateName(templateId)})"))
+            # The MNI lesion keeps the name of the native segment (segment ID stays LESION_SEGMENT): with several lesions
+            # in one segmentation, the Map seed then names the lesion that was normalized
+            lesionName = _sourceSegmentName(request) or LESION_SEGMENT
+            segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", slicer.mrmlScene.GenerateUniqueName(f"{lesionName} ({templateName(templateId)})"))
             segmentation.CreateDefaultDisplayNodes()
             # Hidden until it is shown over a template-space image (showInViews): over the native scan it would mislead
             segmentation.GetDisplayNode().SetVisibility(False)
             if volume is not None:
                 segmentation.SetReferenceImageGeometryParameterFromVolumeNode(volume)
-            segmentId = segmentation.GetSegmentation().AddEmptySegment(LESION_SEGMENT, LESION_SEGMENT, LESION_COLOR)
+            segmentId = segmentation.GetSegmentation().AddEmptySegment(LESION_SEGMENT, lesionName, LESION_COLOR)
             mask = loaded.get("lesion")
             if mask is not None and mask.get("kji") is not None:
                 slicer.vtkSlicerSegmentationsModuleLogic.SetBinaryLabelmapToSegment(_orientedLabelmap(mask), segmentation, segmentId)

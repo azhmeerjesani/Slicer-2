@@ -850,6 +850,72 @@ class LesionNetworkMappingNormalizeUITest(unittest.TestCase):
             _pump(200)
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
 
+    def test_08c_draw_result_belongs_to_its_segment(self):
+        """With two lesions in one segmentation, the result of one is not shown (nor used for Map) for the other.
+
+        Regression (bug bash BB-1): after "Lesion 2" was normalized, selecting "Lesion" still showed "Normalized" and
+        Use for Map, which made the warped "Lesion 2" the Map seed; its MNI segment was named "Lesion" as well.
+        """
+        from StudioLib import draw, drawcard_normalize, shell
+
+        nc = self.nc
+        segmentation = self.native.GetSegmentation()
+        secondId = segmentation.AddEmptySegment("", "Lesion 2")
+        slicer.util.updateSegmentBinaryLabelmapFromArray(self.nativeOriginal, self.native, secondId, self.scan)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        _pump(200)
+        made = []
+        try:
+            studioShell.switchTo("draw")
+            _pump(300)
+            editor = slicer.modules.SegmentEditorWidget.editor
+            editor.setSegmentationNode(self.native)
+            editor.setSourceVolumeNode(self.scan)
+            editor.setCurrentSegmentID(self.nativeSegmentId)
+            draw.extension().refreshCards()
+            _pump(500)
+            card = drawcard_normalize.active()
+            self.assertIsNotNone(card)
+            controller = card.controller
+            request = nc.NormalizeRequest(scanNode=self.scan, segmentationNode=self.native, segmentId=self.nativeSegmentId)
+            self.assertTrue(controller.loadResult(self.result.outDir, request))
+            self.assertTrue(_wait(lambda: controller.state == "done", 30.0), controller.state)
+            _pump(400)
+            self.assertIn("Normalized", card.label.text)
+            self.assertFalse(card.doneRow.isHidden())
+            # The other segment is current (the card follows the editor by itself): it has no MNI copy
+            editor.setCurrentSegmentID(secondId)
+            _pump(drawcard_normalize.REFRESH_DELAY_MS + 300)
+            self.assertEqual(card.label.text, "Native space · Map needs MNI")
+            self.assertEqual(card.button.text, "Normalize to MNI")
+            self.assertTrue(card.doneRow.isHidden())
+            self.ctx.setSeed(self.native, secondId)
+            self.assertFalse(card.useForMap())
+            self.assertEqual(self.ctx.seed(), (self.native, secondId))
+            self.assertEqual(studioShell.currentWorkspace(), "draw")
+            # Back on the normalized segment: its result again
+            editor.setCurrentSegmentID(self.nativeSegmentId)
+            _pump(drawcard_normalize.REFRESH_DELAY_MS + 300)
+            self.assertIn("Normalized", card.label.text)
+            self.assertFalse(card.doneRow.isHidden())
+            # The MNI lesion of "Lesion 2" is named after it (the segment ID stays "Lesion")
+            loaded = {"outDir": os.path.join(self.tmp, "second-lesion"), "record": {"template": {"id": TEMPLATE}, "fingerprint": "second-lesion"}, "outputs": {}}
+            before = self._segmentationNodes()
+            second = controller.createNodes(loaded, "done", nc.NormalizeRequest(scanNode=self.scan, segmentationNode=self.native, segmentId=secondId))
+            made = [slicer.mrmlScene.GetNodeByID(nodeId) for nodeId in self._segmentationNodes() - before]
+            self.assertEqual(second.segmentId, nc.LESION_SEGMENT)
+            self.assertEqual(second.segmentationNode.GetSegmentation().GetSegment(second.segmentId).GetName(), "Lesion 2")
+            self.assertTrue(second.segmentationNode.GetName().startswith("Lesion 2 ("), second.segmentationNode.GetName())
+            self.assertEqual(second.segmentationNode.GetAttribute(nc.NORMALIZED_FROM_ATTRIBUTE), f"{self.native.GetID()}|{secondId}")
+        finally:
+            for node in made:
+                slicer.mrmlScene.RemoveNode(node)
+            segmentation.RemoveSegment(secondId)
+            studioShell.dispose()
+            _pump(200)
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+
     #
     # Settings
     #
