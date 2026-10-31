@@ -3291,6 +3291,46 @@ class StudioProjectsTest(unittest.TestCase):
             self.assertFalse(os.path.exists(leftover))
         self.assertFalse([name for name in entries() if projects.COPY_MARKER in name])
 
+    def test_58_open_project_on_a_folder_outside_the_studio_folder_leaves_it_unchanged(self):
+        """Open project… on a project folder outside the Slicer Studio folder (a colleague's project copied to the Desktop
+        under another name) opens a copy in Projects/ and leaves the original byte-for-byte unchanged (A-09, BB-1). The
+        renamed-folder repair ran on the outside folder first: its scene was renamed to "<folder>.mrml" and its
+        project.json rewritten, while the toast said "The original is not changed".
+        """
+        projects = self.projects
+        service = self._service()
+        volume, _path = self._userVolume("MR Head", shape=(12, 14, 16), extension=".nrrd")
+        self._lesion(volume)
+        project = self._projectFor(service)
+        self._save(service)
+        projectPath = project.path
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertIsNone(service.project)
+        outside = os.path.join(self.userDir, "Patient7_from Bob")
+        shutil.copytree(projectPath, outside)
+        lock = os.path.join(outside, ".studio", "lock")
+        if os.path.exists(lock):
+            os.remove(lock)
+        before = {path: _md5File(os.path.join(outside, path)) for path in _relativeFiles(outside)}
+        self.assertIn(os.path.basename(projectPath) + ".mrml", before, "the scene keeps its old name in the outside folder")
+        announced = []
+        service.setProjectAnnouncer(lambda event, opened, **info: announced.append((event, opened.name if opened else None)))
+
+        self.assertTrue(service.openProject(outside))
+        slicer.app.processEvents()
+        self.io.backgroundWriter().drain(30.0)
+        self.assertIsNotNone(service.project)
+        self.assertEqual(os.path.dirname(service.project.path), projects.projectsFolder(), "a copy opens in Projects/")
+        self.assertEqual(service.project.name, "Patient7 from Bob", "the copy is named after the folder")
+        self.assertIn(("copy", "Patient7 from Bob"), announced)
+        self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("Lesions"))
+        self._save(service)
+        self.assertTrue(os.path.isfile(os.path.join(service.project.path, "Patient7 from Bob.mrml")))
+        after = {path: _md5File(os.path.join(outside, path)) for path in _relativeFiles(outside)}
+        self.assertEqual(after, before, "the outside folder is not changed (no file renamed, added or rewritten)")
+
+
 def _sphere(center=(0, 0, 0)):
     import vtk
 

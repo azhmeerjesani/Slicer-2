@@ -1753,13 +1753,21 @@ class AutosaveService:
         if projects.isLockedByOther(path):
             self._announce("locked", projects.Project(path))
             return False
-        # A folder renamed outside Slicer Studio: its scene follows the name (saves write "<folder name>.mrml")
-        scenePath = projects.adoptRenamedScene(path) or scenePath
-        try:
-            if _io().repairBareAmpersands(scenePath):
-                logging.warning(f"Slicer Studio: escaped the bare '&' of the file names in {os.path.basename(scenePath)}")
-        except Exception:
-            logging.error("Slicer Studio: repairing the project scene failed:\n" + traceback.format_exc())
+        projectPath = projects.projectOfPath(path)
+        inRoot = projectPath is not None and os.path.normcase(os.path.realpath(projectPath)) == os.path.normcase(os.path.realpath(path))
+        if inRoot:
+            # A folder renamed outside Slicer Studio: its scene follows the name (saves write "<folder name>.mrml")
+            scenePath = projects.adoptRenamedScene(path) or scenePath
+            try:
+                if _io().repairBareAmpersands(scenePath):
+                    logging.warning(f"Slicer Studio: escaped the bare '&' of the file names in {os.path.basename(scenePath)}")
+            except Exception:
+                logging.error("Slicer Studio: repairing the project scene failed:\n" + traceback.format_exc())
+        else:
+            # A folder outside the Slicer Studio folder (a colleague's project, a copy on the Desktop) opens as a new project
+            # that starts as a copy (A-09): the original is never changed, so its scene is neither renamed nor repaired. The
+            # copy is named after the folder, as the scene would be after a rename.
+            self.setPendingSceneSource(os.path.join(path, os.path.basename(os.path.normpath(path)) + projects.SCENE_EXTENSION))
         self._forceProjectOpen = True
         try:
             # The scene is replaced (Load Scene): the open project is saved and closed first (StartCloseEvent)
@@ -1772,6 +1780,7 @@ class AutosaveService:
             logging.warning(f"Slicer Studio: {error}")
         finally:
             self._forceProjectOpen = False
+            self._pendingSceneSource = None  # used by _afterSceneImport; not left over for a later load if this one failed
         return self.project is not None
 
     def opensSceneAsProject(self):
