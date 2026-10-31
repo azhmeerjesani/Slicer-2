@@ -2912,3 +2912,34 @@ class StudioRegressionTest(unittest.TestCase):
                 slicer.app.processEvents()
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
+
+    def test_36_deciding_the_last_lesion_of_the_review_queue_logs_no_error(self):
+        """Approve (button or Ctrl+Enter) or Send of the last lesion of the review queue ends the review inside the decision:
+        the footer is disposed and its widgets are deleted. The actions then must not hide the form of the deleted widgets
+        (``ValueError: Trying to call 'hide' on a destroyed QFrame object`` in the log).
+        """
+        from StudioLib import review
+
+        for mode in ("approve", "changes", "rejected"):
+            decided = []
+            holder = []
+
+            def decide(to, comment, reason, holder=holder, decided=decided):
+                decided.append((to, comment, reason))
+                holder[0].dispose()  # the review ends with its last lesion: the footer is disposed ...
+                holder[0].widget.delete()  # ... and its widgets are deleted
+                return True
+
+            actions = review.ReviewActions(decide, "StudioTest36")
+            holder.append(actions)
+            if mode == "approve":
+                actions.primary()
+            else:
+                actions.showForm(mode)
+                actions.commentEdit.setText("because")
+                if mode == "rejected":
+                    actions.reasonCombo.setCurrentIndex(1)
+                actions.primary()
+            self.assertEqual(len(decided), 1, mode)
+            self.assertEqual(decided[0][0], "approved" if mode == "approve" else mode)
+            actions.hideForm()  # a late call on the disposed actions does nothing either

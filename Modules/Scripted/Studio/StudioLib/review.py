@@ -450,6 +450,8 @@ class ReviewActions:
             self._modeChanged()
 
     def hideForm(self):
+        if self._decide is None:
+            return  # disposed: the decision that just ended the review (the last lesion of the queue) took the widgets with it
         changed = self._mode is not None
         focus = slicer.app.focusWidget()
         hadFocus = changed and focus is not None and self.form.isAncestorOf(focus)
