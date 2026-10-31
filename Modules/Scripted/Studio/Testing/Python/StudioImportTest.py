@@ -1488,6 +1488,45 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(slicer.mrmlScene.GetNumberOfNodes(), count)
         self.assertEqual(editor.segmentationNode().GetID(), lesion.GetID())
 
+    def test_reopen_scan_continues_bound_lesion_when_draw_edits_nothing(self):
+        """BB-1: a scan that is already open, opened again (Open..., Recent) while Draw edits nothing (as after its
+        project is reopened), continues the lesion bound to it, whatever the lesion's name: no new empty "Lesions (...)".
+        """
+        from StudioLib import importer
+
+        studioShell = self._applyStudio()
+        scanPath = self._writeVolume("sub-09_T1w.nii.gz", GRID_SHIFTED)
+        maskPath = self._writeMask("sub-09_lesion.nii.gz", GRID_SHIFTED)
+        importer.loadFiles([scanPath, maskPath], studioShell)
+        self._pump(8)
+        editor = self._editor()
+        lesion = editor.segmentationNode()
+        scan = editor.sourceVolumeNode()
+        self.assertEqual(lesion.GetName(), "sub-09_lesion")
+        self.assertTrue(importer._isBoundTo(lesion, scan))
+        voxels = self._voxels(lesion)
+        self.assertGreater(voxels, 0)
+        for route in ("open", "recent"):
+            # The reopened project: the scan is Draw's source volume, no segmentation is edited
+            editor.setSegmentationNode(None)
+            self._pump()
+            self.assertIsNone(editor.segmentationNode())
+            studioShell.switchTo("library")
+            self._pump()
+            count = slicer.mrmlScene.GetNumberOfNodes()
+            if route == "open":
+                result = importer.loadFiles([scanPath], studioShell)
+            else:
+                result = importer.loadRecentFile({"fileName": scanPath, "fileType": "VolumeFile"}, None, studioShell)
+            self._pump(6)
+            self.assertEqual([node.GetID() for node in result.alreadyOpen], [scan.GetID()], route)
+            self.assertEqual(slicer.mrmlScene.GetNumberOfNodes(), count, route)
+            self.assertEqual(editor.segmentationNode().GetID(), lesion.GetID(), route)
+            self.assertEqual(editor.sourceVolumeNode().GetID(), scan.GetID(), route)
+            self.assertEqual(self._voxels(lesion), voxels, route)
+            self.assertIsNone(slicer.mrmlScene.GetFirstNodeByName(importer.scanLesionSegmentationName(scan)), route)
+            self.assertEqual(studioShell.currentWorkspace(), "draw", route)
+
     def test_recent_lesion_node_name_has_no_extension(self):
         """A lesion mask re-opened from Recent is named like one opened with Open... (no ".nii.gz" in the node name,
         the toast or the project file name).

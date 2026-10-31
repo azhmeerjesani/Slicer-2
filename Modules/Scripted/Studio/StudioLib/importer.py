@@ -742,6 +742,29 @@ def _lesionSegmentationFor(volumeNode, name):
     return createLesionSegmentation(volumeNode, name)
 
 
+def _boundLesionOf(volumeNode):
+    """A lesion bound to ``volumeNode`` (see ``_isBoundTo()``) whatever its name, None if there is none.
+
+    Segmentations hidden from the editors are skipped. A shown lesion comes before a hidden one (a finished lesion that
+    "New lesion" hid), and the scan's own "Lesions (<scan name>)" before another one; else the first in the scene.
+    """
+    name = scanLesionSegmentationName(volumeNode)
+    candidates = []
+    for index, segmentationNode in enumerate(slicer.util.getNodesByClass("vtkMRMLSegmentationNode")):
+        if segmentationNode.GetHideFromEditors() or not _isBoundTo(segmentationNode, volumeNode):
+            continue
+        displayNode = segmentationNode.GetDisplayNode()
+        shown = displayNode is not None and bool(displayNode.GetVisibility()) and bool(displayNode.GetVisibility2D())
+        candidates.append(((not shown, segmentationNode.GetName() != name, index), segmentationNode))
+    if not candidates:
+        return None
+    segmentationNode = min(candidates, key=lambda candidate: candidate[0])[1]
+    if segmentationNode.GetSegmentation().GetNumberOfSegments() == 0:
+        segmentId = segmentationNode.GetSegmentation().AddEmptySegment("", LESION_SEGMENT_NAME, LESION_COLOR)
+        styleLesionSegment(segmentationNode, segmentId)
+    return segmentationNode
+
+
 def segmentEditorWidget():
     """The Segment Editor module widget (created if needed), or None if the module is not loaded."""
     if not hasattr(slicer.modules, "segmenteditor"):
@@ -1438,7 +1461,11 @@ def _showLoaded(result, shell, scans, openScans, openLesions):
                 # The scan was already open and Draw edits its lesion: keep it (and the selected segment)
                 lesion = editedSegmentation
             else:
-                lesion = _lesionSegmentationFor(sourceVolume, scanLesionSegmentationName(sourceVolume))
+                # The scan was already open and Draw edits nothing on it (for example after its project was reopened):
+                # Draw continues the lesion bound to it, whatever its name (as Library's "Open in Draw" does)
+                lesion = _boundLesionOf(sourceVolume) if not scans else None
+                if lesion is None:
+                    lesion = _lesionSegmentationFor(sourceVolume, scanLesionSegmentationName(sourceVolume))
             if scans or openScans:
                 # A scan of the user: the lesions of a loaded set (MNI masks) are not shown over it
                 _forgetLoadedSetFor(lesion)
