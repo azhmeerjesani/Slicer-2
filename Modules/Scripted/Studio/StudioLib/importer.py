@@ -2278,6 +2278,13 @@ def _showLesion(segmentationNode, shell):
         _showNativeLesion(segmentationNode, shell)
 
 
+def showLesionWithoutScan(segmentationNode, shell=None):
+    """Show a lesion whose scan is not open (Library "Open in Draw" after the scan was closed): on the template when it is on
+    an MNI grid, else Draw's native-lesion state that offers to open its scan (which pairs the lesion with it).
+    """
+    _showLesion(segmentationNode, _currentShell(shell))
+
+
 def _nameAfterSubject(segmentationNode):
     """Name a lesion of a loaded set after the BIDS subject of its file ("sub-05 lesion"): node and single segment."""
     subject = bidsSubject(os.path.basename(_lesionFilePath(segmentationNode) or "")) or bidsSubject(segmentationNode.GetName())

@@ -1119,6 +1119,11 @@ def continueInDraw(shell=None, segmentationNode=None, volumeNode=None):
         _switchToDraw(shell)
         return None
     scan = volumeNode if volumeNode is not None else lesionScan(lesion)
+    if scan is None and shell is not None:
+        # The lesion's scan is closed (or was never opened): Draw says so and offers to open it, as for a lesion opened alone
+        _importer().showLesionWithoutScan(lesion, shell)
+        _switchToDraw(shell)
+        return lesion
     editor = _segmentEditor()
     editsIt = editor is not None and _sameNode(editor.segmentationNode(), lesion) and (scan is None or _sameNode(editor.sourceVolumeNode(), scan))
     if not editsIt:

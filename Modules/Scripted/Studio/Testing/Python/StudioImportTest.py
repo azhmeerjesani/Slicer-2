@@ -1220,6 +1220,39 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertFalse(list(slicer.util.getNodesByClass("vtkMRMLSegmentationStorageNode")))
         self.assertGreaterEqual(scene.GetNumberOfNodes(), nodesBefore)
 
+    def test_closed_scan_lesion_in_draw_offers_scan(self):
+        """Library > Open in Draw on a lesion whose scan was closed shows the native-lesion state, and its scan opens with it."""
+        from StudioLib import importer, library
+
+        studioShell = self._applyStudio()
+        scanPath = self._writeVolume("patient_T1.nii.gz", GRID_SHIFTED, subdirectory="anat")
+        maskPath = self._writeMask("patient_T1_lesion.nii.gz", GRID_SHIFTED, subdirectory="anat")
+        result = importer.loadFiles([scanPath, maskPath], studioShell)
+        self._pump(8)
+        lesion = result.segmentations[0]
+        scan = slicer.util.getNode("patient_T1")
+        editor = self._editor()
+        self.assertEqual(editor.sourceVolumeNode().GetID(), scan.GetID())
+        library.closeNode(scan, confirm=False)
+        self._pump(4)
+        library.continueInDraw(studioShell, lesion)
+        self._pump(6)
+        self.assertEqual(editor.segmentationNode().GetID(), lesion.GetID())
+        self.assertIsNone(editor.sourceVolumeNode())
+        self.assertEqual(studioShell.currentWorkspace(), "draw")
+        emptyState = self._drawEmptyState()
+        self.assertTrue(emptyState.isVisible())
+        text = str(emptyState.findChild("QLabel", "StudioDrawEmptyStateText").text)
+        self.assertEqual(text, "This lesion is in scan space. Open the scan it was drawn on.")
+        # Its "Open scan..." pairs the lesion with the scan, so Draw continues that lesion (no new empty one)
+        nodesBefore = len(slicer.util.getNodesByClass("vtkMRMLSegmentationNode"))
+        importer.openScanForLesion(lesion, scanPath, studioShell)
+        self._pump(8)
+        self.assertEqual(editor.segmentationNode().GetID(), lesion.GetID())
+        self.assertIsNotNone(editor.sourceVolumeNode())
+        self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLSegmentationNode")), nodesBefore)
+        self.assertFalse(self._drawEmptyState().isVisible())
+
     def test_mni_lesion_dropped_on_native_scan_goes_to_template(self):
         """MNI masks opened while a scan in scan space is shown: never drawn over that scan, but on the template (as in an
         empty scene: one lesion with its space line, several as a loaded set); on a scan on an MNI grid they stay.
