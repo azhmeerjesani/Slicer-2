@@ -1623,13 +1623,42 @@ def _moving_lesion_image(ctx):
     return ctx._moving_lesion
 
 
+def _mask_in_image_order(mask, mask_affine, shape, affine, tolerance=0.02):
+    """``mask`` re-indexed to the voxel order of the grid ``(shape, affine)``, or None when it is not the same grid.
+
+    The two grids hold the same voxel centres when every voxel of the image maps onto exactly one voxel of the mask
+    through a signed axis permutation (RAS and LAS copies, or a transposed copy): the array is then transposed and
+    flipped, with no interpolation. ``tolerance`` is in voxels.
+    """
+    np = _np()
+    to_mask = np.linalg.inv(np.asarray(mask_affine, dtype=np.float64)) @ np.asarray(affine, dtype=np.float64)
+    linear, offset = to_mask[:3, :3], to_mask[:3, 3]
+    signed = np.rint(linear)
+    if not np.allclose(linear, signed, atol=tolerance) or not np.allclose(np.abs(signed).sum(axis=0), 1) or not np.allclose(np.abs(signed).sum(axis=1), 1):
+        return None
+    # image axis j is mask axis axes[j], counted forward (sign +1) or backward (sign -1)
+    axes = [int(np.argmax(np.abs(signed[:, j]))) for j in range(3)]
+    flips = []
+    for j, axis in enumerate(axes):
+        negative = signed[axis, j] < 0
+        first = (mask.shape[axis] - 1) if negative else 0
+        if mask.shape[axis] != shape[j] or abs(offset[axis] - first) > tolerance:
+            return None
+        flips.append(negative)
+    out = np.transpose(mask, axes)
+    return out[tuple(slice(None, None, -1) if flip else slice(None) for flip in flips)]
+
+
 def _template_images(ctx):
     """(fixed array, mask bool, affine, SimpleITK fixed image) of the 2 mm template, cached."""
     if getattr(ctx, "_template_images", None) is None:
         fixed, affine = _read_float(ctx.template["files"]["fixed"])
         mask, mask_affine = _read_float(ctx.template["files"]["mask"])
         if mask.shape != fixed.shape or not _np().allclose(mask_affine, affine, atol=1e-3):
-            raise jobs.JobError("The template image and brain mask are not on the same grid", code="template_mismatch")
+            # the same voxel centres stored in another order (a LAS mask of a RAS image) are the same grid
+            mask = _mask_in_image_order(mask, mask_affine, fixed.shape, affine)
+            if mask is None:
+                raise jobs.JobError("The template image and brain mask are not on the same grid", code="template_mismatch")
         ctx._template_images = (fixed, mask >= 0.5, affine, _sitk().ReadImage(ctx.template["files"]["fixed"]))
     return ctx._template_images
 

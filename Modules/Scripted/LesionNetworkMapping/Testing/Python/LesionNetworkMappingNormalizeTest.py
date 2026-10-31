@@ -725,6 +725,66 @@ class NormalizeTest(unittest.TestCase):
         self.assertEqual(record["qc"]["suggestion"], "review")  # more than one attempt
 
 
+class TemplateMaskStorageOrderTest(unittest.TestCase):
+    """The template brain mask may hold the image's voxels in another storage order (a LAS mask of a RAS image)."""
+
+    SHAPE = (6, 8, 5)
+
+    @staticmethod
+    def _grid(shape, spacing, origin, flip_x=False):
+        affine = np.diag([spacing[0], spacing[1], spacing[2], 1.0])
+        affine[:3, 3] = origin
+        if flip_x:  # same voxel centres, stored in the opposite i order
+            affine[0, 0] = -affine[0, 0]
+            affine[0, 3] = origin[0] + spacing[0] * (shape[0] - 1)
+        return affine
+
+    def _images(self, tmp, mask_data, mask_affine, image_data, image_affine):
+        names = {"fixed": os.path.join(tmp, "fixed.nii.gz"), "mask": os.path.join(tmp, "mask.nii.gz")}
+        nifti.write_nifti(names["fixed"], image_data.astype(np.float32), image_affine)
+        nifti.write_nifti(names["mask"], mask_data.astype(np.uint8), mask_affine)
+
+        class Context:
+            template = {"files": names}
+
+        return normalize._template_images(Context())
+
+    def test_mask_in_another_order_is_the_same_grid(self):
+        rng = np.random.default_rng(3)
+        image = rng.random(self.SHAPE)
+        mask = np.zeros(self.SHAPE, bool)
+        mask[1:4, 2:7, 0:3] = True  # not symmetric along any axis
+        origin = (-6.0, -8.0, -4.0)
+        ras = self._grid(self.SHAPE, (2.0, 2.0, 2.0), origin)
+        las = self._grid(self.SHAPE, (2.0, 2.0, 2.0), origin, flip_x=True)
+        transposed = np.array([[0.0, 2.0, 0.0, origin[0]], [2.0, 0.0, 0.0, origin[1]], [0.0, 0.0, 2.0, origin[2]], [0.0, 0.0, 0.0, 1.0]])
+        with tempfile.TemporaryDirectory() as tmp:
+            for label, mask_data, mask_affine, image_data, image_affine in (
+                ("same order", mask, ras, image, ras),
+                ("LAS mask, RAS image", mask[::-1], las, image, ras),
+                ("RAS mask, LAS image", mask, ras, image[::-1], las),
+            ):
+                _, got, affine, _ = self._images(tmp, mask_data, mask_affine, image_data, image_affine)
+                np.testing.assert_array_equal(got, mask if image_affine is ras else mask[::-1], err_msg=label)
+                np.testing.assert_allclose(affine, image_affine, atol=1e-4)
+            # axes swapped as well (i and j exchanged in the mask)
+            _, got, _, _ = self._images(tmp, mask.transpose(1, 0, 2), transposed, image, ras)
+            self.assertEqual(got.shape, self.SHAPE)
+            np.testing.assert_array_equal(got, mask)
+
+    def test_mask_on_another_grid_is_refused(self):
+        image = np.ones(self.SHAPE)
+        mask = np.ones(self.SHAPE, bool)
+        ras = self._grid(self.SHAPE, (2.0, 2.0, 2.0), (-6.0, -8.0, -4.0))
+        shifted = self._grid(self.SHAPE, (2.0, 2.0, 2.0), (-4.0, -8.0, -4.0), flip_x=True)  # also flipped: 2 mm off
+        coarse = self._grid((3, 4, 5), (4.0, 4.0, 2.0), (-6.0, -8.0, -4.0))
+        with tempfile.TemporaryDirectory() as tmp:
+            for label, mask_data, mask_affine in (("shifted", mask, shifted), ("other size", np.ones((3, 4, 5), bool), coarse)):
+                with self.assertRaises(jobs.JobError, msg=label) as raised:
+                    self._images(tmp, mask_data, mask_affine, image, ras)
+                self.assertEqual(raised.exception.code, "template_mismatch")
+
+
 class CheckTextTest(unittest.TestCase):
     """'normalize check' with the text output (a terminal) lists the tools, the templates and why a user template is unusable."""
 
