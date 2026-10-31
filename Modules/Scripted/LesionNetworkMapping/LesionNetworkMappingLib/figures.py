@@ -268,6 +268,34 @@ def _world_box(volume, crop):
     return world.min(axis=0), world.max(axis=0)
 
 
+def inside_fraction(volume, grid):
+    """Share (0..1) of the finite non-zero voxels of ``volume`` whose centres lie inside ``grid``'s box
+    (None when the volume has no such voxel).
+    """
+    data = np.asarray(volume.data)
+    if data.dtype.kind not in "fiub":
+        return None
+    nonzero = np.isfinite(data) & (data != 0)
+    ijk = np.argwhere(nonzero)
+    if not len(ijk):
+        return None
+    affine = np.asarray(volume.affine, dtype=np.float64)
+    world = ijk.astype(np.float64) @ affine[:3, :3].T + affine[:3, 3]
+    position = (world - np.asarray(grid.origin, dtype=np.float64)) / grid.spacing
+    inside = np.all((position >= -0.5) & (position <= np.asarray(grid.shape, dtype=np.float64) - 0.5), axis=1)
+    return float(inside.mean())
+
+
+def _percent_text(share):
+    """``share`` (0..1) as a percentage for a caption note, never rounded to 0% or 100% unless exact."""
+    percent = 100.0 * share
+    if 0 < percent < 0.1:
+        return "less than 0.1%"
+    if 99.9 < percent < 100:
+        return "more than 99.9%"
+    return f"{percent:.1f}%"
+
+
 def reslice(volume, grid, order=1, cval=0.0, dtype=np.float32):
     """``volume`` resampled onto ``grid`` through the affines (``order`` 0 = nearest, 1 = linear).
 
@@ -1162,8 +1190,40 @@ class _Context:
     def _input(self, role, volume):
         self.inputs.append({"role": role, "name": volume.name, "file": volume.source, "sha256": volume.sha256})
 
+    def check_coverage(self, volumes, what="map"):
+        """Compare the input(s) with the template-based display grid, which silently drops whatever lies
+        outside it. Raises when none of the (non-empty) inputs overlaps the grid; else returns the list of
+        (volume, share inside) pairs for the inputs that are partly outside. Inputs without a template
+        define the grid and are always covered.
+        """
+        if self.template is None:
+            return []
+        shares = [(volume, inside_fraction(volume, self.grid)) for volume in volumes]
+        present = [(volume, share) for volume, share in shares if share is not None]
+        if present and all(share == 0.0 for _, share in present):
+            names = ", ".join(volume.name for volume, _ in present[:3]) + (", ..." if len(present) > 3 else "")
+            raise ValueError(f"No voxel of the {what} ({names}) lies inside the template's field of view ({self.template.name}); nothing could be drawn. Is the {what} in the template's space (for example MNI)?")
+        return [(volume, share) for volume, share in present if share < 1.0]
+
+    def lesion_notes(self, volumes, labels=None):
+        """Caption sentences for lesions that lie partly or wholly outside the template's field of view
+        (raises when all of them do).
+        """
+        partial = self.check_coverage(volumes, "lesions")
+        if not partial:
+            return []
+        labels = labels if labels is not None else [str(index + 1) for index in range(len(volumes))]
+        by_id = {id(volume): label for volume, label in zip(volumes, labels, strict=False)}
+        cases = [by_id[id(volume)] for volume, _ in partial]
+        shown = ", ".join(cases[:8]) + (", ..." if len(cases) > 8 else "")
+        worst = min(share for _, share in partial)
+        noun = "lesion lies" if len(cases) == 1 else "lesions lie"
+        return [f"Warning: {len(cases)} of {len(volumes)} {noun} partly or wholly outside the template's field of view (case {shown}; at worst {_percent_text(1.0 - worst)} of a lesion is not shown)."]
+
     def map(self, source, title, role="map"):
         volume = load_volume(source)
+        for _, share in self.check_coverage([volume]):
+            self.notes.append(f"Warning: {_percent_text(1.0 - share)} of the non-zero voxels of {volume.name} lie outside the template's field of view and are not shown; the statistics above describe the whole map.")
         self._input(role, volume)
         key = base = volume.name if role == "map" else role
         suffix = 2
@@ -1674,6 +1734,7 @@ def overlap(count=None, lesions=None, template=None, slices="auto", n_lesions=No
         ctx = _Context("overlap", options, template, volumes)
         for volume in volumes:
             ctx._input("lesion", volume)
+        outside_notes = ctx.lesion_notes(volumes)
         first = volumes[0]
         if all(np.shape(v.data) == np.shape(first.data) and np.allclose(v.affine, first.affine, atol=1e-4) for v in volumes):
             native = np.zeros(np.shape(first.data), dtype=np.int32)
@@ -1691,11 +1752,14 @@ def overlap(count=None, lesions=None, template=None, slices="auto", n_lesions=No
         volume = load_volume(count)
         ctx = _Context("overlap", options, template, volume)
         ctx._input("count", volume)
+        outside_notes = [f"Warning: {_percent_text(1.0 - share)} of the non-zero voxels of {volume.name} lie outside the template's field of view and are not shown." for _, share in ctx.check_coverage([volume], "count map")]
         native = np.rint(np.nan_to_num(np.asarray(volume.data, dtype=np.float64))).astype(np.int32)
         grid_count = np.rint(reslice(volume, ctx.grid, order=0)).astype(np.int32)
         name = volume.name
     max_count = int(native.max()) if native is not None and native.size else int(grid_count.max())
     legend = _overlap_legend(max_count, n_lesions)
+    if outside_notes and int(grid_count.max()) < max_count:
+        outside_notes.append(f"The maximum ({max_count}) is reached outside the displayed area; the largest count shown is {int(grid_count.max())}.")
     plane, coordinates, n_slices = parse_slices(slices)
     if coordinates is None:
         coordinates = auto_slices(grid_count.astype(np.float32), ctx.grid, plane, n_slices or 6)
@@ -1710,6 +1774,7 @@ def overlap(count=None, lesions=None, template=None, slices="auto", n_lesions=No
         _orientation_sentence(options.convention, [plane]),
         f"A voxel counts for a lesion when its value is ≥ {binarize_at:g}." if lesions is not None else "",
         _slices_sentence(plane, [c for _, c, _ in planes]),
+        *outside_notes,
         *_context_sentences(ctx),
     ]
     bar = {"kind": "sequential", "vmin": 0, "vmax": max(max_count, 1), "discrete": True, "label": f"lesions per voxel ({legend})"}
@@ -1753,6 +1818,7 @@ def gallery(lesions, template=None, labels=None, per_page=30, binarize_at=0.5, c
     per_page = max(1, int(per_page))
     pages = []
     ctx_all = _Context("gallery", options, template, volumes)
+    outside_notes = ctx_all.lesion_notes(volumes, labels)
     entries = []
     for volume, label in zip(volumes, labels, strict=False):
         _check_cancel(cancel, len(entries))
@@ -1784,6 +1850,7 @@ def gallery(lesions, template=None, labels=None, per_page=30, binarize_at=0.5, c
         caption = [
             f"Lesion gallery ({len(entries)} lesions{f', page {page + 1} of {total_pages}' if total_pages > 1 else ''}): each lesion (red) on the axial slice of its largest area; numbers match the case table; z in mm.",
             _orientation_sentence(options.convention, ["axial"]),
+            *outside_notes,
             *_context_sentences(ctx),
         ]
         figure = _finish_gallery(ctx, panels, columns, caption, rows, page, total_pages)

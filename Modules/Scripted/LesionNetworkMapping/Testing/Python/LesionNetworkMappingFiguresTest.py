@@ -252,6 +252,51 @@ class FiguresTest(unittest.TestCase):
         grid = figures.triptych(near, far, near, None, "A 0", **SMALL).meta["grid"]
         self.assertGreater(grid["origin"][0] + grid["spacing"] * (grid["shape"][0] - 1), 16)
 
+    def _moved(self, data, dx, name):
+        affine = self.affine.copy()
+        affine[0, 3] += dx
+        return (data, affine, name)
+
+    def test_input_outside_the_template_is_an_error_not_an_empty_figure(self):
+        # A map or lesion in another space (here 300 mm away) used to give a blank figure whose caption still
+        # reported its threshold fraction, a crosshair "peak" at the grid corner and "maximum 1 of 1 lesions"
+        far_map = self._moved(blob_map(), 300.0, "meanT")
+        far_lesion = self._moved(ball((-16, 0, 0), 6), 300.0, "les")
+        calls = [
+            lambda: figures.montage(far_map, self.template, "A 0", threshold=3.0, **SMALL),
+            lambda: figures.ortho(far_map, None, self.template, **SMALL),
+            lambda: figures.glass(far_map, template=self.template, **SMALL),
+            lambda: figures.gallery([far_lesion], self.template, **SMALL),
+            lambda: figures.overlap(lesions=[far_lesion], template=self.template, **SMALL),
+        ]
+        for call in calls:
+            with self.assertRaises(ValueError) as caught:
+                call()
+            self.assertIn("template's field of view", str(caught.exception))
+        # the command line reports it as an input error
+        map_path = os.path.join(self.tmp, "far.nii.gz")
+        tpl_path = os.path.join(self.tmp, "tpl.nii.gz")
+        nifti.write_nifti(map_path, far_map[0], far_map[1])
+        nifti.write_nifti(tpl_path, brain(), self.affine)
+        code, events = self._cli(["--preset", "ortho", "--map", map_path, "--template", tpl_path, "--out", os.path.join(self.tmp, "o"), "--formats", "png"])
+        self.assertNotEqual(code, 0)
+        self.assertEqual(events[-1]["event"], "error")
+        self.assertEqual(events[-1]["code"], "input")
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "o", "figures", "ortho")))
+
+    def test_input_partly_outside_the_template_is_noted_in_the_caption(self):
+        near_map = (blob_map(), self.affine, "meanT")
+        shifted = self._moved(blob_map(), 40.0, "meanT")
+        ok = figures.montage(near_map, self.template, "A 0", threshold=3.0, **SMALL)
+        self.assertNotIn("outside the template", ok.caption)
+        for figure in (figures.montage(shifted, self.template, "A 0", threshold=3.0, **SMALL), figures.glass(shifted, template=self.template, **SMALL)):
+            self.assertIn("outside the template's field of view and are not shown", figure.caption)
+        lesions = [(ball((-16, 0, 0), 6), self.affine, "a"), self._moved(ball((0, 0, 0), 6), 52.0, "b")]
+        for figure in (figures.overlap(lesions=lesions, template=self.template, **SMALL), figures.gallery(lesions, self.template, **SMALL)[0]):
+            self.assertIn("1 of 2 lesion lies partly or wholly outside the template's field of view (case 2", figure.caption)
+        clean = figures.gallery(lesions[:1], self.template, **SMALL)[0]
+        self.assertNotIn("outside the template", clean.caption)
+
     def test_same_named_maps_keep_their_own_records(self):
         positive = ((10.0 * ball((-14, 0, 0), 8)), self.affine, "T")
         negative = ((-10.0 * ball((14, 0, 0), 8)), self.affine, "T")
