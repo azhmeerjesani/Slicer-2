@@ -317,6 +317,38 @@ class MethodsTextCompatibilityTest(unittest.TestCase):
             self.assertIn(phrase, text)
         self.assertEqual(methods.lint_wording(text), [])
 
+    def test_top_pct_states_the_signed_rank_rule(self):
+        """A one-sided top-x% rule is written with its signed cut (as the sidecar's "derived" field), never as |T| or |mean Fz|."""
+        info = _bundle(True)
+        subset = {"preview": False, "partial": False, "n_requested": 120, "random": False, "seed": 0}
+        values = [float(i) for i in range(-40, 60)]  # top 5%: T >= 54.05, -T >= 35.05
+        expected = {
+            ("T", "pos"): ("T maps were thresholded at the top 5% of positive T values (T ≥ 54;", "|T|"),
+            ("T", "neg"): ("T maps were thresholded at the top 5% of negative T values (T ≤ -35;", "|T|"),
+            ("T", "both"): ("T maps were thresholded at the top 5% of absolute T values (|T| ≥ 54;", None),
+            ("Fz", "pos"): ("Mean Fz maps were thresholded at the top 5% of positive mean Fz values (mean Fz ≥ 54;", "|mean Fz|"),
+            ("Fz", "neg"): ("Mean Fz maps were thresholded at the top 5% of negative mean Fz values (mean Fz ≤ -35;", "|mean Fz|"),
+            ("Fz", "both"): ("Mean Fz maps were thresholded at the top 5% of absolute mean Fz values (|mean Fz| ≥ 54;", None),
+        }
+        for (statistic, sign), (phrase, absent) in expected.items():
+            with self.subTest(statistic=statistic, sign=sign):
+                rule = thresholds.normalize_rule({"kind": "top_pct", "value": 5, "statistic": statistic, "sign": sign})
+                resolved = thresholds.resolve(rule, 120, 100, values=values)
+                threshold = {"rule": rule, "resolved": resolved.to_dict(), "derived": thresholds.describe(resolved)}
+                text = export.methods_text(info, 120, subset, threshold, [{"name": "sub-01", "qa": {}}], {"null": {"k": 0}}, software={"slicer": "5.11"})
+                self.assertIn(phrase, text)
+                self.assertIn("rank rule top_pct, no p-value", text)
+                self.assertNotIn("effect size;", text)
+                if absent is not None:
+                    self.assertNotIn(absent, text.split("## Parameters")[0])
+                self.assertEqual(methods.lint_wording(text), [])
+        # A one-sided rule that nothing passes (no value of that sign) is stated, not formatted as a number
+        rule = thresholds.normalize_rule({"kind": "top_pct", "value": 5, "statistic": "T", "sign": "neg"})
+        resolved = thresholds.resolve(rule, 120, 100, values=[1.0, 2.0])
+        threshold = {"rule": rule, "resolved": resolved.to_dict(), "derived": thresholds.describe(resolved)}
+        text = export.methods_text(info, 120, subset, threshold, [{"name": "sub-01", "qa": {}}], {"null": {"k": 0}}, software={"slicer": "5.11"})
+        self.assertIn("top 5% of negative T values (no voxel of this sign, nothing passes;", text)
+
 
 class ChecklistTest(_StudyCase):
     def test_empty_study_is_not_run(self):

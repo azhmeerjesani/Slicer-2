@@ -1213,6 +1213,28 @@ def disclaimer_section():
 # One exported run (export.methods_text)
 
 
+def _top_pct_text(rule, resolved):
+    """Methods sentence of a top-x% rule: a rank rule (no p-value, not an effect size) restricted to the
+    rule's sign, as thresholds.describe and the sidecar's "derived" field state it ("top 5% of T (≥ 2.28)").
+    A one-sided rule is written with its signed cut (T ≥ 2.28, or T ≤ -1.90 for the negative tail), never as |T|.
+    """
+    statistic = resolved.get("statistic") or rule.get("statistic") or "T"
+    name = "T" if statistic == "T" else "mean Fz"
+    sign = rule.get("sign", "both")
+    value = resolved.get("value")
+    x = f"{float(rule.get('value', 0)):g}"
+    if sign == "pos":
+        values, cut = f"positive {name} values", (f"{name} ≥ {value:.3g}" if value is not None else None)
+    elif sign == "neg":
+        values, cut = f"negative {name} values", (f"{name} ≤ -{value:.3g}" if value is not None else None)
+    else:
+        values, cut = f"absolute {name} values", (f"|{name}| ≥ {value:.3g}" if value is not None else None)
+    cut = cut or "no voxel of this sign, nothing passes"
+    df = f"df = {resolved['df']}, " if statistic == "T" and resolved.get("df") is not None else ""
+    maps = "T maps" if statistic == "T" else "Mean Fz maps"
+    return f"{maps} were thresholded at the top {x}% of {values} ({cut}; rank rule top_pct, no p-value; {df}V = {resolved['v']:,} voxels); maps are stored unthresholded."
+
+
 def run_sections(info, n, subset, threshold, lesions, run_meta=None, software=None):
     """Sections of one exported network-mapping run (the content of ``export.methods_text``)."""
     run_meta = run_meta or {}
@@ -1244,7 +1266,10 @@ def run_sections(info, n, subset, threshold, lesions, run_meta=None, software=No
     elif info.get("gsr") is False:
         identity.append("preprocessed without global signal regression")
     identity_text = f"; {', '.join(identity)}" if identity else ""
-    if resolved["statistic"] == "Fz":
+    rule = threshold.get("rule") or resolved.get("rule") or {}
+    if rule.get("kind") == "top_pct":
+        threshold_text = _top_pct_text(rule, resolved)
+    elif resolved["statistic"] == "Fz":
         threshold_text = f"Maps were displayed at |mean Fz| ≥ {resolved['value']:g} (effect size; maps are stored unthresholded)."
     else:
         p_text = f", two-sided p_unc ≤ {resolved['p_unc']:.2g}" if resolved.get("p_unc") is not None else ""
