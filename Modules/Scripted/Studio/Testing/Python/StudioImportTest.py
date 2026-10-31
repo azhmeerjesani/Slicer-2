@@ -1527,6 +1527,109 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertIsNone(slicer.mrmlScene.GetFirstNodeByName(importer.scanLesionSegmentationName(scan)), route)
             self.assertEqual(studioShell.currentWorkspace(), "draw", route)
 
+    def _writeDicomSeries(self, folderName, slices=6, size=24):
+        """A synthetic axial MR series of one series UID written with pydicom; return its folder (None without pydicom)."""
+        try:
+            import pydicom
+            from pydicom.dataset import FileDataset, FileMetaDataset
+            from pydicom.uid import ExplicitVRLittleEndian, generate_uid
+        except ImportError:
+            return None
+        folder = os.path.join(self.directory, folderName)
+        os.makedirs(folder, exist_ok=True)
+        studyUid, seriesUid, frameUid = generate_uid(), generate_uid(), generate_uid()
+        for number in range(slices):
+            meta = FileMetaDataset()
+            meta.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.4"
+            meta.MediaStorageSOPInstanceUID = generate_uid()
+            meta.TransferSyntaxUID = ExplicitVRLittleEndian
+            path = os.path.join(folder, f"slice{number:02d}.dcm")
+            dataset = FileDataset(path, {}, file_meta=meta, preamble=b"\0" * 128)
+            dataset.SOPClassUID = meta.MediaStorageSOPClassUID
+            dataset.SOPInstanceUID = meta.MediaStorageSOPInstanceUID
+            dataset.PatientName = "Import^Test"
+            dataset.PatientID = "IMPORT001"
+            dataset.StudyInstanceUID, dataset.SeriesInstanceUID, dataset.FrameOfReferenceUID = studyUid, seriesUid, frameUid
+            dataset.SeriesDescription = "T1"
+            dataset.Modality = "MR"
+            dataset.SeriesNumber = 2
+            dataset.InstanceNumber = number + 1
+            dataset.ImagePositionPatient = [-24.0, -24.0, float(number) * 3.0]
+            dataset.ImageOrientationPatient = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+            dataset.PixelSpacing = [2.0, 2.0]
+            dataset.SliceThickness = 3.0
+            dataset.Rows = dataset.Columns = size
+            dataset.SamplesPerPixel = 1
+            dataset.PhotometricInterpretation = "MONOCHROME2"
+            dataset.BitsAllocated = dataset.BitsStored = 16
+            dataset.HighBit = 15
+            dataset.PixelRepresentation = 0
+            dataset.PixelData = np.full((size, size), 100 + number, np.uint16).tobytes()
+            pydicom.dcmwrite(path, dataset, enforce_file_format=True)
+        return folder
+
+    def test_dicom_folder_reopened_keeps_series_and_lesion(self):
+        """BB-1: a DICOM folder of one series dropped again, or reopened from its Recent folder row, does not load the
+        series again: its scan becomes current and Draw keeps the traced lesion (no "..._1" copy, no new empty lesion).
+        """
+        from DICOMLib import DICOMUtils
+        from StudioLib import importer
+
+        folder = self._writeDicomSeries("dicom one series")
+        if folder is None:
+            return  # pydicom is not available in this build
+        studioShell = self._applyStudio()
+        # A temporary database; the original one is restored as it was
+        settings = qt.QSettings()
+        settingsKey = slicer.dicomDatabaseDirectorySettingsKey
+        originalSetting = settings.value(settingsKey)
+        originalOpen = bool(slicer.dicomDatabase is not None and slicer.dicomDatabase.isOpen)
+        DICOMUtils.openTemporaryDatabase(os.path.join(self.directory, "dicom database"))
+        try:
+            self.assertEqual(importer.loadFolder(folder, studioShell), "dicom")
+            self._pump(8)
+            editor = self._editor()
+            lesion = editor.segmentationNode()
+            scan = editor.sourceVolumeNode()
+            self.assertIsNotNone(lesion)
+            self.assertIsNotNone(scan)
+            self.assertTrue(scan.GetAttribute("DICOM.instanceUIDs"))
+            segmentId = editor.currentSegmentID()
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(lesion, segmentId, scan)
+            array[2:4, 8:12, 8:12] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, lesion, segmentId, scan)
+            voxels = self._voxels(lesion)
+            self.assertGreater(voxels, 0)
+            count = slicer.mrmlScene.GetNumberOfNodes()
+            scans = [node.GetID() for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")]
+            for route in ("drop", "recent"):
+                studioShell.switchTo("library")
+                self._pump()
+                if route == "drop":
+                    importer.handleDrop([folder], shell=studioShell)
+                else:
+                    # The Recent folder row (RecentFolderEntry.load) opens the folder again with loadFolder()
+                    self.assertEqual(importer.loadFolder(folder, studioShell), "dicom")
+                self._pump(8)
+                self.assertEqual([node.GetID() for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")], scans, route)
+                self.assertEqual(slicer.mrmlScene.GetNumberOfNodes(), count, route)
+                self.assertEqual(editor.segmentationNode().GetID(), lesion.GetID(), route)
+                self.assertEqual(editor.sourceVolumeNode().GetID(), scan.GetID(), route)
+                self.assertEqual(self._voxels(lesion), voxels, route)
+                self.assertEqual(studioShell.currentWorkspace(), "draw", route)
+                self.assertEqual(studioShell.toastText(), f"{scan.GetName()} is already open", route)
+            seriesUID = slicer.dicomDatabase.seriesForFile(os.path.join(folder, "slice00.dcm"))
+            self.assertEqual([node.GetID() for node in importer.openNodesForDicomSeries(seriesUID)], [scan.GetID()])
+        finally:
+            if slicer.dicomDatabase.isOpen:
+                slicer.dicomDatabase.closeDatabase()
+            if originalSetting:
+                settings.setValue(settingsKey, originalSetting)
+                if originalOpen and os.path.isdir(str(originalSetting)):
+                    DICOMUtils.openDatabase(str(originalSetting))
+            else:
+                settings.remove(settingsKey)
+
     def test_recent_lesion_node_name_has_no_extension(self):
         """A lesion mask re-opened from Recent is named like one opened with Open... (no ".nii.gz" in the node name,
         the toast or the project file name).

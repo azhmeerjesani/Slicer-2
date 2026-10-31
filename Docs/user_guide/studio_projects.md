@@ -58,7 +58,9 @@ you compute. In Slicer Studio:
 - The files you open are **copied** into the project. Your original files are
   never changed or moved. Opening one of them again (Open…, a drop, Recent, or a
   folder's **Load all**) does not load a second copy: its scan or lesion becomes
-  current again ("<name> is already open"), also after a restart. Slicer Studio
+  current again ("<name> is already open"), also after a restart. The same goes
+  for a DICOM folder of one series dropped again or reopened from Recent: the
+  series is not loaded a second time. Slicer Studio
   remembers where each copy came from in the project's `.studio/` folder, never
   in the scene file.
 - Opening a Slicer scene (`.mrml` or `.mrb`) from somewhere else makes a new

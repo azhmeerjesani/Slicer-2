@@ -1795,6 +1795,8 @@ def _folderFiles(path, limit=FOLDER_SCAN_MAX_FILES):
 def importDicomFolder(path, shell=None):
     """Import a DICOM folder into the DICOM database; in Studio, a folder of one series opens in Draw.
 
+    In Studio, a series is not loaded twice (dropped again, or its Recent folder row): the scan already loaded from it
+    becomes current again and Draw keeps its lesion (``openNodesForDicomSeries()``, as ``openNodeForFile()`` for files).
     Without a database, the default one is created as 3D Slicer does when a DICOM folder is dropped on it. A folder of
     several series is shown in the DICOM browser (a series loaded there opens in Draw too). Without the DICOM module,
     the Add Data dialog opens with the folder.
@@ -1829,6 +1831,12 @@ def importDicomFolder(path, shell=None):
             except Exception:
                 logging.error(f"Studio: cannot list the DICOM series of {path}:\n{traceback.format_exc()}")
     if shell is not None and len(seriesUIDs) == 1:
+        openNodes = openNodesForDicomSeries(seriesUIDs[0], database)
+        if openNodes:
+            result = LoadResult()
+            result.alreadyOpen.extend(openNodes)
+            _afterLoad(result, shell)
+            return True
         try:
             with _ownLoad(), slicer.util.WaitCursor():
                 nodeIds = DICOMUtils.loadSeriesByUID(seriesUIDs)
@@ -1846,6 +1854,33 @@ def importDicomFolder(path, shell=None):
     # Several series (or none loadable): the DICOM browser lists them
     slicer.util.selectModule("DICOM")
     return True
+
+
+def openNodesForDicomSeries(seriesUID, database=None):
+    """The scans of the scene loaded from the DICOM series ``seriesUID`` (in scene order), [] if none.
+
+    A scan loaded by the DICOM module names the instances it was read from in its "DICOM.instanceUIDs" attribute (kept in
+    the scene, also after its project took the file over): it belongs to the series when all of them are instances of
+    that series in the DICOM database. Only scans shown to the user are considered (not label maps or hidden nodes).
+    """
+    database = database if database is not None else getattr(slicer, "dicomDatabase", None)
+    if not seriesUID or database is None or not database.isOpen:
+        return []
+    try:
+        seriesInstances = set(database.instancesForSeries(seriesUID))
+    except Exception:
+        logging.debug(f"Studio: {traceback.format_exc()}")
+        return []
+    if not seriesInstances:
+        return []
+    nodes = []
+    for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
+        if _shownNodeForFile(node) is None or _isReference(node) or _isTemplate(node):
+            continue
+        instanceUIDs = [uid for uid in (node.GetAttribute("DICOM.instanceUIDs") or "").split() if uid != "Unknown"]
+        if instanceUIDs and all(uid in seriesInstances for uid in instanceUIDs):
+            nodes.append(node)
+    return nodes
 
 
 def _studyUiModule():
