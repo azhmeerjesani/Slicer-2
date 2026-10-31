@@ -395,6 +395,26 @@ class StudyTest(unittest.TestCase):
         self.assertTrue(summary["literature"][0]["text"].startswith("This set: 2 lesions. Sets of \u2265 10 heterogeneous lesions approach the degree map"))
         json.dumps(summary, allow_nan=False)  # strict JSON
 
+    def test_corrupt_deflate_stream_is_an_unreadable_lesion(self):
+        """A .nii.gz with a valid gzip header but a damaged deflate stream (gzip raises ``zlib.error``, which is no
+        OSError/ValueError/EOFError) is left out as unreadable; the other lesions are still loaded.
+        """
+        import zlib
+
+        from LesionNetworkMappingLib import nifti
+
+        path = os.path.join(self.folder, "lesions", "b.nii.gz")  # sub-02
+        with open(path, "wb") as f:
+            f.write(b"\x1f\x8b\x08\x00" + b"garbage-not-a-nifti" * 10)
+        for reader in (nifti.read_nifti_header, nifti.read_nifti, nifti.read_raw_header):
+            with self.assertRaises(ValueError, msg=reader.__name__) as raised:
+                reader(path)
+            self.assertIsInstance(raised.exception, zlib.error)  # callers that catch zlib.error keep working
+            self.assertIn("b.nii.gz", str(raised.exception))
+        occ = lesionset.load_occupancies(self.study)
+        self.assertEqual(occ.sids, ["sub-01", "sub-03", "sub-04"])
+        self.assertEqual(occ.excluded[lesionset.EXCLUDED_UNREADABLE], ["sub-02"])
+
     def test_run_posts_through_the_inbox(self):
         participants = os.path.join(self.folder, "participants.tsv")
         with open(participants, "rb") as f:

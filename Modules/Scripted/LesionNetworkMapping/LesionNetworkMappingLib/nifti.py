@@ -9,8 +9,10 @@ Slicer arrays from ``slicer.util.arrayFromVolume`` are indexed ``[k, j, i]``; tr
 them with ``array.transpose(2, 1, 0)`` and use the IJKToRAS matrix as the affine.
 """
 
+import contextlib
 import gzip
 import os
+import zlib
 
 import numpy as np
 
@@ -103,8 +105,22 @@ def _check_extension(path):
         raise ValueError(f"Only single-file NIfTI-1 images (.nii or .nii.gz) are supported: {path}")
 
 
+class CorruptCompressedDataError(ValueError, zlib.error):
+    """A .nii.gz whose deflate stream is damaged.
+
+    gzip raises ``zlib.error`` for this, which is not an OSError, EOFError or ValueError like the other unreadable-file
+    errors (bad gzip header or CRC, truncated stream, bad NIfTI header). Readers raise this subclass of both, so callers
+    that catch ``ValueError`` (or ``zlib.error``) treat the file as unreadable instead of failing as a whole.
+    """
+
+
+@contextlib.contextmanager
 def _open(path, mode):
-    return gzip.open(path, mode) if _is_gzip(path) else open(path, mode)
+    with gzip.open(path, mode) if _is_gzip(path) else open(path, mode) as f:
+        try:
+            yield f
+        except zlib.error as exc:
+            raise CorruptCompressedDataError(f"Corrupt compressed data ({exc}): {path}") from exc
 
 
 def _decode(value):
