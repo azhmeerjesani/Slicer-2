@@ -99,6 +99,10 @@ Run with the main window and testing enabled::
   puts under a resting mouse: Four-up -> Library -> Draw -> Focus) used to show the brush with its first filter unconnected,
   and the render logged "Input port 0 of algorithm vtkTransformPolyDataFilter ... has 0 connections but is not optional"
   (the red error badge of the top bar).
+- ``test_38_quit_after_fill_between_slices_exits_cleanly`` (BB-1): a child process runs the Fill between slices interpolator
+  (``vtkITKMorphologicalContourInterpolator``) on a lesion with many traced slices and quits: exit code 0, no "exit abnormally"
+  (the interpolator's thread_local ITK filters were destroyed in worker threads that end after ITK's globals at shutdown: a
+  SIGSEGV after the StudioTest suite reported OK, and in official 3D Slicer after any use of Fill between slices).
 """
 
 import json
@@ -122,6 +126,29 @@ import numpy as np
 
 #: Seconds for the child process of the quit test (startup, Start on template, trace, quit)
 QUIT_TIMEOUT_S = 300
+
+# Fill between slices (vtkITKMorphologicalContourInterpolator) on 40 traced slices, then quit
+QUIT_AFTER_INTERPOLATION_SCRIPT = """
+import numpy as np
+import slicer
+import vtk
+import vtkITK
+from vtk.util import numpy_support
+
+array = np.zeros((120, 120, 120), np.uint8)
+for index, z in enumerate(range(0, 120, 3)):
+    array[z, 20 + index * 2:60 + index * 2, 20 + index:70 + index] = 1
+    array[z, 80:100, 10 + index * 3:30 + index * 3] = 1
+image = vtk.vtkImageData()
+image.SetDimensions(array.shape[2], array.shape[1], array.shape[0])
+image.GetPointData().SetScalars(numpy_support.numpy_to_vtk(array.ravel(), deep=True))
+interpolator = vtkITK.vtkITKMorphologicalContourInterpolator()
+interpolator.SetInputData(image)
+interpolator.Update()
+result = numpy_support.vtk_to_numpy(interpolator.GetOutput().GetPointData().GetScalars())
+print("QUITTEST READY filled=%d" % int((result > 0).sum()), flush=True)
+slicer.app.exit(0)
+"""
 
 QUIT_SCRIPT = r"""
 import sys
@@ -3077,3 +3104,30 @@ class StudioRegressionTest(unittest.TestCase):
                 editor.setMRMLScene(None)
             slicer.app.processEvents()
             slicer.mrmlScene.Clear(0)
+
+    def test_38_quit_after_fill_between_slices_exits_cleanly(self):
+        """Quitting after the Fill between slices interpolator ran exits with code 0. Its thread_local ITK filters used to be
+        destroyed in worker threads of the threader that end after ITK's globals at shutdown (SIGSEGV in
+        ``itk::Object::Modified()``: "exit abnormally", exit status 1; about 2 runs in 3 here, every run in official 3D Slicer).
+        """
+        launcher = slicer.app.launcherExecutableFilePath
+        launcher = launcher() if callable(launcher) else launcher
+        if not launcher or not os.path.isfile(launcher):
+            self.skipTest("no Slicer launcher")
+        script = os.path.join(self.directory, "quit_after_interpolation.py")
+        with open(script, "w") as stream:
+            stream.write(QUIT_AFTER_INTERPOLATION_SCRIPT)
+        for attempt in range(4):
+            home = os.path.join(self.directory, f"quit_interpolation_home{attempt}")
+            os.makedirs(home)
+            environment = dict(os.environ)
+            environment.update({"HOME": home, "XDG_CONFIG_HOME": os.path.join(home, ".config")})
+            for key in ("SLICERRC", "SLICER_STUDIO_WEB"):
+                environment.pop(key, None)
+            process = subprocess.run([launcher, "--no-splash", "--testing", "--python-script", script], env=environment,
+                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=QUIT_TIMEOUT_S, check=False)
+            output = process.stdout.decode("utf-8", "replace")
+            self.assertIn("QUITTEST READY filled=", output, output[-3000:])
+            self.assertNotIn("Traceback", output, output[-3000:])
+            self.assertNotIn("exit abnormally", output, f"run {attempt + 1}: {output[-3000:]}")
+            self.assertEqual(process.returncode, 0, f"run {attempt + 1}: {json.dumps(output[-3000:])}")
