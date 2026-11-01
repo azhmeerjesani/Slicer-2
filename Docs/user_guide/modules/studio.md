@@ -206,7 +206,7 @@ Saving a lesion and saving the scene are different things, with different keys:
 | What you want | Key | What is written |
 | ------------- | --- | --------------- |
 | Keep the lesion as a file | **Ctrl+Shift+S**, or **Ctrl+Enter** without a study | A binary mask `<name>_lesion.nii.gz` (uint8) **on the lesion's own grid**, plus a sidecar `<name>_lesion.json` |
-| Save the whole session | **Ctrl+S** | The scene (`.mrml` or `.mrb`) exactly as official 3D Slicer writes it |
+| Save the whole session | **Ctrl+S** | In a project (every scan or template session), the project is saved at once; it is saved continuously anyway, see [Where Slicer Studio saves your work](../studio_projects.md). Without a project (Classic, a study), the scene (`.mrml` or `.mrb`) exactly as official 3D Slicer writes it |
 | Save under another name | **Save lesion as…** in the ⋯ menu of the Lesion card, or Search | Always asks for the file |
 | Go to the next subject of a study | **Ctrl+Enter** ("Done → next") | `lesions/<id>_space-<space>_desc-lesion_mask.nii.gz` and a row in `participants.tsv` |
 
@@ -216,14 +216,16 @@ Saving a lesion and saving the scene are different things, with different keys:
   show a toast with **Show in folder**.
 - **The name** is `<sub-XX>_lesion.nii.gz` when the scan or node name has a subject label, else
   `<scan name>_lesion.nii.gz`. If the last file in the folder ends in a number (`case-001_lesion`), the next one is
-  suggested (`case-002_lesion`). The folder is the last one you used, else the scan's folder, never the application
-  folder.
+  suggested (`case-002_lesion`). In a project the folder is the project's `Lesions` folder. Without a project it is the
+  last one you used, else the scan's folder, never the application folder.
 - **An empty lesion writes nothing** ("The lesion is empty: nothing was saved").
 - **The sidecar** is a small JSON file next to the mask with `Source` (the scan, as a path relative to the sidecar),
   `Space`, `Notes`, `SourceReference` and `GeneratedBy`. 3D Slicer and FSL ignore it; tools that read BIDS use it.
   When you open the lesion alone later, `Source` lets Studio offer to open the scan it was drawn on.
-- **Quitting.** If only saved lesions and the template are unsaved, the message says "Your lesion is saved as
-  sub-01_lesion.nii.gz. The session (scene) is not saved." with **Quit** as the default. If a lesion has changes
+- **Quitting.** In a project the project is saved first and the message only asks "All changes are saved in
+  Projects/<name>. Quit?"; nothing about unsaved changes is asked once the save succeeded. Without a project (Classic),
+  if only saved lesions and the template are unsaved, the message says "Your lesion is saved as
+  sub-01_lesion.nii.gz. The session (scene) is not saved." with **Quit** as the default, and if a lesion has changes
   since it was saved, **Save lesion…** is the default. With a study open, there is no Save: the current subject is
   written to the study first and the message only asks "All changes are saved in study <name>. Quit?".
 
@@ -264,7 +266,7 @@ does not change the layout.
 | `Ctrl+Enter` | the main button of the inspector |
 | `Ctrl+O` | Open… (loads the files directly) |
 | `Ctrl+H` | Library (Windows and Linux) |
-| `Ctrl+S` `Ctrl+W` `Ctrl+0` `Ctrl+2` `Ctrl+3` `Ctrl+4` | save the scene, close the scene, error log, settings, Python console, Extensions Manager (as in 3D Slicer) |
+| `Ctrl+S` `Ctrl+W` `Ctrl+0` `Ctrl+2` `Ctrl+3` `Ctrl+4` | save now (the project; the scene in Classic), close the scene, error log, settings, Python console, Extensions Manager (as in 3D Slicer) |
 
 Inside a text field, the field keeps the keys it needs (Esc with unsent edits, typed characters). On German and French
 keyboards AltGr+digit acts as Ctrl+Alt+digit in a view.

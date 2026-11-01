@@ -3336,3 +3336,34 @@ class StudioRegressionTest(unittest.TestCase):
             with open(paths[name], encoding="utf-8") as stream:
                 text = " ".join(stream.read().replace("*", "").replace("`", "").split())
             self.assertIn(f"View > {classicText}", text, f"{name} does not name the Classic View menu item")
+
+    def test_44_docs_describe_saving_in_a_project(self):
+        """studio.md and the README Quick start describe the Save lesion folder, the quit question and Ctrl+S as they are
+        in a project (D-A16: the project's Lesions folder, "All changes are saved in Projects/<name>. Quit?", Ctrl+S saves
+        the project now), and keep the old rules only for the cases without a project.
+        """
+        from StudioLib import draw, firstrun
+
+        root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", ".."))
+        paths = {name: os.path.join(root, *name.split("/")) for name in ("README.md", "Docs/user_guide/modules/studio.md")}
+        if not all(os.path.isfile(path) for path in paths.values()):
+            self.skipTest("the documentation is not next to this build")
+        texts = {}
+        for name, path in paths.items():
+            with open(path, encoding="utf-8") as stream:
+                texts[name] = " ".join(stream.read().replace("*", "").split())
+        studio = texts["Docs/user_guide/modules/studio.md"]
+        readme = texts["README.md"]
+        # The behaviour the docs describe
+        self.assertIn("_projectLesionsFolder(create=True)", inspect.getsource(draw.defaultSaveDirectory))
+        self.assertIn('"All changes are saved in {project}. Quit?"', inspect.getsource(firstrun.projectCloseSummary))
+        # studio.md: the folder rule, the quit message and Ctrl+S name the project
+        self.assertIn("In a project the folder is the project's `Lesions` folder", studio)
+        self.assertIn('In a project the project is saved first and the message only asks "All changes are saved in Projects/<name>. Quit?"', studio)
+        self.assertIn("In a project (every scan or template session), the project is saved at once", studio)
+        self.assertNotIn("The folder is the last one you used, else the scan's folder", studio)
+        self.assertNotIn("| save the scene, close the scene,", studio)
+        # README Quick start: Ctrl+S saves the project; only without a project does it write a folder or a .mrb
+        self.assertIn("proposes the project's `Lesions` folder", readme)
+        self.assertIn("`Ctrl+S` saves it at once", readme)
+        self.assertNotIn("An autosave is not a save: only these commands write your files", readme)

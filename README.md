@@ -1276,11 +1276,12 @@ Slicer-SuperBuild-Release/Slicer-build/Slicer
    lesion as a NIfTI mask (`.nii.gz`, 0/1 values, `uint8`) on the lesion's own grid, with a small `.json`
    sidecar next to it: a lesion mask that you opened on the FSL MNI152 2 mm grid is saved on that grid, not
    on the grid of the template you drew over. It suggests `sub-XX_lesion.nii.gz` when the scan name has a
-   BIDS subject, and remembers the folder. After the first save, the button and `Ctrl+Shift+S` save again
-   to the same file; *Save lesion as…* always asks. `Ctrl+S` saves the whole scene as a folder or a `.mrb`
-   file, which also opens in official 3D Slicer. An autosave is not a save: only these commands write your
-   files. For other export options, open the Segmentations module (`Ctrl+K`, type "Segmentations") and use
-   *Export to files*.
+   BIDS subject, and proposes the project's `Lesions` folder (without a project, the last folder you used).
+   After the first save, the button and `Ctrl+Shift+S` save again to the same file; *Save lesion as…* always
+   asks. The project itself is saved as you work, and `Ctrl+S` saves it at once; it is a standard scene that
+   also opens in official 3D Slicer (without a project, as in Classic, `Ctrl+S` saves the scene as a folder or
+   a `.mrb` file, and an autosave is not a save). For other export options, open the Segmentations module
+   (`Ctrl+K`, type "Segmentations") and use *Export to files*.
 5. **Map the network (normalize native scans first).** Open Map (`Ctrl+Alt+3`). Choose the lesion and a
    connectome (*Add connectome…* for a `.lnmc` bundle on your computer, or *Use the demo* to try Map with
    synthetic data), accept its data use terms, and click *Map network* (`Ctrl+Enter`). Read the maps, the
