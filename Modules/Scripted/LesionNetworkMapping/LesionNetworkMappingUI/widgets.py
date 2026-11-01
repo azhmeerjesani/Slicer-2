@@ -579,6 +579,40 @@ def tableView(columns):
 VALUE_COLORS = {"hot": ("#ffb02e", "#a35200"), "cold": ("#7ab8ff", "#1f5fbf")}
 
 
+def onPaletteChange(widget, callback):
+    """Call ``callback()`` after the application palette changed (a run-time theme switch) while ``widget`` is alive.
+
+    For colors that are baked into items or rich text and that a stylesheet does not repaint. Without Studio there is no
+    palette notification, and nothing is registered.
+    """
+    ui = _studioUi()
+    if ui is None:
+        return
+
+    def listener():
+        try:
+            widget.objectName
+        except Exception:  # the widget was deleted
+            ui.removePaletteListener(listener)
+            return
+        callback()
+
+    ui.addPaletteListener(listener)
+
+
+def hideMenuIndicator(button):
+    """Hide the menu indicator of a tool button with a menu. Studio's style does that itself for the ghost role; a
+    stylesheet of the button would freeze the palette that the style picks its colors from, so that the label keeps the
+    colors of the theme that was active when it was created.
+    """
+    rule = "QToolButton::menu-indicator { image: none; width: 0px; }"
+    ui = _studioUi()
+    if ui is None:
+        button.setStyleSheet(rule)
+        return
+    ui.bindStyleSheet(button, lambda: "" if ui.supportsRoles() else rule)
+
+
 def valueColor(value):
     """``qt.QColor`` of a signed value in a table: hot for positive, cold for negative values (VISUAL 4.5)."""
     kind = "hot" if value >= 0 else "cold"
@@ -620,6 +654,12 @@ def _bindDisclaimerColor(label):
 DISCLAIMER_LINE = "Research use only. Lesion network mapping specificity is debated."
 
 
+def _disclaimerLineHtml():
+    ui = _studioUi()
+    link = ui.token("accent-fg").name() if ui is not None else slicer.app.palette().color(qt.QPalette.Link).name()
+    return f'{html.escape(DISCLAIMER_LINE)} <a href="#more" style="color: {link}; text-decoration: none;">Read more</a>'
+
+
 def disclaimerLine(parent=None):
     """Return the one-line disclaimer of the Studio inspector (``LNMDisclaimerLine``): an info icon, "Research use only.
     Lesion network mapping specificity is debated." and "Read more", which shows the whole ``export.DISCLAIMER`` (with
@@ -640,8 +680,7 @@ def disclaimerLine(parent=None):
     if ui is not None:
         icon.setPixmap(ui.pixmap("info", 13, "text3"))
     layout.addWidget(icon, 0, qt.Qt.AlignTop)
-    link = ui.token("accent-fg").name() if ui is not None else slicer.app.palette().color(qt.QPalette.Link).name()
-    label = qt.QLabel(f'{html.escape(DISCLAIMER_LINE)} <a href="#more" style="color: {link}; text-decoration: none;">Read more</a>')
+    label = qt.QLabel(_disclaimerLineHtml())
     # The objectName of the disclaimer label that the Map tour and the tests point at
     label.setObjectName("LNMDisclaimer")
     label.setTextFormat(qt.Qt.RichText)
@@ -651,6 +690,8 @@ def disclaimerLine(parent=None):
     label.setTextInteractionFlags(qt.Qt.LinksAccessibleByMouse | qt.Qt.LinksAccessibleByKeyboard)
     _font(label, 11)
     _bindDisclaimerColor(label)
+    # The link color is part of the text: follow a run-time theme switch
+    onPaletteChange(label, lambda: label.setText(_disclaimerLineHtml()))
 
     def readMore(_link=None, label=label):
         showDisclaimer(label)

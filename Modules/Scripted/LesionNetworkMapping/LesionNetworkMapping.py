@@ -3681,7 +3681,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.connectomeMoreButton.setToolTip(_("Other ways to add a connectome"))
         self.connectomeMoreButton.setAccessibleName(_("More connectome actions"))
         self.connectomeMoreButton.setPopupMode(qt.QToolButton.InstantPopup)
-        self.connectomeMoreButton.setStyleSheet("QToolButton::menu-indicator { image: none; width: 0px; }")
+        self.widgets.hideMenuIndicator(self.connectomeMoreButton)
         self.connectomeMoreButton.setProperty("slicerRole", "ghost")
         moreMenu = qt.QMenu(self.connectomeMoreButton)
         moreMenu.setObjectName("LNMConnectomeMoreMenu")
@@ -4863,6 +4863,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.peaksTable.setMaximumHeight(170)
         self.peaksTable.connect("cellClicked(int,int)", self.onPeakClicked)
         self.peaksTable.hide()
+        self.widgets.onPaletteChange(self.peaksTable, self._recolorPeakValues)
         layout.addWidget(self.peaksTable)
         buttons = qt.QHBoxLayout()
         self.binarizeButton = qt.QPushButton(_("Binarize"))
@@ -5616,6 +5617,13 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         table.setVisible(bool(self._peaks))
         if self._peaks:
             self._lookupPeakRegions(self._peaks, grid)
+
+    def _recolorPeakValues(self):
+        """Give the values of the peaks table the hot and cold colors of the current theme (after a theme switch)."""
+        for row, peak in enumerate(self._peaks[: self.peaksTable.rowCount]):
+            item = self.peaksTable.item(row, 2)
+            if item is not None:
+                item.setForeground(qt.QBrush(self.widgets.valueColor(peak["value"])))
 
     def _peakSpace(self, grid):
         """The template space of the peaks' grid (to keep the atlases of its family), or None when it cannot be told."""
