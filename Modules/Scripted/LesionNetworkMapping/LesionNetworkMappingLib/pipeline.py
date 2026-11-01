@@ -1507,6 +1507,22 @@ class Runner:
         self.warnings.append({"code": code, "message": message, **{key: value for key, value in fields.items() if key in ("participant_id", "stage")}})
         self.emit("warning", stage=self.current, code=code, message=message, **fields)
 
+    def _warn_preflight(self):
+        """Report the subject-scope warnings of the plan's preflight, in every run (also when the preflight stage is reused).
+
+        They go through :meth:`warn` so that they reach ``pipeline.json`` and the card shows the same list after a second run
+        and after a reopen. One warning per check: its message is the cohort-level sentence that already names the subjects,
+        so one per subject would print the same sentence once per subject (as the standalone preflight job does, with a list).
+        """
+        report = self.plan.preflight
+        if self.providers["preflight"].kind != "preferred" or report is None:
+            return
+        for check in report["checks"]:
+            if check["level"] == "warn" and check["scope"] == "subject" and not check["excludes"]:
+                subjects = list(check["subjects"])
+                fields = {"participant_id": subjects[0]} if len(subjects) == 1 else {}
+                self.warn(check["message"], code=check["id"], participants=subjects, **fields)
+
     def info(self, message, code="info", **fields):
         self.emit("info", stage=self.current, code=code, message=message, **fields)
 
@@ -1627,6 +1643,7 @@ class Runner:
         for row in self.rows:
             if row["status"] == "excluded":
                 self.warn(f"excluded: {row['reason']}", code="excluded", participant_id=row["participant_id"])
+        self._warn_preflight()
         self.subject_ids = plan_result.subject_ids
         self.null_k = plan_result.null_k
         self.threads = jobs.budget_threads(config.threads)
@@ -2055,13 +2072,6 @@ class Runner:
 
         start = _now_iso()
         path = preflight.save_report(self.study, report)
-        for check in report["checks"]:
-            if check["level"] == "warn" and check["scope"] == "subject" and not check["excludes"]:
-                # One event per check: its message is the cohort-level sentence that already names the subjects, so one event
-                # per subject would print the same sentence once per subject (as the standalone preflight job does, with a list)
-                subjects = list(check["subjects"])
-                fields = {"participant_id": subjects[0]} if len(subjects) == 1 else {}
-                self.emit("warning", stage="preflight", code=check["id"], participants=subjects, message=check["message"], **fields)
         result = {"report": relpath(path, self.study.path), "run_id": report.get("run_id"), "counts": report["counts"], "blocked": report["blocked"]}
         return self._save("preflight", fp, result, [], child_run_id=report.get("run_id"), start=start)
 

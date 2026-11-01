@@ -1116,12 +1116,11 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         runner = mock.MagicMock()
         runner.plan.preflight = report
         runner.providers = {"preflight": mock.MagicMock(kind="preferred")}
-        runner.rows = []
-        runner.study.path = self.tmp
-        runner._cached.return_value = ("fp", None)
+        runner.warnings = []
+        runner.current = "prepare"
         runner.emit = lambda event, **fields: events.append((event, fields))
-        with mock.patch("LesionNetworkMappingLib.preflight.save_report", return_value=os.path.join(self.tmp, "preflight.json")):
-            pipeline.Runner._stage_preflight(runner, None)
+        runner.warn = lambda message, code="warning", **fields: pipeline.Runner.warn(runner, message, code=code, **fields)
+        pipeline.Runner._warn_preflight(runner)
         warnings = [fields for event, fields in events if event == "warning"]
         self.assertEqual(len([w for w in warnings if w["message"] == message]), 1, "the cohort sentence is emitted once")
         cohort_event = next(w for w in warnings if w["code"] == "metrics_stale")
@@ -1130,6 +1129,23 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         single = next(w for w in warnings if w["code"] == "float_storage")
         self.assertEqual(single["participant_id"], "sub-03")
         self.assertEqual(len(warnings), 2)
+        # They are kept for pipeline.json (the card shows its list after a reopen)
+        self.assertEqual([item["code"] for item in runner.warnings], ["metrics_stale", "float_storage"])
+
+    def test_preflight_warnings_persist_after_an_unchanged_rerun(self):
+        """The preflight's subject-scope warnings are in the events and in pipeline.json of every run, also when the preflight stage is reused."""
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f-warnings"))
+        shown = []
+        for _attempt in (1, 2):
+            code, events, _stdout, stderr, _wall = cli(*run_args(fx, *FAST), env=self.env())
+            self.assertEqual(code, 0, stderr[-2000:])
+            if _attempt == 2:
+                self.assertEqual(stage_status(events)["preflight"], "reused", "the second run reuses the preflight")
+            self.assertIn("metrics_stale", [event.get("code") for event in events if event["event"] == "warning"])
+            record = read_json(os.path.join(fx["out"], pipeline.PIPELINE_JSON))
+            self.assertTrue([text for text in record["warnings"] if text.startswith("The lesion metrics of")], record["warnings"])
+            shown.append([text for text in record["warnings"] if "excluded" in text or "lesion metrics" in text])
+        self.assertEqual(shown[0], shown[1])
 
     # Code rules
 
