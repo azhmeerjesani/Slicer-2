@@ -288,6 +288,13 @@ class FiguresTest(unittest.TestCase):
         grid = figures.triptych(near, far, near, None, "A 0", **SMALL).meta["grid"]
         self.assertGreater(grid["origin"][0] + grid["spacing"] * (grid["shape"][0] - 1), 16)
 
+    def test_gallery_caption_uses_the_singular_for_one_lesion(self):
+        # "Lesion gallery (1 lesions)" read wrongly: the count noun follows the number
+        lesions = [(ball((-16, 0, 0), 6), self.affine, "a"), (ball((16, 0, 0), 6), self.affine, "b")]
+        self.assertIn("Lesion gallery (1 lesion):", figures.gallery(lesions[:1], self.template, **SMALL)[0].caption)
+        self.assertIn("Lesion gallery (2 lesions):", figures.gallery(lesions, self.template, **SMALL)[0].caption)
+        self.assertIn("Lesion gallery (2 lesions, page 2 of 2)", figures.gallery(lesions, self.template, per_page=1, **SMALL)[1].caption)
+
     def test_gallery_tiles_have_the_same_size_on_every_page(self):
         # The tile size is set by the column count, not by how many tiles a page holds: a last page with
         # one lesion (or a whole gallery of one) used to get a single page-wide tile

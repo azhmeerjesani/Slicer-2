@@ -1942,7 +1942,7 @@ def gallery(lesions, template=None, labels=None, per_page=30, binarize_at=0.5, c
             rows.append({"case": label, "lesion": volume.name, "sha256": volume.sha256, "plane": "axial", "coordinate_mm": round(z, 3), "area_mm2": round(area * ctx.grid.spacing**2, 3), "voxels_display_grid": voxels})
         columns = options.columns or 6
         caption = [
-            f"Lesion gallery ({len(entries)} lesions{f', page {page + 1} of {total_pages}' if total_pages > 1 else ''}): each lesion (red) on the axial slice of its largest area; numbers match the case table; z in mm.",
+            f"Lesion gallery ({len(entries)} {'lesion' if len(entries) == 1 else 'lesions'}{f', page {page + 1} of {total_pages}' if total_pages > 1 else ''}): each lesion (red) on the axial slice of its largest area; numbers match the case table; z in mm.",
             _orientation_sentence(options.convention, ["axial"]),
             *outside_notes,
             *_context_sentences(ctx),
