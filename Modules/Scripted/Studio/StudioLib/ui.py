@@ -976,9 +976,10 @@ def _elidedPath(metrics, text, width):
 def _showElided(label):
     text = str(label.property("studioFullText") or "")
     width = int(label.width) - int(label.contentsMargins().left()) - int(label.contentsMargins().right())
-    # Before the label is laid out its width says nothing: the whole text is shown
+    # Before the label is laid out its width says nothing: the whole text is shown. A label that is laid out but very
+    # narrow (squeezed by its neighbours) still shows an ellipsis instead of a clipped half word
     shown = text
-    if width > 40:
+    if width > 8:
         if label.property("studioElideMode") == "path":
             shown = _elidedPath(label.fontMetrics(), text, width)
         else:

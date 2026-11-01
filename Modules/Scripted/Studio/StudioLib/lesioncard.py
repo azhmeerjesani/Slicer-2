@@ -497,7 +497,9 @@ class LesionCard:
             cellLayout = qt.QVBoxLayout(cell)
             cellLayout.setContentsMargins(10, 6, 8, 6)
             cellLayout.setSpacing(0)
-            value = ui.label("", "number", "text", "StudioLesionStatValue")
+            # The value is elided too ("Both hemispheres" -> "Both hem…"): an unelided value keeps its size hint and
+            # squeezes the other cells (their captions were cut to "Pa")
+            value = ui.elideLabel(ui.label("", "number", "text", "StudioLesionStatValue"))
             # Elided ("Side · scanner sp…") when the cell is too narrow for its caption: never cut off mid-letter
             captionText = caption
             caption = ui.elideLabel(ui.label("", "small", "text3", "StudioLesionStatCaption"))
@@ -816,8 +818,8 @@ class LesionCard:
         }
         for key, (valueText, captionText, warn) in values.items():
             value, caption = self.statValues[key]
-            if str(value.text) != valueText:
-                value.setText(valueText)
+            if str(value.property("studioFullText") or "") != valueText:
+                ui.setElidedText(value, valueText)
             if str(caption.property("studioFullText") or "") != captionText:
                 ui.setElidedText(caption, captionText)
             styleSheet = f"QLabel {{ color: {ui.token('warning').name()}; }}" if warn else ""

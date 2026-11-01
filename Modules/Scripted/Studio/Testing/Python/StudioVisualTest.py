@@ -569,6 +569,39 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
         self._pump(4)
         draw.session(studioShell).refreshPanel(computeMetrics=True)
 
+    def test_lesion_stat_cells_keep_captions_with_both_hemispheres(self):
+        """A long Side value ("Both hemispheres") must not squeeze the other stat cells: no label of a cell shows a clipped
+        half word, every text that does not fit ends with an ellipsis (1366 x 768, the Parts caption was cut to "Pa").
+        """
+        from StudioLib import draw, importer
+
+        studioShell = self._applyStudio()
+        self.mainWindow.showNormal()
+        self.mainWindow.resize(1366, 768)
+        self._wait(lambda: self.mainWindow.width <= 1366, 2000)
+        importer.startOnTemplate(shell=studioShell)
+        self._restores.append(importer._closeTemplateBanner)
+        self._pump(10)
+        self._paintLesion((-30.0, -10.0, 20.0), 10.0)
+        draw.session(studioShell).refreshPanel(computeMetrics=True)
+        self._pump(10)
+        card = draw.lesionCard()
+        card._setStats({"ml": 2.59, "parts": 1, "gaps": 0, "side": "Both hemispheres", "sideLevel": "warn"})
+        for width in (230, 300):
+            card.statsFrame.setFixedWidth(width)
+            self._pump(6)
+            for key, (value, caption) in card.statValues.items():
+                for label in (value, caption):
+                    shown = str(label.text)
+                    whole = str(label.property("studioFullText"))
+                    self.assertLessEqual(self._textWidth(label, shown), label.width,
+                                         f"{key} cell label {shown!r} is cut off at {width} px")
+                    self.assertTrue(shown == whole or shown.endswith("…"), f"{key} cell label {shown!r} is cut without an ellipsis")
+        card.statsFrame.setMaximumWidth(16777215)
+        card.statsFrame.setMinimumWidth(0)
+        self._pump(4)
+        draw.session(studioShell).refreshPanel(computeMetrics=True)
+
     def test_lesion_name_is_elided_when_long(self):
         """A lesion name that does not fit the name field of the Lesion card ends with an ellipsis (VISUAL 6: no clipped text);
         it never starts in a half letter after a rename, the whole name is the tool tip, and it is whole while it is edited.
