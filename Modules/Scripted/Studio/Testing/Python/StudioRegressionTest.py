@@ -3271,3 +3271,20 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertLessEqual(maskVolume, max(paint, threshold) + 100, f"Mask volume widened the panel: {result['widths']}")
         self.assertLessEqual(paintAgain, paint + 20, f"Paint after Mask volume: {result['widths']}")
         self.assertLessEqual(none, start + 20, f"No tool after Mask volume: {result['widths']}")
+
+    def test_41_balance_shows_complete_separation_not_the_no_data_dash(self):
+        """Cases all left and controls all right: the SMD is infinite, which the balance table says (not the "no data" dash)."""
+        from LesionNetworkMappingLib import lesionset
+
+        from StudioLib import libcard_cohort
+
+        covariates = {f"c{k}": {"hemisphere_left": 1.0, "wm_frac": None} for k in range(3)}
+        covariates.update({f"k{k}": {"hemisphere_left": 0.0, "wm_frac": None} for k in range(3)})
+        table = lesionset.balance(covariates, ["c0", "c1", "c2"], ["k0", "k1", "k2"], names=("hemisphere_left", "wm_frac"))
+        summary = {"balance": {name: lesionset._balance_row(row) for name, row in table.items()}}
+        json.dumps(summary, allow_nan=False)  # stays strict JSON
+        left, whiteMatter = libcard_cohort.balanceRows(summary)
+        self.assertEqual((left[1], left[2], left[3], left[4]), ("100%", "0%", "+∞", True))
+        self.assertEqual((whiteMatter[3], whiteMatter[4]), ("—", False))
+        reverse = lesionset.balance(covariates, ["k0", "k1"], ["c0", "c1"], names=("hemisphere_left",))
+        self.assertEqual(libcard_cohort.balanceRows({"balance": {"hemisphere_left": lesionset._balance_row(reverse["hemisphere_left"])}})[0][3], "-∞")

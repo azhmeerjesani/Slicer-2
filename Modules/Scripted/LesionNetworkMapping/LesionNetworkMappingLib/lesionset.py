@@ -1082,6 +1082,19 @@ def _now():
     return datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds")
 
 
+def _balance_row(row):
+    """A :func:`balance` row for the strict-JSON summary: rounded values; "smd_inf" (+1/-1) marks an infinite SMD.
+
+    JSON has no Infinity, so a complete separation (the groups differ and neither varies) is stored as
+    ``"smd": null`` plus ``"smd_inf": 1`` or ``-1`` (the sign of cases - controls); a null SMD without
+    "smd_inf" means that it is not computable (no data).
+    """
+    out = {**row, "smd": _round(row["smd"]), "case_mean": _round(row["case_mean"]), "control_mean": _round(row["control_mean"])}
+    if row["smd"] is not None and math.isinf(row["smd"]):
+        out["smd_inf"] = 1 if row["smd"] > 0 else -1
+    return out
+
+
 def _round(value, digits=4):
     if value is None:
         return None
@@ -1170,7 +1183,7 @@ def summarize(occ, priors=None, binarize_at=BINARIZE_AT, case="case", control="c
         }
     if cases and controls:
         table = balance(covariates, cases, controls)
-        summary["balance"] = {name: {**row, "smd": _round(row["smd"]), "case_mean": _round(row["case_mean"]), "control_mean": _round(row["control_mean"])} for name, row in table.items()}
+        summary["balance"] = {name: _balance_row(row) for name, row in table.items()}
         dims = {group: [occ.dimensionality[k][0] for k, g in enumerate(occ.groups) if g == group] for group in (case, control)}
         shares = {group: 100.0 * sum(d in ("2D", "multi2D") for d in values) / len(values) for group, values in dims.items()}
         summary["suggest_dimensionality_covariate"] = bool(abs(shares[case] - shares[control]) > DIMENSIONALITY_SHARE_POINTS)

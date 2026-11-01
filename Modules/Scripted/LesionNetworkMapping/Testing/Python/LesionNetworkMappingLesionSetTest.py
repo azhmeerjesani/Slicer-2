@@ -213,6 +213,22 @@ class BalanceTest(unittest.TestCase):
         table = lesionset.balance({"a": {"volume_ml": 1.0}, "b": {"volume_ml": 9.0}, "c": {"volume_ml": 1.0}, "d": {"volume_ml": 2.0}}, ["a", "b"], ["c", "d"], names=("volume_ml",))
         self.assertTrue(table["volume_ml"]["flagged"])
 
+    def test_infinite_smd_is_kept_apart_from_no_data_in_the_summary(self):
+        covariates = {"a": {"hemisphere_left": 1.0}, "b": {"hemisphere_left": 1.0}, "c": {"hemisphere_left": 0.0}, "d": {"hemisphere_left": None}}
+        table = lesionset.balance(covariates, ["a", "b"], ["c"], names=("hemisphere_left",))
+        self.assertEqual(table["hemisphere_left"]["smd"], math.inf)
+        row = lesionset._balance_row(table["hemisphere_left"])
+        self.assertIsNone(row["smd"])
+        self.assertEqual(row["smd_inf"], 1)
+        self.assertTrue(row["flagged"])
+        self.assertEqual(lesionset._balance_row(lesionset.balance(covariates, ["c"], ["a"], names=("hemisphere_left",))["hemisphere_left"])["smd_inf"], -1)
+        json.dumps(row, allow_nan=False)
+        no_data = lesionset._balance_row(lesionset.balance(covariates, ["a"], ["d"], names=("hemisphere_left",))["hemisphere_left"])
+        self.assertIsNone(no_data["smd"])
+        self.assertNotIn("smd_inf", no_data)
+        finite = lesionset._balance_row(lesionset.balance({"a": {"v": 1.0}, "b": {"v": 2.0}, "c": {"v": 1.5}, "d": {"v": 2.5}}, ["a", "b"], ["c", "d"], names=("v",))["v"])
+        self.assertNotIn("smd_inf", finite)
+
     def test_matching_is_seeded_and_without_replacement(self):
         rng = np.random.default_rng(11)
         cases = {f"sub-c{k:02d}": {"volume_ml": float(v), "wm_frac": float(w)} for k, (v, w) in enumerate(zip(rng.lognormal(2.5, 0.6, 12), rng.uniform(0.2, 0.8, 12), strict=True))}

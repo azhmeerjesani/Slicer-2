@@ -487,7 +487,13 @@ def balanceRows(summary):
             return f"{100 * value:.0f}%" if binary else f"{value:.1f}"
 
         smd = entry.get("smd")
-        rows.append((_(COVARIATE_LABELS.get(key, key)), show(entry.get("case_mean")), show(entry.get("control_mean")), "—" if smd is None else f"{smd:+.2f}", bool(entry.get("flagged"))))
+        if smd is not None:
+            smdText = f"{smd:+.2f}"
+        elif entry.get("smd_inf"):  # complete separation (strict JSON stores an infinite SMD as null plus its sign)
+            smdText = "+∞" if entry["smd_inf"] > 0 else "-∞"
+        else:
+            smdText = "—"
+        rows.append((_(COVARIATE_LABELS.get(key, key)), show(entry.get("case_mean")), show(entry.get("control_mean")), smdText, bool(entry.get("flagged"))))
     return rows
 
 

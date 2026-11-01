@@ -21,6 +21,7 @@ card refreshes. Nothing else is written to the settings. Works in Classic (the S
 """
 
 import logging
+import math
 import os
 import sys
 import traceback
@@ -164,7 +165,7 @@ def mismatchLines(report, flag=SMD_FLAG):
         if value is None:
             lines.append((_("{label}: not known (Check the lesion set fills it in)").format(label=_(item["label"])), "text2"))
             continue
-        text = _("{label}: SMD {smd}").format(label=_(item["label"]), smd=f"{value:+.2f}")
+        text = _("{label}: SMD {smd}").format(label=_(item["label"]), smd=("+∞" if value > 0 else "-∞") if math.isinf(value) else f"{value:+.2f}")
         lines.append((text, "warning" if abs(value) > flag else "text2"))
     family = report["family"]
     if family.get("differ"):

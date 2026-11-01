@@ -692,7 +692,8 @@ class _Report:
                 ["dimensionality", ", ".join(f"{key} {value}" for key, value in (summary.get("dimensionality") or {}).items())]]
         for key, item in (summary.get("balance") or {}).items():
             if isinstance(item, dict) and item.get("flagged"):
-                rows.append([_td(_e(f"imbalance: {key}"), "amber"), f"SMD {_num(item.get('smd'))}; cases {_num(item.get('case_mean'))}, controls {_num(item.get('control_mean'))}"])
+                smd_text = ("+inf" if item["smd_inf"] > 0 else "-inf") if item.get("smd_inf") and item.get("smd") is None else _num(item.get("smd"))
+                rows.append([_td(_e(f"imbalance: {key}"), "amber"), f"SMD {smd_text}; cases {_num(item.get('case_mean'))}, controls {_num(item.get('control_mean'))}"])
         literature = [_e(item.get("text")) for item in summary.get("literature") or [] if isinstance(item, dict)]
         return "<h3>Lesion-set diagnostics</h3>" + _table(["Diagnostic", "Value"], rows) + ("<p>Literature context:</p>" + _list(literature) if literature else "")
 
