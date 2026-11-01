@@ -562,6 +562,84 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             if layout.direction() != direction:
                 layout.setDirection(direction)
         self._stackRadioGrids(optionsFrame, stacked)
+        self._wrapOptionRows(optionsFrame, stacked)
+
+    #: Dynamic properties of what ``_wrapOptionRows()`` changed: the row wrap policy of a form layout, and the word wrap of a label
+    _WRAPPED_FORM_PROPERTY = "studioFormWrapPolicy"
+    _WRAPPED_LABEL_PROPERTY = "studioWrappedLabel"
+    _STACKED_ROW_PROPERTY = "studioStackedRowDirection"
+    #: Width of the tool options in the 340 px studio inspector (the padding and the scroll bar are not part of it)
+    _OPTIONS_ROW_WIDTH = 290
+
+    def _wrapOptionRows(self, optionsFrame, stacked):
+        """Studio presentation: the rows of the tool options (a label and its field in a form layout: Smoothing, Margin, Hollow,
+        Combine, Islands, Mask volume) put the label above its field, so that the narrow inspector shows each row whole (instead of
+        squeezing the label to no width and cutting the field), a text beside a field (the size in pixels) wraps over lines, and a
+        row of widgets with a check box that is wider than the options is stacked (Combine: the operation, Apply and "Bypass
+        masking"). The options never widen the inspector, ``_applyStudio()``. The classic presentation puts everything back.
+        """
+        # rowWrapPolicy is a property of QFormLayout (the PythonQt attribute shadows the getter): property()/setProperty()
+        wrapAllRows = qt.QFormLayout.WrapAllRows
+        for layout in optionsFrame.findChildren("QFormLayout"):
+            saved = layout.property(self._WRAPPED_FORM_PROPERTY)
+            if not stacked:
+                if saved is not None:
+                    layout.setProperty("rowWrapPolicy", int(saved))
+                    layout.setProperty(self._WRAPPED_FORM_PROPERTY, None)
+                continue
+            if saved is None:
+                layout.setProperty(self._WRAPPED_FORM_PROPERTY, int(layout.property("rowWrapPolicy")))
+                layout.setProperty("rowWrapPolicy", int(wrapAllRows))
+        for layout in optionsFrame.findChildren("QHBoxLayout"):
+            savedDirection = layout.property(self._STACKED_ROW_PROPERTY)
+            if not stacked:
+                if savedDirection is not None:
+                    layout.setDirection(int(savedDirection))
+                    layout.setProperty(self._STACKED_ROW_PROPERTY, None)
+            elif savedDirection is None and self._rowIsTooWide(layout):
+                layout.setProperty(self._STACKED_ROW_PROPERTY, int(layout.direction()))
+                layout.setDirection(qt.QBoxLayout.TopToBottom)
+        for label in optionsFrame.findChildren("QLabel"):
+            if label.property(self._WRAPPED_LABEL_PROPERTY):
+                if not stacked:
+                    label.wordWrap = False
+                    label.setProperty(self._WRAPPED_LABEL_PROPERTY, None)
+        if not stacked:
+            return
+        for layout in optionsFrame.findChildren("QFormLayout"):
+            for row in range(layout.rowCount()):
+                item = layout.itemAt(row, qt.QFormLayout.FieldRole)
+                for label in self._fieldLabels(item):
+                    if not label.wordWrap:
+                        label.wordWrap = True
+                        label.setProperty(self._WRAPPED_LABEL_PROPERTY, True)
+
+    @classmethod
+    def _rowIsTooWide(cls, layout):
+        """True for a row of widgets with a check box (Combine: the operation, Apply and "Bypass masking") that cannot be made
+        narrower than the options of the studio inspector, so that the check box would lose the end of its text.
+        """
+        widgets = [layout.itemAt(index).widget() for index in range(layout.count())]
+        if len(widgets) < 2 or any(widget is None for widget in widgets):
+            return False
+        # Rows of check boxes only are stacked by _stackCheckBoxRows()
+        if all(widget.inherits("QCheckBox") for widget in widgets) or not any(widget.inherits("QCheckBox") for widget in widgets):
+            return False
+        spacing = layout.spacing if layout.spacing >= 0 else 6
+        return sum(widget.minimumSizeHint.width() for widget in widgets) + spacing * (len(widgets) - 1) > cls._OPTIONS_ROW_WIDTH
+
+    @classmethod
+    def _fieldLabels(cls, item):
+        """The labels in the field of a row of a form layout: the field itself, or in the box layout that holds the field."""
+        if item is None:
+            return []
+        widget = item.widget()
+        if widget is not None:
+            return [widget] if widget.inherits("QLabel") else []
+        layout = item.layout()
+        if layout is None or layout.inherits("QFormLayout") or layout.inherits("QGridLayout"):
+            return []
+        return [label for index in range(layout.count()) for label in cls._fieldLabels(layout.itemAt(index))]
 
     #: Dynamic property of a grid layout that the studio presentation stacked: the cells ("row,column;...") of its widgets, in
     #: the order in which they were put back into the layout

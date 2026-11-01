@@ -2349,6 +2349,60 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                 self.assertEqual(found.get(text), cell, (effectName, text))
         editor.setActiveEffectByName("")
 
+    def test_32d_draw_tool_options_text_fits_the_inspector(self):
+        """The options of Margin, Hollow, Smoothing, Combine (Logical operators), Islands and Mask volume wrap in the 340 px
+        inspector: no label is cut mid-text or squeezed to no width, and the fields keep their labels; Classic puts the rows back.
+        """
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        widget = slicer.modules.SegmentEditorWidget
+        widget.setMoreToolsShown(True)
+        self._pump()
+
+        def labelProblems(effectName):
+            editor.setActiveEffectByName(effectName)
+            self._wait(400)
+            frame = editor.activeEffect().optionsFrame()
+            self.assertTrue(frame.isVisible(), effectName)
+            frameRight = frame.mapToGlobal(qt.QPoint(frame.width, 0)).x()
+            problems = []
+            for label in frame.findChildren("QLabel"):
+                if not label.isVisible() or not label.text.strip():
+                    continue
+                if label.mapToGlobal(qt.QPoint(label.width, 0)).x() > frameRight + 1:
+                    problems.append((label.text, "outside the options"))
+                elif label.width <= 1:
+                    problems.append((label.text, "no width"))
+                elif not label.wordWrap and label.width + 1 < label.sizeHint.width():
+                    problems.append((label.text, label.width, label.sizeHint.width()))
+            for box in frame.findChildren("QAbstractButton"):
+                if not box.isVisible() or not box.text:
+                    continue
+                if box.mapToGlobal(qt.QPoint(box.width, 0)).x() > frameRight + 1:
+                    problems.append((box.text, "outside the options"))
+                elif box.width < box.minimumSizeHint.width():
+                    problems.append((box.text, box.width, box.minimumSizeHint.width()))
+            return frame, problems
+
+        for effectName in ("Margin", "Hollow", "Smoothing", "Logical operators", "Islands", "Mask volume"):
+            frame, problems = labelProblems(effectName)
+            self.assertEqual(problems, [], effectName)
+            self.assertTrue(frame.findChildren("QFormLayout"), effectName)
+            self.assertTrue(all(int(layout.property("rowWrapPolicy")) != int(qt.QFormLayout.DontWrapRows) for layout in frame.findChildren("QFormLayout")), effectName)
+        editor.setActiveEffectByName("")
+
+        studioShell.classic(persist=False)
+        self._pump()
+        for effectName in ("Margin", "Logical operators"):
+            editor.setActiveEffectByName(effectName)
+            self._pump()
+            frame = editor.activeEffect().optionsFrame()
+            self.assertEqual([layout for layout in frame.findChildren("QHBoxLayout") if layout.property("studioStackedRowDirection") is not None], [], effectName)
+            self.assertTrue(all(layout.direction() == qt.QBoxLayout.LeftToRight for layout in frame.findChildren("QHBoxLayout")), effectName)
+            self.assertEqual([layout for layout in frame.findChildren("QFormLayout") if layout.property("studioFormWrapPolicy") is not None], [], effectName)
+            self.assertEqual([label.text for label in frame.findChildren("QLabel") if label.wordWrap and label.text.startswith("Actual")], [], effectName)
+        editor.setActiveEffectByName("")
+
     def test_33_figure_round_trip(self):
         """A synthetic figure and 5 landmark pairs: RMS < 0.5 mm; the crop and fit file are saved; Show source rebuilds the
         overlay in <= 300 ms with the same fit; Ctrl+V follows the clipboard; the trace views are restored on close.
