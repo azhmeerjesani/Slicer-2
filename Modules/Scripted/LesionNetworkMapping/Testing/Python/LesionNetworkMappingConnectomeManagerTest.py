@@ -227,6 +227,58 @@ class LesionNetworkMappingConnectomeManagerTest(unittest.TestCase):
         self.assertTrue(node.connectome.startswith("Manager fetched#"), node.connectome)
         self.assertEqual(os.path.abspath(widget.bundle.path), self.later[0])
 
+    def test_manager_demo_button_shows_the_running_demo_job(self):
+        # While the demo job runs the manager's button is disabled and shows the progress, like the Map card's button
+        widget = self.widget
+
+        class _RunningJob:
+            def isFinished(self):
+                return False
+
+        started = []
+        callbacks = {}
+
+        def fakeStart(onEvent=None, onDone=None):
+            started.append(1)
+            callbacks["event"] = onEvent
+            return _RunningJob()
+
+        widget._demoJob = None
+        original = self.logic.startDemoJob
+        self.logic.startDemoJob = fakeStart
+        try:
+            manager = widget.openManager()
+            _pump(100)
+            button = manager.demoButton
+            self.assertTrue(button.enabled)
+            self.assertEqual(str(button.text), "Create synthetic demo")
+            button.click()
+            _pump(50)
+            self.assertFalse(button.enabled)
+            self.assertIn("Creating the demo", str(button.text))
+            callbacks["event"]({"event": "progress", "done": 1, "total": 4})
+            self.assertFalse(button.enabled)
+            self.assertIn("25%", str(button.text))
+            self.assertEqual(started, [1])
+            # A manager opened while the job runs shows it as well
+            manager.hide()
+            manager.deleteLater()
+            widget.managerDialog = None
+            reopened = widget.openManager()
+            _pump(100)
+            self.assertFalse(reopened.demoButton.enabled)
+            self.assertIn("25%", str(reopened.demoButton.text))
+            # When it ends the button is back (the card button keeps its own label)
+            widget._demoJob = None
+            widget._updateDemoButton()
+            self.assertTrue(reopened.demoButton.enabled)
+            self.assertEqual(str(reopened.demoButton.text), "Create synthetic demo")
+            self.assertEqual(str(widget.demoButton.text), "Use the demo")
+        finally:
+            self.logic.startDemoJob = original
+            widget._demoJob = None
+            widget._updateDemoButton()
+
     def test_import_dialog_label_count_uses_the_singular_for_one_lesion(self):
         from LesionNetworkMappingUI import manager_parity
 

@@ -1645,6 +1645,7 @@ class ConnectomeManagerDialog(qt.QDialog):
         self.addButton = self._button(rowA, _("Add bundle…"), "LNMManagerAddButton", widget.onAddBundle, _("Register a bundle folder (.lnmc) on this computer"))
         self.convertButton = self._button(rowA, _("Convert…"), "LNMManagerConvertButton", self.openConvert, _("Convert NIfTI time series or a Lead-DBS connectome into a bundle"))
         self.demoButton = self._button(rowA, _("Create synthetic demo"), "LNMManagerDemoButton", widget.onCreateDemo, _("SYNTHETIC — not real data"))
+        self.setDemoBusy(getattr(widget, "_demoBusyText", None))
         rowA.addStretch(1)
         layout.addLayout(rowA)
         rowB = qt.QHBoxLayout()
@@ -1689,6 +1690,11 @@ class ConnectomeManagerDialog(qt.QDialog):
         button.connect("clicked()", callback)
         row.addWidget(button)
         return button
+
+    def setDemoBusy(self, busyText=None):
+        """Show the progress of the demo job on the demo button (disabled) while it runs; the usual label and enabled otherwise."""
+        self.demoButton.setEnabled(busyText is None)
+        self.demoButton.setText(busyText or _("Create synthetic demo"))
 
     def refresh(self, select=None):
         """Re-read the registered bundles (``manager.bundle_summary``) and fill the table."""
@@ -4152,6 +4158,10 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
 
     def _updateDemoButton(self, busyText=None):
         """The demo button shows the progress of the demo job and is disabled while it runs."""
+        self._demoBusyText = busyText
+        manager = getattr(self, "managerDialog", None)
+        if manager is not None:
+            manager.setDemoBusy(busyText)
         button = getattr(self, "demoButton", None)
         if button is None:
             return
