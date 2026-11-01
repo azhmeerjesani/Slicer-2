@@ -257,7 +257,12 @@ class JsonArgumentParser(argparse.ArgumentParser):
 
     Abbreviations are refused because run records keep the arguments as given and reproduce
     scripts rewrite them by their full names.
+
+    A command that can print events as text (``--events text``, or auto on a terminal) sets ``error_emit`` to its
+    event emitter: usage errors then look like the command's other errors. The default is ``emit`` (JSON).
     """
+
+    error_emit = None
 
     def __init__(self, *args, **kwargs):
         kwargs.setdefault("allow_abbrev", False)
@@ -269,7 +274,7 @@ class JsonArgumentParser(argparse.ArgumentParser):
 
     def error(self, message):
         self.print_usage(sys.stderr)
-        emit("error", code="usage", message=f"Invalid arguments: {message}")
+        (self.error_emit or emit)("error", code="usage", message=f"Invalid arguments: {message}")
         self.exit(EXIT_USAGE)
 
 

@@ -656,10 +656,31 @@ def _parser(commands=()):
     return parser
 
 
+def _events_option(argv):
+    """The value of --events in ``argv`` (``--events X`` or ``--events=X``; the last one wins); "auto" when absent or invalid."""
+    from . import pipeline
+
+    value = "auto"
+    for index, item in enumerate(argv):
+        if item == "--":
+            break
+        if item == "--events" and index + 1 < len(argv):
+            value = argv[index + 1]
+        elif item.startswith("--events="):
+            value = item.split("=", 1)[1]
+    return value if value in pipeline.EVENT_MODES else "auto"
+
+
 def _main(argv):
     from . import jobs, pipeline
 
-    args = _parser(library_commands()).parse_args(argv)
+    parser = _parser(library_commands())
+    # Usage errors of the parser itself follow --events too (read from the arguments before they are parsed): text on a
+    # terminal or with --events text, like the errors found later in this command; JSON events otherwise
+    early = pipeline.Emitter(_events_option(argv))
+    if early.mode == "text":
+        parser.error_emit = early
+    args = parser.parse_args(argv)
     emit = pipeline.Emitter(args.events)
     if args.subject_list:
         emit("error", code="usage", message="--subject-list is not available in this build: the cohort pipeline maps every connectome subject, or --preview N random subjects")

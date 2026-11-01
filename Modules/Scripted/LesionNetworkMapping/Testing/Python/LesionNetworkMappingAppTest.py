@@ -245,6 +245,53 @@ class AppHelpersTest(unittest.TestCase):
         self.assertIn("(run pipeline-1; recipe comprehensive_battery).", text)
         self.assertIn("Recipe steps outside the pipeline (not part of this run): validation, robustness.", text)
 
+    def test_parser_usage_errors_follow_events_mode(self):
+        """A missing or invalid argument is reported like the command's other errors: text with --events text or on a terminal, JSON otherwise."""
+        code, events, out, err = cli("x", "--threads", "0", "--events", "text")
+        self.assertEqual(code, 2)
+        self.assertEqual(events, [], out)
+        self.assertIn("error (usage): Invalid arguments: argument --threads: must be at least 1", out)
+        self.assertIn("usage:", err)
+        code, events, out, _err = cli("x", "--events=text")
+        self.assertEqual(code, 2)
+        self.assertEqual(events, [], out)
+        self.assertIn("error (usage): Invalid arguments: the following arguments are required", out)
+        # JSON stays the machine protocol (--events json, and auto without a terminal)
+        for extra in (("--events", "json"), ()):
+            code, events, out, _err = cli("x", *extra)
+            self.assertEqual((code, events[-1]["event"], events[-1]["code"]), (2, "error", "usage"), out)
+        self.assertEqual(app._events_option(["a", "--events", "text", "--events=json"]), "json")
+        self.assertEqual(app._events_option(["--events", "bogus"]), "auto")
+        self.assertEqual(app._events_option(["--events"]), "auto")
+
+    @unittest.skipUnless(os.name == "posix", "needs a pseudo-terminal")
+    def test_parser_usage_errors_are_text_on_a_terminal(self):
+        import pty
+
+        master, slave = pty.openpty()
+        try:
+            process = subprocess.Popen([sys.executable, "-m", "LesionNetworkMappingLib.app", "x"], cwd=MODULE_DIR, env=_env(), stdout=slave, stderr=subprocess.PIPE, text=True, encoding="utf-8")
+            os.close(slave)
+            slave = None
+            _stdout, _stderr = process.communicate(timeout=120)
+            chunks = []
+            try:
+                while True:
+                    data = os.read(master, 4096)
+                    if not data:
+                        break
+                    chunks.append(data)
+            except OSError:
+                pass
+        finally:
+            if slave is not None:
+                os.close(slave)
+            os.close(master)
+        output = b"".join(chunks).decode("utf-8", "replace")
+        self.assertEqual(process.returncode, 2)
+        self.assertIn("error (usage): Invalid arguments: the following arguments are required", output)
+        self.assertNotIn('{"event"', output)
+
     def test_usage_errors(self):
         with tempfile.TemporaryDirectory() as tmp:
             code, events, _out, _err = cli(tmp, os.path.join(tmp, "out"), "group", "--connectome", tmp, "--subject-list", "a,b", "--events", "json")
