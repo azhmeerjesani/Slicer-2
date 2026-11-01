@@ -216,6 +216,22 @@ class FiguresTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             figures.montage(self.tmap, None, "A 0", rule={"kind": "fwe_bonferroni"}, **SMALL)
 
+    def test_window_must_be_positive_and_finite(self):
+        # A negative window inverted the colour bar while the tiles silently used 1.0 (zero fell back to auto)
+        for bad in (-2.0, 0.0, float("nan"), float("inf")):
+            with self.assertRaises(ValueError, msg=str(bad)) as caught:
+                figures.montage(self.tmap, None, "A 0", threshold=4.0, window=bad, **SMALL)
+            self.assertIn("window must be positive", str(caught.exception))
+        out = os.path.join(self.tmp, "o-window")
+        map_path = os.path.join(self.tmp, "window-map.nii.gz")
+        nifti.write_nifti(map_path, self.tmap[0], self.affine)
+        code, events = self._cli(["--preset", "montage", "--map", map_path, "--window", "-2", "--threshold", "3", "--out", out, "--formats", "png"])
+        self.assertNotEqual(code, 0)
+        self.assertEqual(events[-1]["code"], "input")
+        self.assertIn("window must be positive", events[-1]["message"])
+        self.assertFalse(os.path.exists(os.path.join(out, "figures")))
+        self.assertEqual(figures.montage(self.tmap, None, "A 0", threshold=4.0, window=2.0, **SMALL).meta["window"], 2.0)
+
     def test_shared_range_identical_across_panels(self):
         strong = (blob_map(amplitude=20.0), self.affine, "strong")
         weak = (blob_map(amplitude=5.0), self.affine, "weak")

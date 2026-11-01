@@ -903,6 +903,8 @@ class Options:
             raise ValueError(f"sign must be one of {', '.join(thresholds.SIGNS)}, got {self.sign!r}")
         if not self.width_mm > 0 or int(self.dpi) < 30:
             raise ValueError("width_mm must be positive and dpi at least 30")
+        if self.window is not None and not (math.isfinite(float(self.window)) and float(self.window) > 0):
+            raise ValueError(f"The window must be positive, got {self.window}")
         if self.watermark is not None and self.watermark not in WATERMARKS.values():
             self.watermark = WATERMARKS.get(str(self.watermark).lower(), str(self.watermark))
         return self
