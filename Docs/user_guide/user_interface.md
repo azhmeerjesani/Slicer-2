@@ -70,7 +70,7 @@ The Data Probe, status bar, menu bar and toolbars are hidden, and everything the
 Edit, View and Help are submenus of ≡).
 
 **Switching.** **Ctrl+Alt+0**, **≡ > Classic interface** or **⋯ > Open in Classic** switches to the classic interface, and
-**View > Studio interface** (or Ctrl+Alt+0 again) switches back. The choice is remembered. To start in the classic
+**View > Switch to Studio interface** (or Ctrl+Alt+0 again) switches back. The choice is remembered. To start in the classic
 interface once, set the environment variable `SLICER_CLASSIC_UI=1`; to turn Studio off, set `Studio/Enabled` to false
 (see [Settings](settings.md#slicer-studio-settings)). Slicer started with `--testing` or `--no-main-window` always behaves as the
 classic interface.

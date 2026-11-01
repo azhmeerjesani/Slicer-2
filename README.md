@@ -70,7 +70,7 @@ What stays the same:
 - **All of 3D Slicer.** Every module, the Python console and API, and extensions. Nothing is removed or
   renamed; modules that the Studio interface does not show are one search away (`Ctrl+K`).
 - **The Classic interface.** `≡ > Classic interface` or `Ctrl+Alt+0` restores the standard Slicer window
-  exactly: menu bar, toolbars, module panel and status bar. `View > Studio interface` or `Ctrl+Alt+0` switches
+  exactly: menu bar, toolbars, module panel and status bar. `View > Switch to Studio interface` or `Ctrl+Alt+0` switches
   back. The choice is remembered. The appearance settings (theme, font, flat view bars) belong to the
   application, so they apply to both interfaces.
 - **Files.** Scenes and data are written in the same formats as official Slicer. Slicer Studio adds no

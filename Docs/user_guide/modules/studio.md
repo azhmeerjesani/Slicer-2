@@ -394,7 +394,7 @@ The keys are listed in [Settings](../settings.md#saving).
 
 - **Classic interface** (≡ menu, or **Ctrl+Alt+0**, or **⋯ > Open in Classic**): the menu bar, toolbars, module panel
   and Data Probe come back exactly as in 3D Slicer, and the window layout you had before is restored. **View >
-  Studio interface** (or Ctrl+Alt+0 again) returns to Studio. Studio remembers your choice (`Studio/Mode`).
+  Switch to Studio interface** (or Ctrl+Alt+0 again) returns to Studio. Studio remembers your choice (`Studio/Mode`).
 - **Start in Classic once:** set the environment variable `SLICER_CLASSIC_UI=1` before starting.
 - **Disable Studio permanently:** set `Studio/Enabled` to false in `Slicer.ini` (see [Settings](../settings.md#slicer-studio-settings)), or choose Classic and leave it.
 - Studio is never applied when Slicer is started with `--testing` or `--no-main-window`, so scripts, tests and

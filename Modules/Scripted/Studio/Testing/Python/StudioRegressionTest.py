@@ -107,6 +107,9 @@ Run with the main window and testing enabled::
   ``StudioLib.autosave_ui`` there) starts Slicer in ``xvfb-run`` like the harness's other Slicer runs unless ``--no-xvfb``
   (without a display Qt cannot start, exit 1, and the report said "A-01b not present" and FAIL on every headless machine);
   only exit code 3 means "not present", another non-zero exit says that Slicer did not start.
+- ``test_42_docs_name_the_classic_view_menu_item`` (BB-1): the documents that tell how to switch back from Classic name the
+  Classic item as ``View > Switch to Studio interface`` (the item's text in Classic), never ``View > Studio interface`` (the
+  checked item of Studio's View menu).
 """
 
 import json
@@ -116,6 +119,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import types
 import unittest
 
 try:
@@ -3288,3 +3292,24 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertEqual((whiteMatter[3], whiteMatter[4]), ("—", False))
         reverse = lesionset.balance(covariates, ["k0", "k1"], ["c0", "c1"], names=("hemisphere_left",))
         self.assertEqual(libcard_cohort.balanceRows({"balance": {"hemisphere_left": lesionset._balance_row(reverse["hemisphere_left"])}})[0][3], "-∞")
+
+    def test_42_docs_name_the_classic_view_menu_item(self):
+        """The docs call the Classic View menu item "Switch to Studio interface", as the app does (not Studio's "Studio interface")."""
+        from StudioLib import shell
+
+        root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", ".."))
+        names = ("README.md", "Docs/user_guide/user_interface.md", "Docs/user_guide/modules/studio.md",
+                 "Docs/user_guide/studio_coming_from_slicer.md")
+        paths = {name: os.path.join(root, *name.split("/")) for name in names}
+        if not all(os.path.isfile(path) for path in paths.values()):
+            self.skipTest("the documentation is not next to this build")
+        classicText = shell.Shell._classicSwitchText(types.SimpleNamespace(_active=False))
+        self.assertEqual(classicText, "Switch to Studio interface")
+        for name, path in paths.items():
+            with open(path, encoding="utf-8") as stream:
+                text = " ".join(stream.read().replace("*", "").replace("`", "").split())
+            self.assertNotIn("View > Studio interface", text, f"{name} names the Studio item for the way back from Classic")
+        for name in names[:3]:
+            with open(paths[name], encoding="utf-8") as stream:
+                text = " ".join(stream.read().replace("*", "").replace("`", "").split())
+            self.assertIn(f"View > {classicText}", text, f"{name} does not name the Classic View menu item")
