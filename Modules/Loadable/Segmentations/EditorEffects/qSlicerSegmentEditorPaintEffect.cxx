@@ -858,11 +858,17 @@ void qSlicerSegmentEditorPaintEffectPrivate::updateBrushModel(qMRMLWidget* viewW
 }
 
 //-----------------------------------------------------------------------------
+bool qSlicerSegmentEditorPaintEffectPrivate::brushModelAvailable() const
+{
+  return this->BrushToWorldOriginTransformer->GetNumberOfInputConnections(0) > 0;
+}
+
+//-----------------------------------------------------------------------------
 void qSlicerSegmentEditorPaintEffectPrivate::updateBrush(qMRMLWidget* viewWidget, BrushPipeline* pipeline)
 {
   Q_Q(qSlicerSegmentEditorPaintEffect);
   qMRMLSliceWidget* sliceWidget = qobject_cast<qMRMLSliceWidget*>(viewWidget);
-  if (this->BrushToWorldOriginTransformer->GetNumberOfInputConnections(0) == 0 //
+  if (!this->brushModelAvailable() //
       || q->integerParameter("BrushPixelMode"))
   {
     pipeline->SetBrushVisibility(false);
@@ -1612,7 +1618,10 @@ bool qSlicerSegmentEditorPaintEffect::processInteractionEvents(vtkRenderWindowIn
     // Mouse pointer entered the widget
     // It is more reliable to check for viewWidget pointer change than vtkCommand::EnterEvent, because
     // the effect may be activated using keyboard shortcut while the mouse pointer is already inside the widget.
-    brushPipeline->SetBrushVisibility(!this->integerParameter("BrushPixelMode"));
+    // The brush model is built at the first mouse move: showing the brush before that would render the brush
+    // pipeline with its first filter unconnected (VTK error "Input port 0 ... has 0 connections but is not optional"),
+    // for example when a layout change puts a view under a resting mouse pointer.
+    brushPipeline->SetBrushVisibility(!this->integerParameter("BrushPixelMode") && d->brushModelAvailable());
   }
   d->ActiveViewWidget = viewWidget;
 
@@ -1732,7 +1741,7 @@ bool qSlicerSegmentEditorPaintEffect::processInteractionEvents(vtkRenderWindowIn
       for (qMRMLWidget* const aViewWidget : viewWidgets)
       {
         d->BrushPipelines[aViewWidget]->SetFeedbackVisibility(false);
-        d->BrushPipelines[aViewWidget]->SetBrushVisibility(worldPositionValid);
+        d->BrushPipelines[aViewWidget]->SetBrushVisibility(worldPositionValid && d->brushModelAvailable());
         qSlicerSegmentEditorAbstractEffect::scheduleRender(aViewWidget);
       }
 

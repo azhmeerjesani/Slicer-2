@@ -92,6 +92,11 @@ Run with the main window and testing enabled::
   table's "Create study" leave the groups empty and keep the column. A group column ("diagnosis": patient / HC) is shown
   in the group-mapping step (L-01) before the study is made by these routes, as on the folder card: Cancel makes no
   study, and the groups are the ones chosen in the step.
+- ``test_37_paint_brush_not_shown_before_its_model_exists`` (BB-1): the Paint effect shows its brush only once the brush model
+  exists (built at the first mouse move). An event that is not a mouse move (the pointer entering a view that a layout change
+  puts under a resting mouse: Four-up -> Library -> Draw -> Focus) used to show the brush with its first filter unconnected,
+  and the render logged "Input port 0 of algorithm vtkTransformPolyDataFilter ... has 0 connections but is not optional"
+  (the red error badge of the top bar).
 """
 
 import json
@@ -2943,3 +2948,54 @@ class StudioRegressionTest(unittest.TestCase):
             self.assertEqual(len(decided), 1, mode)
             self.assertEqual(decided[0][0], "approved" if mode == "approve" else mode)
             actions.hideForm()  # a late call on the disposed actions does nothing either
+
+    def test_37_paint_brush_not_shown_before_its_model_exists(self):
+        """With the Paint effect active, the pointer entering a slice view (an Enter event, no mouse move) does not render the
+        brush pipeline before the brush model exists: no VTK error "Input port 0 of algorithm vtkTransformPolyDataFilter ...
+        has 0 connections but is not optional" is logged. The brush is shown by the first mouse move.
+        """
+        import vtk
+
+        if slicer.util.mainWindow() is None or slicer.app.layoutManager() is None:
+            self.skipTest("needs the main window")
+        slicer.mrmlScene.Clear(0)
+        editor = None
+        try:
+            volume = slicer.util.addVolumeFromArray(np.random.default_rng(1).integers(0, 100, (32, 32, 32)).astype(np.int16), name="Brush")
+            segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode")
+            segmentation.CreateDefaultDisplayNodes()
+            segmentation.SetReferenceImageGeometryParameterFromVolumeNode(volume)
+            segmentId = segmentation.GetSegmentation().AddEmptySegment("Lesion")
+            editor = slicer.qMRMLSegmentEditorWidget()
+            editor.setMRMLScene(slicer.mrmlScene)
+            editor.setMRMLSegmentEditorNode(slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentEditorNode"))
+            editor.setSegmentationNode(segmentation)
+            editor.setSourceVolumeNode(volume)
+            editor.setCurrentSegmentID(segmentId)
+            slicer.util.setSliceViewerLayers(background=volume, fit=True)
+            slicer.app.processEvents()
+            editor.setActiveEffectByName("Paint")
+            slicer.app.processEvents()
+
+            errorModel = slicer.app.errorLogModel()
+            firstRow = errorModel.rowCount()
+            sliceView = slicer.app.layoutManager().sliceWidget("Red").sliceView()
+            interactor = sliceView.interactorStyle().GetInteractor()
+            interactor.SetEventPosition(100, 100)
+            interactor.InvokeEvent(vtk.vtkCommand.EnterEvent)
+            slicer.app.processEvents()
+            sliceView.forceRender()
+            slicer.app.processEvents()
+
+            errors = []
+            for row in range(firstRow, errorModel.rowCount()):
+                text = " | ".join(str(errorModel.data(errorModel.index(row, column))) for column in range(errorModel.columnCount()))
+                if "| Error |" in text or "| Critical |" in text:
+                    errors.append(text)
+            self.assertEqual(errors, [])
+        finally:
+            if editor is not None:
+                editor.setActiveEffectByName("")
+                editor.setMRMLScene(None)
+            slicer.app.processEvents()
+            slicer.mrmlScene.Clear(0)
