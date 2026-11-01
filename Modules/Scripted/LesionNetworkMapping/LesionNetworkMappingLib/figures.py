@@ -2199,6 +2199,14 @@ def main(argv=None, cancel=None):
     run_root = args.run_root or args.study or _find_study(out_root) or out_root
     name = args.name or args.preset
     formats = [item.strip().lower() for item in args.formats.split(",") if item.strip()]
+    # Validate at once: write_figure checks too, but only after the whole figure has been rendered
+    unknown = sorted(set(formats) - set(FORMATS))
+    if unknown:
+        raise jobs.JobError(
+            f"Unknown format(s): {', '.join(unknown)} (use {', '.join(FORMATS)})", code="usage", exit_code=jobs.EXIT_USAGE,
+        )
+    if not formats:
+        raise jobs.JobError(f"Give at least one format in --formats ({', '.join(FORMATS)})", code="usage", exit_code=jobs.EXIT_USAGE)
     watermark = args.watermark
     if watermark == "auto":
         watermark = watermark_for(args.study, args.connectome)

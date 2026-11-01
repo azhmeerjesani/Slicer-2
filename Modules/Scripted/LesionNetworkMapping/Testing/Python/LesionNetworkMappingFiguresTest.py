@@ -232,6 +232,25 @@ class FiguresTest(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(out, "figures")))
         self.assertEqual(figures.montage(self.tmap, None, "A 0", threshold=4.0, window=2.0, **SMALL).meta["window"], 2.0)
 
+    def test_formats_validated_before_rendering(self):
+        # An unknown format used to fail only after the whole figure was rendered; an empty list exited 0 with no image
+        out = os.path.join(self.tmp, "o-formats")
+        map_path = os.path.join(self.tmp, "formats-map.nii.gz")
+        nifti.write_nifti(map_path, self.tmap[0], self.affine)
+        rendered = []
+        original = figures.montage
+        figures.montage = lambda *a, **k: rendered.append(1) or original(*a, **k)
+        try:
+            for bad, text in (("png,jpg", "Unknown format(s): jpg"), (",", "at least one format"), ("", "at least one format")):
+                code, events = self._cli(["--preset", "montage", "--map", map_path, "--threshold", "3", "--out", out, "--formats", bad])
+                self.assertEqual(code, jobs.EXIT_USAGE, bad)
+                self.assertEqual(events[-1]["code"], "usage")
+                self.assertIn(text, events[-1]["message"])
+        finally:
+            figures.montage = original
+        self.assertEqual(rendered, [], "nothing may be rendered for a bad --formats")
+        self.assertFalse(os.path.exists(os.path.join(out, "figures")))
+
     def test_shared_range_identical_across_panels(self):
         strong = (blob_map(amplitude=20.0), self.affine, "strong")
         weak = (blob_map(amplitude=5.0), self.affine, "weak")
