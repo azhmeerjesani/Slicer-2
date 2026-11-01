@@ -1,7 +1,7 @@
 """Library workspace of Slicer Studio (SPEC 3.1): the start page, and the place that answers "what is open".
 
 - ``LibraryCanvas``: the calm page shown over the paused views while Library is the current workspace.
-  It has a drop zone, the Open…, Open folder… and Start on MNI template buttons, the recently loaded
+  It has a drop zone, the Start on template ▾, Open folder… and Open… buttons, the projects and the recently loaded
   files and links to the sample data and to the Classic interface. Once data is loaded (``hasData()``) the
   drop zone becomes a strip and the page shows the current work: the ``CurrentWorkCard`` (scans, lesions with their
   metrics and save state, Continue in Draw) and, for lesions loaded at once, the ``LoadedSetCard``.

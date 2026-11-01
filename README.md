@@ -184,7 +184,7 @@ Navigation details:
 - **Draw remembers its tool.** Going from Draw to the Library or to another module and back keeps the
   selected segment and the armed tool. Pressing `Esc` to deselect the tool is respected. Place and
   window/level modes put the tool aside and bring it back when they end.
-- **Files that are already open** are not loaded a second time from *Recent*, *Open…* or a drop in
+- **Files that are already open** are not loaded a second time from *Opened from elsewhere*, *Open…* or a drop in
   Studio: the existing scan or lesion becomes current and a message says so. Classic still loads the
   file again, as official Slicer does.
 - **Back to Studio from Classic** returns to the workspace of the module you were in (else the last
@@ -1253,15 +1253,16 @@ Slicer-SuperBuild-Release/Slicer-build/Slicer
    - *Open folder…*: a DICOM folder goes to the DICOM module; a folder with several NIfTI files offers
      *Load all* (disabled above 20 files: open one subject's files with *Open…*); any other folder opens
      *Add Data*.
-   - *Start on MNI template* loads the MNI152NLin2009cAsym 2 mm brain that comes with Slicer Studio
-     (no network needed) and creates a "Lesions" segmentation on its grid. After your first stroke, the
+   - *Start on template* loads your default template, by default the MNI152NLin2009cAsym 2 mm brain that comes
+     with Slicer Studio (no network needed), and creates a "Lesions" segmentation on its grid. After your first stroke, the
      inspector offers the 1 mm template: a 13.7 MB download from TemplateFlow with progress, Cancel and a
      checksum check. It never covers the views.
    - Other files: a case-report figure (PNG, JPEG, TIFF) opens large beside the template as a reference
      that cannot be painted into; a statistical map opens as a thresholded overlay; several lesion files
      opened together form a set that you review one lesion at a time (`Alt+Left` and `Alt+Right` in
      Draw). A lesion file without a scan is shown on the template only when it is on an MNI grid.
-   - *Recent* lists the most recent files; `Enter` reopens the first one.
+   - *Opened from elsewhere* lists the files and folders you opened from outside the Slicer Studio folder
+     (*All projects* lists the projects in it); `Enter` reopens the first one.
 3. **Trace the lesion in Draw.** After a scan, a lesion or the template is loaded, Draw opens by itself
    with the "Lesion" segment selected. Use the tool tiles: Brush (`P`), Outline (`D`, with the lasso),
    Smart fill (`M`: click inside the lesion, `Enter` to apply it, then check the result), Erase (`E`) and

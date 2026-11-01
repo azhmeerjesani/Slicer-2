@@ -275,6 +275,42 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertFalse(canvas.footerFrame.isVisible())
         self.assertTrue(studioShell._panelDock().isHidden())
 
+    def test_docs_describe_the_empty_library_that_exists(self):
+        """BB-1: the user guide and README describe the empty Library as it is: the drop zone text, the three buttons and the
+        two lists of the canvas are the ones on screen, and the old names (Start on MNI template for the Library button, the
+        Recent list, "Drop scans, lesion masks or a folder") are gone.
+        """
+        studioShell = self._applyStudio()
+        canvas = self._library(studioShell)
+        self.assertFalse(canvas.isStrip())
+        zoneTitle = canvas.dropZone.findChild("QLabel", "StudioDropZoneTitle").text
+        titles = [str(label.text) for label in canvas.widget.findChildren("QLabel", "StudioLibrarySectionTitle")]
+        for expected in ("All projects", "Opened from elsewhere"):
+            self.assertIn(expected, titles)
+
+        root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", ".."))
+        contents = {}
+        for name in ("README.md", "Docs/user_guide/modules/studio.md"):
+            path = os.path.join(root, *name.split("/"))
+            if not os.path.isfile(path):
+                self.skipTest("the documentation is not next to this build")
+            with open(path, encoding="utf-8") as stream:
+                contents[name] = " ".join(stream.read().split())
+
+        studio = contents["Docs/user_guide/modules/studio.md"]
+        paragraph = studio.split("**Empty Library.**", 1)[1].split("- Dropping a **scan**", 1)[0]
+        for text in (zoneTitle, str(canvas.openButton.text), str(canvas.openFolderButton.text), str(canvas.templateButton.text),
+                     "All projects", "Opened from elsewhere"):
+            self.assertIn(text, paragraph)
+        readme = contents["README.md"]
+        for text in ("*Start on template*", "*Opened from elsewhere*", "*All projects*"):
+            self.assertIn(text, readme)
+        stale = ("Drop scans, lesion masks or a folder", "**Start on MNI template**", "*Start on MNI template*", "**Recent** list",
+                 "*Recent* lists", "from *Recent*")
+        for name, content in contents.items():
+            for phrase in stale:
+                self.assertNotIn(phrase, content, f"{name} still says {phrase!r}")
+
     def test_button_icons_are_16_px_at_every_pixel_ratio(self):
         """The icons of the Library buttons are 16 logical px (VISUAL 3). Without an icon size a button uses the style's 24 px:
         a 16 px icon that has a pixmap for a device pixel ratio above 1 is then drawn at 24 px (1.5 times larger than at 1x).

@@ -109,8 +109,10 @@ go in a notice line between the panel header and the cards, never over the image
 Library is where data comes in and where you choose what to work on. In Studio it replaces Welcome, Add Data,
 Sample Data and, for everyday use, the Data module.
 
-**Empty Library.** A drop zone ("Drop scans, lesion masks or a folder"; NIfTI, NRRD or DICOM folders), the buttons
-**Open…**, **Open folder…** and **Start on MNI template**, and a **Recent** list whose first row has the focus, so
+**Empty Library.** The page is titled **Projects**. It has a drop zone ("Drop scans, DICOM folders or Slicer scenes";
+NIfTI, NRRD, DICOM folders, lesion masks and `.mrb` scenes), the buttons **Start on template ▾** (the arrow lists the
+templates), **Open folder…** and **Open…**, the list **All projects** (the projects of your Slicer Studio folder) and the
+list **Opened from elsewhere** (files and folders opened from outside that folder), whose first row has the focus, so
 Enter reopens the last item. A link "Load sample data" opens the Sample Data module in the inspector.
 
 - Dropping a **scan** (`.nii`, `.nii.gz`, `.nrrd`, `.mha`, `.mhd`) loads it directly. A **lesion mask** is recognised by
@@ -120,8 +122,8 @@ Enter reopens the last item. A link "Load sample data" opens the Sample Data mod
 - A **folder of DICOM** files opens the DICOM module. A folder with several NIfTI files shows a card (for example "40 NIfTI
   files found", with the participants table if the folder has one) that offers **Create study**, or opening one subject at
   a time.
-- **Start on MNI template** loads the bundled MNI152 2009c template (2 mm), creates an empty segmentation named
-  Lesions and opens Draw with the Brush armed. A 1 mm template is offered as an optional download (see
+- **Start on template** loads your default template (the bundled MNI152 2009c template, 2 mm, unless you chose another),
+  creates an empty segmentation named Lesions and opens Draw with the Brush armed. A 1 mm template is offered as an optional download (see
   [Data downloaded on request](lesionnetworkmapping.md#data-downloaded-on-request)).
 
 **With data loaded** the canvas shows the **Current work** card: the scan, the lesion with its side and volume ("Left ·
@@ -165,7 +167,7 @@ Draw is the [Segment Editor](segmenteditor.md) module in its Studio presentation
    (for lesions in MNI space; otherwise it explains why and offers **Normalize to MNI…**). With a study the main button
    is **Done → next · Ctrl+Enter**.
 
-**The first click.** The Brush is armed when you came to trace: **Start on MNI template**, **Continue in Draw →**,
+**The first click.** The Brush is armed when you came to trace: **Start on template**, **Continue in Draw →**,
 **Open in Draw**, a loaded lesion file or set. A scan you only dropped or opened lands in Draw **unarmed**: a
 left-drag then adjusts window/level, so that looking at a scan never paints on it. Pick a tool (P) to start drawing.
 **Space** pauses the active tool (and resumes it); while paused, left-drag adjusts window/level.
