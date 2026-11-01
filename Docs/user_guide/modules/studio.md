@@ -234,9 +234,11 @@ Autosave (see [below](#autosave-and-recovery)) is not Save: it says "Autosaved",
 ### Map
 
 Map is the [Lesion Network Mapping](lesionnetworkmapping.md) module. Its inspector shows the cards Seed, Normalize
-to MNI, Connectome, Preflight, Run everything (when the seed is a cohort), Compute, Result, QA, Cohort, Clusters,
-Networks and Export, and a footer that always reads "Research use only — not for clinical decisions" with the
-references. The top bar shows the state of the computation next to the switcher ("No connectome", "Ready", "Mapping
+to MNI (when a scan is open), Connectome, Compute, Result, QA, Clusters, Networks, Circuits, Compare, Report and
+Export; with the seed set to **Cohort** it also shows Preflight, Run everything and Cohort. The footer is always
+visible and is one line, "Research use only. Lesion network mapping specificity is debated. **Read more**". **Read
+more** opens the whole statement ("Research use only — not for clinical decisions", with its three references), which
+the Report card also shows. The top bar shows the state of the computation next to the switcher ("No connectome", "Ready", "Mapping
 34%", "Done · N=1000"). With the seed set to **Cohort**, **Ctrl+Enter** runs everything; otherwise it maps the
 network. **Ctrl+E** exports. A computation is stopped only with its **Stop** button, never with Esc.
 

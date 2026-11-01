@@ -20,7 +20,9 @@ This page is the overview. Three pages go deeper:
 
 ## Research use only
 
-Every sidecar, the methods text, the report and the footer of the module carry this statement:
+Every sidecar, the methods text and the report carry this statement. The footer of the module shows it as one line,
+"Research use only. Lesion network mapping specificity is debated. Read more", and **Read more** opens the whole
+statement:
 
 > Research use only — not for clinical decisions. Lesion network mapping specificity is debated (van den Heuvel et al., 2026, Nat Neurosci, doi:10.1038/s41593-025-02196-7; Siddiqi et al., 2026, bioRxiv, doi:10.64898/2026.02.24.707529; Zalesky & Cash, 2026, Nat Neurosci, doi:10.1038/s41593-026-02259-3).
 

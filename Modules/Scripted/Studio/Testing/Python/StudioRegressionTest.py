@@ -110,6 +110,10 @@ Run with the main window and testing enabled::
 - ``test_42_docs_name_the_classic_view_menu_item`` (BB-1): the documents that tell how to switch back from Classic name the
   Classic item as ``View > Switch to Studio interface`` (the item's text in Classic), never ``View > Studio interface`` (the
   checked item of Studio's View menu).
+- ``test_45_docs_describe_the_map_footer_as_the_app_builds_it`` (BB-1): studio.md and lesionnetworkmapping.md describe the
+  Map footer as the one line "Research use only. Lesion network mapping specificity is debated. Read more" (the whole
+  statement and its references behind Read more and in the Report card), and studio.md lists the Circuits, Compare and Report
+  cards of the Map inspector.
 """
 
 import inspect
@@ -3367,3 +3371,32 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertIn("proposes the project's `Lesions` folder", readme)
         self.assertIn("`Ctrl+S` saves it at once", readme)
         self.assertNotIn("An autosave is not a save: only these commands write your files", readme)
+
+    def test_45_docs_describe_the_map_footer_as_the_app_builds_it(self):
+        """studio.md and lesionnetworkmapping.md describe the Map footer as it is (VISUAL 4.5): one line, "Research use only.
+        Lesion network mapping specificity is debated. Read more", the whole statement behind Read more (and in the Report
+        card); studio.md lists every card of the Map inspector including Circuits, Compare and Report.
+        """
+        import LesionNetworkMappingUI.widgets as lnmwidgets
+
+        root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", ".."))
+        names = ("Docs/user_guide/modules/studio.md", "Docs/user_guide/modules/lesionnetworkmapping.md")
+        paths = {name: os.path.join(root, *name.split("/")) for name in names}
+        if not all(os.path.isfile(path) for path in paths.values()):
+            self.skipTest("the documentation is not next to this build")
+        texts = {}
+        for name, path in paths.items():
+            with open(path, encoding="utf-8") as stream:
+                texts[name] = " ".join(stream.read().replace("*", "").split())
+        studio, lnm = (texts[name] for name in names)
+        # The behaviour the docs describe
+        self.assertEqual(lnmwidgets.DISCLAIMER_LINE, "Research use only. Lesion network mapping specificity is debated.")
+        self.assertIn("showDisclaimer(label)", inspect.getsource(lnmwidgets.disclaimerLine))
+        line = lnmwidgets.DISCLAIMER_LINE + " Read more"
+        for name, text in ((names[0], studio), (names[1], lnm)):
+            self.assertIn(line, text, f"{name} does not describe the one-line Map footer")
+        self.assertNotIn('footer that always reads "Research use only — not for clinical decisions"', studio)
+        self.assertNotIn("the report and the footer of the module carry this statement", lnm)
+        section = studio.split("### Map", 1)[1].split("### Other modules", 1)[0]
+        for card in ("Circuits", "Compare", "Report"):
+            self.assertIn(card, section, f"studio.md does not list the {card} card of the Map inspector")
