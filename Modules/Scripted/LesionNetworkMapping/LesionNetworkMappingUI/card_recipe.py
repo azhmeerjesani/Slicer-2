@@ -235,7 +235,7 @@ class LockPlanDialog:
             self.targetCombo.setCurrentIndex(max(0, index))
 
     def _addRoi(self):
-        paths = qt.QFileDialog.getOpenFileNames(self.dialog, _("Add a-priori ROI masks"), "", "NIfTI (*.nii *.nii.gz);;All files (*)")
+        paths = qt.QFileDialog.getOpenFileNames(self.dialog, _("Add a-priori ROI masks"), widgets.dialogStartFolder(), "NIfTI (*.nii *.nii.gz);;All files (*)")
         for path in paths or []:
             item = qt.QListWidgetItem(os.path.basename(path))
             item.setData(qt.Qt.UserRole, path)

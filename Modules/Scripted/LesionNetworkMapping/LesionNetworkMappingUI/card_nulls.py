@@ -457,7 +457,7 @@ class NullsCard:
 
     def chooseControlSet(self, how):
         """Choose the control set (``how``: "pool-folder", "pool-tsv" or "pool-maps") with a file dialog."""
-        start = os.path.dirname(self.controlSet["path"]) if self.controlSet else os.path.expanduser("~")
+        start = os.path.dirname(self.controlSet["path"]) if self.controlSet else widgets.dialogStartFolder(os.path.expanduser("~"))
         if how == "pool-folder":
             path = qt.QFileDialog.getExistingDirectory(self.widget, _("Folder of control lesion masks (NIfTI)"), start)
         else:

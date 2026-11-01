@@ -834,7 +834,7 @@ class CircuitsCard:
     def openCircuit(self, path=None):
         """Add a circuit map from a file (a dialog when ``path`` is None); return its path or None."""
         if path is None:
-            path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Open a circuit map"), self.circuitsFolder() or "", _("NIfTI (*.nii *.nii.gz)"))
+            path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Open a circuit map"), self.circuitsFolder() or widgets.dialogStartFolder(), _("NIfTI (*.nii *.nii.gz)"))
         if not path:
             return None
         path = os.path.abspath(path)
@@ -1074,7 +1074,7 @@ class CircuitsCard:
 
     def chooseGmPrior(self, path=None):
         if path is None:
-            path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Choose a gray-matter probability"), "", _("NIfTI (*.nii *.nii.gz)"))
+            path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Choose a gray-matter probability"), widgets.dialogStartFolder(), _("NIfTI (*.nii *.nii.gz)"))
         if not path:
             return None
         self.gmFile = os.path.abspath(path)
@@ -1134,7 +1134,7 @@ class CircuitsCard:
     def importTargets(self, path=None):
         """Use a CSV/TSV/.fcsv file of targets (a dialog when ``path`` is None)."""
         if path is None:
-            path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Import targets"), "", _("Targets (*.csv *.tsv *.fcsv *.mrk.json *.txt)"))
+            path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Import targets"), widgets.dialogStartFolder(), _("Targets (*.csv *.tsv *.fcsv *.mrk.json *.txt)"))
         if not path:
             return None
         self.targetsFile = os.path.abspath(path)

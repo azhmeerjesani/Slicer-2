@@ -3817,7 +3817,7 @@ def warpToConnectomeSpace(sid, transformPath=None, referencePath=None, shell=Non
     target = "MNI152NLin6Asym"
     transformPath = transformPath or slicer.util.settingsValue(WARP_TRANSFORM_KEY, "")
     if not transformPath or not os.path.isfile(transformPath):
-        transformPath = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Transform MNI152NLin2009cAsym → MNI152NLin6Asym"), "",
+        transformPath = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Transform MNI152NLin2009cAsym → MNI152NLin6Asym"), _importer().dialogStartFolder(),
                                                        _("ITK transform") + " (tpl-MNI152NLin6Asym_from-MNI152NLin2009cAsym*.h5 *.h5 *.tfm *.txt)")
         if not transformPath:
             return None

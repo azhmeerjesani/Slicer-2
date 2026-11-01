@@ -502,7 +502,7 @@ class CalibrateCard:
 
     def _onTargetChosen(self, index=None):
         if self.targetCombo.currentData == "mask":
-            path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Target network mask"), self.connectomeDir() or "", _("NIfTI (*.nii *.nii.gz)"))
+            path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Target network mask"), self.connectomeDir() or widgets.dialogStartFolder(), _("NIfTI (*.nii *.nii.gz)"))
             if path:
                 self.targetPath = path
             elif not self.targetPath:

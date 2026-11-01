@@ -2593,6 +2593,35 @@ def _lastDirectory():
     return directory if directory and os.path.isdir(directory) else qt.QDir.homePath()
 
 
+_webStartFolderGiven = False
+
+
+def dialogStartFolder(fallback=""):
+    """The folder a file dialog that has no folder of its own starts in (``fallback`` is what it passed before).
+
+    Qt starts a dialog given "" in the folder of the last file dialog, and in the working folder when none has been shown yet;
+    ``"~"`` starts in the home folder. In the web build that is the container HOME, not /data, which is where its dialogs are
+    meant to start until another folder is chosen (the start-up script sets ``Studio/LastOpenDirectory``). So in the web build
+    the first call gives that folder (``Studio/LastOpenDirectory``, else /data) when it exists; later calls give "" and leave
+    the folder of the last dialog to Qt, so a folder that was chosen stays. Everywhere else ``fallback`` is returned unchanged.
+    """
+    global _webStartFolderGiven
+    try:
+        from . import projects
+
+        if not projects.isWebBuild():
+            return fallback
+    except Exception:
+        return fallback
+    if _webStartFolderGiven:
+        return ""
+    for directory in (str(slicer.util.settingsValue("Studio/LastOpenDirectory", "") or ""), "/data"):
+        if directory and os.path.isdir(directory):
+            _webStartFolderGiven = True
+            return directory
+    return fallback
+
+
 def _rememberDirectory(path):
     directory = path if os.path.isdir(path) else os.path.dirname(path)
     if directory != slicer.util.settingsValue("Studio/LastOpenDirectory", ""):

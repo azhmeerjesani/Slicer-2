@@ -704,7 +704,7 @@ class SourcesCard:
         self.paste.clear()
 
     def chooseFile(self):
-        path = qt.QFileDialog.getOpenFileName(self.widget, _("Import records"), "", FILE_FILTER)
+        path = qt.QFileDialog.getOpenFileName(self.widget, _("Import records"), library._importer().dialogStartFolder(), FILE_FILTER)
         if path:
             self._importPath = str(path)
             self.fileButton.setText(os.path.basename(self._importPath))

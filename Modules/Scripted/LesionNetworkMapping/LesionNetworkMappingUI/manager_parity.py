@@ -139,7 +139,7 @@ class ImportDialog(qt.QDialog):
         self.scan()
 
     def browse(self):
-        folder = qt.QFileDialog.getExistingDirectory(self, _("Folder of Lead-DBS outputs"), self.folderEdit.text or os.path.expanduser("~"))
+        folder = qt.QFileDialog.getExistingDirectory(self, _("Folder of Lead-DBS outputs"), self.folderEdit.text or widgets.dialogStartFolder(os.path.expanduser("~")))
         if folder:
             self.folderEdit.setText(folder)
             self.scan()

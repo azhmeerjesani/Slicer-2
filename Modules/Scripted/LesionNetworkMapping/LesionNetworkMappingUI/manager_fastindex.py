@@ -680,7 +680,7 @@ class FastIndexDialog(qt.QDialog):
         return [entry["id"] for entry in self.packEntries()[0]]
 
     def chooseTiling(self):
-        folder = qt.QFileDialog.getExistingDirectory(self, _("Folder of a tiling (labels.nii.gz, labels.tsv)"), self.tilingDir or os.path.expanduser("~"))
+        folder = qt.QFileDialog.getExistingDirectory(self, _("Folder of a tiling (labels.nii.gz, labels.tsv)"), self.tilingDir or widgets.dialogStartFolder(os.path.expanduser("~")))
         if folder:
             self.tilingDir = folder
             self.refresh()
@@ -1035,7 +1035,7 @@ class FastIndexDialog(qt.QDialog):
             self.matrixButton.setToolTip("")
 
     def chooseMatrix(self):
-        path = qt.QFileDialog.getOpenFileName(self, _("Parcel matrix (.mat) of your own copy of the release"), os.path.expanduser("~"), "MATLAB (*.mat);;All files (*)")
+        path = qt.QFileDialog.getOpenFileName(self, _("Parcel matrix (.mat) of your own copy of the release"), widgets.dialogStartFolder(os.path.expanduser("~")), "MATLAB (*.mat);;All files (*)")
         if path:
             return self.compareMatrix(path)
         return None

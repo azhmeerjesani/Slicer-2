@@ -1154,7 +1154,7 @@ class ValidateCard:
         self.setRefmaps(chosen)
 
     def addRefmapFile(self):
-        path = qt.QFileDialog.getOpenFileName(self.widget, _("Reference map"), "", "NIfTI (*.nii *.nii.gz)")
+        path = qt.QFileDialog.getOpenFileName(self.widget, _("Reference map"), widgets.dialogStartFolder(), "NIfTI (*.nii *.nii.gz)")
         if path:
             self.setRefmaps(self.refmaps() + [path] if path not in self._refmaps else self.refmaps())
             if self.refmapPopover is not None:
@@ -1570,7 +1570,7 @@ class ValidateCard:
         current = getattr(self.ctx, "currentCircuit", None)
         if current and current.get("path") and os.path.isfile(current["path"]):
             return dict(current)
-        path = qt.QFileDialog.getOpenFileName(self.widget, _("Circuit map to freeze"), "", "NIfTI (*.nii *.nii.gz)")
+        path = qt.QFileDialog.getOpenFileName(self.widget, _("Circuit map to freeze"), widgets.dialogStartFolder(), "NIfTI (*.nii *.nii.gz)")
         if not path:
             return None
         return {"path": os.path.abspath(path), "sha256": export.file_sha256(path), "kind": "file"}

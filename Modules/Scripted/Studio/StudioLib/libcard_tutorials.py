@@ -471,14 +471,14 @@ class TutorialsDialog:
             projects.openLink(link)
 
     def browse(self):
-        start = os.path.dirname(self.folder()) or os.path.expanduser("~")
+        start = os.path.dirname(self.folder()) or library._importer().dialogStartFolder(os.path.expanduser("~"))
         chosen = qt.QFileDialog.getExistingDirectory(self.dialog, _("Folder of the new study"), start)
         if chosen:
             entry = self.entry()
             self.folderEdit.setText(os.path.join(str(chosen), entry["id"]) if os.path.isdir(str(chosen)) and os.listdir(str(chosen)) else str(chosen))
 
     def browseSource(self):
-        chosen = qt.QFileDialog.getExistingDirectory(self.dialog, _("The folder you downloaded"), str(self.sourceEdit.text) or os.path.expanduser("~"))
+        chosen = qt.QFileDialog.getExistingDirectory(self.dialog, _("The folder you downloaded"), str(self.sourceEdit.text) or library._importer().dialogStartFolder(os.path.expanduser("~")))
         if chosen:
             self.sourceEdit.setText(str(chosen))
 

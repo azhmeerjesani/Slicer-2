@@ -1142,7 +1142,7 @@ class RobustCard:
     #
 
     def chooseCoordinates(self):
-        path = qt.QFileDialog.getOpenFileName(self.widget, _("Coordinates file"), "", "TSV (*.tsv *.txt);;All files (*)")
+        path = qt.QFileDialog.getOpenFileName(self.widget, _("Coordinates file"), widgets.dialogStartFolder(), "TSV (*.tsv *.txt);;All files (*)")
         if path:
             self.setCoordinates(path)
 

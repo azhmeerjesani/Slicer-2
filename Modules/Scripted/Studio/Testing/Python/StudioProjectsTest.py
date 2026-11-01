@@ -4039,6 +4039,73 @@ class StudioProjectsTest(unittest.TestCase):
             section.dispose()
             parent.deleteLater()
 
+    def test_66_web_file_dialogs_without_a_folder_start_in_the_last_open_folder(self):
+        """README: "File dialogs start in /data until you choose another folder". Map > Import coordinates (and about twenty
+        other dialogs) passed "" or "~" as the start folder, so the first of them opened in the working folder of the
+        container, its HOME. In the web build the first such dialog starts in ``Studio/LastOpenDirectory`` (the start-up
+        script sets it to /data); a later one is left to Qt, which reuses the folder of the last dialog. Elsewhere nothing changes.
+        """
+        from StudioLib import importer
+
+        settings = qt.QSettings()
+        savedFolder = settings.value("Studio/LastOpenDirectory")
+        savedWeb = os.environ.get("SLICER_STUDIO_WEB")
+        savedGiven = importer._webStartFolderGiven
+        realGetOpenFileName = qt.QFileDialog.getOpenFileName
+        folder = os.path.join(self.tempDir, "data folder")
+        os.makedirs(folder)
+        starts = []
+        try:
+            settings.setValue("Studio/LastOpenDirectory", folder)
+            os.environ.pop("SLICER_STUDIO_WEB", None)
+            if not os.path.exists("/.dockerenv"):
+                importer._webStartFolderGiven = False
+                self.assertEqual(importer.dialogStartFolder("~"), "~", "the desktop keeps what the dialog passed")
+                self.assertEqual(importer.dialogStartFolder(), "")
+            os.environ["SLICER_STUDIO_WEB"] = "1"
+            importer._webStartFolderGiven = False
+            self.assertEqual(importer.dialogStartFolder(os.path.expanduser("~")), folder)
+            self.assertEqual(importer.dialogStartFolder(os.path.expanduser("~")), "", "later dialogs reuse the last folder of Qt")
+            settings.setValue("Studio/LastOpenDirectory", os.path.join(self.tempDir, "gone"))
+            importer._webStartFolderGiven = False
+            self.assertIn(importer.dialogStartFolder(), ("/data", ""), "a folder that does not exist is not offered")
+            self.assertNotEqual(importer.dialogStartFolder("~"), os.path.join(self.tempDir, "gone"))
+            # The real call sites: Map > Import coordinates and Import stimulation sites, then a Studio card
+            settings.setValue("Studio/LastOpenDirectory", folder)
+            importer._webStartFolderGiven = False
+            slicer.util.selectModule("LesionNetworkMapping")
+            widget = slicer.modules.lesionnetworkmapping.widgetRepresentation().self()
+
+            def fakeGetOpenFileName(parent, caption, start, *args):
+                starts.append((str(caption), str(start)))
+                return ""
+
+            qt.QFileDialog.getOpenFileName = fakeGetOpenFileName
+            widget.onImportCoordinates()
+            widget.onImportStimulation()
+            self.assertEqual(starts[0], ("Import coordinates", folder))
+            self.assertEqual(starts[1][0], "Import stimulation sites")
+            self.assertEqual(starts[1][1], "", "the second dialog leaves the folder to Qt")
+            importer._webStartFolderGiven = False
+            from StudioLib import libcard_sources
+
+            source = libcard_sources.SourcesCard.__new__(libcard_sources.SourcesCard)
+            source.widget = None
+            del starts[:]
+            source.chooseFile()
+            self.assertEqual(starts, [("Import records", folder)])
+        finally:
+            qt.QFileDialog.getOpenFileName = realGetOpenFileName
+            importer._webStartFolderGiven = savedGiven
+            if savedWeb is None:
+                os.environ.pop("SLICER_STUDIO_WEB", None)
+            else:
+                os.environ["SLICER_STUDIO_WEB"] = savedWeb
+            if savedFolder is None:
+                settings.remove("Studio/LastOpenDirectory")
+            else:
+                settings.setValue("Studio/LastOpenDirectory", savedFolder)
+
 
 
 def _sphere(center=(0, 0, 0)):

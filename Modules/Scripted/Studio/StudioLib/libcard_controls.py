@@ -290,7 +290,7 @@ class AddControlSetDialog:
         self._updateButtons()
 
     def browse(self):
-        folder = qt.QFileDialog.getExistingDirectory(self.dialog, _("Folder of control lesions"), str(self.folderEdit.text) or os.path.expanduser("~"))
+        folder = qt.QFileDialog.getExistingDirectory(self.dialog, _("Folder of control lesions"), str(self.folderEdit.text) or library._importer().dialogStartFolder(os.path.expanduser("~")))
         if folder:
             self.setFolder(str(folder))
 

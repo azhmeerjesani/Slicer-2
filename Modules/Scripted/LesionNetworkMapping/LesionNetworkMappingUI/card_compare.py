@@ -1226,7 +1226,7 @@ class AddReferenceDialog(qt.QDialog):
             self.loadTerms()
 
     def _browse(self):
-        path = qt.QFileDialog.getOpenFileName(self, _("Reference map"), "", _("NIfTI (*.nii *.nii.gz)"))
+        path = qt.QFileDialog.getOpenFileName(self, _("Reference map"), widgets.dialogStartFolder(), _("NIfTI (*.nii *.nii.gz)"))
         if path:
             self.fileEdit.setText(path)
             if not self.titleEdit.text:

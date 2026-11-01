@@ -26,6 +26,19 @@ _LEVEL_COLORS = {
 }
 
 
+def dialogStartFolder(fallback=""):
+    """Where a file dialog without a folder of its own starts (``StudioLib.importer.dialogStartFolder``: /data in the web build).
+
+    ``fallback`` is returned when Studio is not available and in every build except the web one.
+    """
+    try:
+        from StudioLib import importer
+
+        return importer.dialogStartFolder(fallback)
+    except Exception:
+        return fallback
+
+
 def _studioUi():
     """``StudioLib.ui``, or None when the Studio module is not available."""
     try:

@@ -2801,8 +2801,14 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.updateComputeState()
         self._notifyControllers("onCohortMapsChanged", getattr(self.ctx, "cohortMaps", None))
 
+    def _dialogStartFolder(self):
+        """Where a file dialog without a folder of its own starts: /data in the web build, else Qt's choice."""
+        from LesionNetworkMappingUI import widgets
+
+        return widgets.dialogStartFolder()
+
     def onImportCoordinates(self):
-        path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Import coordinates"), "", COORDINATE_FILTER)
+        path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Import coordinates"), self._dialogStartFolder(), COORDINATE_FILTER)
         if path:
             self.importCoordinates(path)
 
@@ -2980,7 +2986,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             self._parameterNode.stimulationFlip = bool(checked)
 
     def onImportStimulation(self):
-        path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Import stimulation sites"), "", "Tables (*.csv *.tsv *.txt);;All files (*)")
+        path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Import stimulation sites"), self._dialogStartFolder(), "Tables (*.csv *.tsv *.txt);;All files (*)")
         if path:
             self.importStimulation(path)
 
