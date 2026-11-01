@@ -103,6 +103,10 @@ Run with the main window and testing enabled::
   (``vtkITKMorphologicalContourInterpolator``) on a lesion with many traced slices and quits: exit code 0, no "exit abnormally"
   (the interpolator's thread_local ITK filters were destroyed in worker threads that end after ITK's globals at shutdown: a
   SIGSEGV after the StudioTest suite reported OK, and in official 3D Slicer after any use of Fill between slices).
+- ``test_39_crash_check_studio_probe_runs_in_xvfb`` (BB-1): the ``--studio`` probe of ``StudioAutosaveCrashCheck.py`` (is
+  ``StudioLib.autosave_ui`` there) starts Slicer in ``xvfb-run`` like the harness's other Slicer runs unless ``--no-xvfb``
+  (without a display Qt cannot start, exit 1, and the report said "A-01b not present" and FAIL on every headless machine);
+  only exit code 3 means "not present", another non-zero exit says that Slicer did not start.
 """
 
 import json
@@ -3131,3 +3135,52 @@ class StudioRegressionTest(unittest.TestCase):
             self.assertNotIn("Traceback", output, output[-3000:])
             self.assertNotIn("exit abnormally", output, f"run {attempt + 1}: {output[-3000:]}")
             self.assertEqual(process.returncode, 0, f"run {attempt + 1}: {json.dumps(output[-3000:])}")
+
+    def test_39_crash_check_studio_probe_runs_in_xvfb(self):
+        """The A-01b probe of ``StudioAutosaveCrashCheck.py --studio`` is wrapped in xvfb-run (as every other Slicer run of the
+        harness) unless ``--no-xvfb``, and only its exit code 3 says that ``StudioLib.autosave_ui`` is missing.
+        """
+        import argparse
+        import importlib.util
+        from unittest import mock
+
+        path = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), *([os.pardir] * 5), "Utilities", "Scripts",
+                                             "StudioAutosaveCrashCheck.py"))
+        if not os.path.isfile(path):
+            self.skipTest("no source tree")
+        spec = importlib.util.spec_from_file_location("StudioAutosaveCrashCheckProbeTest", path)
+        crashCheck = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(crashCheck)
+
+        calls = []
+
+        def fake(returncode):
+            def run(command, **kwargs):
+                calls.append(command)
+                return subprocess.CompletedProcess(command, returncode, b"", b"")
+
+            return run
+
+        def probe(noXvfb, returncode):
+            del calls[:]
+            args = argparse.Namespace(slicer="/x/Slicer", out=self.directory, timeout=5, no_xvfb=noXvfb)
+            with mock.patch.object(crashCheck.subprocess, "run", fake(returncode)):
+                return crashCheck._probeStudio(args)
+
+        self.assertIsNone(probe(False, 0))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][:3], ["xvfb-run", "-a", "-s"], calls[0])
+        self.assertEqual(calls[0][4], "/x/Slicer", calls[0])
+        self.assertIn("--no-main-window", calls[0])
+        self.assertIn("StudioLib.autosave_ui", calls[0][-1])
+        self.assertIsNone(probe(True, 0))
+        self.assertEqual(calls[0][0], "/x/Slicer", calls[0])
+        self.assertNotIn("xvfb-run", calls[0])
+        self.assertIn("A-01b not present", probe(False, crashCheck.PROBE_ABSENT_EXIT))
+        failed = probe(False, 1)
+        self.assertIn("exited with code 1", failed)
+        self.assertNotIn("not present", failed)
+
+        # The real command line of a run goes through the same wrapper
+        self.assertEqual(crashCheck._withDisplay(["a", "b"], argparse.Namespace(no_xvfb=False))[:3], ["xvfb-run", "-a", "-s"])
+        self.assertEqual(crashCheck._withDisplay(["a", "b"], argparse.Namespace(no_xvfb=True)), ["a", "b"])

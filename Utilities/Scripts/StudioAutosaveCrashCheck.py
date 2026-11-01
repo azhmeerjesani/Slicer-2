@@ -590,6 +590,31 @@ def _generatedScript(configPath):
     )
 
 
+#: Exit code of the A-01b probe when StudioLib.autosave_ui cannot be imported (any other non-zero exit: Slicer did not start)
+PROBE_ABSENT_EXIT = 3
+#: Code of the A-01b probe
+PROBE_CODE = ("import importlib.util,slicer; "
+              f"slicer.app.exit(0 if importlib.util.find_spec('StudioLib.autosave_ui') else {PROBE_ABSENT_EXIT})")
+
+
+def _withDisplay(command, args):
+    """The command, wrapped in xvfb-run (a virtual display) unless ``--no-xvfb``; every Slicer process of the harness uses it."""
+    if args.no_xvfb:
+        return list(command)
+    return ["xvfb-run", "-a", "-s", "-screen 0 1920x1080x24", *command]
+
+
+def _probeStudio(args):
+    """Return the problem text when the Studio recovery card (A-01b) cannot be checked, else None."""
+    probe = subprocess.run(_withDisplay([args.slicer, "--no-splash", "--no-main-window", "--testing", "--python-code", PROBE_CODE], args),
+                           env=dict(os.environ, HOME=os.path.join(args.out, "probe-home")), capture_output=True, timeout=args.timeout, check=False)
+    if probe.returncode == 0:
+        return None
+    if probe.returncode == PROBE_ABSENT_EXIT:
+        return "A-01b not present (StudioLib.autosave_ui cannot be imported): --studio cannot be checked"
+    return f"A-01b probe failed: Slicer exited with code {probe.returncode} (no display? see --no-xvfb): --studio cannot be checked"
+
+
 def _runSlicer(slicerPath, name, config, home, args, official=False):
     runDir = os.path.join(args.out, "runs", name)
     shutil.rmtree(runDir, ignore_errors=True)
@@ -601,9 +626,7 @@ def _runSlicer(slicerPath, name, config, home, args, official=False):
     scriptPath = os.path.join(runDir, "script.py")
     with open(scriptPath, "w", encoding="utf-8") as f:
         f.write(_generatedScript(configPath))
-    command = [slicerPath, "--no-splash", "--ignore-slicerrc", "--python-script", scriptPath]
-    if not args.no_xvfb:
-        command = ["xvfb-run", "-a", "-s", "-screen 0 1920x1080x24", *command]
+    command = _withDisplay([slicerPath, "--no-splash", "--ignore-slicerrc", "--python-script", scriptPath], args)
     environment = dict(os.environ, HOME=home, XDG_CONFIG_HOME=os.path.join(home, ".config"), XDG_CACHE_HOME=os.path.join(home, ".cache"),
                        XDG_DATA_HOME=os.path.join(home, ".local", "share"))
     environment.pop("SLICER_STUDIO_AUTOSAVE", None)
@@ -684,11 +707,9 @@ def main(argv=None):
     os.makedirs(home)
 
     if args.studio:
-        probe = subprocess.run([args.slicer, "--no-splash", "--no-main-window", "--testing", "--python-code",
-                                "import importlib.util,slicer; slicer.app.exit(0 if importlib.util.find_spec('StudioLib.autosave_ui') else 3)"],
-                               env=dict(os.environ, HOME=os.path.join(args.out, "probe-home")), capture_output=True, timeout=args.timeout, check=False)
-        if probe.returncode != 0:
-            problems.append("A-01b not present (StudioLib.autosave_ui cannot be imported): --studio cannot be checked")
+        probeProblem = _probeStudio(args)
+        if probeProblem:
+            problems.append(probeProblem)
 
     if args.projects:
         return _mainProjects(args, checkers, report, problems, home)
