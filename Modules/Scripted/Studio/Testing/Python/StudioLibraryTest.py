@@ -324,6 +324,43 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             actual = button.icon.actualSize(size)
             self.assertEqual((actual.width(), actual.height()), (16, 16), button.objectName)
 
+    def test_open_button_icon_follows_the_highlighted_text_of_the_palette(self):
+        """The icon of the primary Open... button has the ink of its text: HighlightedText of the palette. With a light user accent
+        color the text is dark and the icon used to stay white (1.4:1 on yellow) because the "onAccent" tint was hard-coded (BB-1).
+        """
+        from StudioLib import ui
+
+        def inkOf(icon):
+            image = icon.pixmap(16, 16).toImage()
+            best = (0, None)
+            for y in range(image.height()):
+                for x in range(image.width()):
+                    color = qt.QColor(image.pixel(x, y))
+                    alpha = qt.QColor.fromRgba(image.pixel(x, y)).alpha()
+                    if alpha > best[0]:
+                        best = (alpha, color.name())
+            return best[1]
+
+        studioShell = self._applyStudio()
+        canvas = self._library(studioShell)
+        original = qt.QPalette(slicer.app.palette())
+
+        def restore():
+            slicer.app.setPalette(original)
+            ui._iconCache.clear()
+            canvas._refreshIcons()
+
+        self.cleanup.append(restore)
+        for accent, ink in (("#f5d90a", "#1c1c1f"), ("#2158bd", "#ffffff")):
+            palette = qt.QPalette(original)
+            for group in (qt.QPalette.Active, qt.QPalette.Inactive, qt.QPalette.Disabled):
+                palette.setColor(group, qt.QPalette.Highlight, qt.QColor(accent))
+                palette.setColor(group, qt.QPalette.HighlightedText, qt.QColor(ink))
+            slicer.app.setPalette(palette)
+            canvas._refreshIcons()
+            self.assertEqual(inkOf(canvas.openButton.icon), ink, accent)
+            self.assertEqual(inkOf(ui.icon("import", 16, "onAccent")), ink, accent)
+
     def test_open_now_row_icons_are_16_px_at_every_pixel_ratio(self):
         """The eye and the more button of the Open now rows draw their 16 px icons at 16 logical px, as the header buttons do:
         without an icon size they use the style's 24 px and, at a device pixel ratio of 2, draw the icons at 24 px (BB-1).

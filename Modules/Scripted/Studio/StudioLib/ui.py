@@ -351,7 +351,7 @@ _ICON_TINTS = {
     "normal": ("text2", "text", "accent-fg", "text-disabled"),
     "strong": ("text", "text", "accent-fg", "text-disabled"),
     "accent": ("accent-fg", "accent-fg", "accent-fg", "text-disabled"),
-    "onAccent": ("#ffffff", "#ffffff", "#ffffff", "text-disabled"),
+    "onAccent": ("highlighted-text", "highlighted-text", "highlighted-text", "text-disabled"),
     "danger": ("danger", "danger", "danger", "text-disabled"),
     "warning": ("warning", "warning", "warning", "text-disabled"),
 }
@@ -405,7 +405,7 @@ def icon(name, size=18, role="normal"):
 
     The icon is tinted for each state: normal = text2, active (hover) = text, checked = accent-fg,
     disabled = text-disabled. ``role`` selects another tint set: "strong" (text), "accent", "onAccent"
-    (white, for icons on an accent fill), "danger" or "warning".
+    (the palette's HighlightedText, white on the default accent and dark on a light accent, for icons on an accent fill), "danger" or "warning".
     Pixmaps are rendered at 1x and at the device pixel ratio. Icons are cached per palette.
     """
     global _iconCachePaletteKey
