@@ -1275,6 +1275,7 @@ class _DrawSession(VTKObservationMixin):
             # Created on every entry and disposed by leave(): nothing is kept across Classic
             self.footer = _CtaFooter(self)
         shell.setInspectorFooter(self.footer.widget)
+        extension()._scheduleTabOrder()
         self._updateFooter()
 
     def _updateFooter(self):
@@ -2562,6 +2563,7 @@ class DrawExtension:
         self._lastReadout = None
         self._lastReadoutKey = None
         self._lastStats = None
+        self._tabOrderScheduled = False
 
     #
     # Session
@@ -2625,7 +2627,27 @@ class DrawExtension:
         return ui.tooltip(text, " · ".join(keys) if keys else None, description)
 
     def onEnter(self):
-        pass
+        self._scheduleTabOrder()
+
+    def _scheduleTabOrder(self):
+        """Put the Tab order of the inspector in its reading order, once the widgets that are being added are all there
+        (the keyboard focus chain follows the creation order: a card that is added late, or placed above a row that was
+        created before it, would otherwise be reached out of order).
+        """
+        if self._tabOrderScheduled:
+            return
+        self._tabOrderScheduled = True
+        qt.QTimer.singleShot(0, self._arrangeTabOrder)
+
+    def _arrangeTabOrder(self):
+        self._tabOrderScheduled = False
+        shell = self._shell()
+        if shell is None or self._session is None:
+            return
+        try:
+            shell.arrangeInspectorTabOrder()
+        except Exception:
+            logging.error(f"Studio: the Tab order of the Draw inspector could not be arranged:\n{traceback.format_exc()}")
 
     def onExit(self):
         pass
@@ -2976,6 +2998,7 @@ class DrawExtension:
                       key=lambda k: self._cards[k][1])
         target.insertWidget(keys.index(key), widget)
         widget.show()
+        self._scheduleTabOrder()
 
     def removeInspectorCard(self, key):
         entry = self._cards.pop(key, None)
@@ -2987,6 +3010,7 @@ class DrawExtension:
                 layout.removeWidget(widget)
         widget.hide()
         widget.setParent(None)
+        self._scheduleTabOrder()
         return True
 
     def _discoverDrawCards(self):

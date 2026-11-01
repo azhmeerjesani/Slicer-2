@@ -452,6 +452,73 @@ void qMRMLViewControllerBarPrivate::ensureFlatStyleApplied()
 }
 
 //---------------------------------------------------------------------------
+void qMRMLViewControllerBarPrivate::arrangeBarTabOrder()
+{
+  // The keyboard focus chain follows the creation order of the widgets, not the layout: the flat bar puts the
+  // orientation first and the buttons last, which the creation order does not follow
+  auto takesTabFocus = [](QWidget* widget) { return widget && (widget->focusPolicy() & Qt::TabFocus); };
+  auto focusTarget = [](QWidget* widget)
+  {
+    while (widget->focusProxy())
+    {
+      widget = widget->focusProxy();
+    }
+    return widget;
+  };
+
+  if (!this->ClassicTabOrderRecorded)
+  {
+    // The classic order is the focus chain of the widgets that are in the bar, before the first change
+    this->ClassicTabOrderRecorded = true;
+    for (QWidget* widget = this->BarWidget->nextInFocusChain(); widget && widget != this->BarWidget; widget = widget->nextInFocusChain())
+    {
+      if (this->BarWidget->isAncestorOf(widget) && takesTabFocus(widget))
+      {
+        this->ClassicTabOrder << widget;
+      }
+    }
+  }
+
+  QList<QWidget*> ordered;
+  if (this->FlatStyle)
+  {
+    for (int index = 0; index < this->BarLayout->count(); ++index)
+    {
+      QWidget* itemWidget = this->BarLayout->itemAt(index)->widget();
+      if (!itemWidget)
+      {
+        continue;
+      }
+      // The widget, then the widgets inside it (a slider with its spin box) in their creation order
+      QList<QWidget*> candidates;
+      candidates << itemWidget << itemWidget->findChildren<QWidget*>();
+      for (QWidget* candidate : candidates)
+      {
+        QWidget* target = takesTabFocus(candidate) ? focusTarget(candidate) : nullptr;
+        if (target && !ordered.contains(target))
+        {
+          ordered << target;
+        }
+      }
+    }
+  }
+  else
+  {
+    for (const QPointer<QWidget>& widget : this->ClassicTabOrder)
+    {
+      if (widget)
+      {
+        ordered << widget;
+      }
+    }
+  }
+  for (int index = 1; index < ordered.count(); ++index)
+  {
+    QWidget::setTabOrder(ordered[index - 1], ordered[index]);
+  }
+}
+
+//---------------------------------------------------------------------------
 void qMRMLViewControllerBarPrivate::updateFlatStyle()
 {
   Q_Q(qMRMLViewControllerBar);
@@ -465,6 +532,7 @@ void qMRMLViewControllerBarPrivate::updateFlatStyle()
     this->ClassicMaximizeIconSize = this->MaximizeViewButton->iconSize();
   }
   this->arrangeBarLayout();
+  this->arrangeBarTabOrder();
   this->AppliedFlatStyle = flat;
 
   if (flat)

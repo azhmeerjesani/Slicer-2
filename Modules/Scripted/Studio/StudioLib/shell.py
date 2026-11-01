@@ -3233,6 +3233,13 @@ class Shell:
     def inspectorFooter(self):
         return self._footerWidget
 
+    def arrangeInspectorTabOrder(self):
+        """Make Tab go through the inspector (panel header, notice, module, footer) in reading order, top to bottom."""
+        dock = self._panelDock()
+        contents = dock.widget() if dock is not None else None
+        if contents is not None:
+            ui.arrangeTabOrder(contents)
+
     def setInspectorNotice(self, widget=None, key=None, workspace=None):
         """Show ``widget`` in the inspector notice slot, between the panel header and the module (USABILITY 6.4).
 

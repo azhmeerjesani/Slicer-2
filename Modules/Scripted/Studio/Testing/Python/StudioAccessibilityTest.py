@@ -17,6 +17,7 @@ Classic interface. They cover:
 - the close prompt modes (saved lesion and template only, unsaved lesion edits, Save lesion then Cancel).
 """
 
+import itertools
 import os
 
 import qt
@@ -94,6 +95,17 @@ class StudioAccessibilityTest(ScriptedLoadableModule.ScriptedLoadableModuleTest)
         while time.perf_counter() < end:
             slicer.app.processEvents()
             time.sleep(0.005)
+
+    def _waitFor(self, condition, ms):
+        import time
+
+        end = time.perf_counter() + ms / 1000.0
+        while time.perf_counter() < end:
+            slicer.app.processEvents()
+            if condition():
+                return True
+            time.sleep(0.005)
+        return condition()
 
     def _applyStudio(self):
         from StudioLib import shell
@@ -568,6 +580,151 @@ class StudioAccessibilityTest(ScriptedLoadableModule.ScriptedLoadableModuleTest)
         studioShell.dispose()
         self._pump(8)
         self.assertEqual(int(panelScrollArea.focusPolicy), int(classicPolicy), "Classic gets the focus policy back")
+
+    def _tabStops(self, root):
+        """The widgets under ``root`` that Tab stops on now, in the order of the keyboard focus chain (starting at the
+        stop that is highest on the screen, then left).
+        """
+        tab = int(qt.Qt.TabFocus)
+        first = None
+        stops = []
+        widget = root.nextInFocusChain()
+        while widget is not None and widget != root:
+            if widget.isVisible() and widget.isEnabled() and int(widget.focusPolicy) & tab and root.isAncestorOf(widget):
+                stops.append(widget)
+            widget = widget.nextInFocusChain()
+        self.assertGreater(len(stops), 3, "the widget has Tab stops")
+
+        def position(widget):
+            point = widget.mapTo(root, qt.QPoint(0, 0))
+            return point.y(), point.x()
+
+        # The first stop: the leftmost of the stops on the top row (within the few pixels of the rows' rounding)
+        highest = min(position(widget)[0] for widget in stops)
+        top = min((index for index in range(len(stops)) if position(stops[index])[0] <= highest + 12), key=lambda index: position(stops[index])[1])
+        return stops[top:] + stops[:top]
+
+    def _assertReadingOrder(self, stops, direction, what):
+        """Each stop is not above (direction "down") or not left of (direction "right") the one before it, where the two
+        are not on the same row (or column), within the rounding of a few pixels.
+        """
+        for before, after in itertools.pairwise(stops):
+            first = before.mapToGlobal(qt.QPoint(0, 0))
+            second = after.mapToGlobal(qt.QPoint(0, 0))
+            if direction == "down":
+                ok = second.y() + 12 >= first.y() and (abs(second.y() - first.y()) > 12 or second.x() >= first.x())
+            else:
+                ok = second.x() + 2 >= first.x()
+            self.assertTrue(ok, f"{what}: Tab goes from {before.objectName or before.className()} ({first.x()}, {first.y()}) "
+                                f"to {after.objectName or after.className()} ({second.x()}, {second.y()})")
+
+    def test_tab_order_follows_reading_order(self):
+        """Tab follows the reading order: in the Draw inspector top to bottom (the card of "Trace from a figure" above
+        Notes, "Normalize to MNI" above Notes), in each slice view bar left to right (orientation, slider, link, Fit,
+        Options, Maximize), where the keyboard focus chain follows the creation order of the widgets.
+        """
+        import numpy as np
+
+        slicer.util.addVolumeFromArray(np.arange(8 * 9 * 10, dtype=np.uint8).reshape(8, 9, 10), name="Scan")
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        from StudioLib import draw
+
+        # The cards are added over the first moments (the figure card, the case strip) and the order follows each one
+        self._waitFor(lambda: not draw.extension()._tabOrderScheduled and self.mainWindow.findChild("QWidget", "StudioNormalizeDrawRow") is not None
+                      and self.mainWindow.findChild("QWidget", "StudioNormalizeDrawRow").isVisible(), 5000)
+        # The row of "Trace from a figure" is hidden until a figure is used: its place in the order does not depend on that
+        figureSlot = self.mainWindow.findChild("QWidget", "StudioFigureSlot")
+        self.assertIsNotNone(figureSlot)
+        figureSlot.setVisible(True)
+        self._wait(100)
+        dock = self.mainWindow.findChild("QDockWidget", "PanelDockWidget")
+        contents = dock.widget()
+        stops = self._tabStops(contents)
+        names = [widget.objectName for widget in stops]
+        for name in ("StudioDisplayOpacitySlider", "StudioFigureRow", "StudioNormalizeDrawRow", "StudioDrawNotesRow"):
+            self.assertIn(name, names, f"{name} is a Tab stop of the Draw inspector")
+        self.assertLess(names.index("StudioDisplayOpacitySlider"), names.index("StudioNormalizeDrawRow"))
+        self.assertLess(names.index("StudioNormalizeDrawRow"), names.index("StudioFigureRow"))
+        self.assertLess(names.index("StudioFigureRow"), names.index("StudioDrawNotesRow"))
+        if "StudioSaveLesionButton" in names:
+            self.assertLess(names.index("StudioDrawNotesRow"), names.index("StudioSaveLesionButton"), "the footer comes last")
+        self._assertReadingOrder(stops, "down", "Draw inspector")
+
+        # A card that a module adds later takes its place in the order (above the Display card here)
+        late = qt.QPushButton("Late card")
+        late.setObjectName("StudioLateCardButton")
+        draw.addInspectorCard("late-card-test", late, 10)
+        try:
+            self._waitFor(lambda: not draw.extension()._tabOrderScheduled, 2000)
+            names = [widget.objectName for widget in self._tabStops(contents)]
+            self.assertIn("StudioLateCardButton", names)
+            self.assertLess(names.index("StudioLateCardButton"), names.index("StudioNormalizeDrawRow"))
+            self.assertLess(names.index("StudioLateCardButton"), names.index("StudioDisplayOpacitySlider"))
+            self.assertLess(names.index("StudioLateCardButton"), names.index("SegmentEditorMoreToolsButton"), "before the tools")
+            for name in ("StudioLesionMenuButton", "StudioFollowStrokesButton"):
+                if name in names:
+                    self.assertLess(names.index(name), names.index("StudioLateCardButton"), f"after the Lesion card ({name})")
+        finally:
+            draw.extension().removeInspectorCard("late-card-test")
+
+        # The slice view bars (flat in Studio)
+        layoutManager = slicer.app.layoutManager()
+        controllers = [layoutManager.sliceWidget(name).sliceController() for name in layoutManager.sliceViewNames()]
+        flatBefore = [controller.flatStyle for controller in controllers]
+        try:
+            for controller in controllers:
+                controller.setProperty("flatStyle", False)
+            self._pump(8)
+            classicOrders = []
+            for controller in controllers:
+                bar = controller.findChild("QWidget", "BarWidget")
+                classicOrders.append(self._chainStops(bar, shownOnly=False))
+            for controller in controllers:
+                controller.setProperty("flatStyle", True)
+            self._wait(100)
+            checked = 0
+            for controller in controllers:
+                bar = controller.findChild("QWidget", "BarWidget")
+                if not bar.isVisible():
+                    # The layout of the workspace shows some of the views
+                    continue
+                checked += 1
+                barStops = self._chainStops(bar)
+                barNames = [widget.objectName or widget.className() for widget in barStops]
+                self.assertEqual(barNames[0], "OrientationButton", barNames)
+                self.assertEqual(barNames[-1], "MaximizeViewButton", barNames)
+                self.assertIn("BarLinkButton", barNames)
+                self.assertIn("OptionsButton", barNames)
+                # Left to right: the bar is a row
+                self._assertReadingOrder(barStops, "right", "flat slice view bar")
+            self.assertGreater(checked, 0, "a slice view bar is shown")
+            # Back to the classic presentation: its own order again
+            for controller in controllers:
+                controller.setProperty("flatStyle", False)
+            self._pump(8)
+            for controller, classicOrder in zip(controllers, classicOrders, strict=True):
+                bar = controller.findChild("QWidget", "BarWidget")
+                self.assertEqual([widget.objectName or widget.className() for widget in self._chainStops(bar, shownOnly=False)],
+                                 [widget.objectName or widget.className() for widget in classicOrder], "the classic bar keeps its Tab order")
+        finally:
+            for controller, flat in zip(controllers, flatBefore, strict=True):
+                controller.setProperty("flatStyle", flat)
+
+        studioShell.dispose()
+        self._pump(8)
+
+    def _chainStops(self, root, shownOnly=True):
+        """The Tab stops inside ``root`` (the visible, enabled ones, or all), in the order of the focus chain from ``root``."""
+        tab = int(qt.Qt.TabFocus)
+        stops = []
+        widget = root.nextInFocusChain()
+        while widget is not None and widget != root:
+            if ((widget.isVisible() and widget.isEnabled()) or not shownOnly) and int(widget.focusPolicy) & tab and root.isAncestorOf(widget):
+                stops.append(widget)
+            widget = widget.nextInFocusChain()
+        self.assertGreater(len(stops), 2, "the widget has Tab stops")
+        return stops
 
     #
     # First run

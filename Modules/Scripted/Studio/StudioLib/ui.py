@@ -277,6 +277,64 @@ def layoutContentsMargins(layout):
     return margins() if callable(margins) else margins
 
 
+def readingOrderFocusWidgets(root):
+    """The widgets under ``root`` that Tab can reach, in reading order: layout order, depth first (top to bottom in a
+    vertical layout, left to right in a horizontal one), whether they are shown now or not. The keyboard focus chain of
+    Qt follows the creation order of the widgets, which differs from the layout order when a row is created late (a
+    card that a module adds) or placed above a row that was created before it.
+    """
+    # The lists keep the wrappers alive, so that id() stays the key of one widget (PythonQt gives one wrapper per widget
+    # while a reference to it exists; == between wrappers is slow for hundreds of widgets)
+    result = []
+    resultIds = set()
+    visited = []
+    visitedIds = set()
+    window = root.window()
+
+    def addWidget(widget):
+        if int(widget.focusPolicy) & int(qt.Qt.TabFocus):
+            target = widget
+            while target.focusProxy() is not None:
+                target = target.focusProxy()
+            if id(target) not in resultIds and target.window() == window:
+                result.append(target)
+                resultIds.add(id(target))
+
+    def visitLayout(layout):
+        for index in range(layout.count()):
+            item = layout.itemAt(index)
+            widget = item.widget()
+            if widget is not None:
+                visitWidget(widget)
+            elif item.layout() is not None:
+                visitLayout(item.layout())
+
+    def visitWidget(widget):
+        if id(widget) in visitedIds or (widget.isWindow() and widget != root):
+            return
+        visited.append(widget)
+        visitedIds.add(id(widget))
+        addWidget(widget)
+        layout = widget.layout()
+        if layout is not None:
+            visitLayout(layout)
+        # The children that no layout holds (the viewport of a scroll area, the parts of a tab widget), in creation order
+        for child in widget.children():
+            if child.isWidgetType():
+                visitWidget(child)
+
+    visitWidget(root)
+    return result
+
+
+def arrangeTabOrder(root):
+    """Make the Tab order of the widgets under ``root`` follow their reading order (readingOrderFocusWidgets())."""
+    widgets = readingOrderFocusWidgets(root)
+    for index in range(1, len(widgets)):
+        qt.QWidget.setTabOrder(widgets[index - 1], widgets[index])
+    return widgets
+
+
 def _isAlive(widget):
     try:
         widget.objectName
