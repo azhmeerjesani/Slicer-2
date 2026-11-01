@@ -3661,6 +3661,12 @@ class _CardInfo:
             self.note = _("No lesion yet") if self.status == "untraced" else _("No preview")
         self.signature = (self.status, self.qc, self.current, self.bottomChips, self.topChips, self.thumbKey)
 
+    def failedNote(self, service):
+        """The note of a card whose thumbnail failed: names a lesion file that cannot be read, else ``note``."""
+        if service is not None and self.request is not None and self.request.lesion and service.lesionUnreadable(self.thumbKey):
+            return _("Lesion file cannot be read")
+        return self.note
+
 
 class _GridView(qt.QListView):
     """The card grid (a ``QListView`` in icon mode over the list's model).
@@ -4065,7 +4071,7 @@ class StudyGrid(qt.QObject):
             else:
                 painter.setFont(self._font(11))
                 painter.setPen(qt.QColor(THUMB_CHIP_COLORS["muted"]))
-                note = _("Making preview…") if state == "pending" else info.note
+                note = _("Making preview…") if state == "pending" else info.failedNote(self._service)
                 painter.drawText(thumbRect, int(qt.Qt.AlignCenter), note)
             # Chips: extension columns at the top, space and volume at the bottom of the thumbnail
             painter.setFont(self._font(11))

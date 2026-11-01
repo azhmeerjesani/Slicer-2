@@ -1564,3 +1564,64 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                 close()
                 self.assertFalse(form.isOpen())
                 self.assertFalse(row.isHidden(), form.widget.objectName)
+
+    def test_corrupt_lesion_thumbnail_is_named_unreadable(self):
+        """A damaged lesion file gives a one-line log message and the card note "Lesion file cannot be read" (BB-1)."""
+        import logging
+        import types
+
+        from StudioLib import library, thumbnails
+
+        grid = GRID_NLIN6_2MM
+        good = self._writeMask("sub-01_lesion.nii.gz", grid)
+        bad = os.path.join(self.directory, "sub-02_lesion.nii.gz")
+        with open(good, "rb") as f:
+            blob = f.read()
+        with open(bad, "wb") as f:  # a valid gzip header with a damaged deflate stream
+            f.write(blob[:20] + bytes(b ^ 0xFF for b in blob[20:60]) + blob[60:])
+        plain = os.path.join(self.directory, "sub-03_lesion.nii.gz")
+        with open(plain, "w") as f:  # not gzip at all
+            f.write("not a NIfTI image")
+        truncated = os.path.join(self.directory, "sub-04_lesion.nii.gz")
+        with open(truncated, "wb") as f:
+            f.write(blob[: len(blob) // 2])
+
+        records = []
+
+        class Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        handler = Capture(level=logging.DEBUG)
+        logging.getLogger().addHandler(handler)
+        self.cleanup.append(lambda: logging.getLogger().removeHandler(handler))
+        service = thumbnails.ThumbnailService(self.directory)
+        self.cleanup.append(service.stop)
+        requests = {name: service.requestFor(name, path, None) for name, path in (("good", good), ("bad", bad), ("plain", plain), ("truncated", truncated))}
+        for request in requests.values():
+            service.request(request)
+        deadline = time.time() + 60
+        while not service.isIdle() and time.time() < deadline:
+            self._wait(50)
+        self._pump()
+        self.assertIsNotNone(service.pixmap(requests["good"].key))
+        self.assertFalse(service.lesionUnreadable(requests["good"].key))
+        for name in ("bad", "plain", "truncated"):
+            key = requests[name].key
+            self.assertIsNotNone(service.failed(key), name)
+            self.assertTrue(service.lesionUnreadable(key), name)
+            info = types.SimpleNamespace(note="No preview", request=requests[name], thumbKey=key)
+            self.assertEqual(library._CardInfo.failedNote(info, service), "Lesion file cannot be read", name)
+        # A lesion that was fine, or a failure that is not about the lesion, keeps the card's own note
+        info = types.SimpleNamespace(note="No preview", request=requests["good"], thumbKey=requests["good"].key)
+        self.assertEqual(library._CardInfo.failedNote(info, service), "No preview")
+        self.assertEqual(library._CardInfo.failedNote(types.SimpleNamespace(note="No preview", request=None, thumbKey=None), service), "No preview")
+        # One line per damaged file, no traceback (an expected error with user data)
+        ours = [r for r in records if "no thumbnail for" in r.getMessage()]
+        self.assertEqual(len(ours), 3, [r.getMessage() for r in ours])
+        for record in ours:
+            message = record.getMessage()
+            self.assertEqual(record.levelno, logging.WARNING)
+            self.assertNotIn("Traceback", message)
+            self.assertNotIn("\n", message)
+            self.assertIn("cannot be read", message)
