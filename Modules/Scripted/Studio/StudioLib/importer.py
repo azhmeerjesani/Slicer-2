@@ -1672,6 +1672,14 @@ def loadRecentFile(properties, action=None, shell=None):
     """
     shell = _currentShell(shell)
     fileName = str((properties or {}).get("fileName", ""))
+    if fileName and not os.path.exists(fileName):
+        # A recent file that was moved or deleted since: say so plainly (not a generic "Failed to load")
+        result = LoadResult()
+        result.errors.append((fileName, _("moved or deleted")))
+        slicer.util.warningDisplay(
+            _("{name} was moved or deleted, so it cannot be opened.").format(name=os.path.basename(fileName) or fileName),
+            windowTitle=_("File not found"), detailedText=fileName)
+        return result
     isScene = (properties or {}).get("fileType") == "SceneFile" or _extension(fileName) in SCENE_EXTENSIONS
     if shell is not None and not isScene and os.path.isfile(fileName) and fileKind(fileName) in ("figure", "statmap"):
         # A figure or a statistical map takes its own route (never a scan of Draw); an open one is shown again

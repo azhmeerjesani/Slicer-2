@@ -462,6 +462,71 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self._pump()
         self.assertEqual(slicer.mrmlScene.GetNumberOfNodes(), nodesBefore, "re-opening a Recent file adds no node")
 
+    def test_06b_recent_files_skip_missing_and_internal(self):
+        """Recent files of Search match Library's: a deleted file and a file of the cache folder are not offered; choosing a
+        recent file that disappeared after the list was built says it was moved or deleted (no generic "Failed to load").
+        """
+        import os
+
+        from StudioLib import importer, palette
+
+        studioShell = self._applyStudio()
+        directory = qt.QTemporaryDir()
+        paths = []
+        for name in ("StudioPaletteKeep", "StudioPaletteGone"):
+            path = f"{directory.path()}/{name}.nrrd"
+            scan = self._mriVolume(name, (10, 10, 10), 1.0, (0.0, 0.0, 0.0))
+            self.assertTrue(slicer.util.saveNode(scan, path))
+            slicer.mrmlScene.RemoveNode(scan)
+            paths.append(path)
+        keep, gone = paths
+        importer.loadFiles([keep, gone], studioShell)
+        self._pump()
+        studioShell.openPalette()
+        live = palette.instance()
+        live.index.refresh()
+        ids = [entry.id for entry in live.index.entries if entry.kind == palette.KIND_RECENT]
+        self.assertIn(f"recent:{gone}", ids)
+        # The file is deleted: Search no longer lists it; nor a file of the cache folder, which Library hides
+        os.remove(gone)
+        cacheFolder = slicer.app.cachePath
+        os.makedirs(cacheFolder, exist_ok=True)
+        cached = os.path.join(cacheFolder, "StudioPaletteCached.nrrd")
+        scan = self._mriVolume("StudioPaletteCached", (10, 10, 10), 1.0, (0.0, 0.0, 0.0))
+        self.assertTrue(slicer.util.saveNode(scan, cached))
+        slicer.mrmlScene.RemoveNode(scan)
+        try:
+            importer.loadFiles([cached], studioShell)
+            self._pump()
+            menuFiles = [str(action.property("fileParameters").get("fileName", ""))
+                         for action in self.mainWindow.findChild("QMenu", "RecentlyLoadedMenu").actions() if action.property("fileParameters")]
+            self.assertIn(cached, menuFiles, "the cache file is in the recently loaded menu (so the filter is tested)")
+            live.index.refresh()
+            ids = [entry.id for entry in live.index.entries if entry.kind == palette.KIND_RECENT]
+            self.assertNotIn(f"recent:{gone}", ids)
+            self.assertNotIn(f"recent:{cached}", ids)
+            self.assertIn(f"recent:{keep}", ids)
+        finally:
+            os.remove(cached)
+        live.close()
+        # A recent file that disappeared after the list was built: a plain message
+        messages = []
+        original = slicer.util.warningDisplay
+        errors = []
+        originalError = slicer.util.errorDisplay
+        slicer.util.warningDisplay = lambda text, *args, **kwargs: messages.append(str(text))
+        slicer.util.errorDisplay = lambda text, *args, **kwargs: errors.append(str(text))
+        try:
+            result = importer.loadRecentFile({"fileName": gone, "fileType": "VolumeFile"}, shell=studioShell)
+        finally:
+            slicer.util.warningDisplay = original
+            slicer.util.errorDisplay = originalError
+        self.assertEqual(errors, [])
+        self.assertEqual(len(messages), 1)
+        self.assertIn("moved or deleted", messages[0])
+        self.assertIn("StudioPaletteGone.nrrd", messages[0])
+        self.assertEqual(result.nodes(), [])
+
     def test_07_commands(self):
         """View commands and window/level presets."""
         from StudioLib import importer, palette

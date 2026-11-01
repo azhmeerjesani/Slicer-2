@@ -1135,12 +1135,17 @@ class Index:
         entries = []
         if menu is None:
             return entries
+        # Like Library's "Opened from elsewhere": only files that still exist and are the user's own (not the templates
+        # and samples that Studio downloaded into the cache or temporary folders)
+        from . import library
+
+        internal = library._internalFolders()
         for action in menu.actions():
             properties = action.property("fileParameters")
             if not properties:
                 continue
             fileName = str(properties.get("fileName", "") if hasattr(properties, "get") else "")
-            if not fileName:
+            if not fileName or library.isInternalPath(fileName, internal) or not os.path.exists(fileName):
                 continue
             title = os.path.basename(fileName)
             entries.append(Entry(f"recent:{fileName}", title, _("Recent file"), lambda properties=properties, action=action: _loadRecent(properties, action, shell),
