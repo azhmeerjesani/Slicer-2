@@ -244,6 +244,7 @@ class NullsCard:
 
     def _buildSettings(self, layout):
         form = qt.QFormLayout()
+        form.setRowWrapPolicy(qt.QFormLayout.WrapLongRows)
         form.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
         self.kSpin = self._spin("LNMNullsK", MIN_K, MAX_K, DEFAULT_K, _("Null cohorts: the permutation p has the floor 1 / (K + 1). Fast mode computes at most 10,000."), 100)
         self.kLabel = qt.QLabel(_("Null cohorts (K)"))

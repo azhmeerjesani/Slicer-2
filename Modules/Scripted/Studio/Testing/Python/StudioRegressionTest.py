@@ -41,6 +41,8 @@ Run with the main window and testing enabled::
   stored width in every workspace, and no workspace module's stored width (``Studio/WorkspacePanelWidths/*``) is wider than it.
 - ``test_23_map_cards_keep_inspector_width`` (BB-1): expanding any Map card (Circuits with a long circuit name, Compare with its results
   shown) keeps the inspector at its stored width, and it stays there after the card is collapsed and in every workspace.
+- ``test_24_map_seed_modes_keep_inspector_width`` (BB-1): choosing each Map seed mode (Coordinates, Stimulation, ...) keeps the inspector at
+  the width of Draw, and it stays there back in Lesion mode and in every workspace, at the normal and at a 125 % application font.
 - ``test_17_job_result_waits_for_open_subject_edits`` (BB-1): a job result (a normalization) that repoints the open subject's
   scan, lesion and space while it has unsaved edits stays in the inbox when the inbox is merged (Library shown, "Merge job
   results", Search): Done writes the native tracing as the native lesion (never as template space) and the result is merged
@@ -1990,6 +1992,82 @@ class StudioRegressionTest(unittest.TestCase):
         finally:
             if studioShell is not None:
                 studioShell.dispose()
+            mainWindow.restoreGeometry(savedGeometry)
+            for key, value in saved.items():
+                if value is None:
+                    settings.remove(key)
+                else:
+                    settings.setValue(key, value)
+            slicer.mrmlScene.Clear(0)
+
+    def test_24_map_seed_modes_keep_inspector_width(self):
+        """Choosing a Map seed mode neither widens the inspector nor leaves it wide, at 100 % and 125 % font (BB-1).
+
+        The check box "Flip the sign (TMS: anticorrelation predicts response)" of the Stimulation seed (a check box does not wrap
+        its text), the Import / Points / Add points row of the Coordinates seed, and at a 125 % font the form rows and buttons
+        of the other Map cards had a layout minimum wider than the inspector, and the widest minimum a workspace module needed
+        stays for good (``Shell._workspacePanelWidths``): the inspector went from 340 px to 415 px in Stimulation mode and stayed
+        there back in Lesion mode, in Draw and in Library.
+        """
+        from StudioLib import shell, ui
+
+        mainWindow = slicer.util.mainWindow()
+        if mainWindow is None or not hasattr(slicer.modules, "lesionnetworkmapping"):
+            self.skipTest("needs the main window and the Map module")
+        settings = qt.QSettings()
+        keys = [f"{shell._WORKSPACE_PANEL_WIDTHS_GROUP}/{name}" for name in ("Studio", "SegmentEditor", "LesionNetworkMapping")]
+        saved = {key: settings.value(key) for key in keys}
+        savedGeometry = mainWindow.saveGeometry()
+        savedFont = qt.QFont(qt.QApplication.font())
+        studioShell = None
+
+        def pump(count=10):
+            for _ in range(count):
+                slicer.app.processEvents()
+
+        try:
+            mainWindow.resize(1366, 768)
+            for fontPx in (None, 17):
+                if studioShell is not None:
+                    studioShell.dispose()
+                    studioShell = None
+                for key in keys:
+                    settings.remove(key)
+                font = qt.QFont(savedFont)
+                if fontPx is not None:
+                    font.setPixelSize(fontPx)
+                qt.QApplication.setFont(font)
+                pump()
+                label = f"at {ui.applicationFontPx():g} px font"
+                studioShell = shell.Shell(force=True)
+                studioShell.apply()
+                dock = mainWindow.findChild("QDockWidget", "PanelDockWidget")
+                studioShell.switchTo("draw")
+                pump()
+                drawWidth = dock.width
+                studioShell.switchTo("map")
+                pump()
+                widget = slicer.modules.LesionNetworkMappingWidget
+                self.assertEqual(dock.width, drawWidth, f"the Map lesion seed widens the inspector {label}")
+                # Cohort mode needs a study with tabs of its own and is left out
+                for index, mode in enumerate(widget.seedModes):
+                    if mode == "cohort":
+                        continue
+                    widget.seedModeGroup.button(index).click()
+                    pump()
+                    self.assertEqual(dock.width, drawWidth, f"the {mode} seed mode widens the inspector {label}")
+                widget.seedModeGroup.button(0).click()
+                pump()
+                self.assertEqual(dock.width, drawWidth, f"the inspector stays wide back in Lesion mode {label}")
+                for workspace in ("draw", "library", "map"):
+                    studioShell.switchTo(workspace)
+                    pump()
+                    self.assertEqual(dock.width, drawWidth, f"the inspector is {dock.width} px in {workspace} {label}")
+        finally:
+            if studioShell is not None:
+                studioShell.dispose()
+            qt.QApplication.setFont(savedFont)
+            pump()
             mainWindow.restoreGeometry(savedGeometry)
             for key, value in saved.items():
                 if value is None:

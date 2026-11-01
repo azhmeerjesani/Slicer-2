@@ -1417,6 +1417,7 @@ class ConvertConnectomeDialog(qt.QDialog):
         intro.setWordWrap(True)
         layout.addWidget(intro)
         form = qt.QFormLayout()
+        form.setRowWrapPolicy(qt.QFormLayout.WrapLongRows)
         self.sourceCombo = qt.QComboBox()
         self.sourceCombo.setObjectName("LNMConvertSource")
         for source, text in (("nifti", _("NIfTI time series folder")), ("leaddbs", _("Lead-DBS connectome folder"))):  # manager.SOURCES
@@ -2220,6 +2221,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         layout = lesionLayout
 
         form = qt.QFormLayout()
+        form.setRowWrapPolicy(qt.QFormLayout.WrapLongRows)
         self.segmentationSelector = slicer.qMRMLNodeComboBox()
         self.segmentationSelector.setObjectName("LNMSeedSegmentationSelector")
         self.segmentationSelector.nodeTypes = ["vtkMRMLSegmentationNode"]
@@ -2552,6 +2554,10 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.coordImportButton.setToolTip(_("A table (x, y, z and optionally radius, study, space), a BrainMap Sleuth text file or a NiMARE dataset JSON"))
         self.coordImportButton.connect("clicked()", self.onImportCoordinates)
         row.addWidget(self.coordImportButton)
+        row.addStretch(1)
+        layout.addLayout(row)
+        # Two rows: the three controls side by side are wider than the inspector
+        row = qt.QHBoxLayout()
         self.coordMarkupsSelector = slicer.qMRMLNodeComboBox()
         self.coordMarkupsSelector.setObjectName("LNMCoordMarkupsSelector")
         self.coordMarkupsSelector.nodeTypes = ["vtkMRMLMarkupsFiducialNode"]
@@ -2576,6 +2582,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.coordSummaryLabel = self._label("", role="secondaryText", objectName="LNMCoordSummary")
         layout.addWidget(self.coordSummaryLabel)
         form = qt.QFormLayout()
+        form.setRowWrapPolicy(qt.QFormLayout.WrapLongRows)
         sphereRow, self.coordSphereKindCombo, self.coordSphereSizeSpin, self.coordSphereLabel = self._buildSphereRow("LNMCoord")
         form.addRow(_("Sphere"), sphereRow)
         layout.addLayout(form)
@@ -2652,6 +2659,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         layout = qt.QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
         form = qt.QFormLayout()
+        form.setRowWrapPolicy(qt.QFormLayout.WrapLongRows)
         self.stimKindCombo = qt.QComboBox()
         self.stimKindCombo.setObjectName("LNMStimKind")
         for kind, label in (("points", _("Points + sphere (TMS sites)")), ("efield", _("E-field NIfTI (SimNIBS)")), ("vta", _("VTA NIfTI (Lead-DBS)"))):
@@ -2698,16 +2706,22 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.stimSpaceBanner.hide()
         layout.addWidget(self.stimSpaceBanner)
         form = qt.QFormLayout()
+        form.setRowWrapPolicy(qt.QFormLayout.WrapLongRows)
         self.stimOutcomeCombo = qt.QComboBox()
         self.stimOutcomeCombo.setObjectName("LNMStimOutcome")
         self.stimOutcomeCombo.setToolTip(_("The per-patient outcome (for example % improvement) of the R-map"))
         self.stimOutcomeCombo.connect("currentIndexChanged(int)", lambda index: self._showStimulation())
         form.addRow(_("Outcome"), self.stimOutcomeCombo)
         layout.addLayout(form)
-        self.stimFlipCheckBox = qt.QCheckBox(_("Flip the sign (TMS: anticorrelation predicts response)"))
+        # The explanation is a label of its own that wraps: a check box never wraps its text, and the long line made the
+        # seed card (and the inspector with it, for good) wider than Studio/PanelWidth
+        self.stimFlipCheckBox = qt.QCheckBox(_("Flip the sign"))
         self.stimFlipCheckBox.setObjectName("LNMStimFlip")
+        self.stimFlipCheckBox.setToolTip(_("TMS: anticorrelation predicts response"))
         self.stimFlipCheckBox.connect("toggled(bool)", self.onStimulationFlipToggled)
         layout.addWidget(self.stimFlipCheckBox)
+        self.stimFlipHint = self._label(_("TMS: anticorrelation predicts response"), role="secondaryText", objectName="LNMStimFlipHint")
+        layout.addWidget(self.stimFlipHint)
         row = qt.QHBoxLayout()
         self.stimRmapButton = qt.QPushButton(_("Compute R-map"))
         self.stimRmapButton.setObjectName("LNMStimRmapButton")
@@ -3335,6 +3349,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.coordinateSeedPanel.setVisible(mode == "coordinates")
         self.stimulationSeedPanel.setVisible(mode == "stimulation")
         self.nullCheckBox.setVisible(mode == "lesion")
+        self.nullHintLabel.setVisible(mode == "lesion")
         if cohort and self.cohortInfo is None:
             self.refreshCohort()
         self._publishCohortMaps()
@@ -4160,11 +4175,14 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.subjectsLabel = self._label("", role="secondaryText", objectName="LNMSubjectsText")
         row.addWidget(self.subjectsLabel, 1)
         layout.addLayout(row)
-        self.nullCheckBox = qt.QCheckBox(_("Specificity QA: 50 relocated lesions"))
+        # A check box never wraps its text: the 50 relocations are a line of their own, under the check box
+        self.nullCheckBox = qt.QCheckBox(_("Specificity QA"))
         self.nullCheckBox.setObjectName("LNMNullCheckBox")
         self.nullCheckBox.setToolTip(_("Map 50 copies of the lesion moved elsewhere in the brain in the same pass, to compare the map with what any lesion of this shape gives"))
         self.nullCheckBox.connect("toggled(bool)", self.onNullToggled)
         layout.addWidget(self.nullCheckBox)
+        self.nullHintLabel = self._label(_("50 relocated lesions"), role="secondaryText", objectName="LNMNullHint")
+        layout.addWidget(self.nullHintLabel)
         # The family notice of the seed (A-10) also lives here: the Seed card collapses once the lesion is done
         self.computeFamilyLabel = self._label("", role="secondaryText", objectName="LNMComputeFamilyNotice")
         self.computeFamilyLabel.setWordWrap(True)
@@ -4780,6 +4798,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         layout.addLayout(row)
 
         form = qt.QFormLayout()
+        form.setRowWrapPolicy(qt.QFormLayout.WrapLongRows)
         ruleRow = qt.QHBoxLayout()
         self.ruleCombo = qt.QComboBox()
         self.ruleCombo.setObjectName("LNMRuleCombo")

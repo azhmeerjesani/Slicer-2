@@ -93,6 +93,7 @@ class OverlapTab:
         row.addStretch(1)
         layout.addLayout(row)
         form = qt.QFormLayout()
+        form.setRowWrapPolicy(qt.QFormLayout.WrapLongRows)
         import ctk
 
         self.sensitivitySlider = ctk.ctkSliderWidget()
