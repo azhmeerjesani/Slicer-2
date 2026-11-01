@@ -3517,6 +3517,48 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertIn("Normalize native subjects in the Library", templates)
         self.assertNotIn("Normalize all in the Library", templates)
 
+    def test_50_wrap_check_box_row_is_one_line_high_when_the_text_fits(self):
+        """The row of ui.wrapCheckBox() was laid out for two lines at every width (setSizePolicy() on the label dropped the
+        height-for-width flag that setWordWrap() sets), and the label centred its text: in the wide Classic panel the text
+        of "Blind tracing" sat 9 px below its check box (BB-1). The row is now as high as its text needs, and the text starts
+        level with the first line of the check box.
+        """
+        from StudioLib import ui
+
+        text = "Blind tracing: hide the other tracers' names while a case is traced"
+        host = qt.QWidget()
+        try:
+            hostLayout = qt.QVBoxLayout(host)
+            hostLayout.setContentsMargins(0, 0, 0, 0)
+            checkBox = qt.QCheckBox(text)
+            checkBox.setObjectName("StudioTestWrapCheckBox")
+            hostLayout.addWidget(ui.wrapCheckBox(checkBox))
+            hostLayout.addStretch(1)
+            host.show()
+            row = checkBox.parentWidget()
+            label = next(w for w in row.findChildren("QLabel") if w.objectName == "StudioWrapCheckBoxText")
+            metrics = label.fontMetrics
+            metrics = metrics() if callable(metrics) else metrics
+            lineHeight = metrics.height()
+            results = {}
+            for width in (900, 240):
+                host.resize(width, 300)
+                for _ in range(6):
+                    slicer.app.processEvents()
+                needed = label.heightForWidth(label.width)
+                results[width] = needed
+                self.assertEqual(row.height, needed, f"width {width}: the row is {row.height} px high, its text needs {needed} px")
+                self.assertLessEqual(label.y, 1, "the text starts at the top of the row")
+                self.assertTrue(int(label.alignment) & int(qt.Qt.AlignTop), "the text is top-aligned")
+                firstLineCentre = label.y + lineHeight / 2
+                boxCentre = checkBox.y + checkBox.height / 2
+                self.assertLessEqual(abs(firstLineCentre - boxCentre), 3, f"width {width}: text {firstLineCentre}, box {boxCentre}")
+            self.assertLess(results[900], 1.5 * lineHeight, "one line in the wide row")
+            self.assertGreaterEqual(results[240], 2 * lineHeight, "two or more lines in the narrow row")
+            self.assertEqual(str(checkBox.accessibleName), text)
+        finally:
+            host.deleteLater()
+
     def test_48_case_doi_field_is_as_wide_as_the_other_source_fields(self):
         """The Case section's DOI field was 53 px wide in a 137 px field: the flat "Open" button next to it keeps a minimum
         width of about 80 px, so no DOI could be read (BB-1). The edit now has the width of the other fields and the link

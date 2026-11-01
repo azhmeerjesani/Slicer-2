@@ -1373,7 +1373,12 @@ def wrapCheckBox(checkBox):
     label.setWordWrap(True)
     label.setTextFormat(qt.Qt.PlainText)
     label.setToolTip(checkBox.toolTip)
-    label.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+    # setSizePolicy() replaces the height-for-width flag that setWordWrap() set: keep it, or the row is laid out for two
+    # lines at every width. The text starts at the top, level with the first line of the check box.
+    labelPolicy = qt.QSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+    labelPolicy.setHeightForWidth(True)
+    label.setSizePolicy(labelPolicy)
+    label.setAlignment(qt.Qt.AlignLeft | qt.Qt.AlignTop)
     label.installEventFilter(_checkLabelFilter)
     layout.addWidget(label, 1)
     policy = qt.QSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
