@@ -4099,20 +4099,41 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             return
         self.refreshConnectomes(select=bundle.path)
 
+    def _projectUsesConnectome(self):
+        """True when an open project or the scene really uses the selected connectome: a project is open, or the scene
+        holds a map, a lesion seed or a run (not merely the identifier that choosing a bundle in the combo stored).
+        """
+        try:
+            from StudioLib import projects
+
+            if projects.currentProject() is not None:
+                return True
+        except ImportError:
+            pass
+        node = self._parameterNode
+        if node is not None and (node.resultVolume is not None or node.seedSegmentation is not None):
+            return True
+        return bool(self.runOutputs) or self.loadedMap is not None or self._runBundle is not None
+
     def onRemoveBundle(self):
         """Remove the selected connectome from the registered list (its files are kept).
 
-        The open project keeps naming that connectome (it is shown as not registered, like a scene opened on a computer
-        without it) and no other bundle is chosen silently. Return True when the project names it.
+        When an open project or the scene uses that connectome (``_projectUsesConnectome``), it keeps naming it (it is
+        shown as not registered, like a scene opened on a computer without it) and no other bundle is chosen silently.
+        Otherwise the name that choosing the bundle stored is dropped and Map falls back to the remaining bundle or to
+        the empty state. Return True when the project or scene uses it.
         """
         path = self._connectomePath
         if not path:
             return False
         self.logic.unregisterConnectome(path)
         node = self._parameterNode
-        named = node is not None and bool(node.connectome)
-        if node is not None and node.connectomePath:
-            node.connectomePath = ""
+        named = node is not None and bool(node.connectome) and self._projectUsesConnectome()
+        if node is not None:
+            if node.connectome and not named:
+                node.connectome = ""
+            if node.connectomePath:
+                node.connectomePath = ""
         self.refreshConnectomes()
         return named
 

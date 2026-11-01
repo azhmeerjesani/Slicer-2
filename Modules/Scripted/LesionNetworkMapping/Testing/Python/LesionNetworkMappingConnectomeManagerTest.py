@@ -80,10 +80,17 @@ class LesionNetworkMappingConnectomeManagerTest(unittest.TestCase):
                 return
         self.fail(f"{path} is not in the manager")
 
+    def _useConnectome(self):
+        """The scene holds a map computed with the selected connectome (what makes the scene "use" it)."""
+        volume = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "Map of the connectome")
+        self.widget._parameterNode.resultVolume = volume
+        return volume
+
     def test_removing_the_connectome_in_use_keeps_the_project_naming_it(self):
         widget = self.widget
         node = widget._parameterNode
         self.assertIsNotNone(node)
+        self._useConnectome()
         identifier = node.connectome
         self.assertTrue(identifier.startswith("Manager one#"), identifier)
         manager = widget.openManager()
@@ -107,10 +114,44 @@ class LesionNetworkMappingConnectomeManagerTest(unittest.TestCase):
     def test_context_menu_remove_keeps_the_project_naming_it(self):
         widget = self.widget
         identifier = widget._parameterNode.connectome
+        self._useConnectome()
         self.assertTrue(widget.onRemoveBundle())
         _pump(100)
         self.assertEqual(widget._parameterNode.connectome, identifier)
         self.assertIsNone(widget.bundle)
+
+    def test_removing_the_auto_selected_connectome_without_a_project_just_unregisters_it(self):
+        # Nothing uses the connectome: choosing it in the combo only stored its identifier in the parameter node
+        widget = self.widget
+        node = widget._parameterNode
+        self.assertTrue(node.connectome.startswith("Manager one#"), node.connectome)
+        self.assertFalse(widget._projectUsesConnectome())
+        manager = widget.openManager()
+        _pump(100)
+        self._select(manager, self.paths[0])
+        manager.removeButton.click()
+        _pump(200)
+        self.assertNotIn(self.paths[0], [os.path.abspath(p) for p in self.logic.registeredConnectomes()])
+        self.assertNotIn("open project", str(manager.statusLabel.text))
+        self.assertIn("Removed from the list", str(manager.statusLabel.text))
+        # Map falls back to the remaining bundle: no "not registered" error
+        self.assertIsNone(widget.bundleError)
+        self.assertIsNotNone(widget.bundle)
+        self.assertEqual(os.path.abspath(widget.bundle.path), self.paths[1])
+        self.assertEqual(os.path.abspath(widget.connectomeCombo.currentData), self.paths[1])
+        self.assertTrue(node.connectome.startswith("Manager two#"), node.connectome)
+
+    def test_removing_the_only_connectome_without_a_project_shows_the_empty_state(self):
+        widget = self.widget
+        self.logic.unregisterConnectome(self.paths[1])
+        widget.refreshConnectomes(select=self.paths[0])
+        _pump(100)
+        self.assertFalse(widget.onRemoveBundle())
+        _pump(100)
+        self.assertEqual(widget._parameterNode.connectome, "")
+        self.assertIsNone(widget.bundle)
+        self.assertIsNone(widget.bundleError)
+        self.assertEqual(widget.connectomeCombo.count, 0)
 
     def test_removing_another_connectome_leaves_the_project_alone(self):
         widget = self.widget
