@@ -1783,6 +1783,7 @@ class StudioProjectsTest(unittest.TestCase):
         running = self.autosave._service
         self.autosave._service = service
         try:
+            canvas.widget.show()  # Library is shown (a hidden Library lists its projects when it is shown)
             canvas.refresh()
             self.assertIsNone(self.projects.currentProject(), "no project yet")
             self.assertEqual(card(canvas), ("Open now", "Not in a project yet"))
@@ -1803,6 +1804,7 @@ class StudioProjectsTest(unittest.TestCase):
                 second.dispose()
         finally:
             self.autosave._service = running
+            canvas.widget.hide()
             canvas.dispose()
 
     def test_31_copy_notice_is_not_replaced_by_the_loaded_toast(self):
@@ -3975,6 +3977,67 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertTrue(needsSave(), "a data edit is a change")
         self._save(service)
         self.assertFalse(needsSave())
+
+    def test_65_hidden_library_does_not_list_projects_and_a_save_rebuilds_one_card(self):
+        """With many projects ("Show all"), every save of the open project rebuilt every card and stalled the application
+        for a few hundred milliseconds, even while working in Draw. A Library that is not on screen waits (a scheduled
+        refresh is held until it is shown), and a refresh builds again only the card of the project that changed.
+        """
+        from StudioLib import projects_ui
+
+        projects = self.projects
+        created = [projects.createProject(name) for name in ("Alpha", "Beta", "Gamma")]
+        parent = qt.QWidget()
+        layout = qt.QVBoxLayout(parent)
+        section = projects_ui.ProjectsSection()
+        layout.addWidget(section.widget)
+        section.deferWhenHidden = True
+        built = []
+        original = projects_ui.ProjectsSection._card
+
+        def counting(sectionSelf, info):
+            built.append(info.name)
+            return original(sectionSelf, info)
+
+        def pump(seconds):
+            end = time.time() + seconds
+            while time.time() < end:
+                slicer.app.processEvents()
+                time.sleep(0.02)
+
+        try:
+            parent.hide()
+            section.refresh()  # an explicit refresh always lists (the Library does it on entering)
+            self.assertEqual(len(section.cards()), 3)
+            before = {str(card.property("studioProjectPath")): card for card in section.cards()}
+            projects_ui.ProjectsSection._card = counting
+            # A save of one project while the Library is hidden: nothing is listed or built
+            target = created[1]
+            self.io.atomicWriteJson(projects.projectFile(target.path), {"name": target.name, "modified": projects._isoTime(time.time() + 60)})
+            section.scheduleRefresh()
+            pump(projects_ui.REFRESH_DELAY_MS / 1000.0 + 0.5)
+            self.assertEqual(built, [], "a hidden Library builds no cards")
+            # Shown: it catches up, and only the changed card is built again
+            parent.show()
+            pump(projects_ui.REFRESH_DELAY_MS / 1000.0 + 1.0)
+            self.assertEqual(built, [target.name])
+            after = {str(card.property("studioProjectPath")): card for card in section.cards()}
+            self.assertEqual(sorted(after), sorted(before))
+            for path, card in after.items():
+                if path == target.path:
+                    self.assertIsNot(card, before[path])
+                else:
+                    self.assertIs(card, before[path], "the card of an unchanged project is kept")
+            # Shown: a change is listed with no wait for a switch, as before
+            built.clear()
+            self.io.atomicWriteJson(projects.projectFile(target.path), {"name": target.name, "modified": projects._isoTime(time.time() + 120)})
+            section.scheduleRefresh()
+            pump(projects_ui.REFRESH_DELAY_MS / 1000.0 + 1.0)
+            self.assertEqual(built, [target.name])
+        finally:
+            projects_ui.ProjectsSection._card = original
+            section.dispose()
+            parent.deleteLater()
 
 
 

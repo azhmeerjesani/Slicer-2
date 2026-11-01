@@ -5568,6 +5568,8 @@ class LibraryCanvas(qt.QObject):
             # was loaded) or changes, with no workspace switch
             # (the same refresh keeps the caption right when the projects folder is chosen or changed)
             self.projectsSection.onRefreshed = self._onProjectsRefreshed
+            # Saves of the open project (while working in Draw, say) do not list and rebuild the projects of a hidden Library
+            self.projectsSection.deferWhenHidden = True
         except Exception:
             logging.error(f"Studio Library: the Projects section failed:\n{traceback.format_exc()}")
 

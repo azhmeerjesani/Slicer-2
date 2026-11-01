@@ -963,6 +963,9 @@ class _ClickFilter(qt.QObject):
 
     def eventFilter(self, obj, event):
         eventType = event.type()
+        if eventType == qt.QEvent.Show and obj == self.section.widget:
+            self.section.onShown()
+            return False
         if eventType == qt.QEvent.Resize:
             if obj == self.section.widget:
                 self.section.updateColumns()
@@ -1134,8 +1137,15 @@ class ProjectsSection(qt.QObject):
         self._showAll = False
         self._signature = None
         self._cards = []
+        #: The key of each card in ``_cards`` (what the card shows): a refresh keeps the cards whose key is unchanged
+        self._cardKeys = []
         self._columns = 0
         self._infos = []
+        #: Set by the Library canvas: a scheduled refresh (a project was saved, the folder changed) waits while the section
+        #: is not on screen, and runs when it is shown (listing and rebuilding the cards of a Library of many projects
+        #: stalls the application, for example while drawing)
+        self.deferWhenHidden = False
+        self._stale = False
         #: Called (no arguments) each time the projects were listed again: the Library canvas shows the open project on its
         #: Continue card, which must follow the project that a load creates or a listener change renames
         self.onRefreshed = None
@@ -1232,9 +1242,27 @@ class ProjectsSection(qt.QObject):
         self._signature = None
         self.refresh()
 
+    def _isOnHold(self):
+        """True while the section is deferring its scheduled refreshes and is not on screen (its parent is not visible)."""
+        if not self.deferWhenHidden:
+            return False
+        parent = self.widget.parentWidget()
+        return parent is not None and not parent.isVisible()
+
     def scheduleRefresh(self):
-        if _isAlive(self.widget):
-            self._timer.start()
+        if not _isAlive(self.widget):
+            return
+        if self._isOnHold():
+            # Listed again when the section is shown (or by the Library, which refreshes when it is entered)
+            self._timer.stop()
+            self._stale = True
+            return
+        self._timer.start()
+
+    def onShown(self):
+        """The section is on screen: list the projects again if something changed while it was hidden."""
+        if self._stale:
+            self.scheduleRefresh()
 
     def _folderChanged(self, *_args):
         self.scheduleRefresh()
@@ -1285,6 +1313,8 @@ class ProjectsSection(qt.QObject):
         self.widget.setVisible(enabled)
         if not enabled:
             return
+        self._stale = False
+        self._timer.stop()
         self.caption.setText(self.captionText())
         self.caption.setToolTip(projects.root())
         self._watchFolder()
@@ -1296,8 +1326,8 @@ class ProjectsSection(qt.QObject):
             except Exception:
                 logging.error(f"Studio Projects: the refresh callback failed:\n{traceback.format_exc()}")
         shown = infos[:self._shownCount(len(infos))]
-        signature = (self.viewMode, tuple((info.path, info.modified, info.isCurrent(), tuple(sorted(info.views.items())),
-                                           tuple(sorted(info.counts.items()))) for info in shown))
+        keys = [self._cardKey(info) for info in shown]
+        signature = (self.viewMode, tuple(keys))
         self.countLabel.setText(str(len(infos)) if infos else "")
         self.showAllButton.setVisible(len(infos) > len(shown) or self._showAll)
         self.showAllButton.setText(_("Show fewer") if self._showAll else _("Show all ({count})").format(count=len(infos)))
@@ -1307,15 +1337,31 @@ class ProjectsSection(qt.QObject):
         if signature == self._signature:
             return
         self._signature = signature
-        for card in self._cards:
-            self.grid.removeWidget(card)
-            card.hide()
-            card.setObjectName("")
-            card.deleteLater()
-        self._cards = []
-        for info in shown:
-            self._cards.append(self._row(info) if self.viewMode == "list" else self._card(info))
+        # Only the cards of projects that changed are built again (saving the open project changes its card only)
+        kept = {key: card for key, card in zip(self._cardKeys, self._cards, strict=False) if _isAlive(card)}
+        cards = [kept.pop(key, None) for key in keys]
+        for card in kept.values():
+            self._discard(card)
+        for card in cards:
+            if card is not None:
+                self.grid.removeWidget(card)
+        for index, (info, card) in enumerate(zip(shown, cards, strict=True)):
+            if card is None:
+                cards[index] = self._row(info) if self.viewMode == "list" else self._card(info)
+        self._cards = cards
+        self._cardKeys = keys
         self._placeCards(force=True)
+
+    def _cardKey(self, info):
+        """What a card shows (the view, the path, the last edit, whether the project is open, its views and counts)."""
+        return (self.viewMode, info.path, info.modified, info.isCurrent(), tuple(sorted(info.views.items())),
+                tuple(sorted(info.counts.items())))
+
+    def _discard(self, card):
+        self.grid.removeWidget(card)
+        card.hide()
+        card.setObjectName("")
+        card.deleteLater()
 
     def updateColumns(self):
         """Lay the cards out again when the width calls for another number of columns."""
