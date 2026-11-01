@@ -1211,11 +1211,15 @@ class ProjectsSection(qt.QObject):
             f"QFrame#studioProjectCard:hover {{ border-color: {t['text3']}; }}"
             f"QFrame#studioProjectCard:focus {{ border: 2px solid {t['accent-fg']}; }}"
             f"QFrame#studioProjectCard[studioCurrent=\"true\"] {{ border: 2px solid {t['accent']}; }}"
+            # The open project's card keeps its accent border, so the focus ring needs another colour: the text colour (the
+            # accent and accent-fg are too alike in the light theme). These rules come after the studioCurrent ones.
+            f"QFrame#studioProjectCard[studioCurrent=\"true\"]:focus {{ border: 2px solid {t['text']}; }}"
             # List rows: 44 px, a hairline between them, the hover fill; the open project in the accent
             f'QFrame#studioProjectCard[studioProjectView="list"] {{ border: none; border-radius: 8px; background-color: transparent; }}'
             f'QFrame#studioProjectCard[studioProjectView="list"]:hover {{ background-color: {t["control-hover"]}; }}'
             f'QFrame#studioProjectCard[studioProjectView="list"]:focus {{ border: 2px solid {t["accent-fg"]}; }}'
             f'QFrame#studioProjectCard[studioProjectView="list"][studioCurrent="true"] {{ border: 1px solid {t["accent"]}; }}'
+            f'QFrame#studioProjectCard[studioProjectView="list"][studioCurrent="true"]:focus {{ border: 2px solid {t["text"]}; }}'
             f"QLabel#studioProjectCardName {{ color: {t['text']}; background: transparent; border: none; }}"
             f"QLabel#studioProjectCardMeta {{ color: {t['text3']}; background: transparent; border: none; }}"
             "QLabel#studioProjectCardThumbnail { background-color: #000000; border: none; border-top-left-radius: 11px; border-top-right-radius: 11px; }"

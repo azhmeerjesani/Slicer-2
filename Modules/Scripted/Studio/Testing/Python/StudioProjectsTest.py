@@ -799,6 +799,56 @@ class StudioProjectsTest(unittest.TestCase):
         items = {item["id"] for item in projects_ui.paletteItems()}
         self.assertTrue({"projects.new", "projects.open", "projects.rename", "projects.showFolder", "projects.changeFolder"} <= items)
 
+    def test_13a_keyboard_focus_ring_shows_on_the_open_projects_card(self):
+        """The card of the open project (studioCurrent) keeps its accent border, and a keyboard focus on it must still show
+        (grid and list): the studioCurrent rules used to come after the :focus rules and replaced the ring.
+        """
+        from StudioLib import projects_ui
+
+        service = self._service()
+        self._userVolume()
+        self._projectFor(service)
+        self._save(service)
+        section = projects_ui.ProjectsSection()
+        remembered = section.viewMode  # setViewMode remembers the view in the settings
+        try:
+            section.widget.resize(900, 500)
+            section.widget.show()
+            section.widget.activateWindow()
+            section.widget.raise_()
+            slicer.app.processEvents()
+            for mode in ("grid", "list"):
+                section.setViewMode(mode)
+                section.refresh()
+                slicer.app.processEvents()
+                cards = section.cards()
+                self.assertEqual(len(cards), 1)
+                card = cards[0]
+                self.assertTrue(card.property("studioCurrent"))
+                self.assertEqual(card.property("studioProjectView"), mode)
+                card.clearFocus()
+                slicer.app.processEvents()
+                before = card.grab().toImage()
+                card.setFocus(qt.Qt.TabFocusReason)
+                for _attempt in range(20):  # the window of a bare widget is activated by the window system, which takes a moment
+                    slicer.app.processEvents()
+                    if card.hasFocus():
+                        break
+                    section.widget.activateWindow()
+                    time.sleep(0.05)
+                self.assertTrue(card.hasFocus(), mode)
+                after = card.grab().toImage()
+                changed = sum(1 for x in range(after.width()) for y in range(after.height()) if before.pixel(x, y) != after.pixel(x, y))
+                self.assertGreater(changed, 50, f"the focus ring of the open project's card is invisible in the {mode} view")
+        finally:
+            section.setViewMode(remembered)
+            section.widget.hide()
+            section.dispose()
+            section.widget.setParent(None)
+            section.widget.deleteLater()
+            qt.QCoreApplication.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.app.processEvents()
+
     def test_13b_folder_chooser_rows_follow_a_larger_application_font(self):
         """With a large (18 px) application font the names of "Inside this folder" ("About this folder") are not cut (BB-1)."""
         from StudioLib import projects_ui
