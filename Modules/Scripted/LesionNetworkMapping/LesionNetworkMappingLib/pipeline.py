@@ -415,6 +415,29 @@ def _slicer_executable(configured=None):
     return configured or os.environ.get(SLICER_ENV) or shutil.which("Slicer")
 
 
+PROGRESS_UNITS = {"maps": "subject passes", "specificity": "permutations", "slnm": "permutations", "normalize": "subjects"}
+# What a child job of the specificity / slnm stages counts, by the stage it reports (it loads the maps, then permutes)
+CHILD_PROGRESS_UNITS = {"maps": "maps", "permutations": "permutations"}
+
+
+def progress_fields(stage, child_stage, fields):
+    """The fields of a pipeline progress event relayed from a child job: ``unit`` names what ``done``/``total`` count.
+
+    A child of the specificity / slnm stages first loads the maps ("N/M maps"), then permutes ("N/M permutations"); the unit follows the
+    child's own stage, not the pipeline stage. slnm reports the analysis it permutes ("main", "control:age") as ``unit``; that stays
+    available as ``analysis_unit``.
+    """
+    fields = dict(fields)
+    unit = CHILD_PROGRESS_UNITS.get(child_stage) if stage in ("specificity", "slnm") else None
+    if unit:
+        if fields.get("unit") and fields["unit"] != unit:
+            fields["analysis_unit"] = fields["unit"]
+        fields["unit"] = unit
+    else:
+        fields.setdefault("unit", PROGRESS_UNITS.get(stage, "units"))
+    return fields
+
+
 # Providers
 
 
@@ -1931,7 +1954,7 @@ class Runner:
                             run_id = event.get("run_id") or run_id
                         elif kind == "progress":
                             fields = {key: value for key, value in event.items() if key not in ("event", "t", "stage")}
-                            fields.setdefault("unit", {"maps": "subject passes", "specificity": "permutations", "slnm": "permutations", "normalize": "subjects"}.get(stage, "units"))
+                            fields = progress_fields(stage, event.get("stage"), fields)
                             self.emit("progress", stage=stage, child_stage=event.get("stage"), **fields)
                         elif kind == "warning":
                             fields = {key: value for key, value in event.items() if key not in ("event", "t", "message", "code", "stage")}

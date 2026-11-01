@@ -415,6 +415,18 @@ class PipelineChecks:
 class PipelineTest(PipelineChecks, unittest.TestCase):
     """The full suite (preferred providers), plus the scenarios that need their own runs."""
 
+    def test_child_progress_units_name_what_is_counted(self):
+        """The maps a child job loads are "maps", its shufflings "permutations" (slnm sends the analysis it permutes as ``unit``)."""
+        self.assertEqual(pipeline.progress_fields("specificity", "maps", {"done": 25, "total": 26})["unit"], "maps")
+        self.assertEqual(pipeline.progress_fields("slnm", "maps", {"done": 25, "total": 26})["unit"], "maps")
+        self.assertEqual(pipeline.progress_fields("specificity", "permutations", {"done": 1, "total": 9})["unit"], "permutations")
+        fields = pipeline.progress_fields("slnm", "permutations", {"done": 4160, "total": 4999, "unit": "control:age"})
+        self.assertEqual((fields["unit"], fields["analysis_unit"]), ("permutations", "control:age"))
+        self.assertEqual(pipeline.progress_fields("slnm", "lodo", {"done": 1, "total": 9})["unit"], "permutations")
+        self.assertEqual(pipeline.progress_fields("normalize", "normalize", {})["unit"], "subjects")
+        self.assertEqual(pipeline.progress_fields("maps", "maps", {})["unit"], "subject passes")
+        self.assertEqual(pipeline.progress_fields("maps", "maps", {"unit": "batches"})["unit"], "batches")
+
     def test_resume_scenarios(self):
         fx = fixture.make_fixture(os.path.join(self.tmp, "f2"))
         code, events, _stdout, stderr, _wall = cli(*run_args(fx, *FAST))
@@ -729,10 +741,15 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
                 open(os.path.join(out, pipeline.PRIVATE_DIR, pipeline.STOP_NAME), "w").close()
                 stopped["at"] = event["_wall"]
 
-        code, _events, _stdout, stderr, wall = cli(*args, on_event=on_event)
+        code, events, _stdout, stderr, wall = cli(*args, on_event=on_event)
         self.assertIn("at", stopped)
         self.assertEqual(code, 3, stderr[-2000:])
         self.assertLessEqual(wall - stopped["at"], 3.0)
+        # The progress text names what is counted: the maps the GLM loads, then its permutations
+        for event in events:
+            if event["event"] == "progress" and event.get("stage") == "specificity":
+                self.assertEqual(event.get("unit"), {"maps": "maps", "permutations": "permutations"}.get(event.get("child_stage")), event)
+        self.assertTrue(any(e["event"] == "progress" and e.get("child_stage") == "permutations" for e in events))
         state = read_json(os.path.join(out, "stages", "glm", ".glm-resume.json"))
         cursor = state["data"]["cursor"]
         self.assertGreater(cursor, 1)
