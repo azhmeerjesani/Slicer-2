@@ -1389,6 +1389,7 @@ class Shell:
         self.hoverTracker = None
         #: Scroll area of the module panel (PageUp and PageDown over a slice view go to the view)
         self._panelScrollArea = None
+        self._panelScrollAreaFocusPolicy = None
         self._forwardingSliceKey = False
         self.workspaces = None
         self.topBar = None
@@ -2007,6 +2008,11 @@ class Shell:
         self._panelScrollArea = dock.findChild("QScrollArea", "ScrollArea")
         if self._panelScrollArea is not None:
             self._panelScrollArea.installEventFilter(self._eventFilter)
+            # The scroll area draws no focus ring: it is not a Tab or F6 stop (its controls are; USABILITY 9.1). Classic
+            # gets its policy back in ``_removeEventFilters()``.
+            if self._panelScrollAreaFocusPolicy is None:
+                self._panelScrollAreaFocusPolicy = self._panelScrollArea.focusPolicy
+            self._panelScrollArea.setFocusPolicy(qt.Qt.NoFocus)
 
         # 7. Draw presentation of the Segment Editor and the Studio look of Map, if they exist already. The folder of the
         # Save dialog (Ctrl+S).
@@ -4042,10 +4048,13 @@ class Shell:
         if self._panelScrollArea is not None:
             try:
                 self._panelScrollArea.removeEventFilter(self._eventFilter)
+                if self._panelScrollAreaFocusPolicy is not None:
+                    self._panelScrollArea.setFocusPolicy(self._panelScrollAreaFocusPolicy)
             except Exception:
                 # Deleted with the module panel
                 pass
             self._panelScrollArea = None
+            self._panelScrollAreaFocusPolicy = None
         if self._watchedPanelContents is not None:
             try:
                 self._watchedPanelContents.removeEventFilter(self._eventFilter)

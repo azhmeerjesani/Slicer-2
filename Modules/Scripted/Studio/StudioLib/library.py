@@ -5327,6 +5327,8 @@ class LibraryCanvas(qt.QObject):
         self.scrollArea.setObjectName("StudioLibraryScroll")
         self.scrollArea.setFrameShape(qt.QFrame.NoFrame)
         self.scrollArea.setWidgetResizable(True)
+        # The scroll area draws no focus ring, so it is no keyboard stop: its controls are (USABILITY 9.1)
+        self.scrollArea.setFocusPolicy(qt.Qt.NoFocus)
         # Below the page's minimum width the header and the Continue card reflow (``_updateNarrow()``); the scroll bar is the
         # last resort for what still does not fit (a control is never cut off without a way to reach it)
         self.scrollArea.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAsNeeded)

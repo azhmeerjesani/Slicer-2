@@ -775,7 +775,9 @@ class LesionCard:
         if not stats:
             self.readoutLabel.setMinimumHeight(0)
             self.readoutLabel.setMaximumHeight(16777215)
-            self.readoutLabel.setTextInteractionFlags(qt.Qt.LinksAccessibleByMouse | qt.Qt.LinksAccessibleByKeyboard)
+            # Only a text with a link is a keyboard stop (a label without one draws no focus ring)
+            self.readoutLabel.setTextInteractionFlags(
+                qt.Qt.LinksAccessibleByMouse | qt.Qt.LinksAccessibleByKeyboard if "<a " in (readoutHtml or "") else qt.Qt.NoTextInteraction)
             # The text is shown: screen readers read it (not the readout of the stats shown before)
             if self.readoutLabel.accessibleName:
                 self.readoutLabel.setAccessibleName("")

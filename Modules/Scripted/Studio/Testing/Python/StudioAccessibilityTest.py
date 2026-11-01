@@ -511,6 +511,64 @@ class StudioAccessibilityTest(ScriptedLoadableModule.ScriptedLoadableModuleTest)
         maximize = self.layoutManager.sliceWidget("Red").sliceController().findChild("QToolButton", "MaximizeViewButton")
         self.assertIn(str(maximize.accessibleName), ("Maximize view", "Maximize", "Restore view layout", "Restore layout"))
 
+    def test_no_invisible_focus_stops(self):
+        """No Tab or F6 stop draws nothing (USABILITY 9.1): the scroll areas of the inspector and of the Library canvas
+        take no focus (their controls do), F6 to the inspector lands on a control, and the lesion readout line is a
+        stop only while its text has a link. Classic gets the focus policy of the inspector scroll area back.
+        """
+        from StudioLib import lesioncard
+
+        tab = int(qt.Qt.TabFocus)
+        dock = self.mainWindow.findChild("QDockWidget", "PanelDockWidget")
+        panelScrollArea = dock.findChild("QScrollArea", "ScrollArea")
+        classicPolicy = panelScrollArea.focusPolicy
+        self.assertTrue(int(classicPolicy) & tab, "the Classic inspector scroll area keeps its focus policy")
+
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        self._pump(8)
+        self.assertEqual(int(panelScrollArea.focusPolicy), int(qt.Qt.NoFocus))
+        # F6 to the inspector: the focus lands on a widget that is no scroll area
+        self.mainWindow.activateWindow()
+        for _step in range(5):
+            studioShell.cycleFocusRegion(1)
+            if studioShell.focusRegion() == "inspector":
+                break
+        self._pump()
+        if studioShell.focusRegion() != "inspector":
+            self.skipTest("the main window cannot take the keyboard focus here")
+        focused = slicer.app.focusWidget()
+        self.assertIsNotNone(focused)
+        self.assertFalse(focused.inherits("QAbstractScrollArea"), f"F6 stopped on {focused.className()} {focused.objectName}")
+        # Tab never stops on it
+        stops = [widget for widget in dock.findChildren("QWidget") if widget.isVisible() and int(widget.focusPolicy) & tab]
+        self.assertNotIn(panelScrollArea, stops)
+
+        studioShell.switchTo("library")
+        self._pump(8)
+        libraryScroll = studioShell.canvas().findChild("QScrollArea", "StudioLibraryScroll")
+        self.assertIsNotNone(libraryScroll)
+        self.assertEqual(int(libraryScroll.focusPolicy), int(qt.Qt.NoFocus))
+
+        # The readout line of the Lesion card: a keyboard stop only with a link to follow
+        card = lesioncard.LesionCard(lesioncard._NullController())
+        try:
+            readout = card.readoutLabel
+            card._setReadout("Empty lesion", None)
+            self.assertEqual(int(readout.textInteractionFlags), int(qt.Qt.NoTextInteraction))
+            self.assertFalse(int(readout.focusPolicy) & tab, "a label without a link is no Tab stop")
+            card._setReadout('2 parts <a href="keep">Keep largest</a>', None)
+            self.assertTrue(int(readout.textInteractionFlags) & int(qt.Qt.LinksAccessibleByKeyboard))
+            self.assertTrue(int(readout.focusPolicy) & tab, "a link is reachable with Tab")
+            card._setReadout("Left \u00b7 1.00 mL", None)
+            self.assertFalse(int(readout.focusPolicy) & tab)
+        finally:
+            card.widget.deleteLater()
+
+        studioShell.dispose()
+        self._pump(8)
+        self.assertEqual(int(panelScrollArea.focusPolicy), int(classicPolicy), "Classic gets the focus policy back")
+
     #
     # First run
     #
