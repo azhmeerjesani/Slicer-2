@@ -253,6 +253,28 @@ class FiguresTest(unittest.TestCase):
         grid = figures.triptych(near, far, near, None, "A 0", **SMALL).meta["grid"]
         self.assertGreater(grid["origin"][0] + grid["spacing"] * (grid["shape"][0] - 1), 16)
 
+    def test_gallery_tiles_have_the_same_size_on_every_page(self):
+        # The tile size is set by the column count, not by how many tiles a page holds: a last page with
+        # one lesion (or a whole gallery of one) used to get a single page-wide tile
+        lesions = [(ball((-10 + 4 * i, 0, 0), 5), self.affine, f"l{i}") for i in range(7)]
+
+        def widths(figure):
+            return {tile["bbox"][2] - tile["bbox"][0] for tile in figure.meta["tiles"]}
+
+        pages = figures.gallery(lesions, self.template, per_page=6, **SMALL)
+        self.assertEqual([len(page.meta["tiles"]) for page in pages], [6, 1])
+        full, short = widths(pages[0]), widths(pages[1])
+        self.assertEqual(len(full), 1)
+        self.assertEqual(len(short), 1)
+        self.assertLessEqual(abs(short.pop() - full.pop()), 1)
+        self.assertEqual(pages[0].meta["size_px"][0], pages[1].meta["size_px"][0])
+        single = widths(figures.gallery(lesions[:1], self.template, **SMALL)[0]).pop()
+        self.assertLessEqual(abs(single - widths(pages[0]).pop()), 1)
+        three = figures.gallery(lesions[:2], self.template, columns=3, **SMALL)[0]
+        wide = figures.gallery(lesions[:3], self.template, columns=3, **SMALL)[0]
+        self.assertLessEqual(abs(widths(three).pop() - widths(wide).pop()), 1)
+        self.assertLess(widths(three).pop(), 0.4 * three.meta["size_px"][0])
+
     def _moved(self, data, dx, name):
         affine = self.affine.copy()
         affine[0, 3] += dx

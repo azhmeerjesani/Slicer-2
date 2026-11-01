@@ -1003,9 +1003,12 @@ def _letters(count):
     return [chr(ord("A") + index) if index < 26 else f"A{index - 25}" for index in range(count)]
 
 
-def _compose(panels, options, fonts, colorbars=(), panel_columns=1, heading=None):
+def _compose(panels, options, fonts, colorbars=(), panel_columns=1, heading=None, pad_rows=False):
     """Lay out panels (each a grid of tiles at one mm-to-pixel scale) at the figure width and return
     (base image, annotations, tile records).
+
+    With ``pad_rows`` a row that holds fewer than ``panel_columns`` panels is sized as if it were full, so
+    the scale only depends on the column count (a gallery's last page keeps the tile size of the others).
     """
     from PIL import Image
 
@@ -1032,6 +1035,11 @@ def _compose(panels, options, fonts, colorbars=(), panel_columns=1, heading=None
     for members in panel_rows:
         mm = sum(max(sum(w for w, _ in row) for row in layouts[p][1]) for p in members)
         gaps = sum((max(len(row) for row in layouts[p][0]) - 1) * gap for p in members) + (len(members) - 1) * panel_gap
+        if pad_rows and len(members) < panel_columns:
+            widest = max(members, key=lambda p: max(sum(w for w, _ in row) for row in layouts[p][1]))
+            missing = panel_columns - len(members)
+            mm += missing * max(sum(w for w, _ in row) for row in layouts[widest][1])
+            gaps += missing * ((max(len(row) for row in layouts[widest][0]) - 1) * gap + panel_gap)
         scale = min(scale, (available - gaps) / mm)
     scale = max(scale, 0.05)
 
@@ -1902,7 +1910,7 @@ def gallery(lesions, template=None, labels=None, per_page=30, binarize_at=0.5, c
 
 def _finish_gallery(ctx, panels, columns, caption, rows, page, total_pages):
     options = ctx.options
-    base, annotations, tiles = _compose(panels, options, ctx.fonts, (), columns, options.title)
+    base, annotations, tiles = _compose(panels, options, ctx.fonts, (), columns, options.title, pad_rows=True)
     meta = {
         "format": FORMAT,
         "version": VERSION,
