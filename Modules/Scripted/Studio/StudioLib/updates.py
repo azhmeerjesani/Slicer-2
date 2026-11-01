@@ -512,6 +512,55 @@ class _BodyReader:
             self.thread.join(2)
 
 
+class _OpenWithCancel:
+    """Opens ``url`` in a helper thread (``_open`` blocks until the server has sent its headers, and a blocked connect
+    or read cannot be interrupted), so that Cancel is looked at while the server is silent. ``wait(cancelled)`` returns
+    the response, raises the ``UpdateError`` of ``_open``, or raises ``UpdateError("The download was cancelled.")`` when
+    ``cancelled()`` turned True first: the thread is then abandoned (it ends with the connection timeout) and closes the
+    response itself if one arrives late.
+    """
+
+    def __init__(self, url, feed, timeout, notFound=None):
+        self.lock = threading.Lock()
+        self.done = threading.Event()
+        self.abandoned = False
+        self.response = None
+        self.error = None
+        self.thread = threading.Thread(target=self._run, args=(url, feed, timeout, notFound), name="StudioDownloadOpen", daemon=True)
+        self.thread.start()
+
+    def _run(self, url, feed, timeout, notFound):
+        response = None
+        error = None
+        try:
+            response = _open(url, feed, timeout, notFound=notFound)
+        except BaseException as exception:  # handed to the thread that waits
+            error = exception
+        with self.lock:
+            if self.abandoned:
+                if response is not None:
+                    try:
+                        response.close()
+                    except Exception:
+                        pass
+                return
+            self.response = response
+            self.error = error
+        self.done.set()
+
+    def wait(self, cancelled=None):
+        while not self.done.wait(DOWNLOAD_POLL_S):
+            if cancelled is not None and cancelled():
+                break
+        with self.lock:
+            if not self.done.is_set():
+                self.abandoned = True
+                raise UpdateError(_("The download was cancelled."))
+            if self.error is not None:
+                raise self.error
+            return self.response
+
+
 def downloadAsset(manifest, key, directory, feed=None, progress=None, cancelled=None):
     """Download the release file of the platform ``key`` to ``directory`` and verify it. Return its path.
 
@@ -541,7 +590,8 @@ def downloadAsset(manifest, key, directory, feed=None, progress=None, cancelled=
     try:
         missing = _("The release {version} has no downloadable file {name} yet (404: {address}).").format(
             version=manifest.version, name=asset["name"], address=url)
-        with _open(url, feed, DOWNLOAD_TIMEOUT_S, notFound=missing) as response, open(part, "wb") as stream:
+        opened = _OpenWithCancel(url, feed, DOWNLOAD_TIMEOUT_S, notFound=missing).wait(cancelled)
+        with opened as response, open(part, "wb") as stream:
             length = response.headers.get("Content-Length") if hasattr(response, "headers") else None
             if length and length.isdigit() and int(length) != size:
                 raise UpdateError(_("The download has the wrong size ({actual} bytes instead of {expected}): it was refused.").format(actual=int(length), expected=size))

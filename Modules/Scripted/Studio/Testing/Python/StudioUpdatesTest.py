@@ -61,6 +61,7 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
     slowPaths = set()
     tricklePaths = set()
     stallPaths = set()
+    silentPaths = set()
     stallRelease = threading.Event()
     notHttpPaths = set()
     cutChunkedPaths = set()
@@ -96,6 +97,11 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                     time.sleep(0.05)
             except (BrokenPipeError, ConnectionResetError):
                 pass
+            return
+        if path in self.silentPaths:
+            # A server that accepted the connection and read the request but sends no answer (until the test releases it)
+            self.stallRelease.wait(30)
+            self.close_connection = True
             return
         if path in self.stallPaths:
             # A server that sends the headers and a few bytes, then nothing (until the test releases it)
@@ -157,6 +163,7 @@ class StudioUpdatesTest(unittest.TestCase):
         _Handler.slowPaths = set()
         _Handler.tricklePaths = set()
         _Handler.stallPaths = set()
+        _Handler.silentPaths = set()
         _Handler.stallRelease = threading.Event()
         _Handler.notHttpPaths = set()
         _Handler.cutChunkedPaths = set()
@@ -488,6 +495,37 @@ class StudioUpdatesTest(unittest.TestCase):
         self.assertLess(outcome["end"] - cancelAt, 5)
         self.assertIn("cancelled", outcome["error"])
         self.assertEqual(os.listdir(downloads), [], "the partial file is deleted")
+        thread.join(5)
+
+    def test_DownloadCancelBeforeServerAnswers(self):
+        """Cancel stops a download at once when the server has accepted the connection but sent no headers yet."""
+        updates = self.updates
+        data = self._publish("1.2.0")
+        manifest = updates.parseManifest(data)
+        _Handler.silentPaths = {"/" + data["assets"]["linux-x86_64"]["name"]}
+        downloads = os.path.join(self.tempDir, "downloads")
+        cancel = threading.Event()
+        outcome = {}
+
+        def work():
+            try:
+                updates.downloadAsset(manifest, "linux-x86_64", downloads, feed=self.feed, cancelled=cancel.is_set)
+                outcome["error"] = None
+            except updates.UpdateError as error:
+                outcome["error"] = str(error)
+            outcome["end"] = time.monotonic()
+
+        thread = threading.Thread(target=work, daemon=True)
+        thread.start()
+        self._pump(1.5)
+        self.assertNotIn("end", outcome, "the download waits for the silent server")
+        cancelAt = time.monotonic()
+        cancel.set()
+        self.assertTrue(self._waitFor(lambda: "end" in outcome, 8), "Cancel is noticed while the server has not answered")
+        self.assertLess(outcome["end"] - cancelAt, 3)
+        self.assertEqual(outcome["error"], "The download was cancelled.")
+        self.assertEqual([n for n in os.listdir(downloads) if n.endswith(".part")], [], "no partial file is left")
+        _Handler.stallRelease.set()
         thread.join(5)
 
     def test_DownloadTimeoutMessage(self):
