@@ -499,6 +499,33 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             else:
                 settings.setValue("Studio/Mode", savedMode)
 
+    def test_4c_classic_round_trip_restores_classic_layout(self):
+        """Classic -> Studio -> Classic shows the view layout chosen in Classic again, not Studio's (USABILITY P4, P11)."""
+        studioShell = self._applyStudio()
+        settings = qt.QSettings()
+        savedMode = settings.value("Studio/Mode")
+        layoutManager = slicer.app.layoutManager()
+        conventional = slicer.vtkMRMLLayoutNode.SlicerLayoutConventionalView
+        try:
+            studioShell.classic(persist=False)
+            layoutManager.setLayout(conventional)
+            self._pump()
+            for _ in range(2):
+                studioShell.studio()
+                self._pump()
+                # A workspace that has its own layout replaces the Classic one while Studio is on
+                studioShell.switchTo("draw")
+                self._pump()
+                self.assertNotEqual(layoutManager.layout, conventional, layoutManager.layout)
+                studioShell.classic(persist=False)
+                self._pump()
+                self.assertEqual(layoutManager.layout, conventional)
+        finally:
+            if savedMode is None:
+                settings.remove("Studio/Mode")
+            else:
+                settings.setValue("Studio/Mode", savedMode)
+
     def test_5_toolbar_toggle_honoured(self):
         """View > Toolbars shows a toolbar in Studio and remembers it; Classic is unchanged (NAV-03, CM-08)."""
         mainWindow = self.mainWindow

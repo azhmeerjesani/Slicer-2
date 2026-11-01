@@ -1393,6 +1393,7 @@ class Shell:
         self._active = False
         self._classicState = None
         self._classicModule = None
+        self._classicLayout = None
         self._moduleOnEntry = None
         self._classicSwitchAction = None
         self._classicSwitchSeparator = None
@@ -1760,7 +1761,21 @@ class Shell:
         sequences = getattr(slicer.modules, "sequences", None)
         if sequences is not None and self._classicVisibility.get("sequencesAutoShowToolBar") is not None:
             sequences.autoShowToolBar = self._classicVisibility["sequencesAutoShowToolBar"]
+        self._restoreClassicLayout()
         self._restoreClassicModule()
+
+    def _restoreClassicLayout(self):
+        """Classic shows the view layout it had before Studio was applied (USABILITY P4, P11)."""
+        layout = self._classicLayout
+        self._classicLayout = None
+        if layout is None:
+            return
+        try:
+            layoutManager = slicer.app.layoutManager()
+            if layoutManager is not None and layoutManager.layout != layout:
+                layoutManager.setLayout(layout)
+        except Exception:
+            logging.error(f"Studio: showing the Classic layout again failed:\n{traceback.format_exc()}")
 
     def _restoreClassicModule(self):
         """Classic shows the module it had before Studio was applied (USABILITY P4: navigation never destroys state).
@@ -1839,6 +1854,10 @@ class Shell:
         settings.setValue("Studio/ClassicWindowState", self._classicState)
         # The module that Classic showed (not part of the window state): Classic shows it again after a round trip
         self._classicModule = str(self.currentModuleName()) if midSession else None
+        # The view layout that Classic showed (a Studio workspace replaces it): Classic shows it again after a round trip
+        layoutManager = slicer.app.layoutManager()
+        classicLayout = layoutManager.layout if midSession and layoutManager is not None else None
+        self._classicLayout = None if classicLayout is None or layouts.isStudioLayout(classicLayout) else classicLayout
         self._moduleOnEntry = None
         self._classicToolBarNames = {toolBar.objectName for toolBar in self._mainWindowToolBars() if toolBar.objectName}
         self._unsavedToolBars = []
