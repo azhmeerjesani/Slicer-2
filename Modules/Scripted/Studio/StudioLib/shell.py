@@ -563,6 +563,8 @@ class PanelHeader:
         button = qt.QToolButton()
         button.setObjectName(objectName)
         button.setToolTip(toolTip)
+        # Icon only: the accessible name is what a screen reader announces
+        button.setAccessibleName(ui.nameOfToolTip(toolTip))
         button.setAutoRaise(True)
         # Reachable with Tab (not by a click: the focus stays where the user works)
         button.setFocusPolicy(qt.Qt.TabFocus)
@@ -590,6 +592,7 @@ class PanelHeader:
         self.closeButton.setVisible(transient)
         if closeToolTip:
             self.closeButton.setToolTip(closeToolTip)
+            self.closeButton.setAccessibleName(ui.nameOfToolTip(closeToolTip))
         captionText = f"· {caption}" if caption and not transient else ""
         self.captionLabel.setText(captionText)
         self.captionLabel.setVisible(bool(captionText))

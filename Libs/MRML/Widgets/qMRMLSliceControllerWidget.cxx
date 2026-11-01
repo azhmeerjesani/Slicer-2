@@ -644,6 +644,7 @@ void qMRMLSliceControllerWidgetPrivate::setupFlatBar()
   this->BarLinkButton->setIcon(qMRMLSymbolicIconEngine::icon("unlink", "link"));
   this->BarLinkButton->setToolTip(
     Self::flatToolTip(qMRMLSliceControllerWidget::tr("Link views"), QString(), qMRMLSliceControllerWidget::tr("Keep zoom and slices of all views together")));
+  this->BarLinkButton->setAccessibleName(qMRMLSliceControllerWidget::tr("Link views"));
   // Hot linking stays available from the context menu (actions added to the button would make it a menu button)
   this->BarLinkButton->setContextMenuPolicy(Qt::CustomContextMenu);
   QMenu* linkMenu = new QMenu(qMRMLSliceControllerWidget::tr("Linked"), q);

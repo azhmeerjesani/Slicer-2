@@ -92,6 +92,8 @@ def _toolButton(objectName, iconName, toolTip, role="ghost"):
     button = qt.QToolButton()
     button.setObjectName(objectName)
     button.setToolTip(toolTip)
+    # Icon only: the name a screen reader announces comes from the accessible name, not the tooltip
+    button.setAccessibleName(ui.nameOfToolTip(toolTip))
     button.setAutoRaise(True)
     button.setIconSize(qt.QSize(ICON_SIZE, ICON_SIZE))
     button.setFixedSize(30, 30)
@@ -373,6 +375,7 @@ class TopBar:
         pill.setFocusPolicy(qt.Qt.TabFocus)
         pill.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
         pill.setToolTip(ui.tooltip(_("Search"), "Ctrl+K", _("modules, tools, actions, views, files")))
+        pill.setAccessibleName(_("Search"))
         self.pillLayout = qt.QHBoxLayout(pill)
         self.pillLayout.setContentsMargins(10, 0, 8, 0)
         self.pillLayout.setSpacing(6)

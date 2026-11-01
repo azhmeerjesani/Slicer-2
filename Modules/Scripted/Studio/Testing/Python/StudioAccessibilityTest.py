@@ -467,6 +467,50 @@ class StudioAccessibilityTest(ScriptedLoadableModule.ScriptedLoadableModuleTest)
         self.assertFalse(topBar.isCompact())
         self.assertFalse(a11y.instance().isNarrow())
 
+    def test_icon_only_buttons_have_accessible_names(self):
+        """A button without text is announced by its accessible name (the tooltip is only the description): the
+        top bar, panel header and every visible icon-only button of the view bars have one.
+        """
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        self.layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
+        self._wait(200)
+        expected = {
+            "StudioAppMenuButton": "Menu",
+            "StudioLayoutButton": "Layout",
+            "StudioSearchPill": "Search",
+            "StudioUndoButton": "Undo",
+            "StudioRedoButton": "Redo",
+            "StudioPanelHelpButton": "Help and acknowledgment",
+            "StudioPanelMoreButton": "More",
+        }
+        for objectName, name in expected.items():
+            button = self.mainWindow.findChild("QAbstractButton", objectName)
+            self.assertIsNotNone(button, objectName)
+            self.assertEqual(str(button.accessibleName), name, objectName)
+            # The name never carries the key or the description of the tooltip
+            self.assertNotIn(" \u00b7 ", str(button.accessibleName), objectName)
+
+        # Every visible button without text, whatever the view: a name that is not the whole tooltip
+        unnamed = []
+        count = 0
+        for view in ("Red", "Green", "Yellow"):
+            bar = self.layoutManager.sliceWidget(view).sliceController()
+            for objectName in ("MaximizeViewButton", "OptionsButton", "BarLinkButton"):
+                for button in bar.findChildren("QToolButton", objectName):
+                    count += 1
+                    if not str(button.accessibleName).strip():
+                        unnamed.append(f"{view} {objectName}")
+        self.assertGreater(count, 0)
+        self.assertEqual(unnamed, [])
+        threeDBar = self.layoutManager.threeDWidget(0).threeDController()
+        for objectName in ("MaximizeViewButton", "OptionsButton"):
+            for button in threeDBar.findChildren("QToolButton", objectName):
+                self.assertTrue(str(button.accessibleName).strip(), f"3D {objectName}")
+        # The maximize button names the action, without the key or the description of its tooltip
+        maximize = self.layoutManager.sliceWidget("Red").sliceController().findChild("QToolButton", "MaximizeViewButton")
+        self.assertIn(str(maximize.accessibleName), ("Maximize view", "Maximize", "Restore view layout", "Restore layout"))
+
     #
     # First run
     #

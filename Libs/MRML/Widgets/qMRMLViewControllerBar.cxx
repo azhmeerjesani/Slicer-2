@@ -150,6 +150,8 @@ void qMRMLViewControllerBarPrivate::init()
   this->PinButton = new QToolButton(q);
   this->PinButton->setObjectName("PinButton");
   this->PinButton->setCheckable(true);
+  // Icon only buttons need an accessible name: a screen reader announces it, not the tooltip
+  this->PinButton->setAccessibleName(qMRMLViewControllerBar::tr("Pin options"));
   this->PinButton->setAutoRaise(true);
   QIcon pushPinIcon;
   pushPinIcon.addFile(":/Icons/PushPinIn.png", QSize(), QIcon::Normal, QIcon::On);
@@ -173,6 +175,7 @@ void qMRMLViewControllerBarPrivate::init()
   this->MaximizeViewButton = new QToolButton(q);
   this->MaximizeViewButton->setObjectName("MaximizeViewButton");
   this->MaximizeViewButton->setToolTip(tr("Maximize/restore view"));
+  this->MaximizeViewButton->setAccessibleName(tr("Maximize view"));
   this->MaximizeViewButton->setAutoRaise(true);
   this->MaximizeViewButton->setIcon(this->ViewMaximizeIcon);
   this->BarLayout->addWidget(this->MaximizeViewButton);
@@ -185,6 +188,7 @@ void qMRMLViewControllerBarPrivate::init()
   this->OptionsButton->setIcon(qMRMLSymbolicIconEngine::icon("sliders-horizontal"));
   this->OptionsButton->setToolTip(
     qMRMLViewControllerBarPrivate::flatToolTip(qMRMLViewControllerBar::tr("Options"), QString(), qMRMLViewControllerBar::tr("Layers, opacity, interpolation")));
+  this->OptionsButton->setAccessibleName(qMRMLViewControllerBar::tr("Options"));
   this->BarLayout->addWidget(this->OptionsButton);
   QObject::connect(this->OptionsButton,
                    &QToolButton::clicked,
@@ -897,6 +901,8 @@ void qMRMLViewControllerBar::updateWidgetFromMRMLView()
     if (d->MaximizeViewButton->toolTip() != toolTip)
     {
       d->MaximizeViewButton->setToolTip(toolTip);
+      // The name part of the tooltip ("Maximize · double-click · ...") is the accessible name
+      d->MaximizeViewButton->setAccessibleName(toolTip.section(QString::fromUtf8(" \u00B7 "), 0, 0));
     }
     if (d->MaximizeViewButton->icon().cacheKey() != icon.cacheKey())
     {

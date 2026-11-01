@@ -22,6 +22,7 @@ there is no application-wide stylesheet.
 
 import html
 import os
+import re
 
 import qt
 import slicer
@@ -1135,6 +1136,16 @@ def tooltip(name, key=None, description=None):
     escaped = html.escape(text, quote=False)
     # Plain text unless escaping was needed (rich text tooltips are word-wrapped)
     return escaped if escaped == text else f"<qt>{escaped}</qt>"
+
+
+def nameOfToolTip(toolTip):
+    """Return the name part ("Name" of "Name · key · description") of a Studio tooltip.
+
+    An icon-only button has no text, so this is its accessible name: a screen reader announces the
+    accessible name, and the tooltip is only the description.
+    """
+    text = html.unescape(re.sub(r"</?qt>", "", str(toolTip)))
+    return text.split(" · ")[0].strip()
 
 
 def _relativeLuminance(color):
