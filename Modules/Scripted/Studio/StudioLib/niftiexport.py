@@ -925,6 +925,12 @@ class Job:
             raise ExportError(_("Failed to export the segments of {name}").format(name=node.GetName()))
         return labelmapNode
 
+    def _hasVoxelsOnGrid(self, node, segmentId, referenceNode):
+        """Whether the segment alone has a voxel on the export grid (tells a segment hidden by an overlap from one lost by resampling)."""
+        labelmapNode = self._exportLabelmap(node, [segmentId], referenceNode)
+        data = volumeData(labelmapNode)[0]
+        return bool(np.any(data != 0))
+
     @staticmethod
     def _segmentationTransformNotes(node, labelmapNode, labelmapNote, referenceNode):
         """``(lesion's transform note, reference's transform note)`` of a segmentation exported as ``labelmapNode``.
@@ -976,6 +982,8 @@ class Job:
         tasks = []
         # Segments that have voxels on their own grid but none on the chosen grid (a thin lesion resampled onto a coarser image)
         lostOnGrid = []
+        # Label map only: segments that have voxels on the chosen grid but all of them are covered by a later segment
+        covered = []
         transformNote = None
         with _temporaryNodes():
             referenceNode, resampled = self._referenceVolume(node)
@@ -1007,7 +1015,10 @@ class Job:
                     segment = segmentation.GetSegment(segmentId)
                     labels.append({"Value": value, "Name": segment.GetName(), "Color": _hexColor(segment.GetColor()), "VoxelCount": int(counts[value])})
                     if not counts[value]:
-                        lostOnGrid.append(segment.GetName())
+                        if self._hasVoxelsOnGrid(node, segmentId, referenceNode):
+                            covered.append(segment.GetName())
+                        else:
+                            lostOnGrid.append(segment.GetName())
                 sidecar.update({"Kind": "labelmap", "Units": "label", "Labels": labels})
                 if len(ids) > 1:
                     sidecar["Overlap"] = "Where segments overlap, a voxel has the value of the later segment"
@@ -1020,6 +1031,10 @@ class Job:
                 else:
                     message = _("{name}: no voxel of these segments remains on the chosen grid (VoxelCount 0): {segments}")
                 self.notes.append(message.format(name=self.nodeName, segments=", ".join(lostOnGrid)))
+            if covered:
+                self.notes.append(_("{name}: these segments are entirely covered by a later segment, so they are missing from the label map "
+                                    "(the later segment wins where segments overlap; use One mask per segment to keep them): {segments}")
+                                  .format(name=self.nodeName, segments=", ".join(covered)))
             if transformNote is not None:
                 self.notes.append(_("{name}: its transform was applied to the exported copy (the scene is unchanged)").format(name=self.nodeName))
         return tasks

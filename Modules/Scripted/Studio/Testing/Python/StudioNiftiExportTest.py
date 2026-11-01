@@ -468,6 +468,32 @@ class StudioNiftiExportTest(unittest.TestCase):
         self.assertTrue(any("Thin" in note and "chosen grid" in note for note in labelmap.notes), labelmap.notes)
         self.assertFalse(any("Big" in note for note in masks.notes + labelmap.notes), masks.notes + labelmap.notes)
 
+    def test_04ba_segment_hidden_by_a_later_segment_is_not_blamed_on_the_grid(self):
+        """A segment entirely covered by a later one is missing from the label map because of the overlap: the note says so."""
+        scan = self._volume("scan overlap", np.zeros((20, 20, 20), np.int16), np.diag([-1.0, -1.0, 1.0, 1.0]))
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "lesions")
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(scan)
+        core = segmentation.GetSegmentation().AddEmptySegment("", "Core")
+        penumbra = segmentation.GetSegmentation().AddEmptySegment("", "Penumbra")
+        coreArray = np.zeros((20, 20, 20), np.uint8)
+        coreArray[8:12, 8:12, 2:6] = 1
+        penumbraArray = np.zeros((20, 20, 20), np.uint8)
+        penumbraArray[7:13, 7:13, 1:7] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(coreArray, segmentation, core, scan)
+        slicer.util.updateSegmentBinaryLabelmapFromArray(penumbraArray, segmentation, penumbra, scan)
+
+        result = self.export.exportSegmentation(segmentation, os.path.join(self.out, "overlap.nii.gz"))
+        self.assertEqual(result.errors, [])
+        counts = {entry["Name"]: entry["VoxelCount"] for entry in self._sidecar(result.images[0])["Labels"]}
+        self.assertEqual(counts, {"Core": 0, "Penumbra": 216})
+        self.assertFalse(any("chosen grid" in note for note in result.notes), result.notes)
+        covered = [note for note in result.notes if "Core" in note]
+        self.assertEqual(len(covered), 1, result.notes)
+        self.assertIn("covered by a later segment", covered[0])
+        self.assertIn("One mask per segment", covered[0])
+        self.assertFalse(any("Penumbra" in note for note in result.notes), result.notes)
+
     def test_04c_transform_note_with_a_reference_grid(self):
         """On a reference grid the sidecar names the lesion's own transform, and the reference's one separately."""
         scan = self._volume("scan", np.zeros((40, 40, 40), np.int16), np.array([[1.0, 0, 0, -20], [0, 1.0, 0, -20], [0, 0, 1.0, -20], [0, 0, 0, 1]]))
