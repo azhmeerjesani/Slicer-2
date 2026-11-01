@@ -917,7 +917,10 @@ def listRow(iconName, text, value=None, callback=None, objectName="StudioListRow
     iconLabel.setProperty("studioIconName", iconName)
     iconLabel.setFixedSize(16, 16)
     layout.addWidget(iconLabel)
-    textLabel = label(text, "body", "text", "StudioListRowText")
+    # Elided ("…") when the row is narrow (a large app font, a scroll bar): never cut in the middle of a word. The whole text
+    # is the tooltip of the label while it is elided
+    textLabel = elideLabel(label(text, "body", "text", "StudioListRowText"))
+    setElidedText(textLabel, text)
     layout.addWidget(textLabel, 1)
     valueLabel = label(value or "", "caption", "text3", "StudioListRowValue")
     layout.addWidget(valueLabel)
@@ -1012,6 +1015,11 @@ def setElidedText(label, text, toolTip=None):
     label.setProperty("studioFullText", text or "")
     label.setProperty("studioFullToolTip", toolTip or "")
     _showElided(label)
+
+
+def setListRowText(row, text):
+    """Change the text of a ``listRow()`` (elided to the row width)."""
+    setElidedText(row.findChild("QLabel", "StudioListRowText"), text)
 
 
 def setListRowValue(row, value):

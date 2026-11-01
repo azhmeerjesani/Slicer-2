@@ -569,6 +569,45 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
         self._pump(4)
         draw.session(studioShell).refreshPanel(computeMetrics=True)
 
+    def test_list_row_text_is_elided_when_cut(self):
+        """The text of a ``ui.listRow()`` ("Normalize scan only" next to the "Native space" value at a 125 % font) that does
+        not fit the row ends with an ellipsis instead of being cut mid-word (VISUAL 6); the whole text is its tool tip and
+        shows whole again in a wide row. ``ui.setListRowText()`` elides the same way.
+        """
+        from StudioLib import ui
+
+        whole = "Normalize scan only"
+        for theme in ("dark", "light"):
+            self._setTheme(theme)
+            host = qt.QWidget()
+            hostLayout = qt.QVBoxLayout(host)
+            hostLayout.setContentsMargins(0, 0, 0, 0)
+            row = ui.listRow("globe", whole, "Native space")
+            hostLayout.addWidget(row)
+            text = row.findChild("QLabel", "StudioListRowText")
+            try:
+                host.setFixedWidth(600)
+                host.show()
+                self._pump(6)
+                self.assertEqual(str(text.text), whole, f"{theme}: a wide row shows the whole text")
+                host.setFixedWidth(230)
+                self._pump(6)
+                shown = str(text.text)
+                self.assertTrue(shown.endswith("…"), f"{theme}: the cut row text has no ellipsis: {shown!r}")
+                self.assertLessEqual(self._textWidth(text, shown), text.width, f"{theme}: the elided text fits the label")
+                self.assertIn(whole, str(text.toolTip))
+                ui.setListRowText(row, "Normalize scan only (changed)")
+                self._pump(4)
+                shown = str(text.text)
+                self.assertTrue(shown.endswith("…"), f"{theme}: setListRowText did not elide: {shown!r}")
+                self.assertEqual(str(row.accessibleName), whole)
+                host.setFixedWidth(600)
+                self._pump(6)
+                self.assertEqual(str(text.text), "Normalize scan only (changed)")
+            finally:
+                host.hide()
+                host.deleteLater()
+
     def test_lesion_stat_cells_keep_captions_with_both_hemispheres(self):
         """A long Side value ("Both hemispheres") must not squeeze the other stat cells: no label of a cell shows a clipped
         half word, every text that does not fit ends with an ellipsis (1366 x 768, the Parts caption was cut to "Pa").

@@ -315,7 +315,7 @@ class DrawNormalizeCard:
         self._setRowMode(rowMode)
         if rowMode:
             ui.setListRowValue(self.listRow, _("Native space"))
-            self.listRow.findChild("QLabel", "StudioListRowText").setText(str(self.button.text))
+            ui.setListRowText(self.listRow, str(self.button.text))
             self.listRow.setAccessibleName(str(self.button.text))
             tip = str(self.button.toolTip)
             if self._lesionEmpty:
