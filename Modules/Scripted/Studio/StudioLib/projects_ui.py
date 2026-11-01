@@ -1004,7 +1004,8 @@ class _ClickFilter(qt.QObject):
         return False
 
 
-#: Project cards (VISUAL 4.2): a 128 px black thumbnail and a 52 px body; 4 columns from 1000 px, else 3 (2 when narrow)
+#: Project cards (VISUAL 4.2): a 128 px black thumbnail and a 52 px body (at the 14 px default application font: the body
+#: grows with the text when the application font is larger, USABILITY 9.4); 4 columns from 1000 px, else 3 (2 when narrow)
 CARD_THUMBNAIL_HEIGHT = 128
 CARD_BODY_HEIGHT = 54
 CARD_SPACING = 16
@@ -1185,6 +1186,8 @@ class ProjectsSection(qt.QObject):
         self._watchedFolder = None
         ui.bindStyleSheet(self.widget, self._styleSheet)
         ui.addPaletteListener(self._refreshIcons)
+        # Listeners run after the fonts of the Studio widgets followed the application font
+        ui.addPaletteListener(self._fitCards)
         self._refreshIcons()
         self._updateSortText()
         self.refresh()
@@ -1447,7 +1450,6 @@ class ProjectsSection(qt.QObject):
 
     def _card(self, info):
         card = self._newCard(info, "grid")
-        card.setFixedHeight(CARD_THUMBNAIL_HEIGHT + CARD_BODY_HEIGHT)
         card.setMinimumWidth(CARD_MIN_WIDTH)
         card.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
         layout = qt.QVBoxLayout(card)
@@ -1481,7 +1483,30 @@ class ProjectsSection(qt.QObject):
         layout.addWidget(body)
         for widget in (thumbnail, body, name, metaLabel):
             widget.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
+        self.fitCardHeight(card)
         return card
+
+    @staticmethod
+    def fitCardHeight(card):
+        """Give a grid card the height of its thumbnail and its body (128 + 54 px at the default application font).
+
+        The body (the name and the meta line) follows the application font (USABILITY 9.4): a fixed 54 px body squeezed
+        the body layout at a larger font, so the name slid under the thumbnail. The card grows by what the body needs
+        beyond 54 px.
+        """
+        body = card.findChild("QWidget", "studioProjectCardBody")
+        if body is None:
+            return
+        extra = max(0, body.sizeHint.height() - CARD_BODY_HEIGHT)
+        height = CARD_THUMBNAIL_HEIGHT + CARD_BODY_HEIGHT + extra
+        if card.minimumHeight != height or card.maximumHeight != height:
+            card.setFixedHeight(height)
+
+    def _fitCards(self):
+        """After an application font change: the cards follow the size of their texts."""
+        for card in self.cards():
+            if card.property("studioProjectView") == "grid":
+                self.fitCardHeight(card)
 
     def _row(self, info):
         """A 44 px row of the list view: a 40 x 30 thumbnail, the name, the meta line and an "Open" chip."""

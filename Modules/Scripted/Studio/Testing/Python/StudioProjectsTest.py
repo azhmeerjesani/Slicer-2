@@ -877,6 +877,66 @@ class StudioProjectsTest(unittest.TestCase):
             qt.QApplication.setFont(base)
             slicer.app.processEvents()
 
+    def test_13bb_project_card_body_follows_a_larger_application_font(self):
+        """At a 125% or 150% application font the name of a grid card starts below the thumbnail (the card was a fixed
+        128 + 54 px, so the 22 px name label slid under the thumbnail); the card keeps its 182 px at the default font, and a
+        font change while the Library shows follows (BB-1).
+        """
+        from StudioLib import projects_ui, ui
+
+        service = self._service()
+        self._userVolume()
+        self._projectFor(service)
+        self._save(service)
+        base = qt.QFont(qt.QApplication.font())
+        section = projects_ui.ProjectsSection()
+        remembered = section.viewMode  # setViewMode remembers the view in the settings
+
+        def check(message):
+            slicer.app.processEvents()
+            card = section.cards()[0]
+            self.assertEqual(card.property("studioProjectView"), "grid")
+            thumbnail = card.findChild("QLabel", "studioProjectCardThumbnail")
+            name = card.findChild("QLabel", "studioProjectCardName")
+            meta = card.findChild("QLabel", "studioProjectCardMeta")
+            thumbnailBottom = thumbnail.mapTo(card, qt.QPoint(0, thumbnail.height)).y()
+            self.assertGreaterEqual(name.mapTo(card, qt.QPoint(0, 0)).y(), thumbnailBottom, f"{message}: the name is under the thumbnail")
+            self.assertGreaterEqual(name.height, qt.QFontMetrics(name.font).height(), f"{message}: the name is squeezed")
+            self.assertGreaterEqual(meta.height, qt.QFontMetrics(meta.font).height(), f"{message}: the meta line is squeezed")
+            self.assertLessEqual(meta.mapTo(card, qt.QPoint(0, meta.height)).y(), card.height, f"{message}: the meta line leaves the card")
+            return card.height
+
+        try:
+            section.setViewMode("grid")
+            section.widget.resize(900, 500)
+            section.widget.show()
+            section.refresh()
+            defaultHeight = check("default font")
+            if ui.applicationFontPx() == 14:
+                self.assertEqual(defaultHeight, projects_ui.CARD_THUMBNAIL_HEIGHT + projects_ui.CARD_BODY_HEIGHT)
+            previous = defaultHeight
+            for pixelSize in (17, 21):
+                font = qt.QFont(base)
+                font.setPixelSize(pixelSize)
+                qt.QApplication.setFont(font)  # while the section shows: the cards follow
+                for _step in range(5):
+                    slicer.app.processEvents()
+                height = check(f"{pixelSize} px font, changed while shown")
+                self.assertGreater(height, previous, f"the card does not grow at {pixelSize} px")
+                previous = height
+                section.refresh()  # the cards of the new font
+                section.setViewMode("grid")
+                self.assertEqual(check(f"{pixelSize} px font, rebuilt"), height)
+        finally:
+            qt.QApplication.setFont(base)
+            section.setViewMode(remembered)
+            section.widget.hide()
+            section.dispose()
+            section.widget.setParent(None)
+            section.widget.deleteLater()
+            qt.QCoreApplication.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.app.processEvents()
+
     def test_13c_folder_chooser_enter_presses_continue(self):
         """Enter in the folder chooser presses the primary "Continue" and does not open the folder picker, whichever button has
         the initial focus; Cancel (Change folder) is never the default either (BB-1).
