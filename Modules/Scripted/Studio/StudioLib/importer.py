@@ -337,7 +337,8 @@ def bidsSubject(text):
 
 
 def readTableHeader(path, countRows=True):
-    """``(columns, rowCount)`` of a TSV or CSV file (its first non-empty line is the header), None if it cannot be read.
+    """``(columns, rowCount)`` of a TSV or CSV file (its first non-empty line is the header), None if it cannot be read
+    (or is not UTF-8 text).
 
     Rows are counted up to ``MAX_TABLE_ROWS_COUNTED`` (a large file dropped by mistake is not read to its end); without
     ``countRows`` only the header is read and ``rowCount`` is None.
@@ -345,7 +346,7 @@ def readTableHeader(path, countRows=True):
     header = None
     rowCount = 0
     try:
-        with open(path, encoding="utf-8-sig", errors="replace") as f:
+        with open(path, encoding="utf-8-sig") as f:
             for line in f:
                 if not line.strip():
                     continue
@@ -357,12 +358,14 @@ def readTableHeader(path, countRows=True):
                 rowCount += 1
                 if rowCount >= MAX_TABLE_ROWS_COUNTED:
                     break
-    except OSError:
-        return None
+    except (OSError, UnicodeDecodeError):
+        return None  # unreadable, or not UTF-8 text (Excel's Windows-1252 and UTF-16): no garbled column names
     if header is None:
         return None
     delimiter = "\t" if "\t" in header or _extension(path) == ".tsv" else ","
     columns = [column.strip().strip('"') for column in header.split(delimiter)]
+    while columns and not columns[-1]:
+        columns.pop()  # empty names after the last column (spreadsheets write trailing tabs)
     return columns, (rowCount if countRows else None)
 
 

@@ -179,6 +179,33 @@ class StudyTest(unittest.TestCase):
         with open(os.path.join(folder, study.PARTICIPANTS_TSV), "w", encoding="utf-8") as f:
             f.write("participant_id\tgroup\nsub-01\tcase\t\t\n")
         self.assertEqual(Study.open(folder).subject("sub-01")["group"], "case")
+        # Tables from Excel: empty column names after the last column (trailing tabs) are ignored, values under them are not
+        path = os.path.join(folder, "excel.tsv")
+        with open(path, "wb") as f:
+            f.write(b"participant_id\tgroup\t\t\r\nsub-01\tcase\t\t\r\nsub-02\tcontrol\t\t\r\n")
+        self.assertEqual(study.read_tsv(path)[0], ["participant_id", "group"])
+        with open(path, "wb") as f:
+            f.write(b"participant_id\tgroup\t\r\nsub-01\tcase\tx\r\n")
+        with self.assertRaisesRegex(ValueError, "line 2: 3 fields but only 2 columns"):
+            study.read_tsv(path)
+        with open(path, "wb") as f:
+            f.write(b"participant_id\t\tgroup\r\nsub-01\t\tcase\r\n")
+        with self.assertRaisesRegex(ValueError, "duplicate or empty column names"):
+            study.read_tsv(path)
+        # Windows-1252 and UTF-16 (Excel's Text and Unicode Text) are refused with what to do, not a raw codec error
+        for encoding in ("cp1252", "utf-16"):
+            with open(path, "wb") as f:
+                f.write("participant_id\tnotes\r\nsub-01\tcafé Müller\r\n".encode(encoding))
+            with self.assertRaises(study.TableError) as raised:
+                study.read_tsv(path)
+            self.assertIn("Save the table as UTF-8", str(raised.exception))
+            self.assertNotIn("codec", str(raised.exception))
+            self.assertNotIn(folder, str(raised.exception))
+            self.assertTrue(raised.exception.user_problem)
+            self.assertIsInstance(raised.exception, ValueError)
+        with open(path, "wb") as f:
+            f.write("participant_id\tnotes\r\nsub-01\tcafé\r\n".encode("utf-8-sig"))
+        self.assertEqual(study.read_tsv(path)[1][0]["notes"], "café")
         with open(os.path.join(folder, study.STUDY_JSON), "w", encoding="utf-8") as f:
             json.dump({"format": "slicer-studio-study", "version": 2}, f)
         with self.assertRaisesRegex(ValueError, "newer"):

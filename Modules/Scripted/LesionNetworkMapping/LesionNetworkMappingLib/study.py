@@ -202,6 +202,29 @@ def detect_file_space(path):
     return detect_space(header["shape"][:3], header["affine"])
 
 
+class TableError(ValueError):
+    """A problem with the user's table file (its encoding, its columns): the message says what to do about it.
+
+    ``user_problem`` lets the application show the message without logging a traceback (it is not a program error).
+    """
+
+    user_problem = True
+
+
+def decode_table(data, path):
+    """The text of the bytes of a TSV or CSV table (UTF-8, with or without a byte order mark).
+
+    :raises TableError: for any other encoding (Windows-1252 and UTF-16 are what Excel writes), with what to do.
+    """
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        name = os.path.basename(os.fspath(path))
+        raise TableError(f"{name} is not saved as UTF-8 text (for example as Windows-1252 or UTF-16 by Excel). "
+                         "Save the table as UTF-8 (in Excel: Save As > CSV UTF-8, then rename it to .tsv if needed; "
+                         "in a text editor: Save with encoding UTF-8) and try again.") from None
+
+
 def read_tsv(path):
     """Read a TSV table: (column names, list of row dicts). Empty values become "n/a".
 
@@ -209,10 +232,13 @@ def read_tsv(path):
     that way, and pandas, R and spreadsheets write such values so).
 
     :raises ValueError: for duplicate or empty column names, or a row with more non-empty values
-      than there are columns (they would be lost on the next save); extra empty fields are ignored.
+      than there are columns (they would be lost on the next save); extra empty fields are ignored,
+      and so are empty column names at the end of the header (spreadsheets write them as trailing tabs).
+      A table that is not UTF-8 text raises :class:`TableError` (a ``ValueError``) that says so.
     """
-    with open(path, encoding="utf-8-sig", newline="") as f:
-        return _parse_tsv(f.read(), path)
+    with open(path, "rb") as f:
+        data = f.read()
+    return _parse_tsv(decode_table(data, path), path)
 
 
 def _tsv_records_plain(text):
@@ -266,12 +292,14 @@ def _parse_tsv(text, path):
     if not records:
         return [], []
     columns = records[0][1]
+    while columns and not columns[-1]:
+        columns = columns[:-1]  # empty names after the last column: trailing tabs; values under them are refused below
     if len(set(columns)) != len(columns) or not all(columns):
-        raise ValueError(f"{path}: duplicate or empty column names")
+        raise TableError(f"{os.path.basename(os.fspath(path))}: duplicate or empty column names")
     rows = []
     for number, values in records[1:]:
         if any(values[len(columns):]):
-            raise ValueError(f"{path}, line {number}: {len(values)} fields but only {len(columns)} columns; add a column name for the extra values or remove them")
+            raise TableError(f"{os.path.basename(os.fspath(path))}, line {number}: {len(values)} fields but only {len(columns)} columns; add a column name for the extra values or remove them")
         values += [NA] * (len(columns) - len(values))
         rows.append({column: value or NA for column, value in zip(columns, values[: len(columns)], strict=True)})
     return columns, rows
@@ -559,7 +587,7 @@ class Study:
         tsv = os.path.join(path, PARTICIPANTS_TSV)
         data = _read_bytes(tsv) if os.path.isfile(tsv) else None
         digests[PARTICIPANTS_TSV] = _digest(data)
-        columns, rows = _parse_tsv(data.decode("utf-8-sig"), tsv) if data is not None else ([], [])
+        columns, rows = _parse_tsv(decode_table(data, tsv), tsv) if data is not None else ([], [])
         if columns and "participant_id" not in columns:
             raise ValueError(f"{tsv} has no participant_id column")
         # participant_id first, other columns in file order, then the missing standard columns
@@ -690,7 +718,7 @@ class Study:
 
         tsv_path, data = changed(PARTICIPANTS_TSV)
         if data is not None:
-            columns, rows = _parse_tsv(data.decode("utf-8-sig"), tsv_path)
+            columns, rows = _parse_tsv(decode_table(data, tsv_path), tsv_path)
             _canonical_cells(rows, tsv_path)
             self._merge_rows(base["rows"], columns, rows, conflicts)
         _, data = changed(STUDY_JSON)

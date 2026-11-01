@@ -62,6 +62,7 @@ The session works in Studio and in Classic (the Studio module panel lists the su
 import contextlib
 import datetime
 import importlib
+import io
 import json
 import logging
 import os
@@ -493,9 +494,9 @@ def readTable(path):
     if str(path).lower().endswith(".csv"):
         import csv
 
-        with open(path, encoding="utf-8-sig", newline="") as f:
-            reader = csv.reader(f)
-            table = [row for row in reader if any(cell.strip() for cell in row)]
+        with open(path, "rb") as f:
+            text = study.decode_table(f.read(), path)  # TableError (a ValueError) for a table that is not UTF-8
+        table = [row for row in csv.reader(io.StringIO(text, newline="")) if any(cell.strip() for cell in row)]
         if not table:
             return [], []
         columns = [name.strip() for name in table[0]]

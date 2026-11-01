@@ -323,7 +323,11 @@ def _runAction(function, errorMessage):
     try:
         return function()
     except Exception as e:
-        logging.error(f"Studio Library: {errorMessage}\n{traceback.format_exc()}")
+        if getattr(e, "user_problem", False):
+            # A problem with the user's own file (a table that is not UTF-8, ...): its message says what to do, not a program error
+            logging.warning(f"Studio Library: {errorMessage} {e}")
+        else:
+            logging.error(f"Studio Library: {errorMessage}\n{traceback.format_exc()}")
         if not slicer.app.testingEnabled():
             slicer.util.errorDisplay(f"{errorMessage}\n\n{e}")
     return None
@@ -5140,8 +5144,13 @@ class FolderCard:
         try:
             columns, rows = studyUi.readTable(table)
             proposal = studyUi.groupMappingProposal(columns, rows)
-        except Exception:
-            logging.warning(f"Studio Library: {table} could not be read:\n{traceback.format_exc()}")
+        except Exception as e:
+            if getattr(e, "user_problem", False):
+                # The user's file (not UTF-8, ...): said in the card, what to do is in the message
+                logging.warning(f"Studio Library: {e}")
+                layout.addWidget(self._textLabel(str(e), "StudioFolderCardTableProblem"))
+            else:
+                logging.warning(f"Studio Library: {table} could not be read:\n{traceback.format_exc()}")
             return
         if proposal is None:
             return

@@ -677,6 +677,58 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         card.close()
         self._pump(4)
 
+    def test_folder_card_excel_tables(self):
+        """A participants.tsv saved by Excel: Windows-1252 and UTF-16 say "save as UTF-8" (no raw codec error, no garbled
+        card line, no ERROR log); trailing empty columns are ignored like extra empty fields in a row.
+        """
+        import logging
+
+        from StudioLib import importer, library
+
+        studioShell = self._applyStudio()
+        records = []
+
+        class Recorder(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        handler = Recorder(level=logging.DEBUG)
+        logging.getLogger().addHandler(handler)
+        try:
+            for case, (encoding, tail) in {"cp1252": ("cp1252", ""), "utf16": ("utf-16", ""), "trailing": ("utf-8", "\t\t")}.items():
+                folder = self._writeTinyFiles(4, "excel-" + case)
+                lines = ["participant_id\tgroup\tnotes" + tail] + ["sub-%02d\t%s\tcafé Müller%s" % (i + 1, "patient" if i < 2 else "HC", tail)
+                                                                 for i in range(4)]
+                with open(os.path.join(folder, "participants.tsv"), "w", encoding=encoding, newline="") as f:
+                    f.write("\r\n".join(lines) + "\r\n")
+                del records[:]
+                importer.loadFolder(folder, studioShell)
+                self._pump(6)
+                card = library.canvas().folderCard()
+                self.assertIsNotNone(card, case)
+                if card.createStudyButton is None:
+                    card.close()
+                    continue
+                if case == "trailing":
+                    self.assertIn("participants.tsv · 4 rows · group, notes", card.participantsLabel.text)
+                    self.assertIsNotNone(card.createStudy())
+                    library._studyUi().closeStudy()
+                else:
+                    self.assertIsNone(card.participantsLabel)  # no garbled columns
+                    problem = card.widget.findChild("QLabel", "StudioFolderCardTableProblem")
+                    self.assertIsNotNone(problem, case)
+                    self.assertIn("UTF-8", problem.text)
+                    self.assertNotIn("codec", problem.text)
+                    self.assertIsNone(card.createStudy())  # said in a message box, no study
+                    self.assertFalse(os.path.exists(os.path.join(folder, "study.json")), case)
+                self.assertEqual([r.getMessage()[:200] for r in records if r.levelno >= logging.ERROR], [], case)
+                card = library.canvas().folderCard()
+                if card is not None:
+                    card.close()
+                self._pump(4)
+        finally:
+            logging.getLogger().removeHandler(handler)
+
     #
     # Loaded set
     #
