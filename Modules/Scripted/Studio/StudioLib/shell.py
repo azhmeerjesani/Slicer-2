@@ -3957,6 +3957,45 @@ class Shell:
             self._updateInspectorHandle()
         return False
 
+    @staticmethod
+    def _hoveredSliceView():
+        """(widget under the pointer, the slice view it is in), or (None, None) if the pointer is not over a visible one."""
+        hovered = qt.QApplication.widgetAt(qt.QCursor.pos())
+        view = hovered
+        while view is not None and not view.inherits("qMRMLSliceView"):
+            view = view.parentWidget()
+        if view is None or not hovered.isVisible():
+            return None, None
+        return hovered, view
+
+    def focusHoveredView(self):
+        """Give the keyboard focus to the slice view under the pointer. Return True if the view has it afterwards.
+
+        Focus follows the mouse when the pointer enters a view (``qMRMLSliceView::enterEvent``). When Studio moves the
+        focus itself while the pointer stays where it is (a scan was dropped or opened and Draw put the focus on its
+        tool tile), no enter event follows, and Home, End, the arrow keys, f and b went to the tile (the arrows would
+        even have changed the tool). Workspaces call this after their initial focus: the view under the pointer takes
+        it back, as if the pointer had just entered. Nothing changes if the setting is off, the window is not active, a
+        popup or dialog is open, or a text input has the focus.
+        """
+        if not self._active or not slicer.app.property(FOCUS_FOLLOWS_MOUSE_PROPERTY):
+            return False
+        if not self.mainWindow.isActiveWindow:
+            return False
+        if qt.QApplication.activePopupWidget() is not None or qt.QApplication.activeModalWidget() is not None:
+            return False
+        if _isTextInput(qt.QApplication.focusWidget()):
+            return False
+        hovered, view = self._hoveredSliceView()
+        if view is None:
+            return False
+        target = view.VTKWidget() if hasattr(view, "VTKWidget") else None
+        if target is None:
+            target = hovered
+        if qt.QApplication.focusWidget() != target:
+            target.setFocus(qt.Qt.MouseFocusReason)
+        return qt.QApplication.focusWidget() == target
+
     def _forwardSliceKey(self, event):
         """PageUp or PageDown that would scroll the inspector, or that no widget used, step the slice view under the
         pointer, as the keyboard shortcuts say. Focus follows the mouse only when the pointer enters a view: after a
@@ -3977,11 +4016,8 @@ class Shell:
             # A view that has the focus already stepped its slice (it does not accept the key event, so the event
             # comes up to the main window afterwards): forwarding it again would step twice, or step a second view
             return False
-        hovered = qt.QApplication.widgetAt(qt.QCursor.pos())
-        view = hovered
-        while view is not None and not view.inherits("qMRMLSliceView"):
-            view = view.parentWidget()
-        if view is None or not hovered.isVisible():
+        hovered, view = self._hoveredSliceView()
+        if view is None:
             return False
         # The render widget handles the key (the widget under the pointer may be a child drawn over it)
         target = view.VTKWidget() if hasattr(view, "VTKWidget") else None

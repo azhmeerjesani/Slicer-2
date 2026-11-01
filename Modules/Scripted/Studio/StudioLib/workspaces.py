@@ -295,14 +295,15 @@ class WorkspaceController:
         self.transientModule = None
         self.shell._onWorkspaceEntered(ws, shrinkPanel=shrinkPanel)
         _callHook(ws, "enter", self.shell)
-        if hookFunction(ws, "focusFirst") is not None:
-            # After the module widget and the canvas are laid out
-            qt.QTimer.singleShot(0, lambda key=ws.key: self._focusFirst(key))
+        # After the module widget and the canvas are laid out
+        qt.QTimer.singleShot(0, lambda key=ws.key: self._focusFirst(key))
 
     def _focusFirst(self, key):
         if self.current != key or not self.shell.isActive():
             return
         callHook(workspace(key), "focusFirst", self.shell)
+        # The pointer may already be over a view (a scan was opened): the view gets the keys, as on entering
+        self.shell.focusHoveredView()
 
     def _leave(self):
         if self.current is None:

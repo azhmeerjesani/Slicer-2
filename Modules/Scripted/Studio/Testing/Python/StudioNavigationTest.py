@@ -1850,6 +1850,70 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         finally:
             window.hide()
 
+    def test_25b_pointer_already_over_view_keeps_the_keys(self):
+        """The pointer is over a slice view when Draw is entered (a scan was opened): Draw's focus on its tool tile must
+        not take Home, End, the arrow keys, f and b away from the view (focus follows the mouse only on entering a
+        view, and no enter event follows). The view under the pointer takes the focus; with Focus follows mouse off
+        the tile keeps it.
+        """
+        volume, segmentation = self._loadScanAndSegmentation()
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        slicer.util.setSliceViewerLayers(background=volume, fit=True)
+        self._pump(10)
+        sliceView = self._redSliceView()
+        renderWidget = sliceView.VTKWidget()
+        logic = self.layoutManager.sliceWidget("Red").sliceLogic()
+        self.mainWindow.activateWindow()
+        qt.QCursor.setPos(sliceView.mapToGlobal(qt.QPoint(sliceView.width // 2, sliceView.height // 2)))
+        self._pump()
+        hit = qt.QApplication.widgetAt(qt.QCursor.pos())
+        if hit is None or not (hit == sliceView or sliceView.isAncestorOf(hit)):
+            self.skipTest("the pointer cannot be put over the view on this display")
+        if not self.mainWindow.isActiveWindow:
+            self.skipTest("the main window cannot be activated on this display")
+        self.assertTrue(slicer.app.property("SlicerFocusFollowsMouse"))
+        studioShell.switchTo("library")
+        self._pump()
+        studioShell.switchTo("draw")
+        self._pump(10)
+        self.assertEqual(slicer.app.focusWidget(), renderWidget, "Draw's focus stayed on a tile with the pointer over the view")
+        bounds = [0.0] * 6
+        logic.GetLowestVolumeSliceBounds(bounds)
+        middle = (bounds[4] + bounds[5]) / 2.0
+        logic.SetSliceOffset(middle)
+        self._pump()
+        for key, expected in ((qt.Qt.Key_End, "above"), (qt.Qt.Key_Home, "below")):
+            self._sendKey(renderWidget, key)
+            self._pump()
+            offset = logic.GetSliceOffset()
+            self.assertTrue(offset > middle if expected == "above" else offset < middle, f"key {key} did not move the view ({offset})")
+            logic.SetSliceOffset(middle)
+            self._pump()
+        # The pointer over the inspector: the tile keeps the focus (nothing to give to a view)
+        scrollArea = self._dock().findChild("QScrollArea", "ScrollArea")
+        qt.QCursor.setPos(scrollArea.mapToGlobal(qt.QPoint(scrollArea.width // 2, scrollArea.height // 2)))
+        self._pump()
+        studioShell.switchTo("library")
+        self._pump()
+        studioShell.switchTo("draw")
+        self._pump(10)
+        self.assertNotEqual(slicer.app.focusWidget(), renderWidget, "The view took the focus with the pointer over the inspector")
+        # Focus follows mouse off: the tile keeps the focus although the pointer is over the view
+        qt.QCursor.setPos(sliceView.mapToGlobal(qt.QPoint(sliceView.width // 2, sliceView.height // 2)))
+        self._pump()
+        slicer.app.setProperty("SlicerFocusFollowsMouse", False)
+        try:
+            studioShell.switchTo("library")
+            self._pump()
+            studioShell.switchTo("draw")
+            self._pump(10)
+            self.assertNotEqual(slicer.app.focusWidget(), renderWidget, "The view took the focus with Focus follows mouse off")
+        finally:
+            slicer.app.setProperty("SlicerFocusFollowsMouse", True)
+        slicer.mrmlScene.RemoveNode(segmentation)
+        slicer.mrmlScene.RemoveNode(volume)
+
     def test_25_page_keys_step_the_hovered_view(self):
         """PageUp and PageDown step the slice view under the pointer also when the focus is on a tool tile of Draw (they
         used to scroll the inspector); over the inspector they scroll it as before; a text input keeps them. A view
