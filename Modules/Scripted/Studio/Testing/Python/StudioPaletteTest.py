@@ -1031,6 +1031,55 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             tree.setMaximumHeight(16777215)
             self._pump()
 
+    def test_15a_settings_panel_icons_follow_a_theme_switch_with_the_dialog_open(self):
+        """The theme is switched on the Appearance page while the (modal) settings dialog stays open, so no Show event redraws
+        the panel list: its Lucide icons (pixmaps tinted for the palette at show time) kept the old theme's ink, and the
+        selected row's icon was invisible on the new selection fill. They are redrawn when the palette changes.
+        """
+        from StudioLib import ui
+
+        self._applyStudio()
+        dialog = slicer.app.settingsDialog()
+        tree = dialog.findChild("QTreeWidget", "SettingsTreeWidget")
+        self.assertIsNotNone(tree)
+        originalPalette = qt.QPalette(slicer.app.palette())
+        wasDark = ui.isDark()
+        # The theme switch of the Appearance page changes the application palette (the test session keeps its style fixed)
+        otherWindow = "#f4f4f6" if wasDark else "#1c1c1f"
+
+        def ink(mode):
+            """The colour of the first opaque pixel of the first row's icon in the given icon mode."""
+            image = tree.topLevelItem(0).icon(0).pixmap(16, 16, mode).toImage()
+            for y in range(16):
+                for x in range(16):
+                    color = qt.QColor.fromRgba(image.pixel(x, y))
+                    if color.alpha() > 200:
+                        return color.name()
+            return None
+
+        try:
+            dialog.show()
+            self._wait(0.5)
+            before = (ink(qt.QIcon.Normal), ink(qt.QIcon.Selected))
+            self.assertTrue(all(before), before)
+            slicer.app.setPalette(qt.QPalette(qt.QColor(otherWindow)))
+            self._wait(1.0)
+            self.assertEqual(ui.isDark(), not wasDark, "the palette did not change with the theme")
+            self.assertTrue(dialog.isVisible())
+            after = (ink(qt.QIcon.Normal), ink(qt.QIcon.Selected))
+            self.assertNotEqual(after[0], before[0], f"the icons of the panel list keep the old theme's ink: {before} -> {after}")
+            self.assertNotEqual(after[1], before[1], f"the selected icon keeps the old theme's ink: {before} -> {after}")
+            # The same inks as when the dialog is opened again
+            dialog.hide()
+            self._pump()
+            dialog.show()
+            self._wait(0.5)
+            self.assertEqual((ink(qt.QIcon.Normal), ink(qt.QIcon.Selected)), after)
+        finally:
+            dialog.hide()
+            slicer.app.setPalette(originalPalette)
+            self._pump()
+
     def test_15b_settings_dialog_look_with_qt6_layout_margins(self):
         """Qt 6: QLayout declares the ``contentsMargins`` property, so PythonQt gives a QMargins value and not the getter.
 

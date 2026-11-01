@@ -901,11 +901,16 @@ class SettingsDialogLook:
                     item.setData(0, _SETTINGS_TEXT_ROLE, original)
                     self._saved.setdefault("icons", {})[original] = item.icon(0)
                 item.setText(0, sentenceCase(original))
-                item.setIcon(0, ui.icon(SETTINGS_PANEL_ICONS.get(str(original), SETTINGS_PANEL_ICON), 16))
+            self._applyPanelIcons(tree)
             tree.setIndentation(0)
             tree.setIconSize(qt.QSize(16, 16))
             tree.setMinimumWidth(200)
             ui.bindStyleSheet(tree, self._treeStyleSheet)
+            # The icons are pixmaps tinted for the palette of this moment, and the dialog stays open while the theme is
+            # switched on the Appearance page (no Show event), so they are redrawn when the palette changes
+            if getattr(self, "_paletteCallback", None) is None:
+                self._paletteCallback = self._onPaletteChanged
+                ui.addPaletteListener(self._paletteCallback)
         box = self._buttonBox()
         if box is not None:
             roles = ((qt.QDialogButtonBox.Ok, "primary", None), (qt.QDialogButtonBox.Cancel, "secondary", None),
@@ -936,6 +941,24 @@ class SettingsDialogLook:
         # A panel selected while the dialog was hidden (Check for updates opens Settings at Updates) is not scrolled to by the
         # tree; the rows have their final size only after the show event, so scroll once the dialog has been laid out
         qt.QTimer.singleShot(0, self._scrollToCurrentPanel)
+
+    def _applyPanelIcons(self, tree):
+        """The Lucide icons of the panel list, tinted for the current palette (``ui.icon`` caches them per palette)."""
+        for item in self._items(tree):
+            original = item.data(0, _SETTINGS_TEXT_ROLE)
+            if original:
+                item.setIcon(0, ui.icon(SETTINGS_PANEL_ICONS.get(str(original), SETTINGS_PANEL_ICON), 16))
+
+    def _onPaletteChanged(self):
+        if not ui._isAlive(self.dialog):
+            ui.removePaletteListener(self._paletteCallback)
+            self._paletteCallback = None
+            return
+        if not self.applied:
+            return
+        tree = self._tree()
+        if tree is not None:
+            self._applyPanelIcons(tree)
 
     def _scrollToCurrentPanel(self):
         """Scroll the panel list so that the selected panel's entry is fully visible."""
@@ -1018,6 +1041,9 @@ class SettingsDialogLook:
 
     def restore(self):
         """The official look again (Classic)."""
+        if getattr(self, "_paletteCallback", None) is not None:
+            ui.removePaletteListener(self._paletteCallback)
+            self._paletteCallback = None
         dialog = self.dialog
         if not ui._isAlive(dialog):
             return
