@@ -44,6 +44,13 @@ def _mapWidget():
     return getattr(slicer.modules, "LesionNetworkMappingWidget", None)
 
 
+def cohortMapsStatusText(mapped, label, subjects, hits):
+    """"Lesion maps: 3 lesions · conn-X · N=120 (0 from the cache)", with "1 lesion" for one."""
+    if mapped == 1:
+        return _("Lesion maps: 1 lesion · conn-{label} · N={subjects} ({hits} from the cache)").format(label=label, subjects=subjects, hits=hits)
+    return _("Lesion maps: {n} lesions · conn-{label} · N={subjects} ({hits} from the cache)").format(n=mapped, label=label, subjects=subjects, hits=hits)
+
+
 def _updateProgress(progressRow, force=False):
     """The progress row of a job, throttled and repainted asynchronously (``LesionNetworkMapping.updateProgressQuietly``)."""
     try:
@@ -448,8 +455,8 @@ class CohortCard:
         record = self.cohortMapsRecord() or {}
         if mapsTsv:
             lesions = record.get("lesions") or {}
-            self.statusLabel.setText(_("Lesion maps: {n} lesions · conn-{label} · N={subjects} ({hits} from the cache)").format(
-                n=lesions.get("mapped", "?"), label=(record.get("bundle") or {}).get("label", "?"), subjects=record.get("n", "?"), hits=lesions.get("cache_hits", 0)))
+            self.statusLabel.setText(cohortMapsStatusText(
+                lesions.get("mapped", "?"), (record.get("bundle") or {}).get("label", "?"), record.get("n", "?"), lesions.get("cache_hits", 0)))
         elif info and info.get("n"):
             self.statusLabel.setText((_("The lesion of the study is not mapped with this connectome yet.") if info["n"] == 1 else _("The {n} lesions of the study are not mapped with this connectome yet.")).format(n=info["n"]))
         else:

@@ -1307,6 +1307,29 @@ def _ownRadiusText(foci):
     return " · " + (_("1 focus uses the radius from the file") if own == 1 else _("{n} foci use the radius from the file").format(n=own))
 
 
+def coordinatesSummaryText(studies, foci):
+    """"2 studies · 5 foci" of the Seed Coords summary: the study and focus counts are singular or plural each on their own
+    ("1 study · 2 foci").
+    """
+    return _("{studies} · {foci}").format(
+        studies=_("1 study") if studies == 1 else _("{n} studies").format(n=studies),
+        foci=_("1 focus") if foci == 1 else _("{n} foci").format(n=foci))
+
+
+def stimulationSummaryText(patients, rows):
+    """"3 patients · 4 rows" of the Seed Stim summary, with "1 patient" and "1 row" for one."""
+    return _("{patients} · {rows}").format(
+        patients=_("1 patient") if patients == 1 else _("{n} patients").format(n=patients),
+        rows=_("1 row") if rows == 1 else _("{n} rows").format(n=rows))
+
+
+def seedMapsReadyText(n):
+    """Toast after the seed maps of a Coords or Stim seed set are mapped ("1 seed map ready ...")."""
+    if n == 1:
+        return _("1 seed map ready · see the Cohort card")
+    return _("{n} seed maps ready · see the Cohort card").format(n=n)
+
+
 def _formatBytes(count):
     from LesionNetworkMappingLib.manager import format_bytes
 
@@ -2881,7 +2904,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             self.coordSummaryLabel.setText(_("Import reported coordinates (or add a point list): the foci of each study make one seed."))
         else:
             talairach = sum(1 for focus in foci if focus.space == "TAL")
-            text = _("{studies} studies · {foci} foci").format(studies=len(studies), foci=len(foci))
+            text = coordinatesSummaryText(len(studies), len(foci))
             if talairach:
                 text += " · " + (_("1 Talairach focus will be converted to MNI (Lancaster et al. 2007)") if talairach == 1 else
                                  _("{n} Talairach foci will be converted to MNI (Lancaster et al. 2007)").format(n=talairach))
@@ -3068,7 +3091,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         if not self.stimulationItems:
             self.stimSummaryLabel.setText(_("Import a table of stimulation sites: one seed per patient, mapped like lesions."))
         else:
-            text = _("{n} patients · {rows} rows").format(n=patients, rows=len(self.stimulationItems))
+            text = stimulationSummaryText(patients, len(self.stimulationItems))
             if points:
                 text += _ownRadiusText([p for item in self.stimulationItems for p in item.get("points") or ()])
             self.stimSummaryLabel.setText(text)
@@ -3250,7 +3273,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         shell = self._shell()
         if shell is not None and job.state == "done":
             done = job.doneEvent or {}
-            shell.toast(_("{n} seed maps ready · see the Cohort card").format(n=done.get("n", "?")), 3000)
+            shell.toast(seedMapsReadyText(done.get("n", "?")), 3000)
 
     def runCoordinateNull(self):
         """Run the random-coordinate control (``coords null``) in the job runner; return the job or None."""
