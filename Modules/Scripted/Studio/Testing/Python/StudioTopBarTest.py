@@ -1021,6 +1021,33 @@ class StudioTopBarTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(topBar.errorCount(), before + 7 + 10 - topbar._DICOM_FIRST_RUN_MAX_SQL_ERRORS)
         topBar._onErrorLogViewed()
 
+    def test_error_badge_ignores_blank_stderr_line(self):
+        """A stray newline on stderr (CTK's FD reader logs it as an empty Critical entry at some starts) is not an error to count."""
+        from StudioLib import topbar
+
+        studioShell = self._applyStudio()
+        topBar = studioShell.topBar
+        model = topBar.errorLogModel
+        self._pump()
+        topBar._scanErrors()
+        before = topBar.errorCount()
+        rows = model.rowCount()
+        if "FD" not in model.msgHandlerNames:
+            self.skipTest("the stderr (FD) log handler is not registered here")
+        # The very entry of the startup race: Critical, origin FD, no text
+        os.write(2, b"\n")
+        self._pump(10)
+        topBar._scanErrors()
+        blank = [row for row in range(rows, model.rowCount()) if model.index(row, topbar._LEVEL_COLUMN).data() == "Critical" and not (model.index(row, topbar._DESCRIPTION_COLUMN).data() or "").strip()]
+        self.assertTrue(blank, "no empty Critical entry was logged for a newline on stderr")
+        self.assertEqual(topBar.errorCount(), before)
+        # A real stderr line is still counted
+        os.write(2, b"a real failure on stderr\n")
+        self._pump(10)
+        topBar._scanErrors()
+        self.assertEqual(topBar.errorCount(), before + 1)
+        topBar._onErrorLogViewed()
+
 
 class _Width:
     """A stand-in for the main window with another width (the narrow mode only reads ``width``)."""

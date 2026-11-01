@@ -358,7 +358,17 @@ void qSlicerApplicationPrivate::init()
 #if !defined(Q_OS_WIN32) || defined(Slicer_BUILD_WIN32_CONSOLE)
   this->ErrorLogModel->registerMsgHandler(new ctkErrorLogFDMessageHandler);
 #endif
-  this->ErrorLogModel->setAllMsgHandlerEnabled(true);
+  // Enable all handlers except ctkErrorLogFDMessageHandler: it must stay disabled until after Superclass::init()
+  // (see below). Enabling it here only to disable it right away is racy: ctkFDHandler::setEnabled(false) writes
+  // a newline to wake its reader thread before it clears its enabled flag, so the reader sometimes logs that empty
+  // line as a Critical "FD" entry, which shows up as an error at a clean start.
+  foreach (const QString& handlerName, this->ErrorLogModel->msgHandlerNames())
+  {
+    if (handlerName != ctkErrorLogFDMessageHandler::HandlerName)
+    {
+      this->ErrorLogModel->setMsgHandlerEnabled(handlerName, true);
+    }
+  }
 
   // ctkErrorLogStreamMessageHandler intercepts std::cerr/std::cout, which would prevent
   // command-line argument validation messages (written via showConsoleMessage -> std::cerr)

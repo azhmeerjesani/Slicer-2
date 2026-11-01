@@ -1267,12 +1267,24 @@ class TopBar:
         if rowCount < self._scannedRows:
             self._rescanErrors()
             return
+        scanned = self._scannedRows
         for row in range(self._scannedRows, rowCount):
             isError = model.index(row, _LEVEL_COLUMN).data() in _ERROR_LEVEL_NAMES
-            if not self._isExpectedFirstRunMessage(row, isError) and isError:
+            if isError and self._isBlankMessage(row):
+                if row == rowCount - 1:
+                    # The log groups consecutive entries of a level in the last row: a later line can still join this one
+                    break
+            elif not self._isExpectedFirstRunMessage(row, isError) and isError:
                 self._errorRows += 1
-        self._scannedRows = rowCount
+            scanned = row + 1
+        self._scannedRows = scanned
         self._updateErrorBadge()
+
+    def _isBlankMessage(self, row):
+        """True for a log row without text. CTK's stderr reader logs a stray newline as an empty Critical "FD" entry
+        (a startup race of ``ctkFDHandler``, also in official Slicer): it tells nothing, so it is not counted.
+        """
+        return not (self.errorLogModel.index(row, _DESCRIPTION_COLUMN).data() or "").strip()
 
     def _isExpectedFirstRunMessage(self, row, isError):
         """True for the messages of the first DICOM use of a profile (``_DICOM_FIRST_RUN_NOTICE``), not counted."""
