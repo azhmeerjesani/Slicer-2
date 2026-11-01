@@ -755,13 +755,16 @@ class CaseSection:
             self.editors[column] = editor
             if column == "doi":
                 row = qt.QWidget()
-                rowLayout = qt.QHBoxLayout(row)
+                # The edit keeps the width of the other fields (a DOI is long); the "Open" link goes below it, because
+                # next to it the link's minimum width (about 80 px) left the edit 53 px of a 137 px field (BB-1)
+                rowLayout = qt.QVBoxLayout(row)
                 rowLayout.setContentsMargins(0, 0, 0, 0)
-                rowLayout.setSpacing(4)
-                rowLayout.addWidget(editor, 1)
+                rowLayout.setSpacing(0)
+                rowLayout.addWidget(editor)
                 self.doiButton = library._linkButton(_("Open"), "StudioCaseDoiOpen", self.openDoi)
                 self.doiButton.setToolTip(_("Open https://doi.org/<doi> in the browser"))
-                rowLayout.addWidget(self.doiButton)
+                self.doiButton.setSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Fixed)
+                rowLayout.addWidget(self.doiButton, 0, qt.Qt.AlignLeft)
                 form.addRow(label, row)
                 self.rows[column] = (label, row)
             else:

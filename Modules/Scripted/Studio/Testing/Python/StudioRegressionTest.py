@@ -3467,3 +3467,45 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertNotIn("Use anyway", statistics)
         self.assertIn("Normalize native subjects in the Library", templates)
         self.assertNotIn("Normalize all in the Library", templates)
+
+    def test_48_case_doi_field_is_as_wide_as_the_other_source_fields(self):
+        """The Case section's DOI field was 53 px wide in a 137 px field: the flat "Open" button next to it keeps a minimum
+        width of about 80 px, so no DOI could be read (BB-1). The edit now has the width of the other fields and the link
+        sits below it.
+        """
+        from StudioLib import libcard_columns, study_ui
+
+        if not study_ui.isAvailable():
+            self.skipTest("needs the lesion network mapping library")
+        study = self._study([("sub-01", {}, False), ("sub-02", {}, False)])
+        section = host = None
+        try:
+            session = study_ui.openStudy(study.path, showLibrary=False)
+            self.assertIsNotNone(session)
+            host = qt.QWidget()
+            hostLayout = qt.QVBoxLayout(host)
+            sectionWidget = libcard_columns._createSection(session)
+            section = libcard_columns._sections[sectionWidget]
+            hostLayout.addWidget(sectionWidget)
+            host.resize(306, 600)
+            host.show()
+            section.refresh("sub-02")
+            button = section.groups["source"][0]
+            if not button.isChecked():
+                button.click()
+            doi = "10.1016/j.cortex.2020.01.001"
+            section.setField("doi", doi)
+            section.setField("pmid", "31234567")
+            for _ in range(6):
+                slicer.app.processEvents()
+            edit, pmid, link = section.editors["doi"], section.editors["pmid"], section.doiButton
+            self.assertTrue(edit.isVisible() and link.isVisible())
+            self.assertGreaterEqual(edit.width, pmid.width - 2, f"DOI edit {edit.width} px, PMID edit {pmid.width} px")
+            self.assertGreaterEqual(edit.width, 100)
+            self.assertEqual(str(edit.text), doi)
+            self.assertLess(link.width, 100, "the Open link is compact")
+            self.assertTrue(link.enabled, "a DOI that resolves enables the Open link")
+        finally:
+            if host is not None:
+                host.deleteLater()
+            study_ui.closeStudy()
