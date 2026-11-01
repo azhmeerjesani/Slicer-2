@@ -192,6 +192,13 @@ def normalize_rule(rule=None):
     kind = rule.get("kind")
     if kind not in KINDS:
         raise ValueError(f"Unknown threshold rule kind {kind!r}; expected one of {', '.join(KINDS)}")
+    allowed = {"kind", "reference_n", "override", *RULE_DEFAULTS[kind]}
+    unknown = sorted((key for key in rule if key not in allowed), key=str)
+    if unknown:
+        raise ValueError(
+            f"Unknown key(s) {', '.join(repr(key) for key in unknown)} in a {kind} threshold rule; "
+            f"expected: {', '.join(sorted(allowed))}",
+        )
     out = {"kind": kind, **RULE_DEFAULTS[kind]}
     out.update({key: value for key, value in rule.items() if key != "kind"})
     if kind == "top_pct":

@@ -166,6 +166,12 @@ and opens in the Library. A GUI run and a batch run of the same study, connectom
 within numerical tolerance. The `participant` level runs the stages up to the network maps and the per-lesion export;
 the `group` level runs every stage and reuses what the participant level completed.
 
+**Threshold rule (`--rule`)** is a JSON object with a `kind` and that kind's keys, for example
+`{"kind":"top_pct","value":5}`. `fwe_bonferroni`: `alpha` (default 0.05). `t_convention`, `fz_abs`, `custom_t`: `value`
+(the threshold). `top_pct`: `value` (the percentage, default 10), `statistic` (`Fz` or `T`), `sign` (`both`, `pos` or
+`neg`). `t_convention` and `custom_t` also take `reference_n`, and any kind takes `override`. A key that the kind does not
+know, for example a misspelled one, is refused as a usage error (exit 2) that lists the keys it expects.
+
 **Exit codes** of the pipeline and the twin: 0 done, 1 error, 2 usage, 3 stopped, 4 data use terms not accepted
 (`--accept-terms` is required: it states that you accepted the terms of the connectome), 5 blocked by the preflight,
 6 no eligible lesion, 75 another run holds the output folder.

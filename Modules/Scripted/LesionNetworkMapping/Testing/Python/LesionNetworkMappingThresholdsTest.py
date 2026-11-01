@@ -182,6 +182,23 @@ class TopPercentRuleTest(unittest.TestCase):
             self.assertNotIn("Fz", thresholds.describe(resolved, fraction=resolved.fraction))
 
 
+class UnknownRuleKeyTest(unittest.TestCase):
+    """A misspelled key is refused (it used to be ignored, leaving the default threshold in place)."""
+
+    def test_unknown_keys_are_refused_naming_the_expected_keys(self):
+        for text in ('{"kind":"top_pct","pct":5}', '{"kind":"fwe_bonferroni","alpha":0.01,"aplha":0.5}', '{"kind":"fz_abs","statistic":"Fz"}'):
+            with self.subTest(rule=text), self.assertRaisesRegex(ValueError, "Unknown key.*expected: "):
+                thresholds.rule_from_json(text)
+        with self.assertRaisesRegex(ValueError, "'pct'.*expected: kind, override, reference_n, sign, statistic, value"):
+            thresholds.normalize_rule({"kind": "top_pct", "pct": 5})
+
+    def test_every_documented_key_is_still_accepted(self):
+        self.assertEqual(thresholds.normalize_rule({"kind": "top_pct", "value": 5, "statistic": "T", "sign": "pos"})["value"], 5.0)
+        self.assertEqual(thresholds.normalize_rule({"kind": "t_convention", "value": 6, "reference_n": 800, "override": True})["override"], True)
+        for kind in thresholds.KINDS:
+            self.assertEqual(thresholds.normalize_rule(thresholds.normalize_rule({"kind": kind}))["kind"], kind)
+
+
 class GsrAndReadoutTest(unittest.TestCase):
     def test_gsr_banner_only_for_symmetric_t_rules_without_gsr(self):
         banner = thresholds.GSR_BANNER
