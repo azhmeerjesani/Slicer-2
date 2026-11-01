@@ -3917,7 +3917,7 @@ def helpHtml(shell):
         ("C", _("Center on lesion")),
         ("Alt+← · Alt+→", _("Previous / next lesion of a set or subject")),
         (ui.keyText(SAVE_LESION_SHORTCUT) + " · " + ui.keyText(PRIMARY_SHORTCUT), _("Save lesion")),
-        ("Ctrl+Z · " + ui.keyText(REDO_SHORTCUT), _("Undo · Redo")),
+        (ui.keyText("Ctrl+Z") + " · " + ui.keyText(REDO_SHORTCUT), _("Undo · Redo")),
     ]
     table = "".join(f"<tr><td style='padding-right: 12px;'><b>{html.escape(key)}</b></td><td>{html.escape(text)}</td></tr>" for key, text in rows)
     body = ""

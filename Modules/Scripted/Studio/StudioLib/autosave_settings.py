@@ -101,7 +101,7 @@ class AutosaveSettingsPanel(ctk.ctkSettingsPanel):
         self.intervalSpinBox = self._spinBox(1, 60, "IntervalMinutes", _(" min"))
         layout.addWidget(ui.settingsRow(_("And at least every"), self.intervalSpinBox, last=True))
         layout.addWidget(ui.label(_("Large scans (over 100 MB to write) are saved every 10 minutes, and always when you switch projects, "
-                                    "press Ctrl+S or quit."), "caption", "text3", "StudioSavingLargeNote", wrap=True))
+                                    "press {key} or quit.").format(key=ui.keyText("Ctrl+S")), "caption", "text3", "StudioSavingLargeNote", wrap=True))
         layout.addSpacing(16)
 
         # Recovery of the scenes that are not projects

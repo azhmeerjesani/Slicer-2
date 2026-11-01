@@ -235,7 +235,7 @@ ROWS = (
         category="editor"),
     Row("segment-editor-undo", _("Segment Editor Undo / Redo"), _("Undo and Redo in the top bar while you draw ({key:Ctrl+Z}, {key:Ctrl+Y})"),
         officialKey="Ctrl+Z / Ctrl+Shift+Z", key="Ctrl+Z", target="StudioUndoButton", workspace="draw", keywords="undo redo history", category="editor",
-        note=_("Ctrl+Shift+Z, and Z and Y without Ctrl, still work as in 3D Slicer.")),
+        note=_("{key:Ctrl+Shift+Z}, and Z and Y alone, still work as in 3D Slicer.")),
     Row("segmentations-module", _("Segmentations module"),
         _("Search > Segmentations ({key:Ctrl+K}); in Draw, ⋯ of the panel > Show all controls also shows its button"),
         key="Ctrl+K", target="StudioSearchPill", keywords="segmentations module representations closed surface import export",

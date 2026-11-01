@@ -80,6 +80,11 @@ def _isMacOS():
     return sys.platform == "darwin"
 
 
+def _controlGesture(gesture):
+    """"Ctrl+wheel", or "⌘+wheel" on macOS: the view interactor gets Qt::ControlModifier, which is the Command key there."""
+    return f"{'⌘' if _isMacOS() else 'Ctrl'}+{gesture}"
+
+
 def _native(key):
     """A key ("Ctrl+K") as displayed on this platform ("⌘K"); descriptions of gestures ("Shift+wheel") and single
     characters ("v" is not "V") are kept.
@@ -273,7 +278,7 @@ def _drawStaticRows():
         [["x"], _("Outline: remove the last point")],
         [["drag ↔", "Shift+wheel", "+ - = _"], _("Smart fill: tolerance")],
         [["Shift+click"], _("Smart fill: extend (click without moving)")],
-        [["Ctrl+click" if not _isMacOS() else "⌘+click"], _("Smart fill: remove (click without moving)")],
+        [[_controlGesture("click")], _("Smart fill: remove (click without moving)")],
         [["Return", "Enter"], _("Smart fill: apply")],
         [["Backspace"], _("Smart fill: discard the preview")],
     ]
@@ -286,10 +291,10 @@ def _viewRows():
         [["PageUp", "PageDown"], _("Several slices at once (Studio)")],
         [["Home", "End"], _("First / last slice")],
         [["Shift+move"], _("Move the crosshair: the other views follow")],
-        [["Ctrl+wheel", "right-drag"], _("Zoom")],
+        [[_controlGesture("wheel"), "right-drag"], _("Zoom")],
         [["middle-drag", "Shift+drag"], _("Pan")],
         [["left-drag"], _("Window/level, when no tool is active (Studio)")],
-        [["Ctrl+left-drag"], _("Blend the foreground and background")],
+        [[_controlGesture("left-drag")], _("Blend the foreground and background")],
         [["double-click"], _("Maximize the view; Esc restores")],
         [["r"], _("Reset the view (fit)")],
         [["g", "t"], _("Toggle label / foreground opacity")],

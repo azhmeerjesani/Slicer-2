@@ -1265,7 +1265,7 @@ def closeNode(node, confirm=True):
         return False
     if confirm and node.IsA("vtkMRMLSegmentationNode") and isLesionUnsaved(node):
         if not _confirmClose(_("{name} has changes that are not saved.").format(name=node.GetName()),
-                             _("Save the lesion in Draw first (Ctrl+Shift+S), or close it and lose the changes.")):
+                             _("Save the lesion in Draw first ({key}), or close it and lose the changes.").format(key=ui.keyText("Ctrl+Shift+S"))):
             return False
     editor = _segmentEditor()
     if editor is not None:
@@ -1290,7 +1290,7 @@ def closeLoadedSet(confirm=True):
     unsaved = [node for node in loaded.nodes() if isLesionUnsaved(node)]
     if confirm and unsaved:
         if not _confirmClose(_("{count} lesions of this set have changes that are not saved.").format(count=len(unsaved)),
-                             _("Save them in Draw first (Ctrl+Shift+S), or close the set and lose the changes.")):
+                             _("Save them in Draw first ({key}), or close the set and lose the changes.").format(key=ui.keyText("Ctrl+Shift+S"))):
             return False
     loaded.close()
     return True
@@ -1558,7 +1558,7 @@ class CurrentWorkCard(qt.QObject):
         actionsLayout.setSpacing(8)
         actionsLayout.addStretch(1)
         self.continueButton = _roleButton(_("Continue in Draw →"), "StudioCurrentWorkContinueButton", lambda: continueInDraw(_shell()), "primary")
-        self.continueButton.setToolTip(_("Edit the lesion in Draw (Ctrl+Alt+2)"))
+        self.continueButton.setToolTip(ui.tooltip(_("Edit the lesion in Draw"), "Ctrl+Alt+2"))
         self.continueButton.setFixedHeight(36)
         self.closeButton = _roleButton(_("Close"), "StudioCurrentWorkCloseButton", lambda: closeScene(), "secondary")  # noqa: PLW0108 (looked up when clicked)
         self.closeButton.setToolTip(_("Close the scene"))
@@ -5599,7 +5599,7 @@ class LibraryCanvas(qt.QObject):
         self.sampleDataLink.setToolTip(_("Load a sample scan (downloaded from the 3D Slicer sample data)"))
         linkRow.addWidget(self.sampleDataLink)
         self.classicLink = self._ghost(_("Classic interface"), "StudioLibraryClassicLink", switchToClassic, "monitor")
-        self.classicLink.setToolTip(_("Switch to the Classic interface (Ctrl+Alt+0)"))
+        self.classicLink.setToolTip(ui.tooltip(_("Switch to the Classic interface"), "Ctrl+Alt+0"))
         linkRow.addWidget(self.classicLink)
         linkRow.addStretch(1)
         columnLayout.addLayout(linkRow)

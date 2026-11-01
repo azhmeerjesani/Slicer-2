@@ -1155,3 +1155,76 @@ class StudioTourTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         finally:
             tour.stopTour()
             self._pump()
+
+    def test_22_keys_in_texts_are_shown_natively(self):
+        """On macOS every key named in a text is shown as the platform displays it ("⌘O"), not as the portable "Ctrl+O":
+        the tour card bodies, the ≡ menu, the cheat sheet gestures (bug bash). Linux shows no difference, so the
+        functions that render native keys return what macOS returns.
+        """
+        import ast
+        from StudioLib import appmenu, cheatsheet, migration, tours, ui
+
+        mac = {"Ctrl": "\u2318", "Alt": "\u2325", "Shift": "\u21e7"}
+
+        def macKey(key):
+            key = str(key)
+            if not key or " " in key.strip():
+                return key
+            parts = key.split("+")
+            if len(parts) < 2 or any(part not in mac for part in parts[:-1]):
+                return key
+            return "".join(mac[part] for part in sorted(parts[:-1], key=["Alt", "Shift", "Ctrl"].index)) + parts[-1]
+
+        originals = (migration.keyText, ui.keyText, cheatsheet._isMacOS)
+        migration.keyText = lambda key, native=True: macKey(key) if native and key else (key or "")
+        ui.keyText = macKey
+        cheatsheet._isMacOS = lambda: True
+        studioShell = None
+        try:
+            studioShell = self._applyStudio()
+            # Tour card bodies
+            raw = re.compile(r"\bCtrl\+")
+            for tour in tours.TOURS:
+                for step in tour.steps:
+                    body = step.bodyText(studioShell)
+                    self.assertIsNone(raw.search(body), f"{tour.id}/{step.id}: {body}")
+                    self.assertNotIn("{key:", body, f"{tour.id}/{step.id}")
+            self.assertIn("\u2318O", tours.tour("studio").steps[1].bodyText(studioShell))
+            # The ≡ menu
+            holder = qt.QWidget()
+            menu = appmenu.AppMenu(studioShell, holder)
+            shown = [str(action.text).split("\t", 1)[1] for action in menu.menu.actions() if "\t" in str(action.text)]
+            self.assertGreaterEqual(len(shown), 9, shown)
+            for text in shown:
+                # "Show inspector" asks Qt for the native text itself: on Linux it is the portable one
+                if text != "Ctrl+\\":
+                    self.assertIsNone(re.search(r"\bCtrl\+", text), text)
+            # The cheat sheet gestures follow the Command key of the view interactor
+            gestures = [key for row in cheatsheet._viewRows() for key in row[0]]
+            self.assertIn("\u2318+wheel", gestures)
+            self.assertIn("\u2318+left-drag", gestures)
+            self.assertFalse([key for key in gestures if key.startswith("Ctrl+")], gestures)
+            holder.deleteLater()
+        finally:
+            migration.keyText, ui.keyText, cheatsheet._isMacOS = originals
+            if studioShell is not None:
+                studioShell.classic()
+                self._pump()
+        # Texts of the Studio modules never hard-code the portable key (they use {key:...}, ui.keyText or ui.tooltip)
+        allowed = ("Ctrl+F2", "AltGr+digit", "Inspector: Ctrl+")
+        import StudioLib
+
+        libDirectory = os.path.dirname(os.path.abspath(StudioLib.__file__))
+        offenders = []
+        for name in sorted(os.listdir(libDirectory)):
+            if not name.endswith(".py"):
+                continue
+            with open(os.path.join(libDirectory, name), encoding="utf-8") as source:
+                tree = ast.parse(source.read())
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_" and node.args
+                        and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)):
+                    text = re.sub(r"\{key:[^}]*\}", "", node.args[0].value)
+                    if re.search(r"\bCtrl\+", text) and not any(item in text for item in allowed):
+                        offenders.append(f"{name}:{node.lineno}: {text[:80]}")
+        self.assertEqual(offenders, [], "portable keys in texts: use {key:...}, ui.keyText or ui.tooltip")
