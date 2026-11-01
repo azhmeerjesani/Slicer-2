@@ -1011,6 +1011,10 @@ class StudioNiftiExportTest(unittest.TestCase):
         self.assertIn("Lesions_label-Lesion_mask.nii", dialog.summaryLabel.text)
         dialog.segmentationGroup.button(0).click()
         self.assertIn("Lesions_dseg.nii", dialog.summaryLabel.text)
+        self.assertIn("plus 1 sidecar and 1 label table", dialog.summaryLabel.text)
+        dialog.segmentationGroup.button(1).click()
+        self.assertIn("plus 1 sidecar", dialog.summaryLabel.text)
+        self.assertNotIn("label", dialog.summaryLabel.text.replace("label-Lesion", ""))
         # With more images than rows, the chosen one is scrolled into view
         extra = [self._volume(f"extra {index}", np.zeros((3, 3, 3), np.int16), np.eye(4)) for index in range(8)]
         dialog = niftiexport_ui.exportNodesDialog([segmentation], show=False, executor=autosave_io.InlineExecutor())
@@ -1025,6 +1029,19 @@ class StudioNiftiExportTest(unittest.TestCase):
         for node in extra:
             slicer.mrmlScene.RemoveNode(node)
         self._assertNoAbsolutePaths(self.out)
+
+    def test_08_summary_counts_sidecars_and_names_label_tables_only_when_written(self):
+        """"plus 1 sidecar" / "plus 3 sidecars": no "label files" for plain images (only a label map writes label tables)."""
+        from StudioLib import autosave_io, niftiexport_ui
+
+        scans = [self._volume(f"count scan {index}", np.zeros((3, 3, 3), np.int16), np.eye(4)) for index in range(3)]
+        for chosen, expected in ((scans[:1], "1 image: count_scan_0.nii.gz · plus 1 sidecar"), (scans, "plus 3 sidecars")):
+            dialog = niftiexport_ui.exportNodesDialog(chosen, show=False, executor=autosave_io.InlineExecutor())
+            dialog.setFolder(self.out)
+            self.assertIn(expected, dialog.summaryLabel.text)
+            self.assertNotIn("label", dialog.summaryLabel.text)
+            self.assertNotIn(" and ", dialog.summaryLabel.text.split("plus", 1)[1])
+            dialog.close()
 
     def test_08_list_title_is_sentence_case(self):
         """The list title reads "Images", not an ALL-CAPS overline (VISUAL 2.4: overlines only for CONTINUE and group headers)."""

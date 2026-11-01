@@ -288,6 +288,15 @@ def announce(result):
 #
 
 
+def _extraFilesText(sidecars, tables):
+    """"1 sidecar", "14 sidecars" or "1 sidecar and 1 label table": label tables are named only when a label map writes them."""
+    sidecarText = (_("1 sidecar") if sidecars == 1 else _("{count} sidecars").format(count=sidecars)) if sidecars else ""
+    tableText = (_("1 label table") if tables == 1 else _("{count} label tables").format(count=tables)) if tables else ""
+    if sidecarText and tableText:
+        return _("{sidecars} and {tables}").format(sidecars=sidecarText, tables=tableText)
+    return sidecarText or tableText
+
+
 class ExportDialog(qt.QDialog):
     """"Export as NIfTI" (module docstring). ``mode``: "images", "project" or "dicom" (title, names and README differ)."""
 
@@ -553,13 +562,17 @@ class ExportDialog(qt.QDialog):
             jobs = []
             logging.error(f"Slicer Studio: the NIfTI export could not be planned: {e}")
         images = [path for job in jobs for path in job.images()]
-        others = sum(len(job.files()) for job in jobs) - len(images)
+        files = [path for job in jobs for path in job.files()]
+        others = len(files) - len(images)
+        # Each label table is written twice (.tsv for BIDS, .txt for ITK-SNAP) but is one table to the user
+        extras = _extraFilesText(sum(1 for path in files if path.endswith(".json")), sum(1 for path in files if path.endswith(".tsv")))
         if images:
             names = ", ".join(os.path.basename(path) for path in images[:SUMMARY_NAMES])
             if len(images) > SUMMARY_NAMES:
                 names += " " + _("and {count} more").format(count=len(images) - SUMMARY_NAMES)
             text = (_("1 image: {names}") if len(images) == 1 else _("{count} images: {names}")).format(count=len(images), names=names)
-            text += " · " + _("plus {count} sidecar and label files").format(count=others)
+            if extras:
+                text += " · " + _("plus {things}").format(things=extras)
             if self.mode == "project":
                 text += " · README.txt"
         else:
