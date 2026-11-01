@@ -72,10 +72,12 @@ often copyrighted, is never kept or exported), and `trace_method` records "figur
 
 When a lesion was traced on one slice (2D), the Lesion card asks how to turn it into a volume, once per study:
 
-- **Keep as drawn** (a single slice).
-- **Extrude to a total thickness** (default 2 mm) with fractional edge slices, written as `desc-lesionProb` and mapped with
-  the engine's probabilistic option; or
-- **Extrude as a binary mask** by a whole number of voxels on each side.
+- **Keep single-slice**: map the one slice only.
+- **Extrude to N mm total** (a thickness box sets N, default 2 mm): the lesion is extruded to that exact total thickness,
+  centred on the drawn plane, with fractional edge slices; it is written as `desc-lesionProb` and mapped with the engine's
+  probabilistic option.
+- **Extrude ±N/2 mm, binary** (for the default 2 mm, "Extrude ±1 mm, binary"): the lesion is extruded by a whole number
+  of voxels on each side of the drawn plane and stays a binary mask.
 
 The study stores the choice and its semantics ("total, centred on the drawn plane"), and the methods text reports it.
 Several single-slice drawings on different planes are "multi2D". The traced mask is never modified: the extruded file is

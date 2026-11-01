@@ -3430,3 +3430,40 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertNotIn("`Studio/LNM/DataDirectory` | `Documents/SlicerStudio`", readme)
         self.assertNotIn("Without one: `Documents/SlicerStudio/normalization/<name>-<hash>`", readme)
         self.assertIn("LNM/ normalization outputs, control sets and recipes", projects)
+
+    def test_47_docs_name_the_lnm_buttons_the_app_shows(self):
+        """lnm_intake.md, lnm_statistics.md and studio_templates.md name the single-slice extrusion choices, the rule
+        banner buttons and the Library normalization button with the labels of the app, not with the spec's shorthand
+        (Keep as drawn, Extrude to a total thickness, Extrude as a binary mask, Use anyway, Normalize all).
+        """
+        import LesionNetworkMapping as lnm
+        from StudioLib import lesionqc, libcard_normalize
+
+        root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", ".."))
+        names = ("Docs/user_guide/modules/lnm_intake.md", "Docs/user_guide/modules/lnm_statistics.md",
+                 "Docs/user_guide/studio_templates.md")
+        paths = {name: os.path.join(root, *name.split("/")) for name in names}
+        if not all(os.path.isfile(path) for path in paths.values()):
+            self.skipTest("the documentation is not next to this build")
+        texts = {}
+        for name, path in paths.items():
+            with open(path, encoding="utf-8") as stream:
+                texts[name] = " ".join(stream.read().replace("*", "").split())
+        intake, statistics, templates = (texts[name] for name in names)
+        # The labels the app shows
+        qc = inspect.getsource(lesionqc)
+        for label in ("Keep single-slice", "Extrude to {mm:g} mm total", "Extrude ±{mm:g} mm, binary"):
+            self.assertIn('_("%s")' % label, qc)
+        banner = inspect.getsource(lnm)
+        self.assertIn('(_("Switch to FWE"), self.onSwitchToFwe), (_("Keep"), self.onKeepRule)', banner)
+        self.assertIn('_("Normalize native subjects")', inspect.getsource(libcard_normalize))
+        # The docs use them
+        for text in ("Keep single-slice", "Extrude to N mm total", "Extrude ±N/2 mm, binary"):
+            self.assertIn(text, intake)
+        for text in ("Keep as drawn", "Extrude to a total thickness", "Extrude as a binary mask"):
+            self.assertNotIn(text, intake)
+        self.assertIn("Switch to FWE", statistics)
+        self.assertIn("Keep in the banner", statistics)
+        self.assertNotIn("Use anyway", statistics)
+        self.assertIn("Normalize native subjects in the Library", templates)
+        self.assertNotIn("Normalize all in the Library", templates)

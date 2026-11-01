@@ -124,7 +124,7 @@ shared files.
   Map), and the Lesion card notes that the lesion grid and the template differ by a
   few millimetres. A project reopened without the template, or a template removed
   while it is open, keeps its lesion in the template's space in the same way.
-  *Normalize all* in the Library (and `normalize
+  *Normalize native subjects* in the Library (or *Normalize all native lesions* in the command palette; and `normalize
   batch --template auto`) normalizes the study's lesions to the study's template
   when it is on this computer with a brain mask; otherwise it uses the built-in
   2009c brain and says so. With a study open, *Start on template* (or choosing the

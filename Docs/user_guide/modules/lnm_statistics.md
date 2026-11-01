@@ -35,7 +35,7 @@ never reused silently for another. The derived line under the threshold shows th
 | Rule | Meaning | Notes |
 | ---- | ------- | ----- |
 | **FWE (Bonferroni)**, the default | \|T\| at which p < α/V, two-sided, α = 0.05: `t.isf(α / 2 / V, N - 1)` | The table below |
-| **\|T\| ≥ 7** (the convention) | T = 7 | Defined for about N = 1000 and **disabled for N below 900** unless you choose "Use anyway" (the override is recorded). A banner appears when N differs from the reference N by more than 10% |
+| **\|T\| ≥ 7** (the convention) | T = 7 | Defined for about N = 1000 and **not applied for N below 900** (nothing is shown) until you choose **Keep** in the banner that appears (the override is recorded); **Switch to FWE** in the same banner goes back to the default rule. A banner also appears when N differs from the reference N by more than 10% |
 | **Fz ≥ x** | an effect size on the mean Fz | Does not depend on N; the statistic switches to Fz |
 | **Custom T** | a value you type | A banner appears when the map's N differs from the N it was chosen for. A map whose N is unknown can only take this rule and the two N-free rules, and shows no p value |
 | **Top x %** | the value above which the top x % of in-mask voxels of this map lie (default 10) | Does not depend on N; there are no p values. This is the only kind of rule that the fast (parcel) mode accepts |
