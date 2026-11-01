@@ -137,6 +137,7 @@ DEFAULT_TOP_PCT = 10.0
 ON_DEMAND_ROWS = 16  # approximate_maps converts at most this many (or R / 8) touched rows of P per call, else keeps float32 P
 SIZE_BINS_ML = (1.0, 10.0, 50.0)  # bin edges in ml: < 1, 1-10, 10-50, >= 50
 SIZE_BIN_NAMES = ("lt1ml", "1to10ml", "10to50ml", "ge50ml")
+SIZE_BIN_TEXT = {"lt1ml": "< 1 mL", "1to10ml": "1–10 mL", "10to50ml": "10–50 mL", "ge50ml": "≥ 50 mL"}  # noqa: RUF001  # shown to users
 
 GSP_PARCEL_MATRIX = "GSP1000_FCz_Schaefer1000Melbourne54.mat"
 
@@ -1231,6 +1232,11 @@ def lesion_volumes_ml(occ, index):
     return [float(weights.sum() * voxel_ml) for _, weights in _lesion_columns(occ, tiling.n_voxels)]
 
 
+def size_bin_text(name):
+    """The user-facing name of a size-bin id ("lt1ml" -> "< 1 mL"); unknown ids are returned unchanged."""
+    return SIZE_BIN_TEXT.get(name, name)
+
+
 def size_bin(volume_ml, edges=SIZE_BINS_ML, names=SIZE_BIN_NAMES):
     """Size bin name of a lesion volume in ml (None for an unknown volume)."""
     if volume_ml is None or not np.isfinite(volume_ml):
@@ -1418,7 +1424,7 @@ def gate(report, constants=None, min_lesions=None, min_group=None):
             if size_axis and m.get("size_bin") is None:
                 reasons.append("the lesion volume is unknown")
             elif size_axis and (not bin_verdict or not bin_verdict["passed"]):
-                reasons.append(f"the {m.get('size_bin')} size bin failed the parity gate ({bin_verdict['reason'] if bin_verdict else 'not evaluated'})")
+                reasons.append(f"the {size_bin_text(m.get('size_bin'))} size bin failed the parity gate ({bin_verdict['reason'] if bin_verdict else 'not evaluated'})")
         if reasons:
             excluded.append({"name": m.get("name"), "stratum": m.get("stratum"), "size_bin": m.get("size_bin"), "message": "Excluded from fast-mode statistics: " + "; ".join(reasons) + "."})
     for stratum, verdict in strata.items():
@@ -1426,7 +1432,7 @@ def gate(report, constants=None, min_lesions=None, min_group=None):
             messages.append(f"Fast mode is not allowed for {stratum} lesions: {verdict['reason']}.")
     for name, verdict in bins.items():
         if not verdict["passed"]:
-            messages.append(f"Fast mode is not allowed for lesions of size {name}: {verdict['reason']}.")
+            messages.append(f"Fast mode is not allowed for lesions of size {size_bin_text(name)}: {verdict['reason']}.")
     return {
         "constants": constants,
         "min_lesions": min_lesions,
@@ -1465,7 +1471,7 @@ def lesion_allowed(report, stratum, volume_ml=None, size=None):
         if size is None:
             return False, "Fast mode is not allowed for this lesion: its volume is unknown, so its size bin cannot be checked."
         verdict = result["size_bins"].get(size)
-        return False, f"Fast mode is not allowed for lesions of size {size}: {verdict['reason'] if verdict else 'no exact lesion of this size was checked'}."
+        return False, f"Fast mode is not allowed for lesions of size {size_bin_text(size)}: {verdict['reason'] if verdict else 'no exact lesion of this size was checked'}."
     return True, "allowed by the parity gate"
 
 

@@ -544,6 +544,24 @@ class FastmapTest(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertIn("volume is unknown", message)
 
+    def test_gate_texts_name_size_bins_like_the_parity_table(self):
+        def lesion(name, size):
+            return {"name": name, "stratum": "cortical", "size_bin": size, "volume_ml": 2.0, "r": 0.9, "partial_r": 0.9, "top10_dice": 0.7}
+
+        lesions = [lesion("tiny", "lt1ml")] + [lesion(f"c{i}", "1to10ml") for i in range(11)]
+        result = fastmap.gate({"lesions": lesions, "reference": {}})
+        texts = list(result["messages"]) + [item["message"] for item in result["excluded"]]
+        _, allowed_message = fastmap.lesion_allowed({"gate": result}, "cortical", size="lt1ml")
+        texts.append(allowed_message)
+        self.assertIn("Fast mode is not allowed for lesions of size < 1 mL: ", allowed_message)
+        self.assertTrue(any("the < 1 mL size bin failed the parity gate" in text for text in texts))
+        self.assertTrue(any(text.startswith("Fast mode is not allowed for lesions of size < 1 mL: ") for text in result["messages"]))
+        for text in texts:
+            for raw in fastmap.SIZE_BIN_NAMES:
+                self.assertNotIn(raw, text, "the internal size-bin id must not reach user-visible text")
+        self.assertEqual(fastmap.size_bin_text("ge50ml"), "≥ 50 mL")  # noqa: RUF001
+        self.assertEqual(fastmap.size_bin_text("other"), "other")
+
     def test_gate_without_lesion_volumes_is_per_stratum(self):
         rng = np.random.default_rng(8)
         n_voxels = 2000
