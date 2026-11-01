@@ -2223,6 +2223,10 @@ def main(argv=None, cancel=None):
         )
     if not formats:
         raise jobs.JobError(f"Give at least one format in --formats ({', '.join(FORMATS)})", code="usage", exit_code=jobs.EXIT_USAGE)
+    # An explicit --font that is not a file is refused (Fonts() alone would silently use Pillow's font, which is
+    # only the right fallback when no font was asked for)
+    if args.font is not None and not os.path.isfile(args.font):
+        raise jobs.JobError(f"Font file not found: {args.font} (--font needs an Inter TTF file)", code="input")
     watermark = args.watermark
     if watermark == "auto":
         watermark = watermark_for(args.study, args.connectome)

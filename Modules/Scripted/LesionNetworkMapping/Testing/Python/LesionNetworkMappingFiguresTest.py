@@ -565,6 +565,22 @@ class FiguresTest(unittest.TestCase):
         missing = figures.Fonts(os.path.join(self.tmp, "missing.ttf"))
         self.assertTrue(missing.default)
 
+    def test_font_that_is_not_a_file_is_an_error_not_pillows_font(self):
+        # --font with a typo in the path used to exit 0 and draw with Pillow's font (figure.json: "Pillow default")
+        out = os.path.join(self.tmp, "o-font")
+        map_path = os.path.join(self.tmp, "font-map.nii.gz")
+        nifti.write_nifti(map_path, self.tmap[0], self.affine)
+        base = ["--preset", "montage", "--map", map_path, "--threshold", "3", "--slices", "A 0", "--width-mm", "89", "--dpi", "150", "--out", out, "--formats", "png"]
+        for bad in (os.path.join(self.tmp, "no-such-Inter-Regular.ttf"), self.tmp):
+            code, events = self._cli(base + ["--font", bad])
+            self.assertNotEqual(code, 0, bad)
+            self.assertEqual(events[-1]["code"], "input", bad)
+            self.assertIn(bad, events[-1]["message"])
+            self.assertIn("Font file not found", events[-1]["message"])
+            self.assertFalse(os.path.exists(os.path.join(out, "figures")), "nothing may be written for a bad --font")
+        code, events = self._cli(base)  # no --font: Pillow's font, as documented
+        self.assertEqual(code, 0)
+
     def test_watermark_for(self):
         study = os.path.join(self.tmp, "study")
         os.makedirs(study)
