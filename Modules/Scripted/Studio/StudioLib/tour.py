@@ -1063,6 +1063,9 @@ class TourPlayer:
         self._lastLayout = None
         #: True while a step is prepared (the events processed then must not move the tour)
         self._busy = False
+        #: True while a Try-it step that Back showed is already done (Draw is the current workspace): it waits for Next
+        #: instead of going on by itself, which would make Back inert on it
+        self._holdDone = False
 
     #
     # Start, stop
@@ -1168,6 +1171,7 @@ class TourPlayer:
                     target = resolveTarget(step.target, self.shell)
                     if target is not None:
                         self.index = index
+                        self._holdDone = direction < 0
                         self._setTarget(target)
                         self._showStep()
                         return True
@@ -1285,7 +1289,10 @@ class TourPlayer:
                 done = step.done(self.shell)
             except Exception:
                 done = False
-            if done:
+            if not done:
+                # The user undid it: doing it again goes on
+                self._holdDone = False
+            elif not self._holdDone:
                 self.next()
                 return
         if self.target is None or not _isAlive(self.target) or not _isShown(self.target, self.shell.mainWindow):

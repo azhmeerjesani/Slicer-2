@@ -1108,3 +1108,50 @@ class StudioTourTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             totals = {text.rsplit(" ", 1)[-1] for text in counters}
             self.assertEqual(len(totals), 1, label)
             self.assertEqual(counters[-1], f"Step {len(counters)} of {len(counters)}", label)
+
+    def test_21_back_onto_a_try_it_step(self):
+        """Back from 'Draw is the Segment Editor' shows 'Three workspaces' (a Try-it step that is already done while Draw
+        is current) and stays there; Back goes on to step 1; clicking Draw again (after leaving it) still goes on (bug bash).
+        """
+        from StudioLib import tour
+
+        studioShell = self._applyStudio()
+        self._resize(1366, 768)
+        self.assertTrue(tour.startTour("studio"))
+        player = tour.activePlayer()
+        try:
+            while player.currentStep().id != "draw-tools":
+                player.next()
+                self._wait(tour.FOLLOW_INTERVAL_MS)
+            seen = [player.currentStep().id]
+            for index in range(len(player.tour.steps)):
+                if player.index == 0:
+                    break
+                player.card().backButton.click()
+                # Several follow ticks: the Try-it step must not bounce forward again
+                for tick in range(3):
+                    self._wait(tour.FOLLOW_INTERVAL_MS)
+                seen.append(player.currentStep().id)
+            self.assertEqual(seen[:3], ["draw-tools", "workspaces", "template"], seen)
+            self.assertEqual(player.index, 0, seen)
+            # Forward again: the Try-it step goes on only when Draw is chosen
+            while player.currentStep().id != "workspaces":
+                player.next()
+            self._wait(3 * tour.FOLLOW_INTERVAL_MS)
+            self.assertEqual(player.currentStep().id, "workspaces")
+            studioShell.topBar.workspaceButtons["draw"].click()
+            self._wait(400)
+            self.assertEqual(player.currentStep().id, "draw-tools")
+            # Back onto it, leave Draw, choose Draw again: it goes on
+            player.card().backButton.click()
+            self._wait(3 * tour.FOLLOW_INTERVAL_MS)
+            self.assertEqual(player.currentStep().id, "workspaces")
+            studioShell.switchTo("library")
+            self._wait(3 * tour.FOLLOW_INTERVAL_MS)
+            self.assertEqual(player.currentStep().id, "workspaces")
+            studioShell.topBar.workspaceButtons["draw"].click()
+            self._wait(400)
+            self.assertEqual(player.currentStep().id, "draw-tools")
+        finally:
+            tour.stopTour()
+            self._pump()
