@@ -1220,12 +1220,16 @@ class UpdateService:
             self.hideNotice()
             self.showBanner(offline=offline)
         elif not status.skipped and not self.installChosen(status.version):
+            # The latest release is optional: the banner of an earlier required result (a release that is no longer
+            # the latest, or no longer required) must not contradict the notice
+            self.hideBanner()
             if self.notice is not None and self.noticeVersion != status.version:
                 # A later check found another version: the notice names the version that Update now and Skip act on
                 self.hideNotice()
             self.scheduleNotice()
         else:
             self.hideNotice()
+            self.hideBanner()
 
     #
     # Optional update: the notice

@@ -1080,6 +1080,38 @@ fi
         self.assertEqual(service.status.kind, "none")
         self.assertIsNone(service.banner)
 
+    def test_RequiredBannerGoesWhenLatestIsOptional(self):
+        """A later check that finds an optional release (or one that was skipped) removes the banner of the earlier
+        required result: Settings and the notice say 1.3.0 is available, so a banner about 1.2.1 contradicts them.
+        """
+        updates = self.updates
+        self._publish("1.2.1", required=True)
+        updates._installableOverride = False  # a development build: the banner says it is not updated
+        service = self._service()
+        called = self._startup(service)
+        self.assertTrue(self._waitFor(lambda: called, 10))
+        self.assertIsNotNone(service.banner)
+        self.assertIn("1.2.1", self._bannerText(service))
+        # The latest release is optional now
+        self._publish("1.3.0")
+        service.checkNow()
+        self.assertTrue(self._waitFor(lambda: not service.checking, 10))
+        self.assertEqual(service.status.kind, "optional")
+        self.assertEqual(service.status.version, "1.3.0")
+        self.assertIsNone(service.banner, "the banner of a release that is no longer required goes")
+        # A skipped optional release takes the other branch: the banner goes there too
+        self._publish("1.2.1", required=True)
+        service.checkNow()
+        self.assertTrue(self._waitFor(lambda: not service.checking, 10))
+        self.assertIsNotNone(service.banner)
+        self._publish("1.3.0")
+        updates.setSettingsValue("SkippedVersion", "1.3.0")
+        service.checkNow()
+        self.assertTrue(self._waitFor(lambda: not service.checking, 10))
+        self.assertTrue(service.status.skipped)
+        self.assertIsNone(service.banner)
+        service.hideNotice()
+
     def _bannerText(self, service):
         widget = service.banner[0]
         if widget.metaObject().className() == "QMessageBox":
