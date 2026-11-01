@@ -317,7 +317,7 @@ _panel = None
 
 
 def install(service=None):
-    """Add the Autosave panel to the application settings (idempotent; never under --testing)."""
+    """Add the Saving panel to the application settings (idempotent; never under --testing)."""
     global _panel
     if slicer.app.testingEnabled() and not getattr(service, "force", False):
         return None

@@ -124,19 +124,19 @@ the top bar of Studio also leads to it) controls where and how often your work i
 
 | Setting | Key | Default | Range |
 | ------- | --- | ------- | ----- |
-| **Slicer Studio folder** (**Change…**, **Show**) | `Studio/Projects/Root` (`Studio/Projects/RootChosen` once you chose it) | `Slicer Studio` in Documents | a folder |
-| **Save continuously** | `Studio/Autosave/Enabled` | on | |
-| **At most every** (minutes) | `Studio/Autosave/IntervalMinutes` | 2 | 1-60 |
-| **or after a pause of** (seconds) | `Studio/Autosave/IdleSeconds` | 10 | 3-300 |
+| **Slicer Studio folder** (**Change…**, **Show in Files**; Finder on macOS, Explorer on Windows) | `Studio/Projects/Root` (`Studio/Projects/RootChosen` once you chose it) | `Slicer Studio` in Documents | a folder |
+| **Save automatically** | `Studio/Autosave/Enabled` | on | |
+| **And at least every** (minutes) | `Studio/Autosave/IntervalMinutes` | 2 | 1-60 |
+| **After a pause of** (seconds) | `Studio/Autosave/IdleSeconds` | 10 | 3-300 |
 | **Location** | `Studio/Autosave/Directory` | empty, meaning the private folder `StudioAutosave` in the application data folder | a folder |
-| **Keep** (sessions) | `Studio/Autosave/KeepSessions` | 5 | 1-50 |
-| **Max size** (MB) | `Studio/Autosave/MaxDiskMB` | 2048 | 256-102400 |
+| **Sessions to keep** | `Studio/Autosave/KeepSessions` | 5 | 1-50 |
+| **At most** (MB) | `Studio/Autosave/MaxDiskMB` | 2048 | 256-102400 |
 | **Delete after** (days) | `Studio/Autosave/MaxAgeDays` | 14 | 1-365 |
 | **Skip data larger than** (MB) | `Studio/Autosave/MaxNodeMB` | 2048 | 16-102400 |
 
-The pause and the interval apply to projects and to recovery copies; **Location**, **Keep**, **Max size** and **Delete
+The pause and the interval apply to projects and to recovery copies; **Location**, **Sessions to keep**, **At most** and **Delete
 after** apply to the recovery copies of scenes that are not projects (Classic, studies). **Change…** offers to move the
-projects, studies and templates to the new folder. The buttons **Recover autosaved work…**, **Autosave now** and **Delete all
+projects, studies and templates to the new folder. The buttons **Recover older work…**, **Autosave now** and **Delete all
 autosaves…** (permanent, for closed sessions) are in the panel too. The environment variable
 `SLICER_STUDIO_PROJECTS_ROOT` sets the Slicer Studio folder (the first-start question is then not asked),
 `SLICER_STUDIO_PROJECTS=0` turns projects off, `SLICER_STUDIO_AUTOSAVE_DIR` overrides the recovery location and

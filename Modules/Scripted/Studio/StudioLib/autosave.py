@@ -2194,7 +2194,7 @@ class AutosaveService:
 
 
 def showAutosaveSettings():
-    """Open the application settings at the Autosave panel."""
+    """Open the application settings at the Saving panel."""
     dialog = slicer.app.settingsDialog()
     mainWindow = slicer.util.mainWindow()
     if dialog is None or mainWindow is None:

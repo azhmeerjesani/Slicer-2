@@ -369,11 +369,11 @@ close does not lose them. It runs in Studio and in Classic.
 - **Where.** A private folder in the application data of your user account: `~/.local/share/slicer.org/Slicer/StudioAutosave` on
   Linux, `~/Library/Application Support/slicer.org/Slicer/StudioAutosave` on macOS and under `%LOCALAPPDATA%` on Windows. It is
   not a folder such as Documents, which is often synchronised to the cloud. You can change it in
-  **Application Settings > Autosave** or with the environment variable `SLICER_STUDIO_AUTOSAVE_DIR`.
+  **Application Settings > Saving** (under **Recovery**, **Location**) or with the environment variable `SLICER_STUDIO_AUTOSAVE_DIR`.
 - **Retention.** The most recent 5 sessions are kept, within 2 GB, for at most 14 days. Sessions that you leave with
   "Exit (discard modifications)" are kept for that time too, so that an accidental discard can be undone.
 - **Privacy.** Autosaves can contain patient data, so the folder is private to your account (mode 0700 on
-  Linux and macOS). **Delete all autosaves…** in the Autosave settings removes the autosaves of every closed session for good.
+  Linux and macOS). **Delete all autosaves…** in the Saving settings removes the autosaves of every closed session for good.
 - **Autosave is not Save.** The top bar shows "Autosaved · 2 min ago" (in Classic, a short message in the status
   bar). Ctrl+S, the exit prompt and the saved state of the scene keep their meaning: the exit prompt tells you that
   unsaved changes were autosaved and remain recoverable for 14 days.
@@ -384,7 +384,7 @@ close does not lose them. It runs in Studio and in Classic.
   autosave folder.
 - **Opening an autosave in official 3D Slicer.** An autosave is a normal scene. In official 3D Slicer 5.12 or 5.13
   use **File > Load Scene** on the `Scene.mrml` in the session's folder.
-- **Switching it off.** Clear **Autosave the scene** in Application Settings > Autosave, set
+- **Switching it off.** Turn off **Save automatically** in Application Settings > Saving, set
   `Studio/Autosave/Enabled` to false, or start with the environment variable `SLICER_STUDIO_AUTOSAVE=0`. Autosave
   never runs with `--testing` or `--no-main-window`.
 

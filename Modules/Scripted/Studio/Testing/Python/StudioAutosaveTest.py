@@ -1377,3 +1377,49 @@ class StudioAutosaveTest(unittest.TestCase):
         self.assertEqual(ran, ["installActions", "registerPaletteProvider", "autosave_settings.install", "connectCloseSummary",
                                "projects_ui.attachService"])
         self.assertTrue(service._pollTimer.isActive())
+
+    def test_zb_docsNameTheSavingPanel(self):
+        """BB-1: A-09 renamed the Autosave settings panel to Saving and relabelled its controls. The documentation and the
+        README.txt of the autosave folder name the panel and the controls that exist: every bold name of the Saving section
+        of settings.md is a label or a button of the panel, and the old names are gone.
+        """
+        import re
+
+        from StudioLib import autosave_io, autosave_settings
+
+        self.assertEqual(autosave_settings.PANEL_NAME, "Saving")
+        panel = autosave_settings.AutosaveSettingsPanel(None)
+        try:
+            texts = set()
+            for className in ("QLabel", "QAbstractButton"):
+                for widget in panel.findChildren(className):
+                    texts.add(str(widget.text).strip())
+            texts.discard("")
+        finally:
+            panel.deleteLater()
+
+        root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", ".."))
+        documents = {name: os.path.join(root, *name.split("/")) for name in
+                     ("README.md", "Docs/user_guide/settings.md", "Docs/user_guide/modules/studio.md")}
+        if not all(os.path.isfile(path) for path in documents.values()):
+            self.skipTest("the documentation is not next to this build")
+        contents = {}
+        for name, path in documents.items():
+            with open(path, encoding="utf-8") as stream:
+                contents[name] = stream.read()
+
+        section = contents["Docs/user_guide/settings.md"].split("\n### Saving\n", 1)[1].split("\n### ", 1)[0]
+        names = [" ".join(name.split()) for name in re.findall(r"\*\*([^*]+)\*\*", section)]
+        self.assertGreater(len(names), 10)
+        # "Show in Files" is "Show in Finder" or "Show in Explorer" on the other systems
+        missing = [name for name in names if name not in texts and not name.startswith("Show in ")]
+        self.assertEqual(missing, [], "settings.md names controls that the Saving panel does not have")
+
+        stale = ["Application Settings > Autosave", "Autosave the scene", "Autosave panel", "in the Autosave settings",
+                 "Save continuously", "**At most every**", "**or after a pause of**", "**Max size**",
+                 "**Recover autosaved work…**", "**Keep**"]
+        for name, content in contents.items():
+            for phrase in stale:
+                self.assertNotIn(phrase, content, f"{name} still says {phrase!r}")
+        self.assertNotIn("Application Settings > Autosave", autosave_io._README_TEXT)
+        self.assertIn("Application Settings > Saving", autosave_io._README_TEXT)

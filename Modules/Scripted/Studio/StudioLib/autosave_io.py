@@ -195,7 +195,7 @@ unsaved work can be recovered after a crash or after closing without saving.
 - Recover them with File > Recover Autosaved Work... in Slicer Studio.
 - Each session folder contains scene-<n> folders. Each one is a standard Slicer scene
   (Scene.mrml and its data files) that any Slicer version can open with File > Load Scene.
-- Sessions are deleted automatically after some days (Edit > Application Settings > Autosave).
+- Sessions are deleted automatically after some days (Edit > Application Settings > Saving).
 - The files may contain patient data: this folder is private to your user account.
 
 Deleting this folder is safe when Slicer is not running.

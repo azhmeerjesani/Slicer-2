@@ -848,7 +848,7 @@ Save) and the exit prompt keep their meaning. Use *File > Save* to keep your wor
 - **How long.** The last 5 sessions, 2 GB in total and 14 days; the settings below change this.
 - **Privacy.** An autosave may contain copies of patient data. The folder is private to your account
   (mode `0700` on Linux and macOS), has a `README.txt` that says what it is, and is not synchronized by
-  Slicer Studio; choose a private folder if you change it. *Application Settings > Autosave > Delete all
+  Slicer Studio; choose a private folder if you change it. *Application Settings > Saving > Delete all
   autosaves…* removes them all.
 - **Recovery.** If Slicer closed unexpectedly, or you closed it without saving, the next start lists what can
   be recovered, with a thumbnail and a summary: in the Classic interface as a window, in Studio as a card
@@ -859,7 +859,7 @@ Save) and the exit prompt keep their meaning. Use *File > Save* to keep your wor
   disk is nearly full). Nothing is shown while nothing was autosaved. Its tooltip says that autosave is not
   Save ("This is not saving: use File › Save (Ctrl+S) to save your files") and gives the time and size of the
   last autosave. Clicking it opens a menu: the last autosave, *Autosave now*, *Recover autosaved work…*,
-  *Open autosave folder* and *Autosave settings…*. In a window narrower than 1500 px (1700 px while the
+  *Open autosave folder*, *Open project…* and *Saving settings…*. In a window narrower than 1500 px (1700 px while the
   status chip is shown), or when the top bar is compact, it is an icon and the text moves to the tooltip.
   When a study is open, the tooltip also shows when the study's journal was last saved.
 - **Recovery card in Studio.** After a crash, a card at the top of the Library lists the sessions that can be
@@ -878,8 +878,8 @@ Save) and the exit prompt keep their meaning. Use *File > Save* to keep your wor
   the study (and holds the patient's lesion). Autosave pauses while a subject is switched.
 - **Official Slicer.** The `Scene.mrml` of an autosave opens in official 3D Slicer 5.12 and 5.13
   (*File > Load Scene*), which the compatibility check tests with `--autosave`.
-- **Off.** `SLICER_STUDIO_AUTOSAVE=0` turns autosave off for a run. The *Autosave the scene* option of
-  the Autosave panel (`Studio/Autosave/Enabled`) stops autosaving but keeps recovery. Autosave never runs
+- **Off.** `SLICER_STUDIO_AUTOSAVE=0` turns autosave off for a run. The *Save automatically* switch of
+  the Saving panel (`Studio/Autosave/Enabled`) stops autosaving but keeps recovery. Autosave never runs
   with `--testing`, `--no-main-window` or `--exit-after-startup`.
 - **Web version.** The autosave folder is in the `slicer-studio-web-home` volume, so it survives
   stopping and starting the container. Stopping the container ends Slicer with a signal and not through the
@@ -921,7 +921,7 @@ classic behavior, so most of these keys have no effect there. The ones you may w
 |---|---|---|
 | `Studio/Enabled` | `true` | `false` starts the Classic interface |
 | `Studio/StartWorkspace` | `Library` | Workspace shown at start (`Last`: the one you left) |
-| `Studio/Autosave/Enabled` | `true` | Autosave on or off (Application Settings > Autosave) |
+| `Studio/Autosave/Enabled` | `true` | Autosave on or off (Application Settings > Saving > Save automatically) |
 | `Studio/Autosave/IntervalMinutes` | `2` | Longest time between autosaves during continuous work |
 | `Studio/Autosave/IdleSeconds` | `10` | Autosave after this many seconds without input |
 | `Studio/Autosave/Directory` | (private folder) | Folder of new autosaves |
