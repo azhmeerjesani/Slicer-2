@@ -65,6 +65,20 @@ def _env(**extra):
     return env
 
 
+def _plain_python():
+    """The Python interpreter itself, never a launcher.
+
+    Under ``Slicer --testing`` ``sys.executable`` is the build tree's PythonSlicer launcher, which puts the
+    build tree's qt-scripted-modules ahead of PYTHONPATH. A fake bundle must not use it: it needs an interpreter
+    that honours PYTHONPATH, like the PythonSlicer of a real bundle does with its own library.
+    """
+    base = getattr(sys, "_base_executable", "") or ""
+    for candidate in (base, os.path.join(sys.base_prefix, "bin", "python3"), sys.executable):
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK) and "pythonslicer" not in os.path.basename(os.path.realpath(candidate)).lower():
+            return candidate
+    return sys.executable
+
+
 def _events(text):
     return [json.loads(line) for line in text.splitlines() if line.startswith("{")]
 
@@ -851,6 +865,17 @@ class PackagingTest(unittest.TestCase):
             # the pinned versions are those of the PythonSlicer that runs this test
             self.assertEqual((np.__version__, scipy.__version__), ("2.4.6", "1.17.1"))
 
+    def test_fake_bundle_python_honours_pythonpath(self):
+        """The interpreter of the fake bundle imports a library from PYTHONPATH before anything else (also under Slicer --testing)."""
+        with tempfile.TemporaryDirectory(prefix="lnm path ") as tmp:
+            with open(os.path.join(tmp, "lnm_marker_module.py"), "w", encoding="utf-8") as f:
+                f.write("WHERE = 'pythonpath'\n")
+            env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+            env["PYTHONPATH"] = tmp
+            result = subprocess.run([_plain_python(), "-c", "import sys, lnm_marker_module; print(sys.path.index(sys.argv[1]), len(sys.path))", tmp], capture_output=True, text=True, env=env, check=False, timeout=120)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertLessEqual(int(result.stdout.split()[0]), 1, result.stdout)  # right after the script directory entry
+
     def test_dmg_wrapper_with_spaces_and_symlink(self):
         bash = shutil.which("bash")
         if bash is None or sys.platform == "win32":
@@ -871,7 +896,7 @@ class PackagingTest(unittest.TestCase):
             os.makedirs(os.path.join(contents, "bin"))
             python = os.path.join(contents, "bin", "PythonSlicer")
             with open(python, "w", encoding="utf-8") as f:
-                f.write(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+                f.write(f'#!/bin/sh\nexec "{_plain_python()}" "$@"\n')
             os.chmod(python, 0o755)
             command = f'source "{DMG_SCRIPT}"; DRY_RUN=0; SOURCE_DIR="{REPO_DIR}"; install_lnm_wrapper "$1"'
             result = subprocess.run([bash, "-c", command, "test", app_dir], capture_output=True, text=True, check=False)
