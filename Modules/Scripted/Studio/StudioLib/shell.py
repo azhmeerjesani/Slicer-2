@@ -2253,7 +2253,7 @@ class Shell:
         """The buttons of the top bar take the keyboard focus with Tab (not by a click), and Space and Enter press them."""
         topBar = self.topBar
         buttons = [getattr(topBar, name, None) for name in ("menuButton", "breadcrumbButton", "undoButton", "redoButton", "layoutButton", "errorBadge")]
-        buttons += list(getattr(topBar, "workspaceButtons", {}).values())
+        # The tabs of the workspace switcher are not here: the top bar gives the Tab stop to the current tab only
         for button in buttons:
             if button is None:
                 continue

@@ -242,7 +242,7 @@ class StudioTopBarTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         topBar._updateErrorBadge()
         self._pump()
         tab = int(qt.Qt.TabFocus)
-        controls = [topBar.menuButton, *topBar.workspaceButtons.values(), topBar.undoButton, topBar.redoButton, topBar.layoutButton, topBar.searchPill, topBar.errorBadge]
+        controls = [topBar.menuButton, topBar.workspaceButtons["draw"], topBar.undoButton, topBar.redoButton, topBar.layoutButton, topBar.searchPill, topBar.errorBadge]
         for control in controls:
             self.assertTrue(int(control.focusPolicy) & tab, f"{control.objectName} takes no Tab focus")
         # The error badge is no focus stop while it is hidden
@@ -263,8 +263,9 @@ class StudioTopBarTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self._pump(1)
         for control in (topBar.menuButton, topBar.layoutButton, topBar.searchPill):
             self.assertIn(str(control.objectName), visited)
-        # Qt keeps one Tab stop in the group of tabs that has had the focus: at least one is reached, the arrows reach the others
-        self.assertTrue(visited & {str(button.objectName) for button in topBar.workspaceButtons.values()})
+        # The tabs have one Tab stop, the current tab (Draw here); the arrows reach the others
+        self.assertIn(str(topBar.workspaceButtons["draw"].objectName), visited)
+        self.assertFalse(visited & {str(topBar.workspaceButtons[key].objectName) for key in ("library", "map")})
         # Space and Enter press a focused button in Draw (the Segment Editor's Space shortcut must not take them)
         libraryButton = topBar.workspaceButtons["library"]
         for key, text in ((qt.Qt.Key_Space, " "), (qt.Qt.Key_Return, "\r"), (qt.Qt.Key_Enter, "\r")):
@@ -286,6 +287,42 @@ class StudioTopBarTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(slicer.app.focusWidget(), libraryButton)
         self._sendKey(libraryButton, qt.Qt.Key_Left)
         self.assertEqual(slicer.app.focusWidget(), libraryButton)
+
+    def test_switcher_tab_stop_is_current_tab(self):
+        """Tab enters the workspace switcher on the current tab, as in a tab bar (not always on Library)."""
+        studioShell = self._applyStudio()
+        topBar = studioShell.topBar
+        tab = int(qt.Qt.TabFocus)
+
+        def stops():
+            return [key for key, button in topBar.workspaceButtons.items() if int(button.focusPolicy) & tab]
+
+        for key in ("draw", "library", "draw", "map"):
+            if key not in topBar.workspaceButtons:
+                continue
+            studioShell.switchTo(key)
+            self._pump()
+            if studioShell.currentWorkspace() != key:
+                continue  # Map is not available in this build
+            self.assertEqual(stops(), [key], f"the Tab stop of the switcher while {key} is current")
+        studioShell.switchTo("draw")
+        self._pump()
+        if not self._focus(topBar.menuButton):
+            self.skipTest("the main window cannot take the keyboard focus here")
+        entered = None
+        for _step in range(80):
+            self._sendKey(slicer.app.focusWidget(), qt.Qt.Key_Tab)
+            self._pump(1)
+            widget = slicer.app.focusWidget()
+            if widget is not None and widget.parentWidget() == topBar.switcherFrame:
+                entered = widget
+                break
+        self.assertEqual(entered, topBar.workspaceButtons["draw"], "Tab enters the switcher on the current tab")
+        # Shift+Tab enters it on the current tab too
+        self.assertTrue(self._focus(topBar.layoutButton))
+        self._sendKey(topBar.layoutButton, qt.Qt.Key_Backtab)
+        self._pump(1)
+        self.assertEqual(slicer.app.focusWidget(), topBar.workspaceButtons["draw"])
 
     #
     # Geometry

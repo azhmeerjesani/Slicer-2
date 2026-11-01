@@ -609,10 +609,13 @@ class TopBar:
             if not key:
                 workspacesController = getattr(self.shell, "workspaces", None)
                 parentKey = getattr(self.shell, "_transientOrigin", None) or getattr(workspacesController, "last", None)
+        # The tabs share one Tab stop, as the tabs of a tab bar do (the arrow keys move between them, ``_SwitcherKeys``).
+        # Qt keeps one stop in a group of checkable buttons anyway, but it is always the first tab: make it the
+        # current tab (or, in a transient module, the tab it was opened from) so that Space or Enter on arrival
+        # does not leave the workspace.
+        stopKey = key if button is not None else (parentKey or next(iter(self.workspaceButtons), None))
         for workspaceKey, workspaceButton in self.workspaceButtons.items():
-            # Qt keeps one Tab stop in a group of checkable buttons (the one that had the focus last): give them all
-            # back, so that Tab reaches every tab again (the arrow keys move between them, ``_SwitcherKeys``)
-            workspaceButton.setFocusPolicy(qt.Qt.TabFocus)
+            workspaceButton.setFocusPolicy(qt.Qt.TabFocus if workspaceKey == stopKey else qt.Qt.NoFocus)
             isParent = workspaceKey == parentKey
             if bool(workspaceButton.property("studioParent")) != isParent:
                 workspaceButton.setProperty("studioParent", isParent)

@@ -1435,15 +1435,21 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         studioShell.switchTo("draw")
         self._pump()
         libraryButton = studioShell.topBar.workspaceButtons["library"]
-        self.assertTrue(int(libraryButton.focusPolicy) & int(qt.Qt.TabFocus))
+        drawButton = studioShell.topBar.workspaceButtons["draw"]
+        # The switcher has one Tab stop, the current tab (Draw); the arrow keys reach the other tabs
+        self.assertTrue(int(drawButton.focusPolicy) & int(qt.Qt.TabFocus))
+        self.assertEqual(int(libraryButton.focusPolicy), int(qt.Qt.NoFocus))
         if not self._focus(studioShell.topBar.menuButton):
             self.skipTest("the main window cannot take the keyboard focus here")
-        # Tab reaches the Library tab
+        # Tab enters the switcher on the Draw tab, Left moves to the Library tab
         for _step in range(40):
-            if slicer.app.focusWidget() == libraryButton:
+            if slicer.app.focusWidget() == drawButton:
                 break
             self._sendKey(slicer.app.focusWidget(), qt.Qt.Key_Tab)
             self._pump(1)
+        self.assertEqual(slicer.app.focusWidget(), drawButton)
+        self._sendKey(drawButton, qt.Qt.Key_Left)
+        self._pump(1)
         self.assertEqual(slicer.app.focusWidget(), libraryButton)
         for key in (qt.Qt.Key_Space, qt.Qt.Key_Return, qt.Qt.Key_Enter):
             studioShell.switchTo("draw")
