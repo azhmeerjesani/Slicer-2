@@ -399,7 +399,8 @@ def lesionOutline(segNode, segmentId=None):
         segNode.CreateDefaultDisplayNodes()
     displayNode = segNode.GetDisplayNode()
     segmentIds = [segmentId] if segmentId else list(segNode.GetSegmentation().GetSegmentIDs())
-    state = {"node": segNode, "fill": displayNode.GetVisibility2DFill(), "outline": displayNode.GetVisibility2DOutline(), "override": {}}
+    state = {"node": segNode, "fill": displayNode.GetVisibility2DFill(), "outline": displayNode.GetVisibility2DOutline(), "override": {},
+             "mtimeBefore": displayNode.GetMTime()}
     wasModifying = displayNode.StartModify()
     displayNode.SetVisibility2DFill(False)
     displayNode.SetVisibility2DOutline(True)
@@ -408,6 +409,7 @@ def lesionOutline(segNode, segmentId=None):
         state["override"][identifier] = (color.GetX(), color.GetY(), color.GetZ())
         displayNode.SetSegmentOverrideColor(identifier, *OUTLINE_COLOR)
     displayNode.EndModify(wasModifying)
+    state["mtimeApplied"] = displayNode.GetMTime()
     return state
 
 
@@ -419,6 +421,7 @@ def restoreLesionDisplay(state):
     displayNode = segNode.GetDisplayNode()
     if displayNode is None or segNode.GetScene() is None:
         return
+    untouched = state.get("mtimeApplied") == displayNode.GetMTime()  # nobody else changed the display meanwhile
     wasModifying = displayNode.StartModify()
     displayNode.SetVisibility2DFill(state["fill"])
     displayNode.SetVisibility2DOutline(state["outline"])
@@ -431,3 +434,11 @@ def restoreLesionDisplay(state):
         else:
             displayNode.SetSegmentOverrideColor(identifier, *color)
     displayNode.EndModify(wasModifying)
+    if untouched and state.get("mtimeBefore") is not None:
+        # The lesion looks as before: leaving Map is not an edit of the project (its "Last edited" time stays)
+        try:
+            from StudioLib import autosave_io
+
+            autosave_io.settleNode(displayNode, state["mtimeBefore"])
+        except ImportError:
+            pass

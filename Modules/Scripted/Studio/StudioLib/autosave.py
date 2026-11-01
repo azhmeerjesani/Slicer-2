@@ -1825,7 +1825,22 @@ class AutosaveService:
         finally:
             self._forceProjectOpen = False
             self._pendingSceneSource = None  # used by _afterSceneImport; not left over for a later load if this one failed
+        self._adoptMergedHierarchy()
         return self.project is not None
+
+    def _adoptMergedHierarchy(self):
+        """The subject hierarchy of a project that was just opened is merged after the scene load ends, so the fingerprint
+        taken when the project was attached lacks it. That is not an edit: the project is up to date, and "Last edited"
+        stays (only the hierarchy differs; anything else that changed is kept as a change).
+        """
+        saved = self._savedFingerprint
+        if self.project is None or self.plan is not None or saved is None:
+            return
+        io = _io()
+        fingerprint = io.sceneFingerprint(slicer.mrmlScene, io.sentinelIds())
+        if fingerprint != saved and fingerprint[:3] == saved[:3]:
+            self._savedFingerprint = fingerprint
+            self._lastPolledFingerprint = fingerprint
 
     def opensSceneAsProject(self):
         """True if a scene file opened now (Open…, drop, Open folder…) replaces the open project instead of being added to it.
@@ -1900,6 +1915,8 @@ class AutosaveService:
                 self._announce("opened", project)
             if self.dirty:
                 qt.QTimer.singleShot(0, lambda: self.autosaveNow("open"))
+            else:
+                qt.QTimer.singleShot(0, self._adoptMergedHierarchy)  # other ways to load the scene (openProject does it itself)
             return
         if not self.projectsActive():
             return

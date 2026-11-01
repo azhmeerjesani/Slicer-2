@@ -3866,6 +3866,118 @@ class StudioProjectsTest(unittest.TestCase):
                     settings.setValue(key, value)
 
 
+    def test_64_looking_at_a_project_is_not_an_edit(self):
+        """Opening a project and going through the workspaces (Draw, Map, Library) without an edit leaves "Last edited" alone.
+        What the views and the editors do by themselves is not a change of the project: the nodes that the scene does not
+        save (the slice models and their display and transform nodes appear once the views are shown), the state of the
+        Segment Editor and the Subject Hierarchy items made again with new numbers for the same data. A change of
+        the hierarchy that the user makes (a folder, a data node moved into it) and an edit of the data still count.
+        """
+        service = self._service()
+        volume, _path = self._userVolume("Scan", shape=(12, 14, 16), extension=".nrrd")
+        _segmentation, segmentId, _array = self._lesion(volume)
+        project = self._projectFor(service)
+        self._save(service)
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertTrue(service.openProject(project.path))
+        io = self.io
+        scene = slicer.mrmlScene
+        shNode = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(scene)
+        volume = scene.GetFirstNodeByClass("vtkMRMLScalarVolumeNode")  # the nodes of the project that was opened
+        lesion = scene.GetFirstNodeByClass("vtkMRMLSegmentationNode")
+        self.assertIsNotNone(volume)
+        self.assertIsNotNone(lesion)
+
+        def needsSave():
+            return service.projectNeedsSave(io.sceneFingerprint(scene, io.sentinelIds()))
+
+        self.assertFalse(needsSave(), "a project that was only opened is up to date")
+
+        # The views show: nodes that are not saved with the scene appear and change
+        for className in ("vtkMRMLModelNode", "vtkMRMLLinearTransformNode", "vtkMRMLSliceDisplayNode"):
+            node = scene.CreateNodeByClass(className)
+            node.SetName("view " + className)
+            node.SetSaveWithScene(False)
+            node.SetHideFromEditors(True)
+            scene.AddNode(node)
+            node.Modified()
+        self.assertFalse(needsSave(), "nodes that the scene does not save are not changes")
+
+        # The Segment Editor keeps its own state
+        editorNode = scene.AddNewNodeByClass("vtkMRMLSegmentEditorNode", "SegmentEditor")
+        self.assertTrue(needsSave(), "a new node is a change")
+        self._save(service)
+        self.assertFalse(needsSave())
+        editorNode.SetSelectedSegmentID(segmentId)
+        editorNode.SetActiveEffectName("Paint")
+        editorNode.Modified()
+        self.assertFalse(needsSave(), "the state of the Segment Editor is not an edit")
+
+        # The hierarchy items are made again with other numbers for the same data (entering and leaving Draw does it)
+        shNode.RemoveItem(shNode.GetItemByDataNode(volume), False, False)  # the item only, not the volume
+        shNode.CreateItem(shNode.GetSceneItemID(), volume)
+        shNode.SetItemExpanded(shNode.GetSceneItemID(), False)
+        shNode.Modified()
+        self.assertFalse(needsSave(), "the same hierarchy with new item numbers is not a change")
+
+        # Map shows the lesion as an outline and gives it its look back on leaving: that is not an edit, but an edit of the
+        # display made meanwhile (or later) is
+        try:
+            from LesionNetworkMappingLib import display
+        except ImportError:
+            display = None
+        if display is not None:
+            state = display.lesionOutline(lesion, segmentId)
+            self.assertTrue(needsSave(), "the outline is a change while it is shown (an autosave then writes it)")
+            display.restoreLesionDisplay(state)
+            self.assertFalse(needsSave(), "the lesion looks as it did: nothing to save")
+            state = display.lesionOutline(lesion, segmentId)
+            lesion.GetDisplayNode().SetOpacity(0.4)  # the user's edit while the outline is shown
+            display.restoreLesionDisplay(state)
+            self.assertTrue(needsSave(), "a display edit made meanwhile is an edit")
+            self._save(service)
+            self.assertFalse(needsSave())
+            state = display.lesionOutline(lesion, segmentId)
+            self._save(service)  # an autosave while Map is open writes the outline ...
+            display.restoreLesionDisplay(state)
+            self.assertTrue(needsSave(), "... so the lesion's own look is saved again on leaving")
+            self._save(service)
+            self.assertFalse(needsSave())
+            lesion.GetDisplayNode().SetOpacity(0.7)
+            self.assertTrue(needsSave(), "a display edit after Map is an edit")
+            self._save(service)
+            self.assertFalse(needsSave())
+
+        # Going back to Library (projects_ui.onWorkspaceEntered) saves nothing: the project file keeps the time of the last edit
+        projectJson = os.path.join(project.path, ".studio", "project.json")
+        before = (self.projects.readJson(projectJson).get("modified"), os.path.getmtime(self.projects.sceneFile(project.path)))
+        time.sleep(1.1)
+        self.assertFalse(service.autosaveNow("workspace", synchronous=True), "nothing to save")
+        self.io.backgroundWriter().drain(30.0)
+        after = (self.projects.readJson(projectJson).get("modified"), os.path.getmtime(self.projects.sceneFile(project.path)))
+        self.assertEqual(after, before, "Last edited and the scene file are as they were")
+
+        # A change that the user makes is one
+        folder = shNode.CreateFolderItem(shNode.GetSceneItemID(), "Group")
+        self.assertTrue(needsSave(), "a new folder is a change")
+        self._save(service)
+        self.assertFalse(needsSave())
+        shNode.SetItemParent(shNode.GetItemByDataNode(volume), folder)
+        self.assertTrue(needsSave(), "moving a node into a folder is a change")
+        self._save(service)
+        self.assertFalse(needsSave())
+        volume.SetName("Scan renamed")
+        self.assertTrue(needsSave(), "a rename is a change")
+        self._save(service)
+        self.assertFalse(needsSave())
+        lesion.GetSegmentation().GetNthSegment(0).SetColor(0.3, 0.6, 0.1)
+        self.assertTrue(needsSave(), "a data edit is a change")
+        self._save(service)
+        self.assertFalse(needsSave())
+
+
+
 def _sphere(center=(0, 0, 0)):
     import vtk
 

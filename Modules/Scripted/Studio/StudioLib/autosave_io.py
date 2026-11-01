@@ -100,6 +100,7 @@ FINGERPRINT_EXCLUDED_CLASSES = (
     "vtkMRMLCrosshairNode",
     "vtkMRMLSliceCompositeNode",
     "vtkMRMLLayoutNode",
+    "vtkMRMLSegmentEditorNode",  # the Segment Editor's selection and parameters, changed by entering and leaving Draw
 )
 
 #: numpy dtype name -> NRRD type (other types are written by the C++ storage node)
@@ -242,6 +243,10 @@ def _isExcludedClass(node):
     return excluded
 
 
+def _isHierarchyClass(node):
+    return node.IsA("vtkMRMLSubjectHierarchyNode")
+
+
 def contentMTime(node):
     """Modification time of the content of a storable node: it changes on data edits, not on display edits."""
     mtime = node.GetMTime()
@@ -277,29 +282,89 @@ def contentMTime(node):
     return mtime
 
 
+_hierarchyEntries = {}
+
+
+def _hierarchyItems(node):
+    """What the user sees of a subject hierarchy: the data node or the name of each item and of its parent.
+
+    The numbers of the items are not part of it: entering and leaving Draw (segments shown in the hierarchy) removes
+    and makes the items again with new numbers for the same data, which is not a change of the project.
+    """
+    cached = _hierarchyEntries.get(node.GetID())
+    if cached is not None and cached[0] == node.GetMTime():
+        return cached[1]
+    try:
+        import vtk
+
+        def key(itemId):
+            dataNode = node.GetItemDataNode(itemId)
+            return dataNode.GetID() if dataNode is not None else node.GetItemName(itemId)
+
+        sceneItem = node.GetSceneItemID()
+        ids = vtk.vtkIdList()
+        node.GetItemChildren(sceneItem, ids, True)
+        entries = []
+        for index in range(ids.GetNumberOfIds()):
+            itemId = ids.GetId(index)
+            parent = node.GetItemParent(itemId)
+            entries.append((key(itemId), "" if parent == sceneItem else key(parent)))
+    except Exception:
+        entries = [("modified", node.GetMTime())]  # an unreadable hierarchy counts as changed whenever it is modified
+    if len(_hierarchyEntries) > 16:
+        _hierarchyEntries.clear()
+    _hierarchyEntries[node.GetID()] = (node.GetMTime(), entries)
+    return entries
+
+
+_settledNodes = {}
+
+
+def settleNode(node, mtimeBefore):
+    """Tell the autosave that ``node`` is as it was at ``mtimeBefore``: its last modifications put back what a view
+    change (for example a lesion shown as an outline while Map is open) had changed, so they are not an edit.
+
+    Only the modifications made until now are taken back: a later change of the node counts as an edit again.
+    """
+    if node is None or not node.GetID():
+        return
+    if len(_settledNodes) > 64:
+        _settledNodes.clear()
+    _settledNodes[node.GetID()] = (node.GetMTime(), mtimeBefore)
+
+
 def sceneFingerprint(scene, ignoreIds=()):
     """A cheap value that changes when the scene content changes (MTimes only: it computes nothing).
 
-    ``(number of nodes, max content MTime of the storable nodes saved with the scene, max MTime of the
-    other nodes, excluding views, cameras and interaction state)``.
+    ``(number of nodes saved with the scene, max content MTime of the storable nodes, max MTime of the other nodes,
+    structure of the subject hierarchy)``. Left out: the nodes that the scene does not save (the slice models and their
+    display and transform nodes appear and change once the views show), views, cameras, interaction state and the Segment
+    Editor's state, and the subject hierarchy nodes themselves (the one made by the application and the one loaded with
+    the scene are merged after the load; the items' numbers change without an edit): the hierarchy counts by its structure.
     """
-    count = scene.GetNumberOfNodes()
+    count = 0
     storableMTime = 0
     otherMTime = 0
-    ignored = 0
-    for index in range(count):
+    items = []
+    for index in range(scene.GetNumberOfNodes()):
         node = scene.GetNthNode(index)
-        if node is None:
+        if node is None or not node.GetSaveWithScene():
             continue
         if ignoreIds and node.GetID() in ignoreIds:
-            ignored += 1
             continue
+        if _isHierarchyClass(node):
+            items.extend(_hierarchyItems(node))
+            continue
+        count += 1
         if _isStorableClass(node):
-            if node.GetSaveWithScene():
-                storableMTime = max(storableMTime, contentMTime(node))
+            storableMTime = max(storableMTime, contentMTime(node))
         elif not _isExcludedClass(node):
-            otherMTime = max(otherMTime, node.GetMTime())
-    return (count - ignored, storableMTime, otherMTime)
+            mtime = node.GetMTime()
+            settled = _settledNodes.get(node.GetID())
+            if settled is not None and settled[0] == mtime:
+                mtime = settled[1]
+            otherMTime = max(otherMTime, mtime)
+    return (count, storableMTime, otherMTime, hash(tuple(sorted(items))))
 
 
 def estimateBytes(node):
