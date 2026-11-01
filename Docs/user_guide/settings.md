@@ -192,7 +192,7 @@ Most keys are written by the application and need not be edited. The keys that y
 | `Studio/SmartFill/*` | see [Segment Editor](modules/segmenteditor.md#smart-fill) | The defaults of Smart fill: `Mode`, `AutoTolerance`, `TolerancePercent`, `MaxRadiusMm`, `LeakGuardMm`, `FillHoles`, `StayInsideBrain`, `ApplyOnClick`. Written only when you change them; ignored with `--testing` |
 | `Studio/Autosave/*` | see the table above | The autosave settings |
 | `Studio/LNM/Connectomes` | | The connectomes registered in the module (their folders, in the setting only: never in a shared file) |
-| `Studio/LNM/DataDirectory` | the `SlicerStudio` folder in your documents | Where network mapping data and normalization outputs go when no study is open |
+| `Studio/LNM/DataDirectory` | the `LNM` folder inside your Slicer Studio folder (the `SlicerStudio` folder in your documents only if it already holds data) | Where network mapping data and normalization outputs go when no study is open |
 | `Studio/LNM/AcceptedTerms/<sha>` | false | You ticked "I accept these data use terms" for the connectome with this manifest hash |
 | `Studio/LNM/MaxJobThreads` | number of cores minus one | The most threads a background job uses |
 | `Studio/LNM/MemoryBudgetGB` | the smaller of a quarter of the memory and 4 | The memory a cohort pass may use |

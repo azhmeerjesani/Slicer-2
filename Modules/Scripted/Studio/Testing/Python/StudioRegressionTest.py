@@ -3400,3 +3400,33 @@ class StudioRegressionTest(unittest.TestCase):
         section = studio.split("### Map", 1)[1].split("### Other modules", 1)[0]
         for card in ("Circuits", "Compare", "Report"):
             self.assertIn(card, section, f"studio.md does not list the {card} card of the Map inspector")
+
+    def test_46_docs_give_the_lnm_data_directory_default_as_the_app_uses_it(self):
+        """settings.md and the README give the default of Studio/LNM/DataDirectory as the app uses it (A-09, D-A16): the
+        LNM folder inside the Slicer Studio folder, and Documents/SlicerStudio only when that older folder already holds
+        data (as studio_projects.md says), not Documents/SlicerStudio as the default.
+        """
+        import LesionNetworkMappingUI.normalize_controller as normalize
+
+        root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", ".."))
+        names = ("README.md", "Docs/user_guide/settings.md", "Docs/user_guide/studio_projects.md")
+        paths = {name: os.path.join(root, *name.split("/")) for name in names}
+        if not all(os.path.isfile(path) for path in paths.values()):
+            self.skipTest("the documentation is not next to this build")
+        texts = {}
+        for name, path in paths.items():
+            with open(path, encoding="utf-8") as stream:
+                texts[name] = " ".join(stream.read().replace("*", "").split())
+        # The behaviour the docs describe: the Studio folder's LNM folder, the legacy folder only when it holds data
+        source = inspect.getsource(normalize.dataDirectory)
+        self.assertIn("projects.lnmFolder()", source)
+        self.assertIn("os.listdir(legacy)", source)
+        readme, settings, projects = (texts[name] for name in names)
+        self.assertIn("`Studio/LNM/DataDirectory` | the `LNM` folder inside your Slicer Studio folder", settings)
+        self.assertIn("only if it already holds data", settings)
+        self.assertNotIn("| the `SlicerStudio` folder in your documents |", settings)
+        self.assertIn("`Studio/LNM/DataDirectory` | the `LNM` folder inside the Slicer Studio folder", readme)
+        self.assertIn("`<Slicer Studio folder>/LNM/normalization/<name>-<hash>`", readme)
+        self.assertNotIn("`Studio/LNM/DataDirectory` | `Documents/SlicerStudio`", readme)
+        self.assertNotIn("Without one: `Documents/SlicerStudio/normalization/<name>-<hash>`", readme)
+        self.assertIn("LNM/ normalization outputs, control sets and recipes", projects)

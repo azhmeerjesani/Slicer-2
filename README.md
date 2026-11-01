@@ -966,7 +966,7 @@ classic behavior, so most of these keys have no effect there. The ones you may w
 | `Studio/LNM/Networks/Scheme` | `yeo7` | `yeo7` or `yeo17`, the networks of the Networks card |
 | `Studio/LNM/Networks/RoiMinPercent` | `50` | Share of a region of interest that must be suprathreshold for a lesion to count as connected |
 | `Studio/LNM/Normalize/LastOptions` | (none) | Normalization options (template, quality, modality, margin), written when you tick *Remember these options* |
-| `Studio/LNM/DataDirectory` | `Documents/SlicerStudio` (`/data/SlicerStudio` in the web version) | Where normalization results go when no study is open. Only read: set it yourself |
+| `Studio/LNM/DataDirectory` | the `LNM` folder inside the Slicer Studio folder (`Documents/SlicerStudio` only if it already holds data; `/data/SlicerStudio` in the web version) | Where normalization results go when no study is open. Only read: set it yourself |
 | `Studio/LNM/CohortStudy` | (none) | The study folder of the Cohort seed that you chose with *Open study…* in Map |
 | `Studio/RaterName` | the operating-system user | The name recorded with a normalization review. Only read: set it yourself |
 
@@ -1503,8 +1503,9 @@ every Slicer, as child processes of `PythonSlicer`; there is nothing to install.
   random and uses several threads, so a rerun with `--no-reuse` can differ slightly.
 
 **Where results go.** With a study: `<study>/derivatives/normalization/sub-<id>/`. Without one:
-`Documents/SlicerStudio/normalization/<name>-<hash>`, or the folder in `Studio/LNM/DataDirectory`
-(`/data/SlicerStudio` in the web version). The folder holds the transforms (`.h5`), the lesion and the scan in
+`<Slicer Studio folder>/LNM/normalization/<name>-<hash>`, or the folder in `Studio/LNM/DataDirectory`
+(`Documents/SlicerStudio/normalization/<name>-<hash>` if that older folder already holds data, and
+`/data/SlicerStudio` in the web version). The folder holds the transforms (`.h5`), the lesion and the scan in
 template space, the cost-function mask, `normalization.json` (inputs, fingerprint, tool versions),
 logs, and the QC files `sub-<id>_desc-normqc.png` (a 3×3 mosaic: axial, coronal and sagittal through the lesion,
 patient's left on the image left) and `sub-<id>_desc-normqc.json`.
