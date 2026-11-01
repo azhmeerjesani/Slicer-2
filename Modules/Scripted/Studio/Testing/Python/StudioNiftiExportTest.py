@@ -780,6 +780,38 @@ class StudioNiftiExportTest(unittest.TestCase):
             "Lesions_label-Cyst2_mask.nii.gz": "Cyst2",
         })
 
+    def test_06da_accented_letters_are_transliterated_in_names(self):
+        """Non-ASCII letters are not deleted from file names: "Ödem rechts" -> ``Odemrechts``; CJK names use the segment number."""
+        export = self.export
+        self.assertEqual(export.entityValue("Ödem rechts"), "Odemrechts")
+        self.assertEqual(export.entityValue("Lésion"), "Lesion")
+        self.assertEqual(export.entityValue("Ĉerbo"), "Cerbo")
+        self.assertEqual(export.entityValue("Straße Øre"), "StrasseOre")
+        self.assertEqual(export.safeName("Läsionen"), "Lasionen")
+        self.assertEqual(export.safeName("Ĉerbo"), "Cerbo")
+        self.assertEqual(export.safeName("Läsionen"), export.entityValue("Läsionen"))
+        self.assertEqual(export.safeName("扫描"), "image")
+        scan = self._volume("scan", np.zeros((30, 30, 30), np.int16), np.eye(4))
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Läsionen")
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(scan)
+        names = ("Ödem rechts", "Lésion", "病变", "水肿", "Odem rechts")
+        for index, name in enumerate(names):
+            segmentId = segmentation.GetSegmentation().AddEmptySegment("", name)
+            data = np.zeros((30, 30, 30), np.uint8)
+            data[3 + 4 * index, 5, 5] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(data, segmentation, segmentId, scan)
+        result = self.export.exportSegmentation(segmentation, os.path.join(self.out, "Lasionen.nii.gz"), mode=self.export.SEGMENTATION_MASKS)
+        self.assertEqual(result.errors, [])
+        found = {os.path.basename(path): self._sidecar(path)["Segment"] for path in result.images}
+        self.assertEqual(found, {
+            "Lasionen_label-Odemrechts_mask.nii.gz": "Ödem rechts",
+            "Lasionen_label-Lesion_mask.nii.gz": "Lésion",
+            "Lasionen_label-segment3_mask.nii.gz": "病变",
+            "Lasionen_label-segment4_mask.nii.gz": "水肿",
+            "Lasionen_label-Odemrechtsdup2_mask.nii.gz": "Odem rechts",
+        })
+
     def test_06e_4d_image_is_written_whole(self):
         """A 4D image (fMRI) opened as a sequence is written with every time point and its TR, not only the one on screen."""
         from LesionNetworkMappingLib import nifti

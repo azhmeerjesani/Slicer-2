@@ -39,6 +39,7 @@ import json
 import logging
 import os
 import re
+import unicodedata
 
 import numpy as np
 import slicer
@@ -160,16 +161,36 @@ def sidecarPath(path):
     return splitExtension(path)[0] + ".json"
 
 
+# Letters that Unicode normalisation does not split into a base letter and an accent (sharp s, o with stroke, ligatures...).
+_TRANSLITERATION = {
+    "\u00df": "ss", "\u1e9e": "SS", "\u00f8": "o", "\u00d8": "O",
+    "\u00e6": "ae", "\u00c6": "AE", "\u0153": "oe", "\u0152": "OE",
+    "\u0111": "d", "\u0110": "D", "\u00f0": "d", "\u00d0": "D",
+    "\u00fe": "th", "\u00de": "Th", "\u0142": "l", "\u0141": "L",
+    "\u0131": "i", "\u0127": "h", "\u0126": "H",
+}
+
+
+def asciiText(text):
+    """``text`` with accented letters written as plain ones ("Ödem" -> "Odem", "Lésion" -> "Lesion", "Straße" -> "Strasse").
+
+    Letters of scripts that have no plain form (Chinese, Arabic...) stay as they are, for the caller to filter out.
+    """
+    text = "".join(_TRANSLITERATION.get(character, character) for character in str(text or ""))
+    decomposed = unicodedata.normalize("NFKD", text)
+    return "".join(character for character in decomposed if not unicodedata.combining(character))
+
+
 def safeName(text, fallback="image"):
-    """A file name made of ASCII letters, digits, ".", "_" and "-" only (spaces become "_")."""
-    name = re.sub(r"[^A-Za-z0-9._-]+", "_", str(text or "")).strip("._-")
+    """A file name made of ASCII letters, digits, ".", "_" and "-" only (spaces become "_", accents are dropped)."""
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", asciiText(text)).strip("._-")
     name = re.sub(r"_+", "_", name)
     return name or fallback
 
 
 def entityValue(text, fallback="segment"):
-    """A BIDS entity value (letters and digits only): "Left lesion 2" -> "Leftlesion2"."""
-    value = re.sub(r"[^A-Za-z0-9]+", "", str(text or ""))
+    """A BIDS entity value (letters and digits only): "Left lesion 2" -> "Leftlesion2", "Ödem" -> "Odem"."""
+    value = re.sub(r"[^A-Za-z0-9]+", "", asciiText(text))
     return value or fallback
 
 
@@ -800,7 +821,9 @@ class Job:
         """
         base, extension = splitExtension(self.path)
         segmentation = node.GetSegmentation()
-        entries = [(segmentId, entityValue(segmentation.GetSegment(segmentId).GetName()))
+        allIds = segmentIds(node)
+        entries = [(segmentId, entityValue(segmentation.GetSegment(segmentId).GetName(),
+                                           fallback=f"segment{allIds.index(segmentId) + 1}"))
                    for segmentId in segmentIds(node, nonEmpty=True)]
         reserved = {value.lower() for _segmentId, value in entries}
         taken = set()
