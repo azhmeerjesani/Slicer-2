@@ -162,10 +162,14 @@ Draw is the [Segment Editor](segmenteditor.md) module in its Studio presentation
 2. **Tools**: **Brush** (P), **Outline** (D), **Smart fill** (M), **Erase** (E) and **Fill gaps** (Shift+F), plus
    **More tools**, which shows the remaining effects.
 3. The **options of the active tool**. Brush and Erase have size chips 1, 3, 6 and 12 mm.
-4. **Display** (collapsed): fill or outline, opacity, window/level presets, **Voxel view**.
-5. A sticky footer. Without a study the main button is **Save lesion · Ctrl+Enter** and the second is **Map network →**
-   (for lesions in MNI space; otherwise it explains why and offers **Normalize to MNI…**). With a study the main button
-   is **Done → next · Ctrl+Enter**.
+4. The **Overlay** row: a slider for the opacity of the lesion fill in the slice views, with an **Outline** switch
+   that shows the outline only. Window/level presets, **Voxel view** and **Show lesion in 3D** are in the **⋯** menu
+   of the inspector header.
+5. On a scan in native space, a **Normalize to MNI** row (value **Native space**) opens the card that normalizes the
+   scan (**Normalize scan only** while the lesion is empty).
+6. A sticky footer. Without a study the main button is **Save lesion · Ctrl+Enter** and, under it, the link
+   **Map this lesion's network →**, which opens Map (for a lesion in scan space, Map offers to normalize it to MNI
+   first). With a study the main button is **Done → next · Ctrl+Enter**.
 
 **The first click.** The Brush is armed when you came to trace: **Start on template**, **Continue in Draw →**,
 **Open in Draw**, a loaded lesion file or set. A scan you only dropped or opened lands in Draw **unarmed**: a

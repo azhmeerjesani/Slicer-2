@@ -112,6 +112,7 @@ Run with the main window and testing enabled::
   checked item of Studio's View menu).
 """
 
+import inspect
 import json
 import logging
 import os
@@ -3292,6 +3293,28 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertEqual((whiteMatter[3], whiteMatter[4]), ("—", False))
         reverse = lesionset.balance(covariates, ["k0", "k1"], ["c0", "c1"], names=("hemisphere_left",))
         self.assertEqual(libcard_cohort.balanceRows({"balance": {"hemisphere_left": lesionset._balance_row(reverse["hemisphere_left"])}})[0][3], "-∞")
+
+    def test_43_docs_describe_the_draw_inspector_as_the_app_builds_it(self):
+        """studio.md describes the Draw inspector as it is (VISUAL 4.4): an Overlay row with an Outline switch, the display items
+        in the panel menu and the footer link "Map this lesion's network →"; there is no Display card and no "Normalize to MNI…"
+        footer button.
+        """
+        from StudioLib import draw
+
+        root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", ".."))
+        path = os.path.join(root, "Docs", "user_guide", "modules", "studio.md")
+        if not os.path.isfile(path):
+            self.skipTest("the documentation is not next to this build")
+        with open(path, encoding="utf-8") as stream:
+            text = stream.read()
+        section = " ".join(text.split("### Draw", 1)[1].split("#### Draw keys", 1)[0].split())
+        for stale in ("**Display** (collapsed)", "**Map network →**", "**Normalize to MNI…**"):
+            self.assertNotIn(stale, section, f"studio.md still describes {stale} in the Draw inspector")
+        for current in ("**Overlay**", "**Outline** switch", "**Voxel view**", "**Show lesion in 3D**", "**Map this lesion's network →**"):
+            self.assertIn(current, section, f"studio.md does not describe {current} in the Draw inspector")
+        # The names used by the docs are the ones the app shows
+        self.assertIn('_("Map this lesion\'s network →")', inspect.getsource(draw._CtaFooter._secondaryAction))
+        self.assertIn('_("Overlay")', inspect.getsource(draw._DisplayCard))
 
     def test_42_docs_name_the_classic_view_menu_item(self):
         """The docs call the Classic View menu item "Switch to Studio interface", as the app does (not Studio's "Studio interface")."""

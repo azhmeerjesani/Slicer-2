@@ -5,8 +5,9 @@ extension())``; SPEC D2/D3). This module is that extension and the hooks around 
 
 - **Panel**: the Lesion card (``StudioLib.lesioncard``) with the brush size chips and the source chip, the tool
   tiles (Brush, Outline, Smart fill, Erase, Fill gaps; "More tools ▾"), the options of the active tool, the
-  Display card (collapsed) and a sticky call-to-action footer: "Save lesion · Ctrl+Enter" without a study,
-  "Done → next · Ctrl+Enter" with one, and the secondary "Map network →" / "Normalize to MNI…".
+  Overlay row with the Outline switch (VISUAL 4.4; the display items are in the ⋯ menu) and a sticky call-to-action
+  footer: "Save lesion · Ctrl+Enter" without a study, "Done → next · Ctrl+Enter" with one, and the link
+  "Map this lesion's network →".
 - **Tool state** (``_DrawSession``, from QW-A): the user's last tool survives every round trip. Arming is intent
   based (USABILITY 5.2, D-U2): Brush is armed on entry for Start on MNI template, New lesion, a loaded lesion
   file, a loaded set, an explicit request (``requestArm()``, "Continue in Draw") or a return with a recorded
