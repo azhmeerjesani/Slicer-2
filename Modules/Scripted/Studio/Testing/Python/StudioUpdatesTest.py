@@ -1826,6 +1826,28 @@ fi
         with open(os.path.join(out, "studio-update.json"), encoding="utf-8") as f:
             self.assertEqual(json.load(f)["published"], "2024-02-29")
 
+    def test_ReleaseScriptsOutputPathIsFile(self):
+        """--out-dir and the launcher's update --dest naming a file (or under one) are errors, never a traceback."""
+        makeRelease = self._importScript(os.path.join("Utilities", "Scripts", "SlicerStudioRelease", "make_release.py"), "make_release_test5")
+        web = self._importScript(os.path.join("Utilities", "SlicerStudioWeb", "slicer_studio_web.py"), "slicer_studio_web_test5")
+        linux = os.path.join(self.feedDir, "Slicer-5.13.0-linux-amd64.tar.gz")
+        _fakeLinuxPackage(linux, makeRelease.read_studio_version())
+        afile = os.path.join(self.tempDir, "afile")
+        with open(afile, "w") as f:
+            f.write("x")
+        for out in (afile, os.path.join(afile, "sub")):
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                code = makeRelease.main([linux, "--no-web", "--out-dir", out])
+            self.assertEqual(code, 1, out)
+            self.assertTrue(stderr.getvalue().startswith("Error: Cannot create the output folder"), stderr.getvalue())
+            self.assertNotIn("Traceback", stderr.getvalue())
+        bundle = makeRelease.make_web_bundle("1.2.0", self.feedDir)
+        for destination in (afile, os.path.join(afile, "sub")):
+            with self.assertRaisesRegex(web.LauncherError, "Cannot unpack the launcher"):
+                web.unpack_web_bundle(web.Path(bundle), web.Path(destination))
+        self.assertEqual(open(afile).read(), "x")
+
     def test_WebLauncher(self):
         web = self._importScript(os.path.join("Utilities", "SlicerStudioWeb", "slicer_studio_web.py"), "slicer_studio_web_test")
         makeRelease = self._importScript(os.path.join("Utilities", "Scripts", "SlicerStudioRelease", "make_release.py"), "make_release_test2")

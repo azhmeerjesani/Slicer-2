@@ -277,12 +277,18 @@ def main(argv=None):
         elif args.notes_text:
             notes_text = args.notes_text
         out_dir = Path(args.out_dir or f"release-v{version}").resolve()
-        out_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise ReleaseError(f"Cannot create the output folder {out_dir}: {error.strerror or error}.") from None
         if "linux-x86_64" in assets and "web" not in assets and not args.no_web:
             assets["web"] = str(make_web_bundle(version, out_dir))
         manifest = build_manifest(version, assets, args.required, args.minimum_supported, notes_text, args.published)
         manifest_path = out_dir / MANIFEST_NAME
-        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        try:
+            manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        except OSError as error:
+            raise ReleaseError(f"Cannot write {manifest_path}: {error.strerror or error}.") from None
         files = [assets[key] for key in PLATFORM_KEYS if key in assets] + [str(manifest_path)]
         print_steps(version, manifest_path, files, args.required, args.notes)
     except ReleaseError as error:

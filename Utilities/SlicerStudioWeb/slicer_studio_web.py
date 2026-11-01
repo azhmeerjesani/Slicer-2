@@ -815,14 +815,17 @@ def unpack_web_bundle(bundle, destination):
         target = destination / tops.pop()
         if target.resolve() == SCRIPT_DIR:
             raise LauncherError(f"{target} is the folder of this launcher; choose another --dest.")
-        if target.exists():
-            shutil.rmtree(target)
-        destination.mkdir(parents=True, exist_ok=True)
-        archive.extractall(destination)
-        for info_entry in archive.infolist():
-            mode = (info_entry.external_attr >> 16) & 0o777
-            if mode:
-                os.chmod(destination / info_entry.filename, mode)
+        try:
+            if target.exists():
+                shutil.rmtree(target)
+            destination.mkdir(parents=True, exist_ok=True)
+            archive.extractall(destination)
+            for info_entry in archive.infolist():
+                mode = (info_entry.external_attr >> 16) & 0o777
+                if mode:
+                    os.chmod(destination / info_entry.filename, mode)
+        except OSError as error:
+            raise LauncherError(f"Cannot unpack the launcher into {destination}: {error.strerror or error}.") from None
     if not (target / "slicer_studio_web.py").is_file():
         raise LauncherError(f"{bundle.name} does not contain slicer_studio_web.py.")
     return target
