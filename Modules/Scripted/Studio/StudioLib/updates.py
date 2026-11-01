@@ -816,6 +816,7 @@ class UpdateService:
         self.prepared = None
         self.requiredDialog = None
         self.updateDialog = None
+        self._settingsWatched = None  # the Settings dialog whose finished(int) returns the update dialog to the main window
         self.notice = None
         self.noticeVersion = None
         self.noticeWhere = None
@@ -1434,8 +1435,11 @@ class UpdateService:
         stale = self.prepared is not None and self.prepared.version != status.version
         if stale and self._discardPrepared():
             stale = False
+        parent = self._updateDialogParent()
         if self.updateDialog is None or not _isAlive(self.updateDialog.dialog):
-            self.updateDialog = UpdateDialog(self, _mainWindow())
+            self.updateDialog = UpdateDialog(self, parent)
+        else:
+            self.updateDialog.setParentWindow(parent)
         self.updateDialog.show()
         if self.job is None and self.prepared is None:
             self.updateDialog.begin()
@@ -1443,6 +1447,31 @@ class UpdateService:
             # Its install helper already runs (administrator rights given): it cannot be taken back, so say so
             self.updateDialog.preparedInstead(self.prepared.version, status.version)
         return self.updateDialog
+
+    def _updateDialogParent(self):
+        """The window the update dialog is shown over. Settings is application-modal (it runs its own event loop), and Qt
+        blocks the input of every window that is not the modal one or its child: from Settings > Updates the dialog
+        has to be a child of Settings to be usable at once. It goes back to the main window when Settings closes.
+        """
+        import slicer
+
+        mainWindow = _mainWindow()
+        settings = slicer.app.settingsDialog()
+        if settings is not None and settings.isVisible() and slicer.app.activeModalWidget() == settings:
+            if self._settingsWatched != settings:
+                self._settingsWatched = settings
+                settings.connect("finished(int)", self._onSettingsClosed)
+            return settings
+        return mainWindow
+
+    def _onSettingsClosed(self, result=0):
+        """Settings closed: the update dialog (hidden with it) returns to the main window, shown again if it was open."""
+        dialog = self.updateDialog
+        if dialog is None or not _isAlive(dialog.dialog):
+            return
+        dialog.setParentWindow(_mainWindow())
+        if dialog.wanted:
+            dialog.show()
 
     def _discardPrepared(self):
         """Drop the prepared update (and its Install when I quit) so that another version can be downloaded. Return
@@ -2069,6 +2098,8 @@ class UpdateDialog:
         self.service = service
         self.task = None
         self.state = "idle"
+        #: Open (shown and not closed by the user), also while hidden along with its parent window
+        self.wanted = False
         status = service.status
         self.dialog = qt.QDialog(parent)
         self.dialog.setObjectName(UPDATE_DIALOG_OBJECT_NAME)
@@ -2105,8 +2136,20 @@ class UpdateDialog:
         layout.addLayout(buttons)
         # Dialog chrome (VISUAL 4.7). Non-modal, so without the backdrop: the main window stays usable behind it
         ui.dialogChrome(self.dialog, backdrop=False, styleSheet=_dialogStyleSheet)
+        self.dialog.connect("finished(int)", self._onFinished)
+
+    def _onFinished(self, result):
+        self.wanted = False
+
+    def setParentWindow(self, parent):
+        """Show the dialog over another window (the Settings dialog while that is modal, else the main window)."""
+        dialog = self.dialog
+        if parent is None or not _isAlive(dialog) or dialog.parentWidget() == parent:
+            return
+        dialog.setParent(parent, dialog.windowFlags())
 
     def show(self):
+        self.wanted = True
         self.dialog.show()
         self._fitToText()
         self.dialog.raise_()
@@ -2212,6 +2255,7 @@ class UpdateDialog:
             shell = _shell()
             if shell is not None:
                 shell.toast(_("The update installs when you quit"), 3000)
+        self.wanted = False
         self.dialog.hide()
 
     def dispose(self):

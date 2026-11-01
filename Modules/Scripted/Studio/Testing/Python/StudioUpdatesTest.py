@@ -941,6 +941,55 @@ fi
         self.assertEqual(dialog.state, "unavailable")
         self.assertIsNone(service.job)
 
+    def test_UpdateDialogFromModalSettingsIsUsable(self):
+        """Settings runs its own event loop (application-modal), and Qt ignores the clicks on every window that is not
+        Settings or its child. Update now in Settings > Updates therefore opens the update dialog as a child of
+        Settings, and it goes back to the main window (open) when Settings closes.
+        """
+        updates = self.updates
+        self._publish("1.2.0")
+        updates._installableOverride = False  # no download: the dialog says why (any state shows the same window rules)
+        service = self._service()
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        mainWindow = slicer.util.mainWindow()
+        settings = slicer.app.settingsDialog()
+        self.assertIsNotNone(settings)
+        seen = {}
+
+        def probe():
+            try:
+                seen["modal"] = slicer.app.activeModalWidget() == settings
+                dialog = service.updateNow()
+                seen["dialog"] = dialog
+                seen["visible"] = dialog.dialog.isVisible()
+                seen["child"] = dialog.dialog.parentWidget() == settings
+                # Reused while Settings is still open: the same window, still usable
+                seen["again"] = service.updateNow() is dialog
+                seen["childAgain"] = dialog.dialog.parentWidget() == settings
+            except Exception as error:  # a failure in a timer callback is not reported by the test
+                seen["error"] = repr(error)
+            finally:
+                settings.reject()
+
+        qt.QTimer.singleShot(300, probe)
+        slicer.app.openSettingsDialog()
+        self.assertNotIn("error", seen, seen.get("error"))
+        self.assertTrue(seen["modal"], "Settings is the application-modal window")
+        self.assertTrue(seen["visible"])
+        self.assertTrue(seen["child"], "the update dialog is a child of the modal Settings dialog, so it receives clicks")
+        self.assertTrue(seen["again"])
+        self.assertTrue(seen["childAgain"])
+        # Settings closed: the update dialog is back over the main window and open
+        dialog = seen["dialog"]
+        self.assertTrue(self._waitFor(dialog.dialog.isVisible, 5), "still open after Settings closes")
+        self.assertTrue(dialog.dialog.parentWidget() == mainWindow)
+        # Outside Settings it stays a child of the main window; closing it by the user keeps it closed
+        self.assertIs(service.updateNow(), dialog)
+        self.assertTrue(dialog.dialog.parentWidget() == mainWindow)
+        dialog.secondaryButton.click()
+        self.assertFalse(dialog.dialog.isVisible())
+        self.assertFalse(dialog.wanted)
+
     def test_RequiredFoundOnline(self):
         """A required release that can be installed but is shown as a warning (found after the startup, or cached while
         automatic checks are off) offers Update now, not 'Connect to the internet'.
