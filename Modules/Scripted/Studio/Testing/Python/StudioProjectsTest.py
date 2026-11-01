@@ -4107,6 +4107,50 @@ class StudioProjectsTest(unittest.TestCase):
                 settings.setValue("Studio/LastOpenDirectory", savedFolder)
 
 
+    def test_67_opening_a_project_again_while_it_loads_loads_it_once(self):
+        """A second click on a project card while that project is still loading (the two releases are handled in one pass of
+        the event loop; the load processes timer events) is ignored: the scene is read once, not twice.
+        """
+        from unittest import mock
+
+        from StudioLib import projects_ui
+
+        service = self._service()
+        self._userVolume("Scan", shape=(12, 14, 16))
+        project = self._projectFor(service)
+        self._save(service)
+        projectPath = project.path
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertIsNone(service.project)
+
+        loads = []
+        results = []
+
+        def secondClick():
+            results.append(projects_ui.openProject(projectPath))
+
+        def onStart(caller, event):
+            loads.append(slicer.mrmlScene.GetURL())
+
+        tag = slicer.mrmlScene.AddObserver(slicer.vtkMRMLScene.StartImportEvent, onStart)
+        try:
+            with mock.patch.object(projects_ui, "_service", lambda: service), mock.patch.object(projects_ui, "_shell", lambda: None):
+                # Two clicks handled in one pass of the event loop: the card's click filter defers each one with a 0 ms timer,
+                # and the load of the first one runs the queued timer of the second
+                qt.QTimer.singleShot(0, secondClick)
+                self.assertTrue(projects_ui.openProject(projectPath))
+                slicer.app.processEvents()
+        finally:
+            slicer.mrmlScene.RemoveObserver(tag)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertEqual(len(loads), 1, "the project scene is loaded once")
+        self.assertEqual(results, [True], "the second request was handled (and ignored)")
+        self.assertIsNotNone(service.project)
+        self.assertEqual(os.path.normcase(os.path.realpath(service.project.path)), os.path.normcase(os.path.realpath(projectPath)))
+        self.assertIsNone(projects_ui._openingPath, "a finished open leaves nothing behind")
+        self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")), 1)
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk

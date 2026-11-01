@@ -709,20 +709,34 @@ class _CloseSceneMenuFilter(qt.QObject):
         return True
 
 
+#: The folder (normalized) that openProject is loading right now, None when no project is being opened. The project is only
+#: attached when the scene load has finished, and the load processes timer events, so a second click on the same card (its
+#: release is handled from a 0 ms timer) would otherwise load the whole scene again.
+_openingPath = None
+
+
 def openProject(path, shell=None):
     """Open a project folder: the open project is saved first; in Studio the project is shown in Library (Continue in Draw
-    goes on), and opening the open project again goes to Draw.
+    goes on), and opening the open project again goes to Draw. A request that arrives while a project is being opened (a
+    double click on a card) is ignored: the project loads once.
     """
+    global _openingPath
     service = _service()
     if service is None:
         return False
+    if _openingPath is not None:
+        return os.path.normcase(os.path.realpath(path)) == _openingPath
     shell = shell or _shell()
     if service.currentProject() is not None and os.path.normcase(os.path.realpath(service.currentProject().path)) == os.path.normcase(os.path.realpath(path)):
         if shell is not None:
             shell.switchTo("draw")
         return True
-    with slicer.util.WaitCursor():
-        opened = service.openProject(path)
+    _openingPath = os.path.normcase(os.path.realpath(path))
+    try:
+        with slicer.util.WaitCursor():
+            opened = service.openProject(path)
+    finally:
+        _openingPath = None
     if opened and shell is not None and shell.currentWorkspace() != "library":
         # The project is shown in Library (its Current work card has "Continue in Draw")
         shell.switchTo("library")
