@@ -2229,6 +2229,10 @@ class UpdateDialog:
             dialog.resize(dialog.width, needed)
 
     def begin(self):
+        # The dialog is reused for later updates: its title names the version that is downloaded now
+        status = self.service.status
+        if status is not None:
+            self.title.setText(_("Slicer Studio {version}").format(version=status.version))
         reason = self.service.unavailableReason()
         if reason:
             self._setState("unavailable", reason)

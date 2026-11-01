@@ -1358,6 +1358,34 @@ fi
         self.assertEqual(dialog.state, "failed")
         self.assertFalse(os.path.exists(os.path.join(self.stateDir, updates.STAGED_MARKER)))
 
+    def test_ReusedUpdateDialogTitleNamesVersionBeingInstalled(self):
+        """Update now for 1.2.0 fails and the dialog is closed; a later check finds 1.3.0 and Update now reuses the dialog:
+        its title names 1.3.0, not the version of the failed attempt.
+        """
+        updates = self.updates
+        if updates.platformKey() != "linux-x86_64":
+            self.skipTest("the Linux package path is tested on Linux")
+        self._publish("1.2.0", tamper="sha256")
+        target = self._fakeLinuxInstall("0.9.0")
+        updates._installableOverride = True
+        updates.installTargetOverride = target
+        service = self._service()
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        dialog = service.updateNow()
+        self.assertEqual(dialog.title.text, "Slicer Studio 1.2.0")
+        self.assertTrue(self._waitFor(lambda: dialog.state in ("ready", "failed"), 30), dialog.state)
+        self.assertEqual(dialog.state, "failed")
+        dialog.secondaryButton.click()  # Close
+        self._publish("1.3.0")
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        dialog2 = service.updateNow()
+        self.assertIs(dialog2, dialog, "the dialog is reused")
+        self.assertEqual(dialog2.title.text, "Slicer Studio 1.3.0")
+        self.assertTrue(self._waitFor(lambda: dialog2.state in ("ready", "failed"), 30), dialog2.state)
+        self.assertEqual(dialog2.state, "ready", dialog2.text.text)
+        self.assertEqual(dialog2.title.text, "Slicer Studio 1.3.0")
+        self.assertIn("1.3.0", dialog2.text.text)
+
     def test_AbandonedPreparedUpdateRemovedAtQuit(self):
         updates, install = self.updates, self.install
         if updates.platformKey() != "linux-x86_64":
