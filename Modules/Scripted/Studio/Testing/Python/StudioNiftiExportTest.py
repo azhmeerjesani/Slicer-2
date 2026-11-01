@@ -1026,6 +1026,19 @@ class StudioNiftiExportTest(unittest.TestCase):
             slicer.mrmlScene.RemoveNode(node)
         self._assertNoAbsolutePaths(self.out)
 
+    def test_08_list_title_is_sentence_case(self):
+        """The list title reads "Images", not an ALL-CAPS overline (VISUAL 2.4: overlines only for CONTINUE and group headers)."""
+        from StudioLib import autosave_io, niftiexport_ui
+
+        node = self._volume("caps check", np.zeros((3, 3, 3), np.int16), np.eye(4))
+        dialog = niftiexport_ui.exportNodesDialog([node], show=False, executor=autosave_io.InlineExecutor())
+        title = dialog.findChild(qt.QLabel, "StudioNiftiExportListTitle")
+        self.assertIsNotNone(title)
+        self.assertEqual(title.text, "Images")
+        self.assertNotEqual(title.font.capitalization(), qt.QFont.AllUppercase)
+        dialog.close()
+        slicer.mrmlScene.RemoveNode(node)
+
     def test_08a_replace_question_defaults_to_keeping_the_files(self):
         """In the "Replace existing files?" question the default (Enter) and Escape button is Cancel, never Replace."""
         from StudioLib import autosave_io, niftiexport_ui

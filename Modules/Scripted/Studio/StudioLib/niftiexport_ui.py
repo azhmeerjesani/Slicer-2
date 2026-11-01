@@ -327,7 +327,7 @@ class ExportDialog(qt.QDialog):
 
         # What to export: every image that is open, the chosen ones checked
         listHeader = qt.QHBoxLayout()
-        listHeader.addWidget(ui.overline(_("Images"), "StudioNiftiExportListTitle"))
+        listHeader.addWidget(ui.sectionLabel(_("Images"), "StudioNiftiExportListTitle"))
         listHeader.addStretch(1)
         self.selectAllLink = ui.linkButtonWidget(_("Select all"), self.selectAll, "StudioNiftiExportSelectAll")
         listHeader.addWidget(self.selectAllLink)
