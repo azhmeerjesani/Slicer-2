@@ -332,13 +332,26 @@ def _adoptDrawSeed(widget):
     widget.updateGUIFromParameterNode()
 
 
+def shortcutDescriptions():
+    """``[(key sequence, description)]`` of the keys of Map (also listed by the keyboard shortcut sheet)."""
+    return [
+        (EXPORT_SHORTCUT, _("Export the maps")),
+        (PREVIOUS_MAP_SHORTCUT, _("Previous map")),
+        (NEXT_MAP_SHORTCUT, _("Next map")),
+    ]
+
+
 def _installShortcuts(shell):
     if _state["shortcutsShell"] is shell:
         return
     _state["shortcutsShell"] = shell
-    shell.addWorkspaceShortcut("map", EXPORT_SHORTCUT, exportCurrent, _("Export the maps"))
-    shell.addWorkspaceShortcut("map", PREVIOUS_MAP_SHORTCUT, lambda: browseStep(-1), _("Previous map"))
-    shell.addWorkspaceShortcut("map", NEXT_MAP_SHORTCUT, lambda: browseStep(1), _("Next map"))
+    callbacks = {
+        EXPORT_SHORTCUT: exportCurrent,
+        PREVIOUS_MAP_SHORTCUT: lambda: browseStep(-1),
+        NEXT_MAP_SHORTCUT: lambda: browseStep(1),
+    }
+    for key, description in shortcutDescriptions():
+        shell.addWorkspaceShortcut("map", key, callbacks[key], description)
 
 
 def _takeActionShortcuts(shell):

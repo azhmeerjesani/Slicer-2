@@ -688,6 +688,32 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                 studioShell.toggleCheatSheet()
             self.mainWindow.resize(oldSize)
 
+    def test_08b_cheat_sheet_agrees_with_the_docs(self):
+        """Ctrl+Alt+0 is described by what it does (the key leaves Studio: docs say "Classic interface (and back)"), and
+        the Map keys are listed before Map has been shown (README: the full list is in Ctrl+/).
+        """
+        from StudioLib import cheatsheet
+
+        studioShell = self._applyStudio()
+        studioShell.installClassicSwitch()
+        studioShell.switchTo("library")
+        self._pump()
+        # As in a session in which Map has not been shown yet: its keys are not registered with the shell
+        registered = studioShell._workspaceShortcuts.pop("map", None)
+        try:
+            content = {section: rows for section, title, rows in cheatsheet.sections(studioShell)}
+        finally:
+            if registered is not None:
+                studioShell._workspaceShortcuts["map"] = registered
+        appRows = {description: keys for keys, description in content[cheatsheet.SECTION_APP]}
+        interfaceRows = [description for keys, description in content[cheatsheet.SECTION_APP] if "Ctrl+Alt+0" in keys]
+        self.assertEqual(len(interfaceRows), 1, interfaceRows)
+        self.assertIn("Classic", interfaceRows[0])
+        self.assertNotEqual(interfaceRows[0], "Studio interface")
+        self.assertIn("Ctrl+E", appRows.get("Export the maps", []), appRows)
+        self.assertIn("Alt+Left", appRows.get("Previous map", []), appRows)
+        self.assertIn("Alt+Right", appRows.get("Next map", []), appRows)
+
     def test_09_probe_texts(self):
         """The probe in MNI space, in scanner space and over a figure; hidden when the mouse leaves; Classic has none."""
         from StudioLib import importer, probe

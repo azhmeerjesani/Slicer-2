@@ -5,7 +5,7 @@ Draw (the tools), Views, and App with Library. It is generated each time it open
 
 - every Studio ``QShortcut`` of the main window (properties ``studioShortcut`` / ``studioDescription``), including the
   keys that a workspace installs when it is entered (``Shell.addWorkspaceShortcut()``), so the Draw keys are listed
-  in any workspace;
+  in any workspace, and the Map keys, which are listed before Map has been shown (``mappage.shortcutDescriptions()``);
 - the main window actions that have a key (File, Edit, View and Help, and the actions attached to the window);
 - the Segment Editor's live effect order: 1 to 0 and Shift+1 to Shift+0 pick the tools in the order of the Draw panel;
 - the keys of the Segment Editor and of the slice views (SPEC 5.4 and Appendix A), including the Smart fill and
@@ -226,7 +226,12 @@ def _actionRows(shell, takenKeys):
         owners = associated(action) if associated is not None else []
         if not any(owner == mainWindow or str(owner.objectName) in _MENUS for owner in owners):
             continue
-        text = _ACTION_DESCRIPTIONS.get(str(action.objectName)) or str(action.text).replace("&", "").replace("…", "").strip()
+        # studioDescription describes what the key does (the text of the checkable Ctrl+Alt+0 action is its state)
+        text = (
+            _ACTION_DESCRIPTIONS.get(str(action.objectName))
+            or str(action.property("studioDescription") or "").strip()
+            or str(action.text).replace("&", "").replace("…", "").strip()
+        )
         if text:
             _addRow(rows, shortcuts, text)
     return rows
@@ -312,6 +317,18 @@ def _libraryRows():
     return rows
 
 
+def _mapRows():
+    """The keys of Map. Map installs them when it is first shown, but the sheet lists them in any workspace (README)."""
+    mapPage = sys.modules.get("StudioLib.mappage")
+    if mapPage is None:
+        try:
+            from . import mappage as mapPage
+        except Exception:
+            logging.debug("cheatsheet: the Map keys are not available:\n%s", traceback.format_exc())
+            return []
+    return [[[_portable(qt.QKeySequence(key))], description] for key, description in mapPage.shortcutDescriptions()]
+
+
 def _escapeRows():
     shellModule = _shellModule()
     ladder = getattr(shellModule, "ESCAPE_LADDER", None) or []
@@ -336,7 +353,7 @@ def sections(shell):
     takenKeys = {key for rows in studioRows.values() for row in rows for key in row[0]}
     draw = _mergedRows(studioRows[SECTION_DRAW], _effectRows(), _drawStaticRows())
     views = _mergedRows(studioRows[SECTION_VIEWS], _viewRows())
-    app = _mergedRows(studioRows[SECTION_APP], _actionRows(shell, takenKeys))
+    app = _mergedRows(studioRows[SECTION_APP], _mapRows(), _actionRows(shell, takenKeys))
     library = _mergedRows(studioRows[SECTION_LIBRARY], _libraryRows())
     return [
         (SECTION_DRAW, _("Draw"), draw),
