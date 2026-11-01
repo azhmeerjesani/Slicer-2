@@ -691,7 +691,7 @@ def viewLetters(sliceViewName):
 
 
 def viewStatement(sliceViewName):
-    """The display statement shown in a slice view ("Left is on screen right"), "" if it has none, None without letters."""
+    """The display statement shown in a slice view ("Radiological · L on right"), "" if it has none, None without letters."""
     if _controller is None:
         return None
     view = _controller.views.get(sliceViewName)

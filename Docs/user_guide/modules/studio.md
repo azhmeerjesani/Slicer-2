@@ -291,8 +291,10 @@ Laterality is always shown, and never guessed:
 
 - Every slice view shows **R/L**, **A/P** and **S/I** at its edges, computed from the view's orientation (also for
   oblique and flipped views). Over a figure the letters other than R/L are not shown.
-- The axial and coronal views say, in words at the bottom left, "Left is on screen right" (the radiological display
-  that 3D Slicer uses) or "Left is on screen left". A neurological display for the views is not part of Studio yet.
+- The axial and coronal views say, in words at the bottom right, "Radiological · L on right" (the radiological display
+  that 3D Slicer uses) or "Neurological · L on left" for a flipped view; a narrow view shows the short "L on right" or
+  "L on left". The bottom left shows the name of the volume. A neurological display for the views is not part of Studio
+  yet.
 - **Hemisphere words ("Left", "Right", "Both hemispheres") appear only in MNI space**, where the midline is known.
   In scan space coordinates are shown with direction letters ("L 11.2 · P 17.8 · S 9.5 (scanner)") and a tooltip says
   they are measured from the image origin, not from the midline. The in-view readout shows MNI or scanner space

@@ -114,6 +114,9 @@ Run with the main window and testing enabled::
   Map footer as the one line "Research use only. Lesion network mapping specificity is debated. Read more" (the whole
   statement and its references behind Read more and in the Report card), and studio.md lists the Circuits, Compare and Report
   cards of the Map inspector.
+- ``test_51_docs_quote_the_view_orientation_statement_as_the_views_show_it`` (BB-1): studio.md quotes the statement of the
+  axial and coronal views as "Radiological · L on right" / "Neurological · L on left" at the bottom right, as
+  ``orientation.displayStatement`` returns it, not the old "Left is on screen right" at the bottom left.
 """
 
 import inspect
@@ -3516,6 +3519,42 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertNotIn("Use anyway", statistics)
         self.assertIn("Normalize native subjects in the Library", templates)
         self.assertNotIn("Normalize all in the Library", templates)
+
+    def test_51_docs_quote_the_view_orientation_statement_as_the_views_show_it(self):
+        """studio.md quotes the statement of the axial and coronal views as the views show it (VISUAL 4.3): "Radiological · L on
+        right" or "Neurological · L on left" at the bottom right, not "Left is on screen right" at the bottom left.
+        """
+        from StudioLib import orientation
+
+        root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", ".."))
+        path = os.path.join(root, "Docs", "user_guide", "modules", "studio.md")
+        if not os.path.isfile(path):
+            self.skipTest("the documentation is not next to this build")
+        with open(path, encoding="utf-8") as stream:
+            text = stream.read()
+        section = " ".join(text.split("## Left and right", 1)[1].split("\n## ", 1)[0].split())
+        self.assertNotIn("Left is on screen", section, "studio.md still quotes the old statement")
+        # The statements quoted are the ones the views show (a radiological and a flipped view, and the short forms)
+        shown = {orientation.displayStatement(matrix) for matrix in self._sliceToRasPair(orientation)}
+        self.assertEqual(shown, {"Radiological · L on right", "Neurological · L on left"})
+        for statement in shown:
+            self.assertIn(f'"{statement}"', section)
+        for short in ("L on right", "L on left"):
+            self.assertIn(f'"{short}"', section)
+        self.assertIn("bottom right", section)
+        self.assertNotIn("bottom left, ", section)
+
+    @staticmethod
+    def _sliceToRasPair(orientation):
+        """The SliceToRAS matrices of an axial view in the radiological display (x axis towards -R) and of a flipped one."""
+        import vtk
+
+        matrices = []
+        for sign in (-1.0, 1.0):
+            matrix = vtk.vtkMatrix4x4()
+            matrix.SetElement(0, 0, sign)
+            matrices.append(matrix)
+        return matrices
 
     def test_50_wrap_check_box_row_is_one_line_high_when_the_text_fits(self):
         """The row of ui.wrapCheckBox() was laid out for two lines at every width (setSizePolicy() on the label dropped the
