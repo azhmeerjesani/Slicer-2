@@ -1394,6 +1394,8 @@ class Result:
         self.images = []
         self.notes = []
         self.errors = []
+        #: The plain reason (no error number, no temporary file name) of the first file that could not be written
+        self.writeFailure = None
 
     def add(self, written):
         self.files += written

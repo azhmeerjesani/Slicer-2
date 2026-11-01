@@ -1054,6 +1054,62 @@ class StudioNiftiExportTest(unittest.TestCase):
         dialog.close()
         slicer.mrmlScene.RemoveNode(node)
 
+    def test_08ad_write_failure_is_plain_and_keeps_the_dialog_open(self):
+        """A folder that does not accept files: a plain message (no errno, no temporary file name), a warning in the log (no
+        error badge), and the dialog stays open so that another folder can be chosen.
+        """
+        import logging
+
+        from StudioLib import autosave_io, niftiexport_ui
+
+        class Failing(autosave_io.InlineExecutor):
+            def submit(self, function, *args, onDone=None, onError=None):
+                onError(PermissionError(13, "Permission denied", os.path.join(self.folder, "sub-01.nii.gz.4242.tmp")))
+
+        records = []
+
+        class Handler(logging.Handler):
+            def emit(self, record):
+                records.append((record.levelno, record.getMessage()))
+
+        handler = Handler()
+        logging.getLogger().addHandler(handler)
+        toasts = []
+        original = niftiexport_ui.message
+        niftiexport_ui.message = lambda text, **kwargs: toasts.append(text)
+        node = self._volume("unwritable scan", np.zeros((3, 3, 3), np.int16), np.eye(4))
+        try:
+            executor = Failing()
+            executor.folder = self.out
+            dialog = niftiexport_ui.exportNodesDialog([node], show=False, executor=executor)
+            dialog.show()
+            dialog.setFolder(self.out)
+            runner = dialog.export()
+            self.assertTrue(runner.wait(30))
+            self.assertEqual(len(toasts), 1)
+            self.assertIn("could not be written", toasts[0])
+            self.assertIn("Permission denied", toasts[0])
+            for raw in (".tmp", "Errno", "4242", "Nothing was exported"):
+                self.assertNotIn(raw, toasts[0])
+            self.assertEqual(runner.result.errors, ["unwritable scan: Permission denied"])
+            self.assertFalse([text for level, text in records if level >= logging.ERROR and "NIfTI export" in text], "expected failures are not errors")
+            self.assertTrue([text for level, text in records if level == logging.WARNING and "NIfTI export" in text])
+            # Still open and usable: another folder can be chosen and exported to
+            self.assertTrue(dialog.isVisible())
+            self.assertIsNone(dialog.runner)
+            self.assertTrue(dialog.exportButton.isEnabled())
+            self.assertTrue(dialog.list.isEnabled())
+            self.assertTrue(dialog.changeButton.isEnabled())
+            dialog.executor = autosave_io.InlineExecutor()
+            runner = dialog.export()
+            self.assertTrue(runner.wait(30))
+            self.assertEqual([os.path.basename(path) for path in runner.result.images], ["unwritable_scan.nii.gz"])
+            self.assertFalse(dialog.isVisible())
+        finally:
+            niftiexport_ui.message = original
+            logging.getLogger().removeHandler(handler)
+            slicer.mrmlScene.RemoveNode(node)
+
     def test_08aa_dialog_grows_when_the_summary_wraps(self):
         """Select all makes the summary wrap onto more lines: the dialog grows and the image list stays above the folder card."""
         from StudioLib import autosave_io, niftiexport_ui

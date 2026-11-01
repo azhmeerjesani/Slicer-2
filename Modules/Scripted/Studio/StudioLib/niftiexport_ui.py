@@ -113,6 +113,13 @@ def _connectIdClicked(group, slot):
 #
 
 
+def plainError(error):
+    """An I/O error in plain words ("Permission denied"), without the error number and the internal temporary file name."""
+    from .autosave import plainOSError
+
+    return plainOSError(error) if isinstance(error, OSError) else str(error)
+
+
 class ExportRunner:
     """Run export jobs: each job reads the scene on the main thread (``Job.prepare``), then its images are written by the
     background writer (``autosave_io.backgroundWriter()``, or ``executor``). ``onProgress(done, total, title)`` and
@@ -156,8 +163,7 @@ class ExportRunner:
         try:
             tasks = job.prepare()
         except Exception as e:
-            logging.error(f"Slicer Studio: NIfTI export of {job.nodeName} failed:\n{traceback.format_exc()}")
-            self.result.errors.append(f"{job.nodeName}: {e}")
+            self._failure(job.nodeName, e, traceback.format_exc())
             tasks = []
         self.result.notes += job.notes
         self.index += 1
@@ -167,7 +173,7 @@ class ExportRunner:
                 try:
                     self.result.add(niftiexport._writeWithSlicer(task))
                 except Exception as e:
-                    self.result.errors.append(f"{job.nodeName}: {e}")
+                    self._failure(job.nodeName, e, traceback.format_exc())
         if not background:
             qt.QTimer.singleShot(0, self._next)
             return
@@ -180,9 +186,22 @@ class ExportRunner:
         self._taskDone()
 
     def _onFailed(self, name, error):
-        logging.error(f"Slicer Studio: NIfTI export of {name} failed: {error}")
-        self.result.errors.append(f"{name}: {error}")
+        self._failure(name, error)
         self._taskDone()
+
+    def _failure(self, name, error, details=None):
+        """Record a failed job. A file that cannot be written (read-only share, full disk, unplugged drive) is expected: it is
+        reported in plain words and logged as a warning, so that it does not raise the error badge. Anything else is a bug.
+        """
+        if isinstance(error, OSError):
+            reason = plainError(error)
+            logging.warning(f"Slicer Studio: NIfTI export of {name} could not be written: {error}")
+            if self.result.writeFailure is None:
+                self.result.writeFailure = reason
+            self.result.errors.append(f"{name}: {reason}")
+            return
+        logging.error(f"Slicer Studio: NIfTI export of {name} failed:\n{details or error}")
+        self.result.errors.append(f"{name}: {error}")
 
     def _taskDone(self):
         self._waiting -= 1
@@ -196,7 +215,8 @@ class ExportRunner:
                 niftiexport.writeReadme(self.readme[0], self.jobs[:self.index], self.result, self.readme[1])
                 self.result.files.append(self.readme[0])
             except OSError as e:
-                self.result.errors.append(f"{os.path.basename(self.readme[0])}: {e}")
+                logging.warning(f"Slicer Studio: the NIfTI export README could not be written: {e}")
+                self.result.errors.append(f"{os.path.basename(self.readme[0])}: {plainError(e)}")
         if self.onProgress is not None:
             self.onProgress(len(self.jobs), len(self.jobs), "")
         if self.onFinished is not None:
@@ -242,6 +262,10 @@ def announce(result):
     """The toast after an export: what was written, the notes (empty segments that were skipped, an empty threshold
     mask, a transform applied to the copy) and "Show in Finder/Explorer/Files".
     """
+    if not result.images and result.errors and getattr(result, "writeFailure", None):
+        message(_("The files could not be written to {folder}: {reason}").format(folder=shortPath(result.folder), reason=result.writeFailure),
+                level="warning", ms=8000, toolTip=result.folder)
+        return
     if not result.images and result.errors:
         message(_("Nothing was exported: {error}").format(error=result.errors[0]), level="warning", ms=8000)
         return
@@ -651,8 +675,19 @@ class ExportDialog(qt.QDialog):
     def _onFinished(self, result):
         self.lastResult = result
         announce(result)
-        if _isAlive(self.progress):
-            self.accept()
+        if not _isAlive(self.progress):
+            return
+        if result.errors and not result.images:
+            # Nothing was written (an unwritable folder, for example): stay open, so that another folder can be chosen
+            # without picking the images and options again
+            self.runner = None
+            self.progress.hide()
+            self.list.setEnabled(True)
+            self.changeButton.setEnabled(True)
+            self.cancelButton.setEnabled(True)
+            self.updateSummary()
+            return
+        self.accept()
 
     def reject(self):
         # Esc or Cancel while writing stops after the current image
