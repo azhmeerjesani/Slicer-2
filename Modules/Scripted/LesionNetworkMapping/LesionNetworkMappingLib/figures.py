@@ -113,6 +113,7 @@ SEQUENTIAL_COLORS = ("#3B0F70", "#8C2981", "#DE4968", "#FE9F6D", "#FCFDBF")
 LESION_COLOR = "#F2545B"  # SPEC §4.12
 LUT_ENTRIES = colormaps.DEFAULT_ENTRIES
 WINDOW_PERCENTILE = 99.5  # SPEC §4.12 (as display.WINDOW_PERCENTILE)
+COLORBAR_ROW_EM = 1.25  # line spacing (in label heights) of a second row of colour bar tick labels
 WIDEN_FACTOR = 1.1  # a threshold at or above W widens W to at least this multiple of the threshold
 WATERMARKS = {"tutorial": "TUTORIAL DATA", "synthetic": "SYNTHETIC"}
 #: Colour and opacity of the watermark (figures here and the report figures of :mod:`reportfigs`)
@@ -1104,8 +1105,12 @@ def _compose(panels, options, fonts, colorbars=(), panel_columns=1, heading=None
     for bar in colorbars:
         y += round(text_px * 1.8)
         inset = round(fonts.width("\u221200.0", small_px) / 2)  # room for the first tick value
-        annotations.extend(_colorbar(bar, margin + inset, y, round(available * (0.45 if options.width_mm > 120 else 0.8)), bar_h, fonts, text_px, small_px))
-        y += bar_h + round(small_px * 1.8)
+        items = _colorbar(bar, margin + inset, y, round(available * (0.45 if options.width_mm > 120 else 0.8)), bar_h, fonts, text_px, small_px)
+        annotations.extend(items)
+        # A second row of tick labels (a threshold next to the bar end) needs a line of its own
+        first_row_bottom = y + bar_h * 1.9 + small_px * 0.65
+        second_row = any(item.role in ("tick value", "threshold value") and item.y > first_row_bottom for item in items)
+        y += bar_h + round(small_px * 1.8) + (round(small_px * COLORBAR_ROW_EM) if second_row else 0)
     height = y + margin
 
     base = Image.new("RGB", (width_px, height), (255, 255, 255))
@@ -1175,11 +1180,32 @@ def _colorbar(bar, x, y, width, height, fonts, text_px, small_px):
             ticks = [(x, _fmt(vmin), False), (x + width, _fmt(vmax), False)]
     items.append(Annotation("bar", x, y, w=width, h=height, colors=colors, role=bar["label"]))
     items.append(Annotation("rect", x, y + height, w=width, h=1, color="#000000"))
-    for tx, label, is_threshold in ticks:
-        tick = height * (0.9 if is_threshold else 0.45)
+    rows = _label_rows(ticks, fonts, small_px)
+    for (tx, label, is_threshold), row in zip(ticks, rows, strict=True):
+        tick = height * (0.9 if is_threshold else 0.45) + row * COLORBAR_ROW_EM * small_px
         items.append(Annotation("line", tx, y + height, w=tx, h=y + height + tick, size=1, color="#000000", role="threshold tick" if is_threshold else "tick"))
         items.append(Annotation("text", tx, y + height + tick + small_px * 0.15, text=label, size=small_px, anchor="mt", role="threshold value" if is_threshold else "tick value"))
     return items
+
+
+def _label_rows(ticks, fonts, small_px):
+    """The row (0 = the first line below the bar, 1 = the line under it) of each tick label, so that no two
+    labels overprint: the end and centre values keep row 0 and a threshold value whose centred text would
+    touch a label already placed there (a threshold widened to 1.1 x its value lies close to the bar end)
+    drops to the next row that is free.
+    """
+    gap = small_px * 0.4
+    rows = [0] * len(ticks)
+    placed = []  # (left, right, row) of the labels placed so far
+    for index in sorted(range(len(ticks)), key=lambda i: ticks[i][2]):  # plain ticks first
+        tx, label, _ = ticks[index]
+        half = fonts.width(label, small_px) / 2
+        row = 0
+        while any(r == row and tx - half < right + gap and tx + half > left - gap for left, right, r in placed):
+            row += 1
+        rows[index] = row
+        placed.append((tx - half, tx + half, row))
+    return rows
 
 
 # Context: shared loading, display grid and caption pieces

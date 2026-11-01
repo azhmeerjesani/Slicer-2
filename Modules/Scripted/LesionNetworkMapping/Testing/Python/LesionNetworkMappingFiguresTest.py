@@ -391,6 +391,29 @@ class FiguresTest(unittest.TestCase):
         self.assertEqual(len(labels), 2)
         self.assertTrue(all(label[0] in "≤≥" for label in labels), labels)
 
+    def test_colorbar_tick_labels_never_overprint(self):
+        # BB-1: a threshold widened to 1.1 x its value lies at 0.909 of the half bar, closer to the end tick
+        # than a label is wide, so "-5.66" and "-5.15" were drawn on top of each other
+        for sign, count in (("neg", 1), ("both", 2)):
+            figure = figures.montage(self.tmap, self.template, "A 0", threshold=5.146, window=5.66, sign=sign, **SMALL)
+            labels = [item for item in figure.annotations if item.role in ("tick value", "threshold value")]
+            self.assertEqual(len([item for item in labels if item.role == "threshold value"]), count)
+            boxes = []
+            for item in labels:
+                half = figure.fonts.width(item.text, item.size) / 2
+                boxes.append((item.x - half, item.x + half, item.y, item.y + item.size, item.text))
+            for index, first in enumerate(boxes):
+                self.assertLessEqual(first[3], figure.size[1], first)
+                for second in boxes[index + 1 :]:
+                    apart = first[1] <= second[0] or second[1] <= first[0] or first[3] <= second[2] or second[3] <= first[2]
+                    self.assertTrue(apart, f"colour bar labels overlap: {first} and {second} ({sign})")
+        # Ticks that are far apart keep the single row
+        plain = figures.montage(self.tmap, self.template, "A 0", threshold=3.0, window=6.0, sign="both", **SMALL)
+        rows = {round(item.y) for item in plain.annotations if item.role == "threshold value"}
+        ends = {round(item.y) for item in plain.annotations if item.role == "tick value"}
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(len(ends), 1)
+
     def test_colorbar_label_and_caption_state_the_displayed_sign(self):
         # --sign neg shows T <= -t: the bar must not read "T >= t", and the caption must say which tail is shown
         rule = {"kind": "custom_t", "value": 4.0}
