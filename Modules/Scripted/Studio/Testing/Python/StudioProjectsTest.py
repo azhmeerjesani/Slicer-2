@@ -4242,6 +4242,29 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertIsNone(projects_ui._openingPath, "a finished open leaves nothing behind")
         self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")), 1)
 
+    def test_68_documentation_names_the_first_start_folder_buttons_as_they_are_labelled(self):
+        """The docs named a "Choose folder…" button in the first-start question; the button is "Choose…" (BB-1).
+        Every button the documents name for that dialog must exist in it.
+        """
+        from StudioLib import projects_ui
+
+        root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", ".."))
+        documents = {name: os.path.join(root, *name.split("/")) for name in ("README.md", "Docs/user_guide/studio_projects.md")}
+        if not all(os.path.isfile(path) for path in documents.values()):
+            self.skipTest("the documentation is not next to this build")
+
+        dialog = projects_ui.FolderChooserDialog()
+        try:
+            labels = {str(button.text) for button in dialog.findChildren("QPushButton")}
+        finally:
+            dialog.deleteLater()
+        self.assertEqual(labels, {"Choose…", "Continue"})
+        for name, path in documents.items():
+            with open(path, encoding="utf-8") as stream:
+                content = stream.read()
+            self.assertNotIn("Choose folder…", content, f"{name} names a button that the folder question does not have")
+            self.assertIn("Choose…", content, f"{name} does not name the button that picks another folder")
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk

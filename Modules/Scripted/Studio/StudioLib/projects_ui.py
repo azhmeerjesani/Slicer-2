@@ -3,7 +3,7 @@ the save status and its menu, the crash offer, File menu and Search actions, and
 
 - **Folder chooser** (``StudioProjectsFolderDialog``): at the first start of Studio, before the tour and the other
   first-run cards (and after A-08's required-update dialog), "Where should Slicer Studio keep your work?" proposes
-  ``Documents/Slicer Studio`` with "Choose folder…" and a warning for a cloud-synced folder. Escape or closing the dialog
+  ``Documents/Slicer Studio`` with "Choose…" and a warning for a cloud-synced folder. Escape or closing the dialog
   accepts the proposal: it never blocks the application. Never shown under ``--testing``, with
   ``SLICER_STUDIO_PROJECTS_ROOT`` or in the web build.
 - **Library** (``ProjectsSection``, object name ``studioProjectsSection``): the projects of the folder, the most recently

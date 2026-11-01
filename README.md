@@ -201,7 +201,7 @@ The Classic interface is also used, whatever the last choice, with `--testing`, 
 
 Studio saves your work as you go; there is no Save button to remember. The first start asks one question,
 *Where should Slicer Studio keep your work?*, and proposes a folder called *Slicer Studio* in your Documents
-folder: *Continue* accepts it, *Choose folder…* picks another one, and closing the window accepts the proposal.
+folder: *Continue* accepts it, *Choose…* picks another one, and closing the window accepts the proposal.
 *Settings > Saving* changes the folder later (and offers to move your projects). A folder that a cloud service
 syncs is flagged, because scans can contain patient data. Everything is ordinary files, sorted so that a person
 who never used 3D Slicer can find them in Finder, Explorer or a file manager:

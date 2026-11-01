@@ -6,7 +6,7 @@ remember. The first time Slicer Studio starts, it asks one question:
 > **Where should Slicer Studio keep your work?**
 
 It proposes a folder called **Slicer Studio** in your Documents folder. Press
-**Continue** to accept it, or **Choose folder…** to pick another one. If you
+**Continue** to accept it, or **Choose…** to pick another one. If you
 close the window, the proposed folder is used. You can change the folder later
 in **Settings › Saving**.
 
