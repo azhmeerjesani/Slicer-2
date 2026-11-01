@@ -1949,6 +1949,69 @@ fi
                 self.assertEqual(raised.exception.code, 2, f"{command} --port {bad!r}")
                 self.assertIn("--port must be between 1 and 65535", stderr.getvalue())
 
+    def test_LastCheckSurvivesTimeZoneChange(self):
+        """'Last checked' and the daily re-check are written in UTC with Z: a time zone change (travel, DST) neither puts
+        the last check in the future nor delays the re-check; an old value without a zone is still read as local time.
+        """
+        from StudioLib import updates_settings
+
+        updates = self.updates
+        savedZone = os.environ.get("TZ")
+        realTime = time.time
+
+        def setZone(name):
+            os.environ["TZ"] = name
+            time.tzset()
+
+        def restoreZone():
+            if savedZone is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = savedZone
+            time.tzset()
+
+        self.addCleanup(restoreZone)
+        self._publish("0.9.0")
+        service = self._service()
+        service.automaticChecksEnabled = lambda: True
+        setZone("Asia/Tokyo")
+        done = []
+        service.check(onDone=lambda status, error: done.append(error))
+        self.assertTrue(self._waitFor(lambda: done, 10))
+        self.assertIsNone(done[0])
+        checkedAt = realTime()
+        written = updates.settingsValue("LastCheck")
+        self.assertTrue(written.endswith("Z"), written)
+        self.assertLess(abs(updates.parseTime(written) - checkedAt), 5)
+        # Same instant, other zone (16 h behind Tokyo in November): not in the future, shown in local time
+        setZone("America/Los_Angeles")
+        lastTime = updates.parseTime(written)
+        self.assertLessEqual(lastTime, realTime() + 1)
+        panel = updates_settings.UpdatesSettingsPanel(service)
+        self.addCleanup(panel.deleteLater)
+        self.assertIn("Last checked " + time.strftime("%Y-%m-%d %H:%M", time.localtime(lastTime)) + ".", panel.statusText())
+        checks = []
+        service.check = lambda *args, **kwargs: checks.append(1)
+        service.checking = False
+        try:
+            time.time = lambda: checkedAt + 23 * 3600
+            service._maybeRecheck()
+            self.assertEqual(checks, [], "no re-check 23 h after the real check")
+            time.time = lambda: checkedAt + 25 * 3600
+            service._maybeRecheck()
+            self.assertEqual(checks, [1], "re-check 25 h after the real check")
+            # A value written by an earlier version (local time, no zone) is read as local time
+            checks.clear()
+            time.time = realTime
+            updates.setSettingsValue("LastCheck", time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(checkedAt - 25 * 3600)))
+            service._maybeRecheck()
+            self.assertEqual(checks, [1])
+            updates.setSettingsValue("LastCheck", time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(checkedAt - 3600)))
+            service._maybeRecheck()
+            self.assertEqual(checks, [1])
+        finally:
+            time.time = realTime
+
     #
     # (k) testing
     #

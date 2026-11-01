@@ -248,7 +248,7 @@ class PreparedInstall:
             "backup": self.backup,
             "relaunch": bool(relaunch),
             "admin": bool(self.needsAdmin),
-            "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "log": logPath,
         }
         data.update(record or {})

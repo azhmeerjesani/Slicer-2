@@ -120,6 +120,20 @@ NOTICE_RETRY_MS = 5000
 NOTICE_MAX_RETRIES = 24
 
 SETTINGS_GROUP = "Studio/Updates"
+def isoTime(seconds=None):
+    """An ISO 8601 time in UTC ("2026-11-01T05:30:00Z"), so that it means the same instant after a time zone change."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(seconds if seconds is not None else time.time()))
+
+
+def parseTime(text):
+    """Seconds since the epoch of a time written by ``isoTime``; one without a zone (written by earlier versions) is
+    local time. None when ``text`` is empty or not a time.
+    """
+    from . import projects
+
+    return projects.parseTime(text) if text else None
+
+
 DEFAULT_SETTINGS = {"AutoCheck": True, "LastCheck": "", "LastManifest": "", "SkippedVersion": ""}
 
 #: Object names (stable once released, SPEC 9.2)
@@ -1099,7 +1113,7 @@ class UpdateService:
         self._checkTask = None
         if error is None:
             setSettingsValue("LastManifest", manifest.toJson())
-            setSettingsValue("LastCheck", time.strftime("%Y-%m-%dT%H:%M:%S"))
+            setSettingsValue("LastCheck", isoTime())
             self.status = evaluate(manifest, currentVersion(), settingsValue("SkippedVersion"))
             self.lastError = None
         else:
@@ -1134,11 +1148,7 @@ class UpdateService:
     def _maybeRecheck(self):
         if not self.automaticChecksEnabled() or self.checking:
             return
-        last = settingsValue("LastCheck")
-        try:
-            lastTime = time.mktime(time.strptime(last, "%Y-%m-%dT%H:%M:%S")) if last else 0
-        except ValueError:
-            lastTime = 0
+        lastTime = parseTime(settingsValue("LastCheck")) or 0
         if time.time() - lastTime >= RECHECK_INTERVAL_S:
             self.check()
 

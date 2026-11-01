@@ -190,10 +190,9 @@ class UpdatesSettingsPanel(ctk.ctkSettingsPanel):
             parts.append(_("The last check failed: {error}").format(error=service.lastError))
         last = updates.settingsValue("LastCheck")
         if last:
-            try:
-                parts.append(_("Last checked {time}.").format(time=time.strftime("%Y-%m-%d %H:%M", time.strptime(last, "%Y-%m-%dT%H:%M:%S"))))
-            except ValueError:
-                pass
+            lastTime = updates.parseTime(last)
+            if lastTime is not None:
+                parts.append(_("Last checked {time}.").format(time=time.strftime("%Y-%m-%d %H:%M", time.localtime(lastTime))))
         elif updates.channel() != "release" and updates.feedOverride() is None:
             parts.append(_("A development build does not check by itself: use Check now."))
         return " ".join(parts)
