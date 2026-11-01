@@ -933,6 +933,10 @@ class CohortCard:
         self.balanceTable.setVerticalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
         self.balanceTable.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
         self.balanceTable.setAccessibleName(_("Case/control balance"))
+        self.balanceTable.setWordWrap(True)  # a covariate name wraps onto a second line rather than being cut off
+        self._balanceRows = []
+        self._balanceWatcher = _ResizeWatcher(self._fitBalanceRows)
+        library._installEventFilter(self.balanceTable, self._balanceWatcher)
         resultLayout.addWidget(self.balanceTable)
         self.matchRow, self.matchButton = library._rowButton(_("Create volume-matched control subset"), "StudioCohortMatchButton", self.createSubset, "secondary")
         self._matchTip = _("Each case gets the control with the nearest volume (no replacement). Stored as a named subset in study.json; "
@@ -1331,11 +1335,14 @@ class CohortCard:
 
     def _renderBalance(self, rows):
         table = self.balanceTable
+        self._balanceRows = list(rows)
         table.setRowCount(len(rows))
         for index, (label, cases, controls, smd, flagged) in enumerate(rows):
             for column, text in enumerate((label, cases, controls, ("! " if flagged else "") + smd)):
                 item = qt.QTableWidgetItem(text)
                 item.setFlags(qt.Qt.ItemIsEnabled)
+                if not column:
+                    item.setToolTip(text)
                 if column:
                     alignment = qt.Qt.AlignRight | qt.Qt.AlignVCenter
                     try:
@@ -1349,10 +1356,24 @@ class CohortCard:
                     item.setFont(font)
                     item.setToolTip(_("The groups differ on this covariate (|SMD| above {limit})").format(limit=SMD_FLAG))
                 table.setItem(index, column, item)
+        self._fitBalanceRows()
+
+    def _fitBalanceRows(self):
+        """Row heights that hold the wrapped covariate names (the first column is only about 110 px wide in the inspector)."""
+        table = self.balanceTable
+        if not library._isAlive(table):
+            return
         rowHeight = max(24, ui.fontPx(24))
-        for index in range(len(rows)):
-            table.setRowHeight(index, rowHeight)
-        table.setFixedHeight(table.horizontalHeader().height + rowHeight * len(rows) + 4)
+        metrics = table.fontMetrics
+        metrics = metrics() if callable(metrics) else metrics
+        usable = max(20, table.columnWidth(0) - 10)  # the cell margins of the item delegate
+        total = 0
+        for index, row in enumerate(self._balanceRows):
+            wrapped = metrics.boundingRect(0, 0, usable, 10000, int(qt.Qt.TextWordWrap), row[0]).height()
+            height = max(rowHeight, wrapped + 8)
+            table.setRowHeight(index, height)
+            total += height
+        table.setFixedHeight(table.horizontalHeader().height + total + 4)
 
     def _onPlotResize(self):
         """The plot follows the width of its label."""

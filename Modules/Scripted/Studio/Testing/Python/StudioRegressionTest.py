@@ -3298,6 +3298,55 @@ class StudioRegressionTest(unittest.TestCase):
         reverse = lesionset.balance(covariates, ["k0", "k1"], ["c0", "c1"], names=("hemisphere_left",))
         self.assertEqual(libcard_cohort.balanceRows({"balance": {"hemisphere_left": lesionset._balance_row(reverse["hemisphere_left"])}})[0][3], "-∞")
 
+    def test_49_balance_table_shows_whole_covariate_names_in_the_inspector(self):
+        """The balance table is only about 280 px wide in the 340 px inspector: "White matter share" and "Left hemisphere" wrap
+        onto a second line (each row is tall enough for it) instead of ending in "..." (BB-1).
+        """
+        import qt
+        from LesionNetworkMappingLib import lesionset
+
+        from StudioLib import libcard_cohort, study_ui
+
+        if not study_ui.isAvailable():
+            self.skipTest("needs the lesion network mapping library")
+        rows = [(f"sub-0{index}", {"group": "case" if index <= 3 else "control"}, False) for index in range(1, 6)]
+        study = self._study(rows)
+        cohortCard = None
+        try:
+            session = study_ui.openStudy(study.path, showLibrary=False)
+            self.assertIsNotNone(session)
+            cohortCard = libcard_cohort.CohortCard(session)
+            cohortCard.widget.setFixedWidth(250)
+            cohortCard.widget.show()
+            covariates = {f"c{k}": {"volume_ml": 1.0 + k, "wm_frac": 0.3, "dim_2d": 0.0, "hemisphere_left": 1.0} for k in range(3)}
+            covariates.update({f"k{k}": {"volume_ml": 2.0 + k, "wm_frac": 0.6, "dim_2d": 1.0, "hemisphere_left": 0.0} for k in range(3)})
+            table = lesionset.balance(covariates, ["c0", "c1", "c2"], ["k0", "k1", "k2"], names=tuple(libcard_cohort.COVARIATE_LABELS))
+            summary = {"balance": {name: lesionset._balance_row(row) for name, row in table.items()}}
+            balanceRows = libcard_cohort.balanceRows(summary)
+            self.assertEqual(len(balanceRows), 4)
+            cohortCard.results.setVisible(True)
+            cohortCard.balanceTable.setVisible(True)
+            cohortCard._renderBalance(balanceRows)
+            for _ in range(6):
+                slicer.app.processEvents()
+            balance = cohortCard.balanceTable
+            metrics = balance.fontMetrics
+            metrics = metrics() if callable(metrics) else metrics
+            usable = balance.columnWidth(0) - 10
+            self.assertLess(usable, metrics.horizontalAdvance("White matter share"), "the table is narrow enough for the check to mean something")
+            for index, row in enumerate(balanceRows):
+                label = row[0]
+                self.assertEqual(balance.item(index, 0).toolTip(), label)
+                for word in label.split():
+                    self.assertLessEqual(metrics.horizontalAdvance(word), usable, f"the word {word!r} of {label!r} does not fit the column")
+                needed = metrics.boundingRect(0, 0, usable, 10000, int(qt.Qt.TextWordWrap), label).height()
+                self.assertGreaterEqual(balance.rowHeight(index), needed + 4, f"{label!r} needs {needed} px but its row is {balance.rowHeight(index)} px")
+            self.assertGreaterEqual(balance.height, balance.horizontalHeader().height + sum(balance.rowHeight(i) for i in range(4)))
+        finally:
+            if cohortCard is not None:
+                cohortCard.dispose()
+                cohortCard.widget.deleteLater()
+
     def test_43_docs_describe_the_draw_inspector_as_the_app_builds_it(self):
         """studio.md describes the Draw inspector as it is (VISUAL 4.4): an Overlay row with an Outline switch, the display items
         in the panel menu and the footer link "Map this lesion's network →"; there is no Display card and no "Normalize to MNI…"
