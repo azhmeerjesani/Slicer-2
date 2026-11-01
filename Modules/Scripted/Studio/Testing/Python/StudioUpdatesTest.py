@@ -1848,6 +1848,37 @@ fi
                 web.unpack_web_bundle(web.Path(bundle), web.Path(destination))
         self.assertEqual(open(afile).read(), "x")
 
+    def test_WebLauncherMistypedCommand(self):
+        """A word that is not a command is refused (never started as 'run' with the word handed to Slicer);
+        only arguments after '--' go to Slicer.
+        """
+        web = self._importScript(os.path.join("Utilities", "SlicerStudioWeb", "slicer_studio_web.py"), "slicer_studio_web_typo")
+        calls = []
+        saved = web.command_run, web.command_local
+        web.command_run = lambda args: calls.append(("run", list(args.slicer_args))) or 0
+        web.command_local = lambda args: calls.append(("local", list(args.slicer_args))) or 0
+        try:
+            for argv in (["stauts", "--no-browser"], ["stp"], ["staus"], ["run", "stauts"], ["local", "stauts"], ["run", "--no-browser", "file.mrb"]):
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+                    web.main(argv)
+                self.assertEqual(raised.exception.code, 2, argv)
+                self.assertEqual(calls, [], argv)
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+                web.main(["stauts"])
+            self.assertIn("unknown command 'stauts'", stderr.getvalue())
+            for command in ("build", "run", "stop", "logs", "status", "local", "update"):
+                self.assertIn(command, stderr.getvalue())
+            # Valid forms still work: default command, explicit command, and Slicer arguments after "--"
+            self.assertEqual(web.main(["--no-browser"]), 0)
+            self.assertEqual(web.main(["run", "--no-browser", "--", "--python-script", "x.py"]), 0)
+            self.assertEqual(web.main(["--no-browser", "--", "file.mrb"]), 0)
+            self.assertEqual(web.main(["local", "--no-browser", "--", "-v"]), 0)
+            self.assertEqual(calls, [("run", []), ("run", ["--python-script", "x.py"]), ("run", ["file.mrb"]), ("local", ["-v"])])
+        finally:
+            web.command_run, web.command_local = saved
+
     def test_WebLauncher(self):
         web = self._importScript(os.path.join("Utilities", "SlicerStudioWeb", "slicer_studio_web.py"), "slicer_studio_web_test")
         makeRelease = self._importScript(os.path.join("Utilities", "Scripts", "SlicerStudioRelease", "make_release.py"), "make_release_test2")

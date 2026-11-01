@@ -1414,7 +1414,8 @@ def add_server_options(parser):
     parser.add_argument("--geometry", metavar="WxH", type=geometry_value, help=f"initial screen size (default {DEFAULT_GEOMETRY}; the browser window size is used once connected)")
     parser.add_argument("--ask-password", action="store_true", help="ask for a password to require in the browser (or set VNC_PASSWORD)")
     parser.add_argument("--no-browser", action="store_true", help="do not open the web browser")
-    parser.add_argument("slicer_args", nargs="*", metavar="-- SLICER_ARGS", help="arguments passed to Slicer, after '--'")
+    # Slicer arguments are only taken from after "--" (see main()); a stray word is an error, not a Slicer argument
+    parser.set_defaults(slicer_args=[])
 
 
 def build_parser():
@@ -1474,6 +1475,10 @@ def main(argv=None):
     commands = ("build", "run", "stop", "logs", "status", "local", "update")
     if "--update" in argv and (not argv or argv[0] not in commands):
         argv = ["update"] + [arg for arg in argv if arg != "--update"]
+    if argv and not argv[0].startswith("-") and argv[0] not in commands:
+        # A mistyped command (for example "stauts") must not start Slicer Studio and reach Slicer as a file name
+        build_parser().error(f"unknown command '{argv[0]}' (commands: {', '.join(commands)}); "
+                             "arguments for Slicer go after '--'")
     if not argv or (argv[0] not in commands and argv[0] not in ("-h", "--help")):
         argv.insert(0, "run")
     # Everything after "--" goes to Slicer.
