@@ -450,6 +450,36 @@ class FiguresTest(unittest.TestCase):
         x0, y0, x1, y1 = tile["bbox"]
         self.assertTrue((np.asarray(transparent.base)[y0:y1, x0:x1] == 0).all(axis=2).any())
 
+    def test_bad_input_messages_name_the_file_or_option(self):
+        # Raw Python texts ("Not a gzipped file (b'ga')", "invalid literal for int()") named neither the file nor the option
+        out = os.path.join(self.tmp, "o-badinput")
+        good = os.path.join(self.tmp, "badinput-good.nii.gz")
+        nifti.write_nifti(good, self.tmap[0], self.affine)
+        short = os.path.join(self.tmp, "short-ga.nii.gz")
+        with open(short, "wb") as f:
+            f.write(b"ga")
+        text = os.path.join(self.tmp, "plain-text.nii.gz")
+        with open(text, "w") as f:
+            f.write("garbage\n")
+        cases = [
+            (["--preset", "triptych", "--map", good, "--map", short, "--map", good], ["short-ga.nii.gz", "Cannot read"]),
+            (["--preset", "montage", "--map", text], ["plain-text.nii.gz"]),
+            (["--preset", "montage", "--map", good, "--template", short], ["short-ga.nii.gz", "Cannot read"]),
+            (["--preset", "montage", "--map", os.path.join(self.tmp, "missing.nii.gz")], ["missing.nii.gz"]),
+            (["--preset", "montage", "--map", good, "--slices", "A auto x"], ["slice specification", "A auto x"]),
+            (["--preset", "ortho", "--map", good, "--point", "1,2,a"], ["--point needs three numbers"]),
+        ]
+        for argv, needles in cases:
+            code, events = self._cli(argv + ["--out", out, "--formats", "png"])
+            self.assertNotEqual(code, 0, argv)
+            self.assertEqual(events[-1]["code"], "input", argv)
+            for needle in needles:
+                self.assertIn(needle, events[-1]["message"], argv)
+            for raw in ("Not a gzipped file", "invalid literal", "could not convert"):
+                self.assertNotIn(raw, events[-1]["message"], argv)
+        with self.assertRaises(ValueError):
+            figures.parse_slices("A auto x")
+
     def test_parse_slices(self):
         self.assertEqual(figures.parse_slices("A -20 -10 0 10 20 30"), ("axial", [-20.0, -10.0, 0.0, 10.0, 20.0, 30.0], None))
         self.assertEqual(figures.parse_slices("C 0"), ("coronal", [0.0], None))

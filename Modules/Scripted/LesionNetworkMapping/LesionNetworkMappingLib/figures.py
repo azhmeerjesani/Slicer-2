@@ -74,6 +74,7 @@ It writes ``DIR/figures/<name>/`` and registers the run (kind ``figure``) in the
 import base64
 import copy
 import csv
+import gzip
 import hashlib
 import io
 import json
@@ -82,6 +83,7 @@ import os
 import re
 import sys
 import time
+import zlib
 from dataclasses import dataclass, field, fields
 from xml.sax.saxutils import escape as _xml_escape
 
@@ -175,8 +177,19 @@ def load_volume(source, name=None):
         return source if name is None else Volume(source.data, source.affine, name, source.sha256, source.source)
     if isinstance(source, (str, os.PathLike)):
         path = os.fspath(source)
-        data, affine, _ = nifti.read_nifti(path)
         base = os.path.basename(path)
+        try:
+            data, affine, _ = nifti.read_nifti(path)
+        except ValueError:
+            raise  # the NIfTI reader's own messages already name the file
+        except (OSError, EOFError, zlib.error) as exc:
+            if isinstance(exc, gzip.BadGzipFile):
+                reason = "not a NIfTI image (it is not gzip-compressed data)"
+            elif isinstance(exc, (EOFError, zlib.error)):
+                reason = "the compressed data is truncated or damaged"
+            else:
+                reason = getattr(exc, "strerror", None) or str(exc)
+            raise ValueError(f"Cannot read {base}: {reason}") from exc
         if data.ndim > 3:
             count = int(np.prod(data.shape[3:]))
             if count != 1:
@@ -382,7 +395,10 @@ def parse_slices(text, default_plane="axial"):
             plane = head.lower()
             tokens = tokens[1:]
     if not tokens or tokens[0].lower() == "auto":
-        count = int(tokens[1]) if len(tokens) > 1 else None
+        try:
+            count = int(tokens[1]) if len(tokens) > 1 else None
+        except ValueError:
+            raise ValueError(f"Cannot read the slice specification {text!r} (the number of automatic slices must be a whole number, e.g. 'A auto 6')") from None
         if count is not None and count < 1:
             raise ValueError(f"The number of automatic slices must be at least 1, got {count}")
         return plane, None, count
@@ -2267,7 +2283,10 @@ def main(argv=None, cancel=None):
             options.pop("mask")
             figure = glass(args.map[0], mask=args.mask, template=args.template, **options)
         elif preset == "ortho":
-            point = None if args.point is None else tuple(float(v) for v in args.point.split(","))
+            try:
+                point = None if args.point is None else tuple(float(v) for v in args.point.split(","))
+            except ValueError:
+                raise ValueError(f"--point needs three numbers x,y,z (for example 10,-20,30), got {args.point!r}") from None
             if point is not None and len(point) != 3:
                 raise ValueError("--point needs x,y,z")
             figure = ortho(args.map[0], point, args.template, **options)
