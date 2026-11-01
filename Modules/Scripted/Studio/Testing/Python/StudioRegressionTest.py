@@ -154,6 +154,58 @@ print("QUITTEST READY filled=%d" % int((result > 0).sum()), flush=True)
 slicer.app.exit(0)
 """
 
+# Classic Segment Editor in an application that keeps the width of the module panel (not --testing): the panel width after each tool
+CLASSIC_PANEL_WIDTH_SCRIPT = r"""
+import json
+import os
+import time
+
+import numpy as np
+import slicer
+
+
+def pump(ms):
+    end = time.monotonic() + ms / 1000.0
+    while time.monotonic() < end:
+        slicer.app.processEvents()
+        time.sleep(0.005)
+
+
+result = {"widths": {}, "error": ""}
+try:
+    mainWindow = slicer.util.mainWindow()
+    mainWindow.resize(1366, 768)
+    pump(1000)
+    dock = mainWindow.findChild("QDockWidget", "PanelDockWidget")
+    volume = slicer.util.addVolumeFromArray(np.zeros((40, 40, 40), np.uint8))
+    pump(300)
+    slicer.util.selectModule("SegmentEditor")
+    pump(800)
+    editor = slicer.modules.SegmentEditorWidget.editor
+    segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode")
+    segmentation.CreateDefaultDisplayNodes()
+    editor.setSegmentationNode(segmentation)
+    segmentID = segmentation.GetSegmentation().AddEmptySegment("", "Tumor")
+    editor.setSourceVolumeNode(volume)
+    editor.setCurrentSegmentID(segmentID)
+    pump(300)
+    steps = [("start", "")]
+    steps += [(name, name) for name in ("Paint", "Threshold", "Mask volume", "Paint", "")]
+    widths = []
+    for label, effect in steps:
+        if label != "start":
+            editor.setActiveEffectByName(effect)
+            pump(1500)
+        widths.append([label or "none", int(dock.width)])
+    result["widths"] = widths
+except Exception:
+    import traceback
+
+    result["error"] = traceback.format_exc()
+print("PANELWIDTH " + json.dumps(result), flush=True)
+slicer.app.exit(0)
+"""
+
 QUIT_SCRIPT = r"""
 import sys
 import time
@@ -3184,3 +3236,38 @@ class StudioRegressionTest(unittest.TestCase):
         # The real command line of a run goes through the same wrapper
         self.assertEqual(crashCheck._withDisplay(["a", "b"], argparse.Namespace(no_xvfb=False))[:3], ["xvfb-run", "-a", "-s"])
         self.assertEqual(crashCheck._withDisplay(["a", "b"], argparse.Namespace(no_xvfb=True)), ["a", "b"])
+
+    def test_40_classic_mask_volume_does_not_widen_the_module_panel_for_good(self):
+        """Choosing Mask volume in the Classic Segment Editor widens the module panel only as far as its options need and the
+        panel is as narrow as before once the effect is left (it stayed 784 px wide, 57% of a 1366 px screen, for the rest of the
+        session). The panel width is kept between modules, so this runs without ``--testing``, which turns that off.
+        """
+        launcher = slicer.app.launcherExecutableFilePath
+        launcher = launcher() if callable(launcher) else launcher
+        if not launcher or not os.path.isfile(launcher):
+            self.skipTest("no Slicer launcher")
+        script = os.path.join(self.directory, "classic_panel_width.py")
+        with open(script, "w") as stream:
+            stream.write(CLASSIC_PANEL_WIDTH_SCRIPT)
+        home = os.path.join(self.directory, "classic_panel_width_home")
+        os.makedirs(os.path.join(home, ".config", "slicer.org"))
+        with open(os.path.join(home, ".config", "slicer.org", "Slicer.ini"), "w") as stream:
+            stream.write("[Studio]\nMode=classic\n")
+        environment = dict(os.environ)
+        environment.update({"HOME": home, "XDG_CONFIG_HOME": os.path.join(home, ".config"),
+                            "SLICER_STUDIO_PROJECTS_ROOT": os.path.join(home, "Studio")})
+        for key in ("SLICERRC", "SLICER_STUDIO_WEB"):
+            environment.pop(key, None)
+        process = subprocess.run([launcher, "--no-splash", "--python-script", script], env=environment, stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, timeout=QUIT_TIMEOUT_S, check=False)
+        output = process.stdout.decode("utf-8", "replace")
+        lines = [line for line in output.splitlines() if line.startswith("PANELWIDTH ")]
+        self.assertEqual(len(lines), 1, output[-3000:])
+        result = json.loads(lines[0][len("PANELWIDTH "):])
+        self.assertEqual(result["error"], "", result["error"])
+        widths = [width for _, width in result["widths"]]
+        self.assertEqual(len(widths), 6, result)
+        start, paint, threshold, maskVolume, paintAgain, none = widths
+        self.assertLessEqual(maskVolume, max(paint, threshold) + 100, f"Mask volume widened the panel: {result['widths']}")
+        self.assertLessEqual(paintAgain, paint + 20, f"Paint after Mask volume: {result['widths']}")
+        self.assertLessEqual(none, start + 20, f"No tool after Mask volume: {result['widths']}")

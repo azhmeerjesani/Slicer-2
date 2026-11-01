@@ -958,6 +958,15 @@ void qSlicerMainWindowPrivate::updatePanelWidth()
     this->PanelWidth = dock->width();
     return;
   }
+  // The minimum size of the dock widget is only reliable once the pending layout requests have been handled: a layout
+  // that has just changed (for example the options of a Segment Editor effect, some of them still to be hidden) passes
+  // its new minimum size up to the module panel through one posted layout request per level, and until then the dock
+  // widget reports a stale, often much larger minimum (784 px instead of 581 px for Mask volume)
+  for (int pass = 0; pass < 16; ++pass)
+  {
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::LayoutRequest);
+  }
+
   // Wider only if the module needs it (the dock widget cannot be narrower than its minimum size anyway)
   int width = qMax(this->PanelWidth, dock->minimumSizeHint().width());
   if (dock->width() != width)
@@ -2142,6 +2151,14 @@ bool qSlicerMainWindow::eventFilter(QObject* object, QEvent* event)
     if (event->type() == QEvent::Resize)
     {
       d->onPanelResized();
+      if (!(QApplication::mouseButtons() & Qt::LeftButton))
+      {
+        // Not dragged by the user: the contents made the dock widget wider (a module needs more room, or a minimum
+        // size that is stale for a moment, see updatePanelWidth()). A width that the contents asked for and then no
+        // longer need would be kept for the rest of the session (the dock widget does not get narrower by itself
+        // once it has been resized to a given width), so it is measured again when the layouts have settled.
+        d->schedulePanelWidthUpdate();
+      }
     }
     else if (event->type() == QEvent::Show && d->FocusMode && !d->FocusModeChanging)
     {
