@@ -378,6 +378,23 @@ class LesionNetworkMappingNetworksUITest(unittest.TestCase):
             slicer.app.processEvents()
             shutil.rmtree(folder, ignore_errors=True)
 
+    def test_clusters_peak_coordinates_round_half_away_from_zero(self):
+        """On a grid with voxel centres at .5 mm (2009c 2 mm) the Clusters table, tooltip and detail line must round every
+        coordinate the same way and never print "-0" (``:.0f`` rounds half to even: 19.5 gave 20 but -58.5 gave -58).
+        """
+        from types import SimpleNamespace
+
+        from LesionNetworkMappingUI import card_clusters
+
+        fmt = card_clusters.formatCoordinate
+        self.assertEqual([fmt(v) for v in (-0.5, 0.5, -0.0, -0.3, 0.0, 19.5, -58.5, -40.5, 39.5, 31.5, -31.5, 2.5, -2.5, 51.4)], ["-1", "1", "0", "0", "0", "20", "-59", "-41", "40", "32", "-32", "3", "-3", "51"])
+        row = {"id": 2, "voxels": 26, "mm3": 208.0, "xyz": (-0.5, -58.5, 39.5), "subpeak": False, "hemisphere": "L", "labels": [], "network": "", "sign": "neg"}
+        stub = SimpleNamespace(knownSpace=True)
+        self.assertEqual([card_clusters.ClustersCard._cell(stub, row, key)[0] for key in "xyz"], ["-1", "-59", "40"])
+        text = card_clusters.ClustersCard.detailText(stub, row)
+        self.assertIn("peak at -1, -59, 40", text)
+        self.assertNotIn("-0", text)
+
     def test_scheme_click_without_buttonClicked_int(self):
         card = self.card
         self.assertIsNotNone(card)

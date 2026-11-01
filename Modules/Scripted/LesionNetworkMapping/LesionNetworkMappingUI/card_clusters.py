@@ -103,6 +103,16 @@ def _readFloat(key, default):
     return value if math.isfinite(value) and value >= 0 else default
 
 
+def formatCoordinate(value):
+    """A peak coordinate in mm as a whole number, rounded half away from zero and never "-0".
+
+    ``f"{v:.0f}"`` rounds half to even and prints a small negative value as "-0", which is wrong on a grid whose voxel
+    centres lie at .5 mm (the 2009c 2 mm grid): 19.5 became 20 but -58.5 became -58, and -0.5 became "-0".
+    """
+    rounded = math.floor(abs(value) + 0.5)
+    return f"-{rounded}" if value < 0 and rounded else str(rounded)
+
+
 def shortName(atlasId):
     """Short, readable name of a catalog atlas id."""
     return SHORT_NAMES.get(atlasId, atlasId)
@@ -1465,7 +1475,7 @@ class ClustersCard:
             value = row["extra"].get(key[6:])
             return ("" if value is None or not math.isfinite(value) else f"{value:.2f}"), "r"
         if key in ("x", "y", "z"):
-            return f"{row['xyz']['xyz'.index(key)]:.0f}", "r"
+            return formatCoordinate(row["xyz"]["xyz".index(key)]), "r"
         if key == "side":
             if not self.knownSpace:
                 return "–", "c"  # noqa: RUF001
@@ -1527,7 +1537,7 @@ class ClustersCard:
                     if key == "labels":
                         item.setToolTip(text.replace("; ", "\n"))
                     elif key == "id":
-                        item.setToolTip(_("Peak {x:.0f}, {y:.0f}, {z:.0f}: click to jump there").format(x=row["xyz"][0], y=row["xyz"][1], z=row["xyz"][2]))
+                        item.setToolTip(_("Peak {x}, {y}, {z}: click to jump there").format(x=formatCoordinate(row["xyz"][0]), y=formatCoordinate(row["xyz"][1]), z=formatCoordinate(row["xyz"][2])))
                     self.itemModel.setItem(rowIndex, column, item)
         finally:
             self._loading = False
@@ -1574,7 +1584,7 @@ class ClustersCard:
         """What a row says in full: the cluster or sub-peak, its peak and side, and every atlas label with its share."""
         x, y, z = row["xyz"]
         side = {"L": _("left"), "R": _("right"), "midline": _("midline")}.get(row["hemisphere"], "") if self.knownSpace else ""
-        place = _("peak at {x:.0f}, {y:.0f}, {z:.0f}").format(x=x, y=y, z=z) + (f" ({side})" if side else "")
+        place = _("peak at {x}, {y}, {z}").format(x=formatCoordinate(x), y=formatCoordinate(y), z=formatCoordinate(z)) + (f" ({side})" if side else "")
         if row["subpeak"]:
             return _("Sub-peak {id}: {place}.").format(id=row["id"], place=place)
         text = _("Cluster {id}: {voxels:,} voxels ({mm3:,.0f} mm³), {place}.").format(id=row["id"], voxels=row["voxels"], mm3=row["mm3"], place=place)
