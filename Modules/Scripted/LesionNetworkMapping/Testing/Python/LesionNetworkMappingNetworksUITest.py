@@ -125,6 +125,55 @@ class LesionNetworkMappingNetworksUITest(unittest.TestCase):
             slicer.app.processEvents()
             shutil.rmtree(folder, ignore_errors=True)
 
+    def test_header_counts_the_suprathreshold_voxels_when_no_network_is_listed(self):
+        """With no unit (no atlas for the map, no ROI) the table is empty, but the header still gives the real counts."""
+        import os
+        import shutil
+        import tempfile
+
+        import numpy as np
+
+        from LesionNetworkMappingLib import nifti, thresholds
+
+        # The totals alone (no units): the statistics function returns no row, the totals function the counts
+        values = np.array([6.0, 5.0, -5.0, -7.0, -1.0, 0.0, np.nan, 4.9])
+        self.assertEqual(self.cn.networkStatistics(values, [], 5.0, "both"), [])
+        self.assertEqual(self.cn.suprathresholdTotals(values, 5.0, "both"), {"supraPos": 2, "supraNeg": 2, "voxels": 7})
+        self.assertEqual(self.cn.suprathresholdTotals(values, 5.0, "pos")["supraNeg"], 0)
+        units = [{"system": "yeo7", "name": "A", "atlas": None, "positions": np.array([0, 1, 2])}]
+        rows = self.cn.networkStatistics(values, units, 5.0, "both")
+        self.assertEqual({k: rows[0]["totals"][k] for k in ("supraPos", "supraNeg")}, {"supraPos": 2, "supraNeg": 2})
+
+        widget = slicer.modules.LesionNetworkMappingWidget
+        card = self.card
+        folder = tempfile.mkdtemp(prefix="lnm-networks-header-")
+        try:
+            affine = np.diag([2.0, 2.0, 2.0, 1.0])
+            affine[:3, 3] = -20.0
+            data = np.zeros((20, 20, 20), dtype=np.float32)
+            data[2:18, 2:18, 2:18] = np.random.default_rng(1).normal(0.0, 4.0, (16, 16, 16))
+            path = os.path.join(folder, "synth_conn-Test_desc-T_funcmap.nii.gz")
+            nifti.write_nifti(path, data, affine)
+            widget.showMapFile(path)
+            widget.signGroup.button(0).click()
+            widget.setRule({"kind": "custom_t", "value": 5.0})
+            card.widget.collapsed = True
+            card.rois.clear()
+            slicer.app.processEvents()
+            rows = card.update()
+            self.assertFalse(rows, "the synthetic map was expected to have no network to list")
+            self.assertEqual(int((data >= 5).sum()) > 0 and int((data <= -5).sum()) > 0, True)
+            header = str(card.headerLabel.text)
+            self.assertIn(f"{int((data >= 5).sum()):,} voxels positive", header)
+            self.assertIn(f"{int((data <= -5).sum()):,} negative", header)
+        finally:
+            card.widget.collapsed = True
+            card.rois.clear()
+            widget.setRule(thresholds.DEFAULT_RULE)
+            card.schedule()
+            slicer.app.processEvents()
+            shutil.rmtree(folder, ignore_errors=True)
+
     def test_declared_template_space_off_the_standard_grids(self):
         """A map whose template space the app knows (its sidecar's connectome space, the ``Studio.Space`` of its volume)
         but whose grid is no standard grid (a 4 mm resampled map, the demo connectome's 6 mm grid) gets its Side column,

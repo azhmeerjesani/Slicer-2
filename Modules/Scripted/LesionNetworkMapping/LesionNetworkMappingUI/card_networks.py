@@ -179,6 +179,20 @@ def _signs(sign):
     return sign in ("both", "pos"), sign in ("both", "neg")
 
 
+def suprathresholdTotals(values, threshold, sign="both"):
+    """Counts of the finite voxels of ``values`` that pass the threshold: ``supraPos`` (``>= t``), ``supraNeg`` (``<= -t``, as the sign allows), ``voxels``.
+
+    These totals do not depend on the network units, so they are available also when no network can be listed.
+    """
+    import numpy as np
+
+    values = np.asarray(values, dtype=np.float64)
+    finite = np.isfinite(values)
+    wantPos, wantNeg = _signs(sign)
+    return {"supraPos": int((finite & (values >= threshold)).sum()) if wantPos else 0,
+            "supraNeg": int((finite & (values <= -threshold)).sum()) if wantNeg else 0, "voxels": int(finite.sum())}
+
+
 def networkStatistics(values, units, threshold, sign="both"):
     """One row per unit, plus the voxels that are in no unit, with the statistics of the card (see the module docstring).
 
@@ -728,6 +742,7 @@ class NetworksCard:
         self.scheme = self._storedScheme()
         self.source = None
         self.rows = []
+        self.totals = {}
         self.notices = []
         self.null = None
         self.nullInfo = {"reason": _("Nothing is computed yet.")}
@@ -1169,6 +1184,7 @@ class NetworksCard:
                 notices = [*notices, *roiNotices, *source.notes]
                 values = source.vector
                 rows = networkStatistics(values, [*units, *roiUnits], source.value, source.sign)
+                totals = suprathresholdTotals(values, source.value, source.sign)
                 null, reason = self._findNull(source)
                 nullInfo = {"reason": reason}
                 if null is not None:
@@ -1185,7 +1201,7 @@ class NetworksCard:
             logging.exception("Lesion network mapping: the network table could not be made")
             self._showMessage(_("The network table could not be made: {error}").format(error=exc))
             return None
-        self.source, self.rows, self.notices, self.null, self.nullInfo = source, rows, notices, null, nullInfo
+        self.source, self.rows, self.totals, self.notices, self.null, self.nullInfo = source, rows, totals, notices, null, nullInfo
         self._shown = self.signature(source)
         self._fillTable()
         self._showHeader()
@@ -1197,7 +1213,7 @@ class NetworksCard:
     def _showHeader(self):
         source = self.source
         parts = [source.thresholdText(), SCHEMES[self.scheme]["title"]]
-        totals = (self.rows[0].get("totals") if self.rows else None) or {}
+        totals = self.totals or {}
         if source.sign in ("both", "pos"):
             parts.append(_("{n:,} voxels positive").format(n=totals.get("supraPos", 0)))
         if source.sign in ("both", "neg"):
