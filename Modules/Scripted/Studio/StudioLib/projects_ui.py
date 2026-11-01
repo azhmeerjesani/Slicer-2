@@ -307,6 +307,9 @@ class FolderChooserDialog(qt.QDialog):
         self.chooseButton.setObjectName("StudioProjectsFolderChooseButton")
         self.chooseButton.setToolTip(_("Choose another folder"))
         self.chooseButton.setMinimumHeight(36)
+        # Not an auto-default button: it takes the initial keyboard focus (first in the focus chain), and a focused auto-default
+        # button becomes the dialog's default, so Enter would open the folder picker instead of pressing "Continue" (BB-1)
+        self.chooseButton.setAutoDefault(False)
         ui.setRole(self.chooseButton, "secondary")
         self.chooseButton.connect("clicked()", self.choose)
         pathRow.addWidget(self.chooseButton, 0, qt.Qt.AlignVCenter)
@@ -378,6 +381,8 @@ class FolderChooserDialog(qt.QDialog):
         # Dialog chrome (VISUAL 4.7, V-02): frameless, rounded, bordered, over a backdrop
         ui.dialogChrome(self, styleSheet=self._styleSheet)
         self._update()
+        # The keyboard focus starts on the primary answer, so Enter and Space both press "Continue"
+        self.continueButton.setFocus()
 
     def _styleSheet(self):
         for icon in getattr(self, "_insideIcons", []):

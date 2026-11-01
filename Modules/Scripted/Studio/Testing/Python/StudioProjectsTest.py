@@ -827,6 +827,47 @@ class StudioProjectsTest(unittest.TestCase):
             qt.QApplication.setFont(base)
             slicer.app.processEvents()
 
+    def test_13c_folder_chooser_enter_presses_continue(self):
+        """Enter in the folder chooser presses the primary "Continue" and does not open the folder picker, whichever button has
+        the initial focus; Cancel (Change folder) is never the default either (BB-1).
+        """
+        from StudioLib import projects_ui
+
+        opened = []
+        original = qt.QFileDialog.getExistingDirectory
+        qt.QFileDialog.getExistingDirectory = staticmethod(lambda *args, **kwargs: (opened.append(1), "")[1])
+        try:
+            for cancellable in (False, True):
+                dialog = projects_ui.FolderChooserDialog(proposal=os.path.join(self.tempDir, "Slicer Studio"), cancellable=cancellable)
+                accepted = []
+                dialog.connect("accepted()", lambda accepted=accepted: accepted.append(1))
+                try:
+                    dialog.show()
+                    for _step in range(5):
+                        slicer.app.processEvents()
+                    self.assertFalse(dialog.chooseButton.autoDefault)
+                    self.assertTrue(dialog.continueButton.isDefault())
+                    self.assertFalse(dialog.chooseButton.isDefault())
+                    self.assertEqual(qt.QApplication.focusWidget(), dialog.continueButton, "the keyboard focus starts on Continue")
+                    # Enter on the widget that has the keyboard focus (the first button of the focus chain)
+                    for target in (qt.QApplication.focusWidget() or dialog, dialog.chooseButton):
+                        opened.clear()
+                        accepted.clear()
+                        dialog.setResult(qt.QDialog.Rejected)
+                        for eventType in (qt.QEvent.KeyPress, qt.QEvent.KeyRelease):
+                            qt.QApplication.sendEvent(target, qt.QKeyEvent(eventType, qt.Qt.Key_Return, qt.Qt.NoModifier))
+                        slicer.app.processEvents()
+                        self.assertEqual(opened, [], f"Enter opened the folder picker (cancellable={cancellable})")
+                        self.assertEqual(accepted, [1], f"Enter did not press Continue (cancellable={cancellable})")
+                        dialog.show()
+                        slicer.app.processEvents()
+                finally:
+                    dialog.hide()
+                    dialog.deleteLater()
+        finally:
+            qt.QFileDialog.getExistingDirectory = original
+            slicer.app.processEvents()
+
     def test_14_closed_surface_segmentation(self):
         """A segmentation written as "<name>.seg.vtm" plus a "<name>.seg/" folder is saved again in place (the folder is
         replaced) and the project reloads with every segment; nothing refers to a temporary folder.
