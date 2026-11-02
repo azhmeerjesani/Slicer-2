@@ -261,6 +261,48 @@ class FiguresTest(unittest.TestCase):
             self.assertEqual(events[-1]["code"], "input", extra)
             self.assertFalse(os.path.exists(os.path.join(out, "figures")), extra)
 
+    def test_rule_without_threshold_is_refused_not_drawn_unthresholded(self):
+        # A rule that gives no threshold (N < 2, a negative N, top_pct with no voxel of its sign) made a panel titled
+        # "thresholded" that showed the whole map, under a caption saying voxels below the threshold were hidden
+        negative = (-np.abs(self.tmap[0]), self.affine, "negT")
+        fwe = {"kind": "fwe_bonferroni", "alpha": 0.05}
+        top_pos = {"kind": "top_pct", "value": 10, "statistic": "T", "sign": "pos"}
+        cases = {
+            "fwe n=1": (figures.montage, self.tmap, {"rule": fwe, "n": 1}, "at least 2 subjects"),
+            "custom_t n=1": (figures.montage, self.tmap, {"rule": {"kind": "custom_t", "value": 7}, "n": 1}, "at least 2 subjects"),
+            "pair n=1": (figures.pair, self.tmap, {"rule": fwe, "n": 1}, "at least 2 subjects"),
+            "transparent n=1": (figures.montage, self.tmap, {"rule": fwe, "n": 1, "mode": "transparent"}, "at least 2 subjects"),
+            "top_pct pos on a negative map": (figures.montage, negative, {"rule": top_pos, "n": 50}, "no positive values"),
+        }
+        for label, (preset, tmap, kwargs, reason) in cases.items():
+            with self.assertRaises(ValueError, msg=label) as caught:
+                preset(tmap, self.template, "A 0", **kwargs, **SMALL)
+            self.assertIn("gives no threshold", str(caught.exception), label)
+            self.assertIn(reason, str(caught.exception), label)
+            self.assertIn(tmap[2], str(caught.exception), label)
+        with self.assertRaises(ValueError) as caught:
+            figures.triptych(self.tmap, self.tmap, negative, self.template, "A 0", rule=top_pos, n=50, **SMALL)
+        self.assertIn("negT", str(caught.exception))
+        # Drawn unthresholded on purpose, the rule's sentence stays in the caption and no panel claims a threshold
+        plain = figures.montage(self.tmap, self.template, "A 0", rule=fwe, n=1, mode="unthresholded", **SMALL)
+        self.assertEqual({panel["mode"] for panel in plain.meta["panels"]}, {"unthresholded"})
+        self.assertIn("Maps are shown unthresholded.", plain.caption)
+        self.assertNotIn("Thresholded panels", plain.caption)
+        # N below 1 is refused (0 used to mean "N unknown", a negative N reached the N < 2 branch)
+        for bad in (0, -5):
+            with self.assertRaises(ValueError, msg=str(bad)) as caught:
+                figures.montage(self.tmap, self.template, "A 0", rule=fwe, n=bad, **SMALL)
+            self.assertIn("must be at least 1", str(caught.exception))
+        # The command line refuses before writing anything
+        map_path = os.path.join(self.tmp, "unresolved-map.nii.gz")
+        nifti.write_nifti(map_path, self.tmap[0], self.affine)
+        out = os.path.join(self.tmp, "o-unresolved")
+        for n in ("1", "-5"):
+            code, events = self._cli(["--preset", "montage", "--map", map_path, "--rule", json.dumps(fwe), "--n", n, "--out", out, "--formats", "png"])
+            self.assertNotEqual(code, 0, n)
+            self.assertEqual(events[-1]["code"], "input", n)
+            self.assertFalse(os.path.exists(os.path.join(out, "figures")), n)
+
     def test_window_must_be_positive_and_finite(self):
         # A negative window inverted the colour bar while the tiles silently used 1.0 (zero fell back to auto)
         for bad in (-2.0, 0.0, float("nan"), float("inf")):

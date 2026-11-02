@@ -922,6 +922,9 @@ class Options:
             raise ValueError("width_mm must be positive and dpi at least 30")
         if self.window is not None and not (math.isfinite(float(self.window)) and float(self.window) > 0):
             raise ValueError(f"The window must be positive, got {self.window}")
+        if self.n is not None and int(self.n) < 1:
+            # 0 and negative N used to pass: 0 as "N unknown", a negative N as a T map with N < 2 drawn unthresholded
+            raise ValueError(f"The number of subjects (N) must be at least 1, got {self.n}")
         if self.v is not None and int(self.v) < 1:
             # 0 is not "not given": V is the number of voxels tested, at least 1 (as thresholds.resolve says)
             raise ValueError(f"The number of voxels must be at least 1, got {self.v}")
@@ -998,6 +1001,14 @@ def _resolve(info, options):
         resolved = thresholds.resolve(rule, int(options.n), info.v, gsr=options.gsr, values=values)
     else:
         resolved = thresholds.resolve_unknown_n(rule, info.v, values=values)
+    if not math.isfinite(resolved.value) and options.mode != "unthresholded":
+        # No threshold (N < 2, or top_pct with no voxel of the sign): a "thresholded" panel used to show the whole
+        # map under a caption that said voxels below the threshold were hidden (or that nothing passes)
+        reason = resolved.banner or "the threshold is undefined."
+        raise ValueError(
+            f"The rule {thresholds.rule_label(resolved.rule)} gives no threshold for the map {info.volume.name}: {reason} "
+            "Change the rule, its sign or N (--n), or draw the map unthresholded (--mode unthresholded).",
+        )
     info.resolved = resolved
     info.fraction = resolved.fraction
     return resolved
