@@ -345,6 +345,9 @@ class ColumnsDialog:
         self.cancelButton = qt.QPushButton(_("Cancel"))
         self.cancelButton.setObjectName("StudioColumnsCancelButton")
         ui.setRole(self.cancelButton, "secondary")
+        # No default button: Return that a cell, a combo or the check box leaves unhandled must not close the dialog
+        # (with Cancel as QDialog's automatic default it dropped every edit; Confirm is clicked, never pressed by Return)
+        self.cancelButton.setAutoDefault(False)
         self.cancelButton.connect("clicked()", dialog.reject)
         buttons.addWidget(self.cancelButton)
         self.confirmButton = qt.QPushButton(_("Confirm"))

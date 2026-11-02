@@ -120,6 +120,9 @@ Run with the main window and testing enabled::
 - ``test_53_a_scan_opened_from_outside_a_study_never_feeds_done_next`` (BB-1): with a study open, opening a subject's own
   scan opens that subject; another scan closes the study first (the subject's lesion is written) and is saved like any
   scan; a lesion of another scan in Draw gets Save lesion, never Done → next of the hidden subject.
+- ``test_54_return_in_the_columns_dialog_never_cancels_the_edits`` (BB-1): Return in the Columns… dialog (on a role combo, the
+  table, the filter check box or a button) neither closes it nor drops the edits: the dialog has no default button (Cancel was,
+  so Return threw every edit away without a word); Confirm still saves.
 """
 
 import inspect
@@ -3832,3 +3835,51 @@ class StudioRegressionTest(unittest.TestCase):
             pump()
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
+
+    def test_54_return_in_the_columns_dialog_never_cancels_the_edits(self):
+        """Columns...: Return that a focused child leaves unhandled (a closed role combo, the table, the "Only columns without
+        a role" check box) clicked Cancel, the dialog's default button, so every edit was dropped without a word (BB-1). The
+        dialog has no default button now: Return does nothing, and the edits stay until Confirm or Cancel is clicked.
+        """
+        from StudioLib import libcard_columns as lc
+        from StudioLib import study_ui
+
+        study = self._study([("sub-01", {"my_score": "3"}, False), ("sub-02", {"my_score": "5"}, False)])
+        folder = study.path
+        session = study_ui.openStudy(folder, None, showLibrary=False)
+        self.addCleanup(study_ui.closeStudy)
+        slicer.app.processEvents()
+        self.assertEqual(session.study.column_spec("my_score").role, lc.NOT_SET)
+        jsonPath = os.path.join(folder, "participants.json")
+
+        def saved():
+            if not os.path.exists(jsonPath):
+                return None
+            with open(jsonPath, encoding="utf-8") as f:
+                return f.read()
+
+        before = saved()
+        dialog = lc.ColumnsDialog(session)
+        self.addCleanup(dialog.widget.deleteLater)
+        dialog.show()
+        slicer.app.processEvents()
+        self.assertEqual([button.objectName for button in dialog.widget.findChildren("QPushButton") if button.isDefault()], [],
+                         "no button of the Columns dialog is clicked by Return")
+        dialog.setRole("my_score", "score")
+        dialog.onlyUnset.setChecked(False)
+        for target in (dialog.roleCombo("my_score"), dialog.table, dialog.onlyUnset, dialog.cancelButton, dialog.confirmButton):
+            for key in (qt.Qt.Key_Return, qt.Qt.Key_Enter):
+                target.setFocus()
+                for eventType in (qt.QEvent.KeyPress, qt.QEvent.KeyRelease):
+                    slicer.app.sendEvent(target, qt.QKeyEvent(eventType, key, qt.Qt.NoModifier))
+                slicer.app.processEvents()
+                self.assertTrue(dialog.widget.isVisible(), f"Return on {target.objectName or target.className()} closed the dialog")
+        self.assertEqual(dialog.widget.result(), 0)
+        self.assertEqual(saved(), before, "Return wrote nothing")
+        self.assertEqual(dialog.changes()[0], {"my_score": {"role": "score"}}, "the edit is still there after Return")
+        self.assertEqual(session.study.column_spec("my_score").role, lc.NOT_SET)
+        # Confirm still saves (the edits were kept for it)
+        dialog.confirmButton.click()
+        slicer.app.processEvents()
+        self.assertEqual(session.study.column_spec("my_score").role, "score")
+        self.assertFalse(dialog.widget.isVisible())
