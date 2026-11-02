@@ -158,6 +158,52 @@ int testMultiSelection(qMRMLSegmentSelectorWidget* segmentSelectorWidget)
   return EXIT_SUCCESS;
 }
 
+// ----------------------------------------------------------------------------
+int testMultiSelectionNodeChange(qMRMLSegmentSelectorWidget* segmentSelectorWidget)
+{
+  // The selection stored for one segmentation node must not be reported as a
+  // selection change when another segmentation node becomes current. The slice
+  // controller applies segmentSelectionChanged to the current node's segment
+  // visibility, so a stale selection used to hide every segment of a newly loaded
+  // segmentation (for example when a scene is loaded with clear=True).
+  vtkNew<vtkMRMLScene> scene;
+  segmentSelectorWidget->setMultiSelection(true);
+  segmentSelectorWidget->setMRMLScene(scene.GetPointer());
+
+  vtkNew<vtkMRMLSegmentationNode> segmentationNodeA;
+  scene->AddNode(segmentationNodeA);
+  QString segmentAID = QString::fromStdString(segmentationNodeA->GetSegmentation()->AddEmptySegment("segmentA"));
+
+  segmentSelectorWidget->setCurrentNode(segmentationNodeA);
+  segmentSelectorWidget->setSelectedSegmentIDs(QStringList() << segmentAID);
+  CHECK_QSTRINGLIST(QStringList() << segmentAID, segmentSelectorWidget->selectedSegmentIDs());
+
+  QSignalSpy segmentSelectionChangedSpy(segmentSelectorWidget, SIGNAL(segmentSelectionChanged(QStringList)));
+
+  // Switch to another segmentation node whose segment IDs differ
+  vtkNew<vtkMRMLSegmentationNode> segmentationNodeB;
+  scene->AddNode(segmentationNodeB);
+  QString segmentBID = QString::fromStdString(segmentationNodeB->GetSegmentation()->AddEmptySegment("segmentB"));
+  segmentSelectorWidget->setCurrentNode(segmentationNodeB);
+  CHECK_INT(segmentSelectionChangedSpy.count(), 0);
+  CHECK_INT(segmentSelectorWidget->selectedSegmentIDs().count(), 0);
+
+  // Scene replaced: the current node is removed, then a new node is selected
+  segmentSelectorWidget->setSelectedSegmentIDs(QStringList() << segmentBID);
+  CHECK_INT(segmentSelectionChangedSpy.count(), 1);
+  scene->RemoveNode(segmentationNodeA);
+  scene->RemoveNode(segmentationNodeB);
+  vtkNew<vtkMRMLSegmentationNode> segmentationNodeC;
+  scene->AddNode(segmentationNodeC);
+  segmentationNodeC->GetSegmentation()->AddEmptySegment("segmentC");
+  segmentSelectorWidget->setCurrentNode(segmentationNodeC);
+  CHECK_INT(segmentSelectionChangedSpy.count(), 1);
+  CHECK_INT(segmentSelectorWidget->selectedSegmentIDs().count(), 0);
+
+  return EXIT_SUCCESS;
+}
+
+//-----------------------------------------------------------------------------
 int qMRMLSegmentSelectorWidgetTest1(int argc, char* argv[])
 {
   qMRMLWidget::preInitializeApplication();
@@ -180,6 +226,13 @@ int qMRMLSegmentSelectorWidgetTest1(int argc, char* argv[])
   qMRMLSegmentSelectorWidget multiSegmentSelectorWidget;
   multiSegmentSelectorWidget.show();
   if (testMultiSelection(&multiSegmentSelectorWidget) != EXIT_SUCCESS)
+  {
+    return EXIT_FAILURE;
+  }
+
+  qMRMLSegmentSelectorWidget nodeChangeSegmentSelectorWidget;
+  nodeChangeSegmentSelectorWidget.show();
+  if (testMultiSelectionNodeChange(&nodeChangeSegmentSelectorWidget) != EXIT_SUCCESS)
   {
     return EXIT_FAILURE;
   }

@@ -3836,6 +3836,67 @@ class StudioRegressionTest(unittest.TestCase):
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
 
+    def test_55_a_scene_loaded_after_another_keeps_its_segments_visible(self):
+        """Opening project X after project Y (``slicer.util.loadScene(X, clear=True)``, what Open project..., Recent and the crash
+        card do) hid X's lesion segment: the segment selector of each slice controller restored the segment IDs it had checked
+        for Y's segmentation, found none of them in X's and reported "nothing checked", so the slice controller hid every
+        segment of X. The Draw eye button stayed on, and the next save wrote ``Visible:false`` for official 3D Slicer too (BB-1).
+        """
+        import numpy as np
+
+        if slicer.util.mainWindow() is None or slicer.app.layoutManager() is None:
+            self.skipTest("needs the main window and its slice views")
+        slicer.mrmlScene.Clear(0)
+        self.addCleanup(slicer.mrmlScene.Clear, 0)
+
+        def pump():
+            for _ in range(5):
+                slicer.app.processEvents()
+
+        def saveProject(name, segmentId):
+            """A scene with a scan and a lesion whose segment ID is unique, as Studio's lesions are."""
+            slicer.mrmlScene.Clear(0)
+            image = np.zeros((10, 12, 14), np.int16)
+            image[3:7, 4:8, 5:9] = 100
+            volumeNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "scan" + name)
+            slicer.util.updateVolumeFromArray(volumeNode, image)
+            volumeNode.CreateDefaultDisplayNodes()
+            segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesions")
+            segmentationNode.CreateDefaultDisplayNodes()
+            segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(volumeNode)
+            segmentationNode.GetSegmentation().AddEmptySegment(segmentId, "lesion")
+            slicer.util.updateSegmentBinaryLabelmapFromArray((image > 50).astype(np.uint8), segmentationNode, segmentId, volumeNode)
+            folder = os.path.join(self.directory, name)
+            os.makedirs(folder)
+            self.assertTrue(slicer.app.applicationLogic().SaveSceneToSlicerDataBundleDirectory(folder))
+            pump()
+            return os.path.join(folder, name + ".mrml")
+
+        sceneX = saveProject("X", "2.25.1111")
+        sceneY = saveProject("Y", "2.25.2222")
+        slicer.mrmlScene.Clear(0)
+        pump()
+        slicer.util.loadScene(sceneY)
+        pump()
+        slicer.util.loadScene(sceneX, {"clear": True})
+        pump()
+        segmentationNodes = slicer.util.getNodesByClass("vtkMRMLSegmentationNode")
+        self.assertEqual(len(segmentationNodes), 1)
+        segmentationNode = segmentationNodes[0]
+        self.assertEqual(segmentationNode.GetSegmentation().GetNumberOfSegments(), 1)
+        self.assertEqual(segmentationNode.GetSegmentation().GetNthSegmentID(0), "2.25.1111")
+        self.assertTrue(segmentationNode.GetDisplayNode().GetSegmentVisibility("2.25.1111"),
+                        "the lesion of the scene loaded second is shown as it was saved")
+        # The slice view's segment checklist follows the new lesion and still shows and hides it
+        selector = slicer.app.layoutManager().sliceWidget("Red").sliceController().findChild("qMRMLSegmentSelectorWidget", "SegmentSelectorWidget")
+        self.assertIsNotNone(selector)
+        self.assertIs(selector.currentNode(), segmentationNode)
+        self.assertEqual(list(selector.selectedSegmentIDs()), ["2.25.1111"])
+        selector.setSelectedSegmentIDs([])
+        self.assertFalse(segmentationNode.GetDisplayNode().GetSegmentVisibility("2.25.1111"))
+        selector.setSelectedSegmentIDs(["2.25.1111"])
+        self.assertTrue(segmentationNode.GetDisplayNode().GetSegmentVisibility("2.25.1111"))
+
     def test_54_return_in_the_columns_dialog_never_cancels_the_edits(self):
         """Columns...: Return that a focused child leaves unhandled (a closed role combo, the table, the "Only columns without
         a role" check box) clicked Cancel, the dialog's default button, so every edit was dropped without a word (BB-1). The
