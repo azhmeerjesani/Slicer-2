@@ -2589,12 +2589,21 @@ def newLesionSegmentation(volumeNode=None, name=None, shell=None):
     It is named by the next free "Lesion 2", "Lesion 3"... (the node and its single segment), the previous lesion is
     hidden in the slice views, and a consequence toast offers Undo (removes the new lesion and shows the previous one).
     Return the new segmentation node, None without a volume.
+
+    Refused (None, with a toast) on the scan of the open study's subject: a study keeps one lesion per subject, the one
+    that Done writes and that leaving the subject saves and removes. A second lesion there would be saved nowhere and
+    stay shown over the next subject's scan.
     """
     shell = _currentShell(shell)
     previousSegmentation, previousSource = _editedNodes()
     if volumeNode is None:
         volumeNode = previousSource if previousSource is not None else _backgroundVolume()
     if volumeNode is None or _isReference(volumeNode):
+        return None
+    studySession = _studySession()
+    if studySession is not None and _sameNode(volumeNode, studySession.volumeNode()):
+        if shell is not None:
+            shell.toast(_("New lesion is not available in a study: each subject has one lesion"), level="warning")
         return None
     name = name or _nextLesionName()
     segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", name)

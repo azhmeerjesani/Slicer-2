@@ -975,7 +975,8 @@ class Index:
                       description=_("Your default MNI template in Draw (the bundled MNI152NLin2009cAsym unless you chose your own), with an empty lesion"),
                       iconName="brain"),
                 Entry("action.newLesion", _("New lesion"), action, lambda: importer.newLesionSegmentation(shell=shell),
-                      synonyms=("another lesion", "new segmentation", "add lesion", "next lesion"), enabled=_hasScan,
+                      synonyms=("another lesion", "new segmentation", "add lesion", "next lesion"),
+                      enabled=lambda: _hasScan() and getattr(shell, "studySession", None) is None,
                       description=_("A new lesion on the scan of Draw; the previous one is hidden"), iconName="brush"),
             ]
         if draw is not None and hasattr(draw, "saveLesionDialog"):

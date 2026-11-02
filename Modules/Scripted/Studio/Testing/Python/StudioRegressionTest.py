@@ -3639,3 +3639,90 @@ class StudioRegressionTest(unittest.TestCase):
             if host is not None:
                 host.deleteLater()
             study_ui.closeStudy()
+
+    def test_52_new_lesion_is_not_offered_in_a_study(self):
+        """In a study the Lesion card's ⋯ menu (and Search) offered New lesion, although the card's own New lesion button is
+        hidden there: it made a "Lesion 2" next to the subject's lesion and hid it. Done then found the subject's lesion empty
+        ("nothing was saved"), leaving the subject wrote nothing, and "Lesion 2" stayed shown over the next subject's scan,
+        saved nowhere (BB-1). New lesion is not offered in a study, and a new lesion on the subject's scan is refused.
+        """
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import draw, importer, palette, shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "New lesion study")
+        os.makedirs(folder)
+        scans = []
+        for sid in ("sub-01", "sub-02"):
+            scans.append(os.path.join(folder, f"{sid}_T1w.nii.gz"))
+            nifti.write_nifti(scans[-1], np.zeros(grid.shape, np.uint8), grid.affine)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        toasts = []
+        originalToast = studioShell.toast
+        studioShell.toast = lambda text, *args, **kwargs: (toasts.append(str(text)), originalToast(text, *args, **kwargs))[1]
+
+        def pump():
+            for _ in range(4):
+                slicer.app.processEvents()
+
+        def lesionNames():
+            return sorted(node.GetName() for node in slicer.util.getNodesByClass("vtkMRMLSegmentationNode"))
+
+        def labels():
+            return [action[0] for action in draw.lesionMenuActions(studioShell) if action]
+
+        try:
+            session = study_ui.createStudy(scans, studioShell, folder=folder)
+            self.assertIsNotNone(session)
+            session.open("sub-01", switchToDraw=True)
+            pump()
+            self.assertEqual(session.current(), "sub-01")
+            before = lesionNames()
+
+            # Not offered: the ⋯ menu (Save lesion saves the subject's lesion instead) and Search
+            self.assertNotIn("New lesion", labels())
+            self.assertLess(labels().index("Save lesion"), labels().index("Save lesion as…"))
+            drawEntry = [entry for entry in draw._paletteEntries(studioShell) if entry["id"] == "action.newLesion"]
+            self.assertEqual(len(drawEntry), 1)
+            self.assertFalse(drawEntry[0]["enabled"]())
+            index = palette.Index(studioShell)
+            commandEntry = [entry for entry in index._commandEntries() if entry.id == "action.newLesion"]
+            self.assertTrue(all(not entry.isEnabled() for entry in commandEntry))
+            index.refresh()
+            if index.entry("action.newLesion") is not None:
+                self.assertFalse(index.entry("action.newLesion").isEnabled())
+
+            # Refused when called anyway: no second lesion on the subject's scan, and the user is told why
+            self.assertIsNone(draw.newLesion(studioShell))
+            self.assertIsNone(importer.newLesionSegmentation(shell=studioShell))
+            pump()
+            self.assertEqual(lesionNames(), before)
+            self.assertTrue(any("not available in a study" in text for text in toasts), toasts)
+            displayNode = session.segmentationNode().GetDisplayNode()
+            self.assertTrue(displayNode.GetVisibility() and displayNode.GetVisibility2D(), "the subject's lesion stays shown")
+
+            # The subject's lesion is the one that is painted and saved by Done
+            segmentationNode, volumeNode = session.segmentationNode(), session.volumeNode()
+            segmentId = segmentationNode.GetSegmentation().GetNthSegmentID(0)
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, volumeNode)
+            array[20:23, 30:33, 20:23] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, volumeNode)
+            pump()
+            self.assertIsNotNone(session.done())
+            pump()
+            self.assertEqual(session.study.subject("sub-01")["status"], "traced")
+
+            # Without a study the ⋯ menu offers New lesion as before
+            study_ui.closeStudy()
+            pump()
+            self.assertIn("New lesion", labels())
+        finally:
+            study_ui.closeStudy()
+            studioShell.dispose()
+            pump()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)

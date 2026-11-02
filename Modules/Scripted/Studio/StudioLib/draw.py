@@ -3418,7 +3418,7 @@ def newLesion(shell=None):
     importer = _importer()
     if importer is None or not hasattr(importer, "newLesionSegmentation"):
         return None
-    if shell is not None:
+    if shell is not None and getattr(shell, "studySession", None) is None:
         session(shell).requestArm()
     return importer.newLesionSegmentation(shell=shell)
 
@@ -3454,20 +3454,27 @@ def exportSegmentMasks(shell=None):
 
 
 def lesionMenuActions(shell=None):
-    """Items of the Lesion card ⋯ menu: [(label, callback)] (None for a separator)."""
-    actions = [
-        (_("Rename lesion"), lambda: renameLesion(shell)),
-        (_("New lesion"), lambda: newLesion(shell)),
+    """Items of the Lesion card ⋯ menu: [(label, callback)] (None for a separator).
+
+    With a study open there is no New lesion (like the card's own button): a study keeps one lesion per subject, the one
+    that Done writes. Save lesion saves it now instead.
+    """
+    study = getattr(shell, "studySession", None) if shell is not None else None
+    actions = [(_("Rename lesion"), lambda: renameLesion(shell))]
+    if study is None:
+        actions.append((_("New lesion"), lambda: newLesion(shell)))
+    actions += [
         (_("Hide lesion"), lambda: hideLesion(shell)),
         None,
+    ]
+    if study is not None:
+        actions.append((_("Save lesion"), lambda: saveLesionNow(shell)))
+    actions += [
         (_("Save lesion as…"), lambda: saveLesionDialog(shell)),
         (_("Export each segment as a NIfTI mask…"), lambda: exportSegmentMasks(shell)),
         (_("Fill gaps and specks"), lambda: fillGapsAndSpecks(shell)),
         (_("Keep largest part"), lambda: keepLargestPart(shell)),
     ]
-    study = getattr(shell, "studySession", None) if shell is not None else None
-    if study is not None:
-        actions.insert(4, (_("Save lesion"), lambda: saveLesionNow(shell)))
     return actions
 
 
@@ -3902,7 +3909,8 @@ def _paletteEntries(shell=None):
         {"id": "draw.renameLesion", "title": _("Rename lesion"), "category": category, "synonyms": ["rename", "lesion name"],
          "callback": lambda: (shell.switchTo("draw") if shell is not None else None, renameLesion(shell)), "enabled": hasLesion},
         {"id": "action.newLesion", "title": _("New lesion"), "category": _("Action"), "synonyms": ["another lesion", "new segmentation", "add lesion", "next lesion"],
-         "callback": lambda: newLesion(shell), "enabled": hasLesion, "description": _("A new lesion on the scan of Draw; the previous one is hidden")},
+         "callback": lambda: newLesion(shell), "enabled": lambda: hasLesion() and getattr(shell, "studySession", None) is None,
+         "description": _("A new lesion on the scan of Draw; the previous one is hidden")},
         {"id": "draw.centerLesion", "title": _("Center on lesion"), "category": category, "key": CENTER_SHORTCUT, "synonyms": ["center", "centre", "go to lesion", "find lesion"],
          "callback": lambda: centerOnLesion(shell), "enabled": hasLesion, "description": _("Bring all views to the lesion")},
         {"id": "draw.fillGapsAndSpecks", "title": _("Fill gaps and specks"), "category": category, "synonyms": ["clean up", "cleanup", "fill holes", "remove specks", "despeckle"],
