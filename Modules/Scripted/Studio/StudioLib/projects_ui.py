@@ -574,6 +574,8 @@ def writeBundleKeepingState(scene, path):
 
     import vtk
 
+    from . import autosave_io
+
     path = os.path.abspath(path)
     folder = os.path.dirname(path)
     messages = slicer.vtkMRMLMessageCollection()
@@ -588,7 +590,8 @@ def writeBundleKeepingState(scene, path):
         scene.SetURL(path)
         scene.SetRootDirectory(folder)
         try:
-            success = bool(scene.WriteToMRB(path, None, messages))
+            with autosave_io.nodesOwnLook():  # Map's lesion outline is a view state, not the lesion's look
+                success = bool(scene.WriteToMRB(path, None, messages))
         finally:
             # Writing the data bundle made the nodes look written: the ones that were not saved yet are still to be saved
             for nodeId in modifiedIds:

@@ -2100,6 +2100,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneStartClose)
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndCloseEvent, self.onSceneEndClose)
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.NodeAddedEvent, self.onNodeAdded)
+        # Bundles written by the scene (a .mrb, a data bundle folder) keep the lesion's own look, not Map's outline
+        self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartSaveEvent, self.onSceneStartSave)
+        self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndSaveEvent, self.onSceneEndSave)
         self.initializeParameterNode()
         self.refreshConnectomes()
         if self._shell() is not None:
@@ -6092,6 +6095,16 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             self.ctx.cleanup()
         if getattr(slicer.modules, "LesionNetworkMappingWidget", None) is self:
             del slicer.modules.LesionNetworkMappingWidget
+
+    def onSceneStartSave(self, caller, event):
+        from LesionNetworkMappingLib import display
+
+        display.suspendOutlines()
+
+    def onSceneEndSave(self, caller, event):
+        from LesionNetworkMappingLib import display
+
+        display.resumeOutlines()
 
     def onSceneStartClose(self, caller, event):
         self._outlineState = None

@@ -49,6 +49,7 @@ import shutil
 import tempfile
 import time
 import unittest
+import urllib.parse
 
 import numpy as np
 import qt
@@ -4083,7 +4084,7 @@ class StudioProjectsTest(unittest.TestCase):
             display = None
         if display is not None:
             state = display.lesionOutline(lesion, segmentId)
-            self.assertTrue(needsSave(), "the outline is a change while it is shown (an autosave then writes it)")
+            self.assertFalse(needsSave(), "the outline is a view state: files never hold it (test_73)")
             display.restoreLesionDisplay(state)
             self.assertFalse(needsSave(), "the lesion looks as it did: nothing to save")
             state = display.lesionOutline(lesion, segmentId)
@@ -4093,11 +4094,11 @@ class StudioProjectsTest(unittest.TestCase):
             self._save(service)
             self.assertFalse(needsSave())
             state = display.lesionOutline(lesion, segmentId)
-            self._save(service)  # an autosave while Map is open writes the outline ...
-            display.restoreLesionDisplay(state)
-            self.assertTrue(needsSave(), "... so the lesion's own look is saved again on leaving")
+            lesion.GetDisplayNode().SetOpacity(0.5)  # an edit while Map is open: an autosave writes it, not the outline ...
             self._save(service)
             self.assertFalse(needsSave())
+            display.restoreLesionDisplay(state)
+            self.assertFalse(needsSave(), "... so leaving Map has nothing more to save")
             lesion.GetDisplayNode().SetOpacity(0.7)
             self.assertTrue(needsSave(), "a display edit after Map is an edit")
             self._save(service)
@@ -4606,6 +4607,143 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(os.path.join(newRoot, projects.LNM_DIR))), [projects.LNM_DIR, projects.LNM_DIR + " 2"])
         self.assertFalse(os.path.exists(os.path.join(oldRoot, projects.PROJECTS_DIR)), "everything moved")
 
+
+    def test_73_map_outline_is_never_written_into_the_project_or_a_copy(self):
+        """Map shows the lesion as a white outline (fill off, white override colour): a view state. Files written while Map
+        is shown keep the lesion's own look (fill on, its own colour): the project scene (Ctrl+S, then a crash), the
+        autosave, a .mrb copy for a colleague (official Slicer opens it too) and the project saved by New project. Before,
+        all of them held the outline, and a project reopened after New project or a crash showed the lesion outline-only
+        in Draw for good (BB-1). The outline stays on screen meanwhile, and showing it is not an edit of the project.
+        """
+        import xml.etree.ElementTree as ET
+        import zipfile
+
+        from LesionNetworkMappingLib import display
+        from StudioLib import projects_ui
+
+        service = self._service()
+        volume, _path = self._userVolume("Scan", shape=(12, 14, 16), extension=".nrrd")
+        lesion, segmentId, _array = self._lesion(volume)
+        project = self._projectFor(service)
+        self._save(service)
+        io = self.io
+        scene = slicer.mrmlScene
+        displayNode = lesion.GetDisplayNode()
+        displayNode.SetVisibility2DFill(True)
+        self._save(service)
+
+        def needsSave():
+            return service.projectNeedsSave(io.sceneFingerprint(scene, io.sentinelIds()))
+
+        def writtenLook(xml, where):
+            """(fill, override colour of the lesion segment) of the segmentation display node in a scene file's text."""
+            looks = []
+            for element in ET.fromstring(xml).iter("SegmentationDisplay"):
+                properties = {}
+                for segment in (element.get("SegmentationDisplayProperties") or "").split("|"):
+                    fields = segment.split()
+                    if fields:
+                        properties[urllib.parse.unquote(fields[0])] = dict(field.split(":", 1) for field in fields[1:] if ":" in field)
+                override = properties.get(segmentId, {})
+                looks.append((element.get("Visibility2DFill"), tuple(float(override.get("OverrideColor" + c, -1)) for c in "RGB")))
+            self.assertEqual(len(looks), 1, where)
+            return looks[0]
+
+        ownLook = ("true", (-1.0, -1.0, -1.0))
+
+        def assertOutlineShown(where):
+            color = displayNode.GetSegmentOverrideColor(segmentId)
+            self.assertEqual((displayNode.GetVisibility2DFill(), (color.GetX(), color.GetY(), color.GetZ())), (False, (1.0, 1.0, 1.0)),
+                             where + ": the outline stays on screen")
+
+        def projectLook(where):
+            with open(project.scenePath, encoding="utf-8") as f:
+                return writtenLook(f.read(), where)
+
+        self.assertEqual(projectLook("before Map"), ownLook)
+        state = display.lesionOutline(lesion, segmentId)
+        assertOutlineShown("Map")
+        self.assertFalse(needsSave(), "showing the outline is not an edit")
+
+        # Ctrl+S in Map (a crash may follow: the file on disk is what the project reopens with)
+        lesion.GetSegmentation().GetSegment(segmentId).SetName("Renamed in Map")  # an edit, so that the project is written
+        lesion.StorableModified()
+        self._save(service)
+        self.assertEqual(projectLook("Ctrl+S in Map"), ownLook, "the project keeps the lesion's own look")
+        assertOutlineShown("after Ctrl+S")
+        self.assertFalse(scene.GetModifiedSinceRead(), "after Ctrl+S in Map, closing the scene or quitting asks nothing")
+        self.assertFalse(needsSave(), "writing the scene while the outline is shown is not an edit")
+
+        # The autosave (crash recovery) writes its scene text the same way
+        xml, _root = io.sceneXml(scene)
+        self.assertEqual(writtenLook(xml, "autosave"), ownLook)
+        assertOutlineShown("after the autosave")
+
+        # Save a copy as… .mrb
+        copyPath = os.path.join(self.tempDir, "For a colleague.mrb")
+        running = self.autosave._service
+        self.autosave._service = service
+        try:
+            self.assertEqual(projects_ui.saveCopyAs(copyPath), copyPath)
+        finally:
+            self.autosave._service = running
+        with zipfile.ZipFile(copyPath) as archive:
+            sceneNames = [name for name in archive.namelist() if name.endswith(".mrml")]
+            self.assertEqual(len(sceneNames), 1, archive.namelist())
+            copyXml = archive.read(sceneNames[0]).decode("utf-8")
+        self.assertEqual(writtenLook(copyXml, ".mrb copy"), ownLook, "the copy shows the lesion as the colleague drew it")
+        assertOutlineShown("after Save a copy as")
+
+        # A bundle written by the official writer (Save dialog, slicer.util.saveScene) while the module shows Map
+        widget = slicer.modules.lesionnetworkmapping.widgetRepresentation().self()
+        officialPath = os.path.join(self.tempDir, "Official.mrb")
+        self.assertTrue(slicer.util.saveScene(officialPath))
+        with zipfile.ZipFile(officialPath) as archive:
+            officialXml = archive.read(next(name for name in archive.namelist() if name.endswith(".mrml"))).decode("utf-8")
+        self.assertEqual(writtenLook(officialXml, "official .mrb"), ownLook)
+        assertOutlineShown("after the official writer")
+        slicer.mrmlScene.SetURL(project.scenePath)
+        slicer.mrmlScene.SetRootDirectory(project.path)
+        self._save(service)  # (the official writer marks the data modified)
+        self.assertEqual(projectLook("saved again in Map"), ownLook)
+        self.assertFalse(needsSave())
+
+        # Leaving Map gives the lesion its look back, still with nothing to save
+        display.restoreLesionDisplay(state)
+        color = displayNode.GetSegmentOverrideColor(segmentId)
+        self.assertEqual((displayNode.GetVisibility2DFill(), color.GetX()), (True, -1.0))
+        self.assertFalse(needsSave(), "the lesion looks as it did: nothing to save")
+
+        # New project (the scene is closed) while Map shows the outline, after an edit: the project is saved first
+        widget._outlineState = display.lesionOutline(lesion, segmentId)
+        assertOutlineShown("Map again")
+        lesion.GetSegmentation().GetSegment(segmentId).SetName("Renamed before New project")
+        lesion.StorableModified()
+        asked = []
+
+        def closeQuestion():
+            dialog = slicer.app.activeModalWidget()
+            if dialog is not None:
+                asked.append(str(dialog.windowTitle))
+                dialog.reject()
+
+        timer = qt.QTimer()
+        timer.setInterval(200)
+        timer.connect("timeout()", closeQuestion)
+        timer.start()
+        try:
+            service.newProject()  # Ctrl+N: saved, then closed with File > Close Scene
+        finally:
+            timer.stop()
+        self.assertEqual(asked, [], "New project from Map asks nothing (the project was saved)")
+        self.assertEqual(scene.GetNumberOfNodesByClass("vtkMRMLSegmentationNode"), 0, "the scene was closed")
+        self.io.backgroundWriter().drain(10.0)
+        self.assertIsNone(widget._outlineState)
+        with open(project.scenePath, encoding="utf-8") as f:
+            closedXml = f.read()
+        self.assertIn("Renamed before New project", closedXml, "the project was saved when the scene closed")
+        self.assertEqual(writtenLook(closedXml, "New project"), ownLook, "the project closed in Map reopens with the lesion's own look")
+        self.assertEqual(display._liveOutlines(), [], "no outline is left behind with the closed scene")
 
 def _sphere(center=(0, 0, 0)):
     import vtk

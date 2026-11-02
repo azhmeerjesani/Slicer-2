@@ -22,6 +22,7 @@ single ``BackgroundWriter`` thread (``backgroundWriter()``), which other feature
 """
 
 import collections
+import contextlib
 import errno
 import json
 import logging
@@ -328,6 +329,55 @@ def settleNode(node, mtimeBefore):
     _settledNodes[node.GetID()] = (node.GetMTime(), mtimeBefore)
 
 
+def settledMTime(node):
+    """The modification time of ``node`` as the change detection sees it (see :func:`settleNode`)."""
+    mtime = node.GetMTime()
+    settled = _settledNodes.get(node.GetID()) if node.GetID() else None
+    if settled is not None and settled[0] == mtime:
+        return settled[1]
+    return mtime
+
+
+def _lesionDisplay():
+    """``LesionNetworkMappingLib.display`` if it was imported (never imported for this: no outline is shown without it)."""
+    return sys.modules.get("LesionNetworkMappingLib.display")
+
+
+def ownLookXml(xml):
+    """Scene file text with the nodes' own look: view states that change how a node looks (the lesion shown as a white
+    outline while Map is open) never reach the project or its autosave. The live scene is not changed.
+    """
+    hook = getattr(_lesionDisplay(), "ownLookXml", None)
+    return hook(xml) if hook is not None and xml else xml
+
+
+def ownLookFile(path):
+    """:func:`ownLookXml` applied to the scene file ``path`` (just written by ``vtkMRMLScene::Commit``)."""
+    if getattr(_lesionDisplay(), "ownLookXml", None) is None:
+        return
+    with open(path, "rb") as stream:
+        data = stream.read()
+    text = data.decode("utf-8", "surrogateescape")
+    changed = ownLookXml(text)
+    if changed != text:
+        with open(path, "wb") as stream:
+            stream.write(changed.encode("utf-8", "surrogateescape"))
+
+
+@contextlib.contextmanager
+def nodesOwnLook():
+    """``with nodesOwnLook(): scene.WriteToMRB(...)``: view states that change how a node looks (the lesion shown as a
+    white outline while Map is open) are taken back for the length of a bundle write, so that a copy keeps the nodes' own
+    look (they are put back afterwards). Scene files written with ``vtkMRMLScene::Commit`` use :func:`ownLookXml`.
+    """
+    hook = getattr(_lesionDisplay(), "ownLookWhileWriting", None)
+    if hook is None:
+        yield
+        return
+    with hook():
+        yield
+
+
 def sceneFingerprint(scene, ignoreIds=()):
     """A cheap value that changes when the scene content changes (MTimes only: it computes nothing).
 
@@ -354,11 +404,7 @@ def sceneFingerprint(scene, ignoreIds=()):
         if _isStorableClass(node):
             storableMTime = max(storableMTime, contentMTime(node))
         elif not _isExcludedClass(node):
-            mtime = node.GetMTime()
-            settled = _settledNodes.get(node.GetID())
-            if settled is not None and settled[0] == mtime:
-                mtime = settled[1]
-            otherMTime = max(otherMTime, mtime)
+            otherMTime = max(otherMTime, settledMTime(node))
     return (count, storableMTime, otherMTime, hash(tuple(sorted(items))))
 
 
@@ -561,7 +607,7 @@ def sceneXml(scene):
         scene.Commit()
     finally:
         scene.SetSaveToXMLString(0)
-    xml = scene.GetSceneXMLString()
+    xml = ownLookXml(scene.GetSceneXMLString())
     if modifiedNames is not None and not scene.GetModifiedSinceRead():
         _Sentinel.touch(scene, modifiedNames)
     return xml, rootDirectory
@@ -2448,6 +2494,7 @@ class ProjectWriter(SlotWriter):
             checkDiskNotFull(projectDir)
             if not written or not sceneFileComplete(temporary):
                 raise OSError(_tr("The scene file could not be written."))
+            ownLookFile(temporary)  # Map's lesion outline is a view state, not the lesion's look
             fsyncFile(temporary)
             replaceWithRetry(temporary, target)
         finally:

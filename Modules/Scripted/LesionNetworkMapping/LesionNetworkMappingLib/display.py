@@ -17,6 +17,7 @@ the main thread. ``applyTwoSidedThreshold(volumeNode, t)`` is the one implementa
 display shared by the Map module and the statistical-map overlay of the Library importer.
 """
 
+import contextlib
 import math
 
 import numpy as np
@@ -388,10 +389,52 @@ def setForegroundOpacity(opacity):
     slicer.util.setSliceViewerLayers(foregroundOpacity=float(opacity))
 
 
+def _settledMTime(displayNode):
+    """The modification time of ``displayNode`` as the autosave sees it (after a view change it took back), if Studio is there."""
+    try:
+        from StudioLib import autosave_io
+    except ImportError:
+        return displayNode.GetMTime()
+    return autosave_io.settledMTime(displayNode)
+
+
+def _settle(displayNode, mtimeBefore):
+    """Tell the autosave that ``displayNode`` changed for a view only (not an edit of the project), if Studio is there."""
+    try:
+        from StudioLib import autosave_io
+    except ImportError:
+        return
+    autosave_io.settleNode(displayNode, mtimeBefore)
+
+
+def _setLook(segNode, displayNode, fill, outline, overrides):
+    """Set fill, outline and per-segment override colours (a negative component: no override) in one modification."""
+    wasModifying = displayNode.StartModify()
+    displayNode.SetVisibility2DFill(fill)
+    displayNode.SetVisibility2DOutline(outline)
+    segmentation = segNode.GetSegmentation()
+    for identifier, color in overrides.items():
+        if segmentation.GetSegment(identifier) is None:
+            continue
+        if any(component < 0 for component in color):  # SEGMENT_COLOR_NO_OVERRIDE is -1
+            displayNode.UnsetSegmentOverrideColor(identifier)
+        else:
+            displayNode.SetSegmentOverrideColor(identifier, *color)
+    displayNode.EndModify(wasModifying)
+
+
+#: States of the lesions shown as an outline now (:func:`lesionOutline`): files written meanwhile keep their own look
+_outlines = []
+#: Nesting depth of :func:`suspendOutlines` and the looks it took back: [(state, look shown, its settled MTime), ...]
+_suspension = {"depth": 0, "looks": []}
+
+
 def lesionOutline(segNode, segmentId=None):
     """Show the lesion as a white outline (``Visibility2DFill`` off) over a map; return the previous state.
 
-    Pass the returned state to :func:`restoreLesionDisplay` to give the lesion its own look back.
+    Pass the returned state to :func:`restoreLesionDisplay` to give the lesion its own look back. The outline is a view
+    state: it is not an edit of the project, and a scene written while it is shown keeps the lesion's own look
+    (:func:`ownLookXml` for scene files, :func:`ownLookWhileWriting` for data bundles).
     """
     if segNode is None:
         return None
@@ -400,16 +443,14 @@ def lesionOutline(segNode, segmentId=None):
     displayNode = segNode.GetDisplayNode()
     segmentIds = [segmentId] if segmentId else list(segNode.GetSegmentation().GetSegmentIDs())
     state = {"node": segNode, "fill": displayNode.GetVisibility2DFill(), "outline": displayNode.GetVisibility2DOutline(), "override": {},
-             "mtimeBefore": displayNode.GetMTime()}
-    wasModifying = displayNode.StartModify()
-    displayNode.SetVisibility2DFill(False)
-    displayNode.SetVisibility2DOutline(True)
+             "mtimeBefore": _settledMTime(displayNode)}
     for identifier in segmentIds:
         color = displayNode.GetSegmentOverrideColor(identifier)
         state["override"][identifier] = (color.GetX(), color.GetY(), color.GetZ())
-        displayNode.SetSegmentOverrideColor(identifier, *OUTLINE_COLOR)
-    displayNode.EndModify(wasModifying)
+    _setLook(segNode, displayNode, False, True, dict.fromkeys(segmentIds, OUTLINE_COLOR))
     state["mtimeApplied"] = displayNode.GetMTime()
+    _settle(displayNode, state["mtimeBefore"])
+    _outlines[:] = [shown for shown in _outlines if shown["node"].GetScene() is not None] + [state]
     return state
 
 
@@ -417,28 +458,121 @@ def restoreLesionDisplay(state):
     """Undo :func:`lesionOutline` (fill, outline and per-segment colours)."""
     if not state or state.get("node") is None:
         return
+    _outlines[:] = [shown for shown in _outlines if shown is not state]
     segNode = state["node"]
     displayNode = segNode.GetDisplayNode()
     if displayNode is None or segNode.GetScene() is None:
         return
     untouched = state.get("mtimeApplied") == displayNode.GetMTime()  # nobody else changed the display meanwhile
-    wasModifying = displayNode.StartModify()
-    displayNode.SetVisibility2DFill(state["fill"])
-    displayNode.SetVisibility2DOutline(state["outline"])
-    segmentation = segNode.GetSegmentation()
-    for identifier, color in state["override"].items():
-        if segmentation.GetSegment(identifier) is None:
-            continue
-        if any(component < 0 for component in color):  # SEGMENT_COLOR_NO_OVERRIDE is -1
-            displayNode.UnsetSegmentOverrideColor(identifier)
-        else:
-            displayNode.SetSegmentOverrideColor(identifier, *color)
-    displayNode.EndModify(wasModifying)
+    _setLook(segNode, displayNode, state["fill"], state["outline"], state["override"])
     if untouched and state.get("mtimeBefore") is not None:
         # The lesion looks as before: leaving Map is not an edit of the project (its "Last edited" time stays)
-        try:
-            from StudioLib import autosave_io
+        _settle(displayNode, state["mtimeBefore"])
 
-            autosave_io.settleNode(displayNode, state["mtimeBefore"])
-        except ImportError:
-            pass
+
+def suspendOutlines():
+    """Give every lesion shown as an outline its own look back until :func:`resumeOutlines` (calls nest).
+
+    A data bundle (a .mrb copy, a bundle written by the official Save dialog) is written in between, so that the outline
+    of Map, a view state, never reaches a file. Scene files written with ``vtkMRMLScene::Commit`` (the project and its
+    autosave) use :func:`ownLookXml` instead, which leaves the live scene alone.
+    """
+    _suspension["depth"] += 1
+    if _suspension["depth"] > 1:
+        return
+    for state in _liveOutlines():
+        segNode = state["node"]
+        displayNode = segNode.GetDisplayNode()
+        shown = {}
+        for identifier in state["override"]:
+            color = displayNode.GetSegmentOverrideColor(identifier)
+            shown[identifier] = (color.GetX(), color.GetY(), color.GetZ())
+        look = (displayNode.GetVisibility2DFill(), displayNode.GetVisibility2DOutline(), shown)
+        _suspension["looks"].append((state, look, _settledMTime(displayNode)))
+        _setLook(segNode, displayNode, state["fill"], state["outline"], state["override"])
+
+
+def resumeOutlines():
+    """Show again what :func:`suspendOutlines` took back, exactly as it was (not an edit of the project)."""
+    if _suspension["depth"] <= 0:
+        return
+    _suspension["depth"] -= 1
+    if _suspension["depth"] > 0:
+        return
+    looks, _suspension["looks"] = _suspension["looks"], []
+    for state, (fill, outline, shown), settledBefore in looks:
+        segNode = state["node"]
+        displayNode = segNode.GetDisplayNode()
+        if displayNode is None or segNode.GetScene() is None:
+            continue
+        _setLook(segNode, displayNode, fill, outline, shown)
+        _settle(displayNode, settledBefore)
+        # What the file holds is what leaving Map gives back: leaving Map from here on is not an edit either
+        state["mtimeApplied"] = displayNode.GetMTime()
+        state["mtimeBefore"] = settledBefore
+
+
+def _liveOutlines():
+    """The outline states of lesions still in the scene (the others are forgotten: their scene was closed)."""
+    _outlines[:] = [state for state in _outlines if state["node"].GetScene() is not None and state["node"].GetDisplayNode() is not None]
+    return list(_outlines)
+
+
+def _xmlNumber(value):
+    """A number as ``vtkMRMLSegmentationDisplayNode::WriteXML`` writes it (an ostream: 6 significant digits)."""
+    return "%g" % value
+
+
+def ownLookXml(xml):
+    """Scene file text ``xml`` (as ``vtkMRMLScene::Commit`` wrote it) with every lesion shown as an outline written with
+    its own look: fill, outline and override colours of its display node as :func:`restoreLesionDisplay` gives them back.
+
+    The live scene is not changed (a change after the scene was written would leave it "modified since read", and closing
+    the scene or quitting would then ask to save it): the project and its autosave never hold Map's outline, a view state.
+    """
+    import re
+    import urllib.parse
+
+    for state in _liveOutlines():
+        displayNode = state["node"].GetDisplayNode()
+        identifier = displayNode.GetID()
+        if not identifier:
+            continue
+        pattern = re.compile(r'<SegmentationDisplay\b[^>]*\sid="%s"[^>]*>' % re.escape(identifier))
+
+        def element(match, state=state):
+            text = match.group(0)
+            text = re.sub(r'(\sVisibility2DFill=")[^"]*"', lambda m: m.group(1) + ("true" if state["fill"] else "false") + '"', text)
+            text = re.sub(r'(\sVisibility2DOutline=")[^"]*"', lambda m: m.group(1) + ("true" if state["outline"] else "false") + '"', text)
+
+            def properties(m):
+                segments = []
+                for segment in m.group(2).split("|"):
+                    fields = segment.split(" ")
+                    color = state["override"].get(urllib.parse.unquote(fields[0])) if fields and fields[0] else None
+                    if color is not None:
+                        for index, field in enumerate(fields):
+                            for component, name in enumerate(("OverrideColorR:", "OverrideColorG:", "OverrideColorB:")):
+                                if field.startswith(name):
+                                    fields[index] = name + _xmlNumber(color[component] if color[component] >= 0 else -1)
+                    segments.append(" ".join(fields))
+                return m.group(1) + "|".join(segments) + '"'
+
+            return re.sub(r'(\sSegmentationDisplayProperties=")([^"]*)"', properties, text)
+
+        xml, found = pattern.subn(element, xml, count=1)
+        if found:
+            # What the file holds is what leaving Map gives back now: leaving Map from here on is not an edit either
+            state["mtimeApplied"] = displayNode.GetMTime()
+            state["mtimeBefore"] = _settledMTime(displayNode)
+    return xml
+
+
+@contextlib.contextmanager
+def ownLookWhileWriting():
+    """``with ownLookWhileWriting(): scene.WriteToMRB(...)``: the lesions keep their own look in the bundle (:func:`suspendOutlines`)."""
+    suspendOutlines()
+    try:
+        yield
+    finally:
+        resumeOutlines()
