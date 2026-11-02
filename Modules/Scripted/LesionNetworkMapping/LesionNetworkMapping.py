@@ -2009,7 +2009,10 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self._runFailure = None
         #: The connectome the shown run was computed with: its V, mask and name belong to the run, not to the one selected later
         self._runBundle = None
-        #: {connectome folder: run state} of runs parked when another connectome was chosen (they come back with their connectome)
+        #: The lesion seed the shown run mapped (``_seedKey()``): its map belongs to that lesion, not to a segment chosen later
+        self._runSeed = None
+        #: {(connectome folder, seed key): run state} of runs parked when another connectome or lesion seed was chosen (they
+        #: come back when their connectome and seed are chosen again)
         self._parkedRuns = {}
         self.resolved = None
         #: What the cards that read the Result threshold were last told (``_notifyThresholdChanged``)
@@ -3600,8 +3603,13 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         except Exception as exc:
             logging.exception("Lesion network mapping: the seed could not be checked")
             self.seedCheck = {"ok": False, "reason": _("The lesion could not be read: {error}").format(error=exc), "kind": "error", "space": None, "volumeMl": 0.0, "qc": None}
+        # A run belongs to its lesion: another seed parks it (its map would read as the chosen lesion's), its own seed restores it
+        changed = self._parkRunOfOtherConnectome()
+        changed = self._restoreParkedRun() or changed
         self._showSeed(segNode, segmentId)
         self.updateComputeState()
+        if changed:
+            self._refreshAfterPark()
         self._notifyControllers("onSeedChecked", self.seedCheck)
 
     def _showSeed(self, segNode, segmentId):
@@ -3937,7 +3945,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         for key, parked in self._parkedRuns.items():
             bundle = follow(parked.get("runBundle"))
             parked["runBundle"] = bundle
-            parkedRuns[self._connectomeKey(bundle.path) if bundle is not None else key] = parked
+            parkedRuns[(self._connectomeKey(bundle.path), key[1]) if bundle is not None else key] = parked
         self._parkedRuns = parkedRuns
         if self.cohortStudy is not None and movedPath(self.cohortStudy.path) != self.cohortStudy.path:
             self.cohortStudy = None  # opened again from its new place (the rewritten setting) by refreshCohort()
@@ -3998,8 +4006,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
     def _refreshAfterPark(self):
         node = self._parameterNode
         volume = node.resultVolume if node is not None else None
-        # A run that finished while another connectome was chosen never had its map loaded (its volume is still "computing")
-        self.refreshResult(reloadMaps=volume is not None and volume.GetAttribute(COMPUTING_ATTRIBUTE) is not None and bool(self.runOutputs))
+        # A run that finished while another connectome was chosen never had its map loaded (its volume is still "computing").
+        # The peak table follows the run shown (a run that comes back gets its own peaks, not those of the run parked)
+        self.refreshResult(reloadMaps=volume is not None and volume.GetAttribute(COMPUTING_ATTRIBUTE) is not None and bool(self.runOutputs), peaks=True)
 
     @staticmethod
     def _connectomeKey(path):
@@ -4011,25 +4020,41 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             return True
         return self.bundle is not None and self._connectomeKey(self.bundle.path) == self._connectomeKey(self._runBundle.path)
 
+    def _seedKey(self):
+        """(segmentation node ID, segment ID) of the chosen lesion seed: the lesion a run maps."""
+        segNode, segmentId = self.ctx.seed() if self.ctx is not None else (None, None)
+        return ((segNode.GetID() or "") if segNode is not None else "", segmentId or "")
+
+    def _runSeedSelected(self):
+        """True when the shown run mapped the chosen lesion seed (or there is no run)."""
+        return self._runSeed is None or self._runSeed == self._seedKey()
+
+    def _runSelected(self):
+        """True when the shown run was computed with the selected connectome for the chosen lesion seed (or there is no run)."""
+        return self._runConnectomeSelected() and self._runSeedSelected()
+
     def _runState(self):
         return (self.lesionName, self.runDir, self.runOutputs, self.runN, self.runPartial, self.runPreviewN, self.runDescSuffix)
 
     def _parkRunOfOtherConnectome(self):
-        """Another connectome was chosen after a run: the Result card, the current run (Export and the cards that read it)
-        and the rule no longer use that run, whose V and mask are its own connectome's; it comes back when its connectome
-        is chosen again (``_restoreParkedRun``). The map volume stays in the scene but leaves the views: drawn without its
-        rule and legend, it would read as a map of the chosen connectome. Return whether a run was parked.
+        """Another connectome (or another lesion seed) was chosen after a run: the Result card, the current run (Export and
+        the cards that read it) and the rule no longer use that run, whose V and mask are its own connectome's and whose map
+        is its own lesion's; it comes back when its connectome and seed are chosen again (``_restoreParkedRun``). The map
+        volume stays in the scene but leaves the views: drawn without its rule and legend, it would read as a map of the
+        chosen connectome or lesion. Return whether a run was parked.
         """
-        if not self.runOutputs or self._runConnectomeSelected() or (self.job is not None and not self.job.isFinished()):
+        if not self.runOutputs or self._runSelected() or (self.job is not None and not self.job.isFinished()):
             return False
         from LesionNetworkMappingLib import display
 
         node = self._parameterNode
-        self._parkedRuns[self._connectomeKey(self._runBundle.path)] = {
+        runBundle = self._runBundle or self.bundle
+        self._parkedRuns[(self._connectomeKey(runBundle.path) if runBundle is not None else "", self._runSeed)] = {
             "volume": node.resultVolume if node is not None else None, "ctxVolume": self.ctx.resultVolume, "run": self.ctx.currentRun,
-            "mapStamp": dict(self._mapStamp), "state": self._runState(), "runBundle": self._runBundle}
+            "mapStamp": dict(self._mapStamp), "state": self._runState(), "runBundle": runBundle, "runSeed": self._runSeed}
         self.runOutputs, self.runN, self.runPartial, self.runPreviewN, self.runDescSuffix = {}, None, False, None, ""
         self._runBundle = None
+        self._runSeed = None
         self._mapStamp.clear()
         self._valuesCache.clear()
         self.resolved = None
@@ -4041,6 +4066,14 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.ctx.setCurrentRun(None)
         return True
 
+    @staticmethod
+    def _parkedSegmentName(parked):
+        """The current name of the segment a parked run mapped, or "" when it is gone."""
+        nodeId, segmentId = parked.get("runSeed") or ("", "")
+        segNode = slicer.mrmlScene.GetNodeByID(nodeId) if nodeId else None
+        segment = segNode.GetSegmentation().GetSegment(segmentId) if segNode is not None and segmentId and hasattr(segNode, "GetSegmentation") else None
+        return segment.GetName() if segment is not None else ""
+
     def _parkedRunShown(self):
         """The latest parked run whose map is still in the scene (the Result card names it), or None."""
         for parked in reversed(list(self._parkedRuns.values())):
@@ -4050,15 +4083,18 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         return None
 
     def _restoreParkedRun(self):
-        """The connectome of a parked run was chosen again, and the Result card shows nothing else: show that run again."""
+        """The connectome and lesion seed of a parked run were chosen again, and the Result card shows nothing else: show that
+        run again.
+        """
         if self.bundle is None or self.runOutputs or self.loadedMap is not None or (self.job is not None and not self.job.isFinished()):
             return False
-        parked = self._parkedRuns.pop(self._connectomeKey(self.bundle.path), None)
+        parked = self._parkedRuns.pop((self._connectomeKey(self.bundle.path), self._seedKey()), None)
         volume = parked["volume"] if parked is not None else None
         if volume is None or volume.GetScene() is None:
             return False
         (self.lesionName, self.runDir, self.runOutputs, self.runN, self.runPartial, self.runPreviewN, self.runDescSuffix) = parked["state"]
         self._runBundle = parked["runBundle"]
+        self._runSeed = parked["runSeed"]
         self._mapStamp.clear()
         self._mapStamp.update(parked["mapStamp"])
         self._valuesCache.clear()
@@ -4559,10 +4595,12 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         rule = self.currentRule()
         # The shown result is kept, untouched, until the new run has a map; it comes back if the run ends without one
         self._previousRun = {"volume": node.resultVolume, "ctxVolume": self.ctx.resultVolume, "run": self.ctx.currentRun, "mapStamp": dict(self._mapStamp),
-                             "state": self._runState(), "loadedMap": self.loadedMap, "runBundle": self._runBundle}
+                             "state": self._runState(), "loadedMap": self.loadedMap, "runBundle": self._runBundle, "runSeed": self._runSeed}
         self.loadedMap = None
         self._runBundle = self.bundle
-        self._parkedRuns.pop(self._connectomeKey(self.bundle.path), None)  # the new run replaces a parked run of this connectome
+        self._runSeed = self._seedKey()
+        # The new run replaces a parked run of this connectome and lesion
+        self._parkedRuns.pop((self._connectomeKey(self.bundle.path), self._runSeed), None)
         self.lesionName, self.runDir = lesionName, runDir
         self.runOutputs, self.runN, self.runPartial = {}, None, False
         self.runPreviewN = previewN
@@ -4791,7 +4829,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             run = contextModule.RunInfo(self.runDir, runJson, list(self.runOutputs.values()), self.runN, self.currentStatistic(), job, self.runPartial)
             self.ctx.setCurrentRun(run)
         if self._parkRunOfOtherConnectome():
-            self._refreshAfterPark()  # another connectome was chosen while it ran
+            self._refreshAfterPark()  # another connectome or lesion was chosen while it ran
         self.updateComputeState()
         self._notifyControllers("onRunDone", job)
 
@@ -4828,6 +4866,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         if volume is not None:
             (self.lesionName, self.runDir, self.runOutputs, self.runN, self.runPartial, self.runPreviewN, self.runDescSuffix) = previous["state"]
             self._runBundle = previous.get("runBundle")
+            self._runSeed = previous.get("runSeed")
             self.loadedMap = previous.get("loadedMap")
             self._mapStamp.clear()
             self._mapStamp.update(previous["mapStamp"])
@@ -4835,6 +4874,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         else:
             self.runOutputs, self.runN, self.runPartial, self.runPreviewN, self.runDescSuffix = {}, None, False, None, ""
             self._runBundle = None
+            self._runSeed = None
             self._mapStamp.clear()
             run, ctxVolume = None, None
         self._valuesCache.clear()
@@ -4844,7 +4884,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.ctx.setCurrentRun(run)
         if volume is not None:
             self._showLayers(volume)
-        self._parkRunOfOtherConnectome()  # another connectome was chosen while it ran
+        self._parkRunOfOtherConnectome()  # another connectome or lesion was chosen while it ran
         self.refreshResult()
 
     def stop(self):
@@ -5158,8 +5198,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         return "Fz" if rule["kind"] == "fz_abs" else "T"
 
     def _hasResult(self):
-        """True when the Result card has a map: a run's (with its connectome) or one shown from a file or a scene."""
-        return (bool(self.runOutputs) and self.bundle is not None and self._runConnectomeSelected()) or self.loadedMap is not None
+        """True when the Result card has a map: a run's (with its connectome and lesion) or one shown from a file or a scene."""
+        return (bool(self.runOutputs) and self.bundle is not None and self._runSelected()) or self.loadedMap is not None
 
     def _loadedOnBundleGrid(self):
         """True when the loaded map lies on the grid of the open connectome (its mask then gives V and the voxels)."""
@@ -5276,7 +5316,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         node = self._parameterNode
         statistic = self.currentStatistic()
         resultVolume = node.resultVolume if node is not None else None
-        hasMap = bool(self.runOutputs) and self.bundle is not None and self._runConnectomeSelected()
+        hasMap = bool(self.runOutputs) and self.bundle is not None and self._runSelected()
         self._refreshGeneration += 1
 
         # Map: load or update the volume (never on a pure threshold change)
@@ -5341,8 +5381,14 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             self.resultTitleLabel.setText(_("Mapping: the map appears with the first partial result."))
         elif self._parkedRunShown() is not None:
             parked = self._parkedRunShown()
-            self.resultTitleLabel.setText(_("No map with this connectome yet: the map of {lesion} was computed with {connectome}; choose that connectome to show it again.").format(
-                lesion=parked["state"][0] or _("the lesion"), connectome=parked["runBundle"].name))
+            lesion = parked["state"][0] or _("the lesion")
+            runBundle = parked["runBundle"]
+            if runBundle is not None and self.bundle is not None and self._connectomeKey(runBundle.path) == self._connectomeKey(self.bundle.path):
+                self.resultTitleLabel.setText(_("No map of this lesion yet: the map of {lesion} was computed for the segment “{segment}”; choose that segment in Seed to show it again.").format(
+                    lesion=lesion, segment=self._parkedSegmentName(parked) or lesion))
+            else:
+                self.resultTitleLabel.setText(_("No map with this connectome yet: the map of {lesion} was computed with {connectome}; choose that connectome to show it again.").format(
+                    lesion=lesion, connectome=runBundle.name if runBundle is not None else _("another connectome")))
         else:
             self.resultTitleLabel.setText(_("No map yet: Map network computes it."))
         # Studio: with a map the step row of Result names it (N, statistic, name); the line says what to do without one
@@ -5636,6 +5682,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         # The Result card follows this map; an earlier run's map stays in the scene
         self.runOutputs, self.runN, self.runPartial, self.runPreviewN, self.runDescSuffix, self.runDir = {}, None, False, None, "", None
         self._runBundle = None
+        self._runSeed = None
         self.loadedMap = info
         self._valuesCache.clear()
         self._mapStamp.clear()
@@ -6115,6 +6162,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
     def onSceneEndClose(self, caller, event):
         self.runOutputs, self.runN, self.runPartial, self.runDir = {}, None, False, None
         self._runBundle = None
+        self._runSeed = None
         self._parkedRuns.clear()
         self.loadedMap = None
         self._peaksPending = False
@@ -6216,6 +6264,9 @@ class LesionNetworkMappingTest(ScriptedLoadableModuleTest):
             self.tearDown()
             self.setUp()
             self.test_LesionNetworkMapping_switchConnectome()
+            self.tearDown()
+            self.setUp()
+            self.test_LesionNetworkMapping_switchSeedSegment()
             self.tearDown()
             self.setUp()
             self.test_LesionNetworkMapping_outsideMask()
@@ -6396,6 +6447,95 @@ class LesionNetworkMappingTest(ScriptedLoadableModuleTest):
         self.assertEqual(sidecar["connectome"]["n_voxels"], vA)
         self.assertEqual(sidecar["threshold"]["resolved"]["v"], vA)
         self.assertAlmostEqual(sidecar["threshold"]["resolved"]["value"], expectedA, places=4)
+
+    def test_LesionNetworkMapping_switchSeedSegment(self):
+        """A run belongs to its lesion: choosing another segment in the Seed card never shows the run's map as the chosen
+        lesion's finished result (Compute "Done", its peaks and Export); choosing the run's segment again shows the run.
+        """
+        import numpy as np
+
+        from LesionNetworkMappingLib import connectome, thresholds
+
+        self.delayDisplay("Map segment Lesion, then choose segment Lesion 2")
+        widget = slicer.modules.lesionnetworkmapping.widgetRepresentation().self()
+        widget.initializeParameterNode()
+        meta = connectome.make_synthetic(os.path.join(self.tempDir, "segswitch.lnmc"), shape=(20, 24, 20), n_subjects=20, runs=(20,), seed=0, name="Segment switch test")
+        segNode, segmentIdA, _voxels = self._sphereLesion(meta)
+        reference = slicer.util.getNode("seedgrid")
+        affine = np.asarray(meta["affine"])
+        world = np.indices(tuple(meta["shape"])).reshape(3, -1).T @ affine[:3, :3].T + affine[:3, 3]
+        sphereB = (np.linalg.norm(world - np.asarray(meta["blobs"]["B"]["center_world"]), axis=1) <= 4.0).reshape(tuple(meta["shape"]))
+        segmentIdB = segNode.GetSegmentation().AddEmptySegment("", "Lesion 2")
+        slicer.util.updateSegmentBinaryLabelmapFromArray(np.transpose(sphereB.astype(np.uint8), (2, 1, 0)), segNode, segmentIdB, reference)
+        widget.refreshConnectomes(select=os.path.abspath(meta["path"]))
+        widget.ctx.setSeed(segNode, segmentIdA)
+        widget.updateGUIFromParameterNode()
+        widget.updateSeed()
+        widget.acceptTermsCheckBox.setChecked(True)
+        widget.subjectsGroup.button(0).click()
+        widget.setRule(thresholds.DEFAULT_RULE)
+        compositeNodes = slicer.util.getNodesByClass("vtkMRMLSliceCompositeNode")
+        computeCard = widget._cardWidgets["compute"][1]
+
+        def foregrounds():
+            return [compositeNode.GetForegroundVolumeID() for compositeNode in compositeNodes]
+
+        def chooseSegment(name):
+            widget.segmentSelector.setCurrentIndex(widget.segmentSelector.findText(name))  # the user's choice in the Seed card
+            widget.updateSeed()  # what the seed timer does
+
+        def mapSeed():
+            self.assertTrue(widget.computeButton.enabled, widget.computeReasonLabel.text)
+            job = widget.compute()
+            self.assertTrue(self._waitFor(job.isFinished, 300), "the engine did not finish")
+            self.assertEqual(job.state, "done", f"{job.failureReason} {list(job.logTail)}")
+            self.assertTrue(self._waitFor(lambda: widget.resolved is not None and widget._hasResult() and widget.ctx.currentRun is not None, 30))
+            self._waitFor(lambda: False, 0.3)  # the deferred refresh of the final map
+            return widget._parameterNode.resultVolume, widget.ctx.currentRun, widget.lesionName
+
+        def firstPeak():
+            return [widget.peaksTable.item(0, column).text() for column in (1, 2)] if widget.peaksTable.rowCount else None
+
+        mapA, runA, lesionA = mapSeed()
+        peakA = firstPeak()
+        self.assertIsNotNone(peakA)
+        self.assertEqual(computeCard.property("studioStepState"), "done")
+        chooseSegment("Lesion 2")
+        self.assertEqual(widget._parameterNode.seedSegmentId, segmentIdB)
+        self.assertFalse(widget._hasResult())
+        self.assertIsNone(widget.ctx.currentRun)
+        self.assertNotEqual(computeCard.property("studioStepState"), "done", computeCard.property("studioStepSummary"))
+        self.assertFalse(str(computeCard.property("studioStepSummary")).startswith("Done"), computeCard.property("studioStepSummary"))
+        self.assertFalse(widget.resultExportButton.enabled)
+        self.assertIsNone(widget.ctx.card("export")._run())
+        self.assertIsNotNone(mapA.GetScene())  # the map stays in the scene, out of the views
+        self.assertNotIn(mapA.GetID(), foregrounds())
+        self.assertIn("Lesion", widget.resultTitleLabel.text)  # the Result card names the lesion of the kept map
+        self.assertTrue(widget.resultTitleLabel.isVisibleTo(widget.parent))
+
+        self.delayDisplay("Map Lesion 2, then choose Lesion again: Lesion's own run comes back")
+        mapB, runB, lesionB = mapSeed()
+        self.assertIsNot(mapB, mapA)
+        self.assertIsNot(runB, runA)
+        peakB = firstPeak()
+        self.assertNotEqual(peakA, peakB)
+        chooseSegment("Lesion")
+        self.assertTrue(widget._hasResult())
+        self.assertIs(widget.ctx.currentRun, runA)
+        self.assertIs(widget._parameterNode.resultVolume, mapA)
+        self.assertEqual(widget.lesionName, lesionA)
+        self.assertEqual(foregrounds(), [mapA.GetID()] * len(compositeNodes))
+        self.assertIsNotNone(mapB.GetScene())
+        self.assertEqual(computeCard.property("studioStepState"), "done")
+        self.assertTrue(widget.resultExportButton.enabled)
+        self.assertEqual(firstPeak(), peakA)  # its own peaks, not those of Lesion 2
+        self.assertTrue(widget.peaksTable.isVisibleTo(widget.parent))
+        chooseSegment("Lesion 2")
+        self.assertIs(widget.ctx.currentRun, runB)
+        self.assertIs(widget._parameterNode.resultVolume, mapB)
+        self.assertEqual(widget.lesionName, lesionB)
+        self.assertEqual(foregrounds(), [mapB.GetID()] * len(compositeNodes))
+        self.assertEqual(firstPeak(), peakB)
 
     def test_LesionNetworkMapping_outsideMask(self):
         """A lesion with no voxel in the connectome mask is refused before mapping; a run that fails after its map is
