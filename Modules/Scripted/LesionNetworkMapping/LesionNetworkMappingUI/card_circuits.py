@@ -551,11 +551,22 @@ class CircuitsCard:
                     return os.path.join(folder, name), name.split("_desc-", 1)[1].split("_", 1)[0]
         return None, desc
 
-    def _resultMapPath(self):
-        """The file of the current result's T map (the parent of a cluster or peak seed from the Result map), or None."""
+    def _resultMapPath(self, statistic=None):
+        """The file of the current result's map of ``statistic`` ("T", "Fz" or "r"; default the one the Result card shows).
+
+        It is the parent of a cluster or peak seed from the Result map: the file the cluster was cut from, not its T sibling.
+        """
+        import re
+
+        if statistic is None:
+            statistic = getattr(self.ctx.parameterNode, "statistic", None) or "T"
+        label = {"T": "T", "Fz": "AvgRFz", "r": "AvgR"}.get(statistic)
+        if label is None:
+            return None
         run = self.ctx.currentRun
         for path in getattr(run, "outputs", None) or []:
-            if "_desc-T" in os.path.basename(path) and os.path.isfile(path):
+            match = re.search(r"_desc-(AvgRFz|AvgR|T)(?=[^A-Za-z]|PreviewN|Subset|_funcmap)", os.path.basename(path))
+            if match and match.group(1) == label and os.path.isfile(path):
                 return path
         return None
 
@@ -612,7 +623,7 @@ class CircuitsCard:
             if row is None:
                 return SeedSource(kind, error=_("Select a cluster in the Clusters card."))
             mask = (np.asarray(table.cluster_vector).reshape(source.grid.shape) == int(row["cluster"])).astype(np.uint8)
-            parent = getattr(source, "path", None) or (self._resultMapPath() if source.key == "result" else None)
+            parent = getattr(source, "path", None) or (self._resultMapPath(source.statistic) if source.key == "result" else None)
             text = _("Seed: cluster {id} of {map} ({voxels:,} voxels, {threshold}; peak {where}).").format(
                 id=row["cluster"], map=source.name, voxels=int(mask.sum()), threshold=source.thresholdText(), where=whereText(*row["xyz"]))
             return SeedSource(kind, parent=parent, name=f"Cluster{row['cluster']}", text=text, roiData=(mask, np.asarray(source.grid.affine)))
@@ -620,7 +631,7 @@ class CircuitsCard:
         radius = float(self.radiusSpin.value)
         if row is not None:
             peak = tuple(float(v) for v in row["xyz"])
-            parent = getattr(source, "path", None) or (self._resultMapPath() if source.key == "result" else None)
+            parent = getattr(source, "path", None) or (self._resultMapPath(source.statistic) if source.key == "result" else None)
             origin = _("peak of cluster {id}").format(id=row["id"])
         else:
             crosshair = slicer.mrmlScene.GetFirstNodeByClass("vtkMRMLCrosshairNode") if slicer.mrmlScene is not None else None
