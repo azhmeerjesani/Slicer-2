@@ -2102,6 +2102,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
 
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneStartClose)
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndCloseEvent, self.onSceneEndClose)
+        self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndImportEvent, self.onSceneEndImport)
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.NodeAddedEvent, self.onNodeAdded)
         # Bundles written by the scene (a .mrb, a data bundle folder) keep the lesion's own look, not Map's outline
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartSaveEvent, self.onSceneStartSave)
@@ -6173,6 +6174,12 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         if self.parent.isEntered:
             self.initializeParameterNode()
 
+    def onSceneEndImport(self, caller, event):
+        # A scene or project opened while Map is shown: its parameter values (the threshold rule among them) are shown
+        # and reach the cards now, as they would when the module is entered next.
+        if self.parent.isEntered:
+            self.initializeParameterNode()
+
     @vtk.calldata_type(vtk.VTK_OBJECT)
     def onNodeAdded(self, caller, event, node):
         if node is not None and node.IsA("vtkMRMLSegmentationNode") and self._parameterNode is not None and self._parameterNode.seedSegmentation is None:
@@ -6227,7 +6234,12 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self._showCoordinates()
         self._showStimulation()
         self._observeSeed(node.seedSegmentation)
-        self._showRuleControls(self.currentRule())
+        rule = self.currentRule()
+        self._showRuleControls(rule)
+        # The cards read the rule from the shared context: keep it in step with the parameter node (a reopened project
+        # or scene restores the rule only there), or the Robust card and its analyses would fall back to the default.
+        if self.ctx is not None and self.ctx.rule != rule:
+            self.ctx.setRule(rule)
         self._showSubjectsText()
         self._showSeedMode()
         self.updateCardVisibility()

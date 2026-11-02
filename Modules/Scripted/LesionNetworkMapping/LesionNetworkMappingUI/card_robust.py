@@ -535,7 +535,15 @@ class RobustCard:
     def rule(self):
         from LesionNetworkMappingLib import thresholds
 
-        return thresholds.normalize_rule(self.ctx.rule)
+        rule = self.ctx.rule
+        if rule is None:
+            widget = _mapWidget()
+            if widget is not None and hasattr(widget, "currentRule"):
+                try:
+                    rule = widget.currentRule()
+                except Exception:
+                    rule = None
+        return thresholds.normalize_rule(rule)
 
     def overlapPct(self):
         """The primary overlap criterion: the Overlap tab's sensitivity (default 90)."""
