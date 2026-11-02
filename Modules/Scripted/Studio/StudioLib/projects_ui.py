@@ -1385,9 +1385,12 @@ class ProjectsSection(qt.QObject):
         self._placeCards(force=True)
 
     def _cardKey(self, info):
-        """What a card shows (the view, the path, the last edit, whether the project is open, its views and counts)."""
-        return (self.viewMode, info.path, info.modified, info.isCurrent(), tuple(sorted(info.views.items())),
-                tuple(sorted(info.counts.items())))
+        """What a card shows (the view, the path, the last edit and how long ago that was, whether the project is open, its
+        views and counts). The relative time is part of the key: it changes with the clock, not with the project, and a
+        card kept while the app runs for hours would otherwise say "just now" for ever.
+        """
+        return (self.viewMode, info.path, info.modified, _relativeTime(info.modified) if info.modified else "", info.isCurrent(),
+                tuple(sorted(info.views.items())), tuple(sorted(info.counts.items())))
 
     def _discard(self, card):
         self.grid.removeWidget(card)
@@ -1781,7 +1784,9 @@ class StudiesSection(qt.QObject):
             return
         folders = studyFolders()
         summaries = [(folder, studySummary(folder)) for folder in folders]
-        signature = tuple((folder, tuple(sorted(summary.items()))) for folder, summary in summaries)
+        # The relative time ("Edited 3 h ago") follows the clock, so it is part of what a card shows
+        signature = tuple((folder, tuple(sorted(summary.items())), _relativeTime(summary["modified"]) if summary["modified"] else "")
+                          for folder, summary in summaries)
         self.widget.setVisible(bool(summaries))
         if signature == self._signature:
             return

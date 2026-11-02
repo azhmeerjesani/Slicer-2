@@ -5331,6 +5331,55 @@ class StudioProjectsTest(unittest.TestCase):
             projects.clearPendingMove()
             os.environ[projects.ROOT_ENVIRONMENT] = self.root
 
+    def test_82_cards_follow_the_clock_while_the_app_stays_open(self):
+        """The relative time of a project card and a study card ("just now", "Edited just now") follows the clock: a card kept
+        while nothing about its project changed said "just now" for hours until the app was restarted (BB-1).
+        """
+        from StudioLib import library, projects_ui
+
+        projects = self.projects
+        project = projects.createProject("Old project")
+        studyFolder = os.path.join(projects.studiesFolder(), "Old study")
+        os.makedirs(studyFolder)
+        self.io.atomicWriteJson(os.path.join(studyFolder, "study.json"), {"name": "Old study"})
+        section = projects_ui.ProjectsSection()
+        studies = projects_ui.StudiesSection()
+        real = time.time
+        try:
+            def metas(owner, name):
+                # The cards that are listed (a card that was replaced waits for its deletion, with its labels)
+                slicer.app.processEvents()
+                return [str(card.findChild("QLabel", name).text) for card in owner.cards()]
+
+            section.refresh()
+            studies.refresh()
+            self.assertTrue(metas(section, "studioProjectCardMeta")[0].startswith("just now"), metas(section, "studioProjectCardMeta"))
+            self.assertTrue(metas(studies, "studioStudyMeta")[0].startswith("Edited just now"), metas(studies, "studioStudyMeta"))
+            for offset, expected in ((3 * 3600, "3 h ago"), (2 * 86400 + 5, "2 days ago")):
+                time.time = lambda offset=offset: real() + offset
+                section.refresh()  # what entering the Library does: the project did not change
+                studies.refresh()
+                projectMeta = metas(section, "studioProjectCardMeta")[0]
+                self.assertTrue(projectMeta.startswith(expected), (expected, projectMeta))
+                self.assertEqual(str(section.cards()[0].property("studioProjectPath")), project.path)
+                studyMeta = metas(studies, "studioStudyMeta")[0]
+                self.assertTrue(studyMeta.startswith("Edited " + expected), (expected, studyMeta))
+            # The Continue card is set again with the project on every refresh of the Library
+            info = section.currentInfo() or next(info for info in projects.listProjects() if info.path == project.path)
+            canvas = library.LibraryCanvas()
+            try:
+                canvas.currentWork.setProject(info)
+                self.assertIn("Edited 2 days ago", canvas.currentWork.metaLabel.property("fullText"))
+            finally:
+                canvas.dispose()
+        finally:
+            time.time = real
+            for owner in (section, studies):
+                owner.dispose()
+                owner.widget.setParent(None)
+                owner.widget.deleteLater()
+            slicer.app.processEvents()
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk
