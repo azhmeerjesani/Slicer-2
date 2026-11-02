@@ -1288,3 +1288,85 @@ class StudioTemplatesTest(unittest.TestCase):
                 templates.readNrrdData(niftiPath)
         finally:
             shutil.rmtree(work, ignore_errors=True)
+
+    def test_26_moved_template_with_a_taken_name_gets_its_own_id(self):
+        """BB-1: moving the Slicer Studio folder into one that already has a template of the same name (or the same id under
+        another folder name, "Atlas X" and "atlas x") gives the moved template its own id and name ("My template 2",
+        "user:my-template-2"). Two templates used to share "user:my-template": the menu checked both, and the default, Studio
+        and Normalize each picked one of them by folder order, so a lesion could be registered to another image than the
+        one the user chose. The default and the scene's volumes of the moved template follow its new id; the templates that
+        were there keep theirs.
+        """
+        from LesionNetworkMappingLib import normalize
+        from LesionNetworkMappingUI import normalize_controller as nc
+
+        from StudioLib import autosave
+
+        templates, projects = self.templates, self.projects
+        newRoot = self.root
+        oldRoot = os.path.join(self.tempDir, "old folder", "Slicer Studio")
+        shutil.rmtree(os.path.dirname(oldRoot), ignore_errors=True)
+        settings = qt.QSettings()
+        try:
+            keptMine = self._add(name="My template", rootPath=newRoot)
+            keptAtlas = self._add(name="Atlas X", rootPath=newRoot)
+            movedMine = templates.addTemplate(self.bundled, mask=self.bundledMask, name="My template", rootPath=oldRoot, makeDefault=True)
+            movedAtlas = templates.addTemplate(self.bundled, mask=self.bundledMask, name="atlas x", rootPath=oldRoot)
+            alone = templates.addTemplate(self.bundled, mask=self.bundledMask, name="Only in the old folder", rootPath=oldRoot)
+            self.assertEqual((movedMine.id, movedAtlas.id), (keptMine.id, keptAtlas.id), "the same ids before the move")
+            self.assertNotEqual(movedMine.imageSha256, keptMine.imageSha256)
+            # A volume of the moved template in the scene (the project that follows the move)
+            volume = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "template volume")
+            volume.SetAttribute(templates.TEMPLATE_ID_ATTRIBUTE, movedMine.id)
+
+            os.environ.pop(projects.ROOT_ENVIRONMENT, None)
+            settings.setValue(projects.ROOT_KEY, oldRoot)
+            self.assertEqual(templates.defaultTemplateId(), "user:my-template")
+            service = autosave.AutosaveService(force=True, root=os.path.join(self.tempDir, "private autosave move"))
+            service.studioActiveOverride = True
+            service.reloadSettings()
+            self.services.append(service)
+            self.assertIn("Templates", service.moveRoot(newRoot, moveContent=True))
+            self.assertEqual(projects.root(), os.path.normpath(newRoot))
+
+            mine = sorted(templates.userTemplates(), key=lambda template: template.id)
+            ids = [template.id for template in mine]
+            self.assertEqual(len(ids), len(set(ids)), ids)
+            names = [template.name.lower() for template in mine]
+            self.assertEqual(len(names), len(set(names)), names)
+            bySha = {}
+            for template in mine:
+                bySha.setdefault(template.imageSha256, []).append((template.id, template.name))
+            self.assertEqual(sorted(bySha[keptMine.imageSha256]), [("user:atlas-x", "Atlas X"), ("user:my-template", "My template")],
+                             "the templates that were there keep their ids and names")
+            self.assertEqual(sorted(bySha[movedMine.imageSha256]), [("user:atlas-x-2", "atlas x 2"), ("user:my-template-2", "My template 2"),
+                                                                     ("user:only-in-the-old-folder", "Only in the old folder")])
+            with open(os.path.join(templates.templateById("user:my-template-2").folder, templates.TEMPLATE_JSON), encoding="utf-8") as f:
+                record = json.load(f)
+            self.assertEqual((record["id"], record["name"]), ("my-template-2", "My template 2"))
+            self.assertEqual(alone.slug, "only-in-the-old-folder")
+
+            # The default is still the image the user chose, for Studio and for Normalize
+            self.assertEqual(settings.value(templates.DEFAULT_KEY), "user:my-template-2")
+            self.assertEqual(templates.defaultTemplate().imageSha256, movedMine.imageSha256)
+            for templateId, sha in (("user:my-template", keptMine.imageSha256), ("user:my-template-2", movedMine.imageSha256),
+                                    ("user:atlas-x", keptAtlas.imageSha256), ("user:atlas-x-2", movedAtlas.imageSha256)):
+                self.assertEqual(templates.templateById(templateId).imageSha256, sha, templateId)
+                record = normalize.resolve_user_template(templateId, nc.templateDirectories())
+                self.assertEqual(record["sha256"]["image"], sha, templateId)
+            offered = nc.userTemplates()
+            self.assertEqual(len(offered), len(set(offered)), offered)
+            self.assertEqual(volume.GetAttribute(templates.TEMPLATE_ID_ATTRIBUTE), "user:my-template-2", "the scene follows the moved template")
+
+            # One checked item in Start on template
+            menu = qt.QMenu()
+            try:
+                self.ui.populateTemplateMenu(menu, onStart=lambda templateId: None)
+                checked = [action.data() for action in menu.actions() if action.checkable and action.checked]
+                self.assertEqual(checked, ["user:my-template-2"])
+            finally:
+                menu.deleteLater()
+        finally:
+            settings.remove(projects.ROOT_KEY)
+            settings.remove(projects.ROOT_CHOSEN_KEY)
+            shutil.rmtree(os.path.dirname(oldRoot), ignore_errors=True)

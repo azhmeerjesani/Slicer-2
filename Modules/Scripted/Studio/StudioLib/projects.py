@@ -1494,7 +1494,28 @@ def checkNotOpenElsewhere(rootPath):
             names=", ".join(studies)))
 
 
-def moveContent(oldRoot, newRoot, progress=None, renamed=None):
+def _movedTemplateIdsUnique(templatesFolder, before, renamedIds):
+    """After Templates/ was merged into ``templatesFolder`` (whose item names were ``before``): the moved templates whose id
+    or name a template there already had get their own (``templates.makeMovedIdsUnique``). Worker-safe.
+    """
+    try:
+        movedNames = set(os.listdir(templatesFolder)) - before
+    except OSError:
+        return
+    if not movedNames or not before:
+        return
+    try:
+        from . import templates
+
+        changed = templates.makeMovedIdsUnique(templatesFolder, movedNames)
+    except Exception:
+        logging.warning("Slicer Studio: the ids of the moved templates could not be checked", exc_info=True)
+        return
+    if renamedIds is not None:
+        renamedIds.update(changed)
+
+
+def moveContent(oldRoot, newRoot, progress=None, renamed=None, renamedIds=None):
     """Move Projects/, Studies/, LNM/, Templates/ and "About this folder.txt" from ``oldRoot`` to ``newRoot``. Worker-safe.
 
     Return the list of moved items. Raise OSError on failure (what was moved stays moved; nothing is deleted before it was
@@ -1503,6 +1524,9 @@ def moveContent(oldRoot, newRoot, progress=None, renamed=None):
     ``renamed`` (a dict) receives the items that moved under another name because ``newRoot`` already had one with that
     name (a project "MRHead" lands as "MRHead 2"): ``{path relative to oldRoot: path relative to newRoot}``. Pass it to
     ``pathAfterMove`` so a path follows the item, never the other one that kept the name.
+
+    ``renamedIds`` (a dict) receives ``{old id: new id}`` of the moved templates that got another id because a template of
+    ``newRoot`` already had theirs (``templates.followRenamedIds`` makes the default and the scene follow them).
     """
     checkMoveTarget(oldRoot, newRoot)
     created = not os.path.isdir(newRoot)
@@ -1512,7 +1536,19 @@ def moveContent(oldRoot, newRoot, progress=None, renamed=None):
     absoluteRenames = {}
     try:
         for name in movableItems(oldRoot):
-            _mergeMove(os.path.join(oldRoot, name), os.path.join(newRoot, name), sameVolume, progress, absoluteRenames)
+            target = os.path.join(newRoot, name)
+            if name == TEMPLATES_DIR:
+                try:
+                    before = set(os.listdir(target)) if os.path.isdir(target) else set()
+                except OSError:
+                    before = set()
+                try:
+                    _mergeMove(os.path.join(oldRoot, name), target, sameVolume, progress, absoluteRenames)
+                finally:
+                    # Also after a failed move: what moved has its own id there
+                    _movedTemplateIdsUnique(target, before, renamedIds)
+            else:
+                _mergeMove(os.path.join(oldRoot, name), target, sameVolume, progress, absoluteRenames)
             moved.append(name)
     except OSError:
         if created and not moved:

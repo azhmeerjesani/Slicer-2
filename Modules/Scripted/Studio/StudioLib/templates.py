@@ -37,6 +37,7 @@ Threads: ``identify``, ``copyFiles`` and ``thumbnailArray`` use only files and n
 runs on the main thread.
 """
 
+import contextlib
 import datetime
 import hashlib
 import json
@@ -1042,6 +1043,92 @@ def _uniqueSlug(name, rootPath=None):
         slug = f"{base}-{counter}"
         counter += 1
     return slug
+
+
+def makeMovedIdsUnique(folder, movedNames):
+    """Give each template of ``folder`` (a Templates/ folder) whose folder name is in ``movedNames`` (the templates that a
+    move of the Slicer Studio folder merged in) its own id and name when another template there already uses its id or
+    its name (without case): "My template" -> "My template 2" ("my-template-2"), as an add would name it. The templates
+    that were there keep theirs, so what refers to them (scans, studies, the default) stays theirs. Return
+    ``{old id: new id}`` ("user:<slug>") of the templates that changed. Worker-safe (files only).
+    """
+    entries = []
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return {}
+    for name in names:
+        path = os.path.join(folder, name)
+        if name.startswith(".") or not os.path.isdir(path):
+            continue
+        record = readRecord(path)
+        if record is not None:
+            entries.append((name, path, record))
+    moved = set(movedNames)
+    kept = [record for name, path, record in entries if name not in moved]
+    takenSlugs = {str(record.get("id")) for record in kept}
+    takenNames = {str(record.get("name") or record.get("id")).strip().lower() for record in kept}
+    # A new id or name never takes one that another moved template keeps
+    reservedSlugs = {str(record.get("id")) for name, path, record in entries if name in moved}
+    reservedNames = {str(record.get("name") or record.get("id")).strip().lower() for name, path, record in entries if name in moved}
+    changed = {}
+    for name, path, record in entries:
+        if name not in moved:
+            continue
+        slug = str(record.get("id"))
+        baseName = str(record.get("name") or slug)
+        newName, counter = baseName, 2
+        if newName.strip().lower() in takenNames:
+            while newName.strip().lower() in takenNames or newName.strip().lower() in reservedNames:
+                newName = f"{baseName} {counter}"
+                counter += 1
+        newSlug = slug
+        if newSlug in takenSlugs:
+            base = slugOf(newName)
+            newSlug, counter = base, 2
+            while newSlug in takenSlugs or newSlug in reservedSlugs:
+                newSlug = f"{base}-{counter}"
+                counter += 1
+        if newSlug != slug or newName != baseName:
+            updated = dict(record, id=newSlug, name=newName)
+            target = os.path.join(path, TEMPLATE_JSON)
+            staging = f"{target}.renaming-{os.getpid()}"
+            try:
+                with open(staging, "w", encoding="utf-8", newline="\n") as f:
+                    json.dump(updated, f, indent=2, ensure_ascii=False)
+                    f.write("\n")
+                os.replace(staging, target)
+            except OSError:
+                logging.warning(f"Slicer Studio: the moved template {baseName} could not be renamed", exc_info=True)
+                with contextlib.suppress(OSError):
+                    os.remove(staging)
+                newSlug, newName = slug, baseName
+            if newSlug != slug:
+                changed[USER_PREFIX + slug] = USER_PREFIX + newSlug
+        takenSlugs.add(newSlug)
+        takenNames.add(newName.strip().lower())
+    return changed
+
+
+def followRenamedIds(renamedIds):
+    """Main thread, after a move gave moved templates new ids (``makeMovedIdsUnique``): the default and the scene's
+    volumes and surfaces of those templates follow them (they came from the moved folder), and the lists refresh.
+    """
+    if not renamedIds:
+        return
+    settings = qt.QSettings()
+    value = str(settings.value(DEFAULT_KEY) or "")
+    if value in renamedIds:
+        settings.setValue(DEFAULT_KEY, renamedIds[value])
+    nodes = list(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")) + list(slicer.util.getNodesByClass("vtkMRMLModelNode"))
+    tagged = [(node, node.GetAttribute(TEMPLATE_ID_ATTRIBUTE)) for node in nodes if node is not None]
+    for node, templateId in tagged:
+        if templateId in renamedIds:
+            node.SetAttribute(TEMPLATE_ID_ATTRIBUTE, renamedIds[templateId])
+    for oldId, newId in renamedIds.items():
+        forgetThumbnails(oldId)
+        forgetThumbnails(newId)
+    _notify()
 
 
 def nameTaken(name, rootPath=None):

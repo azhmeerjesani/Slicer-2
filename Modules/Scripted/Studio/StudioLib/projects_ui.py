@@ -940,14 +940,16 @@ def changeRootDialog(parent=None):
                                      run=lambda function: _runWithProgress(function, _("Moving your projects and studies…"), parent))
         else:
             renamed = {}
-            moved = _runWithProgress(lambda: projects.moveContent(oldRoot, newRoot, renamed=renamed), _("Moving your projects and studies…"),
-                                     parent) if move else []
+            renamedIds = {}
+            moved = _runWithProgress(lambda: projects.moveContent(oldRoot, newRoot, renamed=renamed, renamedIds=renamedIds),
+                                     _("Moving your projects and studies…"), parent) if move else []
             if moved:
                 # Paths kept in the settings follow what moved, as moveRoot does (recent studies, registered connectomes...)
-                from . import autosave
+                from . import autosave, templates
 
                 autosave._updateRecentStudies(oldRoot, newRoot, renamed)
                 autosave._updateMovedPathSettings(oldRoot, newRoot, moved, renamed)
+                templates.followRenamedIds(renamedIds)
             projects.setRoot(newRoot)
         projects.ensureRoot(newRoot)
     except projects.OpenElsewhereError as error:

@@ -2091,9 +2091,11 @@ class AutosaveService:
             # Items that landed under another name (" 2") because the new folder already had one with that name: paths
             # follow them there, never the other item that kept the name (a project of the new folder)
             renamed = {}
+            # Moved templates that got another id because the new folder had a template with theirs
+            renamedIds = {}
             try:
                 projects.checkNotOpenElsewhere(oldRoot)  # again: one may have been opened elsewhere while this one saved
-                function = lambda: projects.moveContent(oldRoot, newRoot, renamed=renamed)  # noqa: E731
+                function = lambda: projects.moveContent(oldRoot, newRoot, renamed=renamed, renamedIds=renamedIds)  # noqa: E731
                 moved = run(function) if run is not None else function()
                 succeeded = True
                 for relative in sorted(renamed, key=len, reverse=True):
@@ -2118,6 +2120,10 @@ class AutosaveService:
                         project.lock()
             _updateRecentStudies(oldRoot, newRoot, renamed)
             _updateMovedPathSettings(oldRoot, newRoot, moved, renamed)
+            if renamedIds:
+                from StudioLib import templates
+
+                templates.followRenamedIds(renamedIds)
         projects.setRoot(newRoot)
         return moved
 
