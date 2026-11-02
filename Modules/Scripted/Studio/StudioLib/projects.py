@@ -1265,11 +1265,18 @@ def duplicateFolder(path, onDone=None, onError=None):
 
 def moveToTrash(path):
     """Move a folder to the trash of the system (QFile.moveToTrash, Qt 5.15 and later). Return True if it was moved."""
-    moveToTrashFunction = getattr(qt.QFile, "moveToTrash", None)
-    if moveToTrashFunction is None:
+    if not hasattr(qt.QFile, "moveToTrash"):
         return False
+    if sys.platform.startswith("linux"):
+        # Qt puts the trash in <data folder>/Trash; when the data folder (~/.local/share) does not exist yet it cannot make
+        # that folder and moves the file into files/ and info/ of the current folder instead
+        dataFolder = qt.QStandardPaths.writableLocation(qt.QStandardPaths.GenericDataLocation)
+        if dataFolder:
+            with contextlib.suppress(OSError):
+                os.makedirs(dataFolder, mode=0o700, exist_ok=True)
     try:
-        result = moveToTrashFunction(path)
+        # The instance method: PythonQt does not expose the static QFile.moveToTrash(fileName)
+        result = qt.QFile(path).moveToTrash()
     except Exception:
         logging.warning(f"Slicer Studio: cannot move {path} to the trash")
         return False

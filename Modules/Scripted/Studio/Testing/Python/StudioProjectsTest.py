@@ -46,6 +46,7 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 import tempfile
 import time
 import unittest
@@ -4873,6 +4874,45 @@ class StudioProjectsTest(unittest.TestCase):
         projects.Project(damaged.path).writeJson(state="closed")
         self.io.backgroundWriter().drain(10.0)
         self.assertEqual(projects.readJson(projects.projectFile(damaged.path)).get("name"), "Damaged")
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the freedesktop.org Trash (a temporary home stands in for it)")
+    def test_76_move_to_trash_uses_the_system_trash_without_asking(self):
+        """Move to Trash (a project, a template) puts the folder in the Trash: no "There is no Trash here" question.
+
+        PythonQt has only the instance QFile.moveToTrash(), and Qt 5 puts the Trash into the current folder when the data
+        folder (~/.local/share) does not exist yet.
+        """
+        projects = self.projects
+        home = os.path.join(self.tempDir, "home é")
+        dataFolder = os.path.join(home, "data ü", "share")  # does not exist yet
+        os.makedirs(home)
+        saved = {name: os.environ.get(name) for name in ("HOME", "XDG_DATA_HOME")}
+        os.environ["HOME"] = home
+        os.environ["XDG_DATA_HOME"] = dataFolder
+        try:
+            projects.ensureRoot()
+            project = projects.createProject("Trash me ü")
+            name = os.path.basename(project.path)
+            asked = []
+            self.assertTrue(projects.trashFolder(project.path, confirmDelete=lambda: asked.append(True) or False))
+            self.assertEqual(asked, [], "no question when there is a Trash")
+            self.assertFalse(os.path.exists(project.path))
+            self.assertTrue(os.path.isdir(os.path.join(dataFolder, "Trash", "files", name)))
+            self.assertTrue(os.path.isfile(os.path.join(dataFolder, "Trash", "info", name + ".trashinfo")))
+            self.assertFalse(os.path.exists(os.path.join(os.getcwd(), "files", name)), "never a Trash in the current folder")
+            # A plain folder (a template's) goes there too
+            folder = os.path.join(self.tempDir, "Template ä")
+            os.makedirs(folder)
+            self.assertTrue(projects.moveToTrash(folder))
+            self.assertFalse(os.path.exists(folder))
+            self.assertTrue(os.path.isdir(os.path.join(dataFolder, "Trash", "files", "Template ä")))
+        finally:
+            for variable, value in saved.items():
+                if value is None:
+                    os.environ.pop(variable, None)
+                else:
+                    os.environ[variable] = value
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk

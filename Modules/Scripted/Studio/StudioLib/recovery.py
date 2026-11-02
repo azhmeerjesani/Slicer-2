@@ -612,14 +612,9 @@ def discard(session, confirm=True, parent=None):
         if answer != qt.QMessageBox.Discard:
             return False
     markSession(session, "discarded", synchronous=True)
-    moved = False
-    if hasattr(qt.QFile, "moveToTrash"):
-        try:
-            # The instance method: PythonQt does not expose the static overload
-            moved = bool(qt.QFile(session.path).moveToTrash())
-        except Exception:
-            moved = False
-    if not moved:
+    from . import projects
+
+    if not projects.moveToTrash(session.path):
         io.backgroundWriter().submit(io.removeTree, session.path)
     return True
 
