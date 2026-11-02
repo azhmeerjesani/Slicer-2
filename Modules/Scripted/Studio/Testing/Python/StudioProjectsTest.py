@@ -4831,6 +4831,49 @@ class StudioProjectsTest(unittest.TestCase):
             self.assertEqual(f.read(), damaged, "the damaged scene is left as it is")
         self.assertEqual([path for path in _relativeFiles(projectPath) if not path.startswith(".studio/")], filesBefore)
 
+    def test_75_project_json_of_another_shape_does_not_hide_the_other_projects(self):
+        """A .studio/project.json that is valid JSON but not an object (a list, a string), or whose "counts" is not an
+        object, made listProjects raise: the Library showed no project at all (its empty state) and the crash scan at
+        startup failed for every project (BB-1). The damaged project is now listed with fallback values, like a project.json
+        that cannot be read, and the other projects are listed as before.
+        """
+        from StudioLib import projects_ui
+
+        projects = self.projects
+        service = self._service()
+        for name in ("Alpha", "Beta"):
+            good = projects.createProject(name)
+            self.io.atomicWriteJson(projects.projectFile(good.path), {"name": name, "state": "closed", "counts": {"scans": 1}})
+        shapes = ("[1, 2]", '"hello"', "3", '{"counts": 3}', '{"counts": [1, 2]}',
+                  '{"counts": {"scans": "two", "maps": [1], "models": {"a": 1}, "tables": true, "lesions": 2}}')
+        damaged = projects.createProject("Damaged")
+        for text in shapes:
+            with open(projects.projectFile(damaged.path), "w", encoding="utf-8") as f:
+                f.write(text)
+            infos = {info.name: info for info in projects.listProjects()}
+            self.assertEqual(sorted(infos), ["Alpha", "Beta", "Damaged"], text)
+            self.assertEqual(infos["Alpha"].contentLine(), "1 scan", text)
+            info = infos["Damaged"]
+            self.assertIsInstance(info.data, dict, text)
+            self.assertTrue(all(isinstance(value, int) for value in info.counts.values()), text)
+            self.assertEqual(info.contentLine(), "2 lesions" if "lesions" in text else "Empty", text)
+            self.assertEqual(service.scanProjectsAtStartup(), [], text)
+            self.assertIsInstance(projects.Project(damaged.path).jsonData(state="closed"), dict, text)
+            section = projects_ui.ProjectsSection()
+            try:
+                section.refresh()
+                names = sorted(os.path.basename(str(card.property("studioProjectPath"))) for card in section.cards())
+                self.assertEqual(names, ["Alpha", "Beta", "Damaged"], text)
+            finally:
+                section.dispose()
+        self.assertEqual(projects.contentLine({"scans": "two", "maps": 1}), "1 map")
+        # A save repairs the file: project.json is an object again
+        with open(projects.projectFile(damaged.path), "w", encoding="utf-8") as f:
+            f.write("[1, 2]")
+        projects.Project(damaged.path).writeJson(state="closed")
+        self.io.backgroundWriter().drain(10.0)
+        self.assertEqual(projects.readJson(projects.projectFile(damaged.path)).get("name"), "Damaged")
+
 def _sphere(center=(0, 0, 0)):
     import vtk
 

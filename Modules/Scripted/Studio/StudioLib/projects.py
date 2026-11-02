@@ -494,7 +494,10 @@ def contentLine(countsValue):
     )
     parts = []
     for key, one, many in words:
-        n = int((countsValue or {}).get(key) or 0)
+        try:
+            n = int((countsValue or {}).get(key) or 0)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            n = 0  # a damaged project.json
         if n:
             parts.append(one if n == 1 else many.format(n=n))
     return " · ".join(parts) if parts else _("Empty")
@@ -534,6 +537,21 @@ def readJson(path):
             return json.load(f)
     except (OSError, ValueError):
         return None
+
+
+def readProjectJson(projectPath):
+    """The content of the .studio/project.json of a project; None if it does not exist, cannot be read, or is not a
+    JSON object (a file damaged by hand, by a sync tool or by another program). Worker-safe.
+    """
+    data = readJson(projectFile(projectPath))
+    return data if isinstance(data, dict) else None
+
+
+def _validCounts(value):
+    """The "counts" of a project.json: ``{kind: number}``, without the entries that are not whole numbers."""
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): number for key, number in value.items() if isinstance(number, int) and not isinstance(number, bool)}
 
 
 def sceneFile(projectPath):
@@ -626,7 +644,7 @@ class ProjectInfo:
     def __init__(self, path):
         self.path = os.path.normpath(str(path))
         self.name = os.path.basename(self.path)
-        data = readJson(projectFile(self.path)) or {}
+        data = readProjectJson(self.path) or {}
         self.data = data
         self.scene = sceneFile(self.path)
         # The later of Studio's last save and the scene file's time (official 3D Slicer does not update project.json)
@@ -638,7 +656,7 @@ class ProjectInfo:
         candidates = [value for value in (modified, sceneTime) if value is not None]
         self.modified = max(candidates) if candidates else 0.0
         self.created = parseTime(data.get("created"))
-        self.counts = data.get("counts") or {}
+        self.counts = _validCounts(data.get("counts"))
         #: {view: path} of the thumbnails ("axial" is ``thumbnail``)
         self.views = thumbnailViews(self.path)
         self.thumbnail = self.views.get("axial")
@@ -813,7 +831,7 @@ class Project:
         self.readOnly = False
         self._lock = None
         self._lockKey = None
-        data = readJson(projectFile(self.path)) or {}
+        data = readProjectJson(self.path) or {}
         self.created = data.get("created")
 
     @property
@@ -869,7 +887,7 @@ class Project:
 
     def jsonData(self, state="open", scene=None, savedAt=None):
         """The content of .studio/project.json (no absolute path, no process id: the lock holds those)."""
-        data = readJson(projectFile(self.path)) or {}
+        data = readProjectJson(self.path) or {}
         now = _isoTime()
         data.update({
             "format": FORMAT,
@@ -1080,7 +1098,7 @@ def renameFolder(path, newName):
     scene = sceneFile(path)
     os.rename(path, newPath)
     renameSceneFile(newPath, scene)
-    data = readJson(projectFile(newPath))
+    data = readProjectJson(newPath)
     if data is not None:
         from . import autosave_io
 
@@ -1126,7 +1144,7 @@ def adoptRenamedScene(projectPath):
                       and os.path.isfile(os.path.join(projectPath, name))]
             if len(scenes) == 1:
                 renameSceneFile(projectPath, os.path.join(projectPath, scenes[0]))
-                data = readJson(projectFile(projectPath))
+                data = readProjectJson(projectPath)
                 if data is not None and data.get("name") != os.path.basename(projectPath):
                     from . import autosave_io
 
@@ -1236,7 +1254,7 @@ def duplicateFolder(path, onDone=None, onError=None):
         finally:
             _releaseCopyName(parent, newName)
         renameSceneFile(target, scene)
-        data = readJson(projectFile(target)) or {}
+        data = readProjectJson(target) or {}
         data.update(name=targetName, state="closed", created=_isoTime(), modified=_isoTime())
         autosave_io.atomicWriteJson(projectFile(target), data)
         return target
