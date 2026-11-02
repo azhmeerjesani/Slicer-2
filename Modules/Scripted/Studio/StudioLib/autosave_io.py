@@ -282,18 +282,16 @@ def contentMTime(node):
     return mtime
 
 
-_hierarchyEntries = {}
-
-
 def _hierarchyItems(node):
     """What the user sees of a subject hierarchy: the data node or the name of each item and of its parent.
 
     The numbers of the items are not part of it: entering and leaving Draw (segments shown in the hierarchy) removes
     and makes the items again with new numbers for the same data, which is not a change of the project.
+
+    It is read again on every call (about 1 ms for 500 items), not cached by the node's MTime: renaming a folder, patient
+    or study item (``SetItemName`` of an item without a data node) does not modify the node, only invokes
+    ``SubjectHierarchyItemModifiedEvent``, and is an edit of the project.
     """
-    cached = _hierarchyEntries.get(node.GetID())
-    if cached is not None and cached[0] == node.GetMTime():
-        return cached[1]
     try:
         import vtk
 
@@ -311,9 +309,6 @@ def _hierarchyItems(node):
             entries.append((key(itemId), "" if parent == sceneItem else key(parent)))
     except Exception:
         entries = [("modified", node.GetMTime())]  # an unreadable hierarchy counts as changed whenever it is modified
-    if len(_hierarchyEntries) > 16:
-        _hierarchyEntries.clear()
-    _hierarchyEntries[node.GetID()] = (node.GetMTime(), entries)
     return entries
 
 

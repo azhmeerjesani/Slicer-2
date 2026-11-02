@@ -4325,6 +4325,71 @@ class StudioProjectsTest(unittest.TestCase):
             self.assertNotIn("Choose folder…", content, f"{name} names a button that the folder question does not have")
             self.assertIn("Choose…", content, f"{name} does not name the button that picks another folder")
 
+    def test_69_renaming_a_folder_patient_or_study_is_saved(self):
+        """Renaming a folder, patient or study item in the Data module was never saved (BB-1): the item has no data node, so
+        vtkMRMLSubjectHierarchyNode::SetItemName does not modify the hierarchy node, and the fingerprint cached the
+        hierarchy by the node's MTime. Ctrl+S and the save before quitting wrote nothing and reopening showed the old name.
+        """
+        service = self._service()
+        volume, _path = self._userVolume("Scan", shape=(12, 14, 16), extension=".nrrd")
+        project = self._projectFor(service)
+        io = self.io
+        scene = slicer.mrmlScene
+        shNode = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(scene)
+        sceneItem = shNode.GetSceneItemID()
+        patient = shNode.CreateSubjectItem(sceneItem, "Patient 1")
+        study = shNode.CreateStudyItem(patient, "Study 1")
+        folder = shNode.CreateFolderItem(study, "Alpha Folder")
+        shNode.SetItemParent(shNode.GetItemByDataNode(volume), folder)
+        self._save(service)
+
+        def needsSave():
+            return service.projectNeedsSave(io.sceneFingerprint(scene, io.sentinelIds()))
+
+        def sceneText():
+            with open(self.projects.sceneFile(project.path), encoding="utf-8") as stream:
+                return stream.read()
+
+        self.assertFalse(needsSave())
+        self.assertIn("Alpha Folder", sceneText())
+
+        # Ctrl+S writes a folder rename
+        shNode.SetItemName(folder, "Beta Folder")
+        self.assertEqual(shNode.GetItemName(folder), "Beta Folder")
+        self.assertTrue(needsSave(), "renaming a folder is an edit")
+        self._save(service)
+        self.assertFalse(needsSave())
+        self.assertIn("Beta Folder", sceneText())
+        self.assertNotIn("Alpha Folder", sceneText())
+
+        # The save before quitting writes a patient and a study rename
+        shNode.SetItemName(patient, "Patient 7")
+        self.assertTrue(needsSave(), "renaming a patient is an edit")
+        shNode.SetItemName(study, "Study 7")
+        self.assertTrue(service.flushForClose())
+        self.io.backgroundWriter().drain(30.0)
+        self.assertFalse(needsSave())
+        text = sceneText()
+        for name in ("Patient 7", "Study 7", "Beta Folder"):
+            self.assertIn(name, text)
+        for name in ("Patient 1", "Study 1"):
+            self.assertNotIn(name, text)
+
+        # Reopening the project shows the new names
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertTrue(service.openProject(project.path))
+        shNode = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(slicer.mrmlScene)
+        sceneItem = shNode.GetSceneItemID()
+        patient = shNode.GetItemChildWithName(sceneItem, "Patient 7")
+        self.assertTrue(patient, "the renamed patient is in the reopened project")
+        study = shNode.GetItemChildWithName(patient, "Study 7")
+        self.assertTrue(study, "the renamed study is in the reopened project")
+        folder = shNode.GetItemChildWithName(study, "Beta Folder")
+        self.assertTrue(folder, "the renamed folder is in the reopened project")
+        volume = slicer.mrmlScene.GetFirstNodeByClass("vtkMRMLScalarVolumeNode")
+        self.assertEqual(shNode.GetItemParent(shNode.GetItemByDataNode(volume)), folder)
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk
