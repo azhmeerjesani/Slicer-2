@@ -1109,6 +1109,62 @@ class StudioRegressionTest(unittest.TestCase):
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
 
+    def test_9d_done_next_ends_the_flagged_queue(self):
+        """Done -> next in the Flagged queue opens each flagged case once and then says "No more cases in Flagged": a flag
+        that Done leaves (multipart) did not make the queue cycle between two flagged cases forever (BB-1).
+        """
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Flagged study")
+        os.makedirs(folder)
+        paths = []
+        for index in range(1, 5):
+            paths.append(os.path.join(folder, f"sub-0{index}_T1w.nii.gz"))
+            nifti.write_nifti(paths[-1], np.zeros(grid.shape, np.uint8), grid.affine)
+        toasts = []
+        originalToast = study_ui._toast
+        study_ui._toast = lambda shell, text, **kwargs: toasts.append(str(text))
+        self.addCleanup(setattr, study_ui, "_toast", originalToast)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        try:
+            session = study_ui.createStudy(paths, studioShell, folder=folder)
+            self.assertIsNotNone(session)
+            study = session.study
+            for sid in ("sub-01", "sub-03"):
+                study.set(sid, qc_flags="multipart")
+            session.open("sub-01", switchToDraw=False)
+            session.setQueue(study_ui.QUEUE_FLAGGED)
+            self.assertEqual(session.queueMembers(), ["sub-01", "sub-03"])
+            opened = []
+            for _ in range(4):
+                del toasts[:]
+                before = session.current()
+                session.done(writeLesion=False)
+                opened.append((before, session.current()))
+                if [text for text in toasts if "No more cases in Flagged" in text]:
+                    break
+            # sub-01 -> sub-03, then the queue is finished and stays on sub-03 (its flag is still there)
+            self.assertEqual(opened, [("sub-01", "sub-03"), ("sub-03", "sub-03")])
+            self.assertTrue([text for text in toasts if "No more cases in Flagged" in text], toasts)
+            # A new pass (the queue chosen again) offers the flagged cases again
+            session.setQueue(study_ui.QUEUE_FLAGGED)
+            self.assertEqual(session.next_subject("sub-03"), "sub-01")
+            session.setQueue(None)
+        finally:
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
+
     def test_9c_all_traced_toast_waits_for_a_consequence_with_its_action(self):
         """The "All N lesions traced" confirmation does not replace the consequence "No more cases of <paper> to
         trace" with its "New case from this paper" action: it waits for the next input (BB-1).

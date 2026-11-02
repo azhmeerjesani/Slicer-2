@@ -1980,6 +1980,7 @@ class StudySession:
         self._closed = False
         self._queue = None  # the active trace queue: {"key", "record"} (L-45)
         self._queuePosition = None  # the last subject opened while the queue was active
+        self._queueHandled = set()  # subjects that Done passed in this pass of the queue (queues whose todo is their membership)
         self._prefetched = {}  # sid -> result of _prefetchCase (main thread only)
         self._prefetchPending = set()
         self._cropCache = {}  # sid -> figure crop thumbnail of the current case ({} when it has none)
@@ -2202,6 +2203,7 @@ class StudySession:
         self._queue = {"key": record["key"], "record": record.get("record")}
         position = record.get("position")
         self._queuePosition = position if position in self.study else None
+        self._queueHandled = set()
 
     # Saving participants.tsv (main thread only)
 
@@ -2767,6 +2769,7 @@ class StudySession:
         if key is None:
             self._queue = None
             self._queuePosition = None
+            self._queueHandled = set()
         else:
             if key == QUEUE_PAPER and record is None and self._current is not None:
                 record = recordOf(self.study.subject(self._current))
@@ -2775,6 +2778,7 @@ class StudySession:
                 raise ValueError(_("This case names no paper (DOI or record)") if key == QUEUE_PAPER else f"Unknown queue {key!r}")
             self._queue = {"key": key, "record": spec.get("record")}
             self._queuePosition = self._current if self._current is not None and _safe(spec["predicate"], self.study.subject(self._current)) else None
+            self._queueHandled = set()  # a new pass
         self._writeHeartbeat()
         self._schedulePrefetch()
         _notify(self)
@@ -2837,8 +2841,12 @@ class StudySession:
             return self.study.next_subject(after, status="untraced") or self.study.next_subject(after, status="inprogress")
         ids = self.study.subject_ids
         start = ids.index(after) + 1 if after in ids else 0
+        # A queue whose todo is its membership (Flagged, Needs review, ...) does not drop a case when Done is pressed on it
+        # (a QC flag such as "multipart" stays): the cases that Done already passed in this pass are not offered again, so
+        # that the queue ends instead of cycling
+        handled = self._queueHandled if queue is None and spec.get("todo") is spec.get("predicate") else ()
         for sid in ids[start:] + ids[:start]:
-            if sid != after and _safe(spec["todo"], self.study.subject(sid)):
+            if sid != after and sid not in handled and _safe(spec["todo"], self.study.subject(sid)):
                 return sid
         return None
 
@@ -3636,6 +3644,8 @@ class StudySession:
             _toast(shell, _("Saved {name}").format(name=os.path.basename(result["path"])), ms=2500, toolTip=result["path"])
         # The active trace queue decides the next case (L-45); without one, the next untraced subject (W3-07)
         spec = self.queue()
+        if spec is not None:
+            self._queueHandled.add(sid)
         nextSid = self.next_subject(sid)
         if nextSid is None and spec is None:
             _toast(shell, _("All subjects of {study} are traced").format(study=self.study.name), ms=4000, level="consequence")
