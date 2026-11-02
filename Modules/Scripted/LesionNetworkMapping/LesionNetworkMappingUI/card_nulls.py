@@ -163,6 +163,7 @@ class NullsCard:
         self._buildResults(layout)
         self.captionLabel = label(self._caption(), "LNMNullsCaption", "caption")
         layout.addWidget(self.captionLabel)
+        ctx.bundleChanged.append(self._onBundleChanged)
         for name in ("studyChanged", "bundleChanged", "ruleChanged", "computeEnabledChanged", "runChanged"):
             getattr(ctx, name).append(self.scheduleRefresh)
         ctx.runner.jobFinished.append(self._onJobFinished)
@@ -475,7 +476,11 @@ class NullsCard:
         self.scheduleRefresh()
 
     def hasReference(self):
-        """Whether the connectome has reference maps (rl_strength needs μC_r or the hubness map)."""
+        """Whether the connectome has reference maps (rl_strength needs μC_r or the hubness map).
+
+        The answer is kept per bundle (load_reference checks every file); a reference build that finishes, another
+        bundle and new cohort maps forget it.
+        """
         bundle = self.ctx.bundle
         if bundle is None:
             return False
@@ -826,6 +831,9 @@ class NullsCard:
                     self._start(self.currentMapsTsv())
                     return
             self.showState(self.currentMapsTsv())
+        elif getattr(job, "kind", None) == "reference":  # built from the manager or the QA card: rl_strength can now run
+            self._referenceOk.clear()
+            self.scheduleRefresh()
         elif getattr(job, "kind", None) in ("cohortmaps", "fastindex", "fast-parity"):
             self.scheduleRefresh()
 
@@ -1065,16 +1073,20 @@ class NullsCard:
         self._referenceOk.clear()
         self.scheduleRefresh()
 
+    def _onBundleChanged(self):
+        self._referenceOk.clear()
+
     def onResultChanged(self):
         self.scheduleRefresh()
 
     def cleanup(self):
         self._cleanedUp = True
         self._timer.stop()
-        for name in ("studyChanged", "bundleChanged", "ruleChanged", "computeEnabledChanged", "runChanged"):
+        for name, callback in (("studyChanged", self.scheduleRefresh), ("bundleChanged", self.scheduleRefresh), ("bundleChanged", self._onBundleChanged),
+                               ("ruleChanged", self.scheduleRefresh), ("computeEnabledChanged", self.scheduleRefresh), ("runChanged", self.scheduleRefresh)):
             callbacks = getattr(self.ctx, name, [])
-            if self.scheduleRefresh in callbacks:
-                callbacks.remove(self.scheduleRefresh)
+            if callback in callbacks:
+                callbacks.remove(callback)
         finished = getattr(self.ctx.runner, "jobFinished", [])
         if self._onJobFinished in finished:
             finished.remove(self._onJobFinished)
