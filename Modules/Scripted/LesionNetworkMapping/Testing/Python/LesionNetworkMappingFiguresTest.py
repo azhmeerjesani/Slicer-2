@@ -874,6 +874,36 @@ class FiguresTest(unittest.TestCase):
             figures.write_figure(figure, self.tmp, "m", ("png", "svg"), cancel=lambda: True)
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "figures")))
 
+    def test_render_again_under_the_same_name_removes_the_previous_figures_files(self):
+        folder = os.path.join(self.tmp, "figures", "m")
+        figure = figures.montage(self.tmap, self.template, "A 0", threshold=4.0, **SMALL)
+        figures.write_figure(figure, self.tmp, "m")
+        self.assertTrue(os.path.isfile(os.path.join(folder, "m.tiff")))
+        with open(os.path.join(folder, "notes.txt"), "w", encoding="utf-8") as f:
+            f.write("a file of the user")
+        # Fewer formats: the other formats of the previous render are removed, a file of the user stays
+        written = figures.write_figure(figure, self.tmp, "m", ("png",))
+        self.assertEqual(sorted(os.listdir(folder)), sorted(written["files"] + ["notes.txt"]))
+        # A gallery of 3 pages rendered again as 1 page (and back): no pages of the other render are left
+        lesions = [(ball((x, 0, 0), 5.0), self.affine, f"lesion{i}") for i, x in enumerate((-12, 0, 12))]
+        written = figures.write_figure(figures.gallery(lesions, self.template, per_page=1, **SMALL), self.tmp, "g")
+        self.assertIn("g_p03.png", written["files"])
+        written = figures.write_figure(figures.gallery(lesions, self.template, per_page=3, **SMALL), self.tmp, "g")
+        self.assertEqual(sorted(os.listdir(written["dir"])), sorted(written["files"]))
+        written = figures.write_figure(figures.gallery(lesions[:2], self.template, per_page=1, **SMALL), self.tmp, "g", ("png", "svg"))
+        self.assertEqual(sorted(os.listdir(written["dir"])), sorted(written["files"]))
+        # An edited figure.json cannot point the cleanup at files the figure did not write
+        with open(written["figure_json"], encoding="utf-8") as f:
+            record = json.load(f)
+        record["files"] += ["notes.txt", "../m/m.png"]
+        with open(written["figure_json"], "w", encoding="utf-8") as f:
+            json.dump(record, f)
+        with open(os.path.join(written["dir"], "notes.txt"), "w", encoding="utf-8") as f:
+            f.write("a file of the user")
+        figures.write_figure(figures.gallery(lesions[:1], self.template, **SMALL), self.tmp, "g", ("png",))
+        self.assertTrue(os.path.isfile(os.path.join(written["dir"], "notes.txt")))
+        self.assertTrue(os.path.isfile(os.path.join(folder, "m.png")))
+
     def test_command_line_resume_skips_a_completed_figure(self):
         out, argv = self._cli_inputs()
         code, _ = self._cli(argv)

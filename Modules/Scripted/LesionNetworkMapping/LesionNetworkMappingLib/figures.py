@@ -60,7 +60,9 @@ Outputs (:func:`write_figure`)
 ``<out>/figures/<name>/``: ``<name>.png`` and ``.tiff`` (with dpi), ``<name>.svg`` (the raster as an
 embedded base64 PNG, vector text and colour bar), ``<name>.pdf`` (Pillow), ``figure.json`` (every
 parameter, input sha256s, no local paths), ``caption.txt`` (orientation, statistic, rule ⇒ |T| and p,
-N, df, connectome, colour range, slice coordinates) and ``<name>_sourcedata.csv``. Tutorial studies get
+N, df, connectome, colour range, slice coordinates) and ``<name>_sourcedata.csv``. Rendering again under
+the same name replaces the earlier figure: its files that the new one does not write (other formats, other
+page counts) are removed, so the folder holds what ``figure.json`` lists. Tutorial studies get
 a ``TUTORIAL DATA`` watermark and synthetic bundles ``SYNTHETIC`` (:func:`watermark_for`).
 
 Command line::
@@ -72,6 +74,7 @@ It writes ``DIR/figures/<name>/`` and registers the run (kind ``figure``) in the
 """
 
 import base64
+import contextlib
 import copy
 import csv
 import gzip
@@ -2192,10 +2195,34 @@ def write_figure(figure, out_root, name, formats=FORMATS, cancel=None):
     record["created"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     payloads.append(("figure.json", (json.dumps(_json_ready(record), indent=1, ensure_ascii=False) + "\n").encode("utf-8")))
     _check_cancel(cancel, len(files))
+    previous = _previous_outputs(folder, name)
     os.makedirs(folder, exist_ok=True)
     for file_name, data in payloads:
         _write_bytes(os.path.join(folder, file_name), data)
+    # A render under the same name replaces the previous one: remove the files of the previous figure that this
+    # one no longer writes (other formats, or <name>_pNN pages when the page count changed), so the folder holds
+    # only what figure.json lists. Only files the previous figure.json listed are removed; other files stay.
+    for file_name in sorted(previous - set(record["files"])):
+        with contextlib.suppress(OSError):
+            os.remove(os.path.join(folder, file_name))
     return {"dir": folder, "files": record["files"], "figure_json": os.path.join(folder, "figure.json")}
+
+
+def _previous_outputs(folder, name):
+    """The image files that an earlier :func:`write_figure` under ``name`` wrote into ``folder`` (from its figure.json).
+
+    Only plain file names that ``write_figure`` itself makes for ``name`` are returned (``<name>.png/.tiff/.svg/.pdf``
+    and ``<name>_pNN.png/.tiff/.svg``), so an edited or foreign figure.json can never point the cleanup at other files.
+    """
+    try:
+        with open(os.path.join(folder, "figure.json"), encoding="utf-8") as f:
+            listed = json.load(f).get("files") or []
+    except (OSError, ValueError, AttributeError):
+        return set()
+    if not isinstance(listed, list):
+        return set()
+    pattern = re.compile(re.escape(name) + r"(?:_p\d{2,})?\.(?:png|tiff|svg|pdf)")
+    return {item for item in listed if isinstance(item, str) and pattern.fullmatch(item) and os.path.isfile(os.path.join(folder, item))}
 
 
 # Command line
