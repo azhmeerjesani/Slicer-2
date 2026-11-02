@@ -1217,8 +1217,7 @@ def _copyHashed(source, target, plan):
     digest = hashlib.sha256()
     with open(source, "rb") as reader, open(target, "wb") as writer:
         for chunk in iter(lambda: reader.read(COPY_CHUNK), b""):
-            if plan.cancelled:
-                raise TemplateError(_("Cancelled"))
+            _checkCancelled(plan)
             digest.update(chunk)
             writer.write(chunk)
             plan.progress += len(chunk)
@@ -1226,16 +1225,35 @@ def _copyHashed(source, target, plan):
     return digest.hexdigest()
 
 
+def _checkCancelled(plan):
+    if plan.cancelled:
+        raise TemplateError(_("Cancelled"))
+
+
 def _writeFirstVolume(source, target, plan):
-    """The first volume of a 4D NIfTI file as a 3D NIfTI file (same header geometry and codes)."""
+    """The first volume of a 4D NIfTI file as a 3D NIfTI file (same header geometry and codes).
+
+    Cancel (``plan.cancelled``) is checked while the file is read and before and after the volume is written; the progress
+    moves while the file is read (most of the time) and reaches the size of the file when the volume is written.
+    """
     from LesionNetworkMappingLib import nifti
 
-    data, affine, header = nifti.read_nifti(source, apply_scaling=False)
+    start = plan.progress
+    size = os.path.getsize(source)
+    readShare = 0.9 * size
+
+    def onBlock(done, total):
+        _checkCancelled(plan)
+        plan.progress = start + int(readShare * done / max(1, total))
+
+    data, affine, header = nifti.read_nifti(source, apply_scaling=False, on_block=onBlock)
+    _checkCancelled(plan)
     first = data.reshape(data.shape[:3] + (-1,))[..., 0]
     nifti.write_nifti(target, first, affine, sform_code=max(1, header["sform_code"]), qform_code=max(1, header["qform_code"]),
                       dtype=first.dtype, scl_slope=header["scl_slope"] or None, scl_inter=header["scl_inter"] if header["scl_slope"] else None,
                       descrip=header.get("descrip", ""))
-    plan.progress += os.path.getsize(source)
+    _checkCancelled(plan)
+    plan.progress = start + size
     return fileSha256(target)
 
 
@@ -1244,6 +1262,9 @@ def copyFiles(plan):
 
     The files are written into a hidden ".adding-..." folder that is renamed when everything is copied, so a failed or
     cancelled add leaves nothing behind. The user's files are only read.
+
+    :raises TemplateError: "Cancelled" when ``plan.cancelled`` is set before the folder is renamed (a cancel after that
+      is handled by the caller, which removes ``plan.folder``: see ``templates_ui.AddTemplateDialog``).
     """
     parent = os.path.dirname(plan.folder)
     os.makedirs(parent, exist_ok=True)
@@ -1266,6 +1287,8 @@ def copyFiles(plan):
         with open(os.path.join(staging, TEMPLATE_JSON), "w", encoding="utf-8", newline="\n") as f:
             json.dump(record, f, indent=2, ensure_ascii=False)
             f.write("\n")
+        # A cancel that came while the last file was written: nothing is added
+        _checkCancelled(plan)
         folder = plan.folder
         if os.path.exists(folder):
             base, counter = folder, 2

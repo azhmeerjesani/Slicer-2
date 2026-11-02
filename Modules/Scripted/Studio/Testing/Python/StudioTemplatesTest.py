@@ -1370,3 +1370,93 @@ class StudioTemplatesTest(unittest.TestCase):
             settings.remove(projects.ROOT_KEY)
             settings.remove(projects.ROOT_CHOSEN_KEY)
             shutil.rmtree(os.path.dirname(oldRoot), ignore_errors=True)
+
+    def test_27_cancelled_add_adds_nothing(self):
+        """BB-1: Cancel in "Add your own MNI template" adds nothing, for a 4D image as well. The first volume of a 4D image
+        was read and written without looking at Cancel, and the dialog registered a copy whose result came after Cancel:
+        the template was added after the dialog had closed ("Added the template ..."). The progress also stayed at 0 while
+        a 4D image was read.
+        """
+        templates, ui = self.templates, self.ui
+
+        def leftovers():
+            folder = templates.templatesFolder()
+            return sorted(os.listdir(folder)) if os.path.isdir(folder) else []
+
+        # Core: a 4D plan cancelled before the copy
+        plan = templates.prepareAdd(self.image4d, name="Cancelled before")
+        self.assertTrue(plan.firstVolume)
+        plan.cancelled = True
+        with self.assertRaises(templates.TemplateError):
+            templates.copyFiles(plan)
+        self.assertEqual(leftovers(), [])
+
+        # Core: Cancel while the 4D image is read (the progress moves before the copy ends)
+        class CancelOnProgress(templates.AddPlan):
+            seen = []
+
+            @property
+            def progress(self):
+                return self.__dict__.get("_progress", 0)
+
+            @progress.setter
+            def progress(self, value):
+                self.__dict__["_progress"] = value
+                if 0 < value < self.totalBytes:
+                    CancelOnProgress.seen.append(value)
+                    self.cancelled = True
+
+        plan = templates.prepareAdd(self.image4d, name="Cancelled while reading")
+        plan.__class__ = CancelOnProgress
+        with self.assertRaises(templates.TemplateError):
+            templates.copyFiles(plan)
+        self.assertTrue(CancelOnProgress.seen, "the progress moves while a 4D image is read")
+        self.assertEqual(leftovers(), [])
+
+        # The dialog: Cancel before the background copy runs, and Cancel after it is done but before its result is delivered
+        class HeldExecutor:
+            def __init__(self, runFirst):
+                self.runFirst, self.jobs = runFirst, []
+
+            def submit(self, function, *args, onDone=None, onError=None):
+                if self.runFirst:
+                    try:
+                        result = function(*args)
+                    except Exception as error:
+                        self.jobs.append(lambda: onError(error))
+                        return
+                    self.jobs.append(lambda: onDone(result))
+                else:
+                    self.jobs.append(lambda: InlineExecutor().submit(function, *args, onDone=onDone, onError=onError))
+
+            def release(self):
+                for job in self.jobs:
+                    job()
+
+        from StudioLib.autosave_io import InlineExecutor
+
+        toasts = []
+        message = ui.message
+        ui.message = lambda text, level="info": toasts.append(text)
+        try:
+            for name, image, runFirst in (("Cancelled 4D", self.image4d, False), ("Cancelled 4D late", self.image4d, True),
+                                          ("Cancelled 3D late", self.image15, True)):
+                added = []
+                executor = HeldExecutor(runFirst)
+                dialog = ui.AddTemplateDialog(executor=executor, onAdded=added.append)
+                try:
+                    dialog.setImage(image)
+                    dialog.nameEdit.setText(name)
+                    dialog.addTemplate()
+                    self.assertEqual(len(executor.jobs), 1, name)
+                    dialog.reject()
+                    executor.release()
+                    self.assertIsNone(dialog.template, name)
+                    self.assertEqual(added, [], name)
+                    self.assertEqual(templates.userTemplates(), [], name)
+                    self.assertEqual(leftovers(), [], name)
+                finally:
+                    dialog.deleteLater()
+            self.assertFalse([text for text in toasts if "Added" in text], toasts)
+        finally:
+            ui.message = message

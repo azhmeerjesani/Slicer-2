@@ -303,12 +303,14 @@ def read_nifti_header(path):
     return _parse_header(raw, path)
 
 
-def read_nifti(path, apply_scaling=True):
+def read_nifti(path, apply_scaling=True, on_block=None):
     """Read a NIfTI-1 image.
 
     :param path: .nii or .nii.gz file.
     :param apply_scaling: apply scl_slope/scl_inter (when slope is non-zero and not an identity);
       the result is then floating point.
+    :param on_block: optional ``on_block(bytes_read, total_bytes)``, called after each block of image data is read
+      (progress); an exception it raises stops the read and is passed on (cancel).
     :return: (data, affine, header): data indexed [i, j, k, (t)] in file voxel order,
       4x4 float64 affine mapping voxel indices to RAS world mm, header dictionary.
     """
@@ -330,6 +332,8 @@ def read_nifti(path, apply_scaling=True):
             if not n:
                 raise ValueError(f"Truncated NIfTI image data ({filled} of {len(view)} bytes): {path}")
             filled += n
+            if on_block is not None:
+                on_block(filled, len(view))
     if not dtype.isnative:
         flat = flat.astype(dtype.newbyteorder("="))
     data = flat.reshape(header["shape"], order="F")

@@ -18,6 +18,7 @@ The model is ``templates``. Only the fork-only key ``Studio/Templates/Default`` 
 import logging
 import os
 import re
+import shutil
 import sys
 import traceback
 
@@ -641,6 +642,12 @@ class AddTemplateDialog(qt.QDialog):
         plan, self.plan = self.plan, None
         if plan is None:
             return
+        if plan.cancelled:
+            # Cancel came after the copy was done but before its result was delivered: remove the new folder (it is not
+            # registered yet), so a cancelled add leaves nothing behind and adds no template
+            if plan.folder and os.path.isdir(plan.folder):
+                shutil.rmtree(plan.folder, ignore_errors=True)
+            return
         try:
             self.template = templates.finishAdd(plan, record)
         except Exception as error:
@@ -657,8 +664,8 @@ class AddTemplateDialog(qt.QDialog):
 
     def _onCopyFailed(self, error):
         self._progressTimer.stop()
-        self.plan = None
-        if not _isAlive(self):
+        plan, self.plan = self.plan, None
+        if not _isAlive(self) or (plan is not None and plan.cancelled):
             return
         self.progressBar.hide()
         self.addButton.setText(_("Add template"))
