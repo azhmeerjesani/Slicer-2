@@ -1667,9 +1667,52 @@ def spatial_r(a, b, mask=None):
     return (float((x * y).sum()) / denominator if denominator > 0 else math.nan), int(keep.sum())
 
 
+def _same_grid(volume, reference):
+    """Whether ``volume`` has exactly ``reference``'s array shape and affine."""
+    return np.shape(volume.data) == np.shape(reference.data) and np.allclose(volume.affine, reference.affine, atol=1e-4)
+
+
+def _same_lattice(volume, reference, tol=1e-3):
+    """Whether every voxel centre of ``reference`` falls on a voxel centre of ``volume``'s lattice: the same
+    spacing and axes up to the order and the flips of the stored axes (a RAS file and its LPS or FSL-style copy),
+    with offsets of a whole number of voxels (``tol`` in voxels).
+    """
+    to_volume = np.linalg.inv(np.asarray(volume.affine, dtype=np.float64)) @ np.asarray(reference.affine, dtype=np.float64)
+    linear, offset = to_volume[:3, :3], to_volume[:3, 3]
+    signed = np.round(linear)
+    if not np.allclose(linear, signed, atol=tol) or not np.allclose(offset, np.round(offset), atol=tol):
+        return False
+    return bool((np.abs(signed).sum(axis=0) == 1).all() and (np.abs(signed).sum(axis=1) == 1).all())
+
+
+def _replication_r(a, b, mask_volume=None):
+    """Spatial r of maps ``a`` and ``b`` on a grid of their own (never the template's display grid, whose
+    interpolation onto finer voxels smooths the maps and inflates r and the voxel count).
+
+    Returns (r, voxels, r_grid, where): r_grid is "native" when the voxel centres coincide (``b`` is then moved
+    voxel for voxel onto ``a``'s grid, without interpolation), else "resampled" (the finer map linearly resampled
+    onto the coarser map's grid); voxels outside either map's field of view are left out.
+    """
+    if _same_lattice(b, a):
+        reference, values = a, (b.data if _same_grid(b, a) else reslice(b, _NativeGrid(a), order=0, cval=np.nan, dtype=np.float64))
+        r_grid, where = "native", "on the maps' common grid"
+    else:
+        size_a, size_b = (abs(float(np.linalg.det(np.asarray(v.affine, dtype=np.float64)[:3, :3]))) for v in (a, b))
+        reference, other = (b, a) if size_b > size_a * (1.0 + 1e-6) else (a, b)
+        values = reslice(other, _NativeGrid(reference), order=1, cval=np.nan, dtype=np.float64)
+        r_grid, where = "resampled", f"on the grid of {reference.name}, the coarser map, with {other.name} linearly resampled onto it"
+    mask = None
+    if mask_volume is not None:
+        mask = mask_volume.data if _same_grid(mask_volume, reference) else reslice(mask_volume, _NativeGrid(reference), order=0)
+    r, voxels = spatial_r(reference.data, values, mask)
+    return r, voxels, r_grid, where
+
+
 def replication(first, second, template=None, slices="auto", titles=("Discovery", "Replication"), **kwargs):
-    """Two maps side by side (unthresholded by default) with their spatial correlation r, computed on
-    the maps' own grid when they share it (else on the display grid) inside the mask when given.
+    """Two maps side by side (unthresholded by default) with their spatial correlation r, inside the mask when
+    given. r never depends on the template or on how the files are stored: it is computed on the maps' own grid
+    when their voxel centres coincide (whatever the axis order or flips of the files), else on the grid of the
+    coarser map with the other map linearly resampled onto it.
     """
     kwargs = dict(kwargs)
     kwargs.setdefault("mode", "unthresholded")
@@ -1680,17 +1723,7 @@ def replication(first, second, template=None, slices="auto", titles=("Discovery"
     for info in infos:
         _resolve(info, options)
     a, b = infos[0].volume, infos[1].volume
-    same_grid = np.shape(a.data) == np.shape(b.data) and np.allclose(a.affine, b.affine, atol=1e-4)
-    if same_grid:
-        mask = None
-        if ctx.mask is not None:
-            mask = reslice(ctx.mask, _NativeGrid(a), order=0) if not (np.shape(ctx.mask.data) == np.shape(a.data) and np.allclose(ctx.mask.affine, a.affine, atol=1e-4)) else ctx.mask.data
-        r, voxels = spatial_r(a.data, b.data, mask)
-        where = "on the maps' common grid"
-    else:
-        mask = ctx.mask_on_grid() if ctx.mask is not None else None
-        r, voxels = spatial_r(infos[0].grid_values, infos[1].grid_values, mask)
-        where = "on the display grid"
+    r, voxels, r_grid, where = _replication_r(a, b, ctx.mask)
     plane, coordinates, count = parse_slices(slices)
     if coordinates is None:
         combined = np.abs(infos[0].grid_values) + np.abs(infos[1].grid_values)
@@ -1717,7 +1750,7 @@ def replication(first, second, template=None, slices="auto", titles=("Discovery"
         *_context_sentences(ctx),
     ]
     meta = _threshold_meta(infos, window, planes)
-    meta.update({"spatial_r": None if not math.isfinite(r) else r, "r_voxels": voxels, "r_grid": "native" if same_grid else "display"})
+    meta.update({"spatial_r": None if not math.isfinite(r) else r, "r_voxels": voxels, "r_grid": r_grid})
     figure = _finish(ctx, panels, "replication", caption, None, [_map_bar(infos, window, sign, options, statistic)], extra_meta=meta)
     figure.sourcedata = _map_rows(panels, infos, planes) + [{"panel": "", "map": f"{a.name} vs {b.name}", "plane": "spatial_r", "coordinate_mm": "", "voxels_nonzero": voxels, "min": "", "max": "", "window": "", "threshold": "", "sha256": "", "mode": "", "voxels_suprathreshold": "", "r": r}]
     return figure

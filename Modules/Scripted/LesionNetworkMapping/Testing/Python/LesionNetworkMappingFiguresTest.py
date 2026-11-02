@@ -379,6 +379,44 @@ class FiguresTest(unittest.TestCase):
         self.assertEqual(extremes["specificity"][0], -10.0)
         self.assertEqual(extremes["conjunction"][1], 5.0)
 
+    def test_replication_r_does_not_depend_on_storage_order_or_template(self):
+        # Two noisy 2 mm maps; the second one is also stored LPS and with its axes swapped (same voxel centres).
+        # With a 1 mm template, r used to come from the maps linearly resliced onto the finer display grid (smoothed
+        # noise, inflated r and voxel count) whenever the affines differed, even with identical voxel centres.
+        rng = np.random.default_rng(5)
+        inside = brain() > 0
+        signal = blob_map() / 4.0
+        first = np.where(inside, signal + rng.normal(0, 1, SHAPE), 0).astype(np.float32)
+        second = np.where(inside, signal + rng.normal(0, 1, SHAPE), 0).astype(np.float32)
+        expected = float(np.corrcoef(first[inside], second[inside])[0, 1])
+        nx, ny, _ = SHAPE
+        lps = self.affine @ np.array([[-1.0, 0, 0, nx - 1], [0, -1, 0, ny - 1], [0, 0, 1, 0], [0, 0, 0, 1]])
+        swapped = self.affine[:, [2, 1, 0, 3]]
+        stored = {"RAS": (second, self.affine), "LPS": (second[::-1, ::-1].copy(), lps), "KJI": (second.transpose(2, 1, 0).copy(), swapped)}
+        fine_shape = tuple(2 * n - 1 for n in SHAPE)
+        fine_affine = ras_affine(fine_shape, 1.0)
+        fine_world = world(fine_shape, fine_affine)
+        fine = (np.where((fine_world[..., 0] / 26) ** 2 + (fine_world[..., 1] / 32) ** 2 + (fine_world[..., 2] / 26) ** 2 <= 1, 50.0, 0.0).astype(np.float32), fine_affine, "template 1 mm")
+        mask = (inside.astype(np.float32), self.affine, "mask")
+        for template in (self.template, fine, None):
+            for name, (data, affine) in stored.items():
+                with self.subTest(template=None if template is None else template[2], storage=name):
+                    figure = figures.replication((first, self.affine, "A"), (data, affine, "B"), template, "A 0", mask=mask, **SMALL)
+                    self.assertAlmostEqual(figure.meta["spatial_r"], expected, places=5)
+                    self.assertEqual(figure.meta["r_voxels"], int(inside.sum()))
+                    self.assertEqual(figure.meta["r_grid"], "native")
+                    self.assertIn("on the maps' common grid", figure.caption)
+        # Maps on different lattices: r on the coarser map's own grid, whatever the template's spacing
+        shifted = self.affine.copy()
+        shifted[:3, 3] += 0.5 * SPACING
+        values = {}
+        for template in (self.template, fine):
+            figure = figures.replication((first, self.affine, "A"), (second, shifted, "B"), template, "A 0", mask=mask, **SMALL)
+            self.assertEqual(figure.meta["r_grid"], "resampled")
+            self.assertLessEqual(figure.meta["r_voxels"], int(inside.sum()))
+            values[template[2]] = (figure.meta["spatial_r"], figure.meta["r_voxels"])
+        self.assertEqual(values["template"], values["template 1 mm"])
+
     def test_sparse_threshold_widens_window_and_keeps_tick(self):
         # Fewer than 0.5% of the non-zero voxels pass: the 99.5th percentile window is below the threshold
         values = np.where(brain() > 0, 1.0, 0.0).astype(np.float32)
