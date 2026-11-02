@@ -32,3 +32,16 @@ foreach(scriptName ${EXTENSION_TEST_PYTHON_SCRIPTS})
     TESTNAME_PREFIX nomainwindow_
     )
 endforeach()
+
+# Tests that draw with mouse events in the slice views need the main window
+foreach(scriptName
+    SegmentEditorScissorsSliceCutTest.py
+    )
+  slicer_add_python_unittest(
+    SCRIPT ${scriptName}
+    SLICER_ARGS --disable-cli-modules
+                --additional-module-paths
+                  ${MODULE_BUILD_DIR}
+                  ${CMAKE_BINARY_DIR}/${Slicer_QTSCRIPTEDMODULES_LIB_DIR}
+    )
+endforeach()
