@@ -937,7 +937,13 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
 
     @staticmethod
     def runDirectory(context=None, lesionName="lesion"):
-        """A new run folder: ``<study>/derivatives/lnm/runs/<time>_<lesion>`` with a study, else ``<cache>/LNM/runs/<time>_<lesion>``."""
+        """A new run folder: ``<study>/derivatives/lnm/runs/<time>_<lesion>`` with a study, else ``<cache>/LNM/runs/<time>_<lesion>``.
+
+        The folder is created here, exclusively (``os.mkdir``), so that it belongs to this run alone: another window or
+        process that asks in the same second for the same lesion name gets the next ``<time>-<N>_<lesion>`` folder
+        instead of sharing (and overwriting) this one. When the folder cannot be created (for example a read-only
+        study), the path is returned unreserved and the step that writes into it reports the error, as before.
+        """
         from LesionNetworkMappingUI import jobrunner
 
         if context is not None and getattr(context, "study", None) is not None:
@@ -945,12 +951,20 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
         else:
             root = jobrunner.defaultRunRoot()
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        path = os.path.join(root, f"{stamp}_{lesionName}")
-        counter = 2
-        while os.path.exists(path):
-            path = os.path.join(root, f"{stamp}-{counter}_{lesionName}")
-            counter += 1
-        return path
+        try:
+            os.makedirs(root, exist_ok=True)
+        except OSError:
+            pass  # os.mkdir below fails too: the path is returned unreserved
+        counter = 1
+        while True:
+            path = os.path.join(root, f"{stamp}_{lesionName}" if counter == 1 else f"{stamp}-{counter}_{lesionName}")
+            try:
+                os.mkdir(path)
+                return path
+            except FileExistsError:
+                counter += 1
+            except OSError:
+                return path
 
     @staticmethod
     def engineArguments(bundlePath, lesionPath, runDir, previewN=None, previewSeed=0, nullRelocations=50, rule=None, snapshotEvery=SNAPSHOT_EVERY, lesionSpace=None):
