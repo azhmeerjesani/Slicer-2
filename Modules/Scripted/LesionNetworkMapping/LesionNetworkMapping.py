@@ -5892,7 +5892,10 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         passing = array >= value if sign == "pos" else array <= -value if sign == "neg" else np.abs(array) >= value
         matrix = vtk.vtkMatrix4x4()
         volume.GetIJKToRASMatrix(matrix)
-        name = f"{volume.GetName()} mask {SIGN_LABELS[sign]}{self.currentStatistic()}≥{value:.2f}"
+        from LesionNetworkMappingLib import thresholds
+
+        # The threshold as the legend, the derived line and the sidecars state it (a fixed two decimals would name 0.004 "0.00")
+        name = f"{volume.GetName()} mask {SIGN_LABELS[sign]}{self.currentStatistic()}≥{thresholds.format_value(self.resolved)}"
         binary = slicer.util.addVolumeFromArray(passing.astype(np.uint8), ijkToRAS=matrix, name=name, nodeClassName="vtkMRMLScalarVolumeNode")
         binary.SetAttribute("LNM.Result", "1")
         return binary
