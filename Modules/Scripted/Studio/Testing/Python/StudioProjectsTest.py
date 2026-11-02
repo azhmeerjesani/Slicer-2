@@ -4545,6 +4545,68 @@ class StudioProjectsTest(unittest.TestCase):
             self.io.backgroundWriter().drain(10.0)
 
 
+    def test_72_root_move_keeps_a_project_or_study_named_like_a_kind_folder_apart(self):
+        """Change folder > Move into a folder that already has a project named "LNM", "Studies" or "Projects" (or a study
+        named "LNM"...) with the same name (BB-1): the moved one lands as "<name> 2" with its own scene and images, like any
+        other project. Those names used to be merged into the other one (one folder with "LNM 2.mrml", "Images 2" and
+        ".studio 2", the moved scene pointing at the other project's image), so the moved project could no longer be
+        reached and loaded the other scan. Only the kind folders themselves (Projects/, Studies/, LNM/) are merged.
+        """
+        projects = self.projects
+        oldRoot = os.path.join(self.tempDir, "A", "Slicer Studio")
+        newRoot = os.path.join(self.tempDir, "B", "Slicer Studio")
+        names = (projects.LNM_DIR, projects.STUDIES_DIR, projects.PROJECTS_DIR, projects.TEMPLATES_DIR, "MRHead")
+
+        def makeProject(rootPath, name, content):
+            folder = os.path.join(rootPath, projects.PROJECTS_DIR, name)
+            os.makedirs(os.path.join(folder, "Images"))
+            os.makedirs(os.path.join(folder, projects.PRIVATE_DIR))
+            with open(os.path.join(folder, "Images", name + ".nrrd"), "w") as f:
+                f.write(content)
+            with open(os.path.join(folder, name + projects.SCENE_EXTENSION), "w") as f:
+                f.write('<MRML><VolumeArchetypeStorage fileName="Images/%s.nrrd"/></MRML>\n' % name)
+
+        for name in names:
+            makeProject(oldRoot, name, "A " + name)
+            makeProject(newRoot, name, "B " + name)
+            os.makedirs(os.path.join(oldRoot, projects.STUDIES_DIR, name))
+            with open(os.path.join(oldRoot, projects.STUDIES_DIR, name, "study.json"), "w") as f:
+                f.write('{"from": "A"}\n')
+            os.makedirs(os.path.join(newRoot, projects.STUDIES_DIR, name))
+            with open(os.path.join(newRoot, projects.STUDIES_DIR, name, "study.json"), "w") as f:
+                f.write('{"from": "B"}\n')
+        os.makedirs(os.path.join(oldRoot, projects.LNM_DIR, projects.LNM_DIR))
+        with open(os.path.join(oldRoot, projects.LNM_DIR, projects.LNM_DIR, "map.txt"), "w") as f:
+            f.write("A")
+        os.makedirs(os.path.join(newRoot, projects.LNM_DIR, projects.LNM_DIR))
+        with open(os.path.join(newRoot, projects.LNM_DIR, projects.LNM_DIR, "map.txt"), "w") as f:
+            f.write("B")
+        before = {name: _relativeFiles(os.path.join(newRoot, projects.PROJECTS_DIR, name)) for name in names}
+        renamed = {}
+        projects.moveContent(oldRoot, newRoot, renamed=renamed)
+        projectsDir = os.path.join(newRoot, projects.PROJECTS_DIR)
+        self.assertEqual(sorted(os.listdir(projectsDir)), sorted([*names, *(name + " 2" for name in names)]))
+        for name in names:
+            theirs = os.path.join(projectsDir, name)
+            self.assertEqual(_relativeFiles(theirs), before[name], "%s: the other project gets no files of the moved one" % name)
+            with open(os.path.join(theirs, "Images", name + ".nrrd")) as f:
+                self.assertEqual(f.read(), "B " + name)
+            ours = os.path.join(projectsDir, name + " 2")
+            self.assertEqual(_relativeFiles(ours), sorted(["Images/%s.nrrd" % name, name + projects.SCENE_EXTENSION]),
+                             "%s: the moved project keeps its own files under their own names" % name)
+            with open(os.path.join(ours, "Images", name + ".nrrd")) as f:
+                self.assertEqual(f.read(), "A " + name, "%s: the moved scene finds its own image" % name)
+            self.assertTrue(os.path.isdir(os.path.join(ours, projects.PRIVATE_DIR)))
+            self.assertEqual(renamed.get(os.path.join(projects.PROJECTS_DIR, name)), os.path.join(projects.PROJECTS_DIR, name + " 2"))
+            self.assertEqual(os.path.normpath(projects.pathAfterMove(os.path.join(oldRoot, projects.PROJECTS_DIR, name), oldRoot, newRoot, renamed)),
+                             os.path.normpath(ours), "%s: the open project follows its own folder" % name)
+            for study, origin in ((name, "B"), (name + " 2", "A")):
+                with open(os.path.join(newRoot, projects.STUDIES_DIR, study, "study.json")) as f:
+                    self.assertIn(origin, f.read(), study)
+        self.assertEqual(sorted(os.listdir(os.path.join(newRoot, projects.LNM_DIR))), [projects.LNM_DIR, projects.LNM_DIR + " 2"])
+        self.assertFalse(os.path.exists(os.path.join(oldRoot, projects.PROJECTS_DIR)), "everything moved")
+
+
 def _sphere(center=(0, 0, 0)):
     import vtk
 

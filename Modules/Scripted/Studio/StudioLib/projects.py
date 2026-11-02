@@ -1342,7 +1342,10 @@ def _copyError(source, error):
 
 def _mergeMove(source, destination, sameVolume, progress=None, renamed=None):
     """Move ``source`` (a file or folder) to ``destination``: a rename on the same volume, else copy, check the sizes and
-    delete the original. Folders that exist on both sides are merged; names that exist are kept (" 2"). Worker-safe.
+    delete the original. When ``source`` and ``destination`` are both folders (a kind folder such as Projects/, as
+    ``moveContent`` passes them) their items are merged: an item whose name exists there moves under another name (" 2"),
+    whatever its name, so a project, study or folder is never merged into another one of the same name (a project named
+    "LNM" or "Studies" is a project like "MRHead"). Worker-safe.
 
     ``renamed`` (a dict) receives ``{source: destination}`` for each item that moved under another name (" 2") because
     its name was taken there.
@@ -1350,7 +1353,7 @@ def _mergeMove(source, destination, sameVolume, progress=None, renamed=None):
     if os.path.isdir(source) and os.path.isdir(destination):
         for name in os.listdir(source):
             target = os.path.join(destination, name)
-            if os.path.exists(target) and not (os.path.isdir(target) and os.path.isdir(os.path.join(source, name)) and name in (PROJECTS_DIR, STUDIES_DIR, LNM_DIR)):
+            if os.path.exists(target):
                 target = os.path.join(destination, uniqueName(destination, name, isFile=os.path.isfile(os.path.join(source, name))))
                 if renamed is not None:
                     renamed[os.path.join(source, name)] = target
