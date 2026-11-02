@@ -632,12 +632,32 @@ int vtkMRMLSegmentationStorageNode::ReadBinaryLabelmapRepresentation(vtkMRMLSegm
 
     // Special case: extent = [0, 0, 0, 0, 0, 0] means there is no image data
     isExtentValid = true;
-    if (imageExtentInFile[0] == 0    //
-        && imageExtentInFile[1] == 0 //
-        && imageExtentInFile[2] == 0 //
-        && imageExtentInFile[3] == 0 //
-        && imageExtentInFile[4] == 0 //
-        && imageExtentInFile[5] == 0)
+    bool noImageData = (imageExtentInFile[0] == 0    //
+                        && imageExtentInFile[1] == 0 //
+                        && imageExtentInFile[2] == 0 //
+                        && imageExtentInFile[3] == 0 //
+                        && imageExtentInFile[4] == 0 //
+                        && imageExtentInFile[5] == 0);
+    if (noImageData)
+    {
+      // Files written cropped to an all-zero or one-voxel segment store a non-empty segment extent in a 1x1x1 image:
+      // that voxel is image data (treating it as no image data would make the segment extent invalid).
+      for (int segmentIndex = 0; dictionary.HasKey(GetSegmentMetaDataKey(segmentIndex, KEY_SEGMENT_ID)); ++segmentIndex)
+      {
+        std::string segmentExtentString;
+        if (this->GetSegmentMetaDataFromDicitionary(segmentExtentString, dictionary, segmentIndex, KEY_SEGMENT_EXTENT))
+        {
+          int segmentExtent[6] = { 0, -1, 0, -1, 0, -1 };
+          GetImageExtentFromString(segmentExtent, segmentExtentString);
+          if (segmentExtent[0] <= segmentExtent[1] && segmentExtent[2] <= segmentExtent[3] && segmentExtent[4] <= segmentExtent[5])
+          {
+            noImageData = false;
+            break;
+          }
+        }
+      }
+    }
+    if (noImageData)
     {
       imageExtentInFile[1] = -1;
       imageExtentInFile[3] = -1;
@@ -1336,6 +1356,7 @@ int vtkMRMLSegmentationStorageNode::WriteBinaryLabelmapRepresentation(vtkMRMLSeg
       commonGeometryImage->GetExtent(commonGeometryExtent);
     }
   }
+  bool commonGeometryIsEmpty = false;
   if (commonGeometryExtent[0] > commonGeometryExtent[1]    //
       || commonGeometryExtent[2] > commonGeometryExtent[3] //
       || commonGeometryExtent[4] > commonGeometryExtent[5])
@@ -1348,6 +1369,19 @@ int vtkMRMLSegmentationStorageNode::WriteBinaryLabelmapRepresentation(vtkMRMLSeg
     commonGeometryExtent[3] = 0;
     commonGeometryExtent[4] = 0;
     commonGeometryExtent[5] = 0;
+    commonGeometryImage->SetExtent(commonGeometryExtent);
+    commonGeometryImage->AllocateScalars(scalarType, 1);
+    // The common extent covers the effective extent of every segment, so no segment has a non-zero voxel:
+    // all segments are written as empty (the reader takes a 1x1x1 image as "no image data").
+    commonGeometryIsEmpty = true;
+  }
+  else if (commonGeometryExtent[0] == commonGeometryExtent[1]    //
+           && commonGeometryExtent[2] == commonGeometryExtent[3] //
+           && commonGeometryExtent[4] == commonGeometryExtent[5])
+  {
+    // A single voxel (cropped to a one-voxel segment): the reader takes a 1x1x1 image as "no image data",
+    // so add a blank voxel to keep the image readable.
+    commonGeometryExtent[1] += 1;
     commonGeometryImage->SetExtent(commonGeometryExtent);
     commonGeometryImage->AllocateScalars(scalarType, 1);
   }
@@ -1413,7 +1447,10 @@ int vtkMRMLSegmentationStorageNode::WriteBinaryLabelmapRepresentation(vtkMRMLSeg
     }
 
     int currentBinaryLabelmapExtent[6] = { 0, -1, 0, -1, 0, -1 };
-    currentBinaryLabelmap->GetExtent(currentBinaryLabelmapExtent);
+    if (!commonGeometryIsEmpty)
+    {
+      currentBinaryLabelmap->GetExtent(currentBinaryLabelmapExtent);
+    }
     if (currentBinaryLabelmapExtent[0] <= currentBinaryLabelmapExtent[1]    //
         && currentBinaryLabelmapExtent[2] <= currentBinaryLabelmapExtent[3] //
         && currentBinaryLabelmapExtent[4] <= currentBinaryLabelmapExtent[5])

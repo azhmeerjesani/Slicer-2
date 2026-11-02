@@ -37,7 +37,8 @@ folder "Slicer Studio tést" (spaces and non-ASCII characters). The tests cover:
 - Save lesion after the open project was renamed or the folder moved writes into the project where it is now (no ghost
   folder of the old name);
 - a scene saved inside a project folder (a subfolder such as Exports/) opens as a copy: only the project's own scene file
-  continues the project in place.
+  continues the project in place;
+- a lesion that was cleared (or has one voxel) is saved so that the project opens again, also in official 3D Slicer.
 """
 
 import contextlib
@@ -4389,6 +4390,85 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertTrue(folder, "the renamed folder is in the reopened project")
         volume = slicer.mrmlScene.GetFirstNodeByClass("vtkMRMLScalarVolumeNode")
         self.assertEqual(shNode.GetItemParent(shNode.GetItemByDataNode(volume)), folder)
+
+
+    def test_70_cleared_or_one_voxel_lesion_is_saved_so_the_project_opens_again(self):
+        """A lesion painted and then cleared (Logical operators > Clear, or every voxel erased) keeps its extent but
+        holds only zeros. Saved cropped (the project writer crops segmentations), it was written as a 1x1x1 image with
+        the segment extent "0 0 0 0 0 0": reading it crashed Studio and official 3D Slicer 5.12/5.13, so the project
+        could never be opened again (BB-1). A one-voxel lesion was written the same way. Now an all-zero segment is
+        written empty and a one-voxel image gets a blank voxel; a file saved the old way opens as well.
+        """
+        service = self._service()
+        volume, _path = self._userVolume("Scan", shape=(12, 14, 16), extension=".nrrd")
+        segmentation, segmentId, array = self._lesion(volume)
+        project = self._projectFor(service)
+        self._save(service)
+        lesionFile = os.path.join(project.path, "Segmentations", "Lesions.seg.nrrd")
+        self.assertTrue(os.path.isfile(lesionFile))
+
+        def header(path):
+            with open(path, "rb") as stream:
+                text = stream.read(4096).decode("latin1")
+            return {line.split(":", 1)[0]: line.split(":", 1)[1].lstrip("=").strip() for line in text.split("\n\n", 1)[0].splitlines() if ":" in line}
+
+        def reloaded(path):
+            node = slicer.util.loadSegmentation(path)
+            self.assertIsNotNone(node, path)
+            self.assertEqual(node.GetSegmentation().GetNumberOfSegments(), 1, "the lesion segment is kept")
+            loadedId = node.GetSegmentation().GetNthSegmentID(0)
+            labelmap = node.GetBinaryLabelmapInternalRepresentation(loadedId)
+            if labelmap is None or labelmap.IsEmpty():
+                voxels = np.zeros_like(array)  # an empty segment (slicer.util cannot export one)
+            else:
+                voxels = slicer.util.arrayFromSegmentBinaryLabelmap(node, loadedId, volume)
+            slicer.mrmlScene.RemoveNode(node)
+            return voxels
+
+        # Cleared: every voxel set to 0 (the labelmap keeps its extent, as after Logical operators > Clear or erasing)
+        slicer.util.updateSegmentBinaryLabelmapFromArray(np.zeros_like(array), segmentation, segmentId, volume)
+        labelmap = segmentation.GetBinaryLabelmapInternalRepresentation(segmentId)
+        extent = labelmap.GetExtent()
+        self.assertTrue(extent[0] <= extent[1] and extent[2] <= extent[3] and extent[4] <= extent[5], "the cleared labelmap keeps an extent")
+        self._save(service)
+        fields = header(lesionFile)
+        self.assertEqual(fields.get("Segment0_Extent"), "0 -1 0 -1 0 -1", "a cleared lesion is written as an empty segment")
+        self.assertEqual(int(reloaded(lesionFile).sum()), 0)
+
+        # One voxel: kept where it is
+        one = np.zeros_like(array)
+        one[6, 7, 8] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(one, segmentation, segmentId, volume)
+        self._save(service)
+        self.assertNotEqual(header(lesionFile).get("sizes"), "1 1 1", "a 1x1x1 image is read as 'no image data'")
+        voxels = reloaded(lesionFile)
+        self.assertEqual([index.tolist() for index in np.nonzero(voxels)], [[6], [7], [8]])
+
+        # The project opens again after the lesion was cleared
+        slicer.util.updateSegmentBinaryLabelmapFromArray(np.zeros_like(array), segmentation, segmentId, volume)
+        self._save(service)
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertTrue(service.openProject(project.path))
+        reopened = slicer.mrmlScene.GetFirstNodeByClass("vtkMRMLSegmentationNode")
+        self.assertIsNotNone(reopened)
+        self.assertEqual(reopened.GetSegmentation().GetNumberOfSegments(), 1)
+
+        # A file saved the old way (1x1x1 image, segment extent "0 0 0 0 0 0") opens with an empty lesion
+        oldFile = os.path.join(self.userDir, "Old cleared lesion.seg.nrrd")
+        with open(oldFile, "wb") as stream:
+            stream.write(
+                b"NRRD0004\ntype: unsigned char\ndimension: 3\nspace: left-posterior-superior\nsizes: 1 1 1\n"
+                b"space directions: (-1,0,0) (0,-1,0) (0,0,1)\nkinds: domain domain domain\nencoding: raw\n"
+                b"space origin: (0,0,0)\nSegment0_Extent:=0 0 0 0 0 0\nSegment0_ID:=Segment_1\nSegment0_LabelValue:=1\n"
+                b"Segment0_Layer:=0\nSegment0_Name:=Lesion\nSegmentation_ContainedRepresentationNames:=Binary labelmap|\n"
+                b"Segmentation_MasterRepresentation:=Binary labelmap\nSegmentation_ReferenceImageExtentOffset:=0 0 0\n\n\x00",
+            )
+        old = slicer.util.loadSegmentation(oldFile)
+        self.assertIsNotNone(old)
+        self.assertEqual(old.GetSegmentation().GetNumberOfSegments(), 1, "the lesion segment is kept")
+        labelmap = old.GetBinaryLabelmapInternalRepresentation(old.GetSegmentation().GetNthSegmentID(0))
+        self.assertTrue(labelmap.IsEmpty() or labelmap.GetScalarRange()[1] == 0, "the old cleared lesion opens empty")
 
 
 def _sphere(center=(0, 0, 0)):
