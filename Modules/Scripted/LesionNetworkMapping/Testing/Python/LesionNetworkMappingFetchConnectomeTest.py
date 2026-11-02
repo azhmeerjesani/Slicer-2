@@ -400,6 +400,16 @@ class FetchRunTest(FetchConnectomeBase):
         self.assertEqual(bundle.provenance["population"]["n"], 4)
         self.assertFalse([r for r in self.server.requests if r["file"] == 1002])  # the third archive was not requested
 
+    def test_a_subject_subset_records_the_subjects_the_bundle_holds(self):
+        # 3 of 5 subjects are estimated to be in ceil(3/5 * 3) = 2 archives, which hold 4: the bundle does not claim "subjects:3"
+        summary = self.fetch(subset="subjects:3")
+        bundle = connectome.ConnectomeBundle.open(summary["path"])
+        self.assertEqual(bundle.subject_ids, ["sub-0001", "sub-0002", "sub-0003", "sub-0004"])
+        self.assertEqual(bundle.provenance["source"]["subset"], "archives:00-01")
+        differs = self.warnings("subset_differs")
+        self.assertEqual(len(differs), 1)
+        self.assertIn("hold 4", differs[0]["message"])
+
     def test_keep_archives_stores_each_archive(self):
         summary = self.fetch(keep_archives=True)
         for index, data in enumerate(self.archives):
@@ -854,6 +864,149 @@ class FetchLeadDbsTest(unittest.TestCase):
                     os.environ.pop(key, None)
                 else:
                     os.environ[key] = value
+
+
+class FetchLeadDbsSubsetTest(unittest.TestCase):
+    """A named subset of a Lead-DBS entry: the bundle holds exactly its subjects, however they are spread over the archives."""
+
+    N = 8
+    NAMED = {"Full Set": 8, "First 4 Subjects": 4, "First 2 Subjects": 2, "First Subject": 1}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tempfile.mkdtemp(prefix="lnm-fetch-leaddbs-subset-")
+        cls._no_proxy = os.environ.get("NO_PROXY"), os.environ.get("no_proxy")
+        os.environ["NO_PROXY"] = os.environ["no_proxy"] = "127.0.0.1,localhost"
+        rng = np.random.default_rng(4)
+        dataset = os.path.join(cls.root, "dataset")
+        os.makedirs(os.path.join(dataset, "vol"))
+        shape = (5, 6, 4)
+        mask = np.zeros(shape, dtype=bool)
+        mask[1:4, 1:5, 1:3] = True
+        outidx = np.sort(np.ravel_multi_index(np.nonzero(mask), shape, order="F")) + 1
+        cls.subjects = [f"sub{i:02d}" for i in range(1, cls.N + 1)]
+        sub_ids = np.empty((cls.N, 1), dtype=object)
+        cls.runs = {}
+        for index, subject in enumerate(cls.subjects):
+            sub_ids[index, 0] = np.array([subject, f"{subject}_run1.mat"], dtype=object)
+            path = os.path.join(dataset, "vol", f"{subject}_run1.mat")
+            sio.savemat(path, {"gmtc": (50 + rng.standard_normal((10, len(outidx)))).astype(np.float32)})
+            with open(path, "rb") as f:
+                cls.runs[subject] = f.read()
+        spm_mat = np.array([[-2.0, 0, 0, 92], [0, 2, 0, -128], [0, 0, 2, -74], [0, 0, 0, 1]])
+        sio.savemat(os.path.join(dataset, "dataset_volsurf.mat"), {"vol": {"outidx": outidx.astype(np.float64)[:, np.newaxis], "space": {"dim": np.array([shape], np.float64), "mat": spm_mat, "fname": "space.nii"}, "subIDs": sub_ids}})
+        info = {"name": "GSP subset (test)", "tag": "GSPsubset", "type": "fMRI_timecourses",
+                "subsets": [{"name": name, "subs": list(range(1, n + 1)) if n > 1 else 1} for name, n in cls.NAMED.items()]}
+        with open(os.path.join(dataset, "dataset_info.json"), "w", encoding="utf-8") as f:
+            json.dump(info, f)
+        cls.metadata = {}
+        for name in ("dataset_info.json", "dataset_volsurf.mat"):
+            with open(os.path.join(dataset, name), "rb") as f:
+                cls.metadata[name] = f.read()
+        cls.server = FakeDataverse()
+        cls.next_id = 3000
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.close()
+        shutil.rmtree(cls.root, ignore_errors=True)
+        for key, value in zip(("NO_PROXY", "no_proxy"), cls._no_proxy, strict=True):
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def setUp(self):
+        self.server.reset()
+        self.dest = tempfile.mkdtemp(prefix="lnm-fetch-leaddbs-subset-dest-")
+        self.addCleanup(shutil.rmtree, self.dest, True)
+        self.events = []
+
+    def entry(self, layout):
+        """An entry whose archives hold ``layout`` (subjects per archive, in order); returns (entry, archive file ids)."""
+        entry = copy.deepcopy(catalog.load_catalog().get("gsp1000-kktjqc"))
+        api = f"https://dataverse.invalid/api/datasets/:persistentId/?persistentId=doi:{DOI}"
+        entry.update({"id": "fake-leaddbs-" + "-".join(str(n) for n in layout), "title": "GSP1000 Preprocessed Connectome for Lead-DBS (fake)"})
+        entry["source"].update({"api": api, "doi": DOI})
+        entry["terms"].update({"api": api})
+        files, ids, start = [], [], 0
+        for index, count in enumerate(layout):
+            data = _tar([(f"GSP1000-LeadDBS/vol/{subject}_run1.mat", self.runs[subject]) for subject in self.subjects[start : start + count]])
+            start += count
+            file_id = type(self).next_id = type(self).next_id + 1
+            self.server.add(file_id, f"GSP1000_leadDBS_{index:02d}.tar", data, folder="GSP1000-LeadDBS/vol")
+            files.append({"name": f"GSP1000_leadDBS_{index:02d}.tar", "folder": "GSP1000-LeadDBS/vol", "id": file_id, "size": len(data), "checksum": {"algo": "md5", "value": _md5(data)}, "role": "archive"})
+            ids.append(file_id)
+        for name, data in self.metadata.items():
+            file_id = type(self).next_id = type(self).next_id + 1
+            self.server.add(file_id, name, data, folder="")
+            files.append({"name": name, "folder": "", "id": file_id, "size": len(data), "checksum": {"algo": "md5", "value": _md5(data)}, "role": "metadata"})
+        entry["files"] = files
+        entry["size"] = sum(f["size"] for f in files)
+        entry["disk"] = {"subjects": self.N, "voxels": None, "timepoints_per_run": None, "runs_per_subject": [1, 1], "stored_bytes": None}
+        entry["population"]["n"] = self.N
+        entry["subsets"] = dict(self.NAMED)
+        self.assertEqual(catalog.validate_entry(entry), [])
+        return entry, ids
+
+    def emit(self, event, **fields):
+        self.events.append({"event": event, **fields})
+
+    def fetch(self, entry, subset, dest=None, **kwargs):
+        with _fast_retries():
+            return fetchconnectome.fetch_connectome(entry, dest or os.path.join(self.dest, re.sub(r"\W+", "_", str(subset))), TERMS_SHA, subset=subset, streams=2,
+                                                    server=self.server.url, emit=kwargs.pop("emit", self.emit), **kwargs)
+
+    def warnings(self, code):
+        return [e for e in self.events if e["event"] == "warning" and e.get("code") == code]
+
+    def assertExactSubset(self, summary, subset, n):
+        bundle = connectome.ConnectomeBundle.open(summary["path"])
+        self.assertEqual(bundle.subject_ids, self.subjects[:n])
+        self.assertEqual(summary["subjects"], n)
+        self.assertEqual(bundle.provenance["source"]["subset"], subset)
+        self.assertEqual(bundle.provenance["population"]["n"], n)
+        if subset in self.NAMED:
+            self.assertEqual(bundle.subsets[subset], self.subjects[:n])  # the bundle's own named subset is the one asked for
+        self.assertEqual(self.warnings("subset_differs"), [])
+        return bundle
+
+    def test_archives_that_hold_more_subjects_keep_only_the_named_subset(self):
+        entry, ids = self.entry((4, 4))
+        self.assertExactSubset(self.fetch(entry, "First Subject"), "First Subject", 1)
+        self.assertExactSubset(self.fetch(entry, "First 2 Subjects"), "First 2 Subjects", 2)
+        self.assertExactSubset(self.fetch(entry, "subjects:3"), "subjects:3", 3)
+        self.assertFalse(self.server.requests_for(ids[1]))  # the second archive is never needed
+        self.assertEqual(self.warnings("subset_more_archives"), [])
+
+    def test_archives_that_hold_fewer_subjects_are_followed_by_the_next_ones(self):
+        entry, ids = self.entry((1, 1, 3, 3))  # "First 4 Subjects" is estimated in 2 archives, which hold 2 subjects
+        self.assertEqual(catalog.disk_plan(entry, "First 4 Subjects")["archives"], ["GSP1000_leadDBS_00.tar", "GSP1000_leadDBS_01.tar"])
+        summary = self.fetch(entry, "First 4 Subjects")
+        self.assertExactSubset(summary, "First 4 Subjects", 4)
+        self.assertEqual(summary["archives"], 3)
+        self.assertEqual([e["archive"] for e in self.warnings("subset_more_archives")], ["GSP1000_leadDBS_02.tar"])
+        self.assertFalse(self.server.requests_for(ids[3]))
+        self.assertIn("GSP1000_leadDBS_02.tar", [f["name"] for f in connectome.ConnectomeBundle.open(summary["path"]).provenance["source"]["files"]])
+        self.assertTrue(fetchconnectome.read_state(entry, os.path.dirname(summary["path"]))["complete"])
+
+    def test_a_fetch_cancelled_in_an_extra_archive_resumes_to_the_exact_subset(self):
+        entry, ids = self.entry((1, 1, 3, 3))
+        cancel = threading.Event()
+        dest = os.path.join(self.dest, "resumed")
+
+        def emit(event, **fields):
+            self.emit(event, **fields)
+            if event == "warning" and fields.get("code") == "subset_more_archives":
+                cancel.set()
+
+        with self.assertRaises(jobs.Cancelled):
+            self.fetch(entry, "First 4 Subjects", dest=dest, emit=emit, cancel=cancel)
+        self.assertFalse(os.path.isfile(os.path.join(fetchconnectome.bundle_path(entry, dest), "connectome.json")))
+        self.assertIsNotNone(fetchconnectome.unfinished_fetch(entry, dest))
+        summary = self.fetch(entry, "First 4 Subjects", dest=dest, resume=True)
+        self.assertExactSubset(summary, "First 4 Subjects", 4)
+        self.assertFalse(self.server.requests_for(ids[3]))
 
 
 class FetchCommandLineTest(FetchConnectomeBase):

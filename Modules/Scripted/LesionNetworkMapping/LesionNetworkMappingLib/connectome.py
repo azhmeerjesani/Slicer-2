@@ -1617,7 +1617,7 @@ def _drop_staging(bundle_path, subject_id):
 class _TarStreamConverter:
     """State of one :func:`from_tar_stream` call (see there)."""
 
-    def __init__(self, fileobj, out_dir, layout, name, mask_policy, mask_path, resume, start_offset, progress, cancel, provenance, description, citation, data_use_terms, dtype, overwrite, finalize, dataset_dir, grid):
+    def __init__(self, fileobj, out_dir, layout, name, mask_policy, mask_path, resume, start_offset, progress, cancel, provenance, description, citation, data_use_terms, dtype, overwrite, finalize, dataset_dir, grid, subjects=None):
         self.fileobj = fileobj
         self.path = os.path.abspath(os.fspath(out_dir))
         self.layout = layout
@@ -1640,6 +1640,9 @@ class _TarStreamConverter:
         self.user_subsets = self.provenance.pop("subsets", None)
         self.writer = None
         self.dataset = None
+        self.only = None if subjects is None else {str(s) for s in subjects}  # convert only these subjects (Lead-DBS)
+        if self.only is not None and layout != "leaddbs_vol":
+            raise ValueError("subjects (a subject subset to convert) is supported by the leaddbs_vol layout only")
         self.run_map = {}
         self.pending = {}  # subject id -> {"runs": {key: array or staged .npy path}, "first": absolute offset or None, "skip": bool}
         self.written = set()  # subjects written by this call
@@ -1810,6 +1813,8 @@ class _TarStreamConverter:
             return
         subject_index, run_index = hit
         subject_id = self.dataset.subject_ids[subject_index]
+        if self.only is not None and subject_id not in self.only:
+            return  # not in the subject subset being converted
         if self.writer.has_subject(subject_id):
             _drop_staging(self.path, subject_id)
             return
@@ -1853,7 +1858,12 @@ class _TarStreamConverter:
             return
         if not getattr(tar, "lnm_end_marker", False):
             raise StreamIntegrityError(f"The archive stream ends at offset {self.start_offset + tar.offset} without the tar end-of-archive marker: the download is truncated or the archive damaged")
-        end = self.start_offset + tar.offset
+        yield from self.close(self.start_offset + tar.offset)
+
+    def close(self, end):
+        """Write or stage the pending subjects at the end of a stream (``end``: its archive offset) and finalize the
+        bundle when asked; yields their checkpoints and then the last ``{"done": True, ...}`` item.
+        """
         staged = []
         for subject_id in list(self.pending):
             entry = self.pending[subject_id]
@@ -1936,6 +1946,7 @@ def from_tar_stream(
     finalize=True,
     dataset_dir=None,
     grid=None,
+    subjects=None,
 ):
     """Convert one tar archive, read as a stream, into a bundle: a generator of checkpoints.
 
@@ -1999,13 +2010,32 @@ def from_tar_stream(
     :param finalize: write connectome.json at the end of this archive (False while more archives follow).
     :param dataset_dir: the Lead-DBS dataset folder (``leaddbs_vol`` only).
     :param grid: the expected run grid (a :class:`geometry.Grid`); None is :data:`GSP_RUN_GRID`, False any grid.
+    :param subjects: convert only these subject ids (``leaddbs_vol`` only, for example the ids of a named subset);
+      the run files of other subjects are skipped. None converts every subject.
     """
     if layout not in STREAM_LAYOUTS:
         raise ValueError(f"layout must be one of {', '.join(STREAM_LAYOUTS)}")
     if dtype not in SUBJECT_DTYPES:
         raise ValueError(f"dtype must be one of {sorted(SUBJECT_DTYPES)}")
-    converter = _TarStreamConverter(fileobj, out_dir, layout, name, mask_policy, mask_path, resume, start_offset, progress, cancel, provenance, description, citation, data_use_terms, dtype, overwrite, finalize, dataset_dir, grid)
+    converter = _TarStreamConverter(fileobj, out_dir, layout, name, mask_policy, mask_path, resume, start_offset, progress, cancel, provenance, description, citation, data_use_terms, dtype, overwrite, finalize, dataset_dir, grid, subjects)
     return converter.run()
+
+
+def finalize_stream(out_dir, layout="gsp_ilxiks", name=None, provenance=None, description="", citation="", data_use_terms="", dtype="float16", dataset_dir=None, grid=None):
+    """Finalize a bundle that :func:`from_tar_stream` converted with ``finalize=False`` (when the caller only knows
+    after the last archive that no other archive follows): the same last step as ``finalize=True``.
+
+    :return: the last item of :func:`from_tar_stream` (``{"done": True, "path", "subjects", "incomplete", ...}``).
+    """
+    if layout not in STREAM_LAYOUTS:
+        raise ValueError(f"layout must be one of {', '.join(STREAM_LAYOUTS)}")
+    converter = _TarStreamConverter(None, out_dir, layout, name, None, None, True, 0, None, None, provenance, description, citation, data_use_terms, dtype, False, True, dataset_dir, grid)
+    if converter.writer is None or not (converter.writer.metadata["subjects"] or converter.pending):
+        raise ValueError(f"{converter.path} has no converted subject, so there is nothing to finalize")
+    last = None
+    for last in converter.close(None):
+        pass
+    return last
 
 
 def make_synthetic(out_dir, shape=(20, 24, 20), n_subjects=6, runs=(30, 30), seed=0, amplitude=1.5, radius=3.0, affine=None, name="Synthetic", dtype="float16", overwrite=True):

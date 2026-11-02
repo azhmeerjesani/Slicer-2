@@ -33,6 +33,11 @@ accepted (addendum 4.1, never automatically, never bundled, no app-owned credent
   once more to compute its MD5 again; if it still differs the job stops (exit code 1, ``code: checksum``) and the
   caller may run it again with ``--accept-checksum-mismatch``, which records ``checksumOverride`` in
   ``connectome.json`` (``source``) and in the run record.
+- **Subject subsets.** The archives of a subject subset (a named subset or ``subjects:N``) are estimated. For a Lead-DBS
+  entry the subset's subject ids are read from dataset_info.json and dataset_volsurf.mat: only they are converted, and the
+  next archives are read (warning ``subset_more_archives``) until the bundle holds all of them. Otherwise the bundle holds
+  every subject of the archives read; ``source.subset`` names the subset only when the bundle holds exactly its subjects,
+  and else records what it holds (the archives read, ``archives:00-01``), with a ``subset_differs`` warning.
 - **Keep-awake.** :class:`jobs.KeepAwake` runs ``caffeinate -i -w <pid>`` on macOS and calls
   SetThreadExecutionState on Windows; Linux does nothing.
 - **Result.** ``<dest>/<entry>.lnmc`` (connectome.json keeps ``format: "lnmc"``, version 1) with ``source{doi, version,
@@ -323,10 +328,21 @@ def compare_catalog(entry, live):
     return differences
 
 
-def plan_files(entry, live, subset=None):
-    """The files a fetch needs, from the live listing: ``{"archives": [...], "others": [...], "selection": dict}``.
+def _plan_item(entry, catalog_file, live):
+    """The live file of a catalog file, as a plan item (see :func:`plan_files`)."""
+    is_archive = catalog_file.get("role") == "archive"
+    item = _match_live(catalog_file, live["files"])
+    if item is None:
+        raise jobs.JobError(f"{catalog_file['name']} is no longer listed in the dataset {entry['source'].get('doi')}; check the catalog for updates", code="listing")
+    return {**item, "role": catalog_file.get("role"), "size": catalog_file.get("size") if (is_archive and item["size"] is None) else item["size"]}
 
-    Each file is ``{id, name, folder, size, md5, tabular, role}`` with the live id and checksum.
+
+def plan_files(entry, live, subset=None):
+    """The files a fetch needs, from the live listing: ``{"archives": [...], "others": [...], "selection": dict, "more": [...]}``.
+
+    Each file is ``{id, name, folder, size, md5, tabular, role}`` with the live id and checksum. ``more`` lists the
+    catalog files of the other archives (name order), which a subject subset reads when its estimated archives
+    do not hold all its subjects.
     Raises ``jobs.JobError`` (code ``listing``) when a needed file is no longer listed.
     """
     try:
@@ -339,13 +355,10 @@ def plan_files(entry, live, subset=None):
         is_archive = catalog_file.get("role") == "archive"
         if is_archive and catalog_file["name"] not in chosen:
             continue
-        item = _match_live(catalog_file, live["files"])
-        if item is None:
-            raise jobs.JobError(f"{catalog_file['name']} is no longer listed in the dataset {entry['source'].get('doi')}; check the catalog for updates", code="listing")
-        item = {**item, "role": catalog_file.get("role"), "size": catalog_file.get("size") if (is_archive and item["size"] is None) else item["size"]}
-        (archives if is_archive else others).append(item)
+        (archives if is_archive else others).append(_plan_item(entry, catalog_file, live))
     archives.sort(key=lambda f: f["name"])
-    return {"archives": archives, "others": others, "selection": selection}
+    more = [f for f in catalogs.archives(entry) if f["name"] not in chosen]
+    return {"archives": archives, "others": others, "selection": selection, "more": more}
 
 
 #
@@ -823,7 +836,7 @@ def _provenance(entry, live, plan, terms_sha, results, full_set, participants, s
         "files": source_files,
     }
     if not full_set:
-        source["subset"] = plan["selection"].get("text") or "partial"
+        source["subset"] = plan["selection"].get("recorded") or plan["selection"].get("text") or "partial"
     if override:
         source["checksumOverride"] = True
     population = entry.get("population") or {}
@@ -1047,11 +1060,19 @@ def _run_fetch(entry, live, plan, terms_sha, state, work, bundle, dest, session,
         results[item["name"]] = {"md5": item.get("md5"), "bytes": size, "verification": verification}
         state.save()
 
-    for item in archives:
+    def restart_if_changed(item):
         info = data["archives"].get(item["name"])
         if info is not None and info.get("md5Published") and item.get("md5") and info["md5Published"] != item["md5"] and info.get("status") != "done":
             emit("warning", code="catalog_differs", message=f"{item['name']} has changed at the provider since it was started; it is read again from its start.")
             info.update({"status": "pending", "memberOffset": 0, "bytes": 0})
+
+    for item in archives:
+        restart_if_changed(item)
+
+    # A subject subset of a Lead-DBS dataset (a named subset, or the first N subjects) has known subject ids: only they
+    # are converted, and the archives after the estimated ones are read until the bundle holds all of them
+    subset_ids = _subset_subject_ids(plan["selection"], dataset_dir) if layout == "leaddbs_vol" and not full_set and not plan["selection"]["exact"] else None
+    more = list(plan.get("more") or []) if subset_ids is not None else []
 
     def completed():
         """Bytes of the archives that are converted (the checksum of a "mismatch" archive is pending only)."""
@@ -1090,7 +1111,7 @@ def _run_fetch(entry, live, plan, terms_sha, state, work, bundle, dest, session,
             for checkpoint in connectome.from_tar_stream(
                 source, bundle, layout=layout, name=bundle_name(entry), resume=True, start_offset=source.start, cancel=cancel, finalize=last, description=description,
                 citation=entry.get("citation") or "", data_use_terms=f"{entry.get('licence')} (accepted terms text sha256 {terms_sha[:12]}...)",
-                dataset_dir=dataset_dir if layout == "leaddbs_vol" else None, grid=_expected_grid(entry),
+                dataset_dir=dataset_dir if layout == "leaddbs_vol" else None, grid=_expected_grid(entry), subjects=subset_ids,
             ):
                 if checkpoint.get("cancelled"):
                     info.update({"status": "partial", "memberOffset": int(checkpoint["member_offset"]), "bytes": source.position})
@@ -1117,10 +1138,30 @@ def _run_fetch(entry, live, plan, terms_sha, state, work, bundle, dest, session,
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", connectome.ConversionWarning)
-            for position, index in enumerate(todo):
+            position = 0
+            while True:
+                if position == len(todo):
+                    missing = _missing_subjects(subset_ids, bundle)
+                    if not missing or not more:
+                        break
+                    # The estimated archives do not hold the whole subset: read the next one
+                    item = _plan_item(entry, more.pop(0), live)
+                    emit("warning", code="subset_more_archives", archive=item["name"],
+                         message=f"{len(missing)} subject(s) of {plan['selection']['text']} are not in the archives read so far: {item['name']} is read too.")
+                    restart_if_changed(item)
+                    archives.append(item)
+                    data["sizes"][item["name"]] = item["size"]
+                    progress.total += item["size"]
+                    progress.count = len(archives)
+                    if data["archives"].get(item["name"], {}).get("status") == "done":
+                        position = len(todo)
+                        continue  # converted already (a resumed fetch)
+                    todo.append(len(archives) - 1)
+                index = todo[position]
                 for ahead in todo[position : position + int(streams)]:
                     if ahead not in pool:
                         pool[ahead] = make_source(ahead)
+                position += 1
                 item = archives[index]
                 source = pool.pop(index)
                 info = state.archive(item["name"])
@@ -1129,7 +1170,7 @@ def _run_fetch(entry, live, plan, terms_sha, state, work, bundle, dest, session,
                 progress.completed = completed()
                 if source is not None:
                     progress.update(source, force=True)
-                    result = convert(source, item, info, last=index == len(archives) - 1)
+                    result = convert(source, item, info, last=subset_ids is None and index == len(archives) - 1)
                     if keep_archives:
                         final = os.path.join(work, "archives", item["name"])
                         os.replace(final + ".part", final)
@@ -1154,7 +1195,15 @@ def _run_fetch(entry, live, plan, terms_sha, state, work, bundle, dest, session,
                 source.close()
         state.save()
 
-    subjects = len(connectome.ConnectomeBundle.open(bundle).subject_ids)
+    if subset_ids is not None and not os.path.isfile(os.path.join(bundle, "connectome.json")):
+        # Converted without finalizing (whether another archive was needed was known only after each one)
+        if not _bundle_subject_ids(bundle):
+            raise jobs.JobError(f"None of the subjects of {plan['selection']['text']} is in the archives of {entry['id']}", code="listing")
+        connectome.finalize_stream(bundle, layout=layout, name=bundle_name(entry), description=description, citation=entry.get("citation") or "",
+                                   data_use_terms=f"{entry.get('licence')} (accepted terms text sha256 {terms_sha[:12]}...)", dataset_dir=dataset_dir, grid=_expected_grid(entry))
+    subject_ids = list(connectome.ConnectomeBundle.open(bundle).subject_ids)
+    subjects = len(subject_ids)
+    plan["selection"]["recorded"] = _recorded_subset(entry, plan, archives, subset_ids, subject_ids, full_set, emit)
     participants = _copy_documents(plan, files_dir, bundle)
     shutil.copyfile(os.path.join(work, "terms-accepted.txt"), os.path.join(bundle, "terms-accepted.txt"))
     keys = _provenance(entry, live, plan, terms_sha, results, full_set, participants, subjects, bool(data.get("checksumOverride")))
@@ -1165,6 +1214,79 @@ def _run_fetch(entry, live, plan, terms_sha, state, work, bundle, dest, session,
     emit("result", kind="connectome", path=bundle, subjects=subjects, licence=entry.get("licence"), terms_sha256=terms_sha, checksum_override=bool(data.get("checksumOverride")))
     return {"path": bundle, "subjects": subjects, "archives": len(archives), "checksum_override": bool(data.get("checksumOverride")), "unverified_resumed": totals["unverified_resumed"],
             "reconnects": totals["reconnects"], "resigns": totals["resigns"], "bytes": totals["bytes"], "work_dir": work}
+
+
+def _subset_subject_ids(selection, dataset_dir):
+    """The subject ids of a subject subset of a Lead-DBS dataset, from its dataset_info.json and dataset_volsurf.mat in
+    ``dataset_dir``: a named subset, or the first N subjects of vol.subIDs. None when they cannot be known.
+    """
+    from . import connectome
+
+    text = str(selection.get("text") or "").strip()
+    try:
+        dataset = connectome._read_leaddbs_dataset(dataset_dir)
+    except Exception:
+        return None
+    named = connectome._leaddbs_subsets(dataset.info, dataset.subject_ids, dataset.n_listed)
+    if text in named:
+        return list(named[text])
+    if text and (catalogs._SUBJECT_SUBSET_PATTERN.match(text) or text.isdigit()) and selection.get("subjects"):
+        return list(dataset.subject_ids[: int(selection["subjects"])])
+    return None
+
+
+def _bundle_subject_ids(bundle):
+    """The subject ids a bundle holds (finished or not), from connectome.json or connectome.partial.json."""
+    for name in ("connectome.json", "connectome.partial.json"):
+        try:
+            with open(os.path.join(bundle, name), encoding="utf-8") as f:
+                return {entry["id"] for entry in json.load(f).get("subjects") or []}
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return set()
+
+
+def _missing_subjects(subset_ids, bundle):
+    """The subjects of ``subset_ids`` (None: no subset) that the bundle does not hold yet."""
+    if subset_ids is None:
+        return []
+    have = _bundle_subject_ids(bundle)
+    return [subject_id for subject_id in subset_ids if subject_id not in have]
+
+
+def _archive_spec(entry, archives):
+    """The archive subset ("archives:00-03", "archives:0,2,5") of the archives read, by index in the entry's name order."""
+    names = [f["name"] for f in catalogs.archives(entry)]
+    indices = sorted(names.index(item["name"]) for item in archives if item["name"] in names)
+    if indices and indices == list(range(len(indices))):
+        return f"archives:00-{indices[-1]:02d}"
+    return "archives:" + ",".join(str(i) for i in indices)
+
+
+def _recorded_subset(entry, plan, archives, subset_ids, subject_ids, full_set, emit):
+    """What ``source.subset`` of the bundle records: the subset asked for only when the bundle holds exactly its
+    subjects. Otherwise the subjects the bundle really holds are recorded (and a ``subset_differs`` warning says so):
+    the archives read, or the part of the named subset that they hold.
+    """
+    selection = plan["selection"]
+    text = selection.get("text")
+    if full_set or selection.get("exact") or not text:
+        return None
+    if subset_ids is not None:
+        wanted = set(subset_ids)
+        if set(subject_ids) == wanted:
+            return text
+        if set(subject_ids) < wanted:
+            recorded = f"{text} ({len(subject_ids)} of {len(wanted)} subjects)"
+            emit("warning", code="subset_differs", subset=text, subjects=len(subject_ids),
+                 message=f"{text} has {len(wanted)} subjects, but only {len(subject_ids)} of them are in the archives of the dataset: the bundle holds those {len(subject_ids)} and records them as {recorded!r}.")
+            return recorded
+    elif selection.get("subjects") is not None and len(subject_ids) == selection["subjects"]:
+        return text  # the first N subjects in archive order
+    recorded = _archive_spec(entry, archives)
+    emit("warning", code="subset_differs", subset=text, subjects=len(subject_ids),
+         message=f"{text} asks for {selection.get('subjects')} subjects, but the archives read ({recorded}) hold {len(subject_ids)}: the bundle holds all {len(subject_ids)} and records them as {recorded!r}.")
+    return recorded
 
 
 def _expected_grid(entry):

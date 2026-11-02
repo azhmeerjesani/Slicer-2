@@ -460,6 +460,10 @@ def disk_plan(entry, subset=None, keep_archives=False):
             peak = download + kept
     if not selection["exact"]:
         notes.append("The archives of a subject subset are estimated: subjects are assumed spread evenly over the archives in order.")
+        if entry.get("converter") == "leaddbs_vol":
+            notes.append("Only the subset's subjects are kept, and the next archives are read too when these do not hold all of them.")
+        else:
+            notes.append("The bundle holds every subject of these archives, and records them as the archives read when that is not the subset.")
     return {
         "download": download,
         "stored": stored,
