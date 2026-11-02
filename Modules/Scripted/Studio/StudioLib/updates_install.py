@@ -120,6 +120,15 @@ class InstallError(Exception):
         self.manualSteps = manualSteps
 
 
+def manualSteps(kind, packagePath, target):
+    """How to install the package ``packagePath`` (named by its full path: the user must find it) by hand."""
+    if kind == "macos":
+        return ("To install the update by hand, quit Slicer Studio, open the disk image "
+                f"{packagePath} and drag Slicer Studio to the Applications folder, replacing the old one.")
+    return (f"To install the update by hand, quit Slicer Studio, extract {packagePath} and replace the folder "
+            f"{target} with the extracted folder.")
+
+
 #
 # Where the application is installed
 #
@@ -324,8 +333,7 @@ def prepareLinux(packagePath, target, expectedVersion, stagingParent=None):
     """
     if not target or not os.path.isdir(target):
         raise InstallError("The installed application folder was not found.")
-    manual = (f"To install the update by hand, quit Slicer Studio, extract {os.path.basename(packagePath)} and replace the folder "
-              f"{target} with the extracted folder.")
+    manual = manualSteps("linux", packagePath, target)
     if not isWritable(target):
         raise InstallError(f"Slicer Studio cannot replace itself: the folder {os.path.dirname(target)} is not writable.", manual)
     root = stagingRoot(target, stagingParent)
@@ -412,8 +420,7 @@ def prepareMacOS(dmgPath, target, expectedVersion, env=None, stagingParent=None)
 
     Raise ``InstallError`` (with manual steps) on any problem; the installed application is never touched here.
     """
-    manual = ("To install the update by hand, quit Slicer Studio, open the disk image "
-              f"{os.path.basename(dmgPath)} and drag Slicer Studio to the Applications folder, replacing the old one.")
+    manual = manualSteps("macos", dmgPath, target)
     if not target or not os.path.isdir(target):
         raise InstallError("The installed application was not found.", manual)
     if isTranslocated(target):

@@ -37,6 +37,7 @@ Settings (fork-only, SPEC 9.7 rule 5): ``Studio/Updates/AutoCheck`` (default tru
 The functions above the "Service" section use no Qt and no Slicer object (the tests use them with local files).
 """
 
+import filecmp
 import hashlib
 import http.client
 import importlib
@@ -45,6 +46,7 @@ import logging
 import os
 import platform
 import re
+import shutil
 import sys
 import threading
 import time
@@ -724,6 +726,46 @@ def downloadDirectory():
     return os.path.join(stateDirectory(), "downloads")
 
 
+def manualPackageDirectory():
+    """Where a verified package that the user must install by hand is kept: the user's Downloads folder, which the
+    manual steps name and which Slicer Studio never cleans up (unlike ``downloadDirectory()``). Main thread only.
+    """
+    import qt
+
+    if manualPackageDirectoryOverride:
+        return manualPackageDirectoryOverride
+    return qt.QStandardPaths.writableLocation(qt.QStandardPaths.DownloadLocation) or os.path.expanduser("~")
+
+
+def keepPackage(path, directory):
+    """Move the downloaded package ``path`` to ``directory`` (see ``manualPackageDirectory()``) so that it can be
+    installed by hand. A file of the same name is never overwritten: the same file is reused, another one gets a
+    numbered name. Return the path of the kept package, or ``path`` when it cannot be moved.
+    """
+    name = os.path.basename(path)
+    stem, extension = (name[:-len(".tar.gz")], ".tar.gz") if name.endswith(".tar.gz") else os.path.splitext(name)
+    destination = None
+    try:
+        os.makedirs(directory, exist_ok=True)
+        if os.path.samefile(os.path.dirname(os.path.abspath(path)), directory):
+            return path
+        destination = os.path.join(directory, name)
+        number = 2
+        while os.path.lexists(destination):
+            if os.path.isfile(destination) and filecmp.cmp(destination, path, shallow=False):
+                _removeQuietly(path)
+                return destination
+            destination = os.path.join(directory, f"{stem} ({number}){extension}")
+            number += 1
+        shutil.move(path, destination)
+        return destination
+    except OSError:
+        logging.warning("Updates: could not keep the package for an install by hand:\n" + traceback.format_exc())
+        if destination and os.path.isfile(path) and os.path.isfile(destination):
+            _removeQuietly(destination)  # a partial copy (another file system)
+        return path if os.path.isfile(path) else (destination or path)
+
+
 #
 # Service
 #
@@ -736,6 +778,8 @@ installTargetOverride = None
 currentVersionOverride = None
 #: Tests: replaces the private state folder (install record, downloads)
 stateDirectoryOverride = None
+#: Tests: replaces the folder where a package to install by hand is kept (the user's Downloads folder)
+manualPackageDirectoryOverride = None
 
 
 def instance():
@@ -1591,6 +1635,7 @@ class UpdateService:
         target = self.installTarget()
         feed = feedUrl()
         directory = downloadDirectory()
+        keepDirectory = manualPackageDirectory()
         if target is None and key in ("macos-arm64", "macos-x86_64", "linux-x86_64"):
             raise updates_install.InstallError(_("The installed application was not found."))
         unavailable = _("This computer cannot install the update.")
@@ -1609,10 +1654,18 @@ class UpdateService:
             if task.cancelled():
                 raise UpdateError(_("The download was cancelled."))
             task.phase = "prepare"
-            if key == "linux-x86_64":
-                return updates_install.prepareLinux(path, target, manifest.version)
-            if key in ("macos-arm64", "macos-x86_64"):
-                return updates_install.prepareMacOS(path, target, manifest.version, stagingParent=None)
+            try:
+                if key == "linux-x86_64":
+                    return updates_install.prepareLinux(path, target, manifest.version)
+                if key in ("macos-arm64", "macos-x86_64"):
+                    return updates_install.prepareMacOS(path, target, manifest.version, stagingParent=None)
+            except updates_install.InstallError as error:
+                if error.manualSteps and os.path.isfile(path):
+                    # The steps tell the user to install this package by hand: it leaves the private download folder
+                    # (emptied at the next start) for a folder the user knows, and the steps name its full path
+                    kept = keepPackage(path, keepDirectory)
+                    error.manualSteps = updates_install.manualSteps("linux" if key == "linux-x86_64" else "macos", kept, target)
+                raise
             raise UpdateError(unavailable)
 
         def done(prepared, error):

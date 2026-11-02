@@ -235,7 +235,9 @@ administrator password; you can instead quit, open the downloaded disk image and
 drag Slicer Studio to Applications. If Slicer Studio runs from the disk image or
 from the Downloads folder (macOS "App Translocation"), move it to Applications
 first. On Linux, the folder of the package must be writable; otherwise extract the
-new package yourself. **Install when I quit** installs the downloaded update the
+new package yourself. When Slicer Studio cannot install an update itself, it keeps
+the checked package in your Downloads folder and names its full path.
+**Install when I quit** installs the downloaded update the
 next time you quit, without restarting.
 
 ### Web version

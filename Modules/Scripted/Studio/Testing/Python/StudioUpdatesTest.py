@@ -2016,6 +2016,55 @@ fi
     # (k) testing
     #
 
+    def test_ManualInstallKeepsPackageWhereStepsSay(self):
+        """When Slicer Studio cannot replace itself, the manual steps name the full path of the verified package, in a
+        folder the user knows (not the private download folder), and the next start does not delete it.
+        """
+        updates, install = self.updates, self.install
+        if updates.platformKey() != "linux-x86_64":
+            self.skipTest("the Linux package path is tested on Linux")
+        data = self._publish("1.2.0")
+        name = data["assets"]["linux-x86_64"]["name"]
+        target = self._fakeLinuxInstall("0.9.0")
+        updates._installableOverride = True
+        updates.installTargetOverride = target
+        keepDir = os.path.join(self.tempDir, "Downloads")
+        updates.manualPackageDirectoryOverride = keepDir
+        self.addCleanup(setattr, updates, "manualPackageDirectoryOverride", None)
+        # The folder of the installation is not writable (for example /opt, owned by root)
+        savedIsWritable = install.isWritable
+        install.isWritable = lambda path: False
+        self.addCleanup(setattr, install, "isWritable", savedIsWritable)
+        service = self._service()
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        dialog = service.updateNow()
+        self.assertTrue(self._waitFor(lambda: dialog.state in ("ready", "failed"), 30), dialog.state)
+        self.assertEqual(dialog.state, "failed")
+        text = dialog.text.text
+        self.assertIn("cannot replace itself", text)
+        kept = os.path.join(keepDir, name)
+        self.assertIn(kept, text, "the steps name the full path of the package")
+        self.assertEqual(_sha256(kept), data["assets"]["linux-x86_64"]["sha256"])
+        self.assertFalse(os.path.exists(os.path.join(updates.downloadDirectory(), name)), "not left in the private folder")
+        self.assertEqual(install.linuxPackageVersion(target), "0.9.0", "Slicer Studio was not changed")
+        # The next start cleans up what a previous run left in the private folders: the kept package stays
+        self.assertIsNone(self._service().finishInstall())
+        self._pump(1.0)
+        self.assertTrue(os.path.isfile(kept), "the package that the steps name is kept")
+        # Try again: the same package is not kept twice
+        dialog.onPrimary()
+        self.assertTrue(self._waitFor(lambda: dialog.state in ("ready", "failed"), 30), dialog.state)
+        self.assertIn(kept, dialog.text.text)
+        self.assertEqual(os.listdir(keepDir), [name])
+        # A different file of the same name in that folder is never overwritten
+        other = os.path.join(self.tempDir, "other")
+        os.makedirs(other)
+        with open(os.path.join(other, name), "wb") as f:
+            f.write(b"another file")
+        self.assertEqual(updates.keepPackage(kept, other), os.path.join(other, name.replace(".tar.gz", " (2).tar.gz")))
+        with open(os.path.join(other, name), "rb") as f:
+            self.assertEqual(f.read(), b"another file")
+
     def test_NothingUnderTesting(self):
         updates = self.updates
         self.assertTrue(updates.isDisabledByEnvironment())
