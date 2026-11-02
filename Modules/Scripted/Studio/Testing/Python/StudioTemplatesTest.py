@@ -1494,3 +1494,58 @@ class StudioTemplatesTest(unittest.TestCase):
                 self.assertTrue(scrollArea.isAncestorOf(row))
         finally:
             panel.deleteLater()
+
+    def test_29_readding_the_study_template_reopens_the_open_case_on_it(self):
+        """BB-1: after "Add it…" adds the study's missing template, the case that is open on the built-in template is
+        reopened on the added one (its lesion unchanged); it did stay on the fallback until another case was opened.
+        """
+        from LesionNetworkMappingLib import nifti
+        from LesionNetworkMappingLib.study import Study
+
+        from StudioLib import study_ui
+
+        templates, ui = self.templates, self.ui
+        template = self._add(name="Lab ICBM 1.5", space="MNI152NLin6Asym")
+        record = templates.studyRecord(template)
+        study = Study.create(os.path.join(self.tempDir, "study readd open case"), name="Study", template=record)
+        sid = "sub-case001"
+        study.add_subject(sid, {"group": "case", "status": "traced", "space": "MNI152NLin6Asym", "trace_template": "MNI152NLin6Asym"})
+        lesionPath = os.path.join(study.path, *study.lesion_relpath(sid).split("/"))
+        os.makedirs(os.path.dirname(lesionPath), exist_ok=True)
+        _data, affine, _header = nifti.read_nifti(template.imagePath)
+        mask = np.zeros(self.shape15, np.uint8)
+        mask[30:40, 70:80, 60:70] = 1
+        nifti.write_nifti(lesionPath, mask, affine)
+        study.set(sid, {"lesion": study.relpath(lesionPath)})
+        study.save()
+        templates.removeTemplate(template.id, confirmDelete=lambda: True)
+        self.assertIsNone(templates.templateForStudyRecord(record))
+        settings = qt.QSettings()
+        recent = settings.value(study_ui.RECENT_STUDIES_KEY)
+        shown = ui.offerMissingStudyTemplate
+        offered = {}
+        ui.offerMissingStudyTemplate = lambda *args, **kwargs: offered.update(kwargs)  # the notice is not shown; its callback is kept
+        try:
+            session = study_ui.openStudy(study.path, shell=self._shell(), subject=sid, showLibrary=False)
+            slicer.app.processEvents()
+            self.assertIsNone(session.volumeNode().GetAttribute("Studio.TemplateId"), "the built-in template meanwhile")
+            self.assertIn("onAdded", offered, "the Add it… notice")
+            added = templates.addTemplate(self.image15, name="Lab ICBM 1.5", space="MNI152NLin6Asym")
+            self.assertEqual(templates.templateForStudyRecord(record).id, added.id)
+            before = int(np.count_nonzero(study_ui.lesionMask(session.segmentationNode())[0]))
+            offered["onAdded"](added)
+            slicer.app.processEvents()
+            self.assertEqual(session.current(), sid, "the same case stays open")
+            self.assertEqual(session.volumeNode().GetAttribute("Studio.TemplateId"), added.id, "on the added template, not the fallback")
+            self.assertEqual(int(np.count_nonzero(study_ui.lesionMask(session.segmentationNode())[0])), before, "the lesion is unchanged")
+            fallbacks = [n for n in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode") if n.GetAttribute(study_ui.SUBJECT_ATTRIBUTE) == "template"
+                         and n.GetAttribute("Studio.TemplateId") != added.id]
+            self.assertEqual(fallbacks, [], "the fallback volume is gone from the scene")
+        finally:
+            ui.offerMissingStudyTemplate = shown
+            study_ui.closeStudy()
+            if recent is None:
+                settings.remove(study_ui.RECENT_STUDIES_KEY)
+            else:
+                settings.setValue(study_ui.RECENT_STUDIES_KEY, recent)
+            shutil.rmtree(study.path, ignore_errors=True)

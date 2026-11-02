@@ -2693,8 +2693,12 @@ class StudySession:
 
             def added(template):
                 # The cached fallback is forgotten: the next case (or this one, reopened) uses the added template
-                self._templateCache.pop(str(record.get("source")), None)
+                fallbackId = self._templateCache.pop(str(record.get("source")), None)
                 self._missingTemplateOffered = False
+                # The case that is open on the fallback is reopened on the added template (its edits are written first)
+                volume = self.volumeNode()
+                if self._current is not None and fallbackId is not None and volume is not None and volume.GetID() == fallbackId:
+                    self.open(self._current, switchToDraw=False, reload=True)
 
             templates_ui.offerMissingStudyTemplate(record, _currentShell(), onAdded=added)
         except Exception:
@@ -3023,14 +3027,15 @@ class StudySession:
 
     # Opening subjects
 
-    def open(self, sid, switchToDraw=True):
+    def open(self, sid, switchToDraw=True, reload=False):
         """Open a subject: write the current one's edits, load the scan (or the study template) and the lesion, and
-        edit the lesion in Draw. Return True if the subject is open.
+        edit the lesion in Draw. Return True if the subject is open. Opening the subject that is already open changes
+        nothing, unless ``reload`` (its edits are written and it is loaded again, for example on another template).
         """
         if sid is None or sid not in self.study:
             return False
         shell = _currentShell(self._shell)
-        if sid == self._current and self.segmentationNode() is not None:
+        if sid == self._current and self.segmentationNode() is not None and not reload:
             if switchToDraw:
                 self._showDraw(shell)
             return True
