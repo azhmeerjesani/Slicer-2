@@ -2833,20 +2833,37 @@ class Shell:
         target = self._firstTabStop(canvas)
         (target or canvas).setFocus(qt.Qt.ShortcutFocusReason)
 
-    def _focusView(self):
+    def _viewToFocus(self):
+        """The view that F6 focuses, or None: a shown view only (``sliceViewNames()`` also lists the slice views that a
+        maximized view, a one-up layout or the 3D-only layout hides). The last hovered slice view, else Red, else the
+        first shown slice view, else the first shown 3D view.
+        """
         layoutManager = slicer.app.layoutManager()
         if layoutManager is None:
-            return
-        names = list(layoutManager.sliceViewNames())
+            return None
+        sliceViews = {}
+        for name in layoutManager.sliceViewNames():
+            sliceWidget = layoutManager.sliceWidget(name)
+            if sliceWidget is not None and sliceWidget.isVisible():
+                sliceViews[name] = sliceWidget.sliceView()
         name = self.hoverTracker.lastSliceViewName if self.hoverTracker is not None else None
-        if name not in names:
-            name = "Red" if "Red" in names else (names[0] if names else None)
-        sliceWidget = layoutManager.sliceWidget(name) if name else None
-        if sliceWidget is None:
+        for candidate in (name, "Red"):
+            if candidate in sliceViews:
+                return sliceViews[candidate]
+        if sliceViews:
+            return next(iter(sliceViews.values()))
+        for index in range(layoutManager.threeDViewCount):
+            threeDWidget = layoutManager.threeDWidget(index)
+            if threeDWidget is not None and threeDWidget.isVisible():
+                return threeDWidget.threeDView()
+        return None
+
+    def _focusView(self):
+        view = self._viewToFocus()
+        if view is None:
             return
-        sliceView = sliceWidget.sliceView()
-        vtkWidget = sliceView.VTKWidget() if hasattr(sliceView, "VTKWidget") else None
-        (vtkWidget or sliceView).setFocus(qt.Qt.ShortcutFocusReason)
+        vtkWidget = view.VTKWidget() if hasattr(view, "VTKWidget") else None
+        (vtkWidget or view).setFocus(qt.Qt.ShortcutFocusReason)
 
     @staticmethod
     def _isAlive(widget):

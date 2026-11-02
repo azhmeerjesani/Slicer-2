@@ -1429,6 +1429,56 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertIn("canvas", regions)
         self.assertNotIn("view", regions)
 
+    def test_19b_f6_focuses_shown_view(self):
+        """F6 to the views focuses a view that is shown (USABILITY 9.1: no invisible focus stops): the maximized view
+        rather than the hidden last hovered one, the view of a one-up layout, and the 3D view of the 3D-only layout.
+        """
+        from StudioLib import layouts
+
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        self.layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
+        self._pump(8)
+        if not self._focus(studioShell.topBar.menuButton):
+            self.skipTest("the main window cannot take the keyboard focus here")
+
+        def focusViewRegion():
+            self._focus(studioShell.topBar.menuButton)
+            for _step in range(3):
+                self._activateShortcut(studioShell, "F6")
+                if studioShell.focusRegion() == "view":
+                    break
+            self.assertEqual(studioShell.focusRegion(), "view")
+            focusWidget = slicer.app.focusWidget()
+            self.assertIsNotNone(focusWidget)
+            self.assertTrue(focusWidget.isVisible(), f"F6 focused a hidden {focusWidget.className()}")
+            return focusWidget
+
+        def sliceFocusWidget(name):
+            sliceView = self.layoutManager.sliceWidget(name).sliceView()
+            return sliceView.VTKWidget() if hasattr(sliceView, "VTKWidget") else sliceView
+
+        # Red was hovered last, then Yellow was maximized: the shown Yellow view gets the focus
+        studioShell.hoverTracker.lastSliceViewName = "Red"
+        self.assertEqual(focusViewRegion(), sliceFocusWidget("Red"))
+        self.assertEqual(layouts.maximizeView("Yellow"), "Yellow")
+        self._pump(8)
+        self.assertFalse(self.layoutManager.sliceWidget("Red").isVisible())
+        self.assertEqual(focusViewRegion(), sliceFocusWidget("Yellow"))
+        layouts.restoreMaximized()
+        self._pump(8)
+        # One-up Green
+        self.layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUpGreenSliceView)
+        self._pump(8)
+        studioShell.hoverTracker.lastSliceViewName = "Red"
+        self.assertEqual(focusViewRegion(), sliceFocusWidget("Green"))
+        # 3D only: the 3D view
+        self.layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUp3DView)
+        self._pump(8)
+        threeDView = self.layoutManager.threeDWidget(0).threeDView()
+        threeDFocus = threeDView.VTKWidget() if hasattr(threeDView, "VTKWidget") else threeDView
+        self.assertEqual(focusViewRegion(), threeDFocus)
+
     def test_20_button_keys_in_draw(self):
         """Space and Enter press a focused top bar button also in Draw (before the Segment Editor's Space shortcut)."""
         studioShell = self._applyStudio()
