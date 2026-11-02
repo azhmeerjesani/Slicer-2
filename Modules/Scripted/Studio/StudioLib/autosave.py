@@ -1839,6 +1839,11 @@ class AutosaveService:
         if projects.isLockedByOther(path):
             self._announce("locked", projects.Project(path))
             return False
+        if self._studyOpen():
+            # Opening a project is an explicit choice of the user: the study is closed first (its subject's edits are written),
+            # as opening another study closes the open one. Left open, the project would be attached, announced as continued and
+            # released at the next poll (a study saves its own files, and no project is saved while one is open).
+            self._closeOpenStudy()
         projectPath = projects.projectOfPath(path)
         inRoot = projectPath is not None and os.path.normcase(os.path.realpath(projectPath)) == os.path.normcase(os.path.realpath(path))
         if inRoot and projects.isWritable(path):
@@ -1873,6 +1878,16 @@ class AutosaveService:
             self._pendingSceneSource = None  # used by _afterSceneImport; not left over for a later load if this one failed
         self._adoptMergedHierarchy()
         return self.project is not None
+
+    @staticmethod
+    def _closeOpenStudy():
+        """Close the open study (the current subject's edits are written first)."""
+        module = sys.modules.get("StudioLib.study_ui")
+        try:
+            if module is not None:
+                module.closeStudy()
+        except Exception:
+            logging.error("Slicer Studio: the study could not be closed before a project opened:\n" + traceback.format_exc())
 
     def _adoptMergedHierarchy(self):
         """The subject hierarchy of a project that was just opened is merged after the scene load ends, so the fingerprint
@@ -1942,6 +1957,8 @@ class AutosaveService:
         # would make the next save replace the project's scene with it.
         projectPath = projects.projectOfSceneFile(url)
         if projectPath is not None:
+            if self._studyOpen():
+                return  # a study keeps 3D Slicer's behavior: no project is attached (it would be released at once) or announced
             if not (self._studioActive() or getattr(self, "_forceProjectOpen", False)) or not self.enabled():
                 return  # Classic loads a project like any scene (official behavior)
             if not projects.sceneHasUserData(scene) and not _sceneFileParses(url):

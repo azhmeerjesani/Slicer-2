@@ -4913,6 +4913,82 @@ class StudioProjectsTest(unittest.TestCase):
                 else:
                     os.environ[variable] = value
 
+    def test_77_opening_a_project_while_a_study_is_open_closes_the_study(self):
+        """Opening a project from Library while a study was open attached it, said "Continuing ..." and released it at the
+        next poll (no project is saved while a study is open), so the project's later edits were never saved and nothing
+        said so (BB-1). The explicit open now closes the study first (its subject's edits are written) and the project keeps
+        saving; a project that cannot be opened leaves the study open; a scene file loaded while a study is open keeps
+        3D Slicer's behavior (no project is attached or announced).
+        """
+        from StudioLib import study_ui
+
+        if not study_ui.isAvailable():
+            self.skipTest("studies are not part of this build")
+        projects = self.projects
+        service = self._service()
+        volume, _path = self._userVolume("Scan", shape=(12, 14, 16), extension=".nrrd")
+        self._lesion(volume)
+        project = self._projectFor(service)
+        self._save(service)
+        projectPath = project.path
+        service.releaseProject()
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertIsNone(service.project)
+
+        # A study is open
+        studyFolder = os.path.join(projects.studiesFolder(), "Plain")
+        os.makedirs(studyFolder)
+        _volume, scanPath = self._userVolume("sub-01_T1w", shape=(12, 14, 16))
+        slicer.mrmlScene.Clear(0)
+        shutil.copy(scanPath, os.path.join(studyFolder, "sub-01_T1w.nii.gz"))
+        session = study_ui.createStudy([os.path.join(studyFolder, "sub-01_T1w.nii.gz")], folder=studyFolder)
+        self.addCleanup(study_ui.closeStudy)
+        self.assertIs(study_ui.session(), session)
+        announced = []
+        service.setProjectAnnouncer(lambda event, project, **info: announced.append(event))
+
+        # A folder that cannot be opened leaves the study as it is
+        self.assertFalse(service.openProject(os.path.join(self.tempDir, "no such project")))
+        self.assertIs(study_ui.session(), session)
+
+        # A scene file loaded while the study is open: no project is attached, nothing is announced as continued
+        announced.clear()
+        slicer.util.loadScene(projects.sceneFile(projectPath), {"clear": True})
+        self.assertIsNone(service.project)
+        self.assertNotIn("opened", announced)
+        self.assertIs(study_ui.session(), session)
+
+        # Open project: the study is closed first, the project is attached and stays attached
+        announced.clear()
+        self.assertTrue(service.openProject(projectPath))
+        self.assertIsNone(study_ui.session(), "the study is closed by opening a project")
+        self.assertIsNotNone(service.project)
+        self.assertEqual(os.path.normcase(os.path.realpath(service.project.path)), os.path.normcase(os.path.realpath(projectPath)))
+        self.assertEqual(announced.count("opened"), 1)
+        service.poll()
+        slicer.app.processEvents()
+        service.poll()
+        self.assertIsNotNone(service.project, "the project is not released at the next poll")
+
+        # Its later edits are saved
+        segmentation = slicer.util.getFirstNodeByClassByName("vtkMRMLSegmentationNode", "Lesions")
+        volume = slicer.util.getFirstNodeByClassByName("vtkMRMLScalarVolumeNode", "Scan")
+        self.assertIsNotNone(segmentation)
+        segmentId = segmentation.GetSegmentation().GetNthSegmentID(0)
+        edited = slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, segmentId, volume)
+        edited[0:3, 0:3, 0:3] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(edited, segmentation, segmentId, volume)
+        service.poll()
+        self._save(service)
+        self.assertIsNotNone(service.project)
+        slicer.mrmlScene.Clear(0)
+        reloaded = slicer.util.loadSegmentation(os.path.join(projectPath, "Segmentations", "Lesions.seg.nrrd"))
+        volume = slicer.util.addVolumeFromArray(np.zeros(edited.shape, np.int16), name="Reference")
+        volume.SetSpacing(1.0, 1.1, 1.2)
+        saved = slicer.util.arrayFromSegmentBinaryLabelmap(reloaded, reloaded.GetSegmentation().GetNthSegmentID(0), volume)
+        self.assertGreater(int(saved[0:3, 0:3, 0:3].sum()), 0, "the edit made after opening the project is saved")
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk
