@@ -2172,21 +2172,44 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         node = self._parameterNode
         return node.seedMode if node is not None and node.seedMode else "lesion"
 
-    def updateCardVisibility(self):
+    def _visibleCardIds(self, mode=None):
+        """The ids of the cards shown for seed mode ``mode`` (the current one by default)."""
         from LesionNetworkMappingUI import visibleSpecs
 
-        visible = {spec["id"] for spec in visibleSpecs([spec for spec, _widget in self._cardWidgets.values()], self.seedMode(), self._classic())}
-        if self.seedMode() in ("cohort", *SEED_SET_MODES) and self.loadedMap is None:
+        mode = mode or self.seedMode()
+        visible = {spec["id"] for spec in visibleSpecs([spec for spec, _widget in self._cardWidgets.values()], mode, self._classic())}
+        if mode in ("cohort", *SEED_SET_MODES) and self.loadedMap is None:
             visible.discard("result")  # the cohort's maps are in the Cohort card; Result shows a browsed lesion map
-        if self.seedMode() in SEED_SET_MODES and getattr(self.ctx, "cohortMaps", None) and "cohort" in self._cardWidgets:
+        if mode in SEED_SET_MODES and getattr(self.ctx, "cohortMaps", None) and "cohort" in self._cardWidgets:
             visible.add("cohort")  # the seed maps go through the Cohort card (overlap, browsing) like a cohort's lesion maps
+        return visible
+
+    def updateCardVisibility(self):
+        visible = self._visibleCardIds()
         for cardId, (spec, widget) in self._cardWidgets.items():
             widget.setVisible(cardId in visible)
 
+    def _seedModeForCard(self, cardId):
+        """The seed mode to switch to so that card ``cardId`` belongs on the page ("cohort" first), or None when none offers it."""
+        for mode in sorted(getattr(self, "seedModes", ()), key=lambda mode: mode != "cohort"):
+            if cardId in self._visibleCardIds(mode):
+                return mode
+        return None
+
     def _focusCard(self, cardId):
-        entry = self._cardWidgets.get(str(cardId))
+        cardId = str(cardId)
+        entry = self._cardWidgets.get(cardId)
         if entry is None:
             return False
+        if cardId not in self._visibleCardIds():
+            # A card of another seed mode (for example Calibrate, Validate or the Cohort card on the Lesion page) is never shown
+            # among the cards of this mode: go to the mode it belongs to, as a click on the Seed control does (like "Run everything")
+            mode = self._seedModeForCard(cardId)
+            if mode is None:
+                return False
+            index = self.seedModes.index(mode)
+            self.seedModeGroup.button(index).setChecked(True)
+            self.onSeedModeClicked(index)
         widget = entry[1]
         widget.setVisible(True)
         if widget.property("collapsed") is not None:
