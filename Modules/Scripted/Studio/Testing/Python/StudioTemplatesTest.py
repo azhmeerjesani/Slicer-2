@@ -1460,3 +1460,37 @@ class StudioTemplatesTest(unittest.TestCase):
             self.assertFalse([text for text in toasts if "Added" in text], toasts)
         finally:
             ui.message = message
+
+    def test_28_settings_panel_scrolls_so_many_templates_keep_the_dialog_on_screen(self):
+        """BB-1: Settings > Templates scrolls. Every template adds a row, and the panel's minimum height used to follow them (about
+        65 px each), so the Settings dialog grew taller than a 1366x768 screen with 7 templates and OK/Cancel left it.
+        """
+        templates, ui = self.templates, self.ui
+        panel = ui.TemplatesSettingsPanel()
+        try:
+            panel.show()  # the size hints are only exact for a shown panel
+            slicer.app.processEvents()
+            panel.refresh()
+            slicer.app.processEvents()
+            self.assertEqual(len(panel.rows), len(templates.listTemplates()))
+            few = panel.minimumSizeHint.height()
+            for index in range(12):
+                self._add(name=f"Lab average {index + 1}")
+            panel.refresh()
+            slicer.app.processEvents()
+            self.assertEqual(len(panel.rows), len(templates.listTemplates()))
+            self.assertGreaterEqual(len(panel.rows), 13)
+            self.assertEqual(panel.minimumSizeHint.height(), few, "the rows no longer raise the minimum height of the panel")
+            self.assertLess(panel.minimumSizeHint.height(), 400)
+            scrollArea = panel.findChild(qt.QScrollArea, "studioTemplatesScrollArea")
+            self.assertIsNotNone(scrollArea)
+            self.assertTrue(scrollArea.widgetResizable)
+            for objectName in ("studioTemplatesList", "studioTemplatesFamilyNotice", "studioTemplatesShowFolder", "studioTemplatesAddButton"):
+                widget = panel.findChild(qt.QWidget, objectName)
+                self.assertIsNotNone(widget, objectName)
+                self.assertTrue(scrollArea.isAncestorOf(widget), objectName)
+            # The rows are inside the scroll area (reachable by scrolling), not beside it
+            for row in panel.rows:
+                self.assertTrue(scrollArea.isAncestorOf(row))
+        finally:
+            panel.deleteLater()

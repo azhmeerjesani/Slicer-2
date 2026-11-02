@@ -719,7 +719,21 @@ class TemplatesSettingsPanel(ctk.ctkSettingsPanel):
         ctk.ctkSettingsPanel.__init__(self, *args, **kwargs)
         self.setObjectName(PANEL_OBJECT_NAME)
         self.rows = []
-        layout = qt.QVBoxLayout(self)
+        # The page scrolls (like Settings > Saving): every template adds a row, and without a scroll area
+        # the Settings dialog's minimum height grew with the number of templates until OK/Cancel left the screen.
+        outer = qt.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.scrollArea = qt.QScrollArea()
+        self.scrollArea.setObjectName("studioTemplatesScrollArea")
+        self.scrollArea.setWidgetResizable(True)
+        self.scrollArea.setFrameShape(qt.QFrame.NoFrame)
+        self.scrollArea.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+        outer.addWidget(self.scrollArea)
+        page = qt.QWidget()
+        page.setObjectName("studioTemplatesPage")
+        self.scrollArea.setWidget(page)
+        self.scrollArea.viewport().setAutoFillBackground(False)
+        layout = qt.QVBoxLayout(page)
         # The margins of the other Studio settings pages (VISUAL 4.7)
         layout.setContentsMargins(24, 20, 24, 16)
         layout.setSpacing(14)
@@ -780,7 +794,8 @@ class TemplatesSettingsPanel(ctk.ctkSettingsPanel):
     @staticmethod
     def _styleSheet():
         t = {name: ui.token(name).name() for name in ("border", "hairline", "card", "accent-subtle", "accent-fg", "text", "text2")}
-        return (f"QFrame#studioTemplatesList {{ border: 1px solid {t['border']}; border-radius: 10px; background: transparent; }}"
+        return (f"QScrollArea#studioTemplatesScrollArea, QWidget#studioTemplatesPage {{ background: transparent; }}"
+                f"QFrame#studioTemplatesList {{ border: 1px solid {t['border']}; border-radius: 10px; background: transparent; }}"
                 f"QFrame#studioTemplateRow {{ border: none; border-bottom: 1px solid {t['hairline']}; background: transparent; }}"
                 f"QFrame#studioTemplateRow[last=\"true\"] {{ border-bottom: none; }}"
                 f"QFrame#studioTemplateRow[isDefault=\"true\"] {{ background-color: {t['card']}; }}"
