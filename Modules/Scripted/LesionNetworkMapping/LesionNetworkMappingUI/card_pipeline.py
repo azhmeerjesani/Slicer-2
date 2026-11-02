@@ -1017,6 +1017,14 @@ def headlineMaps(record, alpha=0.05):
     return chosen[:MAX_LOADED_MAPS]
 
 
+def maskByP(array, pData, alpha):
+    """Set to 0, in place, the voxels of ``array`` that do not pass ``pData <= alpha`` (the one rule of the cohort pipeline, tolerant of float32 p maps)."""
+    from LesionNetworkMappingLib import glm
+
+    array[~glm.passes_alpha(pData, alpha)] = 0
+    return array
+
+
 #
 # The card
 #
@@ -2013,14 +2021,12 @@ class PipelineCard:
         attributes = {"LNM.PipelineMap": desc, "Studio.Role": "statmap"}
         volume = logic.loadMap(path, name, existing, saveWithScene=True, attributes=attributes)
         if mask is not None:
-            import numpy as np
-
             pData, _affine = logic.readMap(mask[0])
             array = slicer.util.arrayFromVolume(volume)
             if pData.shape == array.shape:
-                array[~(np.asarray(pData) < float(mask[1]))] = 0
+                maskByP(array, pData, mask[1])
                 slicer.util.arrayFromVolumeModified(volume)
-                volume.SetAttribute("LNM.MaskedBy", f"{os.path.basename(mask[0])} < {mask[1]:g}")
+                volume.SetAttribute("LNM.MaskedBy", f"{os.path.basename(mask[0])} <= {mask[1]:g}")
         if kind == "stat":
             display.applyResultDisplay(volume, display.ensureLUT(volume.GetScene()))  # the shared "LNM Diverging" table
         else:
