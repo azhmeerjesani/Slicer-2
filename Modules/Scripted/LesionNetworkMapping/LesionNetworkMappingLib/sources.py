@@ -146,21 +146,30 @@ def parse_nbib(text):
     records, current = [], None
     for tag, value in _tagged(text, r"^([A-Z][A-Z0-9 ]{1,3}?)\s*- (.*)$"):
         if tag == "PMID":
-            current = {"authors": [], "pmid": value}
+            current = {"authors": [], "full_authors": [], "pmid": value}
             records.append(current)
         elif current is None:
             continue
         elif tag == "TI":
             current["title"] = value
-        elif tag in ("AU", "FAU") and (tag == "AU" or not current["authors"]):
+        elif tag == "AU":
             current["authors"].append(value)
+        elif tag == "FAU":
+            current["full_authors"].append(value)
         elif tag == "DP":
             current["year"] = value
         elif tag in ("TA", "JT") and (tag == "TA" or "journal" not in current):
             current["journal"] = value
         elif tag in ("LID", "AID") and "[doi]" in value and not current.get("doi"):
             current["doi"] = value.replace("[doi]", "")
-    return [draft(**{**record, "authors": "; ".join(record["authors"])}) for record in records]
+    out = []
+    for record in records:
+        # PubMed writes FAU (full name) and AU (short name) for the same author, so each author is kept once: the full
+        # names when every author has one, otherwise the short names (never both forms of the same person)
+        short, full = record.pop("authors"), record.pop("full_authors")
+        authors = full if full and len(full) >= len(short) else short
+        out.append(draft(**{**record, "authors": "; ".join(authors)}))
+    return out
 
 
 def parse_ris(text):

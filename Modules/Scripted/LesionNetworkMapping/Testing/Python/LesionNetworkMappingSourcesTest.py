@@ -123,6 +123,19 @@ class SourcesTest(unittest.TestCase):
         self.assertEqual((first["year"], first["journal"]), ("2020", "Brain"))
         self.assertEqual(records[1]["doi"], "10.1212/wnl.0000000000000999")
 
+    def test_nbib_pubmed_field_order_lists_each_author_once(self):
+        # PubMed writes FAU before AU for every author: one author must not appear twice
+        single = sources.parse_nbib("PMID- 3\nTI  - One author paper.\nFAU - Smith, John\nAU  - Smith J\nDP  - 2019\nTA  - Neurology\n")[0]
+        self.assertEqual(single["authors"], "Smith, John")
+        self.assertEqual(sources.citation({**single}), "Smith 2019, Neurology")
+        three = (
+            "PMID- 4\nTI  - Three authors.\nFAU - Boes, Aaron D\nAU  - Boes AD\nFAU - Prasad, Sashank\nAU  - Prasad S\n"
+            "FAU - Liu, Hesheng\nAU  - Liu H\nDP  - 2015\nTA  - Brain\n"
+        )
+        self.assertEqual(sources.parse_nbib(three)[0]["authors"], "Boes, Aaron D; Prasad, Sashank; Liu, Hesheng")
+        # AU only, and records where only some authors have an FAU line: the short names
+        self.assertEqual(sources.parse_nbib("PMID- 5\nAU  - Smith J\nAU  - Lee K\n")[0]["authors"], "Smith J; Lee K")
+
     def test_ris(self):
         records = sources.parse_ris(RIS)
         self.assertEqual(len(records), 2)
