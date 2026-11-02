@@ -287,6 +287,22 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertIn("All changes are saved in Projects/sub-012 T1w", summary)
         self.assertEqual(service.closeFlushResult, (True, ""))
 
+    def test_03b_user_scan_named_like_a_template_is_user_data(self):
+        """A scan the user opened from a file is user data whatever its name (FSL's MNI152_T1_2mm_brain is not a template)."""
+        service = self._service()
+        volume, _path = self._userVolume(name="MNI152_T1_2mm_brain")
+        self.assertFalse(self.projects.isTemplateNode(volume))
+        project = self._projectFor(service)
+        self.assertEqual(os.path.basename(project.path), self.projects.defaultProjectName())
+        self.assertNotEqual(self.projects.defaultProjectName(), self.projects.UNTITLED_NAME)
+        self.assertEqual(self.projects.counts()["scans"], 1)
+        # A template is still not user data: tagged, or named after the template space (a scene saved before the tag)
+        volume.SetAttribute("Studio.Role", "template")
+        self.assertTrue(self.projects.isTemplateNode(volume))
+        volume.RemoveAttribute("Studio.Role")
+        volume.SetName("MNI152NLin2009cAsym 2 mm")
+        self.assertTrue(self.projects.isTemplateNode(volume))
+
     def test_04_incremental_and_other_program(self):
         service = self._service()
         volume, _path = self._userVolume()

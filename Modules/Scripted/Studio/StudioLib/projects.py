@@ -407,7 +407,11 @@ def isTemplateNode(node):
         return False
     if _role(node) == "template":
         return True
-    return (node.GetName() or "").startswith("MNI152")
+    # A template of a scene saved before the tag existed (as library.volumeKind() and niftiexport.isTemplateNode() judge it).
+    # Not every name that starts with "MNI152": the user's own scan (FSL's MNI152_T1_2mm_brain) is user data.
+    from StudioLib import space
+
+    return (node.GetName() or "").startswith(space.TEMPLATE_SPACE)
 
 
 def kindFolder(node):
