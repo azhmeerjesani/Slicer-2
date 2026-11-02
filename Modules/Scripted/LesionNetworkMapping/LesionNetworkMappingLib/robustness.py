@@ -25,7 +25,9 @@ how much the conclusion depends on the connectome; it is not split-half sampling
 **Lesion split-half** (:func:`lesion_split_half`; Ferguson 2019). The lesions are split at random into two
 halves (``n_splits`` times, seeded, optionally within strata); each split gives the spatial r of the two
 halves' overlap maps, the Dice of their sensitivity maps and, with a design, the r of their GLM t maps,
-computed from sufficient statistics (XᵀX, XᵀY, Σy²) of each half.
+computed from sufficient statistics (XᵀX, XᵀY, Σy²) of each half. The overlap and sensitivity maps threshold
+the T maps; the GLM is fitted to the maps of the design's input (``design.json`` "input": AvgFz for "Fz", the
+default, or T), so that it is the GLM of the Contrast tab.
 
 **Leave-one-lesion-out influence** (:func:`leave_one_lesion_out`). Removing one lesion is a downdate of the
 overlap counts and of the GLM's sufficient statistics (no refit): the sensitivity map's Dice against the
@@ -1025,6 +1027,17 @@ def _design_arrays(design, n_lesions):
     return X, C[0]
 
 
+def _glm_rows(glm_maps, shape):
+    """The (L, V) float64 maps the GLM is fitted to (a :class:`Cohort` or an array), checked against the threshold maps' shape."""
+    np = _np()
+    if isinstance(glm_maps, Cohort):
+        glm_maps = glm_maps.maps
+    Y = np.asarray(glm_maps, dtype=np.float64)
+    if Y.shape != tuple(shape):
+        raise ValueError(f"The GLM maps have shape {Y.shape}, the thresholded maps {tuple(shape)}")
+    return Y
+
+
 def glm_t(XtX, XtY, yy, n, c):
     """t map of a one-row contrast from sufficient statistics (XᵀX, XᵀY, Σy², n rows); None when not estimable.
 
@@ -1106,7 +1119,8 @@ def split_indices(n_lesions, n_splits=DEFAULT_SPLITS, seed=0, strata=None):
     return first, second
 
 
-def lesion_split_half(maps, n_splits=DEFAULT_SPLITS, seed=0, rule=None, n=None, v=None, gsr=None, sign="both", overlap_pct=DEFAULT_SENSITIVITY_PCT, design=None, strata=None, batch=None, cancel=None):
+def lesion_split_half(maps, n_splits=DEFAULT_SPLITS, seed=0, rule=None, n=None, v=None, gsr=None, sign="both", overlap_pct=DEFAULT_SENSITIVITY_PCT, design=None, strata=None, batch=None, cancel=None,
+                      glm_maps=None):
     """Lesion split-half stability (Ferguson 2019): distributions over ``n_splits`` random half splits.
 
     :param maps: (L, V) per-lesion maps (T maps for T rules) or a :class:`Cohort` (then ``n``, ``v`` and ``gsr`` come from it).
@@ -1115,6 +1129,8 @@ def lesion_split_half(maps, n_splits=DEFAULT_SPLITS, seed=0, rule=None, n=None, 
     :param overlap_pct: sensitivity criterion (% of the half's lesions).
     :param design: optional GLM (``design.Design``, {"X", "C"} or (X, C), rows in map order, one-row contrast):
       the t maps of the two halves are computed from their sufficient statistics and correlated.
+    :param glm_maps: optional (L, V) maps (or a :class:`Cohort`) the GLM is fitted to, rows as ``maps``: the maps of
+      the design's input (AvgFz for input "Fz"); default ``maps``.
     :param strata: optional label per lesion; splits are made within strata (e.g. groups of a two-group design).
     :param cancel: optional ``jobs.CancelToken`` (or Event/callable), checked before each batch of splits.
     :return: {"label", "n_splits", "seed", "half_size", "left_out", "r_overlap", "dice_sensitivity", "r_glm_t"
@@ -1137,7 +1153,7 @@ def lesion_split_half(maps, n_splits=DEFAULT_SPLITS, seed=0, rule=None, n=None, 
     r_overlap = np.full(n_splits, np.nan)
     dice = np.full(n_splits, np.nan)
     r_glm = np.full(n_splits, np.nan) if X is not None else None
-    Y = maps.astype(np.float64) if X is not None else None
+    Y = _glm_rows(maps if glm_maps is None else glm_maps, maps.shape) if X is not None else None
     Y2 = Y * Y if X is not None else None
     for start in range(0, n_splits, batch):
         _check_cancel(cancel, done=start)
@@ -1206,13 +1222,15 @@ def _peak_index(t, sign):
     return int(np.argmax(np.abs(t)))
 
 
-def leave_one_lesion_out(maps, design=None, ids=None, rule=None, n=None, v=None, gsr=None, sign="both", overlap_pct=DEFAULT_SENSITIVITY_PCT, top_k=DEFAULT_TOP_K, grid=None, mask_indices=None, cancel=None):
+def leave_one_lesion_out(maps, design=None, ids=None, rule=None, n=None, v=None, gsr=None, sign="both", overlap_pct=DEFAULT_SENSITIVITY_PCT, top_k=DEFAULT_TOP_K, grid=None, mask_indices=None, cancel=None,
+                         glm_maps=None):
     """Leave-one-lesion-out influence, by downdates (no refit).
 
     For each lesion i: the sensitivity map of the other L - 1 lesions (overlap counts minus lesion i's binary map)
     against the full sensitivity map (Dice, voxels that change) and, with a design, the GLM t map without row i
     (:meth:`SufficientStatistics.t_without`): t at the full peak, the change, the new peak value and, with a grid,
-    how far the peak moved.
+    how far the peak moved. The sensitivity maps threshold ``maps`` (T maps for T rules); the GLM is fitted to
+    ``glm_maps`` (the maps of the design's input, AvgFz for input "Fz"; rows as ``maps``), default ``maps``.
 
     :return: {"rows" (one per lesion, in map order; keys of :data:`INFLUENCE_COLUMNS`), "top" (the ``top_k`` most
       influential participant ids, ranked by |Δt at the peak| with a design, else by 1 - Dice), "peak" (full GLM peak)}.
@@ -1238,7 +1256,7 @@ def leave_one_lesion_out(maps, design=None, ids=None, rule=None, n=None, v=None,
     stats_ = t_full = None
     peak = None
     if X is not None:
-        stats_ = SufficientStatistics(maps, X, c)
+        stats_ = SufficientStatistics(_glm_rows(maps if glm_maps is None else glm_maps, maps.shape), X, c)
         t_full = stats_.t()
         if t_full is None:
             raise ValueError("The design has no residual degrees of freedom or the contrast is not estimable")
@@ -1728,15 +1746,18 @@ def build_parser():
 
 
 def _design_for(study_path, design_path, ids):
-    """(X, C) of a design.json built on the study, with its rows in the order of ``ids`` (maps without a design row are dropped)."""
+    """(X, C, kept ids, input) of a design.json built on the study, with its rows in the order of ``ids`` (maps without
+    a design row are dropped); input is the design's map statistic ("Fz" or "T", see ``glm.MAP_COLUMNS``).
+    """
     from . import design as design_lib
 
-    built = design_lib.build_design(study_path, design_lib.DesignSpec.load(design_path))
+    spec = design_lib.DesignSpec.load(design_path)
+    built = design_lib.build_design(study_path, spec)
     if built.blocking:
         raise ValueError("The design is blocked: " + "; ".join(check.message for check in built.blocking))
     rows = {sid: index for index, sid in enumerate(built.sids)}
     keep = [sid for sid in ids if sid in rows]
-    return built.X[[rows[sid] for sid in keep]], built.C, keep
+    return built.X[[rows[sid] for sid in keep]], built.C, keep, spec.input
 
 
 def _strata_for(study_path, column, ids):
@@ -1801,33 +1822,39 @@ def main(argv=None):
             outputs = [os.path.join(out, CONNECTOMES_TSV)]
         elif args.command in ("splithalf", "influence"):
             cohort = load_cohort(args.maps)
-            design = None
+            design = glm_maps = glm_input = None
             if args.design:
+                from . import glm
+
                 if not args.study:
                     raise jobs.JobError("--design needs --study", code="usage", exit_code=jobs.EXIT_USAGE)
-                X, C, keep = _design_for(args.study, args.design, cohort.ids)
+                X, C, keep, glm_input = _design_for(args.study, args.design, cohort.ids)
                 cohort = cohort.subset(keep)
                 design = (X, C)
+                # The GLM is the Contrast tab's: fitted to the maps of the design's input (AvgFz for "Fz"); the
+                # overlap and sensitivity maps keep thresholding the T maps.
+                column = glm.MAP_COLUMNS[glm_input]
+                glm_maps = cohort if column == cohort.statistic else load_cohort(args.maps, column=column).subset(keep)
             if args.command == "splithalf":
                 strata = _strata_for(args.study, args.strata, cohort.ids) if args.strata and args.study else None
-                result = lesion_split_half(cohort, n_splits=args.n_splits, seed=args.seed, rule=rule, sign=args.sign, overlap_pct=args.overlap, design=design, strata=strata, cancel=cancel)
+                result = lesion_split_half(cohort, n_splits=args.n_splits, seed=args.seed, rule=rule, sign=args.sign, overlap_pct=args.overlap, design=design, strata=strata, cancel=cancel, glm_maps=glm_maps)
                 write_splithalf_tsv(result, os.path.join(out, SPLITHALF_TSV))
                 arrays = {key: result[key] for key in ("r_overlap", "dice_sensitivity", "r_glm_t") if result[key] is not None}
                 np.savez_compressed(os.path.join(out, SPLITHALF_NPZ), **arrays)
                 summary = {"lesion_split_half": {metric: values.get("median") for metric, values in result["summary"].items()}, "label": result["label"]}
-                params = {"rule": rule, "sign": args.sign, "overlap_pct": args.overlap, "n_splits": args.n_splits, "design": bool(design), "strata": args.strata}
+                params = {"rule": rule, "sign": args.sign, "overlap_pct": args.overlap, "n_splits": args.n_splits, "design": bool(design), "glm_input": glm_input, "strata": args.strata}
                 outputs = [SPLITHALF_TSV, SPLITHALF_NPZ]
                 fields = {k: v for k, v in result.items() if k not in arrays}
             else:
-                result = leave_one_lesion_out(cohort, design=design, rule=rule, sign=args.sign, overlap_pct=args.overlap, top_k=args.top_k, cancel=cancel)
+                result = leave_one_lesion_out(cohort, design=design, rule=rule, sign=args.sign, overlap_pct=args.overlap, top_k=args.top_k, cancel=cancel, glm_maps=glm_maps)
                 write_influence_tsv(result, os.path.join(out, INFLUENCE_TSV))
                 summary = {"influence_top": result["top"], "influence": result["influence"]}
-                params = {"rule": rule, "sign": args.sign, "overlap_pct": args.overlap, "design": bool(design), "top_k": args.top_k}
+                params = {"rule": rule, "sign": args.sign, "overlap_pct": args.overlap, "design": bool(design), "glm_input": glm_input, "top_k": args.top_k}
                 outputs = [INFLUENCE_TSV]
                 fields = {k: v for k, v in result.items() if k != "rows"}
             run_id = _register(_run_root(args, out, args.study), out, args.command, params, parents=[*parents, cohort.run_id], summary=summary, outputs=outputs,
                                seeds={"splits": args.seed} if args.command == "splithalf" else None)
-            _write_json(os.path.join(out, f"{args.command}.json"), _record(args.command, out, run_id, **fields))
+            _write_json(os.path.join(out, f"{args.command}.json"), _record(args.command, out, run_id, glm_input=glm_input, **fields))
             outputs = [os.path.join(out, name) for name in outputs]
         elif args.command == "seeds":
             variants = [name.strip() for name in args.variants.split(",") if name.strip()]

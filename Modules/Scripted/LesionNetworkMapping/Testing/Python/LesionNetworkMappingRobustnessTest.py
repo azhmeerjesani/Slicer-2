@@ -389,6 +389,62 @@ class LabelsAndCommandLineTest(RobustnessTestBase):
         self.assertEqual(code, 1)
         self.assertEqual(events[-1]["event"], "error")
 
+    def test_command_line_glm_uses_the_design_input_maps(self):
+        """Influence and split-half with --design fit the Contrast tab's GLM: on the maps of design.json's input
+        (AvgFz for "Fz", the default), not on the T maps that the overlap and sensitivity maps threshold.
+        """
+        from LesionNetworkMappingLib import cohort as cohort_lib
+        from LesionNetworkMappingLib import design as design_lib
+
+        maps = os.path.join(self.maps_a_dir, cohortmaps.MAPS_TSV)
+        rule = json.dumps(TOP10)
+        rows = {row["participant_id"]: row for row in cohortmaps.read_maps_tsv(maps)}
+        indices, shape, _affine = cohort_lib.mask_geometry(os.path.join(self.meta_a["path"], "mask.nii.gz"))
+        # a continuous score (720 permutations of 6 lesions, enough for the design not to be blocked), on a copy of the study
+        study_dir = self.path("Study")
+        shutil.copytree(self.study_dir, study_dir)
+        study = Study.open(study_dir)
+        for index, sid in enumerate(self.sids):
+            study.set(sid, {"score": str([3.0, 9.5, 1.0, 7.0, 4.5, 12.0][index])})
+        study.set_column_role("score", "score")
+        study.save()
+        peaks = {}
+        for statistic in ("Fz", "T"):
+            path = self.path(f"design-{statistic}.json")
+            design_lib.DesignSpec(test="continuous", group_column=None, score_column="score", contrast="positive", covariates=[], volume_off_reason="test", input=statistic).save(path)
+            built = design_lib.build_design(study_dir, design_lib.DesignSpec.load(path))
+            self.assertFalse(built.blocking, [check.message for check in built.blocking])
+            X = np.asarray(built.X, dtype=np.float64)
+            c = np.asarray(built.C, dtype=np.float64).reshape(-1)
+
+            def ols_t(column, X=X, c=c, sids=built.sids):
+                Y = np.asarray(cohort_lib.load_masked([rows[sid][column] for sid in sids], indices, shape), dtype=np.float64)
+                beta = np.linalg.pinv(X) @ Y
+                df = X.shape[0] - np.linalg.matrix_rank(X)
+                return (c @ beta) / np.sqrt(((Y - X @ beta) ** 2).sum(axis=0) / df * (c @ np.linalg.pinv(X.T @ X) @ c))
+
+            expected = ols_t(glm.MAP_COLUMNS[statistic])
+            expected_peak = float(expected[np.argmax(np.abs(expected))])
+            out = self.path(f"cli-design-{statistic}")
+            code, events, stderr = self.run_cli("influence", "--maps", maps, "--rule", rule, "--overlap", "50", "--study", study_dir, "--design", path, "--out", out, "--run-root", out)
+            self.assertEqual(code, 0, (stderr, events[-1:]))
+            _columns, influence = read_tsv(os.path.join(out, robustness.INFLUENCE_TSV))
+            peak = float(influence[0]["t_peak_full"])
+            self.assertAlmostEqual(peak, expected_peak, delta=1e-4 * max(1.0, abs(expected_peak)), msg=f"input {statistic}")
+            with open(os.path.join(out, "influence.json"), encoding="utf-8") as f:
+                self.assertEqual(json.load(f)["glm_input"], statistic)
+            peaks[statistic] = peak
+            # split-half: the halves' GLM t maps of the design input's maps (same seed, same splits)
+            code, events, stderr = self.run_cli("splithalf", "--maps", maps, "--rule", rule, "--n-splits", "8", "--seed", "2", "--overlap", "50", "--study", study_dir,
+                                                "--design", path, "--out", out, "--run-root", out)
+            self.assertEqual(code, 0, (stderr, events[-1:]))
+            got = np.load(os.path.join(out, robustness.SPLITHALF_NPZ))["r_glm_t"]
+            glm_cohort = robustness.load_cohort(maps, column=glm.MAP_COLUMNS[statistic]).subset(built.sids)
+            want = robustness.lesion_split_half(self.cohort_a.subset(built.sids), n_splits=8, seed=2, rule=TOP10, overlap_pct=50, design=(X, c[None]), glm_maps=glm_cohort)["r_glm_t"]
+            np.testing.assert_allclose(got, want, rtol=1e-6, atol=1e-9, equal_nan=True)
+        # the two inputs give different GLMs, so the check above tells them apart
+        self.assertGreater(abs(peaks["Fz"] - peaks["T"]), 1e-3)
+
     def test_command_line_protocol(self):
         maps = os.path.join(self.maps_a_dir, cohortmaps.MAPS_TSV)
         rule = json.dumps(TOP10)
