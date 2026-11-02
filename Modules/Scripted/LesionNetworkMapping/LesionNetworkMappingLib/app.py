@@ -282,6 +282,11 @@ def prepare_bids_study(input_dir, output_dir, group_column=None, group_map=None,
     lesions = find_bids_lesions(input_dir, skip=[output_dir])
     if not lesions:
         raise ValueError(f"No lesion mask (*_label-lesion_mask, *_desc-lesion_mask or *_label-lesion_roi .nii[.gz]) in {input_dir}")
+    folded = {}
+    for sid in lesions:
+        twin = folded.setdefault(sid.casefold(), sid)
+        if twin != sid:  # the study names files after subject ids
+            raise ValueError(f"Subjects {twin} and {sid} differ only in letter case: on macOS they would share files. Rename one of them.")
     chosen = [paths[0] for paths in lesions.values()]
     skipped = [{"participant_id": sid, "path": os.path.relpath(path, input_dir).replace(os.sep, "/"), "reason": "another lesion mask was chosen"}
                for sid, paths in lesions.items() for path in paths[1:]]

@@ -802,7 +802,7 @@ def add_cases(study, records, record_id, n):
     if not re.fullmatch(r"[A-Za-z0-9]+", record_id):
         raise ValueError(f"Invalid record id {record_id!r}")
     row = records.get(record_id)
-    existing = set(study.subject_ids)
+    existing = {sid.casefold() for sid in study.subject_ids}  # ids name files: sub-A01 and sub-a01 are one file on macOS
     values = {"record_id": record_id, "source_type": "case_report", "group": "case"}
     for column in ("doi", "pmid"):
         if row[column]:
@@ -814,7 +814,7 @@ def add_cases(study, records, record_id, n):
     while len(created) < n:
         number += 1
         sid = f"sub-{record_id}{number:02d}"
-        if sid in existing:
+        if sid.casefold() in existing:
             continue
         study.add_subject(sid, values)
         created.append(sid)

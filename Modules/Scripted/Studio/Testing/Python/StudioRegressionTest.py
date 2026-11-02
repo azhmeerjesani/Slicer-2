@@ -1510,6 +1510,7 @@ class StudioRegressionTest(unittest.TestCase):
         tsv = os.path.join(folder, "participants.tsv")
         for broken, message in (
             ("participant_id\tage\n01\t40\nsub-01\t41\n02\t42\n", "appears twice"),
+            ("participant_id\tage\nsub-P01\t40\nsub-p01\t41\n", "only in letter case"),  # one lesion file on macOS
             ("id\tage\n1\t40\n", "no participant_id column"),
         ):
             with open(tsv, "w", encoding="utf-8") as f:

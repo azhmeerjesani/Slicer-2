@@ -857,10 +857,13 @@ def _lesion_name(path):
 def _unique_name(name, used):
     """``name``, or ``name`` with a counter when it is in ``used``: "lesion-2" or, for BIDS-style
     names, an extra entity that keeps the subject label valid ("sub-01_lesion-2", not "sub-01-2").
+    Names are compared ignoring letter case: they name map files, and "Lesion" and "lesion" are one
+    file on macOS.
     """
     pattern = "{}_lesion-{}" if _BIDS_LABEL.match(name) else "{}-{}"
+    folded = {other.casefold() for other in used}
     unique, counter = name, 2
-    while unique in used:
+    while unique.casefold() in folded:
         unique, counter = pattern.format(name, counter), counter + 1
     return unique
 

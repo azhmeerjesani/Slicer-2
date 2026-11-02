@@ -156,6 +156,10 @@ def participant_label(subject_id):
     return f"sub-{label}"
 
 
+def _case_twin_message(sid, twin):
+    return f"Subject {sid} differs from {twin} only in letter case: on macOS they would share files"
+
+
 def format_value(value):
     """TSV text of a value: "n/a" for None, NaN and empty text; "1"/"0" for booleans; comma-separated sequences."""
     if value is None:
@@ -524,6 +528,7 @@ class Study:
         self._columns = list(columns)
         self._rows = []
         self._index = {}
+        self._folded = {}  # {casefolded id: [ids]}: ids that differ only in case name one file on macOS
         for row in rows:
             self._insert(row)
         self._baseline = None  # state of the files when last read or written (merge-save)
@@ -824,6 +829,18 @@ class Study:
     def __contains__(self, sid):
         return sid in self._index
 
+    def case_twin(self, sid):
+        """The subject id that differs from ``sid`` only in letter case ("sub-P01" for "sub-p01"), else None.
+
+        Subject ids name files (lesions/<sid>_...), and on a case-insensitive disk (the macOS default) such
+        ids would share one file, so new subjects may not be case twins of existing ones.
+        """
+        return next((other for other in self._folded.get(str(sid).casefold(), ()) if other != sid), None)
+
+    def id_taken(self, sid):
+        """True when ``sid`` is a subject id of the study or differs from one only in letter case."""
+        return sid in self._index or self.case_twin(sid) is not None
+
     def __repr__(self):
         return f"Study({self.name!r}, subjects={len(self)})"
 
@@ -877,6 +894,7 @@ class Study:
                 full[column] = value
         self._rows.append(full)
         self._index[sid] = full
+        self._folded.setdefault(sid.casefold(), []).append(sid)
         return full
 
     def _row(self, sid):
@@ -904,6 +922,9 @@ class Study:
         sid = participant_label(sid)
         if sid in self._index:
             raise ValueError(f"Subject {sid} is already in the study")
+        twin = self.case_twin(sid)
+        if twin is not None:
+            raise ValueError(_case_twin_message(sid, twin))
         self._insert({"participant_id": sid})
         try:
             return self.set(sid, values, **fields)
@@ -916,6 +937,9 @@ class Study:
         row = self._row(sid)
         self._rows = [other for other in self._rows if other is not row]
         del self._index[sid]
+        twins = self._folded.get(sid.casefold(), [])
+        if sid in twins:
+            twins.remove(sid)
 
     def set(self, sid, values=None, **fields):
         """Set cells of a subject's row; unknown columns are added at the end of the table.
@@ -1270,6 +1294,10 @@ class Study:
             if sid in self._index:
                 report["skipped"].append({"id": lesion["id"], "reason": f"{sid} is already a subject of the study"})
                 continue
+            twin = self.case_twin(sid)
+            if twin is not None:
+                report["skipped"].append({"id": lesion["id"], "reason": _case_twin_message(sid, twin)})
+                continue
             self.add_subject(sid, values)
             report["added"].append(sid)
         keep = {lesion["id"] for lesion in entry["lesions"] if wanted is None or lesion["id"] in wanted}
@@ -1569,6 +1597,13 @@ class Study:
             prepared.append((sid, values))
         if len({sid for sid, _ in prepared}) != len(prepared):
             raise ValueError(f"{path} has duplicate participant ids")
+        first = {}
+        for sid, _ in prepared:
+            twin = first.setdefault(sid.casefold(), sid)
+            if twin == sid:
+                twin = self.case_twin(sid)
+            if twin is not None:
+                raise ValueError(f"{path}: {_case_twin_message(sid, twin)}")
         new_columns = [column for column in columns if column != "participant_id" and column not in self._columns]
         for column in new_columns:
             self._columns.append(column)
@@ -1664,6 +1699,11 @@ class Study:
             for kind, files in (("scan", scans), ("lesion", lesions)):
                 for path, _ in files[1:]:
                     report["skipped"].append({"path": path, "reason": f"another {kind} was chosen for {sid}"})
+            twin = self.case_twin(sid) if sid not in self._index else None
+            if twin is not None:  # one file name on macOS: keep the subject that is already in the study
+                reason = _case_twin_message(sid, twin)
+                report["skipped"].extend({"path": item[0], "reason": reason} for item in (chosen["lesion"], chosen["scan"]) if item)
+                continue
             space = lesion_space or file_space(chosen["scan"])
             values = {"scan": self.relpath(chosen["scan"][0]) if chosen["scan"] else None, "lesion": self.relpath(chosen["lesion"][0]) if chosen["lesion"] else None}
             report["pairs"][sid] = {kind: chosen[kind][0] if chosen[kind] else None for kind in ("scan", "lesion")}

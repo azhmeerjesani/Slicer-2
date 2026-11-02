@@ -795,13 +795,16 @@ def adoptFolder(folder, name=None, groupColumn=None, groupMapping=None, template
     if "participant_id" not in columns:
         raise ValueError(_("{path} has no participant_id column").format(path=tsvPath))
     added = []
-    seen = set()
+    seen = {}
     for row in rows:
         original = row["participant_id"]
         sid = studyModule.participant_label(original)
-        if sid in seen:
+        twin = seen.get(sid.casefold())
+        if twin == sid:
             raise ValueError(_("{path}: {id} appears twice (after normalizing the ids to sub-<label>)").format(path=tsvPath, id=sid))
-        seen.add(sid)
+        if twin is not None:  # ids name the lesion files: one file on macOS
+            raise ValueError(_("{path}: {id} differs from {other} only in letter case: on macOS they would share files").format(path=tsvPath, id=sid, other=twin))
+        seen[sid.casefold()] = sid
         if sid != original:
             row["participant_id"] = sid
             if studyModule.is_missing(row.get("source_id")):
@@ -3743,7 +3746,7 @@ class StudySession:
         """Add a subject without a scan ("sub-case001"...) whose lesion is drawn on the study template, and open it."""
         studyModule = _lnm("study")
         number = 1
-        while f"sub-{CASE_PREFIX}{number:03d}" in self.study:
+        while self.study.id_taken(f"sub-{CASE_PREFIX}{number:03d}"):
             number += 1
         sid = f"sub-{CASE_PREFIX}{number:03d}"
         record = self.templateRecord()
@@ -3766,7 +3769,7 @@ class StudySession:
         if not label:
             label = re.sub(r"\d+$", "", caseLabel(str(row.get("participant_id", ""))[4:])) or CASE_PREFIX
         number = 1
-        while f"sub-{label}{number:02d}" in self.study:
+        while self.study.id_taken(f"sub-{label}{number:02d}"):
             number += 1
         return f"sub-{label}{number:02d}"
 

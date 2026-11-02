@@ -469,6 +469,42 @@ class StudyTest(unittest.TestCase):
         self.assertEqual(study.format_value(1e-9), "1e-09")
         self.assertEqual(study.format_value([]), "none")
 
+    def test_ids_that_differ_only_in_case_are_refused(self):
+        # Subject ids name the lesion files (lesions/<id>_space-..._desc-lesion_mask.nii.gz): on a case-insensitive
+        # disk (the macOS default) sub-P01 and sub-p01 would be one file, and one subject's lesion would replace the other's
+        created = Study.create(self.path("case"), space="MNI152NLin2009cAsym")
+        created.add_subject("P01", nihss="4")
+        with self.assertRaisesRegex(ValueError, "sub-p01 differs from sub-P01 only in letter case"):
+            created.add_subject("p01", nihss="17")
+        self.assertEqual(created.subject_ids, ["sub-P01"])
+        self.assertEqual(created.case_twin("sub-p01"), "sub-P01")
+        self.assertIsNone(created.case_twin("sub-P01"))
+        self.assertTrue(created.id_taken("sub-p01"))
+        self.assertFalse(created.id_taken("sub-p02"))
+        # A table: twins inside it, or a twin of a subject of the study, are refused before anything changes
+        with open(self.path("twins.tsv"), "w", encoding="utf-8") as f:
+            f.write("participant_id\tnihss\nsub-A02\t3\nsub-a02\t5\n")
+        with self.assertRaisesRegex(ValueError, "sub-a02 differs from sub-A02 only in letter case"):
+            created.import_tsv(self.path("twins.tsv"))
+        with open(self.path("twin_of_study.tsv"), "w", encoding="utf-8") as f:
+            f.write("participant_id\tnihss\nsub-P01\t5\nsub-p01\t17\n")
+        with self.assertRaisesRegex(ValueError, "sub-p01 differs from sub-P01 only in letter case"):
+            created.import_tsv(self.path("twin_of_study.tsv"))
+        self.assertEqual(created.subject_ids, ["sub-P01"])
+        self.assertEqual(created.subject("sub-P01")["nihss"], "4")
+        # Files: a case twin of a subject is skipped with the reason, the subject keeps its row
+        lesion = self._image("drop/sub-p01_lesion.nii.gz", affine=MNI2009C_2MM, value=1)
+        report = created.add_files([lesion])
+        self.assertEqual(report["added"], [])
+        self.assertEqual(report["skipped"], [{"path": lesion, "reason": "Subject sub-p01 differs from sub-P01 only in letter case: on macOS they would share files"}])
+        self.assertEqual(created.subject_ids, ["sub-P01"])
+        # Removing a subject frees its id in every case
+        created.remove_subject("sub-P01")
+        self.assertIsNone(created.case_twin("sub-p01"))
+        created.add_subject("p01")
+        self.assertEqual(created.subject_ids, ["sub-p01"])
+        self.assertEqual(len({path.casefold() for path in (created.lesion_relpath(sid) for sid in created.subject_ids)}), len(created))
+
 
 if __name__ == "__main__":
     unittest.main()

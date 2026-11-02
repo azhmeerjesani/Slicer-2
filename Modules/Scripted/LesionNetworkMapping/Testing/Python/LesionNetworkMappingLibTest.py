@@ -1460,6 +1460,10 @@ class ExportTest(_TempDirTestCase):
         self.assertEqual(engine._unique_name("sub-07_ses-2", ["sub-07_ses-2", "sub-07_ses-2_lesion-2"]), "sub-07_ses-2_lesion-3")
         self.assertEqual(engine._unique_name("patient01_lesion", ["patient01_lesion"]), "patient01_lesion-2")
         self.assertEqual(engine._unique_name("sub-08", ["sub-07"]), "sub-08")
+        # Names that differ only in case name one map file on macOS: they are made unique too
+        self.assertEqual(engine._unique_name("lesion", ["Lesion"]), "lesion-2")
+        self.assertEqual(engine._unique_name("sub-p01", ["sub-P01"]), "sub-p01_lesion-2")
+        self.assertEqual(engine._unique_name("LESION-2", ["Lesion", "lesion-2"]), "LESION-2-2")
         peaks = stats.peak_table(np.array([0.0, 5.0, -7.0]), geometry.Grid((3, 1, 1), RAS_AFFINE), top_k=2, min_distance_mm=0.5)
         export.write_peaks_tsv(self.path("peaks.tsv"), peaks, ["Precuneus"])
         with open(self.path("peaks.tsv"), encoding="utf-8") as f:
