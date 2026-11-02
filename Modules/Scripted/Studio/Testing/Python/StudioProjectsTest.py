@@ -5095,6 +5095,128 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertNotIn(os.path.join(projects.LNM_DIR, "ReferenceMaps"), renamed)
         self.assertFalse(os.path.exists(os.path.join(oldRoot, projects.LNM_DIR)), "everything moved")
 
+    def test_80_interrupted_root_move_to_another_volume_leaves_no_partial_copy_under_the_real_name(self):
+        """Change folder > Move to another volume, killed during the copy, then the same move again (BB-1). The copy went
+        straight to its real name (Projects/, or Projects/P2 when the new folder had Projects/ already), so the kill left
+        complete and truncated projects there under the real names; the retry merged into them and moved every complete
+        original as "<name> 2": each project was listed twice, and the truncated "P2" (its scan cut in the middle) kept the
+        name the user knows. A copy now has a hidden name until it is complete and checked, and the retry deletes what an
+        interrupted move left. Here the copy of P2's scan writes half of it and the process "dies" (an exception that no
+        ``except OSError`` catches, as a kill).
+        """
+        import shutil as shutilModule
+        from unittest import mock
+
+        from StudioLib import projects_ui
+
+        projects = self.projects
+
+        class Killed(BaseException):
+            pass
+
+        def makeProject(rootPath, name, size):
+            folder = os.path.join(rootPath, projects.PROJECTS_DIR, name)
+            os.makedirs(os.path.join(folder, "Images"))
+            os.makedirs(os.path.join(folder, projects.PRIVATE_DIR))
+            with open(os.path.join(folder, "Images", name + ".nrrd"), "wb") as f:
+                f.write(os.urandom(size))
+            with open(os.path.join(folder, name + projects.SCENE_EXTENSION), "w") as f:
+                f.write('<MRML><VolumeArchetypeStorage fileName="Images/%s.nrrd"/></MRML>\n' % name)
+
+        realCopyfile = shutilModule.copyfile
+
+        def killedInP2(source, destination, *args, **kwargs):
+            if os.path.basename(os.fspath(source)) == "P2.nrrd":
+                with open(source, "rb") as original, open(destination, "wb") as f:
+                    f.write(original.read(os.path.getsize(source) // 2))
+                raise Killed()
+            return realCopyfile(source, destination, *args, **kwargs)
+
+        for case, existing in (("new folder", ()), ("folder with projects", ("Other",))):
+            with self.subTest(case=case):
+                oldRoot = os.path.join(self.tempDir, case, "A", "Slicer Studio")
+                newRoot = os.path.join(self.tempDir, case, "B", "My projects")  # not named "Slicer Studio"
+                for name in ("P1", "P2", "P3"):
+                    makeProject(oldRoot, name, 4096)
+                for name in existing:
+                    makeProject(newRoot, name, 1024)
+                originals = {name: _relativeFiles(os.path.join(oldRoot, projects.PROJECTS_DIR, name)) for name in ("P1", "P2", "P3")}
+                with open(os.path.join(oldRoot, projects.PROJECTS_DIR, "P2", "Images", "P2.nrrd"), "rb") as f:
+                    scan = f.read()
+                with mock.patch.object(projects, "_sameVolume", return_value=False), mock.patch.object(shutilModule, "copyfile", side_effect=killedInP2):
+                    with self.assertRaises(Killed):
+                        projects.moveContent(oldRoot, newRoot)
+                # After the kill: the new folder lists no partial project, the old one still has P2 complete
+                self.assertEqual(sorted(info.name for info in projects.listProjects(newRoot)), sorted(existing + tuple(
+                    name for name in ("P1", "P3") if not os.path.isdir(os.path.join(oldRoot, projects.PROJECTS_DIR, name)))),
+                    "only complete projects have their name in the new folder")
+                with open(os.path.join(oldRoot, projects.PROJECTS_DIR, "P2", "Images", "P2.nrrd"), "rb") as f:
+                    self.assertEqual(f.read(), scan, "the original stays complete")
+                if not existing:
+                    # Change… > Choose the same folder again: it holds only the hidden partial copy, so it is used as is
+                    # (no "Slicer Studio" folder inside it, where the partial copy would stay forever)
+                    self.assertTrue(os.listdir(newRoot), "the partial copy is there, hidden")
+                    original = qt.QFileDialog.getExistingDirectory
+                    qt.QFileDialog.getExistingDirectory = staticmethod(lambda *args, newRoot=newRoot, **kwargs: newRoot)
+                    dialog = projects_ui.FolderChooserDialog(proposal=oldRoot, cancellable=True)
+                    try:
+                        dialog.choose()
+                        self.assertEqual(os.path.normpath(dialog.path), os.path.normpath(newRoot))
+                    finally:
+                        qt.QFileDialog.getExistingDirectory = original
+                        dialog.deleteLater()
+                        slicer.app.processEvents()
+                # The same move again
+                with mock.patch.object(projects, "_sameVolume", return_value=False):
+                    renamed = {}
+                    projects.moveContent(oldRoot, newRoot, renamed=renamed)
+                self.assertEqual(renamed, {}, "no project moves as \"<name> 2\"")
+                self.assertEqual(sorted(info.name for info in projects.listProjects(newRoot)), sorted(("P1", "P2", "P3", *existing)),
+                                 "each project is listed once")
+                projectsDir = os.path.join(newRoot, projects.PROJECTS_DIR)
+                self.assertEqual(sorted(os.listdir(projectsDir)), sorted(("P1", "P2", "P3", *existing)), "no hidden partial copy is left")
+                self.assertEqual(sorted(name for name in os.listdir(newRoot) if name.startswith(".")), [], "no hidden partial copy is left")
+                for name, files in originals.items():
+                    self.assertEqual(_relativeFiles(os.path.join(projectsDir, name)), files, name)
+                with open(os.path.join(projectsDir, "P2", "Images", "P2.nrrd"), "rb") as f:
+                    self.assertEqual(f.read(), scan, "P2 has its whole scan")
+                self.assertFalse(os.path.exists(os.path.join(oldRoot, projects.PROJECTS_DIR)), "the originals are deleted after the copy")
+
+        # Killed while the original is deleted, after its copy is complete: no half original stays under its name, so the
+        # same move again does not move it as "<name> 2" next to its complete copy
+        realRmtree = shutilModule.rmtree
+        for case, existing in (("delete, new folder", ()), ("delete, folder with projects", ("Other",))):
+            with self.subTest(case=case):
+                oldRoot = os.path.join(self.tempDir, case, "A", "Slicer Studio")
+                newRoot = os.path.join(self.tempDir, case, "B", "My projects")
+                for name in ("P1", "P2", "P3"):
+                    makeProject(oldRoot, name, 4096)
+                for name in existing:
+                    makeProject(newRoot, name, 1024)
+                originals = {name: _relativeFiles(os.path.join(oldRoot, projects.PROJECTS_DIR, name)) for name in ("P1", "P2", "P3")}
+                oldPrefix = os.path.normpath(oldRoot) + os.sep
+
+                def killedWhileDeleting(path, *args, oldPrefix=oldPrefix, **kwargs):
+                    if os.path.normpath(os.fspath(path)).startswith(oldPrefix):
+                        for directory, _folders, files in os.walk(path):
+                            for name in files:
+                                os.remove(os.path.join(directory, name))  # the first file is deleted, then the process dies
+                                raise Killed()
+                    return realRmtree(path, *args, **kwargs)
+
+                with mock.patch.object(projects, "_sameVolume", return_value=False), mock.patch.object(projects.shutil, "rmtree", side_effect=killedWhileDeleting):
+                    with self.assertRaises(Killed):
+                        projects.moveContent(oldRoot, newRoot)
+                with mock.patch.object(projects, "_sameVolume", return_value=False):
+                    renamed = {}
+                    projects.moveContent(oldRoot, newRoot, renamed=renamed)
+                self.assertEqual(renamed, {}, "no project moves as \"<name> 2\"")
+                self.assertEqual(sorted(info.name for info in projects.listProjects(newRoot)), sorted(("P1", "P2", "P3", *existing)),
+                                 "each project is listed once")
+                for name, files in originals.items():
+                    self.assertEqual(_relativeFiles(os.path.join(newRoot, projects.PROJECTS_DIR, name)), files, name)
+                self.assertEqual(sorted(os.listdir(oldRoot)), [], "what the interrupted delete left is deleted")
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk

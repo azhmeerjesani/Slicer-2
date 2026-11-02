@@ -431,11 +431,12 @@ class FolderChooserDialog(qt.QDialog):
         folder = qt.QFileDialog.getExistingDirectory(self, _("Choose the Slicer Studio folder"), start)
         if folder:
             # A new, empty folder or an existing Slicer Studio folder is used as is; inside another folder, a
-            # "Slicer Studio" folder is proposed so that the user's own files stay apart
+            # "Slicer Studio" folder is proposed so that the user's own files stay apart. A folder that holds only what an
+            # interrupted move into it left (hidden partial copies) is the folder of that move: the retry goes there again
             folder = os.path.normpath(folder)
             if os.path.basename(folder) != projects.ROOT_FOLDER_NAME and not os.path.isdir(os.path.join(folder, projects.PROJECTS_DIR)):
                 try:
-                    empty = not os.listdir(folder)
+                    empty = all(projects.isMoveLeftover(name) for name in os.listdir(folder))
                 except OSError:
                     empty = False
                 if not empty:

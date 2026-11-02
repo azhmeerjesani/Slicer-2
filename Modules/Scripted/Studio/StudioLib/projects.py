@@ -212,6 +212,9 @@ def setRoot(path, chosen=True):
     settings.setValue(ROOT_KEY, path)
     if chosen:
         settings.setValue(ROOT_CHOSEN_KEY, True)
+    # Written now: after a move, the content is already in the new folder, and a crash before Qt writes the settings by
+    # itself would start the next time in the old, now empty folder
+    settings.sync()
     _notify()
     return path
 
@@ -1372,6 +1375,51 @@ def _copyError(source, error):
     return result
 
 
+#: Name part of the hidden copy (".<name>.studio-move") that a move to another volume makes next to the destination and
+#: renames to its name once it is complete and checked: a move that is interrupted (a crash, a kill) never leaves a partial
+#: copy under the real name, and the next move there deletes what it left (``_removeMoveLeftovers``)
+MOVE_MARKER = ".studio-move"
+#: Name part of the hidden name (".<name>.studio-moved") that the original of a folder copied to another volume gets
+#: before it is deleted: a delete that is interrupted never leaves half an original under its name (the next move would
+#: move it as "<name> 2" next to its complete copy)
+MOVED_MARKER = ".studio-moved"
+
+
+def _hiddenName(path, marker):
+    return os.path.join(os.path.dirname(path), "." + os.path.basename(path) + marker)
+
+
+def _moveTemporary(destination):
+    """The hidden name next to ``destination`` that a copy for a move goes to until it is complete."""
+    return _hiddenName(destination, MOVE_MARKER)
+
+
+def isMoveLeftover(name):
+    """True for what an interrupted move left: a partial copy, or an original whose complete copy is in the new folder."""
+    return name.startswith(".") and name.endswith((MOVE_MARKER, MOVED_MARKER))
+
+
+def _deleteCopiedFolder(source):
+    """Delete the original of a folder whose copy is complete: first hide it under another name, then delete it."""
+    hidden = _hiddenName(source, MOVED_MARKER)
+    try:
+        if os.path.lexists(hidden):
+            removePaths([hidden])
+        os.rename(source, hidden)
+    except OSError:
+        hidden = source
+    shutil.rmtree(hidden)
+
+
+def _removeMoveLeftovers(folder):
+    """Delete what an interrupted move left in ``folder`` (hidden, never listed). Worker-safe."""
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return
+    removePaths([os.path.join(folder, name) for name in names if isMoveLeftover(name)])
+
+
 def _mergeMove(source, destination, sameVolume, progress=None, renamed=None):
     """Move ``source`` (a file or folder) to ``destination``: a rename on the same volume, else copy, check the sizes and
     delete the original. When ``source`` and ``destination`` are both folders (a kind folder such as Projects/, as
@@ -1379,11 +1427,21 @@ def _mergeMove(source, destination, sameVolume, progress=None, renamed=None):
     whatever its name, so a project, study or folder is never merged into another one of the same name (a project named
     "LNM" or "Studies" is a project like "MRHead"). Worker-safe.
 
+    A copy is made under a hidden name (``MOVE_MARKER``) and gets its name only once it is complete and checked, so a
+    move that is interrupted (a crash during the copy) leaves no partial copy under the real name: a retry would keep
+    that one and move the complete original as " 2". Only then is the original hidden (``MOVED_MARKER``) and deleted,
+    so an interrupted delete leaves no half original under its name either. What an interrupted move left (hidden) is
+    deleted by the next move.
+
     ``renamed`` (a dict) receives ``{source: destination}`` for each item that moved under another name (" 2") because
     its name was taken there.
     """
     if os.path.isdir(source) and os.path.isdir(destination):
+        _removeMoveLeftovers(destination)
         for name in os.listdir(source):
+            if isMoveLeftover(name):
+                removePaths([os.path.join(source, name)])  # what an interrupted move left here (copied elsewhere, or partial)
+                continue
             target = os.path.join(destination, name)
             if os.path.exists(target):
                 target = os.path.join(destination, uniqueName(destination, name, isFile=os.path.isfile(os.path.join(source, name))))
@@ -1415,28 +1473,40 @@ def _mergeMove(source, destination, sameVolume, progress=None, renamed=None):
             if progress:
                 progress(os.path.basename(source))
             return
+    temporary = _moveTemporary(destination)
+    if os.path.lexists(temporary):
+        removePaths([temporary])  # left by a move that was interrupted
     if os.path.isdir(source):
         try:
-            shutil.copytree(source, destination)
+            shutil.copytree(source, temporary)
         except OSError as error:
             # copytree goes on after a file that fails (a full disk) and leaves a partial copy: never keep it, the
             # original stays the only copy
-            shutil.rmtree(destination, ignore_errors=True)
+            shutil.rmtree(temporary, ignore_errors=True)
             raise _copyError(source, error) from error
-        if treeSize(source) != treeSize(destination):
-            shutil.rmtree(destination, ignore_errors=True)
+        if treeSize(source) != treeSize(temporary):
+            shutil.rmtree(temporary, ignore_errors=True)
             raise OSError(_("Copying {name} failed: the sizes differ").format(name=os.path.basename(source)))
-        shutil.rmtree(source)
+        try:
+            os.rename(temporary, destination)
+        except OSError as error:
+            shutil.rmtree(temporary, ignore_errors=True)
+            raise _copyError(source, error) from error
+        _deleteCopiedFolder(source)
     else:
         try:
-            shutil.copy2(source, destination)
+            shutil.copy2(source, temporary)
         except OSError as error:
-            if os.path.isfile(destination):
-                os.remove(destination)
+            removePaths([temporary])
             raise _copyError(source, error) from error
-        if os.path.getsize(source) != os.path.getsize(destination):
-            os.remove(destination)
+        if os.path.getsize(source) != os.path.getsize(temporary):
+            removePaths([temporary])
             raise OSError(_("Copying {name} failed: the sizes differ").format(name=os.path.basename(source)))
+        try:
+            os.rename(temporary, destination)
+        except OSError as error:
+            removePaths([temporary])
+            raise _copyError(source, error) from error
         os.remove(source)
     if progress:
         progress(os.path.basename(source))
@@ -1474,8 +1544,12 @@ def _mergeLnm(source, destination, sameVolume, progress=None, renamed=None):
     if not (os.path.isdir(source) and os.path.isdir(destination)):
         _mergeMove(source, destination, sameVolume, progress, renamed)
         return
+    _removeMoveLeftovers(destination)
     for name in os.listdir(source):
         item = os.path.join(source, name)
+        if isMoveLeftover(name):
+            removePaths([item])
+            continue
         target = os.path.join(destination, name)
         if name in _LNM_APP_FOLDERS and os.path.isdir(item) and os.path.isdir(target):
             if name != LNM_REFERENCE_MAPS_DIR:
@@ -1619,6 +1693,10 @@ def moveContent(oldRoot, newRoot, progress=None, renamed=None, renamedIds=None):
     checkMoveTarget(oldRoot, newRoot)
     created = not os.path.isdir(newRoot)
     os.makedirs(newRoot, exist_ok=True)
+    # What a move that was interrupted left: partial copies here (".Projects.studio-move"), originals there that were
+    # being deleted after their copy was complete (".Projects.studio-moved")
+    _removeMoveLeftovers(newRoot)
+    _removeMoveLeftovers(oldRoot)
     sameVolume = _sameVolume(oldRoot, newRoot)
     moved = []
     absoluteRenames = {}
