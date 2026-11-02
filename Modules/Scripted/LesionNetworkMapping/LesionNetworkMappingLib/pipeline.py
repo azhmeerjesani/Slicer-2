@@ -1911,8 +1911,7 @@ class Runner:
         env = dict(os.environ)
         env["PYTHONPATH"] = LIB_PARENT + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
         env["PYTHONIOENCODING"] = "utf-8"
-        if sys.platform.startswith("linux") and not any("UTF-8" in env.get(key, "").upper().replace("UTF8", "UTF-8") for key in ("LC_ALL", "LC_CTYPE", "LANG")):
-            env["LC_CTYPE"] = "C.UTF-8"  # the CTK launcher (PythonSlicer) drops non-ASCII arguments under the POSIX locale
+        env.update(jobs.utf8_locale_env(env))  # the CTK launcher (PythonSlicer) drops non-ASCII arguments under the POSIX locale
         os.makedirs(folder, exist_ok=True)
         log_path = os.path.join(folder, "job.log")
         events = collections.deque(maxlen=50)

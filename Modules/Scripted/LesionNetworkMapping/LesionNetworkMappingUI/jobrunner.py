@@ -819,6 +819,8 @@ class JobRunner:
         env.setdefault("PYTHONUNBUFFERED", "1")
         # The reader decodes with the locale encoding: make the job write the same, replacing what it cannot hold
         env.setdefault("PYTHONIOENCODING", f"{locale.getpreferredencoding(False) or 'utf-8'}:replace")
+        # Under the C/POSIX locale the PythonSlicer launcher drops non-ASCII letters from the job's paths
+        env.update(_jobs.utf8_locale_env({**os.environ, **env}))
         return env
 
     def _start(self, job):

@@ -308,6 +308,31 @@ class JobPrimitivesTest(_TempDirTestCase):
             if old is not None:
                 os.environ[jobs.MAX_THREADS_ENV] = old
 
+    def test_utf8_locale_env(self):
+        # Under C/POSIX the PythonSlicer launcher drops non-ASCII argument letters: children get a UTF-8 LC_CTYPE
+        linux = lambda env: jobs.utf8_locale_env(env, platform="linux")  # noqa: E731
+        self.assertEqual(linux({}), {"LC_CTYPE": "C.UTF-8"})
+        self.assertEqual(linux({"LANG": "C"}), {"LC_CTYPE": "C.UTF-8"})
+        self.assertEqual(linux({"LANG": "POSIX", "LC_ALL": ""}), {"LC_CTYPE": "C.UTF-8"})
+        self.assertEqual(linux({"LANG": "C", "LC_ALL": "C"}), {"LC_ALL": "C.UTF-8"})  # LC_ALL overrides LC_CTYPE
+        self.assertEqual(linux({"LANG": "en_US.UTF-8", "LC_ALL": "C"}), {"LC_ALL": "C.UTF-8"})
+        self.assertEqual(linux({"LANG": "de_DE.ISO-8859-1"}), {"LC_CTYPE": "C.UTF-8"})
+        self.assertEqual(linux({"LANG": "C", "LC_CTYPE": "en_US.utf8"}), {})
+        self.assertEqual(linux({"LANG": "C.UTF-8"}), {})
+        self.assertEqual(linux({"LANG": "C", "LC_ALL": "C.UTF-8"}), {})
+        self.assertEqual(jobs.utf8_locale_env({"LANG": "C"}, platform="darwin"), {})
+        self.assertEqual(jobs.utf8_locale_env({"LANG": "C"}, platform="win32"), {})
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("PythonSlicer"), "Linux with the PythonSlicer launcher")
+    def test_utf8_locale_env_keeps_non_ascii_arguments(self):
+        argument = os.path.join(self.tmp, "Läsionsstudie 患者", "sub-01.nii.gz")
+        base = {key: value for key, value in os.environ.items() if key not in ("LC_ALL", "LC_CTYPE", "LANG")}
+        for locale_env in ({"LANG": "C", "LC_ALL": "C"}, {"LANG": "POSIX"}, {}):
+            env = {**base, **locale_env}
+            env.update(jobs.utf8_locale_env(env))
+            out = subprocess.run([shutil.which("PythonSlicer"), "-c", "import sys; sys.stdout.buffer.write(sys.argv[1].encode('utf-8'))", argument], env=env, capture_output=True, check=True, timeout=60)
+            self.assertEqual(out.stdout.decode("utf-8"), argument, locale_env)
+
     def test_resume_state(self):
         path = self.path("sub", "state.json")
         state = jobs.ResumeState(path)

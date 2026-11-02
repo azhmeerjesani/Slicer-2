@@ -110,6 +110,28 @@ MAX_THREADS_ENV = "SLICER_LNM_MAX_THREADS"
 
 _IS_WINDOWS = sys.platform == "win32"
 
+
+def utf8_locale_env(env=None, platform=None):
+    """Variables that give a child process a UTF-8 character locale on Linux; empty when it already has one.
+
+    Under the C or POSIX locale (or with no locale variable at all), the CTK launcher (``PythonSlicer``) decodes its
+    arguments with the 8-bit locale codec and drops every non-ASCII character, so a job given ``/data/Läsionsstudie``
+    receives ``/data/Lsionsstudie``. ``env`` is the environment the child gets (default ``os.environ``). The effective
+    character locale is the first non-empty of LC_ALL, LC_CTYPE and LANG; LC_ALL overrides LC_CTYPE, so a non-UTF-8
+    LC_ALL is replaced, otherwise only LC_CTYPE is set (messages, numbers and dates keep the user's locale).
+    """
+    if not (platform or sys.platform).startswith("linux"):
+        return {}
+    env = os.environ if env is None else env
+    for name in ("LC_ALL", "LC_CTYPE", "LANG"):
+        value = env.get(name)
+        if value:
+            if "UTF-8" in value.upper().replace("UTF8", "UTF-8"):
+                return {}
+            break
+    return {"LC_ALL": "C.UTF-8"} if env.get("LC_ALL") else {"LC_CTYPE": "C.UTF-8"}
+
+
 _clock = {"t0": time.monotonic()}
 _output_lock = threading.Lock()
 _output = {"broken": False}

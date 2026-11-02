@@ -12,6 +12,7 @@ Under a plain PythonSlicer (the library test glob) the module is skipped.
 import logging
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 
@@ -80,6 +81,37 @@ class LesionNetworkMappingJobRunnerChipTest(unittest.TestCase):
         self.assertFalse(any("Run failed" in (text or "") or "exit code" in (text or "") for text, _ in self.chips), self.chips)
         self.assertTrue(any("finished with failures" in text and message in text for text in logs), logs)
         self.assertFalse(any("exit code 1" in text for text in logs), logs)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the launcher drops non-ASCII arguments on Linux only")
+    def test_non_ascii_path_argument_survives_the_posix_locale(self):
+        """Under LANG=LC_ALL=C the PythonSlicer launcher dropped the letters of 'Läsionsstudie' (the job got 'Lsionsstudie')."""
+        from LesionNetworkMappingUI import jobrunner
+
+        with open(os.path.join(self.tmp, "argv_job.py"), "w", encoding="utf-8") as f:
+            f.write("import os, sys\nopen(os.environ['ARGV_OUT'], 'wb').write(sys.argv[1].encode('utf-8'))\n")
+        argument = os.path.join(self.tmp, "Läsionsstudie 患者", "sub-01.nii.gz")
+        out = os.path.join(self.tmp, "argv.txt")
+        names = ("LANG", "LC_ALL", "LC_CTYPE")
+        saved = {name: os.environ.get(name) for name in names}
+        runner = jobrunner.instance()
+        try:
+            for locale_env in ({"LANG": "C", "LC_ALL": "C"}, {"LANG": "POSIX"}):
+                for name in names:
+                    os.environ.pop(name, None)
+                os.environ.update(locale_env)
+                if os.path.exists(out):
+                    os.remove(out)
+                job = runner.submit(jobrunner.JobSpec("argv_job", [argument], title="Argv", heavy=False, kind="probe", runRoot=self.tmp, env={"PYTHONPATH": self.tmp, "ARGV_OUT": out}, name="argv_job"))
+                self.assertTrue(job.waitForFinished(60), job.state)
+                with open(out, "rb") as f:
+                    self.assertEqual(f.read().decode("utf-8"), argument, locale_env)
+        finally:
+            for name, value in saved.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+            runner.clearStatus()
 
     def test_total_failure_still_reads_run_failed(self):
         message = "No subject was normalized (2 failed): The scan file does not exist"
