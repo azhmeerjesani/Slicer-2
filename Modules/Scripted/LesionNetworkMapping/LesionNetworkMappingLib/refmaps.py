@@ -60,6 +60,7 @@ Command line (downloads run as a light job of the Map module)::
 numpy only (Pillow for the figure, requests for downloads); no Slicer, VTK or Qt.
 """
 
+import contextlib
 import datetime
 import hashlib
 import json
@@ -291,6 +292,142 @@ def _remove_entry_folder(entry, remaining, root):
         return
     for relpath in [key for key in fetch.read_manifest(cache)["files"] if key.startswith(folder + "/")]:
         fetch._drop_record(cache, relpath)
+
+
+# Moving the library
+
+
+def _free_name(name, taken):
+    """``name``, else "<name>-2", "<name>-3"... (before the extension of a file name) when it is in ``taken``."""
+    if name not in taken:
+        return name
+    stem, dot, extension = name[1:].partition(".")
+    stem = name[0] + stem
+    suffix = 2
+    while f"{stem}-{suffix}{dot}{extension}" in taken:
+        suffix += 1
+    return f"{stem}-{suffix}{dot}{extension}"
+
+
+def _listdir(folder):
+    try:
+        return sorted(os.listdir(folder))
+    except OSError:
+        return []
+
+
+def merge_into(source_root, destination_root, move):
+    """Merge the library in ``source_root`` into the library in ``destination_root``, so that the maps of both stay listed
+    (Change folder > Move into a Slicer Studio folder whose LNM/ has its own library: ``StudioLib.projects.moveContent``).
+
+    ``move(source, destination)`` moves one file or folder to a free ``destination`` (a rename on the same volume, else a
+    checked copy, and the original is deleted). A file folder whose name is taken in the destination moves under another
+    name ("<name>-2"), an entry whose id is taken gets another id, and the entry's ``file`` and the fetch-manifest records
+    follow its folder. Resampled caches move with their entry; one whose name is taken is dropped (it is made again
+    when needed). Raise RefmapsError, before anything moves, when either registry cannot be read.
+
+    When ``move`` fails (OSError, raised again), the entries whose files moved are listed in the destination library and
+    the others stay in the source library. Return ``{source path: destination path}`` of what moved under another name.
+    """
+    from . import fetch
+
+    source_root = registry_root(source_root)
+    destination_root = registry_root(destination_root)
+    source = load_registry(source_root)
+    destination = load_registry(destination_root)
+    source_manifest = fetch.read_manifest(source_root)
+    taken_ids = {item.get("id") for item in destination["entries"]}
+    new_ids = []
+    for entry in source["entries"]:
+        new_ids.append(_unique_id(str(entry.get("id") or "map"), taken_ids))
+        taken_ids.add(new_ids[-1])
+    moved = {}  # registry-relative "files/<name>" or "<name>" in the source: the one it has in the destination
+    renamed = {}
+    complete = False
+
+    def move_item(relative, target_folder, target_name):
+        source_path = os.path.join(source_root, *relative.split("/"))
+        target = os.path.join(target_folder, target_name)
+        move(source_path, target)
+        moved[relative] = os.path.relpath(target, destination_root).replace(os.sep, "/")
+        if os.path.basename(source_path) != target_name:
+            renamed[source_path] = target
+
+    def mapped(relative):
+        """``relative`` (registry-relative) in the destination, or None while it has not moved."""
+        for key in sorted(moved, key=len, reverse=True):
+            if relative == key or relative.startswith(key + "/"):
+                return moved[key] + relative[len(key):]
+        return None
+
+    files_source = os.path.join(source_root, FILES_DIR)
+    files_destination = os.path.join(destination_root, FILES_DIR)
+    lock_name = os.path.basename(fetch.manifest_path(source_root)) + ".lock"
+    try:
+        os.makedirs(destination_root, exist_ok=True)
+        if os.path.isdir(files_source):
+            os.makedirs(files_destination, exist_ok=True)
+            for name in _listdir(files_source):
+                if name != RESAMPLED_DIR:
+                    move_item(f"{FILES_DIR}/{name}", files_destination, _free_name(name, set(_listdir(files_destination))))
+            caches_source = os.path.join(files_source, RESAMPLED_DIR)
+            if os.path.isdir(caches_source):
+                caches_destination = os.path.join(files_destination, RESAMPLED_DIR)
+                os.makedirs(caches_destination, exist_ok=True)
+                cache_names = {_slug(entry.get("id"), 64): _slug(new_id, 64) for entry, new_id in zip(source["entries"], new_ids, strict=True)}
+                for name in _listdir(caches_source):
+                    target = cache_names.get(name, name)
+                    if os.path.exists(os.path.join(caches_destination, target)):
+                        shutil.rmtree(os.path.join(caches_source, name), ignore_errors=True)  # a cache: made again when needed
+                    else:
+                        move(os.path.join(caches_source, name), os.path.join(caches_destination, target))
+                with contextlib.suppress(OSError):
+                    os.rmdir(caches_source)
+            with contextlib.suppress(OSError):
+                os.rmdir(files_source)
+        for name in _listdir(source_root):
+            if name not in (REGISTRY_JSON, fetch.MANIFEST_NAME, FILES_DIR, lock_name):
+                move_item(name, destination_root, _free_name(name, set(_listdir(destination_root))))
+        complete = True
+    finally:
+        carried, kept = [], []
+        for entry, new_id in zip(source["entries"], new_ids, strict=True):
+            relative = str(entry.get("file") or "")
+            target = mapped(relative) if relative else ""
+            if target is None and not complete:
+                kept.append(entry)  # its file is still in the source library
+                continue
+            entry = dict(entry, id=new_id)
+            if target:
+                entry["file"] = target
+            carried.append(entry)
+        if carried:
+            destination["entries"] = list(destination["entries"]) + carried
+            save_registry(destination, destination_root)
+        records, kept_records = {}, {}
+        for relative, record in source_manifest["files"].items():
+            target = mapped(relative)
+            if target is None and not complete:
+                kept_records[relative] = record
+            else:
+                records[target or relative] = record
+        if records:
+            with fetch._ManifestLock(destination_root):
+                manifest = fetch.read_manifest(destination_root)
+                for relative, record in records.items():
+                    manifest["files"].setdefault(relative, record)
+                fetch._write_json_atomic(fetch.manifest_path(destination_root), manifest)
+        if complete:
+            for name in (REGISTRY_JSON, fetch.MANIFEST_NAME, lock_name):
+                with contextlib.suppress(OSError):
+                    os.remove(os.path.join(source_root, name))
+            with contextlib.suppress(OSError):
+                os.rmdir(source_root)
+        else:
+            save_registry(dict(source, entries=kept), source_root)
+            if records:
+                fetch._write_json_atomic(fetch.manifest_path(source_root), dict(source_manifest, files=kept_records))
+    return renamed
 
 
 def _image_info(path):

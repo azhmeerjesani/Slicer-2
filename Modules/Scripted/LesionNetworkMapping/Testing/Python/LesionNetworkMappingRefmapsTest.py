@@ -598,6 +598,92 @@ class SourcesTest(RefmapsTestBase):
         self.assertEqual(entry["source"]["commit"], "ca410e6")
 
 
+class MergeTest(RefmapsTestBase):
+    """``merge_into`` (Change folder > Move into a Slicer Studio folder whose LNM/ has its own library, BB-1): the maps of
+    both libraries stay listed, the moved files, records and caches follow their entries, nothing is lost on a failure.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.source = os.path.join(self.tmp, "A", "ReferenceMaps")
+        self.destination = os.path.join(self.tmp, "B", "ReferenceMaps")
+        self.shared = self.writeMap("shared.nii.gz", _smooth_field(self.rng, SHAPE))
+        self.own = self.writeMap("own.nii.gz", _smooth_field(self.rng, SHAPE))
+        self.theirs = refmaps.add_file(self.shared, title="B shared", root=self.destination)
+        self.same = refmaps.add_file(self.shared, title="A shared", root=self.source)  # the same id and file folder
+        self.mine = refmaps.add_file(self.own, title="A own", root=self.source)
+        self.assertEqual(self.same["id"], self.theirs["id"])
+        folder = self.same["file"].rsplit("/", 1)[0]
+        self.record = {"url": "https://example.org/shared.nii.gz", "sha256": self.same["sha256"]}
+        fetch._record_file(self.source, self.same["file"], self.record)
+        for root, content in ((self.source, "A"), (self.destination, "B")):
+            cache = os.path.join(root, refmaps.FILES_DIR, refmaps.RESAMPLED_DIR, refmaps._slug(self.same["id"], 64))
+            os.makedirs(cache)
+            with open(os.path.join(cache, "grid.npy"), "w") as f:
+                f.write(content)
+        self.folder = folder
+
+    @staticmethod
+    def move(source, destination):
+        os.rename(source, destination)
+
+    def test_both_libraries_stay_listed(self):
+        renamed = refmaps.merge_into(self.source, self.destination, self.move)
+        listed = refmaps.entries(self.destination)
+        self.assertEqual([entry["title"] for entry in listed], ["B shared", "A shared", "A own"])
+        self.assertEqual(len({entry["id"] for entry in listed}), 3, "every entry keeps an id of its own")
+        moved = listed[1]
+        self.assertEqual(moved["id"], self.same["id"] + "-2")
+        self.assertEqual(moved["file"], self.folder + "-2/shared.nii.gz", "the moved file folder whose name was taken")
+        self.assertEqual(listed[0]["file"], self.theirs["file"], "the destination's own entry is unchanged")
+        for entry in listed:
+            self.assertTrue(os.path.isfile(refmaps.entry_path(entry, self.destination)), entry["title"])
+            self.assertFalse(os.path.isabs(entry["file"]))
+        self.assertEqual(refmaps._sha256(refmaps.entry_path(listed[2], self.destination)), self.mine["sha256"])
+        self.assertEqual(fetch.read_manifest(self.destination)["files"].get(moved["file"]), self.record, "the fetch record follows the file")
+        caches = os.path.join(self.destination, refmaps.FILES_DIR, refmaps.RESAMPLED_DIR)
+        with open(os.path.join(caches, refmaps._slug(self.same["id"], 64), "grid.npy")) as f:
+            self.assertEqual(f.read(), "B", "the destination's cache is kept")
+        with open(os.path.join(caches, refmaps._slug(moved["id"], 64), "grid.npy")) as f:
+            self.assertEqual(f.read(), "A", "the moved cache follows its entry's new id")
+        self.assertEqual(renamed, {os.path.join(self.source, *self.folder.split("/")): os.path.join(self.destination, *(self.folder + "-2").split("/"))})
+        self.assertFalse(os.path.exists(self.source), "everything moved")
+        # The merged library works as any other: removing the moved entry keeps the destination's own one
+        refmaps.remove_entry(moved["id"], root=self.destination)
+        self.assertTrue(os.path.isfile(refmaps.entry_path(listed[0], self.destination)))
+
+    def test_failed_move_loses_no_entry(self):
+        calls = []
+
+        def move(source, destination):
+            calls.append(source)
+            if len(calls) == 2:
+                raise OSError("disk full")
+            os.rename(source, destination)
+
+        with self.assertRaises(OSError):
+            refmaps.merge_into(self.source, self.destination, move)
+        listed = refmaps.entries(self.destination) + refmaps.entries(self.source)
+        self.assertEqual(sorted(entry["title"] for entry in listed), ["A own", "A shared", "B shared"], "every map is in one library")
+        for root in (self.source, self.destination):
+            for entry in refmaps.entries(root):
+                self.assertTrue(os.path.isfile(refmaps.entry_path(entry, root)), (root, entry["title"]))
+        self.assertEqual(len(refmaps.entries(self.source)), 1, "the entry whose file did not move stays in the source library")
+        # Moving again finishes the merge
+        refmaps.merge_into(self.source, self.destination, self.move)
+        self.assertEqual(sorted(entry["title"] for entry in refmaps.entries(self.destination)), ["A own", "A shared", "B shared"])
+        self.assertFalse(os.path.exists(self.source))
+
+    def test_unreadable_registry_moves_nothing(self):
+        with open(os.path.join(self.source, refmaps.REGISTRY_JSON), "w") as f:
+            f.write("{not json")
+        before = sorted(os.listdir(self.source))
+        with self.assertRaises(refmaps.RefmapsError):
+            refmaps.merge_into(self.source, self.destination, self.move)
+        self.assertEqual(sorted(os.listdir(self.source)), before)
+        self.assertEqual([entry["title"] for entry in refmaps.entries(self.destination)], ["B shared"])
+
+
 class OutputsTest(RefmapsTestBase):
     def test_write_outputs(self):
         v = self.bundle.n_voxels

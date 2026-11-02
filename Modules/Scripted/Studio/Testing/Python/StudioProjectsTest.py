@@ -5046,6 +5046,55 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertFalse(slicer.mrmlScene.IsNodePresent(own), "the subject's lesion is removed with the study")
         self.assertTrue(lesion.GetDisplayNode().GetVisibility(), "the project's lesion is shown again once the study is closed")
 
+    def test_79_root_move_merges_the_lnm_app_folders(self):
+        """Change folder > Move into a folder whose LNM/ already has ReferenceMaps/, normalization/, ControlSets/ and
+        connectomes/ (BB-1): each is merged into the one there, whose name the Map module looks for. They used to move as
+        "ReferenceMaps 2", "normalization 2"..., so the moved reference maps were no longer listed and the scans'
+        ``LNM.Normalization`` ("normalization/<scan>/...") no longer resolved. An item inside them is renamed (" 2") only
+        when its name is taken there, and LNM/'s other items as before.
+        """
+        try:
+            from LesionNetworkMappingLib import refmaps
+        except ImportError:
+            self.skipTest("the Map module is not available")
+        from StudioLib import templates
+
+        projects = self.projects
+        oldRoot = os.path.join(self.tempDir, "A", "Slicer Studio")
+        newRoot = os.path.join(self.tempDir, "B", "Slicer Studio")
+        image, mask = templates.builtinTemplates()[0].imagePath, templates.builtinTemplates()[0].maskPath
+        for rootPath, label, own in ((newRoot, "B", image), (oldRoot, "A", mask)):
+            lnm = os.path.join(rootPath, projects.LNM_DIR)
+            refmaps.add_file(own, title=label + " map", root=refmaps.registry_root(data_directory=lnm))
+            for folder, names in (("normalization", ("Scan-" + label, "Shared-0123abcd")), ("ControlSets", ("set-" + label,)),
+                                  ("connectomes", ("conn-%s.lnmc" % label,)), ("python-packages", ("nibabel",))):
+                for name in names:
+                    os.makedirs(os.path.join(lnm, folder, name))
+                    with open(os.path.join(lnm, folder, name, "from.txt"), "w") as f:
+                        f.write(label)
+        renamed = {}
+        projects.moveContent(oldRoot, newRoot, renamed=renamed)
+        lnm = os.path.join(newRoot, projects.LNM_DIR)
+        self.assertEqual(sorted(os.listdir(lnm)), ["ControlSets", "ReferenceMaps", "connectomes", "normalization", "python-packages",
+                                                   "python-packages 2"], "the app folders are merged; another item is renamed as before")
+        self.assertEqual([entry["title"] for entry in refmaps.entries(refmaps.registry_root(data_directory=lnm))], ["B map", "A map"],
+                         "the moved reference map is listed")
+        for entry in refmaps.entries(refmaps.registry_root(data_directory=lnm)):
+            self.assertTrue(os.path.isfile(refmaps.entry_path(entry, refmaps.registry_root(data_directory=lnm))), entry["title"])
+        self.assertEqual(sorted(os.listdir(os.path.join(lnm, "normalization"))), ["Scan-A", "Scan-B", "Shared-0123abcd", "Shared-0123abcd 2"])
+        with open(os.path.join(lnm, "normalization", "Scan-A", "from.txt")) as f:
+            self.assertEqual(f.read(), "A", "normalization/<scan>/... of the moved folder resolves in the new data directory")
+        self.assertEqual(sorted(os.listdir(os.path.join(lnm, "ControlSets"))), ["set-A", "set-B"])
+        self.assertEqual(sorted(os.listdir(os.path.join(lnm, "connectomes"))), ["conn-A.lnmc", "conn-B.lnmc"])
+        shared = os.path.join(projects.LNM_DIR, "normalization", "Shared-0123abcd")
+        self.assertEqual(renamed.get(shared), shared + " 2", "a taken name inside an app folder moves under another name")
+        with open(os.path.join(newRoot, shared + " 2", "from.txt")) as f:
+            self.assertEqual(f.read(), "A")
+        self.assertEqual(os.path.normpath(projects.pathAfterMove(os.path.join(oldRoot, shared, "from.txt"), oldRoot, newRoot, renamed)),
+                         os.path.normpath(os.path.join(newRoot, shared + " 2", "from.txt")))
+        self.assertNotIn(os.path.join(projects.LNM_DIR, "ReferenceMaps"), renamed)
+        self.assertFalse(os.path.exists(os.path.join(oldRoot, projects.LNM_DIR)), "everything moved")
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk

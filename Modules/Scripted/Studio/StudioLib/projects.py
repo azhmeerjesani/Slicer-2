@@ -23,7 +23,8 @@ Settings (fork-only, SPEC 9.7 rule 5): ``Studio/Projects/Root`` (the folder) and
 environment variable ``SLICER_STUDIO_PROJECTS_ROOT`` overrides both and skips the chooser (tests, gates, harnesses);
 ``SLICER_STUDIO_PROJECTS=0`` turns projects off (the private recovery autosave of A-01 then runs in Studio too).
 
-No function here imports numpy or runs at startup. Worker-safe functions (only the standard library) are marked so.
+No function here imports numpy or runs at startup (except a move that merges two reference-map libraries, which needs
+``LesionNetworkMappingLib.refmaps``). Worker-safe functions (only the standard library) are marked so.
 """
 
 import calendar
@@ -1322,6 +1323,12 @@ def treeSize(path):
 
 #: The folders of a Slicer Studio folder that a move takes along (merged into the same folder of the new one)
 _MOVABLE_FOLDERS = (PROJECTS_DIR, STUDIES_DIR, LNM_DIR, TEMPLATES_DIR)
+#: The reference-map library in LNM/ (``LesionNetworkMappingLib.refmaps.REGISTRY_DIR``: a registry file and its files)
+LNM_REFERENCE_MAPS_DIR = "ReferenceMaps"
+#: The folders of LNM/ (the data directory) that the Map module finds by their name there: reference maps, normalization
+#: results (``LNM.Normalization`` is "normalization/<scan>/..."), control sets and connectomes. A move into a folder whose
+#: LNM/ has them too merges each of them (an item inside is renamed only when its name is taken there)
+_LNM_APP_FOLDERS = (LNM_REFERENCE_MAPS_DIR, "normalization", "ControlSets", "connectomes", "Connectomes")
 
 
 def movableItems(rootPath):
@@ -1435,6 +1442,58 @@ def _mergeMove(source, destination, sameVolume, progress=None, renamed=None):
         progress(os.path.basename(source))
 
 
+def _mergeReferenceMaps(source, destination, sameVolume, progress=None, renamed=None):
+    """Merge the reference-map library ``source`` into the library ``destination`` (``refmaps.merge_into``: both
+    libraries' maps stay listed, their files and fetch records follow them). Return False, with nothing moved, when that
+    cannot be done (no Map module, or a registry that cannot be read): the caller then moves the folder under another
+    name, as any other item. Worker-safe (files only).
+    """
+    try:
+        from LesionNetworkMappingLib import refmaps
+    except ImportError:
+        return False
+
+    def move(item, target):
+        _mergeMove(item, target, sameVolume, progress, renamed)
+
+    try:
+        moved = refmaps.merge_into(source, destination, move)
+    except refmaps.RefmapsError:
+        logging.warning("Slicer Studio: the reference-map libraries could not be merged", exc_info=True)
+        return False
+    if renamed is not None:
+        renamed.update(moved)
+    return True
+
+
+def _mergeLnm(source, destination, sameVolume, progress=None, renamed=None):
+    """Move LNM/ (the data directory of the Map module) to ``destination``: its app folders (``_LNM_APP_FOLDERS``) are
+    merged into the ones there, whose names the Map module looks for; any other item whose name is taken moves under
+    another name (" 2"), as in ``_mergeMove``. Worker-safe.
+    """
+    if not (os.path.isdir(source) and os.path.isdir(destination)):
+        _mergeMove(source, destination, sameVolume, progress, renamed)
+        return
+    for name in os.listdir(source):
+        item = os.path.join(source, name)
+        target = os.path.join(destination, name)
+        if name in _LNM_APP_FOLDERS and os.path.isdir(item) and os.path.isdir(target):
+            if name != LNM_REFERENCE_MAPS_DIR:
+                _mergeMove(item, target, sameVolume, progress, renamed)  # its items, " 2" when the name is taken
+                continue
+            if _mergeReferenceMaps(item, target, sameVolume, progress, renamed):
+                continue
+        if os.path.exists(target):
+            target = os.path.join(destination, uniqueName(destination, name, isFile=os.path.isfile(item)))
+            if renamed is not None:
+                renamed[item] = target
+        _mergeMove(item, target, sameVolume, progress, renamed)
+    try:
+        os.rmdir(source)
+    except OSError:
+        pass
+
+
 def checkMoveTarget(oldRoot, newRoot):
     """Raise OSError (a plain message, nothing created) when the content of ``oldRoot`` cannot be moved to ``newRoot``.
 
@@ -1546,6 +1605,10 @@ def moveContent(oldRoot, newRoot, progress=None, renamed=None, renamedIds=None):
     Return the list of moved items. Raise OSError on failure (what was moved stays moved; nothing is deleted before it was
     copied and checked), and before anything is created when ``newRoot`` is inside ``oldRoot``.
 
+    Each kind folder is merged into the one of ``newRoot``; LNM/ one level deeper, because the Map module finds its
+    folders there by name (``_mergeLnm``: the reference maps of both libraries stay listed, and the normalization
+    results stay where the scans' ``LNM.Normalization`` points).
+
     ``renamed`` (a dict) receives the items that moved under another name because ``newRoot`` already had one with that
     name (a project "MRHead" lands as "MRHead 2"): ``{path relative to oldRoot: path relative to newRoot}``. Pass it to
     ``pathAfterMove`` so a path follows the item, never the other one that kept the name.
@@ -1572,6 +1635,8 @@ def moveContent(oldRoot, newRoot, progress=None, renamed=None, renamedIds=None):
                 finally:
                     # Also after a failed move: what moved has its own id there
                     _movedTemplateIdsUnique(target, before, renamedIds)
+            elif name == LNM_DIR:
+                _mergeLnm(os.path.join(oldRoot, name), target, sameVolume, progress, absoluteRenames)
             else:
                 _mergeMove(os.path.join(oldRoot, name), target, sameVolume, progress, absoluteRenames)
             moved.append(name)
