@@ -1588,7 +1588,13 @@ class StudioProjectsTest(unittest.TestCase):
         self.io.backgroundWriter().drain(10.0)
         self.assertIsNone(service.project, "a scene that does not load is not copied into a project")
         self.assertEqual([info.name for info in projects.listProjects()], [])
-        self.assertEqual(announced, [])
+        # Not a copy message: the user is told that the file is damaged (BB-1), and it is left as it is
+        self.assertEqual([(event, info.get("damaged")) for event, info in announced], [("not-opened", True)])
+        self.assertEqual(announced[0][1]["reason"], "Broken study is damaged and could not be read: nothing was opened, and the file is left as it is.")
+        self.assertEqual(slicer.mrmlScene.GetURL(), "")
+        with open(brokenPath, encoding="utf-8") as file:
+            self.assertEqual(file.read(), text[: len(text) // 2])
+        del announced[:]
 
         # A scan of the scene is missing: the copy holds the rest and says what is missing
         slicer.mrmlScene.Clear(0)
@@ -4744,6 +4750,86 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertIn("Renamed before New project", closedXml, "the project was saved when the scene closed")
         self.assertEqual(writtenLook(closedXml, "New project"), ownLook, "the project closed in Map reopens with the lesion's own look")
         self.assertEqual(display._liveOutlines(), [], "no outline is left behind with the closed scene")
+
+    def test_74_damaged_project_scene_is_not_opened_or_saved_over(self):
+        """A project whose scene file was cut short (an interrupted save, a sync conflict) does not parse: nothing of it is
+        read. It opened as an empty project with "Continuing ..." and no word of the damage, and the next edit saved over
+        the scene with only what was added, so the project's scan and lesion dropped out of it (BB-1). It is now not
+        opened: the user is told, the damaged scene and the data files are left as they are, and data added afterwards
+        starts a new project.
+        """
+        from StudioLib import projects_ui
+
+        projects = self.projects
+        service = self._service()
+        volume, _path = self._userVolume("Scan", shape=(12, 14, 16), extension=".nrrd")
+        self._lesion(volume)
+        project = self._projectFor(service)
+        self._save(service)
+        projectPath, scenePath = project.path, project.scenePath
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertIsNone(service.project)
+        with open(scenePath, "rb") as f:
+            data = f.read()
+        damaged = data[: len(data) // 2]
+        with open(scenePath, "wb") as f:
+            f.write(damaged)
+        filesBefore = [path for path in _relativeFiles(projectPath) if not path.startswith(".studio/")]
+        self.assertIn("Images/Scan.nrrd", filesBefore)
+        stateBefore = projects.readJson(projects.projectFile(projectPath))["state"]
+        announced = []
+        service.setProjectAnnouncer(lambda event, project, **info: announced.append((event, info)))
+
+        self.assertFalse(service.openProject(projectPath), "a project whose scene cannot be read is not opened")
+        self.assertIsNone(service.project)
+        self.assertEqual([event for event, _info in announced], ["not-opened"])
+        info = announced[0][1]
+        self.assertTrue(info.get("damaged"))
+        self.assertFalse(info.get("missing"))
+        self.assertEqual(os.path.normpath(info.get("path")), os.path.normpath(projectPath))
+        self.assertIn("damaged", info.get("reason"))
+        self.assertEqual(slicer.mrmlScene.GetURL(), "", "the scene no longer names the damaged file")
+
+        # The message is a warning whose Show opens the project folder (its data files are there)
+        messages = []
+        original = projects_ui.message
+        projects_ui.message = lambda text, **kwargs: messages.append((text, kwargs))
+        try:
+            projects_ui.announce("not-opened", None, **info)
+        finally:
+            projects_ui.message = original
+        self.assertEqual(messages[0][0], info["reason"])
+        self.assertEqual((messages[0][1].get("level"), messages[0][1].get("actionText")), ("warning", "Show"))
+
+        # Data added now (also from the project's own folder) starts a new project: nothing is saved over the damaged one
+        slicer.util.loadVolume(os.path.join(projectPath, "Images", "Scan.nrrd"))
+        self._userVolume("Other", shape=(12, 14, 16), extension=".nrrd")
+        newProject = self._projectFor(service)
+        self.assertNotEqual(os.path.normcase(newProject.path), os.path.normcase(projectPath))
+        self._save(service)
+        with open(scenePath, "rb") as f:
+            self.assertEqual(f.read(), damaged, "the damaged scene is left as it is")
+        self.assertEqual([path for path in _relativeFiles(projectPath) if not path.startswith(".studio/")], filesBefore)
+        self.assertEqual(projects.readJson(projects.projectFile(projectPath))["state"], stateBefore)
+
+        # Loaded in Classic (official Load Scene: the empty scene still names the damaged file), then data of the project
+        # folder is added and Studio is shown: that does not continue the project in place over its damaged scene either
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        service.studioActiveOverride = False
+        with self.assertRaises(RuntimeError):
+            slicer.util.loadScene(scenePath)
+        self.assertIsNone(service.project)
+        self.assertEqual(os.path.normpath(slicer.mrmlScene.GetURL()), os.path.normpath(scenePath))
+        slicer.util.loadVolume(os.path.join(projectPath, "Images", "Scan.nrrd"))
+        service.studioActiveOverride = True
+        copyProject = self._projectFor(service)
+        self.assertNotEqual(os.path.normcase(copyProject.path), os.path.normcase(projectPath))
+        self._save(service)
+        with open(scenePath, "rb") as f:
+            self.assertEqual(f.read(), damaged, "the damaged scene is left as it is")
+        self.assertEqual([path for path in _relativeFiles(projectPath) if not path.startswith(".studio/")], filesBefore)
 
 def _sphere(center=(0, 0, 0)):
     import vtk

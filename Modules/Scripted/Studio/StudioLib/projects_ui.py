@@ -2195,8 +2195,14 @@ def announce(event, project, **info):
     elif event == "failed":
         message(_("Not saved: {reason}").format(reason=info.get("reason") or ""), level="warning", action=saveNow, actionText=_("Retry"), ms=8000)
     elif event == "not-opened":
-        # A project that could not be opened (not a failed save: no Retry that saves the open scene)
-        message(info.get("reason") or "", level="warning", ms=8000)
+        # A project that could not be opened (not a failed save: no Retry that saves the open scene). A damaged scene file:
+        # Show opens its folder (its data files are there)
+        folder = info.get("path") if info.get("damaged") else None
+        if folder:
+            message(info.get("reason") or "", level="warning", ms=12000, action=lambda *_args: projects.showInFileManager(folder),
+                    actionText=_("Show"), toolTip=folder)
+        else:
+            message(info.get("reason") or "", level="warning", ms=8000)
         if info.get("missing"):
             projects.notifyChanged()  # the Library lists the folder again
 

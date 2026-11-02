@@ -178,6 +178,23 @@ def _recovery():
     return recovery
 
 
+def _sceneFileParses(path):
+    """True if the scene file ``path`` is well-formed XML (or cannot be checked). A scene file that was cut short (an
+    interrupted save, a sync conflict) does not parse: vtkMRMLScene::Import then reads no node at all ("Syntax error in
+    scene file"), which is not a project without data. The same parser (expat) as vtkMRMLParser.
+    """
+    from xml.parsers import expat
+
+    try:
+        with open(path, "rb") as file:
+            expat.ParserCreate().ParseFile(file)
+    except expat.ExpatError:
+        return False
+    except Exception:
+        return True  # not readable now (gone, permissions): not known to be damaged
+    return True
+
+
 class AutosaveStatus:
     """State of the autosave, for status displays (A-01b)."""
 
@@ -274,6 +291,8 @@ class AutosaveService:
         self._projectAnnouncer = None
         self._pendingSceneSource = None
         self._forceProjectOpen = False
+        #: the scene file that the last scene load could not read (damaged): openProject does not open its project
+        self._unreadableScene = None
         self._lastProjectPlan = None
         #: (project folder, ``thumbnails.ProjectThumbnailSource.key``) of the last project thumbnail (V-02)
         self._projectThumbnailKey = None
@@ -1360,9 +1379,9 @@ class AutosaveService:
         url = scene.GetURL()
         # Only the project's own scene file: another scene saved inside a project folder is not that project
         projectPath = projects.projectOfSceneFile(url) if url and os.path.isfile(url) else None
-        if projectPath is not None and self._sceneReadFrom(scene, projectPath):
+        if projectPath is not None and self._sceneReadFrom(scene, projectPath) and _sceneFileParses(url):
             # A project of the folder that was loaded in Classic (official Load Scene): it continues in place, never as
-            # a copy
+            # a copy. Not over a damaged scene file (nothing of it was read): the data then starts a new project.
             project = projects.Project(projectPath)
             if not self.attachProject(project, inPlace=True, readStats=self._projectReadStats(project)):
                 if project.readOnly:
@@ -1837,10 +1856,13 @@ class AutosaveService:
             # (a read-only share or medium) is left as it is too; it continues as a copy (_afterSceneImport).
             self.setPendingSceneSource(os.path.join(path, os.path.basename(os.path.normpath(path)) + projects.SCENE_EXTENSION))
         self._forceProjectOpen = True
+        self._unreadableScene = None
         try:
             # The scene is replaced (Load Scene): the open project is saved and closed first (StartCloseEvent)
             slicer.util.loadScene(scenePath, {"clear": True})
         except RuntimeError as error:
+            if self._unreadableScene is not None:
+                return False  # the scene file is damaged: _afterSceneImport said so and did not open the project
             if self.project is None:
                 raise
             # Some data files of the project could not be read (missing or damaged): the project opened with the rest, and
@@ -1922,6 +1944,12 @@ class AutosaveService:
         if projectPath is not None:
             if not (self._studioActive() or getattr(self, "_forceProjectOpen", False)) or not self.enabled():
                 return  # Classic loads a project like any scene (official behavior)
+            if not projects.sceneHasUserData(scene) and not _sceneFileParses(url):
+                # The scene file is damaged (cut short by an interrupted save or a sync conflict): nothing of it was read.
+                # Continuing the project would make the next save replace its scene with only what is added now, so the
+                # project's data would drop out of it. It is not opened, and its files are left as they are.
+                self._refuseUnreadableScene(os.path.basename(os.path.normpath(projectPath)), url, projectPath)
+                return
             project = projects.Project(projectPath)
             # A data file of the project is missing or damaged (deleted in Finder, a partial copy): its node holds no data,
             # could never be saved and would make quitting ask about it. It is left out before the project's files are
@@ -1948,7 +1976,12 @@ class AutosaveService:
             return
         unread = self._removeUnreadNodes(scene)
         if not projects.sceneHasUserData(scene):
-            return  # nothing could be loaded (for example a truncated scene file): no empty project (A-09)
+            # Nothing could be loaded: no empty project (A-09). A damaged scene file is named (its folder is left as it is)
+            if source is not None and not _sceneFileParses(url):
+                name = projects.displayName(os.path.basename(source))
+                self._refuseUnreadableScene(name, url, os.path.dirname(source), reason=_(
+                    "{name} is damaged and could not be read: nothing was opened, and the file is left as it is.").format(name=name))
+            return
         name = projects.displayName(os.path.basename(source or url))
         project = self.createProject(name, announce=None if unread else "copy")
         if project is not None:
@@ -1956,6 +1989,18 @@ class AutosaveService:
                 self._announce("copy-incomplete", project, unread=unread)
             # Copy the files now (in the background): the original is never changed
             qt.QTimer.singleShot(0, lambda: self.autosaveNow("copy"))
+
+    def _refuseUnreadableScene(self, name, scenePath, folder, reason=None):
+        """The scene file ``scenePath`` could not be read (damaged): say so, and keep anything from saving over it."""
+        self._unreadableScene = scenePath
+        # The scene still names the damaged file (Load Scene set its URL): a later save, or a project attached because
+        # data of its folder is added, would replace it. Data added now starts a new project instead.
+        slicer.mrmlScene.SetURL("")
+        logging.error(f"Slicer Studio: the scene file {os.path.basename(scenePath)} is damaged and could not be read; it is left as it is")
+        if reason is None:
+            reason = _("The scene file of {name} is damaged and could not be read: the project was not opened, and its files "
+                       "are left as they are.").format(name=name)
+        self._announce("not-opened", None, name=name, missing=False, damaged=True, path=folder, reason=reason)
 
     @staticmethod
     def _removeUnreadNodes(scene):
