@@ -571,14 +571,38 @@ def _resampledThroughLinear(volumeNode, toWorld):
     return clone
 
 
+def _gridShearMessage():
+    return _("{name}: its grid has shear (a hardened affine transform), which a NIfTI file cannot hold: the exported copy was "
+             "resampled (the scene is unchanged)")
+
+
+def gridShearNote(volumeNode):
+    """``{"Reason", "Interpolation"}`` when ``volumeData`` resamples ``volumeNode`` because its own grid (IJK to RAS
+    matrix) has shear, else None. A linear parent transform is left out: ``volumeData`` judges the shear of the moved
+    affine instead, and its transform note says whether the copy was resampled.
+    """
+    transformNode = volumeNode.GetParentTransformNode()
+    if transformNode is not None and transformNode.IsTransformToWorldLinear():
+        return None
+    matrix = vtk.vtkMatrix4x4()
+    volumeNode.GetIJKToRASMatrix(matrix)
+    if not hasShear(_matrixToArray(matrix)):
+        return None
+    interpolation = "nearest neighbour" if volumeNode.IsA("vtkMRMLLabelMapVolumeNode") else "linear interpolation"
+    return {"Reason": "The image grid has shear (for example a hardened affine transform), which a NIfTI affine cannot hold: the "
+                      "exported copy was resampled onto the closest grid without shear",
+            "Interpolation": interpolation}
+
+
 def volumeData(volumeNode):
     """``(data_ijk, affine, transformNote)`` of a scalar volume as it is shown in the views.
 
     ``data_ijk`` is a copy of the voxels indexed [i, j, k] (file order), ``affine`` the 4x4 IJK to RAS matrix in world
     coordinates. A linear parent transform is folded into the affine when the result has no shear; a non-linear one, or a
     linear one that would give the affine shear (``hasShear``: a NIfTI file cannot store it consistently), is hardened
-    into a temporary copy (resampled). ``transformNote`` describes what was applied (None without a transform). Call it
-    inside ``_temporaryNodes()``. The scene is never changed.
+    into a temporary copy (resampled). A volume whose own IJK to RAS matrix has shear (a hardened affine transform) is
+    resampled onto the closest grid without shear too (``gridShearNote`` describes it). ``transformNote`` describes what
+    was applied (None without a transform). Call it inside ``_temporaryNodes()``. The scene is never changed.
     """
     transformNode = volumeNode.GetParentTransformNode()
     note = None
@@ -596,6 +620,12 @@ def volumeData(volumeNode):
     matrix = vtk.vtkMatrix4x4()
     volumeNode.GetIJKToRASMatrix(matrix)
     affine = _matrixToArray(matrix)
+    if transformNode is None and hasShear(affine):
+        # The image's own grid has shear (a hardened 12-DOF affine transform: hardening a linear transform only multiplies
+        # the IJK to RAS matrix): resampled onto the closest grid without shear, as for a parent transform with shear
+        volumeNode = _resampledThroughLinear(volumeNode, np.eye(4))
+        volumeNode.GetIJKToRASMatrix(matrix)
+        affine = _matrixToArray(matrix)
     if transformNode is not None:
         toWorld = vtk.vtkMatrix4x4()
         transformNode.GetMatrixTransformToWorld(toWorld)
@@ -866,6 +896,9 @@ class Job:
         if self.kind == KIND_MAP and data.dtype != np.float32:
             dtype = np.float32
         sidecar = baseSidecar(node, self.kind, spaceName, resolution, template, code, data, affine, transformNote)
+        shearNote = gridShearNote(node)
+        if shearNote is not None:
+            sidecar["GridResampled"] = shearNote
         if dtype is not None:
             sidecar["DataType"] = "float32"
         sidecar["Units"] = {KIND_LABELMAP: "label", KIND_MAP: "statistic"}.get(self.kind, "arbitrary")
@@ -909,6 +942,8 @@ class Job:
             task = WriteTask(self.path, data, affine, code, sidecar, dtype=dtype, timeStep=step)
         if transformNote is not None:
             self.notes.append(_("{name}: its transform was applied to the exported copy (the scene is unchanged)").format(name=self.nodeName))
+        if shearNote is not None:
+            self.notes.append(_gridShearMessage().format(name=self.nodeName))
         return [task] + tasks
 
     def _referenceVolume(self, node):
@@ -1008,11 +1043,14 @@ class Job:
         # Label map only: segments that have voxels on the chosen grid but all of them are covered by a later segment
         covered = []
         transformNote = None
+        shearNote = None
         with _temporaryNodes():
             referenceNode, resampled = self._referenceVolume(node)
             if mode == SEGMENTATION_MASKS:
                 for segmentId, path in self._maskPaths(node):
                     labelmapNode = self._exportLabelmap(node, [segmentId], referenceNode)
+                    maskShearNote = gridShearNote(labelmapNode)
+                    shearNote = maskShearNote or shearNote
                     data, affine, labelmapNote = volumeData(labelmapNode)
                     transformNote, referenceNote = self._segmentationTransformNotes(node, labelmapNode, labelmapNote, referenceNode)
                     data = (data != 0).astype(np.uint8)
@@ -1024,14 +1062,19 @@ class Job:
                     segment = segmentation.GetSegment(segmentId)
                     sidecar.update({"Kind": "mask", "Units": "binary", "Segment": segment.GetName(), "SegmentColor": _hexColor(segment.GetColor()),
                                     "VoxelCount": int(np.count_nonzero(data))})
+                    if maskShearNote is not None:
+                        sidecar["GridResampled"] = maskShearNote
                     tasks.append(WriteTask(path, data, affine, code, sidecar))
             else:
                 labelmapNode = self._exportLabelmap(node, ids, referenceNode)
+                shearNote = gridShearNote(labelmapNode)
                 data, affine, labelmapNote = volumeData(labelmapNode)
                 transformNote, referenceNote = self._segmentationTransformNotes(node, labelmapNode, labelmapNote, referenceNode)
                 if data.max(initial=0) <= 255 and data.min(initial=0) >= 0:
                     data = data.astype(np.uint8)
                 sidecar, code = self._segmentationSidecar(node, data, affine, transformNote, referenceNode, resampled, referenceNote)
+                if shearNote is not None:
+                    sidecar["GridResampled"] = shearNote
                 labels = []
                 counts = np.bincount(data.ravel().astype(np.int64), minlength=len(ids) + 1) if data.size else np.zeros(len(ids) + 1, int)
                 for value, segmentId in enumerate(ids, start=1):
@@ -1060,6 +1103,8 @@ class Job:
                                   .format(name=self.nodeName, segments=", ".join(covered)))
             if transformNote is not None:
                 self.notes.append(_("{name}: its transform was applied to the exported copy (the scene is unchanged)").format(name=self.nodeName))
+            if shearNote is not None:
+                self.notes.append(_gridShearMessage().format(name=self.nodeName))
         return tasks
 
 

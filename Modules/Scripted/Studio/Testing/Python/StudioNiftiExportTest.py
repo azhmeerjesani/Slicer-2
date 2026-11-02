@@ -738,6 +738,89 @@ class StudioNiftiExportTest(unittest.TestCase):
         np.testing.assert_allclose(centre, shown, atol=0.75)
         self.assertIn("resampled, nearest neighbour", self._sidecar(result.images[0])["TransformApplied"]["Description"])
 
+    def test_06ab_hardened_sheared_grid_is_resampled(self):
+        """Harden transform of a 12-DOF affine (non-uniform scale along rotated axes) leaves the volume's OWN IJK to RAS
+        matrix sheared, with no parent transform. It is resampled like a sheared parent transform: sform equals qform, and
+        FSL/nibabel and 3D Slicer all read the marker where the views show it. Codes stay 1 (no transform is applied), the
+        sidecar says the copy was resampled. Scans, label maps, and lesions drawn on the hardened scan (masks and label map).
+        """
+        angle = np.deg2rad(20.0)
+        rotation = np.eye(4)
+        rotation[:2, :2] = [[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]]
+        sheared = rotation @ np.diag([1.10, 0.92, 1.0, 1.0]) @ rotation.T
+        sheared[:3, 3] = (2.0, -1.0, 0.5)
+        ijkToRas = np.array([[-1.0, 0, 0, 10], [0, -1.0, 0, 10], [0, 0, 1.0, -10], [0, 0, 0, 1]])
+        marker = np.array([-6.0, 2.0, 4.0, 1.0])
+        shown = (sheared @ marker)[:3]
+        transformNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", "affine registration")
+        transformNode.SetMatrixTransformToParent(_matrix(sheared))
+
+        def hardened(node):
+            node.SetAndObserveTransformNodeID(transformNode.GetID())
+            slicer.vtkSlicerTransformLogic().hardenTransform(node)
+            self.assertIsNone(node.GetParentTransformNode())
+            self.assertTrue(self.export.hasShear(_ijkToRas(node)), "hardening keeps the shear in the volume's own grid")
+            return node
+
+        def assertConsistent(path, interpolation):
+            from LesionNetworkMappingLib import nifti
+
+            _data, affine, header = self._read(path)
+            self.assertFalse(self.export.hasShear(affine), "the written affine has no shear")
+            np.testing.assert_allclose(header["qform"], header["sform"], atol=1e-5)
+            self.assertLess(nifti.xform_disagreement(header), 1e-3)
+            self.assertEqual((header["sform_code"], header["qform_code"]), (1, 1), "no transform is applied: scanner")
+            sidecar = self._sidecar(path)
+            self.assertNotIn("TransformApplied", sidecar)
+            self.assertEqual(sidecar["GridResampled"]["Interpolation"], interpolation)
+
+        def assertReopenedWhereShown(path):
+            reopened = slicer.util.loadVolume(path)
+            array = slicer.util.arrayFromVolume(reopened)
+            k, j, i = np.unravel_index(int(np.argmax(array)), array.shape)
+            np.testing.assert_allclose((_ijkToRas(reopened) @ [i, j, k, 1.0])[:3], shown, atol=1.0)
+            slicer.mrmlScene.RemoveNode(reopened)
+
+        scan = hardened(self._phantom("hardened scan", ijkToRas, markerRas=marker[:3]))
+        scanGrid = _ijkToRas(scan)
+        nodesBefore = slicer.mrmlScene.GetNumberOfNodes()
+        result = self.export.exportVolume(scan, os.path.join(self.out, "hardened.nii.gz"))
+        self.assertEqual(result.errors, [])
+        assertConsistent(result.images[0], "linear interpolation")
+        np.testing.assert_allclose(self._markerRas(result.images[0]), shown, atol=1.0)
+        assertReopenedWhereShown(result.images[0])
+        self.assertTrue(any("resampled" in note for note in result.notes), result.notes)
+        # The scene is unchanged and no temporary node is left
+        self.assertEqual(slicer.mrmlScene.GetNumberOfNodes(), nodesBefore)
+        np.testing.assert_allclose(_ijkToRas(scan), scanGrid)
+
+        labels = np.zeros((21, 21, 21), np.uint8)
+        i, j, k = (round(value) for value in np.linalg.solve(ijkToRas, marker)[:3])
+        labels[k, j, i] = 5
+        labelmap = hardened(self._volume("hardened labels", labels, ijkToRas, className="vtkMRMLLabelMapVolumeNode"))
+        result = self.export.exportVolume(labelmap, os.path.join(self.out, "hardened_labels.nii.gz"))
+        assertConsistent(result.images[0], "nearest neighbour")
+        np.testing.assert_allclose(self._markerRas(result.images[0]), shown, atol=1.0)
+        self.assertEqual(set(np.unique(self._read(result.images[0])[0]).tolist()), {0, 5}, "label values are kept")
+
+        # A lesion drawn on the hardened scan (its reference grid is the sheared one)
+        block = np.zeros((21, 21, 21), np.uint8)
+        block[k - 1 : k + 2, j - 1 : j + 2, i - 1 : i + 2] = 1
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesions (hardened scan)")
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(scan)
+        segmentId = segmentation.GetSegmentation().AddEmptySegment("", "Lesion")
+        slicer.util.updateSegmentBinaryLabelmapFromArray(block, segmentation, segmentId, scan)
+        for mode, name in ((self.export.SEGMENTATION_MASKS, "hardened_lesion_masks.nii.gz"), (self.export.SEGMENTATION_LABELMAP, "hardened_lesion.nii.gz")):
+            result = self.export.exportSegmentation(segmentation, os.path.join(self.out, name), mode=mode)
+            self.assertEqual(result.errors, [])
+            assertConsistent(result.images[0], "nearest neighbour")
+            data, affine, _header = self._read(result.images[0])
+            self.assertTrue(15 <= int(np.count_nonzero(data)) <= 40, int(np.count_nonzero(data)))
+            centre = (affine @ np.array([*np.argwhere(data > 0).mean(axis=0), 1.0]))[:3]
+            np.testing.assert_allclose(centre, shown, atol=0.75)
+            self.assertTrue(any("resampled" in note for note in result.notes), result.notes)
+
     def test_06b_fallback_writer_keeps_the_scene(self):
         """3D Slicer's writer (the fallback without LesionNetworkMappingLib) does not re-point the node's storage node."""
         node = self._phantom("fallback", np.array([[1.0, 0, 0, -10], [0, 1.0, 0, -10], [0, 0, 1.0, -10], [0, 0, 0, 1]]))

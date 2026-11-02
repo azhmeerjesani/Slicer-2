@@ -82,7 +82,10 @@ modality, never the patient's name, identifier or dates.
   image in different places in 3D Slicer (qform) and in FSL or nibabel (sform).
   Scans are resampled with linear interpolation, label maps and lesions with
   nearest neighbour. The scene itself is not changed, and the sidecar says which
-  transform was applied and whether the copy was resampled.
+  transform was applied and whether the copy was resampled. The same holds after
+  **Harden transform** of such an affine: the image's own grid then has shear,
+  so the exported copy is resampled onto the closest grid without shear (codes
+  stay 1, and the sidecar's `GridResampled` says so).
 - **Codes.** sform and qform are both written and equal:
 
   | Code | Meaning | When |
