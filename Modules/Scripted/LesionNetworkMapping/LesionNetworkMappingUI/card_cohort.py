@@ -10,7 +10,8 @@ reads the cohort's per-lesion maps, the ``maps.tsv`` of the cohort maps job (Com
 - each lesion's map is thresholded with the Result card's rule (re-resolved for the maps' N), with the chosen sign;
 - the overlap count and percent and the sensitivity map (at least k % of the lesions, slider 50-100, default 90;
   over the cases when the study has case/control groups), labelled as the classic map: "see Nulls for a
-  null-referenced version" (it is never the only output once the Nulls card exists);
+  null-referenced version" (it is never the only output once the Nulls card exists); the sign and the sensitivity
+  show those of the listed group maps (cohort.json) again when a project or study is opened;
 - optionally the legacy two-group maps (Welch t of the mean Fz maps, Liebermeister p of the binarized maps; "legacy
   two-group, no covariates", descriptive) and their conjunction with the sensitivity map.
 
@@ -86,6 +87,10 @@ class OverlapTab:
         self.job = None
         self.outputs = {}
         self.peaks = []
+        #: cohort.json (path, mtime, size) whose sign and sensitivity the controls show (``_restoreSettings``)
+        self._settingsKey = None
+        #: (sign, sensitivity) submitted with the running group maps job
+        self._submittedSettings = None
         self.widget = qt.QWidget()
         self.widget.setObjectName("LNMOverlapTab")
         layout = qt.QVBoxLayout(self.widget)
@@ -275,6 +280,7 @@ class OverlapTab:
             return None
         spec = jobrunner.JobSpec("LesionNetworkMappingLib.cohort", self.arguments(mapsTsv), title=_("Group maps"), heavy=True, kind="cohort", name="cohort",
                                  runRoot=os.path.dirname(mapsTsv), onEvent=self._onEvent, onDone=self._onDone)
+        self._submittedSettings = self._settings()
         self.job = self.ctx.submit(spec)
         self.progress.setJob(self.job)
         self.progress.widget.show()
@@ -286,6 +292,10 @@ class OverlapTab:
 
     def _onDone(self, job):
         _updateProgress(self.progress, force=True)
+        if self._submittedSettings is not None and self._submittedSettings != self._settings():
+            # the user changed the sign or sensitivity while the job ran: keep that, do not show the job's
+            self._settingsKey = self._recordKey(self.card.folder())
+        self._submittedSettings = None
         if job.state == "failed":
             self.reasonLabel.setText(_("The group maps failed: {reason}").format(reason=job.failureReason))
             self.reasonLabel.show()
@@ -294,9 +304,56 @@ class OverlapTab:
             first = "overlapPct" if "overlapPct" in self.outputs else next(iter(self.outputs))
             self.card.showGroupMap(first)
 
+    def _settings(self):
+        return (self.sign(), round(float(self.sensitivitySlider.value)))
+
+    @staticmethod
+    def _recordKey(folder):
+        """(path, mtime, size) of the cohort.json in ``folder``, or None."""
+        if not folder:
+            return None
+        path = os.path.join(folder, "cohort.json")
+        try:
+            info = os.stat(path)
+        except OSError:
+            return None
+        return (path, info.st_mtime_ns, info.st_size)
+
+    def _restoreSettings(self, record, folder):
+        """Show the sign and sensitivity of the group maps the tab lists (their cohort.json), once per record.
+
+        The two controls are saved nowhere else, so after a project or study is opened they showed the defaults (±, 90 %)
+        next to a result computed with others, and the Robust and Nulls cards (which read them as the primary overlap
+        criterion) and the next Compute group maps silently used the defaults. A record is applied only when it is new to
+        the tab (another folder, or the file was rewritten): a setting the user changes afterwards stays.
+        """
+        key = self._recordKey(folder) if record is not None else None
+        if key == self._settingsKey:
+            return
+        self._settingsKey = key
+        if key is None:
+            return
+        before = self._settings()
+        sign = record.get("sign")
+        if sign in SIGNS:
+            self.setSign(sign)
+        try:
+            pct = float(record.get("sensitivity_pct"))
+        except (TypeError, ValueError):
+            pct = None
+        if pct is not None and self.sensitivitySlider.minimum <= pct <= self.sensitivitySlider.maximum:
+            self.sensitivitySlider.value = pct
+        if self._settings() != before:
+            for cardId in ("robust", "nulls"):  # their primary overlap criterion is shown from these controls
+                cardController = self.ctx.card(cardId) if hasattr(self.ctx, "card") else None
+                scheduleRefresh = getattr(cardController, "scheduleRefresh", None)
+                if callable(scheduleRefresh):
+                    scheduleRefresh()
+
     def _showOutputs(self):
         record = self.card.groupRecord()
         folder = self.card.folder()
+        self._restoreSettings(record, folder)
         self.outputs = {}
         if record is not None and folder:
             for desc, name in (record.get("outputs") or {}).items():
