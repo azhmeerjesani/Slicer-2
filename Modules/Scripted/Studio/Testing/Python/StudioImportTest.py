@@ -604,6 +604,86 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(result.errors, [])
         self.assertEqual(len(result.segmentations), 1)
 
+    def test_lesion_values_beyond_label_range_refused(self):
+        """BB-1: a lesion-named image whose values are beyond the label values of a segmentation (float 1e12, int64 2**40,
+        float -1e12) crashed the app in the segmentation reader, or failed to allocate (std::bad_alloc, a MemoryError that
+        ``loadLesion()`` did not catch) and left an empty segmentation node behind. It is refused with a message and
+        nothing stays in the scene; a mask with ordinary values of the same types still opens.
+        """
+        from StudioLib import importer
+
+        leftovers = ("vtkMRMLSegmentationNode", "vtkMRMLSegmentationStorageNode", "vtkMRMLSegmentationDisplayNode",
+                     "vtkMRMLLabelMapVolumeNode", "vtkMRMLVolumeArchetypeStorageNode")
+
+        def assertSceneEmpty(message):
+            for className in leftovers:
+                self.assertEqual(slicer.mrmlScene.GetNumberOfNodesByClass(className), 0, f"{message}: {className} left behind")
+
+        def writeLesion(name, array):
+            if array.dtype != np.int64:
+                return self._writeVolume(name, GRID_2009C_2MM, array)
+            # A 64-bit integer image (Slicer's volume writer has no numpy long long): NIfTI datatype 1024
+            from LesionNetworkMappingLib import nifti
+
+            matrix = self._ijkToRas(GRID_2009C_2MM)
+            affine = np.array([[matrix.GetElement(row, column) for column in range(4)] for row in range(4)])
+            path = os.path.join(self.directory, name)
+            nifti.write_nifti(path, array.transpose(2, 1, 0), affine, dtype=np.int64)
+            return path
+
+        dims = GRID_2009C_2MM[0]
+        lesion = np.zeros((dims[2], dims[1], dims[0]), bool)
+        lesion[38:43, 48:53, 43:48] = True
+        studioShell = self._applyStudio()
+        for name, dtype, value in (("sub-21_lesion.nii.gz", np.float32, 1e12), ("sub-22_lesion.nii.gz", np.int64, 2**40),
+                                   ("sub-23_lesion.nii.gz", np.float32, -1e12), ("sub-24_lesion.nii.gz", np.float32, 3e9)):
+            path = writeLesion(name, lesion.astype(dtype) * dtype(value))
+            stored = float(dtype(value))
+            self.assertEqual(importer._imageValueRange(path), (min(0.0, stored), max(0.0, stored)), name)
+            with self.assertRaisesRegex(RuntimeError, "cannot be opened as a lesion"):
+                importer.loadLesion(path)
+            assertSceneEmpty(name)
+            result = importer.loadFiles([path], studioShell)
+            self._pump()
+            self.assertEqual(result.segmentations, [], name)
+            self.assertEqual(len(result.errors), 1, name)
+            self.assertIn("cannot be opened as a lesion", result.errors[0][1])
+            assertSceneEmpty(name)
+        # Ordinary masks of the same types open
+        for name, dtype in (("sub-25_lesion.nii.gz", np.float32), ("sub-26_lesion.nii.gz", np.int64)):
+            path = writeLesion(name, lesion.astype(dtype))
+            segmentationNode = importer.loadLesion(path)
+            self.assertEqual(self._voxels(segmentationNode), int(np.count_nonzero(lesion)), name)
+            slicer.mrmlScene.RemoveNode(segmentationNode)
+        # A reader that fails to allocate (MemoryError) leaves no node: the labelmap route is tried, and if it fails too
+        # the error is raised with nothing left in the scene
+        slicer.mrmlScene.Clear(0)
+        path = os.path.join(self.directory, "sub-25_lesion.nii.gz")
+
+        def failingLoadSegmentation(filename, properties=None, returnNode=False):
+            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", os.path.basename(filename))
+            node.SetAndObserveStorageNodeID(slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationStorageNode").GetID())
+            raise MemoryError("std::bad_alloc")
+
+        def failingLoadLabelVolume(filename, properties=None, returnNode=False):
+            slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", os.path.basename(filename))
+            raise MemoryError("std::bad_alloc")
+
+        originals = slicer.util.loadSegmentation, slicer.util.loadLabelVolume
+        try:
+            slicer.util.loadSegmentation = failingLoadSegmentation
+            segmentationNode = importer.loadLesion(path)
+            self.assertEqual(slicer.mrmlScene.GetNumberOfNodesByClass("vtkMRMLSegmentationNode"), 1)
+            self.assertEqual(slicer.mrmlScene.GetNumberOfNodesByClass("vtkMRMLLabelMapVolumeNode"), 0)
+            self.assertEqual(self._voxels(segmentationNode), int(np.count_nonzero(lesion)))
+            slicer.mrmlScene.Clear(0)
+            slicer.util.loadLabelVolume = failingLoadLabelVolume
+            with self.assertRaises(MemoryError):
+                importer.loadLesion(path)
+            assertSceneEmpty("MemoryError")
+        finally:
+            slicer.util.loadSegmentation, slicer.util.loadLabelVolume = originals
+
     #
     # Figures
     #

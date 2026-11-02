@@ -108,6 +108,10 @@ LESION_COLOR = (0.949, 0.329, 0.357)  # #F2545B (SPEC 4.12)
 LESION_FILL_OPACITY = 0.4
 LESION_OUTLINE_OPACITY = 1.0
 LESION_SLICE_INTERSECTION_THICKNESS = 2
+#: Largest voxel value (in magnitude) of a lesion image that is read as a segmentation. The segmentation reader counts
+#: every integer between the lowest and the highest value: values beyond the int range crash it, values near it make it
+#: fail to allocate (std::bad_alloc). 2**24 is also the largest integer that a float32 file stores exactly.
+LESION_LABEL_VALUE_LIMIT = 1 << 24
 
 #: Sample data of "Start on MNI template" (SampleData module, "MNI152 (neuro)" category)
 TEMPLATE_SAMPLE_2MM = "MNI152NLin2009cAsym 2mm brain"
@@ -597,32 +601,96 @@ def _removeNodesNotIn(existingIds, classNames):
                     slicer.mrmlScene.RemoveNode(displayNode)
 
 
+def _imageValueRange(path):
+    """``(low, high)`` of the voxel values of an image file whose voxel type can hold values beyond
+    ``LESION_LABEL_VALUE_LIMIT`` (float, 32 or 64 bit integers, scaled NIfTI), as ITK (Slicer's readers) reads them.
+
+    None for a file of a smaller type (its header is enough to know), with no value other than NaN, or that ITK cannot
+    read (the reader that follows reports it).
+    """
+    try:
+        import warnings
+
+        import numpy as np
+        import SimpleITK as sitk
+
+        reader = sitk.ImageFileReader()
+        reader.SetFileName(str(path))
+        reader.ReadImageInformation()
+        small = {sitk.sitkUInt8, sitk.sitkInt8, sitk.sitkUInt16, sitk.sitkInt16,
+                 sitk.sitkVectorUInt8, sitk.sitkVectorInt8, sitk.sitkVectorUInt16, sitk.sitkVectorInt16}
+        if reader.GetPixelID() in small:
+            return None
+        image = reader.Execute()
+        values = sitk.GetArrayViewFromImage(image)  # a view: ``image`` must outlive it
+        if values.dtype.kind not in "iuf" or not values.size:
+            return None
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)  # all NaN
+            low, high = float(np.nanmin(values)) + 0.0, float(np.nanmax(values)) + 0.0  # + 0.0: no "-0"
+        if np.isnan(low) or np.isnan(high):
+            return None
+    except Exception:
+        logging.info(f"Studio: the value range of {path} could not be checked:\n{traceback.format_exc()}")
+        return None
+    return low, high
+
+
+def _checkLesionValueRange(path):
+    """Raise ``RuntimeError`` (a message for the user) if the voxel values of the label image ``path`` are beyond what the
+    segmentation reader reads (``LESION_LABEL_VALUE_LIMIT``): it would crash (values beyond the int range) or fail to
+    allocate, and the labelmap route counts the values the same way. Files that store segments are not checked.
+    """
+    if _extension(path) not in VOLUME_EXTENSIONS or storesSegments(path):
+        return
+    valueRange = _imageValueRange(path)
+    if valueRange is None:
+        return
+    low, high = valueRange
+    if -LESION_LABEL_VALUE_LIMIT <= low and high <= LESION_LABEL_VALUE_LIMIT:
+        return
+    raise RuntimeError(
+        _("{name} cannot be opened as a lesion: its voxel values ({low:g} to {high:g}) are beyond the label values a "
+          "segmentation can hold (-{limit} to {limit}). Save the mask with 1 for the lesion and 0 elsewhere.").format(
+            name=os.path.basename(str(path)), low=low, high=high, limit=LESION_LABEL_VALUE_LIMIT))
+
+
 def loadLesion(path):
     """Load a lesion file as a segmentation (see ``_applyLesionNaming()`` for the "Lesion" segment).
 
     Image files that the segmentation reader cannot read are loaded as a labelmap volume and converted. A NIfTI file
     with fractional values (a probabilistic mask, ``desc-lesionProb``) is shown with every voxel above 0 as the lesion,
     not truncated to integers by the reader; the node gets ``LESION_FRACTIONAL_ATTRIBUTE`` and the file is unchanged.
+    An image whose values are beyond ``LESION_LABEL_VALUE_LIMIT`` is refused (``RuntimeError``) before it is read.
+    A failed load leaves no node in the scene.
     """
-    existing = _sceneNodeIds("vtkMRMLSegmentationNode") | _sceneNodeIds("vtkMRMLSegmentationStorageNode")
+    _checkLesionValueRange(path)
+    segmentationClasses = ("vtkMRMLSegmentationNode", "vtkMRMLSegmentationStorageNode")
+    existing = set().union(*(_sceneNodeIds(className) for className in segmentationClasses))
     try:
         segmentationNode = slicer.util.loadSegmentation(path, {})
-    except RuntimeError:
-        # The reader of a damaged file (truncated, header only) raises but leaves a half-created node and its storage
-        # node in the scene: they would count as data (an empty "Untitled project" would be started for them)
-        _removeNodesNotIn(existing, ("vtkMRMLSegmentationNode", "vtkMRMLSegmentationStorageNode"))
+    except Exception:
+        # The reader of a damaged file (truncated, header only) raises (RuntimeError, or MemoryError for a
+        # std::bad_alloc) but leaves a half-created node and its storage node in the scene: they would count as data (an
+        # empty "Untitled project" would be started for them)
+        _removeNodesNotIn(existing, segmentationClasses)
         if _extension(path) not in VOLUME_EXTENSIONS:
             raise
         logging.info(f"Studio: {path} is not readable as a segmentation, loading it as a labelmap volume")
-        labelmapNode = slicer.util.loadLabelVolume(path, {"singleFile": True, "show": False})
-        segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", labelmapNode.GetName())
-        # The geometry of the mask is kept even if it is empty (no node reference: the labelmap is removed below)
-        segmentationNode.GetSegmentation().SetConversionParameter(
-            slicer.vtkSegmentationConverter.GetReferenceImageGeometryParameterName(), _volumeGeometry(labelmapNode))
-        if not slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(labelmapNode, segmentationNode):
-            slicer.mrmlScene.RemoveNode(segmentationNode)
-            slicer.mrmlScene.RemoveNode(labelmapNode)
-            raise RuntimeError(_("Failed to convert {path} to a segmentation").format(path=path))
+        labelmapClasses = ("vtkMRMLLabelMapVolumeNode", "vtkMRMLVolumeArchetypeStorageNode")
+        existingLabelmaps = set().union(*(_sceneNodeIds(className) for className in labelmapClasses))
+        try:
+            labelmapNode = slicer.util.loadLabelVolume(path, {"singleFile": True, "show": False})
+            segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", labelmapNode.GetName())
+            # The geometry of the mask is kept even if it is empty (no node reference: the labelmap is removed below)
+            segmentationNode.GetSegmentation().SetConversionParameter(
+                slicer.vtkSegmentationConverter.GetReferenceImageGeometryParameterName(), _volumeGeometry(labelmapNode))
+            if not slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(labelmapNode, segmentationNode):
+                raise RuntimeError(_("Failed to convert {path} to a segmentation").format(path=path))
+        except Exception:
+            _removeNodesNotIn(existing, segmentationClasses)
+            _removeNodesNotIn(existingLabelmaps, labelmapClasses)
+            raise
         slicer.mrmlScene.RemoveNode(labelmapNode)
     fractional = None if storesSegments(path) else _fractionalMask(path)
     if fractional is not None:
