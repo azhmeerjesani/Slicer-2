@@ -1081,6 +1081,66 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertFalse(self._composite("Red").GetForegroundVolumeID())
         self.assertNotEqual(studioShell.inspectorNoticeKey(), "statmap")
 
+    def test_statmap_left_drag_keeps_map_window(self):
+        """In Map a window/level left-drag adjusts the template, never the map: the map's colour table encodes the
+        threshold over a symmetric window (SPEC 4.12), so the views keep showing the voxels the legend names (bug bash
+        map-left-drag-changes-statistical-map-window-breaks-threshold-display). Leaving Map gives the views back.
+        """
+        from StudioLib import importer, mappage
+
+        windowLevelWidget = slicer.vtkMRMLWindowLevelWidget
+        if not hasattr(windowLevelWidget, "SetLeftDragWindowLevel"):
+            self.skipTest("this build has no Studio left-drag window/level (W3-02a)")
+        studioShell = self._applyStudio()
+        dims = GRID_2009C_2MM[0]
+        z, y, x = np.mgrid[0:dims[2], 0:dims[1], 0:dims[0]]
+        values = (8.0 * np.exp(-((x - 30) ** 2 + (y - 60) ** 2 + (z - 50) ** 2) / 60.0) - 6.0 * np.exp(-((x - 66) ** 2 + (y - 60) ** 2 + (z - 50) ** 2) / 60.0)).astype(np.float32)
+        node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode")
+        slicer.util.updateVolumeFromArray(node, values)
+        node.SetIJKToRASMatrix(self._ijkToRas(GRID_2009C_2MM))
+        path = os.path.join(self.directory, "sub-06_desc-T_funcmap.nii.gz")
+        self.assertTrue(slicer.util.saveNode(node, path))
+        slicer.mrmlScene.RemoveNode(node)
+        studioShell.switchTo("library")
+        self._pump()
+        result = importer.handleDrop([path], shell=studioShell)
+        self._pump(8)
+        self.assertEqual(len(result.statmaps), 1)
+        mapNode = result.statmaps[0]
+        self.assertEqual(studioShell.currentWorkspace(), "map")
+        self.assertEqual(self._composite("Red").GetForegroundVolumeID(), mapNode.GetID())
+        leftDrag = windowLevelWidget.GetLeftDragWindowLevel()
+        windowLevelWidget.SetLeftDragWindowLevel(True)
+        try:
+            slicer.app.applicationLogic().GetInteractionNode().SetCurrentInteractionMode(slicer.vtkMRMLInteractionNode.ViewTransform)
+            mapDisplay = mapNode.GetDisplayNode()
+            templateDisplay = self._background("Red").GetDisplayNode()
+            mapWindowLevel = (mapDisplay.GetWindow(), mapDisplay.GetLevel())
+            self.assertAlmostEqual(mapWindowLevel[1], 0.0)
+            templateWindowLevel = (templateDisplay.GetWindow(), templateDisplay.GetLevel())
+            # A plain left-drag over the brain (the map's box covers the whole template)
+            self._stroke("Red", ((0.4, 0.5), (0.45, 0.52), (0.5, 0.55), (0.55, 0.58), (0.6, 0.6)))
+            self.assertEqual((mapDisplay.GetWindow(), mapDisplay.GetLevel()), mapWindowLevel, "a left-drag in Map changed the map's window/level")
+            self.assertNotEqual((templateDisplay.GetWindow(), templateDisplay.GetLevel()), templateWindowLevel, "a left-drag in Map did not adjust the template")
+            # The explicit Adjust window/level mouse mode does not change the map either
+            interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+            interactionNode.SetCurrentInteractionMode(slicer.vtkMRMLInteractionNode.AdjustWindowLevel)
+            self._stroke("Green", ((0.4, 0.5), (0.5, 0.55), (0.6, 0.6)))
+            interactionNode.SetCurrentInteractionMode(slicer.vtkMRMLInteractionNode.ViewTransform)
+            self.assertEqual((mapDisplay.GetWindow(), mapDisplay.GetLevel()), mapWindowLevel)
+            # Views of a new layout too
+            self.layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
+            self._pump(6)
+            managers = mappage._windowLevelManagers()
+            self.assertTrue(managers)
+            self.assertFalse(any(manager.GetAdjustForegroundWindowLevelEnabled() for manager in managers))
+            # Leaving Map gives the views their foreground window/level back
+            studioShell.switchTo("library")
+            self._pump(4)
+            self.assertTrue(all(manager.GetAdjustForegroundWindowLevelEnabled() for manager in mappage._windowLevelManagers()))
+        finally:
+            windowLevelWidget.SetLeftDragWindowLevel(leftDrag)
+
     #
     # Lesions without a scan
     #

@@ -868,9 +868,55 @@ def moreMenuActions(shell):
     return items
 
 
+def _windowLevelManagers():
+    """The scalar bar displayable manager of every slice view (it owns the view's window/level widget)."""
+    managers = []
+    for widget in _sliceWidgets():
+        try:
+            manager = widget.sliceView().displayableManagerByClassName("vtkMRMLScalarBarDisplayableManager")
+        except Exception:
+            manager = None
+        if manager is not None and hasattr(manager, "SetAdjustForegroundWindowLevelEnabled"):
+            managers.append(manager)
+    return managers
+
+
+def _lockMapWindowLevel(*args):
+    """While Studio shows Map, a window/level drag in a view (Studio's left-drag, or the Adjust window/level mouse mode)
+    adjusts the template, never the map: the map's colour table encodes the threshold rule over a symmetric window
+    (SPEC 4.12), so a changed window or level would show other voxels than the legend names. Also applied to the views
+    of a new layout. ``_unlockMapWindowLevel`` puts the previous setting back.
+    """
+    saved = _state.setdefault("foregroundWindowLevel", [])
+    for manager in _windowLevelManagers():
+        if any(known is manager for known, _previous in saved):
+            continue
+        saved.append((manager, bool(manager.GetAdjustForegroundWindowLevelEnabled())))
+        manager.SetAdjustForegroundWindowLevelEnabled(False)
+    layoutManager = slicer.app.layoutManager()
+    if layoutManager is not None and _state.get("windowLevelLayoutManager") is None:
+        layoutManager.connect("layoutChanged(int)", _lockMapWindowLevel)
+        _state["windowLevelLayoutManager"] = layoutManager
+
+
+def _unlockMapWindowLevel():
+    layoutManager = _state.pop("windowLevelLayoutManager", None)
+    if layoutManager is not None:
+        try:
+            layoutManager.disconnect("layoutChanged(int)", _lockMapWindowLevel)
+        except Exception:
+            pass
+    for manager, previous in _state.pop("foregroundWindowLevel", []):
+        try:
+            manager.SetAdjustForegroundWindowLevelEnabled(previous)
+        except Exception:
+            logging.error(f"Studio Map: cannot restore the window/level setting of a view:\n{traceback.format_exc()}")
+
+
 def enter(shell):
     _state["shell"] = shell
     captureLayers()
+    _lockMapWindowLevel()
     widget = moduleWidget()
     if widget is None:
         return
@@ -896,6 +942,7 @@ def enter(shell):
 
 def leave(shell):
     _removeOverlay()
+    _unlockMapWindowLevel()
     _restoreActionShortcuts()
     _browser.removeLesion()
     widget = moduleWidget(create=False)

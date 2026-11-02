@@ -353,6 +353,8 @@ Notes:
   box or the Python console), and not while a menu, popup or dialog is open, or while the window is not
   active.
 - In 3D views, `Page Down`, `Home` and `End` keep their standard meaning (rotate to a standard view).
+- In Map, window/level adjustments change the template under the network map, never the map: the map's
+  colours show its threshold rule, which is set in the Map panel.
 - The behaviours can be changed in *Application Settings > Views > Navigation in Studio*:
 
 | Setting | Default | Description |
