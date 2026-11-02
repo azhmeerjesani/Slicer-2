@@ -22,8 +22,8 @@ service never starts by itself under --testing; the tests create ``UpdateService
   only), required without a file for this computer (warning only), required found online after the startup (warning
   with Update now), offline with a cached required manifest (warning only), a slow server (the startup goes on after
   the timeout), the first-start tour offer held during the startup check;
-- (h) Update now up to the install step (download, verify, prepare; the installed folder untouched) and a tampered
-  release refused in the dialog;
+- (h) Update now up to the install step (download, verify, prepare; the installed folder untouched), a tampered
+  release refused in the dialog, and Cancel while the update is prepared (both dialogs);
 - (i) Studio surfaces: the notice on the Library canvas, Skip, the ≡ menu item, the Search entries, the settings
   panel; Classic: the Help menu item;
 - (j) make_release.py output round-trips through the application's manifest parser and download check; the web
@@ -2115,6 +2115,132 @@ fi
         self.assertEqual(updates.keepPackage(kept, other), os.path.join(other, name.replace(".tar.gz", " (2).tar.gz")))
         with open(os.path.join(other, name), "rb") as f:
             self.assertEqual(f.read(), b"another file")
+
+    def test_PrepareLinuxCancelled(self):
+        """prepareLinux() looks at Cancel before each file it extracts: it stops and removes what it extracted."""
+        install = self.install
+        target = self._fakeLinuxInstall("0.9.0")
+        package = os.path.join(self.tempDir, "new.tar.gz")
+        _fakeLinuxPackage(package, "1.2.0")
+        calls = []
+
+        def cancelled():
+            calls.append(True)
+            return len(calls) > 2  # cancelled after the first file
+
+        with self.assertRaises(install.InstallCancelled):
+            install.prepareLinux(package, target, "1.2.0", cancelled=cancelled)
+        self.assertFalse(os.path.exists(install.stagingRoot(target)), "the extracted files are removed")
+        self.assertEqual(install.linuxPackageVersion(target), "0.9.0")
+        # Not cancelled: prepared as before
+        prepared = install.prepareLinux(package, target, "1.2.0", cancelled=lambda: False)
+        self.assertEqual(install.linuxPackageVersion(prepared.staged), "1.2.0")
+
+    def _holdPrepare(self):
+        """Hold the preparation of an update (in the worker thread) until the test releases it. Return (entered, release)."""
+        install = self.install
+        original = install.prepareLinux
+        entered, release = threading.Event(), threading.Event()
+
+        def held(*args, **kwargs):
+            entered.set()
+            release.wait(30)
+            return original(*args, **kwargs)
+
+        install.prepareLinux = held
+        self.addCleanup(setattr, install, "prepareLinux", original)
+        self.addCleanup(release.set)
+        return entered, release
+
+    def test_CancelWhilePreparing(self):
+        """Cancel while the update is being prepared ("Checked. Preparing the new version…") stops the update: the
+        optional dialog says it was cancelled, the required dialog goes back to Update now and never quits to install.
+        """
+        updates, install = self.updates, self.install
+        if updates.platformKey() != "linux-x86_64":
+            self.skipTest("the Linux package path is tested on Linux")
+        self._publish("1.2.0")
+        target = self._fakeLinuxInstall("0.9.0")
+        updates._installableOverride = True
+        updates.installTargetOverride = target
+        root = install.stagingRoot(target)
+        # Optional update dialog
+        entered, release = self._holdPrepare()
+        service = self._service()
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        dialog = service.updateNow()
+        task = dialog.task
+        self.assertTrue(self._waitFor(lambda: entered.is_set() and task.phase == "prepare", 30), dialog.text.text)
+        self._pump(0.2)
+        self.assertEqual(dialog.secondaryButton.text, "Cancel")
+        dialog.secondaryButton.click()
+        self.assertTrue(task.cancelled())
+        self.assertFalse(dialog.secondaryButton.enabled, "Cancel is not clicked twice while the update stops")
+        self.assertIn("Cancelling", dialog.text.text)
+        release.set()
+        self.assertTrue(self._waitFor(lambda: dialog.state in ("ready", "failed"), 30), dialog.state)
+        self.assertEqual(dialog.state, "failed", dialog.text.text)
+        self.assertIn("cancelled", dialog.text.text)
+        self.assertTrue(dialog.secondaryButton.enabled)
+        self.assertIsNone(service.prepared)
+        self.assertFalse(os.path.exists(root), "the staged copy is removed")
+        self.assertFalse(os.path.exists(os.path.join(self.stateDir, updates.STAGED_MARKER)))
+        self.assertEqual(install.linuxPackageVersion(target), "0.9.0")
+        # Try again: the update is prepared
+        dialog.onPrimary()
+        self.assertTrue(self._waitFor(lambda: dialog.state in ("ready", "failed"), 30), dialog.state)
+        self.assertEqual(dialog.state, "ready", dialog.text.text)
+        self.assertEqual(install.linuxPackageVersion(service.prepared.staged), "1.2.0")
+        service.dispose()
+
+        # Required update dialog
+        self._publish("1.2.1", required=True)
+        entered, release = self._holdPrepare()
+        service = self._service()
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        required = updates.RequiredUpdateDialog(service, slicer.util.mainWindow())
+        self.addCleanup(required.dispose)
+        closes = []
+        required._closeApplication = lambda: closes.append(True)
+        required.onUpdateClicked()
+        task = required.task
+        self.assertTrue(self._waitFor(lambda: entered.is_set() and task.phase == "prepare", 30), required.statusLabel.text)
+        self._pump(0.2)
+        self.assertEqual(required.updateButton.text, "Cancel")
+        required.updateButton.click()
+        self.assertTrue(task.cancelled())
+        self.assertFalse(required.updateButton.enabled)
+        release.set()
+        self.assertTrue(self._waitFor(lambda: required.task is None, 30))
+        self._pump(0.2)
+        self.assertEqual(closes, [], "Cancel never quits Slicer Studio to install the update")
+        self.assertEqual(required.state, "offer")
+        self.assertEqual(required.updateButton.text, "Update now")
+        self.assertTrue(required.updateButton.enabled)
+        self.assertIn("cancelled", required.statusLabel.text)
+        self.assertIsNone(service.prepared)
+        self.assertFalse(service._quitConnected, "nothing installs at the next quit")
+        self.assertFalse(os.path.exists(root), "the staged copy is removed")
+        self.assertEqual(install.linuxPackageVersion(target), "0.9.0")
+
+        # Cancel after the worker finished but before its result was reported (the main thread was busy)
+        required.onUpdateClicked()
+        task = required.task
+        release.set()
+        end = time.monotonic() + 30
+        while not task.finished and time.monotonic() < end:
+            time.sleep(0.02)  # no event processing: the result is not reported yet
+        self.assertTrue(task.finished)
+        self.assertIsNone(task.error, str(task.error))
+        required.onUpdateClicked()  # Cancel
+        self.assertTrue(self._waitFor(lambda: required.task is None, 30))
+        self._pump(0.5)
+        self.assertEqual(closes, [])
+        self.assertEqual(required.state, "offer")
+        self.assertEqual(required.updateButton.text, "Update now")
+        self.assertIsNone(service.prepared)
+        self.assertFalse(service._quitConnected)
+        self.assertTrue(self._waitFor(lambda: not os.path.exists(root), 10), "the staged copy is removed")
 
     def test_NothingUnderTesting(self):
         updates = self.updates

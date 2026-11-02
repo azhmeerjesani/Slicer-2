@@ -136,6 +136,18 @@ class InstallError(Exception):
         self.manualSteps = manualSteps
 
 
+class InstallCancelled(InstallError):
+    """The preparation of an update was cancelled (``cancelled()`` turned True); nothing was changed."""
+
+    def __init__(self):
+        InstallError.__init__(self, "The update was cancelled.")
+
+
+def _checkCancelled(cancelled):
+    if cancelled is not None and cancelled():
+        raise InstallCancelled()
+
+
 def manualSteps(kind, packagePath, target):
     """How to install the package ``packagePath`` (named by its full path: the user must find it) by hand."""
     if kind == "macos":
@@ -342,10 +354,11 @@ def _safeMembers(archive, root):
     return members, tops.pop(), total
 
 
-def prepareLinux(packagePath, target, expectedVersion, stagingParent=None):
+def prepareLinux(packagePath, target, expectedVersion, stagingParent=None, cancelled=None):
     """Extract the Linux package ``packagePath`` next to ``target`` and check it. Return a ``PreparedInstall``.
 
-    Raise ``InstallError`` (nothing installed, nothing changed next to ``target``) on any problem.
+    Raise ``InstallError`` (nothing installed, nothing changed next to ``target``) on any problem, and
+    ``InstallCancelled`` (the staging folder removed) when ``cancelled()`` turns True during the extraction.
     """
     if not target or not os.path.isdir(target):
         raise InstallError("The installed application folder was not found.")
@@ -362,10 +375,19 @@ def prepareLinux(packagePath, target, expectedVersion, stagingParent=None):
             free = _freeBytes(root)
             if free is not None and free < total + FREE_SPACE_MARGIN:
                 raise InstallError(f"Not enough free disk space next to {target}: {total + FREE_SPACE_MARGIN >> 20} MB are needed.", manual)
+
+            def checkedMembers():
+                # Cancel is looked at before each file (a package has tens of thousands of them)
+                for member in members:
+                    _checkCancelled(cancelled)
+                    yield member
+
+            _checkCancelled(cancelled)
             if hasattr(tarfile, "data_filter"):
-                archive.extractall(root, members=members, filter="data")
+                archive.extractall(root, members=checkedMembers(), filter="data")
             else:
-                archive.extractall(root, members=members)
+                archive.extractall(root, members=checkedMembers())
+            _checkCancelled(cancelled)
         staged = os.path.join(root, top)
         for required in ("Slicer", os.path.join("bin", "SlicerApp-real")):
             if not os.path.exists(os.path.join(staged, required)):
@@ -430,11 +452,12 @@ def _readPlist(appPath):
         return None
 
 
-def prepareMacOS(dmgPath, target, expectedVersion, env=None, stagingParent=None):
+def prepareMacOS(dmgPath, target, expectedVersion, env=None, stagingParent=None, cancelled=None):
     """Copy the application of the disk image ``dmgPath`` to a staging folder next to ``target`` (the installed
     ``.app``). Return a ``PreparedInstall``; ``needsAdmin`` is set when the folder of ``target`` is not writable.
 
-    Raise ``InstallError`` (with manual steps) on any problem; the installed application is never touched here.
+    Raise ``InstallError`` (with manual steps) on any problem, and ``InstallCancelled`` (the staging folder removed)
+    when ``cancelled()`` is True between the steps; the installed application is never touched here.
     """
     manual = manualSteps("macos", dmgPath, target)
     if not target or not os.path.isdir(target):
@@ -455,11 +478,13 @@ def prepareMacOS(dmgPath, target, expectedVersion, env=None, stagingParent=None)
     try:
         _run(["hdiutil", "attach", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint", mountPoint, dmgPath], env=env)
         attached = True
+        _checkCancelled(cancelled)
         apps = sorted(name for name in os.listdir(mountPoint) if name.endswith(".app") and os.path.isdir(os.path.join(mountPoint, name)))
         if not apps:
             raise InstallError("The disk image contains no application.", manual)
         staged = os.path.join(root, os.path.basename(target))
         _run(["ditto", os.path.join(mountPoint, apps[0]), staged], env=env)
+        _checkCancelled(cancelled)
     except InstallError:
         _removeTree(root)
         raise

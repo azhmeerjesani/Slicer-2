@@ -649,6 +649,22 @@ def downloadAsset(manifest, key, directory, feed=None, progress=None, cancelled=
     return path
 
 
+def _removeStaged(prepared, wait):
+    """Remove the staging folder of ``prepared`` (an update that was cancelled before it was offered), now (``wait``) or
+    in a background thread.
+    """
+    root = os.path.dirname(prepared.staged) if prepared is not None and prepared.staged else None
+    if not root or not os.path.isdir(root) or not os.path.basename(root).endswith(updates_install.STAGING_SUFFIX):
+        return
+    if wait:
+        try:
+            updates_install._removeTree(root)
+        except OSError:
+            logging.warning("Updates: could not remove the cancelled update:\n" + traceback.format_exc())
+    else:
+        updates_install.removeInBackground(root)
+
+
 #: Written when an update is prepared: which run staged it (the staging folder is removed by the next start if that run died)
 STAGED_MARKER = "staged.json"
 
@@ -1639,6 +1655,7 @@ class UpdateService:
         if target is None and key in ("macos-arm64", "macos-x86_64", "linux-x86_64"):
             raise updates_install.InstallError(_("The installed application was not found."))
         unavailable = _("This computer cannot install the update.")
+        cancelledText = _("The update was cancelled.")
         stale, self._staleStaging = self._staleStaging, []
         # From now on this run owns the download and staging folders: another Slicer Studio that starts with the same
         # state folder must not clean them up (the marker names this run until it ends or its update is registered)
@@ -1654,22 +1671,37 @@ class UpdateService:
             if task.cancelled():
                 raise UpdateError(_("The download was cancelled."))
             task.phase = "prepare"
+            prepared = None
             try:
                 if key == "linux-x86_64":
-                    return updates_install.prepareLinux(path, target, manifest.version)
-                if key in ("macos-arm64", "macos-x86_64"):
-                    return updates_install.prepareMacOS(path, target, manifest.version, stagingParent=None)
+                    prepared = updates_install.prepareLinux(path, target, manifest.version, cancelled=task.cancelled)
+                elif key in ("macos-arm64", "macos-x86_64"):
+                    prepared = updates_install.prepareMacOS(path, target, manifest.version, stagingParent=None, cancelled=task.cancelled)
             except updates_install.InstallError as error:
+                if task.cancelled():
+                    # Cancel during the preparation: the staged copy is removed, the verified download is kept (in the
+                    # private download folder) for the next try
+                    raise UpdateError(cancelledText) from None
                 if error.manualSteps and os.path.isfile(path):
                     # The steps tell the user to install this package by hand: it leaves the private download folder
                     # (emptied at the next start) for a folder the user knows, and the steps name its full path
                     kept = keepPackage(path, keepDirectory)
                     error.manualSteps = updates_install.manualSteps("linux" if key == "linux-x86_64" else "macos", kept, target)
                 raise
-            raise UpdateError(unavailable)
+            if prepared is None:
+                raise UpdateError(unavailable)
+            if task.cancelled():
+                # Cancel came as the preparation ended: the update is not kept
+                _removeStaged(prepared, wait=True)
+                raise UpdateError(cancelledText)
+            return prepared
 
         def done(prepared, error):
             self.job = None
+            if error is None and job.cancelled():
+                # Cancel came after the worker finished (before this report): the update is not kept
+                _removeStaged(prepared, wait=False)
+                prepared, error = None, UpdateError(cancelledText)
             if error is None:
                 self.prepared = prepared
                 self._registerStaged(prepared)
@@ -1678,9 +1710,9 @@ class UpdateService:
             onUpdate(prepared, error)
             self._notify()
 
-        self.job = _Task(run, done)
-        self.job.phase = "download"
-        return self.job.start()
+        job = self.job = _Task(run, done)
+        job.phase = "download"
+        return job.start()
 
     def installOnQuit(self, relaunch=True):
         """Swap in the prepared update when the application exits (and relaunch it). With administrator rights the
@@ -2109,7 +2141,11 @@ class RequiredUpdateDialog:
     def onUpdateClicked(self):
         if self.state == "downloading":
             if self.task is not None:
+                # The job stops at its next check (the preparation removes what it extracted): the dialog then goes
+                # back to its offer
                 self.task.cancel()
+                self.updateButton.setEnabled(False)
+                self._setStatus(_("Cancelling…"))
             return
         if self.state == "ready":
             self._restart()
@@ -2136,6 +2172,8 @@ class RequiredUpdateDialog:
         if task is None:
             return
         received, total = task.progress
+        if task.cancelled():
+            return  # "Cancelling…" stays until the job has stopped
         if getattr(task, "phase", "") == "prepare":
             self.progress.setRange(0, 0)
             self._setStatus(_("Checked. Preparing the new version…"))
@@ -2145,11 +2183,13 @@ class RequiredUpdateDialog:
             self._setStatus(_progressText(received, total))
 
     def _onJobDone(self, prepared, error):
+        cancelled = self.task is not None and self.task.cancelled()
         self.task = None
         self.progress.setVisible(False)
+        self.updateButton.setEnabled(True)
         if error is not None:
             self.state = "offer"
-            self.updateButton.setText(_("Try again"))
+            self.updateButton.setText(_("Update now") if cancelled else _("Try again"))
             manual = getattr(error, "manualSteps", None)
             self._setStatus(str(error) + (" " + manual if manual else ""), error=True)
             return
@@ -2314,6 +2354,7 @@ class UpdateDialog:
         self.progress.setVisible(state == "downloading")
         self.primaryButton.setVisible(state in ("ready", "failed"))
         self.primaryButton.setText(_("Restart now") if state == "ready" else _("Try again"))
+        self.secondaryButton.setEnabled(True)
         self.secondaryButton.setText({"downloading": _("Cancel"), "ready": _("Install when I quit")}.get(state, _("Close")))
         if state == "ready":
             self.primaryButton.setDefault(True)
@@ -2324,6 +2365,8 @@ class UpdateDialog:
         if task is None:
             return
         received, total = task.progress
+        if task.cancelled():
+            return  # "Cancelling…" stays until the job has stopped
         if getattr(task, "phase", "") == "prepare":
             self.progress.setRange(0, 0)
             self._setText(_("Checked. Preparing the new version…"))
@@ -2365,7 +2408,10 @@ class UpdateDialog:
     def onSecondary(self):
         if self.state == "downloading":
             if self.task is not None:
+                # The job stops at its next check (the preparation removes what it extracted)
                 self.task.cancel()
+                self.secondaryButton.setEnabled(False)
+                self._setText(_("Cancelling…"))
             return
         if self.state == "ready":
             try:
