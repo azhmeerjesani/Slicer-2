@@ -225,6 +225,39 @@ def _bibtex_value(text, index):
     return match.group(0), match.end()
 
 
+_LATEX_MARKS = {"`": "\u0300", "'": "\u0301", "^": "\u0302", "~": "\u0303", "=": "\u0304", ".": "\u0307", '"': "\u0308"}
+_LATEX_LETTER_MARKS = {"u": "\u0306", "v": "\u030c", "H": "\u030b", "c": "\u0327", "k": "\u0328", "r": "\u030a", "b": "\u0331"}
+_LATEX_LETTERS = {"O": "\u00d8", "o": "\u00f8", "ss": "\u00df", "ae": "\u00e6", "AE": "\u00c6", "oe": "\u0153",
+                  "OE": "\u0152", "aa": "\u00e5", "AA": "\u00c5", "l": "\u0142", "L": "\u0141", "i": "i", "j": "j"}
+_LATEX_BASE = r"(\\[ij](?![A-Za-z])|[A-Za-z])"
+_LATEX_SYMBOL_ACCENT = re.compile(r"\\([`'^~=.\"])\s*(?:\{\s*" + _LATEX_BASE + r"\s*\}|" + _LATEX_BASE + ")")
+_LATEX_LETTER_ACCENT = re.compile(r"\\([uvHckrb])(?:\s*\{\s*" + _LATEX_BASE + r"\s*\}|\s+" + _LATEX_BASE + ")")
+_LATEX_SPECIAL = re.compile(r"\\(" + "|".join(sorted(_LATEX_LETTERS, key=len, reverse=True)) + r")(?![A-Za-z])\s*")
+_LATEX_ESCAPED = re.compile(r"\\([&%$#_])")
+
+
+def _latex_to_unicode(value):
+    r"""``value`` with the LaTeX accents of a BibTeX field decoded (``M{\"u}ller`` -> ``Müller``, ``Fern\'andez``,
+    ``Garc\'{\i}a``, ``\c{c}``, ``{\O}stergaard``, ``\ss``) and the escaped ``\& \% \$ \# \_`` unescaped; other
+    text, braces included, is left as it is.
+    """
+
+    def base(letter):
+        return letter[-1] if letter.startswith("\\") else letter
+
+    def accent(marks):
+        def replace(match):
+            letter = match.group(2) or match.group(3)
+            return unicodedata.normalize("NFC", base(letter) + marks[match.group(1)])
+
+        return replace
+
+    value = _LATEX_SYMBOL_ACCENT.sub(accent(_LATEX_MARKS), value)
+    value = _LATEX_LETTER_ACCENT.sub(accent(_LATEX_LETTER_MARKS), value)
+    value = _LATEX_SPECIAL.sub(lambda match: _LATEX_LETTERS[match.group(1)], value)
+    return _LATEX_ESCAPED.sub(lambda match: match.group(1), value)
+
+
 def parse_bibtex(text):
     """BibTeX entries (``@article{key, title = {...}, author = {A and B}, ...}``)."""
     records = []
@@ -241,7 +274,7 @@ def parse_bibtex(text):
             if not field:
                 break
             value, index = _bibtex_value(text, field.end())
-            fields[field.group(1).lower()] = re.sub(r"[{}]", "", value)
+            fields[field.group(1).lower()] = re.sub(r"[{}]", "", _latex_to_unicode(value))
             comma = re.compile(r"\s*,").match(text, index)
             index = comma.end() if comma else index
         authors = "; ".join(part.strip() for part in re.split(r"\s+and\s+", fields.get("author", "")) if part.strip())

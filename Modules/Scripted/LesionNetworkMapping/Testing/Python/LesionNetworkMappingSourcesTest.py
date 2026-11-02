@@ -148,9 +148,27 @@ class SourcesTest(unittest.TestCase):
         records = sources.parse_bibtex(BIBTEX)
         self.assertEqual(len(records), 2)
         self.assertEqual(records[0]["title"], "Alien hand after callosal lesion")
-        self.assertEqual(records[0]["authors"], "M{\\\"u}ller, Hans; Rossi, Anna".replace("{", "").replace("}", ""))
+        self.assertEqual(records[0]["authors"], "M\u00fcller, Hans; Rossi, Anna")
         self.assertEqual((records[0]["year"], records[0]["journal"]), ("2017", "Neuroimage"))
         self.assertEqual(records[1]["pmid"], "333333")
+
+    def test_bibtex_latex_accents_decoded(self):
+        text = (
+            "@article{a,\n  author = {M{\\\"u}ller, J{\\\"o}rg and Fern{\\'a}ndez, Ana and Sch\\\"on, B and {\\O}stergaard, K"
+            " and Garc\\'{\\i}a, L and Fran\\c{c}ois, P and Dvo\\v{r}\\'ak, T},\n"
+            "  title = {Lesion network of {\\\"a}phasia \\& {\\ss}tudy 100\\% of {X}},\n  journal = {Brain \\_ Mind},\n"
+            "  year = {2020}\n}\n@article{b,\n  author = \"M\\\"uller, J\",\n  title = \"{\\'E}tude\"\n}\n"
+        )
+        first, second = sources.parse_bibtex(text)
+        self.assertEqual(first["title"], "Lesion network of \u00e4phasia & \u00dftudy 100% of X")
+        self.assertEqual(first["authors"], "M\u00fcller, J\u00f6rg; Fern\u00e1ndez, Ana; Sch\u00f6n, B; \u00d8stergaard, K; "
+                         "Garc\u00eda, L; Fran\u00e7ois, P; Dvo\u0159\u00e1k, T")
+        self.assertEqual(first["journal"], "Brain _ Mind")
+        self.assertEqual((second["authors"], second["title"]), ("M\u00fcller, J", "\u00c9tude"))
+        for record in (first, second):
+            self.assertNotIn("\\", record["title"] + record["authors"])
+        # the decoded title matches the same paper from another source
+        self.assertEqual(sources.normalize_title(first["title"]), sources.normalize_title("Lesion network of \u00e4phasia & \u00dftudy 100% of X"))
 
     def test_csv(self):
         records = sources.parse_csv(CSV)
