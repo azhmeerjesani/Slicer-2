@@ -1339,6 +1339,53 @@ def openAddDataDialog(paths):
     return ioManager.openDialog("NoFile", slicer.qSlicerFileDialog.Read, {"fileNames": paths})
 
 
+#: Kinds of file whose load Draw edits a lesion of (a scene, a scan, a 4D image, a lesion)
+_TRACED_KINDS = ("scene", "volume", "sequence", "lesion")
+
+
+def _studySubjectOfFile(studySession, path):
+    """The subject of the open study whose scan or lesion is ``path`` (also its open node), else None."""
+    subjectOfFile = getattr(studySession, "subjectOfFile", None)
+    sid = subjectOfFile(path) if callable(subjectOfFile) else None
+    if sid is None:
+        openNode = openNodeForFile(path)
+        if openNode is not None and (_sameNode(openNode, studySession.volumeNode()) or _sameNode(openNode, studySession.segmentationNode())):
+            sid = studySession.current()
+    return sid
+
+
+def _routeStudyLoad(paths, kinds, shell):
+    """With a study open (Studio), route the scenes, scans and lesions of a load before it: Draw edits one lesion, and
+    Done → next writes the study's subject.
+
+    A file of a subject of the study (its scan or lesion) opens that subject in the study instead of being loaded again. Any
+    other one closes the study first (the current subject's edits are written, as when another study or a project
+    opens): left open, Draw would trace the loaded scan under the study's breadcrumb, Done → next would write the hidden
+    subject, and the tracing would be saved nowhere (no project is saved while a study is open). A toast offers to reopen
+    the study. Return ``(paths, kinds)`` left to load, or None when nothing is loaded (the current subject's edits could
+    not be written: a toast says why, and the study stays open).
+    """
+    studySession = _studySession()
+    if studySession is None or not any(kind in _TRACED_KINDS for kind in kinds):
+        return paths, kinds
+    traced = [path for path, kind in zip(paths, kinds, strict=True) if kind in _TRACED_KINDS]
+    sids = [_studySubjectOfFile(studySession, path) for path in traced]
+    if all(sids):
+        studySession.open(sids[0], switchToDraw=True)
+        kept = [(path, kind) for path, kind in zip(paths, kinds, strict=True) if kind not in _TRACED_KINDS]
+        return [path for path, _kind in kept], [kind for _path, kind in kept]
+    if not studySession.writeCurrent():
+        return None
+    from . import study_ui
+
+    studyPath, studyName, sid = studySession.path, studySession.name, studySession.current()
+    study_ui.closeStudy()
+    outside = traced[sids.index(None)]
+    shell.toast(_("Study {study} closed: {file} is not one of its subjects").format(study=studyName, file=os.path.basename(outside)),
+                level="consequence", action=lambda: study_ui.openStudy(studyPath, shell, subject=sid), actionText=_("Reopen study"))
+    return paths, kinds
+
+
 def loadFiles(paths, shell=None, pairedLesion=None):
     """Load files directly (see the module documentation) and return a ``LoadResult``.
 
@@ -1346,7 +1393,8 @@ def loadFiles(paths, shell=None, pairedLesion=None):
     all the paths. In Studio, the first scan becomes the background of the slice views, the Segment Editor
     is prepared on it (with the lesion file of the same load, if any) and Draw is shown. Figures, statistical maps
     and participants tables take their own routes (module documentation). ``pairedLesion``: a lesion that the scan
-    of this load belongs to ("Open with patient_T1.nii.gz"): Draw edits it on the scan.
+    of this load belongs to ("Open with patient_T1.nii.gz"): Draw edits it on the scan. With a study open, a subject's own
+    scan or lesion opens that subject, and any other scan, lesion or scene closes the study first (``_routeStudyLoad()``).
     """
     shell = _currentShell(shell)
     result = LoadResult()
@@ -1376,6 +1424,12 @@ def loadFiles(paths, shell=None, pairedLesion=None):
         if any(kind not in ("scene", "volume", "sequence", "lesion", "figure", "statmap") for kind in kinds):
             result.addDataPaths = paths
             openAddDataDialog(paths)
+            return result
+        routed = _routeStudyLoad(paths, kinds, shell)
+        if routed is None:
+            return result
+        paths, kinds = routed
+        if not paths:
             return result
 
     loadedPaths = []

@@ -169,7 +169,9 @@ Draw is the [Segment Editor](segmenteditor.md) module in its Studio presentation
    scan (**Normalize scan only** while the lesion is empty).
 6. A sticky footer. Without a study the main button is **Save lesion · Ctrl+Enter** and, under it, the link
    **Map this lesion's network →**, which opens Map (for a lesion in scan space, Map offers to normalize it to MNI
-   first). With a study the main button is **Done → next · Ctrl+Enter**.
+   first). With a study the main button is **Done → next · Ctrl+Enter**. Opening a subject's own scan while the study
+   is open opens that subject; opening any other scan, lesion or scene closes the study first (the subject's edits are
+   saved, and a message offers **Reopen study**).
 
 **The first click.** The Brush is armed when you came to trace: **Start on template**, **Continue in Draw →**,
 **Open in Draw**, a loaded lesion file or set. A scan you only dropped or opened lands in Draw **unarmed**: a

@@ -3031,6 +3031,21 @@ class StudySession:
             self._sayMissing(shell, sid, "lesion", missingLesion)
         return True
 
+    def subjectOfFile(self, path):
+        """participant_id of the subject whose scan or lesion (as the table names it) is the file ``path``, else None."""
+        if not path or not os.path.exists(path):
+            return None
+        target = os.path.normcase(os.path.realpath(path))
+        for row in self.study.subjects:
+            for column in ("scan", "lesion"):
+                try:
+                    filePath = self.study.abspath(row.get(column))
+                except Exception:
+                    filePath = None
+                if filePath and os.path.normcase(os.path.realpath(filePath)) == target:
+                    return row.get("participant_id")
+        return None
+
     def _missingFile(self, sid, column):
         """``(table path, absolute path)`` of the ``scan`` or ``lesion`` of ``sid`` when the table names a file that is
         not on disk, else None (no file named, or the file is there).

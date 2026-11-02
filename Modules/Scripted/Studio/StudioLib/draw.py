@@ -3778,7 +3778,7 @@ class _CtaFooter:
         shell = self._shell()
         key = ui.keyText(PRIMARY_SHORTCUT)
         segmentationNode, _source = lesionNodes()
-        study = getattr(shell, "studySession", None) if shell is not None else None
+        study = _studyOfEditedLesion(shell, segmentationNode)
         if study is not None:
             label = _("Done → next · {key}").format(key=key)
             self._primary = lambda: doneNext(shell)
@@ -3849,11 +3849,25 @@ class _CtaFooter:
         self.secondaryButton = None
 
 
+def _studyOfEditedLesion(shell, segmentationNode):
+    """The open study when Draw edits its subject's lesion (or no lesion), else None. A lesion of another scan (one that a
+    route of 3D Slicer loaded while the study is open) is saved with Save lesion: Done → next would write the hidden
+    subject instead, and the lesion that the user sees would be saved nowhere.
+    """
+    study = getattr(shell, "studySession", None) if shell is not None else None
+    if study is None or segmentationNode is None or not hasattr(study, "segmentationNode"):
+        return study
+    own = study.segmentationNode()
+    return study if own is not None and own.GetID() == segmentationNode.GetID() else None
+
+
 def doneNext(shell=None):
-    """Done → next (a study is open, W3-07): save this subject's lesion and open the next one."""
+    """Done → next (a study is open, W3-07): save this subject's lesion and open the next one. Save lesion when Draw
+    edits a lesion that is not the study subject's.
+    """
     shell = _currentShell(shell)
     _applyPendingSmartFill(shell)
-    study = getattr(shell, "studySession", None) if shell is not None else None
+    study = _studyOfEditedLesion(shell, lesionNodes()[0])
     if study is None:
         return saveLesionNow(shell)
     _commitCardEdits()

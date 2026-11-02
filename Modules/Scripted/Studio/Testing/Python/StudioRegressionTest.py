@@ -117,6 +117,9 @@ Run with the main window and testing enabled::
 - ``test_51_docs_quote_the_view_orientation_statement_as_the_views_show_it`` (BB-1): studio.md quotes the statement of the
   axial and coronal views as "Radiological · L on right" / "Neurological · L on left" at the bottom right, as
   ``orientation.displayStatement`` returns it, not the old "Left is on screen right" at the bottom left.
+- ``test_53_a_scan_opened_from_outside_a_study_never_feeds_done_next`` (BB-1): with a study open, opening a subject's own
+  scan opens that subject; another scan closes the study first (the subject's lesion is written) and is saved like any
+  scan; a lesion of another scan in Draw gets Save lesion, never Done → next of the hidden subject.
 """
 
 import inspect
@@ -3721,6 +3724,108 @@ class StudioRegressionTest(unittest.TestCase):
             pump()
             self.assertIn("New lesion", labels())
         finally:
+            study_ui.closeStudy()
+            studioShell.dispose()
+            pump()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
+
+    def test_53_a_scan_opened_from_outside_a_study_never_feeds_done_next(self):
+        """With a study open, a scan opened from outside it (Open…, Library, a drop) was traced under the study's breadcrumb:
+        Draw edited "Lesions (<scan>)", the footer still read "Done → next", and Done answered "The lesion of sub-01 is
+        empty: nothing was saved" about the hidden subject. The tracing was saved nowhere (no project is saved while a
+        study is open) (BB-1). A subject's own scan now opens that subject in the study; any other scan closes the study
+        first (its subject's edits are written). A lesion of another scan in Draw is saved with Save lesion, never with
+        Done → next of the hidden subject.
+        """
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import draw, importer, shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Outside scan study")
+        os.makedirs(folder)
+        scans = []
+        for sid in ("sub-01", "sub-02", "sub-03"):
+            scans.append(os.path.join(folder, f"{sid}_T1w.nii.gz"))
+            nifti.write_nifti(scans[-1], np.zeros(grid.shape, np.uint8), grid.affine)
+        os.makedirs(os.path.join(self.directory, "own"))
+        outside = os.path.join(self.directory, "own", "patient08_T1w.nii.gz")
+        nifti.write_nifti(outside, np.ones(grid.shape, np.uint8), grid.affine)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        toasts = []
+        originalToast = studioShell.toast
+        studioShell.toast = lambda text, *args, **kwargs: (toasts.append(str(text)), originalToast(text, *args, **kwargs))[1]
+        originalSave = draw.saveLesionNow
+        saved = []
+
+        def pump():
+            for _ in range(4):
+                slicer.app.processEvents()
+
+        def paint(segmentationNode, volumeNode):
+            segmentId = segmentationNode.GetSegmentation().GetNthSegmentID(0)
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, volumeNode)
+            array[20:23, 30:33, 20:23] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, volumeNode)
+            pump()
+
+        def primaryLabel():
+            draw.session(studioShell).refreshPanel()
+            pump()
+            return str(studioShell.primaryActionLabel())
+
+        try:
+            session = study_ui.createStudy(scans, studioShell, folder=folder)
+            self.assertIsNotNone(session)
+            session.open("sub-01", switchToDraw=True)
+            pump()
+            self.assertEqual(session.current(), "sub-01")
+
+            # A subject's own scan opens that subject in the study (not a copy traced outside it)
+            importer.loadFiles([scans[1]], studioShell)
+            pump()
+            self.assertIs(study_ui.session(), session)
+            self.assertEqual(session.current(), "sub-02")
+            self.assertEqual(draw.lesionNodes()[0].GetID(), session.segmentationNode().GetID())
+            paint(session.segmentationNode(), session.volumeNode())
+
+            # Another patient's scan closes the study first: sub-02's tracing is written, and Draw saves the new scan's lesion
+            importer.loadFiles([outside], studioShell)
+            pump()
+            self.assertIsNone(study_ui.session())
+            self.assertIsNone(getattr(studioShell, "studySession", None))
+            lesionsFolder = os.path.join(folder, "lesions")
+            self.assertTrue(any(name.startswith("sub-02") for name in os.listdir(lesionsFolder)), os.listdir(lesionsFolder))
+            self.assertTrue(any("is not one of its subjects" in text for text in toasts), toasts)
+            segmentationNode, sourceNode = draw.lesionNodes()
+            self.assertEqual(sourceNode.GetName(), "patient08_T1w")
+            self.assertIn("patient08_T1w", segmentationNode.GetName())
+            self.assertTrue(primaryLabel().startswith("Save lesion"), primaryLabel())
+
+            # A lesion of another scan in Draw while a study is open (a route of 3D Slicer such as Add Data): Save lesion,
+            # never Done → next of the hidden subject
+            reopened = study_ui.openStudy(folder, studioShell, subject="sub-01")
+            pump()
+            self.assertEqual(reopened.current(), "sub-01")
+            self.assertTrue(primaryLabel().startswith("Done"), primaryLabel())
+            outsideLesion = importer.createLesionSegmentation(sourceNode, "Lesions (patient08_T1w)")
+            importer.selectInSegmentEditor(outsideLesion, sourceNode)
+            paint(outsideLesion, sourceNode)
+            self.assertTrue(primaryLabel().startswith("Save lesion"), primaryLabel())
+            del toasts[:]
+            draw.saveLesionNow = lambda shell=None: saved.append(shell)
+            draw.doneNext(studioShell)
+            pump()
+            self.assertEqual(len(saved), 1)
+            self.assertEqual(reopened.current(), "sub-01")
+            self.assertNotEqual(reopened.study.subject("sub-01")["status"], "traced")
+            self.assertFalse(any("sub-01" in text for text in toasts), toasts)
+        finally:
+            draw.saveLesionNow = originalSave
             study_ui.closeStudy()
             studioShell.dispose()
             pump()
