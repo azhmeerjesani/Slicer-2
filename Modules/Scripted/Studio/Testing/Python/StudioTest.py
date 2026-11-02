@@ -2086,6 +2086,58 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self._pump()
         self.assertEqual(self._voxels(editor), voxels + 1)
 
+    def test_29g_draw_fill_gaps_and_specks_closes_a_2mm_gap_on_the_2mm_template(self):
+        """Fill gaps and specks closes gaps up to 2 mm on every grid, also the 2 mm grid of Start on MNI template
+        (a 1 mm radius rounded to 0 voxels there, so nothing was closed).
+        """
+        import numpy as np
+        from scipy import ndimage
+        from StudioLib import draw, lesioncard
+
+        # The element closes gaps up to 2 mm: radius 1 voxel on 1 mm and 2 mm grids, 2 voxels on a 0.5 mm grid, and
+        # no closing along an axis whose voxels are thicker than 2 mm
+        self.assertEqual(draw._closingElement(np.array([1.0, 1.0, 1.0]), 2.0).shape, (3, 3, 3))
+        self.assertEqual(draw._closingElement(np.array([2.0, 2.0, 2.0]), 2.0).shape, (3, 3, 3))
+        self.assertEqual(draw._closingElement(np.array([0.5, 0.5, 0.5]), 2.0).shape, (5, 5, 5))
+        self.assertEqual(draw._closingElement(np.array([1.0, 1.0, 3.0]), 2.0).shape, (1, 3, 3))
+
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        segmentationNode, segmentId, source = editor.segmentationNode(), editor.currentSegmentID(), editor.sourceVolumeNode()
+        self.assertEqual([round(value, 3) for value in source.GetSpacing()], [2.0, 2.0, 2.0])
+
+        def parts(array):
+            return ndimage.label(array > 0, structure=lesioncard.PARTS_STRUCTURE)[1]
+
+        for axis in (0, 2):
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, source)
+            array[:] = 0
+            first, second = [slice(37, 45), slice(50, 58), slice(30, 38)], [slice(37, 45), slice(50, 58), slice(30, 38)]
+            start = first[axis].start
+            first[axis], second[axis] = slice(start, start + 6), slice(start + 7, start + 13)  # one empty 2 mm slice
+            array[tuple(first)] = 1
+            array[tuple(second)] = 1
+            array[60, 70, 60] = 1  # a speck (8 mm³)
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, source)
+            self._pump()
+            before = self._voxels(editor)
+            self.assertEqual(parts(array), 3)
+            result = draw.fillGapsAndSpecks(studioShell)
+            self._pump()
+            after = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, source)
+            self.assertIsNotNone(result)
+            self.assertEqual(int(after[60, 70, 60]), 0, axis)
+            self.assertEqual(parts(after), 1, f"axis {axis}: the 2 mm gap was not closed")
+            gap = [41, 54, 34]
+            gap[axis] = start + 6
+            self.assertEqual(int(after[tuple(gap)]), 1, axis)
+            self.assertGreater(self._voxels(editor), before - 1, axis)
+            blocks = array.copy()
+            blocks[60, 70, 60] = 0
+            self.assertTrue(((after > 0) | (blocks == 0)).all(), f"axis {axis}: voxels of the parts were removed")
+            editor.undo()
+            self.assertEqual(self._voxels(editor), before, axis)
+
     def test_30_draw_extension_points(self):
         """Inspector cards, card rows and ⋯ items of other work packages; network maps leave Draw; assisted counts (LNM addendum)."""
         import numpy as np

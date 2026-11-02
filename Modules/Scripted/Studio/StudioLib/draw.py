@@ -1656,6 +1656,25 @@ def _editLesion(transform, title, shell=None):
 def _ellipsoid(spacing, radiusMm):
     """Ellipsoid structuring element (k, j, i) of ``radiusMm`` on a grid of ``spacing`` (i, j, k)."""
     radii = [max(0, round(radiusMm / max(1e-6, float(s)))) for s in (spacing[2], spacing[1], spacing[0])]
+    return _ellipsoidVoxels(radii)
+
+
+def _closingElement(spacing, gapMm):
+    """Structuring element (k, j, i) whose closing fills gaps up to ``gapMm`` on a grid of ``spacing`` (i, j, k).
+
+    A closing with a radius of r voxels fills gaps up to 2 r voxels wide, so along each axis the radius is half the
+    number of whole voxels that fit in ``gapMm``, rounded up: on a 2 mm grid a 2 mm gap (one voxel) needs a radius
+    of 1 voxel, which a radius of ``gapMm / 2`` in mm would round to 0 (no closing at all).
+    """
+    radii = []
+    for s in (spacing[2], spacing[1], spacing[0]):
+        gapVoxels = math.floor(gapMm / max(1e-6, float(s)) + 1e-6) if gapMm > 0 else 0
+        radii.append(max(0, math.ceil(gapVoxels / 2.0)))
+    return _ellipsoidVoxels(radii)
+
+
+def _ellipsoidVoxels(radii):
+    """Ellipsoid structuring element (k, j, i) with ``radii`` voxels along k, j and i."""
     grids = np.ogrid[tuple(slice(-r, r + 1) for r in radii)]
     distance = sum((g / max(r, 1)) ** 2 if r > 0 else g * 0.0 for g, r in zip(grids, radii, strict=True))
     return distance <= 1.0
@@ -1673,10 +1692,10 @@ def _keepLargest(mask, spacing):
 
 
 def _fillGapsAndSpecks(mask, spacing):
-    """Closing with a 2 mm ellipsoid, then removal of islands under 10 mm³ (SPEC 5.2 Clean up)."""
+    """Closing that fills gaps up to 2 mm, then removal of islands under 10 mm³ (SPEC 5.2 Clean up)."""
     from scipy import ndimage
 
-    structure = _ellipsoid(spacing, CLEANUP_CLOSING_MM / 2.0 if CLEANUP_CLOSING_MM > 0 else 0)
+    structure = _closingElement(spacing, CLEANUP_CLOSING_MM)
     closed = ndimage.binary_closing(mask, structure=structure) if structure.size > 1 else mask.copy()
     closed |= mask
     voxelVolume = float(np.prod(spacing))
