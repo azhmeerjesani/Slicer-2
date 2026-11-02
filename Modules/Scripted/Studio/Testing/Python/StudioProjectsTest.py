@@ -4989,6 +4989,63 @@ class StudioProjectsTest(unittest.TestCase):
         saved = slicer.util.arrayFromSegmentBinaryLabelmap(reloaded, reloaded.GetSegmentation().GetNthSegmentID(0), volume)
         self.assertGreater(int(saved[0:3, 0:3, 0:3].sum()), 0, "the edit made after opening the project is saved")
 
+    def test_78_opening_a_study_hides_the_open_projects_lesion(self):
+        """A scan opened on its own (a project) and traced in Draw kept its lesion shown over every study subject's scan
+        once a study was opened (on the same grid it lands inside the subject's brain), while Draw said the subject's
+        lesion was empty: only the lesions of a loaded set were hidden (BB-1). Opening a study now saves and releases the
+        project first (its scene keeps the lesion shown) and then hides every segmentation that is not a subject's; closing
+        the study shows them again.
+        """
+        import xml.etree.ElementTree as ET
+
+        from StudioLib import study_ui
+
+        if not study_ui.isAvailable():
+            self.skipTest("studies are not part of this build")
+        projects = self.projects
+        # The study's scan, on the same grid as the project's scan
+        studyFolder = os.path.join(projects.studiesFolder(), "Grid")
+        os.makedirs(studyFolder)
+        _subjectVolume, scanPath = self._userVolume("sub-01_T1w", shape=(12, 14, 16))
+        shutil.copy(scanPath, os.path.join(studyFolder, "sub-01_T1w.nii.gz"))
+        slicer.mrmlScene.Clear(0)
+
+        # A project: a scan and its traced lesion, shown in the views
+        service = self._service()
+        running = self.autosave._service
+        self.autosave._service = service  # as the running service of the application
+        self.addCleanup(setattr, self.autosave, "_service", running)
+        volume, _path = self._userVolume("Scan", shape=(12, 14, 16), extension=".nrrd")
+        lesion, _segmentId, _array = self._lesion(volume)
+        self.assertTrue(lesion.GetDisplayNode().GetVisibility())
+        project = self._projectFor(service)
+        self._save(service)
+
+        # Open a study (Create study opens it) and its subject
+        session = study_ui.createStudy([os.path.join(studyFolder, "sub-01_T1w.nii.gz")], folder=studyFolder)
+        self.addCleanup(study_ui.closeStudy)
+        self.assertIs(study_ui.session(), session)
+        self.assertIsNone(service.project, "the project is saved and released when the study opens")
+        self.assertFalse(lesion.GetDisplayNode().GetVisibility(), "the project's lesion is hidden while the study is open")
+        sid = session.study.subject_ids[0]
+        self.assertTrue(session.open(sid, switchToDraw=False))
+        own = session.segmentationNode()
+        self.assertTrue(own.GetDisplayNode().GetVisibility(), "the subject's lesion is shown")
+        shown = [node.GetName() for node in slicer.util.getNodesByClass("vtkMRMLSegmentationNode")
+                 if node.GetDisplayNode() is not None and node.GetDisplayNode().GetVisibility()]
+        self.assertEqual(shown, [own.GetName()], "only the subject's lesion is shown over the subject's scan")
+
+        # The project was saved before its lesion was hidden: it opens with the lesion shown
+        self.io.backgroundWriter().drain(30.0)
+        displays = list(ET.parse(projects.sceneFile(project.path)).getroot().iter("SegmentationDisplay"))
+        self.assertTrue(displays)
+        self.assertTrue(all(element.get("visibility") == "true" for element in displays), "the project's scene keeps its lesion shown")
+
+        # Closing the study shows the work that was open again
+        self.assertTrue(study_ui.closeStudy())
+        self.assertFalse(slicer.mrmlScene.IsNodePresent(own), "the subject's lesion is removed with the study")
+        self.assertTrue(lesion.GetDisplayNode().GetVisibility(), "the project's lesion is shown again once the study is closed")
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk

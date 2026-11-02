@@ -1364,9 +1364,7 @@ class AutosaveService:
         """Create a project as soon as the scene holds user data (Studio, no study); stop it when a study opens."""
         if self.project is not None:
             if self._studyOpen():
-                # A study saves its own files (journal, lesions, participants.tsv): the project is saved and stops here
-                self.saveNow("study", progress=False)
-                self.releaseProject()
+                self.releaseProjectForStudy()
             return
         if fingerprint == self._lastProjectCheck or self._recovering or not self.projectsActive():
             return
@@ -1523,6 +1521,17 @@ class AutosaveService:
         project.lastSaveTime = self._status.lastSaveTime
         projects.setCurrentProject(project)
         self._setState("idle")
+        return True
+
+    def releaseProjectForStudy(self):
+        """A study opens: the open project is saved and stops here (a study saves its own files: journal, lesions,
+        participants.tsv). ``study_ui.openStudy()`` calls this before it hides the project's lesions, so that the project is
+        saved as it was shown. Return True if a project was released.
+        """
+        if self.project is None:
+            return False
+        self.saveNow("study", progress=False)
+        self.releaseProject()
         return True
 
     def releaseProject(self, state="closed"):

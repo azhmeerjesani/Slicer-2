@@ -1096,6 +1096,8 @@ def openStudy(pathOrStudy, shell=None, subject=None, showLibrary=True):
             return _session
         closeStudy()
     shell = _currentShell(shell)
+    # The open project is saved as it is shown and stops here (a study saves its own files) before its lesions are hidden
+    _releaseProjectForStudy()
     studySession = StudySession(studyObject, shell)
     _session = studySession
     from . import shell as shellModule
@@ -1103,11 +1105,13 @@ def openStudy(pathOrStudy, shell=None, subject=None, showLibrary=True):
     live = shellModule._shell
     if live is not None:
         live.studySession = studySession
-    # A study replaces the loaded set of U-07: its lesions are hidden and no longer stepped through
+    # A study replaces the loaded set of U-07 and the work that was open (W3-07: only the current subject is shown): their
+    # lesions are hidden (they stay in the scene) and the loaded set is no longer stepped through
     importer = _importer()
     loaded = importer._loadedSet
     if loaded is not None:
         loaded.forget(hideLesions=True)
+    studySession._hiddenOutside = _hideLesionsOutsideStudy(importer)
     recordRecentStudy(studyObject.path, studyObject.name)
     _registerWithAutosave()
     _connectQuit()
@@ -1123,6 +1127,38 @@ def openStudy(pathOrStudy, shell=None, subject=None, showLibrary=True):
     if subject:
         studySession.open(subject)
     return studySession
+
+
+def _releaseProjectForStudy():
+    """Save and release the open project (A-09), as autosave's next poll would once the study is open; never after the
+    project's lesions are hidden (the project would be saved with them hidden).
+    """
+    try:
+        from . import autosave
+    except ImportError:
+        return
+    service = autosave.instance()
+    if service is None:
+        return
+    try:
+        service.releaseProjectForStudy()
+    except Exception:
+        logging.error(f"Studio: the open project could not be saved before the study opened:\n{traceback.format_exc()}")
+
+
+def _hideLesionsOutsideStudy(importer):
+    """Hide every segmentation that is not a study subject's (a project's lesion, a lesion drawn or loaded before): on the
+    same template grid, it would be drawn over each subject's scan while Draw says the subject's lesion is empty. Return
+    the nodes that were shown (``StudySession.close()`` shows them again).
+    """
+    hidden = []
+    for node in slicer.util.getNodesByClass("vtkMRMLSegmentationNode"):
+        displayNode = node.GetDisplayNode()
+        if node.GetAttribute(SUBJECT_ATTRIBUTE) or displayNode is None or not displayNode.GetVisibility():
+            continue
+        importer._setLesionVisible(node, False)
+        hidden.append(node)
+    return hidden
 
 
 _quitConnected = [False]
@@ -1963,6 +1999,7 @@ class StudySession:
         self._warnedSessions = set()  # (host, pid) of the other sessions this one was told about
         self._lesionStamp = None  # (normcase path, mtime_ns, size) of the current lesion file as read or written here
         self._openedEpoch = None  # time.time() when the current subject was opened
+        self._hiddenOutside = []  # segmentations of the work that was open, hidden while the study is open (openStudy)
 
     # Identity (A-01b records these in every autosave slot)
 
@@ -2030,6 +2067,11 @@ class StudySession:
             if node is not None and node.GetAttribute(SUBJECT_ATTRIBUTE) == "template":
                 _removeNode(nodeId)
         self._templateCache.clear()
+        # The work that was open before the study (a project continues) is shown again as it was
+        hidden, self._hiddenOutside = self._hiddenOutside, []
+        for node in hidden:
+            if slicer.mrmlScene.IsNodePresent(node):
+                _importer()._setLesionVisible(node, True)
         self.flush()
         self._closed = True
         self._saveTimer.stop()
@@ -2067,6 +2109,7 @@ class StudySession:
         self._observer.dispose()
         if self._journal is not None:
             self._journal.detach()
+        self._hiddenOutside = []
         self._current = None
         self._nodeIds = {"scan": None, "segmentation": None}
         self._templateCache.clear()
