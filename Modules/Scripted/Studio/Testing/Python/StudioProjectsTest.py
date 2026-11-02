@@ -5217,6 +5217,120 @@ class StudioProjectsTest(unittest.TestCase):
                     self.assertEqual(_relativeFiles(os.path.join(newRoot, projects.PROJECTS_DIR, name)), files, name)
                 self.assertEqual(sorted(os.listdir(oldRoot)), [], "what the interrupted delete left is deleted")
 
+    def test_81_interrupted_root_move_is_finished_at_the_next_start(self):
+        """Change folder > Move to another volume, killed once an original was deleted (BB-1). The setting changed only after
+        every item had moved, so the next start read the old folder, which lacked the deleted items: Library listed half
+        the projects or none, the open project's crash offer was lost (its complete copy was in the new folder), and
+        nothing told the user. The move is now recorded (Studio/Projects/MovePending) until the setting points at the new
+        folder, and the next start finishes it, points the setting there, says so and then offers the crashed project.
+        """
+        import shutil as shutilModule
+        from unittest import mock
+
+        projects = self.projects
+
+        class Killed(BaseException):
+            pass
+
+        def makeProject(rootPath, name, state):
+            folder = os.path.join(rootPath, projects.PROJECTS_DIR, name)
+            os.makedirs(os.path.join(folder, "Images"))
+            os.makedirs(os.path.join(folder, projects.PRIVATE_DIR))
+            with open(os.path.join(folder, "Images", name + ".nrrd"), "wb") as f:
+                f.write(os.urandom(4096))
+            with open(os.path.join(folder, name + projects.SCENE_EXTENSION), "w") as f:
+                f.write('<MRML><VolumeArchetypeStorage fileName="Images/%s.nrrd"/></MRML>\n' % name)
+            with open(projects.projectFile(folder), "w") as f:
+                json.dump({"name": name, "state": state}, f)
+
+        realRmtree = shutilModule.rmtree
+        settings = qt.QSettings()
+        os.environ.pop(projects.ROOT_ENVIRONMENT)
+        try:
+            # Killed while the original Projects/ is deleted (the first item), and while Studies/ is (once Projects/ is gone)
+            for case, item in (("Projects", projects.PROJECTS_DIR), ("Studies", projects.STUDIES_DIR)):
+                with self.subTest(case=case):
+                    oldRoot = os.path.normpath(os.path.join(self.tempDir, "interrupted " + case, "A", "Slicer Studio"))
+                    newRoot = os.path.normpath(os.path.join(self.tempDir, "interrupted " + case, "B", "My projects"))
+                    for name, state in (("P1", "closed"), ("P2", "open"), ("P3", "closed")):
+                        makeProject(oldRoot, name, state)
+                    os.makedirs(os.path.join(oldRoot, projects.STUDIES_DIR, "Study A"))
+                    with open(os.path.join(oldRoot, projects.STUDIES_DIR, "Study A", "study.json"), "w") as f:
+                        json.dump({"name": "Study A"}, f)
+                    originals = {name: _relativeFiles(os.path.join(oldRoot, projects.PROJECTS_DIR, name)) for name in ("P1", "P2", "P3")}
+                    settings.setValue(projects.ROOT_KEY, oldRoot)
+                    hidden = "." + item + projects.MOVED_MARKER
+
+                    def killedWhileDeleting(path, *args, hidden=hidden, **kwargs):
+                        if os.path.basename(os.path.normpath(os.fspath(path))) == hidden:
+                            for directory, _folders, files in os.walk(path):
+                                for name in files:
+                                    os.remove(os.path.join(directory, name))  # the first file is deleted, then the process dies
+                                    raise Killed()
+                        return realRmtree(path, *args, **kwargs)
+
+                    service = self._service()
+                    with mock.patch.object(projects, "_sameVolume", return_value=False), mock.patch.object(projects.shutil, "rmtree", side_effect=killedWhileDeleting):
+                        with self.assertRaises(Killed):
+                            service.moveRoot(newRoot, moveContent=True)
+                    self.assertEqual(projects.root(), oldRoot, "the kill came before the setting changed")
+                    self.assertEqual(projects.pendingMove(), (oldRoot, newRoot), "the move is recorded until the setting changes")
+                    # The next start
+                    restarted = self._service()
+                    offered = []
+                    restarted.setProjectPresenter(offered.append)
+                    notices = []
+                    with mock.patch.object(projects, "_sameVolume", return_value=False):
+                        result = restarted.finishInterruptedMove(run=lambda function: function(),
+                                                                 notify=lambda text, level, notices=notices: notices.append((level, text)))
+                    self.assertEqual(result, "finished")
+                    self.assertEqual(projects.root(), newRoot, "the setting points where the projects are")
+                    self.assertIsNone(projects.pendingMove())
+                    self.assertEqual(len(notices), 1, "the user is told")
+                    self.assertEqual(notices[0][0], "info")
+                    self.assertIn("finished", notices[0][1])
+                    self.assertEqual(sorted(info.name for info in projects.listProjects()), ["P1", "P2", "P3"], "each project is listed once")
+                    for name, files in originals.items():
+                        self.assertEqual(_relativeFiles(os.path.join(newRoot, projects.PROJECTS_DIR, name)), files, name)
+                    self.assertTrue(os.path.isfile(os.path.join(newRoot, projects.STUDIES_DIR, "Study A", "study.json")))
+                    self.assertEqual(sorted(os.listdir(oldRoot)), [], "nothing is left in the old folder")
+                    crashed = restarted.scanProjectsAtStartup()
+                    self.assertEqual([info.name for info in crashed], ["P2"], "the project that was open is offered")
+                    self.assertEqual(len(offered), 1)
+                    self.io.backgroundWriter().drain(30.0)
+
+            # The new folder cannot be found now (a drive that is not connected): nothing moves, the move stays pending
+            oldRoot = os.path.normpath(os.path.join(self.tempDir, "unavailable", "A"))
+            missing = os.path.normpath(os.path.join(self.tempDir, "unavailable", "drive", "Slicer Studio"))
+            makeProject(oldRoot, "P1", "closed")
+            settings.setValue(projects.ROOT_KEY, oldRoot)
+            projects.recordPendingMove(oldRoot, missing)
+            notices = []
+            self.assertEqual(self._service().finishInterruptedMove(run=lambda function: function(), notify=lambda text, level: notices.append(level)),
+                             "unavailable")
+            self.assertEqual(notices, ["warning"])
+            self.assertEqual(projects.root(), oldRoot)
+            self.assertEqual(projects.pendingMove(), (oldRoot, missing))
+            self.assertFalse(os.path.exists(missing))
+            # Another folder was chosen since: the record is dropped, nothing moves
+            projects.setRoot(oldRoot)
+            self.assertIsNone(projects.pendingMove(), "choosing a folder ends a pending move")
+            projects.recordPendingMove(os.path.join(self.tempDir, "elsewhere"), missing)
+            self.assertIsNone(self._service().finishInterruptedMove(run=lambda function: function(), notify=lambda text, level: notices.append(level)))
+            self.assertIsNone(projects.pendingMove())
+            # A move that fails (reported to the user) leaves no pending move: the setting stays as it is
+            target = os.path.join(self.tempDir, "unavailable", "B")
+            with mock.patch.object(projects, "moveContent", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    self._service().moveRoot(target, moveContent=True)
+            self.assertIsNone(projects.pendingMove())
+            self.assertEqual(projects.root(), oldRoot)
+        finally:
+            settings.remove(projects.ROOT_KEY)
+            settings.remove(projects.ROOT_CHOSEN_KEY)
+            projects.clearPendingMove()
+            os.environ[projects.ROOT_ENVIRONMENT] = self.root
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk

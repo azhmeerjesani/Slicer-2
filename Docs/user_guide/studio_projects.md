@@ -114,6 +114,9 @@ shows the Slicer Studio folder, with **Change…** and **Show**. When you change
 the folder, Slicer Studio offers to move your projects, studies and templates there.
 Anything whose name the new folder already uses moves in under another name: a
 template "My template" becomes "My template 2" and stays your default if it was.
+If Slicer Studio closes during the move (a crash, a power cut), it finishes the
+move the next time it starts and tells you; when the new folder is on a drive
+that is not connected then, connect it and start Slicer Studio again.
 
 ## Open a project in official 3D Slicer
 

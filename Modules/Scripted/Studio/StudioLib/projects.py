@@ -19,7 +19,8 @@ This module is the model: the folder, the names, the listing and the file operat
 moving the folder). Writing the scene into a project is the autosave engine's job (``autosave.AutosaveService`` with
 ``autosave_io.ProjectWriter``); the user interface is ``projects_ui``.
 
-Settings (fork-only, SPEC 9.7 rule 5): ``Studio/Projects/Root`` (the folder) and ``Studio/Projects/RootChosen``. The
+Settings (fork-only, SPEC 9.7 rule 5): ``Studio/Projects/Root`` (the folder), ``Studio/Projects/RootChosen`` and, while
+the content of the folder is moved, ``Studio/Projects/MovePending`` (``recordPendingMove``). The
 environment variable ``SLICER_STUDIO_PROJECTS_ROOT`` overrides both and skips the chooser (tests, gates, harnesses);
 ``SLICER_STUDIO_PROJECTS=0`` turns projects off (the private recovery autosave of A-01 then runs in Studio too).
 
@@ -46,6 +47,10 @@ from slicer.i18n import tr as _
 #: Settings keys (fork-only)
 ROOT_KEY = "Studio/Projects/Root"
 ROOT_CHOSEN_KEY = "Studio/Projects/RootChosen"
+#: A move of the folder's content that has started and not finished yet (JSON ``{"from": old folder, "to": new folder}``,
+#: ``recordPendingMove``): a move that is interrupted (a crash, a kill) has deleted originals in the old folder while the
+#: setting still points there, so the next start finishes it (``AutosaveService.finishInterruptedMove``)
+MOVE_PENDING_KEY = "Studio/Projects/MovePending"
 #: Environment: the folder (skips the chooser), and "0" to turn projects off
 ROOT_ENVIRONMENT = "SLICER_STUDIO_PROJECTS_ROOT"
 ENABLED_ENVIRONMENT = "SLICER_STUDIO_PROJECTS"
@@ -212,11 +217,41 @@ def setRoot(path, chosen=True):
     settings.setValue(ROOT_KEY, path)
     if chosen:
         settings.setValue(ROOT_CHOSEN_KEY, True)
+    # A move that was pending ends here: it finished, or another folder was chosen since
+    settings.remove(MOVE_PENDING_KEY)
     # Written now: after a move, the content is already in the new folder, and a crash before Qt writes the settings by
     # itself would start the next time in the old, now empty folder
     settings.sync()
     _notify()
     return path
+
+
+def recordPendingMove(oldRoot, newRoot):
+    """Record that the content of ``oldRoot`` is being moved to ``newRoot`` (written now: a kill during the move must find it).
+
+    ``setRoot`` (the end of a move) and ``clearPendingMove`` (a move that failed and was reported) remove it.
+    """
+    settings = qt.QSettings()
+    settings.setValue(MOVE_PENDING_KEY, json.dumps({"from": os.path.normpath(oldRoot), "to": os.path.normpath(newRoot)}))
+    settings.sync()
+
+
+def pendingMove():
+    """``(old folder, new folder)`` of a move that started and did not finish (the app was closed during it), or None."""
+    try:
+        record = json.loads(str(_setting(MOVE_PENDING_KEY, "") or "null"))
+    except ValueError:
+        return None
+    if not isinstance(record, dict) or not record.get("from") or not record.get("to"):
+        return None
+    return os.path.normpath(str(record["from"])), os.path.normpath(str(record["to"]))
+
+
+def clearPendingMove():
+    settings = qt.QSettings()
+    if settings.contains(MOVE_PENDING_KEY):
+        settings.remove(MOVE_PENDING_KEY)
+        settings.sync()
 
 
 def projectsFolder(rootPath=None):

@@ -949,7 +949,7 @@ classic behavior, so most of these keys have no effect there. The ones you may w
 | `Appearance/FlatViewBars` | `true` (not under `--testing`) | Flat view bars (Application Settings > Views, restart needed) |
 | `Appearance/Default3DView/*` | follows the theme | 3D view background and box colors |
 | `Studio/Library/StudyView` | `list` | `list` or `grid`: how the Library shows the subjects of a study (the List and Grid buttons) |
-| `Studio/Projects/Root` | `Documents/Slicer Studio` (in the web version `/data/Slicer Studio`) | The Slicer Studio folder (Settings > Saving); `Studio/Projects/RootChosen` records that you chose it. `SLICER_STUDIO_PROJECTS_ROOT` overrides both and skips the question; `SLICER_STUDIO_PROJECTS=0` turns projects off |
+| `Studio/Projects/Root` | `Documents/Slicer Studio` (in the web version `/data/Slicer Studio`) | The Slicer Studio folder (Settings > Saving); `Studio/Projects/RootChosen` records that you chose it, and `Studio/Projects/MovePending` a move of its content that has not finished yet (the next start finishes it). `SLICER_STUDIO_PROJECTS_ROOT` overrides both and skips the question; `SLICER_STUDIO_PROJECTS=0` turns projects off |
 | `Studio/Library/ProjectSort` | `modified` | How the Library sorts the projects: `modified`, `name` or `created` |
 | `Studio/Library/ProjectView` | `grid` | `grid` or `list`: how the Library shows the projects |
 | `Studio/Templates/Default` | (the built-in template) | The MNI template that *Start on template* uses; `Studio/Templates/LastDirectory` is the folder of the last template you added |

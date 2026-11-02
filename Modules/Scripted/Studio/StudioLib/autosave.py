@@ -1179,6 +1179,11 @@ class AutosaveService:
         except Exception:
             logging.error("Autosave: scanning for recoverable sessions failed:\n" + traceback.format_exc())
         try:
+            # Before the crash scan: the open project of an interrupted move is in the new folder
+            self.finishInterruptedMove()
+        except Exception:
+            logging.error("Slicer Studio: finishing an interrupted move failed:\n" + traceback.format_exc())
+        try:
             self.scanProjectsAtStartup()
         except Exception:
             logging.error("Slicer Studio: scanning the projects for a crash failed:\n" + traceback.format_exc())
@@ -2166,6 +2171,10 @@ class AutosaveService:
             renamedIds = {}
             try:
                 projects.checkNotOpenElsewhere(oldRoot)  # again: one may have been opened elsewhere while this one saved
+                # Recorded until the setting points at the new folder: once the first original is deleted, a kill leaves
+                # the setting on an old folder that lacks it, and the next start finishes the move
+                # (``finishInterruptedMove``). A move that fails is reported, and the setting stays as it is.
+                projects.recordPendingMove(oldRoot, newRoot)
                 function = lambda: projects.moveContent(oldRoot, newRoot, renamed=renamed, renamedIds=renamedIds)  # noqa: E731
                 moved = run(function) if run is not None else function()
                 succeeded = True
@@ -2173,6 +2182,10 @@ class AutosaveService:
                     _relocateSavedLesions(os.path.join(oldRoot, relative), os.path.join(newRoot, renamed[relative]))
                 for name in moved:  # lesions saved in this session in a moved folder (outside the open project too)
                     _relocateSavedLesions(os.path.join(oldRoot, name), os.path.join(newRoot, name))
+            except Exception:
+                if not succeeded:
+                    projects.clearPendingMove()
+                raise
             finally:
                 self._suspendCount -= 1
                 for timer in timers:
@@ -2208,6 +2221,65 @@ class AutosaveService:
             action.trigger()
         else:
             slicer.mrmlScene.Clear(0)
+
+    def finishInterruptedMove(self, run=None, notify=None):
+        """Finish a move of the Slicer Studio folder that was interrupted (the app was closed or killed during ``moveRoot``).
+
+        Once a move deletes its first original the old folder lacks it, while the setting still points there: Library
+        would list half the projects, or none, and the open project's crash offer would be lost (its complete copy is in
+        the new folder). So the move goes on where it stopped (what it left is cleaned up by ``projects.moveContent``),
+        the setting then points at the new folder, and the user is told. Called at startup before the crash scan.
+        ``run`` runs the move (default: a progress dialog), ``notify(text, level)`` tells the user (default: a toast).
+        Return "finished", "failed", "unavailable" or None (no interrupted move).
+        """
+        projects = self._projects()
+        pending = projects.pendingMove()
+        if pending is None or not projects.isEnabled() or projects.isRootFromEnvironment():
+            return None
+        oldRoot, newRoot = pending
+
+        def same(first, second):
+            return os.path.normcase(os.path.realpath(first)) == os.path.normcase(os.path.realpath(second))
+
+        current = projects.root()
+        if same(current, newRoot) or not same(current, oldRoot):
+            projects.clearPendingMove()  # the move finished, or another folder was chosen since
+            return None
+        if notify is None:
+            from StudioLib import projects_ui
+
+            def notify(text, level):
+                projects_ui.message(text, level=level, ms=15000)
+
+        if not os.path.isdir(newRoot):
+            # A drive that is not connected now: the move goes on at a later start
+            notify(_("Slicer Studio was closed while it moved your projects and studies to {folder}. That folder cannot be found now: "
+                     "connect the drive that holds it and start Slicer Studio again.").format(folder=projects.shortPath(newRoot)), "warning")
+            return "unavailable"
+        if run is None:
+            from StudioLib import projects_ui
+
+            def run(function):
+                return projects_ui._runWithProgress(function, _("Finishing the move of your projects and studies…"))
+
+        try:
+            self.moveRoot(newRoot, moveContent=True, run=run)
+        except OSError as error:
+            if projects.hasContent(oldRoot):
+                projects.recordPendingMove(oldRoot, newRoot)  # tried again at the next start
+            else:
+                projects.setRoot(newRoot)  # nothing is left in the old folder: everything is in the new one
+            notify(_("Slicer Studio was closed while it moved your projects and studies to {folder}, and the move could not be "
+                     "finished: {error}").format(folder=projects.shortPath(newRoot), error=error), "warning")
+            projects.notifyChanged()
+            return "failed"
+        # Paths kept in the settings that pointed into the items moved before the interruption follow them too
+        _updateRecentStudies(oldRoot, newRoot)
+        _updateMovedPathSettings(oldRoot, newRoot, [projects.PROJECTS_DIR, projects.STUDIES_DIR, projects.LNM_DIR, projects.TEMPLATES_DIR])
+        projects.notifyChanged()
+        notify(_("Slicer Studio was closed while it moved your projects and studies. The move is now finished: they are in {folder}.").format(
+            folder=projects.shortPath(newRoot)), "info")
+        return "finished"
 
     def scanProjectsAtStartup(self):
         """Offer the projects that were open when Slicer Studio closed unexpectedly (each one once)."""
