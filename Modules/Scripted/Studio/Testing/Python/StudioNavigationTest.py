@@ -1520,6 +1520,67 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self._pump()
         self.assertEqual(studioShell.currentWorkspace(), "draw")
 
+    def test_20b_tool_option_buttons_keys_in_draw(self):
+        """Space and Enter press a focused "More tools ▾" and a focused tool option button (Threshold's Apply) in Draw,
+        before the Segment Editor's window-wide Space shortcut (which would pause the tool instead).
+        """
+        volume, segmentation = self._loadScanAndSegmentation()
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        self._pump(10)
+        editor = slicer.modules.SegmentEditorWidget.editor
+        editor.setSegmentationNode(segmentation)
+        editor.setSourceVolumeNode(volume)
+        self._pump(10)
+        moreTools = self.mainWindow.findChild("QToolButton", "SegmentEditorMoreToolsButton")
+        self.assertIsNotNone(moreTools)
+        self.assertTrue(moreTools.isVisible())
+
+        def press(button, key):
+            """The key as Qt delivers it to the focused button: the shortcut override, then the press and the release."""
+            text = " " if key == qt.Qt.Key_Space else "\r"
+            override = self._sendKey(button, key, eventType=qt.QEvent.ShortcutOverride)
+            self.assertTrue(override.isAccepted(), f"the shortcut override of {key} is not taken by {button.objectName}")
+            self._sendKey(button, key, text=text)
+            self._sendKey(button, key, eventType=qt.QEvent.KeyRelease, text=text)
+            self._pump()
+
+        if not self._focus(moreTools):
+            self.skipTest("the main window cannot take the keyboard focus here")
+        for key in (qt.Qt.Key_Space, qt.Qt.Key_Return, qt.Qt.Key_Enter):
+            self.assertTrue(self._focus(moreTools))
+            before = bool(moreTools.checked)
+            press(moreTools, key)
+            self.assertEqual(bool(moreTools.checked), not before, f"More tools, key {key}")
+        moreTools.setChecked(False)
+        self._pump()
+        clicks = []
+        for key in (qt.Qt.Key_Space, qt.Qt.Key_Return, qt.Qt.Key_Enter):
+            editor.setActiveEffectByName("Threshold")
+            self._pump(6)
+            applyButton = next((button for button in self.mainWindow.findChildren("QPushButton")
+                                if button.objectName == "SegmentEditorThresholdEffectApply" and button.isVisible()), None)
+            self.assertIsNotNone(applyButton, "no visible Apply button of Threshold")
+
+            def onClicked(key=key):
+                clicks.append(key)
+
+            applyButton.connect("clicked()", onClicked)
+            self.assertTrue(self._focus(applyButton))
+            press(applyButton, key)
+            # Only this slot: the effect's own Apply slot stays connected
+            applyButton.disconnect("clicked()", onClicked)
+            self.assertEqual(clicks.count(key), 1, f"Apply of Threshold, key {key}")
+        # Classic gives the official keys back (leaving Draw removes the Studio key filter)
+        studioShell.dispose()
+        self._pump()
+        editor.setActiveEffectByName("Threshold")
+        self._pump(6)
+        self.assertFalse(bool(applyButton.property("studioButtonKeys")))
+        self.assertTrue(self._focus(applyButton))
+        override = self._sendKey(applyButton, qt.Qt.Key_Space, eventType=qt.QEvent.ShortcutOverride)
+        self.assertFalse(override.isAccepted(), "the classic tool options keep the Space shortcut of the Segment Editor")
+
     def test_21_no_invisible_tab_stop(self):
         """Over the Library canvas, Tab never lands on a covered view widget; the policies come back exactly."""
         studioShell = self._applyStudio()

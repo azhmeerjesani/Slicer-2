@@ -1334,6 +1334,13 @@ def installButtonKeys(button):
     return button
 
 
+def removeButtonKeys(button):
+    """Undo ``installButtonKeys(button)`` (nothing happens if it was not installed). Return ``button``."""
+    if _buttonKeys is not None:
+        button.removeEventFilter(_buttonKeys)
+    return button
+
+
 #
 # Height-for-width rows and notice lines
 #

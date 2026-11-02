@@ -2551,6 +2551,18 @@ def setOptionsStudioLook(editor, studio, hideDiameter=False):
     optionsGroupBox = editor.findChild("QFrame", "EffectsOptionsFrame") if editor is not None else None
     if optionsGroupBox is None:
         return
+    # Space and Enter press a focused button of the tool options (Apply of Threshold, Islands, Margin...) in Draw: the
+    # Segment Editor's window-wide Space shortcut would pause the tool instead, and a QPushButton outside a dialog or a
+    # QToolButton does not react to Enter (USABILITY 9.1). The options of every tool exist from the start (the editor
+    # shows those of the active tool), and Draw calls this again after a change of the editor (refresh()).
+    for button in optionsGroupBox.findChildren("QAbstractButton"):
+        if bool(button.property("studioButtonKeys")) == bool(studio):
+            continue
+        button.setProperty("studioButtonKeys", True if studio else None)
+        if studio:
+            ui.installButtonKeys(button)
+        else:
+            ui.removeButtonKeys(button)
     for checkBox in optionsGroupBox.findChildren("QCheckBox"):
         role = "switch" if studio else None
         if checkBox.property("slicerRole") == role:
@@ -3211,6 +3223,17 @@ class DrawExtension:
             if (button.property("studioKey") or "") != key:
                 button.setProperty("studioKey", key)
                 button.update()
+        # "More tools ▾" (a QToolButton, shown only in the studio presentation): Space and Enter toggle it when it has the focus
+        # (on the right of the Tools label, moreToolsHost(); in the editor while it is not shown)
+        toolsRow = getattr(self, "toolsRow", None)
+        moreTools = toolsRow.findChild("QToolButton", "SegmentEditorMoreToolsButton") if toolsRow is not None else None
+        if moreTools is None:
+            moreTools = editor.findChild("QToolButton", "SegmentEditorMoreToolsButton")
+        if moreTools is not None:
+            if studio:
+                ui.installButtonKeys(moreTools)
+            else:
+                ui.removeButtonKeys(moreTools)
         setOptionsStudioLook(editor, studio, hideDiameter=studio and brushActive)
 
     @staticmethod
