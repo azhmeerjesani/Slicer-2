@@ -246,7 +246,7 @@ def parse_bibtex(text):
 
 _CSV_NAMES = {
     "doi": ("doi", "digital object identifier", "di"),
-    "pmid": ("pmid", "pubmed id", "pubmedid", "pm id", "pubmed"),
+    "pmid": ("pmid", "pubmed id", "pubmedid", "pm id", "pubmed", "pm"),
     "title": ("title", "article title", "ti", "document title"),
     "authors": ("authors", "author", "author full names", "au", "author(s)"),
     "year": ("year", "publication year", "py", "pubyear", "date", "publication date"),
@@ -254,14 +254,30 @@ _CSV_NAMES = {
 }
 
 
+def _tab_header(text):
+    """Whether the first line of ``text`` is the header of a tab-delimited table with a DOI, PMID or title column (a Web of
+    Science tab-delimited export names them DI, PM and TI). A first line that holds a DOI is data, not a header.
+    """
+    first = text.lstrip("\ufeff").lstrip().split("\n", 1)[0]
+    if "\t" not in first or _DOI.search(first):
+        return False
+    cells = {cell.strip().lower() for cell in first.split("\t")}
+    return any(name in cells for key in ("doi", "pmid", "title") for name in _CSV_NAMES[key])
+
+
 def parse_csv(text):
     """A CSV (or TSV) with DOI and / or PMID columns; title, authors, year and journal columns are used when present."""
     text = text.lstrip("﻿")
     sample = text[:4096]
-    try:
-        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
-    except csv.Error:
-        dialect = csv.excel
+    if _tab_header(text):
+        # A tab-delimited export (Web of Science "savedrecs.txt"): its cells hold commas and semicolons (authors, cited
+        # references), which can mislead the sniffer
+        dialect = csv.excel_tab
+    else:
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
+        except csv.Error:
+            dialect = csv.excel
     reader = csv.reader(io.StringIO(text), dialect)
     rows = [row for row in reader if any(cell.strip() for cell in row)]
     if not rows:
@@ -323,6 +339,10 @@ def detect_format(text, name=""):
     if re.match(r"PMID- ", head):
         return "nbib"
     if extension in (".csv", ".tsv") or ("," in head.split("\n", 1)[0] and re.search(r"(?i)\b(doi|pmid|title)\b", head.split("\n", 1)[0])):
+        return "csv"
+    if _tab_header(head):
+        # A tab-delimited table such as a Web of Science export (savedrecs.txt): read by its columns, not scanned for
+        # identifiers (which would add the DOIs of its cited references as search records)
         return "csv"
     return "identifiers"
 

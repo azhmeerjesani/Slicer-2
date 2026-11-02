@@ -81,6 +81,20 @@ BIBTEX = """@article{key1,
 
 CSV = "Title,DOI,PubMed ID,Year\nParkinsonism after a midbrain lesion,10.1000/PD.1,444444,2016\nNo identifiers here,,,2014\n"
 
+# A Web of Science "Tab delimited file" export (savedrecs.txt: UTF-8 with a BOM, CRLF), a subset of its columns: the CR cell
+# (cited references) holds DOIs that are not search hits, and the third record has a PMID but no DOI
+WOS_HEADER = ["PT", "AU", "AF", "TI", "SO", "AB", "CR", "NR", "PY", "VL", "DI", "PM", "UT"]
+WOS_ROWS = [
+    ["J", "Boes, AD; Prasad, S", "Boes, Aaron D.; Prasad, Sashank", "Network localization of neurological symptoms", "BRAIN",
+     "Lesions cause symptoms, in places; we map them.",
+     "Fox MD, 2014, P NATL ACAD SCI USA, V111, P4367, DOI 10.1073/pnas.1405003111; Darby RR, 2017, BRAIN, V140, DOI 10.1093/brain/aww288",
+     "2", "2015", "138", "10.1093/brain/awv228", "26254317", "WOS:000361930100023"],
+    ["J", "Fox, MD", "Fox, Michael D.", "Mapping symptoms to brain networks", "NEW ENGLAND JOURNAL OF MEDICINE", "", "", "0", "2018",
+     "379", "10.1056/NEJMra1706158", "30575457", "WOS:000453913000010"],
+    ["J", "Darby, RR", "Darby, R. Ryan", "A record without a DOI", "CORTEX", "", "", "0", "2019", "", "", "31000123", "WOS:000000000000001"],
+]
+WOS = "\ufeff" + "\r\n".join("\t".join(row) for row in [WOS_HEADER] + WOS_ROWS) + "\r\n"
+
 LOOKUP_CROSSREF = {"message": {"DOI": "10.1000/xyz", "title": ["Looked up title"], "author": [{"family": "Roe", "given": "Rita"}],
                                "issued": {"date-parts": [[2022, 5]]}, "container-title": ["Stroke"]}}
 LOOKUP_ESUMMARY = {"result": {"uids": ["555555"], "555555": {"uid": "555555", "title": "From PubMed.", "pubdate": "2023 Feb",
@@ -144,6 +158,23 @@ class SourcesTest(unittest.TestCase):
         self.assertEqual(sources.detect_format(CSV, "x.csv"), "csv")
         self.assertEqual(sources.detect_format("10.1000/abc\n"), "identifiers")
         self.assertEqual(sources.parse_text(RIS, "a.txt")[0], "ris")
+
+    def test_web_of_science_tab_delimited(self):
+        # A WoS savedrecs.txt is a table (its records, with titles), not pasted identifiers (which would add the DOIs of the
+        # cited references as records and lose the record without a DOI)
+        self.assertEqual(sources.detect_format(WOS, "savedrecs.txt"), "csv")
+        path = os.path.join(self.root, "savedrecs.txt")
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write(WOS)
+        for kind, records in (sources.parse_file(path), sources.parse_text(WOS, "savedrecs.tsv")):
+            self.assertEqual(kind, "csv")
+            self.assertEqual([(r["doi"], r["pmid"]) for r in records],
+                             [("10.1093/brain/awv228", "26254317"), ("10.1056/nejmra1706158", "30575457"), ("", "31000123")])
+            self.assertEqual(records[0]["title"], "Network localization of neurological symptoms")
+            self.assertEqual((records[0]["authors"], records[0]["year"], records[0]["journal"]), ("Boes, AD; Prasad, S", "2015", "BRAIN"))
+        # Pasted tab-separated identifiers (no header) stay identifiers
+        self.assertEqual(sources.detect_format("10.1000/a\t10.1000/b\n"), "identifiers")
+        self.assertEqual(sources.detect_format("DOI\t10.1000/a\n"), "identifiers")
 
     def test_parse_file(self):
         path = os.path.join(self.root, "export.nbib")

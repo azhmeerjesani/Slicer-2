@@ -193,8 +193,8 @@ applies a finished run's transform to another image.
 The **Sources** card (Library > Study) keeps the records that a study of published case reports screened, so that the
 counts of the flow diagram and the paper behind each case are never retyped.
 
-- **Import** a file (PubMed `.nbib`/MEDLINE, RIS, BibTeX, or a CSV with DOI or PMID columns) or paste identifiers; nothing
-  touches the network. Each import records the database, the query and the date in the search log (`study.json`).
+- **Import** a file (PubMed `.nbib`/MEDLINE, RIS, BibTeX, a CSV or TSV with DOI or PMID columns, or a Web of Science
+  tab-delimited export `savedrecs.txt`) or paste identifiers; nothing touches the network. Each import records the database, the query and the date in the search log (`study.json`).
 - **Duplicates.** An identical DOI or PMID merges into the record already there (empty fields are filled). A title and
   year that match closely are only **offered** for merging (Merge or Keep both).
 - **Screening.** Select a record and press **P** to pass it to the next stage (identified, screened, full text, included),
