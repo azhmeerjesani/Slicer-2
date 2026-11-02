@@ -1539,6 +1539,61 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(metrics["gaps"], [])  # along k (left-right): none
         self.assertEqual(metrics["gaps_by_axis"], ([], [16, 17], []))
 
+    def test_gaps_follow_the_shown_view_when_red_is_hidden(self):
+        """With the Sagittal view maximized the Red view is hidden: N moves the Sagittal view to a gap slice that the
+        card counts, along the x axis of that view (not the hidden Axial view, not S).
+        """
+        from StudioLib import draw, importer, layouts
+
+        studioShell = self._applyStudio()
+        # i = A, j = S, k = R; 1 mm voxels (a sagittal 3D acquisition)
+        matrix = vtk.vtkMatrix4x4()
+        for row, column in ((0, 0), (1, 1), (2, 2)):
+            matrix.SetElement(row, column, 0.0)
+        for row, column in ((0, 2), (1, 0), (2, 1)):
+            matrix.SetElement(row, column, 1.0)
+        for row, origin in enumerate((-15.0, -20.0, -20.0)):
+            matrix.SetElement(row, 3, origin)
+        # Two slabs with four empty sagittal slices between them (k = 8..11: x = -7..-4 mm), no gap along S or A
+        mask = np.zeros((30, 40, 40), np.uint8)
+        mask[5:8, 10:24, 15:22] = 1
+        mask[12:15, 10:24, 15:22] = 1
+        scan = np.full(mask.shape, 300, np.int16)
+        scan[mask != 0] = 120
+        paths = [self._writeVolume("sub-32_T1w.nii.gz", None, scan, ijkToRas=matrix),
+                 self._writeVolume("sub-32_lesion.nii.gz", None, mask, labelmap=True, ijkToRas=matrix)]
+        importer.loadFiles(paths, studioShell)
+        self._pump(8)
+        self._wait(800)
+        self._pump()
+        segmentationNode = self._editor().segmentationNode()
+        metrics = draw.lesionMetrics(segmentationNode, compute=True)
+        self.assertEqual([len(gaps) for gaps in metrics["gaps_by_axis"]], [4, 0, 0])
+        # The layout shows Red: gaps along S, none
+        self.assertEqual(draw.gapViewName(studioShell), "Red")
+        self.assertEqual(len(draw.viewGaps(metrics)), 0)
+        # Sagittal maximized: Red is hidden, the card and N follow the Sagittal view
+        self.assertEqual(layouts.maximizeView("Yellow"), "Yellow")
+        self._pump(8)
+        self.assertFalse(slicer.app.layoutManager().sliceWidget("Red").isVisible())
+        self.assertEqual(draw.gapViewName(studioShell), "Yellow")
+        self.assertEqual(len(draw.viewGaps(metrics)), 4)
+        self._wait(300)
+        self._pump()
+        self.assertEqual(draw.extension().card._state["stats"]["gaps"], 4)
+        redBefore = self._sliceNode("Red").GetSliceOffset()
+        yellow = self._sliceNode("Yellow")
+        yellow.JumpSliceByOffsetting(-14.0, 0.0, 0.0)
+        self._pump()
+        target = draw.jumpToGap(1, studioShell)
+        self.assertIsNotNone(target)
+        self.assertIn(round(yellow.GetSliceOffset()), (4, 5, 6, 7))
+        self.assertEqual(self._sliceNode("Red").GetSliceOffset(), redBefore, "the hidden Red view does not move")
+        # Back to the default layout: Red again
+        layouts.restoreMaximized()
+        self._pump(8)
+        self.assertEqual(draw.gapViewName(studioShell), "Red")
+
     #
     # Scans from the Sample Data module, the 1 mm offer, re-opening, new lesions
     #

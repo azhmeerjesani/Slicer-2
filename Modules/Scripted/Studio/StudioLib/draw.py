@@ -1176,6 +1176,8 @@ class _DrawSession(VTKObservationMixin):
     def _reinstallViewObservers(self):
         if self.active:
             self._installViewObservers()
+            # The card counts the gaps along the axis of the view that the layout shows (gapViewName)
+            self.refreshPanel()
 
     def _onDoubleClick(self, interactor, viewName):
         """A double-click with a drawing tool does not maximize the view (the effect still gets it first)."""
@@ -1498,11 +1500,30 @@ def _gapAxis(sliceNode, ijkToRAS):
     return best, bestCos > 0.999
 
 
-def viewGaps(metrics, viewName="Red"):
-    """The gap slices of ``lesionMetrics()`` counted along the slicing axis of the view ``viewName`` (SPEC 5.6), the
-    slices N jumps to; along S (the lesion z-extent) without that view. The k axis of the labelmap is only right for an
-    axial acquisition: a sagittal 3D T1 has k = left-right.
+def gapViewName(shell=None):
+    """The slice view whose slicing axis N and the card's gap count follow: Red while the layout shows it, else the view
+    that is shown and was used last (a maximized Sagittal or Coronal view, a one-up layout), else the first one shown.
+    A hidden view is never the target (N would move a view that the user cannot see). "Red" when none is shown.
     """
+    shown = [viewName for viewName, _sliceWidget in _layoutSliceViews()]
+    if not shown or "Red" in shown:
+        return "Red"
+    shell = _currentShell(shell)
+    tracker = getattr(shell, "hoverTracker", None) if shell is not None else None
+    if tracker is not None:
+        for name in (tracker.hoveredNow, tracker.lastSliceViewName):
+            if name in shown:
+                return name
+    return shown[0]
+
+
+def viewGaps(metrics, viewName=None):
+    """The gap slices of ``lesionMetrics()`` counted along the slicing axis of the view ``viewName`` (``gapViewName()``
+    without one; SPEC 5.6), the slices N jumps to; along S (the lesion z-extent) without that view. The k axis of the
+    labelmap is only right for an axial acquisition: a sagittal 3D T1 has k = left-right.
+    """
+    if viewName is None:
+        viewName = gapViewName()
     if metrics is None or metrics.get("ijkToRAS") is None or not metrics.get("gaps_by_axis"):
         return metrics["gaps"] if metrics is not None else []
     layoutManager = slicer.app.layoutManager()
@@ -1514,7 +1535,7 @@ def viewGaps(metrics, viewName="Red"):
     return metrics["gaps_by_axis"][axis]
 
 
-def jumpToGap(step=1, shell=None, viewName="Red"):
+def jumpToGap(step=1, shell=None, viewName=None):
     """N / Shift+N: move the view to the next (``step=1``) or previous gap slice of the lesion, wrapping; to the
     lesion's first slice when it has no gap. On an oblique view the nearest labelmap axis is used ("approx.").
     Return the slice index jumped to, or None.
@@ -1522,6 +1543,8 @@ def jumpToGap(step=1, shell=None, viewName="Red"):
     shell = _currentShell(shell)
     editor = segmentEditor()
     layoutManager = slicer.app.layoutManager()
+    if viewName is None:
+        viewName = gapViewName(shell)
     sliceWidget = layoutManager.sliceWidget(viewName) if layoutManager is not None else None
     segmentationNode = editor.segmentationNode() if editor is not None else None
     if sliceWidget is None or segmentationNode is None:
@@ -3218,7 +3241,7 @@ class DrawExtension:
         readoutKey = (segmentationNode.GetID(), segmentId)
         metrics = lesionMetrics(segmentationNode, compute=computeMetrics or self._lastReadout is None or self._lastReadoutKey != readoutKey)
         if metrics is not None:
-            # Gaps along the Red view's slicing axis, as N counts them (not along the k axis of the scan)
+            # Gaps along the slicing axis of the view N moves (Red, else the view shown), not along the k axis of the scan
             metrics = dict(metrics, gaps=viewGaps(metrics))
             self._lastReadoutKey = readoutKey
             sideWord = metrics.get("sides") if _isMniLesion(segmentationNode) else None
