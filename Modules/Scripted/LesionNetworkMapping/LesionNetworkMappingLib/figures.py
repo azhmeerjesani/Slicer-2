@@ -232,8 +232,10 @@ class DisplayGrid:
         return float(self.origin[axis] + index * self.spacing)
 
     def index(self, axis, coordinate):
-        """Nearest plane index of a world coordinate along ``axis`` (clipped to the grid)."""
-        index = round((float(coordinate) - self.origin[axis]) / self.spacing)
+        """Nearest plane index of a world coordinate along ``axis`` (clipped to the grid; a coordinate halfway
+        between two planes takes the upper one, so evenly spaced coordinates stay on distinct planes).
+        """
+        index = math.floor((float(coordinate) - self.origin[axis]) / self.spacing + 0.5)
         return min(max(index, 0), self.shape[axis] - 1)
 
     def contains(self, axis, coordinate):
@@ -256,7 +258,11 @@ def display_grid(reference, spacing=None, crop=True, margin_mm=4.0):
     :param crop: cover only the finite non-zero voxels of each reference (its whole field of view when
       it has none).
     :param margin_mm: margin added around the covered box.
-    Plane coordinates are multiples of the spacing, so 0 mm is a plane.
+    The planes go through the voxel centres of the references (along each axis, those of the reference
+    with the finest voxels along it), so a display point never falls between the voxel centres of an
+    input on that lattice: linear sampling would average an isolated voxel away, and nearest sampling
+    would break exact ties differently for the same image stored RAS or LPS. Where no reference is
+    aligned with the axes, the planes are multiples of the spacing (0 mm is a plane).
     """
     references = [reference] if isinstance(reference, Volume) else [volume for volume in reference if volume is not None]
     if not references:
@@ -267,10 +273,32 @@ def display_grid(reference, spacing=None, crop=True, margin_mm=4.0):
     if not spacing > 0:
         raise ValueError(f"The display spacing must be positive, got {spacing}")
     boxes = np.array([_world_box(volume, crop) for volume in references])
-    low = np.floor((boxes[:, 0].min(axis=0) - margin_mm) / spacing) * spacing
-    high = np.ceil((boxes[:, 1].max(axis=0) + margin_mm) / spacing) * spacing
+    phase = _lattice_phase(references, spacing)
+    low = np.floor((boxes[:, 0].min(axis=0) - margin_mm - phase) / spacing) * spacing + phase
+    high = np.ceil((boxes[:, 1].max(axis=0) + margin_mm - phase) / spacing) * spacing + phase
     shape = tuple(round((hi_ - lo_) / spacing) + 1 for lo_, hi_ in zip(low, high, strict=False))
-    return DisplayGrid(tuple(float(value) for value in low), spacing, shape)
+    return DisplayGrid(tuple(float(round(value, 6)) + 0.0 for value in low), spacing, shape)
+
+
+def _lattice_phase(references, spacing):
+    """Per world axis, the offset (0 <= offset < spacing, mm) of the voxel-centre planes of the reference
+    with the finest voxels along that axis (0 where no reference has a voxel axis along it).
+    """
+    phase = np.zeros(3)
+    finest = np.full(3, np.inf)
+    for volume in references:
+        affine = np.asarray(volume.affine, dtype=np.float64)
+        matrix = affine[:3, :3]
+        lengths = np.linalg.norm(matrix, axis=0)
+        for column in range(3):
+            axis = int(np.argmax(np.abs(matrix[:, column])))
+            size = abs(matrix[axis, column])
+            if not size > 0 or abs(size - lengths[column]) > 1e-6 * lengths[column] or not size < finest[axis] - 1e-6:
+                continue  # an oblique voxel axis has no planes along a world axis; on ties the first reference wins
+            finest[axis] = size
+            offset = float(np.mod(affine[axis, 3], spacing))
+            phase[axis] = 0.0 if min(offset, spacing - offset) < 1e-6 * spacing else offset
+    return phase
 
 
 def _world_box(volume, crop):

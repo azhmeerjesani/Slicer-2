@@ -160,6 +160,36 @@ class FiguresTest(unittest.TestCase):
         np.testing.assert_allclose(figures.reslice(figures.load_volume((data[::-1].copy(), flipped)), aligned, order=1), data, atol=1e-5)
         np.testing.assert_array_equal(figures.reslice(figures.load_volume((data, self.affine)), aligned, order=0), data)
 
+    def test_grid_planes_go_through_voxel_centres_that_are_not_multiples_of_the_spacing(self):
+        # 2 mm voxels centred at odd mm, and 1 mm voxels centred at x.5 mm: a grid anchored at multiples of the
+        # spacing put every display point between voxel centres, so an isolated voxel of T 7 showed as 0.875
+        # (linear) and a lesion saved RAS and LPS landed on different display voxels (nearest)
+        for spacing, origin in ((2.0, (-29.0, -35.0, -29.0)), (2.0, (-31.0, -37.0, -27.0)), (1.0, (-14.5, -17.5, -14.5))):
+            with self.subTest(spacing=spacing, origin=origin):
+                affine = np.diag([spacing, spacing, spacing, 1.0])
+                affine[:3, 3] = origin
+                template = (brain(ras_affine(spacing=spacing)), affine, "template")
+                peak = np.zeros(SHAPE, dtype=np.float32)
+                peak[10, 18, 15] = 7.0
+                peak[20, 18, 15] = -6.5
+                grid = figures.display_grid(figures.load_volume(template))
+                for axis in range(3):
+                    self.assertAlmostEqual((grid.origin[axis] - origin[axis]) / spacing % 1.0, 0.0, places=6)
+                shown = figures.reslice(figures.load_volume((peak, affine, "map")), grid, order=1)
+                self.assertAlmostEqual(float(shown.max()), 7.0, places=5)
+                self.assertAlmostEqual(float(shown.min()), -6.5, places=5)
+                self.assertEqual(int((np.abs(shown) >= 5).sum()), 2)
+                figure = figures.ortho((peak, affine, "map"), None, template, rule={"kind": "custom_t", "value": 5.0}, **SMALL)
+                self.assertEqual(max(int(row["voxels_suprathreshold"]) for row in figure.sourcedata if "voxels_suprathreshold" in row), 2)
+                lesion = (np.linalg.norm(world(SHAPE, affine) - np.array(world(SHAPE, affine)[12, 20, 16]), axis=-1) <= 3.2 * spacing).astype(np.uint8)
+                lps = np.diag([-spacing, -spacing, spacing, 1.0])
+                lps[:3, 3] = [origin[0] + spacing * (SHAPE[0] - 1), origin[1] + spacing * (SHAPE[1] - 1), origin[2]]
+                pair = [(lesion, affine, "ras"), (lesion[::-1, ::-1].copy(), lps, "lps")]
+                self.assertEqual(figures.overlap(lesions=pair, template=template, **SMALL).meta["bins"], {2: int(lesion.sum())})
+                # Coordinates halfway between planes all take the upper plane: evenly spaced slices stay distinct
+                planes = [grid.coordinate(2, grid.index(2, origin[2] + spacing * (k + 0.5))) for k in (4, 5, 6, 7)]
+                self.assertEqual(planes, [origin[2] + spacing * k for k in (5, 6, 7, 8)])
+
     # Overlap
 
     def test_overlap_bins_exact(self):
@@ -198,9 +228,9 @@ class FiguresTest(unittest.TestCase):
     # Captions and thresholds
 
     def test_caption_has_rule_n_df_and_orientation(self):
-        figure = figures.montage(self.tmap, self.template, "A -4 0 4", rule={"kind": "fwe_bonferroni", "alpha": 0.05}, n=1000, connectome="GSP1000", **SMALL)
+        figure = figures.montage(self.tmap, self.template, "A -5 -1 3", rule={"kind": "fwe_bonferroni", "alpha": 0.05}, n=1000, connectome="GSP1000", **SMALL)
         caption = figure.caption
-        for text in ("FWE (Bonferroni)", "\u03b1 = 0.05", "N = 1000", "df = 999", "Neurological convention", "z = -4, 0, +4 mm", "Connectome: GSP1000", "p_unc ≤", "unthresholded companion"):
+        for text in ("FWE (Bonferroni)", "\u03b1 = 0.05", "N = 1000", "df = 999", "Neurological convention", "z = -5, -1, +3 mm", "Connectome: GSP1000", "p_unc ≤", "unthresholded companion"):
             self.assertIn(text, caption)
         resolved = figure.meta["thresholds"]["meanT"]
         self.assertEqual(resolved["df"], 999)
