@@ -262,6 +262,9 @@ class AutosaveService:
         self._lastProjectCheck = None
         #: projects (normalized paths) whose "open in another Slicer Studio" warning was shown while retrying to attach
         self._lockedAnnounced = set()
+        #: projects (normalized paths) whose scene was read while another Slicer Studio had them open:
+        #: ``autosave_io.projectFileStats()`` of their files as they were then (see ``_projectReadStats``)
+        self._readStats = {}
         #: Slicer Studio folders (normalized paths) whose "cannot be written" message was shown while projects could not be created
         self._rootFailedAnnounced = set()
         self._projectPausedReason = ""
@@ -939,6 +942,7 @@ class AutosaveService:
     #
 
     def _onSceneStartClose(self, caller=None, event=None):
+        self._readStats.clear()  # the scene that was read from those files is gone
         try:
             self._closeSlot()
         except Exception:
@@ -1281,6 +1285,23 @@ class AutosaveService:
         self._lockedAnnounced.add(key)
         self._announce("locked", project)
 
+    def _projectReadStats(self, project, scene=None, fresh=False):
+        """The files of ``project`` as they were when the scene was read from them, while another Slicer Studio had it
+        open. That window may save the project again before it lets go: when this one continues the project then, its
+        files are recorded as they were when its scene was read, so the other window's later saves are another program's
+        changes (kept: Studio writes "<name> (Slicer Studio).<ext>" and says so), not overwritten by this older scene.
+
+        ``scene``: take them now if they were not taken yet (``fresh``: the scene was just read, take them again).
+        Return them, or None.
+        """
+        key = os.path.normcase(os.path.realpath(project.path))
+        if scene is not None and (fresh or key not in self._readStats):
+            try:
+                self._readStats[key] = _io().projectFileStats(project, scene)
+            except Exception:
+                logging.error("Slicer Studio: the files of the project could not be read:\n" + traceback.format_exc())
+        return self._readStats.get(key)
+
     def _announceRootFailedOnce(self, reason):
         """The message that the Slicer Studio folder cannot be written, once per folder. No project exists then, so every
         new scene fingerprint tries to create one again (it is created as soon as the folder can be written); the retries
@@ -1343,10 +1364,11 @@ class AutosaveService:
             # A project of the folder that was loaded in Classic (official Load Scene): it continues in place, never as
             # a copy
             project = projects.Project(projectPath)
-            if not self.attachProject(project, inPlace=True):
+            if not self.attachProject(project, inPlace=True, readStats=self._projectReadStats(project)):
                 if project.readOnly:
                     self._copyReadOnlyProject(project)
                 else:
+                    self._projectReadStats(project, scene)
                     self._announceLockedOnce(project)
                 return
             self._announce("opened", project)
@@ -1434,9 +1456,10 @@ class AutosaveService:
                     return False
         return True
 
-    def attachProject(self, project, inPlace=False):
+    def attachProject(self, project, inPlace=False, readStats=None):
         """Save the current scene into ``project`` from now on (its lock is taken). ``inPlace``: the scene was just loaded
-        from the project's own scene file. Return False if another Slicer Studio has the project open, or if its folder
+        from the project's own scene file. ``readStats``: its files as they were when the scene was read, if that was
+        earlier (``_projectReadStats``). Return False if another Slicer Studio has the project open, or if its folder
         cannot be written (``project.readOnly``).
         """
         io = _io()
@@ -1460,7 +1483,8 @@ class AutosaveService:
         self.projectWriter = io.ProjectWriter(project, io.backgroundWriter())
         scene.SetURL(project.scenePath)
         scene.SetRootDirectory(project.path)
-        self.projectWriter.recordSceneFiles(scene)
+        self.projectWriter.recordSceneFiles(scene, readStats)
+        self._readStats.pop(os.path.normcase(os.path.realpath(project.path)), None)
         project.writeJson(state="open", executor=io.backgroundWriter())
         io.backgroundWriter().submit(projects.pruneRemoved, project.path)
         leftovers = projects.temporaryLeftovers(project.path)
@@ -1907,6 +1931,8 @@ class AutosaveService:
                 if project.readOnly:
                     self._copyReadOnlyProject(project, unread)
                 else:
+                    # Continued later, when the other window lets go: the files as they are now, when they were read
+                    self._projectReadStats(project, scene, fresh=True)
                     self._announceLockedOnce(project)
                 return
             if unread:

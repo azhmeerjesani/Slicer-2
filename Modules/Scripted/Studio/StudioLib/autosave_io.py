@@ -1825,6 +1825,38 @@ def _statOrNone(path):
         return None
 
 
+def _isPrivateProjectFile(projectPath, path):
+    """Files of the hidden nodes (vtkMRMLScene keeps them in "<scene>_Private") and of .studio are not tracked."""
+    relative = os.path.relpath(_canonical(path), _canonical(projectPath))
+    first = relative.split(os.sep)[0]
+    return first == ".studio" or first.endswith("_Private")
+
+
+def projectFileStats(project, scene):
+    """{canonical path: stat} of the project's scene file and of the files of the project that the scene references, as
+    they are now: taken when a scene of ``project`` was read but could not continue it (another Slicer Studio has it
+    open), and given to ``ProjectWriter.recordSceneFiles()`` when it continues it later.
+    """
+    projects = _projects()
+    stats = {}
+    stat = _statOrNone(project.scenePath)
+    if stat is not None:
+        stats[_canonical(project.scenePath)] = stat
+    rootDirectory = scene.GetRootDirectory()
+    nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+    nodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
+    for index in range(nodes.GetNumberOfItems()):
+        node = nodes.GetItemAsObject(index)
+        if node.GetHideFromEditors():
+            continue
+        for path in _storagePaths(node.GetStorageNode(), rootDirectory):
+            if projects.isInside(path, project.path) and not _isPrivateProjectFile(project.path, path):
+                stat = _statOrNone(path)
+                if stat is not None:
+                    stats[_canonical(path)] = stat
+    return stats
+
+
 def _vtkTimeNow():
     """The current value of VTK's modification time counter (``vtkTimeStamp::Modified()``): a time stamp taken later in
     this process, such as a storage node's ``GetStoredTime()`` after it wrote its file, is larger.
@@ -1997,8 +2029,8 @@ class ProjectWriter(SlotWriter):
     def _canonical(self, path):
         return _canonical(path)
 
-    def _record(self, path, ours):
-        stat = _statOrNone(path)
+    def _record(self, path, ours, stat=None):
+        stat = _statOrNone(path) if stat is None else stat
         if stat is not None:
             previous = self.records.get(_canonical(path)) or {}
             self.records[_canonical(path)] = {"stat": stat, "ours": bool(ours or previous.get("ours")), "mark": _vtkTimeNow()}
@@ -2019,20 +2051,27 @@ class ProjectWriter(SlotWriter):
 
     def _isPrivateFile(self, path):
         """Files of the hidden nodes (vtkMRMLScene keeps them in "<scene>_Private") and of .studio are not tracked."""
-        relative = os.path.relpath(_canonical(path), _canonical(self.project.path))
-        first = relative.split(os.sep)[0]
-        return first == ".studio" or first.endswith("_Private")
+        return _isPrivateProjectFile(self.project.path, path)
 
     def _isTemporaryFile(self, path):
         """A file in a temporary folder of a generation (never a node's own file: written again in its kind folder)."""
         relative = os.path.relpath(_canonical(path), _canonical(self.project.path))
         return any(part.startswith(PROJECT_TEMPORARY_PREFIX) for part in relative.split(os.sep))
 
-    def recordSceneFiles(self, scene):
+    def recordSceneFiles(self, scene, readStats=None):
         """Remember the files of the project that the scene references (a project opened in place): another program that
         changes one of them later is detected, and a file that leaves the scene is moved to .studio/removed.
+
+        ``readStats`` (``projectFileStats()`` taken when the scene was read, if that was earlier): the files are recorded
+        as they were then, so a file that changed since (another Slicer Studio saved the project while it had it open)
+        is another program's change and is not overwritten.
         """
-        self._record(self.project.scenePath, ours=False)
+        readStats = readStats or {}
+
+        def record(path):
+            self._record(path, ours=False, stat=readStats.get(_canonical(path)))
+
+        record(self.project.scenePath)
         self._sceneStoredTime = scene.GetStoredTime()
         rootDirectory = scene.GetRootDirectory()
         stored = self._readSources()
@@ -2046,7 +2085,7 @@ class ProjectWriter(SlotWriter):
             files = _storagePaths(node.GetStorageNode(), rootDirectory)
             for path in files if not hidden else ():
                 if _projects().isInside(path, self.project.path) and not self._isPrivateFile(path):
-                    self._record(path, ours=False)
+                    record(path)
             source = stored.get(self._projectRelative(files[0])) if files else None
             if source:
                 self.sources[node.GetID()] = source

@@ -4471,6 +4471,80 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertTrue(labelmap.IsEmpty() or labelmap.GetScalarRange()[1] == 0, "the old cleared lesion opens empty")
 
 
+    def test_71_project_taken_over_after_another_window_lets_go_keeps_that_windows_later_saves(self):
+        """A window that loaded a project's scene file (Load Scene, Recent, drag and drop) while another Slicer Studio had
+        the project open continues the project once the other window lets go. Its scene is the one read before the other
+        window's later saves: those are kept, as another program's change ("<project> (Slicer Studio).mrml" and a notice),
+        never overwritten by the older scene (BB-1). When nothing changed since the scene was read, it continues in place.
+        """
+        projects = self.projects
+        for otherSaves in (True, False):
+            slicer.mrmlScene.Clear(0)
+            first = self._service()
+            self._userVolume("Scan" if otherSaves else "Quiet", shape=(12, 14, 16))
+            markups = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "A first")
+            markups.AddControlPoint([1, 1, 1])
+            project = self._projectFor(first)
+            self._save(first)
+            first.dispose()
+            self.services.remove(first)
+            slicer.mrmlScene.Clear(0)
+            self.io.backgroundWriter().drain(10.0)
+            # The other window holds the project: this one reads its scene file and is refused
+            other = projects.Project(project.path)
+            self.assertTrue(other.lock())
+            try:
+                service = self._service()
+                announced = []
+                service.setProjectAnnouncer(lambda event, project, announced=announced, **info: announced.append((event, info)))
+                self.assertTrue(slicer.util.loadScene(project.scenePath))
+                self.assertIsNone(service.project, "the project is held by the other window")
+                self.assertEqual([event for event, _info in announced], ["locked"])
+                if otherSaves:
+                    # The other window saves a later edit into the project's scene file
+                    time.sleep(0.02)
+                    with open(project.scenePath, encoding="utf-8") as f:
+                        text = f.read()
+                    added = '<MarkupsFiducial id="vtkMRMLMarkupsFiducialNodeLater" name="A later edit" ></MarkupsFiducial>\n'
+                    with open(project.scenePath, "w", encoding="utf-8") as f:
+                        f.write(text.replace("</MRML>", added + "</MRML>"))
+                theirs = _md5File(project.scenePath)
+                slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "B edit 1").AddControlPoint([3, 3, 3])
+                service.poll()
+                self.assertIsNone(service.project)
+            finally:
+                other.unlock()
+            # The other window lets go: the next edit continues the project
+            slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "B edit 2").AddControlPoint([4, 4, 4])
+            service.poll()
+            self.assertIsNotNone(service.project)
+            self.assertEqual(os.path.normpath(service.project.path), os.path.normpath(project.path))
+            self._save(service)
+            stem = os.path.basename(project.scenePath)[: -len(projects.SCENE_EXTENSION)]
+            ours = os.path.join(project.path, f"{stem} (Slicer Studio).mrml")
+            if otherSaves:
+                self.assertEqual(_md5File(project.scenePath), theirs, "the other window's later save is not overwritten")
+                with open(project.scenePath, encoding="utf-8") as f:
+                    self.assertIn("A later edit", f.read())
+                self.assertTrue(os.path.isfile(ours), "this window's scene is saved next to it")
+                with open(ours, encoding="utf-8") as f:
+                    text = f.read()
+                self.assertIn("B edit 1", text)
+                self.assertIn("B edit 2", text)
+                self.assertIn(("conflict", {"conflicts": [(os.path.basename(project.scenePath), os.path.basename(ours))]}), announced)
+            else:
+                self.assertFalse(os.path.exists(ours), "nothing changed since the scene was read: it continues in place")
+                with open(project.scenePath, encoding="utf-8") as f:
+                    text = f.read()
+                self.assertIn("A first", text)
+                self.assertIn("B edit 2", text)
+                self.assertNotIn("conflict", [event for event, _info in announced])
+            service.releaseProject()
+            service.dispose()
+            self.services.remove(service)
+            self.io.backgroundWriter().drain(10.0)
+
+
 def _sphere(center=(0, 0, 0)):
     import vtk
 
