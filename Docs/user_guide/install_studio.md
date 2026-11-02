@@ -227,8 +227,8 @@ account or costs anything.
    Studio. The usual question about unsaved changes appears; unsaved work is also
    autosaved and offered for recovery when the new version starts.
 4. After Slicer Studio has closed, the new version replaces the old one and
-   starts. If anything goes wrong, the previous version is put back, and the next
-   start says why.
+   starts. If anything goes wrong, the previous version is put back and starts
+   instead, and it says why.
 
 On macOS, if the Applications folder is not writable for you, macOS asks for an
 administrator password; you can instead quit, open the downloaded disk image and

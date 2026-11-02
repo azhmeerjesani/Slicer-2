@@ -642,6 +642,57 @@ class StudioUpdatesTest(unittest.TestCase):
         self.assertIsNone(service.finishInstall())
         self.assertIsNotNone(install.readRecord(self.stateDir)[0])
 
+    def test_LinuxFailedInstallRelaunchesKeptVersion(self):
+        """Restart now promises a restart: when the helper fails after the application exited, it still starts the kept
+        previous version (so the failure message shows at once); when the application never exits it starts nothing.
+        """
+        install = self.install
+        target = self._fakeLinuxInstall("0.9.0")
+        relaunched = os.path.join(os.path.dirname(target), "relaunched.txt")
+        package = os.path.join(self.tempDir, "new.tar.gz")
+        _fakeLinuxPackage(package, "1.2.0")
+        # The staged version is damaged: nothing is changed, and the installed version is started again
+        prepared = install.prepareLinux(package, target, "1.2.0")
+        os.remove(os.path.join(prepared.staged, "Slicer"))
+        process = self._sleeper(0.2)
+        prepared.launch(self.stateDir, pid=process.pid, relaunch=True)
+        self.assertTrue(install.waitForResult(self.stateDir, 30).startswith("failed"))
+        self.assertTrue(self._waitFor(lambda: os.path.exists(relaunched), 10), "the kept version is started after a failed install")
+        self.assertEqual(install.linuxPackageVersion(target), "0.9.0")
+        # The new version is not complete after the swap: the previous one is put back and started
+        os.remove(relaunched)
+        other = os.path.join(self.tempDir, "other.tar.gz")
+        _fakeLinuxPackage(other, "1.2.0", top="Slicer-new-linux-amd64")
+        prepared2 = install.prepareLinux(other, target, "1.2.0")
+        launcher = os.path.join(prepared2.staged, "Slicer")
+        os.rename(launcher, os.path.join(prepared2.staged, "real-Slicer"))
+        os.symlink(os.path.join("..", os.path.basename(prepared2.staged), "real-Slicer"), launcher)
+        process = self._sleeper(0.2)
+        prepared2.launch(self.stateDir, pid=process.pid, relaunch=True)
+        self.assertIn("restored", install.waitForResult(self.stateDir, 30))
+        self.assertTrue(self._waitFor(lambda: os.path.exists(relaunched), 10), "the restored version is started")
+        # relaunch=False (quit without restarting) starts nothing, even after a failure
+        os.remove(relaunched)
+        prepared3 = install.prepareLinux(package, target, "1.2.0")
+        os.remove(os.path.join(prepared3.staged, "Slicer"))
+        process = self._sleeper(0.2)
+        prepared3.launch(self.stateDir, pid=process.pid, relaunch=False)
+        self.assertTrue(install.waitForResult(self.stateDir, 30).startswith("failed"))
+        time.sleep(1)
+        self.assertFalse(os.path.exists(relaunched))
+        # The application does not exit in time: the helper gives up without starting a second instance
+        savedScript = install.HELPER_SCRIPT
+        self.addCleanup(setattr, install, "HELPER_SCRIPT", savedScript)
+        install.HELPER_SCRIPT = savedScript.replace('"$waited" -gt 1200', '"$waited" -gt 1')
+        self.assertNotEqual(install.HELPER_SCRIPT, savedScript)
+        prepared4 = install.prepareLinux(package, target, "1.2.0")
+        process = self._sleeper(6)
+        prepared4.launch(self.stateDir, pid=process.pid, relaunch=True)
+        self.assertIn("did not exit", install.waitForResult(self.stateDir, 30))
+        time.sleep(1)
+        self.assertFalse(os.path.exists(relaunched), "nothing is started while the application still runs")
+        self.assertEqual(install.linuxPackageVersion(target), "0.9.0")
+
     def test_RecoveryOfferedAfterUpdate(self):
         """The session closed (with unsaved work) for the update is offered for recovery by the new version."""
         from StudioLib import autosave_io, recovery

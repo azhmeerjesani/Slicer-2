@@ -57,13 +57,35 @@ LAUNCHER_ENVIRONMENT = ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_
 
 HELPER_SCRIPT = r"""#!/bin/sh
 # Slicer Studio update helper (written by StudioLib/updates_install.py). It waits for the application to exit,
-# swaps the installed version with the new one, restores the previous version if anything fails, and relaunches.
+# swaps the installed version with the new one, restores the previous version if anything fails, and relaunches (the
+# new version, or the kept previous one after a failure, so that the failure is shown at once).
 # Arguments: pid target staged backup result relaunch kind check [keepBackup]
 set -u
 pid="$1"; target="$2"; staged="$3"; backup="$4"; result="$5"; relaunch="$6"; kind="$7"; check="$8"; keep="${9:-1}"
 
 log() { printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$*"; }
-fail() { log "failed: $*"; printf 'failed %s\n' "$*" > "$result"; exit 1; }
+# Starts the application again (the new version, or the previous one when the swap failed and it was kept)
+relaunch_application() {
+  [ "$relaunch" = "1" ] || return 0
+  if [ "$kind" = "macos" ]; then
+    [ -e "$target" ] || { log "nothing to relaunch"; return 0; }
+    log "relaunching"
+    open -n "$target" || log "relaunch failed"
+  else
+    [ -x "$target/Slicer" ] || { log "nothing to relaunch"; return 0; }
+    log "relaunching"
+    nohup "$target/Slicer" >/dev/null 2>&1 &
+  fi
+}
+# exited=1 once the application has exited: from then on a failure still relaunches what is installed (the kept
+# previous version), so the user sees the failure message right away instead of an application that vanished
+exited=0
+fail() {
+  log "failed: $*"
+  printf 'failed %s\n' "$*" > "$result"
+  [ "$exited" = "1" ] && relaunch_application
+  exit 1
+}
 
 log "waiting for process $pid to exit"
 waited=0
@@ -74,6 +96,7 @@ while kill -0 "$pid" 2>/dev/null; do
   fi
   sleep 0.5
 done
+exited=1
 log "installing $staged as $target"
 [ -e "$staged/$check" ] || fail "the new version is incomplete; nothing was changed"
 if [ -e "$backup" ]; then
@@ -99,14 +122,7 @@ if [ "$kind" = "macos" ]; then
 fi
 printf 'ok\n' > "$result"
 log "installed"
-if [ "$relaunch" = "1" ]; then
-  log "relaunching"
-  if [ "$kind" = "macos" ]; then
-    open -n "$target" || log "relaunch failed"
-  else
-    nohup "$target/Slicer" >/dev/null 2>&1 &
-  fi
-fi
+relaunch_application
 exit 0
 """.replace("__EXIT_WAIT_TICKS__", str(EXIT_WAIT_S * 2))
 
