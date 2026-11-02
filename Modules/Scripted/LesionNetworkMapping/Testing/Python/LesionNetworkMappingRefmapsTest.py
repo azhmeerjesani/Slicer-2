@@ -6,7 +6,8 @@ also with maps that do not cover every voxel), permutation p only for pairs buil
 under the null, also for two correlated scores of the same participants and for a score and its own dichotomy,
 small for a planted association; participants permuted jointly), no p for external maps, the cross-condition note threshold, the
 NeuroVault and van den Heuvel additions offline (licence shown, terms required, never redistributed) and the outputs
-(no local paths, heat-map figure); removing a downloaded entry deletes its file so adding it again downloads it again.
+(no local paths, heat-map figure); removing a downloaded entry deletes its file so adding it again downloads it again;
+a download or file that is not a complete NIfTI image (non-NIfTI gzip, truncated, cut image data) is refused and not kept.
 
 Run without Slicer's GUI:
 
@@ -463,6 +464,83 @@ class SourcesTest(RefmapsTestBase):
             new = refmaps.resample_to(again, self.bundle, root=self.root)
         np.testing.assert_allclose(new, -old, atol=1e-5)
         self.assertNotEqual(again["sha256"], entry["sha256"])
+
+    def test_unreadable_download_is_refused(self):
+        """A download that is not a complete NIfTI image (a gzip of something else, a truncated .nii.gz, with or
+        without Content-Length, a .nii with cut image data) is refused: no entry, no file and no recorded checksum.
+        """
+        import gzip
+        import http.server
+        import threading
+        from unittest import mock
+
+        good = os.path.join(self.tmp, "good.nii.gz")
+        nifti.write_nifti(good, _smooth_field(self.rng, SHAPE).astype(np.float32), self.bundle.affine, compresslevel=6)
+        with open(good, "rb") as f:
+            packed = f.read()
+        raw = os.path.join(self.tmp, "good.nii")
+        nifti.write_nifti(raw, np.ones(SHAPE, dtype=np.float32), self.bundle.affine)
+        with open(raw, "rb") as f:
+            plain = f.read()
+        files = {
+            "/good.nii.gz": packed,
+            "/garbage.nii.gz": gzip.compress(os.urandom(4096)),
+            "/trunc.nii.gz": packed[: len(packed) // 2],
+            "/nolen/trunc.nii.gz": packed[: len(packed) // 2],
+            "/nolen/tail.nii.gz": packed[:-4],  # all image data, but no gzip trailer (CRC and length)
+            "/cut.nii": plain[: len(plain) - 100],
+        }
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = files.get(self.path)
+                if body is None:
+                    self.send_error(404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                if not self.path.startswith("/nolen/"):
+                    self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+
+        def kept():
+            folder = os.path.join(self.root, refmaps.FILES_DIR)
+            return sorted(os.path.relpath(os.path.join(d, n), folder) for d, _, names in os.walk(folder) for n in names) if os.path.isdir(folder) else []
+
+        with mock.patch.dict(os.environ, {"NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}):
+            for name in ("/garbage.nii.gz", "/trunc.nii.gz", "/nolen/trunc.nii.gz", "/nolen/tail.nii.gz", "/cut.nii"):
+                with self.subTest(name=name):
+                    with self.assertRaises(refmaps.RefmapsError) as raised:
+                        refmaps.add_url(base + name, root=self.root, offline=False)
+                    message = str(raised.exception)
+                    self.assertIn("not a complete, readable NIfTI image", message)
+                    self.assertNotIn(self.tmp, message)  # no local path in what the user is shown
+                    self.assertEqual(refmaps.entries(self.root), [])
+                    self.assertEqual(kept(), [])
+                    self.assertEqual(fetch.read_manifest(self.root)["files"], {})
+            entry = refmaps.add_url(base + "/good.nii.gz", root=self.root, offline=False)
+        self.assertEqual([item["id"] for item in refmaps.entries(self.root)], [entry["id"]])
+        self.assertEqual(refmaps.resample_to(entry, self.bundle, root=self.root).shape, (self.bundle.n_voxels,))
+        # A local file with cut image data is refused before anything is copied
+        before = kept()
+        cut = os.path.join(self.tmp, "cut.nii")
+        with open(cut, "wb") as f:
+            f.write(plain[: len(plain) - 100])
+        with self.assertRaises(refmaps.RefmapsError) as raised:
+            refmaps.add_file(cut, root=self.root)
+        self.assertIn("incomplete", str(raised.exception))
+        self.assertEqual([item["id"] for item in refmaps.entries(self.root)], [entry["id"]])
+        self.assertEqual(kept(), before)
 
     def test_neurovault_offline(self):
         path = self.writeMap("pain.nii.gz", _smooth_field(self.rng, SHAPE))

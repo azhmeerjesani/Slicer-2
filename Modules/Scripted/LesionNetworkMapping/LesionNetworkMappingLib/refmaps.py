@@ -22,6 +22,8 @@ folder ("/" separators), so the folder can be moved; no entry holds an absolute 
 - :func:`add_neurovault` reads the public NeuroVault API (image id, or every image of a collection) when the user
   clicks; NeuroVault shares public images under CC0, which the entry states.
 - :func:`add_url` and :func:`add_file` add any NIfTI map with the licence the user states (default "unknown", grey).
+  A file that is not a complete, readable NIfTI-1 image (also a truncated download) is refused, here and in
+  :func:`add_neurovault`; a refused download is deleted with its fetch-manifest record.
 - :func:`add_vdh` fetches a file of the van den Heuvel 2026 repository at the pinned commit ``ca410e6`` (the voxel
   degree map by default), verified against its git blob id. The repository has no LICENSE, so its files are kept on
   this computer, shown with their attribution and never redistributed (``redistribute: false``; nothing in this module
@@ -66,6 +68,7 @@ import os
 import re
 import shutil
 import sys
+import zlib
 from typing import NamedTuple
 
 if __name__ == "__main__":
@@ -302,6 +305,65 @@ def _image_info(path):
     return space, space_family(space) if space else "unknown"
 
 
+def _image_problem(path):
+    """Why ``path`` is not a complete, readable NIfTI-1 image (a short reason), else None.
+
+    The header is parsed and the whole file is read: a .nii.gz must decompress to its end-of-stream marker (CRC
+    checked) and the image data must be as long as the header says, so a truncated download, a gzip of something else
+    or a web page saved under a .nii.gz name is caught before it gets into the library.
+    """
+    from . import nifti
+
+    path = os.fspath(path)
+    try:
+        nifti._check_extension(path)
+        with nifti._open(path, "rb") as f:
+            header = nifti._parse_header(f.read(nifti.HEADER_SIZE), path)
+            expected = int(np.prod(header["shape"], dtype=np.int64)) * header["dtype"].itemsize
+            offset = int(header["vox_offset"])
+            if offset < nifti.HEADER_SIZE:
+                offset = nifti.HEADER_SIZE + 4
+            f.seek(offset)
+            data = 0
+            for block in iter(lambda: f.read(1 << 20), b""):
+                data += len(block)
+    except (OSError, EOFError, ValueError, zlib.error) as exc:
+        reason = str(exc).replace(f": {path}", "").strip() or type(exc).__name__
+        return reason[:1].lower() + reason[1:]
+    if data < expected:
+        return f"the image data is incomplete, {data} of {expected} bytes"
+    return None
+
+
+def _check_map(path, label):
+    """Raise RefmapsError unless ``path`` is a complete, readable NIfTI-1 image (``label`` names it in the message)."""
+    problem = _image_problem(path)
+    if problem:
+        raise RefmapsError(f"{label} is not a complete, readable NIfTI image: {problem}. Nothing was added to the reference library.")
+
+
+def _check_download(path, root, label):
+    """Like :func:`_check_map` for a downloaded file: a bad file is deleted with its record in the fetch manifest, so
+    no checksum of it is kept as trusted and adding the same URL again downloads it again.
+    """
+    from . import fetch
+
+    try:
+        _check_map(path, label)
+    except RefmapsError:
+        cache = registry_root(root)
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        fetch._drop_record(cache, fetch._relpath(cache, path))
+        try:
+            os.rmdir(os.path.dirname(path))
+        except OSError:
+            pass
+        raise
+
+
 def _base_entry(path, root, **fields):
     space, family = _image_info(path)
     entry = {"sha256": _sha256(path), "space": fields.pop("space", None) or space, "family": family, "file": _rel(root, path)}
@@ -323,6 +385,7 @@ def add_file(path, title=None, licence="unknown", citation="", condition=None, s
         raise RefmapsError(f"No such file: {path}")
     name = os.path.basename(path)
     stem = re.sub(r"\.nii(\.gz)?$", "", name)
+    _check_map(path, name)
     existing = {item.get("id") for item in entries(root)}
     entry_id = entry_id or _unique_id(f"file-{_slug(stem, 32)}-{_sha256(path)[:8]}", existing)
     folder = os.path.join(registry_root(root), FILES_DIR, _slug(entry_id, 64))
@@ -359,6 +422,7 @@ def add_url(url, title=None, licence="unknown", citation="", condition=None, spa
     resource = fetch.Resource({"id": f"refmap-url/{url}", "title": title or filename, "urls": [url], "filename": filename,
                                "checksum": fetch.RECORD_ON_FIRST_DOWNLOAD, "licence": licence or "unknown"})
     path = _fetch_into_registry(resource, root, session, progress, cancel, offline)
+    _check_download(path, root, f"{title or filename} (from {url})")
     existing = {item.get("id") for item in entries(root)}
     entry_id = entry_id or _unique_id(f"url-{_slug(re.sub(r'.nii(.gz)?$', '', filename), 32)}-{hashlib.sha256(url.encode()).hexdigest()[:8]}", existing)
     entry = _base_entry(path, root, id=entry_id, title=title or filename, source={"type": "url", "url": url}, licence=licence or "unknown",
@@ -452,6 +516,7 @@ def add_neurovault(image_id=None, collection_id=None, condition=None, root=None,
                                    "filename": os.path.basename(url.split("?")[0]), "size": image.get("file_size"),
                                    "checksum": fetch.RECORD_ON_FIRST_DOWNLOAD, "licence": NEUROVAULT_LICENCE})
         path = _fetch_into_registry(resource, root, session, progress, cancel, offline)
+        _check_download(path, root, f"NeuroVault image {nv_id}")
         template = str(image.get("target_template_image") or "")
         entry = _base_entry(path, root, id=f"nv-{nv_id}", title=image.get("name") or f"NeuroVault image {nv_id}",
                             source={"type": "neurovault", "image_id": nv_id, "collection_id": str(image.get("collection_id") or collection_id or ""),
