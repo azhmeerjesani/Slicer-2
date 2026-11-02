@@ -608,6 +608,38 @@ class FetchStreamingTest(FetchConnectomeBase):
         self.assertEqual(ctx.exception.code, "exists")
         self.assertEqual(self.fetch(resume=True)["subjects"], 5)
 
+    def test_a_deleted_bundle_is_fetched_again_not_trusted_from_the_state(self):
+        # Paused with the first archive done, then the user deleted the bundle folder: Resume must not skip that archive
+        bundle = self.bundle()
+        with self.assertRaises(jobs.Cancelled):
+            self.fetch(cancel=lambda: os.path.isfile(os.path.join(bundle, "subjects", "sub-0003.f16.npy")))
+        self.assertEqual(fetchconnectome.read_state(self.entry, self.dest)["archives"]["GSP1000_v2_00.tar"]["status"], "done")
+        shutil.rmtree(bundle)
+        self.assertIsNone(fetchconnectome.unfinished_fetch(self.entry, self.dest))  # nothing to resume: the dialog offers a new download
+        before = len(self.server.requests)
+        summary = self.fetch(resume=True)
+        self.assertTrue([r for r in self.server.requests[before:] if r["file"] == 1000])  # the first archive is read again
+        self.assertEqual(summary["subjects"], 5)
+        self.assertSameSubjects(summary["path"], self.reference())
+        self.assertEqual(connectome.ConnectomeBundle.open(summary["path"]).provenance["population"]["n"], 5)
+        self.assertEqual(len(self.warnings("bundle_missing")), 1)
+
+        # A complete fetch whose bundle was deleted: a new download (with or without --resume) starts again
+        shutil.rmtree(bundle)
+        self.assertIsNone(fetchconnectome.unfinished_fetch(self.entry, self.dest))
+        self.assertIsNone(fetchconnectome.finished_fetch(self.entry, self.dest))
+        self.assertEqual(self.fetch()["subjects"], 5)
+        shutil.rmtree(bundle)
+        summary = self.fetch(resume=True)
+        self.assertEqual(summary["subjects"], 5)
+        self.assertSameSubjects(summary["path"], self.reference())
+        self.assertEqual(fetchconnectome.finished_fetch(self.entry, self.dest), bundle)
+
+        # The bundle still there: a finished fetch is refused, as before
+        with self.assertRaises(jobs.JobError) as ctx:
+            self.fetch()
+        self.assertEqual(ctx.exception.code, "exists")
+
     def test_a_server_that_ignores_range_cannot_resume_mid_archive(self):
         bundle = self.bundle()
         with self.assertRaises(jobs.Cancelled):

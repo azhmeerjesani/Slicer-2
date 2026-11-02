@@ -86,6 +86,9 @@ class LesionNetworkMappingCatalogDialogTest(unittest.TestCase):
             os.makedirs(work, exist_ok=True)
             jobs.write_json_atomic(os.path.join(work, "state.json"), {"format": fetchconnectome.STATE_FORMAT, "version": 1, "entry": entry["id"], "sizes": {"a.tar": 100},
                                                                       "archives": {"a.tar": {"status": "mismatch", "bytes": 100}}, "files": {}, "complete": False})
+            bundle = fetchconnectome.bundle_path(entry, dest)  # the subjects converted so far (a state whose bundle is gone is not resumed)
+            os.makedirs(bundle, exist_ok=True)
+            jobs.write_json_atomic(os.path.join(bundle, "connectome.partial.json"), {"format": "lnmc", "subjects": []})
 
         writeMismatchState()
         dialog.entry = entry

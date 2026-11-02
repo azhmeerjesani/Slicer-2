@@ -79,6 +79,10 @@ class LesionNetworkMappingFetchControllerTest(unittest.TestCase):
         archives = {"a.tar": {"status": "done", "bytes": 100}, "b.tar": {"status": "done" if complete else "partial", "bytes": 100 if complete else 40}}
         jobs.write_json_atomic(os.path.join(work, "state.json"), {"format": fetchconnectome.STATE_FORMAT, "version": 1, "entry": ENTRY_ID, "sizes": sizes, "archives": archives, "files": {},
                                                                   "complete": complete})
+        if not complete:  # an interrupted fetch leaves its subjects so far in the bundle (a state whose bundle is gone is not resumed)
+            bundle = fetchconnectome.bundle_path(self.entry, self.dest)
+            os.makedirs(bundle, exist_ok=True)
+            jobs.write_json_atomic(os.path.join(bundle, "connectome.partial.json"), {"format": "lnmc", "subjects": []})
 
     def _bundle(self):
         from LesionNetworkMappingLib import connectome, fetchconnectome

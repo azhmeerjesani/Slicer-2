@@ -24,7 +24,8 @@ accepted (addendum 4.1, never automatically, never bundled, no app-owned credent
   the next unconverted subject (:func:`connectome.from_tar_stream` checkpoints). ``--resume`` restarts the HTTP
   ``Range`` at that offset; archives that are done are skipped; subjects already in the bundle are never converted
   twice. With ``--keep-archives`` an interrupted archive is read again from its start, so that the stored file is
-  complete.
+  complete. A state whose bundle folder was deleted (no connectome.json or connectome.partial.json left) is not
+  trusted: the next fetch, with or without ``--resume``, starts again from the first archive (warning ``bundle_missing``).
 - **Integrity.** The whole-archive MD5 is computed on the fly and compared with the one the provider lists whenever
   the stream was read from its first byte (reconnections in the same run keep the hash valid); a stream that was
   resumed from a member offset records "not verified (resumed); members verified by gzip CRC" (every member's gzip
@@ -761,11 +762,40 @@ def read_state(entry, dest):
     return state.data if state.exists else None
 
 
+def _state_lost_its_bundle(data, bundle):
+    """True when a fetch's state (``data``) records converted subjects but ``bundle`` holds neither connectome.json nor
+    connectome.partial.json (the user deleted the bundle folder): the state no longer describes what is on disk, and
+    trusting it would skip archives whose subjects are gone.
+    """
+    if not data or os.path.isfile(os.path.join(bundle, "connectome.json")) or os.path.isfile(os.path.join(bundle, "connectome.partial.json")):
+        return False
+    if data.get("complete"):
+        return True
+    for info in (data.get("archives") or {}).values():
+        info = info or {}
+        if info.get("status") in ("done", "mismatch") or (info.get("status") == "partial" and (int(info.get("memberOffset") or 0) > 0 or int(info.get("subjectsDone") or 0) > 0)):
+            return True
+    return False
+
+
+def _forget_converted_archives(data):
+    """Reset a state whose bundle is gone (see :func:`_state_lost_its_bundle`): every archive is read again from its start.
+    The small files already downloaded (documents, participants table) are kept with their verification.
+    """
+    archive_names = set(data.get("archives") or {}) | set(data.get("sizes") or {})
+    data["archives"] = {}
+    files = {name: record for name, record in (data.get("files") or {}).items() if name not in archive_names}
+    data["files"] = files
+    data["checksumOverride"] = any((record or {}).get("verification") == VERIFICATION_OVERRIDE for record in files.values())
+    data["complete"] = False
+    data.pop("subjects", None)
+
+
 def unfinished_fetch(entry, dest):
     """A summary of an interrupted fetch (``{"done", "total", "fraction", "archives"}``), or None when none is waiting."""
     data = read_state(entry, dest)
-    if not data or data.get("complete"):
-        return None
+    if not data or data.get("complete") or _state_lost_its_bundle(data, bundle_path(entry, dest)):
+        return None  # a state whose bundle was deleted is not continued: the next download starts again
     sizes = data.get("sizes") or {}
     total = sum(sizes.values())
     done = sum(sizes.get(name, 0) if info.get("status") == "done" else info.get("bytes", 0) for name, info in (data.get("archives") or {}).items())
@@ -937,6 +967,12 @@ def fetch_connectome(entry, dest, terms_sha, subset=None, streams=2, keep_archiv
     if holder is not None and not lock.is_stale(holder):  # a live job is fetching it: say so before the "partly downloaded" refusals below
         raise jobs.Locked(f"{locked} is locked by process {holder.get('pid')} on {holder.get('host')} since {holder.get('started')}", holder=holder)
     state = FetchState(os.path.join(work, "state.json"))
+    if state.exists and _state_lost_its_bundle(state.data, bundle):
+        # The bundle folder was deleted after (part of) the fetch: its converted subjects are gone, so start again from the
+        # first archive instead of skipping the archives the state marks as converted (and refusing a new download)
+        emit("warning", code="bundle_missing", message=f"{os.path.basename(bundle)} is no longer in this folder: the download starts again from the beginning.")
+        _forget_converted_archives(state.data)
+        state.exists = False
     if not resume and (state.exists or os.path.exists(os.path.join(bundle, "connectome.partial.json"))):
         raise jobs.JobError(f"{os.path.basename(bundle)} is partly downloaded here: resume it (--resume) or choose another folder", code="exists")
     if not state.exists and os.path.exists(os.path.join(bundle, "connectome.json")):
