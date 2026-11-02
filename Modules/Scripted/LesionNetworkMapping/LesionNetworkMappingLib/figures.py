@@ -922,6 +922,9 @@ class Options:
             raise ValueError("width_mm must be positive and dpi at least 30")
         if self.window is not None and not (math.isfinite(float(self.window)) and float(self.window) > 0):
             raise ValueError(f"The window must be positive, got {self.window}")
+        if self.v is not None and int(self.v) < 1:
+            # 0 is not "not given": V is the number of voxels tested, at least 1 (as thresholds.resolve says)
+            raise ValueError(f"The number of voxels must be at least 1, got {self.v}")
         if self.watermark is not None and self.watermark not in WATERMARKS.values():
             self.watermark = WATERMARKS.get(str(self.watermark).lower(), str(self.watermark))
         return self
@@ -980,12 +983,17 @@ def _resolve(info, options):
     """Resolve the threshold of one map (None when the figure is unthresholded)."""
     values = _in_mask_values(info.volume, options.mask)
     info.values = values
-    info.v = int(options.v or values.size or 1)
+    info.v = int(options.v) if options.v is not None else int(values.size)
     rule = options.rule
     if rule is None and options.threshold is not None:
         rule = {"kind": "custom_t", "value": float(options.threshold)}
     if rule is None:
         return None
+    if info.v < 1:
+        # V = 0 used to fall back to 1 silently, so an FWE threshold became the uncorrected one under the FWE label
+        if options.mask is not None:
+            raise ValueError(f"The mask ({options.mask.name}) covers no finite voxel of the map {info.volume.name}: it is empty, lies outside the map's field of view or covers only its NaN voxels, so the number of voxels tested (V) is unknown. Is the mask in the map's space? Otherwise give V with --v.")
+        raise ValueError(f"The map {info.volume.name} has no finite non-zero voxel, so the number of voxels tested (V) is unknown. Give V with --v.")
     if options.n:
         resolved = thresholds.resolve(rule, int(options.n), info.v, gsr=options.gsr, values=values)
     else:

@@ -216,6 +216,51 @@ class FiguresTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             figures.montage(self.tmap, None, "A 0", rule={"kind": "fwe_bonferroni"}, **SMALL)
 
+    def test_mask_without_map_voxels_is_refused_not_resolved_at_v_1(self):
+        # A mask that held none of the map's voxels made V = 1 silently: the FWE (Bonferroni) threshold became
+        # the uncorrected one under the FWE label; an explicit V = 0 was taken as "not given"
+        rule = {"kind": "fwe_bonferroni", "alpha": 0.05}
+        inside = brain() > 0
+        full = figures.montage(self.tmap, self.template, "A 0", rule=rule, n=100, mask=(inside, self.affine, "brainmask"), **SMALL)
+        resolved = full.meta["thresholds"]["meanT"]
+        self.assertEqual(resolved["v"], int(np.count_nonzero(inside)))
+        self.assertGreater(resolved["value"], 4.0)
+        away = self.affine.copy()
+        away[:3, 3] += 1000.0
+        nan_map = self.tmap[0].copy()
+        nan_map[:5] = np.nan
+        on_nan = np.zeros(SHAPE, dtype=bool)
+        on_nan[:5] = True
+        cases = {
+            "empty": (self.tmap, (np.zeros(SHAPE, dtype=bool), self.affine, "emptymask")),
+            "outside": (self.tmap, (inside, away, "farmask")),
+            "nan only": ((nan_map, self.affine, "meanT"), (on_nan, self.affine, "nanmask")),
+        }
+        for label, (tmap, mask) in cases.items():
+            for kwargs in ({"rule": rule, "n": 100}, {"threshold": 4.0}):
+                with self.assertRaises(ValueError, msg=f"{label} {kwargs}") as caught:
+                    figures.montage(tmap, self.template, "A 0", mask=mask, **kwargs, **SMALL)
+                self.assertIn(mask[2], str(caught.exception))
+                self.assertIn("covers no finite voxel", str(caught.exception))
+        # An explicit V still works with such a mask; V = 0 is refused as V = -10 is
+        explicit = figures.montage(self.tmap, self.template, "A 0", rule=rule, n=100, v=5000, mask=cases["empty"][1], **SMALL)
+        self.assertEqual(explicit.meta["thresholds"]["meanT"]["v"], 5000)
+        for bad in (0, -10):
+            with self.assertRaises(ValueError, msg=str(bad)) as caught:
+                figures.montage(self.tmap, self.template, "A 0", rule=rule, n=100, v=bad, **SMALL)
+            self.assertIn("must be at least 1", str(caught.exception))
+        # The command line refuses before writing anything
+        map_path = os.path.join(self.tmp, "maskv-map.nii.gz")
+        mask_path = os.path.join(self.tmp, "maskv-empty.nii.gz")
+        nifti.write_nifti(map_path, self.tmap[0], self.affine)
+        nifti.write_nifti(mask_path, np.zeros(SHAPE, dtype=np.uint8), self.affine)
+        out = os.path.join(self.tmp, "o-maskv")
+        for extra in (["--mask", mask_path], ["--v", "0"]):
+            code, events = self._cli(["--preset", "montage", "--map", map_path, "--rule", json.dumps(rule), "--n", "100", "--out", out, "--formats", "png", *extra])
+            self.assertNotEqual(code, 0, extra)
+            self.assertEqual(events[-1]["code"], "input", extra)
+            self.assertFalse(os.path.exists(os.path.join(out, "figures")), extra)
+
     def test_window_must_be_positive_and_finite(self):
         # A negative window inverted the colour bar while the tiles silently used 1.0 (zero fell back to auto)
         for bad in (-2.0, 0.0, float("nan"), float("inf")):
