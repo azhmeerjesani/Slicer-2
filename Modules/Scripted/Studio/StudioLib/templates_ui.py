@@ -895,7 +895,9 @@ class TemplatesSettingsPanel(ctk.ctkSettingsPanel):
         more = qt.QToolButton()
         more.setObjectName("studioTemplateMoreButton")
         more.setIcon(ui.icon("ellipsis", 16))
-        more.setToolTip(_("More"))
+        more.setToolTip(ui.tooltip(_("More"), description=_("Actions for {name}").format(name=template.name)))
+        # An icon-only button is announced by its accessible name, and every row's button must tell its template
+        more.setAccessibleName(_("More actions for {name}").format(name=template.name))
         more.setPopupMode(qt.QToolButton.InstantPopup)
         ui.setRole(more, "ghost")
         menu = qt.QMenu(more)

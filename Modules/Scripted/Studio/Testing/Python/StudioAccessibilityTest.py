@@ -523,6 +523,44 @@ class StudioAccessibilityTest(ScriptedLoadableModule.ScriptedLoadableModuleTest)
         maximize = self.layoutManager.sliceWidget("Red").sliceController().findChild("QToolButton", "MaximizeViewButton")
         self.assertIn(str(maximize.accessibleName), ("Maximize view", "Maximize", "Restore view layout", "Restore layout"))
 
+    def test_settings_icon_only_buttons_have_accessible_names(self):
+        """The Settings buttons without text are named too (BB-1): the accent color swatch of Appearance announces
+        "Accent color" and its value, and the "..." of every template row names its template.
+        """
+        from StudioLib import templates, templates_ui
+
+        self._applyStudio()
+        dialog = slicer.app.settingsDialog()
+        dialog.setCurrentPanel("Appearance")
+        dialog.show()
+        self._wait(200)
+        try:
+            swatch = dialog.findChild("QWidget", "AccentColorPickerButton")
+            self.assertIsNotNone(swatch)
+            self.assertEqual(str(swatch.accessibleName), "Accent color")
+            self.assertTrue(str(swatch.accessibleDescription).strip(), "the current value of the swatch")
+        finally:
+            dialog.hide()
+            self._wait(50)
+
+        panel = templates_ui.TemplatesSettingsPanel()
+        try:
+            panel.refresh()
+            self.assertGreater(len(panel.rows), 0)
+            seenNames = set()
+            for template in templates.listTemplates():
+                row = panel.rowFor(template.id)
+                button = row.findChild("QToolButton", "studioTemplateMoreButton")
+                name = str(button.accessibleName)
+                self.assertIn(template.name, name)
+                self.assertNotIn(" \u00b7 ", name)
+                self.assertTrue(str(button.toolTip).strip())
+                seenNames.add(name)
+            # Every row has its own name: a screen reader user can tell the buttons apart
+            self.assertEqual(len(seenNames), len(panel.rows))
+        finally:
+            panel.deleteLater()
+
     def test_no_invisible_focus_stops(self):
         """No Tab or F6 stop draws nothing (USABILITY 9.1): the scroll areas of the inspector and of the Library canvas
         take no focus (their controls do), F6 to the inspector lands on a control, and the lesion readout line is a

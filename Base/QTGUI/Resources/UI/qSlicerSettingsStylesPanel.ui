@@ -58,6 +58,9 @@
         <property name="toolTip">
          <string>Color of selected items, links and highlighted controls.</string>
         </property>
+        <property name="accessibleName">
+         <string>Accent color</string>
+        </property>
        </widget>
       </item>
       <item>

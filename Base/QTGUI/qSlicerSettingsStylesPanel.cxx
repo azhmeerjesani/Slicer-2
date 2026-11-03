@@ -272,6 +272,9 @@ void qSlicerSettingsStylesPanelPrivate::updateAccentColorWidgets()
   bool classicAppearance = Self::isClassicAppearance();
   this->AccentColorPickerButton->setEnabled(!classicAppearance);
   this->AccentColorResetButton->setEnabled(!isDefault && !classicAppearance);
+  // The swatch has no text: a screen reader announces its accessible name ("Accent color", set in the .ui file)
+  // and this description, the current value
+  this->AccentColorPickerButton->setAccessibleDescription(isDefault ? qSlicerSettingsStylesPanel::tr("Default") : accentColor.name());
   this->AccentColorPickerButton->setToolTip(
     classicAppearance ? qSlicerSettingsStylesPanel::tr("The accent color is not applied when testing is enabled or the application runs without main window.")
                       : qSlicerSettingsStylesPanel::tr("Color of selected items, links and highlighted controls."));
