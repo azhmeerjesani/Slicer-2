@@ -353,6 +353,21 @@ class LesionNetworkMappingNetworksUITest(unittest.TestCase):
             self.assertEqual(json.loads(settings.value(card_clusters.ATLASES_SETTING)), ["harvard-oxford-cortical-th25-2mm"])
             self.assertEqual(clustersCard.usableAtlasIds(), ["tian-s1-2mm-2009c"])
 
+            # Both atlases unchecked in Atlases...: they are still on this computer, so the label must not say they are missing
+            clustersCard.setSelectedAtlasIds([])
+            clustersCard._refreshAtlases()
+            self.assertEqual(clustersCard.usableAtlasIds(), [])
+            self.assertNotIn("no atlas on this computer", str(clustersCard.atlasLabel.text))
+            self.assertIn("no atlas chosen", str(clustersCard.atlasLabel.text))
+            self.assertFalse(clustersCard.atlasBanner.isVisible())
+            # Nothing cached: the old wording stays
+            manager.override = {}
+            clustersCard.atlases.isCached("tian-s1-2mm-2009c", refresh=True)
+            clustersCard._refreshAtlases()
+            self.assertIn("no atlas on this computer", str(clustersCard.atlasLabel.text))
+            manager.override = {atlas.id: atlas for atlas in (schaefer2009, tian2009, schaeferFsl6)}
+            clustersCard.setSelectedAtlasIds(["tian-s1-2mm-2009c"])
+
             # Networks: cortex from the 2009c Schaefer, subcortex from the 2009c Tian; no 2009c cerebellum in the catalog
             self.assertEqual(card.atlasIds(), ["schaefer2018-400-7n-2mm-2009c", "tian-s1-2mm-2009c"])
             rows = card.update()

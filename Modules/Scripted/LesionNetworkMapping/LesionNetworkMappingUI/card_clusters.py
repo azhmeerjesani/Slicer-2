@@ -1301,6 +1301,9 @@ class ClustersCard:
         busy = self.atlases.busy()
         if usable:
             self.atlasLabel.setText(_("Labels: {names}").format(names=", ".join(shortName(atlasId) for atlasId in usable)))
+        elif not self.selectedAtlasIds(source) and any(self.atlases.isCached(atlasId) for atlasId in self.labelAtlasIds(source)):
+            # Atlases are on this computer but all unchecked in Atlases…: not the same as "not downloaded"
+            self.atlasLabel.setText(_("Labels: off (no atlas chosen, see Atlases…)"))
         else:
             self.atlasLabel.setText(_("Labels: none (no atlas on this computer)"))
         self.atlasLabel.setToolTip("\n".join(self.atlases.title(atlasId) for atlasId in usable))
