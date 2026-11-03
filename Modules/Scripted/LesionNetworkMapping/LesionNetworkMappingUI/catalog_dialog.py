@@ -137,8 +137,12 @@ def freeBytes(path):
         return None
 
 
-def planSummary(entry, subset, keepArchives, destination):
-    """``(text, problem)``: the disk plan of a download as a sentence, and why it cannot fit (or None)."""
+def planSummary(entry, subset, keepArchives, destination, unfinished=None):
+    """``(text, problem)``: the disk plan of a download as a sentence, and why it cannot fit (or None).
+
+    ``unfinished`` (the summary of an interrupted download in the folder, see ``fetchconnectome.unfinished_fetch``) makes it a
+    resume: what is already written is no longer free, so only the part still to be written is compared with the free space.
+    """
     from LesionNetworkMappingLib import catalog
 
     plan = catalog.disk_plan(entry, None if subset == "all" else subset, keepArchives)
@@ -157,8 +161,14 @@ def planSummary(entry, subset, keepArchives, destination):
     if plan["notes"]:
         text += "\n" + " ".join(plan["notes"])
     problem = None
-    if plan["peak"] and free is not None and free < plan["peak"] * 1.05:
-        problem = _("Not enough free space here: the plan needs about {need} at the peak and {free} are free.").format(need=formatBytes(plan["peak"]), free=formatBytes(free))
+    if plan["peak"] and free is not None:
+        fraction = (unfinished or {}).get("fraction")
+        if fraction is not None:
+            remaining = round(plan["peak"] * (1 - min(max(fraction, 0), 1)))
+            if free < remaining * 1.05:
+                problem = _("Not enough free space here: resuming needs about {need} more and {free} are free.").format(need=formatBytes(remaining), free=formatBytes(free))
+        elif free < plan["peak"] * 1.05:
+            problem = _("Not enough free space here: the plan needs about {need} at the peak and {free} are free.").format(need=formatBytes(plan["peak"]), free=formatBytes(free))
     return text, problem
 
 
@@ -682,7 +692,7 @@ class CatalogDialog(qt.QDialog):
         subset = self.subsetCombo.currentData or "all"
         problem = None
         if destination:
-            text, problem = planSummary(entry, subset, self.keepCheck.checked, destination)
+            text, problem = planSummary(entry, subset, self.keepCheck.checked, destination, None if self.mismatchHere() else self.unfinishedHere())
             self.planLabel.setText(text)
         else:
             self.planLabel.setText("")

@@ -156,6 +156,64 @@ class LesionNetworkMappingCatalogDialogTest(unittest.TestCase):
         dialog.onControllerChanged()
         self.assertTrue(dialog.resumeButton.isVisibleTo(dialog))
 
+    def test_resume_is_judged_by_the_space_still_to_be_written(self):
+        """A partly written download compares the free space with what is still to be written, not with the whole peak (the part
+        written is no longer free): the main button stays 'Resume this download' and enabled, like the banner's Resume button.
+        """
+        from LesionNetworkMappingLib import catalog, fetchconnectome, jobs
+        from LesionNetworkMappingUI import catalog_dialog, manager_catalog
+
+        entry = catalog.load_catalog().get("gsp1000-ilxiks")
+        peak = catalog.disk_plan(entry, None, False)["peak"]
+        self.assertTrue(peak)
+        free = round(peak * 0.4)
+        self.assertLess(free, peak * 1.05)
+        # A new download needs the whole peak
+        with mock.patch.object(catalog_dialog, "freeBytes", return_value=free):
+            problem = catalog_dialog.planSummary(entry, "all", False, self.tmp)[1]
+            self.assertIn("at the peak", problem or "")
+            # 90 % written: 10 % of the peak is still to come, and it fits
+            self.assertIsNone(catalog_dialog.planSummary(entry, "all", False, self.tmp, {"done": 90, "total": 100, "fraction": 0.9})[1])
+            # 10 % written: 90 % is still to come, and it does not fit; the hint says how much is still needed
+            problem = catalog_dialog.planSummary(entry, "all", False, self.tmp, {"done": 10, "total": 100, "fraction": 0.1})[1]
+            self.assertIn("resuming needs about", problem or "")
+            # An unknown fraction is judged by the whole peak
+            self.assertIn("at the peak", catalog_dialog.planSummary(entry, "all", False, self.tmp, {"done": 0, "total": 0, "fraction": None})[1] or "")
+
+        # The dialog: an interrupted download in the folder, 90 % written
+        dialog = self.makeDialog(None)
+        dest = os.path.join(self.tmp, "dest resume")
+        work = fetchconnectome.work_dir(entry, dest)
+        os.makedirs(work, exist_ok=True)
+        jobs.write_json_atomic(os.path.join(work, "state.json"), {"format": fetchconnectome.STATE_FORMAT, "version": 1, "entry": entry["id"], "sizes": {"a.tar": 90, "b.tar": 10},
+                                                                  "archives": {"a.tar": {"status": "done", "bytes": 90}, "b.tar": {"status": "pending", "bytes": 0}}, "files": {}, "complete": False})
+        bundle = fetchconnectome.bundle_path(entry, dest)
+        os.makedirs(bundle, exist_ok=True)
+        jobs.write_json_atomic(os.path.join(bundle, "connectome.partial.json"), {"format": "lnmc", "subjects": []})
+        dialog.entry = entry
+        dialog.destEdit.setText(dest)
+        dialog.terms[entry["id"]] = {"text": "terms", "display": "terms", "sha": "a" * 64}
+        wasBlocked = dialog.acceptCheck.blockSignals(True)
+        dialog.acceptCheck.setChecked(True)
+        dialog.acceptCheck.blockSignals(wasBlocked)
+        controller = dialog.controller
+        saved = (controller.state, controller.request, controller.errorEvent, controller.job)
+        self.addCleanup(lambda: (setattr(controller, "state", saved[0]), setattr(controller, "request", saved[1]), setattr(controller, "errorEvent", saved[2]),
+                                 setattr(controller, "job", saved[3])))
+        controller.job = None
+        controller.state = "idle"
+        controller.errorEvent = None
+        with mock.patch.object(manager_catalog, "termsAccepted", return_value=True), mock.patch.object(catalog_dialog, "freeBytes", return_value=free):
+            dialog.updateState()
+            self.assertEqual(dialog.downloadButton.text, "Resume this download")
+            self.assertTrue(dialog.downloadButton.enabled, dialog.hintLabel.text)
+            self.assertEqual(dialog.hintLabel.text, "")
+            # A resume that really lacks the space is refused up front, with the space still needed
+            with mock.patch.object(catalog_dialog, "freeBytes", return_value=round(peak * 0.05)):
+                dialog.updateState()
+                self.assertFalse(dialog.downloadButton.enabled)
+                self.assertIn("resuming needs about", dialog.hintLabel.text)
+
     def test_licence_chips_fit_their_column(self):
         """The Licence column is sized from the chip cell widgets (the shipped catalog, nothing is fetched): no chip is narrower than its size hint."""
         from LesionNetworkMappingUI import catalog_dialog
