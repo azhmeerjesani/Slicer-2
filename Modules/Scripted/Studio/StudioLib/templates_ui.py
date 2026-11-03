@@ -241,6 +241,18 @@ class _OptionalRow:
         self.clearButton.setVisible(bool(text))
 
 
+def _plainCopyError(error, plan):
+    """A failure of the copy in plain words: "Permission denied" naming the folder that cannot be written, not the error
+    number and the internal staging folder (``.adding-<id>``) of the Templates folder.
+    """
+    if not isinstance(error, OSError):
+        return str(error)
+    from .autosave import plainOSErrorIn
+
+    folder = os.path.dirname(os.path.normpath(plan.folder)) if plan is not None and getattr(plan, "folder", None) else ""
+    return plainOSErrorIn(error, folder)
+
+
 class AddTemplateDialog(qt.QDialog):
     """"Add your own MNI template" (``studioAddTemplateDialog``, VISUAL.md 4.7b).
 
@@ -669,9 +681,11 @@ class AddTemplateDialog(qt.QDialog):
             return
         self.progressBar.hide()
         self.addButton.setText(_("Add template"))
-        text = str(error) if isinstance(error, templates.TemplateError) else _("The template could not be added: {error}").format(error=error)
-        if not isinstance(error, templates.TemplateError):
-            logging.error(f"Slicer Studio: adding a template failed: {error}")
+        if isinstance(error, templates.TemplateError):
+            text = str(error)
+        else:
+            text = _("The template could not be added: {error}").format(error=_plainCopyError(error, plan))
+            logging.error(f"Slicer Studio: adding a template failed: {text} ({error})")
         self._setError(text)
         self._update()
 

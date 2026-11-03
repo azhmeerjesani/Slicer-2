@@ -2087,7 +2087,8 @@ class AutosaveService:
             os.rename(oldPath, newPath)
         except OSError as error:
             project.lock()
-            raise projects.ProjectError(_("The project could not be renamed: {error}").format(error=error))
+            raise projects.ProjectError(_("The project could not be renamed: {error}").format(
+                error=plainOSErrorIn(error, parent)))
         projects.renameSceneFile(newPath, oldScene)
         self._relocateProject(oldPath, newPath)
         return newPath
@@ -2487,6 +2488,18 @@ def _requiredFreeBytes(estimatedBytes, project=False):
 def plainOSError(error):
     """An I/O error in plain words: "Permission denied", without the error number and the (temporary) file path."""
     return (getattr(error, "strerror", None) or str(error)).strip()
+
+
+def plainOSErrorIn(error, folder):
+    """``plainOSError`` that names ``folder`` ("Permission denied (in the folder Projects)") when the error is about a file
+    inside it, so a read-only folder is recognised without its full path or the temporary names.
+    """
+    reason = plainOSError(error)
+    folder = os.path.normpath(str(folder or ""))
+    names = [os.path.normpath(str(n)) for n in (getattr(error, "filename", None), getattr(error, "filename2", None)) if n]
+    if folder and any(n == folder or n.startswith(folder + os.sep) for n in names):
+        return _("{reason} (in the folder {folder})").format(reason=reason, folder=os.path.basename(folder))
+    return reason
 
 
 def _formatBytes(size):

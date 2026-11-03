@@ -175,7 +175,7 @@ class Download:
             os.makedirs(os.path.dirname(os.path.abspath(self.dest)), exist_ok=True)
             self._file = open(self.partPath, "wb")
         except OSError as e:
-            self._fail(_("Cannot write {path}: {reason}").format(path=self.partPath, reason=e.strerror or str(e)))
+            self._fail(self._cannotWrite(e))
             return
         request = qt.QNetworkRequest(qt.QUrl(self.url))
         request.setAttribute(qt.QNetworkRequest.RedirectPolicyAttribute, qt.QNetworkRequest.NoLessSafeRedirectPolicy)
@@ -267,10 +267,16 @@ class Download:
             os.replace(self.partPath, self.dest)
         except OSError as e:
             self._closeAndRemovePartFile()
-            self._fail(_("Cannot write {path}: {reason}").format(path=self.dest, reason=e.strerror or str(e)))
+            self._fail(self._cannotWrite(e))
             return
         self.state = "done"
         self.finished.emit(self.dest)
+
+    def _cannotWrite(self, error):
+        """The failure in plain words, naming the folder: not the error number nor the internal ".part" file."""
+        folder = os.path.dirname(os.path.abspath(self.dest))
+        return _("Cannot save the download in the folder {folder}: {reason}").format(
+            folder=os.path.basename(folder) or folder, reason=(error.strerror or str(error)).strip())
 
     def _fail(self, message):
         self.state = "failed"

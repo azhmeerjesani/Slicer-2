@@ -1495,6 +1495,38 @@ class StudioTemplatesTest(unittest.TestCase):
         finally:
             panel.deleteLater()
 
+    def test_30_permission_denied_while_adding_is_said_in_plain_words(self):
+        """BB-1: a read-only Templates folder showed "[Errno 13] Permission denied: '.../Templates/.adding-<id>-<pid>'" (the error
+        number and the internal staging folder); it says "Permission denied" and names the folder, as Duplicate does.
+        """
+        from StudioLib import autosave_io
+
+        templates, ui = self.templates, self.ui
+        real = os.makedirs
+
+        def denied(path, *args, **kwargs):
+            if ".adding-" in str(path):
+                raise PermissionError(13, "Permission denied", str(path))
+            return real(path, *args, **kwargs)
+
+        dialog = ui.AddTemplateDialog(executor=autosave_io.InlineExecutor())
+        os.makedirs = denied
+        try:
+            dialog.setImage(self.las)
+            dialog.nameEdit.setText("Read only")
+            dialog.addTemplate()
+        finally:
+            os.makedirs = real
+        try:
+            text = dialog.errorLabel.text
+            self.assertIn("The template could not be added: Permission denied (in the folder " + os.path.basename(templates.templatesFolder()) + ")", text)
+            for raw in ("Errno", ".adding-", os.sep + os.path.basename(templates.templatesFolder()) + os.sep):
+                self.assertNotIn(raw, text)
+            self.assertFalse(dialog.errorLabel.isHidden())
+            self.assertIsNone(dialog.template)
+        finally:
+            dialog.deleteLater()
+
     def test_29_readding_the_study_template_reopens_the_open_case_on_it(self):
         """BB-1: after "Add it…" adds the study's missing template, the case that is open on the built-in template is
         reopened on the added one (its lesion unchanged); it did stay on the fallback until another case was opened.

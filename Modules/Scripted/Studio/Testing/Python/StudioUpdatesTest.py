@@ -528,6 +528,35 @@ class StudioUpdatesTest(unittest.TestCase):
         _Handler.stallRelease.set()
         thread.join(5)
 
+    def test_DownloadWriteFailureMessage(self):
+        """BB-1: a download folder that cannot be written said "Cannot write <path>.nii.gz.part: Permission denied" (the internal
+        .part name and the full path); it says "Permission denied" and names the folder.
+        """
+        from StudioLib import downloads
+
+        data = self._publish("1.2.0")
+        name = data["assets"]["linux-x86_64"]["name"]
+        dest = os.path.join(self.tempDir, "StudioTemplates", name)
+        realOpen = open
+
+        def denied(path, *args, **kwargs):
+            if str(path).endswith(".part"):
+                raise PermissionError(13, "Permission denied", str(path))
+            return realOpen(path, *args, **kwargs)
+
+        download = downloads.Download(self.root + name, None, dest)
+        messages = []
+        download.failed.connect(messages.append)
+        downloads.open = denied
+        try:
+            download.start()
+        finally:
+            del downloads.open
+        self.assertEqual(messages, ["Cannot save the download in the folder StudioTemplates: Permission denied"])
+        self.assertNotIn(".part", messages[0])
+        self.assertNotIn(self.tempDir, messages[0])
+        self.assertEqual(download.state, "failed")
+
     def test_DownloadTimeoutMessage(self):
         """A download that stalls until the transfer timeout says so, not 'Operation canceled' (the user cancelled nothing)."""
         from StudioLib import downloads

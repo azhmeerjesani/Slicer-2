@@ -398,6 +398,37 @@ class StudioProjectsTest(unittest.TestCase):
             if not path.endswith(".mrml"):
                 self.assertEqual(os.stat(os.path.join(projectPath, path)).st_mtime_ns, mtime, f"{path} is not rewritten")
 
+    def test_07b_permission_denied_while_renaming_is_said_in_plain_words(self):
+        """BB-1: a read-only Projects folder showed "[Errno 13] Permission denied: '<old>' -> '<new>'" (error number and full
+        paths) in a "Slicer error" box; the message says "Permission denied" and names the folder.
+        """
+        projects = self.projects
+        service = self._service()
+        volume, _path = self._userVolume()
+        self._lesion(volume)
+        project = self._projectFor(service)
+        self._save(service)
+        other = projects.duplicateFolder(project.path)
+        self.io.backgroundWriter().drain(30.0)
+        folderName = os.path.basename(os.path.dirname(project.path))
+        realRename = os.rename
+
+        def denied(old, new, *args, **kwargs):
+            raise PermissionError(13, "Permission denied", old, None, new)
+
+        os.rename = denied
+        try:
+            for rename in (lambda: service.renameProject("Renamed BB"), lambda: projects.renameFolder(other, "Renamed BB 2")):
+                with self.assertRaises(projects.ProjectError) as caught:
+                    rename()
+                text = str(caught.exception)
+                self.assertEqual(text, "The project could not be renamed: Permission denied (in the folder %s)" % folderName)
+                self.assertNotIn("Errno", text)
+                self.assertNotIn("->", text)
+        finally:
+            os.rename = realRename
+        self.assertTrue(os.path.isdir(project.path), "nothing was renamed")
+
     def test_07_rename_duplicate_trash(self):
         projects = self.projects
         service = self._service()

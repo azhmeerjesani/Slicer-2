@@ -1139,7 +1139,12 @@ def renameFolder(path, newName):
     if os.path.exists(newPath) and not isSamePath(newPath, path):
         raise ProjectError(_("A project named {name} already exists.").format(name=newName))
     scene = sceneFile(path)
-    os.rename(path, newPath)
+    try:
+        os.rename(path, newPath)
+    except OSError as error:
+        from .autosave import plainOSErrorIn
+
+        raise ProjectError(_("The project could not be renamed: {error}").format(error=plainOSErrorIn(error, parent))) from error
     renameSceneFile(newPath, scene)
     data = readProjectJson(newPath)
     if data is not None:

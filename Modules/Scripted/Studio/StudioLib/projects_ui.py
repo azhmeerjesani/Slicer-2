@@ -789,7 +789,9 @@ def renameDialog(path=None, parent=None):
             else:
                 newPath = projects.renameFolder(path, newName)
     except (projects.ProjectError, OSError) as error:
-        slicer.util.errorDisplay(str(error))
+        from .autosave import plainOSError
+
+        slicer.util.errorDisplay(plainOSError(error) if isinstance(error, OSError) else str(error))
         return None
     projects.notifyChanged()
     message(_("Renamed to {name}").format(name=os.path.basename(newPath)))
