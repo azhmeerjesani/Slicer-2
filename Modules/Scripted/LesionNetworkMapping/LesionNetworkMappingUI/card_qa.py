@@ -33,6 +33,13 @@ from slicer.i18n import tr as _
 
 from . import ORDER_QA, widgets
 
+
+def _fixed(value, digits=2):
+    """``value`` with ``digits`` decimals; a value that rounds to zero is printed without a sign ("0.00", never "-0.00")."""
+    text = f"{value:.{digits}f}"
+    return text[1:] if text.startswith("-") and not text.strip("-0.") else text
+
+
 #: Chip level of the qa.py levels
 _LEVELS = {"neutral": "neutral", "amber": "warn", "red": "danger", "below": "ok", "not_calibrated": "neutral"}
 #: Engine cost of 50 relocated lesions per subject for a GSP1000-size connectome (SPEC 7.5: ~146 ms for L = 51 vs ~10 ms)
@@ -390,7 +397,7 @@ class QACard:
 
     @staticmethod
     def _number(value):
-        return f"{value:.2f}" if isinstance(value, (int, float)) and math.isfinite(value) else "\u2013"
+        return _fixed(value) if isinstance(value, (int, float)) and math.isfinite(value) else "\u2013"
 
     def _setCalibrated(self, level, chipText, text):
         widgets.setChipLevel(self.calibratedChip, _LEVELS.get(level, "neutral") if level in _LEVELS else level, chipText)
@@ -402,7 +409,7 @@ class QACard:
         percentile, k = values.get("percentile"), values.get("k") or 0
         sample = values.get("mu_r_sample")
         muR = sample if isinstance(sample, (int, float)) and math.isfinite(sample) else values.get("mu_r")
-        muText = f"r(μC_r) = {muR:.2f} · " if isinstance(muR, (int, float)) and math.isfinite(muR) else ""
+        muText = f"r(μC_r) = {_fixed(muR)} · " if isinstance(muR, (int, float)) and math.isfinite(muR) else ""
         group = (values.get("null_kind") or "relocated") != "relocated"
         nulls = _("null cohorts") if group else _("relocated lesions")
         if level == "not_calibrated" or percentile is None:
@@ -567,11 +574,11 @@ class QACard:
             from LesionNetworkMappingLib import qa as qaLib
 
             r2 = shownValues.get("r2_ref")
-            text = (qaLib.R2_REFERENCE_LABEL[:1].upper() + qaLib.R2_REFERENCE_LABEL[1:]) + (f": {r2:.2f}" if isinstance(r2, (int, float)) and math.isfinite(r2) else ": \u2013")
+            text = (qaLib.R2_REFERENCE_LABEL[:1].upper() + qaLib.R2_REFERENCE_LABEL[1:]) + (f": {_fixed(r2)}" if isinstance(r2, (int, float)) and math.isfinite(r2) else ": \u2013")
             partialValues = shownValues.get("partial_pc1_mu") or {}
             pc1 = partialValues.get("pc1_given_mu_r")
             if isinstance(pc1, (int, float)) and math.isfinite(pc1):
-                text += " · " + _("PC1 beyond μC_r: r = {r:.2f}").format(r=pc1)
+                text += " · " + _("PC1 beyond μC_r: r = {r}").format(r=_fixed(pc1))
             if metadata is not None:
                 text += " · " + _("reference {definition}, {k} sampled seeds").format(definition=metadata.get("definition", ""), k=metadata.get("K_seeds", "?"))
             self.r2Label.setText(text)
@@ -643,8 +650,8 @@ class QACard:
         if degreeR is not None:
             _level, text = qaLib.chip_level(degreeR)
             rho = qa.get("degree_rho")
-            rhoText = f", ρ = {rho:.2f}" if isinstance(rho, (int, float)) and math.isfinite(rho) else ""  # noqa: RUF001
-            self.degreeLabel.setText(_("Hubness (degree) similarity: r = {r:.2f}{rho}. Fixed cut-offs, secondary: {text}").format(r=degreeR, rho=rhoText, text=text))
+            rhoText = f", ρ = {_fixed(rho)}" if isinstance(rho, (int, float)) and math.isfinite(rho) else ""  # noqa: RUF001
+            self.degreeLabel.setText(_("Hubness (degree) similarity: r = {r}{rho}. Fixed cut-offs, secondary: {text}").format(r=_fixed(degreeR), rho=rhoText, text=text))
             widgets.setChipLevel(self.degreeChip, "neutral", _("Hubness"))
         elif bundle is None:
             self.degreeLabel.setText(_("Hubness (degree) similarity: choose a connectome."))

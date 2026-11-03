@@ -233,6 +233,13 @@ class MetricsTest(unittest.TestCase):
         self.assertIn("does not exceed", validate.verdict_text(0.01, [-0.09, -0.04], "lesion-volume baseline"))
         self.assertIn("exceeds", validate.verdict_text(0.06, [0.04, 0.09], "lesion-volume baseline"))
 
+    def test_verdict_prints_values_that_round_to_zero_without_a_sign(self):
+        text = validate.verdict_text(-0.001, (-0.004, 0.003), "degree baseline", metric="r2")
+        self.assertIn("(ΔR² 0.00, 95% CI 0.00 to 0.00)", text)
+        self.assertNotIn("\u22120.00", text)
+        self.assertIn("\u22120.05", validate.verdict_text(-0.05, (-0.09, -0.01), "degree baseline"))  # real negatives keep the minus
+        self.assertEqual(validate._format_number(-0.0), "0.00")
+
     def test_logistic_fits(self):
         rng = np.random.default_rng(6)
         X = np.column_stack([np.ones(80), rng.standard_normal((80, 2))])

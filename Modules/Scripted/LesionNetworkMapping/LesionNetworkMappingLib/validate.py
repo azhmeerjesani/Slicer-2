@@ -1333,7 +1333,10 @@ def permutation_p(null, observed):
 
 
 def _format_number(value):
-    return f"{value:.2f}".replace("-", "\u2212")  # the minus sign of the addendum's verdicts
+    text = f"{value:.2f}"
+    if text == "-0.00":  # a value that rounds to zero is printed without a sign
+        text = "0.00"
+    return text.replace("-", "\u2212")  # the minus sign of the addendum's verdicts
 
 
 def verdict_text(delta, ci, baseline_label, metric="auc", p_perm=None, subject="the circuit"):

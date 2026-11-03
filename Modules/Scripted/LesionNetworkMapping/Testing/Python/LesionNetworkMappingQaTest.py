@@ -404,5 +404,30 @@ class ReferenceIntegrationTest(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(z[ref.maps["sigma_r"] > 0])))
 
 
+def _has_slicer():
+    try:
+        import slicer
+    except ImportError:
+        return False
+    return getattr(slicer, "app", None) is not None
+
+
+@unittest.skipUnless(_has_slicer(), "needs the Slicer application")
+class QaNumberFormatTest(unittest.TestCase):
+    """BB-1 qa-validate-negative-zero-shown: a value that rounds to zero is printed "0.00", never "-0.00"."""
+
+    def test_reference_table_numbers(self):
+        from LesionNetworkMappingUI import card_qa
+
+        self.assertEqual(card_qa.QACard._number(-0.003), "0.00")
+        self.assertEqual(card_qa.QACard._number(-0.0), "0.00")
+        self.assertEqual(card_qa.QACard._number(0.004), "0.00")
+        self.assertEqual(card_qa.QACard._number(-0.05), "-0.05")
+        self.assertEqual(card_qa.QACard._number(-1.234), "-1.23")
+        self.assertEqual(card_qa.QACard._number(float("nan")), "\u2013")
+        self.assertEqual(card_qa._fixed(-0.0004, 3), "0.000")
+        self.assertEqual(card_qa._fixed(-0.1004, 3), "-0.100")
+
+
 if __name__ == "__main__":
     unittest.main()
