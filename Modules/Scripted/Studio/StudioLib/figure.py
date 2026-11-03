@@ -1829,7 +1829,11 @@ class FigureCard:
         self.widget = qt.QFrame()
         self.widget.setObjectName("StudioFigureCard")
         ui.setRole(self.widget, "card")
-        self.widget.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Maximum)
+        # Preferred, not Maximum: the card has word-wrapped notes, so its height depends on its width; a Maximum policy caps
+        # the card at its non-wrapped size hint and cuts the second line of the notes.
+        policy = qt.QSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+        policy.setHeightForWidth(True)
+        self.widget.setSizePolicy(policy)
         slotLayout.addWidget(self.widget)
         layout = qt.QVBoxLayout(self.widget)
         layout.setContentsMargins(10, 8, 10, 8)
@@ -1896,6 +1900,11 @@ class FigureCard:
         steps.setHorizontalSpacing(8)
         steps.setVerticalSpacing(6)
         steps.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
+        # The Plane control (Axial / Coronal / Sagittal) is a fixed-width row that does not fit next to the step labels
+        # at the default 340 px inspector: without wrapping, the form is wider than the card, so the label column is
+        # squeezed ('4 Landr') and the wrapped notes are measured for a wider card (their second line is cut). A row
+        # that does not fit puts its label above its field instead.
+        steps.setRowWrapPolicy(qt.QFormLayout.WrapLongRows)
 
         labels = qt.QHBoxLayout()
         self.figureLabelEdit = qt.QLineEdit()

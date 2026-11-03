@@ -2576,6 +2576,59 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self._pump(2)
         self.assertTrue(paste[0].enabled)
 
+    def test_33b_figure_card_text_fits_the_340_px_inspector(self):
+        """In the default 340 px inspector the Figure card's step labels ('4 Landmarks') get their full width and its
+        word-wrapped notes (the residual note, the mirror warning) the height of all their lines: nothing is cut.
+        """
+        import tempfile
+
+        import vtk
+
+        if not _hasFigureTracing():
+            self.skipTest("figure tracing is not in this build")
+        from StudioLib import figure, importer
+
+        studioShell = self._applyStudio()
+        self._startOnTemplate(studioShell)
+        self.addCleanup(lambda: figure.closeFigure(removeNodes=True))
+        directory = tempfile.mkdtemp(prefix="StudioTestFigureClip", dir=slicer.app.temporaryPath)
+        image = qt.QImage(220, 260, qt.QImage.Format_RGB32)
+        image.fill(qt.QColor(20, 20, 20))
+        path = f"{directory}/case-8_fig1.png"
+        self.assertTrue(image.save(path))
+        importer.handleDrop([path], shell=studioShell)
+        self._pump(10)
+        session = figure.session()
+        panel = session.panel()
+        session.setPlane("axial")
+        session.setCut(z=10.0)
+        # A neurological figure whose convention is not confirmed: the mirror warning shows
+        for pixel in ((30, 40), (190, 40), (110, 230), (60, 150), (170, 180)):
+            panel.figureLandmarks().AddControlPoint(vtk.vtkVector3d(*panel.localOf(pixel)))
+            panel.templateLandmarks().AddControlPoint(vtk.vtkVector3d(-88 + 0.8 * pixel[0], 104 - 0.8 * pixel[1], 10.0))
+        session.updateFit()
+        session.enterTrace()
+        self._pump(6)
+        card = self.mainWindow.findChild("QFrame", "StudioFigureCard")
+        self.assertTrue(card.isVisible())
+        dock = next(widget for widget in self.mainWindow.findChildren("QDockWidget") if widget.isVisible() and widget.isAncestorOf(card))
+        self.mainWindow.resizeDocks([dock], [340], qt.Qt.Horizontal)
+        self._wait(600)
+        warning = card.findChild("QLabel", "StudioFigureFitWarning")
+        note = card.findChild("QLabel", "StudioFigureResidualNote")
+        self.assertTrue(warning.isVisible())
+        self.assertTrue(note.isVisible())
+        problems = []
+        for label in card.findChildren("QLabel"):
+            if not label.isVisible() or not label.text.strip():
+                continue
+            if label.wordWrap:
+                if label.height < label.heightForWidth(label.width):
+                    problems.append((label.text, "height", label.height, label.heightForWidth(label.width)))
+            elif label.width < label.fontMetrics().horizontalAdvance(label.text):
+                problems.append((label.text, "width", label.width))
+        self.assertEqual(problems, [])
+
 
 def _hasFigureTracing():
     """True when this build has trace-from-figure (StudioLib.figure, L-29)."""
