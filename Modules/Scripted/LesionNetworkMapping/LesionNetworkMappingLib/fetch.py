@@ -45,11 +45,13 @@ Command line (one JSON event per line, see ``jobs``; the GUI runs it as a light 
 
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
 import threading
 import time
+import urllib.parse
 import zipfile
 
 CATALOG_FORMAT = "slicer-lnm-catalog"
@@ -664,11 +666,50 @@ class _PartLock:
 
 
 class _Transient(Exception):
-    """A download attempt failed in a way that may pass (dropped connection, 5xx); ``offline`` for no connection."""
+    """A download attempt failed in a way that may pass (dropped connection, 5xx); ``offline`` for no connection.
 
-    def __init__(self, message, offline=False):
+    ``str()`` is a short sentence for the user; the raw exception text (urllib3 chains) is in ``detail`` and goes to the log only.
+    """
+
+    def __init__(self, message, offline=False, detail=None):
         super().__init__(message)
         self.offline = offline
+        self.detail = detail or message
+
+
+def host_of(url):
+    """The host name of ``url`` (what a message names), else the text itself."""
+    try:
+        return urllib.parse.urlsplit(str(url)).hostname or str(url)
+    except ValueError:
+        return str(url)
+
+
+def network_problem(exc, url):
+    """A short sentence for a failed request (``requests`` exception ``exc`` for ``url``); the raw text is left to the log.
+
+    Naming only the host: the exception texts of requests and urllib3 chain the whole URL, the retry count and the
+    socket error, and are of no use to the user.
+    """
+    import requests
+
+    host = host_of(url)
+    logging.info(f"Slicer Studio: request to {url} failed: {exc!r}")
+    if isinstance(exc, requests.exceptions.SSLError):
+        return f"The secure connection to {host} could not be verified. Check the date, the proxy and the network, and try again."
+    if isinstance(exc, requests.exceptions.ProxyError):
+        return f"No connection to {host}: the proxy server cannot be reached. Check the network and try again."
+    # requests wraps the read timeout of a streamed body (urllib3's ReadTimeoutError) in a plain ConnectionError
+    stalled = isinstance(exc, requests.exceptions.ReadTimeout) or any(type(arg).__name__ == "ReadTimeoutError" for arg in exc.args)
+    if stalled:
+        return f"{host} stopped sending data. Check the network and try again."
+    if isinstance(exc, (requests.exceptions.ChunkedEncodingError, requests.exceptions.ContentDecodingError)):
+        return f"The connection to {host} dropped. Check the network and try again."
+    if isinstance(exc, requests.exceptions.Timeout):
+        return f"No answer from {host}. Check the network and try again."
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        return f"No connection to {host}. Check the network and try again."
+    return f"The request to {host} failed. Check the network and try again."
 
 
 class _Restart(Exception):
@@ -746,9 +787,9 @@ def _stream(session, url, part, size_hint, progress, cancel):
     try:
         response = session.get(url, headers=headers, stream=True, timeout=(CONNECT_TIMEOUT_S, READ_TIMEOUT_S), allow_redirects=True)
     except (requests.ConnectionError, requests.Timeout) as exc:
-        raise _Transient(f"cannot connect to {url}: {exc}", offline=True) from None
+        raise _Transient(network_problem(exc, url), offline=True, detail=f"cannot connect to {url}: {exc}") from None
     except requests.RequestException as exc:
-        raise FetchError(f"Request to {url} failed: {exc}", code="http") from None
+        raise FetchError(network_problem(exc, url), code="http") from None
     with response:
         status = response.status_code
         if status == 416 and start:
@@ -758,7 +799,7 @@ def _stream(session, url, part, size_hint, progress, cancel):
             os.remove(part)  # the file changed or the .part file is longer than it: start again
             raise _Restart()
         if status >= 500 or status in (408, 429):
-            raise _Transient(f"HTTP {status} from {url}")
+            raise _Transient(f"{host_of(url)} answered HTTP {status}. Try again later.", detail=f"HTTP {status} from {url}")
         if status >= 400:
             raise FetchError(f"HTTP {status} for {url}", code="http", status=status, url=url)
         if status == 206:
@@ -784,9 +825,10 @@ def _stream(session, url, part, size_hint, progress, cancel):
                             progress(done, total)
                     _raise_if_cancelled(cancel, done)
         except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError, requests.exceptions.ContentDecodingError) as exc:
-            raise _Transient(f"the connection dropped after {done} bytes: {exc}", offline=done == start) from None
+            raise _Transient(network_problem(exc, url), offline=done == start, detail=f"the connection dropped after {done} bytes: {exc}") from None
         if expected_total is not None and done != expected_total:
-            raise _Transient(f"the connection closed after {done} of {expected_total} bytes")
+            raise _Transient(f"The connection to {host_of(url)} closed after {done:,} of {expected_total:,} bytes. Check the network and try again.",
+                             detail=f"the connection closed after {done} of {expected_total} bytes")
 
 
 def _download(resource, dest, progress, cancel, session, retries):
@@ -822,9 +864,16 @@ def _download(resource, dest, progress, cancel, session, retries):
                 break
     if isinstance(last, FetchError):
         raise last
+    logging.info(f"Slicer Studio: download of {resource.title} failed: {getattr(last, 'detail', last)}")
+    # The partial file is mentioned only where there is one: it is not created before the first byte, nor after a refused connection
+    try:
+        kept = os.path.getsize(part)
+    except OSError:
+        kept = 0
+    resumes = " The partial download is kept and resumes next time." if kept else ""
     if last is not None and last.offline:
-        raise OfflineError(f"No network connection to download {resource.title}: {last}. A partial download is kept and resumes next time.", resource_id=resource.id)
-    raise FetchError(f"Download of {resource.title} was interrupted: {last}. The partial file is kept and resumes next time.", code="interrupted", resource_id=resource.id)
+        raise OfflineError(f"{last}{resumes}", resource_id=resource.id)
+    raise FetchError(f"Download of {resource.title} was interrupted. {last}{resumes}", code="interrupted", resource_id=resource.id)
 
 
 def _record_for(resource, path, url, sha256, recorded, override=False, archive=None):

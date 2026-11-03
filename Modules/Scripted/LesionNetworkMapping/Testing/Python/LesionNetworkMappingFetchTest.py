@@ -241,6 +241,51 @@ class FetchTest(_Base):
         self.assertEqual(read_bytes(path), self.body)
         self.assertEqual(self.requests_for("/file.bin")[-1][1], f"bytes={kept}-")
 
+    def test_failure_messages_are_short_and_true_about_the_partial_file(self):
+        # No connection: one short sentence naming the host, no urllib3 chain, and no partial file to speak of
+        entry = entry_for(dead_url(), self.body)
+        with self.assertRaises(fetch.OfflineError) as caught:
+            fetch.fetch(entry, self.cache, retries=1)
+        message = str(caught.exception)
+        self.assertEqual(message, "No connection to 127.0.0.1. Check the network and try again.")
+        for raw in ("HTTPConnectionPool", "Max retries", "NewConnectionError", "Errno", "partial"):
+            self.assertNotIn(raw, message)
+        self.assertFalse(os.path.exists(fetch.download_path(entry, self.cache) + ".part"))
+        # A dropped connection after some bytes: the partial file exists, so it is said to be kept (and no raw exception text)
+        url = self.serve("/file.bin", self.body, cut=[300_000])
+        entry = entry_for(url, self.body)
+        with self.assertRaises(fetch.FetchError) as caught:
+            fetch.fetch(entry, self.cache, retries=0)
+        message = str(caught.exception)
+        self.assertEqual(caught.exception.code, "interrupted")
+        self.assertIn("partial download is kept", message)
+        self.assertNotIn("IncompleteRead", message)
+        self.assertNotIn("Connection broken", message)
+        self.assertGreater(os.path.getsize(fetch.download_path(entry, self.cache) + ".part"), 0)
+        # An error answer: no partial file, and none is claimed
+        entry = entry_for(self.server.base + "/missing.bin", self.body)
+        with self.assertRaises(fetch.FetchError) as caught:
+            fetch.fetch(entry, self.cache)
+        self.assertNotIn("partial", str(caught.exception))
+
+    def test_network_problem_sentences(self):
+        import requests
+        import urllib3
+
+        url = "https://neurovault.org/api/images/63/?format=json"
+        chain = requests.exceptions.ProxyError("HTTPSConnectionPool(host='neurovault.org', port=443): Max retries exceeded (Caused by ProxyError)")
+        for exc, expected in (
+            (chain, "No connection to neurovault.org: the proxy server cannot be reached. Check the network and try again."),
+            (requests.exceptions.ConnectionError("Max retries exceeded"), "No connection to neurovault.org. Check the network and try again."),
+            (requests.exceptions.ReadTimeout("Read timed out."), "neurovault.org stopped sending data. Check the network and try again."),
+            (requests.exceptions.ConnectionError(urllib3.exceptions.ReadTimeoutError(None, url, "Read timed out.")),
+             "neurovault.org stopped sending data. Check the network and try again."),  # a stalled body, as iter_content raises it
+            (requests.exceptions.ChunkedEncodingError("Connection broken: IncompleteRead(1000 bytes read)"),
+             "The connection to neurovault.org dropped. Check the network and try again."),
+            (requests.exceptions.ConnectTimeout("Connect timed out."), "No answer from neurovault.org. Check the network and try again."),
+        ):
+            self.assertEqual(fetch.network_problem(exc, url), expected)
+
     def test_server_that_ignores_range_restarts_cleanly(self):
         url = self.serve("/file.bin", self.body, ignore_range=True)
         entry = entry_for(url, self.body)

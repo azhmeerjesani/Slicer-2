@@ -571,6 +571,20 @@ def _https(url):
     return re.sub(r"^http://", "https://", str(url or ""))
 
 
+def _neurovault_problem(what, exc, url=None):
+    """The ``RefmapsError`` of a failed NeuroVault read: one short sentence (what went wrong, never the urllib3 chain)."""
+    import requests
+
+    from . import fetch
+
+    if isinstance(exc, requests.HTTPError) and getattr(exc, "response", None) is not None:
+        status = exc.response.status_code
+        return RefmapsError(f"{what} could not be read: NeuroVault answered HTTP {status}" + (" (no such item)." if status == 404 else "."))
+    if isinstance(exc, requests.RequestException):
+        return RefmapsError(fetch.network_problem(exc, url or NEUROVAULT_API))
+    return RefmapsError(f"{what} could not be read: {exc}")
+
+
 def neurovault_image(image_id, session=None, timeout=30.0):
     """The public NeuroVault metadata of an image (a dict), read from the API."""
     from .fetch import make_session
@@ -583,7 +597,7 @@ def neurovault_image(image_id, session=None, timeout=30.0):
     except (ValueError, TypeError) as exc:
         raise RefmapsError(f"NeuroVault image {image_id}: {exc}") from None
     except Exception as exc:
-        raise RefmapsError(f"NeuroVault image {image_id} could not be read: {exc}") from None
+        raise _neurovault_problem(f"NeuroVault image {image_id}", exc) from None
 
 
 def neurovault_collection(collection_id, session=None, timeout=30.0):
@@ -601,7 +615,7 @@ def neurovault_collection(collection_id, session=None, timeout=30.0):
     except (ValueError, TypeError) as exc:
         raise RefmapsError(f"NeuroVault collection {collection_id}: {exc}") from None
     except Exception as exc:
-        raise RefmapsError(f"NeuroVault collection {collection_id} could not be read: {exc}") from None
+        raise _neurovault_problem(f"NeuroVault collection {collection_id}", exc) from None
     collection["images"] = images.get("results", images) if isinstance(images, dict) else images
     return collection
 

@@ -563,6 +563,31 @@ class SourcesTest(RefmapsTestBase):
         self.assertTrue(any(call.startswith(refmaps.NEUROVAULT_API) for call in session.calls))
         self.assertEqual(refmaps.resample_to(entry, self.bundle, root=self.root).shape, (self.bundle.n_voxels,))
 
+    def test_neurovault_read_failures_are_short(self):
+        import requests
+
+        class Failing:
+            def __init__(self, exc):
+                self.exc = exc
+
+            def get(self, url, **kwargs):
+                raise self.exc
+
+        proxy = requests.exceptions.ProxyError("HTTPSConnectionPool(host='neurovault.org', port=443): Max retries exceeded with url: /api/images/63/ "
+                                               "(Caused by ProxyError('Unable to connect to proxy', NewConnectionError('Failed to establish')))")
+        for call in (lambda: refmaps.neurovault_image(63, session=Failing(proxy)), lambda: refmaps.neurovault_collection(3324, session=Failing(proxy)),
+                     lambda: refmaps.add_neurovault(image_id=63, root=self.root, session=Failing(proxy))):
+            with self.assertRaises(refmaps.RefmapsError) as raised:
+                call()
+            message = str(raised.exception)
+            self.assertEqual(message, "No connection to neurovault.org: the proxy server cannot be reached. Check the network and try again.")
+            self.assertNotIn("Max retries", message)
+        response = requests.Response()
+        response.status_code = 404
+        with self.assertRaises(refmaps.RefmapsError) as raised:
+            refmaps.neurovault_image(63, session=Failing(requests.HTTPError("404 Client Error: Not Found for url: https://neurovault.org/api/images/63/", response=response)))
+        self.assertEqual(str(raised.exception), "NeuroVault image 63 could not be read: NeuroVault answered HTTP 404 (no such item).")
+
     def test_vdh_needs_terms_and_pinned_commit(self):
         with self.assertRaises(refmaps.RefmapsError) as raised:
             refmaps.add_vdh(root=self.root, offline=True)
