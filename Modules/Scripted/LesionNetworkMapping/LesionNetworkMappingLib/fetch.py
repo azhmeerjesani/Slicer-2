@@ -123,6 +123,12 @@ class ChecksumError(FetchError):
         self.url = url
 
 
+class DiskFullError(FetchError):
+    """A file could not be written because the disk (or the quota) is full; the partial file was removed."""
+
+    code = "disk_full"
+
+
 class NotDownloadableError(FetchError):
     """The entry is a link-out or derived: there is nothing to download (``code`` "link_out" or "derive")."""
 
@@ -807,6 +813,27 @@ def _content_range(header):
     return start, total
 
 
+def _disk_full_error(part, exc):
+    """Remove the partial file that filled the disk and return the error to raise (``None`` when ``exc`` is another error).
+
+    A partial file left on a full disk would make every later write there fail, even for a file that fits, and nothing
+    in the app frees the space, so it is not kept for a Range resume (an interrupted connection still keeps it).
+    """
+    from . import jobs
+
+    if not jobs.is_disk_full_error(exc):
+        return None
+    try:
+        os.remove(part)
+    except OSError:
+        pass
+    folder = os.path.dirname(part)
+    return DiskFullError(
+        f"The disk is full: the file could not be saved in {folder}. The partial download was removed. Free some space on that disk and try again.",
+        path=folder,
+    )
+
+
 def _stream(session, url, part, size_hint, progress, cancel):
     """One attempt: download ``url`` into ``part``, resuming from its current size. Returns normally when the file is complete."""
     import requests
@@ -855,6 +882,11 @@ def _stream(session, url, part, size_hint, progress, cancel):
                     _raise_if_cancelled(cancel, done)
         except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError, requests.exceptions.ContentDecodingError) as exc:
             raise _Transient(network_problem(exc, url), offline=done == start, detail=f"the connection dropped after {done} bytes: {exc}") from None
+        except OSError as exc:
+            full = _disk_full_error(part, exc)
+            if full is None:
+                raise
+            raise full from None
         if expected_total is not None and done != expected_total:
             raise _Transient(f"The connection to {host_of(url)} closed after {done:,} of {expected_total:,} bytes. Check the network and try again.",
                              detail=f"the connection closed after {done} of {expected_total} bytes")
@@ -888,6 +920,8 @@ def _download(resource, dest, progress, cancel, session, retries):
                 while time.monotonic() < deadline:
                     _raise_if_cancelled(cancel, os.path.getsize(part) if os.path.exists(part) else 0)
                     time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+            except DiskFullError:
+                raise  # another URL would fill the same disk
             except FetchError as exc:
                 last = exc
                 break
@@ -1043,6 +1077,11 @@ def _extract(resource, cache, archive, override=False):
                 for chunk in iter(lambda: source.read(HASH_CHUNK_BYTES), b""):
                     target.write(chunk)
                     digest.update(chunk)
+    except OSError as exc:
+        full = _disk_full_error(part, exc)
+        if full is None:
+            raise
+        raise full from None
     except zipfile.BadZipFile as exc:
         os.remove(archive)
         _drop_record(cache, _relpath(cache, archive))

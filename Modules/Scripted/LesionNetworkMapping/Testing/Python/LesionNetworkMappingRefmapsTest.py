@@ -542,6 +542,76 @@ class SourcesTest(RefmapsTestBase):
         self.assertEqual([item["id"] for item in refmaps.entries(self.root)], [entry["id"]])
         self.assertEqual(kept(), before)
 
+    def test_full_disk_keeps_no_partial_file_and_later_additions_work(self):
+        """BB-1: the .part file that filled the disk was kept, so every later addition (even a small map) failed with
+        "[Errno 28] No space left on device". The partial file is removed and the message says the disk is full and where.
+        """
+        import errno
+        import functools
+        import gzip
+        import http.server
+        import threading
+        from unittest import mock
+
+        served = os.path.join(self.tmp, "served")
+        os.makedirs(served)
+        with open(os.path.join(served, "big.nii.gz"), "wb") as f:
+            f.write(gzip.compress(os.urandom(3_000_000), compresslevel=1))
+        nifti.write_nifti(os.path.join(served, "small.nii.gz"), _smooth_field(self.rng, SHAPE).astype(np.float32), self.bundle.affine)
+
+        class QuietHandler(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(QuietHandler, directory=served))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        capacity = 1_000_000  # a small disk: the files below the registry root may hold this many bytes
+        realOpen = open
+
+        def used():
+            return sum(os.path.getsize(os.path.join(d, n)) for d, _, names in os.walk(self.root) for n in names)
+
+        class _Limited:
+            def __init__(self, path, *args):
+                self._f = realOpen(path, *args)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self._f.close()
+
+            def write(self, data):
+                if used() + len(data) > capacity:
+                    raise OSError(errno.ENOSPC, "No space left on device")
+                return self._f.write(data)
+
+            def __getattr__(self, name):
+                return getattr(self._f, name)
+
+        def SmallDisk(path, mode="r", *args, **kwargs):  # only the downloaded files (binary writes) fill the small disk
+            return _Limited(path, mode, *args, **kwargs) if "b" in mode and ("w" in mode or "a" in mode) else realOpen(path, mode, *args, **kwargs)
+
+        def partials():
+            folder = os.path.join(self.root, refmaps.FILES_DIR)
+            return [n for _, _, names in os.walk(folder) for n in names if n.endswith(".part")] if os.path.isdir(folder) else []
+
+        with mock.patch.dict(os.environ, {"NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}), mock.patch.object(fetch, "open", SmallDisk, create=True):
+            with self.assertRaises(refmaps.RefmapsError) as raised:
+                refmaps.add_url(base + "/big.nii.gz", root=self.root, offline=False)
+            message = str(raised.exception)
+            self.assertIn("disk is full", message)
+            self.assertIn(os.path.join(self.root, refmaps.FILES_DIR), message)  # where
+            self.assertNotIn("Errno", message)
+            self.assertEqual(partials(), [], "the partial file that filled the disk is not kept")
+            self.assertEqual(refmaps.entries(self.root), [])
+            entry = refmaps.add_url(base + "/small.nii.gz", root=self.root, offline=False)  # a map that fits can still be added
+        self.assertEqual([item["id"] for item in refmaps.entries(self.root)], [entry["id"]])
+        self.assertEqual(partials(), [])
+
     def test_neurovault_offline(self):
         path = self.writeMap("pain.nii.gz", _smooth_field(self.rng, SHAPE))
         url = "https://neurovault.org/media/images/3324/pain.nii.gz"
