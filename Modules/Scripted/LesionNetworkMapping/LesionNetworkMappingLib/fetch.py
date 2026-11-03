@@ -665,6 +665,35 @@ class _PartLock:
             pass
 
 
+_URL_RE = re.compile(r"https?://[^\s,;)\]'\"]+")
+
+
+def short_message(text, limit=160):
+    """One readable line of a failure text for a label: the first line, URLs replaced by their host, cut at a word with an ellipsis.
+
+    Labels word-wrap at spaces only: a long URL or an exception chain is clipped at the edge of the panel, and a
+    hard cut at a fixed length ends in the middle of a word.
+    """
+    lines = str(text or "").strip().splitlines()
+    line = " ".join(_URL_RE.sub(lambda match: host_of(match.group(0)), lines[0] if lines else "").split())
+    if len(line) <= limit:
+        return line
+    cut = line[:limit - 1]
+    if " " in cut and line[limit - 1] != " ":
+        cut = cut.rsplit(" ", 1)[0]
+    return cut.rstrip(" ,;:.") + "\u2026"
+
+
+def user_message(exc, limit=160):
+    """The sentence a failed download shows to the user: the text of a :class:`FetchError` (already one sentence), else a
+    plain notice (the exception class and its text go to the log, not to the screen).
+    """
+    if isinstance(exc, FetchError):
+        return short_message(getattr(exc, "message", None) or str(exc), limit)
+    logging.info(f"Slicer Studio: unexpected download failure: {exc!r}")
+    return "The download failed unexpectedly. The details are in the log."
+
+
 class _Transient(Exception):
     """A download attempt failed in a way that may pass (dropped connection, 5xx); ``offline`` for no connection.
 

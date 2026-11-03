@@ -16,6 +16,7 @@ They need the Slicer application::
 Under a plain PythonSlicer (the library test glob) the module is skipped.
 """
 
+import time
 import unittest
 
 try:
@@ -409,6 +410,50 @@ class LesionNetworkMappingNetworksUITest(unittest.TestCase):
         text = card_clusters.ClustersCard.detailText(stub, row)
         self.assertIn("peak at -1, -59, 40", text)
         self.assertNotIn("-0", text)
+
+    def test_atlas_download_failure_banner_is_a_readable_sentence(self):
+        """Get atlases without a network: the Clusters banner says in one sentence what happened, with no exception class names,
+        atlas ids, URLs or urllib3 chains (they were clipped mid-word and ran below the fold).
+        """
+        from unittest import mock
+
+        from LesionNetworkMappingLib import fetch
+        from LesionNetworkMappingUI import card_clusters
+
+        reason = "No connection to templateflow.s3.amazonaws.com: the proxy server cannot be reached. Check the network and try again."
+        self.assertEqual(card_clusters.AtlasManager.failureText([], 2), "")
+        self.assertEqual(card_clusters.AtlasManager.failureText([reason, reason], 2), "The atlases could not be downloaded. " + reason)
+        self.assertEqual(card_clusters.AtlasManager.failureText([reason], 2), "Some atlases could not be downloaded. " + reason)
+
+        manager = card_clusters.AtlasManager()
+        ids = ["schaefer2018-400-7n-2mm-2009c", "tian-s1-2mm-2009c"]
+
+        def fail(resource, progress=None, **kwargs):
+            raise fetch.OfflineError(reason + " A partial download is kept and resumes next time.")
+
+        with mock.patch.object(card_clusters.AtlasManager, "isCached", return_value=False), mock.patch.object(fetch, "fetch_set", fail):
+            self.assertTrue(manager.fetch(ids))
+            deadline = time.time() + 30
+            while manager.fetching is not None and time.time() < deadline:  # cleared by the poll timer when the job is done
+                slicer.app.processEvents()
+                time.sleep(0.05)
+        self.assertIsNone(manager.fetching)
+        self.assertTrue(manager.message.startswith("The atlases could not be downloaded. " + reason), manager.message)
+        for raw in ("OfflineError", "schaefer2018", "tian-s1", "https://", "HTTPSConnectionPool"):
+            self.assertNotIn(raw, manager.message)
+        self.assertLess(len(manager.message), 400)
+        self.assertEqual(manager.message.count(reason), 1)  # the same reason of two atlases is said once
+
+        # The banner breaks a long host name instead of clipping it at the edge of the label
+        from LesionNetworkMappingUI import widgets
+
+        frame = widgets.banner("short words stay as they are", level="warn")
+        label = frame.findChild(qt.QLabel, "LNMBannerText")
+        self.assertEqual(label.text, "short words stay as they are")
+        widgets.setBannerText(frame, manager.message)
+        broken = label.text
+        self.assertIn("templateflow.\u200bs3.\u200bamazonaws.\u200bcom", broken)
+        self.assertEqual(broken.replace("\u200b", ""), manager.message)
 
     def test_scheme_click_without_buttonClicked_int(self):
         card = self.card

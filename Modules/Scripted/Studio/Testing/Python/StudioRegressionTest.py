@@ -478,6 +478,29 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertNotIn("planes", lesionqc.dimensionColumns(info, figure=True))
         self.assertNotIn("planes", lesionqc.dimensionColumns(info, planeNormal=[0.0, 1.0, 0.0]))
 
+    # Atlas download failure (BB-1)
+
+    def test_atlas_download_failure_chip_is_one_readable_line(self):
+        """The Draw QC chip names the reason of a failed "Get atlases" job as a whole sentence: no cut at 120 characters in the
+        middle of a word, no URL that cannot wrap, and the text stays a short sentence.
+        """
+        from StudioLib import lesionqc
+
+        raw = ("No connection to templateflow.s3.amazonaws.com: the proxy server cannot be reached. Check the network and try again. "
+               "See https://templateflow.s3.amazonaws.com/tpl-MNI152NLin6Asym/tpl-MNI152NLin6Asym_res-02_atlas-HOCPAL_desc-th25_dseg.nii.gz for the file.\nSecond line")
+        for error, expectedPart in ((raw, "No connection to templateflow.s3.amazonaws.com: the proxy server cannot be reached."), ("", "unknown error")):
+            core = types.SimpleNamespace(_atlasProcess=object(), _atlasFailed=True, _atlasError=error, atlasJob="running", _changed=lambda: None)
+            lesionqc.QcCore._finishAtlasJob(core)
+            reason = core.atlasJob
+            self.assertIn(expectedPart, reason)
+            self.assertNotIn("\n", reason)
+            self.assertNotIn("https://", reason)
+            self.assertLessEqual(len(reason), 160)
+            if error:
+                # cut at a word, ending in an ellipsis, never in the middle of a word or a URL
+                self.assertTrue(reason.endswith("\u2026") or reason.endswith("."), reason)
+                self.assertNotIn("amazonaws.c ", reason + " ")
+
     # Quit (W4-I1)
 
     def test_2_quit_with_chips_pending(self):

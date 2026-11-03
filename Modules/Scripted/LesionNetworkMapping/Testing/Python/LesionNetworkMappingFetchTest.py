@@ -286,6 +286,26 @@ class FetchTest(_Base):
         ):
             self.assertEqual(fetch.network_problem(exc, url), expected)
 
+    def test_short_message_and_user_message_for_labels(self):
+        long_text = "No connection to host.example: " + " ".join(["word"] * 80)
+        short = fetch.short_message(long_text, 100)
+        self.assertLessEqual(len(short), 100)
+        self.assertTrue(short.endswith("\u2026"))
+        self.assertTrue(short[:-1].endswith("word"), short)  # cut between words
+        # URLs are replaced by their host, only the first line is kept, and short texts stay as they are
+        text = "HTTP 404 for https://templateflow.s3.amazonaws.com/tpl-X/file.nii.gz (see log)\nsecond line"
+        self.assertEqual(fetch.short_message(text), "HTTP 404 for templateflow.s3.amazonaws.com (see log)")
+        self.assertEqual(fetch.short_message(""), "")
+        self.assertEqual(fetch.short_message(None), "")
+        # a single token longer than the limit is still cut, with an ellipsis
+        self.assertEqual(fetch.short_message("x" * 50, 10), "x" * 9 + "\u2026")
+        # a download failure: the text of a FetchError, a plain notice for anything else (no class name, no raw text)
+        self.assertEqual(fetch.user_message(fetch.OfflineError("No connection to a.example. Check the network and try again.")),
+                         "No connection to a.example. Check the network and try again.")
+        other = fetch.user_message(ValueError("HTTPSConnectionPool(host='a.example', port=443): Max retries exceeded"))
+        for raw in ("ValueError", "HTTPSConnectionPool", "Max retries"):
+            self.assertNotIn(raw, other)
+
     def test_server_that_ignores_range_restarts_cleanly(self):
         url = self.serve("/file.bin", self.body, ignore_range=True)
         entry = entry_for(url, self.body)

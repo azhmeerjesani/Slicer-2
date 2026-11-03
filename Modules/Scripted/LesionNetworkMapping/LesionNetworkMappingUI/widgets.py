@@ -7,6 +7,7 @@ only set on a chip or banner when the style does not paint roles.
 """
 
 import html
+import re
 
 import ctk
 import qt
@@ -257,6 +258,20 @@ def chip(text, level="neutral"):
 #
 
 
+def breakableText(text, longest=24):
+    """``text`` with a zero-width space after the ``. / _ - :`` of every word longer than ``longest`` characters.
+
+    A word-wrapped QLabel breaks at spaces only, so a long host name or file name is clipped at the right edge of the
+    label without an ellipsis. Words up to ``longest`` characters (all of the usual text) are left as they are.
+    """
+    def fix(match):
+        word = match.group(0)
+        return re.sub(r"([./_:-])", "\\1\u200b", word) if len(word) > longest else word
+
+    text = str(text)
+    return text if "<" in text else re.sub(r"\S+", fix, text)  # rich text (markup) is left alone
+
+
 def banner(text, actions=(), level="warn"):
     """Return a notice frame: a word-wrapped text and one button per ``(label, callback)`` of ``actions``.
 
@@ -270,7 +285,7 @@ def banner(text, actions=(), level="warn"):
     layout = qt.QHBoxLayout(frame)
     layout.setContentsMargins(10, 6, 6, 6)
     layout.setSpacing(6)
-    label = qt.QLabel(text)
+    label = qt.QLabel(breakableText(text))
     label.setObjectName("LNMBannerText")
     label.setWordWrap(True)
     label.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
@@ -310,7 +325,7 @@ def setBannerText(bannerFrame, text):
     """Change the text of a banner made by ``banner()``."""
     label = bannerFrame.findChild(qt.QLabel, "LNMBannerText")
     if label is not None:
-        label.setText(text)
+        label.setText(breakableText(text))
 
 
 #

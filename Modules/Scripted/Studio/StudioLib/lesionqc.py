@@ -1392,7 +1392,11 @@ class QcCore:
     def _finishAtlasJob(self):
         self._atlasProcess = None
         if self._atlasFailed:
-            self.atlasJob = (self._atlasError or _("unknown error")).splitlines()[0][:120]
+            try:
+                reason = _lnm("fetch").short_message(self._atlasError or "", 160)
+            except Exception:  # the chip must leave "running" whatever happens
+                reason = (self._atlasError or "").strip().splitlines()[0][:160] if (self._atlasError or "").strip() else ""
+            self.atlasJob = reason or _("unknown error")
         else:
             self.atlasJob = None
             _toast(_("Atlases ready: the location of the lesion is shown"), ms=3000)

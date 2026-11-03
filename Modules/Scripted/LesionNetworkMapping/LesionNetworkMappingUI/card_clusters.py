@@ -852,6 +852,16 @@ class AtlasManager:
     def busy(self):
         return self.fetching is not None and self.fetching["thread"].is_alive()
 
+    @staticmethod
+    def failureText(errors, total):
+        """The line shown when downloads failed: one readable sentence (the same reason once), "" when none failed."""
+        if not errors:
+            return ""
+        reasons = " ".join(reason if reason[-1:] in ".!?\u2026" else reason + "." for reason in dict.fromkeys(errors))  # one sentence per distinct reason, in order
+        if len(errors) < total:
+            return _("Some atlases could not be downloaded. {reason}").format(reason=reasons)
+        return _("The atlases could not be downloaded. {reason}").format(reason=reasons)
+
     def fetch(self, ids):
         """Download the missing atlases of ``ids`` in a background thread (an explicit user action; one at a time)."""
         if self.busy():
@@ -873,7 +883,8 @@ class AtlasManager:
 
                     fetch.fetch_set(resource, progress=progress)
                 except Exception as exc:
-                    state["errors"].append(f"{atlasId}: {type(exc).__name__}: {exc}")
+                    logging.info(f"Lesion network mapping: the atlas {atlasId} could not be downloaded: {exc!r}")
+                    state["errors"].append(fetch.user_message(exc))
             state["done"] = True
 
         timer = qt.QTimer()
@@ -885,7 +896,7 @@ class AtlasManager:
                 timer.stop()
                 self._status = None
                 self.fetching = None
-                self.message = _("Some atlases could not be downloaded: {errors}").format(errors="; ".join(state["errors"])) if state["errors"] else ""
+                self.message = self.failureText(state["errors"], len(ids))
             self.notify()
 
         timer.connect("timeout()", poll)
