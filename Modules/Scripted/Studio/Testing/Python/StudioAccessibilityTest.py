@@ -767,6 +767,93 @@ class StudioAccessibilityTest(ScriptedLoadableModule.ScriptedLoadableModuleTest)
         studioShell.dispose()
         self._pump(8)
 
+    def test_library_tab_order_follows_reading_order(self):
+        """Tab goes through the Library page as it is shown: the Continue card (built when data is first loaded) comes after
+        the header and before the project cards, the links and the recent files, and the inspector follows the page, its
+        "Open now" rows (rebuilt with the scene) above the project's buttons. The keyboard focus chain follows the creation
+        order of the widgets, which put the Continue card after the Recent rows and the inspector's rows before the cards
+        that were built later.
+        """
+        import shutil
+        import tempfile
+
+        from StudioLib import importer, library, projects
+
+        root = tempfile.mkdtemp(prefix="StudioLibraryTabOrder")
+        previous = os.environ.get(projects.ROOT_ENVIRONMENT)
+        os.environ[projects.ROOT_ENVIRONMENT] = root
+        try:
+            studioShell = self._applyStudio()
+            studioShell.switchTo("library")
+            importer.loadFiles([self._scanFile()], studioShell)
+            self._pump(8)
+            studioShell.switchTo("library")
+            self._waitFor(lambda: not getattr(library, "_tabOrderScheduled", False), 3000)
+            canvas = library.canvas()
+            self.assertTrue(canvas.widget.isVisible())
+            self.assertTrue(canvas.currentWork.widget.isVisible(), "the Continue card is shown")
+            stops = self._tabStops(canvas.widget)
+            names = [widget.objectName for widget in stops]
+            for name in ("StudioCurrentWorkContinueButton", "StudioLibraryNewStudyLink", "StudioLibraryClassicLink"):
+                self.assertIn(name, names)
+            self.assertLess(names.index("StudioLibraryOpenButton"), names.index("StudioCurrentWorkContinueButton"), "Continue after the header")
+            self.assertLess(names.index("StudioCurrentWorkDataLink"), names.index("StudioLibraryNewStudyLink"), "the Continue card before the links")
+            if "studioProjectCard" in names:
+                self.assertLess(names.index("StudioCurrentWorkContinueButton"), names.index("studioProjectCard"), "Continue before the projects")
+            if "StudioRecentRow" in names:
+                self.assertLess(names.index("StudioLibraryClassicLink"), names.index("StudioRecentRow"))
+            self._assertReadingOrder(stops, "down", "Library page")
+
+            # The inspector: after the page, "Open now" top to bottom, then the project's buttons
+            dock = self.mainWindow.findChild("QDockWidget", "PanelDockWidget")
+            self.assertTrue(dock.isVisible())
+
+            def inspectorStops():
+                # The Tab stops of the inspector in the order of the focus chain, from its first stop on the screen
+                contents = dock.widget()
+                found = []
+                widget = contents.nextInFocusChain()
+                while widget is not None and widget != contents and len(found) < 2000:
+                    if widget.isVisible() and widget.isEnabled() and int(widget.focusPolicy) & int(qt.Qt.TabFocus) and contents.isAncestorOf(widget):
+                        found.append(widget)
+                    widget = widget.nextInFocusChain()
+                top = min(range(len(found)), key=lambda index: (found[index].mapToGlobal(qt.QPoint(0, 0)).y(), found[index].mapToGlobal(qt.QPoint(0, 0)).x()))
+                return found[top:] + found[:top]
+
+            inspector = inspectorStops()
+            inspectorNames = [widget.objectName for widget in inspector]
+            self.assertIn("StudioOpenNowMenuButton", inspectorNames)
+            self._assertReadingOrder(inspector, "down", "Library inspector")
+            if "StudioProjectOverviewShowButton" in inspectorNames:
+                self.assertLess(inspectorNames.index("StudioOpenNowMenuButton"), inspectorNames.index("StudioProjectOverviewShowButton"))
+            chain = []
+            widget = canvas.widget
+            for _index in range(1500):
+                widget = widget.nextInFocusChain()
+                if widget == canvas.widget:
+                    break
+                if widget.isVisible() and widget.isEnabled() and int(widget.focusPolicy) & int(qt.Qt.TabFocus):
+                    chain.append(widget)
+            chainNames = [widget.objectName for widget in chain]
+            self.assertLess(chainNames.index("StudioCurrentWorkContinueButton"), chainNames.index("StudioOpenNowMenuButton"),
+                            "the page is reached before the inspector")
+
+            # Rows that are built again (a node was renamed) keep their place
+            node = slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")[0]
+            node.SetName("A scan that was renamed")
+            studioShell.switchTo("library")
+            self._waitFor(lambda: not getattr(library, "_tabOrderScheduled", False), 3000)
+            self._pump(4)
+            self._assertReadingOrder(inspectorStops(), "down", "Library inspector after a rename")
+            self._assertReadingOrder(self._tabStops(canvas.widget), "down", "Library page after a rename")
+        finally:
+            if previous is None:
+                os.environ.pop(projects.ROOT_ENVIRONMENT, None)
+            else:
+                os.environ[projects.ROOT_ENVIRONMENT] = previous
+            self._pump(4)
+            shutil.rmtree(root, ignore_errors=True)
+
     def _chainStops(self, root, shownOnly=True):
         """The Tab stops inside ``root`` (the visible, enabled ones, or all), in the order of the focus chain from ``root``."""
         tab = int(qt.Qt.TabFocus)

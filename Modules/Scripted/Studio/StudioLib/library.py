@@ -2401,6 +2401,7 @@ class OpenNowCard(qt.QObject):
         self.moreLink.setVisible(extra > 0)
         if extra > 0:
             self.moreLink.setText(_("+{count} more · Show in Data module").format(count=extra))
+        scheduleTabOrder()
         return len(items)
 
     def rowNames(self):
@@ -5866,6 +5867,11 @@ class LibraryCanvas(qt.QObject):
 
     def refreshData(self):
         """Show the open study, else the current work (and the loaded set) when data is loaded, else the empty state."""
+        shown = self._refreshData()
+        scheduleTabOrder()
+        return shown
+
+    def _refreshData(self):
         studySession = _studySession()
         if studySession is not None:
             self._showStudy(True)
@@ -5960,6 +5966,7 @@ class LibraryCanvas(qt.QObject):
         """The Projects section listed the projects again (a project changed, or the folder was chosen or changed)."""
         self._syncCurrentProject()
         self._refreshCaption()
+        scheduleTabOrder()
 
     def _syncCurrentProject(self):
         """Show the open project (as the Projects section lists it) on the Continue card."""
@@ -5978,6 +5985,7 @@ class LibraryCanvas(qt.QObject):
                 logging.error(f"Studio Library: the Studies section failed:\n{traceback.format_exc()}")
         self._refreshCaption()
         self.recentList.refresh(force=False)
+        scheduleTabOrder()
 
     def focusFirst(self):
         """Focus the subject list of an open study, else "Continue in Draw" when the current work is shown, else the first recent
@@ -6325,6 +6333,10 @@ class LibraryPanel(qt.QObject):
         """
         if not self.isBuilt():
             return
+        self._refresh()
+        scheduleTabOrder()
+
+    def _refresh(self):
         withCanvas = self.withCanvas()
         studySession = _studySession()
         if studySession is not None:
@@ -6404,6 +6416,35 @@ def _livePanel():
 
 _canvas = None
 _sceneWatcher = None
+_tabOrderScheduled = False
+
+
+def scheduleTabOrder():
+    """Put the Tab order of the Library canvas and of the Library inspector in their reading order, once the cards that are
+    being built or rebuilt are all there. The keyboard focus chain of Qt follows the creation order of the widgets, which is
+    not the order on the screen where a card is created late (the Continue card, the study filter chips, the Import card) or
+    rebuilt (the "Open now" rows), so that Tab would reach the cards of the middle of the page after its bottom links and
+    after the inspector (USABILITY 9.1). Many refreshes in a row make one arrangement.
+    """
+    global _tabOrderScheduled
+    if _tabOrderScheduled:
+        return
+    _tabOrderScheduled = True
+    qt.QTimer.singleShot(0, _arrangeTabOrder)
+
+
+def _arrangeTabOrder():
+    global _tabOrderScheduled
+    _tabOrderScheduled = False
+    try:
+        if _canvas is not None and _isAlive(_canvas.widget) and _canvas.widget.isVisible():
+            ui.arrangeTabOrder(_canvas.widget)
+        panel = _livePanel()
+        shell = _shell()
+        if shell is not None and panel is not None and panel.isBuilt() and panel.widget.isVisible():
+            shell.arrangeInspectorTabOrder()
+    except Exception:
+        logging.error(f"Studio Library: the Tab order could not be arranged:\n{traceback.format_exc()}")
 
 
 def canvas():
