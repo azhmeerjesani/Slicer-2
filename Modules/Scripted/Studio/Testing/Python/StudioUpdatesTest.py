@@ -1409,6 +1409,91 @@ fi
         self.assertEqual(dialog.state, "failed")
         self.assertFalse(os.path.exists(os.path.join(self.stateDir, updates.STAGED_MARKER)))
 
+    def _closedDuringDownload(self, version="1.2.0", tamper=None, cancel=False):
+        """Update now with a slow download, then Esc (reject) on the dialog while it downloads. Return the toasts shown
+        (text, action, actionText) until the job ended, with the service and the dialog.
+        """
+        updates = self.updates
+        self._publish(version, tamper=tamper)
+        _Handler.slowPaths = {"/" + self.updates_assetName(version)}
+        target = self._fakeLinuxInstall("0.9.0")
+        updates._installableOverride = True
+        updates.installTargetOverride = target
+        service = self._service()
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        toasts = []
+
+        class FakeShell:
+            def toast(self, text, ms=1600, action=None, actionText=None, sticky=False, level="info", toolTip=None):
+                toasts.append((text, action, actionText))
+
+        saved = updates._shell
+        updates._shell = FakeShell
+        self.addCleanup(setattr, updates, "_shell", saved)
+        dialog = service.updateNow()
+        self.assertEqual(dialog.state, "downloading")
+        if cancel:
+            dialog.secondaryButton.click()
+        dialog.dialog.reject()  # Esc
+        self.assertFalse(dialog.wanted)
+        self.assertIsNotNone(service.job, "the download goes on")
+        self.assertTrue(self._waitFor(lambda: service.job is None, 30))
+        return toasts, service, dialog
+
+    def updates_assetName(self, version):
+        return f"Slicer-5.13.0-studio{version}-linux-amd64.tar.gz"
+
+    def test_UpdateDialogClosedDuringDownloadSaysWhenReady(self):
+        """Esc on the update dialog during the download leaves the job running: the user is told when the update is
+        ready, with a button that shows the dialog (Restart now / Install when I quit) again.
+        """
+        if self.updates.platformKey() != "linux-x86_64":
+            self.skipTest("the Linux package path is tested on Linux")
+        toasts, service, dialog = self._closedDuringDownload()
+        self.assertEqual(dialog.state, "ready", dialog.text.text)
+        self.assertEqual(service.prepared.version, "1.2.0")
+        self.assertEqual(len(toasts), 1, toasts)
+        text, action, actionText = toasts[0]
+        self.assertIn("1.2.0", text)
+        self.assertIn("ready", text)
+        self.assertEqual(actionText, "Show")
+        action()
+        self.assertTrue(dialog.dialog.isVisible())
+        self.assertEqual(dialog.state, "ready")
+        self.assertTrue(dialog.primaryButton.isVisible())
+
+    def test_UpdateDialogClosedDuringDownloadSaysWhenFailed(self):
+        if self.updates.platformKey() != "linux-x86_64":
+            self.skipTest("the Linux package path is tested on Linux")
+        toasts, _service, dialog = self._closedDuringDownload(tamper="sha256")
+        self.assertEqual(dialog.state, "failed")
+        self.assertEqual(len(toasts), 1, toasts)
+        self.assertIn("could not be downloaded", toasts[0][0])
+        self.assertEqual(toasts[0][2], "Show")
+        toasts[0][1]()
+        self.assertTrue(dialog.dialog.isVisible())
+        self.assertEqual(dialog.state, "failed", "the dialog shows the failure again")
+
+    def test_UpdateDialogOpenOrCancelledDownloadShowsNoToast(self):
+        """Nothing extra is announced while the dialog is open (it shows the result itself), nor after the user's own Cancel."""
+        if self.updates.platformKey() != "linux-x86_64":
+            self.skipTest("the Linux package path is tested on Linux")
+        toasts, service, _dialog = self._closedDuringDownload(cancel=True)
+        self.assertEqual(toasts, [], "the user cancelled it themselves")
+        toasts2 = []
+
+        class FakeShell:
+            def toast(self, text, *args, **kwargs):
+                toasts2.append(text)
+
+        self.updates._shell = FakeShell
+        service2 = self._service()
+        service2.status = service.status
+        service2.updateDialog = None
+        dialog2 = service2.updateNow()
+        self.assertTrue(self._waitFor(lambda: dialog2.state in ("ready", "failed"), 30), dialog2.state)
+        self.assertEqual(toasts2, [], "the dialog stayed open and shows the result")
+
     def test_ReusedUpdateDialogTitleNamesVersionBeingInstalled(self):
         """Update now for 1.2.0 fails and the dialog is closed; a later check finds 1.3.0 and Update now reuses the dialog:
         its title names 1.3.0, not the version of the failed attempt.

@@ -2255,6 +2255,8 @@ class UpdateDialog:
         self.service = service
         self.task = None
         self.state = "idle"
+        #: The user pressed Cancel during the download: its end is then not announced
+        self._cancelRequested = False
         #: Open (shown and not closed by the user), also while hidden along with its parent window
         self.wanted = False
         status = service.status
@@ -2340,6 +2342,7 @@ class UpdateDialog:
         if reason:
             self._setState("unavailable", reason)
             return
+        self._cancelRequested = False
         try:
             self.task = self.service.startJob(self._onJobDone)
         except updates_install.InstallError as error:
@@ -2380,10 +2383,34 @@ class UpdateDialog:
         if error is not None:
             manual = getattr(error, "manualSteps", None)
             self._setState("failed", str(error) + (" " + manual if manual else "") + " " + _("Slicer Studio was not changed."))
+        else:
+            self._setState("ready", _("Slicer Studio {version} was downloaded and checked. Slicer Studio restarts to install it; "
+                                      "you are asked to save unsaved work, and autosaved work is offered for recovery after the restart.").format(
+                version=prepared.version))
+        self._announceIfClosed(prepared, error)
+
+    def _showAgain(self):
+        """Show the closed dialog again as it is (the result stays; Update now would start a failed download over)."""
+        if _isAlive(self.dialog):
+            self.setParentWindow(self.service._updateDialogParent())
+            self.show()
+
+    def _announceIfClosed(self, prepared, error):
+        """The dialog was closed (Esc, the close button) while the download went on: tell the user how it ended, with a
+        button that shows the dialog again (Restart now, Install when I quit, Try again). Otherwise the update is
+        prepared, or has failed, without any sign, and is discarded when the application quits.
+        """
+        if self.wanted or self._cancelRequested:
+            return  # the dialog shows the result, or the user cancelled it themselves
+        shell = _shell()
+        if shell is None:
             return
-        self._setState("ready", _("Slicer Studio {version} was downloaded and checked. Slicer Studio restarts to install it; "
-                                  "you are asked to save unsaved work, and autosaved work is offered for recovery after the restart.").format(
-            version=prepared.version))
+        if error is None:
+            text = _("Slicer Studio {version} is ready to install").format(version=prepared.version)
+        else:
+            status = self.service.status
+            text = _("Slicer Studio {version} could not be downloaded").format(version=status.version if status is not None else "?")
+        shell.toast(text, 8000, action=self._showAgain, actionText=_("Show"), sticky=True, level="consequence")
 
     def preparedInstead(self, preparedVersion, version):
         """The update shown is ready but is not the latest one, and it cannot be taken back."""
@@ -2409,6 +2436,7 @@ class UpdateDialog:
         if self.state == "downloading":
             if self.task is not None:
                 # The job stops at its next check (the preparation removes what it extracted)
+                self._cancelRequested = True
                 self.task.cancel()
                 self.secondaryButton.setEnabled(False)
                 self._setText(_("Cancelling…"))
