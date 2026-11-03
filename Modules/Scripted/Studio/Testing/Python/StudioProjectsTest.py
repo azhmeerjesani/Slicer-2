@@ -5403,6 +5403,76 @@ class StudioProjectsTest(unittest.TestCase):
                 owner.widget.deleteLater()
             slicer.app.processEvents()
 
+    def test_70_tab_goes_through_the_project_cards_in_the_order_they_are_shown(self):
+        """Qt's focus chain follows the creation order of the widgets, so the cards that a refresh built later (the card of
+        the project that was just saved, which then moves to the first place; the cards after a new sort order) were
+        reached after the links below the grid. Tab goes through the cards as they are shown, before those links.
+        """
+        from StudioLib import projects_ui
+
+        projects = self.projects
+        created = [projects.createProject(f"Case {number}") for number in range(1, 7)]
+        parent = qt.QWidget()
+        parent.resize(1000, 800)
+        layout = qt.QVBoxLayout(parent)
+        section = projects_ui.ProjectsSection()
+        layout.addWidget(section.widget)
+        # Created after the section, shown below it (like the links of the Library page)
+        link = qt.QPushButton("Link below the cards", parent)
+        layout.addWidget(link)
+        layout.addStretch(1)
+
+        def pump(seconds):
+            end = time.time() + seconds
+            while time.time() < end:
+                slicer.app.processEvents()
+                time.sleep(0.02)
+
+        def stamp(project, offset):
+            self.io.atomicWriteJson(projects.projectFile(project.path), {"name": project.name, "modified": projects._isoTime(time.time() + offset)})
+
+        def shown():
+            cards = section.cards()
+            positions = {id(card): (card.mapTo(parent, qt.QPoint(0, 0)).y(), card.mapTo(parent, qt.QPoint(0, 0)).x()) for card in cards}
+            return [str(card.property("studioProjectPath")) for card in sorted(cards, key=lambda card: positions[id(card)])]
+
+        def tabbed():
+            order = []
+            widget = section.sortButton
+            for _ in range(400):
+                widget = widget.nextInFocusChain()
+                if widget == section.sortButton:
+                    break
+                if widget.objectName == "studioProjectCard" and widget.window() == parent.window():
+                    order.append(str(widget.property("studioProjectPath")))
+                elif widget == link:
+                    order.append("link")
+            return order
+
+        try:
+            for number, project in enumerate(created):
+                stamp(project, -60 * number)
+            parent.show()
+            section.refresh()
+            pump(0.3)
+            self.assertEqual(len(section.cards()), 6)
+            self.assertGreater(len({card.mapTo(parent, qt.QPoint(0, 0)).y() for card in section.cards()}), 1, "the cards are on two rows")
+            self.assertEqual(tabbed(), shown() + ["link"], "Tab goes through the cards as shown, then to the link")
+            # The 3rd project is saved: its card is the only one that is built again and is shown first
+            stamp(created[2], 120)
+            section.refresh()
+            pump(0.3)
+            self.assertEqual(shown()[0], created[2].path)
+            self.assertEqual(tabbed(), shown() + ["link"], "the card that was built again is reached first, as shown")
+            # Another sort order only places the cards again
+            section.setSortOrder("name")
+            pump(0.3)
+            self.assertEqual(shown(), [project.path for project in created])
+            self.assertEqual(tabbed(), shown() + ["link"], "a new sort order changes the Tab order with the cards")
+        finally:
+            section.dispose()
+            parent.deleteLater()
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk

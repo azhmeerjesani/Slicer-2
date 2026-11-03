@@ -1416,6 +1416,9 @@ class ProjectsSection(qt.QObject):
         for column in range(4):
             self.grid.setColumnStretch(column, 1 if column < columns else 0)
         self.grid.setVerticalSpacing(2 if self.viewMode == "list" else CARD_SPACING)
+        # Qt's focus chain is the creation order of the widgets, and a refresh keeps cards and builds only the changed ones
+        # (the card of the saved project is the last widget created, and is shown first): Tab follows the cards as shown
+        ui.arrangeTabOrder(self.widget)
 
     def _thumbnail(self, info):
         return _scaledThumbnail(info.thumbnail, 4 * CARD_THUMBNAIL_HEIGHT // 3, CARD_THUMBNAIL_HEIGHT - 2, self._pixmaps)
