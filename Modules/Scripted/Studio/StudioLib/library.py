@@ -3235,8 +3235,11 @@ class StudyList(qt.QObject):
         widths = {"participant_id": 140, "group": 90, "volume_ml": 90, "space": 170, "status": 100, "qc": 70}
         if self.compact:
             widths = {"participant_id": 96, "group": 64, "volume_ml": 64, "space": 96, "status": 80, "qc": 48}
+        # The widths are designed for the 13 px body: they follow the application font (SPEC 4.5), and a header whose label
+        # is still longer than its width gets the width that the label needs, not a label cut mid-letter (BB-1)
         for index, entry in enumerate(self.model.columns):
-            header.resizeSection(index, widths.get(entry["key"], 110))
+            width = ui.fontPx(widths.get(entry["key"], 110))
+            header.resizeSection(index, max(width, header.sectionSizeHint(index)))
 
     # Selection
 

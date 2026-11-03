@@ -1089,6 +1089,58 @@ class StudioRegressionTest(unittest.TestCase):
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
 
+    def test_8b_study_list_headers_follow_the_font(self):
+        """The study list column widths follow the application font: at 125 % (17 px) no header ('Lesion mL') is cut
+        mid-letter (BB-1; the widths were fixed pixels).
+        """
+        import numpy as np
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import library, shell, study_ui, ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Header study")
+        os.makedirs(folder)
+        paths = []
+        for index in range(1, 3):
+            paths.append(os.path.join(folder, f"sub-0{index}_T1w.nii.gz"))
+            nifti.write_nifti(paths[-1], np.zeros(grid.shape, np.uint8), grid.affine)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        studyList = None
+        savedFont = qt.QFont(qt.QApplication.font())
+        try:
+            study_ui.createStudy(paths, studioShell, folder=folder)
+            large = qt.QFont(savedFont)
+            large.setPixelSize(17)
+            qt.QApplication.setFont(large)
+            studyList = library.StudyList()
+            studyList.widget.resize(900, 400)
+            studyList.widget.show()
+            studyList.refresh()
+            for _ in range(6):
+                slicer.app.processEvents()
+            header = studyList.table.horizontalHeader()
+            columns = [entry["key"] for entry in studyList.model.columns]
+            self.assertIn("volume_ml", columns)
+            for index, key in enumerate(columns):
+                self.assertGreaterEqual(header.sectionSize(index), header.sectionSizeHint(index), f"header {key} is cut")
+            # The designed width (90 px for a 13 px body) scales with the font
+            self.assertGreaterEqual(header.sectionSize(columns.index("volume_ml")), ui.fontPx(90))
+        finally:
+            qt.QApplication.setFont(savedFont)
+            if studyList is not None:
+                studyList.dispose()
+                studyList.widget.deleteLater()
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
+
     # Done -> next without a queue reaches the subjects left in progress (BB-1)
 
     def test_9_done_next_reaches_inprogress(self):
