@@ -269,11 +269,17 @@ def normalize_labels(labels):
     return sorted(set(out))
 
 
-def prepare_bids_study(input_dir, output_dir, group_column=None, group_map=None, score_columns=(), emit=None):
+def prepare_bids_study(input_dir, output_dir, group_column=None, group_map=None, score_columns=(), emit=None, bundle=None):
     """Create or update the study of a BIDS dataset in ``<output_dir>/sourcedata/slicer-lnm-study``; return (study path, summary).
 
     Only the lesion masks (:func:`is_lesion_file`) are added, one per subject (template space first; the
     others are reported), and only the participants.tsv rows of those subjects are imported.
+
+    With ``bundle`` (the run's connectome) the lesion metrics are measured and stored in the study, as the Studio session
+    does for its studies (volume_ml, n_parts, fractional_sum, outside_brain_pct, qc_flags and the file's mtime and size):
+    the preflight then trusts them and does not warn on every run that the metrics of an unchanged input "were measured now".
+    They are measured again by every run, so that they always describe the lesion files and the connectome of that run
+    (the study is shared by the runs of an output folder, which may use different connectomes).
     """
     from . import pipeline
     from .study import Study, is_missing
@@ -291,6 +297,7 @@ def prepare_bids_study(input_dir, output_dir, group_column=None, group_map=None,
     skipped = [{"participant_id": sid, "path": os.path.relpath(path, input_dir).replace(os.sep, "/"), "reason": "another lesion mask was chosen"}
                for sid, paths in lesions.items() for path in paths[1:]]
     participants = os.path.join(input_dir, "participants.tsv")
+    given_volumes = set()  # subjects whose volume_ml the dataset's participants.tsv gives (kept, not measured over)
     with tempfile.TemporaryDirectory(prefix="slicer-lnm-") as tmp:
         table = None
         if os.path.isfile(participants):
@@ -298,6 +305,7 @@ def prepare_bids_study(input_dir, output_dir, group_column=None, group_map=None,
             id_column = "participant_id" if "participant_id" in columns else columns[0]
             kept = [row for row in rows if row.get(id_column) in lesions]
             if kept:
+                given_volumes = {row[id_column] for row in kept if "volume_ml" in columns and not is_missing(row.get("volume_ml"))}
                 table = os.path.join(tmp, "participants.tsv")
                 with open(table, "w", encoding="utf-8", newline="") as f:
                     f.write("\t".join(columns) + "\n")
@@ -329,6 +337,8 @@ def prepare_bids_study(input_dir, output_dir, group_column=None, group_map=None,
         sid, space = f"sub-{bids_entities(path)[0]['sub']}", bids_lesion_space(path)
         if space and study.subject(sid).get("space") != space:
             study.set(sid, space=space)
+    if bundle is not None:
+        _store_lesion_metrics(study, [f"sub-{bids_entities(path)[0]['sub']}" for path in chosen], bundle, given_volumes)
     study.save()
     for item in report["warnings"]:
         summary.setdefault("warnings", []).append(item)
@@ -343,6 +353,21 @@ def prepare_bids_study(input_dir, output_dir, group_column=None, group_map=None,
         for item in skipped:
             emit("warning", code="bids_lesion_skipped", participant_id=item["participant_id"], message=f"{item['path']}: {item['reason']}")
     return study_path, summary
+
+
+def _store_lesion_metrics(study, sids, bundle, keep_volume=()):
+    """Measure the lesions of ``sids`` against the connectome and write the values to the study rows (not saved).
+
+    :param keep_volume: subjects whose volume_ml the dataset gave: it is kept, not measured over.
+
+    A lesion that cannot be read has no values: the preflight of the run excludes it as unreadable.
+    """
+    from . import preflight
+
+    for sid, values in preflight.remeasure(study, [sid for sid in sids if sid in study], bundle, outside=True).items():
+        if sid in keep_volume:
+            values.pop("volume_ml", None)
+        study.set(sid, values)
 
 
 # Pipeline configuration
@@ -784,7 +809,7 @@ def _main(argv):
                     emit("error", code="usage", message=f"Participant label(s) not in the input: {', '.join(missing)}")
                     return jobs.EXIT_USAGE
             if bids:
-                prepare_bids_study(input_dir, output_dir, args.group_column, args.group_map, [name.strip() for name in args.score_columns.split(",") if name.strip()], emit)
+                prepare_bids_study(input_dir, output_dir, args.group_column, args.group_map, [name.strip() for name in args.score_columns.split(",") if name.strip()], emit, bundle)
             if labels:
                 missing = sorted(set(labels) - set(Study.open(study_path).subject_ids))
                 if missing:

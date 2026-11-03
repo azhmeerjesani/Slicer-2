@@ -759,6 +759,87 @@ class CorruptLesionMessagesTest(unittest.TestCase):
         self.assertNotIn("sub-01", excluded)
 
 
+class BidsStudyMetricsTest(unittest.TestCase):
+    """The study that the BIDS app writes keeps the lesion metrics, so that an unchanged input is not reported as stale on every run."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="lnm-bids-metrics-")
+        cls.fx = fixture.make_fixture(os.path.join(cls.tmp, "f"), n_cases=3, n_controls=3, extra_rows=False)
+        cls.bundle = connectome.ConnectomeBundle.open(cls.fx["bundle"])
+        cls.bids = make_bids(cls.tmp, cls.fx["study"])
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def stale(self, study_path):
+        from LesionNetworkMappingLib import preflight
+
+        report = preflight.run_preflight(Study.open(study_path), self.bundle, accepted_terms=True)
+        return [check for check in report["checks"] if check["id"] == "metrics_stale"], report
+
+    def test_metrics_are_stored_and_trusted_by_the_next_preflight(self):
+        output = os.path.join(self.tmp, "stored out")
+        plain, _summary = app.prepare_bids_study(self.bids, os.path.join(self.tmp, "plain out"), group_map="patient=case,HC=control")
+        self.assertEqual({row["volume_ml"] for row in Study.open(plain).subjects}, {"n/a"}, "without the connectome nothing is measured")
+        self.assertTrue(self.stale(plain)[0], "the preflight of such a study still measures and says so")
+        study_path, _summary = app.prepare_bids_study(self.bids, output, group_map="patient=case,HC=control", bundle=self.bundle)
+        study = Study.open(study_path)
+        for row in study.subjects:
+            path = study.abspath(row["lesion"])
+            self.assertNotEqual(row["volume_ml"], "n/a", row["participant_id"])
+            self.assertEqual(int(float(row["lesion_size"])), os.path.getsize(path))
+            self.assertAlmostEqual(float(row["lesion_mtime"]), os.stat(path).st_mtime, places=2)
+            self.assertNotEqual(row["fractional_sum"], "n/a")
+        stale, report = self.stale(study_path)
+        self.assertEqual(stale, [])
+        self.assertEqual(report["measured"], {})
+        # a second run on the same output gives the same rows and still no stale metrics
+        again, _summary = app.prepare_bids_study(self.bids, output, group_map="patient=case,HC=control", bundle=self.bundle)
+        self.assertEqual(Study.open(again).subjects, study.subjects)
+        self.assertEqual(self.stale(again)[0], [])
+
+    def test_a_dataset_volume_is_kept(self):
+        bids = os.path.join(self.tmp, "bids volume")
+        shutil.copytree(self.bids, bids)
+        with open(os.path.join(bids, "participants.tsv"), encoding="utf-8") as f:
+            lines = f.read().splitlines()
+        with open(os.path.join(bids, "participants.tsv"), "w", encoding="utf-8") as f:
+            f.write("\n".join([lines[0] + "\tvolume_ml"] + [f"{line}\t{index + 1}.5" for index, line in enumerate(lines[1:])]) + "\n")
+        for _attempt in (1, 2):
+            study_path, _summary = app.prepare_bids_study(bids, os.path.join(self.tmp, "volume out"), group_map="patient=case,HC=control", bundle=self.bundle)
+            study = Study.open(study_path)
+            self.assertEqual([row["volume_ml"] for row in study.subjects], [f"{index + 1}.5" for index in range(len(study))])
+            self.assertEqual(self.stale(study_path)[0], [])
+
+    def test_a_changed_lesion_is_measured_again(self):
+        bids = os.path.join(self.tmp, "bids changed")
+        shutil.copytree(self.bids, bids)
+        output = os.path.join(self.tmp, "changed out")
+        study_path, _summary = app.prepare_bids_study(bids, output, group_map="patient=case,HC=control", bundle=self.bundle)
+        before = float(Study.open(study_path).subject("sub-04")["volume_ml"])
+        study = Study.open(study_path)
+        path = study.abspath(study.subject("sub-04")["lesion"])
+        data, affine, _header = nifti.read_nifti(path)
+        data = (data > 0).astype(np.uint8)
+        data[tuple(np.argwhere(data > 0)[:200].T)] = 0  # 200 voxels less: the file differs from the stored metrics
+        nifti.write_nifti(path, data, affine)
+        os.utime(path, ns=(os.stat(path).st_atime_ns, os.stat(path).st_mtime_ns + 10**9))
+        study_path, _summary = app.prepare_bids_study(bids, output, group_map="patient=case,HC=control", bundle=self.bundle)
+        self.assertLess(float(Study.open(study_path).subject("sub-04")["volume_ml"]), before)
+        self.assertEqual(self.stale(study_path)[0], [])
+
+    def test_a_run_does_not_warn_that_the_metrics_were_measured_now(self):
+        output = os.path.join(self.tmp, "run out")
+        for _attempt in (1, 2):
+            code, events, _stdout, stderr = cli(self.bids, output, "participant", "--connectome", self.fx["bundle"], *COMMON, *BIDS_OPTIONS)
+            self.assertEqual(code, 0, stderr[-2000:])
+            self.assertNotIn("metrics_stale", [event.get("code") for event in events if event["event"] == "warning"])
+        record = read_json(os.path.join(output, export.run_dir_name(self.bundle.name), pipeline.PIPELINE_JSON))
+        self.assertEqual([text for text in record.get("warnings", []) if "lesion metrics" in text], [])
+
+
 class UserTemplateSpaceTest(unittest.TestCase):
     """BIDS lesions on a user template (space-user<Id>, as ``normalize --template user:<id>`` names them, on the
     template's own grid, which header detection does not know) are template-space lesions, not native ones.

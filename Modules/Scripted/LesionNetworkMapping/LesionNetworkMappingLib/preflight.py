@@ -247,19 +247,26 @@ def measure_lesion(path, connectome_grid=None, connectome_mask=None, header=None
     return values, result
 
 
-def remeasure(study, sids, bundle=None, post=False):
+def remeasure(study, sids, bundle=None, post=False, outside=False):
     """The "re-measure" fix: measure the lesions of ``sids`` again (voxel reads).
 
     :param bundle: the connectome; without it fractional_sum is None (posted as n/a, which clears a
       value measured on another grid; a preflight then estimates it from volume_ml).
     :param post: post the values to the study inbox (``Study.post_results``, source "preflight"); the
       session merges them (single-writer rule: this never writes participants.tsv).
+    :param outside: also give outside_brain_pct, the share of the lesion outside the connectome's mask (needs ``bundle``).
     :return: {sid: values} (qc_flags joined with ";", keeping the row's flags that the hygiene checks
       do not compute, such as side_mismatch, csf and duplicate); unreadable files are left out.
     """
     study = _as_study(study)
     bundle = _as_bundle(bundle)
     grid = bundle.grid if bundle is not None else None
+    mask = None
+    if outside and bundle is not None:
+        try:
+            mask = (bundle.mask, bundle.affine)
+        except (OSError, ValueError):
+            mask = None
     hygiene_codes = ("nonbinary", "empty", "subvoxel", "outside", "xform", "grid", "multipart")
     out = {}
     for sid in sids:
@@ -268,9 +275,11 @@ def remeasure(study, sids, bundle=None, post=False):
         if not path or not os.path.isfile(path):
             continue
         try:
-            values, _ = measure_lesion(path, connectome_grid=grid, multifocal=row.get("multifocal") == "1")
+            values, result = measure_lesion(path, connectome_grid=grid, connectome_mask=mask, multifocal=row.get("multifocal") == "1")
         except (OSError, EOFError, ValueError, ArithmeticError, IndexError):
             continue
+        if mask is not None:
+            values["outside_brain_pct"] = None if result["outside_pct"] is None else round(result["outside_pct"], 2)
         kept = [code for code in _flags(row) if code not in hygiene_codes]
         codes = set(kept) | set(values["qc_flags"])
         values["qc_flags"] = ";".join(code for code in lesionops.QC_FLAGS if code in codes) or None
