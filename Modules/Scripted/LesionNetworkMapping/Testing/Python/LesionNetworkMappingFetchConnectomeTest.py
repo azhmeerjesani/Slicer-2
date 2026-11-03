@@ -13,6 +13,7 @@ Run without Slicer's GUI:
 """
 
 import copy
+import errno
 import hashlib
 import http.server
 import io
@@ -691,6 +692,33 @@ class FetchStreamingTest(FetchConnectomeBase):
                 finally:
                     timer.cancel()
                 self.assertFalse([e for e in self.events if e["event"] == "error"])
+
+    def test_a_full_disk_is_a_disk_space_error_and_leaves_no_temporary_file_after_the_resume(self):
+        real_save = np.save
+        calls = {"n": 0}
+
+        def full_disk_save(file, array, *args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 5:  # the third subject's data: a partial file, then the write fails like a full disk
+                file.write(b"\x93NUMPY partial")
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real_save(file, array, *args, **kwargs)
+
+        with mock.patch.object(connectome.np, "save", full_disk_save):
+            with self.assertRaises(jobs.JobError) as context:
+                self.fetch(streams=1)
+        self.assertEqual(context.exception.code, "disk_space")
+        self.assertIn("resume", context.exception.message)
+        subjects_dir = os.path.join(self.bundle(), "subjects")
+        self.assertEqual([n for n in os.listdir(subjects_dir) if n.endswith(".tmp")], [])
+        # a writer that was killed leaves its file under another pid: the resume removes that as well
+        stale = os.path.join(subjects_dir, "sub-stale.f16.npy.99999.tmp")
+        with open(stale, "wb") as f:
+            f.write(b"x")
+        summary = self.fetch(resume=True, streams=1)
+        self.assertEqual(summary["subjects"], 5)
+        self.assertSameSubjects(summary["path"], self.reference())
+        self.assertEqual([n for _, _, names in os.walk(self.bundle()) for n in names if n.endswith(".tmp")], [])
 
     def test_progress_events_carry_bytes_and_totals(self):
         self.fetch()

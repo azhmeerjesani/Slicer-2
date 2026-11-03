@@ -89,9 +89,11 @@ if __name__ == "__main__":
     set_blas_threads(sys.argv[1:])
 
 import argparse
+import errno
 import json
 import math
 import platform
+import re
 import secrets
 import signal
 import socket
@@ -418,6 +420,19 @@ class CancelToken:
 
 
 # Resume
+
+
+def is_disk_full_error(exc):
+    """True when ``exc`` is a write that failed because the disk (or the quota) is full.
+
+    Besides ``ENOSPC`` and ``EDQUOT`` this recognizes numpy's short write on a full disk, an ``OSError``
+    without an errno whose message reads "N requested and M written".
+    """
+    if not isinstance(exc, OSError):
+        return False
+    if exc.errno is not None:
+        return exc.errno in (errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC))
+    return bool(re.search(r"\d+ requested and \d+ written", str(exc)))
 
 
 def write_json_atomic(path, obj):

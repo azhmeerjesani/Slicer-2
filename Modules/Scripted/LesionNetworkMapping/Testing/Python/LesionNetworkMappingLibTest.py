@@ -7,6 +7,7 @@ Run without Slicer's GUI:
 """
 
 import contextlib
+import errno
 import io
 import json
 import os
@@ -17,6 +18,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 MODULE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if MODULE_DIR not in sys.path:
@@ -26,7 +28,7 @@ import numpy as np
 from scipy import io as sio
 from scipy import stats as scipy_stats
 
-from LesionNetworkMappingLib import connectome, engine, export, geometry, nifti, qa, stats, thresholds
+from LesionNetworkMappingLib import connectome, engine, export, geometry, jobs, nifti, qa, stats, thresholds
 
 # float16 stores the unit-norm time series with unit roundoff u = 2**-11. By Cauchy-Schwarz the error
 # of r = x . s is at most ~u from the voxel row plus ~2u from the seed, i.e. |dr| <= 3u ~ 1.5e-3.
@@ -756,6 +758,36 @@ class BundleTest(_TempDirTestCase):
             with self.assertRaisesRegex(ValueError, "Cannot resume"):
                 connectome.ConnectomeWriter(path, mask, affine, resume=True)
         self.assertEqual(connectome.ConnectomeBundle.open(path).subject_ids, ["s3"])
+
+    def test_a_full_disk_leaves_no_temporary_file_and_a_resume_removes_stale_ones(self):
+        path = self.path("full.lnmc")
+        writer = connectome.ConnectomeWriter(path, self.mask, RAS_AFFINE)
+        writer.add_subject("s1", _random_subjects(self.rng, self.n_voxels, 1, (6,))[0])
+        subjects_dir = os.path.join(path, "subjects")
+        def short_write(file, array, *args, **kwargs):
+            file.write(b"\x93NUMPY partial")
+            raise OSError("409600 requested and 303040 written")  # numpy's short write on a full disk has no errno
+
+        with mock.patch.object(connectome.np, "save", short_write):
+            with self.assertRaises(OSError) as context:
+                writer.add_subject("s2", _random_subjects(self.rng, self.n_voxels, 1, (6,))[0])
+        self.assertTrue(jobs.is_disk_full_error(context.exception))
+        self.assertTrue(jobs.is_disk_full_error(OSError(errno.ENOSPC, "No space left on device")))
+        self.assertFalse(jobs.is_disk_full_error(OSError(errno.EACCES, "denied")))
+        self.assertFalse(jobs.is_disk_full_error(ValueError("409600 requested and 303040 written")))
+        self.assertEqual(sorted(os.listdir(subjects_dir)), ["s1.f16.npy", "s1.norms.npy"])
+        self.assertFalse(writer.has_subject("s2"))
+        # Files of a writer that was killed (another pid) are removed by the resume, so they never reach the finished bundle
+        for stale in (os.path.join(subjects_dir, "s2.f16.npy.4242.tmp"), os.path.join(path, "connectome.partial.json.4242.tmp")):
+            with open(stale, "wb") as f:
+                f.write(b"partial")
+        resumed = connectome.ConnectomeWriter(path, self.mask, RAS_AFFINE, resume=True)
+        self.assertTrue(resumed.has_subject("s1"))
+        resumed.add_subject("s2", _random_subjects(self.rng, self.n_voxels, 1, (6,))[0])
+        resumed.finalize()
+        leftovers = [name for folder, _, names in os.walk(path) for name in names if name.endswith(".tmp")]
+        self.assertEqual(leftovers, [])
+        self.assertEqual(connectome.ConnectomeBundle.open(path).subject_ids, ["s1", "s2"])
 
     def test_prefetch_thread_stops_on_early_close(self):
         bundle = _write_bundle(self.path("prefetch.lnmc"), _random_subjects(self.rng, self.n_voxels, 6, (10,)), self.mask)

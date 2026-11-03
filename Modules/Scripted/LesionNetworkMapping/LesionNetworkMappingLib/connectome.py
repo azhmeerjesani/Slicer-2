@@ -118,11 +118,25 @@ def _is_cancelled(cancel):
     return bool(cancel())
 
 
+_STALE_TMP_PATTERN = re.compile(r".+\.\d+(\.\d+)?\.tmp$")
+
+
+def _remove_quietly(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
 def _write_json_atomic(path, obj):
     tmp_path = f"{path}.{os.getpid()}.tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, indent=2)
-    os.replace(tmp_path, path)
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=2)
+        os.replace(tmp_path, path)
+    except BaseException:
+        _remove_quietly(tmp_path)  # a full disk must not leave a partial file behind
+        raise
 
 
 def subjects_sha256(subject_ids):
@@ -245,9 +259,13 @@ def _apply_metadata(metadata, keys):
 
 def _save_npy_atomic(path, array):
     tmp_path = f"{path}.{os.getpid()}.tmp"
-    with open(tmp_path, "wb") as f:
-        np.save(f, array)
-    os.replace(tmp_path, path)
+    try:
+        with open(tmp_path, "wb") as f:
+            np.save(f, array)
+        os.replace(tmp_path, path)
+    except BaseException:
+        _remove_quietly(tmp_path)  # a full disk must not leave a partial subject file in the bundle
+        raise
 
 
 def _read_npy(path, shape, dtype, out=None):
@@ -787,7 +805,16 @@ class ConnectomeWriter:
     def n_voxels(self):
         return len(self.mask_indices)
 
+    def _remove_stale_temporary_files(self):
+        """Delete ``<file>.<pid>.tmp`` files that a writer which was killed (or whose disk was full) left in the bundle."""
+        for folder in (self.path, os.path.join(self.path, "subjects"), os.path.join(self.path, "derived")):
+            if os.path.isdir(folder):
+                for name in os.listdir(folder):
+                    if _STALE_TMP_PATTERN.match(name):
+                        _remove_quietly(os.path.join(folder, name))
+
     def _resume(self):
+        self._remove_stale_temporary_files()
         for name in (PARTIAL_MANIFEST_NAME, MANIFEST_NAME):
             path = os.path.join(self.path, name)
             if not os.path.isfile(path):
@@ -818,6 +845,7 @@ class ConnectomeWriter:
         """Delete a previous bundle's manifests (first, so that an interrupted overwrite never leaves
         a manifest describing new data), its subject files and derived degree maps.
         """
+        self._remove_stale_temporary_files()
         stale = [os.path.join(self.path, "derived", name) for name in ("degree.npy", "degree_fz.npy")]
         for name in (MANIFEST_NAME, PARTIAL_MANIFEST_NAME):
             path = os.path.join(self.path, name)
@@ -1084,8 +1112,12 @@ def _copy_participants(source, bundle_path):
         target = os.path.join(bundle_path, name)
         if os.path.isfile(source_path) and not (os.path.exists(target) and os.path.samefile(source_path, target)):
             tmp_path = f"{target}.{os.getpid()}.tmp"
-            shutil.copyfile(source_path, tmp_path)
-            os.replace(tmp_path, target)
+            try:
+                shutil.copyfile(source_path, tmp_path)
+                os.replace(tmp_path, target)
+            except BaseException:
+                _remove_quietly(tmp_path)
+                raise
 
 
 def _loadmat(path, **kwargs):

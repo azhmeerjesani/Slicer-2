@@ -1020,6 +1020,14 @@ def fetch_connectome(entry, dest, terms_sha, subset=None, streams=2, keep_archiv
             raise
         except BaseException as exc:
             _update_run(run_root, run_id, status="failed", summary={"error": str(exc)}, ended=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+            if jobs.is_disk_full_error(exc):
+                try:
+                    free_now = f"{shutil.disk_usage(dest).free:,} B are free"
+                except OSError:
+                    free_now = "the disk is full"
+                needed = f"; the plan needs about {plan_info['peak']:,} B at the peak" if plan_info["peak"] else ""
+                raise jobs.JobError(f"The disk is full: {os.path.basename(bundle)} could not be written in {dest} ({free_now}{needed}). "
+                                    "What was converted is kept: free some space and resume (--resume).", code="disk_space") from exc
             raise
         _update_run(run_root, run_id, status="done", summary={k: summary[k] for k in ("subjects", "archives", "checksum_override", "unverified_resumed", "reconnects", "resigns", "bytes")}, outputs=[os.path.basename(bundle)],
                     ended=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
