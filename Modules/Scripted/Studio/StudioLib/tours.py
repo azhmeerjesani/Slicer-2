@@ -179,7 +179,7 @@ def _drawToolsBody(shell):
     text = _("The Segment Editor effects as labelled tools: Brush, Outline, Smart fill, Erase and Fill gaps; More tools shows the others. ")
     if _hasSourceVolume():
         return text + _("Pick Brush (P) and drag in a view to draw. On the MNI template or a new lesion it is ready.")
-    return text + _("Once a scan is open (Library, or Start on MNI template), pick Brush (P) and drag in a view to draw.")
+    return text + _("Once a scan is open (Library > Start on template, or Start on MNI template here), pick Brush (P) and drag in a view to draw.")
 
 
 def _viewsBody(shell):
@@ -367,7 +367,7 @@ _DRAW_STEPS = (
          _("Click inside a lesion: Smart fill grows the region with an automatic intensity tolerance and shows a preview before you apply it."),
          inSlicer=_("No such effect; the closest are Grow from seeds and Level tracing."), keys=((("M",), _("Smart fill")),),
          workspace="draw", inspector=True, placement="left"),
-    Step("display", "StudioDisplayCard", _("Display"),
+    Step("display", "StudioDisplayCard", _("Overlay"),
          _("The Overlay slider sets the opacity of the lesion fill and the Outline switch draws its outline. ⋯ in the inspector header has "
            "Show lesion in 3D, Voxel view (crisp voxels, on by default on the MNI template) and the Window/level presets."),
          inSlicer=_("The Segmentations module (display) and the Volumes module (window/level, interpolation)."), keys=((("O",), _("fill or outline")),),
@@ -423,8 +423,8 @@ TOURS = (
     Tour("studio", _("Slicer Studio in 2 minutes"), _("The top bar, the three workspaces, Search, layouts and the Classic interface."), _STUDIO_STEPS),
     Tour("from-slicer", _("Coming from 3D Slicer"), _("What stays the same, what moved, and where to find it now."), _FROM_SLICER_STEPS,
          finishText=_("Open the map")),
-    Tour("library", _("Library tour"), _("Opening data, the MNI template, Recent and sample data."), _LIBRARY_STEPS, workspace="library"),
-    Tour("draw", _("Draw tour"), _("Your lesion, the tools, the brush, Display, Undo and Save lesion."), _DRAW_STEPS, workspace="draw"),
+    Tour("library", _("Library tour"), _("Opening data, the MNI template, files opened from elsewhere and sample data."), _LIBRARY_STEPS, workspace="library"),
+    Tour("draw", _("Draw tour"), _("Your lesion, the tools, the brush, Overlay, Undo and Save lesion."), _DRAW_STEPS, workspace="draw"),
     Tour("map", _("Map tour"), _("Lesion network mapping: the lesion, the connectome, Map network, the result and its threshold."), _MAP_STEPS,
          workspace="map", available=_mapAvailable),
 )

@@ -1261,3 +1261,37 @@ class StudioTourTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                     if re.search(r"\bCtrl\+", text) and not any(item in text for item in allowed):
                         offenders.append(f"{name}:{node.lineno}: {text[:80]}")
         self.assertEqual(offenders, [], "portable keys in texts: use {key:...}, ui.keyText or ui.tooltip")
+
+    def test_23_texts_use_the_labels_on_screen(self):
+        """Tour and Search texts name the controls as they are labelled now: the Draw inspector row is "Overlay" (not the old
+        "Display"), the Library list is "Opened from elsewhere" (no "Recent" section) and its button "Start on template" (bug bash).
+        """
+        from StudioLib import migration, tours
+
+        studioShell = self._applyStudio()
+        try:
+            studioShell.switchTo("draw")
+            self._pump()
+            overlay = slicer.util.mainWindow().findChild("QLabel", "StudioDisplayOpacityLabel")
+            self.assertIsNotNone(overlay)
+            self.assertEqual(overlay.text, "Overlay")
+            displayStep = next(step for step in tours.tour("draw").steps if step.id == "display")
+            self.assertEqual(displayStep.target, "StudioDisplayCard")
+            self.assertEqual(displayStep.title, overlay.text)
+            self.assertIn(overlay.text, tours.tour("draw").description)
+            self.assertNotRegex(tours.tour("draw").description, r"\bDisplay\b")
+            studioShell.switchTo("library")
+            self._pump()
+            main = slicer.util.mainWindow()
+            self.assertEqual(main.findChild("QWidget", "StudioLibraryStartOnTemplateButton").text, "Start on template")
+            titles = [str(label.text) for label in main.findChildren("QLabel") if label.isVisible()]
+            self.assertIn("Opened from elsewhere", titles)
+            self.assertNotIn("Recent", titles)
+            self.assertNotRegex(tours.tour("library").description, r"\bRecent\b")
+            self.assertEqual(tours.tour("library").steps[[s.id for s in tours.tour("library").steps].index("recent")].title, "Opened from elsewhere")
+            self.assertNotIn("Recent", migration.row("recent").studio)
+            # Draw tools text with no scan open: the Library button is named as it reads
+            self.assertNotIn("Library, or Start on MNI template", tours._drawToolsBody(studioShell))
+        finally:
+            studioShell.classic()
+            self._pump()

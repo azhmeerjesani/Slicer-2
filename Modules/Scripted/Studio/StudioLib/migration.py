@@ -147,7 +147,7 @@ ROWS = (
         keywords="template templates own mni brain model add template icbm fsl mni152 2009b colin custom atlas space default template",
         note=_("Official 3D Slicer has no template list: you load a template with File > Add Data. In Studio a template you add is "
                "copied into the Slicer Studio folder (Templates) and used by Start on template, Map and Normalize to MNI.")),
-    Row("recent", _("File > Recent"), _("Library > Recent"), target="StudioRecentList", workspace="library", keywords="recent files history reopen"),
+    Row("recent", _("File > Recent"), _("Library > Opened from elsewhere"), target="StudioRecentList", workspace="library", keywords="recent files history reopen"),
     Row("save-data", _("File > Save Data"), _("Saved automatically to Projects/<name> in the Slicer Studio folder ({key:Ctrl+S} saves now)"),
         officialKey="Ctrl+S", key="Ctrl+S", target=("StudioSaveStatus", "StudioAppMenuButton"), keywords="save scene mrb mrml save data write save project autosave",
         note=_("Each project is a 3D Slicer scene (.mrml) with its data in folders. To save only the lesion as a NIfTI mask, use Save "
