@@ -212,8 +212,11 @@ class Download:
 
     def _closeAndRemovePartFile(self):
         if self._file is not None:
-            self._file.close()
-            self._file = None
+            file, self._file = self._file, None
+            try:
+                file.close()
+            except OSError:
+                pass  # a full disk makes the last flush fail; the file is removed anyway
         if os.path.exists(self.partPath):
             try:
                 os.remove(self.partPath)
@@ -225,7 +228,14 @@ class Download:
             return
         data = self._reply.readAll()
         if data.size() > 0:
-            self._file.write(data.data())
+            try:
+                self._file.write(data.data())
+            except OSError as e:
+                # Disk full (or the folder went away): stop the transfer now instead of downloading the rest into a
+                # truncated file that would then be reported as "damaged (checksum mismatch)".
+                self._releaseReply(abort=True)
+                self._closeAndRemovePartFile()
+                self._fail(self._cannotWrite(e))
 
     def _onDownloadProgress(self, bytesReceived, bytesTotal):
         self.bytesReceived = int(bytesReceived)
@@ -237,13 +247,20 @@ class Download:
         if reply is None or self.state != "running":
             return
         self._onReadyRead()
+        if self.state != "running":
+            return  # writing the last data failed: already reported
         error = reply.error()
         errorString = reply.errorString()
         status = reply.attribute(qt.QNetworkRequest.HttpStatusCodeAttribute)
         self._releaseReply()
         if self._file is not None:
-            self._file.close()
-            self._file = None
+            file, self._file = self._file, None
+            try:
+                file.close()  # flushes the last buffered data, which fails on a full disk
+            except OSError as e:
+                self._closeAndRemovePartFile()
+                self._fail(self._cannotWrite(e))
+                return
         if error != qt.QNetworkReply.NoError:
             self._closeAndRemovePartFile()
             if error in (qt.QNetworkReply.OperationCanceledError, qt.QNetworkReply.TimeoutError):

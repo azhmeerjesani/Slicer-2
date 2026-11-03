@@ -557,6 +557,72 @@ class StudioUpdatesTest(unittest.TestCase):
         self.assertNotIn(self.tempDir, messages[0])
         self.assertEqual(download.state, "failed")
 
+    def _downloadOnFullDisk(self, failOn):
+        """Download a 3 MB file whose writes (or whose final close) fail with ENOSPC; return what the Download did."""
+        from StudioLib import downloads
+
+        name = "tpl-big.bin"
+        payload = os.urandom(3 * 1024 * 1024)
+        with open(os.path.join(self.feedDir, name), "wb") as f:
+            f.write(payload)
+        realOpen = open
+        attempts = []
+
+        class FullDisk:
+            def __init__(self, path, *args):
+                self._f = realOpen(path, *args)
+
+            def write(self, data):
+                attempts.append(len(data))
+                if failOn == "write":
+                    raise OSError(28, "No space left on device")
+                return self._f.write(data)
+
+            def close(self):
+                self._f.close()
+                if failOn == "close":
+                    raise OSError(28, "No space left on device")
+
+        dest = os.path.join(self.tempDir, "StudioTemplates-" + failOn, name)
+        download = downloads.Download(self.root + name, hashlib.sha256(payload).hexdigest(), dest)
+        messages, done, tracebacks = [], [], []
+        download.failed.connect(messages.append)
+        download.finished.connect(done.append)
+        previousHook = sys.excepthook
+        sys.excepthook = lambda *args: tracebacks.append(args)
+        downloads.open = FullDisk
+        try:
+            download.start()
+            deadline = time.time() + 30
+            while download.state == "running" and time.time() < deadline:
+                slicer.app.processEvents()
+                time.sleep(0.01)
+            for _ in range(20):
+                slicer.app.processEvents()
+                time.sleep(0.01)
+        finally:
+            del downloads.open
+            sys.excepthook = previousHook
+        return download, dest, len(payload), attempts, messages, done, tracebacks
+
+    def test_DownloadDiskFullStopsWithMessage(self):
+        """BB-1: on a full disk every write raised an OSError traceback, the transfer ran on to the end and the notice said
+        "damaged (checksum mismatch)"; the download stops at the first failed write and says the disk is full.
+        """
+        for failOn in ("write", "close"):
+            download, dest, size, attempts, messages, done, tracebacks = self._downloadOnFullDisk(failOn)
+            with self.subTest(failOn=failOn):
+                self.assertEqual(download.state, "failed")
+                self.assertEqual(messages, ["Cannot save the download in the folder StudioTemplates-%s: No space left on device" % failOn])
+                self.assertNotIn("damaged", messages[0])
+                self.assertEqual(done, [])
+                self.assertEqual(tracebacks, [], "no traceback")
+                if failOn == "write":
+                    self.assertEqual(len(attempts), 1, "the transfer stops at the first failed write")
+                    self.assertLess(download.bytesReceived, size, "the rest of the file is not downloaded")
+                self.assertFalse(os.path.exists(dest))
+                self.assertFalse(os.path.exists(dest + ".part"))
+
     def test_DownloadTimeoutMessage(self):
         """A download that stalls until the transfer timeout says so, not 'Operation canceled' (the user cancelled nothing)."""
         from StudioLib import downloads
