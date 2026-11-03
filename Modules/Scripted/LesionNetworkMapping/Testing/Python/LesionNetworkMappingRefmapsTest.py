@@ -92,12 +92,17 @@ class RegistryTest(RefmapsTestBase):
         moved = os.path.join(self.tmp, "moved")
         shutil.move(self.root, moved)
         self.assertTrue(os.path.isfile(refmaps.entry_path(refmaps.entries(moved)[0], moved)))
-        # Unknown licence: grey badge; a second add gets a new id
+        # Unknown licence: grey badge; adding the same file again replaces its entry (never a second, identical one)
         other = refmaps.add_file(path, root=moved)
         self.assertEqual(other["badge"], "grey")
-        self.assertNotEqual(other["id"], entry["id"])
-        refmaps.remove_entry(entry["id"], root=moved)
+        self.assertEqual(other["id"], entry["id"])
         self.assertEqual([item["id"] for item in refmaps.entries(moved)], [other["id"]])
+        # An explicit id still makes a separate entry for the same file
+        twin = refmaps.add_file(path, root=moved, entry_id="twin")
+        self.assertEqual([item["id"] for item in refmaps.entries(moved)], [entry["id"], "twin"])
+        refmaps.remove_entry(twin["id"], root=moved)
+        refmaps.remove_entry(entry["id"], root=moved)
+        self.assertEqual(refmaps.entries(moved), [])
         with self.assertRaises(refmaps.RefmapsError):
             refmaps.get_entry(entry["id"], moved)
 
@@ -427,6 +432,42 @@ class _FakeSession:
 
 
 class SourcesTest(RefmapsTestBase):
+    def test_same_url_added_twice_refreshes_one_entry(self):
+        """Adding the same URL (or the same file) again replaces its entry: the library never lists one map twice, so Compare
+        never compares a map with itself.
+        """
+        import functools
+        import http.server
+        import threading
+        from unittest import mock
+
+        served = os.path.join(self.tmp, "served_twice")
+        os.makedirs(served)
+        nifti.write_nifti(os.path.join(served, "m.nii.gz"), _smooth_field(self.rng, SHAPE).astype(np.float32), self.bundle.affine)
+
+        class QuietHandler(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(QuietHandler, directory=served))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        url = f"http://127.0.0.1:{server.server_address[1]}/m.nii.gz"
+        with mock.patch.dict(os.environ, {"NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}):
+            first = refmaps.add_url(url, title="Map", licence="CC0-1.0", root=self.root, offline=False)
+            second = refmaps.add_url(url, title="Map again", licence="CC0-1.0", root=self.root, offline=False)
+        self.assertEqual(second["id"], first["id"])
+        listed = refmaps.entries(self.root)
+        self.assertEqual([item["id"] for item in listed], [first["id"]])
+        self.assertEqual(listed[0]["title"], "Map again")
+        path = os.path.join(self.tmp, "again.nii.gz")
+        shutil.copyfile(refmaps.entry_path(first, self.root), path)
+        one = refmaps.add_file(path, root=self.root)
+        two = refmaps.add_file(path, root=self.root)
+        self.assertEqual(two["id"], one["id"])
+        self.assertEqual(sorted(item["id"] for item in refmaps.entries(self.root)), sorted([first["id"], one["id"]]))
+
     def test_remove_url_entry_deletes_download(self):
         import functools
         import http.server
@@ -449,7 +490,10 @@ class SourcesTest(RefmapsTestBase):
         url = f"http://127.0.0.1:{server.server_address[1]}/m.nii.gz"
         with mock.patch.dict(os.environ, {"NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}):
             entry = refmaps.add_url(url, root=self.root, offline=False)
-            twin = refmaps.add_url(url, root=self.root, offline=False)  # a second entry sharing the downloaded file
+            repeat = refmaps.add_url(url, root=self.root, offline=False)  # the same URL again refreshes the entry, never a second one
+            self.assertEqual(repeat["id"], entry["id"])
+            self.assertEqual([item["id"] for item in refmaps.entries(self.root)], [entry["id"]])
+            twin = refmaps.add_url(url, root=self.root, offline=False, entry_id="twin")  # a second entry sharing the downloaded file
             path = refmaps.entry_path(entry, self.root)
             old = refmaps.resample_to(entry, self.bundle, root=self.root)
             refmaps.remove_entry(twin["id"], root=self.root)

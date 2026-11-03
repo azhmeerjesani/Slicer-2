@@ -523,8 +523,9 @@ def add_file(path, title=None, licence="unknown", citation="", condition=None, s
     name = os.path.basename(path)
     stem = re.sub(r"\.nii(\.gz)?$", "", name)
     _check_map(path, name)
-    existing = {item.get("id") for item in entries(root)}
-    entry_id = entry_id or _unique_id(f"file-{_slug(stem, 32)}-{_sha256(path)[:8]}", existing)
+    # The default id carries the file's hash, so adding the same file again replaces its entry (as a NeuroVault image added
+    # twice does) instead of listing it twice and comparing it with itself.
+    entry_id = entry_id or f"file-{_slug(stem, 32)}-{_sha256(path)[:8]}"
     folder = os.path.join(registry_root(root), FILES_DIR, _slug(entry_id, 64))
     os.makedirs(folder, exist_ok=True)
     target = os.path.join(folder, name)
@@ -560,8 +561,8 @@ def add_url(url, title=None, licence="unknown", citation="", condition=None, spa
                                "checksum": fetch.RECORD_ON_FIRST_DOWNLOAD, "licence": licence or "unknown"})
     path = _fetch_into_registry(resource, root, session, progress, cancel, offline)
     _check_download(path, root, f"{title or filename} (from {url})")
-    existing = {item.get("id") for item in entries(root)}
-    entry_id = entry_id or _unique_id(f"url-{_slug(re.sub(r'.nii(.gz)?$', '', filename), 32)}-{hashlib.sha256(url.encode()).hexdigest()[:8]}", existing)
+    # The default id carries the URL's hash, so adding the same URL again refreshes its entry instead of listing it twice.
+    entry_id = entry_id or f"url-{_slug(re.sub(r'.nii(.gz)?$', '', filename), 32)}-{hashlib.sha256(url.encode()).hexdigest()[:8]}"
     entry = _base_entry(path, root, id=entry_id, title=title or filename, source={"type": "url", "url": url}, licence=licence or "unknown",
                         licence_note=licence_note, citation=citation or "", condition=condition or None, kind=kind, space=space)
     return _register(entry, root)
