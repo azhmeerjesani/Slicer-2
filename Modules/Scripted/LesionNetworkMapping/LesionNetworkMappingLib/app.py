@@ -753,6 +753,9 @@ def _main(argv):
     except (OSError, ValueError, TypeError, KeyError) as exc:
         emit("error", code="usage", message=f"{type(exc).__name__}: {exc}")
         return jobs.EXIT_USAGE
+    if not config.accept_terms:  # refused before anything is written: the study of a BIDS input and the run folders are created only for a run that can start
+        emit("error", code="terms_not_accepted", message=f"The data use terms of the connectome {bundle.name} must be accepted (--accept-terms).", data_use_terms=bundle.data_use_terms, connectome=bundle.name)
+        return pipeline.EXIT_TERMS
     out = os.path.join(output_dir, run_dir_name(bundle.name, config.preview_n))
     config.out = out
     # The output lock comes first: the study of a BIDS input is shared by every run writing to this output folder, and a
@@ -769,9 +772,19 @@ def _main(argv):
     ran = False
     try:
         try:
+            labels = normalize_labels(args.participant_label)
+            if bids and labels:
+                # Refused before the study is written: it would stay in the output folder of a run that never started. The study
+                # of this run holds the lesion masks of the input and the subjects of an earlier run's study (it is extended).
+                known = set(find_bids_lesions(input_dir, skip=[output_dir]))
+                if known and Study.is_study(study_path):
+                    known |= set(Study.open(study_path).subject_ids)
+                missing = sorted(set(labels) - known) if known else []
+                if missing:
+                    emit("error", code="usage", message=f"Participant label(s) not in the input: {', '.join(missing)}")
+                    return jobs.EXIT_USAGE
             if bids:
                 prepare_bids_study(input_dir, output_dir, args.group_column, args.group_map, [name.strip() for name in args.score_columns.split(",") if name.strip()], emit)
-            labels = normalize_labels(args.participant_label)
             if labels:
                 missing = sorted(set(labels) - set(Study.open(study_path).subject_ids))
                 if missing:

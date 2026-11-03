@@ -651,6 +651,36 @@ class AppLevelsTest(unittest.TestCase):
         self.assertEqual(tree_digest(self.output), before)
         self.assertEqual(read_tsv(study_tsv)[1][0]["group"], "case")
 
+    def test_run_refused_before_its_first_stage_leaves_no_output_folder(self):
+        """Without --accept-terms (exit 4) or with an unknown --participant-label (exit 2) the run stops before its first
+        stage: the new output folder stays absent (it kept conn-<label>/.pipeline and the whole study of the BIDS input, BB-1).
+        """
+
+        def everything(folder):
+            return sorted(os.path.relpath(os.path.join(root, name), folder).replace(os.sep, "/") for root, dirs, files in os.walk(folder) for name in dirs + files)
+
+        refused = [arg for arg in COMMON if arg != "--accept-terms"]
+        output = os.path.join(self.tmp, "terms out")
+        code, events, _stdout, stderr = cli(self.bids, output, "participant", "--connectome", self.fx["bundle"], *refused, *BIDS_OPTIONS)
+        self.assertEqual((code, last_event(events)["code"]), (4, "terms_not_accepted"), stderr[-2000:])
+        self.assertFalse(os.path.exists(output), everything(output) if os.path.isdir(output) else None)
+        output = os.path.join(self.tmp, "label out")
+        code, events, _stdout, stderr = cli(self.bids, output, "participant", "--connectome", self.fx["bundle"], "--participant-label", "99", *COMMON, *BIDS_OPTIONS)
+        self.assertEqual((code, last_event(events)["code"]), (2, "usage"), stderr[-2000:])
+        self.assertIn("sub-99", last_event(events)["message"])
+        self.assertFalse(os.path.exists(output), everything(output) if os.path.isdir(output) else None)
+        # a study folder as input: no conversion, and the empty run folders of the refused run are removed too
+        output = os.path.join(self.tmp, "study terms out")
+        code, events, _stdout, stderr = cli(self.fx["study"], output, "participant", "--connectome", self.fx["bundle"], *refused)
+        self.assertEqual((code, last_event(events)["code"]), (4, "terms_not_accepted"), stderr[-2000:])
+        self.assertFalse(os.path.exists(output), everything(output) if os.path.isdir(output) else None)
+        # an output folder that existed stays as it was
+        output = os.path.join(self.tmp, "kept out")
+        os.makedirs(output)
+        code, _events, _stdout, _stderr = cli(self.bids, output, "participant", "--connectome", self.fx["bundle"], *refused, *BIDS_OPTIONS)
+        self.assertEqual(code, 4)
+        self.assertEqual(everything(output), [])
+
     def test_output_folder_is_not_the_input_folder(self):
         # The BIDS input is never written: output == input would put conn-<label>/ and sourcedata/ into the dataset,
         # and the next run would scan the snapshots there as competing lesion masks
