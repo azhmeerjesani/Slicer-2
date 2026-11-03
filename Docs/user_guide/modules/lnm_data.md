@@ -23,10 +23,10 @@ setting `Studio/LNM/EnableConnectomeFetch` (on by default).
 
 ## Getting a connectome
 
-**Map > Connectome > Manage… > Get a connectome…** opens a catalog of the connectomes that can be obtained (a non-modal
-dialog; you can keep working). The shipped catalog (`catalog/connectomes.json`) lists, for each entry, its source and
-DOI, version, files with sizes and checksums, licence, terms, population, preprocessing, the template space and the
-estimated disk space. It is refreshed only when you click **Check catalog updates**.
+**Map > Connectome > Get a connectome…** (with a connectome already registered: **Manage… > Get a connectome…**) opens a
+catalog of the connectomes that can be obtained (a non-modal dialog; you can keep working). The shipped catalog
+(`catalog/connectomes.json`) lists, for each entry, its source and DOI, version, files with sizes and checksums, licence,
+terms, population, preprocessing, the template space and the estimated disk space. It is refreshed only when you click **Check catalog updates**.
 
 | Entry | Status | Licence | Notes |
 | ----- | ------ | ------- | ----- |

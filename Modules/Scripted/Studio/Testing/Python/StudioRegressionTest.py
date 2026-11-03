@@ -126,6 +126,9 @@ Run with the main window and testing enabled::
 - ``test_54_return_in_the_columns_dialog_never_cancels_the_edits`` (BB-1): Return in the Columns… dialog (on a role combo, the
   table, the filter check box or a button) neither closes it nor drops the edits: the dialog has no default button (Cancel was,
   so Return threw every edit away without a word); Confirm still saves.
+- ``test_62_docs_name_the_connectome_buttons_as_the_card_shows_them`` (BB-1): lesionnetworkmapping.md and lnm_data.md name the
+  way to the catalog as the Connectome card shows it: **Get a connectome…** when no connectome is registered (the card has no
+  Manage… button then), **Manage… > Get a connectome…** only when one is, and the card's demo button as "Use the demo".
 """
 
 import inspect
@@ -4390,3 +4393,41 @@ class StudioRegressionTest(unittest.TestCase):
             pump()
             mainWindow.restoreGeometry(savedGeometry)
             slicer.mrmlScene.Clear(0)
+
+    def test_62_docs_name_the_connectome_buttons_as_the_card_shows_them(self):
+        """With no connectome registered the Connectome card shows Get a connectome…, a ⋯ menu and Use the demo, and no
+        Manage… button (that one appears with a registered connectome), so the documents never send a user without a
+        connectome to Manage… > Get a connectome… (BB-1).
+        """
+        import re
+
+        from LesionNetworkMappingUI import widgets as lnmwidgets  # noqa: F401  (the module is there)
+
+        root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", ".."))
+        names = ("Docs/user_guide/modules/lesionnetworkmapping.md", "Docs/user_guide/modules/lnm_data.md")
+        paths = {name: os.path.join(root, *name.split("/")) for name in names}
+        if not all(os.path.isfile(path) for path in paths.values()):
+            self.skipTest("the documentation is not next to this build")
+        texts = {}
+        for name, path in paths.items():
+            with open(path, encoding="utf-8") as stream:
+                texts[name] = " ".join(stream.read().replace("*", "").split())
+        # The behaviour the docs describe: the empty state has the buttons below and no Manage… button
+        if hasattr(slicer.modules, "LesionNetworkMappingWidget"):
+            widget = slicer.modules.LesionNetworkMappingWidget
+            if getattr(widget, "connectomeCombo", None) is not None and widget.connectomeCombo.count == 0:
+                self.assertTrue(widget.manageButton.isHidden(), "no Manage… button without a connectome")
+                self.assertFalse(widget.connectomeEmpty.isHidden())
+                self.assertEqual(widget.getConnectomeButton.text, "Get a connectome…")
+                self.assertEqual(widget.demoButton.text, "Use the demo")
+        for name, text in texts.items():
+            # Every "Manage… > Get a connectome…" is said to be the way with a registered connectome
+            for found in re.finditer(r"Manage… > Get a connectome…", text):
+                around = text[max(0, found.start() - 120):found.end() + 120]
+                self.assertTrue(re.search(r"already registered|once a connectome is registered|with a connectome", around, re.IGNORECASE),
+                                f"{name} sends a user without a connectome to Manage… > Get a connectome…: {around}")
+            self.assertNotIn("Map > Connectome > Manage… > Get a connectome…", text, name)
+        lnm, data = (texts[name] for name in names)
+        self.assertIn("the card shows Get a connectome…", lnm)
+        self.assertIn("Use the demo", lnm)
+        self.assertIn("Map > Connectome > Get a connectome…", data)

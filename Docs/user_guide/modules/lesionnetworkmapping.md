@@ -102,9 +102,10 @@ statement is always visible at the bottom.
 1. **Open or create a study** in the Library (drop a folder of lesion masks, or use a
    [tutorial cohort](lnm_data.md#templates-atlases-and-tutorials)). Check that the lesions are in MNI space or normalize
    them first ([Intake](lnm_intake.md)). Confirm the role of any column you want to use (a group or a score).
-2. **Choose a connectome** in the Connectome card. If you have none, **Manage… > Get a connectome…** offers the catalog,
-   after you have read and accepted the provider's terms ([Data](lnm_data.md#getting-a-connectome)), and **Create
-   synthetic demo** makes a toy one for learning.
+2. **Choose a connectome** in the Connectome card. If you have none, the card shows **Get a connectome…**, which offers
+   the catalog, after you have read and accepted the provider's terms ([Data](lnm_data.md#getting-a-connectome)), and
+   **Use the demo**, which makes a toy one for learning. (Once a connectome is registered the card shows **Manage…**
+   instead, and the catalog is in **Manage… > Get a connectome…**.)
 3. **Open Map**, set the seed to **Cohort**, and read the **Preflight** card. It says what is missing before anything runs.
 4. **Run everything** (or **Maps only** and the single steps). Look at the overlap and the QA chips first.
 5. **Compare cases with controls or relate a score** in the Cohort card ([Statistics](lnm_statistics.md)), look at the
@@ -190,12 +191,13 @@ PythonSlicer -m LesionNetworkMappingLib.manager estimate --source nifti --input 
 **Where to get a connectome.** The module is made for the **Brain Genomics Superstruct Project (GSP1000)** connectome, the
 one used for most lesion network mapping papers. GSP1000 is **not** included with Slicer Studio and is **never downloaded
 by itself**. You can fetch it from the Harvard Dataverse (doi:[10.7910/DVN/ILXIKS](https://doi.org/10.7910/DVN/ILXIKS)) with
-**Manage… > Get a connectome…**, only after you have clicked "Load terms", read the provider's current Data Use Terms and
-ticked "I accept". Or obtain it yourself and convert it once. Time series that are already preprocessed for Lead-DBS
+**Get a connectome…** (in the Connectome card, or in **Manage…** when a connectome is already registered), only after you
+have clicked "Load terms", read the provider's current Data Use Terms and ticked "I accept". Or obtain it yourself and
+convert it once. Time series that are already preprocessed for Lead-DBS
 (doi:[10.7910/DVN/KKTJQC](https://doi.org/10.7910/DVN/KKTJQC)) can be converted or fetched too. For trying the module,
-**Create synthetic demo** in the connectome manager builds a small connectome of random numbers with planted networks on
-your computer. It is labelled "SYNTHETIC — not real data" in the module, in every sidecar and on figures; never use it for a
-conclusion.
+**Use the demo** in the Connectome card (**Create synthetic demo** in the connectome manager) builds a small connectome of
+random numbers with planted networks on your computer. It is labelled "SYNTHETIC — not real data" in the module, in every
+sidecar and on figures; never use it for a conclusion.
 
 **Data use terms.** The terms text of a connectome is shown in the Connectome card. **Compute stays disabled until you tick
 "I accept these data use terms"** for that connectome. The acceptance is stored for that connectome (as a hash of its
