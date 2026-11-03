@@ -775,6 +775,21 @@ def _esummary_record(entry):
     return draft(title=entry.get("title"), authors=authors, year=entry.get("pubdate"), journal=entry.get("source"), doi=doi, pmid=entry.get("uid"))
 
 
+def _lookup_failure_text(error, kind):
+    """What to tell the user when the lookup raised ``error`` (an HTTP answer is not a connection problem)."""
+    status = getattr(getattr(error, "response", None), "status_code", None)  # requests.HTTPError carries the response
+    service = "Crossref" if kind == "DOI" else "PubMed"
+    if isinstance(status, int):
+        if status in (404, 410):
+            return f"{service} has no record for this {kind}"
+        if status == 429 or status >= 500:
+            return f"The lookup failed: {service} is busy or unavailable right now (HTTP {status}); try again later"
+        return f"The lookup failed: {service} did not accept the request (HTTP {status})"
+    if isinstance(error, ValueError):  # bad JSON
+        return f"The lookup failed: {service} sent an answer that could not be read; try again later"
+    return "The lookup failed; check the connection and try again"  # offline, proxy, timeout
+
+
 def lookup(doi="", pmid="", get=None):
     """Metadata of a publication from Crossref (DOI) or the NCBI esummary (PMID). Only the identifier is sent.
 
@@ -803,7 +818,7 @@ def lookup(doi="", pmid="", get=None):
     except ImportError as e:
         raise SourcesError("The lookup needs the 'requests' package") from e
     except Exception as e:  # offline, timeout, HTTP error, bad JSON
-        raise SourcesError(f"The lookup failed ({type(e).__name__}); check the connection and try again") from e
+        raise SourcesError(_lookup_failure_text(e, "DOI" if doi else "PMID")) from e
     raise SourcesError("The record has no DOI or PMID to look up")
 
 

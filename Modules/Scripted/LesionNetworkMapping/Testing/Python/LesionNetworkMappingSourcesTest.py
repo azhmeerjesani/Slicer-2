@@ -309,6 +309,41 @@ class SourcesTest(unittest.TestCase):
         with self.assertRaises(sources.SourcesError):
             sources.lookup(pmid="1", get=lambda url, params: {"result": {"1": {"error": "cannot get document summary"}}})
 
+    def test_lookup_http_status_is_not_a_connection_problem(self):
+        class _Response:
+            def __init__(self, status_code):
+                self.status_code = status_code
+
+        class _HTTPError(Exception):  # stands for requests.HTTPError (carries .response)
+            def __init__(self, status_code):
+                super().__init__(f"{status_code} Error")
+                self.response = _Response(status_code)
+
+        def failing(status):
+            def get(url, params):
+                raise _HTTPError(status)
+
+            return get
+
+        def message(**kwargs):
+            with self.assertRaises(sources.SourcesError) as raised:
+                sources.lookup(**kwargs)
+            return str(raised.exception)
+
+        self.assertEqual(message(doi="10.9999/does-not-exist", get=failing(404)), "Crossref has no record for this DOI")
+        self.assertEqual(message(pmid="1", get=failing(404)), "PubMed has no record for this PMID")
+        for status in (429, 503):
+            text = message(doi="10.1000/xyz", get=failing(status))
+            self.assertIn("busy or unavailable", text)
+            self.assertNotIn("check the connection", text)
+        text = message(doi="10.1000/xyz", get=failing(400))
+        self.assertNotIn("check the connection", text)
+        self.assertNotIn("_HTTPError", text)
+        # no HTTP answer: still the connection text, without the exception class name
+        text = message(doi="10.1000/xyz", get=lambda url, params: (_ for _ in ()).throw(OSError("no network")))
+        self.assertIn("check the connection", text)
+        self.assertNotIn("OSError", text)
+
     def test_fetch_fills_empty_fields_only(self):
         records = sources.Records.open(self.study)
         records.add([sources.draft(doi="10.1000/xyz", title="My own title")])
