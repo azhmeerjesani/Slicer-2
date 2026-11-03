@@ -88,6 +88,13 @@ def _importer():
     return importer
 
 
+def left_out_text(n, reason):
+    """The toast when some second tracings are refused: "1 second tracing left out: ..." / "{n} second tracings left out: ..."."""
+    if n == 1:
+        return _("1 second tracing left out: {reason}").format(reason=reason)
+    return _("{n} second tracings left out: {reason}").format(n=n, reason=reason)
+
+
 def _toast(text, ms=3000, **kwargs):
     review._toast(text, ms, **kwargs)
 
@@ -1148,7 +1155,7 @@ def _start(queue, sid=None, sids=None, shell=None):
             _toast(refused[0] if refused else _("Nothing is waiting in {queue}").format(queue=label), ms=6000, level="warning")
             return None
         if refused:
-            _toast(_("{n} second tracing(s) left out: {reason}").format(n=len(refused), reason=refused[0]), ms=5000)
+            _toast(left_out_text(len(refused), refused[0]), ms=5000)
         order = allowed
     if review.state() is not None:
         review.exitReview()

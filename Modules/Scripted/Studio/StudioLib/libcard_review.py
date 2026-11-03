@@ -76,6 +76,18 @@ def autoUnreviewed(row):
     return _rules().is_auto_unreviewed(row)
 
 
+def changes_text(n):
+    """"1 change requested" / "{n} changes requested" (the Review card's summary line)."""
+    return _("1 change requested") if n == 1 else _("{n} changes requested").format(n=n)
+
+
+def gate_text(n):
+    """The line under the Require review box: how many lesions the analyses leave out."""
+    if n == 1:
+        return _("Analyses leave out 1 lesion that review has not approved (preflight lists it; Include anyway is recorded).")
+    return _("Analyses leave out {n} lesions that review has not approved (preflight lists them; Include anyway is recorded).").format(n=n)
+
+
 def counts(studyObject):
     """{queue key: n} of a study."""
     rows = studyObject.subjects
@@ -246,7 +258,7 @@ class ReviewCard:
         numbers = counts(studyObject)
         rules = _rules()
         summary = rules.gate_summary(studyObject)
-        parts = [_("{n} to review").format(n=numbers[review.QUEUE_NEEDS_REVIEW]), _("{n} changes requested").format(n=numbers[review.QUEUE_CHANGES])]
+        parts = [_("{n} to review").format(n=numbers[review.QUEUE_NEEDS_REVIEW]), changes_text(numbers[review.QUEUE_CHANGES])]
         if numbers[review.QUEUE_AUTO]:
             parts.append(_("{n} automatic not approved").format(n=numbers[review.QUEUE_AUTO]))
         parts.append(_("{n} approved").format(n=summary["approved"]))
@@ -270,7 +282,7 @@ class ReviewCard:
             self._setting = False
         gated = sum(len(sids) for sids in summary["excluded"].values())
         if gated:
-            self.gateLabel.setText(_("Analyses leave out {n} lesion(s) that review has not approved (preflight lists them; Include anyway is recorded).").format(n=gated))
+            self.gateLabel.setText(gate_text(gated))
         else:
             self.gateLabel.setText(_("Analyses use every included lesion.") if not summary["required"] else _("Analyses use approved lesions only."))
         _scheduleBlinding(session)

@@ -84,6 +84,23 @@ def agreementCell(row):
     return f"{DOT} " + _("To do"), "warn"
 
 
+def pairs_text(n):
+    """"1 pair" / "{n} pairs"."""
+    return _("1 pair") if n == 1 else _("{n} pairs").format(n=n)
+
+
+def assigned_text(n):
+    """The toast after Assign: "1 second tracing assigned" / "{n} second tracings assigned"."""
+    return _("1 second tracing assigned") if n == 1 else _("{n} second tracings assigned").format(n=n)
+
+
+def written_text(n):
+    """The toast after Compute agreement."""
+    if n == 1:
+        return _("Agreement of 1 pair written to derivatives/qc/interrater.tsv")
+    return _("Agreement of {n} pairs written to derivatives/qc/interrater.tsv").format(n=n)
+
+
 def counts(studyObject):
     rules = _rules()
     rows = studyObject.subjects
@@ -214,7 +231,7 @@ class AssignForm:
         session.flush()
         self.hide()
         n = len(record["sids"])
-        text = _("{n} second tracing(s) assigned").format(n=n)
+        text = assigned_text(n)
         if record.get("seed") is not None:
             text += " · " + _("seed {seed}").format(seed=record["seed"])
         if record.get("skipped"):
@@ -243,7 +260,7 @@ def _metricsText(data):
         _("Median Dice {dice} · HD95 {hd} · volume ratio {ratio}").format(dice=number(median.get("dice")), hd=number(median.get("hd95_mm"), 1, " mm"),
                                                                           ratio=number(median.get("volume_ratio"))),
         _("Centroids {centroid} apart vs {baseline} between lesions").format(centroid=number(median.get("centroid_mm"), 1, " mm"), baseline=number(baseline, 1, " mm")),
-        _("2 mm grid: Dice {dice} · {n} pairs").format(dice=number(coarse.get("dice")), n=data["n_pairs"]),
+        _("2 mm grid: Dice {dice} · {pairs}").format(dice=number(coarse.get("dice")), pairs=pairs_text(data["n_pairs"])),
     ]
     return "\n".join(lines)
 
@@ -311,7 +328,7 @@ class AgreementCard:
         studyObject = session.study
         rules = _rules()
         numbers = counts(studyObject)
-        parts = [_("{n} to trace twice").format(n=numbers["todo"]), _("{n} pairs").format(n=numbers["pairs"])]
+        parts = [_("{n} to trace twice").format(n=numbers["todo"]), pairs_text(numbers["pairs"])]
         if numbers["adjudicate"]:
             parts.append(_("{n} to adjudicate").format(n=numbers["adjudicate"]))
         if numbers["consensus"]:
@@ -449,7 +466,7 @@ def computeAgreement():
     session.setValues([], {})
     session.flush()
     if data["n_pairs"]:
-        review._toast(_("Agreement of {n} pairs written to derivatives/qc/interrater.tsv").format(n=data["n_pairs"]), ms=3500)
+        review._toast(written_text(data["n_pairs"]), ms=3500)
     else:
         review._toast(_("No lesion is traced twice yet"), ms=3000)
     return data

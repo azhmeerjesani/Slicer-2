@@ -1730,3 +1730,30 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertNotIn("Traceback", message)
             self.assertNotIn("\n", message)
             self.assertIn("cannot be read", message)
+
+    def test_review_and_agreement_counts_use_singular_for_one(self):
+        """The Review, Agreement and adjudication texts say "1 change requested", "1 pair", "1 lesion" and "1 second tracing", not
+        "1 changes requested", "1 pairs", "lesion(s)" or "tracing(s)".
+        """
+        from StudioLib import adjudicate, libcard_agreement, libcard_review
+
+        self.assertEqual(libcard_review.changes_text(1), "1 change requested")
+        self.assertEqual(libcard_review.changes_text(0), "0 changes requested")
+        self.assertEqual(libcard_review.changes_text(2), "2 changes requested")
+        self.assertIn("leave out 1 lesion that", libcard_review.gate_text(1))
+        self.assertIn("lists it;", libcard_review.gate_text(1))
+        self.assertIn("leave out 3 lesions that", libcard_review.gate_text(3))
+        self.assertEqual(libcard_agreement.pairs_text(1), "1 pair")
+        self.assertEqual(libcard_agreement.pairs_text(0), "0 pairs")
+        self.assertEqual(libcard_agreement.pairs_text(4), "4 pairs")
+        self.assertEqual(libcard_agreement.assigned_text(1), "1 second tracing assigned")
+        self.assertEqual(libcard_agreement.assigned_text(6), "6 second tracings assigned")
+        self.assertEqual(libcard_agreement.written_text(1), "Agreement of 1 pair written to derivatives/qc/interrater.tsv")
+        self.assertEqual(libcard_agreement.written_text(2), "Agreement of 2 pairs written to derivatives/qc/interrater.tsv")
+        self.assertEqual(adjudicate.left_out_text(1, "why"), "1 second tracing left out: why")
+        self.assertEqual(adjudicate.left_out_text(2, "why"), "2 second tracings left out: why")
+        for module in (libcard_review, libcard_agreement, adjudicate):
+            with open(module.__file__) as f:
+                source = f.read()
+            self.assertNotIn("lesion(s)", source, module.__name__)
+            self.assertNotIn("tracing(s)", source, module.__name__)
