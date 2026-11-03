@@ -27,6 +27,8 @@ DIALOG_OBJECT_NAME = "StudioNiftiExportDialog"
 DIALOG_WIDTH = 600
 #: Rows of the list of images shown without scrolling
 LIST_ROWS = 6
+#: Rows the image list keeps when the dialog is squeezed (it scrolls)
+LIST_MIN_ROWS = 2
 LIST_ROW_HEIGHT = 30
 #: Names shown in the summary before "and N more"
 SUMMARY_NAMES = 4
@@ -360,8 +362,12 @@ class ExportDialog(qt.QDialog):
             item.setSizeHint(qt.QSize(0, LIST_ROW_HEIGHT))
             item.setToolTip(_("{name} ({kind})").format(name=node.GetName(), kind=kindText))
             self.list.addItem(item)
+        # Up to LIST_ROWS rows when there is room. The height is flexible (not fixed): on a short screen or at a large app font the
+        # dialog is capped to the screen, and a fixed-height list would be drawn under the folder card; this one shrinks and scrolls
         rows = max(1, min(LIST_ROWS, len(nodes)))
-        self.list.setFixedHeight(rows * LIST_ROW_HEIGHT + 6)
+        self.list.setMaximumHeight(rows * LIST_ROW_HEIGHT + 6)
+        self.list.setMinimumHeight(min(rows, LIST_MIN_ROWS) * LIST_ROW_HEIGHT + 6)
+        self.list.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Preferred)
         self.list.connect("itemChanged(QListWidgetItem*)", lambda item: self.updateSummary())
         layout.addWidget(self.list)
         self.emptyLabel = ui.label(_("Nothing to export: open a scan, draw a lesion or open a map first."), "body", "text3", "StudioNiftiExportEmpty", wrap=True)
@@ -614,6 +620,14 @@ class ExportDialog(qt.QDialog):
             # Never taller than the screen's usable area (the window frame takes a few pixels)
             height = min(height, max(screen.availableGeometry.height() - 40, layout.totalMinimumSize().height()))
         self.resize(self.width, height)
+        if screen is not None and self.isVisible():
+            # The dialog was centred at its first, shorter height: when it grew, keep its frame on the screen
+            decoration = max(0, self.frameGeometry.height() - self.geometry.height())
+            available = screen.availableGeometry
+            top = available.y() if hasattr(available, "y") else 0
+            overflow = self.y + height + decoration - (top + available.height())
+            if overflow > 0:
+                self.move(self.x, max(top, self.y - overflow))
 
     #
     # Export

@@ -1246,7 +1246,7 @@ class StudioNiftiExportTest(unittest.TestCase):
         self.assertGreater(dialog.height, heightBefore, "the dialog grows with the summary")
         listBottom = dialog.list.geometry.y() + dialog.list.geometry.height()
         self.assertLessEqual(listBottom, card.geometry.y(), "the image list is not drawn under the folder card")
-        self.assertEqual(dialog.list.height, dialog.list.minimumHeight)
+        self.assertEqual(dialog.list.height, dialog.list.maximumHeight, "with room, the list shows all its rows")
         dialog.close()
 
     def test_08ac_dialog_opens_at_the_height_its_content_needs(self):
@@ -1277,6 +1277,40 @@ class StudioNiftiExportTest(unittest.TestCase):
             control = dialog.findChild(qt.QWidget, name)
             self.assertGreaterEqual(control.height, control.sizeHint.height(), f"{name} is not clipped")
         dialog.close()
+
+    def test_08ae_short_screen_shrinks_the_list_instead_of_drawing_it_under_the_folder_card(self):
+        """On a screen too short for the whole dialog (1366x768 at a 125 % app font) the dialog is capped to the screen: the image
+        list gives up rows and scrolls, it is not drawn under the folder card (BB-1 nifti-export).
+        """
+        from types import SimpleNamespace
+
+        from StudioLib import autosave_io, niftiexport_ui, ui
+
+        nodes = [self._volume(f"sub-{index:02d}_ses-baseline_acq-mprage_run-{index}_T1w", np.ones((3, 3, 3), np.int16), np.eye(4)) for index in range(8)]
+        original = ui.screenOf
+        # A screen whose usable height is 500 px: less than the dialog needs with 6 list rows
+        ui.screenOf = lambda widget: SimpleNamespace(availableGeometry=SimpleNamespace(height=lambda: 500))
+        dialog = None
+        try:
+            dialog = niftiexport_ui.exportNodesDialog(nodes, show=False, executor=autosave_io.InlineExecutor())
+            dialog.setFolder(self.out)
+            dialog.selectAll()
+            dialog.show()
+            for _ in range(5):
+                slicer.app.processEvents()
+            layout = dialog.layout()
+            self.assertLess(dialog.height, layout.totalHeightForWidth(dialog.width) if layout.hasHeightForWidth() else layout.totalSizeHint().height(),
+                            "the dialog is capped by the screen (the test needs a squeezed layout)")
+            card = dialog.findChild(qt.QWidget, "StudioNiftiExportFolderCard")
+            listBottom = dialog.list.geometry.y() + dialog.list.geometry.height()
+            self.assertLessEqual(listBottom, card.geometry.y(), "the image list is not drawn under the folder card")
+            self.assertLess(dialog.list.height, dialog.list.maximumHeight, "the list gave up rows")
+            self.assertGreaterEqual(dialog.list.height, dialog.list.minimumHeight)
+            self.assertGreater(dialog.list.verticalScrollBar().maximum, 0, "the list scrolls")
+        finally:
+            ui.screenOf = original
+            if dialog is not None:
+                dialog.close()
 
     def test_08ab_long_folder_path_is_elided_and_keeps_the_end(self):
         """A destination path wider than the folder card is elided with an ellipsis that keeps 'Exports/nifti'; the tooltip has it all."""
