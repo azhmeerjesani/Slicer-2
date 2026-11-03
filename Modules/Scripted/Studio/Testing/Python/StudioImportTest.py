@@ -2558,3 +2558,31 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             numpy_support.vtk_to_numpy = original
             if blockBackup is not None:
                 importer._LABEL_VALUE_SCAN_BLOCK_VOXELS = blockBackup
+
+    def test_template_loads_when_the_cache_cannot_be_written(self):
+        """The bundled 2 mm template opens although SampleData cannot copy it into its cache (a read-only or full cache
+        folder); a template that has to be downloaded fails with a plain message, not "list index out of range".
+        """
+        import SampleData
+        from StudioLib import importer
+
+        def cannotWrite(self, *args, **kwargs):
+            raise ValueError("cache folder is not writable")
+
+        original = SampleData.SampleDataLogic.downloadFileIntoCache
+        SampleData.SampleDataLogic.downloadFileIntoCache = cannotWrite
+        try:
+            # Bundled template: loaded from where it is installed
+            volume = importer._templateVolume(importer.TEMPLATE_SAMPLE_2MM)
+            self.assertIsNotNone(volume)
+            self.assertEqual(volume.GetName(), importer._templateNodeName(importer.TEMPLATE_SAMPLE_2MM))
+            self.assertIsNone(volume.GetStorageNode(), "the bundled file is not the storage of the scene node")
+            slicer.mrmlScene.RemoveNode(volume)
+            # Downloaded template: a plain message that says what to check, shown without a traceback in the log
+            with self.assertRaises(RuntimeError) as raised:
+                importer._templateVolume(importer.TEMPLATE_SAMPLE_1MM)
+            self.assertTrue(getattr(raised.exception, "user_problem", False))
+            self.assertNotIn("list index", str(raised.exception))
+            self.assertIn("MNI152NLin2009cAsym 1mm T1w", str(raised.exception))
+        finally:
+            SampleData.SampleDataLogic.downloadFileIntoCache = original

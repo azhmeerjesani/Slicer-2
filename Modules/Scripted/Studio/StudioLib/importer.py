@@ -2837,6 +2837,28 @@ def _tagTemplate(volumeNode, sampleName):
     return volumeNode
 
 
+def _loadBundledTemplate(logic, source):
+    """Load a template that is bundled with the application (a ``file://`` source) from where it is installed.
+
+    Used when SampleData could not copy it into its cache (a read-only or full cache folder): the bundled template
+    works offline, so it must not need a writable cache. A template that has to be downloaded cannot be loaded this
+    way: a plain message says what is wrong (``user_problem``: a problem with the user's setup, not a program error).
+    """
+    uri = source.uris[0] if source.uris else ""
+    if str(uri).startswith("file:"):
+        path = qt.QUrl(uri).toLocalFile()
+        if os.path.isfile(path):
+            return logic.loadNode(path, source.nodeNames[0], None, dict(source.loadFileProperties or {}))
+    cacheFolder = slicer.mrmlScene.GetCacheManager().GetRemoteCacheDirectory()
+    error = RuntimeError(
+        _("The template {sampleName} could not be downloaded or saved. Check that you are online and that the folder {folder} can be written (it must have free space).").format(
+            sampleName=source.sampleName, folder=cacheFolder,
+        ),
+    )
+    error.user_problem = True
+    raise error
+
+
 def _templateVolume(sampleName, path=None, show=True):
     """The template volume already in the scene, else load it (from ``path``, else from SampleData).
 
@@ -2855,7 +2877,11 @@ def _templateVolume(sampleName, path=None, show=True):
             return _tagTemplate(slicer.util.loadVolume(path, {"name": nodeName, "singleFile": True, "show": False}), sampleName)
         import SampleData
 
-        volumeNode = SampleData.SampleDataLogic().downloadSample(sampleName)
+        logic = SampleData.SampleDataLogic()
+        # downloadSamples() (not downloadSample(), which raises IndexError) returns [] when the file cannot be copied into
+        # the cache (a read-only or full cache folder) or downloaded
+        nodes = logic.downloadSamples(sampleName)
+        volumeNode = nodes[0] if nodes else _loadBundledTemplate(logic, source)
     if volumeNode is None:
         raise RuntimeError(_("Failed to load {sampleName}").format(sampleName=sampleName))
     return _tagTemplate(volumeNode, sampleName)
