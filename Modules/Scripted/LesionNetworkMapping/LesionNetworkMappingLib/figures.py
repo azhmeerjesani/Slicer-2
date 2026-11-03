@@ -953,6 +953,9 @@ class Options:
             raise ValueError("width_mm must be positive and dpi at least 30")
         if self.window is not None and not (math.isfinite(float(self.window)) and float(self.window) > 0):
             raise ValueError(f"The window must be positive, got {self.window}")
+        if self.columns is not None and int(self.columns) < 1:
+            # A negative count gave an empty row split (a blank figure, or max() of nothing); 0 was silently "default"
+            raise ValueError(f"The number of columns must be at least 1, got {self.columns}")
         if self.n is not None and int(self.n) < 1:
             # 0 and negative N used to pass: 0 as "N unknown", a negative N as a T map with N < 2 drawn unthresholded
             raise ValueError(f"The number of subjects (N) must be at least 1, got {self.n}")
@@ -1995,7 +1998,10 @@ def gallery(lesions, template=None, labels=None, per_page=30, binarize_at=0.5, c
     labels = [str(label) for label in labels] if labels is not None else [str(index + 1) for index in range(len(volumes))]
     if len(labels) != len(volumes):
         raise ValueError(f"{len(labels)} labels for {len(volumes)} lesions")
-    per_page = max(1, int(per_page))
+    if int(per_page) < 1:
+        # 0 and negative used to become 1 silently (one tile per page)
+        raise ValueError(f"The number of tiles per page must be at least 1, got {per_page}")
+    per_page = int(per_page)
     pages = []
     ctx_all = _Context("gallery", options, template, volumes)
     outside_notes = ctx_all.lesion_notes(volumes, labels)
@@ -2347,6 +2353,11 @@ def main(argv=None, cancel=None):
         raise jobs.JobError("Give --out or --study", code="usage", exit_code=jobs.EXIT_USAGE)
     if args.rule is not None and args.threshold is not None:
         raise jobs.JobError("Give --rule or --threshold, not both", code="usage", exit_code=jobs.EXIT_USAGE)
+    # Whole numbers of at least 1: checked before anything is read or rendered (0 and negatives used to be accepted)
+    if args.columns is not None and args.columns < 1:
+        raise jobs.JobError(f"--columns must be at least 1, got {args.columns}", code="usage", exit_code=jobs.EXIT_USAGE)
+    if args.per_page < 1:
+        raise jobs.JobError(f"--per-page must be at least 1, got {args.per_page}", code="usage", exit_code=jobs.EXIT_USAGE)
     out_root = args.out or os.path.join(args.study, "derivatives", "lnm")
     run_root = args.run_root or args.study or _find_study(out_root) or out_root
     name = args.name or args.preset

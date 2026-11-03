@@ -392,6 +392,26 @@ class FiguresTest(unittest.TestCase):
         self.assertEqual(rendered, [], "nothing may be rendered for a bad --formats")
         self.assertFalse(os.path.exists(os.path.join(out, "figures")))
 
+    def test_columns_and_per_page_validated(self):
+        # --columns -2 wrote a blank figure, montage --columns -1 failed with "max() iterable argument is empty",
+        # and --per-page 0 silently became 1
+        out = os.path.join(self.tmp, "o-columns")
+        map_path = os.path.join(self.tmp, "columns-map.nii.gz")
+        nifti.write_nifti(map_path, self.tmap[0], self.affine)
+        for preset, option, value in (("gallery", "--columns", "-2"), ("montage", "--columns", "-1"), ("montage", "--columns", "0"),
+                                      ("gallery", "--per-page", "0"), ("gallery", "--per-page", "-3")):
+            code, events = self._cli(["--preset", preset, "--map", map_path, "--lesion", map_path, option, value, "--out", out, "--formats", "png"])
+            self.assertEqual(code, jobs.EXIT_USAGE, (preset, option, value))
+            self.assertEqual(events[-1]["code"], "usage")
+            self.assertIn(f"{option} must be at least 1", events[-1]["message"])
+        self.assertFalse(os.path.exists(os.path.join(out, "figures")))
+        for bad in (-1, 0):
+            with self.assertRaises(ValueError, msg=str(bad)) as caught:
+                figures.montage(self.tmap, None, "A 0", threshold=4.0, columns=bad, **SMALL)
+            self.assertIn("columns must be at least 1", str(caught.exception))
+        with self.assertRaises(ValueError):
+            figures.gallery([(ball((0, 0, 0), 5), self.affine, "a")], None, per_page=0, **SMALL)
+
     def test_shared_range_identical_across_panels(self):
         strong = (blob_map(amplitude=20.0), self.affine, "strong")
         weak = (blob_map(amplitude=5.0), self.affine, "weak")
