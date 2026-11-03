@@ -822,6 +822,16 @@ def lookup(doi="", pmid="", get=None):
     raise SourcesError("The record has no DOI or PMID to look up")
 
 
+def fill_from_lookup(records, record_id, found):
+    """Fill the empty fields of a record from a draft that :func:`lookup` returned (never overwrites). Return the fields filled.
+
+    Split from :func:`fetch_metadata` so that a card can run the request in a thread and change the records on the main thread.
+
+    :raises KeyError: for a record id that is not in ``records``.
+    """
+    return records._fill(records.get(record_id), found)
+
+
 def fetch_metadata(records, record_id, get=None):
     """Fill the empty fields of a record from :func:`lookup` (never overwrites). Return the fields filled.
 
@@ -829,7 +839,7 @@ def fetch_metadata(records, record_id, get=None):
     """
     row = records.get(record_id)
     found = lookup(row["doi"], row["pmid"], get=get)
-    return records._fill(row, found)
+    return fill_from_lookup(records, record_id, found)
 
 
 #

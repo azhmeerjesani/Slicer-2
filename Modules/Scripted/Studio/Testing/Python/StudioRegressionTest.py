@@ -85,6 +85,10 @@ Run with the main window and testing enabled::
 - ``test_56_study_folder_renamed_while_open_is_said_and_not_recreated`` (BB-1): a study folder renamed while the study is
   open is said in plain words by the heartbeat and by Done (not "the grid has no NIfTI file"), and the journal, the
   heartbeat and Done recreate no ``.studio`` folder at the old path; with the folder back, writing resumes.
+- ``test_27b_sources_fetch_metadata_runs_in_the_background_and_can_be_cancelled`` (BB-1): Fetch metadata on the Sources card made its
+  request on the main thread, so a network that does not answer froze the whole application for up to 10 s with no Cancel. The
+  request now runs in a helper thread: the click returns at once, the button reads "Cancel lookup", the answer is applied on the
+  main thread, a cancelled lookup ignores its late answer, and a failure is said on the card.
 - ``test_30_missing_scan_or_lesion_is_said`` (BB-1): a subject whose scan file is missing is not opened on the study
   template (open and Done -> next say so, the current subject stays open); a traced subject whose lesion file is missing
   opens on its scan with an empty lesion and says so.
@@ -2690,6 +2694,123 @@ class StudioRegressionTest(unittest.TestCase):
             self.assertEqual(stages(), {"smith2020": "screened", "doe2019": "screened", "ng2018": "identified"})
             self.assertEqual(toasts[-1], "Undo · ng2018 back to Identified")
         finally:
+            libcard_sources._toast = toast
+            if card is not None:
+                card.widget.hide()
+                card.widget.deleteLater()
+            study_ui.closeStudy()
+            for _ in range(4):
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+
+    def test_27b_sources_fetch_metadata_runs_in_the_background_and_can_be_cancelled(self):
+        """Sources > Fetch metadata made its request on the main thread: on a network that does not answer the whole application
+        froze for up to 10 s with no Cancel. The request now runs in a helper thread: the click returns at once, the event loop
+        keeps running, the button becomes "Cancel lookup", and the result is applied on the main thread when it arrives; a
+        cancelled lookup ignores its late answer (BB-1).
+        """
+        import threading
+
+        from LesionNetworkMappingLib.study import Study
+
+        from StudioLib import libcard_sources, study_ui
+
+        if not study_ui.isAvailable():
+            self.skipTest("needs the lesion network mapping library")
+        crossref = {
+            "message": {
+                "title": ["A paper"],
+                "author": [{"family": "Smith", "given": "J"}],
+                "issued": {"date-parts": [[2020]]},
+                "container-title": ["Brain"],
+                "DOI": "10.1000/xyz",
+            },
+        }
+        release = threading.Event()
+        calls, threads = [], []
+
+        def waiting(url, params):
+            calls.append(url)
+            threads.append(threading.current_thread())
+            release.wait(20)
+            return crossref
+
+        def failing(url, params):
+            raise ConnectionError("no network")
+
+        def wait(condition, seconds=5.0):
+            end = time.time() + seconds
+            while not condition() and time.time() < end:
+                slicer.app.processEvents()
+                time.sleep(0.01)
+            return condition()
+
+        path = os.path.join(self.directory, "LitFetch")
+        Study.create(path, name="LitFetch").save()
+        toasts = []
+        toast = libcard_sources._toast
+        libcard_sources._toast = lambda text, *args, **kwargs: toasts.append(str(text))
+        card = None
+        try:
+            session = study_ui.openStudy(path, showLibrary=False)
+            self.assertIsNotNone(session)
+            card = libcard_sources.SourcesCard(session)
+            card.widget.show()
+            card.importRecords(text="10.1000/xyz", database="Manual", query="q")
+            self.assertEqual(len(card._rows), 1)
+            card.table.selectRow(0)
+            self.assertTrue(card.fetchButton.isEnabled())
+            self.assertEqual(card.fetchButton.text, "Fetch metadata")
+
+            def title():
+                return card.load().rows[0]["title"]
+
+            self.assertEqual(title(), "")
+            # A request that does not answer: the click returns at once and the event loop keeps running
+            card._lookupGet = waiting
+            started = time.time()
+            card.fetchButton.click()
+            self.assertLess(time.time() - started, 1.0, "the click must not wait for the request")
+            self.assertTrue(card.lookupBusy())
+            self.assertEqual(card.fetchButton.text, "Cancel lookup")
+            self.assertTrue(card.fetchButton.isEnabled())
+            self.assertTrue(wait(lambda: calls, 5), "the request did not start")
+            self.assertNotEqual(threads[0], threading.main_thread(), "the request must not run on the main thread")
+            wait(lambda: False, 0.3)  # the event loop runs while the request waits
+            self.assertTrue(card.lookupBusy())
+            self.assertEqual(title(), "", "nothing is filled before the answer arrives")
+            # The answer arrives: it is applied on the main thread
+            release.set()
+            self.assertTrue(wait(lambda: not card.lookupBusy()))
+            self.assertEqual(title(), "A paper")
+            self.assertEqual(card.fetchButton.text, "Fetch metadata")
+            self.assertTrue(toasts[-1].startswith("Filled"), toasts[-1])
+
+            # Cancel: the late answer is ignored
+            card.load().rows[0]["title"] = ""
+            card._save()
+            release.clear()
+            del calls[:]
+            card.fetchButton.click()
+            self.assertTrue(wait(lambda: calls, 5))
+            self.assertTrue(card.lookupBusy())
+            card.fetchButton.click()
+            self.assertFalse(card.lookupBusy())
+            self.assertEqual(card.fetchButton.text, "Fetch metadata")
+            self.assertEqual(toasts[-1], "Lookup cancelled")
+            release.set()
+            wait(lambda: False, 0.4)
+            self.assertEqual(title(), "", "a cancelled lookup must not fill the record")
+
+            # A failure is said on the card
+            card._lookupGet = failing
+            card.fetchButton.click()
+            self.assertTrue(wait(lambda: not card.lookupBusy()))
+            self.assertTrue(card.errorLabel.isVisible())
+            self.assertIn("lookup failed", card.errorLabel.text)
+            self.assertEqual(title(), "")
+        finally:
+            release.set()
             libcard_sources._toast = toast
             if card is not None:
                 card.widget.hide()

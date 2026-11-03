@@ -23,6 +23,9 @@ Works in Classic (the Studio module panel hosts the same cards).
 import contextlib
 import logging
 import os
+import queue
+import threading
+import time
 import traceback
 
 import qt
@@ -44,6 +47,10 @@ TABLE_KEYS = (
     ("Return", "Sources table: open the record's attachments folder"),
     ("/", "Sources table: filter"),
 )
+#: The lookup's result is handed over every LOOKUP_POLL_MS; the main thread then sleeps LOOKUP_SLEEP_S so that the lookup thread
+#: runs (Python threads only run while the main thread runs Python, as in the cohort card)
+LOOKUP_POLL_MS = 15
+LOOKUP_SLEEP_S = 0.008
 FILE_FILTER = "Reference files (*.ris *.nbib *.bib *.bibtex *.txt *.csv *.tsv *.medline);;All files (*)"
 
 
@@ -159,11 +166,44 @@ class _ReasonPopover:
         self.card.exclude(recordId, text)
 
 
+class _LookupJob:
+    """One metadata lookup in a helper thread (the request can wait for seconds on a bad network).
+
+    The thread touches no Qt or MRML object and no record: it only calls ``sources.lookup`` and puts ``("ok", draft)`` or
+    ``("error", text)`` in ``queue``. The card applies the result on the main thread. A cancelled job is abandoned: its thread
+    ends with the request (the timeout) and the late result is never read.
+    """
+
+    def __init__(self, sources, recordId, records, studyPath, doi, pmid, get=None):
+        self.recordId = recordId
+        self.records = records
+        self.studyPath = studyPath
+        self.queue = queue.Queue()
+        self.thread = threading.Thread(target=self._run, args=(sources, doi, pmid, get), name="StudioSourcesLookup", daemon=True)
+
+    def start(self):
+        self.thread.start()
+
+    def _run(self, sources, doi, pmid, get):
+        try:
+            self.queue.put(("ok", sources.lookup(doi, pmid, get=get)))
+        except sources.SourcesError as e:
+            self.queue.put(("error", str(e)))
+        except Exception as e:
+            logging.debug(f"Studio sources: the lookup failed:\n{traceback.format_exc()}")
+            self.queue.put(("error", f"The lookup failed ({type(e).__name__})"))
+
+
 class SourcesCard:
     """The 'Sources' part of the STUDY card."""
 
     def __init__(self, session):
         self.session = session
+        self._lookup = None  # the _LookupJob that runs, if any
+        self._lookupGet = None  # tests: a stub for the HTTP request of sources.lookup
+        self._lookupTimer = qt.QTimer()
+        self._lookupTimer.setInterval(LOOKUP_POLL_MS)
+        self._lookupTimer.connect("timeout()", self._pumpLookup)
         self.records = None
         self._studyPath = None
         self._signature = None
@@ -520,7 +560,7 @@ class SourcesCard:
         if has and self.records is not None:
             with contextlib.suppress(KeyError):
                 record = self.records.get(selected)
-        self.fetchButton.setEnabled(record is not None and bool(record["doi"] or record["pmid"]))
+        self.fetchButton.setEnabled(self._lookup is not None or (record is not None and bool(record["doi"] or record["pmid"])))
         if record is not None and not (record["doi"] or record["pmid"]):
             self.fetchButton.setToolTip(_("The record has no DOI or PMID to look up"))
         self.prismaButton.setEnabled(self.records is not None and len(self.records) > 0)
@@ -746,22 +786,89 @@ class SourcesCard:
     # Metadata and cases
 
     def fetchMetadata(self):
+        """Look up the selected record in the background (the views stay usable). A click while it runs cancels it.
+
+        :return: True when the lookup started (the result is applied when it arrives), else None.
+        """
+        if self._lookup is not None:
+            self.cancelLookup()
+            return None
         recordId = self.selectedId()
         records = self.load()
         if recordId is None or records is None:
             return None
         sources = _sources()
-        self._showError("")
-        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
         try:
-            filled = sources.fetch_metadata(records, recordId)
-        except sources.SourcesError as e:
-            self._showError(str(e))
+            row = records.get(recordId)
+        except KeyError:
             return None
-        finally:
-            qt.QApplication.restoreOverrideCursor()
-        self._save()
-        self.refresh(select=recordId)
+        self._showError("")
+        job = _LookupJob(sources, recordId, records, self._study().path, row["doi"], row["pmid"], get=self._lookupGet)
+        self._lookup = job
+        self._setLookupBusy(True)
+        job.start()
+        self._lookupTimer.start()
+        return True
+
+    def lookupBusy(self):
+        return self._lookup is not None
+
+    def cancelLookup(self):
+        """Stop waiting for the running lookup (its late answer is ignored)."""
+        if self._lookup is None:
+            return False
+        self._lookup = None
+        self._lookupTimer.stop()
+        self._setLookupBusy(False)
+        _toast(_("Lookup cancelled"))
+        return True
+
+    def _setLookupBusy(self, busy):
+        if not library._isAlive(self.widget):
+            return
+        self.fetchButton.setText(_("Cancel lookup") if busy else _("Fetch metadata"))
+        self.fetchButton.setToolTip(
+            _("Stop waiting for the lookup")
+            if busy
+            else _("Look up title, authors, year and journal of the selected record online (Crossref or PubMed). Only its DOI or PMID is sent."),
+        )
+        self._updateButtons()
+
+    def _pumpLookup(self):
+        job = self._lookup
+        if job is None:
+            self._lookupTimer.stop()
+            return
+        try:
+            kind, value = job.queue.get_nowait()
+        except queue.Empty:
+            if job.thread.is_alive():
+                time.sleep(LOOKUP_SLEEP_S)  # lends the interpreter to the lookup thread
+            return
+        self._lookup = None
+        self._lookupTimer.stop()
+        if not library._isAlive(self.widget):
+            return
+        self._setLookupBusy(False)
+        self._run(lambda: self._applyLookup(job, kind, value))
+
+    def _applyLookup(self, job, kind, value):
+        """Show the result of a lookup on the main thread (the single writer of the records)."""
+        sources = _sources()
+        if kind == "error":
+            self._showError(value)
+            return None
+        records = self.load()
+        studyObject = self._study()
+        if records is None or studyObject is None or studyObject.path != job.studyPath:
+            return None  # another study is open now
+        try:
+            filled = sources.fill_from_lookup(records, job.recordId, value)
+        except KeyError:
+            return None  # the record was merged or removed meanwhile
+        if filled:
+            self._save()
+        self.refresh(select=job.recordId)
         _toast(_("Filled {fields}").format(fields=", ".join(filled)) if filled else _("Nothing new to fill"))
         return filled
 

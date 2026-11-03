@@ -352,6 +352,19 @@ class SourcesTest(unittest.TestCase):
         self.assertEqual(sorted(filled), ["authors", "journal", "year"])
         self.assertEqual(records.get(rid)["title"], "My own title")
 
+    def test_fill_from_lookup_applies_a_draft_without_a_request(self):
+        """The card runs ``lookup`` in a thread and applies the draft on the main thread with ``fill_from_lookup``."""
+        records = sources.Records.open(self.study)
+        records.add([sources.draft(doi="10.1000/xyz", title="My own title")])
+        rid = records.ids()[0]
+        found = sources.lookup(doi="10.1000/xyz", get=lambda url, params: LOOKUP_CROSSREF)
+        filled = sources.fill_from_lookup(records, rid, found)
+        self.assertEqual(sorted(filled), ["authors", "journal", "year"])
+        self.assertEqual(records.get(rid)["title"], "My own title")
+        self.assertEqual(sources.fill_from_lookup(records, rid, found), [])
+        with self.assertRaises(KeyError):
+            sources.fill_from_lookup(records, "nobody2000", found)
+
     def test_no_network_without_a_call(self):
         original = sources._http_json
         sources._http_json = lambda *a, **k: self.fail("network used")

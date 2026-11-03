@@ -199,7 +199,8 @@ counts of the flow diagram and the paper behind each case are never retyped.
   year that match closely are only **offered** for merging (Merge or Keep both).
 - **Screening.** Select a record and press **P** to pass it to the next stage (identified, screened, full text, included),
   **X** to exclude it with a reason, **U** to undo. **Fetch metadata** (Crossref or NCBI, sending only the identifier) runs
-  only when you click it, and offline it changes nothing.
+  only when you click it, in the background (the views stay usable; click the button again, now **Cancel lookup**, to stop
+  waiting), and offline it changes nothing.
 - **Add cases…** creates the rows `sub-<record><nn>` of a record, with its DOI, PMID and citation.
 - **Export PRISMA flow diagram** writes `derivatives/prisma/prisma_counts.json` and `prisma_flow.svg` (a fixed template:
   no scripts, no paths). Records hold citation fields only; the attachment folder `sources/<record>/` (figures, PDFs) is
