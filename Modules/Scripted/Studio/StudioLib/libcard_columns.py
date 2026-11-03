@@ -918,6 +918,11 @@ class CaseSection:
     def _warningOf(self, study, column, value):
         if _missing(value):
             return ""
+        if column == "doi":
+            # The same check as the case strip of Draw (the schema has none): a text that is no DOI is kept, but flagged
+            studyUi = library._studyUi()
+            if studyUi is not None and not studyUi.isDoi(value):
+                return _("{text} does not look like a DOI (10.xxxx/…)").format(text=studyUi.normalizeDoi(value))
         schema = _lnm("schema")
         spec = self._specOf(study, column)
         if spec is None or spec.strict:

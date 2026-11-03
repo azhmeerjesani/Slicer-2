@@ -4280,3 +4280,37 @@ class StudioRegressionTest(unittest.TestCase):
             study_ui.closeStudy()
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
+
+    def test_60_case_section_warns_about_a_doi_that_is_not_a_doi(self):
+        """The Case section stored "see the paper" as the DOI without a word, while the case strip of Draw warned about it (BB-1)."""
+        from StudioLib import libcard_columns as lc
+        from StudioLib import study_ui
+
+        study = self._study([("sub-01", {}, False)])
+        session = study_ui.openStudy(study.path, None, showLibrary=False)
+        self.addCleanup(study_ui.closeStudy)
+        slicer.app.processEvents()
+        host = qt.QWidget()
+        self.addCleanup(host.deleteLater)
+        hostLayout = qt.QVBoxLayout(host)
+        sectionWidget = lc._createSection(session)
+        section = lc._sections[sectionWidget]
+        hostLayout.addWidget(sectionWidget)
+        host.resize(306, 700)
+        host.show()
+        section.refresh("sub-01")
+        for key in ("imaging", "case"):
+            button = section.groups[key][0]
+            if not button.isChecked():
+                button.click()
+        slicer.app.processEvents()
+        self.assertTrue(section.setField("doi", "see the paper"))
+        self.assertEqual(session.study.subject("sub-01")["doi"], "see the paper", "the text is kept, as in the case strip after a second Enter")
+        section.refresh("sub-01")
+        self.assertIn("see the paper does not look like a DOI", str(section.warningLabel.text))
+        self.assertFalse(section.warningLabel.isHidden())
+        for good in ("10.1000/xyz", "https://doi.org/10.1000/abc", "doi:10.1000/def"):
+            self.assertTrue(section.setField("doi", good))
+            section.refresh("sub-01")
+            self.assertEqual(str(section.warningLabel.text), "", f"{good!r} is a DOI")
+            self.assertTrue(section.warningLabel.isHidden())
