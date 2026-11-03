@@ -1089,7 +1089,13 @@ class CohortCard:
                 result["source"] = "cli"
                 result["created"] = None
                 session.applyInbox()  # the command line posted the per-subject values to the study inbox
-        self._onResult(result, None if result is not None else _("The command line did not finish ({state})").format(state=job.state))
+        if result is not None:
+            error = None
+        elif job.state == _jobrunner().CANCELLED:
+            error = "cancelled"  # Stop: "Stopped." and the previous result stays, as for the thread path
+        else:
+            error = _("The command line did not finish ({state})").format(state=job.state)
+        self._onResult(result, error)
 
     def stop(self):
         self.worker.cancel()

@@ -4237,3 +4237,46 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertEqual(libcard_cohort.excludedText({}), "")
         # The engine keeps the raw strings as its keys
         self.assertEqual((study.EXCLUDED_INCLUDE, study.EXCLUDED_QC), ("include=0", "qc=fail"))
+
+    def test_59_stopping_the_command_line_check_keeps_the_previous_result(self):
+        """Stop on a Cohort diagnostics check run by the command line said "The check failed" and dropped the result (BB-1)."""
+        from StudioLib import libcard_cohort, study_ui
+
+        if not study_ui.isAvailable():
+            self.skipTest("needs the lesion network mapping library")
+        study = self._study([(f"sub-0{index}", {"group": "case" if index <= 3 else "control"}, False) for index in range(1, 6)])
+        card = None
+        try:
+            session = study_ui.openStudy(study.path, showLibrary=False)
+            self.assertIsNotNone(session)
+            card = libcard_cohort.CohortCard(session)
+            card.refresh()
+            previous = libcard_cohort.checkLesionSet(session.study.path)
+            self.assertIsNotNone(previous.get("summary"))
+            jobrunner = libcard_cohort._jobrunner()
+
+            class FakeJob:
+                def __init__(self, state):
+                    self.state = state
+
+                def succeeded(self):
+                    return False
+
+            for state, stopped in ((jobrunner.CANCELLED, True), (jobrunner.FAILED, False)):
+                card.result = previous
+                card._runPath = card.studyPath
+                card._onCliDone(FakeJob(state))
+                text = str(card.statusLabel.text)
+                if stopped:
+                    self.assertEqual(text, "Stopped.")
+                    self.assertIs(card.result, previous, "a stopped check dropped the previous result")
+                else:
+                    self.assertIn("The check failed", text)
+                    self.assertIsNone(card.result)
+        finally:
+            if card is not None:
+                card.dispose()
+                card.widget.deleteLater()
+            study_ui.closeStudy()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
