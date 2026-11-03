@@ -683,16 +683,39 @@ def _bindDisclaimerColor(label):
 DISCLAIMER_LINE = "Research use only. Lesion network mapping specificity is debated."
 
 
-def _disclaimerLineHtml():
+#: The text of the "Read more" button of the disclaimer line (``LNMDisclaimerReadMore``)
+DISCLAIMER_READ_MORE = "Read more"
+
+
+def _readMoreButton(callback):
+    """Return the link-styled "Read more" button of the disclaimer line: a real button, so it is one Tab stop with a
+    visible focus ring and Enter or Space opens the popover (USABILITY 9.1: no invisible focus stops). A link inside the
+    label's text is not: a ``QLabel`` with ``LinksAccessibleByKeyboard`` takes a first, inert Tab stop with no link selected,
+    and a Python event filter that works around it crashes the application when the label is deleted at shutdown.
+    """
     ui = _studioUi()
-    link = ui.token("accent-fg").name() if ui is not None else slicer.app.palette().color(qt.QPalette.Link).name()
-    return f'{html.escape(DISCLAIMER_LINE)} <a href="#more" style="color: {link}; text-decoration: none;">Read more</a>'
+    if ui is not None and hasattr(ui, "linkButtonWidget"):
+        button = ui.linkButtonWidget(DISCLAIMER_READ_MORE, callback, "LNMDisclaimerReadMore")
+        ui.setText(button, "small")  # the 11 px of the line
+        return button
+    button = qt.QPushButton(DISCLAIMER_READ_MORE)
+    button.setObjectName("LNMDisclaimerReadMore")
+    button.setFlat(True)
+    button.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
+    button.setSizePolicy(qt.QSizePolicy.Maximum, qt.QSizePolicy.Fixed)
+    palette = qt.QPalette(button.palette)
+    palette.setColor(qt.QPalette.ButtonText, slicer.app.palette().color(qt.QPalette.Link))
+    button.setPalette(palette)
+    _font(button, 11)
+    button.connect("clicked()", callback)
+    return button
 
 
 def disclaimerLine(parent=None):
     """Return the one-line disclaimer of the Studio inspector (``LNMDisclaimerLine``): an info icon, "Research use only.
-    Lesion network mapping specificity is debated." and "Read more", which shows the whole ``export.DISCLAIMER`` (with
-    its references) in a popover. The full text is also the tooltip.
+    Lesion network mapping specificity is debated." (the ``LNMDisclaimer`` label) and the link-styled button "Read more"
+    (``LNMDisclaimerReadMore``, the line's one Tab stop), which shows the whole ``export.DISCLAIMER`` (with its
+    references) in a popover. The full text is also the tooltip.
     """
     from LesionNetworkMappingLib import export
 
@@ -709,24 +732,24 @@ def disclaimerLine(parent=None):
     if ui is not None:
         icon.setPixmap(ui.pixmap("info", 13, "text3"))
     layout.addWidget(icon, 0, qt.Qt.AlignTop)
-    label = qt.QLabel(_disclaimerLineHtml())
+    label = qt.QLabel(DISCLAIMER_LINE)
     # The objectName of the disclaimer label that the Map tour and the tests point at
     label.setObjectName("LNMDisclaimer")
-    label.setTextFormat(qt.Qt.RichText)
+    label.setTextFormat(qt.Qt.PlainText)
     label.setWordWrap(True)
     label.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
     label.setToolTip(export.DISCLAIMER)
-    label.setTextInteractionFlags(qt.Qt.LinksAccessibleByMouse | qt.Qt.LinksAccessibleByKeyboard)
     _font(label, 11)
     _bindDisclaimerColor(label)
-    # The link color is part of the text: follow a run-time theme switch
-    onPaletteChange(label, lambda: label.setText(_disclaimerLineHtml()))
+    layout.addWidget(label, 1)
 
-    def readMore(_link=None, label=label):
+    def readMore(label=label):
         showDisclaimer(label)
 
-    label.connect("linkActivated(QString)", readMore)
-    layout.addWidget(label, 1)
+    # "Read more" is a real button after the text (on the last line of the wrapped text, like the buttons of a notice line)
+    button = _readMoreButton(readMore)
+    button.setToolTip(export.DISCLAIMER)
+    layout.addWidget(button, 0, qt.Qt.AlignBottom)
     return frame
 
 

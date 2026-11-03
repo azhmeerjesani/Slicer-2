@@ -66,7 +66,9 @@ class LesionNetworkMappingThemeSwitchTest(unittest.TestCase):
         slicer.mrmlScene.Clear(0)
 
     def _readMoreColor(self):
-        match = re.search(r"color:\s*(#[0-9a-fA-F]{6})", self.line.findChild("QLabel", "LNMDisclaimer").text)
+        # "Read more" is a link-styled button: its text color is in its bound stylesheet (the first color rule)
+        button = self.line.findChild("QPushButton", "LNMDisclaimerReadMore")
+        match = re.search(r"[^-]color:\s*(#[0-9a-fA-F]{6})", button.styleSheet)
         return match.group(1).lower()
 
     def test_peaks_link_and_more_button_follow_a_theme_switch(self):
