@@ -771,11 +771,17 @@ class _Manager:
         if not auto and not redo:
             self._writeQueue(run)
         run.job = jobrunner.instance().submit(spec)
+        # A subject that was left out says why (the button counts it): the reason is part of the toast, not lost
+        skipped = " · ".join(notes) if notes and not auto else ""
         if note:
-            _toast(note, 6000, level="warning")
+            _toast(" · ".join(part for part in (note, skipped) if part), 6000, level="warning")
         elif not auto:
-            _toast(_("Normalizing {n} subjects in the background").format(n=len(chosen)) if len(chosen) > 1
-                   else _("Normalizing {sid} in the background").format(sid=chosen[0]), 3000)
+            started = (_("Normalizing {n} subjects in the background").format(n=len(chosen)) if len(chosen) > 1
+                       else _("Normalizing {sid} in the background").format(sid=chosen[0]))
+            if skipped:
+                _toast(" · ".join((started, skipped)), 6000, level="warning")
+            else:
+                _toast(started, 3000)
         _refreshLists()
         self.scheduleUi()
         return run.job

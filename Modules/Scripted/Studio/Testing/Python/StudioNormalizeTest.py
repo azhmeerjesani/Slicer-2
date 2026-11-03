@@ -724,6 +724,32 @@ class StudioNormalizeTest(unittest.TestCase):
         self.assertEqual(self.chips(["sub-01"]), {"sub-01": "Stale"})
         self.assertEqual(len(self.auditEvents(path, "norm_lesion_edited", "sub-01")), 1)
 
+    def test_07c_skipped_open_subject_is_explained(self):
+        """The button counts the open subject with unsaved edits; the batch leaves it out and the toast says why."""
+        from StudioLib import libcard_normalize as ln
+
+        path = self.makeStudy("skipnote", native=2, templateRows=0)
+        session = self.openStudy(path)
+        self.assertTrue(session.open("sub-01", switchToDraw=False))
+        session.markDirty()
+        toasts = []
+        original = ln._toast
+        ln._toast = lambda text, ms=3000, **kwargs: toasts.append(str(text))
+        try:
+            job = ln.normalizeSubjects(["sub-01", "sub-02"])
+            self.assertIsNotNone(job)
+            manager = ln._manager
+            self.assertEqual([run.sids for run in manager.runs if run.isLive()], [["sub-02"]])
+            started = [text for text in toasts if text.startswith("Normalizing sub-02 in the background")]
+            self.assertEqual(len(started), 1, toasts)
+            self.assertIn("sub-01 has edits that are not saved yet", started[0])
+            manager.stop()
+            _wait(lambda: not manager.isBusy(), 60)
+        finally:
+            ln._toast = original
+            session._dirty = session._markedDirty = False
+            ln._manager.stop() if ln._manager is not None else None
+
     #
     # Stop and resume
     #
