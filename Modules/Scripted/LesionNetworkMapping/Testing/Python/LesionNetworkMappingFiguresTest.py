@@ -509,6 +509,33 @@ class FiguresTest(unittest.TestCase):
         self.assertIn("Lesion gallery (2 lesions):", figures.gallery(lesions, self.template, **SMALL)[0].caption)
         self.assertIn("Lesion gallery (2 lesions, page 2 of 2)", figures.gallery(lesions, self.template, per_page=1, **SMALL)[1].caption)
 
+    def test_gallery_case_labels_wider_than_the_tile_are_elided_inside_it(self):
+        # A long --label ran left across its tile (over the z label) and into the previous tile
+        longs = ["P-0001-left-MCA", "P-0002-left-MCA-second-stroke", "P-0003-right-PCA-chronic-infarct-with-hemorrhage"]
+        lesions = [(ball((-10 + 4 * i, 0, 0), 5), self.affine, f"l{i}") for i in range(3)]
+        figure = figures.gallery(lesions, self.template, labels=longs, **SMALL)[0]
+        fonts = figure.fonts
+        small = next(item.size for item in figure.annotations if item.role == "case")
+        cases = []
+        for tile in figure.meta["tiles"]:
+            x0, y0, x1, y1 = tile["bbox"]
+            in_tile = [item for item in figure.annotations if x0 <= item.x <= x1 and y0 <= item.y <= y1]
+            case = [item for item in in_tile if item.role == "case"]
+            z = [item for item in in_tile if item.role == "slice"]
+            self.assertEqual((len(case), len(z)), (1, 1))
+            left_edge = case[0].x - fonts.width(case[0].text, small)
+            self.assertGreaterEqual(left_edge, z[0].x + fonts.width(z[0].text, small), f"{case[0].text} overprints the z label")
+            self.assertGreaterEqual(left_edge, x0, f"{case[0].text} leaves its tile")
+            cases.append(case[0].text)
+        shown = [tile["case"] for tile in figure.meta["tiles"]]
+        self.assertEqual(shown, longs)  # the full labels stay in figure.json
+        elided = [text for text in cases if text.endswith("\u2026")]
+        self.assertGreaterEqual(len(elided), 2)
+        for text in elided:
+            self.assertTrue(any(full.startswith(text[:-1]) for full in longs))
+        short = figures.gallery(lesions, self.template, labels=["A1", "A2", "A3"], **SMALL)[0]
+        self.assertEqual(sorted(item.text for item in short.annotations if item.role == "case"), ["A1", "A2", "A3"])
+
     def test_gallery_tiles_have_the_same_size_on_every_page(self):
         # The tile size is set by the column count, not by how many tiles a page holds: a last page with
         # one lesion (or a whole gallery of one) used to get a single page-wide tile

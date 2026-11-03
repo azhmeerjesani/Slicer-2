@@ -1176,10 +1176,16 @@ def _compose(panels, options, fonts, colorbars=(), panel_columns=1, heading=None
         left, right = side_labels(tile.plane, options.convention)
         annotations.append(Annotation("text", tx + pad, ty + h_px - pad, text=left, size=small_px, color=ink, anchor="lb", bold=True, role="stamp"))
         annotations.append(Annotation("text", tx + w_px - pad, ty + h_px - pad, text=right, size=small_px, color=ink, anchor="rb", bold=True, role="stamp"))
-        if tile.top_left:
-            annotations.append(Annotation("text", tx + pad, ty + pad, text=tile.top_left, size=small_px, color=ink, anchor="lt", role="slice"))
+        # Both labels stay inside their own tile: a case label wider than the tile is elided (the full text
+        # stays in figure.json and the case table)
+        top_left = _elide(tile.top_left, fonts, small_px, w_px - 2 * pad) if tile.top_left else ""
+        if top_left:
+            annotations.append(Annotation("text", tx + pad, ty + pad, text=top_left, size=small_px, color=ink, anchor="lt", role="slice"))
         if tile.top_right:
-            annotations.append(Annotation("text", tx + w_px - pad, ty + pad, text=tile.top_right, size=small_px, color=ink, anchor="rt", role="case"))
+            room = w_px - 2 * pad - (fonts.width(top_left, small_px) + 2 * pad if top_left else 0)
+            top_right = _elide(tile.top_right, fonts, small_px, room)
+            if top_right:
+                annotations.append(Annotation("text", tx + w_px - pad, ty + pad, text=top_right, size=small_px, color=ink, anchor="rt", role="case"))
         record = {"panel": panel.letter, "plane": tile.plane, "bbox": [tx, ty, tx + w_px, ty + h_px], "stamps": {"left": left, "right": right}}
         record.update(tile.meta)
         tiles_out.append(record)
@@ -1187,6 +1193,19 @@ def _compose(panels, options, fonts, colorbars=(), panel_columns=1, heading=None
         # First, so every label and stamp is drawn over it and stays readable
         annotations.insert(0, Annotation("text", width_px / 2, height / 2, text=options.watermark, size=min(width_px / max(len(options.watermark), 1) * 1.2, height * 0.3), color=WATERMARK_COLOR, opacity=WATERMARK_OPACITY, anchor="mm", bold=True, role="watermark"))
     return base, annotations, tiles_out
+
+
+def _elide(text, fonts, size, room, bold=False):
+    """``text`` cut with an ellipsis at the end so it is at most ``room`` pixels wide ("" when not even
+    one character and the ellipsis fit).
+    """
+    if fonts.width(text, size, bold) <= room:
+        return text
+    for count in range(len(text) - 1, 0, -1):
+        cut = text[:count].rstrip() + "\u2026"
+        if fonts.width(cut, size, bold) <= room:
+            return cut
+    return ""
 
 
 def _is_dark(color):
