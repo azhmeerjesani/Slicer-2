@@ -3628,6 +3628,16 @@ def init_study(source, study_path, participants=None, name=None, score_columns=(
 
     from .study import NA, Study, write_tsv
 
+    from .study import whole_word_rule
+
+    for option, pattern in (("--lesion-rule", lesion_rule), ("--id-regex", id_regex)):
+        if pattern:  # a pattern that does not compile must not leave a half-made study behind (re.error is no ValueError)
+            try:
+                re.compile(pattern)  # the positions in its message refer to the user's own text
+                if option == "--lesion-rule":
+                    whole_word_rule(pattern)
+            except re.error as exc:
+                raise PipelineError(f"Invalid {option}: {exc}", code="usage", exit_code=EXIT_USAGE) from exc
     study_path = os.path.abspath(os.fspath(study_path))
     columns = out_rows = None
     if participants:
@@ -3858,6 +3868,9 @@ def _main(argv):
         except jobs.Locked as exc:
             jobs.emit("error", code="locked", message=exc.message)
             return EXIT_LOCKED
+        except PipelineError as exc:
+            jobs.emit("error", code=exc.code, message=exc.message)
+            return exc.exit_code
         except (OSError, ValueError, KeyError) as exc:
             jobs.emit("error", code="input", message=f"{type(exc).__name__}: {exc}")
             return EXIT_ERROR

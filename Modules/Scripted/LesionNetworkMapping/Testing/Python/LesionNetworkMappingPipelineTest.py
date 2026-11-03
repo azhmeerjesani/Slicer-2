@@ -1063,6 +1063,24 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         summary = pipeline.init_study(source, os.path.join(self.tmp, "group ok"), participants=table, group_column="group", group_map="patient=case,HC=control")
         self.assertEqual(summary["subjects"], 2)
 
+    def test_init_invalid_patterns_are_usage_errors_and_leave_no_study(self):
+        # A --id-regex or --lesion-rule that does not compile is a usage error (exit 2) that names the option, not a traceback,
+        # and no study folder is created
+        source = os.path.join(self.tmp, "regex lesions")
+        os.makedirs(source)
+        study = Study.open(self.fx["study"])
+        sid = self.mapped_sids()[0]
+        shutil.copyfile(study.abspath(study.subject(sid)["lesion"]), os.path.join(source, f"{sid}_lesion.nii.gz"))
+        for index, (option, value) in enumerate([("--id-regex", "("), ("--id-regex", "sub-(\\d+"), ("--lesion-rule", "(")]):
+            target = os.path.join(self.tmp, f"regex study {index}")
+            code, events, _stdout, stderr, _wall = cli("init", "--from", source, "--study", target, option, value)
+            self.assertEqual(code, 2, stderr[-2000:])
+            self.assertIn(f"Invalid {option}", str(events))
+            self.assertNotIn("Traceback", stderr + str(events))
+            self.assertFalse(os.path.exists(target), "a refused pattern must not leave a study behind")
+        summary = pipeline.init_study(source, os.path.join(self.tmp, "regex ok"), id_regex="(\\w+)_lesion")
+        self.assertEqual(summary["subjects"], 1)
+
     # Events and speed
 
     def test_text_events_and_help(self):
