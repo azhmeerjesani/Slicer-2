@@ -1424,6 +1424,39 @@ class StudioAutosaveTest(unittest.TestCase):
         self.assertNotIn("Application Settings > Autosave", autosave_io._README_TEXT)
         self.assertIn("Application Settings > Saving", autosave_io._README_TEXT)
 
+    def test_zb2_studioProjectsDocNamesTheFolderButtonsOfTheSavingPanel(self):
+        """BB-1: studio_projects.md named a "Show" button next to "Change…" in Settings > Saving; the button is "Show in Files"
+        ("Show in Finder" on macOS, "Show in Explorer" on Windows). Every bold button name that the sentence about the Slicer
+        Studio folder of the Saving panel gives must be a button of the panel (the file manager name differs per system).
+        """
+        import re
+
+        from StudioLib import autosave_settings
+
+        panel = autosave_settings.AutosaveSettingsPanel(None)
+        try:
+            buttons = {str(button.text).strip() for button in panel.findChildren("QAbstractButton")}
+            names = [str(panel.findChild(qt.QPushButton, name).text) for name in
+                     ("StudioProjectsShowRootButton", "StudioProjectsChangeRootButton")]
+        finally:
+            panel.deleteLater()
+        self.assertEqual(names[1], "Change\u2026")
+        self.assertTrue(names[0].startswith("Show in "), names[0])
+
+        root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", ".."))
+        path = os.path.join(root, "Docs", "user_guide", "studio_projects.md")
+        if not os.path.isfile(path):
+            self.skipTest("the documentation is not next to this build")
+        with open(path, encoding="utf-8") as stream:
+            content = stream.read()
+        sentence = content.split("shows the Slicer Studio folder, with ", 1)[1].split(". When you change", 1)[0]
+        named = [" ".join(name.split()) for name in re.findall(r"\*\*([^*]+)\*\*", sentence)]
+        self.assertIn("Change\u2026", named)
+        for name in named:
+            self.assertTrue(name in buttons or name in ("Show in Files", "Show in Finder", "Show in Explorer"),
+                            f"studio_projects.md names {name!r}, which the Saving panel does not have")
+        self.assertNotIn("Show", named, "the Saving panel has no button called Show")
+
     def test_zc_labelLockAndTreeOrderAreEdits(self):
         """BB-1: the label, the description and the lock of a control point (they invoke a custom modified event, not
         Modified(), so the node's MTime stays) and the order of siblings in the Data tree (the fingerprint sorted the items)

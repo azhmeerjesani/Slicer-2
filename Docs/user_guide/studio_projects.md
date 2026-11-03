@@ -110,8 +110,9 @@ When you close something in a project (a scan, a point list), its file goes to
 `.studio/removed/` in the project, where it stays for 14 days.
 
 The pause and the interval are set in **Settings › Saving**. The same panel
-shows the Slicer Studio folder, with **Change…** and **Show**. When you change
-the folder, Slicer Studio offers to move your projects, studies and templates there.
+shows the Slicer Studio folder, with **Change…** and **Show in Files** (**Show in Finder**
+on macOS, **Show in Explorer** on Windows). When you change the folder, Slicer Studio
+offers to move your projects, studies and templates there.
 Anything whose name the new folder already uses moves in under another name: a
 template "My template" becomes "My template 2" and stays your default if it was.
 If Slicer Studio closes during the move (a crash, a power cut), it finishes the
