@@ -887,6 +887,9 @@ class SettingsDialogLook:
             f"QTreeWidget#SettingsTreeWidget::item {{ height: 32px; border-radius: 8px; padding-left: 6px; color: {t['text2']}; }}"
             f"QTreeWidget#SettingsTreeWidget::item:hover {{ background-color: {t['control-hover']}; color: {t['text']}; }}"
             f"QTreeWidget#SettingsTreeWidget::item:selected {{ background-color: {t['selected']}; color: {t['text']}; }}"
+            # Keyboard focus (USABILITY 9.2): the current row gets the 2 px ring while the list has the focus (outline: 0 above
+            # removes the dotted rectangle), the padding is reduced by the ring so that the row does not change size
+            f"QTreeWidget#SettingsTreeWidget::item:focus {{ border: 2px solid {t['accent-fg']}; padding-left: 4px; }}"
             "QTreeWidget#SettingsTreeWidget::branch { image: none; border: none; background: transparent; }")
 
     def apply(self):
@@ -909,6 +912,11 @@ class SettingsDialogLook:
             tree.setIconSize(qt.QSize(16, 16))
             tree.setMinimumWidth(200)
             ui.bindStyleSheet(tree, self._treeStyleSheet)
+            # The panel shown at opening is the current item but is not selected (the list has no selection until a key moves
+            # it): select it, so that the list marks the panel that is shown
+            current = tree.currentItem()
+            if current is not None and not tree.selectedItems():
+                current.setSelected(True)
             # The icons are pixmaps tinted for the palette of this moment, and the dialog stays open while the theme is
             # switched on the Appearance page (no Show event), so they are redrawn when the palette changes
             if getattr(self, "_paletteCallback", None) is None:

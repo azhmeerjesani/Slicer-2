@@ -1031,6 +1031,45 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             tree.setMaximumHeight(16777215)
             self._pump()
 
+    def test_15c_settings_panel_list_shows_the_current_panel_and_the_keyboard_focus(self):
+        """The panel shown when Settings opens was the current item but not selected, so the list marked nothing, and the
+        stylesheet removed the focus rectangle (``outline: 0``) without a replacement: a keyboard user could not see that the
+        list has the focus (USABILITY 9.2). The shown panel is selected, and the current row has a ring while the list has the
+        focus (the official dialog highlights it too).
+        """
+        self._applyStudio()
+        dialog = slicer.app.settingsDialog()
+        tree = dialog.findChild("QTreeWidget", "SettingsTreeWidget")
+        self.assertIsNotNone(tree)
+        try:
+            dialog.hide()
+            self._pump()
+            dialog.setCurrentPanel(str(tree.topLevelItem(0).data(0, qt.Qt.UserRole + 1101) or tree.topLevelItem(0).text(0)))
+            tree.clearSelection()
+            dialog.show()
+            self._wait(0.5)
+            self.assertIn("::item:focus", str(tree.styleSheet), "the panel list has no rule for the keyboard focus")
+            self.assertEqual(list(tree.selectedItems()), [tree.currentItem()],
+                             "the panel shown at opening is not marked in the list")
+            dialog.activateWindow()
+            tree.setFocus(qt.Qt.TabFocusReason)
+            self._wait(0.5)
+            self.assertTrue(tree.hasFocus(), "the panel list did not take the keyboard focus")
+            rect = tree.visualItemRect(tree.currentItem())
+            focused = tree.viewport().grab().toImage()
+            dialog.findChild("QDialogButtonBox", "SettingsButtonBox").button(qt.QDialogButtonBox.Ok).setFocus(qt.Qt.TabFocusReason)
+            self._wait(0.5)
+            self.assertFalse(tree.hasFocus())
+            unfocused = tree.viewport().grab().toImage()
+            changed = 0
+            for y in range(rect.y(), rect.y() + rect.height()):
+                for x in range(rect.x(), rect.x() + rect.width()):
+                    changed += focused.pixel(x, y) != unfocused.pixel(x, y)
+            self.assertGreater(changed, 50, "the current row does not change when the panel list gets the keyboard focus")
+        finally:
+            dialog.hide()
+            self._pump()
+
     def test_15a_settings_panel_icons_follow_a_theme_switch_with_the_dialog_open(self):
         """The theme is switched on the Appearance page while the (modal) settings dialog stays open, so no Show event redraws
         the panel list: its Lucide icons (pixmaps tinted for the palette at show time) kept the old theme's ink, and the
