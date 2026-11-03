@@ -1689,8 +1689,10 @@ class _OfferCard:
         canvas.installEventFilter(self._watcher)
         #: Library page widgets watched for content changes (see _watchPage())
         self._watchedPage = []
-        self.frame.setFixedWidth(ui.fontPx(OFFER_CARD_WIDTH))
-        self._fitHeight()
+        self._fitSize()
+        # After an application font change (Settings > Appearance > Font) the texts are resized first (ui._refresh()),
+        # then this listener gives the card the width and the height that its larger or smaller content needs
+        ui.addPaletteListener(self._fitSize)
         self.updatePosition()
         self.frame.show()
         self.frame.raise_()
@@ -1709,6 +1711,21 @@ class _OfferCard:
     def refreshIcons(self):
         if _isAlive(self.frame):
             self.icon.setPixmap(ui.pixmap("compass", 18, "accent-fg"))
+
+    def _fitSize(self):
+        """The width (it follows the application font) and the height that the word-wrapped texts need for it; again
+        after an application font change.
+        """
+        if not _isAlive(self.frame):
+            return
+        width = ui.fontPx(OFFER_CARD_WIDTH)
+        if self.frame.minimumHeight != 0 or self.frame.maximumHeight != 16777215 or self.frame.width != width:
+            # The height was fixed by the previous fit: free it, so that the layout can be measured again
+            self.frame.setMinimumHeight(0)
+            self.frame.setMaximumHeight(16777215)
+        self.frame.setFixedWidth(width)
+        self._fitHeight()
+        self.updatePosition()
 
     def _fitHeight(self):
         """Word-wrapped texts: the height for the fixed width."""
@@ -1781,6 +1798,7 @@ class _OfferCard:
 
     def dispose(self):
         ui.removePaletteListener(self.refreshIcons)
+        ui.removePaletteListener(self._fitSize)
         ui.bindStyleSheet(self.frame, None)
         if _isAlive(self.canvas):
             self.canvas.removeEventFilter(self._watcher)

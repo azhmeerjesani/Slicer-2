@@ -584,6 +584,39 @@ class StudioTourTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             tour.plugin().offerWidget().findChild("QPushButton", "StudioTourOfferNotNowButton").click()
             self._pump()
 
+    def test_09d_offer_fits_its_text_after_a_font_change(self):
+        """USABILITY 9.4: after an application font change the offer card gets the height its wrapped text needs."""
+        from StudioLib import tour
+
+        studioShell = self._applyStudio()
+        self._resize(1366, 768)
+        qt.QSettings().remove("Studio/Tour")
+        studioShell.switchTo("library")
+        self._pump()
+        self.assertTrue(tour.offerTour())
+        self._pump()
+        card = tour.plugin().offerWidget()
+        text = card.findChild("QLabel", "StudioTourOfferText")
+        original = qt.QFont(qt.QApplication.font())
+        try:
+            for pixelSize in (20, 11):
+                font = qt.QFont(original)
+                font.setPixelSize(pixelSize)
+                slicer.app.setFont(font)
+                self._wait(300)
+                layout = card.layout()
+                needed = layout.totalHeightForWidth(card.width)
+                self.assertEqual(card.height, needed, f"font {pixelSize} px")
+                self.assertGreaterEqual(text.height, text.heightForWidth(text.width), f"font {pixelSize} px")
+                self.assertTrue(tour._rectIn(card, self.mainWindow).intersected(self.mainWindow.rect) == tour._rectIn(card, self.mainWindow))
+        finally:
+            slicer.app.setFont(original)
+            self._wait(300)
+            card = tour.plugin().offerWidget()
+            if card is not None:
+                card.findChild("QPushButton", "StudioTourOfferNotNowButton").click()
+            self._pump()
+
     def test_09_first_start_offer(self):
         """The first-start offer is a non-modal card shown once; any answer (or opening a file) is remembered."""
         from StudioLib import tour
