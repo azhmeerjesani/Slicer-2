@@ -156,6 +156,14 @@ QString sliceOffsetSliderToolTip(vtkMRMLSliceNode* sliceNode, bool flat)
 }
 
 //---------------------------------------------------------------------------
+/// Return true if the volume is a figure image (Studio.Role = figure): a 2D picture with no patient directions.
+bool isFigureVolume(vtkMRMLVolumeNode* volumeNode)
+{
+  const char* roleAttribute = volumeNode ? volumeNode->GetAttribute("Studio.Role") : nullptr;
+  return roleAttribute && QString::fromUtf8(roleAttribute) == "figure";
+}
+
+//---------------------------------------------------------------------------
 /// Return true if the volume is known to be on an MNI template grid, where x = 0 is the midline.
 /// It follows the rules of the Studio space helper (StudioLib.space.spaceOf): the "Studio.Space" node attribute,
 /// then the "Studio.Role" attribute, then the grids of the MNI152NLin2009cAsym and MNI152NLin6Asym templates.
@@ -848,7 +856,7 @@ void qMRMLSliceControllerWidgetPrivate::updateReadoutLabel()
   }
   // The full readout shows the slice index in the tertiary text color: "S 17.5 mm   49 / 97"
   QString shownText = text;
-  if (!this->CompactReadout && !this->ReadoutIndexText.isEmpty() && text.endsWith(this->ReadoutIndexText))
+  if (!this->CompactReadout && !this->ReadoutIndexText.isEmpty() && text.size() > this->ReadoutIndexText.size() && text.endsWith(this->ReadoutIndexText))
   {
     QColor indexColor = this->styleToken("text3");
     if (!indexColor.isValid())
@@ -928,6 +936,21 @@ void qMRMLSliceControllerWidgetPrivate::updateFlatBarFromMRMLSliceNode()
   {
     return;
   }
+  // Slice index in the first volume layer
+  vtkMRMLVolumeNode* volumeNode = nullptr;
+  if (this->MRMLSliceCompositeNode && q->mrmlScene())
+  {
+    for (const char* volumeID :
+         { this->MRMLSliceCompositeNode->GetBackgroundVolumeID(), this->MRMLSliceCompositeNode->GetForegroundVolumeID(), this->MRMLSliceCompositeNode->GetLabelVolumeID() })
+    {
+      volumeNode = volumeID ? vtkMRMLVolumeNode::SafeDownCast(q->mrmlScene()->GetNodeByID(volumeID)) : nullptr;
+      if (volumeNode && volumeNode->GetImageData())
+      {
+        break;
+      }
+      volumeNode = nullptr;
+    }
+  }
   // Position along the slice normal, as a direction letter and a distance (never a minus sign)
   double offset = this->SliceLogic->GetSliceOffset();
   vtkMatrix4x4* sliceToRAS = sliceNode->GetSliceToRAS();
@@ -948,23 +971,8 @@ void qMRMLSliceControllerWidgetPrivate::updateFlatBarFromMRMLSliceNode()
     }
   }
   const int decimals = (this->SliceOffsetResolution >= 0.5) ? 1 : 2;
-  QString position = QString("%1 %2 %3").arg(direction).arg(std::fabs(offset) * displayCoefficient, 0, 'f', decimals).arg(suffix);
+  QString position = isFigureVolume(volumeNode) ? QString() : QString("%1 %2 %3").arg(direction).arg(std::fabs(offset) * displayCoefficient, 0, 'f', decimals).arg(suffix);
 
-  // Slice index in the first volume layer
-  vtkMRMLVolumeNode* volumeNode = nullptr;
-  if (this->MRMLSliceCompositeNode && q->mrmlScene())
-  {
-    for (const char* volumeID :
-         { this->MRMLSliceCompositeNode->GetBackgroundVolumeID(), this->MRMLSliceCompositeNode->GetForegroundVolumeID(), this->MRMLSliceCompositeNode->GetLabelVolumeID() })
-    {
-      volumeNode = volumeID ? vtkMRMLVolumeNode::SafeDownCast(q->mrmlScene()->GetNodeByID(volumeID)) : nullptr;
-      if (volumeNode && volumeNode->GetImageData())
-      {
-        break;
-      }
-      volumeNode = nullptr;
-    }
-  }
   QString indexText;
   QString indexDescription;
   if (volumeNode)
@@ -987,15 +995,16 @@ void qMRMLSliceControllerWidgetPrivate::updateFlatBarFromMRMLSliceNode()
       indexDescription = qMRMLSliceControllerWidget::tr("the slice is outside the image");
     }
   }
-  QString text = indexText.isEmpty() ? position : position + QString("   ") + indexText;
+  // A figure has no patient directions: the readout is the slice index only, never "S 0.0 mm"
+  QString text = position.isEmpty() ? indexText : (indexText.isEmpty() ? position : position + QString("   ") + indexText);
   this->ReadoutIndexText = indexText;
   QString compactText = indexText.isEmpty() ? position : indexText;
   QString description = position;
   if (!indexDescription.isEmpty())
   {
-    description += QString(", ") + indexDescription;
+    description += (description.isEmpty() ? QString() : QString(", ")) + indexDescription;
   }
-  if (!isOnMniGrid(volumeNode))
+  if (!position.isEmpty() && !isOnMniGrid(volumeNode))
   {
     description += QString(" ") + qMRMLSliceControllerWidget::tr("(from the image origin, not the midline)");
   }

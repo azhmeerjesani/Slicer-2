@@ -1327,6 +1327,55 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
         self.assertFalse(bool(bar.property("slicerFlatViewBar")))
         self.assertNotEqual(bar.height, 34)
 
+    def test_flat_view_bar_figure_has_no_patient_direction(self):
+        """A figure view bar never states a patient direction (U-04, USABILITY P6): the readout is the slice index only
+        ("1 / 1"), without "S 0.0 mm" and without the origin caveat, while a scan view keeps its direction letter.
+        """
+        import re
+
+        studioShell = self._applyStudio()
+        volume = self._addVolume()
+        figure = self._addVolume(shape=(1, 24, 24))
+        figure.SetName("figure for the bar")
+        figure.SetAttribute("Studio.Role", "figure")
+        slicer.util.setSliceViewerLayers(background=volume, fit=True)
+        studioShell.switchTo("draw")
+        self._pump(10)
+        controllers = {name: self.layoutManager.sliceWidget(name).sliceController() for name in ("Red", "Yellow")}
+        for controller in controllers.values():
+            flatBefore = controller.flatStyle
+            self._restores.append(lambda controller=controller, flatBefore=flatBefore: controller.setProperty("flatStyle", flatBefore))
+            controller.setProperty("flatStyle", True)
+        yellowComposite = self.layoutManager.sliceWidget("Yellow").mrmlSliceCompositeNode()
+        backgroundBefore = yellowComposite.GetBackgroundVolumeID()
+        self._restores.append(lambda: yellowComposite.SetBackgroundVolumeID(backgroundBefore))
+        yellowComposite.SetBackgroundVolumeID(figure.GetID())
+        self._pump(10)
+
+        def readoutOf(name):
+            label = slicer.util.findChild(controllers[name].barWidget(), "SliceIndexLabel")
+            return re.sub(r"<[^>]+>", "", str(label.text)).strip(), re.sub(r"<[^>]+>", "", str(label.toolTip))
+
+        # One view at a time: the bar is wide enough for the full readout
+        layoutNode = self.layoutManager.layout
+        self._restores.append(lambda: self.layoutManager.setLayout(layoutNode))
+        self.layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUpRedSliceView)
+        self.assertTrue(self._wait(lambda: " / " in readoutOf("Red")[0] and "mm" in readoutOf("Red")[0], 2000), readoutOf("Red"))
+        self.assertRegex(readoutOf("Red")[0], r"^[RLAPSI] [0-9.]+ mm\s+\d+ / \d+$")
+        self.layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUpYellowSliceView)
+        self._pump(6)
+        yellowComposite.SetLinkedControl(False)
+        yellowComposite.SetBackgroundVolumeID(figure.GetID())
+        yellowNode = self.layoutManager.sliceWidget("Yellow").mrmlSliceNode()
+        yellowNode.SetOrientationToAxial()
+        yellowNode.SetSliceOffset(0.0)
+        self.assertTrue(self._wait(lambda: " / " in readoutOf("Yellow")[0], 2000), readoutOf("Yellow"))
+        self._pump(6)
+        text, toolTip = readoutOf("Yellow")
+        self.assertEqual(text, "1 / 1")
+        self.assertNotRegex(toolTip, r"\bmm\b|midline|origin")
+        self.assertIn("slice 1 of 1", toolTip)
+
     def _bottomLeftCornerText(self, sliceViewName="Red"):
         """The bottom-left corner text of a slice view once the pending annotation updates are done."""
         sliceAnnotations = slicer.modules.DataProbeInstance.infoWidget.sliceAnnotations
