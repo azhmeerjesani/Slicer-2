@@ -311,6 +311,38 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             for phrase in stale:
                 self.assertNotIn(phrase, content, f"{name} still says {phrase!r}")
 
+    def test_docs_describe_the_lesion_card_that_exists(self):
+        """BB-1: the user guide and README describe the Lesion card as it is (VISUAL 4.4): three stat cells (Volume, Parts and
+        gaps, Side) and "Fill gaps and specks" as an item of the lesion's menu; there is no live line drawn on the card and no
+        "Clean up" control, and in scan space the Side cell says "Unknown".
+        """
+        from StudioLib import lesioncard
+        root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", ".."))
+        contents = {}
+        for name in ("README.md", "Docs/user_guide/modules/studio.md"):
+            path = os.path.join(root, *name.split("/"))
+            if not os.path.isfile(path):
+                self.skipTest("the documentation is not next to this build")
+            with open(path, encoding="utf-8") as stream:
+                contents[name] = " ".join(stream.read().split())
+        # What the card has: the stat cells and the menu item (the cleanup button exists but is hidden by design)
+        source = os.path.join(os.path.dirname(os.path.abspath(lesioncard.__file__)), "lesioncard.py")
+        with open(source, encoding="utf-8") as stream:
+            code = stream.read()
+        for text in ('_("Volume")', '_("Side")', '_("Unknown")', '_("Fill gaps and specks")'):
+            self.assertIn(text, code)
+        self.assertIn("self.cleanupButton.hide()", code)
+        studio = contents["Docs/user_guide/modules/studio.md"]
+        card = studio.split("1. The **Lesion card**", 1)[1].split("2. **Tools**", 1)[0]
+        for text in ("**Volume**", "**Parts**", "**Side**", "Unknown", "**Fill gaps and specks**", "**⋯** menu"):
+            self.assertIn(text, card)
+        for name, content in contents.items():
+            for phrase in ("**Clean up**", "*Clean up*", "a live line", "no side word is shown", "reads out the lesion as you draw"):
+                self.assertNotIn(phrase, content, f"{name} still says {phrase!r}")
+        readme = contents["README.md"]
+        self.assertIn("three stat cells", readme)
+        self.assertIn("Fill gaps and specks* (an item of the lesion's ⋯ menu)", readme)
+
     def test_button_icons_are_16_px_at_every_pixel_ratio(self):
         """The icons of the Library buttons are 16 logical px (VISUAL 3). Without an icon size a button uses the style's 24 px:
         a 16 px icon that has a pixmap for a device pixel ratio above 1 is then drawn at 24 px (1.5 times larger than at 1x).

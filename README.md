@@ -311,10 +311,11 @@ and the options of the active tool:
 
 - The **lesion card** names the lesion (a menu switches between lesions or makes a new one), has an eye,
   a *center on lesion* button and *follow strokes* (the other views move to each stroke:
-  `Studio/FollowStrokes`), and reads out the lesion as you draw, for example "Left · 2.27 mL · 1 part ·
-  0 gaps". When there are several parts, gap slices or a part outside the brain, a link acts on them
+  `Studio/FollowStrokes`), and shows three stat cells as you draw (*Volume*, *Parts* with the gaps under it, and *Side*:
+  "Left" in MNI space, "Unknown" in scanner space; screen readers hear the same as one line, for example
+  "Left · 2.27 mL · 1 part · 0 gaps"). When there are several parts, gap slices or a part outside the brain, a link acts on them
   (*Keep largest*, *Fill*, *Clip*). It also shows whether the lesion is saved, and the source volume you
-  are tracing on ("on T1 ▾"). *Fill gaps and specks* closes gaps up to 2 mm and removes islands under
+  are tracing on ("on T1 ▾"). *Fill gaps and specks* (an item of the lesion's ⋯ menu) closes gaps up to 2 mm and removes islands under
   10 mm³.
 - **Brush size** chips (1, 3, 6 and 12 mm) set the brush; the diameter is remembered
   (`Studio/BrushDiameterMm`). A small label next to the brush ("Ø 3.0 mm") shows the diameter for about a

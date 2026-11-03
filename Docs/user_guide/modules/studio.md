@@ -155,10 +155,13 @@ normalization, the analysis line) appear when the study needs them.
 
 Draw is the [Segment Editor](segmenteditor.md) module in its Studio presentation. Its inspector has, top to bottom:
 
-1. The **Lesion card**: colour, name (click to rename), visibility, a live line "2.41 mL · 1 part · 0 gaps", and
-   **Clean up**. In MNI space the line starts with the side ("Left · 2.27 mL"); in scan space no side word is shown,
-   because x = 0 is not the midline there. Parts and gaps turn amber when they are more than 1 or 0, with a link to fix
-   them (**Keep largest**, **Fill**).
+1. The **Lesion card**: colour, name (click to rename), visibility, and three stat cells that follow the drawing:
+   **Volume** ("2.41 mL"), **Parts** with the gaps under it ("1 part · 0 gaps") and **Side**. In MNI space the Side cell
+   says "Left", "Right" or "Both hemispheres"; in scan space it says "Unknown" with "scanner space" under it, because
+   x = 0 is not the midline there. Parts and gaps turn amber when they are more than 1 or 0, with a link to fix
+   them (**Keep largest**, **Fill**). The same numbers are also read as one line by screen readers ("Left · 2.41 mL ·
+   1 part · 0 gaps"). **Fill gaps and specks** is an item of the lesion's **⋯** menu, together with **Rename lesion**,
+   **Keep largest part** and **Save lesion as…**.
 2. **Tools**: **Brush** (P), **Outline** (D), **Smart fill** (M), **Erase** (E) and **Fill gaps** (Shift+F), plus
    **More tools**, which shows the remaining effects.
 3. The **options of the active tool**. Brush and Erase have size chips 1, 3, 6 and 12 mm.
