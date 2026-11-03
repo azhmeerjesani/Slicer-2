@@ -82,6 +82,9 @@ Run with the main window and testing enabled::
   (``.studio/journal/rater-<label>/<sid>.nii.gz``, 2 s after the last edit); the autosave names the second tracing and
   its subject (never the session's earlier subject); recovering that autosave reopens the second tracing, whose notice
   offers the journal; Recover brings the voxels back and saving removes the journal.
+- ``test_56_study_folder_renamed_while_open_is_said_and_not_recreated`` (BB-1): a study folder renamed while the study is
+  open is said in plain words by the heartbeat and by Done (not "the grid has no NIfTI file"), and the journal, the
+  heartbeat and Done recreate no ``.studio`` folder at the old path; with the folder back, writing resumes.
 - ``test_30_missing_scan_or_lesion_is_said`` (BB-1): a subject whose scan file is missing is not opened on the study
   template (open and Done -> next say so, the current subject stays open); a traced subject whose lesion file is missing
   opens on its scan with an empty lesion and says so.
@@ -2664,6 +2667,72 @@ class StudioRegressionTest(unittest.TestCase):
             self.assertTrue(session.open("sub-02", switchToDraw=False))
             self.assertEqual(study.subject("sub-01").get("lesion"), row01.get("lesion"))
             self.assertEqual(study.subject("sub-01").get("status"), "traced")
+        finally:
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
+
+    def test_56_study_folder_renamed_while_open_is_said_and_not_recreated(self):
+        """The study folder was renamed (or moved) in the file manager while the study is open: Done says that the study
+        folder moved (not that the grid has no NIfTI file), and neither the journal, the heartbeat nor Done recreates a
+        stray ``.studio`` folder at the old path (BB-1).
+        """
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Renamed study")
+        renamed = os.path.join(self.directory, "Renamed study moved")
+        os.makedirs(folder)
+        scans = []
+        for index in range(1, 3):
+            scans.append(os.path.join(folder, f"sub-0{index}_T1w.nii.gz"))
+            nifti.write_nifti(scans[-1], np.zeros(grid.shape, np.uint8), grid.affine)
+        toasts = []
+        originalToast = study_ui._toast
+        study_ui._toast = lambda shell, text, **kwargs: toasts.append(str(text))
+        self.addCleanup(setattr, study_ui, "_toast", originalToast)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        try:
+            session = study_ui.createStudy(scans, studioShell, folder=folder)
+            self.assertIsNotNone(session)
+            self.assertTrue(session.open("sub-01", switchToDraw=False))
+            self.assertTrue(session.folderAvailable())
+            os.rename(folder, renamed)
+            self.assertFalse(session.folderAvailable())
+            segmentationNode, volumeNode = session.segmentationNode(), session.volumeNode()
+            segmentId = segmentationNode.GetSegmentation().GetNthSegmentID(0)
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, volumeNode)
+            array[20:23, 30:33, 20:23] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, volumeNode)
+            # The journal and the heartbeat write nothing at the old path
+            self.assertFalse(session._journal.writeNow())
+            session._writeHeartbeat()
+            self.assertFalse(os.path.exists(folder), "the journal or the heartbeat recreated the old study folder")
+            said = [text for text in toasts if "moved" in text and "renamed" in text]
+            self.assertEqual(len(said), 1, toasts)
+            # Done says what happened, keeps the subject open and writes nothing at the old path
+            del toasts[:]
+            self.assertIsNone(session.done())
+            self.assertEqual(session.current(), "sub-01")
+            self.assertTrue([text for text in toasts if "moved" in text and "renamed" in text], toasts)
+            self.assertFalse([text for text in toasts if "no NIfTI file" in text], toasts)
+            self.assertFalse(os.path.exists(folder), "Done recreated the old study folder")
+            self.assertFalse(os.path.exists(os.path.join(renamed, ".studio", "journal", "sub-01.nii.gz")))
+            # The folder back at its place: everything writes again and the message can be said again
+            os.rename(renamed, folder)
+            self.assertTrue(session.folderAvailable())
+            self.assertTrue(session._journal.writeNow())
+            self.assertIsNotNone(session.done())
+            self.assertEqual(session.study.subject("sub-01")["status"], "traced")
         finally:
             study_ui.closeStudy()
             studioShell.dispose()

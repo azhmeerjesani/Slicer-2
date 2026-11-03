@@ -2004,6 +2004,7 @@ class StudySession:
         self._lesionStamp = None  # (normcase path, mtime_ns, size) of the current lesion file as read or written here
         self._openedEpoch = None  # time.time() when the current subject was opened
         self._hiddenOutside = []  # segmentations of the work that was open, hidden while the study is open (openStudy)
+        self._folderGoneSaid = False  # the "study folder moved or renamed" toast was shown (until the folder is back)
 
     # Identity (A-01b records these in every autosave slot)
 
@@ -2126,6 +2127,32 @@ class StudySession:
 
     # Heartbeat (.studio/session.json)
 
+    def folderAvailable(self):
+        """True while the study folder is where it was opened (its ``study.json`` is there).
+
+        A study folder that was moved, renamed or deleted (or a drive that was disconnected) while the study is open is not
+        written to: ``makedirs`` on the old path would leave a stray ``.studio`` folder there, and the user's tracing
+        in it would not be found when the study is opened from its new place.
+        """
+        return _lnm("study").Study.is_study(self.study.path)
+
+    def _folderGoneText(self):
+        return _("The study folder {name} was moved, renamed or is not connected, so nothing can be saved in it. Open the study "
+                 "again from its new place (Open study…); your tracing is still on screen").format(name=self.study.name)
+
+    def _checkFolder(self, sayOnce=False):
+        """True when the study folder is there. When it is not, ``sayOnce`` shows the plain message once (until the folder
+        is back); the callers write nothing.
+        """
+        if self.folderAvailable():
+            self._folderGoneSaid = False
+            return True
+        if sayOnce and not self._folderGoneSaid:
+            self._folderGoneSaid = True
+            logging.warning(f"Studio: the study folder {self.study.path} is gone (moved, renamed or not connected): nothing is written")
+            _toast(self._shell, self._folderGoneText(), ms=15000, level="warning", toolTip=self.study.path)
+        return False
+
     def _sessionFile(self):
         studyModule = _lnm("study")
         return os.path.join(self.study.path, studyModule.PRIVATE_DIR, SESSION_FILE)
@@ -2164,6 +2191,8 @@ class StudySession:
         Another live session of the study (a second window) is noticed here; closing never marks it closed: its heartbeat
         is left (or put back) for ``pipeline init`` and the next session.
         """
+        if not self._checkFolder(sayOnce=not closed):
+            return
         other = _liveOtherSession(self._readSessionRecord())
         if closed:
             if other is not None:
@@ -3120,6 +3149,9 @@ class StudySession:
     def _sayMissing(self, shell, sid, column, missing):
         """Tell the user that the scan or lesion file of ``sid`` is missing (a consequence: it stays until the next input)."""
         tablePath, path = missing
+        if not self._checkFolder():
+            _toast(shell, self._folderGoneText(), ms=8000, level="consequence", toolTip=self.study.path)
+            return
         if column == "scan":
             text = _("{sid} was not opened: its scan {file} is missing (moved, renamed, or on a drive that is not connected)")
         else:
@@ -3398,6 +3430,8 @@ class StudySession:
         segmentationNode = self.segmentationNode()
         if sid is None or segmentationNode is None:
             raise Blocking(_("No subject is open"))
+        if not self._checkFolder():
+            raise Blocking(self._folderGoneText())
         nifti = _lnm("nifti")
         studyModule = _lnm("study")
         if mask is None:

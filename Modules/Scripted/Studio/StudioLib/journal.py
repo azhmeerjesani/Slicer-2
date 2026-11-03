@@ -189,6 +189,8 @@ class Journal:
         segmentationNode = self._segmentationNode()
         if self.sid is None or segmentationNode is None:
             return False
+        if not self.session._checkFolder(sayOnce=True):
+            return False  # the study folder was moved or renamed: no stray .studio folder is made at the old path
         segmentId = _lesionSegmentId(segmentationNode)
         data = study_ui._internalArray(segmentationNode, segmentId) if segmentId else None
         cropped = study_ui._cropped(*data) if data is not None else None
