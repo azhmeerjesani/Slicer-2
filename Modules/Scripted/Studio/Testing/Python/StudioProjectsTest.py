@@ -4321,6 +4321,79 @@ class StudioProjectsTest(unittest.TestCase):
                 settings.setValue("Studio/LastOpenDirectory", savedFolder)
 
 
+    def test_66b_web_recipe_folder_and_engine_run_dialogs_start_in_the_last_open_folder(self):
+        """"Add a folder of lab recipes", "Folder for lab recipes" (Save as lab recipe without a study) and "Engine run folder"
+        passed no start folder, so in the web build the first of them opened in the container HOME, not /data. They now start
+        in ``Studio/LastOpenDirectory`` like the other dialogs of the web build; a later one is left to Qt.
+        """
+        from unittest import mock
+
+        slicer.util.selectModule("LesionNetworkMapping")
+        from LesionNetworkMappingUI import card_recipe
+        from StudioLib import importer
+
+        settings = qt.QSettings()
+        savedFolder = settings.value("Studio/LastOpenDirectory")
+        savedWeb = os.environ.get("SLICER_STUDIO_WEB")
+        savedGiven = importer._webStartFolderGiven
+        realGetExistingDirectory = qt.QFileDialog.getExistingDirectory
+        folder = os.path.join(self.tempDir, "data folder 2")
+        os.makedirs(folder)
+        starts = []
+
+        def fakeGetExistingDirectory(parent, caption, *args):
+            starts.append((str(caption), str(args[0]) if args else None))
+            return ""
+
+        def saveAsLabRecipe():
+            header = card_recipe.RecipeHeader.__new__(card_recipe.RecipeHeader)
+            header.recipe = object()
+            header.labRecipeFolder = lambda: None
+            header.currentParameters = lambda: {}
+            fakeRecipes = mock.Mock()
+            fakeRecipes.custom_label.return_value = "x"
+            with mock.patch.object(card_recipe, "_recipes", return_value=fakeRecipes):
+                header.saveLabRecipe(title="a recipe")
+
+        try:
+            settings.setValue("Studio/LastOpenDirectory", folder)
+            os.environ["SLICER_STUDIO_WEB"] = "1"
+            qt.QFileDialog.getExistingDirectory = fakeGetExistingDirectory
+            for call, caption in (
+                (lambda: card_recipe.RecipeHeader.__new__(card_recipe.RecipeHeader).chooseRecipeFolder(), "Add a folder of lab recipes"),
+                (saveAsLabRecipe, "Folder for lab recipes"),
+                (lambda: self._engineRunCard().chooseEngineRun(), "Engine run folder"),
+            ):
+                importer._webStartFolderGiven = False
+                del starts[:]
+                call()
+                self.assertEqual(starts, [(caption, folder)], caption)
+                del starts[:]
+                call()
+                self.assertEqual(starts, [(caption, "")], "the second dialog leaves the folder to Qt")
+            os.environ.pop("SLICER_STUDIO_WEB", None)
+            del starts[:]
+            card_recipe.RecipeHeader.__new__(card_recipe.RecipeHeader).chooseRecipeFolder()
+            self.assertEqual(starts, [("Add a folder of lab recipes", "")], "outside the web build nothing changes")
+        finally:
+            qt.QFileDialog.getExistingDirectory = realGetExistingDirectory
+            importer._webStartFolderGiven = savedGiven
+            if savedWeb is None:
+                os.environ.pop("SLICER_STUDIO_WEB", None)
+            else:
+                os.environ["SLICER_STUDIO_WEB"] = savedWeb
+            if savedFolder is None:
+                settings.remove("Studio/LastOpenDirectory")
+            else:
+                settings.setValue("Studio/LastOpenDirectory", savedFolder)
+
+    def _engineRunCard(self):
+        from LesionNetworkMappingUI import card_robust
+
+        card = card_robust.RobustCard.__new__(card_robust.RobustCard)
+        card.widget = None
+        return card
+
     def test_67_opening_a_project_again_while_it_loads_loads_it_once(self):
         """A second click on a project card while that project is still loading (the two releases are handled in one pass of
         the event loop; the load processes timer events) is ignored: the scene is read once, not twice.

@@ -1159,7 +1159,7 @@ class RobustCard:
         self.scheduleRefresh()
 
     def chooseEngineRun(self):
-        path = qt.QFileDialog.getExistingDirectory(self.widget, _("Engine run folder"))
+        path = qt.QFileDialog.getExistingDirectory(self.widget, _("Engine run folder"), widgets.dialogStartFolder())
         if path:
             self.setEngineRun(path)
 

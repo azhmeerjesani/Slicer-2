@@ -878,7 +878,7 @@ class RecipeHeader:
                 return None
         folder = folder or self.labRecipeFolder()
         if folder is None:
-            folder = qt.QFileDialog.getExistingDirectory(slicer.util.mainWindow(), _("Folder for lab recipes"))
+            folder = qt.QFileDialog.getExistingDirectory(slicer.util.mainWindow(), _("Folder for lab recipes"), widgets.dialogStartFolder())
             if not folder:
                 return None
             addRecipeFolder(folder)
@@ -909,7 +909,7 @@ class RecipeHeader:
         return saved
 
     def chooseRecipeFolder(self):
-        folder = qt.QFileDialog.getExistingDirectory(slicer.util.mainWindow(), _("Add a folder of lab recipes"))
+        folder = qt.QFileDialog.getExistingDirectory(slicer.util.mainWindow(), _("Add a folder of lab recipes"), widgets.dialogStartFolder())
         if folder:
             addRecipeFolder(folder)
             self.reload()
