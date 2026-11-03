@@ -270,7 +270,7 @@ class RobustCard:
             builder(layout)
         self._buildMethods(layout)
         layout.addStretch(1)
-        for name in ("studyChanged", "bundleChanged", "computeEnabledChanged", "ruleChanged", "runChanged"):
+        for name in ("studyChanged", "bundleChanged", "computeEnabledChanged", "ruleChanged", "runChanged", "overlapChanged"):
             getattr(ctx, name).append(self.scheduleRefresh)
         ctx.runner.jobFinished.append(self._onJobFinished)
         self.refresh()
@@ -1176,7 +1176,7 @@ class RobustCard:
     def cleanup(self):
         self._cleanedUp = True
         self._timer.stop()
-        for name in ("studyChanged", "bundleChanged", "computeEnabledChanged", "ruleChanged", "runChanged"):
+        for name in ("studyChanged", "bundleChanged", "computeEnabledChanged", "ruleChanged", "runChanged", "overlapChanged"):
             callbacks = getattr(self.ctx, name, [])
             if self.scheduleRefresh in callbacks:
                 callbacks.remove(self.scheduleRefresh)

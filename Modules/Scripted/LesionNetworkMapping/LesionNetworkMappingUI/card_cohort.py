@@ -119,6 +119,8 @@ class OverlapTab:
         self.sensitivitySlider.value = 90
         self.sensitivitySlider.setToolTip(_("Sensitivity: the voxels where at least this percent of the lesions' maps pass the rule"))
         form.addRow(_("Sensitivity"), self.sensitivitySlider)
+        # the Robust card's "Primary (fixed)" line reads the sensitivity from here
+        self.sensitivitySlider.connect("valueChanged(double)", lambda value: self.ctx.notifyOverlapChanged())
         layout.addLayout(form)
         # Short labels: the inspector stays 340 px wide (the details are in the tooltips)
         self.legacyCheckBox = qt.QCheckBox(_("Legacy two-group maps"))

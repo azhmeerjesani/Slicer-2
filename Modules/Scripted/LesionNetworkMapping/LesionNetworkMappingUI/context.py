@@ -44,7 +44,8 @@ class MapContext:
 
     Observer lists (called with no argument unless stated): ``studyChanged``, ``bundleChanged``,
     ``runChanged``, ``resultChanged``, ``ruleChanged``, ``seedChanged``, ``primaryOverrideChanged(mode)``,
-    ``computeEnabledChanged``, ``thresholdChanged`` (the Result card's resolved threshold, the statistic it applies to
+    ``computeEnabledChanged``, ``overlapChanged`` (the Overlap tab's sensitivity, the percent of the lesions that must pass the
+    rule, changed: it is the overlap criterion of the Robust card's primary), ``thresholdChanged`` (the Result card's resolved threshold, the statistic it applies to
     or the sign changed; notified after the widget's ``resolved`` holds the new value).
 
     Hook lists:
@@ -56,7 +57,7 @@ class MapContext:
       ``doneEvent``, ``results``, ``spec.kind``, ``runRoot``...). Any failure makes the job fail.
     """
 
-    OBSERVER_LISTS = ("studyChanged", "bundleChanged", "runChanged", "resultChanged", "ruleChanged", "seedChanged", "primaryOverrideChanged", "computeEnabledChanged", "primaryPinnedChanged", "thresholdChanged")
+    OBSERVER_LISTS = ("studyChanged", "bundleChanged", "runChanged", "resultChanged", "ruleChanged", "seedChanged", "primaryOverrideChanged", "computeEnabledChanged", "primaryPinnedChanged", "thresholdChanged", "overlapChanged")
 
     def __init__(self, parameterNode=None, logic=None, runner=None):
         self.parameterNode = parameterNode
@@ -150,6 +151,10 @@ class MapContext:
     def notifyThresholdChanged(self):
         """Notify ``thresholdChanged`` after the Result card re-resolved its rule to another threshold or sign."""
         self._notify("thresholdChanged")
+
+    def notifyOverlapChanged(self):
+        """Notify ``overlapChanged`` after the Overlap tab's sensitivity changed (typed, dragged or restored)."""
+        self._notify("overlapChanged")
 
     #
     # Cards
