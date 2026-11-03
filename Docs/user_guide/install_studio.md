@@ -176,6 +176,15 @@ folder (`SlicerStudioData` in your home folder unless you pass `--data`), in
 asks as the desktop application does). See
 [Where Slicer Studio saves your work](studio_projects.md).
 
+## Extensions
+
+The Extensions Manager offers the extensions of the official 3D Slicer build
+that Slicer Studio is based on. Only extensions written in Python work in
+Slicer Studio. Extensions with compiled (C++) parts, such as MarkupsToModel,
+were built for official 3D Slicer and cannot run here: they still install, but
+the Extensions Manager shows them as incompatible, says why, and keeps them
+disabled. Use official 3D Slicer for those extensions.
+
 ## Updates
 
 Slicer Studio updates itself from the public releases of its repository,

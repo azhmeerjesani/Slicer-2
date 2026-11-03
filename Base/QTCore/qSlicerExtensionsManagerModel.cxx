@@ -52,6 +52,7 @@
 #include "qSlicerCoreApplication.h"
 #include "qSlicerExtensionsManagerModel.h"
 #include "vtkSlicerConfigure.h"
+#include "vtkSlicerVersionConfigure.h" // For Slicer_REVISION, Slicer_EXTENSIONS_SERVER_REVISION (Slicer Studio fork)
 #include "vtkSlicerVersionConfigureMinimal.h"
 
 // MRML includes
@@ -226,6 +227,14 @@ public:
   static bool validateExtensionMetadata(const ExtensionMetadataType& extensionMetadata, int serverAPI);
 
   static QStringList isExtensionCompatible(const ExtensionMetadataType& metadata, const QString& slicerRevision, const QString& slicerOs, const QString& slicerArch);
+
+  /// Slicer Studio fork: why the extension installed in \a extensionName can never run in this application, or an empty
+  /// string. This build asks the extensions server for the extensions of the official build it is based on
+  /// (Slicer_EXTENSIONS_SERVER_REVISION is not Slicer_REVISION): their compiled (C++) modules need libraries of official
+  /// 3D Slicer (its own Qt build) and fail to load or crash here, while their Python modules work. So an extension
+  /// with a compiled module file (a library or an executable in its cli-modules or qt-loadable-modules folder) is
+  /// incompatible when \a slicerRevision is that server revision. Always empty in builds that ask for their own revision.
+  QString compiledModulesIncompatibility(const QString& extensionName, const QString& slicerRevision) const;
 
   void initializeColumnIdToNameMap(int columnIdx, const char* columnName);
   QHash<int, QString> ColumnIdToName;
@@ -1033,6 +1042,69 @@ QStringList qSlicerExtensionsManagerModelPrivate::isExtensionCompatible(const Ex
     reasons << qSlicerExtensionsManagerModel::tr("extensionOs [%1] is different from slicerOs [%2]").arg(extensionOs).arg(slicerOs);
   }
   return reasons;
+}
+
+// --------------------------------------------------------------------------
+QString qSlicerExtensionsManagerModelPrivate::compiledModulesIncompatibility(const QString& extensionName, const QString& slicerRevision) const
+{
+  Q_Q(const qSlicerExtensionsManagerModel);
+  if (QLatin1String(Slicer_EXTENSIONS_SERVER_REVISION) == QLatin1String(Slicer_REVISION) //
+      || slicerRevision != QLatin1String(Slicer_EXTENSIONS_SERVER_REVISION)              //
+      || this->SlicerVersion.isEmpty())
+  {
+    return QString();
+  }
+  const QString path = q->extensionInstallPath(extensionName);
+  if (path.isEmpty())
+  {
+    return QString();
+  }
+  const QStringList moduleDirs = QStringList()                                                                                          //
+                                 << path + "/" + QString(Slicer_QTLOADABLEMODULES_LIB_DIR).replace(Slicer_VERSION, this->SlicerVersion) //
+                                 << path + "/" + QString(Slicer_CLIMODULES_LIB_DIR).replace(Slicer_VERSION, this->SlicerVersion)        //
+                                 << path + "/" + QString(Slicer_CLIMODULES_BIN_DIR).replace(Slicer_VERSION, this->SlicerVersion)        //
+                                 << path + "/" Slicer_CLIMODULES_SUBDIR;
+  const QStringList librarySuffixes = QStringList() << "so" << "dylib" << "dll" << "pyd" << "exe";
+  // Executables without a suffix: ELF, PE and Mach-O (thin and universal) headers
+  const QList<QByteArray> executableMagics = QList<QByteArray>() << QByteArray::fromHex("7f454c46") << QByteArray("MZ")                //
+                                                                 << QByteArray::fromHex("feedface") << QByteArray::fromHex("feedfacf") //
+                                                                 << QByteArray::fromHex("cefaedfe") << QByteArray::fromHex("cffaedfe") //
+                                                                 << QByteArray::fromHex("cafebabe");
+  QString compiledFileName;
+  for (const QString& moduleDir : moduleDirs)
+  {
+    for (const QFileInfo& fileInfo : QDir(moduleDir).entryInfoList(QDir::Files, QDir::Name))
+    {
+      bool compiled = librarySuffixes.contains(fileInfo.suffix().toLower()) || fileInfo.fileName().contains(".so.");
+      if (!compiled && fileInfo.isExecutable())
+      {
+        QFile file(fileInfo.absoluteFilePath());
+        const QByteArray header = file.open(QIODevice::ReadOnly) ? file.read(4) : QByteArray();
+        for (const QByteArray& magic : executableMagics)
+        {
+          compiled = compiled || header.startsWith(magic);
+        }
+      }
+      if (compiled)
+      {
+        compiledFileName = fileInfo.fileName();
+        break;
+      }
+    }
+    if (!compiledFileName.isEmpty())
+    {
+      break;
+    }
+  }
+  if (compiledFileName.isEmpty())
+  {
+    return QString();
+  }
+  //: %1 is the file name of a compiled module library or executable of the extension
+  return qSlicerExtensionsManagerModel::tr("It cannot run in Slicer Studio, which can only use extensions written in Python: "
+                                           "it contains compiled (C++) modules, such as %1, built for official 3D Slicer. "
+                                           "Use official 3D Slicer for this extension.")
+    .arg(compiledFileName);
 }
 
 // --------------------------------------------------------------------------
@@ -2066,6 +2138,16 @@ bool qSlicerExtensionsManagerModel::installExtension(const QString& extensionNam
 
   this->writeExtensionDescriptionFile(this->extensionDescriptionFile(extensionName), this->extensionMetadata(extensionName));
 
+  // Slicer Studio fork: compiled modules built for official 3D Slicer can never run here. Disable the extension at once,
+  // so that they are not loaded at the next start, and say why (the Extensions Manager shows it as incompatible).
+  const QString compiledModulesReason = d->compiledModulesIncompatibility(extensionName, d->SlicerRevision);
+  if (!compiledModulesReason.isEmpty())
+  {
+    this->setExtensionEnabled(extensionName, false);
+    //: %1 is the extension name, %2 says why it cannot run
+    d->warning(tr("%1 was installed but is disabled. %2").arg(extensionName).arg(compiledModulesReason));
+  }
+
   emit this->extensionInstalled(extensionName);
 
   // Log notice that extension was installed
@@ -2943,7 +3025,18 @@ QStringList qSlicerExtensionsManagerModel::isExtensionCompatible(const QString& 
     return QStringList() << tr("'extensionName' parameter is not specified");
   }
   ExtensionMetadataType metadata = this->extensionMetadata(extensionName);
-  return qSlicerExtensionsManagerModelPrivate::isExtensionCompatible(metadata, slicerRevision, slicerOs, slicerArch);
+  QStringList reasons = qSlicerExtensionsManagerModelPrivate::isExtensionCompatible(metadata, slicerRevision, slicerOs, slicerArch);
+  // Slicer Studio fork: an installed extension with compiled modules built for official 3D Slicer cannot run here.
+  if (this->isExtensionInstalled(extensionName))
+  {
+    Q_D(const qSlicerExtensionsManagerModel);
+    const QString compiledModulesReason = d->compiledModulesIncompatibility(extensionName, slicerRevision);
+    if (!compiledModulesReason.isEmpty())
+    {
+      reasons << compiledModulesReason;
+    }
+  }
+  return reasons;
 }
 
 // --------------------------------------------------------------------------

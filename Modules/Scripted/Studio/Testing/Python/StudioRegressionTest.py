@@ -138,6 +138,10 @@ Run with the main window and testing enabled::
   save status (Saved, Saving…, Not saved · Retry), not "the autosave status" on the right.
 - ``test_65_qc_chip_text_shows_every_line`` (BB-1): the text of a QC chip of the Lesion card is as high as its wrapped lines need
   at its width (the row was capped at its size hint by a Maximum vertical policy, so the last line of a long text was cut off).
+- ``test_66_cxx_extensions_of_the_official_build_are_said_incompatible`` (BB-1): an extension with compiled (C++) modules
+  (a library in ``qt-loadable-modules``, an executable in ``cli-modules``) is incompatible, with a plain reason, and kept
+  disabled (its folders are not in the module or launcher paths), at install and when found at start: such modules were
+  built for official 3D Slicer and never load in the fork. An extension written in Python stays compatible and enabled.
 """
 
 import inspect
@@ -4814,3 +4818,93 @@ class StudioRegressionTest(unittest.TestCase):
         finally:
             panel.clear()
             host.deleteLater()
+
+    def test_66_cxx_extensions_of_the_official_build_are_said_incompatible(self):
+        """The fork asks the extensions server for the extensions of official 3D Slicer, so an extension with compiled (C++)
+        modules installed but never loaded: they need official Slicer's own libraries. It is said to be incompatible, in
+        plain words, and kept disabled (its folders are not added to the module or launcher paths), at install and when
+        an extension installed earlier is found at start; an extension written in Python stays compatible and enabled (BB-1).
+        """
+        import tarfile
+
+        serverRevision = slicer.app.extensionsManagerModel().slicerRevision
+        if serverRevision == slicer.app.revision:
+            self.skipTest("this build asks the extensions server for its own extensions (an official-like build)")
+        libDir = f"lib/Slicer-{slicer.app.majorVersion}.{slicer.app.minorVersion}"
+        installPath = os.path.join(self.directory, "Extensions")
+        os.makedirs(installPath)
+        settingsPath = os.path.join(self.directory, "extensions.ini")
+        settings = qt.QSettings(settingsPath, qt.QSettings.IniFormat)
+        settings.setValue("Extensions/InstallPath", installPath)
+        settings.sync()
+
+        def newModel():
+            """A model like the application's, on its own settings file and extensions folder."""
+            model = slicer.qSlicerExtensionsManagerModel()
+            model.interactive = False
+            model.extensionsSettingsFilePath = settingsPath
+            model.slicerOs, model.slicerArch, model.slicerRevision = "linux", "amd64", serverRevision
+            return model
+
+        def write(path, content, mode=0o644):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as stream:
+                stream.write(content)
+            os.chmod(path, mode)
+
+        def package(name, files):
+            """An extension package as the server has it: <top folder>/<files>, with share/.../<name>.s4ext."""
+            top = f"{serverRevision}-linux-amd64-{name}-git0123456-2026-10-16"
+            source = os.path.join(self.directory, "packages", top)
+            files = dict(files, **{f"share/Slicer-{slicer.app.majorVersion}.{slicer.app.minorVersion}/{name}.s4ext": (b"scm git\n", 0o644)})
+            for relative, (content, mode) in files.items():
+                write(os.path.join(source, *relative.split("/")), content, mode)
+            path = source + ".tar.gz"
+            with tarfile.open(path, "w:gz") as tar:
+                tar.add(source, arcname=top)
+            return path
+
+        def settingsText():
+            with open(settingsPath, encoding="utf-8") as stream:
+                return stream.read()
+
+        def assertCxxIncompatible(model, name, fileName, when):
+            self.assertTrue(model.isExtensionInstalled(name), f"{name} {when}")
+            reasons = list(model.isExtensionCompatible(name))
+            self.assertEqual(len(reasons), 1, f"{name} {when}: {reasons}")
+            self.assertIn("compiled (C++) modules, such as " + fileName, reasons[0])
+            self.assertIn("written in Python", reasons[0])
+            self.assertFalse(model.isExtensionEnabled(name), f"{name} {when} is enabled: its modules would be loaded")
+
+        def assertPythonCompatible(model, when):
+            self.assertEqual(list(model.isExtensionCompatible("StudioPythonProbe")), [], when)
+            self.assertTrue(model.isExtensionEnabled("StudioPythonProbe"), when)
+
+        cxx = package("StudioCxxProbe", {f"{libDir}/qt-loadable-modules/libqSlicerStudioCxxProbeModule.so": (b"\x7fELF\x02\x01\x01\x00", 0o755)})
+        python = package("StudioPythonProbe", {
+            f"{libDir}/qt-scripted-modules/StudioPythonProbe.py": (b"# a scripted module\n", 0o644),
+            f"{libDir}/cli-modules/StudioPythonCli.py": (b"#!/usr/bin/env python-real\n", 0o755),  # a scripted CLI
+            f"{libDir}/cli-modules/StudioPythonCli.xml": (b"<executable/>\n", 0o644),
+        })
+        model = newModel()
+        self.assertTrue(model.newExtensionEnabledByDefault)
+        self.assertTrue(model.installExtension(cxx, False), "the C++ extension package was not installed")
+        self.assertTrue(model.installExtension(python, False), "the Python extension package was not installed")
+        assertCxxIncompatible(model, "StudioCxxProbe", "libqSlicerStudioCxxProbeModule.so", "after install")
+        assertPythonCompatible(model, "after install")
+        # Disabled at once: no folder of the C++ extension in the module paths or the launcher's library paths
+        self.assertNotIn("StudioCxxProbe", settingsText())
+        self.assertIn("StudioPythonProbe", settingsText())
+
+        # At start, an extension installed earlier (enabled) with a compiled CLI module (an executable without suffix) is
+        # found incompatible and disabled too; the description file keeps it disabled.
+        write(os.path.join(installPath, "StudioCliProbe", *libDir.split("/"), "cli-modules", "StudioCliProbe"), b"\x7fELF\x02\x01\x01\x00", 0o755)
+        with open(os.path.join(installPath, "StudioCliProbe.s4ext"), "w", encoding="utf-8") as stream:
+            stream.write(f"installed true\nenabled true\nslicer_revision {serverRevision}\nos linux\narch amd64\n")
+        started = newModel()
+        started.updateModel()
+        assertCxxIncompatible(started, "StudioCliProbe", "StudioCliProbe", "at start")
+        assertCxxIncompatible(started, "StudioCxxProbe", "libqSlicerStudioCxxProbeModule.so", "at start")
+        assertPythonCompatible(started, "at start")
+        with open(os.path.join(installPath, "StudioCliProbe.s4ext"), encoding="utf-8") as stream:
+            self.assertIn("enabled false", stream.read())

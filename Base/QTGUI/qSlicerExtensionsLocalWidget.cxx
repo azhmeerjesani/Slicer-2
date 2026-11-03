@@ -40,6 +40,7 @@
 #include <QUrlQuery>
 
 // Slicer includes
+#include "qSlicerCoreApplication.h"
 #include "qSlicerExtensionsManagerModel.h"
 #include "qSlicerExtensionsLocalWidget.h"
 #include "ui_qSlicerExtensionsButtonBox.h"
@@ -75,7 +76,8 @@ public:
     BookmarkedRole,
     EnabledRole,
     ScheduledForUpdateRole,
-    ScheduledForUninstallRole
+    ScheduledForUninstallRole,
+    IncompatibilityReasonsRole // Slicer Studio fork: why the extension is incompatible
   };
 
   qSlicerExtensionsLocalWidgetPrivate(qSlicerExtensionsLocalWidget& object);
@@ -416,15 +418,40 @@ protected:
                       .arg(this->WarningColor)
                     + qSlicerExtensionsLocalWidget::tr("Not found for this version of the application (r%1)").arg(this->SlicerRevision) + QLatin1String("</p>");
     }
+    QString incompatibilityReasons;
     if (!compatible)
     {
-      statusText += QLatin1String("<p style=\"font-weight: bold; font-size: 80%; color: %1;\">"
-                                  "<img style=\"float: left\" src=\":/Icons/ExtensionIncompatible.svg\"/> ")
-                      .arg(this->WarningColor)
-                    + qSlicerExtensionsLocalWidget::tr("Incompatible with Slicer r%1 [built for r%2]")
-                        .arg(this->SlicerRevision)
-                        .arg(this->WidgetItem->data(qSlicerExtensionsLocalWidgetPrivate::InstalledExtensionSlicerVersionRole).toString())
-                    + QLatin1String("</p>");
+      const QString incompatibleParagraph = QLatin1String("<p style=\"font-weight: bold; font-size: 80%; color: %1;\">"
+                                                          "<img style=\"float: left\" src=\":/Icons/ExtensionIncompatible.svg\"/> %2</p>");
+      const QString builtForRevision = this->WidgetItem->data(qSlicerExtensionsLocalWidgetPrivate::InstalledExtensionSlicerVersionRole).toString();
+      QString incompatibleText = qSlicerExtensionsLocalWidget::tr("Incompatible with Slicer r%1 [built for r%2]").arg(this->SlicerRevision).arg(builtForRevision);
+      // Slicer Studio fork: this build asks the extensions server for the extensions of another build (official
+      // 3D Slicer), so an extension built for that revision can be incompatible for another reason (compiled modules):
+      // say it, cut to the one line of the label (shortened until it fits), and in full in the tool tip.
+      qSlicerCoreApplication* app = qSlicerCoreApplication::application();
+      if (app && this->SlicerRevision != app->revision() && builtForRevision == this->SlicerRevision)
+      {
+        incompatibilityReasons = this->WidgetItem->data(qSlicerExtensionsLocalWidgetPrivate::IncompatibilityReasonsRole).toString();
+        const QString fullText = qSlicerExtensionsLocalWidget::tr("Incompatible. %1").arg(incompatibilityReasons);
+        // A text too long to fit beside the icon goes below it (or past the right edge)
+        QTextDocument line;
+        line.setDefaultFont(this->Text.defaultFont());
+        line.setDefaultTextOption(this->Text.defaultTextOption());
+        line.setDocumentMargin(this->Text.documentMargin());
+        line.setTextWidth(this->contentsRect().width());
+        line.setHtml(incompatibleParagraph.arg(this->WarningColor).arg(QChar(0x2026)));
+        const qreal lineHeight = line.size().height();
+        for (int length = fullText.size(); length > 0; length -= 3)
+        {
+          incompatibleText = length == fullText.size() ? fullText : fullText.left(length).trimmed() + QChar(0x2026);
+          line.setHtml(incompatibleParagraph.arg(this->WarningColor).arg(incompatibleText.toHtmlEscaped()));
+          if (line.size().height() <= lineHeight && line.idealWidth() + 2 * line.documentMargin() <= this->contentsRect().width())
+          {
+            break;
+          }
+        }
+      }
+      statusText += incompatibleParagraph.arg(this->WarningColor).arg(incompatibleText.toHtmlEscaped());
     }
     if (this->WidgetItem->data(qSlicerExtensionsLocalWidgetPrivate::UpdateAvailableRole).toBool() && !scheduledForUpdate)
     {
@@ -486,7 +513,7 @@ protected:
     labelText += QString("<p>%1%2</p>").arg(elidedDescription).arg(linkText);
 
     this->Text.setHtml(labelText);
-    this->setToolTip(extensionDescription);
+    this->setToolTip(incompatibilityReasons.isEmpty() ? extensionDescription : incompatibilityReasons + "\n\n" + extensionDescription);
     this->setMouseTracking(!moreLink.isEmpty());
   }
 
@@ -745,7 +772,9 @@ QListWidgetItem* qSlicerExtensionsLocalWidgetPrivate::updateExtensionItem(const 
   item->setData(Self::UpdateAvailableRole, q->extensionsManagerModel()->isExtensionUpdateAvailable(extensionName));
   item->setData(Self::MoreLinkRole, moreLinkTarget);
   item->setData(Self::DescriptionRole, metadata["description"].toString());
-  item->setData(Self::CompatibleRole, q->extensionsManagerModel()->isExtensionCompatible(extensionName).isEmpty());
+  const QStringList incompatibilityReasons = q->extensionsManagerModel()->isExtensionCompatible(extensionName);
+  item->setData(Self::CompatibleRole, incompatibilityReasons.isEmpty());
+  item->setData(Self::IncompatibilityReasonsRole, incompatibilityReasons.join(" "));
   item->setData(Self::LoadedRole, metadata["loaded"].toBool());
   item->setData(Self::InstalledRole, metadata["installed"].toBool());
   item->setData(Self::BookmarkedRole, metadata["bookmarked"].toBool());
