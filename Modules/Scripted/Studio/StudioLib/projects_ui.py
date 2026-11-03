@@ -1328,8 +1328,18 @@ class ProjectsSection(qt.QObject):
         return _("Saved automatically in {folder}").format(folder=projects.shortPath(root))
 
     def currentInfo(self):
-        """The ``projects.ProjectInfo`` of the open project among the listed ones, or None."""
-        return next((info for info in self._infos if info.isCurrent()), None)
+        """The ``projects.ProjectInfo`` of the open project among the listed ones, or None.
+
+        An open project that is not in the listed folder (a Change folder > Move that failed partway: the project was followed
+        into the new folder while the setting still points at the old one) is read from where it is.
+        """
+        listed = next((info for info in self._infos if info.isCurrent()), None)
+        if listed is not None:
+            return listed
+        current = projects.currentProject()
+        if current is not None and os.path.isdir(current.path):
+            return projects.ProjectInfo(current.path)
+        return None
 
     def _shownCount(self, total):
         if self._showAll:

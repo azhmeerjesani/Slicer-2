@@ -1652,11 +1652,13 @@ class CurrentWorkCard(qt.QObject):
 
     def setProject(self, info):
         """The current project (``projects.ProjectInfo``) of the Slicer Studio folder, or None: its name, when it was saved
-        and its thumbnail.
+        and its thumbnail. The scan rows show the folders of the scans' files too: a project that moved (Change folder >
+        Move, Rename) took its files along without a change of the scene that the card would hear of.
         """
         self._project = info
         if _isAlive(self.widget):
             self._showProject()
+            self._updateScanFolders()
 
     def _showProject(self):
         info = self._project
@@ -1748,11 +1750,8 @@ class CurrentWorkCard(qt.QObject):
         self._blocks[lesion.GetID()] = block
         self.rowsLayout.addWidget(block.widget)
 
-    def _updateTexts(self, queue=True):
-        """Set the texts of the rows. ``queue``: lesions whose metrics are not cached are queued for ``_computeNext()``."""
-        model = self._model
-        if model is None:
-            return
+    def _updateScanFolders(self):
+        """Set the folder line of each scan row (where its file is now)."""
         for scanId, folderLabel in self._scanRows:
             scan = slicer.mrmlScene.GetNodeByID(scanId)
             if scan is None:
@@ -1770,6 +1769,13 @@ class CurrentWorkCard(qt.QObject):
             else:
                 text = toolTip = os.path.dirname(path)
             setElidedText(folderLabel, text, toolTip)
+
+    def _updateTexts(self, queue=True):
+        """Set the texts of the rows. ``queue``: lesions whose metrics are not cached are queued for ``_computeNext()``."""
+        model = self._model
+        if model is None:
+            return
+        self._updateScanFolders()
         for lesionId, block in self._blocks.items():
             lesion = block.node()
             if lesion is None:

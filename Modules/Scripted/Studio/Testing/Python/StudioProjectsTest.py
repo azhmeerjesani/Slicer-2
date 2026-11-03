@@ -5787,6 +5787,83 @@ class StudioProjectsTest(unittest.TestCase):
             self.io.backgroundWriter().drain(10.0)
             slicer.app.processEvents()
 
+    def test_85_continue_card_follows_the_moved_project(self):
+        """After Change folder > Move the Continue card (Library) named the scan's folder in the old location until the next
+        scene event, and after a move that failed partway (the open project was followed into the new folder while the setting
+        stayed on the old one) it said "Open now · Not in a project yet" (BB-1). The card shows where the scan is now, and
+        describes the open project wherever it is.
+        """
+        import errno
+        from unittest import mock
+
+        from StudioLib import library
+
+        projects = self.projects
+
+        def card(canvas):
+            slicer.app.processEvents()
+            work = canvas.currentWork
+            folders = [str(label.property("fullText")) for _id, label in work._scanRows]
+            return work.titleLabel.property("fullText"), work.metaLabel.property("fullText"), folders
+
+        def waitFor(canvas, condition, seconds=10.0):
+            end = time.time() + seconds
+            while time.time() < end and not condition(card(canvas)):
+                time.sleep(0.02)
+            return card(canvas)
+
+        service = self._service()
+        volume, _path = self._userVolume("Moving scan", shape=(12, 14, 16))
+        project = self._projectFor(service)
+        self._save(service)
+        oldRoot = projects.root()
+        os.environ.pop(projects.ROOT_ENVIRONMENT)
+        qt.QSettings().setValue(projects.ROOT_KEY, oldRoot)
+        canvas = library.LibraryCanvas()
+        running = self.autosave._service
+        self.autosave._service = service
+        try:
+            canvas.widget.show()
+            canvas.refresh()
+            title, meta, folders = card(canvas)
+            self.assertEqual(title, project.name)
+            self.assertEqual(folders, [os.path.join(project.path, "Images")])
+            # A move that succeeds: the folder line names the scan's new folder at once, not after the next scene event
+            newRoot = os.path.normpath(os.path.join(self.tempDir, "card move", "A", "Slicer Studio"))
+            service.moveRoot(newRoot, moveContent=True)
+            movedPath = os.path.join(newRoot, projects.PROJECTS_DIR, project.name)
+            self.assertEqual(os.path.dirname(volume.GetStorageNode().GetFileName()), os.path.join(movedPath, "Images"))
+            title, meta, folders = waitFor(canvas, lambda state: state[2] == [os.path.join(movedPath, "Images")])
+            self.assertEqual(folders, [os.path.join(movedPath, "Images")], "the card names the scan's new folder")
+            self.assertEqual(title, project.name)
+            # A move that fails partway: the project moved, the setting stays on the old folder
+            realMove = projects.moveContent
+            failedRoot = os.path.normpath(os.path.join(self.tempDir, "card move", "B", "Slicer Studio"))
+
+            def failsAfterProjects(*args, **kwargs):
+                realMove(*args, **kwargs)
+                raise OSError(errno.ENOSPC, "No space left on device")
+
+            with mock.patch.object(projects, "moveContent", side_effect=failsAfterProjects):
+                with self.assertRaises(OSError):
+                    service.moveRoot(failedRoot, moveContent=True)
+            self.assertEqual(projects.root(), newRoot, "the setting is unchanged")
+            movedPath = os.path.join(failedRoot, projects.PROJECTS_DIR, project.name)
+            self.assertEqual(os.path.normpath(service.project.path), movedPath)
+            title, meta, folders = waitFor(canvas, lambda state: state[2] == [os.path.join(movedPath, "Images")])
+            self.assertEqual(folders, [os.path.join(movedPath, "Images")])
+            self.assertEqual(title, project.name)
+            self.assertIn("Projects \u203a " + project.name, meta)
+            self.assertNotIn("Not in a project yet", meta)
+        finally:
+            self.autosave._service = running
+            canvas.widget.hide()
+            canvas.dispose()
+            qt.QSettings().remove(projects.ROOT_KEY)
+            qt.QSettings().remove(projects.ROOT_CHOSEN_KEY)
+            os.environ[projects.ROOT_ENVIRONMENT] = self.root
+            self.io.backgroundWriter().drain(10.0)
+
     def test_70_tab_goes_through_the_project_cards_in_the_order_they_are_shown(self):
         """Qt's focus chain follows the creation order of the widgets, so the cards that a refresh built later (the card of
         the project that was just saved, which then moves to the first place; the cards after a new sort order) were
