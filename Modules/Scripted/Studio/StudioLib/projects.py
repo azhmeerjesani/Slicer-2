@@ -1794,10 +1794,36 @@ def moveContent(oldRoot, newRoot, progress=None, renamed=None, renamedIds=None):
                 os.rmdir(newRoot)  # nothing was moved: leave no empty folder behind
         raise
     finally:
+        _studiesFollowRenamedFolders(absoluteRenames, newRoot)  # also after a failed move: what moved is listed there
         if renamed is not None:
             for source, destination in absoluteRenames.items():
                 renamed[os.path.normpath(os.path.relpath(source, oldRoot))] = os.path.normpath(os.path.relpath(destination, newRoot))
     return moved
+
+
+def _studiesFollowRenamedFolders(absoluteRenames, newRoot):
+    """A study that moved as "<name> 2" (its name was taken in ``newRoot``) is named "<name> 2" in its ``study.json`` too.
+
+    The Library lists a study by its ``study.json`` name only, so the moved study and the one that kept the name would be two
+    identical cards. Like a project (``adoptRenamedScene``), the study follows its folder. Only a study whose name was its old
+    folder name follows (a name the user chose stays), and only what moved into ``Studies/``. Worker-safe; never raises.
+    """
+    studies = os.path.join(newRoot, STUDIES_DIR)
+    for source, destination in absoluteRenames.items():
+        try:
+            studyJson = os.path.join(destination, "study.json")
+            if not (isInside(destination, studies) and os.path.isfile(studyJson)):
+                continue
+            data = readJson(studyJson)
+            if not isinstance(data, dict) or data.get("name") != os.path.basename(os.path.normpath(source)):
+                continue
+            from . import autosave_io
+
+            data["name"] = os.path.basename(os.path.normpath(destination))
+            # The text format of LesionNetworkMappingLib.study (indent 2, keys in their order, final newline)
+            autosave_io.atomicWriteText(studyJson, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+        except Exception:
+            logging.warning(f"Slicer Studio: cannot name the moved study {destination} after its folder", exc_info=True)
 
 
 def pathAfterMove(path, oldRoot, newRoot, renamed=None):

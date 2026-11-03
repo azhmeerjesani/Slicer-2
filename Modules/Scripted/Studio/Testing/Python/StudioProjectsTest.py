@@ -3356,6 +3356,60 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertEqual(projects_ui._question(None, "Title", "Text", ["Move", "Keep", "Cancel"]), 0)
         timer.stop()
 
+    def test_53b_moved_study_with_a_taken_name_is_named_after_its_new_folder(self):
+        """A study that Change folder > Move lands as "<name> 2" is named "<name> 2" in its study.json too (BB-1): the Library
+        titles a study card by that name, so the two "Stroke" studies were identical cards. A name the user chose stays; the
+        recent-studies entry follows the new name.
+        """
+        from StudioLib import autosave, study_ui
+
+        projects = self.projects
+        oldRoot = os.path.join(self.tempDir, "rm-old", "Slicer Studio")
+        newRoot = os.path.join(self.tempDir, "rm-new", "Slicer Studio")
+
+        def makeStudy(root, folder, name, mark):
+            path = os.path.join(root, projects.STUDIES_DIR, folder)
+            os.makedirs(path)
+            with open(os.path.join(path, "study.json"), "w", encoding="utf-8") as f:
+                json.dump({"format": "slicer-studio-study", "version": 1, "name": name, "created": "2026-01-01"}, f, indent=2)
+                f.write("\n")
+            with open(os.path.join(path, "whose.txt"), "w") as f:
+                f.write(mark)
+            return path
+
+        oldStroke = makeStudy(oldRoot, "Stroke", "Stroke", "old")
+        makeStudy(oldRoot, "Chosen", "My chosen name", "old")
+        makeStudy(oldRoot, "Fresh", "Fresh", "old")
+        newStroke = makeStudy(newRoot, "Stroke", "Stroke", "new")
+        makeStudy(newRoot, "Chosen", "My chosen name", "new")
+        settings = qt.QSettings()
+        previousRecent = settings.value(study_ui.RECENT_STUDIES_KEY)
+        settings.setValue(study_ui.RECENT_STUDIES_KEY, json.dumps([{"path": oldStroke, "name": "Stroke"}]))
+        try:
+            renamed = {}
+            projects.moveContent(oldRoot, newRoot, renamed=renamed)
+            studies = os.path.join(newRoot, projects.STUDIES_DIR)
+            self.assertEqual(projects.readJson(os.path.join(studies, "Stroke 2", "study.json"))["name"], "Stroke 2")
+            self.assertEqual(projects.readJson(os.path.join(studies, "Stroke 2", "study.json"))["created"], "2026-01-01")
+            self.assertEqual(open(os.path.join(studies, "Stroke 2", "whose.txt")).read(), "old")
+            self.assertEqual(projects.readJson(os.path.join(newStroke, "study.json"))["name"], "Stroke", "the study that kept the name")
+            self.assertEqual(open(os.path.join(newStroke, "whose.txt")).read(), "new")
+            self.assertEqual(projects.readJson(os.path.join(studies, "Chosen 2", "study.json"))["name"], "My chosen name", "a chosen name stays")
+            self.assertEqual(projects.readJson(os.path.join(studies, "Fresh", "study.json"))["name"], "Fresh", "not renamed: untouched")
+            from StudioLib import projects_ui
+
+            names = sorted(projects_ui.studySummary(path)["name"] for path in projects.listStudies(newRoot) if "Stroke" in path)
+            self.assertEqual(names, ["Stroke", "Stroke 2"], "two different cards in the Library")
+            autosave._updateRecentStudies(oldRoot, newRoot, renamed)
+            recent = json.loads(settings.value(study_ui.RECENT_STUDIES_KEY))
+            self.assertEqual(os.path.normpath(recent[0]["path"]), os.path.join(studies, "Stroke 2"))
+            self.assertEqual(recent[0]["name"], "Stroke 2")
+        finally:
+            if previousRecent is None:
+                settings.remove(study_ui.RECENT_STUDIES_KEY)
+            else:
+                settings.setValue(study_ui.RECENT_STUDIES_KEY, previousRecent)
+
     def test_53_root_move_into_a_folder_with_a_project_of_the_same_name_follows_its_own_project(self):
         """Change folder > Move into a Slicer Studio folder that already has a project with the open project's name (BB-1):
         the moved project lands as "<name> 2" and the open project follows it there, scene file named after the folder.

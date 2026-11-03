@@ -2436,6 +2436,8 @@ def _updateRecentStudies(oldRoot, newRoot, renamed=None):
         path = record.get("path") if isinstance(record, dict) else None
         newPath = projects.pathAfterMove(path, oldRoot, newRoot, renamed) if path else path
         if newPath != path:
+            if record.get("name") == os.path.basename(os.path.normpath(path)) != os.path.basename(os.path.normpath(newPath)):
+                record["name"] = os.path.basename(os.path.normpath(newPath))  # the study follows its folder (moveContent)
             record["path"] = newPath
             changed = True
     if changed:
