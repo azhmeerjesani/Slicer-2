@@ -5682,6 +5682,57 @@ class StudioProjectsTest(unittest.TestCase):
                 owner.widget.deleteLater()
             slicer.app.processEvents()
 
+    def test_84_studies_section_lists_the_studies_of_the_new_folder_after_change_folder(self):
+        """Library > Studies listed only the studies of the old folder after Change folder > Move into a folder with its own
+        studies, until the workspace was switched and back: only the Projects section listened to the folder changes (BB-1).
+        """
+        from StudioLib import projects_ui
+
+        projects = self.projects
+
+        def makeStudy(rootPath, name):
+            folder = os.path.join(rootPath, "Studies", name)
+            os.makedirs(folder)
+            self.io.atomicWriteJson(os.path.join(folder, "study.json"), {"name": name})
+
+        oldRoot = os.path.normpath(os.path.join(self.tempDir, "studies move", "A", "Slicer Studio"))
+        newRoot = os.path.normpath(os.path.join(self.tempDir, "studies move", "B", "Slicer Studio"))
+        makeStudy(oldRoot, "Aphasia")
+        makeStudy(newRoot, "Stroke")
+        settings = qt.QSettings()
+        os.environ.pop(projects.ROOT_ENVIRONMENT)
+        settings.setValue(projects.ROOT_KEY, oldRoot)
+        section = projects_ui.StudiesSection()
+
+        def listed():
+            slicer.app.processEvents()
+            return sorted(os.path.basename(str(card.property("studioStudyPath"))) for card in section.cards())
+
+        def waitFor(expected, seconds=5.0):
+            end = time.time() + seconds
+            while time.time() < end and listed() != expected:
+                time.sleep(0.02)
+            return listed()
+
+        try:
+            self.assertEqual(listed(), ["Aphasia"])
+            service = self._service()
+            service.moveRoot(newRoot, moveContent=True)
+            self.assertEqual(sorted(os.path.basename(path) for path in projects.listStudies()), ["Aphasia", "Stroke"])
+            self.assertEqual(waitFor(["Aphasia", "Stroke"]), ["Aphasia", "Stroke"], "the section follows the new folder")
+            # A section that was disposed no longer listens (and no timer is left to fire on it)
+            section.dispose()
+            self.assertNotIn(section.scheduleRefresh, projects._listeners)
+        finally:
+            section.dispose()
+            section.widget.setParent(None)
+            section.widget.deleteLater()
+            settings.remove(projects.ROOT_KEY)
+            settings.remove(projects.ROOT_CHOSEN_KEY)
+            os.environ[projects.ROOT_ENVIRONMENT] = self.root
+            self.io.backgroundWriter().drain(10.0)
+            slicer.app.processEvents()
+
     def test_70_tab_goes_through_the_project_cards_in_the_order_they_are_shown(self):
         """Qt's focus chain follows the creation order of the widgets, so the cards that a refresh built later (the card of
         the project that was just saved, which then moves to the first place; the cards after a new sort order) were

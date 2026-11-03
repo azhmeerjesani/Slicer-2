@@ -1765,6 +1765,13 @@ class StudiesSection(qt.QObject):
         self._signature = None
         self._clickFilter = _StudyClickFilter(self)
         slicer.app.connect("aboutToQuit()", self._removeEventFilters)
+        # The folder of the studies changes with Change folder > Move (or Use the folder), which notifies the listeners: the
+        # list follows it at once instead of when the Library is entered again (BB-1). Debounced: saves notify as well.
+        self._timer = qt.QTimer()
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(REFRESH_DELAY_MS)
+        self._timer.connect("timeout()", self.refresh)
+        projects.addListener(self.scheduleRefresh)
         ui.bindStyleSheet(self.widget, self._styleSheet)
         self.refresh()
 
@@ -1783,6 +1790,10 @@ class StudiesSection(qt.QObject):
 
     def cards(self):
         return [card for card in self._cards if _isAlive(card)]
+
+    def scheduleRefresh(self):
+        if _isAlive(self.widget):
+            self._timer.start()
 
     def refresh(self):
         if not _isAlive(self.widget):
@@ -1874,6 +1885,8 @@ class StudiesSection(qt.QObject):
                 card.removeEventFilter(self._clickFilter)
 
     def dispose(self):
+        projects.removeListener(self.scheduleRefresh)
+        self._timer.stop()
         try:
             slicer.app.disconnect("aboutToQuit()", self._removeEventFilters)
         except Exception:
