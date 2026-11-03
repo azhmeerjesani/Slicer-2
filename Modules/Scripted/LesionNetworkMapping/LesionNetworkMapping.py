@@ -174,6 +174,7 @@ def _jobMain(argv):
 if __name__ == "__main__":
     sys.exit(_jobMain(sys.argv[1:]))
 
+import itertools
 import json
 import logging
 import math
@@ -2537,6 +2538,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             self._seedModeRow.setVisible(len(self.seedModes) > 1)
             # The frame may come from a collapsed Seed card, which hid it with its other contents
             self._showSeedModeFrame()
+            self._arrangeSeedModeTabOrder()
         elif frame.parentWidget() is not seedCard:
             if self._seedModeRow is not None:
                 self._seedModeRow.layout().removeWidget(frame)
@@ -2546,6 +2548,53 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
                 button.setSizePolicy(qt.QSizePolicy.Preferred, qt.QSizePolicy.Fixed)
             seedCard.layout().insertWidget(0, frame)
             frame.setVisible(len(self.seedModes) > 1 and not bool(getattr(seedCard, "collapsed", False)))
+            self._arrangeSeedModeTabOrder()
+
+    def _arrangeSeedModeTabOrder(self):
+        """Put the seed mode buttons in their reading place in the keyboard focus chain. The focus chain of Qt follows the
+        creation (and reparenting) order of the widgets: the row that Studio shows above the Seed card is made after the
+        cards, so Tab would reach it after the last card (Export). Studio: the buttons go right before the Seed card;
+        Classic: right after the header of the Seed card, which they are the first row of.
+        """
+        frame = getattr(self, "seedModeFrame", None)
+        seedCard = self._cardWidgets.get("seed", (None, None))[1]
+        if frame is None or seedCard is None:
+            return
+        tab = int(qt.Qt.TabFocus)
+        buttons = [button for button in self.seedModeGroup.buttons() if int(button.focusPolicy) & tab]
+        if not buttons or not int(seedCard.focusPolicy) & tab:
+            return
+        if getattr(self, "_seedModesStudio", False):
+            # Qt ignores setTabOrder() for a widget without a focus policy: the stop before the Seed card is the first
+            # one that takes Tab (the buttons themselves are skipped, in case they are already in place)
+            previous = seedCard.previousInFocusChain()
+            for _ in range(500):
+                if previous is None or previous == seedCard:
+                    return
+                if int(previous.focusPolicy) & tab and previous.window() == seedCard.window() and previous not in buttons:
+                    break
+                previous = previous.previousInFocusChain()
+            else:
+                return
+            chain = [previous, *buttons, seedCard]
+        else:
+            chain = [seedCard, *buttons]
+        for before, after in itertools.pairwise(chain):
+            qt.QWidget.setTabOrder(before, after)
+
+    def _arrangeFooterTabOrder(self):
+        """Studio footer: Tab reaches the primary button, then the research-use line below it (the primary button is made in
+        the Compute card and moved to the footer later, so the focus chain would put it after the line).
+        """
+        footer, button = getattr(self, "shellDisclaimer", None), getattr(self, "computeButton", None)
+        if footer is None or button is None or button.window() != footer.window():
+            return
+        tab = int(qt.Qt.TabFocus)
+        stops = [widget for widget in footer.findChildren("QWidget") if int(widget.focusPolicy) & tab]
+        if not int(button.focusPolicy) & tab:
+            return
+        for before, after in itertools.pairwise([button, *stops]):
+            qt.QWidget.setTabOrder(before, after)
 
     def _showSeedModeFrame(self):
         """Studio: the seed modes row shows its segmented control (a collapsed Seed card may have hidden it)."""
@@ -5998,6 +6047,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
                 shell.setInspectorFooter(self.shellFooter)
                 self._footerInShell = True
                 self.footer.hide()
+                self._arrangeFooterTabOrder()
             except Exception:
                 logging.exception("Lesion network mapping: the inspector footer could not be set")
         self._statusChipText = None

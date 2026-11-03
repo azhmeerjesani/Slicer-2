@@ -4314,3 +4314,79 @@ class StudioRegressionTest(unittest.TestCase):
             section.refresh("sub-01")
             self.assertEqual(str(section.warningLabel.text), "", f"{good!r} is a DOI")
             self.assertTrue(section.warningLabel.isHidden())
+
+    def test_61_map_tab_order_mode_switch_before_cards_and_button_before_disclaimer(self):
+        """Tab reaches the Lesion / Cohort / Coords / Stim switch right before the Seed card, and the primary button
+        "Map network" before the research-use line under it (BB-1).
+
+        The keyboard focus chain of Qt follows the creation order of the widgets: the switch is made after the cards and put
+        above the Seed card, so Tab reached it after the last card (Export); the primary button is made in the Compute card
+        and moved to the footer later, so Tab reached it after the research-use line.
+        """
+        from StudioLib import shell
+
+        mainWindow = slicer.util.mainWindow()
+        if mainWindow is None or not hasattr(slicer.modules, "lesionnetworkmapping"):
+            self.skipTest("needs the main window and the Map module")
+        savedGeometry = mainWindow.saveGeometry()
+        studioShell = None
+        tab = int(qt.Qt.TabFocus)
+
+        def pump(count=10):
+            for _ in range(count):
+                slicer.app.processEvents()
+
+        def stops(first):
+            """The Tab stops of the window, from ``first`` round the focus chain."""
+            result, widget = [], first
+            for _ in range(2000):
+                if int(widget.focusPolicy) & tab:
+                    result.append(widget)
+                widget = widget.nextInFocusChain()
+                if widget == first:
+                    break
+            return result
+
+        def index(chain, widget):
+            return next(position for position, stop in enumerate(chain) if stop == widget)
+
+        try:
+            mainWindow.resize(1366, 768)
+            studioShell = shell.Shell(force=True)
+            studioShell.apply()
+            studioShell.switchTo("map")
+            pump()
+            widget = slicer.modules.LesionNetworkMappingWidget
+            seedCard = widget._cardWidgets["seed"][1]
+            buttons = list(widget.seedModeGroup.buttons())
+            self.assertGreater(len(buttons), 1)
+            for _round in range(2):
+                chain = stops(seedCard)
+                positions = [index(chain, button) for button in buttons]
+                self.assertEqual(positions, list(range(len(chain) - len(buttons), len(chain))),
+                                 "the mode buttons are the stops right before the Seed card")
+                # The Seed card is first in the chain here; the cards after it are the ones that the switch must come before
+                for key in ("connectome", "compute", "export"):
+                    card = widget._cardWidgets[key][1]
+                    self.assertLess(index(chain, seedCard), index(chain, card), f"{key} card after the Seed card")
+                chain = stops(buttons[0])
+                for key in ("seed", "connectome", "compute", "export"):
+                    card = widget._cardWidgets[key][1]
+                    self.assertLess(0, index(chain, card), key)
+                    self.assertLess(index(chain, buttons[-1]), index(chain, card), f"the mode switch comes before the {key} card")
+                # Leaving and entering Map again (the primary button goes back to the Compute card and to the footer)
+                studioShell.switchTo("draw")
+                pump()
+                studioShell.switchTo("map")
+                pump()
+            chain = stops(widget.computeButton)
+            disclaimer = [child for child in widget.shellDisclaimer.findChildren("QWidget") if int(child.focusPolicy) & tab]
+            self.assertTrue(disclaimer, "the research-use line has a Tab stop (its Read more link)")
+            self.assertEqual(chain[0], widget.computeButton)
+            self.assertEqual(chain[1], disclaimer[0], "the research-use line comes right after the primary button")
+        finally:
+            if studioShell is not None:
+                studioShell.dispose()
+            pump()
+            mainWindow.restoreGeometry(savedGeometry)
+            slicer.mrmlScene.Clear(0)
