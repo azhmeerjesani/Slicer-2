@@ -1363,8 +1363,13 @@ class UpdateService:
         if self.canInstall() and not self.releaseHasFile(status):
             # The release has no file for this computer yet: Update now could not work (Settings > Updates shows why)
             return
-        if self._otherPromptShown() or not shell.mainWindow.isVisible() or self.showNotice() is None:
-            # Another prompt is shown (or the inspector notice slot is taken): try again later
+        if self._otherPromptShown():
+            # Another prompt (the first-start tour lasts about 2 minutes, a dialog can stay open for longer) comes
+            # first: wait for it as long as it lasts, without using up the retries, so the notice appears when it ends
+            self._noticeTimer.start(NOTICE_RETRY_MS)
+            return
+        if not shell.mainWindow.isVisible() or self.showNotice() is None:
+            # The window is hidden (or the inspector notice slot is taken): try again later, a limited number of times
             self._noticeRetries += 1
             if self._noticeRetries < NOTICE_MAX_RETRIES:
                 self._noticeTimer.start(NOTICE_RETRY_MS)

@@ -1732,6 +1732,57 @@ fi
         self.assertIsNone(service.notice)
         self.assertNotIn(updates.NOTICE_KEY, library.notices())
 
+    def test_NoticeWaitsForLongPrompt(self):
+        """The notice waits while another prompt (the 2-minute first-start tour, a dialog) is shown, however long that
+        lasts, and appears when it ends: the retries are not used up while a prompt is shown.
+        """
+        from StudioLib import shell
+
+        updates = self.updates
+        self._publish("1.2.0")
+        mainWindow = slicer.util.mainWindow()
+        geometry = mainWindow.saveGeometry()
+
+        def restore():
+            live = shell._shell
+            if live is not None:
+                live.dispose()
+            mainWindow.restoreGeometry(geometry)
+            self._pump(0.3)
+
+        self.addCleanup(restore)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        self._pump(0.5)
+        studioShell.switchTo("library")
+        updates._installableOverride = False
+        self.addCleanup(lambda: setattr(updates, "_installableOverride", None))
+        service = self._service()
+        previous = updates._service
+        updates._service = service
+        self.addCleanup(lambda: setattr(updates, "_service", previous))
+        service._startTime = time.monotonic() - 1000  # long after the startup: no delay for the notice
+        # Fast retries; the prompt lasts for more ticks than the retries allow
+        originalRetryMs = updates.NOTICE_RETRY_MS
+        self.addCleanup(lambda: setattr(updates, "NOTICE_RETRY_MS", originalRetryMs))
+        updates.NOTICE_RETRY_MS = 10
+        ticks = []
+        promptShown = [True]
+
+        def otherPromptShown():
+            ticks.append(1)
+            return promptShown[0]
+
+        service._otherPromptShown = otherPromptShown
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        service._showAvailability()
+        self.assertTrue(self._waitFor(lambda: len(ticks) > updates.NOTICE_MAX_RETRIES + 5, 30))
+        self.assertIsNone(service.notice, "no notice while the prompt is shown")
+        self.assertTrue(service._noticeTimer.isActive(), "the notice still waits for the prompt to end")
+        promptShown[0] = False
+        self.assertTrue(self._waitFor(lambda: service.notice is not None, 10), "the notice appears when the prompt ends")
+        self.assertEqual(service.notice.findChild("QLabel", "StudioNoticeText").text, "Update 1.2.0 available")
+
     def test_NoNoticeForUpdateThatInstallsAtQuit(self):
         """After Install when I quit, a later check does not offer the same version again: its Skip could not take the
         install back (it said "Update skipped" and the update installed at quit anyway). A newer version is offered.
