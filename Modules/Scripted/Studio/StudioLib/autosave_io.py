@@ -248,6 +248,32 @@ def _isHierarchyClass(node):
     return node.IsA("vtkMRMLSubjectHierarchyNode")
 
 
+_classIsMarkups = {}
+
+
+def _isMarkupsClass(node):
+    className = node.GetClassName()
+    markups = _classIsMarkups.get(className)
+    if markups is None:
+        markups = _classIsMarkups[className] = bool(node.IsA("vtkMRMLMarkupsNode"))
+    return markups
+
+
+def _markupsDetails(node):
+    """The label, description and lock of each control point of a markups node.
+
+    They are saved in the node's file but changing them does not modify the node (``GetMTime()`` stays the same): the
+    control point only invokes a custom modified event. So the change detection has to read them.
+    """
+    try:
+        return tuple(
+            (node.GetNthControlPointLabel(index), node.GetNthControlPointDescription(index), node.GetNthControlPointLocked(index))
+            for index in range(node.GetNumberOfControlPoints())
+        )
+    except Exception:
+        return (("modified", node.GetMTime()),)
+
+
 def contentMTime(node):
     """Modification time of the content of a storable node: it changes on data edits, not on display edits."""
     mtime = node.GetMTime()
@@ -287,7 +313,8 @@ def _hierarchyItems(node):
     """What the user sees of a subject hierarchy: the data node or the name of each item and of its parent.
 
     The numbers of the items are not part of it: entering and leaving Draw (segments shown in the hierarchy) removes
-    and makes the items again with new numbers for the same data, which is not a change of the project.
+    and makes the items again with new numbers for the same data, which is not a change of the project. The order of the
+    items is: moving an item before or after its sibling (drag and drop in the Data module) is an edit of the project.
 
     It is read again on every call (about 1 ms for 500 items), not cached by the node's MTime: renaming a folder, patient
     or study item (``SetItemName`` of an item without a data node) does not modify the node, only invokes
@@ -382,7 +409,7 @@ def sceneFingerprint(scene, ignoreIds=()):
     """A cheap value that changes when the scene content changes (MTimes only: it computes nothing).
 
     ``(number of nodes saved with the scene, max content MTime of the storable nodes, max MTime of the other nodes,
-    structure of the subject hierarchy)``. Left out: the nodes that the scene does not save (the slice models and their
+    structure of the subject hierarchy, hash of the labels, descriptions and locks of the control points)``. Left out: the nodes that the scene does not save (the slice models and their
     display and transform nodes appear and change once the views show), views, cameras, interaction state and the Segment
     Editor's state, and the subject hierarchy nodes themselves (the one made by the application and the one loaded with
     the scene are merged after the load; the items' numbers change without an edit): the hierarchy counts by its structure.
@@ -391,6 +418,7 @@ def sceneFingerprint(scene, ignoreIds=()):
     storableMTime = 0
     otherMTime = 0
     items = []
+    points = []
     for index in range(scene.GetNumberOfNodes()):
         node = scene.GetNthNode(index)
         if node is None or not node.GetSaveWithScene():
@@ -403,9 +431,11 @@ def sceneFingerprint(scene, ignoreIds=()):
         count += 1
         if _isStorableClass(node):
             storableMTime = max(storableMTime, contentMTime(node))
+            if _isMarkupsClass(node):
+                points.append((node.GetID(), _markupsDetails(node)))
         elif not _isExcludedClass(node):
             otherMTime = max(otherMTime, settledMTime(node))
-    return (count, storableMTime, otherMTime, hash(tuple(sorted(items))))
+    return (count, storableMTime, otherMTime, hash(tuple(items)), hash(tuple(points)))
 
 
 def estimateBytes(node):

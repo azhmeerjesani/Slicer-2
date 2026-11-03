@@ -1423,3 +1423,42 @@ class StudioAutosaveTest(unittest.TestCase):
                 self.assertNotIn(phrase, content, f"{name} still says {phrase!r}")
         self.assertNotIn("Application Settings > Autosave", autosave_io._README_TEXT)
         self.assertIn("Application Settings > Saving", autosave_io._README_TEXT)
+
+    def test_zc_labelLockAndTreeOrderAreEdits(self):
+        """BB-1: the label, the description and the lock of a control point (they invoke a custom modified event, not
+        Modified(), so the node's MTime stays) and the order of siblings in the Data tree (the fingerprint sorted the items)
+        are edits of the project: the fingerprint changes, the poll marks the scene as not saved, and the next autosave
+        writes them (it said "Saved" and a crash lost them).
+        """
+        scene = slicer.mrmlScene
+        points = scene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "Pts")
+        points.AddControlPoint([1.0, 2.0, 3.0], "P1")
+        others = [scene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", name) for name in ("B", "C")]
+        hierarchy = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(scene)
+
+        def fingerprint():
+            return self.io.sceneFingerprint(scene, self.io.sentinelIds())
+
+        edits = [
+            ("label", lambda: points.SetNthControlPointLabel(0, "Target")),
+            ("description", lambda: points.SetNthControlPointDescription(0, "the target")),
+            ("lock", lambda: points.SetNthControlPointLocked(0, True)),
+            ("unlock", lambda: points.SetNthControlPointLocked(0, False)),
+            ("order", lambda: hierarchy.MoveItem(hierarchy.GetItemByDataNode(others[1]), hierarchy.GetItemByDataNode(others[0]))),
+        ]
+        for name, edit in edits:
+            before = fingerprint()
+            edit()
+            self.assertNotEqual(fingerprint(), before, f"the fingerprint does not see the {name} edit")
+            self.assertEqual(fingerprint(), fingerprint())
+
+        # The poll sees the edit and the next generation writes the new label
+        service = self._service()
+        self._generate(service)
+        service.poll()
+        self.assertFalse(service.dirty)
+        points.SetNthControlPointLabel(0, "Renamed")
+        service.poll()
+        self.assertTrue(service.dirty, "the status says saved with an unsaved label")
+        self._generate(service)
+        self.assertFalse(service.dirty)

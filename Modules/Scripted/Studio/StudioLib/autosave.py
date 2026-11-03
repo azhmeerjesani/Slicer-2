@@ -1913,7 +1913,7 @@ class AutosaveService:
             return
         io = _io()
         fingerprint = io.sceneFingerprint(slicer.mrmlScene, io.sentinelIds())
-        if fingerprint != saved and fingerprint[:3] == saved[:3]:
+        if fingerprint != saved and fingerprint[:3] == saved[:3] and fingerprint[4:] == saved[4:]:
             self._savedFingerprint = fingerprint
             self._lastPolledFingerprint = fingerprint
 

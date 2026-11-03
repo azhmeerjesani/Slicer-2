@@ -4093,8 +4093,15 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertFalse(needsSave(), "the state of the Segment Editor is not an edit")
 
         # The hierarchy items are made again with other numbers for the same data (entering and leaving Draw does it)
+        # (in their place: the order of the items is part of the project, BB-1)
+        siblings = vtk.vtkIdList()
+        shNode.GetItemChildren(shNode.GetSceneItemID(), siblings, False)
+        siblingIds = [siblings.GetId(index) for index in range(siblings.GetNumberOfIds())]
+        position = siblingIds.index(shNode.GetItemByDataNode(volume))
         shNode.RemoveItem(shNode.GetItemByDataNode(volume), False, False)  # the item only, not the volume
-        shNode.CreateItem(shNode.GetSceneItemID(), volume)
+        newItem = shNode.CreateItem(shNode.GetSceneItemID(), volume)
+        if position + 1 < len(siblingIds):
+            shNode.MoveItem(newItem, siblingIds[position + 1])
         shNode.SetItemExpanded(shNode.GetSceneItemID(), False)
         shNode.Modified()
         self.assertFalse(needsSave(), "the same hierarchy with new item numbers is not a change")
