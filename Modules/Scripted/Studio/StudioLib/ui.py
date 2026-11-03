@@ -1049,7 +1049,8 @@ class _ElideFilter(qt.QObject):
     """Elides the text of a one-line label to its width when it is resized (``elideLabel()``)."""
 
     def eventFilter(self, obj, event):
-        if event.type() == qt.QEvent.Resize:
+        # A resize and a font change (a larger application font) both change how much of the text fits
+        if event.type() in (qt.QEvent.Resize, qt.QEvent.FontChange):
             _showElided(obj)
         return False
 

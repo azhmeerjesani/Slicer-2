@@ -199,8 +199,9 @@ class AnalysisCard:
         layout.addLayout(top)
         self.line = qt.QLabel()
         self.line.setObjectName("StudioAnalysisLine")
-        self.line.setTextFormat(qt.Qt.PlainText)
-        self.line.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+        # One line in a card of a fixed height: a long state ("Cohort analysis failed (open Map for the details)") is
+        # elided with "…" to the width of the card (and its tooltip holds the whole text), never cut off mid-word
+        ui.elideLabel(self.line)
         library._setFont(self.line, 12)
         self._level = "text2"
         ui.bindStyleSheet(self.line, lambda: f"QLabel#StudioAnalysisLine {{ color: {ui.token(self._level).name()}; }}")
@@ -253,13 +254,16 @@ class AnalysisCard:
 
     def show(self):
         text, level = stateLine(self.analysis, self.plan if self.planKey == self._planKey() else None, self._liveModel())
-        if str(self.line.text) != text:
-            self.line.setText(text)
-            self.line.setToolTip(text)
+        if self.lineText() != text:
+            ui.setElidedText(self.line, text)
         if level != self._level:
             self._level = level
             ui.bindStyleSheet(self.line, lambda: f"QLabel#StudioAnalysisLine {{ color: {ui.token(self._level).name()}; }}")
         self.openReportButton.setVisible(self.reportPath() is not None)
+
+    def lineText(self):
+        """The whole text of the state line (the label shows it elided to its width)."""
+        return str(self.line.property("studioFullText") or "")
 
     def _onTimer(self):
         if library._isAlive(self.widget) and self.widget.isVisible():

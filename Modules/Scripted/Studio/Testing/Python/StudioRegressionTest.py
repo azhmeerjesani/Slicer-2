@@ -4636,3 +4636,58 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertIn("the card shows Get a connectome…", lnm)
         self.assertIn("Use the demo", lnm)
         self.assertIn("Map > Connectome > Get a connectome…", data)
+
+    def test_63_analysis_card_state_line_is_elided_not_cut_off(self):
+        """The state line of the Analysis card is one line in a card of a fixed height: a long state ("Cohort analysis failed
+        (open Map for the details)") is elided with "…" to the width of the card (200 px here), the whole text is the tooltip, and it is
+        elided again after a resize and after a larger application font (it was cut off mid-word without an ellipsis) (BB-1).
+        """
+        from StudioLib import libcard_analysis, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        long = ("Cohort analysis failed (open Map for the details)", "Cohort analysis: up to date · finished 61 days ago")
+        state = {"text": long[0]}
+        original = libcard_analysis.stateLine
+        self.addCleanup(setattr, libcard_analysis, "stateLine", original)
+        libcard_analysis.stateLine = lambda *args, **kwargs: (state["text"], "text2")
+        narrow = 200
+        card = libcard_analysis.AnalysisCard(None)
+        self.addCleanup(card.dispose)
+        self.addCleanup(card.widget.delete)
+        card.widget.resize(narrow, libcard_analysis.CARD_HEIGHT)
+        card.widget.show()
+        slicer.app.processEvents()
+        line = card.line
+
+        def check(text, expectElided):
+            card.show()
+            slicer.app.processEvents()
+            shownText = str(line.text)
+            width = line.width
+            self.assertEqual(card.lineText(), text)
+            self.assertLessEqual(qt.QFontMetrics(line.font).horizontalAdvance(shownText), width, (shownText, width))
+            if expectElided:
+                self.assertTrue(shownText.endswith("…"), shownText)
+                self.assertIn(text, str(line.toolTip))
+            else:
+                self.assertEqual(shownText, text)
+
+        for text in long:
+            state["text"] = text
+            card.widget.resize(narrow, libcard_analysis.CARD_HEIGHT)
+            slicer.app.processEvents()
+            check(text, qt.QFontMetrics(line.font).horizontalAdvance(text) > line.width)
+            self.assertTrue(str(line.text).endswith("…"), "a state longer than the narrow card is elided")
+            # A wider card shows more of it, a wide enough one shows all of it
+            card.widget.resize(520, libcard_analysis.CARD_HEIGHT)
+            slicer.app.processEvents()
+            check(text, False)
+            # A larger application font: the line is elided again to the same width
+            card.widget.resize(narrow, libcard_analysis.CARD_HEIGHT)
+            slicer.app.processEvents()
+            font = qt.QFont(line.font)
+            font.setPixelSize(int(font.pixelSize()) + 5 if font.pixelSize() > 0 else 17)
+            line.setFont(font)
+            slicer.app.processEvents()
+            check(text, True)
