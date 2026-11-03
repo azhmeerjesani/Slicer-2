@@ -907,6 +907,12 @@ def main(argv=None):
         raise jobs.JobError(f"--alpha must be between 0 and 0.5, got {args.alpha}", code="usage", exit_code=jobs.EXIT_USAGE)
     if not 0.0 < args.target_top_pct < 100.0:
         raise jobs.JobError(f"--target-top-pct must be between 0 and 100, got {args.target_top_pct}", code="usage", exit_code=jobs.EXIT_USAGE)
+    if args.sensitivity:
+        from . import nulls
+
+        low, high = nulls.OVERLAP_RANGE
+        if not low <= args.overlap <= high:  # also refuses nan
+            raise jobs.JobError(f"--overlap must be between {low:g} and {high:g} %, got {args.overlap}", code="usage", exit_code=jobs.EXIT_USAGE)
     if args.target and args.target_lesion:
         raise jobs.JobError("Give --target or --target-lesion, not both", code="usage", exit_code=jobs.EXIT_USAGE)
     if args.no_fwer and args.no_planted and not args.sensitivity:

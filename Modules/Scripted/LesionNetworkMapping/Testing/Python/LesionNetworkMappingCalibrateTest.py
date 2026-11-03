@@ -302,6 +302,17 @@ class CommandLineTest(_CalibrateTestCase):
         self.assertEqual(code, 2)
         self.assertEqual(events[-1]["code"], "design_blocked")
 
+    def test_sensitivity_overlap_out_of_range_is_refused(self):
+        # An overlap outside 50-100 % (or nan) is a usage error: a rule of at least -1 % passes every voxel and would be
+        # written as a calibrated 0 % false-positive rate.
+        common = ["--maps", self.path("maps.tsv"), "--participants", self.path("participants.tsv"), "--mask", self.path("mask.nii.gz"), "--out", self.path("out"), "--no-fwer", "--no-planted", "--sensitivity"]
+        for value in ("-1", "0", "49", "150", "nan"):
+            code, events, _ = self.run_cli(*common, "--overlap", value)
+            self.assertEqual(code, 2, value)
+            self.assertEqual(events[-1]["event"], "error", value)
+            self.assertEqual(events[-1]["code"], "usage", value)
+            self.assertIn("--overlap", events[-1]["message"], value)
+
 
 if __name__ == "__main__":
     unittest.main()
