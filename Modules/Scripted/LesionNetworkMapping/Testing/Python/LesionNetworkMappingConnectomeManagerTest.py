@@ -300,6 +300,43 @@ class LesionNetworkMappingConnectomeManagerTest(unittest.TestCase):
         finally:
             dialog.hide()
 
+    def test_buttons_show_their_full_text_at_the_smallest_size(self):
+        # The seven actions of the selected connectome were one row: at 1366 x 768 their labels were cut. They wrap now:
+        # as opened (the dialog fits the screen) and at the dialog's minimum size, every visible button is as wide as its
+        # text needs, inside the dialog, and overlaps no other button. Long connectome names may still be cut.
+        import qt
+
+        manager = self.widget.openManager()
+        _pump(200)
+        actions = ("Build reference maps…", "Build hubness map", "Remove from the list", "Get a connectome…", "Import Lead-DBS maps…",
+                   "Verify against Lead-DBS…", "Build fast index…")
+        texts = [str(button.text) for button in manager.findChildren("QPushButton") if button.isVisible()]
+        for text in actions:
+            self.assertIn(text, texts)
+
+        def check(when):
+            dialog = qt.QRect(0, 0, manager.width, manager.height)
+            rects = {}
+            for button in manager.findChildren("QPushButton"):
+                if not button.isVisible():
+                    continue
+                text = str(button.text)
+                need = button.sizeHint.width()
+                self.assertGreaterEqual(button.width, need, f"{when}: '{text}' is {button.width} px wide, its text needs {need} px")
+                rect = qt.QRect(button.mapTo(manager, qt.QPoint(0, 0)), button.size)
+                self.assertTrue(dialog.contains(rect), f"{when}: '{text}' ({rect}) leaves the dialog ({dialog})")
+                for other, otherRect in rects.items():
+                    self.assertFalse(rect.intersects(otherRect), f"{when}: '{text}' overlaps '{other}'")
+                rects[text] = rect
+
+        check("as opened")
+        self.assertLessEqual(manager.width, 1366, "the dialog is wider than a 1366 x 768 screen")
+        self.assertLessEqual(manager.height, 768, "the dialog is higher than a 1366 x 768 screen")
+        manager.resize(manager.minimumSize)
+        _pump(200)
+        self.assertEqual((manager.width, manager.height), (manager.minimumWidth, manager.minimumHeight))
+        check("at the minimum size")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1658,6 +1658,8 @@ class ConnectomeManagerDialog(qt.QDialog):
     COLUMNS = (_("Name"), _("Subjects"), _("Time points"), _("Voxels"), _("Size"), _("Space"), _("Terms"), _("Reference"))
 
     def __init__(self, widget, parent=None):
+        import ctk
+
         qt.QDialog.__init__(self, parent)
         self.widget = widget
         self.logic = widget.logic
@@ -1674,6 +1676,11 @@ class ConnectomeManagerDialog(qt.QDialog):
         layout.addWidget(intro)
         self.table = widget.widgets.tableView(list(self.COLUMNS))
         self.table.setObjectName("LNMManagerTable")
+        # The Name column takes the room left by the others, which are as wide as their contents (all stretched, the
+        # numbers had as much room as the name, which was cut off first)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(qt.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(0, qt.QHeaderView.Stretch)
         self.table.connect("itemSelectionChanged()", self.onSelectionChanged)
         layout.addWidget(self.table, 1)
         self.provenanceLabel = qt.QLabel("")
@@ -1688,7 +1695,13 @@ class ConnectomeManagerDialog(qt.QDialog):
         self.setDemoBusy(getattr(widget, "_demoBusyText", None))
         rowA.addStretch(1)
         layout.addLayout(rowA)
-        rowB = qt.QHBoxLayout()
+        # The seven actions of the selected connectome wrap onto more lines when the dialog is narrow (one row cut their
+        # labels at 1366 x 768). Each button keeps its own size hint (alignItems off), and the row grows in height, never
+        # in width (preferredExpandingDirections), so it does not set the width of the dialog. PythonQt wraps only the
+        # properties and slots of CTK classes, hence setProperty.
+        rowB = ctk.ctkFlowLayout()
+        rowB.setProperty("alignItems", False)
+        rowB.setProperty("preferredExpandingDirections", qt.Qt.Vertical)
         self.referenceButton = self._button(rowB, _("Build reference maps…"), "LNMManagerReferenceButton", self.buildReference,
                                             _("μC_r, PC1-3 and hubness of the selected connectome (lnm-reference-v1), for the QA of every map"))
         self.hubnessButton = self._button(rowB, _("Build hubness map"), "LNMManagerHubnessButton", self.buildHubness, _("The degree map (mean |Fz| to 1000 seeds)"))
@@ -1704,7 +1717,6 @@ class ConnectomeManagerDialog(qt.QDialog):
                 self.pluginButtons.append(button)
         except Exception:
             logging.exception("Lesion network mapping: the connectome actions could not be discovered")
-        rowB.addStretch(1)
         layout.addLayout(rowB)
         self.progress = widget.widgets.progressRow(objectNamePrefix="LNMManager")
         self.progress.widget.hide()
@@ -1720,6 +1732,10 @@ class ConnectomeManagerDialog(qt.QDialog):
         closeRow.addWidget(closeButton)
         layout.addLayout(closeRow)
         self.refresh()
+        # A top-level window takes no height for width from its layout: size it for the wrapped button rows before it
+        # is first shown (as wide as the layout wants, as high as it needs at that width)
+        width = max(self.minimumWidth, layout.totalSizeHint().width())
+        self.resize(width, max(self.minimumHeight, layout.totalHeightForWidth(width)))
 
     def _button(self, row, text, objectName, callback, toolTip):
         button = qt.QPushButton(text)
