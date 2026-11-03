@@ -1053,7 +1053,11 @@ class LesionNetworkMappingNormalizeUITest(unittest.TestCase):
         slicer.mrmlScene.Clear(0)
         self.assertTrue(_wait(lambda: not controller.isBusy(), 30.0), controller.state)
         _pump(500)
-        self.assertEqual(controller.state, "cancelled")
+        # The run that the close stopped ends idle, not cancelled: the user did not stop it, so no "Normalization stopped"
+        # message waits under the button for the next scene's scan
+        self.assertEqual(controller.state, "idle")
+        self.assertIsNone(self.card.message, self.card.message and self.card.message.findChild("QLabel", "LNMBannerText").text)
+        self.assertIsNone(controller.request)
         self.assertIsNone(controller.result)
         self.assertEqual(slicer.util.getNodesByClass("vtkMRMLSegmentationNode"), [])
         self.assertEqual(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"), [])

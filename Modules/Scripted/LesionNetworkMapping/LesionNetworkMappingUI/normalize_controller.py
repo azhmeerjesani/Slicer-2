@@ -1343,7 +1343,16 @@ class NormalizeController(VTKObservationMixin):
         return True
 
     def _setCancelled(self):
-        """The run ended without a result: the previous one (if any) is back before the state changes."""
+        """The run ended without a result: the previous one (if any) is back before the state changes.
+
+        A run that the scene close stopped ends idle, not cancelled: the user did not stop it, and the next scene's cards
+        must not show "stopped" for a run they never saw.
+        """
+        if self._runGeneration != self._sceneGeneration:
+            self._previousRun = None
+            self.request = None
+            self._setState(IDLE)
+            return
         self._restoreRun()
         self._setState(CANCELLED)
 
