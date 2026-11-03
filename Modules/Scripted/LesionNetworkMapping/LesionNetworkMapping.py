@@ -5767,9 +5767,12 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         table = self.peaksTable
         self._setPeakValueHeader(statistic)
         table.setRowCount(len(self._peaks))
+        # The same whole-mm rounding as the Clusters card: half away from zero and never "-0" (plain ":.0f" rounds half to even)
+        from LesionNetworkMappingUI.card_clusters import formatCoordinate
+
         for row, peak in enumerate(self._peaks):
             x, y, z = peak["world"]
-            cells = ("…", f"{x:.0f}, {y:.0f}, {z:.0f}", f"{peak['value']:.2f}")
+            cells = ("…", f"{formatCoordinate(x)}, {formatCoordinate(y)}, {formatCoordinate(z)}", f"{peak['value']:.2f}")
             for column, text in enumerate(cells):
                 item = qt.QTableWidgetItem(text)
                 if column == 2:

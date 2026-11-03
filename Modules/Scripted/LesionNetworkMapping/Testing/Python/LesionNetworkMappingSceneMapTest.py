@@ -68,6 +68,40 @@ class LesionNetworkMappingSceneMapTest(unittest.TestCase):
         self.assertFalse(widget.peaksTable.isHidden())
         self.assertEqual(widget.peaksTable.rowCount, 5)
 
+    def test_peak_table_rounds_half_mm_coordinates_like_the_clusters_card(self):
+        """On a grid with voxel centres at .5 mm (the 2009c 2 mm grid) the Result card's peak table rounds half away from
+        zero and never prints "-0", as the Clusters card does (``:.0f`` gave "-0, -58, 40" for (-0.5, -58.5, 39.5)).
+        """
+        from LesionNetworkMappingUI.card_clusters import formatCoordinate
+
+        widget = self.widget
+        widget.exit()
+        data = np.zeros((19, 19, 19), np.float32)
+        for i, j, k, value in PEAKS:
+            data[k, j, i] = value
+        # Voxel centres at .5 mm: voxel (i, j, k) is at (2i - 8.5, 2j - 12.5, 2k - 6.5), so (4, 4, 4) is (-0.5, -4.5, 1.5)
+        affine = np.array([[2.0, 0, 0, -8.5], [0, 2.0, 0, -12.5], [0, 0, 2.0, -6.5], [0, 0, 0, 1.0]])
+        volume = slicer.util.addVolumeFromArray(data, ijkToRAS=affine, name="Lesion T", nodeClassName="vtkMRMLScalarVolumeNode")
+        volume.SetAttribute("LNM.Result", "1")
+        volume.SetAttribute("LNM.Statistic", "T")
+        volume.SetAttribute("LNM.N", "120")
+        widget.loadedMap = None
+        widget.runOutputs = {}
+        widget._peaks = []
+        widget.initializeParameterNode()
+        widget._parameterNode.resultVolume = volume
+        widget.enter()
+        _pump(300)
+        self.assertEqual(len(widget._peaks), 5, widget._peaks)
+        halves = 0
+        for row, peak in enumerate(widget._peaks):
+            halves += sum(1 for v in peak["world"] if abs(abs(v) % 1.0 - 0.5) < 1e-6)
+            expected = ", ".join(formatCoordinate(v) for v in peak["world"])
+            shown = widget.peaksTable.item(row, 1).text()
+            self.assertEqual(shown, expected, peak["world"])
+            self.assertNotIn("-0,", shown + ",", shown)
+        self.assertGreaterEqual(halves, 10, "the test grid must put the peaks at half millimetres")
+
     def test_project_nifti_export_reads_the_threshold_of_a_reopened_map_before_map_is_shown(self):
         """A reopened project exports the map with its thresholded mask without Map having been entered (BB-1)."""
         from StudioLib import niftiexport
