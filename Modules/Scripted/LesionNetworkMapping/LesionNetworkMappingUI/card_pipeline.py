@@ -511,9 +511,13 @@ def summarizePlan(result):
     """The plain summary of a ``pipeline.Plan`` that the card shows (built in the worker thread)."""
     pipeline = _pipeline()
     counts = {status: result.count(status) for status in ("compute", "reuse", "normalize", "excluded")}
+    # Native lesions that an earlier run already normalized (or could not) and then left out: a new run changes nothing for them
+    settled = [row for row in result.rows if row["status"] == "normalize" and row.get("settled")]
+    counts["settled"] = len(settled)
+    counts["normalize"] -= len(settled)
     groups = {}
     for row in result.rows:
-        if row["status"] in ("compute", "reuse", "normalize"):
+        if row["status"] in ("compute", "reuse", "normalize") and not row.get("settled"):
             groups[row["group"]] = groups.get(row["group"], 0) + 1
     batch = pipeline.engine_batch_size(result.bundle.n_voxels, result.budget_bytes)
     toMap = counts["compute"] + counts["normalize"]
@@ -522,7 +526,7 @@ def summarizePlan(result):
         "counts": counts,
         "eligible": counts["compute"] + counts["reuse"] + counts["normalize"],
         "groups": groups,
-        "review": sum(1 for row in result.rows if row.get("reason") == pipeline.NORM_NEEDS_REVIEW),
+        "review": sum(1 for row in settled if row["settled"] == pipeline.NORM_NEEDS_REVIEW) + sum(1 for row in result.rows if row.get("reason") == pipeline.NORM_NEEDS_REVIEW),
         "estimate_s": float(result.estimate_s),
         "passes": math.ceil(toMap / batch) if toMap else 0,
         "bundle": result.bundle.name,

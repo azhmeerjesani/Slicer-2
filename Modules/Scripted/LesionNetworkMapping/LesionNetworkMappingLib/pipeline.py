@@ -1195,6 +1195,43 @@ def _specificity_decision(config, groups):
     return ("block" if config.specificity == "glm" else "skip"), reason
 
 
+def _normalize_outcome(config, entry):
+    """What a run does with one native lesion after its normalization result ``entry``: ``("map", None)`` (the normalized lesion is
+    mapped, ``--native include-unreviewed``), ``("exclude", reason)``, or ``("locked", None)`` (running elsewhere).
+    """
+    status = entry.get("status")
+    if status == "locked":
+        return "locked", None
+    if status in ("done", "reused", "normalized") and (entry.get("values") or {}).get("lesion"):
+        return ("map", None) if config.native == "include-unreviewed" else ("exclude", NORM_NEEDS_REVIEW)
+    return "exclude", f"normalization {status or 'failed'}: {entry.get('reason') or 'no lesion'}"
+
+
+def _settled_normalizations(config, out, providers, rows):
+    """``{participant_id: reason}`` of native lesions whose normalization an earlier run already finished and that the run then excluded
+    (not normalized, or normalized but awaiting review in Library): another run changes nothing for them, so the card must not call
+    them new or changed. Empty unless the stored normalize stage is the one this plan would reuse (same lesions, options and provider).
+    """
+    todo = [row for row in rows if row["status"] == "normalize"]
+    provider = providers.get("normalize")
+    if not todo or config.recompute or provider is None or not provider.available:
+        return {}
+    state = _read_json(os.path.join(out, PRIVATE_DIR, STAGES_DIR, "normalize.json"))
+    if not state or state.get("status") != "done":
+        return {}
+    params = {"subjects": [(row["participant_id"], _lesion_sha(row["path"]) if row["path"] else None) for row in todo], "native": config.native, "template": config.template or "auto"}
+    fp = fingerprint({"stage": "normalize", "provider": provider.module, "provider_sha256": provider.sha256, "parameters": params, "inputs": {}})
+    if state.get("fingerprint") != fp:
+        return {}
+    results = (state.get("result") or {}).get("subjects") or {}
+    settled = {}
+    for row in todo:
+        action, reason = _normalize_outcome(config, results.get(row["participant_id"]) or {"status": "failed", "reason": "no result"})
+        if action == "exclude":
+            settled[row["participant_id"]] = reason
+    return settled
+
+
 def plan(config, hash_lesions=True, providers=None):
     """Plan a run without computing or writing anything (stdlib, numpy and file reads; never MRML or Qt).
 
@@ -1268,6 +1305,13 @@ def plan(config, hash_lesions=True, providers=None):
             item["snapshot"] = os.path.join(out, *INPUTS_DIR, _snapshot_name(sid, path))
         rows.append(item)
 
+    for row in rows:
+        if row["status"] == "normalize":
+            row["settled"] = None
+    for sid, reason in _settled_normalizations(config, out, providers, rows).items():
+        for row in rows:
+            if row["participant_id"] == sid and row["status"] == "normalize":
+                row["settled"] = reason
     eligible = [row for row in rows if row["status"] == "compute"]
     n_future = len(eligible) + sum(1 for row in rows if row["status"] == "normalize")
     if config.null_relocations == "auto":
@@ -2136,23 +2180,20 @@ class Runner:
         normalized = []
         for row in rows:
             entry = results.get(row["participant_id"]) or {"status": "failed", "reason": "no result"}
-            status = entry.get("status")
             values = entry.get("values") or {}
-            if status == "locked":
+            action, reason = _normalize_outcome(self.config, entry)
+            if action == "locked":
                 self._exclude(row, "normalization running elsewhere")
-            elif status in ("done", "reused", "normalized") and values.get("lesion"):
-                if self.config.native == "include-unreviewed":
-                    row["path"] = self.study.abspath(values["lesion"])
-                    row["lesion"] = values["lesion"]
-                    row["status"] = "compute"
-                    row["snapshot"] = self.path(*INPUTS_DIR, _snapshot_name(row["participant_id"], row["path"]))
-                    row["sha256"] = None
-                    normalized.append(row)
-                    self.overrides.append({"what": "norm_qc", "participant_id": row["participant_id"], "reason": "--native include-unreviewed: the normalized lesion is mapped before review"})
-                else:
-                    self._exclude(row, NORM_NEEDS_REVIEW)
+            elif action == "map":
+                row["path"] = self.study.abspath(values["lesion"])
+                row["lesion"] = values["lesion"]
+                row["status"] = "compute"
+                row["snapshot"] = self.path(*INPUTS_DIR, _snapshot_name(row["participant_id"], row["path"]))
+                row["sha256"] = None
+                normalized.append(row)
+                self.overrides.append({"what": "norm_qc", "participant_id": row["participant_id"], "reason": "--native include-unreviewed: the normalized lesion is mapped before review"})
             else:
-                self._exclude(row, f"normalization {status or 'failed'}: {entry.get('reason') or 'no lesion'}")
+                self._exclude(row, reason)
         self.design_rows += [{"participant_id": row["participant_id"], "group": row["group"]} for row in normalized]
         if normalized:
             self._snapshot(normalized)

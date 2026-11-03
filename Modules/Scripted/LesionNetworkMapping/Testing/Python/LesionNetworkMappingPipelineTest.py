@@ -987,6 +987,17 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         self.assertEqual(code, 0, stderr[-2000:])
         rows = {row["participant_id"]: row for row in read_json(os.path.join(self.tmp, "native-stub", "pipeline.json"))["inputs"]["rows"]}
         self.assertEqual(rows[native]["reason"], pipeline.NORM_NEEDS_REVIEW)
+        # The next plan knows the native lesion is settled (normalized, awaiting review): it is not new or changed (the card's "Up to date")
+        out = os.path.join(self.tmp, "native-stub")
+        with mock.patch.dict(os.environ, {pipeline.NORMALIZER_ENV: stub}):
+            config = pipeline.PipelineConfig(study=fx["study"], bundle=fx["bundle"], accept_terms=True, nulls="off", out=out)
+            planned = pipeline.plan(config)
+            self.assertEqual({row["participant_id"]: row["settled"] for row in planned.rows if row["status"] == "normalize"}, {native: pipeline.NORM_NEEDS_REVIEW})
+            config.recompute = True
+            self.assertEqual([row["settled"] for row in pipeline.plan(config).rows if row["status"] == "normalize"], [None])
+            config.recompute = False
+            config.out = os.path.join(self.tmp, "native-never-run")
+            self.assertEqual([row["settled"] for row in pipeline.plan(config).rows if row["status"] == "normalize"], [None])
         code, _events, _stdout, stderr, _wall = cli(*run_args(fx, *cheap, "--native", "include-unreviewed", "--out", os.path.join(self.tmp, "native-include")), env=env)
         self.assertEqual(code, 0, stderr[-2000:])
         data = read_json(os.path.join(self.tmp, "native-include", "pipeline.json"))

@@ -610,6 +610,44 @@ class LesionNetworkMappingPipelineUITest(unittest.TestCase):
         self._settle()
         self.assertTrue(card.stateLabel.text.startswith("Up to date"), card.stateLabel.text)
 
+    def test_d_settled_native_lesion_is_not_new_or_changed(self):
+        """A native lesion that a finished run normalized (awaiting review) or could not normalize stays out of "new or changed" and of the lesion count."""
+        import lnm_pipeline_fixture as fixture
+        from LesionNetworkMappingLib import pipeline
+
+        card = self.card
+        other = fixture.make_fixture(os.path.join(self.tmp, "f3"), study_name="Study C")  # with the native-space row
+        stub = fixture.make_normalizer_stub(self.tmp, other["bundle"])
+        previous = os.environ.get(pipeline.NORMALIZER_ENV)
+        os.environ[pipeline.NORMALIZER_ENV] = stub
+        saved = (card.plan, card.planKey, card.record)
+        try:
+            planned = pipeline.plan(pipeline.PipelineConfig(study=other["study"], bundle=other["bundle"], accept_terms=True, nulls="off"))
+            fresh = self.cp.summarizePlan(planned)
+            self.assertEqual(fresh["counts"]["normalize"], 1)
+            self.assertEqual(fresh["counts"]["settled"], 0)
+            for row in planned.rows:
+                if row["status"] == "normalize":
+                    row["settled"] = pipeline.NORM_NEEDS_REVIEW  # what plan() reports once the run excluded it
+            settled = self.cp.summarizePlan(planned)
+            self.assertEqual((settled["counts"]["normalize"], settled["counts"]["settled"], settled["review"]), (0, 1, 1))
+            self.assertEqual(settled["eligible"], fresh["eligible"] - 1)
+            self.assertEqual(sum(settled["groups"].values()), settled["eligible"])
+            settled["counts"].update(reuse=settled["counts"]["compute"] + settled["counts"]["reuse"], compute=0)  # as after a finished run
+            card.plan, card.planKey, card.record = settled, card._currentPlanKey(), {"status": "done", "updated": None}
+            text, level = card.stateLine()
+            self.assertEqual(text, "1 native lesion needs normalization review in Library")
+            settled["review"] = 0  # a native lesion that could not be normalized: nothing left to do
+            text, level = card.stateLine()
+            self.assertTrue(text.startswith("Up to date"), text)
+            self.assertEqual(level, "ok")
+        finally:
+            card.plan, card.planKey, card.record = saved
+            if previous is None:
+                os.environ.pop(pipeline.NORMALIZER_ENV, None)
+            else:
+                os.environ[pipeline.NORMALIZER_ENV] = previous
+
 
 if __name__ == "__main__":
     unittest.main()
