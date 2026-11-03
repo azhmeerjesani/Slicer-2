@@ -4155,3 +4155,24 @@ class StudioRegressionTest(unittest.TestCase):
         slicer.app.processEvents()
         self.assertEqual(session.study.column_spec("my_score").role, "score")
         self.assertFalse(dialog.widget.isVisible())
+
+    def test_57_cohort_card_names_left_out_lesions_in_plain_words(self):
+        """Cohort diagnostics said "12 not used: review_status != approved (12)" (the engine's reason strings)."""
+        from StudioLib import libcard_cohort
+
+        study = libcard_cohort._lnm("study")
+        text = libcard_cohort.excludedText(
+            {
+                study.EXCLUDED_REVIEW: ["a"] * 12,
+                study.EXCLUDED_INCLUDE: ["b"],
+                study.EXCLUDED_QC: ["c"],
+                study.EXCLUDED_NORM_QC: ["d"],
+                "lesion file not found": ["e", "f"],
+            },
+        )
+        self.assertEqual(text, "17 not used: not approved in review (12), excluded (1), QC fail (1), normalization QC not passed (1), lesion file not found (2)")
+        for code in ("include=0", "qc=fail", "review_status", "norm_qc", "!="):
+            self.assertNotIn(code, text)
+        self.assertEqual(libcard_cohort.excludedText({}), "")
+        # The engine keeps the raw strings as its keys
+        self.assertEqual((study.EXCLUDED_INCLUDE, study.EXCLUDED_QC), ("include=0", "qc=fail"))

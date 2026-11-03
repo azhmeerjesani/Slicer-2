@@ -416,12 +416,29 @@ def groupsText(summary, blind=False):
     return " · ".join(parts) or (_("1 lesion") if summary.get("n", 0) == 1 else _("{n} lesions").format(n=summary.get("n", 0)))
 
 
+def excludedReasonText(reason):
+    """Plain words for a reason of ``study.analysis_rows`` ("include=0" reads "excluded"); any other reason is already
+    words ("lesion file not found") and stays as it is. The raw strings stay the keys of the engine, preflight and
+    reports: only what the cards show is translated here.
+    """
+    study = _lnm("study")
+    if reason == study.EXCLUDED_INCLUDE:
+        return _("excluded")
+    if reason == study.EXCLUDED_QC:
+        return _("QC fail")
+    if reason == study.EXCLUDED_REVIEW:
+        return _("not approved in review")
+    if reason == study.EXCLUDED_NORM_QC:
+        return _("normalization QC not passed")
+    return reason
+
+
 def excludedText(excluded):
     """"3 not used: lesion file not found (2), empty lesion (1)" ("" when every lesion was used)."""
     total = sum(len(sids) for sids in excluded.values())
     if not total:
         return ""
-    reasons = ", ".join(f"{reason} ({len(sids)})" for reason, sids in excluded.items())
+    reasons = ", ".join(f"{excludedReasonText(reason)} ({len(sids)})" for reason, sids in excluded.items())
     return _("{n} not used: {reasons}").format(n=total, reasons=reasons)
 
 

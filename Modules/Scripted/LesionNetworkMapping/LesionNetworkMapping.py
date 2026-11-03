@@ -1351,10 +1351,12 @@ def _formatBytes(count):
 
 
 def cohortExcludedText(excluded):
-    """"Not mapped: missing lesion (3) · include=0 (1)" from {reason: [participant ids]} ("" when none): the count follows
+    """"Not mapped: missing lesion (3) · excluded (1)" from {reason: [participant ids]} ("" when none): the count follows
     the reason, so that no reason needs a plural ("3 missing lesion" was wrong), as in the Library card's "3 not used: ...".
     """
-    parts = [f"{reason} ({len(sids)})" for reason, sids in excluded.items() if sids]
+    from StudioLib.libcard_cohort import excludedReasonText
+
+    parts = [f"{excludedReasonText(reason)} ({len(sids)})" for reason, sids in excluded.items() if sids]
     return _("Not mapped: {parts}").format(parts=" · ".join(parts)) if parts else ""
 
 

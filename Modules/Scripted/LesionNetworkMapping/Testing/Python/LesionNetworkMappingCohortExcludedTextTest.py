@@ -30,8 +30,16 @@ class CohortExcludedTextTest(unittest.TestCase):
 
     def test_count_follows_the_reason(self):
         text = self.module.cohortExcludedText({"missing lesion": ["sub-01", "sub-02", "sub-03"], "include=0": ["sub-04"], "qc=fail": []})
-        self.assertEqual(text, "Not mapped: missing lesion (3) · include=0 (1)")
+        self.assertEqual(text, "Not mapped: missing lesion (3) · excluded (1)")
         self.assertNotIn("3 missing lesion", text)
+
+    def test_internal_codes_read_as_words(self):
+        text = self.module.cohortExcludedText(
+            {"include=0": ["a"], "qc=fail": ["b"], "review_status != approved": ["c", "d"], "norm_qc != pass": ["e"]},
+        )
+        self.assertEqual(text, "Not mapped: excluded (1) · QC fail (1) · not approved in review (2) · normalization QC not passed (1)")
+        for code in ("include=0", "qc=fail", "review_status", "norm_qc", "!="):
+            self.assertNotIn(code, text)
 
     def test_nothing_excluded(self):
         self.assertEqual(self.module.cohortExcludedText({}), "")
