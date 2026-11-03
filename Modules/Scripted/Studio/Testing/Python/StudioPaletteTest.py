@@ -652,6 +652,43 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
     # Probe
     #
 
+    def test_08a_cheat_sheet_follows_a_theme_switch_while_open(self):
+        """The top bar stays usable while the overlay is open: a theme switch restyles the open overlay with the new tokens
+        (the title was left in the old theme's ink on the new card).
+        """
+        from StudioLib import cheatsheet
+        from StudioLib import ui
+
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        self._pump()
+        originalPalette = qt.QPalette(slicer.app.palette())
+        wasDark = ui.isDark()
+        otherWindow = "#f4f4f6" if wasDark else "#1c1c1f"
+        try:
+            studioShell.toggleCheatSheet()
+            self._wait(0.2)
+            self.assertTrue(cheatsheet.isVisible())
+            sheet = cheatsheet.instance()
+            before = sheet.widget.styleSheet
+            self.assertIn(ui.token("text").name(), before)
+            slicer.app.setPalette(qt.QPalette(qt.QColor(otherWindow)))
+            self._wait(0.5)
+            self.assertEqual(ui.isDark(), not wasDark, "the palette did not change with the theme")
+            self.assertTrue(cheatsheet.isVisible())
+            after = sheet.widget.styleSheet
+            self.assertNotEqual(after, before, "the open overlay keeps the old theme's style sheet")
+            self.assertIn(f"QLabel#StudioCheatSheetTitle {{ color: {ui.token('text').name()};", after)
+            # The same style sheet as when the overlay is opened again
+            sheet.close()
+            sheet.open()
+            self.assertEqual(sheet.widget.styleSheet, after)
+        finally:
+            if cheatsheet.isVisible():
+                studioShell.toggleCheatSheet()
+            slicer.app.setPalette(originalPalette)
+            self._pump()
+
     def test_08b_cheat_sheet_title_in_a_narrow_window(self):
         """USABILITY 9.4: in a window of 960x540 logical px (QT_SCALE_FACTOR=2 on 1080p) the title of the overlay is not cut
         off; the hint gives way (it is also the tool tip of the close button), and the search field shrinks.

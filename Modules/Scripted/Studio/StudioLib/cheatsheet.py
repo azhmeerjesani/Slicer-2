@@ -510,6 +510,14 @@ class CheatSheet:
         self._watching = False
         field.connect("textChanged(QString)", self._applyFilter)
         self._styled = None
+        # A theme switch from the top bar while the sheet is open: the style sheet takes the new tokens at once
+        ui.addPaletteListener(self._onPaletteChanged)
+
+    def _onPaletteChanged(self):
+        if not _isAlive(self.widget):
+            ui.removePaletteListener(self._onPaletteChanged)
+            return
+        self._style()
 
     def _style(self):
         key = slicer.app.palette().cacheKey()
@@ -727,6 +735,7 @@ class CheatSheet:
             return
         self.close()
         self._watchWindow(False)
+        ui.removePaletteListener(self._onPaletteChanged)
         self.field.removeEventFilter(self._filter)
         self.widget.deleteLater()
         self.widget = None
