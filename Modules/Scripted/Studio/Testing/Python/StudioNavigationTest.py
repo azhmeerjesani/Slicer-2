@@ -750,6 +750,49 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(len(shell.ESCAPE_LADDER), 6)
         self.assertTrue(all(len(rung) == 2 for rung in shell.ESCAPE_LADDER))
 
+    def test_8c_lesion_name_escape_restores_name(self):
+        """Esc in the Lesion card's name field with unsent edits restores the name; a later focus-out commits nothing."""
+        from StudioLib import lesioncard
+
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        self._pump()
+        committed = []
+        edit = lesioncard._NameEdit(committed.append)
+        edit.setParent(self.mainWindow.centralWidget())
+        edit.resize(240, 28)
+        edit.show()
+        _keepAlive.append(edit)
+        edit.setName("Lesions (sub-07_T1w)")
+        other = qt.QLineEdit(self.mainWindow.centralWidget())
+        other.show()
+        _keepAlive.append(other)
+        if not self._focus(edit):
+            self.skipTest("the main window cannot take the keyboard focus here")
+        self.assertEqual(str(edit.text), "Lesions (sub-07_T1w)")
+        edit.selectAll()
+        edit.insert("zzz")
+        self.assertTrue(edit.isModified())
+        self.assertEqual(str(edit.text), "zzz")
+        # Esc is consumed by the field and puts the name back
+        # (the field takes the shortcut override, so no shortcut runs, and the key press then reaches the field)
+        self.assertTrue(self._sendEscape(edit, qt.QEvent.ShortcutOverride).isAccepted())
+        self.assertTrue(self._sendEscape(edit).isAccepted())
+        self._pump()
+        self.assertEqual(str(edit.text), "Lesions (sub-07_T1w)")
+        self.assertFalse(edit.isModified())
+        # Moving the focus away commits nothing
+        self.assertTrue(self._focus(other))
+        self._pump(8)
+        self.assertEqual(committed, [])
+        self.assertEqual(edit.name(), "Lesions (sub-07_T1w)")
+        # Enter still commits an edited name
+        self.assertTrue(self._focus(edit))
+        edit.selectAll()
+        edit.insert("new name")
+        edit._onEditingFinished()
+        self.assertEqual(committed, ["new name"])
+
     def test_8b_escape_with_spinbox(self):
         """A spin box does not keep Esc; a line edit with unsent text and an open item editor do (USABILITY 3)."""
         from StudioLib import shell

@@ -296,6 +296,16 @@ class _NameEditFilter(qt.QObject):
                 qt.QTimer.singleShot(0, self._edit.endEdit)
         elif eventType in (qt.QEvent.Resize, qt.QEvent.Show):
             self._edit.showElided()
+        elif eventType in (qt.QEvent.ShortcutOverride, qt.QEvent.KeyPress) and event.key() == qt.Qt.Key_Escape:
+            # Esc with unsent edits cancels them (the shell leaves Esc to a modified line edit, USABILITY 3 rung 0); without
+            # unsent edits the key goes on to the Esc ladder of the shell.
+            if self._edit.hasUnsentEdits():
+                if eventType == qt.QEvent.ShortcutOverride:
+                    event.accept()
+                else:
+                    self._edit.cancelEdit()
+                    event.accept()
+                return True
         return False
 
 
@@ -342,6 +352,16 @@ class _NameEdit(qt.QLineEdit):
         self._editing = True
         if str(self.text) != self._shown:
             self.setText(self._shown)
+
+    def hasUnsentEdits(self):
+        """True if the field holds text that was typed and not committed."""
+        return self.hasFocus() and (bool(self.isModified()) or str(self.text) != self._shown)
+
+    def cancelEdit(self):
+        """Put the name back in the field (Esc): a later focus-out then commits nothing."""
+        self.setText(self._shown)
+        self.setModified(False)
+        self.selectAll()
 
     def endEdit(self):
         """Show the elided name again (unless the field has the focus)."""
