@@ -2237,6 +2237,85 @@ class StudioRegressionTest(unittest.TestCase):
                     settings.setValue(key, value)
             slicer.mrmlScene.Clear(0)
 
+    def test_24_map_cards_keep_inspector_width_at_125_percent_font(self):
+        """Opening a Map card neither widens the inspector nor leaves it wide at a 125 % font (BB-1).
+
+        The Threshold spin box and the sign choice of the Clusters and Networks source bar (the Circuits and Compare rows
+        of controls and the Networks region buttons too) need about 350 px at a 17 px font, and the widest minimum a workspace
+        module needed stays for good (``Shell._workspacePanelWidths``): the inspector went from 340 px to 390 px when the
+        Clusters card opened, and stayed there in the other cards, in Draw and back in Map. The rows stack when they are
+        narrower than their controls need side by side (``ui.wrapLayout()``).
+        """
+        from StudioLib import shell, ui
+
+        mainWindow = slicer.util.mainWindow()
+        if mainWindow is None or not hasattr(slicer.modules, "lesionnetworkmapping"):
+            self.skipTest("needs the main window and the Map module")
+        settings = qt.QSettings()
+        keys = [f"{shell._WORKSPACE_PANEL_WIDTHS_GROUP}/{name}" for name in ("Studio", "SegmentEditor", "LesionNetworkMapping")]
+        saved = {key: settings.value(key) for key in keys}
+        savedGeometry = mainWindow.saveGeometry()
+        savedFont = qt.QFont(qt.QApplication.font())
+        studioShell = None
+
+        def pump(count=10):
+            for _ in range(count):
+                slicer.app.processEvents()
+
+        try:
+            mainWindow.resize(1366, 768)
+            for fontPx in (None, 17):
+                if studioShell is not None:
+                    studioShell.dispose()
+                    studioShell = None
+                for key in keys:
+                    settings.remove(key)
+                font = qt.QFont(savedFont)
+                if fontPx is not None:
+                    font.setPixelSize(fontPx)
+                qt.QApplication.setFont(font)
+                pump()
+                label = f"at {ui.applicationFontPx():g} px font"
+                studioShell = shell.Shell(force=True)
+                studioShell.apply()
+                dock = mainWindow.findChild("QDockWidget", "PanelDockWidget")
+                studioShell.switchTo("map")
+                pump()
+                widget = slicer.modules.LesionNetworkMappingWidget
+                cards = {cardId: card for cardId, (_spec, card) in widget._cardWidgets.items() if card is not None and card.inherits("ctkCollapsibleButton")}
+                for cardId in ("clusters", "networks", "circuits", "compare"):
+                    self.assertIn(cardId, cards)
+                for card in cards.values():
+                    card.collapsed = True
+                pump()
+                collapsedWidth = dock.width
+                self.assertLessEqual(collapsedWidth, studioShell.panelWidth + 2, label)
+                for cardId, card in cards.items():
+                    card.collapsed = False
+                    pump()
+                    self.assertEqual(dock.width, collapsedWidth, f"the {cardId} card widens the inspector {label}")
+                    card.collapsed = True
+                    pump()
+                    self.assertEqual(dock.width, collapsedWidth, f"the inspector stays wide after the {cardId} card is collapsed {label}")
+                for workspace in ("draw", "library", "map"):
+                    studioShell.switchTo(workspace)
+                    pump()
+                    self.assertEqual(dock.width, collapsedWidth, f"the inspector is {dock.width} px in {workspace} {label}")
+                wide = {name: width for name, width in studioShell._workspacePanelWidths.items() if width > studioShell.panelWidth + 2}
+                self.assertEqual(wide, {}, f"a workspace module asks for more than the stored width {label}")
+        finally:
+            if studioShell is not None:
+                studioShell.dispose()
+            qt.QApplication.setFont(savedFont)
+            pump()
+            mainWindow.restoreGeometry(savedGeometry)
+            for key, value in saved.items():
+                if value is None:
+                    settings.remove(key)
+                else:
+                    settings.setValue(key, value)
+            slicer.mrmlScene.Clear(0)
+
     @staticmethod
     def _isAncestor(ancestor, widget):
         current = widget

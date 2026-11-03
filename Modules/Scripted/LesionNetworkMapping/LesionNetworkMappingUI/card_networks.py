@@ -872,7 +872,7 @@ class NetworksCard:
         self.roiRemoveButton.connect("clicked()", self.removeSelectedRoi)
         roiRow.addWidget(self.roiRemoveButton)
         roiRow.addStretch(1)
-        layout.addLayout(roiRow)
+        widgets.addWrapRow(layout, roiRow)
         self.roiList = qt.QListWidget()
         self.roiList.setObjectName("LNMNetworksRoiList")
         self.roiList.setMaximumHeight(ROW_HEIGHT * 4)

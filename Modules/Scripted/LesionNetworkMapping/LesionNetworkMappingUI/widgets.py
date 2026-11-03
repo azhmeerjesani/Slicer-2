@@ -57,6 +57,22 @@ def wrapCheckBox(checkBox):
     return ui.wrapCheckBox(checkBox) if ui is not None else checkBox
 
 
+def addWrapRow(layout, rowLayout):
+    """Add the box layout ``rowLayout`` (a row of controls) to ``layout``. With Studio the row stacks its controls when the
+    inspector is narrower than they need side by side (a larger application font makes a row wider than the inspector, and
+    the widest row would make the inspector wider for good); without Studio it is added as it is. Return what was added.
+    """
+    ui = _studioUi()
+    if ui is None:
+        layout.addLayout(rowLayout)
+        return rowLayout
+    spacing = layout.spacing
+    spacing = spacing() if callable(spacing) else spacing
+    row = ui.wrapLayout(rowLayout, spacing=spacing if spacing >= 0 else 6)
+    layout.addWidget(row)
+    return row
+
+
 def showInFileManager(path):
     """Open a folder or file with the desktop; where there is no file manager (the web build) show its location with [Copy path].
 

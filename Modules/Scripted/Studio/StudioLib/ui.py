@@ -1382,17 +1382,38 @@ class _WrapFilter(qt.QObject):
             layout = obj.layout()
             if layout is not None and hasattr(layout, "setDirection"):
                 threshold = obj.property("studioWrapWidth") or WRAP_ROW_WIDTH
+                if obj.property("studioWrapAuto"):
+                    threshold = _sideBySideWidth(layout)
                 direction = qt.QBoxLayout.TopToBottom if obj.width < threshold else qt.QBoxLayout.LeftToRight
                 if layout.direction() != direction:
                     layout.setDirection(direction)
         return False
 
 
+def _sideBySideWidth(layout):
+    """The width that the items of the box layout ``layout`` need side by side: the sum of their minimum widths (what the
+    layout gives a row that is as narrow as it can be) and the spacings. Items that are not shown count for nothing.
+    """
+    widths = []
+    for index in range(layout.count()):
+        item = layout.itemAt(index)
+        if item is not None and not item.isEmpty():
+            widths.append(item.minimumSize().width())
+    margins = layoutContentsMargins(layout)
+    spacing = layout.spacing
+    spacing = spacing() if callable(spacing) else spacing
+    return sum(widths) + max(0, len(widths) - 1) * max(0, spacing) + margins.left() + margins.right()
+
+
 def _installWrap(widget, width):
+    """Make ``widget`` (with a box layout) stack its items when it is narrower than ``width`` px, or, with ``width`` None,
+    when it is narrower than its items need side by side.
+    """
     global _wrapFilter
     if _wrapFilter is None:
         _wrapFilter = _WrapFilter()
-    widget.setProperty("studioWrapWidth", int(width))
+    widget.setProperty("studioWrapAuto", width is None)
+    widget.setProperty("studioWrapWidth", int(width or 0))
     policy = qt.QSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
     policy.setHeightForWidth(True)
     widget.setSizePolicy(policy)
@@ -1400,7 +1421,8 @@ def _installWrap(widget, width):
 
 
 def wrapRow(widgets, width=WRAP_ROW_WIDTH, spacing=6):
-    """Return a widget that lays ``widgets`` out in a row, stacked when it is narrower than ``width`` px.
+    """Return a widget that lays ``widgets`` out in a row, stacked when it is narrower than ``width`` px (with ``width`` None:
+    when it is narrower than the widgets need side by side, so that it follows the application font).
 
     Its horizontal size policy is Ignored: a row never makes its container (the inspector) wider.
     """
@@ -1412,6 +1434,19 @@ def wrapRow(widgets, width=WRAP_ROW_WIDTH, spacing=6):
     for widget in widgets:
         layout.addWidget(widget)
     _installWrap(row, width)
+    return row
+
+
+def wrapLayout(rowLayout, spacing=6):
+    """Like ``wrapRow()`` (stacks when narrower than its items need side by side) for a box layout that is not yet in a
+    widget or layout: return the widget that holds ``rowLayout``, to add to a layout in its place.
+    """
+    row = qt.QWidget()
+    row.setObjectName("StudioWrapRow")
+    rowLayout.setContentsMargins(0, 0, 0, 0)
+    rowLayout.setSpacing(spacing)
+    row.setLayout(rowLayout)
+    _installWrap(row, None)
     return row
 
 

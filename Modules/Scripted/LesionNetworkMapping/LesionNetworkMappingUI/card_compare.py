@@ -211,7 +211,7 @@ class CompareCard:
         self.libraryMenu = menu
         optionsRow.addWidget(self.libraryButton)
         layout.addWidget(self.lesionCheck)
-        layout.addLayout(optionsRow)
+        widgets.addWrapRow(layout, optionsRow)
 
         form = qt.QFormLayout()
         form.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
@@ -242,7 +242,7 @@ class CompareCard:
         self.permButton.connect("clicked()", self.permute)
         buttons.addWidget(self.permButton)
         buttons.addStretch(1)
-        layout.addLayout(buttons)
+        widgets.addWrapRow(layout, buttons)
         self.stateLabel = label("", "LNMCompareState", "secondaryText")
         layout.addWidget(self.stateLabel)
         self.noticeLabel = label("", "LNMCompareNotice")

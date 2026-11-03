@@ -618,6 +618,8 @@ class SourceBar:
         self.ruleCheck.setObjectName(f"{prefix}UseRuleCheckBox")
         self.ruleCheck.connect("toggled(bool)", self._onUseRule)
         layout.addWidget(self.ruleCheck)
+        # The threshold and the sign choice share a row that stacks when the inspector is too narrow for both (a larger
+        # application font makes them about 350 px wide): its minimum width must not make the inspector wider for good
         thresholdRow = qt.QHBoxLayout()
         self.thresholdLabel = qt.QLabel(_("Threshold"))
         thresholdRow.addWidget(self.thresholdLabel)
@@ -637,7 +639,7 @@ class SourceBar:
         self.signCombo.connect("activated(int)", self._onSign)
         thresholdRow.addWidget(self.signCombo)
         thresholdRow.addStretch(1)
-        layout.addLayout(thresholdRow)
+        widgets.addWrapRow(layout, thresholdRow)
         self.extentSpin = None
         if withExtent:
             extentRow = qt.QHBoxLayout()
