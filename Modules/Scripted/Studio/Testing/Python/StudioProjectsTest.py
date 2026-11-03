@@ -3745,6 +3745,40 @@ class StudioProjectsTest(unittest.TestCase):
             self.assertFalse(os.path.exists(leftover))
         self.assertFalse([name for name in entries() if projects.COPY_MARKER in name])
 
+    def test_57b_startup_deletes_the_partial_copy_of_an_interrupted_duplicate(self):
+        """A Duplicate that was killed midway (a crash, kill -9, a power loss) left "<name> copy.studio-copy" of up to
+        hundreds of MB in Projects/: hidden from the Library, never deleted, moved along with every later move of the
+        folder, and only replaced if the same project was duplicated again (BB-1). The startup deletes it, and keeps the
+        copy of a Duplicate that is running in this process.
+        """
+        projects = self.projects
+        service = self._service()
+        project = projects.createProject("Big")
+        parent = os.path.dirname(project.path)
+        leftover = os.path.join(parent, "Big copy.studio-copy")
+        os.makedirs(os.path.join(leftover, "Images"))
+        with open(os.path.join(leftover, "Images", "scan.nrrd"), "wb") as f:
+            f.write(b"\1" * 4096)
+        # A Duplicate of this process that is running: its copy is kept
+        running = projects._reserveCopyName(parent, "Big running")
+        runningCopy = os.path.join(parent, running + projects.COPY_MARKER)
+        os.makedirs(runningCopy)
+        try:
+            self.assertEqual(projects.removeCopyLeftovers(), ["Big copy.studio-copy"])
+            self.assertFalse(os.path.exists(leftover))
+            self.assertTrue(os.path.isdir(runningCopy))
+            os.makedirs(leftover)
+            service.removeInterruptedCopies()
+            self.assertTrue(self.io.backgroundWriter().drain(30.0))
+            self.assertFalse(os.path.exists(leftover), "the startup deletes the copy of an interrupted Duplicate")
+            self.assertTrue(os.path.isdir(runningCopy))
+        finally:
+            projects._releaseCopyName(parent, running)
+        self.assertEqual(sorted(os.listdir(parent)), ["Big", "Big running.studio-copy"])
+        self.assertEqual([info.name for info in projects.listProjects()], ["Big"])
+        self.assertEqual(projects.removeCopyLeftovers(), ["Big running.studio-copy"], "no longer running: a leftover")
+        self.assertEqual(os.listdir(parent), ["Big"])
+
     def test_58_open_project_on_a_folder_outside_the_studio_folder_leaves_it_unchanged(self):
         """Open project… on a project folder outside the Slicer Studio folder (a colleague's project copied to the Desktop
         under another name) opens a copy in Projects/ and leaves the original byte-for-byte unchanged (A-09, BB-1). The

@@ -1243,6 +1243,32 @@ def _releaseCopyName(parent, name):
         _pendingCopies.discard((os.path.normcase(os.path.abspath(parent)), name))
 
 
+def isCopyLeftover(name):
+    """True for the name of a copy that a Duplicate made and was interrupted before it renamed it ("<name>.studio-copy")."""
+    return name.endswith(COPY_MARKER) and len(name) > len(COPY_MARKER)
+
+
+def removeCopyLeftovers(rootPath=None):
+    """Delete the partial copies of Duplicates that were interrupted (a crash, a kill, a power loss) in Projects/.
+
+    A Duplicate copies into "<new name>.studio-copy" and renames it when it is complete, so what stays under that name
+    was never complete: it is not a project (``listProjects`` hides it) and nothing else would remove it, or tell about it,
+    while it takes up as much disk space as the project. The copies of the Duplicates of this process that are queued or
+    running (``_pendingCopies``) are kept. Return the names that were deleted. Worker-safe.
+    """
+    folder = projectsFolder(rootPath)
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return []
+    key = os.path.normcase(os.path.abspath(folder))
+    with _pendingCopiesLock:
+        reserved = {entry + COPY_MARKER for parent, entry in _pendingCopies if parent == key}
+    leftovers = [name for name in names if isCopyLeftover(name) and name not in reserved]
+    removePaths([os.path.join(folder, name) for name in leftovers])
+    return leftovers
+
+
 def _firstCopyFailure(error):
     """(errno, reason without paths) of a failed copy: its first reason (``shutil.Error`` lists every file that failed)."""
     number = error.errno

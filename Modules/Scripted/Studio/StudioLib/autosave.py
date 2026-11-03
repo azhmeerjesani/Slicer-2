@@ -1184,6 +1184,10 @@ class AutosaveService:
         except Exception:
             logging.error("Slicer Studio: finishing an interrupted move failed:\n" + traceback.format_exc())
         try:
+            self.removeInterruptedCopies()
+        except Exception:
+            logging.error("Slicer Studio: deleting the copies of interrupted Duplicates failed:\n" + traceback.format_exc())
+        try:
             self.scanProjectsAtStartup()
         except Exception:
             logging.error("Slicer Studio: scanning the projects for a crash failed:\n" + traceback.format_exc())
@@ -2281,6 +2285,14 @@ class AutosaveService:
         notify(_("Slicer Studio was closed while it moved your projects and studies. The move is now finished: they are in {folder}.").format(
             folder=projects.shortPath(newRoot)), "info")
         return "finished"
+
+    def removeInterruptedCopies(self):
+        """Delete the partial copies ("<name>.studio-copy") that a Duplicate killed midway left in Projects/ (background)."""
+        projects = self._projects()
+        if not projects.isEnabled():
+            return
+        rootPath = projects.root()
+        _io().backgroundWriter().submit(projects.removeCopyLeftovers, rootPath)
 
     def scanProjectsAtStartup(self):
         """Offer the projects that were open when Slicer Studio closed unexpectedly (each one once)."""
