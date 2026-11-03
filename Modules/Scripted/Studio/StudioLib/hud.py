@@ -130,7 +130,50 @@ def toastGeometry(parentWidget, preferredWidth):
     y = parentWidget.height - TOAST_HEIGHT - TOAST_BOTTOM_MARGIN
     if span is not None:
         y -= CORNER_TEXT_RESERVE
-    return left + (spanWidth - width) // 2, max(0, y), width
+    x = left + (spanWidth - width) // 2
+    return x, max(0, _aboveFloatingCards(parentWidget, x, width, y)), width
+
+
+#: Gap (px) between a toast that was raised above a floating card and the card
+TOAST_CARD_GAP = 6
+
+#: Functions ``provider(parentWidget) -> [QRect]`` that give the rectangles (in ``parentWidget`` coordinates) of the
+#: floating cards at the bottom of the views (the Map legend and layer chips) that a toast keeps clear of
+_floatingCardProviders = []
+
+
+def addFloatingCardProvider(provider):
+    """Let a toast keep above the rectangles that ``provider(parentWidget)`` returns (the slots never overlap, USABILITY 6.3)."""
+    if provider not in _floatingCardProviders:
+        _floatingCardProviders.append(provider)
+
+
+def removeFloatingCardProvider(provider):
+    if provider in _floatingCardProviders:
+        _floatingCardProviders.remove(provider)
+
+
+def _aboveFloatingCards(parentWidget, x, width, y):
+    """``y`` of a toast at ``x`` of ``width``, raised above the visible floating cards that it would cover.
+
+    A card beside the toast (the toast is centred, the legend and the chips sit in the bottom corners) does not move it:
+    only a card that shares some of its width does, when the views are narrow.
+    """
+    for _attempt in range(len(_floatingCardProviders) * 4 + 4):
+        overlapping = []
+        for provider in list(_floatingCardProviders):
+            try:
+                rects = provider(parentWidget)
+            except Exception:
+                logging.error(f"Studio: cannot read the floating cards:\n{traceback.format_exc()}")
+                continue
+            for rect in rects:
+                if rect.left() < x + width and rect.right() >= x and rect.top() < y + TOAST_HEIGHT and rect.bottom() >= y:
+                    overlapping.append(rect)
+        if not overlapping:
+            break
+        y = min(rect.top() for rect in overlapping) - TOAST_CARD_GAP - TOAST_HEIGHT
+    return y
 
 
 def elidedText(label, text, overflow):

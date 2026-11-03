@@ -1225,6 +1225,79 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
         self.assertTrue(self._wait(overlay.legend.isVisible, 2000))
         self.assertTrue(overlay.chips.isVisible())
 
+    def test_toast_keeps_clear_of_map_legend_and_chips(self):
+        """At 1366x768 the sticky toast ("Saving to Projects/... Rename") is centred under the main view, where the map
+        legend (bottom-right) and the layer chips (bottom-left) reach: the toast keeps above them, so that none of the
+        overlay slots overlap (USABILITY 6.3), and it comes back down when the Map overlay is gone.
+        """
+        from StudioLib import hud, mappage
+
+        studioShell = self._applyStudio()
+        self.mainWindow.showNormal()
+        self.mainWindow.resize(1366, 768)
+        self._wait(lambda: self.mainWindow.width <= 1366, 2000)
+        studioShell.switchTo("map")
+        self._pump(10)
+        overlay = mappage.overlay()
+        if overlay is None:
+            self.skipTest("the Map overlay is not available")
+        state = {"statistic": "T", "window": 4.0, "level": 0.0, "threshold": None, "thresholdText": "Unthresholded", "sign": "both",
+                 "opacity": 0.8, "outline": False}
+        refresh = overlay.refresh
+
+        def place():
+            overlay._state = state
+            overlay.place()
+
+        overlay.refresh = place
+        self._restores.append(lambda: setattr(overlay, "refresh", refresh))
+        # The main view fills the area, down to the bottom where the toast is
+        initialLayout = self.layoutManager.layout
+        self._restores.append(lambda: self.layoutManager.setLayout(initialLayout))
+        self.layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUpRedSliceView)
+        self._pump(6)
+        place()
+        self._pump(4)
+        self.assertTrue(self._wait(overlay.legend.isVisible, 2000))
+        self.assertTrue(overlay.chips.isVisible())
+        parent = self.mainWindow.centralWidget()
+        # A toast of the kind of a new project's ("Saving to Projects/Untitled project" and Rename), as wide as the views
+        # (a narrow main view puts the legend and the chips under a shorter one)
+        studioShell.toast("Saving to Projects/Untitled project " + "with a very long name of its own " * 8, sticky=True, action=lambda: None, actionText="Rename")
+        sticky = studioShell._stickyToast
+        self.assertTrue(sticky.isVisible())
+
+        def rects():
+            frame = sticky.frame
+            toastRect = qt.QRect(frame.x, frame.y, frame.width, frame.height)
+            return toastRect, [qt.QRect(w.x, w.y, w.width, w.height) for w in (overlay.legend, overlay.chips) if w.isVisible()]
+
+        def overlaps():
+            toastRect, cards = rects()
+            return [card for card in cards if toastRect.intersects(card)]
+
+        self.assertEqual(overlaps(), [])
+        # The test only means something when the plain centred position would cover a card: put the toast there
+        providers = list(hud._floatingCardProviders)
+        hud._floatingCardProviders[:] = []
+        try:
+            sticky.updatePosition()
+            covered = overlaps()
+        finally:
+            hud._floatingCardProviders[:] = providers
+        sticky.updatePosition()
+        if not covered:
+            self.skipTest("the toast does not reach the legend at this size")
+        self.assertEqual(overlaps(), [])
+        toastRect, cards = rects()
+        self.assertGreaterEqual(toastRect.top(), 0)
+        self.assertLess(toastRect.bottom(), min(card.top() for card in cards))
+        # The Map overlay is gone: the toast is back at the bottom, centred, under no card
+        mappage._removeOverlay()
+        self._pump(4)
+        self.assertEqual(sticky.frame.y, parent.height - hud.TOAST_HEIGHT - hud.TOAST_BOTTOM_MARGIN)
+        studioShell._stickyToast.hide()
+
     def test_map_legend_threshold_text_never_clips(self):
         """A long threshold text in the 220 px map legend is elided with an ellipsis (rule name first, the value stays) and
         the label's tooltip holds the whole text; a text that fits the label is shown whole, with no tooltip, even when it

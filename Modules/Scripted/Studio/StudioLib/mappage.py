@@ -461,9 +461,10 @@ class MapOverlay:
     """
 
     def __init__(self, shell):
-        from . import ui
+        from . import hud, ui
 
         self.ui = ui
+        self.hud = hud
         self.shell = shell
         parent = shell.mainWindow.centralWidget()
         self.parent = parent
@@ -526,6 +527,8 @@ class MapOverlay:
             widget.hide()
         self._state = None
         self._views = []
+        # A toast keeps above the legend and the chips (the overlay slots never overlap, USABILITY 6.3)
+        self.hud.addFloatingCardProvider(self.floatingRects)
         self._filter = _OverlayFilter(self)
         self._placeTimer = qt.QTimer()
         self._placeTimer.setSingleShot(True)
@@ -708,6 +711,7 @@ class MapOverlay:
         if self._state is None or sliceWidget is None or not sliceWidget.isVisible():
             self.legend.hide()
             self.chips.hide()
+            self._moveToasts()
             return
         self._updateTemplateChip(sliceWidget)
         view = sliceWidget.sliceView()
@@ -727,8 +731,24 @@ class MapOverlay:
         for widget in (self.legend, self.chips):
             if widget.isVisible():
                 widget.raise_()
+        self._moveToasts()
+
+    def floatingRects(self, parentWidget):
+        """The rectangles of the visible legend and chips in the coordinates of ``parentWidget`` (the central widget)."""
+        if parentWidget != self.parent or not self.ui._isAlive(self.legend):
+            return []
+        return [widget.geometry for widget in (self.legend, self.chips) if widget.isVisible()]
+
+    def _moveToasts(self):
+        """The toast on screen is placed again: it keeps above the legend and the chips that just moved or appeared."""
+        shell = self.shell
+        for name in ("_toast", "_stickyToast"):
+            toast = getattr(shell, name, None)
+            if toast is not None and toast.isVisible():
+                toast.updatePosition()
 
     def dispose(self):
+        self.hud.removeFloatingCardProvider(self.floatingRects)
         self.ui.removePaletteListener(self.refresh)
         self._placeTimer.stop()
         if self._layoutManager is not None and self.ui._isAlive(self._layoutManager):
@@ -743,6 +763,7 @@ class MapOverlay:
                 self.ui.bindStyleSheet(widget, None)
                 widget.hide()
                 widget.deleteLater()
+        self._moveToasts()
 
 
 def _tickText(value):
