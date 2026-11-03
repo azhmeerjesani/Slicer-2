@@ -225,6 +225,28 @@ class FiguresTest(unittest.TestCase):
         self.assertEqual(figure.meta["legend"], "max 5/10 (50%)")
         self.assertEqual(figure.meta["bins"], {2: 39, 5: 1})
 
+    def test_overlap_n_lesions_below_maximum_is_refused(self):
+        # --n-lesions 1 for a count map with maximum 2 was captioned "maximum 2 of 1 lesions (200%)"; 0 and -3 were accepted too
+        count = np.zeros(SHAPE, dtype=np.int16)
+        count[10:14, 15:20, 14:16] = 1
+        count[11:12, 16:17, 15] = 2
+        for value in (1, 0, -3):
+            with self.assertRaises(ValueError, msg=str(value)) as caught:
+                figures.overlap(count=(count, self.affine, "count"), n_lesions=value, slices="A 0", **SMALL)
+            self.assertIn("--n-lesions", str(caught.exception), str(value))
+        figure = figures.overlap(count=(count, self.affine, "count"), n_lesions=2, slices="A 0", **SMALL)
+        self.assertEqual(figure.meta["legend"], "max 2/2 (100%)")
+        out = os.path.join(self.tmp, "overlap_refused")
+        tpl = os.path.join(self.tmp, "overlap_tpl.nii.gz")
+        cp = os.path.join(self.tmp, "overlap_count.nii.gz")
+        nifti.write_nifti(cp, count, self.affine)
+        nifti.write_nifti(tpl, self.template[0], self.affine)
+        code, events = self._cli(["--preset", "overlap", "--count", cp, "--n-lesions", "1", "--template", tpl, "--slices", "A 0", "--out", out, "--formats", "png"])
+        self.assertNotEqual(code, 0)
+        self.assertEqual(events[-1]["code"], "input")
+        self.assertIn("--n-lesions 1", events[-1]["message"])
+        self.assertFalse(os.path.exists(os.path.join(out, "figures")))
+
     # Captions and thresholds
 
     def test_caption_has_rule_n_df_and_orientation(self):

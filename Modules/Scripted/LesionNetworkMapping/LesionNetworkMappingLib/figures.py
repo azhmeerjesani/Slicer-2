@@ -1940,6 +1940,9 @@ def overlap(count=None, lesions=None, template=None, slices="auto", n_lesions=No
         grid_count = np.rint(reslice(volume, ctx.grid, order=0)).astype(np.int32)
         name = volume.name
     max_count = int(native.max()) if native is not None and native.size else int(grid_count.max())
+    if n_lesions is not None and (n_lesions < 1 or n_lesions < max_count):
+        # The maximum count is the number of lesions that cover one voxel, so it cannot exceed the number of lesions
+        raise ValueError(f"--n-lesions {n_lesions} cannot be the number of lesions behind the count map: its maximum count is {max_count}, so there are at least {max(max_count, 1)} lesions")
     legend = _overlap_legend(max_count, n_lesions)
     if outside_notes and int(grid_count.max()) < max_count:
         outside_notes.append(f"The maximum ({max_count}) is reached outside the displayed area; the largest count shown is {int(grid_count.max())}.")
