@@ -133,6 +133,9 @@ Run with the main window and testing enabled::
 - ``test_62_docs_name_the_connectome_buttons_as_the_card_shows_them`` (BB-1): lesionnetworkmapping.md and lnm_data.md name the
   way to the catalog as the Connectome card shows it: **Get a connectome…** when no connectome is registered (the card has no
   Manage… button then), **Manage… > Get a connectome…** only when one is, and the card's demo button as "Use the demo".
+- ``test_64_docs_put_the_save_status_on_the_left_of_the_top_bar`` (BB-1): studio.md and user_interface.md place the save status
+  on the left of the top bar after the breadcrumb (VISUAL 4.1, as ``topbar.py`` adds it to the left layout) and call it the
+  save status (Saved, Saving…, Not saved · Retry), not "the autosave status" on the right.
 """
 
 import inspect
@@ -4743,3 +4746,30 @@ class StudioRegressionTest(unittest.TestCase):
             line.setFont(font)
             slicer.app.processEvents()
             check(text, True)
+
+    def test_64_docs_put_the_save_status_on_the_left_of_the_top_bar(self):
+        """studio.md and user_interface.md say that the save status sits on the left of the top bar, after the breadcrumb, as
+        the top bar builds it, and call it the save status, not "the autosave status" on the right (VISUAL 4.1).
+        """
+        from StudioLib import topbar
+
+        root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", ".."))
+        names = ("Docs/user_guide/modules/studio.md", "Docs/user_guide/user_interface.md")
+        paths = {name: os.path.join(root, *name.split("/")) for name in names}
+        if not all(os.path.isfile(path) for path in paths.values()):
+            self.skipTest("the documentation is not next to this build")
+        source = inspect.getsource(topbar)
+        self.assertIn("self._leftLayout.addWidget(self.saveStatusButton)", source)
+        self.assertNotIn("rightLayout.addWidget(self.saveStatusButton)", source)
+        texts = {}
+        for name, path in paths.items():
+            with open(path, encoding="utf-8") as stream:
+                texts[name] = " ".join(stream.read().replace("*", "").split())
+            self.assertNotIn("the autosave status", texts[name], f"{name} calls the top bar's save status the autosave status")
+        studio = texts[names[0]]
+        left, right = studio.split("On the left", 1)[1].split("In the centre", 1)[0], studio.split("On the right", 1)[1].split("an error badge", 1)[0]
+        self.assertIn("save status", left, "studio.md does not put the save status on the left of the top bar")
+        self.assertIn("Not saved · Retry", left)
+        self.assertNotIn("save status", right, "studio.md still lists the save status on the right of the top bar")
+        interface = texts[names[1]]
+        self.assertIn("the breadcrumb with the save status after it", interface)

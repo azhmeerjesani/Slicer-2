@@ -63,8 +63,8 @@ This fork of 3D Slicer starts in the **Slicer Studio** interface. The descriptio
 module panel on the left and the status bar, is the **classic interface**, which Slicer Studio keeps unchanged and which
 official 3D Slicer shows. The two are two faces of the same application: the same modules, files and Python interface.
 
-**Studio.** One 44 px top bar holds the ≡ menu, the breadcrumb, the switcher **Library | Draw | Map**, Undo/Redo, the layout
-picker, **Search** and the autosave status. The module panel moves to the right as the **inspector**. Library, Draw and Map are
+**Studio.** One 44 px top bar holds the ≡ menu, the breadcrumb with the save status after it, the switcher **Library | Draw | Map**, Undo/Redo, the layout
+picker and **Search**. The module panel moves to the right as the **inspector**. Library, Draw and Map are
 the workspaces; every other module opens in the inspector from Search (**Ctrl+K**), with a back button such as "← Draw".
 The Data Probe, status bar, menu bar and toolbars are hidden, and everything they offer is in Search or in the ≡ menu (File,
 Edit, View and Help are submenus of ≡).

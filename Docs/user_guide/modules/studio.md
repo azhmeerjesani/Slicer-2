@@ -22,9 +22,11 @@ clinical decisions (see [Research use only](lesionnetworkmapping.md#research-use
 
 The Studio window has three parts, and nothing else (no menu bar, toolbars, logo header, Data Probe or status bar):
 
-- **The top bar** (44 px). On the left the **≡ menu** and the breadcrumb (the study and subject, or the name of the
-  scan). In the centre the switcher **Library | Draw | Map**. On the right Undo and Redo (in Draw only), the layout
-  picker, the **Search** field, the autosave status and, only when there are errors, an error badge with a count.
+- **The top bar** (44 px). On the left the **≡ menu**, the breadcrumb (the project name with a ▾ menu, or the study and subject, or the name
+  of the scan) and, after it, the save status: **Saved**, **Saving…** or **Not saved · Retry** in a project, and
+  "Autosaved · 2 min ago" outside a project. In the centre the switcher **Library | Draw | Map**. On the right Undo and
+  Redo (in Draw only), the layout picker, the **Search** field and, only when there are errors, an error badge with a
+  count.
 - **The inspector** on the right (340 px by default; drag its edge to change it). It shows the cards of the current
   workspace, or any other module you open with Search.
 - **The views** on the left: the slice and 3D views, or in Library the canvas.
