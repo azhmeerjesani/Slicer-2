@@ -1963,6 +1963,12 @@ class CrashCard:
 _crashBox = None
 
 
+def _recoveryPath(path):
+    """Where the project of a crash offer is now (Change folder > Move moved it since the offer was made)."""
+    service = _service()
+    return service.recoveryPath(path) if service is not None and hasattr(service, "recoveryPath") else path
+
+
 def showCrashOfferDialog(infos):
     """The crash offer outside Studio: a non-modal message box with "Open project" (Classic)."""
     global _crashBox
@@ -1982,7 +1988,7 @@ def showCrashOfferDialog(infos):
 
     def clicked(button):
         if button == openButton:
-            openProject(info.path)
+            openProject(_recoveryPath(info.path))
 
     box.connect("buttonClicked(QAbstractButton*)", clicked)
     box.show()
@@ -2318,7 +2324,7 @@ class ProjectsUi:
 
     def openCrashed(self, path):
         self.closeCrashOffer()
-        openProject(path, self.shell)
+        openProject(_recoveryPath(path), self.shell)
 
     def closeCrashOffer(self):
         from . import library

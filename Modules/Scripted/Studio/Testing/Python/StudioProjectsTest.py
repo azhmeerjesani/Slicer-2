@@ -5560,6 +5560,79 @@ class StudioProjectsTest(unittest.TestCase):
             projects.clearPendingMove()
             os.environ[projects.ROOT_ENVIRONMENT] = self.root
 
+    def test_83_crash_offer_follows_the_projects_when_the_folder_is_moved(self):
+        """A crash offer (the Library card, the notice, the Classic box) made before Change folder > Move: Open project then
+        opened the old folder's path, which the move had emptied, and answered "P2 was renamed or moved" (BB-1). The offer
+        follows the project to the new folder, and under its new name when the new folder had one with the same name.
+        """
+        from unittest import mock
+
+        from StudioLib import projects_ui
+
+        projects = self.projects
+
+        def makeProject(rootPath, name, state):
+            folder = os.path.join(rootPath, projects.PROJECTS_DIR, name)
+            os.makedirs(os.path.join(folder, projects.PRIVATE_DIR))
+            with open(os.path.join(folder, name + projects.SCENE_EXTENSION), "w") as f:
+                f.write("<MRML></MRML>\n")
+            with open(projects.projectFile(folder), "w") as f:
+                json.dump({"name": name, "state": state}, f)
+            return folder
+
+        oldRoot = os.path.normpath(os.path.join(self.tempDir, "crash move", "A", "Slicer Studio"))
+        newRoot = os.path.normpath(os.path.join(self.tempDir, "crash move", "B", "Slicer Studio"))
+        makeProject(oldRoot, "P1", "closed")
+        crashedPath = makeProject(oldRoot, "P2", "open")
+        makeProject(newRoot, "P2", "closed")  # the new folder has a project of that name: the moved one becomes "P2 2"
+        settings = qt.QSettings()
+        os.environ.pop(projects.ROOT_ENVIRONMENT)
+        settings.setValue(projects.ROOT_KEY, oldRoot)
+        try:
+            service = self._service()
+            offered = []
+            service.setProjectPresenter(offered.append)
+            self.assertEqual([info.name for info in service.scanProjectsAtStartup()], ["P2"])
+            self.assertEqual(service.recoveryPath(crashedPath), crashedPath, "before a move the offer names the project's folder")
+            opened = []
+            with mock.patch.object(projects_ui, "openProject", lambda path, shell=None: opened.append(path) or True), \
+                    mock.patch.object(projects_ui, "_service", lambda: service):
+                # The Classic box and the card are made before the move, as at startup
+                box = projects_ui.showCrashOfferDialog(offered[0])
+                owner = mock.Mock()
+                owner.openCrashed = lambda path: projects_ui.ProjectsUi.openCrashed(owner, path)
+                card = projects_ui.CrashCard(offered[0], owner)
+                try:
+                    service.moveRoot(newRoot, moveContent=True)
+                    self.assertEqual(projects.root(), newRoot)
+                    movedPath = os.path.join(newRoot, projects.PROJECTS_DIR, "P2 2")
+                    self.assertTrue(os.path.isdir(movedPath))
+                    self.assertFalse(os.path.exists(crashedPath))
+                    self.assertEqual(service.recoveryPath(crashedPath), movedPath)
+                    self.assertEqual([os.path.normpath(info.path) for info in service.pendingProjectRecoveries()], [movedPath],
+                                     "a card shown again later is made with the project where it is")
+                    card.openButtons[0].click()
+                    self.assertEqual([os.path.normpath(path) for path in opened], [movedPath], "the card opens the moved project")
+                    if box is not None:
+                        for button in box.buttons():
+                            if button.text == "Open project":
+                                button.click()
+                        self.assertEqual([os.path.normpath(path) for path in opened], [movedPath] * 2, "the Classic box does too")
+                    # Moved again: the offer goes on following it
+                    third = os.path.normpath(os.path.join(self.tempDir, "crash move", "C", "Slicer Studio"))
+                    service.moveRoot(third, moveContent=True)
+                    self.assertEqual(service.recoveryPath(crashedPath), os.path.join(third, projects.PROJECTS_DIR, "P2 2"))
+                finally:
+                    card.dispose()
+                    if box is not None:
+                        box.close()
+                        box.deleteLater()
+        finally:
+            settings.remove(projects.ROOT_KEY)
+            settings.remove(projects.ROOT_CHOSEN_KEY)
+            os.environ[projects.ROOT_ENVIRONMENT] = self.root
+            self.io.backgroundWriter().drain(10.0)
+
     def test_82_cards_follow_the_clock_while_the_app_stays_open(self):
         """The relative time of a project card and a study card ("just now", "Edited just now") follows the clock: a card kept
         while nothing about its project changed said "just now" for hours until the app was restarted (BB-1).

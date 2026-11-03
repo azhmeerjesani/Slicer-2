@@ -276,6 +276,8 @@ class AutosaveService:
         self.projectWriter = None
         self._projectPresenter = None
         self._pendingProjectRecoveries = []
+        #: {path the crash offer was made with: where that project is now} (Change folder > Move follows it)
+        self._recoveryPaths = {}
         self._lastProjectCheck = None
         #: projects (normalized paths) whose "open in another Slicer Studio" warning was shown while retrying to attach
         self._lockedAnnounced = set()
@@ -1291,6 +1293,24 @@ class AutosaveService:
         """Projects of a session that closed unexpectedly (found at startup), as ``projects.ProjectInfo``."""
         return list(self._pendingProjectRecoveries)
 
+    def recoveryPath(self, path):
+        """Where the project that a crash offer named ``path`` is now: the offer outlives Change folder > Move, which
+        moves the project (maybe under another name) while the offer, the card or the box is still shown.
+        """
+        return self._recoveryPaths.get(os.path.normpath(str(path)), path)
+
+    def _followMovedRecoveries(self, oldRoot, newRoot, renamed):
+        """The projects that were offered after a crash follow a folder move (what ``recoveryPath`` answers)."""
+        projects = self._projects()
+        for key, current in list(self._recoveryPaths.items()):
+            newPath = projects.pathAfterMove(current, oldRoot, newRoot, renamed)
+            # Only a project that really moved (after a failed move it may still be in the old folder)
+            if os.path.normpath(newPath) != os.path.normpath(current) and os.path.isdir(newPath) and not os.path.isdir(current):
+                self._recoveryPaths[key] = newPath
+        self._pendingProjectRecoveries = [
+            projects.ProjectInfo(self._recoveryPaths.get(os.path.normpath(info.path), info.path)) if os.path.normpath(info.path) in self._recoveryPaths
+            else info for info in self._pendingProjectRecoveries]
+
     def _announce(self, event, project=None, **info):
         announcer = getattr(self, "_projectAnnouncer", None)
         if announcer is None:
@@ -2207,6 +2227,7 @@ class AutosaveService:
                         self._relocateProject(project.path, newPath)
                     else:
                         project.lock()
+            self._followMovedRecoveries(oldRoot, newRoot, renamed)
             _updateRecentStudies(oldRoot, newRoot, renamed)
             _updateMovedPathSettings(oldRoot, newRoot, moved, renamed)
             if renamedIds:
@@ -2308,6 +2329,7 @@ class AutosaveService:
             data = dict(info.data, state="crashed")
             io.backgroundWriter().submit(io.atomicWriteJson, projects.projectFile(info.path), data)
         self._pendingProjectRecoveries = crashed
+        self._recoveryPaths = {os.path.normpath(info.path): info.path for info in crashed}
         if crashed:
             presenter = self._projectPresenter
             if presenter is None:
