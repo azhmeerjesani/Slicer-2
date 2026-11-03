@@ -8,6 +8,7 @@ its rule but no peak table until the sign or the statistic was clicked. It needs
 Under a plain PythonSlicer (the library test glob) the module is skipped.
 """
 
+import types
 import unittest
 
 try:
@@ -216,6 +217,61 @@ class LesionNetworkMappingSceneMapTest(unittest.TestCase):
         self.widget.setParameterNode(None)
         self.assertEqual(niftiexport.mapOptionsFromMapModule(), {})
         self.assertIsNone(self.widget._parameterNode)
+
+
+    def test_peak_regions_are_looked_up_again_when_atlases_arrive(self):
+        """Get atlases finishing names the peaks without a new Compute (BB-1: the Region column stayed "—")."""
+        from LesionNetworkMappingLib import atlases
+        from LesionNetworkMappingUI.card_clusters import sharedAtlases
+
+        widget = self.widget
+        widget.exit()
+        volume = self._sceneMap()
+        widget.loadedMap = None
+        widget.runOutputs = {}
+        widget._peaks = []
+        widget.initializeParameterNode()
+        widget._parameterNode.resultVolume = volume
+        downloaded = []
+        original = atlases.peak_regions
+
+        def fake(points, space=None, cache=None, **kwargs):
+            # None while no atlas is on the computer, the names once it is
+            return [f"Region {index}" for index in range(len(points))] if downloaded else None
+
+        atlases.peak_regions = fake
+        try:
+            widget.enter()
+            _pump(500)
+            self.assertEqual(len(widget._peaks), 5)
+            column = [widget.peaksTable.item(row, 0).text() for row in range(5)]
+            self.assertEqual(column, ["—"] * 5)
+            self.assertIn("No atlas downloaded", widget.peaksTable.item(0, 0).toolTip())
+            manager = sharedAtlases(widget.ctx)
+            self.assertIn(widget._onAtlasesChanged, manager.listeners)
+            # A download is running: nothing is looked up yet
+            manager.fetching = {"thread": types.SimpleNamespace(is_alive=lambda: True)}
+            downloaded.append(True)
+            manager.notify()
+            _pump(300)
+            self.assertEqual(widget.peaksTable.item(0, 0).text(), "—")
+            # The download finished (the atlases changed, the manager is not busy any more)
+            manager.fetching = None
+            manager.notify()
+            _pump(500)
+            column = [widget.peaksTable.item(row, 0).text() for row in range(5)]
+            self.assertEqual(column, [f"Region {index}" for index in range(5)])
+            self.assertNotIn("No atlas downloaded", widget.peaksTable.item(0, 0).toolTip())
+            # Atlases downloaded elsewhere (the Lesion card of Draw) while Map was left: found again when Map is entered
+            downloaded.clear()
+            widget._showPeakRegions(widget._peaks, None)
+            self.assertEqual(widget.peaksTable.item(0, 0).text(), "—")
+            downloaded.append(True)
+            widget.enter()
+            _pump(500)
+            self.assertEqual(widget.peaksTable.item(0, 0).text(), "Region 0")
+        finally:
+            atlases.peak_regions = original
 
 
 if __name__ == "__main__":

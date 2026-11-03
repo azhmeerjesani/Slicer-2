@@ -2040,6 +2040,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self._ruleOverride = False
         self._entered = False
         self._peaksPending = False
+        self._peakGrid = None
+        self._peakRegionsMissing = False
         self._seedDirty = True
         self._pendingProgress = None
         self._pendingReload = False
@@ -2092,6 +2094,10 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.refreshTimer.connect("timeout()", self._onRefreshTimer)
 
         self._buildCards()
+        # The Peak region column follows the downloaded atlases (the Clusters card is told the same way)
+        from LesionNetworkMappingUI.card_clusters import sharedAtlases
+
+        sharedAtlases(self.ctx).listeners.append(self._onAtlasesChanged)
 
         # Footer: the research-only disclaimer, outside every card and always visible
         self.footer = widgets.disclaimerLabel()
@@ -5802,6 +5808,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         from LesionNetworkMappingLib import stats
 
         self._peaks = []
+        self._peakGrid = None
         if self.loadedMap is not None:
             loaded = self._loadedValues(statistic)
             values, grid, indices = loaded if loaded is not None else (None, None, None)
@@ -5837,7 +5844,19 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
                 table.setItem(row, column, item)
         table.setVisible(bool(self._peaks))
         if self._peaks:
+            self._peakGrid = grid
             self._lookupPeakRegions(self._peaks, grid)
+
+    def _onAtlasesChanged(self):
+        """The atlases of the cache changed (Get atlases finished): the Peak region column looks them up again."""
+        manager = getattr(self.ctx, "lnmAtlasManager", None) if self.ctx is not None else None
+        if manager is not None and not manager.busy():
+            self._refreshPeakRegions()
+
+    def _refreshPeakRegions(self):
+        """Look the Peak region column up again for the peaks shown (the cached atlases may have changed since)."""
+        if self._peaks and hasattr(self, "peaksTable") and self.peaksTable.rowCount == len(self._peaks):
+            self._lookupPeakRegions(self._peaks, self._peakGrid)
 
     def _recolorPeakValues(self):
         """Give the values of the peaks table the hot and cold colors of the current theme (after a theme switch)."""
@@ -5916,6 +5935,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         """The Peak region column: the region names, or "—" when no atlas is downloaded (the tooltip says how to get one)."""
         if peaks is not self._peaks or not hasattr(self, "peaksTable"):
             return
+        self._peakRegionsMissing = regions is None
         noAtlas = _("No atlas downloaded: Get atlases (the Lesion card of Draw, or the Clusters card) names the peak regions")
         for row in range(min(len(peaks), self.peaksTable.rowCount)):
             item = self.peaksTable.item(row, 0)
@@ -6055,6 +6075,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self._preloadScientificModules()
         # A map adopted from the scene has no peak table yet (the map did not change in this session): compute it now
         self.refreshResult(reloadMaps=False, peaks=True if adopted else None)
+        if self._peakRegionsMissing and not adopted:
+            # Get atlases of the Lesion card of Draw may have put the atlases on the computer while Map was left
+            self._refreshPeakRegions()
 
     def _preloadScientificModules(self):
         """Import scipy.stats (about 2 s) in a background thread on the first visit, so that resolving the
@@ -6221,6 +6244,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.removeObservers()
         self._notifyControllers("cleanup")
         if self.ctx is not None:
+            manager = getattr(self.ctx, "lnmAtlasManager", None)
+            if manager is not None and self._onAtlasesChanged in manager.listeners:
+                manager.listeners.remove(self._onAtlasesChanged)
             self.ctx.cleanup()
         if getattr(slicer.modules, "LesionNetworkMappingWidget", None) is self:
             del slicer.modules.LesionNetworkMappingWidget
