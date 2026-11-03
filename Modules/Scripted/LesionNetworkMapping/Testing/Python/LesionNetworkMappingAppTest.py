@@ -322,6 +322,19 @@ class AppHelpersTest(unittest.TestCase):
             self.assertIn("poster", events[-1]["message"])
             code, events, _out, _err = cli(tmp, os.path.join(tmp, "out"), "group", "--connectome", os.path.join(tmp, "missing.lnmc"), "--events", "json")
             self.assertEqual(code, 2)
+            # An output folder that is a file (or sits below one) is a usage error with text output, not a NotADirectoryError traceback
+            blocker = os.path.join(tmp, "out_is_a_file.txt")
+            with open(blocker, "w", encoding="utf-8") as f:
+                f.write("x")
+            for output, text in ((blocker, "The output folder is a file"), (os.path.join(blocker, "sub"), "The output folder cannot be created")):
+                code, events, _out, err = cli(tmp, output, "group", "--connectome", tmp, "--events", "json")
+                self.assertEqual((code, events[-1]["code"]), (2, "usage"), output)
+                self.assertIn(text, events[-1]["message"])
+                self.assertNotIn("Traceback", err)
+            code, _events_unused, out_text, err = cli(tmp, blocker, "group", "--connectome", tmp, "--events", "text")
+            self.assertEqual(code, 2)
+            self.assertIn("error (usage): The output folder is a file", out_text + err)
+            self.assertNotIn("Traceback", err)
             # An explicit file option that names nothing is a usage error, not a silent fallback (black report background)
             for option in ("--template", "--atlas", "--atlas-labels"):
                 code, events, _out, _err = cli(tmp, os.path.join(tmp, "out"), "group", "--connectome", tmp, option, os.path.join(tmp, "nosuch.nii.gz"), "--events", "json")

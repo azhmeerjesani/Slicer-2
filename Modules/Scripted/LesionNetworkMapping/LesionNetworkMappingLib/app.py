@@ -581,6 +581,16 @@ def render_figures(presets, out, config, emit):
     return written
 
 
+def _with_parents(path):
+    """``path`` and each of its parent folders, innermost first."""
+    while True:
+        yield path
+        parent = os.path.dirname(path)
+        if parent == path:
+            return
+        path = parent
+
+
 def _take_lock(out, wait_s, emit):
     """Take the output lock of the run folder ``out``, waiting at most ``wait_s`` seconds while another run holds it.
 
@@ -702,6 +712,11 @@ def _main(argv):
     if not os.path.isdir(args.connectome):
         emit("error", code="usage", message=f"The connectome bundle does not exist: {args.connectome}")
         return jobs.EXIT_USAGE
+    blocker = next((path for path in _with_parents(output_dir) if os.path.exists(path) and not os.path.isdir(path)), None)
+    if blocker is not None:  # a file where the output folder (or one of its parents) should be: makedirs would fail later with a traceback
+        what = "The output folder is a file" if blocker == output_dir else f"The output folder cannot be created: {blocker} is a file"
+        emit("error", code="usage", message=f"{what}: {args.output_dir}" if blocker == output_dir else f"{what} (output folder {args.output_dir})")
+        return jobs.EXIT_USAGE
     for option in ("template", "atlas", "atlas_labels"):
         path = getattr(args, option)
         if path is not None and not os.path.isfile(path):
@@ -743,7 +758,11 @@ def _main(argv):
     # The output lock comes first: the study of a BIDS input is shared by every run writing to this output folder, and a
     # run refused with exit code 75 must not rewrite it (the run holding the folder would read another run's groups)
     created = [path for path in (output_dir, out, os.path.join(out, pipeline.PRIVATE_DIR)) if not os.path.isdir(path)]
-    lock = _take_lock(out, args.lock_wait, emit)
+    try:
+        lock = _take_lock(out, args.lock_wait, emit)
+    except OSError as exc:  # the output folder cannot be created (permissions, a race with another process)
+        emit("error", code="usage", message=f"The output folder cannot be created: {args.output_dir} ({exc.strerror or exc})")
+        return jobs.EXIT_USAGE
     if lock is None:
         emit("error", code="locked", message=f"Another run still writes to {os.path.basename(out)} after {args.lock_wait:g} s")
         return jobs.EXIT_LOCKED
