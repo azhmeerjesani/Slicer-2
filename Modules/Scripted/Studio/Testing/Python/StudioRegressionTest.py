@@ -2371,6 +2371,67 @@ class StudioRegressionTest(unittest.TestCase):
             current = current.parentWidget()
         return None
 
+    def test_24_map_calibrate_card_keeps_inspector_width(self):
+        """Opening the Map Calibrate card neither widens the inspector nor leaves it wide at 1366 x 768 (BB-1).
+
+        The check box "Also the sensitivity route (relocated lesions; slower)" was a plain QCheckBox, which draws its text on
+        one line: its minimum width (367 px) made the card's minimum 506 px, and the widest minimum a workspace module needed
+        stays for good (``Shell._workspacePanelWidths``, stored in ``Studio/WorkspacePanelWidths``): the inspector went from
+        340 px to 516 px and stayed there after a restart. The option is now a word-wrapped label (``ui.wrapCheckBox()``).
+        """
+        from StudioLib import shell
+
+        mainWindow = slicer.util.mainWindow()
+        if mainWindow is None or not hasattr(slicer.modules, "lesionnetworkmapping"):
+            self.skipTest("needs the main window and the Map module")
+        settings = qt.QSettings()
+        keys = [f"{shell._WORKSPACE_PANEL_WIDTHS_GROUP}/{name}" for name in ("Studio", "SegmentEditor", "LesionNetworkMapping")]
+        saved = {key: settings.value(key) for key in keys}
+        savedGeometry = mainWindow.saveGeometry()
+        studioShell = None
+
+        def pump(count=10):
+            for _ in range(count):
+                slicer.app.processEvents()
+
+        try:
+            mainWindow.resize(1366, 768)
+            for key in keys:
+                settings.remove(key)
+            studioShell = shell.Shell(force=True)
+            studioShell.apply()
+            dock = mainWindow.findChild("QDockWidget", "PanelDockWidget")
+            studioShell.switchTo("map")
+            pump()
+            widget = slicer.modules.LesionNetworkMappingWidget
+            card = widget.ctx.card("calibrate")
+            self.assertIsNotNone(card)
+            checkBox = card.widget.findChild("QCheckBox", "LNMCalibrateSensitivityCheckBox")
+            self.assertIsNotNone(checkBox)
+            self.assertLess(checkBox.minimumSizeHint.width(), 60, "the sensitivity option's text is drawn by the check box on one line")
+            before = dock.width
+            self.assertLessEqual(before, studioShell.panelWidth + 2)
+            card.widget.collapsed = False
+            pump()
+            self.assertLessEqual(card.widget.minimumSizeHint.width(), studioShell.panelWidth, "the Calibrate card needs more than the inspector width")
+            self.assertEqual(dock.width, before, "the Calibrate card widens the inspector")
+            card.widget.collapsed = True
+            pump()
+            self.assertEqual(dock.width, before, "the inspector stays wide after the Calibrate card is collapsed")
+            wide = {name: width for name, width in studioShell._workspacePanelWidths.items() if width > studioShell.panelWidth + 2}
+            self.assertEqual(wide, {}, "a workspace module asks for more than the stored width")
+        finally:
+            if studioShell is not None:
+                studioShell.dispose()
+            pump()
+            mainWindow.restoreGeometry(savedGeometry)
+            for key, value in saved.items():
+                if value is None:
+                    settings.remove(key)
+                else:
+                    settings.setValue(key, value)
+            slicer.mrmlScene.Clear(0)
+
     def test_24_lesion_metrics_follow_a_result_that_repoints_the_lesion(self):
         """A merged result that repoints the lesion (a normalization) recomputes the row's metrics from the new file (BB-1).
 

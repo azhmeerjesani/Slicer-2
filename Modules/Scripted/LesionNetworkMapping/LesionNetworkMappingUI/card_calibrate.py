@@ -237,7 +237,8 @@ class CalibrateCard:
         self.sensitivityCheckBox = qt.QCheckBox(_("Also the sensitivity route (relocated lesions; slower)"))
         self.sensitivityCheckBox.setObjectName("LNMCalibrateSensitivityCheckBox")
         self.sensitivityCheckBox.setToolTip(_("False-positive rate of the classic overlap rule and of its null-referenced version on relocated lesion sets"))
-        form.addRow("", self.sensitivityCheckBox)
+        # A QCheckBox draws its text on one line (367 px): it made the card, and so the Map inspector, wider for good.
+        form.addRow("", widgets.wrapCheckBox(self.sensitivityCheckBox))
         layout.addLayout(form)
 
         runRow = qt.QHBoxLayout()
