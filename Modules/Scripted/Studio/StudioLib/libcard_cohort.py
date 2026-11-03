@@ -1328,6 +1328,10 @@ class CohortCard:
             self._renderBalance(rows)
         self.matchButton.setEnabled(bool(rows))
         context = summary.get("literature") or []
+        if blind:
+            # A subset line made before blinding ("5 cases + 5 controls") and the case count in the set size line give the split away
+            self.matchLabel.setText("")
+            context = _lnm("lesionset").literature_context(summary, blind=True) if context else []
         self.contextLabel.setText("\n".join(f"• {line['text']}" for line in context))
         self.contextLink.setVisible(bool(context))
         if not self.contextLabel.isVisibleTo(self.widget):

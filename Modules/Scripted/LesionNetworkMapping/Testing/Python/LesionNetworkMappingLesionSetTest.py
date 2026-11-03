@@ -522,6 +522,9 @@ class LiteratureTest(unittest.TestCase):
         # The nearest reference: 0.22 is nearer 0.25 than 0.16
         self.assertIn("At mean pairwise Dice 0.25, conjunction was significant for 97%", lesionset.literature_context({"n": 5, "dice": {"mean": 0.22}})[1]["text"])
         self.assertIn("At mean pairwise Dice 0.16", lesionset.literature_context({"n": 5, "dice": {"mean": 0.2}})[1]["text"])
+        # Blind tracing: the set size is the total number of lesions, never the number of cases
+        self.assertTrue(lesionset.literature_context({"n": 12, "n_cases": 7}, blind=True)[0]["text"].startswith("This set: 12 lesions."))
+        self.assertTrue(lesionset.literature_context({"n": 12, "n_cases": 7})[0]["text"].startswith("This set: 7 lesions."))
 
 
 if __name__ == "__main__":

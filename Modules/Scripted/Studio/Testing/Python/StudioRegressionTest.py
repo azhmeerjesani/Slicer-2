@@ -1812,6 +1812,8 @@ class StudioRegressionTest(unittest.TestCase):
             groups = str(cohortCard.rows["groups"][1].text)
             self.assertIn("3 cases", groups)
             self.assertTrue(shown(cohortCard.balanceTable))
+            self.assertIn("This set: 3 lesions", str(cohortCard.contextLabel.text))
+            cohortCard.matchLabel.setText("Subset volume_matched: 3 cases + 2 controls")  # as made by createSubset before blinding
 
             # Blind tracing: none of them is shown (L-43, LNM addendum 3.10)
             rules.set_study_setting(session.study, "blind_tracing", True, "Tester")
@@ -1836,6 +1838,10 @@ class StudioRegressionTest(unittest.TestCase):
             self.assertFalse(shown(cohortCard.balanceTable))
             self.assertFalse(shown(cohortCard.matchRow))
             self.assertIsNone(cohortCard.createSubset())
+            self.assertEqual(str(cohortCard.matchLabel.text), "", "a subset line made before blinding shows the split")
+            context = str(cohortCard.contextLabel.text)
+            self.assertIn("This set: 5 lesions", context, "the set size line shows the number of cases while tracing blind")
+            self.assertNotIn("This set: 3 lesions", context)
             # The group control does not write while hidden
             subjectCard._onGroup(1)
             self.assertEqual(session.study.subject("sub-02")["group"], "case")
@@ -1850,6 +1856,7 @@ class StudioRegressionTest(unittest.TestCase):
             self.assertEqual(str(section.editors["symptom"].text), "neglect")
             self.assertIn("3 cases", str(cohortCard.rows["groups"][1].text))
             self.assertTrue(shown(cohortCard.balanceTable))
+            self.assertIn("This set: 3 lesions", str(cohortCard.contextLabel.text))
         finally:
             if cohortCard is not None:
                 cohortCard.dispose()

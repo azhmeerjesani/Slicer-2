@@ -1035,10 +1035,14 @@ def add_subset(study, name, sids):
 # Literature context
 
 
-def literature_context(summary):
-    """Neutral, cited context strings for a summary: [{"key", "text", "citation"}]."""
+def literature_context(summary, blind=False):
+    """Neutral, cited context strings for a summary: [{"key", "text", "citation"}].
+
+    With ``blind`` (blind tracing, L-43) the set size is the total number of lesions, not the number of cases, so the
+    line does not give away the case/control split.
+    """
     out = []
-    n = summary.get("n_cases") or summary.get("n") or 0
+    n = (summary.get("n") or 0) if blind else (summary.get("n_cases") or summary.get("n") or 0)
     out.append(
         {
             "key": "set_size",
