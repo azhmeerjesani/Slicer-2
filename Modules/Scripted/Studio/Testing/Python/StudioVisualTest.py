@@ -1394,6 +1394,52 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
         self.assertFalse(bool(bar.property("slicerFlatViewBar")))
         self.assertNotEqual(bar.height, 34)
 
+    def test_flat_view_bar_readout_follows_application_font(self):
+        """The readout of the flat view bar ("I 10.2 mm   128 / 256") keeps room for its text when the application font is
+        changed while the views are shown (Settings > Appearance > Font): the widths were measured only when the flat style was
+        applied, so the last digit was cut under the link icon (BB-1). A smaller font gives the room back.
+        """
+        import re
+
+        from StudioLib import ui
+
+        studioShell = self._applyStudio()
+        volume = self._addVolume()
+        slicer.util.setSliceViewerLayers(background=volume, fit=True)
+        studioShell.switchTo("draw")
+        self._pump(10)
+        controller = self.layoutManager.sliceWidget("Red").sliceController()
+        flatBefore = controller.flatStyle
+        self._restores.append(lambda: controller.setProperty("flatStyle", flatBefore))
+        controller.setProperty("flatStyle", True)
+        layoutNode = self.layoutManager.layout
+        self._restores.append(lambda: self.layoutManager.setLayout(layoutNode))
+        self.layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUpRedSliceView)
+        readout = slicer.util.findChild(controller.barWidget(), "SliceIndexLabel")
+        self.assertTrue(self._wait(lambda: " / " in str(readout.text) and "mm" in str(readout.text), 2000), readout.text)
+        base = qt.QFont(qt.QApplication.font())
+        self._restores.append(lambda: qt.QApplication.setFont(base))
+
+        def needed():
+            plain = re.sub(r"<[^>]+>", "", str(readout.text)).strip()
+            return qt.QFontMetrics(readout.font).horizontalAdvance(plain)
+
+        self.assertGreaterEqual(readout.width, needed(), "the readout is cut before the font change")
+        widthBefore = readout.width
+        basePx = round(ui.applicationFontPx())
+        for pixelSize in (basePx + 3, basePx + 7):
+            large = qt.QFont(base)
+            large.setPixelSize(pixelSize)
+            qt.QApplication.setFont(large)
+            self._pump(8)
+            self.assertEqual(round(ui.applicationFontPx()), pixelSize, "the application font did not change (the premise of this test)")
+            self.assertTrue(readout.isVisible(), f"the readout is hidden with a {pixelSize} px font")
+            self.assertGreaterEqual(readout.width, needed(), f"the readout is cut with a {pixelSize} px font")
+        qt.QApplication.setFont(base)
+        self._pump(8)
+        self.assertGreaterEqual(readout.width, needed())
+        self.assertLessEqual(readout.width, widthBefore + 4, "the readout kept the room of the larger font")
+
     def test_flat_view_bar_figure_has_no_patient_direction(self):
         """A figure view bar never states a patient direction (U-04, USABILITY P6): the readout is the slice index only
         ("1 / 1"), without "S 0.0 mm" and without the origin caveat, while a scan view keeps its direction letter.

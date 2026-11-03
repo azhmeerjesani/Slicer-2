@@ -641,6 +641,8 @@ void qMRMLSliceControllerWidgetPrivate::setupFlatBar()
   this->SliceIndexLabel->setObjectName("SliceIndexLabel");
   this->SliceIndexLabel->setFixedHeight(this->OptionsButton->height());
   this->SliceIndexLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+  // The reserved readout widths depend on the font of the label: measure them again when it changes
+  this->SliceIndexLabel->installEventFilter(this);
   holderLayout->addWidget(this->SliceIndexLabel);
   this->SliceIndexHolder->setVisible(false);
   this->FlatOnlyWidgets << this->SliceIndexHolder;
@@ -740,9 +742,7 @@ void qMRMLSliceControllerWidgetPrivate::updateFlatStyle()
     {
       this->BarLinkButton->setChecked(this->MRMLSliceCompositeNode->GetLinkedControl());
     }
-    QFontMetrics fontMetrics(this->SliceIndexLabel->font());
-    this->FullReadoutWidth = std::max(this->FullReadoutWidth, fontMetrics.horizontalAdvance(QString("S 000.0 mm   000 / 000")) + 4);
-    this->CompactReadoutWidth = std::max(this->CompactReadoutWidth, fontMetrics.horizontalAdvance(QString("000 / 000")) + 4);
+    this->measureReadoutWidths(false);
     this->updateReadoutLabel();
     this->updateFlatBarFromMRMLSliceNode();
     this->updateFlatBarWidgetsVisibility();
@@ -772,6 +772,27 @@ void qMRMLSliceControllerWidgetPrivate::updateFlatStyle()
   {
     this->SliceOffsetSlider->setToolTip(sliceOffsetSliderToolTip(sliceNode, this->AppliedFlatStyle));
   }
+}
+
+// --------------------------------------------------------------------------
+void qMRMLSliceControllerWidgetPrivate::measureReadoutWidths(bool fromScratch)
+{
+  if (!this->SliceIndexLabel)
+  {
+    return;
+  }
+  // Room for the widest readout the label can show (and for the text now shown), in the current font of the label
+  const QFontMetrics fontMetrics = this->SliceIndexLabel->fontMetrics();
+  int fullWidth = std::max(fontMetrics.horizontalAdvance(QString("S 000.0 mm   000 / 000")), fontMetrics.horizontalAdvance(this->FullReadoutText)) + 4;
+  int compactWidth = std::max(fontMetrics.horizontalAdvance(QString("000 / 000")), fontMetrics.horizontalAdvance(this->CompactReadoutText)) + 4;
+  if (!fromScratch)
+  {
+    // The widths only grow while the font stays the same: a fixed width does not lay out the bar again
+    fullWidth = std::max(fullWidth, this->FullReadoutWidth);
+    compactWidth = std::max(compactWidth, this->CompactReadoutWidth);
+  }
+  this->FullReadoutWidth = fullWidth;
+  this->CompactReadoutWidth = compactWidth;
 }
 
 // --------------------------------------------------------------------------
@@ -1613,6 +1634,13 @@ bool qMRMLSliceControllerWidgetPrivate::eventFilter(QObject* object, QEvent* eve
   }
   else if (object == this->BarWidget && event->type() == QEvent::Resize && this->AppliedFlatStyle)
   {
+    this->updateFlatBarWidgetsVisibility();
+  }
+  else if (object == this->SliceIndexLabel && event->type() == QEvent::FontChange && this->AppliedFlatStyle)
+  {
+    // The application font changed while the views are shown: the readout needs other widths (in both ways)
+    this->measureReadoutWidths(true);
+    this->updateReadoutLabel();
     this->updateFlatBarWidgetsVisibility();
   }
   else if (object == this->BarWidget && (event->type() == QEvent::PaletteChange || event->type() == QEvent::StyleChange) && this->AppliedFlatStyle)
