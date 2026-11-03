@@ -320,6 +320,9 @@ def onStartupCompleted(startTime=None):
     if mainWindow is None:
         return
     installCloseGuard(mainWindow)
+    from . import projects
+
+    projects.installWebLinkHandler()
     if os.environ.get("SLICER_CLASSIC_UI") == "1":
         return
     if not _settingsBool("Studio/Enabled", True):

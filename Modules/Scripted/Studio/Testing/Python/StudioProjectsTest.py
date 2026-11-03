@@ -1872,6 +1872,74 @@ class StudioProjectsTest(unittest.TestCase):
             else:
                 os.environ["SLICER_STUDIO_WEB"] = webValue
 
+    def test_27c_official_link_outs_show_the_link_in_the_web_build(self):
+        """The official actions (the Help menu: Documentation, Quick Start, Get Help ...) call ``QDesktopServices::openUrl``
+        themselves. In the web build there is no browser, so the installed handler shows the link with [Copy link] (before, only
+        a log line said that Qt could not detect a web browser). Elsewhere no handler is installed.
+        """
+        projects = self.projects
+
+        def dialog():
+            for found in slicer.util.mainWindow().findChildren("QDialog"):
+                if found.objectName == "StudioLocationDialog" and found.isVisible():
+                    return found
+            return None
+
+        def closeDialog():
+            found = dialog()
+            if found is not None:
+                found.close()
+            slicer.app.processEvents()
+
+        webValue = os.environ.get("SLICER_STUDIO_WEB")
+        try:
+            # Not the web build: nothing is installed
+            os.environ.pop("SLICER_STUDIO_WEB", None)
+            if not os.path.exists("/.dockerenv"):
+                self.assertFalse(projects.installWebLinkHandler())
+
+            os.environ["SLICER_STUDIO_WEB"] = "1"
+            self.assertTrue(projects.installWebLinkHandler())
+            self.assertTrue(projects.installWebLinkHandler(), "calling it again is safe")
+            self.assertIsNone(dialog())
+
+            # The official Help actions call QDesktopServices::openUrl in C++ (as the Help menu does). The Python name
+            # qt.QDesktopServices.openUrl is not used: the tests above replace it, and putting the original back breaks it.
+            helpMenu = slicer.util.mainWindow().findChild("QMenu", "HelpMenu")
+            self.assertIsNotNone(helpMenu, "the main window has its Help menu")
+            shown = []
+            for action in helpMenu.actions():
+                label = action.text.replace("&", "")
+                if not any(label.startswith(name) for name in ("Documentation", "Quick Start", "Get Help", "Visit the Slicer Forum")):
+                    continue
+                action.trigger()
+                slicer.app.processEvents()
+                found = dialog()
+                self.assertIsNotNone(found, "Help > %s shows the link" % label)
+                link = found.findChild(qt.QLineEdit, "StudioLocationField").text
+                self.assertTrue(link.startswith("http"), link)
+                qt.QApplication.clipboard().setText("")
+                found.findChild(qt.QPushButton, "StudioLocationCopyButton").click()
+                self.assertEqual(qt.QApplication.clipboard().text(), link)
+                shown.append(label)
+                closeDialog()
+            self.assertGreaterEqual(len(shown), 2, "the Help menu has link-out entries: %s" % shown)
+
+            # After uninstall nothing is routed
+            projects.uninstallWebLinkHandler()
+            for action in helpMenu.actions():
+                if action.text.replace("&", "").startswith("Documentation"):
+                    action.trigger()
+                    slicer.app.processEvents()
+                    self.assertIsNone(dialog(), "no handler, no link window")
+        finally:
+            projects.uninstallWebLinkHandler()
+            closeDialog()
+            if webValue is None:
+                os.environ.pop("SLICER_STUDIO_WEB", None)
+            else:
+                os.environ["SLICER_STUDIO_WEB"] = webValue
+
     def test_28_save_copy_as_starts_in_an_existing_folder(self):
         """"Save a copy as…" opens in an existing folder, never the current folder that Qt uses for a missing one (HOME in
         the web container, "/" for a Finder-started app): Exports/ of a new project (created), else Studio/LastSaveFolder

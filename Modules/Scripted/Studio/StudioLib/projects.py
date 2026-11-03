@@ -1898,6 +1898,48 @@ def openLink(url):
     return True
 
 
+#: The hidden object that receives the web addresses of ``QDesktopServices::openUrl`` (the web build)
+_webLinkRelay = None
+
+#: The web address schemes that the web build routes to :func:`openLink`
+WEB_LINK_SCHEMES = ("http", "https")
+
+
+def installWebLinkHandler():
+    """In the web build, send every ``QDesktopServices::openUrl`` of a web address to :func:`openLink`.
+
+    The official actions (the Help menu: Documentation, Quick Start, Get Help, the forum ...) call ``QDesktopServices::openUrl``
+    themselves, which in the web build (no browser in the container) only logs that Qt cannot detect a browser and shows nothing.
+    The handler shows the link and [Copy link] instead. Elsewhere nothing changes. Safe to call again. Return whether the handler
+    is installed.
+
+    ``QDesktopServices::setUrlHandler`` needs a receiver with a method that takes a ``QUrl``, and PythonQt cannot make one; a
+    hidden ``QTextBrowser`` is the receiver and its signal ``anchorClicked(QUrl)`` (which Qt invokes like a method, in Qt 5 and Qt 6)
+    carries the address to Python.
+    """
+    global _webLinkRelay
+    if not isWebBuild():
+        return False
+    if _webLinkRelay is None:
+        relay = qt.QTextBrowser()
+        relay.setObjectName("StudioWebLinkRelay")
+        relay.connect("anchorClicked(QUrl)", openLink)
+        _webLinkRelay = relay
+        # Qt wants the handler removed before its receiver is destroyed (deprecated since Qt 6.6)
+        slicer.app.connect("aboutToQuit()", uninstallWebLinkHandler)
+    for scheme in WEB_LINK_SCHEMES:
+        qt.QDesktopServices.setUrlHandler(scheme, _webLinkRelay, "anchorClicked")
+    return True
+
+
+def uninstallWebLinkHandler():
+    """Undo :func:`installWebLinkHandler` (the tests)."""
+    global _webLinkRelay
+    for scheme in WEB_LINK_SCHEMES:
+        qt.QDesktopServices.unsetUrlHandler(scheme)
+    _webLinkRelay = None
+
+
 def routeLinks(widget):
     """Send the links that a user clicks in ``widget`` (a ``QLabel`` or ``QTextBrowser``) through :func:`openLink`.
 
