@@ -3667,9 +3667,10 @@ class _FigureReference(VTKObservationMixin):
         return source.GetID() if source is not None else None
 
     def _refit(self):
+        # Only the pane and the figure are sized here: the scan or template view keeps the slice and zoom the user was
+        # on (USABILITY P4), a narrower view only shows less of the same scale
         if self.isShown():
-            if self._sizePane():
-                setViewLayers(fit=True)
+            self._sizePane()
             self._fit()
 
     @staticmethod

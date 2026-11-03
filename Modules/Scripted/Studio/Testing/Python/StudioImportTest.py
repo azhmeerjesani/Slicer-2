@@ -753,6 +753,34 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(self._background("Yellow").GetID(), second.GetID())
         self.assertEqual(self._background("Red").GetName(), "sub-09_T1w")
 
+    def test_figure_keeps_scan_view_slice_and_zoom(self):
+        """Opening a figure (Compare layout) leaves the slice and zoom the user was on in the scan view (USABILITY P4):
+        only the figure is fitted, in Yellow.
+        """
+        from StudioLib import importer
+
+        studioShell = self._applyStudio()
+        scan = self._writeVolume("sub-12_T1w.nii.gz", GRID_SHIFTED)
+        importer.loadFiles([scan], studioShell)
+        self._pump(8)
+        studioShell.switchTo("draw")
+        self._pump(4)
+        red = self.layoutManager.sliceWidget("Red")
+        sliceNode = red.mrmlSliceNode()
+        # The user moves to another slice and zooms in
+        sliceNode.SetSliceOffset(sliceNode.GetSliceOffset() + 20.0)
+        fieldOfView = list(sliceNode.GetFieldOfView())
+        sliceNode.SetFieldOfView(fieldOfView[0] * 0.5, fieldOfView[1] * 0.5, fieldOfView[2])
+        self._pump(4)
+        offsetBefore, heightBefore = sliceNode.GetSliceOffset(), sliceNode.GetFieldOfView()[1]
+        self._routeFigure(studioShell, fromLibrary=False)
+        self._wait(500)
+        self.assertEqual(self.layoutManager.layout, importer.COMPARE_LAYOUT_ID)
+        sliceNode = self.layoutManager.sliceWidget("Red").mrmlSliceNode()
+        self.assertAlmostEqual(sliceNode.GetSliceOffset(), offsetBefore, places=3)
+        # The pane is narrower, so only the width of the field of view may change
+        self.assertAlmostEqual(sliceNode.GetFieldOfView()[1], heightBefore, places=1)
+
     def test_toast_beside_figure_keeps_corner_text(self):
         """In Compare, a long consequence toast is beside the figure, above the corner text of the drawing view
         (its laterality cue, USABILITY P6), and its text is shortened with an ellipsis, never clipped.
