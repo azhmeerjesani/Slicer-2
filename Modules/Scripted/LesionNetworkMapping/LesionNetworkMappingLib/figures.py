@@ -1873,6 +1873,18 @@ def ortho(map, point=None, template=None, **kwargs):  # noqa: A002
         point = tuple(ctx.grid.coordinate(axis, peak[axis]) for axis in range(3))
     point = tuple(float(value) for value in point)
     indices = [ctx.grid.index(axis, point[axis]) for axis in range(3)]
+    for plane in PLANES:
+        axis = PLANE_AXIS[plane]
+        if not ctx.grid.contains(axis, point[axis]):
+            # The clipped index shows the edge plane; the crosshair line marking this coordinate in the
+            # two other tiles lies outside their images, so it is not drawn (the tile of this plane keeps
+            # its own crosshair, which marks the two other coordinates).
+            others = [other for other in PLANES if other != plane]
+            ctx.notes.append(
+                f"The {plane} coordinate {_signed(point[axis])} mm is outside the display grid; "
+                f"the nearest {plane} plane is shown, and the crosshair line for {AXIS_NAMES[axis]} = {_signed(point[axis])} mm "
+                f"is missing from the {others[0]} and {others[1]} tiles.",
+            )
     planes = [(plane, ctx.grid.coordinate(PLANE_AXIS[plane], indices[PLANE_AXIS[plane]]), indices[PLANE_AXIS[plane]]) for plane in PLANES]
 
     def build(info):

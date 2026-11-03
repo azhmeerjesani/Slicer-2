@@ -147,6 +147,37 @@ class FiguresTest(unittest.TestCase):
         # The peak of the map (x = -16) is chosen as the point
         self.assertAlmostEqual(figure.meta["point_mm"][0], -16.0, delta=SPACING)
 
+    def test_ortho_point_outside_the_display_grid_is_noted_in_the_caption(self):
+        def crosshair_lines(figure):
+            """Per plane: (vertical line drawn, horizontal line drawn) in the tile, from the crosshair colour."""
+            rgb = np.asarray(figure.base)
+            lines = {}
+            for tile in figure.meta["tiles"]:
+                x0, y0, x1, y1 = tile["bbox"]
+                hit = np.all(rgb[y0:y1, x0:x1] == np.array([0x33, 0xFF, 0x66]), axis=2)
+                # A line fills a whole column (or row) of the tile, except where the L/R stamps overdraw it
+                lines[tile["plane"]] = (bool(hit.mean(axis=0).max() > 0.8), bool(hit.mean(axis=1).max() > 0.8))
+            return lines
+
+        inside = figures.ortho(self.tmap, (0, 0, 0), self.template, **SMALL)
+        self.assertNotIn("outside the display grid", inside.caption)
+        self.assertEqual(crosshair_lines(inside), {"sagittal": (True, True), "coronal": (True, True), "axial": (True, True)})
+        far = figures.ortho(self.tmap, (500, 0, 0), self.template, **SMALL)
+        self.assertEqual(far.caption.count("outside the display grid"), 1)
+        self.assertIn(
+            "The sagittal coordinate +500 mm is outside the display grid; the nearest sagittal plane is shown, "
+            "and the crosshair line for x = +500 mm is missing from the coronal and axial tiles.",
+            far.caption,
+        )
+        # Exactly what the note says: the sagittal tile keeps its crosshair (it marks y and z), the x line
+        # (vertical in the coronal and axial tiles) is the one that is not drawn
+        self.assertEqual(crosshair_lines(far), {"sagittal": (True, True), "coronal": (False, True), "axial": (False, True)})
+        everything = figures.ortho(self.tmap, (500, 500, 500), self.template, **SMALL)
+        self.assertEqual(everything.caption.count("outside the display grid"), 3)
+        self.assertIn("the crosshair line for y = +500 mm is missing from the sagittal and axial tiles", everything.caption)
+        self.assertIn("the crosshair line for z = +500 mm is missing from the sagittal and coronal tiles", everything.caption)
+        self.assertEqual(crosshair_lines(everything), {"sagittal": (False, False), "coronal": (False, False), "axial": (False, False)})
+
     def test_reslice_uses_affines(self):
         data = blob_map()
         flipped = self.affine.copy()
