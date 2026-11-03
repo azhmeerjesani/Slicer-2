@@ -618,6 +618,16 @@ class PipelineConfig:
             self.preview_n = int(self.preview_n)
             if self.preview_n < 1:
                 raise ValueError("--preview must be at least 1")
+        # A negative seed would only fail inside a stage (numpy / the GLM design), after the earlier stages ran
+        for key, option in (("preview_seed", "--preview-seed"), ("null_seed", "--null-seed"), ("perm_seed", "--perm-seed")):
+            value = getattr(self, key)
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                raise ValueError(f"{option} must be a whole number (got {value!r})") from None
+            if value < 0:
+                raise ValueError(f"{option} must not be negative (got {value})")
+            setattr(self, key, value)
         self.rule = thresholds.normalize_rule(self.rule)
         self.extra_rules = [thresholds.normalize_rule(rule) for rule in (self.extra_rules or [])]
         self.sensitivity = float(self.sensitivity)
@@ -639,7 +649,10 @@ class PipelineConfig:
         if isinstance(self.scores, str) and self.scores not in ("auto", "none"):
             self.scores = [name.strip() for name in self.scores.split(",") if name.strip()]
         if isinstance(self.null_relocations, str) and self.null_relocations != "auto":
-            self.null_relocations = int(self.null_relocations)
+            try:
+                self.null_relocations = int(self.null_relocations)
+            except ValueError:
+                raise ValueError(f"--null-relocations must be auto or a number (got {self.null_relocations!r})") from None
         if isinstance(self.null_relocations, int) and self.null_relocations < 0:
             raise ValueError("--null-relocations must be at least 0")
         if int(self.min_slnm_n) < 3:

@@ -218,6 +218,26 @@ class AppHelpersTest(unittest.TestCase):
             config = app.build_config(parser.parse_args(base + ["--design", path]), tmp)
             self.assertEqual((config.covariates, config.volume_off_reason), (["age"], "age-matched cohort"))
 
+    def test_bad_seed_and_relocation_values_are_refused_up_front(self):
+        """A negative seed or a non-numeric --null-relocations is a usage error that names the option, before any stage runs (BB-1)."""
+        parser = app._parser()
+        base = ["in", "out", "group", "--connectome", "c", "--accept-terms"]
+        with tempfile.TemporaryDirectory() as tmp:
+            for extra, expected in ((["--preview", "5", "--preview-seed", "-1"], "--preview-seed must not be negative"),
+                                    (["--null-seed", "-3"], "--null-seed must not be negative"),
+                                    (["--perm-seed", "-2"], "--perm-seed must not be negative"),
+                                    (["--null-relocations", "abc"], "--null-relocations must be auto or a number")):
+                with self.assertRaises(ValueError, msg=extra) as caught:
+                    app.build_config(parser.parse_args(base + extra), tmp)
+                self.assertIn(expected, str(caught.exception))
+            config = app.build_config(parser.parse_args(base + ["--preview", "5", "--preview-seed", "0", "--null-seed", "7", "--perm-seed", "3", "--null-relocations", "12"]), tmp)
+            self.assertEqual((config.preview_seed, config.null_seed, config.perm_seed, config.null_relocations), (0, 7, 3, 12))
+        for key in ("preview_seed", "null_seed", "perm_seed"):
+            with self.assertRaises(ValueError):
+                pipeline.PipelineConfig(**{key: -1})
+            with self.assertRaises(ValueError):
+                pipeline.PipelineConfig(**{key: "x"})
+
     def test_recipe_is_recorded_and_outside_steps_reported(self):
         """--recipe records the recipe for pipeline.json and methods, and names the steps the pipeline does not run (BB-1)."""
         from LesionNetworkMappingLib import methods
