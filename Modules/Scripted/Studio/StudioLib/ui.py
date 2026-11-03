@@ -296,6 +296,11 @@ def readingOrderFocusWidgets(root):
             target = widget
             while target.focusProxy() is not None:
                 target = target.focusProxy()
+            if not int(target.focusPolicy) & int(qt.Qt.TabFocus):
+                # A composite whose proxy never takes Tab focus (the combo box inside a qMRMLNodeComboBox hands its focus
+                # to the node selector, which has no focus policy): Qt ignores setTabOrder() for such a widget, which
+                # would leave the chain unlinked there. The widget itself is the stop (arrangeTabOrder() lifts its proxy).
+                target = widget
             if id(target) not in resultIds and target.window() == window:
                 result.append(target)
                 resultIds.add(id(target))
@@ -330,8 +335,17 @@ def readingOrderFocusWidgets(root):
 def arrangeTabOrder(root):
     """Make the Tab order of the widgets under ``root`` follow their reading order (readingOrderFocusWidgets())."""
     widgets = readingOrderFocusWidgets(root)
-    for index in range(1, len(widgets)):
-        qt.QWidget.setTabOrder(widgets[index - 1], widgets[index])
+    # QWidget.setTabOrder() puts the focus proxy of a widget in its place: a widget that is its own stop although it has a
+    # proxy (see readingOrderFocusWidgets()) is arranged without the proxy, which is put back afterwards
+    lifted = [(widget, widget.focusProxy()) for widget in widgets if widget.focusProxy() is not None]
+    for widget, _proxy in lifted:
+        widget.setFocusProxy(None)
+    try:
+        for index in range(1, len(widgets)):
+            qt.QWidget.setTabOrder(widgets[index - 1], widgets[index])
+    finally:
+        for widget, proxy in lifted:
+            widget.setFocusProxy(proxy)
     return widgets
 
 

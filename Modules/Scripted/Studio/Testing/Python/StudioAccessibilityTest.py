@@ -604,6 +604,47 @@ class StudioAccessibilityTest(ScriptedLoadableModule.ScriptedLoadableModuleTest)
         top = min((index for index in range(len(stops)) if position(stops[index])[0] <= highest + 12), key=lambda index: position(stops[index])[1])
         return stops[top:] + stops[:top]
 
+    def test_tab_order_with_node_selector(self):
+        """A hidden node selector (qMRMLNodeComboBox: its combo box hands its focus to the selector, which takes no Tab
+        focus) between two widgets does not break the Tab order that ui.arrangeTabOrder() makes (Qt ignores
+        setTabOrder() for a widget without a focus policy), and the focus proxy is put back.
+        """
+        from StudioLib import ui
+
+        window = qt.QWidget()
+        window.setObjectName("StudioTabOrderTestWindow")
+        layout = qt.QVBoxLayout(window)
+        # Created in the opposite order of the layout
+        last = qt.QPushButton("Last", window)
+        middle = qt.QPushButton("Middle", window)
+        selector = slicer.qMRMLNodeComboBox(window)
+        selector.nodeTypes = ["vtkMRMLScalarVolumeNode"]
+        first = qt.QPushButton("First", window)
+        for widget in (first, selector, middle, last):
+            layout.addWidget(widget)
+        selector.hide()
+        window.show()
+        try:
+            self._pump(5)
+            combo = [child for child in selector.findChildren("QWidget") if child.focusProxy() is not None and child.focusProxy() == selector]
+            self.assertTrue(combo, "the combo box of the selector has the selector as its focus proxy")
+            combo = combo[0]
+            ui.arrangeTabOrder(window)
+            stops = []
+            widget = first
+            for _ in range(60):
+                if widget.window() == window and int(widget.focusPolicy) & int(qt.Qt.TabFocus):
+                    stops.append(widget)
+                widget = widget.nextInFocusChain()
+                if widget == first:
+                    break
+            order = [widget for widget in stops if widget in (first, combo, middle, last)]
+            self.assertEqual([widget.className() if widget == combo else widget.text for widget in order],
+                             ["First", combo.className(), "Middle", "Last"], "the selector sits between First and Middle")
+            self.assertTrue(combo.focusProxy() == selector, "the focus proxy of the combo box is back")
+        finally:
+            window.deleteLater()
+
     def _assertReadingOrder(self, stops, direction, what):
         """Each stop is not above (direction "down") or not left of (direction "right") the one before it, where the two
         are not on the same row (or column), within the rounding of a few pixels.
@@ -650,6 +691,18 @@ class StudioAccessibilityTest(ScriptedLoadableModule.ScriptedLoadableModuleTest)
         if "StudioSaveLesionButton" in names:
             self.assertLess(names.index("StudioDrawNotesRow"), names.index("StudioSaveLesionButton"), "the footer comes last")
         self._assertReadingOrder(stops, "down", "Draw inspector")
+
+        # Tab goes on from "More tools" to the next control below it in the inspector (the tool tiles, or the Display card
+        # where no tile is shown), not up to the panel header and out to the top bar (the hidden node selectors of the
+        # segment editor sit between the two in the layout)
+        more = self.mainWindow.findChild("QWidget", "SegmentEditorMoreToolsButton")
+        self.assertIsNotNone(more)
+        following = more.nextInFocusChain()
+        while following is not None and not (following.isVisible() and following.isEnabled() and int(following.focusPolicy) & int(qt.Qt.TabFocus)):
+            following = following.nextInFocusChain()
+        self.assertIsNotNone(following)
+        self.assertTrue(dock.isAncestorOf(following) and following.mapToGlobal(qt.QPoint(0, 0)).y() > more.mapToGlobal(qt.QPoint(0, 0)).y(),
+                        f"Tab goes from More tools to {following.objectName or following.className()}, not on down the inspector")
 
         # A card that a module adds later takes its place in the order (above the Display card here)
         late = qt.QPushButton("Late card")
