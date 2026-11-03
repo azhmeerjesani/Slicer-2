@@ -100,6 +100,9 @@ TILE_SPACING = 4
 #: Pixels of a tile's width that its label cannot use (the style elides a text wider than the tile minus this in the middle of the
 #: word: "Thr...old"); measured with Qt 5.15, a 59 px tile shows the 57 px "Threshold" and a 58 px one does not
 TILE_TEXT_MARGIN = 2
+#: Pixels that a label which can be broken at a space keeps free beyond ``TILE_TEXT_MARGIN`` (2 px on each side of the text): a
+#: two-word label that would run edge to edge in its tile ("Fill gaps" in a 58 px tile at a 125% font) is broken instead
+TILE_LABEL_PADDING = 4
 #: Padding of the inspector in the studio presentation (VISUAL 2.7): the tiles start and end this far from its edges, on
 #: the edges of the section labels and cards. The tile grid has no frame there; ``_updateTileGridInset()`` makes up what the
 #: margins of the editor (they follow the density of the style) leave of it.
@@ -141,15 +144,16 @@ def _layoutContentsMargins(layout):
     return margins() if callable(margins) else margins
 
 
-def tileLabelText(text, metrics, width):
+def tileLabelText(text, metrics, width, padding=0):
     """The label of a tool tile ``width`` px wide: ``text`` if it fits on one line, else broken in two lines at the space that
     makes the wider line shortest, so that the style does not elide it in the middle of a word ("Aut...ine"). A line that is
     still too wide (a long word, an extension's long title) is shortened at its end ("Thresh…"); ``metrics`` is the
-    ``QFontMetrics`` of the tile.
+    ``QFontMetrics`` of the tile. A label with a space that fits but leaves less than ``padding`` px free is broken too.
     """
     available = max(1, width - TILE_TEXT_MARGIN)
     text = " ".join(str(text).split())
-    if metrics.horizontalAdvance(text) <= available:
+    advance = metrics.horizontalAdvance(text)
+    if advance <= available and (advance <= available - padding or " " not in text):
         return text
     words = text.split(" ")
     candidates = [(" ".join(words[:index]), " ".join(words[index:])) for index in range(1, len(words))]
@@ -961,25 +965,41 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 button.setProperty("slicerRole", "toolTile")
                 self._repolish(button)
             # After the role: the label is wrapped to the tile with the font of the role
-            self._updateTileLabel(button)
+            self._updateTileLabel(button, equalize=False)
             toolTip = self._callExtension(self._extension, "effectToolTip", effect.name, positionalKeyText(index))
             if toolTip:
                 button.setToolTip(toolTip)
         for column in range(max(layout.columnCount(), columns)):
             layout.setColumnStretch(column, 1 if column < columns else 0)
+        self._equalizeTileHeights()
         for effectName in list(self._tileOutlines):
             self._updateTileOutline(effectName)
 
-    def _updateTileLabel(self, button):
+    def _updateTileLabel(self, button, equalize=True):
         """The label of a tile of the studio presentation, wrapped at a space to the width of the tile; the text of the
-        tile is set only when it changes (a resize of the tile calls this).
+        tile is set only when it changes (a resize of the tile calls this), and then the tiles get one height again.
         """
         plainText = button.property("studioTileText")
         if not plainText or button.property("slicerRole") != "toolTile":
             return
-        text = tileLabelText(plainText, qt.QFontMetrics(button.font), button.width)
+        text = tileLabelText(plainText, qt.QFontMetrics(button.font), button.width, TILE_LABEL_PADDING)
         if button.text != text:
             button.setText(text)
+            if equalize:
+                self._equalizeTileHeights()
+
+    def _equalizeTileHeights(self):
+        """Every tile of the grid is as tall as the tallest one: with a larger application font a label that wraps in two lines
+        makes its tile taller than the others (the style sizes a tile from its contents), and the grid centres the shorter
+        ones, so the icons and labels of a row would not share a line. At the default font all tiles stay 60 px.
+        """
+        tiles = [button for button in self._effectButtons()[1:] if button.property("slicerRole") == "toolTile"]
+        if not tiles:
+            return
+        height = max([TILE_MINIMUM_SIZE[1]] + [button.sizeHint.height() for button in tiles])
+        for button in tiles:
+            if button.minimumHeight != height:
+                button.setMinimumHeight(height)
 
     def _installTileFilter(self):
         if self._tileFilter is None:

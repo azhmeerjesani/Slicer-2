@@ -757,8 +757,75 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
         self.assertEqual(SegmentEditor.tileLabelText("Go go go gogogogogo", metrics, width), "Go go go\ngogogogogo")
         # One long word is shortened at its end, a short one stays whole
         self.assertEqual(SegmentEditor.tileLabelText("Brush", metrics, 100), "Brush")
+        # A label of two words that fits but leaves less than the padding free is broken; one word stays whole
+        edge = metrics.horizontalAdvance("Fill gaps") + SegmentEditor.TILE_TEXT_MARGIN + 1
+        self.assertEqual(SegmentEditor.tileLabelText("Fill gaps", metrics, edge), "Fill gaps")
+        self.assertEqual(SegmentEditor.tileLabelText("Fill gaps", metrics, edge, SegmentEditor.TILE_LABEL_PADDING), "Fill\ngaps")
+        self.assertEqual(SegmentEditor.tileLabelText("Brush", metrics, metrics.horizontalAdvance("Brush") + SegmentEditor.TILE_TEXT_MARGIN, SegmentEditor.TILE_LABEL_PADDING), "Brush")
         cut = SegmentEditor.tileLabelText("Extraordinarily", metrics, 40)
         self.assertTrue(cut.endswith("\u2026") and cut.startswith("Extra") and metrics.horizontalAdvance(cut) <= 40 - SegmentEditor.TILE_TEXT_MARGIN, cut)
+
+    def test_draw_tool_tiles_share_one_height_with_a_larger_font(self):
+        """With a 125 % application font (17 px) a two-word label that no longer fits its tile is broken in two lines. The tile
+        of such a label used to be taller than the others (the style sizes a tile from its contents) and the grid centred the
+        shorter ones: the tile row was ragged (BB-1, Smart fill at 66 px beside four 60 px tiles). Now every tile has the
+        height of the tallest one, a breakable label keeps ``TILE_LABEL_PADDING`` px free, and the default font keeps 60 px.
+        """
+        import SegmentEditor
+        from StudioLib import importer
+
+        studioShell = self._applyStudio()
+        self.mainWindow.showNormal()
+        self.mainWindow.resize(1366, 768)
+        self._wait(lambda: self.mainWindow.width <= 1366, 2000)
+        importer.startOnTemplate(shell=studioShell)
+        self._restores.append(importer._closeTemplateBanner)
+        self._pump(10)
+        widget = slicer.modules.SegmentEditorWidget
+        base = qt.QFont(qt.QApplication.font())
+        large = qt.QFont(base)
+        large.setPixelSize(17)
+
+        def tiles():
+            return [button for button in widget._effectButtons()[1:] if button.isVisibleTo(widget.editor)]
+
+        originalFonts = {str(tile.objectName): qt.QFont(tile.font) for tile in widget._effectButtons()[1:]}
+
+        self.assertEqual({tile.height for tile in tiles()}, {SegmentEditor.TILE_MINIMUM_SIZE[1]}, "the default font changed the tile height")
+        try:
+            qt.QApplication.setFont(large)
+            self._pump(16)
+            # The style gives a tile 0.8 of the application font when it polishes it (at startup); a tile font of 14 px (0.8 * 17)
+            # stands in for the restart that a Settings > Appearance > Font change needs. The inspector may be wider than at 1366 px
+            # in a long test session: the font grows until a label has to break.
+            for pixelSize in range(14, 25):
+                for tile in widget._effectButtons()[1:]:
+                    tileFont = qt.QFont(tile.font)
+                    tileFont.setPixelSize(pixelSize)
+                    tile.setFont(tileFont)
+                widget._applyStudioEffects()
+                self._pump(8)
+                if any("\n" in str(tile.text) for tile in tiles()):
+                    break
+            current = tiles()
+            self.assertGreaterEqual(len(current), 4)
+            self.assertEqual(len({tile.height for tile in current}), 1, f"the tiles differ in height: {[(str(t.text), t.height) for t in current]}")
+            for tile in current:
+                metrics = qt.QFontMetrics(tile.font)
+                for line in str(tile.text).split("\n"):
+                    self.assertLessEqual(metrics.horizontalAdvance(line) + SegmentEditor.TILE_TEXT_MARGIN, tile.width, f"{line!r} is wider than its tile")
+                if " " in " ".join(str(tile.text).split("\n")):
+                    # A one-line label of several words keeps its padding
+                    self.assertTrue("\n" in str(tile.text) or metrics.horizontalAdvance(str(tile.text)) + SegmentEditor.TILE_TEXT_MARGIN + SegmentEditor.TILE_LABEL_PADDING <= tile.width, str(tile.text))
+            self.assertTrue(any("\n" in str(tile.text) for tile in current), "a 17 px font should break a label (the premise of this test)")
+        finally:
+            qt.QApplication.setFont(base)
+            for tile in widget._effectButtons()[1:]:
+                tile.setFont(originalFonts[str(tile.objectName)])
+            self._pump(16)
+            widget._applyStudioEffects()
+            self._pump(8)
+        self.assertEqual({tile.height for tile in tiles()}, {SegmentEditor.TILE_MINIMUM_SIZE[1]}, "the tiles keep the height of the large font")
 
     def test_draw_more_tools_tile_labels_not_elided_1366(self):
         """The tiles of Draw > More tools show their names whole: "Auto outline", "Grow seeds" and "Mask volume" are wrapped at the
