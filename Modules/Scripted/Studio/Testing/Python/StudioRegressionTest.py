@@ -136,6 +136,8 @@ Run with the main window and testing enabled::
 - ``test_64_docs_put_the_save_status_on_the_left_of_the_top_bar`` (BB-1): studio.md and user_interface.md place the save status
   on the left of the top bar after the breadcrumb (VISUAL 4.1, as ``topbar.py`` adds it to the left layout) and call it the
   save status (Saved, Saving…, Not saved · Retry), not "the autosave status" on the right.
+- ``test_65_qc_chip_text_shows_every_line`` (BB-1): the text of a QC chip of the Lesion card is as high as its wrapped lines need
+  at its width (the row was capped at its size hint by a Maximum vertical policy, so the last line of a long text was cut off).
 """
 
 import inspect
@@ -4773,3 +4775,42 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertNotIn("save status", right, "studio.md still lists the save status on the right of the top bar")
         interface = texts[names[1]]
         self.assertIn("the breadcrumb with the save status after it", interface)
+
+    def test_65_qc_chip_text_shows_every_line(self):
+        """The text of a QC chip (Draw's Lesion card) is as high as its word-wrapped lines need at its width: the chip row
+        had a Maximum vertical size policy, which capped it at its size hint (computed for another width than the one it
+        gets), and the label lost its height-for-width flag to setSizePolicy(), so the last line of a long text ("... 16% (approx.: the atlas is in another template family)") was cut off (BB-1).
+        """
+        from StudioLib import lesionqc
+
+        class Owner:
+            def onAction(self, identifier):
+                pass
+
+        texts = (
+            ("Traced: L cerebral cortex 78%, L planum temporale 18%, L superior temporal gyrus, posterior division 16% "
+             "(approx.: the atlas is in another template family)"),
+            "Traced: L cerebral cortex 78%, L planum temporale 18%, L superior temporal gyrus, posterior division 16%",
+            "Traced: L cerebral cortex 78%",
+        )
+        host = qt.QWidget()
+        panel = lesionqc._QcPanel(Owner())
+        try:
+            hostLayout = qt.QVBoxLayout(host)
+            hostLayout.setContentsMargins(0, 0, 0, 0)
+            hostLayout.addWidget(panel.widget)
+            hostLayout.addStretch(1)
+            host.show()
+            for width in (300, 260, 420):
+                host.resize(width, 400)
+                for text in texts:
+                    panel.setChips([{"key": "location", "level": "neutral", "badge": "Where", "text": text, "tooltip": "", "actions": []}])
+                    for _ in range(6):
+                        slicer.app.processEvents()
+                    label = next(w for w in panel.chips["location"].findChildren("QLabel") if w.objectName == "StudioQcText")
+                    self.assertTrue(label.hasHeightForWidth(), "the chip text keeps its height-for-width flag")
+                    needed = label.heightForWidth(label.width)
+                    self.assertGreaterEqual(label.height, needed, f"width {width}: {label.height} px for a text that needs {needed} px: {text[:30]}")
+        finally:
+            panel.clear()
+            host.deleteLater()

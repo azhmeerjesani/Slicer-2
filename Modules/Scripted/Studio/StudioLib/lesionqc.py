@@ -2009,7 +2009,11 @@ class _QcPanel:
         self.qc = qc
         self.widget = qt.QWidget()
         self.widget.setObjectName(ROW_OBJECT_NAME)
-        self.widget.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Maximum)
+        # Not Maximum vertically: that caps the row at its size hint, computed for another width than the one it is given,
+        # and the last line of a long chip text was cut off (BB-1). Preferred takes the height its text needs at its width.
+        widgetPolicy = qt.QSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+        widgetPolicy.setHeightForWidth(True)
+        self.widget.setSizePolicy(widgetPolicy)
         self.layout = qt.QVBoxLayout(self.widget)
         self.layout.setContentsMargins(0, 2, 0, 0)
         self.layout.setSpacing(5)
@@ -2042,7 +2046,9 @@ class _QcPanel:
         frame = qt.QFrame()
         frame.setObjectName("StudioQcChip_" + spec["key"])
         frame.setProperty("studioQcLevel", spec["level"])
-        frame.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Maximum)
+        framePolicy = qt.QSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Maximum)
+        framePolicy.setHeightForWidth(True)
+        frame.setSizePolicy(framePolicy)
         frame.setAccessibleName(f"{spec['badge']}: {spec['text']}")
         layout = qt.QVBoxLayout(frame)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -2057,7 +2063,11 @@ class _QcPanel:
         label = qt.QLabel(spec["text"])
         label.setObjectName("StudioQcText")
         label.setWordWrap(True)
-        label.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+        # setSizePolicy() replaces the height-for-width flag that setWordWrap() set: keep it, or the layout gives the text a
+        # height for another width and the last line of a long text is cut off (the cross-family atlas note)
+        labelPolicy = qt.QSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+        labelPolicy.setHeightForWidth(True)
+        label.setSizePolicy(labelPolicy)
         label.setToolTip(spec.get("tooltip") or "")
         _setPixelFont(label, 12)
         token = "text" if spec["level"] == "warn" else "text2"
