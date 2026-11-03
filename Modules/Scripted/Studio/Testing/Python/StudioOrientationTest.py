@@ -645,6 +645,69 @@ class StudioOrientationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         low, high = self._sliceBounds("Green")
         self.assertAlmostEqual(greenNode.GetSliceOffset(), high - 1.0, delta=0.01)
 
+    def _viewMissesBackground(self, viewName):
+        """True if the in-plane rectangle of the view does not overlap the background volume (the view is black)."""
+        sliceWidget = self.layoutManager.sliceWidget(viewName)
+        bounds = [0.0] * 6
+        sliceWidget.sliceLogic().GetBackgroundSliceBounds(bounds)
+        sliceNode = sliceWidget.mrmlSliceNode()
+        width, height = sliceNode.GetDimensions()[:2]
+        self.assertGreater(width, 1)
+        self.assertGreater(height, 1)
+        # Volume slice bounds are in the slice axes frame without the slice origin
+        rasToSlice = vtk.vtkMatrix4x4()
+        rasToSlice.DeepCopy(sliceNode.GetSliceToRAS())
+        for row in range(3):
+            rasToSlice.SetElement(row, 3, 0.0)
+        rasToSlice.Invert()
+        xyToRAS = sliceNode.GetXYToRAS()
+        corners = [rasToSlice.MultiplyPoint(xyToRAS.MultiplyPoint([float(x), float(y), 0.0, 1.0])) for x in (0, width) for y in (0, height)]
+        xs = [corner[0] for corner in corners]
+        ys = [corner[1] for corner in corners]
+        return max(xs) < bounds[0] or min(xs) > bounds[1] or max(ys) < bounds[2] or min(ys) > bounds[3]
+
+    def test_recentre_fits_view_that_misses_the_background(self):
+        """U-04: a scan whose origin is far from the view's field of view (more than a view width away in the view plane)
+        is fitted into the view when it becomes the background, so the view is not black; the offset still moves inside it.
+        """
+
+        studioShell = self._applyStudio()
+        self._ensureLetters(studioShell)
+        self._setFourUp()
+        bigNode = self._addVolume("big", 100, 2.0, (-100, -100, -100))
+        farNode = self._addVolume("far", 40, 2.0, (900, 800, 700))
+        for viewName in ("Red", "Green", "Yellow"):
+            self._setBackground(viewName, bigNode)
+            self.layoutManager.sliceWidget(viewName).sliceLogic().FitSliceToAll()
+        self._pump()
+        for viewName in ("Red", "Green", "Yellow"):
+            self.assertFalse(self._viewMissesBackground(viewName), viewName)
+            self._setBackground(viewName, farNode)
+            self.assertFalse(self._viewMissesBackground(viewName), f"{viewName} is black after the background changed")
+            low, high = self._sliceBounds(viewName)
+            offset = self.layoutManager.sliceWidget(viewName).mrmlSliceNode().GetSliceOffset()
+            self.assertTrue(low <= offset <= high, f"{viewName}: offset {offset} outside [{low}, {high}]")
+            # And back again
+            self._setBackground(viewName, bigNode)
+            self.assertFalse(self._viewMissesBackground(viewName), f"{viewName} is black after swapping back")
+
+    def test_recentre_keeps_field_of_view_when_background_overlaps(self):
+        """A new background that overlaps the view's field of view does not change the field of view."""
+
+        studioShell = self._applyStudio()
+        self._ensureLetters(studioShell)
+        self._setFourUp()
+        bigNode = self._addVolume("big", 100, 2.0, (-100, -100, -100))
+        smallNode = self._addVolume("small", 20, 2.0, (-20, -20, -20))
+        self._setBackground("Green", bigNode)
+        greenLogic = self.layoutManager.sliceWidget("Green").sliceLogic()
+        greenNode = self.layoutManager.sliceWidget("Green").mrmlSliceNode()
+        greenLogic.FitSliceToAll()
+        self._pump()
+        fieldOfView = list(greenNode.GetFieldOfView())
+        self._setBackground("Green", smallNode)
+        self.assertEqual(list(greenNode.GetFieldOfView()), fieldOfView)
+
     def test_recentre_skips_figure_views(self):
         """A figure keeps the slice offset it has: it is not moved into the picture."""
 

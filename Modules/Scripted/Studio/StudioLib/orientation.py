@@ -373,11 +373,36 @@ class _ViewLetters:
         normal = tuple(round(sliceToRAS.GetElement(row, 2), 3) for row in range(3))
         return (node.GetID(), node.GetAttribute("Studio.Role"), node.GetAttribute("Studio.FigureConvention"), normal)
 
-    def _recentre(self):
-        """Move the slice offset into the new background volume (half a voxel inside the nearest bound).
+    def _viewMissesBackground(self, bounds):
+        """True if the view's in-plane rectangle does not overlap the in-plane extent of the background (``bounds`` are the
+        slice-space bounds of the background volume): such a view shows nothing but black.
+        """
+        dimensions = self.sliceNode.GetDimensions()
+        if not dimensions or dimensions[0] < 2 or dimensions[1] < 2:
+            return False
+        # The slice-space bounds of a volume are in the frame of the slice axes with the origin at (0, 0, 0) (see
+        # vtkMRMLSliceLogic::GetVolumeSliceBounds), so the corners of the view go through the same frame
+        rasToSlice = vtk.vtkMatrix4x4()
+        rasToSlice.DeepCopy(self.sliceNode.GetSliceToRAS())
+        for row in range(3):
+            rasToSlice.SetElement(row, 3, 0.0)
+        rasToSlice.Invert()
+        xyToRAS = self.sliceNode.GetXYToRAS()
+        corners = [
+            rasToSlice.MultiplyPoint(xyToRAS.MultiplyPoint([float(x), float(y), 0.0, 1.0]))
+            for x in (0, dimensions[0]) for y in (0, dimensions[1])
+        ]
+        xs = [corner[0] for corner in corners]
+        ys = [corner[1] for corner in corners]
+        return max(xs) < bounds[0] or min(xs) > bounds[1] or max(ys) < bounds[2] or min(ys) > bounds[3]
 
-        Only a view whose offset is outside the volume along the view normal is moved. Figure views are skipped.
-        Return True if the offset changed.
+    def _recentre(self):
+        """Bring the new background volume into view (U-04: a view never stays black after its background changes).
+
+        A view whose offset is outside the volume along the view normal is moved half a voxel inside the nearest bound.
+        A view whose field of view does not overlap the volume in the view plane (two scans with far apart origins) is
+        fitted to the volume, as the Fit button does; the slice offset stays where it is. Figure views are skipped.
+        Return True if the offset or the field of view changed.
         """
         if self.isFigure or self.backgroundNode is None:
             return False
@@ -387,13 +412,19 @@ class _ViewLetters:
         low, high = bounds[4], bounds[5]
         if not high > low:
             return False
+        changed = False
         offset = self.sliceNode.GetSliceOffset()
-        if low <= offset <= high:
-            return False
-        spacing = sliceLogic.GetBackgroundSliceSpacing()
-        half = min(0.5 * abs(spacing[2]), 0.5 * (high - low))
-        sliceLogic.SetSliceOffset(low + half if offset < low else high - half)
-        return True
+        if not low <= offset <= high:
+            spacing = sliceLogic.GetBackgroundSliceSpacing()
+            half = min(0.5 * abs(spacing[2]), 0.5 * (high - low))
+            sliceLogic.SetSliceOffset(low + half if offset < low else high - half)
+            changed = True
+        if self._viewMissesBackground(bounds):
+            offset = self.sliceNode.GetSliceOffset()
+            sliceLogic.FitSliceToAll()
+            sliceLogic.SetSliceOffset(offset)
+            changed = True
+        return changed
 
     def _cornerTextHeight(self, position=0):
         """Height in pixels of the text of a lower corner of the corner annotation (0: lower left, 1: lower right; 0 if it
