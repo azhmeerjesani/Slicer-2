@@ -927,6 +927,47 @@ class StudioNormalizeTest(unittest.TestCase):
             host.hide()
             host.deleteLater()
 
+    def test_12_resume_label_singular(self):
+        """The Stopped / Interrupted line counts the subjects left in the singular for one ("1 subject left", not "1 subjects left")."""
+        from StudioLib import libcard_normalize as ln
+
+        class Label:
+            text = ""
+
+            def setText(self, text):
+                self.text = text
+
+            def setVisible(self, visible):
+                pass
+
+            setEnabled = setVisible
+
+        class Run:
+            failures = {}
+
+            def __init__(self, n, stopped):
+                self.n = n
+                self.stopped = stopped
+
+            def isBusy(self):
+                return False
+
+            def interrupted(self):
+                return ([f"sub-{i + 1:02d}" for i in range(self.n)], {})
+
+        class Card:
+            def __init__(self):
+                self.resumeLabel = Label()
+                self.progress = type("P", (), {"widget": Label()})()
+                self.resumeRow = self.failureLabel = self.reviewRow = self.reviewButton = Label()
+                self.session = type("S", (), {"study": {}})()
+
+        for n, stopped, expected in ((1, True, "Stopped · 1 subject left"), (1, False, "Interrupted · 1 subject left"),
+                                     (2, True, "Stopped · 2 subjects left"), (3, False, "Interrupted · 3 subjects left")):
+            card = Card()
+            ln.NormalizationCard._refreshStatus(card, Run(n, stopped), {"review": 0})
+            self.assertEqual(str(card.resumeLabel.text), expected)
+
 
 #: How long to let events run after Done so that the deferred automatic start has happened (ms)
 AUTO_WAIT_MS = 600

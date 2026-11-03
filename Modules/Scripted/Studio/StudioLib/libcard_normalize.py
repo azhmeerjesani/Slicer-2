@@ -1614,7 +1614,9 @@ class NormalizationCard:
         self.resumeRow.setVisible(pending is not None)
         if pending is not None:
             label = _("Stopped") if current.stopped else _("Interrupted")
-            self.resumeLabel.setText(_("{label} · {n} subjects left").format(label=label, n=len(pending[0])))
+            n = len(pending[0])
+            text = _("{label} · 1 subject left") if n == 1 else _("{label} · {n} subjects left")
+            self.resumeLabel.setText(text.format(label=label, n=n))
         failures = {sid: reason for sid, reason in (current.failures if current is not None else {}).items() if sid in self.session.study}
         self.failureLabel.setVisible(bool(failures) and not busy)
         if failures:
