@@ -590,7 +590,7 @@ def fetch_live_terms(timeout=15.0, session=None):
         response.raise_for_status()
         value = response.json()
     except Exception as exc:
-        raise fetch.OfflineError(f"The data use terms could not be fetched from {api}: {exc}") from None
+        raise fetch.OfflineError(fetch.network_problem(exc, api)) from None
     for part in str(field).split("."):
         value = value.get(part) if isinstance(value, dict) else None
     if not isinstance(value, str) or not value.strip():

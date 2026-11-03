@@ -227,7 +227,7 @@ def _get_json(session, url, what):
         response.raise_for_status()
         return response.json()
     except Exception as exc:
-        raise jobs.JobError(f"{what} could not be fetched from {url}: {exc}", code="network") from None
+        raise jobs.JobError(f"{what} could not be fetched: {fetch.network_problem(exc, url)}", code="network") from None
 
 
 def _live_file(item):
