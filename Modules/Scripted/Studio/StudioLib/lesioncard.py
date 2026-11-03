@@ -255,11 +255,10 @@ def fixesHtml(stats, outsideKnown=False):
 
 
 def _setPixelFont(widget, basePx, weight=None):
-    font = qt.QFont(widget.font)
-    font.setPixelSize(ui.fontPx(basePx))
-    if weight is not None:
-        font.setWeight(weight)
-    widget.setFont(font)
+    """Set a ``basePx`` font (for a 13 px body) on ``widget``, and keep it in proportion to the application font, also
+    while the card is not in the window (the card is not shown in every workspace).
+    """
+    ui._font(widget, ui.fontPx(basePx), weight)
 
 
 def _iconButton(iconName, toolTip, objectName, checkable=False):

@@ -48,6 +48,7 @@
 #include <QStyleOptionGroupBox>
 #include <QStyleOptionSpinBox>
 #include <QTabBar>
+#include <QTimer>
 #include <QToolButton>
 #include <QtMath>
 
@@ -1880,6 +1881,116 @@ QObject* sliderHandlePressFilter()
   return filter;
 }
 
+//------------------------------------------------------------------------------
+/// Dynamic property of the widgets with a role font: the font that polish() set (see followApplicationFont())
+const char* const RoleFontProperty = "_slicerRoleFont";
+
+//------------------------------------------------------------------------------
+/// Set the font of the role of \a widget, scaled from its current (inherited) font. Return true if the role has a font.
+bool applyRoleFont(QWidget* widget, const QByteArray& role)
+{
+  if (role == "sectionHeader")
+  {
+    // Section labels: 12 px (at a 13 px body), SemiBold, sentence case
+    QFont font = scaledFont(widget->font(), 0.92);
+    font.setWeight(QFont::DemiBold);
+    widget->setFont(font);
+  }
+  else if (role == "overline")
+  {
+    // The rare all-caps labels ("CONTINUE", the group headers of Search): 11 px, SemiBold, +4% letter spacing
+    QFont font = scaledFont(widget->font(), 0.85);
+    font.setWeight(QFont::DemiBold);
+    font.setCapitalization(QFont::AllUppercase);
+    font.setLetterSpacing(QFont::PercentageSpacing, 104.);
+    widget->setFont(font);
+  }
+  else if (role == "secondaryText" || role == "caption" || role == "chip")
+  {
+    widget->setFont(scaledFont(widget->font(), 0.92));
+  }
+  else if (role == "kbd")
+  {
+    widget->setFont(scaledFont(widget->font(), 0.85));
+  }
+  else if (role == "toolTile")
+  {
+    // 10.5 px (at a 13 px body): the 57 px "Threshold" is not elided in a 56 px tile (the style elides a text wider than
+    // the tile minus 2 px in the middle of a word)
+    widget->setFont(scaledFont(widget->font(), 0.8));
+  }
+  else
+  {
+    return false;
+  }
+  return true;
+}
+
+//------------------------------------------------------------------------------
+/// Return true if \a a and \a b have the same size, weight, capitalization and letter spacing (the attributes of the role
+/// fonts: the family is inherited, and follows the application font)
+bool sameRoleFontAttributes(const QFont& a, const QFont& b)
+{
+  return a.pixelSize() == b.pixelSize() && qFuzzyCompare(a.pointSizeF() + 1., b.pointSizeF() + 1.) && a.weight() == b.weight() //
+         && a.capitalization() == b.capitalization() && a.letterSpacingType() == b.letterSpacingType()                         //
+         && qFuzzyCompare(a.letterSpacing() + 1., b.letterSpacing() + 1.);
+}
+
+//------------------------------------------------------------------------------
+/// Make the font of the role of \a widget again from its inherited font, unless the application set another font on the
+/// widget since polish() (see followApplicationFont())
+void refreshRoleFont(QWidget* widget)
+{
+  const QVariant roleFont = widget->property(RoleFontProperty);
+  if (!roleFont.isValid() || !sameRoleFontAttributes(widget->font(), roleFont.value<QFont>()))
+  {
+    return;
+  }
+  widget->setFont(QFont());
+  if (applyRoleFont(widget, widgetRole(widget)))
+  {
+    widget->setProperty(RoleFontProperty, widget->font());
+  }
+  else
+  {
+    widget->setProperty(RoleFontProperty, QVariant());
+  }
+}
+
+//------------------------------------------------------------------------------
+/// polish() sets the role font once, and a widget with its own font no longer follows the application font: when the
+/// application font changes, make the role fonts again from the new font. Done once the widgets have the new inherited
+/// font, for all widgets, also those that are not in the window at that time (the panels of the modules that are not
+/// shown). The application sends the font change event to the windows only.
+void followApplicationFont()
+{
+  static bool connected = false;
+  if (connected || !qobject_cast<QGuiApplication*>(QCoreApplication::instance()))
+  {
+    return;
+  }
+  connected = true;
+  QObject::connect(static_cast<QGuiApplication*>(QCoreApplication::instance()),
+                   &QGuiApplication::fontChanged,
+                   QCoreApplication::instance(),
+                   []()
+                   {
+                     QTimer::singleShot(0,
+                                        QCoreApplication::instance(),
+                                        []()
+                                        {
+                                          const QWidgetList widgets = QApplication::allWidgets();
+                                          for (QWidget* widget : widgets)
+                                          {
+                                            if (widget->property(RoleFontProperty).isValid())
+                                            {
+                                              refreshRoleFont(widget);
+                                            }
+                                          }
+                                        });
+                   });
+}
+
 } // namespace
 
 // --------------------------------------------------------------------------
@@ -2966,38 +3077,12 @@ void qSlicerStyle::polish(QWidget* widget)
     return;
   }
   // Role fonts, unless the application set a font on the widget
-  if (!widget->testAttribute(Qt::WA_SetFont))
+  if (!widget->testAttribute(Qt::WA_SetFont) && applyRoleFont(widget, role))
   {
-    if (role == "sectionHeader")
-    {
-      // Section labels: 12 px (at a 13 px body), SemiBold, sentence case
-      QFont font = scaledFont(widget->font(), 0.92);
-      font.setWeight(QFont::DemiBold);
-      widget->setFont(font);
-    }
-    else if (role == "overline")
-    {
-      // The rare all-caps labels ("CONTINUE", the group headers of Search): 11 px, SemiBold, +4% letter spacing
-      QFont font = scaledFont(widget->font(), 0.85);
-      font.setWeight(QFont::DemiBold);
-      font.setCapitalization(QFont::AllUppercase);
-      font.setLetterSpacing(QFont::PercentageSpacing, 104.);
-      widget->setFont(font);
-    }
-    else if (role == "secondaryText" || role == "caption" || role == "chip")
-    {
-      widget->setFont(scaledFont(widget->font(), 0.92));
-    }
-    else if (role == "kbd")
-    {
-      widget->setFont(scaledFont(widget->font(), 0.85));
-    }
-    else if (role == "toolTile")
-    {
-      // 10.5 px (at a 13 px body): the 57 px "Threshold" is not elided in a 56 px tile (the style elides a text wider than
-      // the tile minus 2 px in the middle of a word)
-      widget->setFont(scaledFont(widget->font(), 0.8));
-    }
+    // The font is set once, so the widget would no longer follow the application font: remember it, to size it again
+    // when the application font changes (see followApplicationFont())
+    widget->setProperty(RoleFontProperty, widget->font());
+    followApplicationFont();
   }
   // Horizontal padding of the label roles
   if (QLabel* label = qobject_cast<QLabel*>(widget))

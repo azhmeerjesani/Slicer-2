@@ -147,17 +147,21 @@ def _paletteChipColors(level):
 
 
 def _font(widget, pixelSize, bold=False):
+    """Set a ``pixelSize`` px font (for a 13 px body) on ``widget``. In Studio it follows the application font when that
+    changes (also while the widget is not in the window).
+    """
     ui = _studioUi()
-    font = qt.QFont(widget.font)
-    size = pixelSize
-    if ui is not None and hasattr(ui, "fontPx"):
+    weight = qt.QFont.DemiBold if bold else None
+    if ui is not None and hasattr(ui, "_font") and hasattr(ui, "fontPx"):
         try:
-            size = ui.fontPx(pixelSize)
+            ui._font(widget, ui.fontPx(pixelSize), weight)
+            return
         except Exception:
-            size = pixelSize
-    font.setPixelSize(int(size))
-    if bold:
-        font.setWeight(qt.QFont.DemiBold)
+            pass
+    font = qt.QFont(widget.font)
+    font.setPixelSize(int(pixelSize))
+    if weight is not None:
+        font.setWeight(weight)
     widget.setFont(font)
 
 

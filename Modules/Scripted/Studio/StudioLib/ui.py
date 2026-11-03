@@ -667,6 +667,23 @@ def _register(widget, designPx, weight, letterSpacing):
         _fontRegistryPruneSize = max(256, 2 * len(_fontRegistry))
 
 
+#: Dynamic property that ``qSlicerStyle`` sets on a widget with a role font (``slicerRole``): the font it set. The style
+#: sizes that font again when the application font changes.
+_ROLE_FONT_PROPERTY = "_slicerRoleFont"
+
+
+def _hasStyleRoleFont(widget):
+    """True if the font of ``widget`` is the role font of the style, which follows the application font by itself."""
+    try:
+        stored = widget.property(_ROLE_FONT_PROPERTY)
+        if stored is None:
+            return False
+        font = widget.font
+        return stored.pixelSize() == font.pixelSize() and abs(stored.pointSizeF() - font.pointSizeF()) < 1e-6 and stored.weight() == font.weight()
+    except Exception:
+        return False
+
+
 def _isStudioWidget(widget):
     """True if ``widget`` or the closest named part of the window above it is a Studio widget (``Studio*`` object name).
 
@@ -688,7 +705,8 @@ def _refreshStudioWidgetFonts(previousApplicationFontPx):
       as set on the widget, so it no longer follows the application font. Under each topmost Studio stylesheet, the
       widgets whose font the application did not set get an empty font (the inherited one again), then the stylesheet
       is set again, which polishes them with the new font and the font rules of the stylesheets.
-    - A Studio widget with a pixel font set directly (``widget.setFont()``, not ``_font()``) joins the ``_font()``
+    - A Studio widget with a pixel font set directly (``widget.setFont()``, not ``_font()``, and not a role font of the
+      style: ``qSlicerStyle`` sizes those again itself) joins the ``_font()``
       registry with the same ratio to the previous application font, so that ``_refreshFonts()`` resizes it now and
       after each later change.
     """
@@ -700,7 +718,12 @@ def _refreshStudioWidgetFonts(previousApplicationFontPx):
     for widget in mainWindow.findChildren("QWidget"):
         if widget.styleSheet and str(widget.objectName).startswith("Studio"):
             styled.append(widget)
-        if widget.testAttribute(qt.Qt.WA_SetFont) and widget.font.pixelSize() > 0 and not widget.property(_FONT_REGISTERED_PROPERTY):
+        if (
+            widget.testAttribute(qt.Qt.WA_SetFont)
+            and widget.font.pixelSize() > 0
+            and not widget.property(_FONT_REGISTERED_PROPERTY)
+            and not _hasStyleRoleFont(widget)
+        ):
             explicit.append(widget)
     for index, root in enumerate(styled):
         # isAncestorOf() is also true for the widget itself

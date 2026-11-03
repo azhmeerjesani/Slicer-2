@@ -1050,6 +1050,73 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
     # (e) view bars
     #
 
+    def test_secondary_texts_follow_application_font(self):
+        """The secondary texts of Map and Draw (role fonts of the style: ``secondaryText``, ``caption``, ``chip``; the lesion card
+        labels; the Map disclaimer) grow with the application font when it is changed at run time (Settings > Appearance > Font),
+        also in a workspace that is not shown at that time (USABILITY 9.4): they kept their size until the next start (BB-1).
+        """
+        from StudioLib import ui
+
+        studioShell = self._applyStudio()
+        volume = self._addVolume()
+        slicer.util.setSliceViewerLayers(background=volume, fit=True)
+        for workspace in ("draw", "map"):
+            studioShell.switchTo(workspace)
+            self._pump(10)
+        studioShell.switchTo("library")
+        self._pump(10)
+        names = [
+            "StudioLesionReadout",
+            "StudioLesionSaveState",
+            "StudioStatusChip",
+            "LNMNormalizeExplanation",
+            "LNMSubjectsText",
+            "LNMNullHint",
+            "LNMDerivedLine",
+            "LNMDisclaimer",
+        ]
+
+        def widgets():
+            found = {}
+            for widget in qt.QApplication.allWidgets():
+                name = str(widget.objectName)
+                if name in names and widget.isWidgetType() and hasattr(widget, "text"):
+                    found.setdefault(name, []).append(widget)
+            return found
+
+        def pixelSize(widget):
+            return qt.QFontInfo(widget.font).pixelSize()
+
+        before = widgets()
+        missing = [name for name in names if name not in before]
+        if "LNMNormalizeExplanation" in missing and "LNMDisclaimer" in missing:
+            self.skipTest("the Map module is not available")
+        self.assertEqual(missing, [], "labels of the test are missing")
+        sizesBefore = {name: [pixelSize(widget) for widget in found] for name, found in before.items()}
+        base = qt.QFont(qt.QApplication.font())
+        self._restores.append(lambda: qt.QApplication.setFont(base))
+        basePx = round(ui.applicationFontPx())
+        large = qt.QFont(base)
+        large.setPixelSize(basePx + 4)
+        qt.QApplication.setFont(large)
+        self._pump(10)
+        self.assertEqual(round(ui.applicationFontPx()), basePx + 4, "the application font did not change (the premise of this test)")
+        after = widgets()
+        for name in names:
+            for index, widget in enumerate(after[name]):
+                self.assertGreater(
+                    pixelSize(widget),
+                    sizesBefore[name][index],
+                    f"{name} keeps its {sizesBefore[name][index]} px font after the application font grew by 4 px",
+                )
+        # The sizes keep their proportion: back to the first font, back to the first sizes
+        qt.QApplication.setFont(base)
+        self._pump(10)
+        again = widgets()
+        for name in names:
+            for index, widget in enumerate(again[name]):
+                self.assertLessEqual(abs(pixelSize(widget) - sizesBefore[name][index]), 1, f"{name} after the font is back")
+
     def test_map_panel(self):
         """Map in Studio (V-03): the seed modes are a row of short labels above the steps, still shown after the Seed step
         collapsed and Map was left and entered again; the peaks table names the region; the Classic look restores them.
