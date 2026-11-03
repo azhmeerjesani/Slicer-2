@@ -4156,6 +4156,67 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertEqual(session.study.column_spec("my_score").role, "score")
         self.assertFalse(dialog.widget.isVisible())
 
+    def test_58_levels_of_registered_columns_in_columns_and_the_case_section(self):
+        """Levels typed in Columns... for a registered column were saved, but the Case section kept offering, warning about and
+        refusing against the registry's levels (sex "X" got "Unknown sex value 'X'", dimensionality "mixed" was refused) (BB-1).
+        A lenient column (sex) now offers and accepts the levels the study declares; the Levels of a strict registered column
+        (dimensionality) are read-only, like the Units of a registered column, because the application refuses any other value.
+        """
+        from StudioLib import libcard_columns as lc
+        from StudioLib import study_ui
+
+        study = self._study([("sub-01", {"sex": "F", "dimensionality": "3D"}, False), ("sub-02", {"sex": "M", "dimensionality": "3D"}, False)])
+        session = study_ui.openStudy(study.path, None, showLibrary=False)
+        self.addCleanup(study_ui.closeStudy)
+        slicer.app.processEvents()
+        dialog = lc.ColumnsDialog(session)
+        self.addCleanup(dialog.widget.deleteLater)
+        dialog.show()
+        dialog.onlyUnset.setChecked(False)
+        slicer.app.processEvents()
+
+        def editable(name):
+            return bool(dialog.table.item(dialog.rowOf(name), lc.COL_LEVELS).flags() & qt.Qt.ItemIsEditable)
+
+        self.assertFalse(editable("dimensionality"), "the levels of a strict registered column are fixed")
+        self.assertTrue(editable("sex"), "the levels of a lenient registered column can be declared")
+        dialog.setText("sex", lc.COL_LEVELS, "M = male; F = female; O = other; X = non-binary")
+        self.assertEqual(list(dialog.changes()[0]), ["sex"], "the read-only Levels of dimensionality are not a change")
+        self.assertEqual(sorted(dialog.confirm()["applied"]), ["sex"])
+        slicer.app.processEvents()
+
+        host = qt.QWidget()
+        self.addCleanup(host.deleteLater)
+        hostLayout = qt.QVBoxLayout(host)
+        sectionWidget = lc._createSection(session)
+        section = lc._sections[sectionWidget]
+        hostLayout.addWidget(sectionWidget)
+        host.resize(306, 700)
+        host.show()
+        section.refresh("sub-01")
+        for key in ("imaging", "case"):
+            button = section.groups[key][0]
+            if not button.isChecked():
+                button.click()
+        slicer.app.processEvents()
+        combo = section.editors["sex"]
+        self.assertEqual([combo.itemData(i) for i in range(combo.count)], [None, "M", "F", "O", "X"], "the combo offers the declared levels")
+        self.assertEqual(combo.itemText(4), "non-binary")
+        self.assertTrue(section.setField("sex", "X"))
+        self.assertEqual(session.study.subject("sub-01")["sex"], "X")
+        section.refresh("sub-01")
+        self.assertEqual(str(section.warningLabel.text), "", "a level the study declares is no warning")
+        self.assertEqual(combo.currentData, "X")
+        # Other studies keep the registry's levels, and an undeclared value still warns
+        session.study.set("sub-02", {"sex": "Z"})
+        section.refresh("sub-02")
+        self.assertIn("Unknown sex value 'Z'", str(section.warningLabel.text))
+        # A strict column keeps the registry's levels and refuses others
+        dimensionality = section.editors["dimensionality"]
+        self.assertEqual([dimensionality.itemData(i) for i in range(dimensionality.count)], [None, "2D", "3D", "multi2D"])
+        self.assertFalse(section.setField("dimensionality", "mixed"))
+        self.assertEqual(session.study.subject("sub-02")["dimensionality"], "3D")
+
     def test_57_cohort_card_names_left_out_lesions_in_plain_words(self):
         """Cohort diagnostics said "12 not used: review_status != approved (12)" (the engine's reason strings)."""
         from StudioLib import libcard_cohort

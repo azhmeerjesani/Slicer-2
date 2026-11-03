@@ -412,6 +412,9 @@ class ColumnsDialog:
                 elif column == COL_UNITS and info["registered"] and schema.registered(name).units:
                     _readOnly(item)  # the registry's units show through: they cannot be removed
                     item.setToolTip(_("The units of a registered column are the registry's"))
+                elif column == COL_LEVELS and info["registered"] and schema.registered(name).strict and schema.registered(name).levels:
+                    _readOnly(item)  # the application checks the values of a strict column against the registry's levels
+                    item.setToolTip(_("The levels of this registered column are fixed: the application only accepts these values"))
                 elif column == COL_DESCRIPTION and info["registered"] and schema.registered(name).description:
                     item.setToolTip(_("Clearing the description of a registered column restores the registry's"))
                 self.table.setItem(row, column, item)
@@ -783,10 +786,7 @@ class CaseSection:
             combo = qt.QComboBox()
             combo.setObjectName(f"StudioCaseEdit_{column}")
             combo.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
-            combo.addItem("—", None)
-            for level, description in spec.levels.items():
-                combo.addItem(levelLabel(level, description), level)
-            combo.setProperty("baseCount", combo.count)
+            self._fillLevels(combo, spec)
             if not spec.strict:
                 combo.setEditable(True)
                 combo.lineEdit().setPlaceholderText("—")
@@ -801,6 +801,37 @@ class CaseSection:
         if column == "doi":
             edit.connect("textChanged(QString)", lambda text: self._updateDoiButton())
         return edit
+
+    @staticmethod
+    def _fillLevels(combo, spec):
+        """Fill a combo with the empty choice and the levels of ``spec`` (and remember which levels these are)."""
+        combo.clear()
+        combo.addItem("—", None)
+        for level, description in spec.levels.items():
+            combo.addItem(levelLabel(level, description), level)
+        combo.setProperty("baseCount", combo.count)
+        combo.setProperty("levelsKey", json.dumps(list(spec.levels.items())))
+
+    @staticmethod
+    def _specOf(study, column):
+        """The spec the Case section works with for a column: the registry's; for a lenient column with levels, the levels
+        the study declares in participants.json (Columns…, or a BIDS dataset's own), which are the ones that column accepts
+        without a warning. A strict column keeps the registry's levels: the application refuses any other value.
+        """
+        spec = _lnm("schema").registered(column)
+        if spec is None or spec.strict or not spec.levels or spec.separator is not None:
+            return spec
+        declared = study.column_spec(column).levels
+        return spec.replace(levels=declared) if declared else spec
+
+    def _syncLevels(self, study, column, editor):
+        """Offer the levels the open study declares for a lenient column (the editors are made once, for every study)."""
+        if not hasattr(editor, "itemData") or editor.hasFocus() or (editor.isEditable() and editor.lineEdit().hasFocus()):
+            return
+        spec = self._specOf(study, column)
+        if spec is None or not spec.levels or editor.property("levelsKey") == json.dumps(list(spec.levels.items())):
+            return
+        self._fillLevels(editor, spec)
 
     def _toggle(self, key, checked):
         button, container, _columns = self.groups[key]
@@ -834,8 +865,9 @@ class CaseSection:
                     self._show(column, editor, None)  # no value of the subject stays in a hidden editor
                     continue
                 value = row.get(column)
+                self._syncLevels(study, column, editor)
                 self._show(column, editor, value)
-                warning = self._warningOf(column, value)
+                warning = self._warningOf(study, column, value)
                 if warning:
                     warnings.append(warning)
             for key, (button, _container, columns) in self.groups.items():
@@ -883,11 +915,11 @@ class CaseSection:
         if str(editor.text) != text:
             editor.setText(text)
 
-    def _warningOf(self, column, value):
+    def _warningOf(self, study, column, value):
         if _missing(value):
             return ""
         schema = _lnm("schema")
-        spec = schema.registered(column)
+        spec = self._specOf(study, column)
         if spec is None or spec.strict:
             return ""
         try:
