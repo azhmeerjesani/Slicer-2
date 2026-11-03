@@ -1207,6 +1207,11 @@ def _run_fetch(entry, live, plan, terms_sha, state, work, bundle, dest, session,
     participants = _copy_documents(plan, files_dir, bundle)
     shutil.copyfile(os.path.join(work, "terms-accepted.txt"), os.path.join(bundle, "terms-accepted.txt"))
     keys = _provenance(entry, live, plan, terms_sha, results, full_set, participants, subjects, bool(data.get("checksumOverride")))
+    # set_metadata replaces the whole "source": keep the dataset's own tag and citation that the converter read from
+    # dataset_info.json (Lead-DBS), so that the conn-<tag>x<Subset> label equals the one of the same data converted from its folder
+    written = connectome.ConnectomeBundle.open(bundle).provenance.get("source")
+    if isinstance(written, dict):
+        keys["source"] = {**{k: written[k] for k in ("tag", "citation") if written.get(k)}, **keys.get("source", {})}
     connectome.set_metadata(bundle, **keys)
     data.update({"complete": True, "subjects": subjects})
     state.save()

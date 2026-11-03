@@ -37,7 +37,7 @@ if MODULE_DIR not in sys.path:
 import numpy as np
 from scipy import io as sio
 
-from LesionNetworkMappingLib import catalog, connectome, fetchconnectome, jobs, manager, nifti, runs
+from LesionNetworkMappingLib import catalog, connectome, fetchconnectome, jobs, leaddbs, manager, nifti, runs
 
 GSP_RUN = "GSP1000/sub-{s}/func/sub-{s}_bld00{r}_rest_skip4_stc_mc_bp_0.0001_0.08_resid_FS1mm_MNI1mm_MNI2mm_sm7_finalmask.nii.gz"
 TERMS_TEXT = "<p>GSP Open Access Data Use Terms (2014-Apr-22)</p><p>1. I will not attempt to identify any participant.<br>2. I will acknowledge the project in publications. See <a href=\"https://example.org/terms\">the terms</a>.</p>"
@@ -855,6 +855,10 @@ class FetchLeadDbsTest(unittest.TestCase):
                 self.assertTrue(np.array_equal(a.load_subject(subject_id).data, b.load_subject(subject_id).data), subject_id)
             self.assertEqual(a.subsets, b.subsets)
             self.assertEqual(a.provenance["source"]["doi"], DOI)
+            self.assertEqual(a.provenance["source"]["tag"], "GSPtest")  # the dataset tag of dataset_info.json survives the fetch
+            self.assertEqual(a.provenance["source"]["citation"], b.provenance["source"]["citation"])
+            self.assertEqual(leaddbs.leaddbs_label(a), leaddbs.leaddbs_label(b))
+            self.assertEqual(leaddbs.leaddbs_label(a), "GSPtestxFullSet")
             self.assertEqual(a.metadata["mask"]["policy"], "volsurf")
         finally:
             server.close()
