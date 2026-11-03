@@ -240,6 +240,30 @@ class FiguresTest(unittest.TestCase):
         no_companion = figures.montage(self.tmap, self.template, "A 0", rule={"kind": "custom_t", "value": 5}, n=50, companion=False, **SMALL)
         self.assertEqual([panel["mode"] for panel in no_companion.meta["panels"]], ["hard"])
 
+    def test_pair_without_threshold_is_refused_not_captioned_thresholded(self):
+        # The pair preset without a rule or threshold drew one unthresholded panel under "Thresholded and unthresholded map"
+        for label, kwargs in {"nothing": {}, "mode transparent": {"mode": "transparent"}}.items():
+            with self.assertRaises(ValueError, msg=label) as caught:
+                figures.pair(self.tmap, self.template, "A 0", **kwargs, **SMALL)
+            self.assertIn("The pair preset shows a thresholded map", str(caught.exception), label)
+            self.assertIn("--threshold", str(caught.exception), label)
+        # The command line refuses before writing anything
+        out = os.path.join(self.tmp, "pair_refused")
+        tpl = os.path.join(self.tmp, "pair_tpl.nii.gz")
+        mp = os.path.join(self.tmp, "pair_map.nii.gz")
+        nifti.write_nifti(mp, self.tmap[0], self.affine)
+        nifti.write_nifti(tpl, self.template[0], self.affine)
+        code, events = self._cli(["--preset", "pair", "--map", mp, "--template", tpl, "--slices", "A 0", "--out", out, "--formats", "png"])
+        self.assertNotEqual(code, 0)
+        self.assertEqual(events[-1]["code"], "input")
+        self.assertIn("The pair preset shows a thresholded map", events[-1]["message"])
+        self.assertFalse(os.path.exists(os.path.join(out, "figures")))
+        # With a threshold or a rule it stays a pair (thresholded panel plus its companion) with that caption
+        for kwargs in ({"threshold": 3.0}, {"rule": {"kind": "custom_t", "value": 3}, "n": 50}):
+            figure = figures.pair(self.tmap, self.template, "A 0", **kwargs, **SMALL)
+            self.assertEqual([panel["mode"] for panel in figure.meta["panels"]], ["hard", "unthresholded"])
+            self.assertIn("Thresholded and unthresholded map of", figure.caption)
+
     def test_caption_without_n(self):
         figure = figures.montage(self.tmap, None, "A 0", threshold=4.0, **SMALL)
         self.assertIn("N unknown", figure.caption)

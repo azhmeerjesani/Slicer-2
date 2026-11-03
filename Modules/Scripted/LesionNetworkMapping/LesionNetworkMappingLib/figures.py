@@ -1611,6 +1611,9 @@ def pair(map, template=None, slices="auto", **kwargs):  # noqa: A002
     kwargs["companion"] = True
     if kwargs.get("mode") == "unthresholded":
         raise ValueError("The pair preset shows a thresholded map: choose mode hard or transparent")
+    if kwargs.get("rule") is None and kwargs.get("threshold") is None:
+        # Without a threshold there is no thresholded panel (nor a companion), and the caption would still say "Thresholded and unthresholded map"
+        raise ValueError("The pair preset shows a thresholded map: give a threshold rule (--rule) or a threshold (--threshold)")
     return _montage("pair", [map], template, slices, kwargs)
 
 

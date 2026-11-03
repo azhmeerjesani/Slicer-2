@@ -568,7 +568,7 @@ def render_figures(presets, out, config, emit):
     import contextlib
     import io
 
-    from . import export, figures, jobs, pipeline
+    from . import export, figures, jobs, pipeline, thresholds
     from .connectome import ConnectomeBundle
 
     bundle = ConnectomeBundle.open(config.bundle)
@@ -589,6 +589,16 @@ def render_figures(presets, out, config, emit):
                 emit("warning", code="figure", message=f"Figure {preset}: the group map {os.path.basename(group_map)} was not written")
                 continue
             args += ["--map", group_map, "--mask", os.path.join(out, pipeline.PRIVATE_DIR, pipeline.MASK_NAME), "--statistic", "mean T", "--title", "Mean T across lesions (descriptive)"]
+            if preset == "pair":
+                # The pair preset is a thresholded map with its unthresholded companion (figures.pair refuses to draw
+                # without a threshold): the run's primary rule with the run's N and V, as the report's mean T montage
+                # and the meanT cluster table, when that rule gives a |T| at all
+                rule = thresholds.normalize_rule(config.rule)
+                if not (rule["kind"] in thresholds.SYMMETRIC_T_KINDS or (rule["kind"] == "top_pct" and rule.get("statistic") == "T")):
+                    emit("warning", code="figure", message=f"Figure {preset} not written: the primary rule ({thresholds.rule_label(rule)}) applies to mean Fz, not to T, so it gives no threshold for the mean T map")
+                    continue
+                n = (data.get("subjects") or {}).get("n") or bundle.n_subjects
+                args += ["--rule", json.dumps(rule), "--n", str(int(n)), "--v", str(int(bundle.n_voxels))]
         if config.template:
             args += ["--template", config.template]
         if config.figure_convention:

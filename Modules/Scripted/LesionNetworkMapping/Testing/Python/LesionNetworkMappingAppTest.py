@@ -401,7 +401,7 @@ class AppLevelsTest(unittest.TestCase):
                 if os.path.isfile(path):
                     cls.participant_maps[(sid, key)] = volume(path)
         # group level
-        cls.group = cli(*level_args, "group", "--connectome", cls.fx["bundle"], *COMMON, *BIDS_OPTIONS, "--figures", "glass")
+        cls.group = cli(*level_args, "group", "--connectome", cls.fx["bundle"], *COMMON, *BIDS_OPTIONS, "--figures", "glass,pair")
         cls.group_json = read_json(os.path.join(cls.out, pipeline.PIPELINE_JSON)) if os.path.isfile(os.path.join(cls.out, pipeline.PIPELINE_JSON)) else {}
         # the application's path: the pipeline command line on the study (Library ▸ Analysis, Map ▸ Run everything)
         cls.gui = cli("run", "--study", cls.fx["study"], "--bundle", cls.fx["bundle"], "--accept-terms", "--perm", "1000", "--events", "json", "--threads", "2", module="pipeline")
@@ -563,6 +563,32 @@ class AppLevelsTest(unittest.TestCase):
             self.assertFalse(os.path.isdir(folder))
             return
         self.assertTrue(os.path.isfile(os.path.join(folder, "slicer-lnm-glass.png")), os.listdir(os.path.join(self.out, "figures")) if os.path.isdir(os.path.join(self.out, "figures")) else None)
+
+    def test_pair_figure_is_thresholded_by_the_primary_rule(self):
+        """--figures pair draws the mean T map thresholded by the run's primary rule (with the run's N) plus its unthresholded
+        companion: it used to pass no rule, which gave one unthresholded panel captioned "Thresholded and unthresholded map".
+        """
+        self.assertDone(self.group)
+        try:
+            import PIL  # noqa: F401
+        except ImportError:
+            self.skipTest("Pillow is not available")
+        folder = os.path.join(self.out, "figures", "slicer-lnm-pair")
+        warnings = [event["message"] for event in self.group[1] if event["event"] == "warning" and event.get("code") == "figure"]
+        self.assertTrue(os.path.isfile(os.path.join(folder, "slicer-lnm-pair.png")), warnings)
+        meta = read_json(os.path.join(folder, "figure.json"))
+        self.assertEqual([panel["mode"] for panel in meta["panels"]], ["hard", "unthresholded"])
+        self.assertTrue(meta["caption"].startswith("Thresholded and unthresholded map of"), meta["caption"])
+        resolved = next(iter(meta["thresholds"].values()))
+        self.assertEqual(resolved["rule"]["kind"], "fwe_bonferroni")
+        self.assertEqual((resolved["n"], resolved["v"]), (self.group_json["subjects"]["n"], self.bundle.n_voxels))
+        # A primary rule that gives no |T| (an Fz effect size) leaves the pair out with a warning, not a mislabeled figure
+        events = []
+        config = mock.Mock(bundle=self.fx["bundle"], study=self.group_json.get("study") or self.fx["study"], template=None, figure_convention=None, rule={"kind": "fz_abs", "value": 0.05})
+        written = app.render_figures(["pair"], self.out, config, lambda event, **fields: events.append({"event": event, **fields}))
+        self.assertEqual(written, [])
+        self.assertEqual([event["event"] for event in events], ["warning"])
+        self.assertIn("applies to mean Fz, not to T", events[0]["message"])
 
     def test_study_folder_input_shares_the_application_cache(self):
         self.assertDone(self.study_run)
