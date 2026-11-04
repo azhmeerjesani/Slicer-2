@@ -491,6 +491,11 @@ class QACard:
     def refresh(self, running=False, n=None, partial=None):
         run = self.ctx.currentRun
         bundle = self.ctx.bundle
+        # The derived maps belong to the run they were made of: when that run is no longer the current one (parked for
+        # another lesion or connectome, or cleared), they leave the views and the toggles are cleared
+        runDir = run.runDir if run is not None else None
+        if any(entry[1] != runDir for entry in self._overlays.values()):
+            self._dropOverlays()
         cohort = self._mode() == "cohort"
         job = getattr(run, "job", None) if run is not None else None
         if run is not None and not running:
@@ -966,8 +971,11 @@ class QACard:
         return volume
 
     def _removeOverlay(self, kind):
+        from LesionNetworkMappingLib import display
+
         entry = self._overlays.pop(kind, None)
         if entry is not None and entry[0].GetScene() is not None:
+            display.hideForeground(entry[0])
             slicer.mrmlScene.RemoveNode(entry[0])
 
     def _dropOverlays(self):

@@ -429,5 +429,70 @@ class QaNumberFormatTest(unittest.TestCase):
         self.assertEqual(card_qa._fixed(-0.1004, 3), "-0.100")
 
 
+@unittest.skipUnless(_has_slicer(), "needs the Slicer application")
+class QaDerivedOverlayParkTest(unittest.TestCase):
+    """BB-1 qa-derived-map-stays-drawn-after-run-parked-for-other-lesion: when the run of a QA derived map (debiased view or
+    analytic RL z) stops being the current run (the Map page parks it for another lesion or connectome), the derived map
+    leaves the views and the QA toggles are cleared.
+    """
+
+    def setUp(self):
+        import slicer
+
+        from LesionNetworkMappingUI import card_qa, context
+
+        slicer.mrmlScene.Clear(0)
+        self.ctx = context.MapContext(runner=object())
+        self.card = card_qa.QACard(self.ctx)
+        self.run = context.RunInfo(runDir=tempfile.mkdtemp(prefix="lnm-qa-park-"), n=10)
+        self.addCleanup(shutil.rmtree, self.run.runDir, True)
+        self.addCleanup(self.card.cleanup)
+        self.ctx.setCurrentRun(self.run)
+
+    def _showOverlay(self, kind, widget):
+        import slicer
+
+        volume = slicer.util.addVolumeFromArray(np.zeros((2, 2, 2), dtype=np.float32), name=f"derived {kind}", nodeClassName="vtkMRMLScalarVolumeNode")
+        self.card._overlays[kind] = (volume, self.run.runDir, "AvgR")
+        self.card._shown = kind
+        self.card._setChecked(widget, True)
+        slicer.util.setSliceViewerLayers(foreground=volume)
+        return volume
+
+    def _foregroundIds(self):
+        import slicer
+
+        return {composite.GetForegroundVolumeID() for composite in slicer.util.getNodesByClass("vtkMRMLSliceCompositeNode")}
+
+    def _check(self, kind, widget):
+        volume = self._showOverlay(kind, widget)
+        volumeId = volume.GetID()
+        self.ctx.setCurrentRun(self.run)  # the same run again: the derived map stays
+        self.assertIn(volumeId, self._foregroundIds())
+        self.assertEqual(self.card.shownOverlay()["kind"], kind)
+        self.ctx.setCurrentRun(None)  # parked for another lesion
+        self.assertNotIn(volumeId, self._foregroundIds())
+        self.assertIsNone(volume.GetScene())
+        self.assertIsNone(self.card.shownOverlay())
+        self.assertFalse(widget.checked)
+        self.assertEqual(self.card._overlays, {})
+
+    def test_debiased_view_leaves_the_views(self):
+        self._check("debiased", self.card.debiasedCheckBox)
+
+    def test_analytic_z_leaves_the_views(self):
+        self._check("analytic", self.card.analyticButton)
+
+    def test_other_run(self):
+        from LesionNetworkMappingUI import context
+
+        volume = self._showOverlay("debiased", self.card.debiasedCheckBox)
+        other = context.RunInfo(runDir=self.run.runDir + "-other", n=10)
+        self.ctx.setCurrentRun(other)
+        self.assertNotIn(volume.GetID(), self._foregroundIds())
+        self.assertIsNone(self.card.shownOverlay())
+        self.assertFalse(self.card.debiasedCheckBox.checked)
+
+
 if __name__ == "__main__":
     unittest.main()
