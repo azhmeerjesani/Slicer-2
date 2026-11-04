@@ -346,6 +346,27 @@ class StudyLinkTest(ControlSetsTestBase):
         self.assertFalse(report["family"]["differ"])
         self.assertFalse(report["covariates"]["volume_ml"]["flagged"])
 
+    def test_qc_failed_cases_are_left_out_of_the_balance(self):
+        # Cases matching the set, plus a mis-traced lesion marked "QC fail": every analysis leaves it out
+        # (Study.analysis_rows), so the balance with a control set must leave it out too.
+        entry = self.register()
+        study = self.study("Q", cases=[(center, radius) for _name, center, radius in CONTROLS])
+        study.link_control_set("Ferguson490")
+        study.add_subject("sub-bad", {"group": "case", "status": "traced", "space": "MNI152NLin6Asym", "qc": "fail", "volume_ml": 250, "dimensionality": "3D", "hemisphere": "L"})
+        study.add_subject("sub-other", {"group": "", "status": "traced", "space": "MNI152NLin6Asym", "volume_ml": 3.0, "dimensionality": "3D", "hemisphere": "R"})
+        analysed = {row["participant_id"] for row in study.analysis_rows(require_review=False, require_norm_qc=False)[0] if row.get("group") == "case"}
+        self.assertNotIn("sub-bad", analysed)
+        self.assertEqual({row["participant_id"] for row in controlsets.case_rows(study)}, analysed)
+        self.assertNotIn("sub-bad", controlsets.study_case_covariates(study))
+        report = controlsets.mismatch_report(entry, study)
+        self.assertEqual(report["n_cases"], len(CONTROLS))
+        self.assertFalse(report["covariates"]["volume_ml"]["flagged"])
+        self.assertNotIn("sub-bad", controlsets.matched_subsample(entry, study)["sids"])
+        # When every case fails QC, the balance has no cases (it does not fall back to the rows without a group)
+        for sid in analysed:
+            study.set(sid, {"qc": "fail"})
+        self.assertEqual(controlsets.case_rows(study), [])
+
     def test_case_values_are_read_ahead_for_a_worker(self):
         entry = self.register()
         study = self.study("A", cases=[((12.0, 0.0, 0.0), 12.0), ((-14.0, 4.0, 0.0), 11.0)])

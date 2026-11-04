@@ -735,13 +735,15 @@ def _covariates(volume, dimensionality, hemisphere):
 
 def case_rows(study):
     """The study's included rows to compare with a control set: group = case when the study has any, else every included
-    row that is not linked from a control set.
+    row that is not linked from a control set. Rows marked "QC fail" (qc = fail) are left out, as every analysis leaves
+    them out (``Study.analysis_rows``).
     """
-    from .study import _included
+    from .study import _included, qc_failed
 
     rows = [row for row in study.subjects if _included(row) and not is_control_row(row)]
     cases = [row for row in rows if row.get("group") == "case"]
-    return cases if cases else [row for row in rows if row.get("group") != "control"]
+    chosen = cases if cases else [row for row in rows if row.get("group") != "control"]
+    return [row for row in chosen if not qc_failed(row)]
 
 
 def _stats_key(path):
