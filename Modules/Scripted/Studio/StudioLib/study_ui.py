@@ -1008,6 +1008,20 @@ def _applyGridAnswers(studyObject, gridRows):
 
 _session = None
 _listeners = []
+#: Tracing that a closing study could not write because its folder was moved, renamed or disconnected:
+#: [{"identity", "sid", "data", "matrix"}] (``StudySession._keepUnwritten``). The study opened from its new place gets it
+#: in its journal, where Draw offers it for recovery (``StudySession._takeKept``).
+_kept = []
+
+
+def _studyIdentity(studyObject):
+    """What a study keeps when its folder is moved or renamed: its ``study.json`` name and creation time (its whole
+    metadata when it has no creation time).
+    """
+    metadata = studyObject.metadata if isinstance(getattr(studyObject, "metadata", None), dict) else {}
+    if metadata.get("created"):
+        return ("created", str(metadata.get("name")), str(metadata.get("created")))
+    return ("metadata", json.dumps(metadata, sort_keys=True, default=str))
 
 
 def session():
@@ -2052,6 +2066,7 @@ class StudySession:
             self._journal = journal.Journal(self)
         except ImportError:
             self._journal = None
+        self._takeKept()
         self.applyInbox()
         self.computeMissingMetrics()
 
@@ -2063,7 +2078,11 @@ class StudySession:
             return
         try:
             if self._current is not None:
-                self._leave(write=True)
+                if self.folderAvailable():
+                    self._leave(write=True)
+                else:
+                    # Nothing can be written at the old path: the tracing is kept for the study opened from its new place
+                    self._keepUnwritten()
         except Exception:
             logging.error(f"Studio: the current subject could not be written when the study closed:\n{traceback.format_exc()}")
         self._removeSubjectNodes()
@@ -2152,6 +2171,63 @@ class StudySession:
             logging.warning(f"Studio: the study folder {self.study.path} is gone (moved, renamed or not connected): nothing is written")
             _toast(self._shell, self._folderGoneText(), ms=15000, level="warning", toolTip=self.study.path)
         return False
+
+    def _keepUnwritten(self):
+        """The study closes while its folder is moved, renamed or disconnected (the user opens it from its new place, as
+        the folder-gone message says): the current subject's tracing that is not written yet is kept in memory
+        (``_kept``) and goes to the journal of this study when it is opened again (``_takeKept``), where Draw offers it
+        for recovery. Nothing is written at the old path.
+        """
+        sid = self._current
+        if sid is None:
+            return
+        if self.isDirty():
+            self._applyPendingSmartFill()
+            mask = lesionMask(self.segmentationNode())
+            if mask is None:
+                # Everything was erased: an empty journal records it (as the journal itself does)
+                data, matrix = np.zeros((1, 1, 1), np.uint8), np.eye(4)
+            else:
+                data = np.ascontiguousarray(np.transpose(mask[0], (2, 1, 0))).astype(np.uint8)
+                matrix = np.array(mask[1], dtype=float)
+            identity = _studyIdentity(self.study)
+            _kept[:] = [entry for entry in _kept if (entry["identity"], entry["sid"]) != (identity, sid)]
+            _kept.append({"identity": identity, "sid": sid, "data": data, "matrix": matrix})
+            logging.warning(f"Studio: the study folder {self.study.path} is gone: the unwritten tracing of {sid} is kept until the study is opened again")
+            _toast(self._shell, _("The tracing of {sid} could not be saved: the study folder {name} was moved or renamed. It is kept "
+                                  "until you open the study from its new place (Open study…) in this window").format(sid=sid, name=self.study.name),
+                   ms=15000, level="warning", toolTip=self.study.path)
+        if self._journal is not None:
+            self._journal.detach()
+
+    def _takeKept(self):
+        """Write the tracing that this study kept when it was closed from a folder that was gone (``_keepUnwritten``) to
+        the journal of its subject here: opening the subject offers it for recovery. Return the subjects.
+        """
+        identity = _studyIdentity(self.study)
+        taken = []
+        for entry in list(_kept):
+            sid = entry["sid"]
+            if entry["identity"] != identity or sid not in self.study:
+                continue
+            if self._journal is not None:
+                path = self._journal.path(sid)
+            else:
+                path = os.path.join(self.study.path, _lnm("study").PRIVATE_DIR, "journal", f"{sid}.nii.gz")
+            try:
+                from . import journal
+
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                journal.writeJournalFile(path, entry["data"], entry["matrix"])
+            except Exception:
+                logging.error(f"Studio: the kept tracing of {sid} could not be written to the journal:\n{traceback.format_exc()}")
+                continue
+            _kept.remove(entry)
+            taken.append(sid)
+        if taken:
+            _toast(self._shell, _("The unsaved tracing of {sids} is offered for recovery: open the subject and press Recover").format(
+                sids=", ".join(taken)), ms=15000, level="consequence")
+        return taken
 
     def _sessionFile(self):
         studyModule = _lnm("study")
@@ -2245,8 +2321,16 @@ class StudySession:
         self.flush(lockTimeout=SAVE_LOCK_TIMEOUT_S)
 
     def flush(self, lockTimeout=2.0):
-        """Save pending participants.tsv changes now (main thread). Return True if saved."""
+        """Save pending participants.tsv changes now (main thread). Return True if saved.
+
+        Nothing is written while the study folder is moved, renamed or disconnected (the files would recreate a stray study
+        at the old path); the changes stay in memory.
+        """
         self._saveTimer.stop()
+        if not self.folderAvailable():
+            self._lastSaveError = self._folderGoneText()
+            _notifySaved(self)
+            return False
         jobs = _lnm("jobs")
         try:
             self.study.save(lock_timeout=lockTimeout)

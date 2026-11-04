@@ -3101,6 +3101,85 @@ class StudioRegressionTest(unittest.TestCase):
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
 
+    def test_68_study_folder_moved_keeps_the_tracing_when_opened_from_its_new_place(self):
+        """The study folder was moved while tracing and the user does what the message says (Open study… from its new
+        place): every stroke still on screen is offered for recovery there, not only the journal made before the move,
+        and closing the old session recreates nothing at the old path (BB-1).
+        """
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import autosave_io, shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Moved study")
+        moved = os.path.join(self.directory, "elsewhere", "Moved study new")
+        os.makedirs(folder)
+        os.makedirs(os.path.dirname(moved))
+        scans = []
+        for index in range(1, 3):
+            scans.append(os.path.join(folder, f"sub-0{index}_T1w.nii.gz"))
+            nifti.write_nifti(scans[-1], np.zeros(grid.shape, np.uint8), grid.affine)
+        toasts = []
+        originalToast = study_ui._toast
+        study_ui._toast = lambda shell, text, **kwargs: toasts.append(str(text))
+        self.addCleanup(setattr, study_ui, "_toast", originalToast)
+        self.addCleanup(lambda: getattr(study_ui, "_kept", []).clear())
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+
+        def paint(session, box):
+            segmentationNode, volumeNode = session.segmentationNode(), session.volumeNode()
+            segmentId = segmentationNode.GetSegmentation().GetNthSegmentID(0)
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, volumeNode)
+            array[box] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, volumeNode)
+            return int(slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, volumeNode).sum())
+
+        try:
+            session = study_ui.createStudy(scans, studioShell, folder=folder)
+            self.assertIsNotNone(session)
+            self.assertTrue(session.open("sub-01", switchToDraw=False))
+            before = paint(session, (slice(20, 23), slice(30, 33), slice(20, 23)))
+            self.assertEqual(before, 27)
+            self.assertTrue(session._journal.writeNow())
+            autosave_io.backgroundWriter().drain(5.0)
+            shutil.move(folder, moved)
+            total = paint(session, (slice(40, 43), slice(30, 33), slice(20, 23)))
+            self.assertEqual(total, 54)
+            self.assertFalse(session._journal.writeNow())
+            # Open study… from the new place: the old session closes while its folder is gone
+            reopened = study_ui.openStudy(moved, studioShell, showLibrary=False)
+            self.assertIsNot(reopened, session)
+            self.assertFalse(os.path.exists(folder), "closing the old session recreated the old study folder")
+            journalFile = os.path.join(moved, ".studio", "journal", "sub-01.nii.gz")
+            self.assertTrue(os.path.isfile(journalFile))
+            data, _affine, _header = nifti.read_nifti(journalFile, apply_scaling=False)
+            self.assertEqual(int((data != 0).sum()), total, "the journal at the new place lacks the strokes drawn after the move")
+            self.assertTrue([text for text in toasts if "offered for recovery" in text], toasts)
+            self.assertEqual(getattr(study_ui, "_kept", []), [])
+            # Opening the subject offers all of it; Recover puts every stroke back
+            self.assertTrue(reopened.open("sub-01", switchToDraw=False))
+            self.assertIsNotNone(reopened._journal.noticeWidget())
+            self.assertTrue(reopened._journal.recover())
+            segmentationNode, volumeNode = reopened.segmentationNode(), reopened.volumeNode()
+            segmentId = segmentationNode.GetSegmentation().GetNthSegmentID(0)
+            self.assertEqual(int(slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, volumeNode).sum()), total)
+            # ...and it is written at the new place
+            self.assertIsNotNone(reopened.done())
+            self.assertEqual(reopened.study.subject("sub-01")["status"], "traced")
+            self.assertTrue(os.listdir(os.path.join(moved, "lesions")))
+            self.assertFalse(os.path.exists(folder))
+        finally:
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
+
     def test_29_second_tracing_survives_a_crash(self):
         """Slicer stopped during a second tracing: nothing of it was journaled, and the recovery card offered to reopen
         the session's earlier subject (an empty second tracing then). The second tracing now has its own journal, the
