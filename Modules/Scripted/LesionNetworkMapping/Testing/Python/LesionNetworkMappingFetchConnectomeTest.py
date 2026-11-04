@@ -619,6 +619,58 @@ class FetchStreamingTest(FetchConnectomeBase):
         self.assertEqual(ctx.exception.code, "exists")
         self.assertEqual(self.fetch(resume=True)["subjects"], 5)
 
+    def test_a_resume_with_a_subset_that_leaves_out_converted_archives_is_refused_up_front(self):
+        # Paused with the first archive done and the second one partly converted, then resumed with only the first archive:
+        # the bundle already holds subjects of the second one, so the resume is refused with a plain message (it used to fail
+        # with "Not a connectome bundle (missing connectome.json)" and record the narrower subset in state.json)
+        bundle = self.bundle()
+        with self.assertRaises(jobs.Cancelled):
+            self.fetch(cancel=lambda: os.path.isfile(os.path.join(bundle, "subjects", "sub-0003.f16.npy")))
+        state = fetchconnectome.read_state(self.entry, self.dest)
+        self.assertEqual(state["archives"]["GSP1000_v2_00.tar"]["status"], "done")
+        self.assertEqual(state["archives"]["GSP1000_v2_01.tar"]["status"], "partial")
+        problem = fetchconnectome.resume_subset_problem(self.entry, self.dest, "archives:00-00")
+        self.assertIn("GSP1000_v2_01.tar", problem or "")
+        for subset in (None, "all", "archives:00-01", "archives:00-02", "subjects:5"):  # the same subset or a larger one
+            self.assertIsNone(fetchconnectome.resume_subset_problem(self.entry, self.dest, subset), subset)
+        with self.assertRaises(jobs.JobError) as ctx:
+            self.fetch(resume=True, subset="archives:00-00")
+        self.assertEqual(ctx.exception.code, "subset_changed")
+        self.assertEqual(ctx.exception.exit_code, jobs.EXIT_USAGE)
+        self.assertIn("GSP1000_v2_01.tar", ctx.exception.message)
+        self.assertIsNone(fetchconnectome.read_state(self.entry, self.dest)["subset"])  # the state keeps the subset it was paused with
+        summary = self.fetch(resume=True)
+        self.assertEqual(summary["subjects"], 5)
+        self.assertSameSubjects(summary["path"], self.reference())
+
+    def test_a_resume_whose_archives_are_all_converted_finalizes_the_bundle(self):
+        # Paused once the first archive was converted (and nothing of the second one), then resumed with only the first
+        # archive: no archive is left to convert, and the bundle is still finished (it used to have no connectome.json)
+        stop = threading.Event()
+
+        def emit(event, **fields):
+            self.emit(event, **fields)
+            if event == "result" and fields.get("kind") == "archive" and fields.get("name") == "GSP1000_v2_00.tar":
+                stop.set()
+
+        with self.assertRaises(jobs.Cancelled):
+            self.fetch(cancel=stop, streams=1, emit=emit)
+        state = fetchconnectome.read_state(self.entry, self.dest)
+        self.assertEqual(state["archives"]["GSP1000_v2_00.tar"]["status"], "done")
+        self.assertFalse(fetchconnectome._archive_has_data(state["archives"].get("GSP1000_v2_01.tar")))
+        self.assertFalse(os.path.isfile(os.path.join(self.bundle(), "connectome.json")))
+        self.assertIsNone(fetchconnectome.resume_subset_problem(self.entry, self.dest, "archives:00-00"))
+        summary = self.fetch(resume=True, subset="archives:00-00")
+        self.assertEqual(summary["subjects"], 2)
+        bundle = connectome.ConnectomeBundle.open(summary["path"])
+        self.assertEqual(bundle.subject_ids, ["sub-0001", "sub-0002"])
+        self.assertEqual(bundle.provenance["source"]["subset"], "archives:00-00")
+        self.assertTrue(fetchconnectome.read_state(self.entry, self.dest)["complete"])
+        # The same bundle as a fetch of the first archive alone
+        other = os.path.join(self.dest, "direct")
+        direct = self.fetch(dest=other, subset="archives:00-00")
+        self.assertSameSubjects(summary["path"], direct["path"])
+
     def test_a_deleted_bundle_is_fetched_again_not_trusted_from_the_state(self):
         # Paused with the first archive done, then the user deleted the bundle folder: Resume must not skip that archive
         bundle = self.bundle()

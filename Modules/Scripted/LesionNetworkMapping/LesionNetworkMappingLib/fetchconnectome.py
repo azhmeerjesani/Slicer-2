@@ -26,6 +26,8 @@ accepted (addendum 4.1, never automatically, never bundled, no app-owned credent
   twice. With ``--keep-archives`` an interrupted archive is read again from its start, so that the stored file is
   complete. A state whose bundle folder was deleted (no connectome.json or connectome.partial.json left) is not
   trusted: the next fetch, with or without ``--resume``, starts again from the first archive (warning ``bundle_missing``).
+  A resume keeps the subjects already converted, so it may use the same subset or a larger one; a subset that leaves out
+  an archive that is (partly) converted is refused before anything is changed (exit code 2, ``code: subset_changed``).
 - **Integrity.** The whole-archive MD5 is computed on the fly and compared with the one the provider lists whenever
   the stream was read from its first byte (reconnections in the same run keep the hash valid); a stream that was
   resumed from a member offset records "not verified (resumed); members verified by gzip CRC" (every member's gzip
@@ -784,11 +786,46 @@ def _state_lost_its_bundle(data, bundle):
         return False
     if data.get("complete"):
         return True
-    for info in (data.get("archives") or {}).values():
-        info = info or {}
-        if info.get("status") in ("done", "mismatch") or (info.get("status") == "partial" and (int(info.get("memberOffset") or 0) > 0 or int(info.get("subjectsDone") or 0) > 0)):
-            return True
-    return False
+    return any(_archive_has_data(info) for info in (data.get("archives") or {}).values())
+
+
+def _archive_has_data(info):
+    """True when the state ``info`` of an archive says that (some of) its subjects were converted into the bundle."""
+    info = info or {}
+    return info.get("status") in ("done", "mismatch") or (info.get("status") == "partial" and (int(info.get("memberOffset") or 0) > 0 or int(info.get("subjectsDone") or 0) > 0))
+
+
+def _resume_subset_problem(entry, data, subset):
+    """Why the interrupted fetch whose state is ``data`` cannot be resumed with ``subset`` (a sentence), or None.
+
+    A resumed fetch only adds to the bundle: the subjects already converted stay in it. So a subset that leaves out an
+    archive the paused fetch has converted (part of) cannot be resumed; the same subset or a larger one can.
+    """
+    text = None if subset in (None, "", "all") else str(subset)
+    if not data or data.get("complete") or text == data.get("subset"):
+        return None
+    try:
+        selection = catalogs.resolve_subset(entry, text)
+    except ValueError:
+        return None  # plan_files refuses it with its own message
+    if entry.get("converter") == "leaddbs_vol" and not selection["exact"]:
+        return None  # a Lead-DBS subject subset reads the next archives until the bundle holds its subjects
+    wanted = {item["name"] for item in selection["archives"]}
+    outside = sorted(name for name, info in (data.get("archives") or {}).items() if name not in wanted and _archive_has_data(info))
+    if not outside:
+        return None
+    return (f"The paused download in this folder has already converted subjects from {', '.join(outside)}, which this subset leaves out. "
+            "Resume it with the subset it was started with (or a larger one), or choose another folder.")
+
+
+def resume_subset_problem(entry, dest, subset=None):
+    """Why the interrupted fetch of ``entry`` in ``dest`` cannot be resumed with ``subset`` (a sentence), or None (nothing
+    to resume, or it can be resumed with it). See :func:`_resume_subset_problem`.
+    """
+    data = read_state(entry, dest)
+    if not data or _state_lost_its_bundle(data, bundle_path(entry, dest)):
+        return None  # nothing is continued: the next download starts again
+    return _resume_subset_problem(entry, data, subset)
 
 
 def _forget_converted_archives(data):
@@ -990,6 +1027,9 @@ def fetch_connectome(entry, dest, terms_sha, subset=None, streams=2, keep_archiv
         raise jobs.JobError(f"{os.path.basename(bundle)} is partly downloaded here: resume it (--resume) or choose another folder", code="exists")
     if not state.exists and os.path.exists(os.path.join(bundle, "connectome.json")):
         raise jobs.JobError(f"{os.path.basename(bundle)} exists already in this folder: choose another folder", code="exists")
+    problem = _resume_subset_problem(entry, state.data, subset) if resume and state.exists else None
+    if problem:  # refused before the state records the new subset
+        raise jobs.JobError(problem, code="subset_changed", exit_code=jobs.EXIT_USAGE)
 
     sizes = {item["name"]: item["size"] for item in archives}
     plan_info = catalogs.disk_plan(entry, subset, keep_archives)
@@ -1203,12 +1243,14 @@ def _run_fetch(entry, live, plan, terms_sha, state, work, bundle, dest, session,
                 source.close()
         state.save()
 
-    if subset_ids is not None and not os.path.isfile(os.path.join(bundle, "connectome.json")):
-        # Converted without finalizing (whether another archive was needed was known only after each one)
+    if not os.path.isfile(os.path.join(bundle, "connectome.json")):
+        # Converted without finalizing: whether another archive was needed was known only after each one (a subject subset),
+        # or no archive was left to convert with finalize=True (a resume whose archives were all converted when it was paused)
         if not _bundle_subject_ids(bundle):
-            raise jobs.JobError(f"None of the subjects of {plan['selection']['text']} is in the archives of {entry['id']}", code="listing")
+            raise jobs.JobError(f"None of the subjects of {plan['selection']['text'] or 'the archives'} is in the archives of {entry['id']}", code="listing")
         connectome.finalize_stream(bundle, layout=layout, name=bundle_name(entry), description=description, citation=entry.get("citation") or "",
-                                   data_use_terms=f"{entry.get('licence')} (accepted terms text sha256 {terms_sha[:12]}...)", dataset_dir=dataset_dir, grid=_expected_grid(entry))
+                                   data_use_terms=f"{entry.get('licence')} (accepted terms text sha256 {terms_sha[:12]}...)",
+                                   dataset_dir=dataset_dir if layout == "leaddbs_vol" else None, grid=_expected_grid(entry))
     subject_ids = list(connectome.ConnectomeBundle.open(bundle).subject_ids)
     subjects = len(subject_ids)
     plan["selection"]["recorded"] = _recorded_subset(entry, plan, archives, subset_ids, subject_ids, full_set, emit)

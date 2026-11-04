@@ -156,6 +156,61 @@ class LesionNetworkMappingCatalogDialogTest(unittest.TestCase):
         dialog.onControllerChanged()
         self.assertTrue(dialog.resumeButton.isVisibleTo(dialog))
 
+    def test_resume_is_not_offered_for_a_subset_that_leaves_out_converted_archives(self):
+        """Paused with All archives when the first archive is done and the second partly converted: choosing 'The first archive'
+        does not offer 'Resume this download' (it failed with "missing connectome.json"); a plain hint says why. The same
+        subset or a larger one can be resumed, and the controller refuses the narrower one up front too.
+        """
+        from LesionNetworkMappingLib import catalog, fetchconnectome, jobs
+        from LesionNetworkMappingUI import catalog_dialog, manager_catalog
+
+        entry = catalog.load_catalog().get("gsp1000-ilxiks")
+        dialog = self.makeDialog(None)
+        dest = os.path.join(self.tmp, "dest subset")
+        work = fetchconnectome.work_dir(entry, dest)
+        os.makedirs(work, exist_ok=True)
+        names = [f["name"] for f in catalog.archives(entry)]
+        archives = {names[0]: {"status": "done", "bytes": 100}, names[1]: {"status": "partial", "bytes": 40, "memberOffset": 4096, "subjectsDone": 2}}
+        jobs.write_json_atomic(os.path.join(work, "state.json"), {"format": fetchconnectome.STATE_FORMAT, "version": 1, "entry": entry["id"], "subset": None,
+                                                                  "sizes": dict.fromkeys(names, 100), "archives": archives, "files": {}, "complete": False})
+        bundle = fetchconnectome.bundle_path(entry, dest)
+        os.makedirs(bundle, exist_ok=True)
+        jobs.write_json_atomic(os.path.join(bundle, "connectome.partial.json"), {"format": "lnmc", "subjects": []})
+        dialog.entry = entry
+        dialog.fillFetchBox(entry)
+        dialog.destEdit.setText(dest)
+        dialog.terms[entry["id"]] = {"text": "terms", "display": "terms", "sha": "a" * 64}
+        wasBlocked = dialog.acceptCheck.blockSignals(True)
+        dialog.acceptCheck.setChecked(True)
+        dialog.acceptCheck.blockSignals(wasBlocked)
+        controller = dialog.controller
+        saved = (controller.state, controller.request, controller.errorEvent, controller.job)
+        self.addCleanup(lambda: (setattr(controller, "state", saved[0]), setattr(controller, "request", saved[1]), setattr(controller, "errorEvent", saved[2]),
+                                 setattr(controller, "job", saved[3])))
+        controller.job = None
+        controller.state = "idle"
+        controller.errorEvent = None
+        values = [dialog.subsetCombo.itemData(i) for i in range(dialog.subsetCombo.count)]
+        with mock.patch.object(manager_catalog, "termsAccepted", return_value=True), mock.patch.object(catalog_dialog, "planSummary", return_value=("", None)):
+            for value, resumable in (("all", True), ("archives:00-00", False), ("archives:00-01", True)):
+                dialog.subsetCombo.setCurrentIndex(values.index(value))
+                dialog.updateState()
+                self.assertEqual(dialog.downloadButton.text, "Resume this download", value)
+                self.assertEqual(dialog.downloadButton.enabled, resumable, (value, dialog.hintLabel.text))
+                if resumable:
+                    self.assertEqual(dialog.hintLabel.text, "", value)
+                else:
+                    self.assertIn(names[1], dialog.hintLabel.text)
+                    self.assertIn("Resume it with the subset it was started with", dialog.hintLabel.text)
+            # The progress card's Resume (and the resume offer) reuse a request: a narrower one is refused before any job starts
+            request = {"entry": entry["id"], "dest": dest, "subset": "archives:00-00", "termsSha": "a" * 64}
+            with mock.patch.object(controller, "entry", return_value=entry), mock.patch.object(manager_catalog, "fetchEnabled", return_value=True), \
+                    mock.patch.object(manager_catalog.jobrunner, "instance") as runner:
+                self.assertIsNone(controller.start(request, resume=True))
+                self.assertIn(names[1], controller.lastRequestError or "")
+                runner.assert_not_called()
+                self.assertIsNone(controller.checkResumeSubset({**request, "subset": None}))
+
     def test_resume_is_judged_by_the_space_still_to_be_written(self):
         """A partly written download compares the free space with what is still to be written, not with the whole peak (the part
         written is no longer free): the main button stays 'Resume this download' and enabled, like the banner's Resume button.

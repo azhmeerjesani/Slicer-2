@@ -712,6 +712,8 @@ class CatalogDialog(qt.QDialog):
             hint = _("A connectome is being fetched.")
         elif self.mismatchHere():
             hint = _("The checksum of an archive does not match: use Keep this data anyway…, or choose another folder. Reading the archive again would fail the same way.")
+        elif resumeProblem := self.resumeSubsetProblem():
+            hint = resumeProblem
         elif self.completeHere():
             hint = _("{name} is already in this folder: choose another folder.").format(name=os.path.basename(fetchconnectome.bundle_path(entry, destination)))
         self.hintLabel.setText(hint or "")
@@ -757,6 +759,20 @@ class CatalogDialog(qt.QDialog):
             return None
         try:
             return fetchconnectome.unfinished_fetch(self.entry, destination)
+        except Exception:
+            return None
+
+    def resumeSubsetProblem(self):
+        """Why the interrupted download in the chosen folder cannot be resumed with the chosen subset (it would leave out
+        archives that are converted already), or None.
+        """
+        from LesionNetworkMappingLib import fetchconnectome
+
+        destination = self.destEdit.text.strip()
+        if self.entry is None or not destination:
+            return None
+        try:
+            return fetchconnectome.resume_subset_problem(self.entry, destination, self.subsetCombo.currentData)
         except Exception:
             return None
 

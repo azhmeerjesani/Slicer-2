@@ -154,6 +154,16 @@ class FetchController:
             return _("Choose a destination folder.")
         return None
 
+    def checkResumeSubset(self, request):
+        """Why the interrupted download of ``request`` cannot be resumed with its subset (it leaves out converted archives), or None."""
+        from LesionNetworkMappingLib import fetchconnectome
+
+        entry = self.entry(request)
+        try:
+            return fetchconnectome.resume_subset_problem(entry, request["dest"], request.get("subset")) if entry is not None else None
+        except Exception:
+            return None
+
     def arguments(self, request, resume=False, acceptChecksumMismatch=False):
         args = ["--entry", request["entry"], "--dest", request["dest"], "--terms-sha", request["termsSha"], "--streams", str(int(request.get("streams") or 2))]
         if request.get("subset"):
@@ -177,6 +187,8 @@ class FetchController:
         entry is not fetchable, or the user has not accepted the terms text with this sha256.
         """
         self.lastRequestError = self.checkRequest(request)
+        if resume and not self.lastRequestError:
+            self.lastRequestError = self.checkResumeSubset(request)
         if self.lastRequestError or self.isRunning():
             if not self.lastRequestError:
                 self.lastRequestError = _("A connectome is being fetched already.")
