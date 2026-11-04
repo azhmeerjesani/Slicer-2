@@ -534,8 +534,19 @@ def recover(slot, mode=None, parent=None):
             service.beginRecovery()
         try:
             with slicer.util.tryWithErrorDisplay(_("Failed to recover the autosaved scene."), waitCursor=True):
-                slicer.util.loadScene(slot.scenePath())
-                report = rehomeAfterLoad(scene, slot.path, manifest, restoreUrl)
+                loadError = None
+                try:
+                    slicer.util.loadScene(slot.scenePath())
+                except Exception as error:
+                    # A node that cannot be read (for example its original file was moved or deleted) fails the load,
+                    # but the other nodes are loaded: they are re-linked like after a complete load, so that none stays
+                    # on the autosave folder (SPEC 9.9)
+                    loadError = error
+                loaded = rehomeAfterLoad(scene, slot.path, manifest, restoreUrl)
+                if loadError is not None and not loaded["missing"]:
+                    # Not explained by missing original files: report the error and keep the session offered
+                    raise loadError
+                report = loaded
         finally:
             if service is not None:
                 service.endRecovery()
@@ -597,6 +608,10 @@ def notify(text, report=None):
     if slicer.app.testingEnabled():
         logging.info(" ".join([text] + details))
         return
+    if report and report.get("missing"):
+        # Not only in the details: data of these files is not in the recovered scene
+        text += "\n\n" + _("These original files no longer exist and were not loaded: {files}").format(
+            files=", ".join(os.path.basename(p) for p in report["missing"][:5]))
     slicer.util.infoDisplay(text, windowTitle=_("Recover autosaved work"), detailedText="\n".join(details) if details else None)
 
 

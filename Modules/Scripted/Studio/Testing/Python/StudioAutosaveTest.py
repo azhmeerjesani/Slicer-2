@@ -13,6 +13,8 @@ and dispose them. They cover:
 - (c) incremental generations, and no generation when nothing changed;
 - (d) the round trip of volumes, segments, markups, tables and color tables (with alpha);
 - (e) recover(): no storage node in the autosave folder, original files, modified state and URL restored;
+  a referenced original file that is gone does not stop the re-linking (the session is recovered and the file
+  reported); another load error fails the recovery, with no storage node left in the autosave folder;
 - (f) a modified 512^3 volume: chunked snapshot and background write without freezing the main thread;
 - (g) scan(): a session locked by a live process, and a crashed session;
 - (h) retention; (i) a scene closed without saving keeps a closed-unsaved slot;
@@ -332,6 +334,58 @@ class StudioAutosaveTest(unittest.TestCase):
             self.assertTrue(node.GetModifiedSinceRead(), name)
             self.assertIsNone(node.GetStorageNode(), name)
         self.assertTrue(scene.GetStorableNodesModifiedSinceRead())
+
+    def test_e3_recoverWithMissingOriginal(self):
+        """BB-1: a referenced original file moved or deleted after the autosave failed the scene load, and recover()
+        returned before re-linking: the lesion stayed on the autosave folder, the session stayed offered and Save
+        proposed the autosave folder. Now the loaded nodes are re-linked, the missing file is reported and the session
+        is recovered.
+        """
+        from StudioLib import recovery
+
+        built = self._buildScene()
+        lesionVoxels = int(built["lesion"].sum())
+        scene = slicer.mrmlScene
+        scene.SetURL(os.path.join(self.userDir, "My scene.mrml"))
+        scene.SetRootDirectory(self.userDir)
+        service = self._service()
+        self._generate(service)
+        scanPath = os.path.join(self.userDir, "MR Head.nrrd")
+        os.makedirs(os.path.join(self.tempDir, "moved"))
+        shutil.move(scanPath, os.path.join(self.tempDir, "moved", "MR Head.nrrd"))
+        slot = recovery.scan(self.root, None)[0].slots[0]
+        scene.Clear(0)
+        scene.SetURL("")
+        report = recovery.recover(slot, mode="replace")
+        self.assertIsNotNone(report, "the recovery stopped at the missing original file")
+        self.assertEqual([os.path.realpath(path) for path in report["missing"]], [os.path.realpath(scanPath)])
+        self.assertEqual(self._storageFilesUnder(self.root), [])
+        self.assertEqual(scene.GetURL(), os.path.join(self.userDir, "My scene.mrml"))
+        segmentation = slicer.util.getNode("Lesions")
+        self.assertIsNone(segmentation.GetStorageNode(), "Save must ask where to save the lesion")
+        self.assertTrue(segmentation.GetModifiedSinceRead())
+        self.assertEqual(int(slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, built["segmentId"]).sum()), lesionVoxels)
+        self.assertEqual(os.path.realpath(slicer.util.getNode("MR Head").GetStorageNode().GetFileName()), os.path.realpath(scanPath))
+        self.assertEqual(slot.session.status, "recovered")
+
+    def test_e4_recoverLoadErrorKeepsSessionOffered(self):
+        """A load error that missing original files do not explain (a damaged autosave file) still fails the recovery:
+        the error is raised, the session is not marked recovered, and no storage node is left on the autosave folder.
+        """
+        from StudioLib import recovery
+
+        self._buildScene()
+        service = self._service()
+        self._generate(service)
+        slot = recovery.scan(self.root, None)[0].slots[0]
+        entry = next(e for e in service.writer.entries.values() if e["name"] == "Lesions")
+        with open(os.path.join(slot.path, entry["file"]), "wb") as f:
+            f.write(b"not a nrrd file")
+        slicer.mrmlScene.Clear(0)
+        with self.assertRaises(RuntimeError):  # shown in an error box, outside testing
+            recovery.recover(slot, mode="replace")
+        self.assertEqual(self._storageFilesUnder(self.root), [])
+        self.assertNotEqual(slot.session.status, "recovered")
 
     def test_e2_recoveredMessagePlural(self):
         from StudioLib import recovery
