@@ -321,15 +321,21 @@ def isInside(path, folder):
 
 _UNSAFE = re.compile(r'[<>:"/\\|?*\x00-\x1f\x7f]')
 _RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+#: ".studio-" starts the name part of Studio's own temporary files and folders (``TEMPORARY_MARKERS``, ``COPY_MARKER``,
+#: ``MOVE_MARKER``): a name that contained it would be hidden from the Library, deleted at the next start as an interrupted
+#: Duplicate, or lose its scene file as a leftover of a save. ``sanitizeName`` writes it with a space instead of the dot.
+_INTERNAL_MARKER = re.compile(r"\.(?=studio-)", re.IGNORECASE)
 
 
 def sanitizeName(name, maxLength=MAX_NAME_LENGTH, fallback=UNTITLED_NAME, maxBytes=MAX_NAME_BYTES):
-    r"""A file or folder name valid on macOS, Windows and Linux: no / \ : * ? " < > |, no trailing dot or space.
+    r"""A file or folder name valid on macOS, Windows and Linux: no / \ : * ? " < > |, no trailing dot or space, and
+    none of Studio's temporary name parts (".studio-copy" is written " studio-copy").
 
     At most ``maxLength`` characters and ``maxBytes`` UTF-8 bytes (cut on a character boundary: 80 Japanese characters are
     240 bytes). Worker-safe.
     """
     name = _UNSAFE.sub(" ", str(name or ""))
+    name = _INTERNAL_MARKER.sub(" ", name)
     name = re.sub(r"\s+", " ", name).strip()
     name = name[:maxLength]
     while len(name.encode("utf-8", "replace")) > maxBytes:
@@ -725,7 +731,7 @@ def listProjects(rootPath=None):
         return []
     projects = []
     for name in names:
-        if name.startswith(".") or COPY_MARKER in name:
+        if name.startswith(".") or (COPY_MARKER in name and not _hasOwnScene(os.path.join(folder, name))):
             continue  # hidden folders, and a Duplicate in progress (or one that an earlier version left after a failure)
         path = os.path.join(folder, name)
         if os.path.isdir(path):
@@ -1018,7 +1024,13 @@ def temporaryLeftovers(projectPath):
                 candidates.extend(os.path.join(folder, entry) for entry in os.listdir(folder))
             except OSError:
                 pass
-    candidates = [path for path in candidates if any(marker in os.path.basename(path) for marker in TEMPORARY_MARKERS)]
+    # The project's own scene file is never a leftover, even when the project's name contains a marker (a name given
+    # before ``sanitizeName`` reserved them)
+    ownScenes = {os.path.normcase(os.path.join(projectPath, os.path.basename(os.path.normpath(projectPath)) + SCENE_EXTENSION))}
+    if sceneFile(projectPath):
+        ownScenes.add(os.path.normcase(sceneFile(projectPath)))
+    candidates = [path for path in candidates if any(marker in os.path.basename(path) for marker in TEMPORARY_MARKERS)
+                  and os.path.normcase(path) not in ownScenes]
     if not candidates:
         return []
     try:
@@ -1248,6 +1260,14 @@ def isCopyLeftover(name):
     return name.endswith(COPY_MARKER) and len(name) > len(COPY_MARKER)
 
 
+def _hasOwnScene(path):
+    """True if the folder has "<folder name>.mrml": a project, not the copy of a Duplicate (its scene file keeps the name of
+    the project that it copies until the copy is renamed).
+    """
+    name = os.path.basename(os.path.normpath(path))
+    return os.path.isfile(os.path.join(path, name + SCENE_EXTENSION))
+
+
 def removeCopyLeftovers(rootPath=None):
     """Delete the partial copies of Duplicates that were interrupted (a crash, a kill, a power loss) in Projects/.
 
@@ -1264,7 +1284,9 @@ def removeCopyLeftovers(rootPath=None):
     key = os.path.normcase(os.path.abspath(folder))
     with _pendingCopiesLock:
         reserved = {entry + COPY_MARKER for parent, entry in _pendingCopies if parent == key}
-    leftovers = [name for name in names if isCopyLeftover(name) and name not in reserved]
+    # A folder with "<its name>.mrml" is a project whose name ends with the marker (named before ``sanitizeName`` reserved it)
+    leftovers = [name for name in names if isCopyLeftover(name) and name not in reserved
+                 and not _hasOwnScene(os.path.join(folder, name))]
     removePaths([os.path.join(folder, name) for name in leftovers])
     return leftovers
 

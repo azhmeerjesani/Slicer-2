@@ -5934,6 +5934,57 @@ class StudioProjectsTest(unittest.TestCase):
             section.dispose()
             parent.deleteLater()
 
+    def test_86_project_named_with_a_studio_marker_stays_listed_kept_and_keeps_its_scene(self):
+        """A project renamed "Pilot.studio-copy", or named after a scan "visit.studio-copy.nii.gz", was hidden from the
+        Library and deleted with all its data at the next start as an interrupted Duplicate; one named after
+        "pilot.studio-part.nii.gz" or "pilot.studio-tmp-a.nii.gz" lost its scene file when it was opened, as a leftover of
+        a save (BB-1). Names never get Studio's temporary name parts, and a project that already has one (named by an
+        earlier version) is listed, kept at the start and keeps its scene file.
+        """
+        projects = self.projects
+        for name in ("Pilot.studio-copy", "a.studio-part", "a.studio-tmp-1", "x.STUDIO-COPY", ".studio-copy"):
+            sanitized = projects.sanitizeName(name)
+            self.assertFalse([marker for marker in projects.TEMPORARY_MARKERS if marker in sanitized.lower()], sanitized)
+        self.assertEqual(projects.sanitizeName("Pilot.studio-copy"), "Pilot studio-copy")
+        self.assertEqual(projects.displayName("visit.studio-copy.nii.gz"), "visit studio-copy")
+        self.assertEqual(projects.displayName("pilot.studio-part.nii.gz"), "pilot studio-part")
+        self.assertEqual(projects.sanitizeName("my.studio"), "my.studio", "only the temporary name parts are changed")
+        # Rename (a closed project, the open project) and a project named after a scan
+        service = self._service()
+        closed = projects.createProject("Baseline")
+        self.assertEqual(os.path.basename(projects.renameFolder(closed.path, "Study.studio-copy")), "Study studio-copy")
+        self._userVolume("visit.studio-copy", shape=(20, 24, 28))
+        project = self._projectFor(service)
+        self.assertEqual(project.name, "visit studio-copy")
+        self._save(service)
+        self.assertEqual(os.path.basename(service.renameProject("Followup.studio-part")), "Followup studio-part")
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        # Projects named by an earlier version: listed, kept by the startup, and their scene file is kept when opened
+        parent = os.path.dirname(project.path)
+        legacy = {}
+        for name in ("Pilot.studio-copy", "pilot.studio-part", "pilot.studio-tmp-a"):
+            path = os.path.join(parent, name)
+            shutil.copytree(os.path.join(parent, "Followup studio-part"), path, ignore=shutil.ignore_patterns(projects.LOCK_FILE))
+            os.rename(os.path.join(path, "Followup studio-part.mrml"), os.path.join(path, name + ".mrml"))
+            legacy[name] = path
+        listed = [info.name for info in projects.listProjects()]
+        for name in ("Study studio-copy", "Followup studio-part", *legacy):
+            self.assertIn(name, listed)
+        self.assertEqual(projects.removeCopyLeftovers(), [])
+        service.removeInterruptedCopies()
+        self.assertTrue(self.io.backgroundWriter().drain(30.0))
+        for name, path in legacy.items():
+            self.assertTrue(os.path.isfile(os.path.join(path, name + ".mrml")), f"{name} is kept at the start")
+            self.assertEqual(projects.temporaryLeftovers(path), [], f"the scene file of {name} is not a leftover")
+        for name, path in legacy.items():
+            self.assertTrue(service.openProject(path), name)
+            self.io.backgroundWriter().drain(10.0)
+            self.assertTrue(os.path.isfile(os.path.join(path, name + ".mrml")), f"opening {name} keeps its scene file")
+            self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")), 1, f"{name} opens with its scan")
+            slicer.mrmlScene.Clear(0)
+            self.io.backgroundWriter().drain(10.0)
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk
