@@ -141,6 +141,8 @@ DEFAULT_SETTINGS = {"AutoCheck": True, "LastCheck": "", "LastManifest": "", "Ski
 #: Object names (stable once released, SPEC 9.2)
 REQUIRED_DIALOG_OBJECT_NAME = "StudioRequiredUpdateDialog"
 UPDATE_DIALOG_OBJECT_NAME = "StudioUpdateDialog"
+#: Classic: the message shown when a download ends after the update dialog was closed (Studio shows a toast)
+CLOSED_NOTICE_OBJECT_NAME = "StudioUpdateClosedNotice"
 NOTICE_OBJECT_NAME = "StudioUpdateNotice"
 HELP_ACTION_OBJECT_NAME = "StudioCheckForUpdatesAction"
 NOTICE_KEY = "updates"
@@ -1601,6 +1603,8 @@ class UpdateService:
         dialog.setParentWindow(_mainWindow())
         if dialog.wanted:
             dialog.show()
+        else:
+            dialog.placeClosedNotice(_mainWindow())
 
     def _discardPrepared(self):
         """Drop the prepared update (and its Install when I quit) so that another version can be downloaded. Return
@@ -2285,6 +2289,8 @@ class UpdateDialog:
         self._cancelRequested = False
         #: Open (shown and not closed by the user), also while hidden along with its parent window
         self.wanted = False
+        #: Classic: the message that says how a download ended after the dialog was closed (Studio uses a toast)
+        self.closedNotice = None
         status = service.status
         self.dialog = qt.QDialog(parent)
         self.dialog.setObjectName(UPDATE_DIALOG_OBJECT_NAME)
@@ -2335,6 +2341,7 @@ class UpdateDialog:
 
     def show(self):
         self.wanted = True
+        self._hideClosedNotice()
         self.dialog.show()
         self._fitToText()
         self.dialog.raise_()
@@ -2428,15 +2435,52 @@ class UpdateDialog:
         """
         if self.wanted or self._cancelRequested:
             return  # the dialog shows the result, or the user cancelled it themselves
-        shell = _shell()
-        if shell is None:
-            return
         if error is None:
             text = _("Slicer Studio {version} is ready to install").format(version=prepared.version)
         else:
             status = self.service.status
             text = _("Slicer Studio {version} could not be downloaded").format(version=status.version if status is not None else "?")
-        shell.toast(text, 8000, action=self._showAgain, actionText=_("Show"), sticky=True, level="consequence")
+        shell = _shell()
+        if shell is not None:
+            shell.toast(text, 8000, action=self._showAgain, actionText=_("Show"), sticky=True, level="consequence")
+            return
+        # Classic (no Studio shell, so no toast): a non-modal message with the same Show button
+        self._showClosedNotice(text, error is None)
+
+    def _showClosedNotice(self, text, ready):
+        import qt
+
+        self._hideClosedNotice()
+        box = qt.QMessageBox(self.service._updateDialogParent())
+        box.setObjectName(CLOSED_NOTICE_OBJECT_NAME)
+        box.setIcon(qt.QMessageBox.Information if ready else qt.QMessageBox.Warning)
+        box.setWindowTitle(_("Update Slicer Studio"))
+        box.setText(text)
+        if ready:
+            box.setInformativeText(_("Show it to restart now or to install it when you quit. "
+                                     "Otherwise it is removed when you quit."))
+        showButton = box.addButton(_("Show"), qt.QMessageBox.AcceptRole)
+        showButton.setObjectName(CLOSED_NOTICE_OBJECT_NAME + "ShowButton")
+        showButton.connect("clicked()", self._showAgain)
+        box.addButton(qt.QMessageBox.Close)
+        box.setDefaultButton(showButton)
+        box.setModal(False)
+        box.setAttribute(qt.Qt.WA_DeleteOnClose, True)
+        box.show()
+        self.closedNotice = box
+
+    def _hideClosedNotice(self):
+        box, self.closedNotice = self.closedNotice, None
+        if box is not None and _isAlive(box):
+            box.close()
+
+    def placeClosedNotice(self, parent):
+        """Settings closed: the Classic notice (hidden with it, when it was shown over Settings) returns to ``parent``."""
+        box = self.closedNotice
+        if box is None or not _isAlive(box) or parent is None or box.parentWidget() == parent:
+            return
+        box.setParent(parent, box.windowFlags())
+        box.show()
 
     def preparedInstead(self, preparedVersion, version):
         """The update shown is ready but is not the latest one, and it cannot be taken back."""
@@ -2482,6 +2526,7 @@ class UpdateDialog:
     def dispose(self):
         if self.task is not None:
             self.task.cancel()
+        self._hideClosedNotice()
         if _isAlive(self.dialog):
             self.dialog.hide()
             self.dialog.deleteLater()

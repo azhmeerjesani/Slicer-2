@@ -1629,6 +1629,71 @@ fi
         self.assertTrue(dialog.dialog.isVisible())
         self.assertEqual(dialog.state, "failed", "the dialog shows the failure again")
 
+    def _closedNoticeInClassic(self, tamper=None):
+        """As _closedDuringDownload, in Classic (no Studio shell, so no toast). Return the visible notice and the dialog."""
+        import slicer
+
+        updates = self.updates
+        self._publish("1.2.0", tamper=tamper)
+        _Handler.slowPaths = {"/" + self.updates_assetName("1.2.0")}
+        target = self._fakeLinuxInstall("0.9.0")
+        updates._installableOverride = True
+        updates.installTargetOverride = target
+        service = self._service()
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        saved = updates._shell
+        updates._shell = lambda: None
+        self.addCleanup(setattr, updates, "_shell", saved)
+        dialog = service.updateNow()
+        self.assertEqual(dialog.state, "downloading")
+        dialog.dialog.reject()  # Esc
+        self.assertTrue(self._waitFor(lambda: service.job is None, 30))
+        slicer.app.processEvents()
+        notices = [w for w in slicer.app.topLevelWidgets()
+                   if w.objectName == "StudioUpdateClosedNotice" and w.isVisible()]
+        self.assertEqual(len(notices), 1, "Classic tells the user how the download ended")
+        return notices[0], service, dialog
+
+    def test_UpdateDialogClosedDuringDownloadSaysWhenReadyInClassic(self):
+        """Classic has no toast: Esc on the update dialog during the download must not prepare the update silently (it
+        would be thrown away at quit). A non-modal message says it is ready, with Show that shows the dialog again.
+        """
+        import qt
+        import slicer
+
+        if self.updates.platformKey() != "linux-x86_64":
+            self.skipTest("the Linux package path is tested on Linux")
+        notice, service, dialog = self._closedNoticeInClassic()
+        self.assertEqual(dialog.state, "ready", dialog.text.text)
+        self.assertEqual(service.prepared.version, "1.2.0")
+        self.assertIn("1.2.0", notice.text)
+        self.assertIn("ready", notice.text)
+        self.assertFalse(notice.isModal())
+        self.assertFalse(dialog.dialog.isVisible())
+        showButton = notice.findChild(qt.QPushButton, "StudioUpdateClosedNoticeShowButton")
+        self.assertIsNotNone(showButton)
+        self.assertEqual(showButton.text, "Show")
+        showButton.click()
+        slicer.app.processEvents()
+        self.assertTrue(dialog.dialog.isVisible())
+        self.assertEqual(dialog.state, "ready")
+        self.assertTrue(dialog.primaryButton.isVisible())
+        self.assertFalse(notice.isVisible(), "the notice closes once the dialog is shown again")
+
+    def test_UpdateDialogClosedDuringDownloadSaysWhenFailedInClassic(self):
+        import qt
+        import slicer
+
+        if self.updates.platformKey() != "linux-x86_64":
+            self.skipTest("the Linux package path is tested on Linux")
+        notice, _service, dialog = self._closedNoticeInClassic(tamper="sha256")
+        self.assertEqual(dialog.state, "failed")
+        self.assertIn("could not be downloaded", notice.text)
+        notice.findChild(qt.QPushButton, "StudioUpdateClosedNoticeShowButton").click()
+        slicer.app.processEvents()
+        self.assertTrue(dialog.dialog.isVisible())
+        self.assertEqual(dialog.state, "failed", "the dialog shows the failure again")
+
     def test_UpdateDialogOpenOrCancelledDownloadShowsNoToast(self):
         """Nothing extra is announced while the dialog is open (it shows the result itself), nor after the user's own Cancel."""
         if self.updates.platformKey() != "linux-x86_64":
