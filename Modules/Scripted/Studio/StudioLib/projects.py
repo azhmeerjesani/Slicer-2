@@ -274,6 +274,75 @@ def discardMoveJournal():
             os.remove(path)
 
 
+#: The lock file (next to the move journal) that a running move of the Slicer Studio folder holds from its start until the
+#: setting points at the new folder: ``Studio/Projects/MovePending`` alone cannot tell a move that another running Slicer
+#: Studio of this user is doing now from one that was interrupted (``isMoveRunningElsewhere``)
+MOVE_LOCK_FILE = "StudioMove.lock"
+#: The move lock that this process holds (``takeMoveLock``), or None
+_moveLock = None
+
+
+def moveLockPath():
+    """Where a running move keeps its lock file, or None without an application data folder (main thread)."""
+    path = moveJournalPath()
+    return os.path.join(os.path.dirname(path), MOVE_LOCK_FILE) if path else None
+
+
+def takeMoveLock():
+    """Mark the move of the folder as running in this process. Return False when another running Slicer Studio of this user
+    is moving it now (main thread: a Qt lock file; a process that was killed holds nothing).
+    """
+    global _moveLock
+    if _moveLock is not None:
+        return True
+    path = moveLockPath()
+    if not path:
+        return True
+    with contextlib.suppress(OSError):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    lock = _tryLockAt(path)
+    if lock is None:
+        # No lock file, so nobody holds it: it could not be created (the move goes on without the mark)
+        return not os.path.lexists(path)
+    _moveLock = lock
+    _heldLocks.add(_lockKey(path))
+    return True
+
+
+def releaseMoveLock():
+    """End the mark of ``takeMoveLock`` (nothing when this process holds none)."""
+    global _moveLock
+    lock, _moveLock = _moveLock, None
+    if lock is not None:
+        path = moveLockPath()
+        lock.unlock()
+        if path:
+            _heldLocks.discard(_lockKey(path))
+
+
+def isMoveRunningElsewhere():
+    """True while another running Slicer Studio of this user moves the Slicer Studio folder (``takeMoveLock``): its
+    ``MovePending`` record is not an interrupted move, and the projects it moves are not crashed. Main thread.
+    """
+    if _moveLock is not None:
+        return False
+    path = moveLockPath()
+    if not path or not os.path.lexists(path):
+        return False
+    lock = _tryLockAt(path)
+    if lock is None:
+        return os.path.lexists(path)
+    lock.unlock()
+    return False
+
+
+def checkMoveNotRunningElsewhere():
+    """Raise MoveRunningElsewhereError while another running Slicer Studio moves the folder (``isMoveRunningElsewhere``)."""
+    if isMoveRunningElsewhere():
+        raise MoveRunningElsewhereError(_("Slicer Studio is moving your projects and studies in another window. Wait until it "
+                                          "finishes, then try again."))
+
+
 class MoveJournal:
     """What a move of the Slicer Studio folder (``moveContent``) did that the folders cannot tell after a kill.
 
@@ -958,13 +1027,6 @@ def _lockKey(lockPath):
     return os.path.normcase(os.path.realpath(lockPath))
 
 
-def _lockFile(projectPath):
-    lock = qt.QLockFile(_lockPath(projectPath))
-    # Never stale by age: a lock is stale only when its process is gone (QLockFile checks the process on this host)
-    lock.setStaleLockTime(0)
-    return lock
-
-
 def _bytesText(value):
     """The text of a QByteArray (or str) that PythonQt returns, with Qt 5 and Qt 6."""
     if isinstance(value, str):
@@ -1006,10 +1068,17 @@ def _lockLeftByEarlierProcess(lockPath):
 
 def _tryLock(projectPath):
     """Take the lock of the project: the locked QLockFile, or None if another running Slicer Studio holds it."""
-    lock = _lockFile(projectPath)
+    return _tryLockAt(_lockPath(projectPath))
+
+
+def _tryLockAt(lockPath):
+    """Take the lock file ``lockPath``: the locked QLockFile, or None if another running Slicer Studio holds it."""
+    lock = qt.QLockFile(lockPath)
+    # Never stale by age: a lock is stale only when its process is gone (QLockFile checks the process on this host)
+    lock.setStaleLockTime(0)
     if lock.tryLock(0):
         return lock
-    if not _lockLeftByEarlierProcess(_lockPath(projectPath)):
+    if not _lockLeftByEarlierProcess(lockPath):
         return None
     lock.removeStaleLockFile()
     return lock if lock.tryLock(0) else None
@@ -2025,6 +2094,10 @@ class OpenElsewhereError(OSError):
     """The folder cannot be moved: another running Slicer Studio has one of its projects or studies open."""
 
 
+class MoveRunningElsewhereError(OpenElsewhereError):
+    """The folder cannot be moved, or its interrupted move finished: another running Slicer Studio is moving it now."""
+
+
 def projectsOpenElsewhere(rootPath=None):
     """The names of the projects of the folder that another running Slicer Studio has open (main thread: Qt lock files)."""
     folder = projectsFolder(rootPath)
@@ -2077,8 +2150,10 @@ def checkNotOpenElsewhere(rootPath):
     study of the folder open: moving Projects/ would move that project, lock included, away from under it, and that
     window would go on saving into the old folder; moving Studies/ would move a study away from under the window that
     traces it (its journal, participants and heartbeat would re-create a half study in the old folder, and its lesions
-    could no longer be written).
+    could no longer be written). A move of the folder that another running Slicer Studio is doing now raises
+    MoveRunningElsewhereError (a subclass): the projects it moves are not locked while they move.
     """
+    checkMoveNotRunningElsewhere()
     names = projectsOpenElsewhere(rootPath)
     if len(names) == 1:
         raise OpenElsewhereError(_("{name} is open in another Slicer Studio. Close it there first, then change the folder.").format(name=names[0]))

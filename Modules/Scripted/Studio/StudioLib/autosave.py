@@ -2169,8 +2169,16 @@ class AutosaveService:
         The open project is saved first and followed. ``run(function)`` runs the move (for example in a thread with a
         progress dialog); by default it runs here. Return the list of moved items. Raise OSError when moving fails (what was
         moved stays moved; the setting is then not changed), and ``projects.OpenElsewhereError`` before anything is moved
-        when another running Slicer Studio has a project or a study of the folder open.
+        when another running Slicer Studio has a project or a study of the folder open
+        (``projects.MoveRunningElsewhereError`` when it is moving the folder now).
         """
+        try:
+            return self._moveRoot(newRoot, moveContent, run)
+        finally:
+            # Held from the start of the move until the setting points at the new folder
+            self._projects().releaseMoveLock()
+
+    def _moveRoot(self, newRoot, moveContent, run):
         projects = self._projects()
         oldRoot = projects.root()
         newRoot = os.path.normpath(os.path.abspath(newRoot))
@@ -2179,6 +2187,12 @@ class AutosaveService:
             projects.checkMoveTarget(oldRoot, newRoot)  # before the open project is saved and unlocked
             # A project or study that another Slicer Studio has open would move away from under it (it would go on saving there)
             projects.checkNotOpenElsewhere(oldRoot)
+            # Marks this move as running until the setting points at the new folder: another Slicer Studio that starts
+            # meanwhile must not take its MovePending record for an interrupted move (``finishInterruptedMove``), nor
+            # offer the projects it moves (unlocked while they move) as crashed, nor move the folder at the same time
+            if not projects.takeMoveLock():
+                raise projects.MoveRunningElsewhereError(_("Slicer Studio is moving your projects and studies in another window. "
+                                                           "Wait until it finishes, then try again."))
             if self._studyOpen():
                 # The open study writes its journal and participants into Studies/ while it is open
                 raise OSError(_("Close the open study first."))
@@ -2274,13 +2288,28 @@ class AutosaveService:
         the new folder). So the move goes on where it stopped (what it left is cleaned up by ``projects.moveContent``),
         the setting then points at the new folder, and the user is told. Called at startup before the crash scan.
         ``run`` runs the move (default: a progress dialog), ``notify(text, level)`` tells the user (default: a toast).
-        Return "finished", "failed", "unavailable" or None (no interrupted move).
+        A move that another running Slicer Studio is doing now (its ``projects.takeMoveLock``) is left to it: nothing is
+        moved or changed, and the user is told. Return "finished", "failed", "unavailable", "running" or None (no
+        interrupted move).
         """
         projects = self._projects()
         pending = projects.pendingMove()
         if pending is None or not projects.isEnabled() or projects.isRootFromEnvironment():
             return None
         oldRoot, newRoot = pending
+        if notify is None:
+            from StudioLib import projects_ui
+
+            def notify(text, level):
+                projects_ui.message(text, level=level, ms=15000)
+
+        def runningElsewhere():
+            notify(_("Slicer Studio is moving your projects and studies to {folder} in another window.").format(
+                folder=projects.shortPath(newRoot)), "info")
+            return "running"
+
+        if projects.isMoveRunningElsewhere():
+            return runningElsewhere()
 
         def same(first, second):
             return os.path.normcase(os.path.realpath(first)) == os.path.normcase(os.path.realpath(second))
@@ -2289,12 +2318,6 @@ class AutosaveService:
         if same(current, newRoot) or not same(current, oldRoot):
             projects.clearPendingMove()  # the move finished, or another folder was chosen since
             return None
-        if notify is None:
-            from StudioLib import projects_ui
-
-            def notify(text, level):
-                projects_ui.message(text, level=level, ms=15000)
-
         if not os.path.isdir(newRoot):
             # A drive that is not connected now: the move goes on at a later start
             notify(_("Slicer Studio was closed while it moved your projects and studies to {folder}. That folder cannot be found now: "
@@ -2308,6 +2331,8 @@ class AutosaveService:
 
         try:
             self.moveRoot(newRoot, moveContent=True, run=run)
+        except projects.MoveRunningElsewhereError:
+            return runningElsewhere()  # started in another window since the check above: its record stays
         except OSError as error:
             if projects.hasContent(oldRoot):
                 projects.recordPendingMove(oldRoot, newRoot)  # tried again at the next start
@@ -2337,14 +2362,18 @@ class AutosaveService:
         no scan, only .studio and temporary files. They are not a project to offer after a crash, and not one to list.
         """
         projects = self._projects()
-        if not projects.isEnabled():
-            return []
+        if not projects.isEnabled() or projects.isMoveRunningElsewhere():
+            return []  # a folder that another Slicer Studio moves now is not cleaned up from here
         return projects.removeUnsavedProjects()
 
     def scanProjectsAtStartup(self):
         """Offer the projects that were open when Slicer Studio closed unexpectedly (each one once)."""
         projects = self._projects()
         if not projects.isEnabled():
+            return []
+        if projects.isMoveRunningElsewhere():
+            # Another Slicer Studio moves the folder now: its open project is unlocked while it moves, not crashed (a
+            # project that did crash is offered at a later start, from the new folder)
             return []
         io = _io()
         crashed = []

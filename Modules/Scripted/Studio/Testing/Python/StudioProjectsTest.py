@@ -6419,6 +6419,123 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertTrue(projects.isStudioFolder(os.path.join(self.tempDir, "new", projects.ROOT_FOLDER_NAME)), "by its name")
         self.assertFalse(projects.isStudioFolder(""))
 
+    def test_89_second_window_leaves_a_running_move_alone(self):
+        """A second Slicer Studio started while the first one moves the Slicer Studio folder (Change… > Move, to another
+        volume) took the move's Studio/Projects/MovePending record for an interrupted move (BB-1): it ran the same move at
+        the same time, deleted the first window's partial copies (whose move then failed), said "Slicer Studio was closed
+        while it moved your projects", and offered the project the first window had open (unlocked while it moves) as
+        crashed. A running move now holds a lock file (``projects.takeMoveLock``) until the setting points at the new
+        folder: the second window leaves that move alone and says it runs in another window, offers no crashed project
+        from the folder that moves, and refuses to move the folder itself. Once that process is gone (killed), the
+        record is an interrupted move again and the next start finishes it.
+        """
+        import subprocess
+
+        projects = self.projects
+        if not shutil.which("sleep"):
+            self.skipTest("needs the sleep program")
+        oldRoot = os.path.normpath(os.path.join(self.tempDir, "A", "Slicer Studio"))
+        newRoot = os.path.normpath(os.path.join(self.tempDir, "B", "My projects"))
+        folder = os.path.join(oldRoot, projects.PROJECTS_DIR, "MRHead")
+        os.makedirs(os.path.join(folder, "Images"))
+        os.makedirs(os.path.join(folder, projects.PRIVATE_DIR))
+        with open(os.path.join(folder, "Images", "MRHead.nrrd"), "wb") as f:
+            f.write(os.urandom(4096))
+        with open(os.path.join(folder, "MRHead" + projects.SCENE_EXTENSION), "w") as f:
+            f.write('<MRML><VolumeArchetypeStorage fileName="Images/MRHead.nrrd"/></MRML>\n')
+        with open(projects.projectFile(folder), "w") as f:
+            json.dump({"name": "MRHead", "state": "open"}, f)  # open in the window that moves it, and unlocked for the move
+        os.makedirs(newRoot)  # the move has begun: the new folder exists
+        lockPath = projects.moveLockPath()
+        self.assertTrue(lockPath, "the move lock has a place")
+        os.makedirs(os.path.dirname(lockPath), exist_ok=True)
+
+        # The lock file that the moving window holds: what Qt writes for this process, with the process id of another live
+        # process of this program (a copy of "sleep" under this program's name, as Qt checks the name of the process)
+        probe = qt.QLockFile(os.path.join(self.tempDir, "probe.lock"))
+        self.assertTrue(probe.tryLock(0))
+        with open(os.path.join(self.tempDir, "probe.lock"), encoding="utf-8") as f:
+            lines = f.read().split("\n")
+        probe.unlock()
+        self.assertEqual(int(lines[0]), os.getpid())
+        program = os.path.join(self.tempDir, "other", lines[1] or "SlicerApp-real")
+        os.makedirs(os.path.dirname(program))
+        shutil.copy2(shutil.which("sleep"), program)
+        other = subprocess.Popen([program, "600"])  # the other Slicer Studio window, moving the folder
+
+        def holdLock(pid):
+            with open(lockPath, "w", encoding="utf-8") as f:
+                f.write("\n".join([str(pid)] + lines[1:]))
+
+        settings = qt.QSettings()
+        os.environ.pop(projects.ROOT_ENVIRONMENT)
+        settings.setValue(projects.ROOT_KEY, oldRoot)
+        try:
+            projects.recordPendingMove(oldRoot, newRoot)
+            holdLock(other.pid)
+            self.assertTrue(projects.isMoveRunningElsewhere())
+            service = self._service()
+            offered = []
+            service.setProjectPresenter(offered.append)
+            notices = []
+            moves = []
+            result = service.finishInterruptedMove(run=moves.append,
+                                                   notify=lambda text, level: notices.append((level, text)))
+            self.assertEqual(result, "running", "a running move is not an interrupted one")
+            self.assertEqual(moves, [], "nothing is moved from here")
+            self.assertEqual(len(notices), 1)
+            self.assertEqual(notices[0][0], "info")
+            self.assertIn("in another window", notices[0][1])
+            self.assertNotIn("was closed", notices[0][1])
+            self.assertEqual(projects.root(), oldRoot, "the setting is the moving window's to change")
+            self.assertEqual(projects.pendingMove(), (oldRoot, newRoot), "the record stays")
+            self.assertTrue(os.path.isfile(os.path.join(folder, "Images", "MRHead.nrrd")), "nothing is moved")
+            self.assertEqual(os.listdir(newRoot), [])
+            self.assertEqual(service.scanProjectsAtStartup(), [], "the project that moves is not offered as crashed")
+            self.assertEqual(offered, [])
+            self.io.backgroundWriter().drain(30.0)
+            self.assertEqual(projects.readProjectJson(folder).get("state"), "open", "not marked crashed")
+            self.assertEqual(service.removeUnsavedProjects(), [])
+            # Change… here while the other window moves: refused before anything is done, with a plain message
+            with self.assertRaises(projects.OpenElsewhereError) as context:
+                service.moveRoot(newRoot, moveContent=True)
+            self.assertIsInstance(context.exception, projects.MoveRunningElsewhereError)
+            self.assertIn("in another window", str(context.exception))
+            self.assertEqual(projects.root(), oldRoot)
+            self.assertEqual(projects.pendingMove(), (oldRoot, newRoot))
+            self.assertTrue(os.path.exists(lockPath), "the other window's lock is kept")
+
+            # The moving window is killed: its record is an interrupted move, finished at the next start
+            other.kill()
+            other.wait()
+            self.assertFalse(projects.isMoveRunningElsewhere())
+            during = []
+
+            def run(function):
+                # This window's own move holds the lock, and is not "elsewhere" for itself
+                during.append((os.path.exists(lockPath), projects.isMoveRunningElsewhere()))
+                return function()
+
+            restarted = self._service()
+            restarted.setProjectPresenter(offered.append)
+            notices = []
+            result = restarted.finishInterruptedMove(run=run, notify=lambda text, level: notices.append((level, text)))
+            self.assertEqual(result, "finished")
+            self.assertEqual(during, [(True, False)])
+            self.assertFalse(os.path.exists(lockPath), "released once the setting points at the new folder")
+            self.assertEqual(projects.root(), newRoot)
+            self.assertIsNone(projects.pendingMove())
+            self.assertEqual([info.name for info in restarted.scanProjectsAtStartup()], ["MRHead"], "a project left open is offered now")
+            self.io.backgroundWriter().drain(30.0)
+        finally:
+            if other.poll() is None:
+                other.kill()
+                other.wait()
+            projects.releaseMoveLock()
+            with contextlib.suppress(OSError):
+                os.remove(lockPath)
+            projects.clearPendingMove()
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk
