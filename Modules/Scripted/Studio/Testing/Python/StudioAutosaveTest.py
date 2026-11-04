@@ -902,6 +902,49 @@ class StudioAutosaveTest(unittest.TestCase):
         self.assertTrue(service.waitForIdle(30.0))
         self.assertEqual(service.writer.generation, 2)
 
+    def test_s2_clockGoesBack(self):
+        """The wall clock set back (NTP, manual change, resumed VM) must not stop the autosave (idle and rate use a clock that never goes back)."""
+        import time as realTime
+
+        class ShiftedTime:
+            """The ``time`` module with the wall clock ``time()`` 1 h behind (``monotonic()`` is not affected)."""
+
+            def time(self):
+                return realTime.time() - 3600.0
+
+            def __getattr__(self, name):
+                return getattr(realTime, name)
+
+        built = self._buildScene()
+        service = self._service()
+        service.reloadSettings()
+        service.settings["IdleSeconds"] = 1
+        service.settings["IntervalMinutes"] = 0.05  # 3 s
+        self._generate(service)
+        self.assertFalse(service.dirty)
+        self.autosave.time = ShiftedTime()
+        self.addCleanup(lambda: setattr(self.autosave, "time", realTime))
+        service._pollTimer.start()
+        try:
+            service.poll()
+            lesion = built["lesion"].copy()
+            lesion[20, 25, 38] = 1
+            edited = time.monotonic()
+            slicer.util.updateSegmentBinaryLabelmapFromArray(lesion, built["segmentation"], built["segmentId"], built["volume"])
+            started = None
+            deadline = time.monotonic() + 25.0
+            while time.monotonic() < deadline and started is None:
+                slicer.app.processEvents()
+                if service.plan is not None:
+                    started = time.monotonic() - edited
+                time.sleep(0.005)
+        finally:
+            service._pollTimer.stop()
+        self.assertIsNotNone(started, "no autosave started in 25 s after the wall clock went back by 1 h")
+        self.assertLess(started, 15.0)
+        self.assertTrue(service.waitForIdle(30.0))
+        self.assertFalse(service.dirty)
+
     #
     # Studio surfaces (A-01b)
     #

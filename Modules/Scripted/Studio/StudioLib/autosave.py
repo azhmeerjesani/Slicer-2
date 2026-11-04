@@ -59,6 +59,18 @@ HEARTBEAT_S = 600
 #: Autosaving pauses this long after a disk error
 ERROR_RETRY_S = 600
 THUMBNAIL_INTERVAL_S = 300
+
+
+def _clock():
+    """Seconds on a clock that never goes back: for idle time, rate limits and retry delays.
+
+    ``time.time()`` jumps when the wall clock is corrected (NTP, a manual change, a resumed VM). After a jump back,
+    ``now - lastGenerationTime`` stays negative for as long as the jump, so no autosave would run. ``time.time()`` stays in use
+    only for times that are shown or stored (``lastSaveTime``, session and manifest files).
+    """
+    return time.monotonic()
+
+
 THUMBNAIL_SIZE = 240
 #: Main-thread budget left in a tick for a thumbnail
 THUMBNAIL_BUDGET_MS = 15
@@ -241,8 +253,8 @@ class AutosaveService:
         self._lastPolledFingerprint = None
         self.dirty = False
         self.firstDirtyTime = None
-        self.lastChangeTime = time.time()
-        self.lastInputTime = time.time()
+        self.lastChangeTime = _clock()
+        self.lastInputTime = _clock()
         self.lastGenerationTime = None
         self._lastPollTime = None
         self._nextPollMs = None
@@ -254,13 +266,13 @@ class AutosaveService:
         self._protectedSlots = set()
         #: size of the other sessions of the autosave folder (measured by the retention rules)
         self._otherSessionsBytes = 0
-        self._lastRuntimePrune = 0.0
+        self._lastRuntimePrune = float("-inf")
         self._lastCursor = None
         self._modalSince = None
         self._pausedUntil = 0.0
         self._suspendCount = 0
         self._recovering = 0
-        self._lastThumbnailTime = 0.0
+        self._lastThumbnailTime = float("-inf")
         self._lastUnsavedAutosaved = False
         self._statusListeners = []
         self._contextProviders = []
@@ -344,7 +356,7 @@ class AutosaveService:
             except Exception:
                 logging.error(f"Autosave: installing the user interface failed ({step.__name__}):\n" + traceback.format_exc())
         # Changes before the first poll are counted from now
-        self._lastPollTime = time.time()
+        self._lastPollTime = _clock()
         self._pollTimer.start()
         self._heartbeatTimer.start()
 
@@ -501,7 +513,7 @@ class AutosaveService:
                 self._pollTimer.start(interval)
 
     def _poll(self):
-        now = time.time()
+        now = _clock()
         previousPoll = getattr(self, "_lastPollTime", None) or now
         self._lastPollTime = now
         # When a change or input happened: between the previous poll and this one. After the fast polls that run
@@ -666,7 +678,7 @@ class AutosaveService:
         if self.project is not None:
             return self._startProjectGeneration(reason, fingerprint, synchronous=synchronous, ignoreBusy=ignoreBusy, force=synchronous)
         io = _io()
-        now = time.time()
+        now = _clock()
         try:
             self._ensureSession()
             writer = self._slotWriter()
@@ -847,7 +859,7 @@ class AutosaveService:
         if not plan.incomplete:
             self._savedFingerprint = plan.fingerprint
         self.dirty = _io().sceneFingerprint(slicer.mrmlScene, _io().sentinelIds()) != self._savedFingerprint
-        self.firstDirtyTime = time.time() if self.dirty else None
+        self.firstDirtyTime = _clock() if self.dirty else None
         self._lastUnsavedAutosaved = plan.unsaved
         slot = self.slots.setdefault(self.slotName(), {"name": self.slotName(), "state": "current"})
         slot.update({
@@ -877,7 +889,7 @@ class AutosaveService:
         return free >= _requiredFreeBytes(estimatedBytes, project)
 
     def _pause(self, message):
-        self._pausedUntil = time.time() + ERROR_RETRY_S
+        self._pausedUntil = _clock() + ERROR_RETRY_S
         self._setState("paused", message)
         logging.warning(message)
 
@@ -912,11 +924,11 @@ class AutosaveService:
             # Projects render their thumbnails from the image arrays in the background (``_queueProjectThumbnail()``)
             return False
         path = getattr(plan, "thumbnailPath", None) or os.path.join(plan.slotDir, _io().THUMBNAIL_FILE)
-        return time.time() - self._lastThumbnailTime >= THUMBNAIL_INTERVAL_S or not os.path.exists(path)
+        return _clock() - self._lastThumbnailTime >= THUMBNAIL_INTERVAL_S or not os.path.exists(path)
 
     def _updateThumbnail(self, plan):
         """Thumbnail of the first visible slice view: at most every 5 min, never a network map (LNM blinding)."""
-        now = time.time()
+        now = _clock()
         io = _io()
         path = getattr(plan, "thumbnailPath", None) or os.path.join(plan.slotDir, io.THUMBNAIL_FILE)
         try:
@@ -1038,7 +1050,7 @@ class AutosaveService:
         self.firstDirtyTime = None
         self.lastGenerationTime = None
         self._lastUnsavedAutosaved = False
-        self._lastThumbnailTime = 0.0
+        self._lastThumbnailTime = float("-inf")
         self._updateStatus()
 
     def _onSceneStartImport(self, caller=None, event=None):
@@ -1170,7 +1182,7 @@ class AutosaveService:
             sessions = recovery.scan(self.rootDirectory(), self.sessionId)
             self._pendingRecoveries = [s for s in sessions if s.presentable()]
             toPresent = [s for s in self._pendingRecoveries if s.presentedCount < 2]
-            self._lastRuntimePrune = time.time()
+            self._lastRuntimePrune = _clock()
             recovery.pruneInBackground(self.rootDirectory(), sessions, self.settings, onDone=self._onPruned,
                                        protectedPaths=self._protectedSlots)
             if toPresent:
@@ -1240,7 +1252,7 @@ class AutosaveService:
         if self.root is None:
             return
         cap = int(self.settings.get("MaxDiskMB", 2048)) << 20
-        now = time.time()
+        now = _clock()
         if self._status.bytes + self._otherSessionsBytes <= cap or now - self._lastRuntimePrune < RUNTIME_PRUNE_INTERVAL_S:
             return
         self._lastRuntimePrune = now
@@ -1554,9 +1566,9 @@ class AutosaveService:
         self._savedFingerprint = fingerprint if clean else None
         self._lastPolledFingerprint = fingerprint
         self.dirty = not clean
-        self.firstDirtyTime = time.time() if self.dirty else None
+        self.firstDirtyTime = _clock() if self.dirty else None
         self.lastGenerationTime = None
-        self._lastThumbnailTime = 0.0
+        self._lastThumbnailTime = float("-inf")
         self._lastUnsavedAutosaved = False
         self._projectPausedReason = ""
         self._status.lastSaveTime = os.path.getmtime(project.scenePath) if clean else None
@@ -1633,7 +1645,7 @@ class AutosaveService:
     def _startProjectGeneration(self, reason, fingerprint, synchronous=False, ignoreBusy=False, force=False, progress=False,
                                 timeoutS=PROJECT_SAVE_TIMEOUT_S):
         io = _io()
-        now = time.time()
+        now = _clock()
         writer = self.projectWriter
         try:
             if synchronous:
@@ -1718,7 +1730,7 @@ class AutosaveService:
         self._projectPausedReason = reason
         if self.project is not None:
             self.project.lastError = reason
-        self._pausedUntil = time.time() + 30.0
+        self._pausedUntil = _clock() + 30.0
         self._setState("error", _("Not saved: {reason}").format(reason=reason))
         logging.warning(f"Slicer Studio: the project could not be saved: {reason}")
         self._announce("failed", reason=reason)
@@ -1739,7 +1751,7 @@ class AutosaveService:
         if not plan.incomplete:
             self._savedFingerprint = plan.fingerprint
         self.dirty = io.sceneFingerprint(slicer.mrmlScene, io.sentinelIds()) != self._savedFingerprint or plan.incomplete
-        self.firstDirtyTime = time.time() if self.dirty else None
+        self.firstDirtyTime = _clock() if self.dirty else None
         self._lastProjectPlan = plan
         now = time.time()
         self._status.lastSaveTime = now
@@ -2168,7 +2180,7 @@ class AutosaveService:
         project.writeJson(state="open", executor=_io().backgroundWriter())
         self._savedFingerprint = None  # the scene file is written again (same content, new name)
         self.dirty = True
-        self.firstDirtyTime = time.time()
+        self.firstDirtyTime = _clock()
         self._projects().setCurrentProject(project)
         self._updateStatus()
 
