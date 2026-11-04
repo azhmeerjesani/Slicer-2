@@ -1298,7 +1298,11 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.activateEffect(target)
 
     def activateEffect(self, effectName):
-        """Activate an effect as a click on its tile does (the first segment is created or selected when needed)."""
+        """Activate an effect as a click on its tile does (the first segment is created or selected when needed). Nothing
+        happens while the editor is read-only (its tiles are disabled too).
+        """
+        if getattr(self.editor, "readOnly", False):
+            return
         button = next((button for button in self._effectButtons(allButtons=True) if button.objectName == effectName), None)
         if button is not None and button.isEnabled():
             button.click()

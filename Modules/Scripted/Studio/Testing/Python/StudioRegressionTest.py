@@ -146,6 +146,10 @@ Run with the main window and testing enabled::
   and a review, Save lesion (Ctrl+Shift+S), Save lesion as… (the Lesion card ⋯ menu and Search) are off with a toast: they
   proposed the first tracer's file (the scan's folder, its BIDS subject) and replaced it with the second rater's strokes, the
   A/B label map or the reviewer's edit. The footer of each state writes its own files.
+- ``test_70_adjudication_tracings_are_read_only_until_edit`` (BB-1): an adjudication opens with no tool armed and the two
+  tracings read-only (tool tiles and keys off, card fixes off, Draw's hint says why) until Edit…: the Brush stayed armed on A,
+  a stroke changed A on screen, and choosing A or Union wrote the files on disk without the stroke and without a word. Edit…
+  makes the Consensus segment editable, Cancel edit makes the tracings read-only again, and leaving gives an editable editor.
 """
 
 import inspect
@@ -5208,6 +5212,133 @@ class StudioRegressionTest(unittest.TestCase):
                 adjudicate.exitState()
             if review.state() is not None:
                 review.exitReview()
+            study_ui.closeStudy()
+            studioShell.dispose()
+            pump()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
+
+    def test_70_adjudication_tracings_are_read_only_until_edit(self):
+        """The adjudication opened with the Brush armed on tracing A: a stroke changed A on screen (the Lesion card said
+        "2 parts", "Not saved yet"), and choosing A or Union wrote the tracings on disk without it and without a word. The
+        tracings are read-only until Edit…, whose Consensus segment is the one to edit (BB-1).
+        """
+        from LesionNetworkMappingLib import agreement, nifti
+
+        from StudioLib import adjudicate, draw, review, shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        shape = (40, 48, 36)
+        affine = np.array([[2.0, 0, 0, -40], [0, 2.0, 0, -48], [0, 0, 2.0, -36], [0, 0, 0, 1]])
+        folder = os.path.join(self.directory, "Adjudication study")
+        os.makedirs(folder)
+        files = []
+        for sid in ("sub-01", "sub-02"):
+            files.append(os.path.join(folder, f"{sid}_T1w.nii.gz"))
+            nifti.write_nifti(files[-1], np.full(shape, 100, np.int16), affine, sform_code=1, qform_code=1)
+            lesion = np.zeros(shape, np.uint8)
+            lesion[10:16, 20:26, 15:21] = 1
+            files.append(os.path.join(folder, f"{sid}_lesion.nii.gz"))
+            nifti.write_nifti(files[-1], lesion, affine, sform_code=1, qform_code=1)
+        originalToast = study_ui._toast
+        study_ui._toast = lambda shell, text, **kwargs: None
+        self.addCleanup(setattr, study_ui, "_toast", originalToast)
+        originalAdjudicateToast = adjudicate._toast
+        adjudicate._toast = lambda text, ms=3000, **kwargs: None
+        self.addCleanup(setattr, adjudicate, "_toast", originalAdjudicateToast)
+        self.addCleanup(review.setRaterName, review.storedRaterName())
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        toasts = []
+        originalShellToast = studioShell.toast
+        studioShell.toast = lambda text, *args, **kwargs: (toasts.append(str(text)), originalShellToast(text, *args, **kwargs))[1]
+
+        def pump():
+            for _ in range(4):
+                slicer.app.processEvents()
+
+        def voxels(path):
+            return int(np.count_nonzero(nifti.read_nifti(path)[0]))
+
+        def effectName(editor):
+            effect = editor.activeEffect()
+            return effect.name if effect is not None else None
+
+        try:
+            review.setRaterName("Ana Bell")
+            session = study_ui.createStudy(files, studioShell, folder=folder)
+            self.assertIsNotNone(session)
+            pump()
+            studyObject = session.study
+            for sid in ("sub-01", "sub-02"):
+                session.setValues([sid], {"status": "traced", "tracer": "Ana Bell"})
+            session.flush()
+            agreement.assign(studyObject, sids=["sub-01", "sub-02"], rater="Carl Diaz", who="Dana PI")
+            for sid in ("sub-01", "sub-02"):
+                primaryPath = os.path.join(folder, f"{sid}_lesion.nii.gz")
+                primary, primaryAffine, _header = nifti.read_nifti(primaryPath)
+                agreement.save_second_tracing(studyObject, sid, np.ascontiguousarray(np.roll(primary, 4, axis=0).transpose(2, 1, 0)),
+                                              primaryAffine, primaryPath, "Carl Diaz")
+            session.setValues([], {})
+            session.flush()
+            primaryPath = os.path.join(folder, "sub-01_lesion.nii.gz")
+            primaryBefore = voxels(primaryPath)
+            editor = draw.segmentEditor()
+            widget = slicer.modules.SegmentEditorWidget
+            review.setRaterName("Dana PI")
+            state = adjudicate.startAdjudication(sids=["sub-01", "sub-02"], shell=studioShell)
+            self.assertIsNotNone(state)
+            pump()
+            self.assertIsNotNone(adjudicate.state(), "the adjudication did not start")
+            node = state.segmentationNode()
+            segmentA = state.segmentIds["A"]
+            voxelsA = int(adjudicate._segmentMask(node, segmentA)[0].sum())
+
+            # Before Edit…: no tool, and neither the tool keys nor Draw's arming nor the card fixes change A
+            self.assertIs(editor.segmentationNode(), node)
+            self.assertIsNone(effectName(editor), "a tool is armed on the tracings before Edit…")
+            self.assertTrue(editor.readOnly, "the tracings can be edited before Edit…")
+            widget._onMnemonic("Paint")
+            draw.session(studioShell).requestArm()
+            pump()
+            self.assertIsNone(effectName(editor), "P armed the Brush on the tracings before Edit…")
+            editor.setCurrentSegmentID(segmentA)
+            toasts.clear()
+            self.assertIsNone(draw.keepLargestPart(studioShell), "Keep largest edited tracing A")
+            self.assertTrue(toasts and "read-only" in toasts[-1], toasts)
+            self.assertEqual(int(adjudicate._segmentMask(node, segmentA)[0].sum()), voxelsA)
+            self.assertIn("read-only", draw.extension()._hint(draw.session(studioShell), editor, None))
+
+            # Edit…: the Consensus segment is edited with the Brush; Cancel edit: read-only again
+            state.choose("edit")
+            pump()
+            self.assertFalse(editor.readOnly, "Edit… left the consensus read-only")
+            self.assertEqual(editor.currentSegmentID(), state.segmentIds["consensus"])
+            widget._onMnemonic("Paint")
+            pump()
+            self.assertEqual(effectName(editor), "Paint", "the Brush cannot be picked to edit the consensus")
+            state.cancelEdit()
+            pump()
+            self.assertTrue(editor.readOnly, "Cancel edit left the tracings editable")
+            self.assertIsNone(effectName(editor), "Cancel edit left a tool armed on the tracings")
+
+            # A: the tracing on disk is the consensus, as shown; the next pair opens read-only too
+            self.assertTrue(state.choose("A"))
+            pump()
+            self.assertEqual(voxels(primaryPath), primaryBefore)
+            self.assertEqual(primaryBefore, voxelsA)
+            self.assertEqual(state.current, "sub-02")
+            self.assertTrue(editor.readOnly)
+            self.assertIsNone(effectName(editor))
+
+            # Leaving the adjudication leaves an editable editor
+            adjudicate.exitState()
+            pump()
+            self.assertFalse(editor.readOnly, "the Segment Editor stayed read-only after the adjudication")
+        finally:
+            if adjudicate.state() is not None:
+                adjudicate.exitState()
             study_ui.closeStudy()
             studioShell.dispose()
             pump()

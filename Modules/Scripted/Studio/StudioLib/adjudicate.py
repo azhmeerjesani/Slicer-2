@@ -201,6 +201,23 @@ def _addSegment(segmentationNode, array_ijk, affine, name, color):
         slicer.mrmlScene.RemoveNode(labelmap)
 
 
+def _readOnlyText():
+    """Draw's hint while the two tracings are shown read-only (before Edit…)."""
+    return _("A and B are read-only: pick a result below, or Edit… to correct the union")
+
+
+def _setReadOnly(segmentationNode, reason):
+    """Show ``segmentationNode`` read-only in Draw while ``reason`` is set (``draw.READ_ONLY_ATTRIBUTE``), editable without."""
+    draw = review._draw()
+    if draw is None or segmentationNode is None:
+        return
+    if reason:
+        segmentationNode.SetAttribute(draw.READ_ONLY_ATTRIBUTE, reason)
+    else:
+        segmentationNode.RemoveAttribute(draw.READ_ONLY_ATTRIBUTE)
+    draw.syncReadOnly()
+
+
 def _segmentMask(segmentationNode, segmentId):
     """``(mask_kji uint8, ijkToRAS)`` of one segment cropped to its voxels, or None when it is empty."""
     studyUi = _studyUi()
@@ -399,6 +416,10 @@ class _AgreementState:
         editor = widget.editor if widget is not None else None
         if editor is not None and editor.segmentationNode() is not None and editor.segmentationNode().GetID() in self._nodeIds:
             editor.setSegmentationNode(None)
+            draw = review._draw()
+            if draw is not None:
+                # The tracings shown read-only (adjudication) do not leave the editor read-only
+                draw.syncReadOnly(editor)
         if self._figureShown:
             figure = review._figure()
             if figure is not None:
@@ -900,6 +921,8 @@ class AdjudicationState(_AgreementState):
         displayNode.SetOpacity2DOutline(1.0)
         importer = _importer()
         importer.selectInSegmentEditor(segmentationNode, volume)
+        # The tracings are read-only until Edit…: no tool armed on A, no stroke that the choice would not use
+        _setReadOnly(segmentationNode, _readOnlyText())
         importer.setViewLayers(background=volume, fit=True)
         with contextlib.suppress(Exception):
             center = rules.centroid_mm((a >= 0.5) | (rules._to_grid(b, affineB, rules.geometry.Grid(a.shape, affineA))), affineA)
@@ -1026,6 +1049,7 @@ class AdjudicationState(_AgreementState):
         union = rules.consensus_mask(a, rules._to_grid(b, affineB, rules.geometry.Grid(a.shape, affineA)), "union")
         if "consensus" not in self.segmentIds:
             self.segmentIds["consensus"] = _addSegment(node, union, affineA, _("Consensus"), COLOR_CONSENSUS)
+        _setReadOnly(node, None)
         displayNode = node.GetDisplayNode()
         displayNode.SetSegmentVisibility2DFill(self.segmentIds["consensus"], True)
         displayNode.SetVisibility2DFill(True)
@@ -1045,6 +1069,7 @@ class AdjudicationState(_AgreementState):
         if node is not None and segmentId:
             node.GetSegmentation().RemoveSegment(segmentId)
             node.GetDisplayNode().SetVisibility2DFill(False)
+        _setReadOnly(node, _readOnlyText())
         self.editing = False
         if self.shell is not None and hasattr(self.shell, "unregisterEscapeOverlay") and self.notice is not None:
             self.shell.unregisterEscapeOverlay(self.notice)

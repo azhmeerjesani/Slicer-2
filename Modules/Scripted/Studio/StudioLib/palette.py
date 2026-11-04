@@ -718,6 +718,11 @@ def _selectTool(shell, effectName):
     if editor.sourceVolumeNode() is None:
         shell.toast(_("Open a scan or start on the MNI template first, then pick the tool"), 3500)
         return
+    if getattr(editor, "readOnly", False):
+        from . import draw
+
+        shell.toast(draw.readOnlyReason(editor.segmentationNode()) or _("This lesion is read-only here"), 3500)
+        return
     if effectName not in [name for name, index in _toolNamesAndIndexes(editor) if index is not None]:
         # A tool under "More tools": its tile is shown, so that the active tool is visible in Draw
         widget = getattr(slicer.modules, "SegmentEditorWidget", None)

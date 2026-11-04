@@ -207,8 +207,36 @@ def _canEdit(editor):
 
 
 def _canDraw(editor):
-    """True if a tool can be picked: a segmentation and a source volume (the first tool adds the "Lesion" segment)."""
-    return editor.segmentationNode() is not None and editor.sourceVolumeNode() is not None
+    """True if a tool can be picked: a segmentation and a source volume (the first tool adds the "Lesion" segment), and the
+    segmentation is not shown read-only (``READ_ONLY_ATTRIBUTE``).
+    """
+    segmentationNode = editor.segmentationNode()
+    return segmentationNode is not None and editor.sourceVolumeNode() is not None and not readOnlyReason(segmentationNode)
+
+
+#: Attribute of a segmentation that Draw shows read-only: no tool, no tool key, no card fix (adjudication: the two
+#: tracings until Edit…). Its value says why, shown as Draw's hint.
+READ_ONLY_ATTRIBUTE = "Studio.ReadOnly"
+
+
+def readOnlyReason(segmentationNode):
+    """Why ``segmentationNode`` is shown read-only (``READ_ONLY_ATTRIBUTE``), or "" if it can be edited."""
+    if segmentationNode is None:
+        return ""
+    return segmentationNode.GetAttribute(READ_ONLY_ATTRIBUTE) or ""
+
+
+def syncReadOnly(editor=None):
+    """The Segment Editor is read-only (tools off and deselected, tool keys off) while it edits a read-only segmentation
+    (``READ_ONLY_ATTRIBUTE``), and editable otherwise. Return True if it is read-only.
+    """
+    editor = editor if editor is not None else segmentEditor()
+    if editor is None or not hasattr(editor, "setReadOnly"):
+        return False
+    readOnly = bool(readOnlyReason(editor.segmentationNode()))
+    if bool(editor.readOnly) != readOnly:
+        editor.setReadOnly(readOnly)
+    return readOnly
 
 
 #: Name that the Segment Editor gives a segment it adds ("Segment_1"): Draw renames the first one to its lesion name
@@ -867,6 +895,8 @@ class _DrawSession(VTKObservationMixin):
             # The module is being left (its exit() deactivates the effect): not a choice of the user
             return
         self._observe(editor)
+        # A read-only segmentation deselects the tool before the snapshot: no tool is armed on it (_canDraw())
+        syncReadOnly(editor)
         snapshot = _Snapshot(editor)
         previous = self._snapshot
         self._snapshot = snapshot
@@ -1068,6 +1098,8 @@ class _DrawSession(VTKObservationMixin):
             if editor.activeEffect() is not None:
                 # The editor keeps its effect without a segmentation: the next case would start with it
                 editor.setActiveEffect(None)
+            # A read-only segmentation of the closed case does not leave the editor read-only
+            syncReadOnly(editor)
             # The deactivation by the closing is not compared with the tool of the closed case
             self._snapshot = _Snapshot(editor)
 
@@ -1649,6 +1681,10 @@ def _editLesion(transform, title, shell=None):
     segmentId = editor.currentSegmentID() if editor is not None else None
     if segmentationNode is None or not segmentId:
         return None
+    if readOnlyReason(segmentationNode):
+        if shell is not None:
+            shell.toast(readOnlyReason(segmentationNode), 4000)
+        return None
     data = _labelmapArray(segmentationNode, segmentId)
     if data is None or not data[0].any():
         if shell is not None:
@@ -1769,7 +1805,7 @@ def fillGapsAndSpecks(shell=None):
 def fillGaps(shell=None):
     """The gaps link of the card: Fill gaps one-click when the effect offers it, else the Fill gaps tool."""
     editor = segmentEditor()
-    if editor is None or editor.effectByName("Fill between slices") is None:
+    if editor is None or editor.effectByName("Fill between slices") is None or not _canDraw(editor):
         return
     widget = _moduleWidget()
     if widget is not None and hasattr(widget, "activateEffect"):
@@ -3361,6 +3397,9 @@ class DrawExtension:
         if self._transientHint and activeName == "Smoothing":
             return self._transientHint
         self._transientHint = None
+        reason = readOnlyReason(editor.segmentationNode()) if editor is not None else ""
+        if reason:
+            return reason
         if drawSession is not None and drawSession.suspendedEffect() is not None:
             title = EFFECT_APPEARANCE.get(drawSession.suspendedEffect(), (drawSession.suspendedEffect(),))[0]
             return _("{tool} resumes after the placement · Esc cancels").format(tool=title)

@@ -129,7 +129,9 @@ Papers say that lesions "were checked by an expert" and rarely show it. The modu
   `derivatives/qc/interrater.tsv` (rater labels only, no paths) and `.json`. Two tracings give network maps that correlate
   highly even when the masks barely overlap, so network similarity overstates tracing agreement.
 - **Adjudicate tracings** resolves a disagreement: keep A, keep B, the union, the intersection or an edit. The consensus
-  becomes the lesion, the first tracing is kept as `desc-preadjudication`, and each decision can be undone.
+  becomes the lesion, the first tracing is kept as `desc-preadjudication`, and each decision can be undone. The two
+  tracings are read-only (no tool is armed on them); **Edit…** adds a green Consensus segment, the union, to correct with
+  the Draw tools, and **Cancel edit** makes them read-only again.
 - **Saving in these states.** While Draw reviews, traces a second time or adjudicates, **Save lesion** (Ctrl+Shift+S) and
   **Save lesion as…** are off: the footer (Ctrl+Enter) writes the state's own files, so the first tracer's file is never
   replaced.
