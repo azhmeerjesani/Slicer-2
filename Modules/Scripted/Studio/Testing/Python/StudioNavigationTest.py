@@ -2074,6 +2074,94 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         slicer.mrmlScene.RemoveNode(segmentation)
         slicer.mrmlScene.RemoveNode(volume)
 
+    def test_25c_layout_key_over_view_keeps_the_keys(self):
+        """Alt+2 (Single) or Alt+3 pressed with the pointer over a slice view: the view now under the still pointer has
+        the keys. The new layout hid or moved the view that had the focus, Qt gave it to an inspector button, and no
+        enter event followed: Up, Home and End were lost (BB-1). After Alt+3 over Red the pointer is over another view,
+        which takes the keys (they used to step Red). A widget outside the views that has the focus keeps it.
+        """
+        from StudioLib import layouts, shell
+
+        volume, segmentation = self._loadScanAndSegmentation()
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        slicer.util.setSliceViewerLayers(background=volume, fit=True)
+        studioShell.setLayoutFromPicker("focus")
+        self._pump(10)
+        self.mainWindow.activateWindow()
+        self._pump()
+        if not self.mainWindow.isActiveWindow:
+            self.skipTest("the main window cannot be activated on this display")
+        self.assertTrue(slicer.app.property("SlicerFocusFollowsMouse"))
+
+        def pointAt(name, fx=0.5, fy=0.5):
+            """Put the pointer over view ``name`` and give it the focus, as entering it does. Return its render widget."""
+            sliceView = self.layoutManager.sliceWidget(name).sliceView()
+            qt.QCursor.setPos(sliceView.mapToGlobal(qt.QPoint(int(sliceView.width * fx), int(sliceView.height * fy))))
+            self._pump()
+            _hovered, view = shell.Shell._hoveredSliceView()
+            if view != sliceView:
+                self.skipTest("the pointer cannot be put over the view on this display")
+            studioShell.hoverTracker._onEnter(name)
+            renderWidget = sliceView.VTKWidget()
+            renderWidget.setFocus(qt.Qt.MouseFocusReason)
+            self._pump()
+            self.assertEqual(slicer.app.focusWidget(), renderWidget)
+            return renderWidget
+
+        def assertKeysGoToHoveredView(context):
+            self._pump(10)
+            _hovered, view = shell.Shell._hoveredSliceView()
+            self.assertIsNotNone(view, f"{context}: no view under the pointer")
+            name = next(name for name in self.layoutManager.sliceViewNames() if self.layoutManager.sliceWidget(name).sliceView() == view)
+            focusWidget = slicer.app.focusWidget()
+            self.assertEqual(focusWidget, view.VTKWidget(),
+                             f"{context}: the focus is on {focusWidget.className() if focusWidget else None} "
+                             f"{focusWidget.objectName if focusWidget else ''}, not on {name} under the pointer")
+            # End and Home, sent where Qt sends keys (the focus widget), step the view under the pointer
+            logic = self.layoutManager.sliceWidget(name).sliceLogic()
+            bounds = [0.0] * 6
+            logic.GetLowestVolumeSliceBounds(bounds)
+            logic.SetSliceOffset((bounds[4] + bounds[5]) / 2.0)
+            self._pump()
+            before = logic.GetSliceOffset()
+            self._sendKey(slicer.app.focusWidget(), qt.Qt.Key_End)
+            self._pump()
+            self.assertNotEqual(logic.GetSliceOffset(), before, f"{context}: End did not move {name}")
+            return name
+
+        # Alt+2 over Yellow and over Green: the hovered view is enlarged and keeps the keys
+        for name in ("Yellow", "Green"):
+            pointAt(name, 0.45, 0.55)
+            studioShell.setLayoutFromPicker("single")
+            self.assertEqual(layouts.maximizedViewNames(), [name])
+            self.assertEqual(assertKeysGoToHoveredView(f"Alt+2 over {name}"), name)
+            studioShell.setLayoutFromPicker("focus")
+            self._pump(10)
+        # Alt+3 over Yellow: Yellow keeps the keys; over Red: the view now under the pointer takes them
+        pointAt("Yellow", 0.45, 0.55)
+        studioShell.setLayoutFromPicker("fourup")
+        assertKeysGoToHoveredView("Alt+3 over Yellow")
+        studioShell.setLayoutFromPicker("focus")
+        self._pump(10)
+        pointAt("Red", 0.45, 0.55)
+        studioShell.setLayoutFromPicker("fourup")
+        assertKeysGoToHoveredView("Alt+3 over Red")
+        # A button outside the views that the user gave the focus to (Tab) keeps it after a layout key
+        studioShell.setLayoutFromPicker("focus")
+        self._pump(10)
+        pointAt("Green", 0.45, 0.55)
+        button = studioShell.topBar.layoutButton
+        button.setFocus(qt.Qt.TabFocusReason)
+        self._pump()
+        self.assertEqual(slicer.app.focusWidget(), button)
+        studioShell.setLayoutFromPicker("single")
+        self._pump(10)
+        self.assertEqual(layouts.maximizedViewNames(), ["Green"])
+        self.assertEqual(slicer.app.focusWidget(), button, "A layout key took the focus from the top bar button")
+        slicer.mrmlScene.RemoveNode(segmentation)
+        slicer.mrmlScene.RemoveNode(volume)
+
     def test_25_page_keys_step_the_hovered_view(self):
         """PageUp and PageDown step the slice view under the pointer also when the focus is on a tool tile of Draw (they
         used to scroll the inspector); over the inspector they scroll it as before; a text input keeps them. A view

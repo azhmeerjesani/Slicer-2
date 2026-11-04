@@ -1084,6 +1084,7 @@ class TopBar:
         if layoutManager is None:
             return
         wasMaximized = layouts.isMaximized()
+        focusBefore = qt.QApplication.focusWidget()
         self._userLayoutRequests += 1
         try:
             layouts.applyPickerEntry(key, self.shell.hoverTracker)
@@ -1093,6 +1094,24 @@ class TopBar:
             self._announceLibraryLayout(layouts.PICKER_ENTRIES[1][1])
         if key != "single" and wasMaximized and not layouts.isMaximized() and self.shell.canvas() is not None:
             self._announceLibraryLayout(layouts.layoutName(layoutManager.layout))
+        # Once the new layout has its geometry, the view under the pointer takes the keys
+        qt.QTimer.singleShot(0, lambda focusBefore=focusBefore: self._focusHoveredViewAfterLayout(focusBefore))
+
+    def _focusHoveredViewAfterLayout(self, focusBefore):
+        """Give the keys to the slice view under the pointer after a layout key (Alt+1..5) or a Search entry.
+
+        Focus follows the mouse only when the pointer enters a view, and the pointer stays still here. The new layout
+        hid or moved the view that had the focus (Alt+2 over a view enlarges it), so Qt gave the focus to the next
+        widget, an inspector button, and the arrow keys, Home and End were lost; or another view is now under the
+        pointer (Alt+3 over Red) and the keys went to the old one. The view under the pointer takes the focus, as if
+        the pointer had just entered it. A widget outside the views that the user gave the focus to (Tab) keeps it.
+        """
+        from . import shell as shellModule
+
+        focusNow = qt.QApplication.focusWidget()
+        if focusBefore is not None and focusNow == focusBefore and not shellModule._isInView(focusNow):
+            return
+        self.shell.focusHoveredView()
 
     def _updateLayoutPicker(self):
         layoutManager = slicer.app.layoutManager()
