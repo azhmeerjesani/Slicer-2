@@ -56,6 +56,9 @@ Command line (JSON events, see ``jobs``; exit codes 0 done, 1 error, 2 usage, 3 
         [--n-splits 1000] [--seed 0] [--rule JSON] [--overlap 90] [--study DIR --design design.json] [--strata COLUMN]
     python -m LesionNetworkMappingLib.robustness influence --maps maps.tsv --out DIR [--rule JSON] [--overlap 90]
         [--study DIR --design design.json] [--top-k 5]
+    (sweep, replicate, splithalf and influence also take [--participants participants.tsv [--group-column group]]:
+    the lesions are then the cases when it names any, as the classic overlap of ``cohort.py``, so that the primary
+    is the Overlap tab's sensitivity map; splithalf and influence with --design keep the design's rows)
     python -m LesionNetworkMappingLib.robustness seeds --study DIR --bundle B --out DIR [--variants a,b,...]
         [--coordinates coords.tsv] [--rule JSON] [--overlap 90] [--no-maps]
     python -m LesionNetworkMappingLib.robustness consolidate --study DIR --side L|R --out DIR
@@ -631,6 +634,23 @@ def load_cohort(maps_tsv, column="T", label=None):
         n = cohort_lib._n_from_header(rows[0]["T"]) if "T" in rows[0] else None
     return Cohort(maps, [row["participant_id"] for row in rows], n, Grid(shape, affine), indices, gsr=bundle.get("gsr"),
                   label=label or bundle.get("label") or "A", info=bundle, statistic=column, run_id=record.get("run_id"))
+
+
+def case_subset(cohort, participants, group_column="group"):
+    """The lesions of the primary overlap: the cohort's cases when ``participants`` (a participants.tsv with
+    ``group_column``) names any of its lesions "case", else the whole cohort (as ``cohort.group_maps``, the Overlap
+    tab's sensitivity map, which is over the cases). Returns ``(cohort, ids left out)``.
+    """
+    if not participants:
+        return cohort, []
+    from .cohort import read_groups
+
+    groups = read_groups(participants, group_column)
+    cases = [sid for sid in cohort.ids if str(groups.get(sid) or "").strip().lower() == "case"]
+    if not cases or len(cases) == len(cohort.ids):
+        return cohort, []
+    kept = set(cases)
+    return cohort.subset(cases), [sid for sid in cohort.ids if sid not in kept]
 
 
 def _pearson_rows(a, b):
@@ -1739,6 +1759,9 @@ def build_parser():
     seeds.add_argument("--no-maps", action="store_true", help="only build the variant files and the manifest")
     seeds.add_argument("--cache", default=None, help="cohortmaps cache (default: the study's)")
     seeds.add_argument("--budget-gb", type=float, default=None, help="memory budget of one engine pass in GB")
+    for sub in (sweep, replicate, splithalf, influence):
+        sub.add_argument("--participants", default=None, help="participants.tsv: the overlap is over its cases when it names any (as the classic overlap of cohort.py)")
+        sub.add_argument("--group-column", default="group", help="group column of --participants (default: group)")
     consolidate = command("consolidate", "derived seeds with every lesion on one hemisphere (mirrored)", maps=False)
     consolidate.add_argument("--study", required=True, help="study folder")
     consolidate.add_argument("--side", required=True, help="hemisphere to consolidate on: L or R")
@@ -1772,6 +1795,21 @@ def _strata_for(study_path, column, ids):
     return [study.value(sid, column) for sid in ids]
 
 
+def _cases_of(args, cohort):
+    """``case_subset`` of the cohort for the command's --participants; a missing file is an input error."""
+    from . import jobs
+
+    participants = getattr(args, "participants", None)
+    if participants and not os.path.isfile(participants):
+        raise jobs.JobError(f"participants file not found: {participants}", code="input")
+    return case_subset(cohort, participants, getattr(args, "group_column", "group"))
+
+
+def _lesion_set(cohort, left_out):
+    """{"lesions": "cases" or "all", "n_lesions", "lesions_left_out": [ids that are not cases]} of a run's record."""
+    return {"lesions": "cases" if left_out else "all", "n_lesions": len(cohort.ids), "lesions_left_out": list(left_out)}
+
+
 def _run_root(args, out, study=None):
     return os.path.abspath(args.run_root or study or out)
 
@@ -1792,19 +1830,22 @@ def main(argv=None):
     cancel = jobs.CancelToken(args.cancel_file)
     try:
         if args.command == "sweep":
-            cohort = load_cohort(args.maps)
+            cohort, left_out = _cases_of(args, load_cohort(args.maps))
             cancel.raise_if_cancelled()
             rows = threshold_sweep(cohort.maps, cohort.n, cohort.v, rule, args.overlap, sign=args.sign, grid=cohort.grid, mask_indices=cohort.mask_indices, gsr=cohort.gsr)
             write_sweep_tsv(rows, os.path.join(out, SWEEP_TSV))
             flip = conclusion_flips(rows)
             summary = {"conclusion_flips": flip["text"] if flip else None, "settings": len(rows)}
-            run_id = _register(_run_root(args, out), out, "sweep", {"rule": rule, "overlap_pct": args.overlap, "sign": args.sign}, parents=[*parents, cohort.run_id], summary=summary, outputs=[SWEEP_TSV])
-            _write_json(os.path.join(out, "sweep.json"), _record("sweep", out, run_id, rule=rule, overlap_pct=args.overlap, sign=args.sign, summary=summary))
+            lesion_set = _lesion_set(cohort, left_out)
+            run_id = _register(_run_root(args, out), out, "sweep", {"rule": rule, "overlap_pct": args.overlap, "sign": args.sign, "lesions": lesion_set["lesions"]}, parents=[*parents, cohort.run_id],
+                               summary=summary, outputs=[SWEEP_TSV])
+            _write_json(os.path.join(out, "sweep.json"), _record("sweep", out, run_id, rule=rule, overlap_pct=args.overlap, sign=args.sign, summary=summary, **lesion_set))
             outputs = [os.path.join(out, SWEEP_TSV)]
         elif args.command == "replicate":
-            cohort = load_cohort(args.maps)
+            cohort, _left_out = _cases_of(args, load_cohort(args.maps))
             rows = cohortmaps.read_maps_tsv(args.maps)
-            lesions = [(row["participant_id"], row["lesion"], row.get("lesion_sha256")) for row in rows]
+            kept = set(cohort.ids)
+            lesions = [(row["participant_id"], row["lesion"], row.get("lesion_sha256")) for row in rows if row["participant_id"] in kept]
             options = {"budget_bytes": cohortmaps._budget_bytes(args.budget_gb), "threads": args.threads, "resume": args.resume}
             if args.cache:
                 options["cache_root"] = args.cache
@@ -1822,6 +1863,10 @@ def main(argv=None):
             outputs = [os.path.join(out, CONNECTOMES_TSV)]
         elif args.command in ("splithalf", "influence"):
             cohort = load_cohort(args.maps)
+            left_out = []
+            if not args.design:
+                # with a design the lesions are the design's rows (its GLM may compare the cases with the controls)
+                cohort, left_out = _cases_of(args, cohort)
             design = glm_maps = glm_input = None
             if args.design:
                 from . import glm
@@ -1842,19 +1887,21 @@ def main(argv=None):
                 arrays = {key: result[key] for key in ("r_overlap", "dice_sensitivity", "r_glm_t") if result[key] is not None}
                 np.savez_compressed(os.path.join(out, SPLITHALF_NPZ), **arrays)
                 summary = {"lesion_split_half": {metric: values.get("median") for metric, values in result["summary"].items()}, "label": result["label"]}
-                params = {"rule": rule, "sign": args.sign, "overlap_pct": args.overlap, "n_splits": args.n_splits, "design": bool(design), "glm_input": glm_input, "strata": args.strata}
+                params = {"rule": rule, "sign": args.sign, "overlap_pct": args.overlap, "n_splits": args.n_splits, "design": bool(design), "glm_input": glm_input, "strata": args.strata,
+                          "lesions": _lesion_set(cohort, left_out)["lesions"]}
                 outputs = [SPLITHALF_TSV, SPLITHALF_NPZ]
                 fields = {k: v for k, v in result.items() if k not in arrays}
             else:
                 result = leave_one_lesion_out(cohort, design=design, rule=rule, sign=args.sign, overlap_pct=args.overlap, top_k=args.top_k, cancel=cancel, glm_maps=glm_maps)
                 write_influence_tsv(result, os.path.join(out, INFLUENCE_TSV))
                 summary = {"influence_top": result["top"], "influence": result["influence"]}
-                params = {"rule": rule, "sign": args.sign, "overlap_pct": args.overlap, "design": bool(design), "glm_input": glm_input, "top_k": args.top_k}
+                params = {"rule": rule, "sign": args.sign, "overlap_pct": args.overlap, "design": bool(design), "glm_input": glm_input, "top_k": args.top_k,
+                          "lesions": _lesion_set(cohort, left_out)["lesions"]}
                 outputs = [INFLUENCE_TSV]
                 fields = {k: v for k, v in result.items() if k != "rows"}
             run_id = _register(_run_root(args, out, args.study), out, args.command, params, parents=[*parents, cohort.run_id], summary=summary, outputs=outputs,
                                seeds={"splits": args.seed} if args.command == "splithalf" else None)
-            _write_json(os.path.join(out, f"{args.command}.json"), _record(args.command, out, run_id, glm_input=glm_input, **fields))
+            _write_json(os.path.join(out, f"{args.command}.json"), _record(args.command, out, run_id, glm_input=glm_input, **fields, **_lesion_set(cohort, left_out)))
             outputs = [os.path.join(out, name) for name in outputs]
         elif args.command == "seeds":
             variants = [name.strip() for name in args.variants.split(",") if name.strip()]

@@ -45,7 +45,7 @@ class MapContext:
     Observer lists (called with no argument unless stated): ``studyChanged``, ``bundleChanged``,
     ``runChanged``, ``resultChanged``, ``ruleChanged``, ``seedChanged``, ``primaryOverrideChanged(mode)``,
     ``computeEnabledChanged``, ``overlapChanged`` (the Overlap tab's sensitivity, the percent of the lesions that must pass the
-    rule, changed: it is the overlap criterion of the Robust card's primary), ``thresholdChanged`` (the Result card's resolved threshold, the statistic it applies to
+    rule, or its sign changed: they are the overlap criterion and the sign of the Robust card's primary), ``thresholdChanged`` (the Result card's resolved threshold, the statistic it applies to
     or the sign changed; notified after the widget's ``resolved`` holds the new value).
 
     Hook lists:
@@ -153,7 +153,7 @@ class MapContext:
         self._notify("thresholdChanged")
 
     def notifyOverlapChanged(self):
-        """Notify ``overlapChanged`` after the Overlap tab's sensitivity changed (typed, dragged or restored)."""
+        """Notify ``overlapChanged`` after the Overlap tab's sensitivity or sign changed (typed, dragged, clicked or restored)."""
         self._notify("overlapChanged")
 
     #

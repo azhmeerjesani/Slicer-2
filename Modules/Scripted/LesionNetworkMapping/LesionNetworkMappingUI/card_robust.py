@@ -2,8 +2,9 @@
 
 The card puts the secondary analyses next to the fixed primary result, so that a reader can see how far the
 conclusion moves when one of the researcher's degrees of freedom is changed. Every analysis here is secondary:
-none of them replaces the primary map, none selects a "best" setting, and the primary rule and overlap criterion
-(the Result card's rule and the Overlap tab's sensitivity) are shown as fixed text, never as a control.
+none of them replaces the primary map, none selects a "best" setting, and the primary rule, sign and overlap criterion
+(the Result card's rule, the Overlap tab's sign and sensitivity) are shown as fixed text, never as a control. Like the
+Overlap tab's sensitivity map, the primary is over the cases when participants.tsv has a "case" group.
 
 Sections (each one runs ``LesionNetworkMappingLib.robustness`` in the job runner, with Stop):
 
@@ -70,6 +71,14 @@ RESULT_FILES = {
     "connsplit": "connectome_split_half.json",
 }
 FOLDER_NAMES = {"connsplit": "connectome_splithalf"}
+
+
+#: The signs of the primary (the Overlap tab's sign buttons: both, positive and negative)
+SIGN_WORDS = ("both", "pos", "neg")
+
+
+def _signText(sign):
+    return {"pos": _("positive sign"), "neg": _("negative sign")}.get(sign, _("both signs"))
 
 
 def _mapWidget():
@@ -554,11 +563,26 @@ class RobustCard:
         except (TypeError, ValueError):
             return float(DEFAULT_SENSITIVITY)
 
+    def sign(self):
+        """The primary sign: the Overlap tab's ("both", "pos" or "neg"; "both" without it), as the Nulls card."""
+        overlap = getattr(self.cohortCard(), "overlap", None)
+        try:
+            sign = overlap.sign()
+        except (AttributeError, TypeError):
+            return "both"
+        return sign if sign in SIGN_WORDS else "both"
+
+    def participantsPath(self):
+        """The study's participants.tsv (its "case" group selects the lesions of the primary overlap), or None."""
+        path = getattr(self.ctx.study, "path", None) if self.ctx.study is not None else None
+        path = os.path.join(path, "participants.tsv") if path else None
+        return path if path and os.path.isfile(path) else None
+
     def primaryKey(self):
-        """(rule label, overlap %) of the primary as it stands now."""
+        """(rule label, overlap %, sign) of the primary as it stands now."""
         from LesionNetworkMappingLib import robustness
 
-        return (robustness.sweep_label(self.rule()), self.overlapPct())
+        return (robustness.sweep_label(self.rule()), self.overlapPct(), self.sign())
 
     def side(self):
         return self.sideCombo.currentData or "L"
@@ -721,7 +745,8 @@ class RobustCard:
     def showSettings(self):
         from LesionNetworkMappingLib import robustness
 
-        self.primaryLabel.setText(_("Primary (fixed): {rule}, sensitivity ≥ {pct:g}%. It changes in the Result card and the Overlap tab, not here.").format(rule=robustness.sweep_label(self.rule()), pct=self.overlapPct()))
+        self.primaryLabel.setText(_("Primary (fixed): {rule}, {sign}, sensitivity ≥ {pct:g}%. It changes in the Result card and the Overlap tab, not here.").format(
+            rule=robustness.sweep_label(self.rule()), sign=_signText(self.sign()), pct=self.overlapPct()))
         _fill(self.replicateCombo, self.otherConnectomes() or [(_("No other connectome registered"), None)])
         designPath = self.designPath()
         self.designCheck.setEnabled(designPath is not None)
@@ -771,17 +796,22 @@ class RobustCard:
         overlap = f"{self.overlapPct():g}"
         maps = self.currentMapsTsv()
         common = ["--out", folder, "--run-root", study]
+        # the primary is the Overlap tab's: its sign, and its lesions (the cases when participants.tsv has a case group)
+        sign = ["--sign", self.sign()]
+        participants = self.participantsPath()
+        cases = ["--participants", participants] if participants else []
         if kind == "sweep":
-            return ["sweep", "--maps", maps, "--rule", rule, "--overlap", overlap, *common]
+            return ["sweep", "--maps", maps, "--rule", rule, *sign, "--overlap", overlap, *cases, *common]
         if kind == "replicate":
-            return ["replicate", "--maps", maps, "--bundle-b", self.replicatePath(), "--rule", rule, "--overlap", overlap, *common]
+            return ["replicate", "--maps", maps, "--bundle-b", self.replicatePath(), "--rule", rule, *sign, "--overlap", overlap, *cases, *common]
         design = ["--study", study, "--design", self.designPath()] if kind in ("splithalf", "influence") and self.designCheck.isChecked() else []
         if kind == "splithalf":
-            return ["splithalf", "--maps", maps, "--rule", rule, "--overlap", overlap, "--n-splits", str(self.splitsSpin.value), "--seed", str(self.splitSeed.value), *design, *common]
+            return ["splithalf", "--maps", maps, "--rule", rule, *sign, "--overlap", overlap, "--n-splits", str(self.splitsSpin.value), "--seed", str(self.splitSeed.value), *cases, *design,
+                    *common]
         if kind == "influence":
-            return ["influence", "--maps", maps, "--rule", rule, "--overlap", overlap, "--top-k", str(TOP_K), *design, *common]
+            return ["influence", "--maps", maps, "--rule", rule, *sign, "--overlap", overlap, "--top-k", str(TOP_K), *cases, *design, *common]
         if kind == "seeds":
-            args = ["seeds", "--study", study, "--bundle", self.ctx.bundle.path, "--rule", rule, "--overlap", overlap, "--variants", ",".join(self.selectedVariants()), *common]
+            args = ["seeds", "--study", study, "--bundle", self.ctx.bundle.path, "--rule", rule, *sign, "--overlap", overlap, "--variants", ",".join(self.selectedVariants()), *common]
             if self._coordinates:
                 args += ["--coordinates", self._coordinates]
             return args
@@ -915,15 +945,18 @@ class RobustCard:
         if not folder:
             return
         rows = _readTsv(os.path.join(folder, "sweep.tsv"))
-        summary = (_readJson(os.path.join(folder, "sweep.json")) or {}).get("summary") or {}
+        record = _readJson(os.path.join(folder, "sweep.json")) or {}
+        summary = record.get("summary") or {}
         primary = next((row for row in rows if _flag(row.get("primary"))), None)
         primaryPct = _float(primary["overlap_pct"]) if primary else None
+        storedSign = record.get("sign") if record.get("sign") in SIGN_WORDS else "both"  # sweeps made before the sign was passed used both
         self._sweepKey = self.primaryKey()
         storedLabel = primary["setting"].removeprefix("Primary: ") if primary else None
-        stale = primary is not None and (storedLabel != self._sweepKey[0] or primaryPct != self._sweepKey[1])
+        stale = primary is not None and (storedLabel != self._sweepKey[0] or primaryPct != self._sweepKey[1] or storedSign != self._sweepKey[2])
         if stale:
-            self.flipLabel.setText(_("Computed for the primary {old}, sensitivity ≥ {oldPct:g}%; the primary is now {new}, sensitivity ≥ {newPct:g}%. Run the sweep again to compare with the current primary.").format(
-                old=storedLabel, oldPct=primaryPct or 0.0, new=self._sweepKey[0], newPct=self._sweepKey[1]))
+            self.flipLabel.setText(_("Computed for the primary {old}, {oldSign}, sensitivity ≥ {oldPct:g}%; the primary is now {new}, {newSign}, sensitivity ≥ {newPct:g}%. "
+                                     "Run the sweep again to compare with the current primary.").format(
+                old=storedLabel, oldSign=_signText(storedSign), oldPct=primaryPct or 0.0, new=self._sweepKey[0], newSign=_signText(self._sweepKey[2]), newPct=self._sweepKey[1]))
             self.flipLabel.setStyleSheet(f"color: {levelColor('warn')};")
         elif summary.get("conclusion_flips"):
             self.flipLabel.setText(str(summary["conclusion_flips"]))
@@ -982,7 +1015,8 @@ class RobustCard:
             if cohort.maps.nbytes > TILE_MAX_BYTES:
                 self.tileNote.setText(_("The maps are too large to redraw as tiles here; the table is the result."))
                 return
-            settings = sweepSettings(cohort, self.rule(), self.overlapPct())
+            cohort, _leftOut = robustness.case_subset(cohort, self.participantsPath())  # the lesions of the sweep (its --participants)
+            settings = sweepSettings(cohort, self.rule(), self.overlapPct(), self.sign())
             images, z = sweepTileImages(cohort, settings)
         except Exception as exc:
             logging.exception("Lesion network mapping: the sweep tiles could not be drawn")

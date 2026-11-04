@@ -255,6 +255,42 @@ class SplitHalfInfluenceTest(unittest.TestCase):
         return os.path.join(folder, robustness.INFLUENCE_TSV)
 
 
+class PrimaryLesionsTest(unittest.TestCase):
+    """The sweep's primary is the Overlap tab's sensitivity map: its sign, over the cases (``case_subset``)."""
+
+    def test_sweep_primary_of_the_cases_is_the_overlap_sensitivity_map(self):
+        from LesionNetworkMappingLib import cohort as cohort_lib
+        from LesionNetworkMappingLib.geometry import Grid
+
+        # 4 cases: + at voxels 0-9, - at 10-14; 4 controls: + at 20-29, - at 0-9 (where the cases are +)
+        maps = np.zeros((8, 64), dtype=np.float32)
+        maps[:4, 0:10], maps[:4, 10:15] = 8.0, -8.0
+        maps[4:, 20:30], maps[4:, 0:10] = 8.0, -8.0
+        ids = [f"sub-{index:02d}" for index in range(8)]
+        groups = ["case"] * 4 + ["control"] * 4
+        cohort = robustness.Cohort(maps, ids, 1000, Grid((4, 4, 4), np.eye(4)), np.arange(64))
+        folder = tempfile.mkdtemp(prefix="lnm-robustness-cases-")
+        self.addCleanup(shutil.rmtree, folder, True)
+        participants = os.path.join(folder, "participants.tsv")
+        with open(participants, "w", encoding="utf-8") as f:
+            f.write("participant_id\tgroup\n" + "".join(f"{sid}\t{group}\n" for sid, group in zip(ids, groups, strict=True)))
+        cases, left_out = robustness.case_subset(cohort, participants)
+        self.assertEqual((cases.ids, left_out), (ids[:4], ids[4:]))
+        for sign, want in (("pos", 10), ("neg", 5), ("both", 15)):
+            overlap = cohort_lib.group_maps(maps, FWE, groups, 75, sign, n=1000).maps[cohort_lib.sensitivity_desc(75)]
+            self.assertEqual(int(np.count_nonzero(overlap)), want, sign)
+            rows = robustness.threshold_sweep(cases.maps, cases.n, cases.v, FWE, 75, sign=sign)
+            primary = next(row for row in rows if row["is_primary"])
+            self.assertEqual(primary["voxels"], want, f"sign {sign}: the sweep's primary is not the Overlap tab's sensitivity map")
+        # over every lesion (the cases and the controls together) it is another map
+        self.assertEqual(next(row for row in robustness.threshold_sweep(maps, 1000, 64, FWE, 75, sign="pos") if row["is_primary"])["voxels"], 0)
+        # without a case group, or without participants, the lesions are all of them
+        self.assertIs(robustness.case_subset(cohort, None)[0], cohort)
+        with open(participants, "w", encoding="utf-8") as f:
+            f.write("participant_id\tgroup\n" + "".join(f"{sid}\tpatient\n" for sid in ids))
+        self.assertEqual(robustness.case_subset(cohort, participants), (cohort, []))
+
+
 class SeedsTest(RobustnessTestBase):
     def test_variants_never_touch_lesions(self):
         lesions_dir = os.path.join(self.study_dir, "lesions")
@@ -386,6 +422,55 @@ class LabelsAndCommandLineTest(RobustnessTestBase):
         analyses = sorted(runs.read_params(out, record)["analysis"] for record in runs.list_runs(out, kind="robustness"))
         self.assertEqual(analyses, ["influence", "splithalf", "sweep"])
         code, events, stderr = self.run_cli("consolidate", "--study", self.study_dir, "--side", "X", "--out", self.path("bad"))
+        self.assertEqual(code, 1)
+        self.assertEqual(events[-1]["event"], "error")
+
+    def test_command_line_primary_is_the_overlap_tabs_sensitivity_map(self):
+        """With the Overlap tab's sign and participants.tsv (as the Robust card passes them), the sweep's primary row is
+        the Overlap tab's sensitivity map: that sign, over the cases (bug map-robust-card:robust-card-ignores-overlap-sign:
+        every sweep was over |T| and over the cases and controls together).
+        """
+        from LesionNetworkMappingLib import cohort as cohort_lib
+
+        maps = os.path.join(self.maps_a_dir, cohortmaps.MAPS_TSV)
+        participants = os.path.join(self.study_dir, "participants.tsv")
+        groups = cohort_lib.read_groups(participants)
+        cases = [sid for sid in self.cohort_a.ids if groups[sid] == "case"]
+        controls = [sid for sid in self.cohort_a.ids if groups[sid] != "case"]
+        self.assertTrue(cases and controls)
+        counts = {}
+        for sign in ("pos", "neg"):
+            # the Overlap tab: cohort.group_maps over the lesions with their groups (its sensitivity is over the cases)
+            expected = cohort_lib.group_maps(self.cohort_a.maps, FWE, [groups[sid] for sid in self.cohort_a.ids], 50, sign, n=self.cohort_a.n)
+            want = int(np.count_nonzero(expected.maps[cohort_lib.sensitivity_desc(50)]))
+            out = self.path(f"cli-primary-{sign}")
+            code, events, stderr = self.run_cli("sweep", "--maps", maps, "--rule", json.dumps(FWE), "--sign", sign, "--overlap", "50", "--participants", participants, "--out", out, "--run-root", out)
+            self.assertEqual(code, 0, (stderr, events[-1:]))
+            _columns, rows = read_tsv(os.path.join(out, robustness.SWEEP_TSV))
+            primary = next(row for row in rows if row["primary"] == "true")
+            self.assertEqual(int(primary["voxels"]), want, f"sign {sign}: the primary row is not the Overlap tab's sensitivity map")
+            with open(os.path.join(out, "sweep.json"), encoding="utf-8") as f:
+                record = json.load(f)
+            self.assertEqual(record["sign"], sign)
+            self.assertEqual((record["lesions"], record["n_lesions"], sorted(record["lesions_left_out"])), ("cases", len(cases), sorted(controls)))
+            counts[sign] = want
+            # the tiles of the card use the same lesions and sign
+            subset, left_out = robustness.case_subset(self.cohort_a, participants)
+            self.assertEqual((subset.ids, sorted(left_out)), (cases, sorted(controls)))
+        self.assertTrue(any(counts.values()), counts)  # the check above compared non-empty maps
+        # split-half and influence take the same sign and lesions (the card passes them to every analysis of the maps)
+        for command, extra in (("splithalf", ["--n-splits", "4"]), ("influence", ["--top-k", "2"])):
+            out = self.path(f"cli-primary-{command}")
+            code, events, stderr = self.run_cli(command, "--maps", maps, "--rule", json.dumps(FWE), "--sign", "neg", "--overlap", "50", *extra, "--participants", participants, "--out", out, "--run-root", out)
+            self.assertEqual(code, 0, (stderr, events[-1:]))
+            with open(os.path.join(out, f"{command}.json"), encoding="utf-8") as f:
+                record = json.load(f)
+            self.assertEqual((record["lesions"], record["n_lesions"], sorted(record["lesions_left_out"])), ("cases", len(cases), sorted(controls)), command)
+        _columns, rows = read_tsv(os.path.join(self.path("cli-primary-influence"), robustness.INFLUENCE_TSV))
+        self.assertEqual(sorted(row["participant_id"] for row in rows), sorted(cases))
+        # without a case group the lesions are all of them
+        self.assertIs(robustness.case_subset(self.cohort_a, None)[0], self.cohort_a)
+        code, events, _stderr = self.run_cli("sweep", "--maps", maps, "--participants", self.path("missing.tsv"), "--out", self.path("cli-missing"))
         self.assertEqual(code, 1)
         self.assertEqual(events[-1]["event"], "error")
 
