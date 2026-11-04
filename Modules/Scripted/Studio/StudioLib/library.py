@@ -2875,7 +2875,7 @@ class StudyList(qt.QObject):
         self.search.setObjectName("StudioStudySearch")
         self.search.setPlaceholderText(_("Search subjects"))
         ui.setClearButton(self.search)
-        self.search.setToolTip(ui.tooltip(_("Search subjects"), "/", _("filter the list by id, group, status or notes")))
+        self._setSearchToolTip(False)
         self.search.connect("textChanged(QString)", lambda text: self.refresh())
         self.search.setMinimumWidth(140)
         rowLayout.addWidget(self.search, 1 if compact else 0)
@@ -3160,12 +3160,20 @@ class StudyList(qt.QObject):
 
     # Content
 
+    def _setSearchToolTip(self, blind):
+        """The search tooltip names what the search matches: not the group while the study traces blind."""
+        description = (_("filter the list by id, status or notes") if blind else
+                       _("filter the list by id, group, status or notes"))
+        self.search.setToolTip(ui.tooltip(_("Search subjects"), "/", description))
+
     def visibleRows(self, studySession):
         """The rows that the filter, the search and the sort show, in their order."""
         rows = studySession.study.subjects
         entry = self._activeFilter()
         predicate = entry.get("predicate") if entry else None
         query = str(self.search.text).strip().lower()
+        # Blind tracing: the search never matches a hidden column, or typing "case" would list exactly the cases (BB-1)
+        searchKeys = [key for key in SEARCH_KEYS if key not in _hiddenColumns(studySession.study)] if query else []
         shown = []
         for index, row in enumerate(rows):
             if predicate is not None:
@@ -3176,7 +3184,7 @@ class StudyList(qt.QObject):
                     logging.error(f"Studio Library: the filter {entry.get('label')} failed:\n{traceback.format_exc()}")
                     continue
             if query:
-                haystack = " ".join(str(row.get(key, "")) for key in ("participant_id", "group", "status", "qc", "notes", "source_id")).lower()
+                haystack = " ".join(str(row.get(key, "")) for key in searchKeys).lower()
                 if query not in haystack:
                     continue
             shown.append((index, row))
@@ -3192,6 +3200,7 @@ class StudyList(qt.QObject):
             return
         for shortcut in self.shortcuts:
             shortcut.setEnabled(True)
+        self._setSearchToolTip("group" in _hiddenColumns(studySession.study))
         self._rebuildChips()
         extra = libcardColumns()
         signature = tuple(entry["key"] for entry in extra)
@@ -3580,6 +3589,10 @@ def _studyTemplateFile(studySession):
         return None
     path = studyUi.sampleFile(source[len("sampledata:"):])
     return path or studyUi.sampleFile(studyUi.DEFAULT_TEMPLATE_SAMPLE)
+
+
+# The subject columns that the "Search subjects" field matches (less the hidden ones while the study traces blind)
+SEARCH_KEYS = ("participant_id", "group", "status", "qc", "notes", "source_id")
 
 
 def _hiddenColumns(studyObject):

@@ -163,6 +163,9 @@ Run with the main window and testing enabled::
   lesion: Draw's caches (lesion metrics, MNI check, saved records) are emptied by the close and the closed project's
   vtkSegmentation is deleted. They were cleared only by Draw's own close observer, active only while Draw is shown, and kept
   one lesion labelmap per closed project (up to 64; about 130 MB each at 0.5 mm).
+- ``test_74_blind_search_does_not_match_the_group`` (BB-1): while the study traces blind, "Search subjects" of the Library
+  list does not match the hidden group ("control" or "case" lists no subject, not exactly the controls or the cases) and its
+  tooltip does not offer the group; without blinding the search by group works again.
 """
 
 import inspect
@@ -5614,6 +5617,74 @@ class StudioRegressionTest(unittest.TestCase):
                 adjudicate.exitState()
             study_ui.closeStudy()
             studioShell.dispose()
+            pump()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
+
+    def test_74_blind_search_does_not_match_the_group(self):
+        """With blind tracing on, typing "control" in "Search subjects" listed exactly the controls and "case" exactly the
+        cases, although the Group column, the chips and the counts are hidden from the tracer (BB-1).
+        """
+        from LesionNetworkMappingLib import review as rules
+
+        from StudioLib import library, study_ui
+
+        if not study_ui.isAvailable():
+            self.skipTest("needs the lesion network mapping library")
+        cases = {"sub-01", "sub-03", "sub-05"}
+        rows = [(f"sub-0{index}", {"group": "case" if f"sub-0{index}" in cases else "control", "notes": "left MCA"}, False)
+                for index in range(1, 7)]
+        study = self._study(rows)
+        studyList = None
+
+        def pump():
+            for _ in range(4):
+                slicer.app.processEvents()
+
+        def listed(text):
+            studyList.search.setText(text)
+            pump()
+            model = studyList.model
+            return {model.sid(row) for row in range(model.rowCount())}
+
+        try:
+            session = study_ui.openStudy(study.path, showLibrary=False)
+            self.assertIsNotNone(session)
+            studyList = library.StudyList()
+            studyList.widget.resize(900, 400)
+            studyList.widget.show()
+            studyList.refresh()
+            pump()
+            everyone = {f"sub-0{index}" for index in range(1, 7)}
+            # Without blinding the search matches the group, the id and the notes
+            self.assertEqual(listed("control"), everyone - cases)
+            self.assertEqual(listed("case"), cases)
+            self.assertIn("group", str(studyList.search.toolTip))
+
+            # Blind tracing: the group is not searched, so neither word sorts the subjects into cases and controls
+            rules.set_study_setting(session.study, "blind_tracing", True, "Tester")
+            self.assertIn("group", library._hiddenColumns(session.study))
+            studyList.refresh()
+            pump()
+            self.assertEqual(listed("control"), set(), "the search lists the controls while tracing blind")
+            self.assertEqual(listed("contr"), set())
+            self.assertEqual(listed("case"), set(), "the search lists the cases while tracing blind")
+            self.assertEqual(listed("ase"), set())
+            self.assertNotIn("group", str(studyList.search.toolTip), "the search tooltip offers the group while tracing blind")
+            # The other columns are still searched
+            self.assertEqual(listed("sub-03"), {"sub-03"})
+            self.assertEqual(listed("mca"), everyone)
+
+            # Blinding off: the search by group is back
+            rules.set_study_setting(session.study, "blind_tracing", False, "Tester")
+            studyList.refresh()
+            self.assertEqual(listed("control"), everyone - cases)
+            self.assertIn("group", str(studyList.search.toolTip))
+        finally:
+            if studyList is not None:
+                studyList.dispose()
+                studyList.widget.deleteLater()
+            study_ui.closeStudy()
             pump()
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
