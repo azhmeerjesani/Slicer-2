@@ -1409,6 +1409,125 @@ class StudioNiftiExportTest(unittest.TestCase):
         self.assertEqual(actions["nifti"].objectName, "StudioSaveStatusExportNiftiAction")
         menu.deleteLater()
 
+    def test_09a_project_reexport_removes_earlier_files(self):
+        """Export project as NIfTI again: the masks of renamed, deleted or erased segments of the earlier export are named in
+        the question and removed, so that Exports/nifti matches the project; a file the user put there stays and the README names it.
+        """
+        from StudioLib import autosave_io, niftiexport_ui, projects
+
+        project = projects.createProject("NIfTI re-export")
+        projects.setCurrentProject(project)
+        folder = self.export.projectExportFolder(create=True)
+        ijkToRas = np.array([[-1.0, 0, 0, 10], [0, -1.0, 0, 10], [0, 0, 1.0, -10], [0, 0, 0, 1]])
+        scan = self._phantom("sub-03_T1w", ijkToRas)
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesions (sub-03_T1w)")
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(scan)
+        mask = (slicer.util.arrayFromVolume(scan) > 0).astype(np.uint8)
+        for name in ("Core", "Rim"):
+            segmentId = segmentation.GetSegmentation().AddEmptySegment(name, name)
+            slicer.util.updateSegmentBinaryLabelmapFromArray(mask, segmentation, segmentId, scan)
+        # A file the user put into the folder (no Studio sidecar, never listed by a README) is never removed
+        manual = os.path.join(folder, "manual_mask.nii.gz")
+        with open(manual, "wb") as f:
+            f.write(b"not a Studio file")
+
+        def export(answer):
+            asked = []
+
+            dialog = niftiexport_ui.exportProjectDialog(show=False, executor=autosave_io.InlineExecutor(), mapOptions={})
+
+            def confirm(files):
+                # The files that would be replaced, then those of the earlier export that would be removed (named in the question)
+                self.assertEqual(files, dialog._existing + dialog._stale)
+                asked.append((sorted(os.path.basename(path) for path in dialog._existing), sorted(os.path.basename(path) for path in dialog._stale)))
+                return answer
+
+            notice = dialog.existingNotice.findChild("QLabel", "StudioNoticeBoxText").text if dialog.existingNotice.isVisibleTo(dialog) else ""
+            shown = []
+            original = niftiexport_ui.message
+            niftiexport_ui.message = lambda text, **kwargs: shown.append(text)
+            try:
+                runner = dialog.export(confirm=confirm)
+                if runner is not None:
+                    self.assertTrue(runner.wait(60))
+                    self.assertEqual(runner.result.errors, [])
+            finally:
+                niftiexport_ui.message = original
+                dialog.close()
+            return runner, asked, notice, shown
+
+        runner, asked, _notice, _shown = export(True)
+        self.assertEqual(asked, [])
+        names = sorted(os.listdir(folder))
+        for expected in ("sub-03_label-Core_desc-lesion_mask.nii.gz", "sub-03_label-Rim_desc-lesion_mask.json"):
+            self.assertIn(expected, names)
+        # Rename Rim, delete Core: the second export names the four files of the earlier export in its question
+        segments = segmentation.GetSegmentation()
+        segments.GetSegment("Rim").SetName("Penumbra")
+        segments.RemoveSegment("Core")
+        runner, asked, notice, _shown = export(False)
+        self.assertIsNone(runner)
+        stale = ["sub-03_label-Core_desc-lesion_mask.json", "sub-03_label-Core_desc-lesion_mask.nii.gz",
+                 "sub-03_label-Rim_desc-lesion_mask.json", "sub-03_label-Rim_desc-lesion_mask.nii.gz"]
+        self.assertEqual(asked[0][1], stale)
+        self.assertNotIn("manual_mask.nii.gz", asked[0][1])
+        self.assertIn("4 files of an earlier export that are not part of this one will be removed", notice)
+        self.assertTrue(all(os.path.exists(os.path.join(folder, name)) for name in stale), "Cancel removes nothing")
+        # The real question names them apart from the files it replaces
+        dialog = niftiexport_ui.exportProjectDialog(show=False, executor=autosave_io.InlineExecutor(), mapOptions={})
+        seen = {}
+
+        def answer():
+            for widget in qt.QApplication.topLevelWidgets():
+                if widget.isVisible() and widget.objectName == "StudioNiftiExportReplaceQuestion":
+                    seen["text"] = widget.text
+                    widget.defaultButton().click()
+                    return
+            qt.QTimer.singleShot(50, answer)
+
+        qt.QTimer.singleShot(50, answer)
+        self.assertFalse(dialog.confirmOverwrite(dialog._existing, dialog._stale))
+        dialog.close()
+        self.assertIn("4 files of an earlier export in nifti are not part of this one and will be removed:", seen["text"])
+        self.assertIn("sub-03_label-Core_desc-lesion_mask.nii.gz", seen["text"])
+        runner, asked, _notice, shown = export(True)
+        self.assertEqual(asked[0][1], stale)
+        names = sorted(os.listdir(folder))
+        for name in stale:
+            self.assertNotIn(name, names)
+        self.assertIn("sub-03_label-Penumbra_desc-lesion_mask.nii.gz", names)
+        self.assertIn("manual_mask.nii.gz", names)
+        self.assertEqual(sorted(os.path.basename(path) for path in runner.result.removed), stale)
+        self.assertIn("removed 4 files of an earlier export", shown[0])
+        with open(os.path.join(folder, "README.txt"), encoding="utf-8") as f:
+            readme = f.read()
+        self.assertNotIn("label-Core", readme)
+        self.assertNotIn("label-Rim", readme)
+        self.assertIn("Also in this folder, not written by this export:\n- manual_mask.nii.gz", readme)
+        self.assertEqual(self.export.readmeImages(os.path.join(folder, "README.txt")),
+                         ["sub-03_T1w.nii.gz", "sub-03_label-Penumbra_desc-lesion_mask.nii.gz"])
+        # A segment erased to empty is skipped, and its earlier mask goes too
+        segmentId = segments.GetSegmentIdBySegmentName("Penumbra")
+        slicer.util.updateSegmentBinaryLabelmapFromArray(np.zeros_like(mask), segmentation, segmentId, scan)
+        segments.AddEmptySegment("Edge", "Edge")
+        slicer.util.updateSegmentBinaryLabelmapFromArray(mask, segmentation, segments.GetSegmentIdBySegmentName("Edge"), scan)
+        runner, asked, _notice, shown = export(True)
+        self.assertEqual(asked[0][1], ["sub-03_label-Penumbra_desc-lesion_mask.json", "sub-03_label-Penumbra_desc-lesion_mask.nii.gz"])
+        self.assertFalse(any("Penumbra" in name for name in os.listdir(folder)))
+        self.assertIn("Edge", " ".join(os.listdir(folder)))
+        # The script API asks too (FileExistsError) and removes them with overwrite=True
+        segments.RemoveSegment(segments.GetSegmentIdBySegmentName("Edge"))
+        readme = (os.path.join(folder, "README.txt"), "NIfTI export")
+        jobs = self.export.planProject()
+        with self.assertRaises(FileExistsError):
+            self.export.runJobs(jobs, readme=readme)
+        result = self.export.runJobs(self.export.planProject(), overwrite=True, readme=readme)
+        self.assertEqual(sorted(os.path.basename(path) for path in result.removed),
+                         ["sub-03_label-Edge_desc-lesion_mask.json", "sub-03_label-Edge_desc-lesion_mask.nii.gz"])
+        self.assertEqual(sorted(name for name in os.listdir(folder) if "_mask" in name), ["manual_mask.nii.gz"])
+        self._assertNoAbsolutePaths(project.path)
+
     def test_10_entry_points(self):
         """Library's Open now ⋯, Draw's lesion ⋯ and Search list the exports; a figure is not exportable."""
         from StudioLib import draw, library, niftiexport_ui

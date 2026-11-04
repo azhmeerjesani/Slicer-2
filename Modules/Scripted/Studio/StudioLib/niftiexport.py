@@ -1425,6 +1425,81 @@ def existingFiles(jobs, extra=()):
     return [path for path in [*plannedFiles(jobs), *extra] if os.path.exists(path)]
 
 
+#: An image line under "Files:" in the README of a project export: "- sub-01_T1w.nii.gz: <node> (<kind>, ...)"
+_README_IMAGE_LINE = re.compile(r"^- ([A-Za-z0-9._-]+\.nii(?:\.gz)?): ")
+
+
+def readmeImages(path):
+    """The names of the images that the README of a project export (``path``) lists ([] without a README)."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except (OSError, ValueError):
+        return []
+    names = []
+    for line in lines:
+        match = _README_IMAGE_LINE.match(line)
+        if match and os.path.basename(match.group(1)) == match.group(1) and match.group(1) not in names:
+            names.append(match.group(1))
+    return names
+
+
+def _writtenByStudio(sidecar):
+    """True unless ``sidecar`` exists and was not written by Slicer Studio (a file the user put there is never removed)."""
+    if not os.path.exists(sidecar):
+        return True
+    try:
+        with open(sidecar, encoding="utf-8") as f:
+            content = json.load(f)
+    except (OSError, ValueError):
+        return False
+    return isinstance(content, dict) and str(content.get("GeneratedBy", "")).startswith("Slicer Studio")
+
+
+def _pathKey(path):
+    return os.path.normcase(os.path.abspath(path))
+
+
+def earlierExportFiles(jobs, readmePath):
+    """The files that an earlier project export wrote next to ``readmePath`` (the images its README lists and their
+    sidecars) and that ``jobs`` do not write again: the masks of segments that were renamed, deleted or erased since,
+    images that were closed, or the other format (.nii and .nii.gz). A project export removes them (after the user
+    confirms), so that ``<project>/Exports/nifti`` holds the project as it is now and a glob such as ``*_mask.nii.gz``
+    finds no deleted segment.
+    """
+    folder = os.path.dirname(readmePath)
+    planned = {_pathKey(path) for path in plannedFiles(jobs)}
+    found = []
+    for name in readmeImages(readmePath):
+        image = os.path.join(folder, name)
+        if _pathKey(image) in planned or not os.path.isfile(image) or not _writtenByStudio(sidecarPath(image)):
+            continue
+        for path in (image, sidecarPath(image)):
+            if os.path.isfile(path) and _pathKey(path) not in planned and path not in found:
+                found.append(path)
+    return found
+
+
+def removeFiles(paths, result=None):
+    """Remove ``paths`` (files of an earlier project export); return the removed ones. A file that cannot be removed is
+    logged and noted in ``result`` (it is then listed in the README among the other files of the folder).
+    """
+    removed = []
+    for path in paths:
+        try:
+            os.remove(path)
+            removed.append(path)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            logging.warning(f"Slicer Studio: {path} from an earlier NIfTI export could not be removed: {e}")
+            if result is not None:
+                result.notes.append(_("{name} from an earlier export could not be removed").format(name=os.path.basename(path)))
+    if result is not None:
+        result.removed += removed
+    return removed
+
+
 #
 # Running
 #
@@ -1439,6 +1514,8 @@ class Result:
         self.images = []
         self.notes = []
         self.errors = []
+        #: Files of an earlier project export that were removed because this export does not write them again
+        self.removed = []
         #: The plain reason (no error number, no temporary file name) of the first file that could not be written
         self.writeFailure = None
 
@@ -1451,15 +1528,18 @@ def runJobs(jobs, overwrite=False, readme=None, progress=None):
     """Run ``jobs`` now (main thread). Return a ``Result``.
 
     :param overwrite: replace existing files; else ``FileExistsError`` is raised before anything is written.
-    :param readme: ``(path, title)``: also write a README listing the files (project exports).
+    :param readme: ``(path, title)``: also write a README listing the files (project exports), and remove the files of
+        an earlier export into that folder that this one does not write again (``earlierExportFiles``).
     :param progress: ``progress(done, total, title)``, called before each job.
     """
     extra = [readme[0]] if readme else []
+    earlier = earlierExportFiles(jobs, readme[0]) if readme else []
     if not overwrite:
-        existing = existingFiles(jobs, extra)
+        existing = existingFiles(jobs, extra) + earlier
         if existing:
             raise FileExistsError(existing[0])
     result = Result(os.path.dirname(jobs[0].path) if jobs else None)
+    removeFiles(earlier, result)
     for index, job in enumerate(jobs):
         if progress is not None:
             progress(index, len(jobs), job.title)
@@ -1530,6 +1610,16 @@ def writeReadme(path, jobs, result, title):
         lines += ["", _("Notes:")] + [f"- {note}" for note in result.notes]
     if result.errors:
         lines += ["", _("Not exported:")] + [f"- {error}" for error in result.errors]
+    # Any other image in the folder (put there by hand, or left by an export that was stopped) is named, so that the
+    # README describes the whole folder; these lines have no ": ", so a later export does not take them for its own files
+    writtenNames = {os.path.basename(image) for image in written}
+    try:
+        others = sorted(name for name in os.listdir(os.path.dirname(path) or ".")
+                        if splitExtension(name)[1] and name not in writtenNames and os.path.isfile(os.path.join(os.path.dirname(path), name)))
+    except OSError:
+        others = []
+    if others:
+        lines += ["", _("Also in this folder, not written by this export:")] + [f"- {name}" for name in others]
     templates = [node.GetName() for node in exportableNodes() if kindOf(node) == KIND_TEMPLATE]
     if templates:
         lines += ["", _("Templates are not copied (they are public files known by name): {names}.").format(names=", ".join(templates))]

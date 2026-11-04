@@ -125,13 +125,15 @@ def plainError(error):
 class ExportRunner:
     """Run export jobs: each job reads the scene on the main thread (``Job.prepare``), then its images are written by the
     background writer (``autosave_io.backgroundWriter()``, or ``executor``). ``onProgress(done, total, title)`` and
-    ``onFinished(result)`` are called on the main thread. ``cancel()`` stops before the next job.
+    ``onFinished(result)`` are called on the main thread. ``cancel()`` stops before the next job. ``remove``: files of an
+    earlier project export that this one does not write again (``niftiexport.earlierExportFiles``), removed when it starts.
     """
 
-    def __init__(self, jobs, executor=None, readme=None, onProgress=None, onFinished=None):
+    def __init__(self, jobs, executor=None, readme=None, onProgress=None, onFinished=None, remove=None):
         self.jobs = list(jobs)
         self.executor = executor
         self.readme = readme
+        self.remove = list(remove or [])
         self.onProgress = onProgress
         self.onFinished = onFinished
         self.result = niftiexport.Result(os.path.dirname(self.jobs[0].path) if self.jobs else None)
@@ -148,6 +150,8 @@ class ExportRunner:
         return self.executor
 
     def start(self):
+        if self.remove:
+            niftiexport.removeFiles(self.remove, self.result)
         self._next()
 
     def cancel(self):
@@ -277,6 +281,10 @@ def announce(result):
         showInFileManager(folder)
 
     text = resultText(result)
+    removed = len(getattr(result, "removed", None) or [])
+    if removed:
+        text += " · " + (_("removed 1 file of an earlier export") if removed == 1 else
+                         _("removed {count} files of an earlier export").format(count=removed))
     if result.notes:
         text += " · " + notesText(result.notes)
     message(text, level="warning" if result.errors else "info", action=show,
@@ -312,6 +320,8 @@ class ExportDialog(qt.QDialog):
         self.executor = executor
         self.mapOptions = dict(mapOptions or {})
         self._existingShown = False
+        self._existing = []
+        self._stale = []
         self._summaryHeight = None
         self.runner = None
         self.lastResult = None
@@ -589,22 +599,34 @@ class ExportDialog(qt.QDialog):
         written = len(images) + others + (1 if readme else 0)
         self.folderMeta.setText(_("{count} files will be written here").format(count=written) if images else "")
         existing = niftiexport.existingFiles(jobs, [readme[0]] if readme else [])
-        if existing:
+        # A project export also removes what an earlier one wrote and this one does not write again (renamed, deleted or
+        # erased segments, closed images): Exports/nifti then matches the project as it is now
+        stale = niftiexport.earlierExportFiles(jobs, readme[0]) if readme and jobs else []
+        if existing and stale:
+            ui.setNotice(self.existingNotice, _("{count} files already exist and will be replaced, and {stale} files of an earlier export that are "
+                                                "not part of this one will be removed, after you confirm").format(count=len(existing), stale=len(stale)))
+        elif stale:
+            ui.setNotice(self.existingNotice, (_("1 file of an earlier export is not part of this one and will be removed after you confirm: {name}")
+                                               if len(stale) == 1 else
+                                               _("{count} files of an earlier export are not part of this one and will be removed after you confirm")
+                                               ).format(count=len(stale), name=os.path.basename(stale[0])))
+        elif existing:
             ui.setNotice(self.existingNotice, (_("1 file already exists and will be replaced after you confirm: {name}") if len(existing) == 1 else
                                                _("{count} files already exist and will be replaced after you confirm")).format(
                                                    count=len(existing), name=os.path.basename(existing[0])))
-        self.existingNotice.setVisible(bool(existing))
+        self.existingNotice.setVisible(bool(existing or stale))
         self.exportButton.setEnabled(bool(images) and self.runner is None)
         self._jobs = jobs
         self._existing = existing
+        self._stale = stale
         # The summary wraps onto more or fewer lines when the names change: the dialog must follow, or the squeezed layout
         # draws the fixed-height image list under the folder card
         summaryHeight = self.summaryLabel.heightForWidth(max(self.summaryLabel.width, 1)) if self.summaryLabel.hasHeightForWidth() else 0
         wrapped = summaryHeight != self._summaryHeight and self._summaryHeight is not None
         self._summaryHeight = summaryHeight
-        if resize or wrapped or bool(existing) != self._existingShown:
+        if resize or wrapped or bool(existing or stale) != self._existingShown:
             # Rows appeared or went away: the dialog takes its new height (a frameless dialog is not resized by its layout)
-            self._existingShown = bool(existing)
+            self._existingShown = bool(existing or stale)
             qt.QTimer.singleShot(0, self._fitHeight)
 
     def _fitHeight(self):
@@ -633,14 +655,27 @@ class ExportDialog(qt.QDialog):
     # Export
     #
 
-    def confirmOverwrite(self, existing):
-        """Ask before replacing files. Return True to replace them."""
-        names = "\n".join(os.path.basename(path) for path in existing[:8])
-        if len(existing) > 8:
-            names += "\n" + _("and {count} more").format(count=len(existing) - 8)
-        box = qt.QMessageBox(qt.QMessageBox.Warning, _("Replace existing files?"),
-                             (_("1 file already exists in {folder}:") if len(existing) == 1 else _("{count} files already exist in {folder}:")).format(
-                                 count=len(existing), folder=os.path.basename(self.folder)) + "\n\n" + names, qt.QMessageBox.NoButton, self)
+    def confirmOverwrite(self, existing, stale=()):
+        """Ask before replacing files (``existing``) and removing the files of an earlier project export that this one
+        does not write again (``stale``). Return True to go ahead.
+        """
+        folder = os.path.basename(self.folder)
+
+        def names(paths):
+            text = "\n".join(os.path.basename(path) for path in paths[:8])
+            if len(paths) > 8:
+                text += "\n" + _("and {count} more").format(count=len(paths) - 8)
+            return text
+
+        parts = []
+        if existing:
+            parts.append((_("1 file already exists in {folder}:") if len(existing) == 1 else _("{count} files already exist in {folder}:")).format(
+                count=len(existing), folder=folder) + "\n\n" + names(list(existing)))
+        if stale:
+            parts.append((_("1 file of an earlier export in {folder} is not part of this one and will be removed:") if len(stale) == 1 else
+                          _("{count} files of an earlier export in {folder} are not part of this one and will be removed:")).format(
+                              count=len(stale), folder=folder) + "\n\n" + names(list(stale)))
+        box = qt.QMessageBox(qt.QMessageBox.Warning, _("Replace existing files?"), "\n\n".join(parts), qt.QMessageBox.NoButton, self)
         box.setObjectName("StudioNiftiExportReplaceQuestion")
         replace = box.addButton(_("Replace"), qt.QMessageBox.DestructiveRole)
         # The safe choice is the default (Enter) and the Escape button: Enter must never overwrite files
@@ -652,8 +687,9 @@ class ExportDialog(qt.QDialog):
         return box.clickedButton() == replace
 
     def export(self, confirm=None):
-        """Plan, ask before replacing files (``confirm(existing)`` replaces the question in tests), then write in the background.
-        Return the runner, or None when nothing is written.
+        """Plan, ask before replacing files (``confirm(files)`` replaces the question in tests: it gets every file that would be
+        replaced, then those of an earlier project export that would be removed), then write in the background. Return the
+        runner, or None when nothing is written.
         """
         if self.runner is not None:
             return self.runner
@@ -661,9 +697,8 @@ class ExportDialog(qt.QDialog):
         jobs = self._jobs
         if not jobs:
             return None
-        if self._existing:
-            ask = confirm or self.confirmOverwrite
-            if not ask(self._existing):
+        if self._existing or self._stale:
+            if not (confirm(self._existing + self._stale) if confirm is not None else self.confirmOverwrite(self._existing, self._stale)):
                 return None
         try:
             os.makedirs(self.folder, exist_ok=True)
@@ -677,7 +712,8 @@ class ExportDialog(qt.QDialog):
         self.progress.setRange(0, len(jobs))
         self.progress.setValue(0)
         self.progress.show()
-        self.runner = ExportRunner(jobs, executor=self.executor, readme=self.readme(), onProgress=self._onProgress, onFinished=self._onFinished)
+        self.runner = ExportRunner(jobs, executor=self.executor, readme=self.readme(), onProgress=self._onProgress, onFinished=self._onFinished,
+                                   remove=self._stale)
         self.runner.start()
         return self.runner
 
