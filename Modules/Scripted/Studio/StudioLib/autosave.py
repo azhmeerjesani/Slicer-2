@@ -2194,13 +2194,20 @@ class AutosaveService:
             renamed = {}
             # Moved templates that got another id because the new folder had a template with theirs
             renamedIds = {}
+            # The same move as the one recorded as pending: it was interrupted (a kill), and this one finishes it
+            pending = projects.pendingMove()
+            resuming = (pending is not None and _canonicalPath(pending[0]) == _canonicalPath(oldRoot)
+                        and _canonicalPath(pending[1]) == _canonicalPath(newRoot))
             try:
                 projects.checkNotOpenElsewhere(oldRoot)  # again: one may have been opened elsewhere while this one saved
+                # What moves under another name, and the new template ids, are written down as the move goes: the move
+                # that finishes an interrupted one follows the items that moved before the kill as this one would
+                journal = projects.MoveJournal(projects.moveJournalPath(), oldRoot, newRoot, resume=resuming)
                 # Recorded until the setting points at the new folder: once the first original is deleted, a kill leaves
                 # the setting on an old folder that lacks it, and the next start finishes the move
                 # (``finishInterruptedMove``). A move that fails is reported, and the setting stays as it is.
                 projects.recordPendingMove(oldRoot, newRoot)
-                function = lambda: projects.moveContent(oldRoot, newRoot, renamed=renamed, renamedIds=renamedIds)  # noqa: E731
+                function = lambda: projects.moveContent(oldRoot, newRoot, renamed=renamed, renamedIds=renamedIds, journal=journal)  # noqa: E731
                 moved = run(function) if run is not None else function()
                 succeeded = True
                 for relative in sorted(renamed, key=len, reverse=True):
@@ -2210,6 +2217,8 @@ class AutosaveService:
             except Exception:
                 if not succeeded:
                     projects.clearPendingMove()
+                    if not resuming:
+                        projects.discardMoveJournal()  # a failed move is reported; the one that finishes a kill tries again
                 raise
             finally:
                 self._suspendCount -= 1
@@ -2229,7 +2238,12 @@ class AutosaveService:
                         project.lock()
             self._followMovedRecoveries(oldRoot, newRoot, renamed)
             _updateRecentStudies(oldRoot, newRoot, renamed)
-            _updateMovedPathSettings(oldRoot, newRoot, moved, renamed)
+            # A move that finishes an interrupted one: paths into the items moved before the interruption follow them too
+            movedKinds = list(moved)
+            if resuming:
+                movedKinds += [name for name in (projects.PROJECTS_DIR, projects.STUDIES_DIR, projects.LNM_DIR, projects.TEMPLATES_DIR)
+                               if name not in movedKinds]
+            _updateMovedPathSettings(oldRoot, newRoot, movedKinds, renamed)
             if renamedIds:
                 from StudioLib import templates
 
@@ -2299,9 +2313,8 @@ class AutosaveService:
                      "finished: {error}").format(folder=projects.shortPath(newRoot), error=error), "warning")
             projects.notifyChanged()
             return "failed"
-        # Paths kept in the settings that pointed into the items moved before the interruption follow them too
-        _updateRecentStudies(oldRoot, newRoot)
-        _updateMovedPathSettings(oldRoot, newRoot, [projects.PROJECTS_DIR, projects.STUDIES_DIR, projects.LNM_DIR, projects.TEMPLATES_DIR])
+        # moveRoot made the paths kept in the settings that pointed into the items moved before the interruption follow
+        # them too, under the names they moved as (its journal)
         projects.notifyChanged()
         notify(_("Slicer Studio was closed while it moved your projects and studies. The move is now finished: they are in {folder}.").format(
             folder=projects.shortPath(newRoot)), "info")

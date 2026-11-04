@@ -219,6 +219,7 @@ def setRoot(path, chosen=True):
         settings.setValue(ROOT_CHOSEN_KEY, True)
     # A move that was pending ends here: it finished, or another folder was chosen since
     settings.remove(MOVE_PENDING_KEY)
+    discardMoveJournal()
     # Written now: after a move, the content is already in the new folder, and a crash before Qt writes the settings by
     # itself would start the next time in the old, now empty folder
     settings.sync()
@@ -252,6 +253,164 @@ def clearPendingMove():
     if settings.contains(MOVE_PENDING_KEY):
         settings.remove(MOVE_PENDING_KEY)
         settings.sync()
+
+
+#: The file (in the private application data folder, never in a shared folder) where a move of the Slicer Studio folder
+#: writes down, as it goes, what the folders alone cannot tell once the move is killed (``MoveJournal``)
+MOVE_JOURNAL_FILE = "StudioMoveJournal.json"
+
+
+def moveJournalPath():
+    """Where ``MoveJournal`` keeps its file, or None without an application data folder (main thread)."""
+    base = str(qt.QStandardPaths.writableLocation(qt.QStandardPaths.AppLocalDataLocation) or "")
+    return os.path.join(base, MOVE_JOURNAL_FILE) if base else None
+
+
+def discardMoveJournal():
+    """Delete the journal of a move (the move finished, or another folder was chosen since). Main thread."""
+    path = moveJournalPath()
+    if path:
+        with contextlib.suppress(OSError):
+            os.remove(path)
+
+
+class MoveJournal:
+    """What a move of the Slicer Studio folder (``moveContent``) did that the folders cannot tell after a kill.
+
+    An uninterrupted move remembers, in memory, the items that moved under another name (" 2") because the new folder had
+    one with theirs, and the moved templates that got another id: paths (the recent study, the Cohort study, registered
+    connectomes) and the default template follow them, and a moved study is named after its new folder. A kill loses that,
+    so the move finished at the next start would point those paths at the new folder's own items that kept the names, and
+    leave two templates with one id. So the move writes them here before each item moves (``recordRename``), with the
+    item names Templates/ of the new folder had before (``setTemplatesBefore``) and each new template id before it is
+    written (``recordId``), and the move that finishes it reads them back (``resume``).
+
+    Holds local paths (as the settings do): kept in the application data folder, deleted when the move ends
+    (``projects.setRoot``) or another move starts. Worker-safe (files only); never raises.
+    """
+
+    def __init__(self, path, oldRoot, newRoot, resume=False):
+        self.path = path
+        self.oldRoot = os.path.normpath(oldRoot)
+        self.newRoot = os.path.normpath(newRoot)
+        self._lock = threading.Lock()
+        self._data = {"from": self.oldRoot, "to": self.newRoot, "renamed": {}, "renamedIds": {}, "templatesBefore": None}
+        if not path:
+            return
+        if resume:
+            try:
+                with open(path, encoding="utf-8") as f:
+                    data = json.load(f)
+            except (OSError, ValueError):
+                data = None
+            # Only the journal of this move (from and to the same folders)
+            def same(path, other):
+                return bool(path) and os.path.normcase(os.path.realpath(path)) == os.path.normcase(os.path.realpath(other))
+
+            if isinstance(data, dict) and same(str(data.get("from") or ""), self.oldRoot) and same(str(data.get("to") or ""), self.newRoot):
+                if isinstance(data.get("renamed"), dict):
+                    self._data["renamed"] = {str(key): str(value) for key, value in data["renamed"].items()}
+                if isinstance(data.get("renamedIds"), dict):
+                    self._data["renamedIds"] = {str(key): str(value) for key, value in data["renamedIds"].items()}
+                if isinstance(data.get("templatesBefore"), list):
+                    self._data["templatesBefore"] = [str(name) for name in data["templatesBefore"]]
+                return
+        # A new move: what an earlier one wrote is not this move's
+        with contextlib.suppress(OSError):
+            os.remove(path)
+
+    def _write(self):
+        if not self.path:
+            return
+        staging = self.path + ".writing"
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            with open(staging, "w", encoding="utf-8") as f:
+                json.dump(self._data, f, indent=1)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(staging, self.path)
+        except OSError:
+            logging.warning("Slicer Studio: the journal of the move could not be written", exc_info=True)
+            with contextlib.suppress(OSError):
+                os.remove(staging)
+
+    def recordRename(self, source, destination):
+        """``source`` (in the old folder) is about to move to ``destination`` (in the new folder, under another name)."""
+        try:
+            key = os.path.normpath(os.path.relpath(source, self.oldRoot))
+            value = os.path.normpath(os.path.relpath(destination, self.newRoot))
+        except ValueError:
+            return  # another drive (Windows): not inside the folders
+        with self._lock:
+            if self._data["renamed"].get(key) != value:
+                self._data["renamed"][key] = value
+                self._write()
+
+    def recordId(self, oldId, newId):
+        """A moved template is about to get the id ``newId`` instead of ``oldId``."""
+        with self._lock:
+            if self._data["renamedIds"].get(oldId) != newId:
+                self._data["renamedIds"][oldId] = newId
+                self._write()
+
+    def templatesBefore(self):
+        """The item names of Templates/ of the new folder before the move (a set), or None when not recorded."""
+        names = self._data["templatesBefore"]
+        return None if names is None else set(names)
+
+    def setTemplatesBefore(self, names):
+        with self._lock:
+            self._data["templatesBefore"] = sorted(names)
+            self._write()
+
+    def completedRenames(self):
+        """``{source: destination}`` (absolute) of the recorded items that moved: the source is gone, the destination is there.
+
+        An item the kill came before is still in the old folder, and the move that finishes records it again.
+        """
+        result = {}
+        for key, value in self._data["renamed"].items():
+            source = os.path.normpath(os.path.join(self.oldRoot, key))
+            destination = os.path.normpath(os.path.join(self.newRoot, value))
+            if not os.path.lexists(source) and os.path.lexists(destination):
+                result[source] = destination
+        return result
+
+    def completedIds(self, templatesFolder):
+        """``{old id: new id}`` of the recorded template ids that a template of ``templatesFolder`` has now."""
+        recorded = self._data["renamedIds"]
+        if not recorded:
+            return {}
+        try:
+            from . import templates
+
+            names = os.listdir(templatesFolder)
+            ids = set()
+            for name in names:
+                record = templates.readRecord(os.path.join(templatesFolder, name)) if not name.startswith(".") else None
+                if record is not None:
+                    ids.add(templates.USER_PREFIX + str(record.get("id")))
+        except Exception:
+            logging.warning("Slicer Studio: the ids of the moved templates could not be read", exc_info=True)
+            return {}
+        return {oldId: newId for oldId, newId in recorded.items() if newId in ids}
+
+
+class _JournaledRenames(dict):
+    """The ``renamed`` dict of ``moveContent`` that writes each item into the journal before it moves under its new name."""
+
+    def __init__(self, journal):
+        super().__init__()
+        self._journal = journal
+
+    def __setitem__(self, source, destination):
+        self._journal.recordRename(source, destination)
+        super().__setitem__(source, destination)
+
+    def update(self, *args, **kwargs):
+        for source, destination in dict(*args, **kwargs).items():
+            self[source] = destination
 
 
 def projectsFolder(rootPath=None):
@@ -1744,9 +1903,10 @@ def checkNotOpenElsewhere(rootPath):
             names=", ".join(studies)))
 
 
-def _movedTemplateIdsUnique(templatesFolder, before, renamedIds):
+def _movedTemplateIdsUnique(templatesFolder, before, renamedIds, journal=None):
     """After Templates/ was merged into ``templatesFolder`` (whose item names were ``before``): the moved templates whose id
-    or name a template there already had get their own (``templates.makeMovedIdsUnique``). Worker-safe.
+    or name a template there already had get their own (``templates.makeMovedIdsUnique``), each new id written into
+    ``journal`` (a ``MoveJournal``) before the template has it. Worker-safe.
     """
     try:
         movedNames = set(os.listdir(templatesFolder)) - before
@@ -1757,7 +1917,7 @@ def _movedTemplateIdsUnique(templatesFolder, before, renamedIds):
     try:
         from . import templates
 
-        changed = templates.makeMovedIdsUnique(templatesFolder, movedNames)
+        changed = templates.makeMovedIdsUnique(templatesFolder, movedNames, recordId=journal.recordId if journal is not None else None)
     except Exception:
         logging.warning("Slicer Studio: the ids of the moved templates could not be checked", exc_info=True)
         return
@@ -1765,7 +1925,7 @@ def _movedTemplateIdsUnique(templatesFolder, before, renamedIds):
         renamedIds.update(changed)
 
 
-def moveContent(oldRoot, newRoot, progress=None, renamed=None, renamedIds=None):
+def moveContent(oldRoot, newRoot, progress=None, renamed=None, renamedIds=None, journal=None):
     """Move Projects/, Studies/, LNM/, Templates/ and "About this folder.txt" from ``oldRoot`` to ``newRoot``. Worker-safe.
 
     Return the list of moved items. Raise OSError on failure (what was moved stays moved; nothing is deleted before it was
@@ -1781,6 +1941,9 @@ def moveContent(oldRoot, newRoot, progress=None, renamed=None, renamedIds=None):
 
     ``renamedIds`` (a dict) receives ``{old id: new id}`` of the moved templates that got another id because a template of
     ``newRoot`` already had theirs (``templates.followRenamedIds`` makes the default and the scene follow them).
+
+    ``journal`` (a ``MoveJournal``) receives both as they happen, so a move that was killed and is finished later (a journal
+    read back) returns them too, the items that moved before the kill included: the result is that of an uninterrupted move.
     """
     checkMoveTarget(oldRoot, newRoot)
     created = not os.path.isdir(newRoot)
@@ -1791,20 +1954,34 @@ def moveContent(oldRoot, newRoot, progress=None, renamed=None, renamedIds=None):
     _removeMoveLeftovers(oldRoot)
     sameVolume = _sameVolume(oldRoot, newRoot)
     moved = []
-    absoluteRenames = {}
+    absoluteRenames = _JournaledRenames(journal) if journal is not None else {}
+    templatesBefore = None
+    templatesChecked = False
+    if journal is not None:
+        # What the interrupted run of this move renamed before it was killed (already in the journal)
+        dict.update(absoluteRenames, journal.completedRenames())
+        if renamedIds is not None:
+            renamedIds.update(journal.completedIds(os.path.join(newRoot, TEMPLATES_DIR)))
+        templatesBefore = journal.templatesBefore()
     try:
         for name in movableItems(oldRoot):
             target = os.path.join(newRoot, name)
             if name == TEMPLATES_DIR:
-                try:
-                    before = set(os.listdir(target)) if os.path.isdir(target) else set()
-                except OSError:
-                    before = set()
+                # What Templates/ there had before this move: the templates of an interrupted run moved in since
+                before = templatesBefore
+                if before is None:
+                    try:
+                        before = set(os.listdir(target)) if os.path.isdir(target) else set()
+                    except OSError:
+                        before = set()
+                    if journal is not None:
+                        journal.setTemplatesBefore(before)
                 try:
                     _mergeMove(os.path.join(oldRoot, name), target, sameVolume, progress, absoluteRenames)
                 finally:
                     # Also after a failed move: what moved has its own id there
-                    _movedTemplateIdsUnique(target, before, renamedIds)
+                    templatesChecked = True
+                    _movedTemplateIdsUnique(target, before, renamedIds, journal)
             elif name == LNM_DIR:
                 _mergeLnm(os.path.join(oldRoot, name), target, sameVolume, progress, absoluteRenames)
             else:
@@ -1816,6 +1993,9 @@ def moveContent(oldRoot, newRoot, progress=None, renamed=None, renamedIds=None):
                 os.rmdir(newRoot)  # nothing was moved: leave no empty folder behind
         raise
     finally:
+        if not templatesChecked and templatesBefore is not None:
+            # The interrupted run moved all of Templates/ and was killed before (or while) its templates got their own ids
+            _movedTemplateIdsUnique(os.path.join(newRoot, TEMPLATES_DIR), templatesBefore, renamedIds, journal)
         _studiesFollowRenamedFolders(absoluteRenames, newRoot)  # also after a failed move: what moved is listed there
         if renamed is not None:
             for source, destination in absoluteRenames.items():

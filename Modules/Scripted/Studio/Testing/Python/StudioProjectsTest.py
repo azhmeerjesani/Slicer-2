@@ -5614,6 +5614,150 @@ class StudioProjectsTest(unittest.TestCase):
             projects.clearPendingMove()
             os.environ[projects.ROOT_ENVIRONMENT] = self.root
 
+    def test_81b_interrupted_root_move_into_a_folder_with_the_same_names_follows_its_own_items(self):
+        """Change folder > Move into a folder that has a study, a template and a connectome with the same names, killed
+        midway; the next start finishes the move (BB-1). The items that moved as "<name> 2" before the kill, and the template
+        ids made unique, were kept in memory only: the finished move left two "Stroke" studies, pointed the recent study, the
+        Cohort study and the registered connectome at the new folder's own items that kept the names, and left two templates
+        with one id (the default one of them). The move now writes them into its journal as it goes, and the move that
+        finishes it ends as an uninterrupted move would. A kill runs no ``finally``: here the steps that a move runs in its
+        ``finally`` do nothing once it is "killed".
+        """
+        from unittest import mock
+
+        from StudioLib import projects_ui, study_ui, templates
+
+        projects = self.projects
+
+        class Killed(BaseException):
+            pass
+
+        def makeStudy(root, mark):
+            path = os.path.join(root, projects.STUDIES_DIR, "Stroke")
+            os.makedirs(path)
+            with open(os.path.join(path, "study.json"), "w", encoding="utf-8") as f:
+                json.dump({"format": "slicer-studio-study", "version": 1, "name": "Stroke", "created": "2026-01-01"}, f, indent=2)
+                f.write("\n")
+            with open(os.path.join(path, "whose.txt"), "w") as f:
+                f.write(mark)
+            return path
+
+        def makeConnectome(root, mark):
+            path = os.path.join(root, projects.LNM_DIR, "connectomes", "GSP")
+            os.makedirs(path)
+            with open(os.path.join(path, "whose.txt"), "w") as f:
+                f.write(mark)
+            return path
+
+        def whose(path):
+            with open(os.path.join(path, "whose.txt")) as f:
+                return f.read()
+
+        builtin = templates.builtinTemplates()[0]
+        settings = qt.QSettings()
+        keys = (templates.DEFAULT_KEY, study_ui.RECENT_STUDIES_KEY, "Studio/LNM/Connectomes", "Studio/LNM/CohortStudy")
+        previous = {key: settings.value(key) for key in keys}
+        os.environ.pop(projects.ROOT_ENVIRONMENT)
+        realRename = os.rename
+        realFollow = projects._studiesFollowRenamedFolders
+        realUnique = projects._movedTemplateIdsUnique
+        try:
+            # Killed right after A's study, or A's template, lands as "<name> 2"; and at the very end of the move, once
+            # every item moved and the moved template has its own id
+            for case, killAfter in (("study", os.path.join(projects.STUDIES_DIR, "Stroke 2")),
+                                    ("template", os.path.join(projects.TEMPLATES_DIR, "My template 2")),
+                                    ("end", None)):
+                with self.subTest(case=case):
+                    oldRoot = os.path.normpath(os.path.join(self.tempDir, "same names " + case, "A", "Slicer Studio"))
+                    newRoot = os.path.normpath(os.path.join(self.tempDir, "same names " + case, "B", "Slicer Studio"))
+                    newStudy = makeStudy(newRoot, "B")
+                    newConnectome = makeConnectome(newRoot, "B")
+                    theirs = templates.addTemplate(builtin.imagePath, name="My template", rootPath=newRoot)
+                    makeStudy(oldRoot, "A")
+                    oldStudy = os.path.join(oldRoot, projects.STUDIES_DIR, "Stroke")
+                    oldConnectome = makeConnectome(oldRoot, "A")
+                    mine = templates.addTemplate(builtin.maskPath, name="My template", rootPath=oldRoot, makeDefault=True)
+                    self.assertEqual(mine.id, theirs.id, "the two templates have the same id")
+                    settings.setValue(projects.ROOT_KEY, oldRoot)
+                    settings.setValue(study_ui.RECENT_STUDIES_KEY, json.dumps([{"path": oldStudy, "name": "Stroke"}]))
+                    settings.setValue("Studio/LNM/CohortStudy", oldStudy)
+                    settings.setValue("Studio/LNM/Connectomes", [oldConnectome])
+                    killed = []
+
+                    def killingRename(source, destination, *args, killAfter=killAfter, killed=killed, **kwargs):
+                        realRename(source, destination, *args, **kwargs)
+                        if killAfter and not killed and os.path.normpath(os.fspath(destination)).endswith(os.sep + killAfter):
+                            killed.append(destination)
+                            raise Killed()
+
+                    def follow(*args, killAfter=killAfter, killed=killed):
+                        if killed:
+                            return None
+                        if killAfter is None:
+                            killed.append("end")
+                            raise Killed()
+                        return realFollow(*args)
+
+                    def unique(*args, killed=killed, **kwargs):
+                        return None if killed else realUnique(*args, **kwargs)
+
+                    service = self._service()
+                    with mock.patch.object(projects.os, "rename", side_effect=killingRename), \
+                            mock.patch.object(projects, "_studiesFollowRenamedFolders", side_effect=follow), \
+                            mock.patch.object(projects, "_movedTemplateIdsUnique", side_effect=unique):
+                        with self.assertRaises(Killed):
+                            service.moveRoot(newRoot, moveContent=True, run=lambda function: function())
+                    self.assertTrue(killed)
+                    self.assertEqual(projects.pendingMove(), (oldRoot, newRoot))
+                    # The next start
+                    notices = []
+                    result = self._service().finishInterruptedMove(run=lambda function: function(),
+                                                                   notify=lambda text, level, notices=notices: notices.append(level))
+                    self.assertEqual(result, "finished")
+                    self.assertEqual(notices, ["info"])
+                    self.assertEqual(projects.root(), newRoot)
+                    self.assertIsNone(projects.pendingMove())
+                    # Two different studies, each one listed under its own name
+                    movedStudy = os.path.join(newRoot, projects.STUDIES_DIR, "Stroke 2")
+                    self.assertEqual(whose(movedStudy), "A")
+                    self.assertEqual(whose(newStudy), "B")
+                    names = sorted(projects_ui.studySummary(path)["name"] for path in projects.listStudies(newRoot))
+                    self.assertEqual(names, ["Stroke", "Stroke 2"], "two different cards in the Library")
+                    # The paths follow A's items, never B's that kept the names
+                    recent = json.loads(settings.value(study_ui.RECENT_STUDIES_KEY))
+                    self.assertEqual(os.path.normpath(recent[0]["path"]), movedStudy, "the recent study")
+                    self.assertEqual(recent[0]["name"], "Stroke 2")
+                    self.assertEqual(os.path.normpath(settings.value("Studio/LNM/CohortStudy")), movedStudy, "the Cohort study")
+                    connectomes = settings.value("Studio/LNM/Connectomes")
+                    connectomes = [connectomes] if isinstance(connectomes, str) else list(connectomes)
+                    movedConnectome = os.path.join(newRoot, projects.LNM_DIR, "connectomes", "GSP 2")
+                    self.assertEqual([os.path.normpath(path) for path in connectomes], [movedConnectome], "the registered connectome")
+                    self.assertEqual(whose(movedConnectome), "A")
+                    self.assertEqual(whose(newConnectome), "B")
+                    # A's template has its own id and name and stays the default; B's keeps its id
+                    listed = {template.id: template for template in templates.userTemplates(newRoot)}
+                    self.assertEqual(len(listed), 2, "two templates, two ids")
+                    self.assertEqual(listed[theirs.id].imageSha256, theirs.imageSha256, "B's template keeps its id")
+                    others = [template for template in listed.values() if template.id != theirs.id]
+                    self.assertEqual(others[0].imageSha256, mine.imageSha256)
+                    self.assertEqual(others[0].name, "My template 2")
+                    self.assertEqual(templates.defaultTemplateId(), others[0].id, "A's template stays the default")
+                    self.assertEqual(sorted(os.listdir(oldRoot)), [], "nothing is left in the old folder")
+                    journalPath = projects.moveJournalPath()
+                    self.assertFalse(journalPath and os.path.exists(journalPath), "the journal ends with the move")
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    settings.remove(key)
+                else:
+                    settings.setValue(key, value)
+            settings.remove(projects.ROOT_KEY)
+            settings.remove(projects.ROOT_CHOSEN_KEY)
+            projects.clearPendingMove()
+            getattr(projects, "discardMoveJournal", lambda: None)()
+            os.environ[projects.ROOT_ENVIRONMENT] = self.root
+            templates.registerGrids(force=True)
+
     def test_83_crash_offer_follows_the_projects_when_the_folder_is_moved(self):
         """A crash offer (the Library card, the notice, the Classic box) made before Change folder > Move: Open project then
         opened the old folder's path, which the move had emptied, and answered "P2 was renamed or moved" (BB-1). The offer

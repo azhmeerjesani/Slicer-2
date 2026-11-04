@@ -1053,12 +1053,13 @@ def _uniqueSlug(name, rootPath=None):
     return slug
 
 
-def makeMovedIdsUnique(folder, movedNames):
+def makeMovedIdsUnique(folder, movedNames, recordId=None):
     """Give each template of ``folder`` (a Templates/ folder) whose folder name is in ``movedNames`` (the templates that a
     move of the Slicer Studio folder merged in) its own id and name when another template there already uses its id or
     its name (without case): "My template" -> "My template 2" ("my-template-2"), as an add would name it. The templates
     that were there keep theirs, so what refers to them (scans, studies, the default) stays theirs. Return
-    ``{old id: new id}`` ("user:<slug>") of the templates that changed. Worker-safe (files only).
+    ``{old id: new id}`` ("user:<slug>") of the templates that changed. ``recordId(old id, new id)`` is called before a
+    template gets its new id (the journal of the move, ``projects.MoveJournal``). Worker-safe (files only).
     """
     entries = []
     try:
@@ -1101,6 +1102,8 @@ def makeMovedIdsUnique(folder, movedNames):
             updated = dict(record, id=newSlug, name=newName)
             target = os.path.join(path, TEMPLATE_JSON)
             staging = f"{target}.renaming-{os.getpid()}"
+            if recordId is not None and newSlug != slug:
+                recordId(USER_PREFIX + slug, USER_PREFIX + newSlug)
             try:
                 with open(staging, "w", encoding="utf-8", newline="\n") as f:
                     json.dump(updated, f, indent=2, ensure_ascii=False)
