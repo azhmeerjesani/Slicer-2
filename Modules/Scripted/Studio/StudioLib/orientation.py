@@ -46,7 +46,8 @@ are separate actors (``StudioFigureLetter_*``), not ``StudioOrientationLetter_*`
 
 Re-centring: when the background volume of a slice view changes and the slice offset is outside the new
 background along the view normal, the offset moves to the nearest bound, half a voxel inside, so that the view
-never stays black. Figure views are skipped, and a view whose offset is inside the volume never moves.
+never stays black. A view whose offset is inside the volume never moves, except a view that has just become a figure
+view (a scan swapped for a figure): it is fitted to the figure and put on the middle of its single slice (SPEC 6.7).
 
 This module is an optional plug-in of the Studio shell: ``install(shell)`` shows the letters while the
 shell is active (unless the ``Studio/OrientationLetters`` setting is false), ``uninstall(shell)``
@@ -396,15 +397,18 @@ class _ViewLetters:
         ys = [corner[1] for corner in corners]
         return max(xs) < bounds[0] or min(xs) > bounds[1] or max(ys) < bounds[2] or min(ys) > bounds[3]
 
-    def _recentre(self):
+    def _recentre(self, becameFigure=False):
         """Bring the new background volume into view (U-04: a view never stays black after its background changes).
 
         A view whose offset is outside the volume along the view normal is moved half a voxel inside the nearest bound.
         A view whose field of view does not overlap the volume in the view plane (two scans with far apart origins) is
-        fitted to the volume, as the Fit button does; the slice offset stays where it is. Figure views are skipped.
+        fitted to the volume, as the Fit button does; the slice offset stays where it is.
+        A view that has just become a figure view (``becameFigure``: a scan was swapped for a figure, SPEC 6.7) shows
+        the figure whole instead: it is fitted to the figure and put on the middle of its single slice. A view that was
+        already a figure view is moved and fitted only if it would otherwise be black, like any other view.
         Return True if the offset or the field of view changed.
         """
-        if self.isFigure or self.backgroundNode is None:
+        if self.backgroundNode is None:
             return False
         sliceLogic = self.sliceWidget.sliceLogic()
         bounds = [0.0] * 6
@@ -414,6 +418,10 @@ class _ViewLetters:
             return False
         changed = False
         offset = self.sliceNode.GetSliceOffset()
+        if becameFigure:
+            sliceLogic.FitSliceToAll()
+            sliceLogic.SetSliceOffset(0.5 * (low + high))
+            return True
         if not low <= offset <= high:
             spacing = sliceLogic.GetBackgroundSliceSpacing()
             half = min(0.5 * abs(spacing[2]), 0.5 * (high - low))
@@ -534,8 +542,9 @@ class _ViewLetters:
         figureKey = self._figureKey()
         if key != self.directionKey or figureKey != self.figureKey or backgroundChanged:
             self.figureKey = figureKey
+            wasFigure = self.isFigure
             self._updateFigureState()
-            if backgroundChanged and self._recentre():
+            if backgroundChanged and self._recentre(becameFigure=self.isFigure and not wasFigure):
                 changed = True
             self.directionKey = key
             if self.isFigure:

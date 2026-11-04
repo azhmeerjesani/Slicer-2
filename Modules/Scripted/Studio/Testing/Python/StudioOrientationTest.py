@@ -708,19 +708,76 @@ class StudioOrientationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self._setBackground("Green", smallNode)
         self.assertEqual(list(greenNode.GetFieldOfView()), fieldOfView)
 
-    def test_recentre_skips_figure_views(self):
-        """A figure keeps the slice offset it has: it is not moved into the picture."""
+    def _figureShare(self, viewName):
+        """(share of the view rectangle covered by the background, share of the background's in-plane extent inside the
+        view), both 0..1 on a 9 x 9 grid; the slice offset must be inside the background for the first to be above 0.
+        """
+        sliceWidget = self.layoutManager.sliceWidget(viewName)
+        sliceNode = sliceWidget.mrmlSliceNode()
+        bounds = [0.0] * 6
+        sliceWidget.sliceLogic().GetBackgroundSliceBounds(bounds)
+        width, height = sliceNode.GetDimensions()[:2]
+        rasToSlice = vtk.vtkMatrix4x4()
+        sliceToRAS = vtk.vtkMatrix4x4()
+        sliceToRAS.DeepCopy(sliceNode.GetSliceToRAS())
+        for row in range(3):
+            sliceToRAS.SetElement(row, 3, 0.0)
+        rasToSlice.DeepCopy(sliceToRAS)
+        rasToSlice.Invert()
+        sliceToXY = vtk.vtkMatrix4x4()
+        sliceToXY.DeepCopy(sliceNode.GetXYToRAS())
+        sliceToXY.Invert()
+        covered = inside = 0
+        for i in range(1, 10):
+            for j in range(1, 10):
+                point = rasToSlice.MultiplyPoint(sliceNode.GetXYToRAS().MultiplyPoint([i / 10 * width, j / 10 * height, 0.0, 1.0]))
+                covered += bounds[0] <= point[0] <= bounds[1] and bounds[2] <= point[1] <= bounds[3]
+                sx = bounds[0] + i / 10 * (bounds[1] - bounds[0])
+                sy = bounds[2] + j / 10 * (bounds[3] - bounds[2])
+                ras = sliceToRAS.MultiplyPoint([sx, sy, sliceNode.GetSliceOffset(), 1.0])
+                xy = sliceToXY.MultiplyPoint(ras)
+                inside += 0 <= xy[0] <= width and 0 <= xy[1] <= height
+        return covered / 81.0, inside / 81.0
+
+    def test_scan_view_swapped_to_figure_is_fitted(self):
+        """SPEC 6.7 and U-04: a view whose background changes from a scan to a figure shows the whole figure, at offset 0
+        (the middle of its single slice), however the view was left on the scan. It is not black and not a corner.
+        """
+
+        studioShell = self._applyStudio()
+        self._ensureLetters(studioShell)
+        self._setFourUp()
+        scanNode = self._addVolume("scan", 100, 2.0, (-100, -100, -100))
+        figureNode = self._addFigure()
+        redLogic = self.layoutManager.sliceWidget("Red").sliceLogic()
+        redNode = self.layoutManager.sliceWidget("Red").mrmlSliceNode()
+        for offset in (-80.0, 0.0):
+            self._setBackground("Red", scanNode)
+            redLogic.FitSliceToAll()
+            redLogic.SetSliceOffset(offset)
+            self._pump()
+            self._setBackground("Red", figureNode)
+            self._pump()
+            low, high = self._sliceBounds("Red")
+            self.assertTrue(low <= redNode.GetSliceOffset() <= high, f"offset {offset}: {redNode.GetSliceOffset()} outside [{low}, {high}]")
+            self.assertAlmostEqual(redNode.GetSliceOffset(), 0.5 * (low + high), delta=1e-6)
+            covered, inside = self._figureShare("Red")
+            self.assertGreater(covered, 0.2, f"offset {offset}: Red is black")
+            self.assertGreaterEqual(inside, 0.95, f"offset {offset}: only part of the figure is in Red")
+
+    def test_recentre_keeps_figure_view_that_is_already_a_figure_view(self):
+        """A view that already shows a figure keeps its field of view when another figure replaces the first one."""
 
         studioShell = self._applyStudio()
         self._ensureLetters(studioShell)
         self._setFourUp()
         yellowLogic = self.layoutManager.sliceWidget("Yellow").sliceLogic()
         yellowNode = self.layoutManager.sliceWidget("Yellow").mrmlSliceNode()
-        yellowNode.SetOrientationToAxial()
-        yellowLogic.SetSliceOffset(30.0)
+        self._setBackground("Yellow", self._addFigure("first"))
+        yellowNode.SetFieldOfView(300.0, 150.0, yellowNode.GetFieldOfView()[2])
         self._pump()
-        self._setBackground("Yellow", self._addFigure())
-        self.assertAlmostEqual(yellowNode.GetSliceOffset(), 30.0, delta=1e-6)
+        self._setBackground("Yellow", self._addFigure("second"))
+        self.assertAlmostEqual(yellowNode.GetFieldOfView()[0], 300.0, delta=1e-6)
 
     def test_recentre_not_in_classic(self):
         """Without Studio (Classic and --testing) a background change never moves the slice offset."""
