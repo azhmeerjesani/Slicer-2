@@ -1661,6 +1661,11 @@ class UpdateService:
             raise updates_install.InstallError(_("The installed application was not found."))
         unavailable = _("This computer cannot install the update.")
         cancelledText = _("The update was cancelled.")
+        if self._otherLiveOwner() is not None:
+            # The download and staging folders are shared by every Slicer Studio of this user: preparing here would
+            # replace (and the exit would delete) the copy that another running window may have chosen to install
+            raise updates_install.InstallError(_("The update is already being prepared, or is prepared, in another Slicer Studio "
+                                                 "window. Finish or close it there, then try again."))
         stale, self._staleStaging = self._staleStaging, []
         # From now on this run owns the download and staging folders: another Slicer Studio that starts with the same
         # state folder must not clean them up (the marker names this run until it ends or its update is registered)
@@ -1754,6 +1759,20 @@ class UpdateService:
         except OSError:
             logging.warning("Updates: could not write the staging marker:\n" + traceback.format_exc())
 
+    def _otherLiveOwner(self):
+        """The pid of another running Slicer Studio that the staging marker names as the owner of the download and the
+        staged copy (it may still install them), or None.
+        """
+        try:
+            with open(os.path.join(stateDirectory(), STAGED_MARKER), encoding="utf-8") as f:
+                marker = json.load(f)
+        except (OSError, ValueError):
+            return None
+        pid = marker.get("pid") if isinstance(marker, dict) else None
+        if isinstance(pid, int) and pid != os.getpid() and _processAlive(pid):
+            return pid
+        return None
+
     def _removeOwnStagedMarker(self):
         """The download or the preparation failed or was cancelled: this run no longer owns anything."""
         path = os.path.join(stateDirectory(), STAGED_MARKER)
@@ -1780,6 +1799,8 @@ class UpdateService:
         prepared = self.prepared
         if prepared is None or prepared.launched or self._quitConnected:
             return  # nothing prepared, or the install is chosen: the helper (or the next start) takes over
+        if self._otherLiveOwner() is not None:
+            return  # the shared folders now belong to another running window: its update must not be deleted
         try:
             root = os.path.dirname(prepared.staged)
             if os.path.isdir(root) and os.path.basename(root).endswith(updates_install.STAGING_SUFFIX):

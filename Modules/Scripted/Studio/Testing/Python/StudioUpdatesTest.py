@@ -1489,6 +1489,66 @@ fi
         self.assertNotIn("No such file", dialog.text.text)
         other.kill()
 
+    def test_SecondWindowLeavesUpdateChosenInFirstWindowAlone(self):
+        """Another running Slicer Studio of the same user has prepared the update (staged copy next to the installation,
+        package in the download folder): a second window that also asks for the update must not replace it, and its
+        exit must not delete it (the first window chose Install when I quit).
+        """
+        updates, install = self.updates, self.install
+        if updates.platformKey() != "linux-x86_64":
+            self.skipTest("the Linux package path is tested on Linux")
+        self._publish("1.2.0")
+        target = self._fakeLinuxInstall("0.9.0")
+        updates._installableOverride = True
+        updates.installTargetOverride = target
+        root = install.stagingRoot(target)
+        first = self._service()
+        first.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        dialog = first.updateNow()
+        self.assertTrue(self._waitFor(lambda: dialog.state in ("ready", "failed"), 30), dialog.state)
+        self.assertEqual(dialog.state, "ready", dialog.text.text)
+        dialog.secondaryButton.click()  # Install when I quit
+        self.assertTrue(first._quitConnected)
+        downloads = updates.downloadDirectory()
+        packages = os.listdir(downloads)
+        # The marker as the first window (another process) wrote it
+        other = self._sleeper(60)
+        self.addCleanup(other.kill)
+        markerPath = os.path.join(self.stateDir, updates.STAGED_MARKER)
+        with open(markerPath) as f:
+            marker = json.load(f)
+        marker["pid"] = other.pid
+        with open(markerPath, "w") as f:
+            json.dump(marker, f)
+        staged = os.stat(root).st_ino
+        second = self._service()
+        second.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        again = second.updateNow()
+        self.assertTrue(self._waitFor(lambda: again.state in ("ready", "failed"), 30), again.state)
+        self.assertEqual(again.state, "failed", "the update is prepared in the other window")
+        self.assertIn("another Slicer Studio window", again.text.text)
+        self.assertIsNone(second.prepared)
+        self.assertEqual(os.stat(root).st_ino, staged, "the staged copy of the other window is not replaced")
+        self.assertEqual(install.linuxPackageVersion(first.prepared.staged), "1.2.0")
+        self.assertEqual(os.listdir(downloads), packages)
+        with open(markerPath) as f:
+            self.assertEqual(json.load(f)["pid"], other.pid, "the marker still names the other window")
+        # Whatever this window does at its exit, the other window's update stays
+        second._onQuitDiscard()
+        first._quitConnected = False  # as if this window had prepared it but not chosen to install it
+        first._onQuitDiscard()
+        self.assertTrue(os.path.isdir(root))
+        self.assertEqual(os.listdir(downloads), packages)
+        self.assertTrue(os.path.isfile(markerPath))
+        # The other window is gone: its marker no longer blocks, and the update can be prepared again
+        other.kill()
+        other.wait()
+        third = self._service()
+        third.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        retry = third.updateNow()
+        self.assertTrue(self._waitFor(lambda: retry.state in ("ready", "failed"), 30), retry.state)
+        self.assertEqual(retry.state, "ready", retry.text.text)
+
     def test_FailedDownloadReleasesStagedMarker(self):
         updates = self.updates
         if updates.platformKey() != "linux-x86_64":
