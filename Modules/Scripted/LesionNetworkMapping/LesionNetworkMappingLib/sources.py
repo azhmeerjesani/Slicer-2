@@ -661,7 +661,16 @@ class Records:
         if row["stage"] != EXCLUDED and other["stage"] in rank and rank.get(row["stage"], 0) < rank[other["stage"]]:
             row["stage"] = other["stage"]
         self.rows = [item for item in self.rows if item is not other]
-        self.log = [entry for entry in self.log if entry["record_id"] != drop]
+        # The stage lines of ``drop`` go (they would feed undo and excluded_at of a record that is gone), but the merges it
+        # absorbed earlier move to ``keep``: each one is a duplicate removed and stays counted (merged_count)
+        kept_log = []
+        for entry in self.log:
+            if entry["record_id"] == drop:
+                if entry["to"] != MERGED:
+                    continue
+                entry["record_id"] = keep
+            kept_log.append(entry)
+        self.log = kept_log
         # Kept in the log: a manual merge counts as a removed duplicate in the PRISMA counts
         self.log.append({"record_id": keep, "from": drop, "to": MERGED, "reason": "", "when": now_iso()})
         return row

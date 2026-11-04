@@ -526,6 +526,36 @@ class SourcesTest(unittest.TestCase):
         self.assertEqual(len(records.merge_offers()), 1)
         self.assertLess(time.time() - start, 10)
 
+    def test_chained_merges_all_count_as_duplicates(self):
+        """Merging a record that had itself absorbed a duplicate keeps both merges in the PRISMA counts (order-independent)."""
+        title = "Lesion network mapping of mutism after cerebellar stroke"
+        for order in ("chain", "star"):
+            with self.subTest(order=order):
+                study = Study.create(os.path.join(self.root, order), name="Lit")
+                records = sources.Records.open(study)
+                records.add([sources.draft(title=title, year="2020"), sources.draft(title=title + ".", year="2020"),
+                             sources.draft(title=title + "!", year="2020")])
+                a, b, c = records.ids()
+                records.set_stage(b, sources.SCREENED)
+                records.merge(b, c)
+                records.save()
+                records = sources.Records.open(study)
+                if order == "chain":
+                    records.merge(a, b)  # b, which absorbed c, is dropped
+                else:
+                    records.merge(b, a)
+                records.save()
+                records = sources.Records.open(study)
+                self.assertEqual(records.merged_count(), 2)
+                self.assertEqual(len(records), 1)
+                kept = records.ids()[0]
+                self.assertTrue(all(entry["record_id"] == kept for entry in records.log))
+                counts = sources.prisma_counts(study, records)
+                self.assertEqual((counts["identified"], counts["duplicates_removed"], counts["screened"]), (3, 2, 1))
+                # the stage line of the dropped record does not feed undo of the kept one
+                if order == "chain":
+                    self.assertIsNone(records.undo(kept))
+
     def test_merge_relinks_cases(self):
         records = sources.Records(self.root)
         records.add([{"title": "A", "year": "2020", "doi": "10.1/a"}, {"title": "B", "year": "2020", "doi": "10.1/b"}])
