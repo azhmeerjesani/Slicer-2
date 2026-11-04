@@ -194,7 +194,11 @@ def suprathresholdTotals(values, threshold, sign="both"):
 
 
 def networkStatistics(values, units, threshold, sign="both"):
-    """One row per unit, plus the voxels that are in no unit, with the statistics of the card (see the module docstring).
+    """One row per unit, plus the voxels that are in no network unit, with the statistics of the card (see the module docstring).
+
+    ROI units (``system == "roi"``) are extra rows: they do not take voxels from the "not in these networks" row, which
+    counts the voxels outside every network unit (so the network rows and that row add up to 100 %). It is listed only
+    when there is a network unit.
 
     :param values: in-mask values of the map (float, NaN ignored).
     :param threshold: absolute threshold: voxels ``>= t`` are positive, ``<= -t`` negative (as the sign allows).
@@ -222,9 +226,12 @@ def networkStatistics(values, units, threshold, sign="both"):
         return 100.0 * part / whole if whole else None
 
     rows = []
+    networks = False
     for unit in units:
         positions = unit["positions"]
-        covered[positions] = True
+        if unit["system"] != "roi":
+            covered[positions] = True
+            networks = True
         inside = finite[positions]
         k = int(inside.sum())
         mine = values[positions][inside]
@@ -240,7 +247,7 @@ def networkStatistics(values, units, threshold, sign="both"):
         rows.append(row)
     other = finite & ~covered
     k = int(other.sum())
-    if units and k:
+    if networks and k:
         mine = values[other]
         rows.append({"system": "other", "name": _("not in these networks"), "atlas": None, "voxels": k,
                      "pctPos": percent(int((pos & other).sum()), totalPos) if wantPos else None, "pctNeg": percent(int((neg & other).sum()), totalNeg) if wantNeg else None,

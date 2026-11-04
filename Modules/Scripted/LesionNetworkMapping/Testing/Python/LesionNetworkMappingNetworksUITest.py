@@ -175,6 +175,35 @@ class LesionNetworkMappingNetworksUITest(unittest.TestCase):
             slicer.app.processEvents()
             shutil.rmtree(folder, ignore_errors=True)
 
+    def test_roi_rows_leave_the_not_in_these_networks_row_unchanged(self):
+        """An ROI is an extra row: the voxels in it but in no network stay in "not in these networks" (rows add up to 100 %)."""
+        import numpy as np
+
+        # 12 voxels: network A holds 0-3, network B 4-5; the ROI holds 3-7 (one voxel of A, both of B, two outside every network)
+        values = np.array([6.0, 1.0, 1.0, 7.0, -6.0, 0.0, 8.0, 9.0, 5.5, -7.0, 0.5, np.nan])
+        networks = [{"system": "cortex", "name": "A", "atlas": None, "positions": np.array([0, 1, 2, 3])},
+                    {"system": "cortex", "name": "B", "atlas": None, "positions": np.array([4, 5])}]
+        roi = [{"system": "roi", "name": "box", "atlas": None, "positions": np.array([3, 4, 5, 6, 7])}]
+        before = self.cn.networkStatistics(values, networks, 5.0, "both")
+        after = self.cn.networkStatistics(values, [*networks, *roi], 5.0, "both")
+        otherBefore = [row for row in before if row["system"] == "other"]
+        otherAfter = [row for row in after if row["system"] == "other"]
+        self.assertEqual(len(otherBefore), 1)
+        self.assertEqual(len(otherAfter), 1)
+        self.assertEqual(otherAfter[0], otherBefore[0])
+        # numpy: voxels 6-10 are in no network (11 is NaN); positive 6, 7, 8 of the 5 positive (0, 3, 6, 7, 8); negative 9 of 2
+        self.assertEqual(otherAfter[0]["voxels"], 5)
+        self.assertAlmostEqual(otherAfter[0]["pctPos"], 60.0)
+        self.assertAlmostEqual(otherAfter[0]["pctNeg"], 50.0)
+        self.assertAlmostEqual(otherAfter[0]["mean"], float(np.mean(values[6:11])))
+        self.assertEqual([row["name"] for row in after], ["A", "B", "box", self.cn._("not in these networks")])
+        roiRow = after[2]
+        self.assertEqual((roiRow["system"], roiRow["voxels"]), ("roi", 5))
+        for key in ("pctPos", "pctNeg"):
+            self.assertAlmostEqual(sum(row[key] for row in after if row["system"] != "roi"), 100.0, msg=key)
+        # Without a network unit (only ROIs) there is no "not in these networks" row
+        self.assertEqual([row["system"] for row in self.cn.networkStatistics(values, roi, 5.0, "both")], ["roi"])
+
     def test_declared_template_space_off_the_standard_grids(self):
         """A map whose template space the app knows (its sidecar's connectome space, the ``Studio.Space`` of its volume)
         but whose grid is no standard grid (a 4 mm resampled map, the demo connectome's 6 mm grid) gets its Side column,
