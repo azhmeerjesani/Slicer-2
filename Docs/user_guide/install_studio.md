@@ -252,8 +252,9 @@ next time you quit, without restarting.
 ### Web version
 
 `slicer_studio_web.py` checks for a new release when it starts Slicer Studio. A
-required update stops it with instructions; an optional one prints a notice. To
-update, run:
+required update stops it with instructions; an optional one prints a notice.
+While the release has no Linux package yet, a required update only prints a
+warning and Slicer Studio starts. To update, run:
 
 ```console
 python3 slicer_studio_web.py update

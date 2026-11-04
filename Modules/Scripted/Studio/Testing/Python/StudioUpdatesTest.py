@@ -2161,6 +2161,57 @@ fi
         finally:
             web.command_run, web.command_local = saved
 
+    def test_WebLauncherRequiredWithoutLinuxPackage(self):
+        """A required release without the Linux package (for example only the macOS disk image so far) does not stop
+        'run': 'update' could not install it. The launcher warns and starts, like the app on a computer whose file the
+        release does not have; 'update' says the package is not published yet. With the package, 'run' stops and names
+        --no-update-check.
+        """
+        web = self._importScript(os.path.join("Utilities", "SlicerStudioWeb", "slicer_studio_web.py"), "slicer_studio_web_rnl")
+        reached = []
+
+        def containerState(name):
+            reached.append(name)
+            raise web.LauncherError("container start reached")
+
+        web.ensure_docker_running = lambda: "x86_64"
+        web.needs_amd64_emulation = lambda architecture: False
+        web.image_exists = lambda image: False
+        web.image_studio_version = lambda image: None
+        web.launcher_version = lambda: "0.9.0"
+        web.container_state = containerState
+        macAsset = {"name": "SlicerStudio-1.2.1-macos-arm64.dmg", "size": 10, "sha256": "a" * 64}
+        for required, minimum in ((True, None), (False, "1.0.0")):
+            data = self._publish("1.2.1", required=required, minimum=minimum, package=False)
+            data["assets"]["macos-arm64"] = macAsset
+            with open(os.path.join(self.feedDir, "studio-update.json"), "w") as f:
+                json.dump(data, f)
+            stderr, stdout = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(stdout):
+                self.assertEqual(web.check_for_updates("0.9.0"), "required")
+                code = web.main(["run", "--no-browser"])
+            self.assertEqual(code, 1)
+            self.assertIn("container start reached", stderr.getvalue(), "run went on to start the container")
+            self.assertEqual(reached, [web.DEFAULT_CONTAINER])
+            reached.clear()
+            self.assertIn("no Linux package yet", stderr.getvalue())
+            self.assertNotIn("is a required update", stderr.getvalue())
+            with self.assertRaisesRegex(web.LauncherError, "no Linux package yet"):
+                web.command_update(web.build_parser().parse_args(["update", "--no-build"]))
+        # An optional release without the package names no 'update' command that would fail
+        data = self._publish("1.2.1", package=False)
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            self.assertEqual(web.check_for_updates("0.9.0"), "optional")
+        self.assertIn("not published yet", stdout.getvalue())
+        self.assertNotIn("Update with", stdout.getvalue())
+        # With the Linux package, a required update still stops 'run', and the message names the way to start anyway
+        self._publish("1.2.1", required=True)
+        with self.assertRaises(web.LauncherError) as raised:
+            web.check_for_updates("0.9.0")
+        self.assertIn("is a required update", str(raised.exception))
+        self.assertIn("--no-update-check", str(raised.exception))
+
     def test_WebLauncher(self):
         web = self._importScript(os.path.join("Utilities", "SlicerStudioWeb", "slicer_studio_web.py"), "slicer_studio_web_test")
         makeRelease = self._importScript(os.path.join("Utilities", "Scripts", "SlicerStudioRelease", "make_release.py"), "make_release_test2")

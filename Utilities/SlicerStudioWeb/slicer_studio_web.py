@@ -20,9 +20,10 @@ Examples::
     python3 slicer_studio_web.py update       # download, verify and install the latest release
 
 Updates: ``run`` checks the public latest release of Slicer Studio on GitHub (one anonymous request; no API, no
-account). A required update stops it with instructions, an optional one prints a notice. ``update`` (or ``--update``)
-downloads the launcher bundle and the Linux package of the latest release, checks their size and SHA-256 against
-the release manifest, unpacks the launcher next to this one and builds the image from the verified package.
+account). A required update stops it with instructions (only a warning while the release has no Linux package),
+an optional one prints a notice. ``update`` (or ``--update``) downloads the launcher bundle and the Linux package of
+the latest release, checks their size and SHA-256 against the release manifest, unpacks the launcher next to this one
+and builds the image from the verified package.
 
 The script only uses the Python standard library (Python 3.8 or later). See
 README.md next to this script for details.
@@ -739,6 +740,11 @@ def update_status(manifest, current):
     return "required" if manifest.get("required") or below else "optional"
 
 
+def release_has_linux_package(manifest):
+    """True when the release has the Linux package that ``update`` installs (the web version needs it)."""
+    return bool((manifest.get("assets") or {}).get("linux-x86_64"))
+
+
 def check_for_updates(current, quiet_failure=True):
     """At launcher start: stop on a required update, print a notice for an optional one."""
     if update_feed() is None:
@@ -751,13 +757,24 @@ def check_for_updates(current, quiet_failure=True):
         info(f"(Could not check for updates: {error})")
         return "unknown"
     status = update_status(manifest, current)
+    have = current or "an unknown version"
+    if not release_has_linux_package(manifest):
+        # 'update' needs the Linux package: until the publisher adds it, a required update only warns (like the app
+        # on a computer whose file the release does not have), and an optional one names no command that would fail.
+        if status == "required":
+            warn(f"Slicer Studio {manifest['version']} is required (you have {have}), but its release has no Linux package yet; "
+                 f"starting this version. Update with {script_command('update')} once the package is published.")
+        elif status == "optional":
+            info(f"Slicer Studio {manifest['version']} is available (you have {have}); its Linux package is not published yet.")
+        return status
     if status == "required":
         raise LauncherError(
-            f"Slicer Studio {manifest['version']} is a required update (you have {current or 'an unknown version'}).\n"
+            f"Slicer Studio {manifest['version']} is a required update (you have {have}).\n"
             f"  Update with: {script_command('update')}\n"
-            f"  then start it again. Release notes: https://github.com/{UPDATE_REPOSITORY}/releases/tag/v{manifest['version']}")
+            f"  then start it again. Release notes: https://github.com/{UPDATE_REPOSITORY}/releases/tag/v{manifest['version']}\n"
+            "  To start this version anyway, add --no-update-check.")
     if status == "optional":
-        info(f"Slicer Studio {manifest['version']} is available (you have {current or 'an unknown version'}). Update with: {script_command('update')}")
+        info(f"Slicer Studio {manifest['version']} is available (you have {have}). Update with: {script_command('update')}")
     return status
 
 
@@ -850,6 +867,9 @@ def command_update(args):
     if status == "none" and not args.force:
         info(f"Slicer Studio is up to date ({current}; the latest release is {version}).")
         return 0
+    if not release_has_linux_package(manifest):
+        raise LauncherError(f"The release {version} has no Linux package yet, so the web version cannot be updated to it. "
+                            f"Try again once the package is published; until then {script_command('run')} keeps starting this version.")
     info(f"Updating to Slicer Studio {version} (you have {current or 'an unknown version'}).")
     directory = cache_dir() / "updates" / version
     package = download_update_asset(manifest, "linux-x86_64", directory, feed)
