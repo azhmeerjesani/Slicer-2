@@ -142,6 +142,10 @@ Run with the main window and testing enabled::
   (a library in ``qt-loadable-modules``, an executable in ``cli-modules``) is incompatible, with a plain reason, and kept
   disabled (its folders are not in the module or launcher paths), at install and when found at start: such modules were
   built for official 3D Slicer and never load in the fork. An extension written in Python stays compatible and enabled.
+- ``test_67_save_lesion_is_off_in_second_tracing_adjudication_and_review`` (BB-1): in a blind second tracing, an adjudication
+  and a review, Save lesion (Ctrl+Shift+S), Save lesion as… (the Lesion card ⋯ menu and Search) are off with a toast: they
+  proposed the first tracer's file (the scan's folder, its BIDS subject) and replaced it with the second rater's strokes, the
+  A/B label map or the reviewer's edit. The footer of each state writes its own files.
 """
 
 import inspect
@@ -4908,3 +4912,161 @@ class StudioRegressionTest(unittest.TestCase):
         assertPythonCompatible(started, "at start")
         with open(os.path.join(installPath, "StudioCliProbe.s4ext"), encoding="utf-8") as stream:
             self.assertIn("enabled false", stream.read())
+
+    def test_67_save_lesion_is_off_in_second_tracing_adjudication_and_review(self):
+        """Save lesion (Ctrl+Shift+S, the Lesion card ⋯ menu, Search) in a second tracing, an adjudication or a review
+        proposed the scan's folder and BIDS subject: in a native study laid out as sub-01_T1w + sub-01_lesion, the first
+        tracer's file. Accepting it overwrote the primary tracing with the blind second rater's strokes, with the A/B label
+        map of the adjudication, or with the reviewer's edit (and the review then kept nothing). These states write their
+        own files with their footer (Ctrl+Enter), so Save lesion and Save lesion as… are off there (BB-1).
+        """
+        from LesionNetworkMappingLib import agreement, nifti
+        from LesionNetworkMappingLib import review as reviewRules
+
+        from StudioLib import adjudicate, draw, review, shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        # A native grid (not an MNI one): the scans and the first tracings side by side, as a scanner export names them
+        shape = (40, 48, 36)
+        affine = np.array([[2.0, 0, 0, -40], [0, 2.0, 0, -48], [0, 0, 2.0, -36], [0, 0, 0, 1]])
+        folder = os.path.join(self.directory, "Rater study")
+        os.makedirs(folder)
+        files = []
+        for sid, offset in (("sub-01", 10), ("sub-02", 20)):
+            files.append(os.path.join(folder, f"{sid}_T1w.nii.gz"))
+            nifti.write_nifti(files[-1], np.full(shape, 100, np.int16), affine, sform_code=1, qform_code=1)
+            lesion = np.zeros(shape, np.uint8)
+            lesion[offset:offset + 6, 20:26, 15:21] = 1
+            files.append(os.path.join(folder, f"{sid}_lesion.nii.gz"))
+            nifti.write_nifti(files[-1], lesion, affine, sform_code=1, qform_code=1)
+        originalToast = study_ui._toast
+        study_ui._toast = lambda shell, text, **kwargs: None
+        self.addCleanup(setattr, study_ui, "_toast", originalToast)
+        originalAdjudicateToast = adjudicate._toast
+        adjudicate._toast = lambda text, ms=3000, **kwargs: None
+        self.addCleanup(setattr, adjudicate, "_toast", originalAdjudicateToast)
+        self.addCleanup(review.setRaterName, review.storedRaterName())
+        # The user accepts whatever the Save dialog proposes
+        dialogs = []
+        realGetSaveFileName = qt.QFileDialog.getSaveFileName
+
+        def acceptProposal(parent, caption, proposal, *args):
+            dialogs.append((str(caption), str(proposal)))
+            return proposal
+
+        qt.QFileDialog.getSaveFileName = acceptProposal
+        self.addCleanup(setattr, qt.QFileDialog, "getSaveFileName", realGetSaveFileName)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        toasts = []
+        originalShellToast = studioShell.toast
+        studioShell.toast = lambda text, *args, **kwargs: (toasts.append(str(text)), originalShellToast(text, *args, **kwargs))[1]
+
+        def pump():
+            for _ in range(4):
+                slicer.app.processEvents()
+
+        def contents(path):
+            with open(path, "rb") as f:
+                return f.read()
+
+        def menuLabels():
+            return [entry[0] for entry in draw.lesionMenuActions(studioShell) if entry]
+
+        def paletteEnabled():
+            entry = next(entry for entry in draw._paletteEntries(studioShell) if entry["id"] == "draw.saveLesionAs")
+            return bool(entry["enabled"]())
+
+        def assertSaveLesionOff(when, primaries):
+            self.assertIsNotNone(draw.lesionNodes()[0], when)
+            toasts.clear()
+            self.assertIsNone(draw.saveLesionNow(studioShell), f"{when}: Ctrl+Shift+S saved the lesion")
+            self.assertIsNone(draw.saveLesionDialog(studioShell), f"{when}: Save lesion as… saved the lesion")
+            pump()
+            for path, before in primaries.items():
+                self.assertEqual(contents(path), before, f"{when}: {os.path.basename(path)} (a first tracing) was overwritten")
+            self.assertEqual(dialogs, [], f"{when}: the Save dialog was offered")
+            self.assertTrue(toasts and all("Save lesion is off" in text for text in toasts), f"{when}: {toasts}")
+            labels = menuLabels()
+            self.assertNotIn("Save lesion", labels, when)
+            self.assertNotIn("Save lesion as…", labels, when)
+            self.assertFalse(paletteEnabled(), f"{when}: Search offers Save lesion as…")
+
+        try:
+            review.setRaterName("Ana Bell")
+            session = study_ui.createStudy(files, studioShell, folder=folder)
+            self.assertIsNotNone(session)
+            pump()
+            studyObject = session.study
+            for sid in ("sub-01", "sub-02"):
+                session.setValues([sid], {"status": "traced", "tracer": "Ana Bell"})
+            session.flush()
+            primaries = {}
+            for sid in ("sub-01", "sub-02"):
+                path = studyObject.abspath(studyObject.subject(sid)["lesion"])
+                self.assertEqual(path, os.path.join(folder, f"{sid}_lesion.nii.gz"))
+                primaries[path] = contents(path)
+
+            # Blind second tracing: a stroke, then Save lesion
+            agreement.assign(studyObject, sids=["sub-01"], rater="Carl Diaz", who="Dana PI")
+            session.flush()
+            review.setRaterName("Carl Diaz")
+            state = adjudicate.startSecondTracing(sid="sub-01", shell=studioShell)
+            self.assertIsNotNone(state)
+            pump()
+            segmentationNode = state.segmentationNode()
+            volumeNode = slicer.mrmlScene.GetNodeByID(state._nodeIds[0])
+            segmentId = segmentationNode.GetSegmentation().GetNthSegmentID(0)
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, volumeNode)
+            array[5:8, 5:8, 5:8] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, volumeNode)
+            pump()
+            assertSaveLesionOff("second tracing", primaries)
+            adjudicate.exitState()
+            pump()
+
+            # Adjudication: the two tracings of sub-02 do not overlap
+            review.setRaterName("Ana Bell")
+            agreement.assign(studyObject, sids=["sub-02"], rater="Carl Diaz", who="Dana PI")
+            primary, primaryAffine, _header = nifti.read_nifti(os.path.join(folder, "sub-02_lesion.nii.gz"))
+            second = np.roll(primary, 8, axis=0)
+            agreement.save_second_tracing(studyObject, "sub-02", np.ascontiguousarray(second.transpose(2, 1, 0)), primaryAffine,
+                                          os.path.join(folder, "sub-02_lesion.nii.gz"), "Carl Diaz")
+            session.setValues([], {})
+            session.flush()
+            review.setRaterName("Dana PI")
+            state = adjudicate.startAdjudication(sid="sub-02", shell=studioShell)
+            self.assertIsNotNone(state)
+            pump()
+            self.assertIsNotNone(adjudicate.state(), "the adjudication did not start")
+            assertSaveLesionOff("adjudication", primaries)
+            adjudicate.exitState()
+            pump()
+
+            # Review: Save lesion would replace the tracer's file with the reviewer's edit
+            for sid in ("sub-01", "sub-02"):
+                reviewRules.apply_transition(studyObject, sid, "pending", "Ana Bell")
+            session.setValues([], {})
+            session.flush()
+            review.setRaterName("Rev Iewer")
+            review.startReview(sids=["sub-01"], shell=studioShell)
+            pump()
+            self.assertIsNotNone(review.state(), "the review did not start")
+            assertSaveLesionOff("review", primaries)
+            review.exitReview()
+            pump()
+
+            # Out of these states, Save lesion is back
+            self.assertEqual(draw.saveLesionBlockedReason(), "")
+            self.assertIn("Save lesion as…", menuLabels())
+        finally:
+            if adjudicate.state() is not None:
+                adjudicate.exitState()
+            if review.state() is not None:
+                review.exitReview()
+            study_ui.closeStudy()
+            studioShell.dispose()
+            pump()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)

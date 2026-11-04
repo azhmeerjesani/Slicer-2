@@ -130,6 +130,9 @@ Papers say that lesions "were checked by an expert" and rarely show it. The modu
   highly even when the masks barely overlap, so network similarity overstates tracing agreement.
 - **Adjudicate tracings** resolves a disagreement: keep A, keep B, the union, the intersection or an edit. The consensus
   becomes the lesion, the first tracing is kept as `desc-preadjudication`, and each decision can be undone.
+- **Saving in these states.** While Draw reviews, traces a second time or adjudicates, **Save lesion** (Ctrl+Shift+S) and
+  **Save lesion as…** are off: the footer (Ctrl+Enter) writes the state's own files, so the first tracer's file is never
+  replaced.
 
 ## Normalize native-space lesions to MNI
 

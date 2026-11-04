@@ -16,7 +16,8 @@ extension())``; SPEC D2/D3). This module is that extension and the hooks around 
 - **Save model** (USABILITY 8): ``saveLesion()`` writes the lesion on its own grid (the segmentation's reference
   geometry, never the source volume's), a BIDS-style sidecar, and nothing for an empty lesion. After the first save
   of a session the CTA and ``Ctrl+Shift+S`` re-save silently; "Save lesion as…" always asks.
-  ``lesionSaveState()`` tells Saved / Unsaved changes / Last saved as / Not saved yet.
+  ``lesionSaveState()`` tells Saved / Unsaved changes / Last saved as / Not saved yet. Both are off in the second
+  tracing, adjudication and review states (``saveLesionBlockedReason()``): their footer writes their own files.
 - **Metrics** (``lesionMetrics()``): cached by the labelmap content, used by the card (300 ms after an edit).
 - **Keys** (Draw only): N / Shift+N gap slices, C centre on the lesion, Alt+←/→ loaded set or study subjects,
   Ctrl+Shift+S save, Ctrl+Y redo; the mnemonics P D M E L Shift+F O come with the presentation.
@@ -2401,12 +2402,47 @@ def _writeLesion(shell, segmentationNode, sourceVolumeNode, path):
     return path
 
 
+def saveLesionBlockedReason():
+    """Why Save lesion and Save lesion as… are off in Draw now, or "" when they are on.
+
+    They are off in the second tracing, adjudication and review states (``StudioLib.adjudicate``, ``StudioLib.review``):
+    each writes its own files with its footer (Ctrl+Enter): ``lesions/rater-<initials>/`` for a second tracing, a
+    consensus that keeps both tracings, a review edit that keeps the tracer's file. Save lesion would propose the first
+    tracer's file (the scan's folder and BIDS subject) and replace it, or reveal it to a blind rater.
+    """
+    try:
+        from . import adjudicate, review
+    except Exception:
+        return ""
+    key = ui.keyText(PRIMARY_SHORTCUT)
+    agreement = adjudicate.state()
+    if agreement is not None:
+        if agreement.queue == adjudicate.QUEUE_SECOND:
+            return _("Save lesion is off during a second tracing: {key} saves it to your rater folder").format(key=key)
+        return _("Save lesion is off during adjudication: A, B, Union, Intersection or Edit… writes the consensus")
+    if review.state() is not None:
+        return _("Save lesion is off during review: Approve ({key}) saves your edits and keeps the tracer's lesion").format(key=key)
+    return ""
+
+
+def _saveLesionAllowed(shell):
+    """False (with a toast that says why) in the states where Save lesion is off (``saveLesionBlockedReason()``)."""
+    reason = saveLesionBlockedReason()
+    if reason:
+        _toast(shell, reason, ms=5000, level="warning")
+        return False
+    return True
+
+
 def saveLesionDialog(shell=None, path=None):
     """"Save lesion as…": choose a NIfTI file (unless ``path`` is given) and save the lesion edited in Draw.
 
-    Return the written path, or None if cancelled, empty or failed (errors are shown).
+    Return the written path, or None if cancelled, empty, failed (errors are shown) or off in this state of Draw
+    (second tracing, adjudication, review: ``saveLesionBlockedReason()``).
     """
     shell = _currentShell(shell)
+    if not _saveLesionAllowed(shell):
+        return None
     _applyPendingSmartFill(shell)
     segmentationNode, sourceVolumeNode = lesionNodes()
     if segmentationNode is None:
@@ -2442,6 +2478,8 @@ def saveLesionNow(shell=None):
     the dialog (in a project, A-09, it proposes Lesions/<name>.nii.gz of the project). Return the written path, or None.
     """
     shell = _currentShell(shell)
+    if not _saveLesionAllowed(shell):
+        return None
     _applyPendingSmartFill(shell)
     segmentationNode, sourceVolumeNode = lesionNodes()
     record = _savedRecord(segmentationNode)
@@ -3480,7 +3518,8 @@ def lesionMenuActions(shell=None):
     """Items of the Lesion card ⋯ menu: [(label, callback)] (None for a separator).
 
     With a study open there is no New lesion (like the card's own button): a study keeps one lesion per subject, the one
-    that Done writes. Save lesion saves it now instead.
+    that Done writes. Save lesion saves it now instead. In second tracing, adjudication and review there is no Save
+    lesion and no Save lesion as… (``saveLesionBlockedReason()``): their footer writes their own files.
     """
     study = getattr(shell, "studySession", None) if shell is not None else None
     actions = [(_("Rename lesion"), lambda: renameLesion(shell))]
@@ -3490,10 +3529,12 @@ def lesionMenuActions(shell=None):
         (_("Hide lesion"), lambda: hideLesion(shell)),
         None,
     ]
-    if study is not None:
-        actions.append((_("Save lesion"), lambda: saveLesionNow(shell)))
+    if not saveLesionBlockedReason():
+        # Not offered in second tracing, adjudication or review: their footer writes their own files
+        if study is not None:
+            actions.append((_("Save lesion"), lambda: saveLesionNow(shell)))
+        actions.append((_("Save lesion as…"), lambda: saveLesionDialog(shell)))
     actions += [
-        (_("Save lesion as…"), lambda: saveLesionDialog(shell)),
         (_("Export each segment as a NIfTI mask…"), lambda: exportSegmentMasks(shell)),
         (_("Fill gaps and specks"), lambda: fillGapsAndSpecks(shell)),
         (_("Keep largest part"), lambda: keepLargestPart(shell)),
@@ -3942,7 +3983,8 @@ def _paletteEntries(shell=None):
     category = _("Draw")
     entries = [
         {"id": "draw.saveLesionAs", "title": _("Save lesion as…"), "category": category, "key": None, "synonyms": ["save as", "save lesion as", "save mask as"],
-         "callback": lambda: saveLesionDialog(shell), "enabled": hasLesion, "description": _("Choose the file of the lesion (NIfTI)")},
+         "callback": lambda: saveLesionDialog(shell), "enabled": lambda: hasLesion() and not saveLesionBlockedReason(),
+         "description": _("Choose the file of the lesion (NIfTI)")},
         {"id": "draw.renameLesion", "title": _("Rename lesion"), "category": category, "synonyms": ["rename", "lesion name"],
          "callback": lambda: (shell.switchTo("draw") if shell is not None else None, renameLesion(shell)), "enabled": hasLesion},
         {"id": "action.newLesion", "title": _("New lesion"), "category": _("Action"), "synonyms": ["another lesion", "new segmentation", "add lesion", "next lesion"],

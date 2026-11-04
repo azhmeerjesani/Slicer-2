@@ -983,7 +983,8 @@ class Index:
             entries.append(Entry("draw.saveLesion", _("Save lesion as NIfTI…"), action, lambda: draw.saveLesionDialog(shell), key="Ctrl+Shift+S",
                                  synonyms=("export", "nifti", "save lesion", "nii", "nii.gz", "export lesion", "export segmentation", "save mask",
                                            "binary labelmap", "export mask"),
-                                 enabled=_hasLesion, description=_("The lesion as a NIfTI mask that official 3D Slicer, FSL and other tools read"),
+                                 enabled=lambda: _hasLesion() and not getattr(draw, "saveLesionBlockedReason", str)(),
+                                 description=_("The lesion as a NIfTI mask that official 3D Slicer, FSL and other tools read"),
                                  iconName="download"))
         # Export as NIfTI (A-11): images, segmentations and maps, the whole project, DICOM series
         niftiUi = _importOptional("StudioLib.niftiexport_ui")
