@@ -150,6 +150,10 @@ Run with the main window and testing enabled::
   tracings read-only (tool tiles and keys off, card fixes off, Draw's hint says why) until Edit…: the Brush stayed armed on A,
   a stroke changed A on screen, and choosing A or Union wrote the files on disk without the stroke and without a word. Edit…
   makes the Consensus segment editable, Cancel edit makes the tracings read-only again, and leaving gives an editable editor.
+- ``test_71_adjudication_edit_survives_escape_and_undo`` (BB-1): Esc during an adjudication's Edit… keeps the edited
+  consensus (it deselects the tool; only Cancel edit leaves the edit): Esc removed the Consensus segment without a word.
+  After Cancel edit, Ctrl+Z (the Segment Editor's undo) brings the edited Consensus back, and Edit… resumes that segment
+  instead of adding a second "Consensus" from the union: Save consensus wrote the plain union, every erasure lost.
 """
 
 import inspect
@@ -5336,6 +5340,140 @@ class StudioRegressionTest(unittest.TestCase):
             adjudicate.exitState()
             pump()
             self.assertFalse(editor.readOnly, "the Segment Editor stayed read-only after the adjudication")
+        finally:
+            if adjudicate.state() is not None:
+                adjudicate.exitState()
+            study_ui.closeStudy()
+            studioShell.dispose()
+            pump()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
+
+    def test_71_adjudication_edit_survives_escape_and_undo(self):
+        """Esc during Edit… of an adjudication removed the edited Consensus segment without a word (it was registered as an
+        Esc overlay); Ctrl+Z then brought back an untracked "Consensus", Edit… added a second one from the union, and Save
+        consensus wrote the plain union: every erasure was lost (BB-1).
+        """
+        from LesionNetworkMappingLib import agreement, nifti
+
+        from StudioLib import adjudicate, draw, review, shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        shape = (40, 48, 36)
+        affine = np.array([[2.0, 0, 0, -40], [0, 2.0, 0, -48], [0, 0, 2.0, -36], [0, 0, 0, 1]])
+        folder = os.path.join(self.directory, "Adjudication edit study")
+        os.makedirs(folder)
+        files = []
+        for sid in ("sub-01", "sub-02"):
+            files.append(os.path.join(folder, f"{sid}_T1w.nii.gz"))
+            nifti.write_nifti(files[-1], np.full(shape, 100, np.int16), affine, sform_code=1, qform_code=1)
+            lesion = np.zeros(shape, np.uint8)
+            lesion[10:16, 20:26, 15:21] = 1
+            files.append(os.path.join(folder, f"{sid}_lesion.nii.gz"))
+            nifti.write_nifti(files[-1], lesion, affine, sform_code=1, qform_code=1)
+        originalToast = study_ui._toast
+        study_ui._toast = lambda shell, text, **kwargs: None
+        self.addCleanup(setattr, study_ui, "_toast", originalToast)
+        originalAdjudicateToast = adjudicate._toast
+        adjudicate._toast = lambda text, ms=3000, **kwargs: None
+        self.addCleanup(setattr, adjudicate, "_toast", originalAdjudicateToast)
+        self.addCleanup(review.setRaterName, review.storedRaterName())
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+
+        def pump():
+            for _ in range(4):
+                slicer.app.processEvents()
+
+        def consensusSegments(node):
+            segmentation = node.GetSegmentation()
+            return [segmentation.GetNthSegmentID(index) for index in range(segmentation.GetNumberOfSegments())
+                    if segmentation.GetNthSegment(index).GetName() == "Consensus"]
+
+        def count(node, segmentId):
+            mask = adjudicate._segmentMask(node, segmentId)
+            return 0 if mask is None else int(mask[0].sum())
+
+        def erase(node, segmentId, editor):
+            """One "stroke" of the Erase tool: the undo state first, as the effects save it, then fewer voxels."""
+            editor.saveStateForUndo()
+            reference = editor.sourceVolumeNode()
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(node, segmentId, reference).copy()
+            kji = np.argwhere(array)
+            array[tuple(kji[kji[:, 0] == kji[:, 0].min()].T)] = 0
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, node, segmentId, reference)
+
+        try:
+            review.setRaterName("Ana Bell")
+            session = study_ui.createStudy(files, studioShell, folder=folder)
+            self.assertIsNotNone(session)
+            pump()
+            studyObject = session.study
+            for sid in ("sub-01", "sub-02"):
+                session.setValues([sid], {"status": "traced", "tracer": "Ana Bell"})
+            session.flush()
+            agreement.assign(studyObject, sids=["sub-01", "sub-02"], rater="Carl Diaz", who="Dana PI")
+            for sid in ("sub-01", "sub-02"):
+                primaryPath = os.path.join(folder, f"{sid}_lesion.nii.gz")
+                primary, primaryAffine, _header = nifti.read_nifti(primaryPath)
+                agreement.save_second_tracing(studyObject, sid, np.ascontiguousarray(np.roll(primary, 4, axis=0).transpose(2, 1, 0)),
+                                              primaryAffine, primaryPath, "Carl Diaz")
+            session.setValues([], {})
+            session.flush()
+            editor = draw.segmentEditor()
+            review.setRaterName("Dana PI")
+            state = adjudicate.startAdjudication(sids=["sub-01", "sub-02"], shell=studioShell)
+            self.assertIsNotNone(state)
+            pump()
+            node = state.segmentationNode()
+
+            # Edit…, two erasures, then Esc (twice: the tool, then nothing): the edit stays
+            state.choose("edit")
+            pump()
+            consensus = state.segmentIds["consensus"]
+            union = count(node, consensus)
+            editor.setActiveEffectByName("Erase")
+            erase(node, consensus, editor)
+            erase(node, consensus, editor)
+            edited = count(node, consensus)
+            self.assertLess(edited, union)
+            for _press in range(2):
+                studioShell.handleEscape()
+                pump()
+                self.assertTrue(state.editing, "Esc left the consensus edit")
+                self.assertEqual(consensusSegments(node), [consensus], "Esc removed the Consensus segment")
+                self.assertEqual(count(node, consensus), edited, "Esc changed the edited consensus")
+
+            # Cancel edit, then Ctrl+Z (undo the last erasure): Edit… resumes the restored Consensus, no second one
+            state.cancelEdit()
+            pump()
+            self.assertEqual(consensusSegments(node), [])
+            editor.undo()
+            pump()
+            restored = consensusSegments(node)
+            self.assertEqual(len(restored), 1, "Ctrl+Z did not bring the Consensus back")
+            restoredCount = count(node, restored[0])
+            self.assertTrue(edited < restoredCount < union, (edited, restoredCount, union))
+            state.choose("edit")
+            pump()
+            self.assertEqual(consensusSegments(node), restored, "Edit… added a second Consensus segment")
+            self.assertEqual(state.segmentIds["consensus"], restored[0])
+            self.assertEqual(count(node, restored[0]), restoredCount)
+
+            # Save consensus writes the mask that is shown, not the union
+            self.assertTrue(state.saveEdit())
+            pump()
+            saved = int(np.count_nonzero(nifti.read_nifti(os.path.join(folder, "sub-01_lesion.nii.gz"))[0]))
+            self.assertEqual(saved, restoredCount, "the saved consensus is not the edited one")
+
+            # The next subject's Edit… starts from its own union again
+            self.assertEqual(state.current, "sub-02")
+            state.choose("edit")
+            pump()
+            node = state.segmentationNode()
+            self.assertEqual(len(consensusSegments(node)), 1)
+            self.assertEqual(count(node, state.segmentIds["consensus"]), union)
         finally:
             if adjudicate.state() is not None:
                 adjudicate.exitState()

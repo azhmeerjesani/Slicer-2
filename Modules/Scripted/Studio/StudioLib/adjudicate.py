@@ -62,6 +62,8 @@ COLOR_A = (0.949, 0.329, 0.357)  # the lesion red of Draw (#F2545B)
 COLOR_B = (0.231, 0.510, 0.965)  # blue (#3B82F6)
 COLOR_CONSENSUS = (0.133, 0.773, 0.369)  # green (#22C55E)
 CHOICE_LABELS = {"A": "A", "B": "B", "union": "Union", "intersection": "Intersection", "edit": "Edit…"}
+#: Segment tag of the Consensus segment of Edit…: the Segment Editor's undo (Ctrl+Z) can bring a removed one back
+CONSENSUS_TAG = "Studio.AdjudicationConsensus"
 
 
 def _rules():
@@ -1037,18 +1039,34 @@ class AdjudicationState(_AgreementState):
             shell.toast(label, 6000, action=lambda: undo(sid), actionText=_("Undo"), level="consequence")
         return True
 
+    def _consensusSegmentId(self, node):
+        """The Consensus segment shown in ``node``, or None. The Segment Editor's undo (Ctrl+Z) after Cancel edit brings
+        a removed one back with its edits, untracked: Edit… resumes it rather than adding a second "Consensus".
+        """
+        segmentation = node.GetSegmentation()
+        segmentId = self.segmentIds.get("consensus")
+        if segmentId and segmentation.GetSegment(segmentId) is not None:
+            return segmentId
+        for index in range(segmentation.GetNumberOfSegments()):
+            if segmentation.GetNthSegment(index).HasTag(CONSENSUS_TAG):
+                return segmentation.GetNthSegmentID(index)
+        return None
+
     def startEdit(self):
         node = self.segmentationNode()
         if node is None:
             return
-        rules = _rules()
-        row = self.session.study.subject(self.current)
-        paths = rules.pair_paths(self.session.study, row)
-        a, affineA = rules.load_mask(paths[0])
-        b, affineB = rules.load_mask(paths[1])
-        union = rules.consensus_mask(a, rules._to_grid(b, affineB, rules.geometry.Grid(a.shape, affineA)), "union")
-        if "consensus" not in self.segmentIds:
-            self.segmentIds["consensus"] = _addSegment(node, union, affineA, _("Consensus"), COLOR_CONSENSUS)
+        segmentId = self._consensusSegmentId(node)
+        if segmentId is None:
+            rules = _rules()
+            row = self.session.study.subject(self.current)
+            paths = rules.pair_paths(self.session.study, row)
+            a, affineA = rules.load_mask(paths[0])
+            b, affineB = rules.load_mask(paths[1])
+            union = rules.consensus_mask(a, rules._to_grid(b, affineB, rules.geometry.Grid(a.shape, affineA)), "union")
+            segmentId = _addSegment(node, union, affineA, _("Consensus"), COLOR_CONSENSUS)
+            node.GetSegmentation().GetSegment(segmentId).SetTag(CONSENSUS_TAG, "1")
+        self.segmentIds["consensus"] = segmentId
         _setReadOnly(node, None)
         displayNode = node.GetDisplayNode()
         displayNode.SetSegmentVisibility2DFill(self.segmentIds["consensus"], True)
@@ -1058,10 +1076,10 @@ class AdjudicationState(_AgreementState):
         widget = getattr(slicer.modules, "SegmentEditorWidget", None)
         if widget is not None and widget.editor is not None:
             widget.editor.setCurrentSegmentID(self.segmentIds["consensus"])
+        # Esc does not cancel the edit (it is not an overlay of the Esc ladder): it deselects the tool (rung 4) and
+        # never throws the manual edit away. Cancel edit is the explicit way out.
         self.editing = True
         self.refreshFooter()
-        if self.shell is not None and hasattr(self.shell, "registerEscapeOverlay") and self.notice is not None:
-            self.shell.registerEscapeOverlay(self.notice, self.cancelEdit)
 
     def cancelEdit(self):
         node = self.segmentationNode()
@@ -1071,8 +1089,6 @@ class AdjudicationState(_AgreementState):
             node.GetDisplayNode().SetVisibility2DFill(False)
         _setReadOnly(node, _readOnlyText())
         self.editing = False
-        if self.shell is not None and hasattr(self.shell, "unregisterEscapeOverlay") and self.notice is not None:
-            self.shell.unregisterEscapeOverlay(self.notice)
         self.refreshFooter()
 
     def saveEdit(self):
@@ -1087,8 +1103,6 @@ class AdjudicationState(_AgreementState):
         if mask is None:
             _toast(_("The consensus is empty: nothing was saved"), ms=4000, level="warning")
             return False
-        if self.shell is not None and hasattr(self.shell, "unregisterEscapeOverlay") and self.notice is not None:
-            self.shell.unregisterEscapeOverlay(self.notice)
         return self.decide("edit", mask)
 
     def skip(self):
@@ -1096,12 +1110,6 @@ class AdjudicationState(_AgreementState):
         if following:
             self.sids = [sid for sid in self.sids if sid != self.current] + [self.current]
             self.open(following[0])
-
-    def exit(self, message=None, quiet=False, fromFooter=False, keepScene=False):
-        if self.shell is not None and hasattr(self.shell, "unregisterEscapeOverlay") and self.notice is not None:
-            with contextlib.suppress(Exception):
-                self.shell.unregisterEscapeOverlay(self.notice)
-        _AgreementState.exit(self, message, quiet, fromFooter, keepScene)
 
 
 def _afterConsensus(session, sid):
