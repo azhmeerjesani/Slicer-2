@@ -1843,27 +1843,33 @@ def _lesionVoxelCount(editor):
 #
 
 #: Saved lesions of this session: {segmentation node ID: (weak reference, absolute path, content stamp, time)}. A record
-#: is valid only for the node it was made for (node IDs are reused after the scene is closed), and Draw clears them
-#: when the scene is closed.
+#: is valid only for the node it was made for (node IDs are reused after the scene is closed), and they are cleared
+#: when the scene is closed (``_onSceneClosed()``).
 _savedRecords = {}
 
 
-def _onSceneClosed():
+def _onSceneClosed(caller=None, event=None):
+    """The scene was closed: forget the lesions of the closed project (their metrics hold its vtkSegmentation)."""
     _savedRecords.clear()
     _metricsCache.clear()
     _mniCache.clear()
 
 
-#: The scene observed by ``_installImportGuard()`` and its observer tag
-_importGuard = {"scene": None, "tag": None}
+#: The scene observed by ``_installImportGuard()`` and its observer tags
+_importGuard = {"scene": None, "tag": None, "closeTag": None}
 
 
 def _installImportGuard():
-    """Observe the scene loads for ``_onSceneStartImport()`` (once per scene; Draw's own observers end when Draw is left)."""
+    """Observe the scene loads for ``_onSceneStartImport()`` and the scene closes for ``_onSceneClosed()`` (once per scene;
+    Draw's own observers end when Draw is left, and a project is usually closed from Library or Map: the caches of this
+    module would keep every closed project's lesion in memory).
+    """
     scene = slicer.mrmlScene
     if scene is None or _importGuard["scene"] is scene:
         return
     _importGuard["tag"] = scene.AddObserver(scene.StartImportEvent, _onSceneStartImport)
+    # Before the other observers of the close (high priority): one that starts the next project at once keeps its records
+    _importGuard["closeTag"] = scene.AddObserver(scene.EndCloseEvent, _onSceneClosed, 100.0)
     _importGuard["scene"] = scene
 
 

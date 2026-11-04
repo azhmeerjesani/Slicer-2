@@ -159,6 +159,10 @@ Run with the main window and testing enabled::
   ``status_original`` (the study's tracing status and QC unchanged), include yes / no as 1 / 0, and the other columns (age,
   NIHSS) imported. Nothing was imported and the toast said "Studies are not available in this build".
   ``Study.import_tsv`` reads include 1.0 / 0.0 (pandas); a table that still cannot be imported says why in the toast.
+- ``test_73_project_closed_outside_draw_frees_its_lesion`` (BB-1): a project closed while Library (or Map) is shown frees its
+  lesion: Draw's caches (lesion metrics, MNI check, saved records) are emptied by the close and the closed project's
+  vtkSegmentation is deleted. They were cleared only by Draw's own close observer, active only while Draw is shown, and kept
+  one lesion labelmap per closed project (up to 64; about 130 MB each at 0.5 mm).
 """
 
 import inspect
@@ -1034,6 +1038,67 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertEqual([[reader(row) for row in study.subjects] for reader in readers], [[True, False, True]] * 3)
         self.assertEqual(libcard_analysis.allTraced(study), (2, True))
         self.assertEqual([row["participant_id"] for row in study.analysis_rows()[0]], ["sub-01", "sub-03"])
+
+    def test_73_project_closed_outside_draw_frees_its_lesion(self):
+        """Closing a project from Library kept its lesion in memory: ``draw._metricsCache`` held the closed project's
+        vtkSegmentation (one entry per project, keyed by a new segment ID each time) and only Draw's close observer, active only
+        while Draw is shown, cleared it (BB-1).
+        """
+        import gc
+
+        import vtk
+
+        from StudioLib import draw, shell
+
+        if slicer.util.mainWindow() is None:
+            self.skipTest("needs the main window")
+
+        def pump():
+            for _ in range(5):
+                slicer.app.processEvents()
+
+        slicer.mrmlScene.Clear(0)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        try:
+            # Draw, then Library: the usual way to switch projects
+            studioShell.switchTo("draw")
+            pump()
+            studioShell.switchTo("library")
+            pump()
+            for cycle in range(3):
+                image = np.zeros((20, 22, 24), np.int16)
+                image[5:12, 6:14, 7:15] = 100
+                volumeNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "scan")
+                slicer.util.updateVolumeFromArray(volumeNode, image)
+                segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesions")
+                segmentationNode.CreateDefaultDisplayNodes()
+                segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(volumeNode)
+                # A new segment ID in each project, as Studio's lesions have
+                segmentId = segmentationNode.GetSegmentation().AddEmptySegment(f"2.25.7300{cycle}", "lesion")
+                slicer.util.updateSegmentBinaryLabelmapFromArray((image > 50).astype(np.uint8), segmentationNode, segmentId, volumeNode)
+                self.assertGreater(draw.lesionMetrics(segmentationNode, compute=True, segmentId=segmentId)["voxels"], 0)
+                draw._isMniLesion(segmentationNode)
+                self.assertTrue(draw._metricsCache)
+                self.assertTrue(draw._mniCache)
+                saved = vtk.vtkWeakReference()
+                saved.Set(segmentationNode)
+                draw._savedRecords[segmentationNode.GetID()] = (saved, os.path.join(self.directory, "lesion.seg.nrrd"), None, 0)
+                segmentation = vtk.vtkWeakReference()
+                segmentation.Set(segmentationNode.GetSegmentation())
+                del volumeNode, segmentationNode
+                # The project is closed while Library is shown (Ctrl+N, Ctrl+W or opening the next project)
+                slicer.mrmlScene.Clear(0)
+                pump()
+                gc.collect()
+                self.assertEqual(len(draw._metricsCache), 0, f"project {cycle + 1}: the closed project's lesion metrics are kept")
+                self.assertEqual(len(draw._mniCache), 0)
+                self.assertEqual(len(draw._savedRecords), 0)
+                self.assertIsNone(segmentation.Get(), f"project {cycle + 1}: the closed project's lesion is still in memory")
+        finally:
+            studioShell.dispose()
+            pump()
+            slicer.mrmlScene.Clear(0)
 
     def test_72_imported_clinical_table_keeps_status_and_include(self):
         from LesionNetworkMappingLib.study import Study
