@@ -32,6 +32,11 @@ only:
   sform, so lesions drawn on it would not be at the MNI positions. Make the two agree
   (for example with `fslorient -copysform2qform`) and add the file again. A template
   of yours whose image disagrees this way is not opened either.
+- **A NIfTI file with an sform but no qform whose voxel size (pixdim) does not
+  match the sform** (by more than 0.1 mm anywhere in the image) is refused for the
+  same reason: Slicer takes the voxel size from pixdim, so it would show the image
+  at another size and place than the sform the check reads. Set the voxel size in
+  the header to the sform's and add the file again.
 
 A file with several volumes (4D) is added with its first volume only. Voxels that
 are not cubic are accepted with a warning: drawing and maps work best on

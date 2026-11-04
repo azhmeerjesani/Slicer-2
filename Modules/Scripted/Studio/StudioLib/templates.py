@@ -97,6 +97,11 @@ XFORM_REFUSAL_MM = 0.1
 XFORM_REFUSAL = ("The sform and qform of this image disagree by up to {distance:.3g} mm, so programs place it differently "
                  "(Slicer uses the qform, FSL the sform). Make them agree (for example with fslorient -copysform2qform) "
                  "and add it again.")
+#: A NIfTI file with an sform and no qform whose voxel sizes (pixdim) do not match the sform is refused as well: Slicer
+#: (ITK) loads it with the sform's directions and origin but the pixdim voxel sizes, away from the grid that was checked
+PIXDIM_REFUSAL = ("The voxel size in the header of this image (pixdim) does not match its sform, so programs place it differently, "
+                  "up to {distance:.3g} mm apart (Slicer uses the voxel size, FSL the sform). Set the voxel size to the sform's "
+                  "({spacing} mm) and add it again.")
 #: Node attribute: the template id of a template volume ("user:<slug>" or "builtin:<name>"); a portable id, never a path
 TEMPLATE_ID_ATTRIBUTE = "Studio.TemplateId"
 #: ``Studio.Role`` of the 3D brain surfaces of a template
@@ -330,10 +335,13 @@ def readNrrdData(path):
 
 
 def readHeader(path):
-    """``{"shape" (3 voxel counts), "frames", "affine" (RAS 4x4), "codes" ((sform, qform) or None), "format", "xformMm"}``.
+    """``{"shape" (3 voxel counts), "frames", "affine" (RAS 4x4), "codes" ((sform, qform) or None), "format", "xformMm",
+    "pixdimMm"}``.
 
     NIfTI-1 through ``LesionNetworkMappingLib.nifti`` (header only), NRRD with a small reader. Raises ValueError for
-    other files. ``xformMm`` is how far (mm) the sform and qform of a NIfTI file disagree (0.0 for NRRD).
+    other files. ``xformMm`` is how far (mm) the sform and qform of a NIfTI file disagree, ``pixdimMm`` how far Slicer
+    places a NIfTI file with an sform and no qform from its sform because the voxel sizes (pixdim) differ (both 0.0 for
+    NRRD). See :func:`xformRefusal`.
     """
     extension = _lowerExtension(path)
     if extension in (".nii", ".nii.gz"):
@@ -345,10 +353,23 @@ def readHeader(path):
         for value in shape[3:]:
             frames *= int(value)
         return {"shape": shape[:3], "frames": frames, "affine": header["affine"], "codes": (header["sform_code"], header["qform_code"]),
-                "format": "NIfTI", "xformMm": float(nifti.xform_disagreement(header))}
+                "format": "NIfTI", "xformMm": float(nifti.xform_disagreement(header)), "pixdimMm": float(nifti.pixdim_disagreement(header))}
     if extension == ".nrrd":
-        return dict(readNrrdHeader(path), xformMm=0.0)
+        return dict(readNrrdHeader(path), xformMm=0.0, pixdimMm=0.0)
     raise ValueError(_("Use a NIfTI (.nii, .nii.gz) or NRRD (.nrrd) file"))
+
+
+def xformRefusal(header):
+    """The plain reason a file with the :func:`readHeader` ``header`` is refused, "" when Slicer loads it at its checked
+    matrix (the sform of a NIfTI file): refused when the sform and qform disagree (Slicer loads the qform) or when the
+    voxel sizes of a file without a qform do not match its sform (Slicer uses the voxel sizes).
+    """
+    if header.get("xformMm", 0.0) > XFORM_REFUSAL_MM:
+        return _(XFORM_REFUSAL).format(distance=header["xformMm"])
+    if header.get("pixdimMm", 0.0) > XFORM_REFUSAL_MM:
+        spacing = voxelSpacing(header["affine"])
+        return _(PIXDIM_REFUSAL).format(distance=header["pixdimMm"], spacing=" × ".join(f"{value:.4g}" for value in spacing))  # noqa: RUF001
+    return ""
 
 
 def worldBox(shape, affine, tolerance=1e-3):
@@ -505,9 +526,10 @@ def identify(path):
             detection.status, detection.message = "refused", _("A NRRD file with several volumes cannot be used: save its first volume as NIfTI.")
             detection.facts = " · ".join(facts)
             return detection
-    if header.get("xformMm", 0.0) > XFORM_REFUSAL_MM:
-        # The checked matrix (the sform) would not be the one the scene uses (Slicer loads the qform)
-        detection.status, detection.message = "refused", _(XFORM_REFUSAL).format(distance=header["xformMm"])
+    refusal = xformRefusal(header)
+    if refusal:
+        # The checked matrix (the sform) would not be the one the scene uses (Slicer loads the qform, or the pixdim voxel sizes)
+        detection.status, detection.message = "refused", refusal
         detection.facts = " · ".join(facts)
         return detection
     match = None
@@ -575,8 +597,9 @@ def checkCompanion(detection, path):
         return False, _("This file cannot be read as an image: {error}").format(error=error)
     if detection is None or detection.shape is None:
         return False, _("Choose the template image first.")
-    if header.get("xformMm", 0.0) > XFORM_REFUSAL_MM:
-        return False, os.path.basename(path) + ": " + _(XFORM_REFUSAL).format(distance=header["xformMm"])
+    refusal = xformRefusal(header)
+    if refusal:
+        return False, os.path.basename(path) + ": " + refusal
     if not sameGrid(header["shape"], header["affine"], detection.shape, detection.affine):
         return False, _("{name} is not on the grid of the template image ({size}).").format(
             name=os.path.basename(path), size=" × ".join(str(n) for n in detection.shape))  # noqa: RUF001

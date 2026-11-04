@@ -71,7 +71,7 @@ startup, or before the engine CLI sets the BLAS thread count) does not import nu
 import importlib
 
 _EXPORTS = {
-    "nifti": ["read_nifti", "read_nifti_header", "write_nifti", "write_like", "xform_disagreement"],
+    "nifti": ["read_nifti", "read_nifti_header", "write_nifti", "write_like", "xform_disagreement", "pixdim_disagreement"],
     "geometry": [
         "Grid",
         "resample_to_grid",

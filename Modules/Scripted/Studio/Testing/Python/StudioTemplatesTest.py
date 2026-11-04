@@ -1642,3 +1642,75 @@ class StudioTemplatesTest(unittest.TestCase):
             self.assertEqual(again.GetID(), volume.GetID(), "Start on template again reuses the volume")
         finally:
             shutil.rmtree(work, ignore_errors=True)
+
+    def test_32_nifti_pixdim_that_disagrees_with_the_sform_is_refused(self):
+        """BB-1: a NIfTI file with an MNI sform and no qform (qform_code 0) whose voxel sizes (pixdim) do not match the
+        sform was checked at the sform and added, but Slicer (ITK) loads it with the sform's directions and origin and
+        the pixdim voxel sizes: the brain was half size, a lesion drawn on it was labelled MNI tens of millimetres away
+        from its place, and every Start on template loaded another copy. Such a file is now refused in plain words (as
+        an image, as a brain mask, and as the image of a template added before the check); a matching pixdim is fine.
+        """
+        import struct
+
+        import vtk
+
+        from LesionNetworkMappingLib import nifti
+
+        from StudioLib import importer
+
+        templates = self.templates
+        work = os.path.join(self.tempDir, "pixdim-sform")
+        os.makedirs(work, exist_ok=True)
+        data, affine, _header = nifti.read_nifti(self.bundled)
+
+        def write(name, pixdim):
+            path = os.path.join(work, name)
+            nifti.write_nifti(path, data, affine, qform_code=0)  # the sform (MNI, code 4) alone
+            endian = nifti.read_nifti_header(path)["byteorder"]
+            with open(path, "r+b") as f:
+                f.seek(80)  # pixdim[1:4]
+                f.write(struct.pack(endian + "3f", *pixdim))
+            return path
+
+        def loadedAffine(path):
+            node = slicer.util.loadVolume(path)
+            matrix = vtk.vtkMatrix4x4()
+            node.GetIJKToRASMatrix(matrix)
+            slicer.mrmlScene.RemoveNode(node)
+            return np.array([[matrix.GetElement(row, column) for column in range(4)] for row in range(4)])
+
+        try:
+            matching = write("matching.nii", (2.0, 2.0, 2.0))
+            header = nifti.read_nifti_header(matching)
+            self.assertEqual((header["sform_code"], header["qform_code"]), (4, 0))
+            self.assertLess(nifti.pixdim_disagreement(header), 1e-3)
+            np.testing.assert_allclose(loadedAffine(matching), header["affine"], atol=1e-4, err_msg="a matching pixdim: Slicer loads the sform")
+            self.assertEqual(templates.identify(matching).status, "known")
+            for name, pixdim in (("half.nii", (1.0, 1.0, 1.0)), ("slightly.nii", (1.9, 1.9, 1.9))):
+                path = write(name, pixdim)
+                header = nifti.read_nifti_header(path)
+                np.testing.assert_allclose(templates.voxelSpacing(loadedAffine(path)), pixdim, atol=1e-4, err_msg=f"{name}: Slicer uses pixdim")
+                corner = np.asarray(self.bundledShape) - 1
+                self.assertAlmostEqual(nifti.pixdim_disagreement(header), float(np.linalg.norm(corner * (2.0 - np.asarray(pixdim)))), places=2)
+                detection = templates.identify(path)
+                self.assertFalse(detection.ok, name)
+                self.assertEqual(detection.status, "refused", name)
+                self.assertIn("pixdim", detection.message)
+                self.assertIn("2 × 2 × 2 mm", detection.message)  # noqa: RUF001
+                ok, reason = templates.checkCompanion(templates.identify(matching), path)
+                self.assertFalse(ok, name)
+                self.assertIn("pixdim", reason)
+            with self.assertRaises(templates.TemplateError):
+                self._add(os.path.join(work, "half.nii"), name="Pixdim 1 mm")
+            # A template added from a matching file whose image was replaced afterwards is not loaded at the pixdim size
+            template = self._add(matching, name="Matching pixdim")
+            volume, _segmentation = importer.startOnTemplate(shell=self._shell(), templateId=template.id)
+            self.assertTrue(templates.isNodeOnTemplateGrid(volume, template))
+            slicer.mrmlScene.Clear(0)
+            shutil.copy(os.path.join(work, "half.nii"), template.imagePath)
+            with self.assertRaises(RuntimeError) as context:
+                importer.startOnTemplate(shell=self._shell(), templateId=template.id)
+            self.assertIn("pixdim", str(context.exception))
+            self.assertFalse([node for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode") if node.GetAttribute("Studio.TemplateId") == template.id])
+        finally:
+            shutil.rmtree(work, ignore_errors=True)

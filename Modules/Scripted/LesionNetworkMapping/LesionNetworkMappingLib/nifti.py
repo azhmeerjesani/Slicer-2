@@ -487,6 +487,33 @@ def xform_disagreement(header):
     return float(np.linalg.norm(difference[:, :3], axis=1).max())
 
 
+def pixdim_disagreement(header):
+    """Largest distance (mm) between the positions that the sform and ITK give to a voxel of a file without a qform.
+
+    ITK (and so Slicer) reads a file with an sform and no qform with the directions and origin of the sform but with
+    the voxel sizes of ``pixdim``, while FSL, nibabel and this module use the sform alone. When the two voxel sizes
+    differ (a header in which only the sform was set), the same file then lies at different places in different
+    programs. With both set, ITK uses the sform only when it agrees with the qform, whose voxel sizes are ``pixdim``
+    (see :func:`xform_disagreement`).
+
+    :param header: header dictionary (see :func:`read_nifti_header`).
+    :return: the distance over the corner voxels of the image (the maximum over the whole grid),
+      or 0.0 unless sform_code is set and qform_code is not.
+    """
+    if header["sform_code"] <= 0 or header["qform_code"] > 0:
+        return 0.0
+    sform = header["sform"]
+    # nifti1_io replaces a zero or non-finite voxel size with 1 before ITK uses it
+    zooms = np.array([v if v != 0.0 and np.isfinite(v) else 1.0 for v in header["pixdim"][1:4]], dtype=float)
+    norms = np.linalg.norm(sform[:3, :3], axis=0)
+    usable = norms > 0  # a zero column has no direction: left to the other checks
+    itk = sform.copy()
+    itk[:3, :3] = sform[:3, :3] * np.where(usable, zooms / np.where(usable, norms, 1.0), 1.0)
+    corners = np.array([[i, j, k, 1.0] for i in (0, header["shape"][0] - 1) for j in (0, header["shape"][1] - 1) for k in (0, header["shape"][2] - 1)])
+    difference = corners @ (sform - itk).T
+    return float(np.linalg.norm(difference[:, :3], axis=1).max())
+
+
 def read_raw_header(path):
     """Return the 348-byte header of a NIfTI-1 file as a numpy record in the file's byte order."""
     _check_extension(path)
