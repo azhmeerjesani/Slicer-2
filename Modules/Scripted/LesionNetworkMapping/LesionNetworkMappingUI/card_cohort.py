@@ -587,7 +587,11 @@ class CohortCard:
             return None
         record = self.groupRecord() or {}
         name = f"Cohort {desc} ({record.get('n_maps', '?')} lesions)"
-        attributes = {GROUP_VOLUME_ATTRIBUTE: "1", "Studio.Role": "statmap", display.GROUP_MAP_ATTRIBUTE: desc}
+        # The group maps are on the cohort's connectome grid, in its template space (declared in connectome.json, also on
+        # a grid that is not standard, such as the demo's): the Clusters and Networks cards label them as the result map
+        bundle = self.ctx.bundle if self.ctx.bundle is not None else getattr(widget, "bundle", None)
+        attributes = {GROUP_VOLUME_ATTRIBUTE: "1", "Studio.Role": "statmap", display.GROUP_MAP_ATTRIBUTE: desc,
+                      "Studio.Space": widget.logic.connectomeSpaceName(bundle)}
         volume = widget.logic.loadMap(path, name, self.groupVolume(), saveWithScene=True, attributes=attributes)
         self.groupVolumeId = volume.GetID()
         display.applyGroupMapDisplay(volume, desc)

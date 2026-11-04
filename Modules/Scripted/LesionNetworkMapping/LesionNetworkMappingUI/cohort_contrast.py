@@ -1093,7 +1093,10 @@ def showGroupFile(ctx, path, desc, name):
     widget = _mapWidget()
     if widget is None or not path or not os.path.isfile(path):
         return None
-    attributes = {GROUP_VOLUME_ATTRIBUTE: "1", "Studio.Role": "statmap", display.GROUP_MAP_ATTRIBUTE: desc}
+    # The cohort's connectome grid and template space (declared in connectome.json, also on a grid that is not standard)
+    bundle = ctx.bundle if ctx.bundle is not None else getattr(widget, "bundle", None)
+    attributes = {GROUP_VOLUME_ATTRIBUTE: "1", "Studio.Role": "statmap", display.GROUP_MAP_ATTRIBUTE: desc,
+                  "Studio.Space": widget.logic.connectomeSpaceName(bundle)}
     try:
         volume = widget.logic.loadMap(path, name, groupVolume(ctx), saveWithScene=True, attributes=attributes)
     except Exception as exc:

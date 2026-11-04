@@ -301,6 +301,88 @@ class LesionNetworkMappingNetworksUITest(unittest.TestCase):
             slicer.app.processEvents()
             shutil.rmtree(folder, ignore_errors=True)
 
+    def test_group_map_keeps_the_connectome_declared_space(self):
+        """A group map of a connectome on a grid that is not standard (the demo's 6 mm grid, a 4 mm conversion) is in the
+        template space its connectome.json declares, as that connectome's result map is: the Cohort card's group map
+        volume (Overlap tab, the Contrast tab's maps, the Nulls maps) carries it in ``Studio.Space``, so the Clusters and
+        Networks cards label it and list its networks instead of "the space of the map could not be told".
+        """
+        import os
+        import shutil
+        import tempfile
+        from types import SimpleNamespace
+        from unittest import mock
+
+        import numpy as np
+
+        from LesionNetworkMappingLib import atlases, nifti
+        from LesionNetworkMappingUI import cohort_contrast
+
+        widget = slicer.modules.LesionNetworkMappingWidget
+        cohortCard = widget.ctx.card("cohort")
+        clustersCard = widget.ctx.card("clusters")
+        folder = tempfile.mkdtemp(prefix="lnm-group-declared-space-")
+        storedOutputs = dict(cohortCard.overlap.outputs)
+        storedChoice = clustersCard.model.choice
+        try:
+            # Group maps on a 4 mm grid that no registry knows; the connectome declares its template space
+            affine = np.diag([4.0, 4.0, 4.0, 1.0])
+            affine[:3, 3] = (-42.0, -50.0, -30.0)
+            shape = (22, 26, 20)
+            self.assertEqual(atlases.mask_family(shape, affine), ("unknown", None), "the test grid must not be a known grid")
+            data = np.zeros(shape, dtype=np.float32)
+            data[4:8, 10:14, 8:12] = 80.0  # x -26..-14: left
+            path = os.path.join(folder, "group_conn-Decl4mm_desc-overlapPct_map.nii.gz")
+            nifti.write_nifti(path, data, affine)
+            bundle = SimpleNamespace(name="Decl4mm", path=folder, shape=shape, affine=affine, metadata={"space": "MNI152NLin2009cAsym"})
+            self.assertEqual(widget.logic.connectomeSpaceName(bundle), "MNI152NLin2009cAsym")
+
+            class Context:
+                """The cards' context with the connectome above."""
+
+                def __init__(self, ctx):
+                    self._ctx = ctx
+                    self.bundle = bundle
+
+                def __getattr__(self, name):
+                    return getattr(self._ctx, name)
+
+            context = Context(cohortCard.ctx)
+            cohortCard.overlap.outputs = {"overlapPct": path}
+            with mock.patch.object(cohortCard, "ctx", context):
+                volume = cohortCard.showGroupMap("overlapPct")
+            slicer.app.processEvents()
+            self.assertIsNotNone(volume)
+            self.assertEqual(volume.GetAttribute("Studio.Space"), "MNI152NLin2009cAsym")
+            clustersCard.model.setChoice("group")
+            self.assertEqual(clustersCard.model.source().space, "MNI152NLin2009cAsym")
+            table = clustersCard.update()
+            self.assertIsNotNone(table, clustersCard.noticeLabel.text)
+            self.assertTrue(clustersCard.knownSpace, clustersCard.noticeLabel.text)
+            self.assertNotIn("could not be told", str(clustersCard.noticeLabel.text))
+
+            # The Contrast tab's group maps go to the same volume, with the same space
+            volume.RemoveAttribute("Studio.Space")
+            shown = cohort_contrast.showGroupFile(context, path, "overlapPct", "Contrast overlapPct")
+            slicer.app.processEvents()
+            self.assertIsNotNone(shown)
+            self.assertEqual(shown.GetAttribute("Studio.Space"), "MNI152NLin2009cAsym")
+
+            # A connectome that declares no template space (native) leaves none on the reused volume
+            bundle.metadata = {"space": "native"}
+            with mock.patch.object(cohortCard, "ctx", context):
+                volume = cohortCard.showGroupMap("overlapPct")
+            self.assertIsNone(volume.GetAttribute("Studio.Space"))
+        finally:
+            cohortCard.overlap.outputs = storedOutputs
+            clustersCard.model.setChoice(storedChoice)
+            for node in list(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")):
+                if node.GetAttribute(cohort_contrast.GROUP_VOLUME_ATTRIBUTE) == "1":
+                    slicer.mrmlScene.RemoveNode(node)
+            cohortCard.groupVolumeId = None
+            slicer.app.processEvents()
+            shutil.rmtree(folder, ignore_errors=True)
+
     def test_2009_family_map_uses_the_2009c_atlases(self):
         """A map of the 2009 template family (the bundled MNI152NLin2009cAsym template's) is labelled and split into
         networks with the catalog's 2009c atlases (Schaefer, Tian S1), which the Atlases menu and Get atlases offer;

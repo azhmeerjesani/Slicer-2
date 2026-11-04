@@ -1015,7 +1015,10 @@ class NullsCard:
             return None
         basis = _("approximate") if record.get("approximate") else _("exact pooled")
         title = f"Nulls {desc[len('sensNull'):]} ({record.get('kind')}, {basis}, K={record.get('k')})"
-        attributes = {VOLUME_ATTRIBUTE: "1", "Studio.Role": "statmap", display.GROUP_MAP_ATTRIBUTE: desc}
+        # On the cohort's connectome grid, in its template space (declared in connectome.json, also on a grid that is not standard)
+        bundle = self.ctx.bundle if self.ctx.bundle is not None else getattr(widget, "bundle", None)
+        attributes = {VOLUME_ATTRIBUTE: "1", "Studio.Role": "statmap", display.GROUP_MAP_ATTRIBUTE: desc,
+                      "Studio.Space": widget.logic.connectomeSpaceName(bundle)}
         volume = widget.logic.loadMap(path, title, self.volume(), saveWithScene=True, attributes=attributes)
         self.volumeId = volume.GetID()
         display.applyGroupMapDisplay(volume, desc)
