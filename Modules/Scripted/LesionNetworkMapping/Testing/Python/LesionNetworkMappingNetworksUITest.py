@@ -455,6 +455,92 @@ class LesionNetworkMappingNetworksUITest(unittest.TestCase):
         self.assertIn("templateflow.\u200bs3.\u200bamazonaws.\u200bcom", broken)
         self.assertEqual(broken.replace("\u200b", ""), manager.message)
 
+    def test_cohort_roi_chart_reads_lesion_maps_with_the_result_rule_for_a_percent_group_map(self):
+        """The cohort ROI chart reads each lesion's T map. With a count or percentage group map in the cards (the overlapPct
+        map shown after a cohort run), the map's threshold (overlapPct >= 25) is not on the T scale: each lesion's map is
+        read with the Result rule and its sign. A typed threshold of a T map still applies to the lesion maps as it is.
+        """
+        import os
+        import shutil
+        import tempfile
+        from types import SimpleNamespace
+        from unittest import mock
+
+        import numpy as np
+
+        from LesionNetworkMappingLib import geometry, nifti, thresholds
+        from LesionNetworkMappingUI import card_clusters
+
+        widget = slicer.modules.LesionNetworkMappingWidget
+        card = self.card
+        folder = tempfile.mkdtemp(prefix="lnm-networks-roichart-")
+        shape = (10, 10, 10)
+        affine = np.diag([6.0, 6.0, 6.0, 1.0])
+        grid = geometry.Grid(shape, affine)
+        indices = np.arange(int(np.prod(shape)), dtype=np.int64)
+        box = np.zeros(shape, dtype=bool)
+        box[3:6, 3:6, 3:6] = True
+        positions = np.flatnonzero(box.reshape(-1))
+        rng = np.random.default_rng(7)
+        paths = []
+        for index in range(6):  # lesions 1-2 positive, 3 negative in the box (connected), 4-6 |T| < 1.5 everywhere
+            data = rng.uniform(-1.5, 1.5, shape).astype(np.float32)
+            if index < 3:
+                data[box] = 8.0 if index < 2 else -8.0
+            path = os.path.join(folder, f"sub-{index + 1:02d}_desc-T_funcmap.nii.gz")
+            nifti.write_nifti(path, data, affine)
+            paths.append(path)
+        rows = [{"participant_id": f"sub-{index + 1:02d}", "T": path} for index, path in enumerate(paths)]
+        mapsTsv = os.path.join(folder, "maps.tsv")
+        bundle = SimpleNamespace(mask_indices=indices, n_subjects=120, n_voxels=int(indices.size), shape=shape)
+        units = [{"system": "roi", "name": "box", "atlas": None, "positions": positions}]
+
+        class Context:
+            """The card's context with the small connectome above (the other cards keep the real one)."""
+
+            def __init__(self, ctx):
+                self._ctx = ctx
+                self.bundle = bundle
+
+            def __getattr__(self, name):
+                return getattr(self._ctx, name)
+
+        def chart(source):
+            card.roiResult = None
+            with mock.patch.object(card.model, "source", return_value=source), mock.patch.object(card, "cohortMapPaths", return_value=(rows, "T", mapsTsv)), \
+                    mock.patch.object(card, "roiUnits", return_value=(units, [])), mock.patch.object(card, "rois", [{"name": "box"}]), \
+                    mock.patch.object(card, "ctx", Context(card.ctx)):
+                self.assertEqual(card.runRoiChart(), 6, card.roiLabel.text)
+                deadline = time.time() + 30
+                while card.roiResult is None and time.time() < deadline:
+                    slicer.app.processEvents()
+            self.assertIsNotNone(card.roiResult, card.roiLabel.text)
+            return card.roiItems()[0], card.roiCaption()
+
+        card.widget.collapsed = True  # no automatic remake of the network table meanwhile
+        try:
+            widget.signGroup.button(0).click()  # both signs
+            widget.setRule(thresholds.DEFAULT_RULE)  # FWE Bonferroni: |T| >= 4.3 at N=120, V=1000
+            slicer.app.processEvents()
+            volume = np.zeros(shape, dtype=np.float64)
+            percent = card_clusters.MapSource("group", "Cohort overlapPct", "overlapPct", volume, grid, indices, 25.0, "pos", 120, False, None, desc="overlapPct")
+            item, caption = chart(percent)
+            self.assertEqual((item["n_connected"], item["n_lesions"]), (3, 6), f"{item['text']}: {caption}")
+            self.assertNotIn("overlapPct", caption)
+            self.assertIn("|T| ≥", caption)
+
+            # A typed threshold of a T map is on the lesion maps' scale: it applies as it is (8 < 9: no lesion is connected)
+            meanT = card_clusters.MapSource("group", "Cohort meanT", "T", volume, grid, indices, 9.0, "both", 120, False, None, desc="meanT")
+            item, caption = chart(meanT)
+            self.assertEqual(item["n_connected"], 0, item["text"])
+            self.assertIn("|T| ≥ 9", caption)
+        finally:
+            card.roiResult = None
+            card._showRoiChart()
+            widget.setRule(thresholds.DEFAULT_RULE)
+            slicer.app.processEvents()
+            shutil.rmtree(folder, ignore_errors=True)
+
     def test_scheme_click_without_buttonClicked_int(self):
         card = self.card
         self.assertIsNotNone(card)

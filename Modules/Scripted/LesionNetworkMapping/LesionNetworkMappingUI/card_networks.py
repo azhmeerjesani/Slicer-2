@@ -1490,14 +1490,37 @@ class NetworksCard:
             gsr = widget.logic.gsr(bundle) if widget is not None else None
         except Exception:
             gsr = None
-        fixed = None if source.fromRule or rule is None else source.value
+        # The lesion maps are the rule's statistic (T, or Fz for an Fz rule). The source's typed threshold is on that scale
+        # only when the source is a map of the same statistic (the Result map, a mean T group map); a count, percentage or
+        # binary group map's threshold (overlapPct >= 25) is not, so each lesion's map is then read with the Result rule
+        # and its sign.
+        lesionStatistic = cohort.rule_statistic(rule) if rule is not None else "T"
+        sameScale = source.statistic == lesionStatistic
+        if source.fromRule or not sameScale:
+            if rule is None:
+                self.roiLabel.setText(_("The lesion maps are read with the Result card's rule: open the Result card first."))
+                return 0
+            fixed = None
+        else:
+            fixed = source.value
+        sign = source.sign
+        thresholdText = source.thresholdText()
+        if not source.fromRule and not sameScale:
+            try:
+                sign = widget._sign() if widget is not None else "both"
+            except Exception:
+                sign = "both"
+            thresholdText = None  # named after the run from the lesions' own thresholds (_finishRoi)
 
         def thresholdFor(values, row):
             if fixed is not None:
                 return fixed
-            return cohort.resolve_rules(values[None, :], rule, n, bundle.n_voxels, gsr)[0].value
+            value = cohort.resolve_rules(values[None, :], rule, n, bundle.n_voxels, gsr)[0].value
+            state["thresholds"].append(float(value))
+            return value
 
-        state = {"paths": [row[column] for row in rows], "ids": [row.get("participant_id", str(index + 1)) for index, row in enumerate(rows)], "index": 0, "connected": [], "percent": [], "stop": False}
+        state = {"paths": [row[column] for row in rows], "ids": [row.get("participant_id", str(index + 1)) for index, row in enumerate(rows)], "index": 0, "connected": [], "percent": [], "stop": False,
+                 "thresholds": [], "statistic": lesionStatistic, "sign": sign, "thresholdText": thresholdText}
         self._roiState = state
         positions = [unit["positions"] for unit in units]
         names = [unit["name"] for unit in units]
@@ -1521,7 +1544,7 @@ class NetworksCard:
                 self._finishRoi(state, names, minPercent, source, notices)
                 return
             try:
-                result = lesionConnectivity([state["paths"][state["index"]]], source.indices, bundle.shape, positions, lambda values, _row: thresholdFor(values, state["index"]), source.sign, minPercent)
+                result = lesionConnectivity([state["paths"][state["index"]]], source.indices, bundle.shape, positions, lambda values, _row: thresholdFor(values, state["index"]), sign, minPercent)
             except Exception as exc:
                 logging.exception("Lesion network mapping: a lesion map could not be read for the ROI chart")
                 state["error"] = str(exc)
@@ -1545,9 +1568,22 @@ class NetworksCard:
         if not done:
             self.roiLabel.setText(_("No lesion map was read.") if not state.get("error") else _("The ROI chart failed: {error}").format(error=state["error"]))
             return
+        threshold = state.get("thresholdText") or self._ruleThresholdText(state)
         self.roiResult = {"names": names, "connected": np.array(state["connected"], dtype=bool), "percent": np.array(state["percent"], dtype=np.float64), "ids": state["ids"][:done],
-                          "minPercent": minPercent, "threshold": source.thresholdText(), "partial": done < len(state["paths"]), "notices": notices}
+                          "minPercent": minPercent, "threshold": threshold, "partial": done < len(state["paths"]), "notices": notices}
         self._showRoiChart()
+
+    @staticmethod
+    def _ruleThresholdText(state):
+        """"|T| ≥ 4.674" (or a range when the lesions' thresholds differ) of the Result rule the lesion maps were read with."""
+        statistic = state.get("statistic") or "T"
+        quantity = {"both": f"|{statistic}|", "pos": statistic, "neg": f"-{statistic}"}.get(state.get("sign"), f"|{statistic}|")
+        values = [value for value in state.get("thresholds", []) if math.isfinite(value)]
+        if not values:
+            return _("the Result rule")
+        low, high = min(values), max(values)
+        cut = f"{low:.4g}" if f"{low:.4g}" == f"{high:.4g}" else f"{low:.4g}–{high:.4g}"  # noqa: RUF001
+        return _("Result rule: {quantity} ≥ {cut}").format(quantity=quantity, cut=cut)
 
     def roiItems(self):
         """Chart items of the ROI result: label, percentage of lesions connected and its text."""
