@@ -1417,6 +1417,8 @@ def _rewritePrivatePaths(scenePath, oldFolder, newFolder):
 
 #: Name part of the folder that a Duplicate copies into before it gets the name of the copy (never listed as a project)
 COPY_MARKER = ".studio-copy"
+#: End of the name of the lock file of a copy that a Duplicate is making (``_copyLockPath``)
+COPY_LOCK_SUFFIX = ".lock"
 
 #: The copies of Duplicates that are queued or running in this process ({(normcase(parent folder), name)}): their names
 #: are taken, so a second Duplicate before the first one finished makes "<name> copy 2", not a second "<name> copy"
@@ -1437,6 +1439,68 @@ def _reserveCopyName(parent, name):
 def _releaseCopyName(parent, name):
     with _pendingCopiesLock:
         _pendingCopies.discard((os.path.normcase(os.path.abspath(parent)), name))
+
+
+def _copyLockPath(temporary):
+    """The lock file of the copy of a Duplicate: ".<name>.studio-copy.lock" next to the copy (hidden, never listed).
+
+    It is made and locked before the copy folder, and deleted after the copy got its name, so a copy folder without a held
+    lock is never one that a Duplicate is still making, in this Slicer Studio or another one on the same folder.
+    """
+    temporary = os.path.normpath(temporary)
+    return os.path.join(os.path.dirname(temporary), "." + os.path.basename(temporary) + COPY_LOCK_SUFFIX)
+
+
+def _lockCopy(lockPath, create=True):
+    """Lock the lock file of a copy (non-blocking; the system releases it when the process ends, even when it is killed).
+
+    Return ``(descriptor, busy)``: the open descriptor of the locked file (``_unlockCopy`` releases it), or None with busy
+    True when a running Duplicate (of any process) holds it, or busy False when there is no such file (``create`` False)
+    or it cannot be opened. A file system without locks gives the descriptor unlocked (``create``) or busy (a check: a
+    copy is never deleted when that cannot be known). Worker-safe (no Qt).
+    """
+    for _attempt in range(5):
+        try:
+            descriptor = os.open(lockPath, os.O_RDWR | (os.O_CREAT if create else 0), 0o644)
+        except OSError:
+            return None, False
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            contended = os.name == "nt" or error.errno in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES)
+            if create and not contended:
+                return descriptor, False  # no locks on this file system: copy without one
+            os.close(descriptor)
+            return None, True
+        # Locked: unless the file was deleted (or replaced) by the Duplicate or the clean-up that held it before
+        try:
+            same = os.path.samestat(os.fstat(descriptor), os.stat(lockPath))
+        except OSError:
+            same = False
+        if same:
+            return descriptor, False
+        os.close(descriptor)
+        if not create:
+            return None, False
+    return None, True
+
+
+def _unlockCopy(descriptor, lockPath):
+    """Delete the lock file of a copy and release the lock (``_lockCopy``). Worker-safe."""
+    if os.name == "nt" and descriptor is not None:
+        os.close(descriptor)  # an open file cannot be deleted on Windows
+        descriptor = None
+    with contextlib.suppress(OSError):
+        os.remove(lockPath)
+    if descriptor is not None:
+        os.close(descriptor)
 
 
 def isCopyLeftover(name):
@@ -1520,7 +1584,8 @@ def removeCopyLeftovers(rootPath=None):
     A Duplicate copies into "<new name>.studio-copy" and renames it when it is complete, so what stays under that name
     was never complete: it is not a project (``listProjects`` hides it) and nothing else would remove it, or tell about it,
     while it takes up as much disk space as the project. The copies of the Duplicates of this process that are queued or
-    running (``_pendingCopies``) are kept. Return the names that were deleted. Worker-safe.
+    running (``_pendingCopies``), and those that a Duplicate of another Slicer Studio on the same folder is making (their
+    lock file is held, ``_copyLockPath``), are kept. Return the names that were deleted. Worker-safe.
     """
     folder = projectsFolder(rootPath)
     try:
@@ -1531,9 +1596,26 @@ def removeCopyLeftovers(rootPath=None):
     with _pendingCopiesLock:
         reserved = {entry + COPY_MARKER for parent, entry in _pendingCopies if parent == key}
     # A folder with "<its name>.mrml" is a project whose name ends with the marker (named before ``sanitizeName`` reserved it)
-    leftovers = [name for name in names if isCopyLeftover(name) and name not in reserved
-                 and not _hasOwnScene(os.path.join(folder, name))]
-    removePaths([os.path.join(folder, name) for name in leftovers])
+    candidates = [name for name in names if isCopyLeftover(name) and name not in reserved
+                  and not _hasOwnScene(os.path.join(folder, name))]
+    # Lock files of copies that are gone (a Duplicate killed after it renamed its copy)
+    for name in names:
+        copyName = name[1:-len(COPY_LOCK_SUFFIX)]
+        if name.startswith(".") and name.endswith(COPY_LOCK_SUFFIX) and isCopyLeftover(copyName) and copyName not in names:
+            candidates.append(copyName)
+    leftovers = []
+    for name in candidates:
+        path = os.path.join(folder, name)
+        lockPath = _copyLockPath(path)
+        descriptor, busy = _lockCopy(lockPath, create=False)
+        if busy:
+            continue  # a Duplicate of another Slicer Studio is making this copy
+        try:
+            if os.path.lexists(path):
+                removePaths([path])
+                leftovers.append(name)
+        finally:
+            _unlockCopy(descriptor, lockPath)
     return leftovers
 
 
@@ -1572,11 +1654,30 @@ def duplicateFolder(path, onDone=None, onError=None):
     def copy():
         target, targetName = newPath, newName
         temporary = newPath + COPY_MARKER
+        # Lock the copy before its folder exists, so that the startup of another Slicer Studio on the same folder
+        # (``removeCopyLeftovers``) never takes it for the leftover of an interrupted Duplicate; a copy of the same name
+        # that another Slicer Studio is making keeps its folder, and this one copies into another
+        lockPath = _copyLockPath(temporary)
+        descriptor, busy = _lockCopy(lockPath)
+        index = 2
+        while busy and index < 100:
+            temporary = f"{newPath} {index}{COPY_MARKER}"
+            lockPath = _copyLockPath(temporary)
+            descriptor, busy = _lockCopy(lockPath)
+            index += 1
+        if busy:
+            _releaseCopyName(parent, newName)
+            raise ProjectError(notCopied.format(reason=os.strerror(errno.EBUSY)))
         try:
             # Left by a Duplicate that was interrupted (a crash): the name is reserved by this one now
             if os.path.lexists(temporary):
                 removePaths([temporary])
             shutil.copytree(path, temporary, ignore=shutil.ignore_patterns(LOCK_FILE, "*.studio-tmp*", ".studio-tmp-*", REMOVED_DIR))
+            # Only a complete copy gets the name of the copy: its scene and project.json are there (they would be missing
+            # if its folder was deleted while it was copied)
+            for required in [os.path.join(PRIVATE_DIR, PROJECT_FILE)] + ([os.path.basename(scene)] if scene else []):
+                if os.path.isfile(os.path.join(path, required)) and not os.path.isfile(os.path.join(temporary, required)):
+                    raise OSError(errno.ENOENT, os.strerror(errno.ENOENT), required)
             if os.path.lexists(target):
                 # Made meanwhile by another program (another Slicer Studio): take the next free name
                 targetName = uniqueName(parent, newName, isFile=False)
@@ -1584,6 +1685,7 @@ def duplicateFolder(path, onDone=None, onError=None):
             os.rename(temporary, target)
         except OSError as error:
             removePaths([temporary])
+            _unlockCopy(descriptor, lockPath)
             number, reason = _firstCopyFailure(error)
             if number in (errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)):
                 reason = diskFull
@@ -1592,9 +1694,11 @@ def duplicateFolder(path, onDone=None, onError=None):
             raise ProjectError(notCopied.format(reason=reason)) from error
         except BaseException:
             removePaths([temporary])
+            _unlockCopy(descriptor, lockPath)
             raise
         finally:
             _releaseCopyName(parent, newName)
+        _unlockCopy(descriptor, lockPath)
         renameSceneFile(target, scene)
         data = readProjectJson(target) or {}
         data.update(name=targetName, state="closed", created=_isoTime(), modified=_isoTime())

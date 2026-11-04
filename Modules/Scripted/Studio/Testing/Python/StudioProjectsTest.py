@@ -3860,6 +3860,130 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertEqual(projects.removeCopyLeftovers(), ["Big running.studio-copy"], "no longer running: a leftover")
         self.assertEqual(os.listdir(parent), ["Big"])
 
+    def test_57c_startup_of_another_slicer_studio_keeps_a_running_duplicate(self):
+        """A second Slicer Studio started on the same folder while a Duplicate copied a big project deleted the copy as the
+        leftover of an interrupted Duplicate (its startup only knew the Duplicates of its own process). The copy then
+        went on into the deleted folder, and the Duplicate said "Duplicated as <name> copy" for a copy without its scene
+        file (the Library listed it; opening it said "has no scene file"), or failed and left a broken project (BB-1).
+        A copy that a running Duplicate is making is locked, so the startup of another Slicer Studio keeps it, and a copy
+        only gets its name when it is complete.
+        """
+        import shutil as shutilModule
+        import threading
+        from unittest import mock
+
+        from StudioLib import projects_ui
+
+        projects = self.projects
+        project = projects.createProject("Patient")
+        os.makedirs(os.path.join(project.path, "Images"))
+        os.makedirs(os.path.join(project.path, "Segmentations"))
+        for folder, name in (("Images", "patient.nii.gz"), ("Segmentations", "lesion.seg.nrrd")):
+            with open(os.path.join(project.path, folder, name), "wb") as f:
+                f.write(b"\1" * 4096)
+        with open(os.path.join(project.path, "Patient.mrml"), "w", encoding="utf-8") as f:
+            f.write("<MRML></MRML>\n")
+        path = project.path
+        parent = os.path.dirname(path)
+
+        def entries():
+            return sorted(os.listdir(parent))
+
+        # The copy waits after its first file (a big project, a slow disk) until the other Slicer Studio has started
+        realCopyfile = shutilModule.copyfile
+        copying, release = threading.Event(), threading.Event()
+
+        def slowCopy(source, destination, *args, **kwargs):
+            result = realCopyfile(source, destination, *args, **kwargs)
+            if projects.COPY_MARKER in os.fspath(destination) and not copying.is_set():
+                copying.set()
+                release.wait(30.0)
+            return result
+
+        toasts = []
+        with mock.patch.object(projects_ui, "message", side_effect=lambda text, **kwargs: toasts.append(str(text))):
+            with mock.patch.object(shutilModule, "copyfile", side_effect=slowCopy):
+                copyPath = projects_ui.duplicate(path)
+                try:
+                    self.assertTrue(copying.wait(30.0), "the copy started")
+                    temporary = copyPath + projects.COPY_MARKER
+                    self.assertTrue(os.path.isdir(temporary))
+                    # The startup clean-up of another Slicer Studio: the Duplicates of this process are not its own
+                    with mock.patch.object(projects, "_pendingCopies", set()):
+                        self.assertEqual(projects.removeCopyLeftovers(), [], "a running Duplicate is not a leftover")
+                    self.assertTrue(os.path.isdir(temporary))
+                finally:
+                    release.set()
+                self.assertTrue(self.io.backgroundWriter().drain(30.0))
+        self.assertEqual(toasts, ["Duplicated as Patient copy"])
+        expected = sorted(name.replace("Patient.mrml", "Patient copy.mrml") for name in _relativeFiles(path) if name != ".studio/lock")
+        self.assertEqual(_relativeFiles(copyPath), expected, "the copy is complete")
+        self.assertEqual(entries(), ["Patient", "Patient copy"], "no partial copy and no lock file stay")
+
+        # A copy that another Slicer Studio is making under the name that this one would use: kept, and this Duplicate
+        # copies into another folder
+        held = os.path.join(parent, "Patient copy 2" + projects.COPY_MARKER)
+        heldLock = projects._copyLockPath(held)
+        descriptor, busy = projects._lockCopy(heldLock)
+        self.assertFalse(busy)
+        os.makedirs(os.path.join(held, "Images"))
+        try:
+            toasts.clear()
+            with mock.patch.object(projects_ui, "message", side_effect=lambda text, **kwargs: toasts.append(str(text))):
+                second = projects_ui.duplicate(path)
+                self.assertTrue(self.io.backgroundWriter().drain(30.0))
+            self.assertEqual(toasts, ["Duplicated as Patient copy 2"])
+            self.assertTrue(os.path.isfile(os.path.join(second, "Patient copy 2.mrml")))
+            self.assertTrue(os.path.isdir(os.path.join(held, "Images")), "the copy of the other Slicer Studio is kept")
+            self.assertEqual(projects.removeCopyLeftovers(), [])
+            self.assertTrue(os.path.isdir(held))
+        finally:
+            projects._unlockCopy(descriptor, heldLock)
+        # Once that Slicer Studio is gone (its lock is released), what it left is a leftover; and so is a lock file
+        # without its copy (killed after the rename) or one that nothing holds
+        stale = os.path.join(parent, "Patient copy 3" + projects.COPY_MARKER)
+        os.makedirs(stale)
+        for lockPath in (projects._copyLockPath(stale), projects._copyLockPath(os.path.join(parent, "Gone" + projects.COPY_MARKER))):
+            with open(lockPath, "w", encoding="utf-8"):
+                pass
+        os.makedirs(held, exist_ok=True)
+        self.assertEqual(sorted(projects.removeCopyLeftovers()), ["Patient copy 2.studio-copy", "Patient copy 3.studio-copy"])
+        self.assertEqual(entries(), ["Patient", "Patient copy", "Patient copy 2"])
+
+    def test_57d_duplicate_whose_copy_lost_its_scene_is_not_reported_done(self):
+        """A copy whose scene file (or project.json) is missing when the copy ends (its folder was deleted while it was
+        copied) is not renamed into a project that cannot be opened: the Duplicate fails and leaves nothing (BB-1).
+        """
+        import shutil as shutilModule
+        from unittest import mock
+
+        from StudioLib import projects_ui
+
+        projects = self.projects
+        project = projects.createProject("Scan")
+        os.makedirs(os.path.join(project.path, "Images"))
+        with open(os.path.join(project.path, "Images", "scan.nrrd"), "wb") as f:
+            f.write(b"\1" * 4096)
+        with open(os.path.join(project.path, "Scan.mrml"), "w", encoding="utf-8") as f:
+            f.write("<MRML></MRML>\n")
+        parent = os.path.dirname(project.path)
+        realCopytree = shutilModule.copytree
+
+        def lossyCopytree(source, destination, *args, **kwargs):
+            result = realCopytree(source, destination, *args, **kwargs)
+            if os.fspath(destination).endswith(projects.COPY_MARKER):  # the project folder (not its subfolders)
+                os.remove(os.path.join(destination, "Scan.mrml"))
+            return result
+
+        toasts = []
+        with mock.patch.object(projects_ui, "message", side_effect=lambda text, **kwargs: toasts.append(str(text))):
+            with mock.patch.object(shutilModule, "copytree", side_effect=lossyCopytree):
+                projects_ui.duplicate(project.path)
+                self.assertTrue(self.io.backgroundWriter().drain(30.0))
+        self.assertEqual(len(toasts), 1, toasts)
+        self.assertIn("could not be duplicated", toasts[0])
+        self.assertEqual(sorted(os.listdir(parent)), ["Scan"])
+
     def test_58_open_project_on_a_folder_outside_the_studio_folder_leaves_it_unchanged(self):
         """Open project… on a project folder outside the Slicer Studio folder (a colleague's project copied to the Desktop
         under another name) opens a copy in Projects/ and leaves the original byte-for-byte unchanged (A-09, BB-1). The
