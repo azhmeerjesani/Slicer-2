@@ -74,6 +74,11 @@ SECTION_TITLES = {
     "disclaimer": "Disclaimer",
 }
 PIPELINE_JSON = "pipeline.json"
+PIPELINE_FORMAT = "slicer-lnm-pipeline"  # pipeline.FORMAT_NAME
+# The kind of the runs that a pipeline stage makes as child jobs (pipeline.json "stages": "child_run_id", comma-separated)
+PIPELINE_CHILD_KINDS = {"maps": "cohortmaps", "nulls": "nulls", "specificity": "glm", "slnm": "slnm"}
+# Stage statuses of a pipeline run that leave no result of the stage: the pipeline dropped the earlier outputs (pipeline._drop_stale)
+PIPELINE_NO_RESULT = ("failed", "blocked", "error", "skipped", "unavailable", "cancelled")
 NORMALIZATION_JSON = "normalization.json"
 RECORDS_TSV = ("sources", "records.tsv")
 INTERRATER_TSV = ("derivatives", "qc", "interrater.tsv")
@@ -413,8 +418,63 @@ class Records:
     # Registry
 
     def done_runs(self, kind):
+        """Finished runs of ``kind`` (a kind or a collection), without those a later pipeline run superseded (:meth:`superseded`)."""
         kinds = {kind} if isinstance(kind, str) else set(kind)
-        return [record for record in self.runs.values() if record.get("kind") in kinds and record.get("status") == "done"]
+        return [record for record in self.runs.values() if record.get("kind") in kinds and record.get("status") == "done" and not self.superseded(record)]
+
+    def _pipeline_stages(self):
+        """{pipeline run id: {stage name: (status, {child run ids})}} from the pipeline.json in each pipeline run's folder.
+
+        The folder's pipeline.json is the one the latest pipeline run there wrote, so every pipeline run of a folder gets
+        the stages of that latest run.
+        """
+        if "pipeline_stages" in self._cache:
+            return self._cache["pipeline_stages"]
+        out, by_folder = {}, {}
+        for record in self.runs.values():
+            if record.get("kind") != "pipeline":
+                continue
+            folder = self.run_dir(record)
+            if not folder:
+                continue
+            real = os.path.realpath(folder)
+            if real not in by_folder:
+                data = _read_json(os.path.join(folder, PIPELINE_JSON))
+                stages = None
+                if data is not None and data.get("format") == PIPELINE_FORMAT and isinstance(data.get("stages"), list):
+                    stages = {}
+                    for stage in data["stages"]:
+                        if isinstance(stage, dict) and stage.get("name"):
+                            ids = {part.strip() for part in str(stage.get("child_run_id") or "").split(",") if part.strip()}
+                            stages[stage["name"]] = (stage.get("status"), ids)
+                by_folder[real] = stages
+            if by_folder[real] is not None:
+                out[record["id"]] = by_folder[real]
+        self._cache["pipeline_stages"] = out
+        return out
+
+    def superseded(self, record):
+        """Whether a run that a pipeline stage made as a child job (sLNM, GLM, null models, cohort maps) no longer stands
+        for the results of that pipeline's output folder: the folder's latest pipeline run lists other runs for the stage,
+        or its stage failed, was skipped or was stopped (the pipeline dropped the earlier outputs; files of an earlier run
+        must never pass for the results of a later one). Runs of other kinds, and runs whose pipeline records nothing
+        about the stage, are never superseded.
+        """
+        stage = next((name for name, kind in PIPELINE_CHILD_KINDS.items() if kind == record.get("kind")), None)
+        if stage is None:
+            return False
+        pipelines = self._pipeline_stages()
+        for parent in record.get("parents") or ():
+            stages = pipelines.get(parent)
+            if stages is None or stage not in stages:
+                continue
+            status, ids = stages[stage]
+            if status in PIPELINE_NO_RESULT:
+                return True
+            if status in ("done", "reused") and ids:
+                return record.get("id") not in ids
+            return False
+        return False
 
     def summary(self, record):
         from . import runs as runslib
@@ -464,6 +524,8 @@ class Records:
         for record in self.done_runs(kind):
             folder = self.run_dir(record)
             data = _read_json(os.path.join(folder, name)) if folder else None
+            if data is not None and data.get("run_id") not in (None, record["id"]):
+                continue  # a later run wrote its results to the same folder: they are not this run's
             if data is not None:
                 seen.add(os.path.realpath(folder))
                 out.append((record["id"], data))

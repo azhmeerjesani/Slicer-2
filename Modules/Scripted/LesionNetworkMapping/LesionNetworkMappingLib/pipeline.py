@@ -1923,6 +1923,17 @@ class Runner:
             except OSError:
                 pass
 
+    def _drop_stale_results(self, folders, module):
+        """Remove the results that an earlier run left in stage folders where this run made none (a GLM or an sLNM score
+        that failed, was blocked or was skipped): ``module`` (glm or slnm) removes the files its JSON record lists, and
+        the record. Resume state and caches stay. Else the report would list them among this run's files.
+        """
+        for folder in folders:
+            try:
+                module._remove_previous_outputs(folder)
+            except OSError:
+                pass
+
     def _drop_invalidated(self):
         """After a stop or an error: drop the earlier outputs of the stopped stage and of the stages after it whose inputs changed
         in this run (their saved fingerprints no longer match: a later run recomputes them). The other completed stages stay.
@@ -2745,6 +2756,9 @@ class Runner:
 
     def _stage_specificity(self, planned):
         if planned["status"] in ("skip", "unavailable") or self.plan.specificity != "glm":
+            from . import glm
+
+            self._drop_stale_results([self.path(STAGES_DIR, "glm")], glm)
             return self._skip("specificity", planned["reason"] or self.plan.specificity_reason or "skipped", "unavailable" if self.plan.specificity == "unavailable" else "skipped")
         import numpy as np
 
@@ -2759,12 +2773,16 @@ class Runner:
         start = _now_iso()
         folder = self.stage_dir("glm")
         spec = self._design_spec()
+        from . import glm
+
         try:
             design = designlib.build_design(self._subset_study(rows), spec)
         except designlib.DesignError as exc:
+            self._drop_stale_results([folder], glm)
             return {"status": "blocked", "reason": f"The design cannot be built: {exc}", "fingerprint": fp}
         design_json, _matrix = designlib.save_design(design, folder)
         if design.blocking:
+            self._drop_stale_results([folder], glm)
             return {"status": "blocked", "reason": "The design is blocked: " + " | ".join(check.message for check in design.blocking), "fingerprint": fp, "result": {"design_type": design.design_type}}
         args = ["--maps", self.maps_tsv, "--participants", self.participants_tsv, "--design", design_json, "--mask", self.mask_path, "--out", folder, "--perm", str(self.config.perm),
                 "--seed", str(self.config.perm_seed), "--conn-label", self.bundle.name]
@@ -2773,9 +2791,8 @@ class Runner:
         args += self._common_child_args()
         child = self._child("specificity", "glm", args, folder)
         if child.status != "done":
+            self._drop_stale_results([folder], glm)
             return {"status": "blocked" if child.status == "blocked" else "failed", "reason": child.message, "fingerprint": fp}
-        from . import glm
-
         record = glm.read_record(os.path.join(folder, glm.GLM_JSON)) or {}
         label = (record.get("contrast") or {}).get("label") or glm.contrast_label(design)
         outputs, descs = [os.path.join(folder, glm.GLM_JSON)], {}
@@ -2820,6 +2837,9 @@ class Runner:
     def _stage_slnm(self, planned):
         columns = list(self.plan.scores)
         if not columns or planned["status"] in ("skip", "unavailable"):
+            from . import slnm
+
+            self._drop_stale_results(sorted(glob.glob(self.path(STAGES_DIR, "slnm-*"))), slnm)
             return self._skip("slnm", planned["reason"] or _slnm_skip_reason(self.config), "skipped")
         import numpy as np
 
@@ -2842,6 +2862,7 @@ class Runner:
             if len(scored) < self.config.min_slnm_n:
                 self.info(f"sLNM of {column} not run: {len(scored)} mapped subjects have a value (at least {self.config.min_slnm_n} needed).", code="slnm_min_n")
                 results[label] = {"column": column, "n": len(scored), "skipped": f"fewer than {self.config.min_slnm_n} values"}
+                self._drop_stale_results([self.path(STAGES_DIR, f"slnm-{label}")], slnm)
                 continue
             folder = self.stage_dir(f"slnm-{label}")
             args = ["--maps", self.maps_tsv, "--participants", self.participants_tsv, "--score", column, "--covariates", ",".join(self.config.covariates)]
@@ -2854,6 +2875,7 @@ class Runner:
             args += self._common_child_args()
             child = self._child("slnm", "slnm", args, folder)
             if child.status != "done":
+                self._drop_stale_results([folder], slnm)  # the child stops before it replaces an earlier run's results (a blocked design)
                 failed.append(f"{column}: {child.message}")
                 results[label] = {"column": column, "n": len(scored), "failed": child.message}
                 continue

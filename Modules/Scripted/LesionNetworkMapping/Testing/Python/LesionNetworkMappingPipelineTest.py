@@ -890,6 +890,52 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         listed = {item["desc"] for item in read_json(os.path.join(out, pipeline.PIPELINE_JSON))["outputs"]["group"]}
         self.assertTrue({"conjPos", "caseVsControlTstat"} <= listed, listed)
 
+    def test_methods_cite_only_the_slnm_of_the_latest_run(self):
+        """A rerun whose sLNM fails (every score equal: the design is rank-deficient) leaves no sLNM in its methods, report or
+        files; a rerun that computes it again cites only its own sLNM, not also the one it superseded (same folder, same score).
+        """
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f-slnm-rerun"))
+        out = fx["out"]
+        args = run_args(fx, *FAST, "--specificity", "off")
+        cited = re.compile(r"Symptom lesion network mapping \(run ([^)]+)\)")
+        folder = os.path.join(out, pipeline.STAGES_DIR, "slnm-AphasiaScore")
+
+        def set_scores(value):
+            study = Study.open(fx["study"])
+            for index, row in enumerate(study.subjects):
+                study.set(row["participant_id"], aphasia_score=value(index))
+            study.save()
+
+        def outputs(label):
+            code, events, _stdout, stderr, _wall = cli(*args)
+            self.assertEqual(code, 0, f"{label}: {stderr[-2000:]}")
+            texts = {}
+            for name in ("methods.md", "methods.html", "methods.txt", "report.html"):
+                with open(os.path.join(out, name), encoding="utf-8") as f:
+                    texts[name] = f.read()
+            return stage_status(events), texts
+
+        status, texts = outputs("first run")
+        self.assertEqual(status["slnm"], "done")
+        first = sorted(set(cited.findall(texts["methods.md"])))
+        self.assertEqual(len(first), 1, first)
+        set_scores(lambda index: 5)
+        status, texts = outputs("constant scores")
+        self.assertEqual(status["slnm"], "failed")
+        for name, text in texts.items():
+            self.assertEqual(cited.findall(text), [], f"{name} describes the sLNM of an earlier run")
+        self.assertNotIn(first[0], texts["methods.md"])
+        self.assertFalse(os.path.exists(os.path.join(folder, "slnm.json")), "the earlier sLNM record stays in the stage folder")
+        self.assertFalse(glob.glob(os.path.join(folder, "group_conn-*")), "the earlier sLNM maps stay in the stage folder")
+        self.assertNotIn("stages/slnm-AphasiaScore/group_conn-", texts["report.html"], "the report lists the earlier sLNM maps")
+        set_scores(lambda index: (index * 7) % 11)
+        status, texts = outputs("new scores")
+        self.assertEqual(status["slnm"], "done")
+        latest = read_json(os.path.join(folder, "slnm.json"))["run_id"]
+        self.assertNotEqual(latest, first[0])
+        for name in ("methods.md", "methods.html", "methods.txt"):
+            self.assertEqual(sorted(set(cited.findall(texts[name]))), [latest], name)
+
     def test_parent_pid_watchdog(self):
         out = os.path.join(self.tmp, "parent")
         per_lesion = cohortmaps.lesion_pass_bytes(self.bundle.n_voxels, 50, engine_null_voxels(self.bundle))
