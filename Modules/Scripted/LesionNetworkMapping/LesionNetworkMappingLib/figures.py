@@ -1928,6 +1928,22 @@ def ortho(map, point=None, template=None, **kwargs):  # noqa: A002
     return figure
 
 
+def _require_lesion_counts(volume):
+    """Refuse a ``--count`` map whose finite values are not whole numbers of at least 0 (a percent map, a
+    probability map, a signed statistic): rounding it would draw impossible lesion counts.
+    """
+    values = np.asarray(volume.data, dtype=np.float64)
+    values = values[np.isfinite(values)]
+    if not values.size:
+        return
+    if values.min() < 0:
+        raise ValueError(f"{volume.name} is not a lesion count map: it has negative values (minimum {values.min():g}). Give the overlapCount map, whose values are whole numbers of lesions.")
+    fractional = values[np.abs(values - np.rint(values)) > 1e-3]
+    if fractional.size:
+        hint = "; it looks like a percent map, give the overlapCount map" if values.max() <= 100 else ""
+        raise ValueError(f"{volume.name} is not a lesion count map: its values are not whole numbers (for example {fractional[0]:g}){hint}. A lesion count map (for example overlapCount) is needed.")
+
+
 def overlap(count=None, lesions=None, template=None, slices="auto", n_lesions=None, binarize_at=0.5, **kwargs):
     """Lesion overlap: colour = number of lesions covering each voxel, exact integer bins 1..max on the
     sequential map, maximum stated ("max 6/23 (26%)").
@@ -1967,6 +1983,7 @@ def overlap(count=None, lesions=None, template=None, slices="auto", n_lesions=No
         ctx = _Context("overlap", options, template, volume)
         ctx._input("count", volume)
         outside_notes = [f"Warning: {_percent_text(1.0 - share)} of the non-zero voxels of {volume.name} lie outside the template's field of view and are not shown." for _, share in ctx.check_coverage([volume], "count map")]
+        _require_lesion_counts(volume)
         native = np.rint(np.nan_to_num(np.asarray(volume.data, dtype=np.float64))).astype(np.int32)
         grid_count = np.rint(reslice(volume, ctx.grid, order=0)).astype(np.int32)
         name = volume.name

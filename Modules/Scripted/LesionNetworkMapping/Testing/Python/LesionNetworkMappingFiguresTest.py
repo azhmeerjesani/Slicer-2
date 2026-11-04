@@ -256,6 +256,22 @@ class FiguresTest(unittest.TestCase):
         self.assertEqual(figure.meta["legend"], "max 5/10 (50%)")
         self.assertEqual(figure.meta["bins"], {2: 39, 5: 1})
 
+    def test_overlap_count_map_must_hold_whole_counts(self):
+        # The overlapPct map (14.29, 28.57) was drawn as "exact integer bins 1-29"; a negative map as "maximum 0"
+        count = np.zeros(SHAPE, dtype=np.float32)
+        count[10:14, 15:20, 14:16] = 1
+        count[11:12, 16:17, 15] = 2
+        for label, data in (("percent", count / 7 * 100), ("fraction", count * 0.4), ("negative", -count)):
+            with self.assertRaises(ValueError, msg=label) as caught:
+                figures.overlap(count=(data.astype(np.float32), self.affine, "group_desc-overlapPct_map"), slices="A 0", **SMALL)
+            self.assertIn("group_desc-overlapPct_map", str(caught.exception), label)
+            self.assertIn("count map", str(caught.exception), label)
+        with self.assertRaises(ValueError) as caught:
+            figures.overlap(count=((count / 7 * 100).astype(np.float32), self.affine, "pct"), slices="A 0", **SMALL)
+        self.assertIn("percent map", str(caught.exception))
+        figure = figures.overlap(count=(count, self.affine, "count"), slices="A 0", **SMALL)
+        self.assertEqual(figure.meta["max_count"], 2)
+
     def test_overlap_n_lesions_below_maximum_is_refused(self):
         # --n-lesions 1 for a count map with maximum 2 was captioned "maximum 2 of 1 lesions (200%)"; 0 and -3 were accepted too
         count = np.zeros(SHAPE, dtype=np.int16)
