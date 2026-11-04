@@ -2180,9 +2180,15 @@ def _openParticipantsTable(path, shell):
     if handler is not None:
         try:
             handler(path, shell)
-            return
-        except Exception:
-            logging.error(f"Studio: cannot open {path} as a study table:\n{traceback.format_exc()}")
+        except Exception as exc:
+            # Studies are available: the toast says why this table was not imported (a ValueError or OSError is about the
+            # user's table or file, anything else is a defect and is logged with its traceback)
+            if isinstance(exc, (ValueError, OSError)):
+                logging.warning(f"Studio: cannot open {path} as a study table: {exc}")
+            else:
+                logging.error(f"Studio: cannot open {path} as a study table:\n{traceback.format_exc()}")
+            shell.toast(_("{name} was not imported: {reason}").format(name=os.path.basename(path), reason=exc), ms=8000, level="warning")
+        return
     columns, rowCount = readTableHeader(path) or ([], 0)
     shown = [column for column in columns if column != "participant_id"][:4]
     columnText = ", ".join(shown) + ("…" if len(columns) - 1 > len(shown) else "")

@@ -379,6 +379,24 @@ def include_value(value):
     return "1" if number == 1 else "0" if number == 0 else None
 
 
+def canonical_value(column, value):
+    """The allowed value (:data:`ALLOWED_VALUES`) that a cell of a standard column with fixed values means, or None.
+
+    Include values go through :func:`include_value` ("yes", "1.0" give "1"); the other columns accept their allowed values
+    in another case ("Traced" gives "traced"). Values that mean none of them ("alive" in a status column) give None, as do
+    columns without fixed values.
+    """
+    allowed = ALLOWED_VALUES.get(column)
+    if allowed is None or value is None:
+        return None
+    text = str(value).strip()
+    if text in allowed:
+        return text
+    if column == "include":
+        return include_value(text)
+    return next((v for v in allowed if v == text.lower()), None)
+
+
 def is_included(row):
     """True unless the row's include value means 0 (:func:`include_value`); the one test every reader uses."""
     return include_value((row or {}).get("include", "1")) != "0"
@@ -412,7 +430,7 @@ def _canonical_cells(rows, path, fill_absent=False):
             if is_missing(text) or text == "nan":
                 row[column] = DEFAULTS.get(column, NA)
                 continue
-            canonical = include_value(text) if column == "include" else next((v for v in allowed if v == text), None)
+            canonical = canonical_value(column, text)
             if canonical is None:
                 unknown.setdefault(column, []).append(row.get("participant_id"))
             else:
@@ -1581,7 +1599,9 @@ class Study:
         """Merge a TSV table keyed by participant_id (ids are normalized to "sub-<label>").
 
         New columns are appended in the file's order; non-missing values overwrite existing cells
-        and unknown subjects are added. All values are validated before anything changes.
+        and unknown subjects are added. All values are validated before anything changes: the standard
+        columns with fixed values take their other spellings (:func:`canonical_value`: include "yes" or
+        "1.0" is 1) and refuse values that mean none of them.
 
         :return: {"added": [ids], "updated": [ids], "columns": [new columns]}.
         """
@@ -1593,7 +1613,11 @@ class Study:
             sid = participant_label(row["participant_id"])
             values = {column: value for column, value in row.items() if column != "participant_id" and not is_missing(value)}
             for column, value in values.items():
-                _normalize(column, format_value(value))  # strict columns raise; set() records the warnings
+                canonical = canonical_value(column, value)
+                if canonical is not None:
+                    values[column] = canonical
+                else:
+                    _normalize(column, format_value(value))  # strict columns raise; set() records the warnings
             prepared.append((sid, values))
         if len({sid for sid, _ in prepared}) != len(prepared):
             raise ValueError(f"{path} has duplicate participant ids")

@@ -291,6 +291,12 @@ class StudyTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             created.import_tsv(self.path("bad.tsv"))
         self.assertEqual(created.subject("sub-01")["group"], "case")  # validated before anything changed
+        # Other spellings of the fixed values keep their meaning: include 1.0 / 0.0 (pandas) or yes, status in another case
+        with open(self.path("pandas.tsv"), "w", encoding="utf-8") as f:
+            f.write("participant_id\tinclude\tstatus\nsub-01\t0.0\tTraced\nsub-02\tyes\tn/a\n")
+        created.import_tsv(self.path("pandas.tsv"))
+        self.assertEqual([(row["include"], row["status"]) for row in created.subjects[:2]], [("0", "traced"), ("1", "untraced")])
+        created.set("sub-01", include=1, status="untraced")
         created.save()
         self.assertEqual(Study.open(created.path).subjects, created.subjects)
 

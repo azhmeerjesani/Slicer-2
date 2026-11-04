@@ -154,6 +154,11 @@ Run with the main window and testing enabled::
   consensus (it deselects the tool; only Cancel edit leaves the edit): Esc removed the Consensus segment without a word.
   After Cancel edit, Ctrl+Z (the Segment Editor's undo) brings the edited Consensus back, and Edit… resumes that segment
   instead of adding a second "Consensus" from the union: Save consensus wrote the plain union, every erasure lost.
+- ``test_72_imported_clinical_table_keeps_status_and_include`` (BB-1): a clinical table opened (or dropped) into an open study
+  with a "status" column of alive / deceased and an "include" column of yes / no is imported as adopting keeps it: status as
+  ``status_original`` (the study's tracing status and QC unchanged), include yes / no as 1 / 0, and the other columns (age,
+  NIHSS) imported. Nothing was imported and the toast said "Studies are not available in this build".
+  ``Study.import_tsv`` reads include 1.0 / 0.0 (pandas); a table that still cannot be imported says why in the toast.
 """
 
 import inspect
@@ -1029,6 +1034,71 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertEqual([[reader(row) for row in study.subjects] for reader in readers], [[True, False, True]] * 3)
         self.assertEqual(libcard_analysis.allTraced(study), (2, True))
         self.assertEqual([row["participant_id"] for row in study.analysis_rows()[0]], ["sub-01", "sub-03"])
+
+    def test_72_imported_clinical_table_keeps_status_and_include(self):
+        from LesionNetworkMappingLib.study import Study
+
+        from StudioLib import importer, study_ui
+
+        folder, study = self._adopt("Import", ["participant_id", "age"], [["sub-01", "60"], ["sub-02", "61"], ["sub-03", "62"]])
+        study.set("sub-01", status="traced", qc="pass")
+        study.save()
+        # The library reads include 1.0 / 0.0 (pandas) as 1 / 0 and still refuses a value that means nothing in the study
+        pandasPath = os.path.join(self.directory, "pandas.tsv")
+        with open(pandasPath, "w", encoding="utf-8") as f:
+            f.write("participant_id\tmrs\tinclude\nsub-01\t2\t1.0\nsub-02\t3\t0.0\nsub-03\t4\t\n")
+        library = Study.open(folder)
+        library.import_tsv(pandasPath)
+        self.assertEqual([(row["mrs"], row["include"]) for row in library.subjects], [("2", "1"), ("3", "0"), ("4", "1")])
+        badPath = os.path.join(self.directory, "bad.tsv")
+        with open(badPath, "w", encoding="utf-8") as f:
+            f.write("participant_id\tqc\nsub-01\tmaybe\n")
+        with self.assertRaises(ValueError):
+            library.import_tsv(badPath)
+
+        class FakeShell:
+            def __init__(self):
+                self.toasts = []
+
+            def isActive(self):
+                return True
+
+            def toast(self, text, *args, **kwargs):
+                self.toasts.append((str(text), kwargs.get("level")))
+
+        fake = FakeShell()
+        session = study_ui.openStudy(folder, None, showLibrary=False)
+        self.addCleanup(study_ui.closeStudy)
+        clinical = os.path.join(self.directory, "clinical.tsv")
+        with open(clinical, "w", encoding="utf-8") as f:
+            f.write("participant_id\tage\tstatus\tinclude\tNIHSS\n"
+                    "sub-01\t70\talive\tyes\t4\nsub-02\t71\tdeceased\tno\t9\nsub-03\t72\talive\tn/a\t12\n")
+        importer._openParticipantsTable(clinical, fake)
+        self.assertEqual(len(fake.toasts), 1, fake.toasts)
+        self.assertNotIn("not available", fake.toasts[0][0])
+        self.assertIn("3 updated", fake.toasts[0][0])
+        self.assertIn("kept status as status_original", fake.toasts[0][0])
+        rows = {row["participant_id"]: row for row in session.study.subjects}
+        self.assertEqual([(rows[sid]["age"], rows[sid]["NIHSS"]) for sid in ("sub-01", "sub-02", "sub-03")], [("70", "4"), ("71", "9"), ("72", "12")])
+        # The study's own columns: tracing status and QC unchanged, include from the yes / no (a missing cell keeps 1)
+        self.assertEqual([rows[sid]["status"] for sid in ("sub-01", "sub-02", "sub-03")], ["traced", "untraced", "untraced"])
+        self.assertEqual(rows["sub-01"]["qc"], "pass")
+        self.assertEqual([rows[sid]["include"] for sid in ("sub-01", "sub-02", "sub-03")], ["1", "0", "1"])
+        self.assertEqual([rows[sid]["status_original"] for sid in ("sub-01", "sub-02", "sub-03")], ["alive", "deceased", "alive"])
+        self.assertNotIn("include_original", session.study.columns)  # yes / no keep their meaning: the study's own column
+        # Importing the same table again updates the same columns (no status_original2)
+        importer._openParticipantsTable(clinical, fake)
+        self.assertNotIn("status_original2", session.study.columns)
+        # A table that cannot be imported (ids that collide) says why, never that studies are not available
+        with open(badPath, "w", encoding="utf-8") as f:
+            f.write("participant_id\tage\n01\t1\nsub-01\t2\n")
+        fake.toasts.clear()
+        importer._openParticipantsTable(badPath, fake)
+        self.assertEqual(len(fake.toasts), 1, fake.toasts)
+        self.assertIn("bad.tsv was not imported", fake.toasts[0][0])
+        self.assertNotIn("not available", fake.toasts[0][0])
+        self.assertNotIn(".studio", fake.toasts[0][0])  # the reason names the user's table, not the temporary copy
+        self.assertEqual(fake.toasts[0][1], "warning")
 
     # Keyboard triage of the subject list (BB-1)
 

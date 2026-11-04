@@ -890,6 +890,44 @@ def _keepClashingColumns(studyModule, columns, rows, dictionary):
     return renamed
 
 
+def _importClashingColumns(studyModule, columns, rows):
+    """Keep the columns of a table imported into a study that are named like a study column with fixed values but hold other
+    values (``_keepClashingColumns()`` of adopting a folder, for an open study).
+
+    Such a column ("status" of alive / deceased) is renamed to ``<name>_original`` (a name the table does not use yet), so
+    that the import keeps its values without changing the study's own column (tracing status, QC). An include column keeps
+    the values that mean 1 or 0 (``study.include_value``: yes / no, 1.0 / 0.0) in the study's include column. A column whose
+    values are all allowed values (in any spelling that ``study.canonical_value`` reads) or missing is the study's column.
+    ``columns`` (without or with participant_id) and ``rows`` are changed in place.
+
+    :return: {old name: new name} of the renamed columns.
+    """
+    renamed = {}
+    for column in studyModule.ALLOWED_VALUES:
+        if column not in columns:
+            continue
+        values = [row.get(column, studyModule.NA) for row in rows]
+        if all(studyModule.is_missing(value) or studyModule.canonical_value(column, value) is not None for value in values):
+            continue
+        target, number = column + ORIGINAL_SUFFIX, 2
+        while target in columns:
+            target, number = f"{column}{ORIGINAL_SUFFIX}{number}", number + 1
+        columns[columns.index(column)] = target
+        keepInclude = column == "include"
+        if keepInclude:
+            columns.append(column)
+        for row, value in zip(rows, values, strict=True):
+            row[target] = row.pop(column, studyModule.NA)
+            mapped = studyModule.include_value(value) if keepInclude else None
+            row[column] = mapped if mapped is not None else studyModule.NA  # a missing cell leaves the study's value
+        if not keepInclude:
+            for row in rows:
+                row.pop(column, None)
+        renamed[column] = target
+        logging.info(f"Studio: the imported column {column} holds other values than the study's ({', '.join(studyModule.ALLOWED_VALUES[column])}); kept as {target}")
+    return renamed
+
+
 def _commonFolder(files):
     folders = [os.path.dirname(os.path.abspath(path)) for path in files]
     if not folders:
@@ -1296,8 +1334,13 @@ def openParticipantsTable(path, shell=None):
     summary = _("{name}: {n} participants ({columns})").format(name=os.path.basename(path), n=len(rows), columns=", ".join(shown) or "participant_id")
     if _session is not None:
         result = _session.importTable(path)
-        _toast(shell, summary + " · " + _("{added} added, {updated} updated in {study}").format(
-            added=len(result["added"]), updated=len(result["updated"]), study=_session.study.name), ms=5000, level="consequence")
+        text = summary + " · " + _("{added} added, {updated} updated in {study}").format(
+            added=len(result["added"]), updated=len(result["updated"]), study=_session.study.name)
+        renamed = result.get("renamed") or {}
+        if renamed:
+            text += " · " + _("kept {columns} (other values than the study's)").format(
+                columns=", ".join(_("{column} as {original}").format(column=column, original=original) for column, original in renamed.items()))
+        _toast(shell, text, ms=5000 if not renamed else 8000, level="consequence")
         return result
     folder = os.path.dirname(os.path.abspath(path))
     problem = studyFolderProblem(folder) if shell is not None else None
@@ -2518,7 +2561,13 @@ class StudySession:
         self.setValues(sids, {column: value})
 
     def importTable(self, path, groupColumn=None, groupMapping=None):
-        """Merge a participants table into the study (``Study.import_tsv``) with the group mapping. Return its report."""
+        """Merge a participants table into the study (``Study.import_tsv``) with the group mapping. Return its report.
+
+        A column named like a study column with fixed values that holds other values ("status" of alive / deceased) is
+        imported as ``<name>_original`` (``_importClashingColumns()``; the report's ``renamed`` lists them), as adopting a
+        folder keeps it: the study's own column is not changed, except include, which takes the values that keep their
+        meaning (yes / no, 1.0 / 0.0). A table that still cannot be imported raises ValueError with a reason that names it.
+        """
         columns, rows = readTable(path)
         if groupColumn is None:
             proposal = groupMappingProposal(columns, rows)
@@ -2528,13 +2577,19 @@ class StudySession:
             applyGroupMapping(rows, groupColumn, groupMapping)
             columns = list(columns) + [column for column in ("group", "include", GROUP_ORIGINAL_COLUMN) if column not in columns and any(column in row for row in rows)]
         studyModule = _lnm("study")
+        columns = list(columns)
+        renamed = _importClashingColumns(studyModule, columns, rows)
         temporary = os.path.join(self.study.path, studyModule.PRIVATE_DIR, f"import-{os.getpid()}.tsv")
         studyModule.write_tsv(temporary, columns, rows)
         try:
             result = self.study.import_tsv(temporary)
+        except ValueError as exc:
+            # The reason names the user's table, not the temporary copy
+            raise ValueError(str(exc).replace(temporary, os.path.basename(path))) from exc
         finally:
             with contextlib.suppress(OSError):
                 os.remove(temporary)
+        result["renamed"] = renamed
         self.flush()
         _notify(self)
         return result

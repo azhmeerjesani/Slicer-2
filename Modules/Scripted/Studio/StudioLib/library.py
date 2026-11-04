@@ -4875,7 +4875,12 @@ class ImportCard(qt.QObject):
             result = _runAction(lambda: studySession.importTable(str(path)), _("Failed to import the table."))
             shell = _shell()
             if result and shell is not None:
-                shell.toast(_("{added} added, {updated} updated").format(added=len(result["added"]), updated=len(result["updated"])))
+                text = _("{added} added, {updated} updated").format(added=len(result["added"]), updated=len(result["updated"]))
+                renamed = result.get("renamed") or {}
+                if renamed:  # columns named like the study's with other values (status of alive / deceased) are kept apart
+                    text += " · " + _("kept {columns} (other values than the study's)").format(
+                        columns=", ".join(_("{column} as {original}").format(column=column, original=original) for column, original in renamed.items()))
+                shell.toast(text, ms=8000 if renamed else 1600)
 
     @staticmethod
     def _report(studySession, report):
