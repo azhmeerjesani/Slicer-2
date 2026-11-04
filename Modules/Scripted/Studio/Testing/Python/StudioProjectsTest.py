@@ -6129,6 +6129,80 @@ class StudioProjectsTest(unittest.TestCase):
             slicer.mrmlScene.Clear(0)
             self.io.backgroundWriter().drain(10.0)
 
+    def test_87_project_killed_before_its_first_save_is_deleted_not_offered_as_saved(self):
+        """A project folder is made when the first scan loads, and its first save takes seconds. A kill (or a full disk)
+        in between left only .studio/project.json (state "open") and a .studio-part file: the crash offer said "Your
+        project X was saved at <time>", its Open project only toasted "has no scene file", and the Library listed an
+        "Empty" card that never opened and was never removed (BB-1). The startup deletes such a folder and never offers a
+        folder without a scene; a folder with anything of the user's (a scene, a saved time, a scan) is kept.
+        """
+        projects = self.projects
+        service = self._service()
+        offered = []
+        service.setProjectPresenter(offered.append)
+
+        def killedFirstSave(name, **extra):
+            project = projects.createProject(name)  # project.json state "open", no savedAt
+            with open(os.path.join(project.path, ".studio", "lock"), "w") as f:
+                f.write("999999\nSlicer\n" + qt.QSysInfo.machineHostName() + "\n")
+            os.makedirs(os.path.join(project.path, "Images"))
+            with open(os.path.join(project.path, "Images", "MRHead.nrrd.studio-part"), "wb") as f:
+                f.write(b"\1" * 1024)
+            return project.path
+
+        gone = killedFirstSave("Killed first save")
+        goneJson = killedFirstSave("Killed json part")
+        os.remove(os.path.join(goneJson, "Images", "MRHead.nrrd.studio-part"))
+        os.rmdir(os.path.join(goneJson, "Images"))
+        with open(os.path.join(goneJson, ".studio", "project.json.1234.part"), "w") as f:
+            f.write("{")
+        # Kept: a scan of the user's in the folder, a saved time, a scene file, a project that is open in a live window
+        withScan = killedFirstSave("Has a scan")
+        with open(os.path.join(withScan, "Images", "MRHead.nrrd"), "wb") as f:
+            f.write(b"\1" * 1024)
+        saved = killedFirstSave("Saved once")
+        data = projects.readJson(projects.projectFile(saved))
+        data["savedAt"] = "2026-11-01T10:00:00Z"
+        self.io.atomicWriteJson(projects.projectFile(saved), data)
+        withScene = killedFirstSave("Has a scene")
+        with open(os.path.join(withScene, "Has a scene.mrml"), "w") as f:
+            f.write("<MRML/>")
+        busy = projects.createProject("Busy first save")
+        self.assertTrue(busy.lock())
+        try:
+            self.assertEqual(sorted(info.name for info in projects.listProjects() if info.contentLine() == "Empty"),
+                             sorted(["Killed first save", "Killed json part", "Has a scan", "Saved once", "Busy first save"]),
+                             "before: the Library lists them as Empty projects")
+            self.assertTrue(projects.isNeverSaved(gone) and projects.isNeverSaved(goneJson))
+            self.assertFalse(any(projects.isNeverSaved(path) for path in (withScan, saved, withScene)))
+            service.removeUnsavedProjects()
+            self.assertFalse(os.path.exists(gone), "the folder that never got a scene is deleted")
+            self.assertFalse(os.path.exists(goneJson))
+            for path in (withScan, saved, withScene, busy.path):
+                self.assertTrue(os.path.isdir(path), os.path.basename(path))
+            self.assertEqual(os.path.isfile(os.path.join(withScan, "Images", "MRHead.nrrd")), True)
+            crashed = service.scanProjectsAtStartup()
+            self.assertEqual([info.name for info in crashed], ["Has a scene"], "only a project with a scene is offered")
+            self.assertEqual(len(offered), 1)
+            self.assertEqual([info.name for info in offered[0]], ["Has a scene"])
+        finally:
+            busy.unlock()
+        # The next start: nothing is left of the killed first save, and nothing is offered again
+        self.assertEqual(projects.removeUnsavedProjects(), ["Busy first save"], "its window is gone now: nothing of it was saved")
+        self.assertEqual(sorted(info.name for info in projects.listProjects()),
+                         ["Has a scan", "Has a scene", "Saved once"])
+        # The project that is open in this process and has no scene yet is never deleted
+        current = projects.createProject("First save pending")
+        self.assertTrue(current.lock())
+        projects.setCurrentProject(current)
+        try:
+            self.assertEqual(projects.removeUnsavedProjects(), [])
+            self.assertTrue(os.path.isdir(current.path))
+        finally:
+            projects.setCurrentProject(None)
+            current.unlock()
+
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk

@@ -1190,6 +1190,10 @@ class AutosaveService:
         except Exception:
             logging.error("Slicer Studio: deleting the copies of interrupted Duplicates failed:\n" + traceback.format_exc())
         try:
+            self.removeUnsavedProjects()
+        except Exception:
+            logging.error("Slicer Studio: deleting the project folders that never got a save failed:\n" + traceback.format_exc())
+        try:
             self.scanProjectsAtStartup()
         except Exception:
             logging.error("Slicer Studio: scanning the projects for a crash failed:\n" + traceback.format_exc())
@@ -2328,6 +2332,15 @@ class AutosaveService:
         rootPath = projects.root()
         _io().backgroundWriter().submit(projects.removeCopyLeftovers, rootPath)
 
+    def removeUnsavedProjects(self):
+        """Delete the project folders that a killed Slicer Studio (or a full disk) left before their first save: no scene,
+        no scan, only .studio and temporary files. They are not a project to offer after a crash, and not one to list.
+        """
+        projects = self._projects()
+        if not projects.isEnabled():
+            return []
+        return projects.removeUnsavedProjects()
+
     def scanProjectsAtStartup(self):
         """Offer the projects that were open when Slicer Studio closed unexpectedly (each one once)."""
         projects = self._projects()
@@ -2338,6 +2351,8 @@ class AutosaveService:
         for info in projects.listProjects():
             if info.state != "open" or info.isCurrent() or projects.isLockedByOther(info.path):
                 continue
+            if info.scene is None:
+                continue  # nothing was saved (the folder of a first save that never came is not offered as "saved")
             crashed.append(info)
             data = dict(info.data, state="crashed")
             io.backgroundWriter().submit(io.atomicWriteJson, projects.projectFile(info.path), data)

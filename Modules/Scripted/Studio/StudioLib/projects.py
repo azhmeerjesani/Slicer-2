@@ -1427,6 +1427,68 @@ def _hasOwnScene(path):
     return os.path.isfile(os.path.join(path, name + SCENE_EXTENSION))
 
 
+def _onlyTemporaryFiles(path):
+    """True if ``path`` is a file or folder of temporary names only (a folder: every file in it has one)."""
+    if any(marker in os.path.basename(path) for marker in TEMPORARY_MARKERS):
+        return True
+    if os.path.islink(path) or not os.path.isdir(path):
+        return False
+    try:
+        entries = os.listdir(path)
+    except OSError:
+        return False
+    return all(_onlyTemporaryFiles(os.path.join(path, entry)) for entry in entries)
+
+
+def isNeverSaved(projectPath):
+    """True if the project folder never got its first save: a .studio/project.json without "savedAt", no scene file, and
+    nothing else in the folder but temporary files of the interrupted save (the folder of a project is created when its
+    first scan is loaded, and the first scene is written seconds later: a kill, or a full disk, in between left it).
+    Such a folder holds nothing of the user's, and it cannot be opened. Worker-safe.
+    """
+    projectPath = str(projectPath)
+    if not os.path.isfile(projectFile(projectPath)):
+        return False  # not a folder that Studio made (or one that was emptied by hand): never touched
+    data = readProjectJson(projectPath)
+    if data is not None and data.get("savedAt"):
+        return False
+    if sceneFile(projectPath) is not None:
+        return False
+    try:
+        names = os.listdir(projectPath)
+    except OSError:
+        return False
+    return all(name == PRIVATE_DIR or _onlyTemporaryFiles(os.path.join(projectPath, name)) for name in names)
+
+
+def removeUnsavedProjects(rootPath=None):
+    """Delete the project folders that never got a first save (``isNeverSaved``) and are not open anywhere: they were left
+    by a Slicer Studio that was killed or ran out of disk space before its first save, and the Library lists them as an
+    "Empty" project that cannot be opened. Return the names that were deleted.
+    """
+    folder = projectsFolder(rootPath)
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return []
+    removed = []
+    for name in names:
+        path = os.path.join(folder, name)
+        if name.startswith(".") or not os.path.isdir(path) or os.path.islink(path) or not isNeverSaved(path):
+            continue
+        current = currentProject()
+        if current is not None and os.path.normcase(os.path.realpath(current.path)) == os.path.normcase(os.path.realpath(path)):
+            continue
+        if isLockedByOther(path):
+            continue
+        removePaths([path])
+        if not os.path.exists(path):
+            removed.append(name)
+    if removed:
+        notifyChanged()
+    return removed
+
+
 def removeCopyLeftovers(rootPath=None):
     """Delete the partial copies of Duplicates that were interrupted (a crash, a kill, a power loss) in Projects/.
 
