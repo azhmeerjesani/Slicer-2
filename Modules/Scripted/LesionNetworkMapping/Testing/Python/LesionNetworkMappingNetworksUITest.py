@@ -541,6 +541,129 @@ class LesionNetworkMappingNetworksUITest(unittest.TestCase):
             slicer.app.processEvents()
             shutil.rmtree(folder, ignore_errors=True)
 
+    def test_group_null_percentiles_of_a_volume_stored_k_flipped(self):
+        """The "vs null" percentiles of a group mean-T map read back from a scene or project are those of its file.
+
+        A Nulls run keeps its null maps on a voxel sample: positions into the connectome mask voxels in the connectome's
+        storage order (the order of the group map file it wrote). Slicer's volume reader stores the k axis of an FSL-style
+        file (diag(-2, 2, 2)) the other way round, so after a scene or project reopen the group map volume holds the same
+        voxels in another order. The card must put the map back in the file's (or the open connectome's) order before
+        taking the sample; it took the sample from the volume's own order, so the percentiles silently changed.
+        """
+        import json
+        import os
+        import shutil
+        import tempfile
+        from types import SimpleNamespace
+        from unittest import mock
+
+        import numpy as np
+        import vtk
+
+        from LesionNetworkMappingLib import display, nifti
+
+        widget = slicer.modules.LesionNetworkMappingWidget
+        card = self.card
+        folder = tempfile.mkdtemp(prefix="lnm-networks-groupnull-")
+        shape = (20, 20, 20)
+        affine = np.diag([-2.0, 2.0, 2.0, 1.0])  # FSL's LAS storage: Slicer's reader flips its k axis
+        affine[:3, 3] = (19.0, -19.0, -19.0)
+        rng = np.random.default_rng(11)
+        data = np.zeros(shape, dtype=np.float32)
+        data[2:18, 2:18, 2:18] = rng.normal(0.5, 1.0, (16, 16, 16))
+        data[2:18, 2:18, 2:7] += 2.0  # a bottom slab of higher values: the k order matters
+        path = os.path.join(folder, "group_conn-Test_desc-meanT_map.nii.gz")
+        nifti.write_nifti(path, data, affine)
+        with open(os.path.join(folder, "maps.tsv"), "w", encoding="utf-8") as f:
+            f.write("participant_id\tT\n")
+        inMask = np.flatnonzero(data.reshape(-1))
+        sample = np.sort(rng.choice(inMask.size, size=inMask.size // 3, replace=False)).astype(np.int64)
+        k = 49
+        # Null maps with the same bottom slab as the map, of random strength: where the slab lands in the volume matters
+        slab = np.zeros(shape, dtype=bool)
+        slab[:, :, 2:7] = True
+        inSlab = slab.reshape(-1)[inMask][sample]
+        nullMaps = (rng.normal(0.5, 1.0, (k, sample.size)) + rng.uniform(0.0, 4.0, (k, 1)) * inSlab).astype(np.float32)
+        nullsDir = os.path.join(folder, "nulls-rl_independent-exact")
+        os.makedirs(nullsDir)
+        np.save(os.path.join(nullsDir, "null_group_mean.npy"), nullMaps)
+        np.save(os.path.join(nullsDir, "null_group_voxels.npy"), sample)
+        with open(os.path.join(nullsDir, "nulls.json"), "w", encoding="utf-8") as f:
+            json.dump({"design": {"kind": "rl_independent"}, "null_group_maps": {"file": "null_group_mean.npy", "voxels": "null_group_voxels.npy", "statistic": "T", "shape": [k, int(sample.size)]}}, f)
+        rois = {}
+        for name, box in (("bottom", np.s_[2:18, 2:18, 2:7]), ("top", np.s_[2:18, 2:18, 13:18]), ("corner", np.s_[2:9, 2:9, 2:9])):
+            roi = np.zeros(shape, dtype=np.uint8)
+            roi[box] = 1
+            rois[name] = os.path.join(folder, f"{name}.nii.gz")
+            nifti.write_nifti(rois[name], roi, affine)
+
+        # The reference: the file's in-mask values and the ROIs as positions into them, in the file's order
+        position = np.full(data.size, -1, dtype=np.int64)
+        position[inMask] = np.arange(inMask.size)
+        units = []
+        for name, roiPath in rois.items():
+            roi, _roiAffine, _header = nifti.read_nifti(roiPath)
+            positions = position[np.flatnonzero(np.asarray(roi).reshape(-1))]
+            units.append({"system": "roi", "name": name, "atlas": None, "positions": positions[positions >= 0]})
+        expected = {unit["name"]: result for unit, result in zip(units, self.cn.nullPercentiles(data.reshape(-1)[inMask].astype(np.float64), units, nullMaps, sample), strict=True)}
+
+        # The group map volume as Slicer reads it back: the k axis stored the other way round
+        flipped = affine.copy()
+        flipped[:3, 2] = -affine[:3, 2]
+        flipped[:3, 3] = affine[:3, 3] + affine[:3, 2] * (shape[2] - 1)
+        matrix = vtk.vtkMatrix4x4()
+        for row in range(4):
+            for column in range(4):
+                matrix.SetElement(row, column, float(flipped[row, column]))
+        node = slicer.util.addVolumeFromArray(np.ascontiguousarray(np.transpose(data[:, :, ::-1], (2, 1, 0))), ijkToRAS=matrix, name="Cohort meanT (reopened)")
+        node.SetAttribute("LNM.GroupMapVolume", "1")
+        node.SetAttribute(display.GROUP_MAP_ATTRIBUTE, "meanT")
+        stub = SimpleNamespace(shape=shape, affine=affine, mask_indices=inMask, n_voxels=int(inMask.size), n_subjects=100)
+
+        class Context:
+            """The source model's context with a connectome on the map file's grid."""
+
+            def __init__(self, ctx):
+                self._ctx = ctx
+                self.bundle = stub
+
+            def __getattr__(self, name):
+                return getattr(self._ctx, name)
+
+        storedChoice, storedMaps = card.model.choice, widget.cohortMapsPath
+        card.widget.collapsed = True
+        try:
+            widget.cohortMapsPath = os.path.join(folder, "maps.tsv")
+            card.rois.clear()
+            for roiPath in rois.values():
+                card.addRoiFile(roiPath)
+            card.model.setChoice("group")
+            for label, patch in (("without a connectome", mock.patch.object(card.model.ctx, "bundle", None, create=True)),
+                                 ("with the connectome open", mock.patch.object(card.model, "ctx", Context(card.model.ctx)))):
+                with self.subTest(label), patch:
+                    card._nullCache = None
+                    rows = card.update()
+                    self.assertTrue(rows, card.messageLabel.text)
+                    self.assertEqual(card.source.key, "group")
+                    self.assertIsNotNone(card.source.path, "the group map file was not found next to maps.tsv")
+                    got = {row["name"]: row.get("null") for row in rows if row["system"] == "roi"}
+                    self.assertEqual(set(got), set(expected))
+                    for name, result in expected.items():
+                        self.assertIsNotNone(got[name], f"{label}: no null result for ROI {name}: {card.nullLabel.text}")
+                        self.assertNotIn("reason", got[name], f"{label}: {got[name]}")
+                        self.assertAlmostEqual(got[name]["pctMean"], result["pctMean"], places=6, msg=f"{label}: ROI {name} pctMean")
+                        self.assertAlmostEqual(got[name]["pctR"], result["pctR"], places=6, msg=f"{label}: ROI {name} pctR")
+        finally:
+            card.widget.collapsed = True
+            card.rois.clear()
+            card.model.setChoice(storedChoice)
+            widget.cohortMapsPath = storedMaps
+            card._nullCache = None
+            slicer.mrmlScene.RemoveNode(node)
+            card.schedule()
+            slicer.app.processEvents()
+            shutil.rmtree(folder, ignore_errors=True)
+
     def test_scheme_click_without_buttonClicked_int(self):
         card = self.card
         self.assertIsNotNone(card)

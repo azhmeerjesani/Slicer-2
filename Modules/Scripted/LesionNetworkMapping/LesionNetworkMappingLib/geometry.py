@@ -108,6 +108,38 @@ def signed_permutation(src_affine, dst_affine, tolerance=1e-3):
     return SignedPermutation(axes, signs, tuple(int(v) for v in rounded[:3, 3]))
 
 
+def reorder_to_grid(volume, affine, dst_shape, dst_affine, tolerance=1e-3):
+    """``volume`` [i, j, k] (on ``affine``) stored in the voxel order of the grid (``dst_shape``, ``dst_affine``).
+
+    Two grids that hold the same voxel centres and extent differ only by their storage order (axes swapped
+    or flipped): Slicer's volume reader, for example, stores the k axis of an FSL MNI file the other way
+    round. Values that are indexed by the destination's flat voxel order (a connectome mask, a voxel sample
+    of null maps) then need the volume in that order.
+
+    :return: C-contiguous array of shape ``dst_shape`` (the same values, moved), or None when the grids do
+      not hold the same voxels (a resampled or cropped grid, another voxel size).
+    """
+    volume = np.asarray(volume)
+    dst_shape = tuple(int(n) for n in dst_shape[:3])
+    if volume.ndim != 3:
+        return None
+    mapping = signed_permutation(affine, dst_affine, tolerance=tolerance)
+    if mapping is None:
+        return None
+    for axis in range(3):
+        target = mapping.axes[axis]
+        first = mapping.offsets[target]
+        last = first + mapping.signs[axis] * (volume.shape[axis] - 1)
+        if volume.shape[axis] != dst_shape[target] or min(first, last) != 0 or max(first, last) != dst_shape[target] - 1:
+            return None
+    order = np.argsort(mapping.axes)  # source axis of each destination axis
+    moved = np.transpose(volume, order)
+    flips = tuple(target for target in range(3) if mapping.signs[order[target]] < 0)
+    if flips:
+        moved = np.flip(moved, axis=flips)
+    return np.ascontiguousarray(moved)
+
+
 # Template grids and spaces
 #
 # A grid (shape, voxel size and position) does not name a space: TemplateFlow resamples

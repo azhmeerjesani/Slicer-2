@@ -414,6 +414,16 @@ def findGroupNull(source):
         return None, _("The null cohorts are of the mean map of the statistic ({desc} is not).").format(desc=source.desc or source.name)
     if not source.path:
         return None, _("A group map is compared with null cohorts only when it is a file of the cohort's analysis folder.")
+    # The voxel sample indexes the in-mask voxels in the storage order of the cohort's connectome, which wrote the map file:
+    # the map must be in that order (a volume read back from a scene is stored flipped until it is put back on the file's grid).
+    from LesionNetworkMappingLib.geometry import Grid
+
+    try:
+        fileGrid = Grid.from_nifti(source.path)
+    except Exception as exc:
+        return None, _("The map file could not be read: {error}").format(error=exc)
+    if not _sameGrid(source.grid, fileGrid.affine, fileGrid.shape):
+        return None, _("The null maps are not on the grid of this map.")
     folder = os.path.dirname(os.path.abspath(source.path))
     candidates = []
     for base in (folder, os.path.dirname(folder)):

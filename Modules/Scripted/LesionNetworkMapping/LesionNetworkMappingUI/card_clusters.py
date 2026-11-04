@@ -255,18 +255,49 @@ def _volumeValues(node):
     return volume, Grid(volume.shape, affine)
 
 
-def _maskIndices(volume, grid, bundle):
-    """The in-mask voxels: the connectome mask when the map lies on its grid, else the finite non-zero voxels."""
+def _inMask(volume, grid, bundle):
+    """``(volume, grid, indices)`` of a map with its in-mask voxels: the connectome mask when the map lies on its grid, else
+    the finite non-zero voxels.
+
+    A map that holds the connectome's voxels in another storage order (Slicer's reader stores the k axis of an FSL MNI
+    file the other way round, so a map read back from a scene or project is flipped) is first stored in the connectome's
+    order: the null maps' voxel sample, the ROI chart and the relocated-lesion nulls index the connectome mask voxels.
+    """
     import numpy as np
+
+    from LesionNetworkMappingLib.geometry import Grid, reorder_to_grid
 
     if bundle is not None:
         try:
-            if tuple(bundle.shape) == tuple(grid.shape) and np.allclose(np.asarray(bundle.affine), grid.affine, atol=1e-4):
-                return np.asarray(bundle.mask_indices)
-        except (AttributeError, TypeError, ValueError):
+            shape, affine = tuple(bundle.shape), np.asarray(bundle.affine, dtype=np.float64)
+            if shape == tuple(grid.shape) and np.allclose(affine, grid.affine, atol=1e-4):
+                return volume, grid, np.asarray(bundle.mask_indices)
+            moved = reorder_to_grid(volume, grid.affine, shape, affine)
+            if moved is not None:
+                return moved, Grid(shape, affine), np.asarray(bundle.mask_indices)
+        except (AttributeError, TypeError, ValueError, np.linalg.LinAlgError):
             pass
     flat = volume.reshape(-1)
-    return np.flatnonzero(np.isfinite(flat) & (flat != 0))
+    return volume, grid, np.flatnonzero(np.isfinite(flat) & (flat != 0))
+
+
+def _onFileGrid(volume, grid, path):
+    """``(volume, Grid)`` of a map stored in the voxel order of the NIfTI file ``path`` it was loaded from, when the two hold
+    the same voxels in another storage order; None when the map is already in that order or is not on the file's voxels.
+    """
+    import numpy as np
+
+    from LesionNetworkMappingLib.geometry import Grid, reorder_to_grid
+
+    try:
+        fileGrid = Grid.from_nifti(path)
+    except Exception:
+        logging.exception("Lesion network mapping: the grid of a map file could not be read")
+        return None
+    if fileGrid.shape == tuple(grid.shape) and np.allclose(fileGrid.affine, grid.affine, atol=1e-4):
+        return None
+    moved = reorder_to_grid(volume, grid.affine, fileGrid.shape, fileGrid.affine)
+    return None if moved is None else (moved, fileGrid)
 
 
 def _kindDefault(desc, volume):
@@ -307,6 +338,7 @@ class SourceModel:
         self.listeners = []
         self._cache = None
         self._fileSpace = None  # (token, space) of the last map file read
+        self._fileOrder = None  # (key, (volume, grid, indices) or None) of the group map in its file's voxel order
         # The Result card's rule re-resolved to another threshold or sign: the "Result rule" sources changed
         thresholdChanged = getattr(ctx, "thresholdChanged", None)
         if thresholdChanged is not None:
@@ -446,7 +478,7 @@ class SourceModel:
 
         def load():
             volume, grid = _volumeValues(node)
-            return volume, grid, _maskIndices(volume, grid, self.ctx.bundle)
+            return _inMask(volume, grid, self.ctx.bundle)
 
         volume, grid, indices = self._loaded(token, load)
         if indices.size == 0 or not np.isfinite(volume).any():
@@ -526,10 +558,35 @@ class SourceModel:
                 if name.endswith(f"_desc-{desc}_map.nii.gz") and name.startswith("group_"):
                     path = os.path.join(folder, name)
                     break
+        if path:
+            volume, grid, indices = self._inFileOrder(token, path, volume, grid, indices)
         statistic = "T" if desc in ("meanT", "legacyWelchT") else ("Fz" if desc in ("meanFz",) else (desc or _("value")))
         record = getattr(widget, "cohortInfo", None) if widget is not None else None
         n = record.get("n") if isinstance(record, dict) else None
         return MapSource("group", node.GetName(), statistic, volume, grid, indices, threshold, sign, n, False, None, desc=desc, path=path, token=token, space=volumeSpace(node))
+
+    def _onConnectome(self, grid):
+        """True when ``grid`` is the open connectome's grid (the map's in-mask voxels are then the connectome mask)."""
+        import numpy as np
+
+        bundle = self.ctx.bundle
+        try:
+            return bundle is not None and tuple(bundle.shape) == tuple(grid.shape) and np.allclose(np.asarray(bundle.affine, dtype=np.float64), grid.affine, atol=1e-4)
+        except (AttributeError, TypeError, ValueError):
+            return False
+
+    def _inFileOrder(self, token, path, volume, grid, indices):
+        """``(volume, grid, indices)`` of a group map in the voxel order of its file (the cohort run's connectome order, which the
+        Nulls run's voxel sample indexes) when no connectome on its grid is open and the volume holds the file's voxels in
+        another storage order (a map read back from a scene or project); else unchanged.
+        """
+        if self._onConnectome(grid):
+            return volume, grid, indices
+        key = (token, path, os.stat(path).st_mtime_ns if os.path.isfile(path) else None)
+        if self._fileOrder is None or self._fileOrder[0] != key:
+            moved = _onFileGrid(volume, grid, path) if key[2] is not None else None
+            self._fileOrder = (key, None if moved is None else _inMask(moved[0], moved[1], None))
+        return self._fileOrder[1] or (volume, grid, indices)
 
     def _fileSource(self, key):
         import numpy as np
@@ -555,7 +612,7 @@ class SourceModel:
                 raise SourceError(_("The file is not a 3D map (shape {shape}): choose a statistic map.").format(shape="x".join(str(extent) for extent in data.shape)))
             volume = data.astype(np.float64)
             grid = Grid(volume.shape, affine)
-            return volume, grid, _maskIndices(volume, grid, self.ctx.bundle)
+            return _inMask(volume, grid, self.ctx.bundle)
 
         volume, grid, indices = self._loaded(token, load)
         if indices.size == 0 or not np.isfinite(volume).any():
