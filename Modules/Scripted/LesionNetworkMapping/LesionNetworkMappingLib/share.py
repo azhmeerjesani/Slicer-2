@@ -61,7 +61,7 @@ import numpy as np
 
 from . import export
 from . import schema
-from .study import NA, PRIVATE_DIR, Study, is_included, is_missing
+from .study import NA, PRIVATE_DIR, Study, _tsv_field, is_included, is_missing
 
 SHARE_FORMAT = "slicer-studio-share"
 SHARE_VERSION = 1
@@ -649,9 +649,10 @@ def _cell(value):
 
 
 def _tsv(columns, rows):
-    lines = ["\t".join(columns)]
+    """TSV text; a cell that starts with a double quote is quoted (inner quotes doubled) so that pandas, R and the csv module read it back as written."""
+    lines = ["\t".join(_tsv_field(column) for column in columns)]
     for row in rows:
-        lines.append("\t".join(_cell(row.get(column, NA)) for column in columns))
+        lines.append("\t".join(_tsv_field(_cell(row.get(column, NA))) for column in columns))
     return "\n".join(lines) + "\n"
 
 
