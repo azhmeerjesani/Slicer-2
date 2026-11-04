@@ -834,6 +834,45 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         finally:
             logging.getLogger().removeHandler(handler)
 
+    def test_folder_card_participants_csv_is_imported_by_create_study(self):
+        """A participants.csv next to the files: the card shows it and its group mapping, and Create study imports it
+        (BB-1: only a participants.tsv was adopted, so the CSV's columns and the mapping were dropped silently).
+        """
+        import csv
+
+        from StudioLib import importer, library
+
+        studioShell = self._applyStudio()
+        folder = self._writeTinyFiles(3, "csvtable")
+        with open(os.path.join(folder, "participants.csv"), "w", encoding="utf-8") as f:
+            f.write("participant_id,age,aphasia_score,group\nsub-01,54.5,1.25,Patient\nsub-02,61.75,0.125,Kontrolle\nsub-03,70,2,Patient\n")
+        importer.loadFolder(folder, studioShell)
+        self._pump(6)
+        card = library.canvas().folderCard()
+        self.assertIsNotNone(card)
+        if card.createStudyButton is None:
+            card.close()
+            return
+        self.assertIn("participants.csv · 3 rows · age, aphasia_score, group", card.participantsLabel.text)
+        self.assertEqual(card.groupColumn, "group")
+        for value, group in (("Patient", "case"), ("Kontrolle", "control")):
+            combo = card.groupCombos[value]
+            combo.setCurrentIndex(combo.findData(group))
+        self.assertEqual(card.groupMapping(), {"Patient": "case", "Kontrolle": "control"})
+        card.createStudyButton.click()
+        self._pump(6)
+        self.cleanup.append(lambda: library._studyUi().closeStudy())
+        self.assertIsNone(library.canvas().folderCard())
+        with open(os.path.join(folder, "participants.tsv"), encoding="utf-8") as f:
+            rows = {row["participant_id"]: row for row in csv.DictReader(f, delimiter="\t")}
+        self.assertEqual(sorted(rows), ["sub-01", "sub-02", "sub-03"])
+        self.assertEqual({sid: row.get("age") for sid, row in rows.items()}, {"sub-01": "54.5", "sub-02": "61.75", "sub-03": "70"})
+        self.assertEqual({sid: row.get("aphasia_score") for sid, row in rows.items()}, {"sub-01": "1.25", "sub-02": "0.125", "sub-03": "2"})
+        self.assertEqual({sid: row["group"] for sid, row in rows.items()}, {"sub-01": "case", "sub-02": "control", "sub-03": "case"})
+        # The user's table is read, never rewritten
+        with open(os.path.join(folder, "participants.csv"), encoding="utf-8") as f:
+            self.assertTrue(f.read().startswith("participant_id,age,aphasia_score,group\nsub-01,54.5,1.25,Patient\n"))
+
     #
     # Loaded set
     #

@@ -5241,11 +5241,14 @@ class FolderCard:
         groupColumn, mapping = self.groupColumn, self.groupMapping()
 
         def create():
-            inFolder = table is not None and os.path.normcase(os.path.dirname(os.path.abspath(table))) == os.path.normcase(os.path.abspath(folder))
-            studySession = studyUi.createStudy(files, _shell(), folder=folder, groupColumn=groupColumn if inFolder else None,
-                                               groupMapping=mapping if inFolder else None)
-            if table is not None and not inFolder:
-                # A participants table of the parent folder (BIDS): imported into the new study
+            # Only the folder's own participants.tsv is adopted in place (study_ui.createStudy); any other table the card
+            # shows (a participants.csv next to the files, a participants table of the parent folder in BIDS) is
+            # imported into the new study with the group mapping chosen in the card
+            adopted = table is not None and os.path.basename(table) == "participants.tsv" and \
+                os.path.normcase(os.path.dirname(os.path.abspath(table))) == os.path.normcase(os.path.abspath(folder))
+            studySession = studyUi.createStudy(files, _shell(), folder=folder, groupColumn=groupColumn if adopted else None,
+                                               groupMapping=mapping if adopted else None)
+            if table is not None and not adopted:
                 studySession.importTable(table, groupColumn, mapping)
             return studySession
 
