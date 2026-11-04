@@ -46,6 +46,7 @@ import os
 import re
 import shutil
 import sys
+import threading
 
 import qt
 import slicer
@@ -120,6 +121,7 @@ BUILTIN_DEFAULT = _BUILTINS[0][0]
 _listeners = []
 _registered = {"root": None, "stamp": None, "ids": set(), "others": []}
 _thumbnails = {}
+_unwritableCopies = set()  # copied template folders whose template.json could not be given their own id
 
 
 #
@@ -828,22 +830,111 @@ def readRecord(folder):
 
 
 def userTemplates(rootPath=None):
-    """Your templates (folders of Templates/ with a template.json), sorted by name."""
+    """Your templates (folders of Templates/ with a template.json), sorted by name. Each has its own id: a folder copied
+    in by hand with the id of another one gets its own first (``_makeCopiedIdsUnique``).
+    """
     folder = templatesFolder(rootPath)
-    found = []
+    entries = []
     try:
         names = os.listdir(folder)
     except OSError:
-        return found
+        return []
     for name in names:
         path = os.path.join(folder, name)
         if name.startswith(".") or not os.path.isdir(path):
             continue
         record = readRecord(path)
         if record is not None:
-            found.append(Template(record, folder=path))
+            entries.append((name, path, record))
+    _makeCopiedIdsUnique(entries)
+    found = [Template(record, folder=path) for name, path, record in entries]
     found.sort(key=lambda template: template.name.lower())
     return found
+
+
+def _arrivalRank(name, path, record):
+    """Sort key of the template folders that share an id: the one that was there first keeps it. That is the folder an add
+    named after the template ("Lab ICBM", or "Lab ICBM 2" when that name was taken), then the oldest template.json (a
+    copy is a new file: its creation, or inode change, time is that of the copy), then the folder name.
+    """
+    from . import projects
+
+    base = projects.sanitizeName(str(record.get("name") or record.get("id")), fallback="Template").lower()
+    lower = name.lower()
+    named = lower == base or (lower.startswith(base + " ") and lower[len(base) + 1:].isdigit())
+    try:
+        info = os.stat(os.path.join(path, TEMPLATE_JSON))
+        arrived = getattr(info, "st_birthtime", None) or info.st_ctime
+    except OSError:
+        arrived = float("inf")
+    return (0 if named else 1, arrived, name)
+
+
+def _makeCopiedIdsUnique(entries):
+    """Give each template folder of ``entries`` (``(folder name, path, record)`` of one Templates/ folder) whose id another
+    one there already has its own id and name, written into its template.json: a folder copied into Templates/ by hand
+    (a colleague's template, a duplicate made in the file manager) keeps everything but its id. The folder that was there
+    first keeps the id (``_arrivalRank``), so what refers to it (the default, scans, studies) stays its; the copy gets
+    "My template 2" ("my-template-2") as an add would name it (the rule of ``makeMovedIdsUnique`` after a move). The
+    records of ``entries`` are replaced. Worker-safe (files only).
+    """
+    groups = {}
+    for index, (name, path, record) in enumerate(entries):
+        groups.setdefault(str(record.get("id")), []).append(index)
+    duplicates = [indexes for indexes in groups.values() if len(indexes) > 1]
+    if not duplicates:
+        return {}
+
+    def nameOf(record):
+        return str(record.get("name") or record.get("id")).strip().lower()
+
+    takenSlugs = set(groups)
+    changed = {}
+    for indexes in duplicates:
+        indexes = sorted(indexes, key=lambda index: _arrivalRank(*entries[index]))
+        for index in indexes[1:]:
+            name, path, record = entries[index]
+            slug = str(record.get("id"))
+            baseName = str(record.get("name") or slug)
+            # A name another template has (without case) becomes "<name> 2"; a name it alone has stays
+            takenNames = {nameOf(other[2]) for position, other in enumerate(entries) if position != index}
+            newName, counter = baseName, 2
+            while newName.strip().lower() in takenNames:
+                newName = f"{baseName} {counter}"
+                counter += 1
+            base = slugOf(newName)
+            newSlug, counter = base, 2
+            while newSlug in takenSlugs:
+                newSlug = f"{base}-{counter}"
+                counter += 1
+            updated = dict(record, id=newSlug, name=newName)
+            if not _writeRecord(path, updated):
+                # A folder that cannot be written (read-only) still gets its own id while it is listed
+                if path not in _unwritableCopies:
+                    _unwritableCopies.add(path)
+                    logging.warning(f"Slicer Studio: the copied template {baseName} could not be given its own id in its template.json")
+            entries[index] = (name, path, updated)
+            takenSlugs.add(newSlug)
+            changed[USER_PREFIX + slug] = USER_PREFIX + newSlug
+            # The cached picture of the shared id may be the copy's
+            forgetThumbnails(USER_PREFIX + slug)
+    return changed
+
+
+def _writeRecord(folder, record):
+    """Replace the template.json of ``folder`` with ``record`` (atomically); return True when it was written."""
+    target = os.path.join(folder, TEMPLATE_JSON)
+    staging = f"{target}.renaming-{os.getpid()}-{threading.get_ident()}"
+    try:
+        with open(staging, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(record, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        os.replace(staging, target)
+        return True
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.remove(staging)
+        return False
 
 
 def listTemplates(rootPath=None):
@@ -1123,19 +1214,10 @@ def makeMovedIdsUnique(folder, movedNames, recordId=None):
                 counter += 1
         if newSlug != slug or newName != baseName:
             updated = dict(record, id=newSlug, name=newName)
-            target = os.path.join(path, TEMPLATE_JSON)
-            staging = f"{target}.renaming-{os.getpid()}"
             if recordId is not None and newSlug != slug:
                 recordId(USER_PREFIX + slug, USER_PREFIX + newSlug)
-            try:
-                with open(staging, "w", encoding="utf-8", newline="\n") as f:
-                    json.dump(updated, f, indent=2, ensure_ascii=False)
-                    f.write("\n")
-                os.replace(staging, target)
-            except OSError:
-                logging.warning(f"Slicer Studio: the moved template {baseName} could not be renamed", exc_info=True)
-                with contextlib.suppress(OSError):
-                    os.remove(staging)
+            if not _writeRecord(path, updated):
+                logging.warning(f"Slicer Studio: the moved template {baseName} could not be renamed")
                 newSlug, newName = slug, baseName
             if newSlug != slug:
                 changed[USER_PREFIX + slug] = USER_PREFIX + newSlug
@@ -1353,7 +1435,7 @@ def addTemplate(imagePath, mask=None, head=None, surfaces=(), name=None, space=N
 
     ``copy`` must be True: the files are always copied into the Slicer Studio folder (the originals are never changed, and
     a template never refers to a file outside its folder). A folder you put into Templates/ yourself with a template.json
-    is listed as it is.
+    is listed as it is (with its own id when another template there has its id: ``userTemplates``).
 
     :raises TemplateError: see ``prepareAdd``.
     """
@@ -1477,8 +1559,8 @@ def forgetThumbnails(templateId):
     """Drop the in-memory thumbnails of a template at every size (the cache keys are ``(id, size)``): a template added later
     under the same name has the same id and must not show the removed one's picture.
     """
-    for key in [key for key in _thumbnails if key[0] == templateId]:
-        del _thumbnails[key]
+    for key in [key for key in list(_thumbnails) if key[0] == templateId]:
+        _thumbnails.pop(key, None)
 
 
 def rememberThumbnail(template, size, pixmap):

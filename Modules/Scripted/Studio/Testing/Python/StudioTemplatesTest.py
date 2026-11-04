@@ -1714,3 +1714,65 @@ class StudioTemplatesTest(unittest.TestCase):
             self.assertFalse([node for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode") if node.GetAttribute("Studio.TemplateId") == template.id])
         finally:
             shutil.rmtree(work, ignore_errors=True)
+
+    def test_33_template_folder_copied_in_with_a_taken_id_gets_its_own(self):
+        """BB-1: a template folder copied by hand into Templates/ (a colleague's "Lab ICBM", made in another Slicer Studio
+        folder, or a duplicate made in the file manager) is listed as it is, but its template.json had the id of one of
+        yours. Both were "user:lab-icbm": both Start on template entries opened the same image (yours could not be
+        opened), and Remove… on your row sent the colleague's folder to the trash. The copy now gets its own id and name
+        ("Lab ICBM 2", "user:lab-icbm-2", written into its template.json); your template keeps its id, so the default
+        and everything else that refers to it stays yours.
+        """
+        from StudioLib import importer
+
+        templates, ui = self.templates, self.ui
+        otherRoot = os.path.join(self.tempDir, "colleague", "Slicer Studio")
+        shutil.rmtree(os.path.dirname(otherRoot), ignore_errors=True)
+        try:
+            mine = self._add(name="Lab ICBM")
+            templates.setDefault(mine.id)
+            theirs = templates.addTemplate(self.bundled, mask=self.bundledMask, name="Lab ICBM", rootPath=otherRoot)
+            self.assertEqual(theirs.id, mine.id, "the same id in both Slicer Studio folders")
+            folder = templates.templatesFolder()
+            shutil.copytree(theirs.folder, os.path.join(folder, "Lab ICBM from Ana"))
+            shutil.copytree(mine.folder, os.path.join(folder, "Lab ICBM copy"))
+
+            listed = {os.path.basename(template.folder): (template.id, template.name) for template in templates.userTemplates()}
+            self.assertEqual(listed, {"Lab ICBM": ("user:lab-icbm", "Lab ICBM"),
+                                      "Lab ICBM copy": ("user:lab-icbm-3", "Lab ICBM 3"),
+                                      "Lab ICBM from Ana": ("user:lab-icbm-2", "Lab ICBM 2")}, "yours keeps its id")
+            with open(os.path.join(folder, "Lab ICBM from Ana", templates.TEMPLATE_JSON), encoding="utf-8") as f:
+                record = json.load(f)
+            self.assertEqual((record["id"], record["name"]), ("lab-icbm-2", "Lab ICBM 2"), "written into the copy's template.json")
+            self.assertEqual(record["sha256"], theirs.sha256, "nothing else of the copy changes")
+            again = sorted((template.id, template.name) for template in templates.userTemplates())
+            self.assertEqual(again, sorted(listed.values()), "the ids stay the same when listed again")
+            self.assertEqual(templates.templateById(mine.id).folder, mine.folder)
+            self.assertEqual(templates.templateById("user:lab-icbm-2").imageSha256, theirs.imageSha256)
+            self.assertEqual(templates.defaultTemplateId(), mine.id)
+
+            # Start on template: one entry per template, each opens its own image
+            menu = qt.QMenu()
+            try:
+                ui.populateTemplateMenu(menu, onStart=lambda templateId: None)
+                entries = [action.data() for action in menu.actions() if action.objectName == "studioTemplateMenuItem" and action.text.startswith("Lab ICBM")]
+            finally:
+                menu.deleteLater()
+            self.assertEqual(sorted(entries), ["user:lab-icbm", "user:lab-icbm-2", "user:lab-icbm-3"])
+            for templateId, shape in (("user:lab-icbm", self.shape15), ("user:lab-icbm-2", self.bundledShape)):
+                volume, _segmentation = importer.startOnTemplate(shell=self._shell(), templateId=templateId)
+                self.assertEqual(tuple(volume.GetImageData().GetDimensions()), tuple(shape), templateId)
+                slicer.mrmlScene.Clear(0)
+
+            # Settings > Templates: Remove… on your row removes your folder, not the copy
+            panel = ui.TemplatesSettingsPanel()
+            try:
+                panel.refresh()
+                rowIds = [row.property("templateId") for row in panel.rows]
+                self.assertEqual(len(rowIds), len(set(rowIds)), rowIds)
+                self.assertTrue(panel.remove(mine.id, confirm=False))
+            finally:
+                panel.deleteLater()
+            self.assertEqual(sorted(os.listdir(folder)), ["Lab ICBM copy", "Lab ICBM from Ana"])
+        finally:
+            shutil.rmtree(os.path.dirname(otherRoot), ignore_errors=True)

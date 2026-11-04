@@ -91,7 +91,11 @@ Slicer Studio/
 ```
 
 `template.json` holds file names relative to its folder and a sha256 checksum of
-each file, never a path on your computer. **Settings › Templates** lists every
+each file, never a path on your computer. A template folder you copy into
+`Templates/` yourself (a colleague's, or a duplicate) is listed as it is; when its
+`id` is already used by one of your templates, the copy gets its own id and name
+("Lab ICBM 2", `user:lab-icbm-2`, written into its `template.json`) and yours keeps
+its id. **Settings › Templates** lists every
 template with a thumbnail, its space, resolution and contrast, and a *Built-in* or
 *Yours* chip. There you can set the default, start on a template, show its folder
 or remove it (its folder goes to the Trash). Slicer Studio remembers the default
