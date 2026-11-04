@@ -199,6 +199,8 @@ class AutosaveSettingsPanel(ctk.ctkSettingsPanel):
             note = _("Set by the {variable} environment variable.").format(variable=projects.ROOT_ENVIRONMENT)
         elif not projects.isEnabled():
             note = _("Projects are turned off ({variable}=0).").format(variable=projects.ENABLED_ENVIRONMENT)
+        elif projects.isRootMissing():
+            note = _("This folder cannot be found: connect the drive that holds it, or choose another folder.")
         else:
             projectCount, studyCount = projects.folderSummary(root) if os.path.isdir(root) else (0, 0)
             note = " · ".join([_("1 project") if projectCount == 1 else _("{n} projects").format(n=projectCount),

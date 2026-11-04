@@ -205,6 +205,34 @@ def isRootChosen():
     return slicer.util.toBool(_setting(ROOT_CHOSEN_KEY, False))
 
 
+def isRootMissing(rootPath=None):
+    """True if the Slicer Studio folder that the user chose cannot be found now: it is on a drive or share that is not
+    connected (or it was renamed or deleted). It is then never created again by itself (``ensureRoot``): new work would
+    go into a new, empty folder at that path while the projects stay on the drive, and Library would look empty with no
+    word why. ``rootPath``: only when it is that folder. Never for the folder of the environment or of the web build
+    (created as needed), nor before the folder was chosen (the chooser creates it).
+    """
+    if isRootFromEnvironment() or isWebBuild() or not isRootChosen():
+        return False
+    current = root()
+    if rootPath is not None and os.path.normcase(os.path.normpath(os.path.abspath(str(rootPath)))) != os.path.normcase(current):
+        return False
+    return not os.path.isdir(current)
+
+
+def rootMissingText(rootPath=None):
+    """What to tell the user when ``isRootMissing()``: where the folder was, and what to do."""
+    return _("The Slicer Studio folder {folder} cannot be found. Connect the drive that holds it, or choose another folder "
+             "in Settings › Saving.").format(folder=shortPath(rootPath or root()))  # noqa: RUF001
+
+
+class RootMissingError(FileNotFoundError):
+    """The Slicer Studio folder that the user chose cannot be found (``isRootMissing``): nothing is created there."""
+
+    def __init__(self, rootPath):
+        FileNotFoundError.__init__(self, errno.ENOENT, _("the folder cannot be found: is its drive connected?"), rootPath)
+
+
 def needsChooser():
     """True if the chooser must be shown before the first project is created (first start of Studio)."""
     return isEnabled() and not isRootChosen()
@@ -520,9 +548,15 @@ def webFolderNotice(path, web=None):
              "Use a folder under {data}.").format(path=normalized, data=WEB_DATA_FOLDER)
 
 
-def ensureRoot(rootPath=None):
-    """Create the folder and its "About this folder.txt" (written once: never overwritten). Return the folder."""
+def ensureRoot(rootPath=None, recreate=False):
+    """Create the folder and its "About this folder.txt" (written once: never overwritten). Return the folder.
+
+    The chosen folder is not created again when it cannot be found (``isRootMissing``: a drive that is not connected):
+    ``RootMissingError`` then, unless ``recreate`` (the user chose that folder just now).
+    """
     rootPath = rootPath or root()
+    if not recreate and isRootMissing(rootPath):
+        raise RootMissingError(rootPath)
     os.makedirs(rootPath, exist_ok=True)
     about = os.path.join(rootPath, ABOUT_FILE)
     if not os.path.exists(about):

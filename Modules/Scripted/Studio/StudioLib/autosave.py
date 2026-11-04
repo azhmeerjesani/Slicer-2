@@ -1354,16 +1354,18 @@ class AutosaveService:
                 logging.error("Slicer Studio: the files of the project could not be read:\n" + traceback.format_exc())
         return self._readStats.get(key)
 
-    def _announceRootFailedOnce(self, reason):
-        """The message that the Slicer Studio folder cannot be written, once per folder. No project exists then, so every
-        new scene fingerprint tries to create one again (it is created as soon as the folder can be written); the retries
-        stay silent, or every edit would show the message again.
+    def _announceRootFailedOnce(self, reason, missing=False):
+        """The message that the Slicer Studio folder cannot be written (``missing``: cannot be found), once per folder. No
+        project exists then, so every new scene fingerprint tries to create one again (it is created as soon as the folder
+        can be written); the retries stay silent, or every edit would show the message again.
         """
         key = os.path.normcase(os.path.abspath(self._projects().root()))
+        if missing:
+            key = "missing:" + key  # not "cannot be written" (``rootUnwritable``) once the drive is connected again
         if key in self._rootFailedAnnounced:
             return
         self._rootFailedAnnounced.add(key)
-        self._announce("root-failed", None, reason=reason)
+        self._announce("root-failed", None, reason=reason, missing=missing)
         self._projects().notifyChanged()  # the Library caption says that nothing is saved
 
     def rootUnwritable(self):
@@ -1467,6 +1469,13 @@ class AutosaveService:
         projects = self._projects()
         try:
             project = projects.createProject(name)
+        except projects.RootMissingError:
+            # The chosen folder is on a drive that is not connected: never a new, empty folder at its path (Library
+            # says so; the project is created once the drive is back)
+            self._pause(_("Autosave paused: the Slicer Studio folder cannot be found. Connect the drive that holds it, or "
+                          "choose another folder."))
+            self._announceRootFailedOnce(None, missing=True)
+            return None
         except OSError as error:
             # Plain words (no error number, no path), and the message only once: see _announceRootFailedOnce
             reason = plainOSError(error)

@@ -6536,6 +6536,116 @@ class StudioProjectsTest(unittest.TestCase):
                 os.remove(lockPath)
             projects.clearPendingMove()
 
+    def test_90_chosen_folder_on_a_drive_that_is_not_connected_is_not_created_again(self):
+        """The chosen Slicer Studio folder is on a drive that is not connected now (BB-1): Library looked empty with no word
+        why ("Open a scan or start on the template"), and opening a scan created a new, empty "Slicer Studio/Projects/<name>"
+        at the missing path, so projects were split between two folders once the drive was back. The folder is not created
+        again by itself: no project is made (autosave is paused, told once), Library and Show in Files say that the folder
+        cannot be found, and the first project is made in it once the drive is connected again. A folder that the user
+        chooses (the chooser, Change…) or that the environment sets is still created.
+        """
+        from StudioLib import projects_ui
+
+        projects = self.projects
+        drive = os.path.join(self.tempDir, "USB")
+        unplugged = os.path.join(self.tempDir, "USB-unplugged")
+        chosenRoot = os.path.normpath(os.path.join(drive, "Slicer Studio"))
+        settings = qt.QSettings()
+        saved = {key: settings.value(key) for key in (projects.ROOT_KEY, projects.ROOT_CHOSEN_KEY)}
+        os.environ.pop(projects.ROOT_ENVIRONMENT)
+        settings.setValue(projects.ROOT_KEY, chosenRoot)
+        settings.setValue(projects.ROOT_CHOSEN_KEY, True)
+        toasts = []
+        shown = []
+        originalMessage, originalShow = projects_ui.message, projects.showInFileManager
+        projects_ui.message = lambda text, **kwargs: toasts.append((str(text), kwargs))
+        projects.showInFileManager = lambda path: shown.append(path) or True
+        section = None
+        try:
+            os.makedirs(chosenRoot)  # made by the chooser, on the drive
+            self.assertFalse(projects.isRootMissing())
+            projects.createProject("MRHead")  # the folder as it was, the drive connected
+            os.rename(drive, unplugged)  # the drive is unplugged
+            self.assertTrue(projects.isRootMissing())
+            self.assertFalse(projects.isRootMissing(os.path.join(self.tempDir, "elsewhere")), "only the chosen folder")
+            with self.assertRaises(projects.RootMissingError):
+                projects.ensureRoot()
+            with self.assertRaises(projects.RootMissingError):
+                projects.createProject("New")
+            self.assertFalse(os.path.exists(drive), "nothing is created at the missing path")
+
+            # Opening a scan and editing: no project in a new, empty folder; the user is told once
+            service = self._service()
+            announced = []
+            service.setProjectAnnouncer(lambda event, project, **info: announced.append((event, info)))
+            self._userVolume()
+            for edit in range(3):
+                slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", f"F{edit}")
+                service.poll()
+            self.assertIsNone(service.project)
+            self.assertFalse(os.path.exists(drive), "the folder is not created again by the autosave")
+            self.assertEqual([event for event, _info in announced], ["root-failed"])
+            self.assertTrue(announced[0][1].get("missing"))
+            status = service.status()
+            self.assertEqual(status.state, "paused")
+            self.assertIn("cannot be found", status.message)
+            self.assertFalse(service.rootUnwritable(), "not told as a folder that cannot be written")
+            projects_ui.announce("root-failed", None, reason=None, missing=True)
+            self.assertEqual(len(toasts), 1)
+            self.assertIn("cannot be found", toasts[0][0])
+            self.assertIn("Connect the drive", toasts[0][0])
+            self.assertEqual(toasts[0][1].get("actionText"), "Change folder…")
+
+            # Library: the section says that the folder cannot be found, not "Open a scan…"
+            section = projects_ui.ProjectsSection()
+            section.refresh()
+            self.assertFalse(section.emptyLabel.isHidden())
+            self.assertIn("cannot be found", section.emptyLabel.text)
+            self.assertIn("Connect the drive", section.emptyLabel.text)
+            self.assertIn("cannot be found", section.captionText())
+            # Show in Files tells it too, and does not create the folder
+            toasts.clear()
+            self.assertFalse(projects_ui.showRootFolder())
+            self.assertFalse(projects_ui.showProjectFolder())
+            self.assertEqual(shown, [])
+            self.assertEqual(len(toasts), 2)
+            self.assertIn("cannot be found", toasts[0][0])
+            self.assertFalse(os.path.exists(drive))
+
+            # The drive is connected again: the projects are listed, and the first project is made there
+            os.rename(unplugged, drive)
+            self.assertFalse(projects.isRootMissing())
+            section.refresh()
+            self.assertEqual([os.path.basename(card.property("studioProjectPath")) for card in section.cards()], ["MRHead"])
+            self.assertNotIn("cannot be found", section.captionText())
+            self.assertEqual(section.emptyLabel.text, projects_ui._emptyText())
+            slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "Later")
+            service.poll()
+            self.assertIsNotNone(service.project)
+            self.assertEqual(os.path.dirname(service.project.path), os.path.join(chosenRoot, projects.PROJECTS_DIR))
+            self.assertFalse(service.rootUnwritable())
+            service.releaseProject()
+
+            # A folder that the user chooses again (the chooser, Change…) is created; the environment's folder always is
+            os.rename(drive, unplugged)
+            self.assertEqual(projects.ensureRoot(chosenRoot, recreate=True), chosenRoot)
+            self.assertTrue(os.path.isdir(chosenRoot))
+            environmentRoot = os.path.join(self.tempDir, "from the environment")
+            os.environ[projects.ROOT_ENVIRONMENT] = environmentRoot
+            self.assertFalse(projects.isRootMissing())
+            projects.ensureRoot()
+            self.assertTrue(os.path.isdir(environmentRoot))
+        finally:
+            projects_ui.message, projects.showInFileManager = originalMessage, originalShow
+            if section is not None:
+                section.dispose()
+                section.widget.deleteLater()
+            for key, value in saved.items():
+                if value is None:
+                    settings.remove(key)
+                else:
+                    settings.setValue(key, value)
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk

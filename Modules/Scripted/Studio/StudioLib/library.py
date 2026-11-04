@@ -5754,8 +5754,14 @@ class LibraryCanvas(qt.QObject):
             from . import projects
 
             enabled = projects.isEnabled()
-            text = _("Saved automatically in {folder}").format(folder=_captionFolder(projects.shortPath(projects.root()))) if enabled else ""
-            toolTip = projects.root() if enabled else ""
+            folder = _captionFolder(projects.shortPath(projects.root()))
+            if enabled and projects.isRootMissing():
+                # The chosen folder is on a drive that is not connected: not "saved automatically" there (A-09)
+                text = _("Not found, connect its drive: {folder}").format(folder=folder)
+                toolTip = projects.rootMissingText() + "\n" + projects.root()
+            else:
+                text = _("Saved automatically in {folder}").format(folder=folder) if enabled else ""
+                toolTip = projects.root() if enabled else ""
         except Exception:
             enabled, text, toolTip = False, "", ""
         self.pageTitle.setText(_("Projects") if enabled else _("Library"))

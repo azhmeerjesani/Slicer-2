@@ -477,7 +477,7 @@ def showChooser(then=None, parent=None):
         retry = False
         try:
             # The folder is stored only once it exists and can be written: otherwise the next start asks again
-            projects.ensureRoot(path)
+            projects.ensureRoot(path, recreate=True)
             if not os.access(path, os.W_OK | os.X_OK):
                 raise PermissionError(errno.EACCES, os.strerror(errno.EACCES))
             projects.setRoot(path, chosen=True)
@@ -656,17 +656,38 @@ def exportProjectAsNifti():
 def showProjectFolder():
     """Show the open project's folder in Finder, Explorer or Files (else the Slicer Studio folder)."""
     project = projects.currentProject()
-    path = project.path if project is not None else projects.root()
+    if project is None:
+        return showRootFolder()
+    path = project.path
     if not os.path.isdir(path):
-        projects.ensureRoot()
+        if not _ensureRootOrTell():
+            return False
     return projects.showInFileManager(path)
 
 
 def showRootFolder():
     root = projects.root()
-    if not os.path.isdir(root):
-        projects.ensureRoot(root)
+    if not os.path.isdir(root) and not _ensureRootOrTell():
+        return False
     return projects.showInFileManager(root)
+
+
+def _ensureRootOrTell():
+    """Create the Slicer Studio folder if it does not exist yet; a chosen folder that cannot be found (a drive that is not
+    connected) is not created again: the user is told instead. Return True if the folder exists now.
+    """
+    try:
+        projects.ensureRoot()
+    except projects.RootMissingError:
+        change = None if projects.isRootFromEnvironment() else (lambda *_args: changeRootDialog())
+        message(projects.rootMissingText(), level="warning", action=change, actionText=_("Change folder…") if change else None,
+                ms=8000, toolTip=projects.root())
+        return False
+    except OSError as error:
+        message(_("The Slicer Studio folder cannot be written ({reason}).").format(reason=(getattr(error, "strerror", None) or str(error)).strip()),
+                level="warning", ms=8000, toolTip=projects.root())
+        return False
+    return True
 
 
 def newProject():
@@ -916,6 +937,16 @@ def changeRootDialog(parent=None):
     if cancelled:
         return None
     if os.path.normcase(os.path.realpath(newRoot)) == os.path.normcase(os.path.realpath(oldRoot)):
+        if projects.isRootMissing():
+            # The folder that cannot be found, chosen again: the user wants it here (created again, empty)
+            try:
+                projects.ensureRoot(oldRoot, recreate=True)
+            except OSError as error:
+                slicer.util.errorDisplay(_("The folder {path} cannot be used: {reason}").format(
+                    path=oldRoot, reason=(getattr(error, "strerror", None) or str(error)).strip()))
+                return None
+            projects.notifyChanged()
+            return oldRoot
         return None
     move = False
     if projects.hasContent(oldRoot):
@@ -958,7 +989,7 @@ def changeRootDialog(parent=None):
                 autosave._updateMovedPathSettings(oldRoot, newRoot, moved, renamed)
                 templates.followRenamedIds(renamedIds)
             projects.setRoot(newRoot)
-        projects.ensureRoot(newRoot)
+        projects.ensureRoot(newRoot, recreate=True)
     except projects.OpenElsewhereError as error:
         # Refused before anything was moved (opened elsewhere after the check above)
         slicer.util.infoDisplay(str(error), windowTitle=_("Change the Slicer Studio folder"))
@@ -1032,6 +1063,11 @@ SORT_KEY = "Studio/Library/ProjectSort"
 VIEW_KEY = "Studio/Library/ProjectView"
 SORT_ORDERS = (("modified", "Last edited"), ("name", "Name"), ("created", "Created"))
 VIEWS = ("grid", "list")
+
+
+def _emptyText():
+    """The Projects section without a project."""
+    return _("Open a scan or start on the template: your work is saved here as a project.")
 
 
 def projectColumns(width):
@@ -1158,7 +1194,7 @@ class ProjectsSection(qt.QObject):
         self.grid.setVerticalSpacing(CARD_SPACING)
         layout.addLayout(self.grid)
         self.listLayout = self.grid
-        self.emptyLabel = qt.QLabel(_("Open a scan or start on the template: your work is saved here as a project."))
+        self.emptyLabel = qt.QLabel(_emptyText())
         self.emptyLabel.setObjectName("studioProjectsEmpty")
         self.emptyLabel.setWordWrap(True)
         ui.setText(self.emptyLabel, "caption")
@@ -1323,6 +1359,8 @@ class ProjectsSection(qt.QObject):
 
     def captionText(self):
         root = projects.root()
+        if projects.isRootMissing():
+            return _("Autosave paused: {folder} cannot be found").format(folder=projects.shortPath(root))
         service = _service()
         if service is not None and service.rootUnwritable():
             return _("Autosave paused: {folder} cannot be written").format(folder=projects.shortPath(root))
@@ -1376,6 +1414,8 @@ class ProjectsSection(qt.QObject):
         self.countLabel.setText(str(len(infos)) if infos else "")
         self.showAllButton.setVisible(len(infos) > len(shown) or self._showAll)
         self.showAllButton.setText(_("Show fewer") if self._showAll else _("Show all ({count})").format(count=len(infos)))
+        # A chosen folder that cannot be found (its drive is not connected) lists no project: say so, not "nothing yet"
+        self.emptyLabel.setText(projects.rootMissingText() if projects.isRootMissing() else _emptyText())
         self.emptyLabel.setVisible(not infos)
         self.sortButton.setVisible(len(infos) > 1)
         self.viewToggle.setVisible(bool(infos))
@@ -2227,12 +2267,17 @@ def announce(event, project, **info):
             message(_("Another program changed {theirs}: Slicer Studio saved its version as {ours}.").format(theirs=theirs, ours=ours),
                     level="consequence", action=showProjectFolder, actionText=_("Show"))
     elif event == "root-failed":
-        # No project could be created: the Slicer Studio folder cannot be written (a read-only share or medium). Once per
-        # folder; Retry (Save) would open the official Save Scene dialog, so the action changes the folder instead
+        # No project could be created: the Slicer Studio folder cannot be written (a read-only share or medium), or the
+        # chosen one cannot be found (``missing``: a drive that is not connected). Once per folder; Retry (Save) would open
+        # the official Save Scene dialog, so the action changes the folder instead
         change = None if projects.isRootFromEnvironment() else (lambda *_args: changeRootDialog())
-        message(_("Autosave paused: the Slicer Studio folder cannot be written ({reason}). Changes made now are not saved in it.").format(
-                reason=info.get("reason") or ""), level="warning", action=change, actionText=_("Change folder…") if change else None, ms=8000,
-                toolTip=projects.root())
+        if info.get("missing"):
+            text = _("Autosave paused: the Slicer Studio folder {folder} cannot be found. Connect the drive that holds it, or choose "
+                     "another folder. Changes made now are not saved in it.").format(folder=projects.shortPath(projects.root()))
+        else:
+            text = _("Autosave paused: the Slicer Studio folder cannot be written ({reason}). Changes made now are not saved in it.").format(
+                reason=info.get("reason") or "")
+        message(text, level="warning", action=change, actionText=_("Change folder…") if change else None, ms=8000, toolTip=projects.root())
     elif event == "failed":
         message(_("Not saved: {reason}").format(reason=info.get("reason") or ""), level="warning", action=saveNow, actionText=_("Retry"), ms=8000)
     elif event == "not-opened":
