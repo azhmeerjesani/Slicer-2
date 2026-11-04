@@ -45,6 +45,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -1497,6 +1498,15 @@ class StudioProjectsTest(unittest.TestCase):
             with open(project.scenePath, encoding="utf-8") as f:
                 sceneText = f.read()
             self.assertNotIn(os.path.basename(self.userDir), sceneText)
+            # The project folder is shared whole: .studio/sources.json holds identifiers of the outside files, no path
+            sourcesPath = os.path.join(projectPath, ".studio", "sources.json")
+            with open(sourcesPath, encoding="utf-8") as f:
+                sourcesText = f.read()
+            self.assertNotIn(os.path.basename(self.userDir), sourcesText)
+            self.assertNotIn(self.tempDir, sourcesText)
+            sources = json.loads(sourcesText)["sources"]
+            self.assertEqual(len(sources), 2)
+            self.assertTrue(all(re.fullmatch(r"sha256:[0-9a-f]{64}", value) for value in sources.values()), sources)
             # After a restart (the project is closed and opened again): still the same nodes
             scanName, lesionName = scan.GetName(), lesion.GetName()
             slicer.mrmlScene.Clear(0)
@@ -1510,6 +1520,23 @@ class StudioProjectsTest(unittest.TestCase):
             self.assertEqual(len(reopened.alreadyOpen), 2)
             self.assertEqual(count(scanName, "vtkMRMLScalarVolumeNode"), 1)
             self.assertEqual(count(lesionName, "vtkMRMLSegmentationNode"), 1)
+            # A project of an earlier version (sources.json holds the paths): still "already open", and the next save
+            # writes identifiers instead
+            legacy = {key: (scanPath if "Images" in key else lesionPath) for key in sources}
+            with open(sourcesPath, "w", encoding="utf-8") as f:
+                json.dump({"format": self.io.SOURCES_FORMAT, "version": 1, "sources": legacy}, f)
+            slicer.mrmlScene.Clear(0)
+            self.io.backgroundWriter().drain(10.0)
+            self.assertTrue(service.openProject(projectPath))
+            scan = slicer.mrmlScene.GetFirstNodeByName(scanName)
+            migrated = importer.loadFiles([scanPath, lesionPath], studioShell)
+            self.assertEqual((migrated.volumes, migrated.segmentations), ([], []))
+            self.assertEqual(len(migrated.alreadyOpen), 2)
+            scan.SetName(scanName + " renamed")  # a change, so that the project is saved
+            scan.SetName(scanName)
+            self._save(service)
+            with open(sourcesPath, encoding="utf-8") as f:
+                self.assertEqual(json.load(f)["sources"], sources)
             # Closed and opened again from outside: loaded anew (nothing is matched to a node that left the scene)
             slicer.mrmlScene.RemoveNode(scan)
             fresh = importer.loadFiles([scanPath], studioShell)

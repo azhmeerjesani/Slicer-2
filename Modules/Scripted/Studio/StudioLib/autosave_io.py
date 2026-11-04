@@ -24,6 +24,7 @@ single ``BackgroundWriter`` thread (``backgroundWriter()``), which other feature
 import collections
 import contextlib
 import errno
+import hashlib
 import json
 import logging
 import os
@@ -1886,6 +1887,14 @@ PORTABLE_SEQUENCE_EXTENSIONS = (".seq.nrrd", ".seq.nhdr", ".nrrd", ".nhdr")
 #: again is then "already open", also after the project saved it (and after a restart)
 SOURCES_FILE = "sources.json"
 SOURCES_FORMAT = "slicer-studio-sources"
+#: prefix of the values of .studio/sources.json: a hash of the outside file's path, never the path itself (the project
+#: folder is shared whole, and the folder of a scan is often named after the patient)
+SOURCE_ID_PREFIX = "sha256:"
+
+
+def sourceId(path):
+    """A portable identifier of the outside file ``path`` (``SOURCE_ID_PREFIX`` + sha256 of its canonical path)."""
+    return SOURCE_ID_PREFIX + hashlib.sha256(_canonical(path).encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def _projects():
@@ -2082,8 +2091,9 @@ class ProjectWriter(SlotWriter):
         self.lastResult = None
         #: [(other program's file name, Studio's file name)] not reported yet (``takeConflicts()``)
         self.conflicts = []
-        #: node ID -> canonical path of the file outside the project that the node was read from (the project took it over:
-        #: its storage node now names a file of the project). Kept in .studio/sources.json (``SOURCES_FILE``)
+        #: node ID -> ``sourceId()`` of the file outside the project that the node was read from (the project took it
+        #: over: its storage node now names a file of the project). Kept in .studio/sources.json (``SOURCES_FILE``),
+        #: as identifiers and not paths: no local path is written into the project folder
         self.sources = {}
         #: the content of .studio/sources.json as last read or written (it is written again only when it changes)
         self._sourcesWritten = None
@@ -2164,7 +2174,7 @@ class ProjectWriter(SlotWriter):
                     record(path)
             source = stored.get(self._projectRelative(files[0])) if files else None
             if source:
-                self.sources[node.GetID()] = source
+                self.sources[node.GetID()] = source if source.startswith(SOURCE_ID_PREFIX) else sourceId(source)
         self._sourcesWritten = stored
 
     def _sourcesPath(self):
@@ -2173,7 +2183,7 @@ class ProjectWriter(SlotWriter):
     def _rememberSource(self, nodeId, files, projectCanonical):
         """A node read from a file outside the project, which the project takes over now: remember that file."""
         if files and not _isUnder(_canonical(files[0]), projectCanonical):
-            self.sources[nodeId] = _canonical(files[0])
+            self.sources[nodeId] = sourceId(files[0])
 
     def _projectRelative(self, path):
         """``path`` relative to the project folder with "/" (a key of .studio/sources.json), None if it is outside."""
@@ -2183,7 +2193,11 @@ class ProjectWriter(SlotWriter):
         return os.path.relpath(canonical, projectCanonical).replace(os.sep, "/")
 
     def _readSources(self):
-        """The content of .studio/sources.json: {file of the project (relative, "/"): canonical outside file}."""
+        """The content of .studio/sources.json: {file of the project (relative, "/"): ``sourceId()`` of the outside file}.
+
+        A file that an earlier version wrote holds the path itself: it is converted when its project is opened, and
+        written again as identifiers (it differs from the new content, so the next save rewrites it).
+        """
         data = readJson(self._sourcesPath())
         sources = data.get("sources") if isinstance(data, dict) and data.get("format") == SOURCES_FORMAT else None
         if not isinstance(sources, dict):
@@ -2194,7 +2208,7 @@ class ProjectWriter(SlotWriter):
         """IDs of the nodes that were read from ``path``, a file outside the project that the project took over."""
         if not path:
             return []
-        target = _canonical(path)
+        target = sourceId(path)
         return [nodeId for nodeId, source in self.sources.items() if source == target]
 
     def relocate(self, oldPath, newPath):
