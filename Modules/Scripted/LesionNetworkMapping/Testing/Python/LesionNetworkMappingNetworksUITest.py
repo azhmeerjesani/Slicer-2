@@ -693,6 +693,68 @@ class LesionNetworkMappingNetworksUITest(unittest.TestCase):
             slicer.app.processEvents()
             shutil.rmtree(folder, ignore_errors=True)
 
+    def test_cohort_mean_map_file_opened_reads_its_statistic_and_nulls(self):
+        """A cohort's group mean map opened as a file (Networks / Clusters > Open...) reads as the Cohort card's group map does.
+
+        ``group_conn-<label>_desc-meanT_map.nii.gz`` is a mean T map and ``desc-meanFz`` a mean Fz map: the source gets that
+        statistic, its default threshold (not the 3 of an unknown "value" map) and the Nulls run of that statistic beside the
+        file. The file source knew only the per-lesion names (desc-T, AvgRFz), so both read as "value" and the null cohorts
+        were never used ("No Nulls run of the mean value map was found next to this map").
+        """
+        import json
+        import os
+        import shutil
+        import tempfile
+
+        import numpy as np
+
+        from LesionNetworkMappingLib import nifti
+
+        card = self.card
+        folder = tempfile.mkdtemp(prefix="lnm-networks-meanfile-")
+        shape = (20, 20, 20)
+        affine = np.diag([2.0, 2.0, 2.0, 1.0])
+        affine[:3, 3] = (-19.0, -19.0, -19.0)
+        rng = np.random.default_rng(5)
+        storedChoice = card.model.choice
+        card.widget.collapsed = True
+        keys = []
+        try:
+            for statistic, desc, scale, threshold in (("T", "meanT", 1.0, 5.0), ("Fz", "meanFz", 0.05, 0.2)):
+                with self.subTest(desc):
+                    work = os.path.join(folder, statistic, "derivatives", "lnm", "conn-Test", "cohort")
+                    nullsDir = os.path.join(work, "nulls-rl_independent-exact")
+                    os.makedirs(nullsDir)
+                    data = np.zeros(shape, dtype=np.float32)
+                    data[2:18, 2:18, 2:18] = rng.normal(0.0, scale, (16, 16, 16))
+                    data[4:8, 4:8, 4:8] += 8.0 * scale
+                    path = os.path.join(work, f"group_conn-Test_desc-{desc}_map.nii.gz")
+                    nifti.write_nifti(path, data, affine)
+                    inMask = np.flatnonzero(data.reshape(-1))
+                    sample = np.sort(rng.choice(inMask.size, size=inMask.size // 3, replace=False)).astype(np.int64)
+                    k = 19
+                    np.save(os.path.join(nullsDir, "null_group_mean.npy"), (rng.normal(0.0, scale, (k, sample.size))).astype(np.float32))
+                    np.save(os.path.join(nullsDir, "null_group_voxels.npy"), sample)
+                    with open(os.path.join(nullsDir, "nulls.json"), "w", encoding="utf-8") as f:
+                        json.dump({"design": {"kind": "rl_independent"}, "null_group_maps": {"file": "null_group_mean.npy", "voxels": "null_group_voxels.npy", "statistic": statistic, "shape": [k, int(sample.size)]}}, f)
+
+                    keys.append(card.model.addFile(path))
+                    source = card.model.source()
+                    self.assertEqual(source.desc, desc)
+                    self.assertEqual(source.statistic, statistic, f"the {desc} file read as {source.statistic!r}")
+                    self.assertAlmostEqual(source.value, threshold, msg=f"default threshold of the {desc} file")
+                    maps, reason = self.cn.findGroupNull(source)
+                    self.assertIsNotNone(maps, reason)
+                    self.assertEqual(maps.maps.shape[0], k)
+                    self.assertEqual(maps.statistic, statistic)
+        finally:
+            for key in keys:
+                card.model.files.pop(key, None)
+            card.model.setChoice(storedChoice)
+            card.schedule()
+            slicer.app.processEvents()
+            shutil.rmtree(folder, ignore_errors=True)
+
     def test_scheme_click_without_buttonClicked_int(self):
         card = self.card
         self.assertIsNotNone(card)

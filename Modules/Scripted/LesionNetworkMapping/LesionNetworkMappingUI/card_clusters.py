@@ -318,6 +318,19 @@ def _kindDefault(desc, volume):
     return None, "both"
 
 
+def _descStatistic(desc):
+    """The statistic of a group mean map from its desc ("T" for ``meanT`` / ``legacyWelchT``, "Fz" for ``meanFz``), else None.
+
+    One rule for the Cohort card's group map and for its file opened in the source menu (``group_conn-<label>_desc-meanT_map``),
+    so both get the same statistic, default threshold and Nulls run.
+    """
+    if desc in ("meanT", "legacyWelchT"):
+        return "T"
+    if desc == "meanFz":
+        return "Fz"
+    return None
+
+
 class SourceModel:
     """Which map the Clusters and Networks cards read, and with which threshold (shared through :func:`sharedModel`).
 
@@ -544,9 +557,10 @@ class SourceModel:
         if display.groupMapKind(desc) == "p":
             raise SourceError(_("A p map is not clustered: choose a statistic, count or conjunction map."))
         default, sign = _kindDefault(desc, volume)
-        if default is None:  # a statistic map (Welch t, mean T): the Result rule when it is a T rule, else a typical value
-            resolved, _sign = self._ruleThreshold(widget, "T")
-            default = resolved.value if resolved is not None else self._fallbackThreshold("T")
+        if default is None:  # a statistic map (Welch t, mean T, mean Fz): the Result rule of its statistic, else a typical value
+            ruleStatistic = _descStatistic(desc) or "T"
+            resolved, _sign = self._ruleThreshold(widget, ruleStatistic)
+            default = resolved.value if resolved is not None else self._fallbackThreshold(ruleStatistic)
         threshold = self.custom if self.custom is not None else default
         if self.signChoice != "rule":
             sign = self.signChoice
@@ -560,7 +574,7 @@ class SourceModel:
                     break
         if path:
             volume, grid, indices = self._inFileOrder(token, path, volume, grid, indices)
-        statistic = "T" if desc in ("meanT", "legacyWelchT") else ("Fz" if desc in ("meanFz",) else (desc or _("value")))
+        statistic = _descStatistic(desc) or desc or _("value")
         record = getattr(widget, "cohortInfo", None) if widget is not None else None
         n = record.get("n") if isinstance(record, dict) else None
         return MapSource("group", node.GetName(), statistic, volume, grid, indices, threshold, sign, n, False, None, desc=desc, path=path, token=token, space=volumeSpace(node))
@@ -618,11 +632,13 @@ class SourceModel:
         if indices.size == 0 or not np.isfinite(volume).any():
             raise SourceError(_("The map has no values."))
         name = os.path.basename(path)
-        statistic = "T" if "desc-T" in name else ("Fz" if "AvgRFz" in name else ("r" if "AvgR" in name else _("value")))
         desc = None
         marker = "_desc-"
         if marker in name:
             desc = name.split(marker, 1)[1].split("_", 1)[0]
+        # A cohort's group mean map (desc-meanT / meanFz) reads as its statistic, as the Cohort card's group map does;
+        # else the per-lesion names (desc-T, AvgRFz, AvgR)
+        statistic = _descStatistic(desc) or ("T" if "desc-T" in name else ("Fz" if "AvgRFz" in name else ("r" if "AvgR" in name else _("value"))))
         if desc and display.groupMapKind(desc) == "p":
             raise SourceError(_("A p map is not clustered: choose a statistic, count or conjunction map."))
         default, sign = (_kindDefault(desc, volume) if desc else (None, "both"))
