@@ -610,6 +610,52 @@ class LesionNetworkMappingPipelineUITest(unittest.TestCase):
         self._settle()
         self.assertTrue(card.stateLabel.text.startswith("Up to date"), card.stateLabel.text)
 
+    def test_c2_other_study_while_running(self):
+        """While study A runs, the card of study B neither shows A's run as its own nor stops it; back on A it follows the run again."""
+        import lnm_pipeline_fixture as fixture
+
+        card, widget = self.card, self.widget
+        self._setOptions(dict(ONE_PER_PASS, perm=50000))
+        self._settle()
+        job = card.run()
+        self.assertIsNotNone(job, card.stateLabel.text)
+        outA = job.spec.lnmOut
+        other = fixture.make_fixture(os.path.join(self.tmp, "f4"), extra_rows=False, study_name="Study B2")
+        try:
+            self.assertTrue(_wait(lambda: job.startEvent is not None, 30))
+            widget.openCohortStudy(other["study"])
+            self.cp.setCohortSeed(widget)
+            _pump(self.cp.APPLY_MS + 50)
+            states = []
+            for _tick in range(5):
+                _pump(200)
+                states.append(card.stateLabel.text)
+            self.assertFalse(job.isFinished(), "study A's run ended before the check (inconclusive)")
+            self.assertIn("Study B2", card.outDir())
+            self.assertFalse(self.cp._samePath(card.outDir(), outA))
+            self.assertIsNot(card.job, job, "study B's card adopted study A's run")
+            self.assertFalse(any(text.startswith("Running") for text in states), states)
+            self.assertFalse(card.stopButton.isVisible(), "study B's card offers Stop for study A's run")
+            self.assertFalse(card.progressBar.isVisible())
+            self.assertFalse(card.canRun(), "Run everything waits for the running analysis")
+            card.stop()  # Stop of study B's card (button, shortcut) must not reach study A's run
+            _pump(300)
+            self.assertFalse(job.stopRequested, "Stop in study B's card cancelled study A's run")
+            self.assertFalse(job.isFinished() and job.state == "cancelled", job.state)
+            widget.openCohortStudy(self.fx["study"])
+            self.cp.setCohortSeed(widget)
+            _pump(self.cp.APPLY_MS + 50)
+            if not job.isFinished():
+                self.assertTrue(_wait(lambda: card.job is job, 5), "back on study A, the card follows its run again")
+                self.assertTrue(_wait(lambda: card.stateLabel.text.startswith("Running") or job.isFinished(), 5), card.stateLabel.text)
+        finally:
+            job.stop()
+            job.waitForFinished(30)
+            widget.openCohortStudy(self.fx["study"])
+            self.cp.setCohortSeed(widget)
+            qt.QSettings().remove(self.cp.OPTIONS_SETTING)
+        self._settle()
+
     def test_d_settled_native_lesion_is_not_new_or_changed(self):
         """A native lesion that a finished run normalized (awaiting review) or could not normalize stays out of "new or changed" and of the lesion count."""
         import lnm_pipeline_fixture as fixture
