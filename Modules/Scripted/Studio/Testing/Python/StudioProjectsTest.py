@@ -6203,6 +6203,71 @@ class StudioProjectsTest(unittest.TestCase):
             current.unlock()
 
 
+    def test_88_chooser_uses_a_studio_folder_without_projects_as_is(self):
+        """Choose… on a Slicer Studio folder that has no Projects/ yet (only "About this folder.txt", studies, templates or
+        LNM/ folders: subfolders are made only when something is written there) nested a "Slicer Studio" folder inside it,
+        and its studies dropped out of the Library (BB-1). Such a folder is used as is, in the first-start chooser and in
+        Change… of Settings, Saving; a folder of the user's own files still gets a "Slicer Studio" folder inside it.
+        """
+        from StudioLib import projects_ui
+
+        projects = self.projects
+
+        def folderWith(name, *files):
+            folder = os.path.join(self.tempDir, name)
+            os.makedirs(folder)
+            for relative in files:
+                path = os.path.join(folder, *relative.split("/"))
+                if relative.endswith("/"):
+                    os.makedirs(path, exist_ok=True)
+                    continue
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("{}")
+            return os.path.normpath(folder)
+
+        studioFolders = [
+            folderWith("LabLNM", projects.ABOUT_FILE, "Studies/Aphasia cohort/study.json", "LNM/"),
+            folderWith("Lab about only", projects.ABOUT_FILE),
+            folderWith("Lab studies only", "Studies/Aphasia cohort/study.json"),
+            folderWith("Lab templates only", "Templates/my-mni/template.json"),
+            folderWith("Lab LNM only", "LNM/normalization/sub-01/"),
+            folderWith("Lab projects", "Projects/"),
+        ]
+        userFolders = [
+            folderWith("My documents", "notes.txt"),
+            folderWith("My research", "LNM/scripts.py", "Studies/paper.docx", "Templates/letter.dotx"),
+        ]
+        realGetExistingDirectory = qt.QFileDialog.getExistingDirectory
+        picked = []
+        qt.QFileDialog.getExistingDirectory = staticmethod(lambda *args, **kwargs: picked[-1])
+        try:
+            for cancellable in (False, True):
+                for folder in studioFolders:
+                    picked.append(folder)
+                    dialog = projects_ui.FolderChooserDialog(proposal=os.path.join(self.tempDir, "Slicer Studio"), cancellable=cancellable)
+                    try:
+                        dialog.choose()
+                        self.assertEqual(os.path.normpath(dialog.path), folder, f"used as is: {os.path.basename(folder)}")
+                    finally:
+                        dialog.deleteLater()
+                for folder in userFolders:
+                    picked.append(folder)
+                    dialog = projects_ui.FolderChooserDialog(proposal=os.path.join(self.tempDir, "Slicer Studio"), cancellable=cancellable)
+                    try:
+                        dialog.choose()
+                        self.assertEqual(os.path.normpath(dialog.path), os.path.join(folder, projects.ROOT_FOLDER_NAME),
+                                         f"a Slicer Studio folder inside: {os.path.basename(folder)}")
+                    finally:
+                        dialog.deleteLater()
+        finally:
+            qt.QFileDialog.getExistingDirectory = realGetExistingDirectory
+            slicer.app.processEvents()
+        # The study of the folder chosen as is is listed there
+        self.assertEqual([os.path.basename(path) for path in projects.listStudies(studioFolders[0])], ["Aphasia cohort"])
+        self.assertTrue(projects.isStudioFolder(os.path.join(self.tempDir, "new", projects.ROOT_FOLDER_NAME)), "by its name")
+        self.assertFalse(projects.isStudioFolder(""))
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk
