@@ -802,6 +802,19 @@ def _undoRedo(which):
         getattr(editor, which)()
 
 
+def _canUndoRedo(which, shell):
+    """Undo and Redo of the lesion are Draw-only, as the top bar's buttons and Ctrl+Z are: in another workspace the
+    lesion is hidden, so an undo there would change it unseen. Offered when the Segment Editor has a step to take.
+    """
+    if shell is None or shell.currentWorkspace() != "draw":
+        return False
+    editor = _segmentEditor()
+    if editor is None:
+        return False
+    button = editor.findChild("QToolButton", "UndoButton" if which == "undo" else "RedoButton")
+    return button is None or bool(button.enabled)
+
+
 def _hasLesion():
     draw = _importOptional("StudioLib.draw")
     if draw is None:
@@ -949,9 +962,9 @@ class Index:
             Entry("action.shortcuts", _("Keyboard shortcuts"), action, shell.toggleCheatSheet, key="Ctrl+/",
                   synonyms=("shortcuts", "keys", "hotkeys", "cheat sheet", "keyboard", "key bindings"), iconName="keyboard"),
             Entry("action.undo", _("Undo"), action, lambda: _undoRedo("undo"), key="Ctrl+Z", synonyms=("undo", "revert", "take back"),
-                  enabled=lambda: _segmentEditor() is not None, description=_("Undo the last lesion edit"), iconName="undo-2"),
+                  enabled=lambda: _canUndoRedo("undo", shell), description=_("Undo the last lesion edit"), iconName="undo-2"),
             Entry("action.redo", _("Redo"), action, lambda: _undoRedo("redo"), key="Ctrl+Y", synonyms=("redo",),
-                  enabled=lambda: _segmentEditor() is not None, description=_("Redo the last undone lesion edit"), iconName="redo-2"),
+                  enabled=lambda: _canUndoRedo("redo", shell), description=_("Redo the last undone lesion edit"), iconName="redo-2"),
             Entry("action.recentMessages", _("Recent messages"), action, shell.showRecentMessages,
                   synonyms=("messages", "notifications", "toasts", "history"), iconName="history"),
             Entry("action.hidePanels", _("Hide panels"), view, shell.toggleFocusMode, key="Ctrl+6",

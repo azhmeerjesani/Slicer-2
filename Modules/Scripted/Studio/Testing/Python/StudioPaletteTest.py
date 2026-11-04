@@ -570,6 +570,56 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             allowed = slicer.util.settingsValue("Studio/AllowedToolbars", [])
             self.assertIn("MarkupsToolBar", [allowed] if isinstance(allowed, str) else list(allowed))
 
+    def test_07a_undo_redo_entries_are_draw_only(self):
+        """Search offers Undo and Redo of the lesion only in Draw, and only with a step to take: in Map (where the lesion is
+        hidden) the entry would silently change the lesion that the shown map was computed from (as Ctrl+Z, it does nothing there).
+        """
+        import numpy as np
+        from StudioLib import importer, palette
+
+        studioShell = self._applyStudio()
+        volume, segmentation = importer.startOnTemplate(shell=studioShell)
+        self._pump()
+        studioShell.switchTo("draw")
+        self._pump()
+        editor = slicer.modules.SegmentEditorWidget.editor
+        segmentId = segmentation.GetSegmentation().GetNthSegmentID(0)
+        palette.search(studioShell, "x")
+        entries = palette._palette.index.byId
+        undo, redo = entries["action.undo"], entries["action.redo"]
+
+        def stroke(voxels):
+            editor.saveStateForUndo()
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, segmentId, volume).copy()
+            array.flat[:voxels] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentation, segmentId, volume)
+            self._pump()
+
+        def voxels():
+            return int(np.count_nonzero(slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, segmentId, volume)))
+
+        stroke(50)
+        stroke(100)
+        self.assertEqual(voxels(), 100)
+        self.assertTrue(undo.isEnabled(), "Undo is offered in Draw with a step to take")
+        self.assertFalse(redo.isEnabled(), "Redo is not offered with nothing undone")
+        for workspace in ("map", "library"):
+            studioShell.switchTo(workspace)
+            self._pump()
+            self.assertFalse(undo.isEnabled(), f"Undo is not offered in {workspace}")
+            self.assertFalse(redo.isEnabled(), f"Redo is not offered in {workspace}")
+            self.assertNotIn(undo, [entry for entry in palette.search(studioShell, "undo") if entry.isEnabled()])
+            self.assertEqual(voxels(), 100, "the lesion is untouched")
+        studioShell.switchTo("draw")
+        self._pump()
+        palette.runEntry(studioShell, "action.undo")
+        self._pump()
+        self.assertEqual(voxels(), 50)
+        self.assertTrue(redo.isEnabled(), "Redo is offered after an undo in Draw")
+        studioShell.switchTo("map")
+        self._pump()
+        self.assertFalse(redo.isEnabled())
+
     #
     # Shortcut overlay
     #
