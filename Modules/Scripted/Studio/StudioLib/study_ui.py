@@ -2552,19 +2552,21 @@ class StudySession:
 
     def removeSubjects(self, sids):
         """Remove subjects from the study (their files are kept). Undo with ``undoRemove()``. Return the number removed."""
-        rows = self.study.subjects
-        order = [row["participant_id"] for row in rows]
-        record = [(order.index(sid), self.study.subject(sid)) for sid in sids if sid in self.study]
-        if not record:
+        if not any(sid in self.study for sid in sids):
             return 0
         if self._current in sids:
-            self._leave(write=True)
+            # The open subject is written first, so that the rows kept for Undo name its lesion (BB-1); a lesion that
+            # could not be written keeps it open and in the study (a toast says why)
+            if not self._leave(write=True):
+                return 0
             self._removeSubjectNodes()
             self._current = None
             shell = _currentShell(self._shell)
             if shell is not None:
                 # The breadcrumb never names a subject that is not open (nor in the study any more)
                 shell.setBreadcrumb(self.study.name, None, onClick=lambda: showSubjectSwitcher(shell))
+        order = [row["participant_id"] for row in self.study.subjects]
+        record = [(order.index(sid), self.study.subject(sid)) for sid in sids if sid in self.study]
         for _index, row in record:
             self.study.remove_subject(row["participant_id"])
         self._removed.append(record)
@@ -3952,7 +3954,8 @@ class StudySession:
             return False
         if previous in self.study:
             self.open(previous, switchToDraw=False)
-        self.removeSubjects([sid])
+        if not self.removeSubjects([sid]):
+            return False
         self._removed.pop()  # not offered by "Undo remove"
         return True
 

@@ -3180,6 +3180,70 @@ class StudioRegressionTest(unittest.TestCase):
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
 
+    def test_69_undo_remove_of_the_open_subject_keeps_its_lesion(self):
+        """Removing the subject being traced writes its lesion first; Undo puts back the row that names that lesion,
+        not the row from before the write, and reopening shows the tracing (BB-1).
+        """
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Remove undo study")
+        os.makedirs(folder)
+        scans = []
+        for index in range(1, 4):
+            scans.append(os.path.join(folder, f"sub-0{index}_T1w.nii.gz"))
+            nifti.write_nifti(scans[-1], np.zeros(grid.shape, np.uint8), grid.affine)
+        originalToast = study_ui._toast
+        study_ui._toast = lambda shell, text, **kwargs: None
+        self.addCleanup(setattr, study_ui, "_toast", originalToast)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+
+        def voxels(session):
+            segmentationNode, volumeNode = session.segmentationNode(), session.volumeNode()
+            segmentId = segmentationNode.GetSegmentation().GetNthSegmentID(0)
+            return int(slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, volumeNode).sum())
+
+        try:
+            session = study_ui.createStudy(scans, studioShell, folder=folder)
+            self.assertIsNotNone(session)
+            self.assertTrue(session.open("sub-02", switchToDraw=False))
+            segmentationNode, volumeNode = session.segmentationNode(), session.volumeNode()
+            segmentId = segmentationNode.GetSegmentation().GetNthSegmentID(0)
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, volumeNode)
+            array[20:23, 30:33, 20:23] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, volumeNode)
+            for _ in range(4):
+                slicer.app.processEvents()
+            self.assertEqual(voxels(session), 27)
+            # Delete in Library with the subject open (no Done), then Undo
+            self.assertEqual(session.removeSubjects(["sub-02"]), 1)
+            self.assertIsNone(session.current())
+            self.assertNotIn("sub-02", session.study)
+            lesions = os.listdir(os.path.join(folder, "lesions"))
+            self.assertTrue([name for name in lesions if name.startswith("sub-02_") and name.endswith(".nii.gz")], lesions)
+            self.assertEqual(session.undoRemove(), 1)
+            self.assertEqual([row["participant_id"] for row in session.study.subjects], ["sub-01", "sub-02", "sub-03"])
+            row = session.study.subject("sub-02")
+            self.assertFalse(study_ui._missing(row.get("lesion")), "Undo put back the row from before the lesion was written")
+            self.assertEqual(row.get("status"), "inprogress")
+            self.assertTrue(os.path.isfile(os.path.join(folder, row["lesion"])))
+            # Reopening shows the tracing
+            self.assertTrue(session.open("sub-02", switchToDraw=False))
+            self.assertEqual(voxels(session), 27)
+        finally:
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
+
     def test_29_second_tracing_survives_a_crash(self):
         """Slicer stopped during a second tracing: nothing of it was journaled, and the recovery card offered to reopen
         the session's earlier subject (an empty second tracing then). The second tracing now has its own journal, the
