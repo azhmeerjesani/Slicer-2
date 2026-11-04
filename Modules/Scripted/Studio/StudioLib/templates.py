@@ -195,12 +195,20 @@ def fileSha256(path):
 #
 
 
+# The signs that turn the coordinates of a NRRD "space" into RAS, as 3D Slicer reads a scalar volume (ITK's NrrdImageIO):
+# only RAS and LAS coordinates are converted; any other space, a missing one included ("3D-right-handed", "scanner-xyz",
+# no "space" field), is taken unchanged as LPS (see _nrrdSpaceSigns).
 _NRRD_SPACES = {
     "right-anterior-superior": (1, 1, 1), "ras": (1, 1, 1),
     "left-posterior-superior": (-1, -1, 1), "lps": (-1, -1, 1),
     "left-anterior-superior": (-1, 1, 1), "las": (-1, 1, 1),
-    "scanner-xyz": (-1, -1, 1), "3d-right-handed": (1, 1, 1),
 }
+_NRRD_OTHER_SPACE = (-1, -1, 1)
+
+
+def _nrrdSpaceSigns(fields):
+    """The RAS signs of the coordinates of a NRRD file: what 3D Slicer does, so the grid checked is the grid loaded."""
+    return _NRRD_SPACES.get(fields.get("space", "").strip().lower(), _NRRD_OTHER_SPACE)
 
 
 def _nrrdVector(text):
@@ -243,7 +251,7 @@ def _nrrdGeometry(fields):
     spatial = [index for index, vector in enumerate(vectors) if vector is not None]
     if len(spatial) != 3:
         raise ValueError(_("Not a 3D image"))
-    signs = np.array(_NRRD_SPACES.get(fields.get("space", "right-anterior-superior").lower(), (1, 1, 1)), dtype=float)
+    signs = np.array(_nrrdSpaceSigns(fields), dtype=float)
     affine = np.eye(4)
     for column, index in enumerate(spatial):
         affine[:3, column] = np.array(vectors[index]) * signs

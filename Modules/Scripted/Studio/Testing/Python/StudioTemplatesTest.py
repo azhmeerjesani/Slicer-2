@@ -1581,3 +1581,64 @@ class StudioTemplatesTest(unittest.TestCase):
             else:
                 settings.setValue(study_ui.RECENT_STUDIES_KEY, recent)
             shutil.rmtree(study.path, ignore_errors=True)
+
+    def test_31_nrrd_without_a_space_is_read_as_slicer_loads_it(self):
+        """BB-1: a NRRD with no "space" field (or "space: 3D-right-handed", "scanner-xyz") was checked and registered as RAS,
+        but Slicer (ITK) reads it as LPS: the template loaded mirrored left-right and front-back, a lesion drawn on its left
+        hemisphere read "Right" while labelled MNI, and every Start on template loaded another copy. The header reader now
+        takes such coordinates as LPS, as Slicer does, so the grid checked is the grid loaded.
+        """
+        import vtk
+
+        from LesionNetworkMappingLib import nifti
+
+        from StudioLib import importer
+
+        templates = self.templates
+        work = os.path.join(self.tempDir, "nrrd-no-space")
+        os.makedirs(work, exist_ok=True)
+        data, affine, _header = nifti.read_nifti(self.bundled)
+        data = np.ascontiguousarray(data.astype(np.float32))
+
+        def write(name, spaceLine, signs):
+            path = os.path.join(work, name)
+            vectors = " ".join("(%s)" % ",".join(repr(float(affine[row, column] * signs[row])) for row in range(3)) for column in range(3))
+            origin = ",".join(repr(float(affine[row, 3] * signs[row])) for row in range(3))
+            header = (f"NRRD0004\ntype: float\ndimension: 3\n{spaceLine}sizes: {data.shape[0]} {data.shape[1]} {data.shape[2]}\n"
+                      f"space directions: {vectors}\nkinds: domain domain domain\nendian: little\nencoding: raw\nspace origin: ({origin})\n\n")
+            with open(path, "wb") as handle:
+                handle.write(header.encode("ascii"))
+                handle.write(data.transpose(2, 1, 0).tobytes())
+            return path
+
+        def loadedAffine(path):
+            node = slicer.util.loadVolume(path)
+            matrix = vtk.vtkMatrix4x4()
+            node.GetIJKToRASMatrix(matrix)
+            slicer.mrmlScene.RemoveNode(node)
+            return np.array([[matrix.GetElement(row, column) for column in range(4)] for row in range(4)])
+
+        try:
+            ras, lps = (1, 1, 1), (-1, -1, 1)
+            cases = [("ras.nrrd", "space: right-anterior-superior\n", ras, True), ("lps.nrrd", "space: left-posterior-superior\n", lps, True)]
+            for spaceLine, tag in (("space dimension: 3\n", "nospace"), ("space: 3D-right-handed\n", "rh3d"), ("space: scanner-xyz\n", "scanner")):
+                cases += [(f"{tag}_rasvalues.nrrd", spaceLine, ras, False), (f"{tag}_lpsvalues.nrrd", spaceLine, lps, True)]
+            for name, spaceLine, signs, onMni in cases:
+                path = write(name, spaceLine, signs)
+                header = templates.readNrrdHeader(path)
+                np.testing.assert_allclose(header["affine"], loadedAffine(path), atol=1e-4, err_msg=f"{name}: the grid checked is the grid Slicer loads")
+                np.testing.assert_allclose(templates.readNrrdData(path)[1], header["affine"], atol=1e-6, err_msg=name)
+                detection = templates.identify(path)
+                self.assertEqual(detection.ok, onMni, f"{name}: {detection.message}")
+            # The no-space file whose coordinates Slicer places at MNI: a template whose volume is reused and sides are right
+            template = self._add(os.path.join(work, "nospace_lpsvalues.nrrd"), name="No space NRRD")
+            shell = self._shell()
+            volume, _segmentation = importer.startOnTemplate(shell=shell, templateId=template.id)
+            self.assertTrue(templates.isNodeOnTemplateGrid(volume, template))
+            matrix = vtk.vtkMatrix4x4()
+            volume.GetIJKToRASMatrix(matrix)
+            self.assertLess(matrix.MultiplyPoint((20, 50, 40, 1))[0], 0, "voxel i=20 is in the left hemisphere, as in the NIfTI")
+            again, _segmentation = importer.startOnTemplate(shell=shell, templateId=template.id)
+            self.assertEqual(again.GetID(), volume.GetID(), "Start on template again reuses the volume")
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
