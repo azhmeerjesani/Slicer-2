@@ -544,6 +544,49 @@ class StudioNiftiExportTest(unittest.TestCase):
         self.assertNotIn("ReferenceTransformApplied", sidecar)
         self.assertEqual(code, 2)
 
+    def test_04d_resampled_lesion_keeps_its_own_space(self):
+        """Resampling a lesion onto another image's grid is not a normalization: the space comes from the lesion, not the grid."""
+        mniGrid = np.array([[-2.0, 0, 0, 90], [0, 2.0, 0, -126], [0, 0, 2.0, -72], [0, 0, 0, 1]])
+        scanGrid = np.array([[1.0, 0, 0, -20], [0, 1.0, 0, -20], [0, 0, 1.0, -20], [0, 0, 0, 1]])
+        scan = self._volume("scan", np.zeros((40, 40, 40), np.int16), scanGrid)
+        template = self._volume("mni", np.zeros((91, 109, 91), np.int16), mniGrid)
+
+        def lesion(name, volume, block, tag=None):
+            segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", name)
+            segmentation.CreateDefaultDisplayNodes()
+            segmentation.SetReferenceImageGeometryParameterFromVolumeNode(volume)
+            segmentId = segmentation.GetSegmentation().AddEmptySegment("", "Lesion")
+            array = np.zeros(slicer.util.arrayFromVolume(volume).shape, np.uint8)
+            array[block] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentation, segmentId, volume)
+            if tag:
+                segmentation.SetAttribute("Studio.Space", tag)
+            return segmentation
+
+        def exported(segmentation, name, reference=None):
+            result = self.export.exportSegmentation(segmentation, os.path.join(self.out, name + ".nii.gz"), mode=self.export.SEGMENTATION_MASKS,
+                                                    reference=reference, overwrite=True)
+            self.assertEqual(result.errors, [])
+            _data, _affine, header = self._read(result.images[0])
+            return self._sidecar(result.images[0]), (header["sform_code"], header["qform_code"])
+
+        # A native lesion (untagged, or tagged native) on the MNI grid is still in scanner space
+        for tag in (None, "native"):
+            native = lesion("native " + str(tag), scan, (slice(15, 25), slice(15, 25), slice(15, 25)), tag)
+            sidecar, codes = exported(native, "native_own_" + str(tag))
+            self.assertEqual((sidecar["Space"], codes), ("scanner", (1, 1)))
+            sidecar, codes = exported(native, "native_on_mni_" + str(tag), reference=template)
+            self.assertIn("Resampled", sidecar)
+            self.assertEqual((sidecar["Space"], codes), ("scanner", (1, 1)), tag)
+            self.assertNotIn("Template", sidecar)
+        # An MNI lesion on a scan grid is still MNI (tagged or recognised by its grid)
+        for tag in (None, "MNI152NLin6Asym"):
+            mni = lesion("mni " + str(tag), template, (slice(35, 45), slice(60, 70), slice(40, 50)), tag)
+            sidecar, codes = exported(mni, "mni_on_scan_" + str(tag), reference=scan)
+            self.assertIn("Resampled", sidecar)
+            self.assertEqual((sidecar["Space"], codes), ("MNI152NLin6Asym", (4, 4)), tag)
+        self._assertNoAbsolutePaths(self.out)
+
     def test_05_template_codes(self):
         """sform/qform code 4 on a recognised MNI grid (the bundled template) and on the user's own template (A-10)."""
         from LesionNetworkMappingLib import geometry, nifti

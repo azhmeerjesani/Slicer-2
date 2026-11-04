@@ -1013,9 +1013,15 @@ class Job:
     def _segmentationSidecar(self, node, data, affine, transformNote, referenceNode, resampled, referenceTransformNote=None):
         grid = (data.shape, affine)
         transformed = transformNote is not None or referenceTransformNote is not None
-        spaceName, resolution, template = spaceInfo(node, grid, transformed=transformed)
-        if spaceName is None and referenceNode is not None and not transformed:
-            spaceName, resolution, template = spaceInfo(referenceNode, grid)
+        if resampled:
+            # Nearest-neighbour resampling onto another image's grid is not a normalization: the voxels keep the
+            # coordinates they had, so the space is the lesion's own (its attribute, else its own grid), never the
+            # chosen grid's (a native lesion on the MNI grid is still scanner space, an MNI lesion on a scan is still MNI)
+            spaceName, resolution, template = spaceInfo(node, space.gridOf(node), transformed=transformed)
+        else:
+            spaceName, resolution, template = spaceInfo(node, grid, transformed=transformed)
+            if spaceName is None and referenceNode is not None and not transformed:
+                spaceName, resolution, template = spaceInfo(referenceNode, grid)
         code = xformCode(spaceName, transformed)
         sidecar = baseSidecar(node, KIND_SEGMENTATION, spaceName, resolution, template, code, data, affine, transformNote)
         if spaceName is None and transformed:
