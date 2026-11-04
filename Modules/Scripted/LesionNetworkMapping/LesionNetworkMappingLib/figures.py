@@ -1031,6 +1031,12 @@ def _resolve(info, options):
         if options.mask is not None:
             raise ValueError(f"The mask ({options.mask.name}) covers no finite voxel of the map {info.volume.name}: it is empty, lies outside the map's field of view or covers only its NaN voxels, so the number of voxels tested (V) is unknown. Is the mask in the map's space? Otherwise give V with --v.")
         raise ValueError(f"The map {info.volume.name} has no finite non-zero voxel, so the number of voxels tested (V) is unknown. Give V with --v.")
+    rule = thresholds.normalize_rule(rule)
+    if rule["kind"] == "top_pct" and options.sign and rule.get("sign") != options.sign:
+        # The sign of a top-x% rule chooses its cut-off (top x% of T, -T or |T|): the shown sign (--sign) used to change
+        # only the tail drawn, at the other tail's cut-off, under the rule's "top x%" label. Resolve the rule for the
+        # shown sign, as the module's sign buttons do (onSignClicked).
+        rule = dict(rule, sign=options.sign)
     if options.n:
         resolved = thresholds.resolve(rule, int(options.n), info.v, gsr=options.gsr, values=values)
     else:
@@ -2334,7 +2340,7 @@ def _parser():
     parser.add_argument("--point", default=None, help="x,y,z in mm (ortho; default: the peak)")
     parser.add_argument("--mode", choices=MODES, default=None, help="display mode of thresholded panels (default hard; replication: unthresholded)")
     parser.add_argument("--no-companion", action="store_true", help="omit the unthresholded companion panels")
-    parser.add_argument("--sign", choices=thresholds.SIGNS, default=None)
+    parser.add_argument("--sign", choices=thresholds.SIGNS, default=None, help="values shown in thresholded panels (default: the rule's sign, else both); a top_pct rule is resolved for this sign")
     parser.add_argument("--statistic", default=None, help="statistic name on the colour bar (default: from the rule)")
     parser.add_argument("--units", default=None, help="units shown on the colour bar")
     parser.add_argument("--window", type=float, default=None, help="symmetric colour range W (default: 99.5th percentile of |value|)")

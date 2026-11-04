@@ -743,6 +743,30 @@ class FiguresTest(unittest.TestCase):
         plain = figures.montage(self.tmap, self.template, "A 0", sign="neg", **SMALL)
         self.assertNotIn("show only", plain.caption)
 
+    def test_shown_sign_resolves_a_top_pct_rule_for_that_tail(self):
+        # A top-x% rule's sign chooses its cut-off. --sign opposite to the rule's sign used to draw the other tail at the
+        # rule's cut-off (on an asymmetric map: 0% of voxels, or far more than x%) under the "top 5%" label
+        values = self.tmap[0][self.tmap[0] != 0].astype(np.float64)
+        neg_cut = float(np.percentile(-values, 95.0))
+        self.assertGreater(abs(float(np.percentile(values, 95.0)) - neg_cut), 0.5)  # the two tails' cut-offs differ
+        rules = {sign: {"kind": "top_pct", "value": 5, "statistic": "T", "sign": sign} for sign in ("both", "pos", "neg")}
+        reference = figures.montage(self.tmap, self.template, "A 0", rule=rules["neg"], sign="neg", **SMALL)
+        for rule_sign in ("pos", "both"):
+            figure = figures.montage(self.tmap, self.template, "A 0", rule=rules[rule_sign], sign="neg", **SMALL)
+            resolved = figure.meta["thresholds"]["meanT"]
+            self.assertEqual(resolved["rule"]["sign"], "neg", rule_sign)
+            self.assertAlmostEqual(resolved["value"], neg_cut, delta=0.05, msg=rule_sign)
+            self.assertAlmostEqual(resolved["fraction"], 0.05, delta=0.005, msg=rule_sign)
+            self.assertEqual(figure.caption, reference.caption, rule_sign)
+        self.assertIn("top 5% of -T", reference.caption)
+        self.assertIn(f"{figures.thresholds._format_fraction(np.mean(values <= -resolved['value']))} of in-mask voxels); ", reference.caption)
+        # The other way round, and without --sign the rule keeps its own sign
+        pos = figures.montage(self.tmap, self.template, "A 0", rule=rules["neg"], sign="pos", **SMALL)
+        self.assertEqual(pos.meta["thresholds"]["meanT"]["rule"]["sign"], "pos")
+        self.assertAlmostEqual(pos.meta["thresholds"]["meanT"]["fraction"], 0.05, delta=0.005)
+        own = figures.montage(self.tmap, self.template, "A 0", rule=rules["pos"], **SMALL)
+        self.assertEqual(own.meta["thresholds"]["meanT"]["rule"]["sign"], "pos")
+
     def test_glass_projection_follows_sign(self):
         values = np.zeros(SHAPE, dtype=np.float32)
         values[6:10, 16:21, 12:17] = 6.0  # on the same sagittal (left-right) rays as a stronger negative block
