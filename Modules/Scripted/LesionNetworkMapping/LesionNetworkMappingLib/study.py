@@ -1653,6 +1653,7 @@ class Study:
         report = {"added": [], "updated": [], "skipped": [], "pairs": {}, "warnings": []}
         candidates = {}
         original_stems = {}
+        canonical = {}  # casefolded id: the id its files go to
         for path in self._expand(paths):
             stem = _nifti_stem(path)
             if stem is None:
@@ -1677,6 +1678,10 @@ class Study:
                 continue
             if sid != raw_id:
                 original_stems[path] = stem  # not a BIDS id: the row keeps the file's stem as source_id
+            # Ids differing only in letter case name one subject (one file name on macOS): "patient01_T1w.nii.gz"
+            # belongs to the row sub-Patient01 of the participants table, and files spelling one new id in
+            # different cases go to one new subject
+            sid = canonical.setdefault(sid.casefold(), sid if sid in self._index else (self.case_twin(sid) or sid))
             kind = "lesion" if is_lesion else "scan"
             candidates.setdefault(sid, {"scan": [], "lesion": []})[kind].append((path, header))
             disagreement = xform_disagreement(header)
@@ -1699,11 +1704,6 @@ class Study:
             for kind, files in (("scan", scans), ("lesion", lesions)):
                 for path, _ in files[1:]:
                     report["skipped"].append({"path": path, "reason": f"another {kind} was chosen for {sid}"})
-            twin = self.case_twin(sid) if sid not in self._index else None
-            if twin is not None:  # one file name on macOS: keep the subject that is already in the study
-                reason = _case_twin_message(sid, twin)
-                report["skipped"].extend({"path": item[0], "reason": reason} for item in (chosen["lesion"], chosen["scan"]) if item)
-                continue
             space = lesion_space or file_space(chosen["scan"])
             values = {"scan": self.relpath(chosen["scan"][0]) if chosen["scan"] else None, "lesion": self.relpath(chosen["lesion"][0]) if chosen["lesion"] else None}
             report["pairs"][sid] = {kind: chosen[kind][0] if chosen[kind] else None for kind in ("scan", "lesion")}

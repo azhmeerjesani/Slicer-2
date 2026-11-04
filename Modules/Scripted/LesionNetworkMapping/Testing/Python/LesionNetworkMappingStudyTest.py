@@ -492,18 +492,52 @@ class StudyTest(unittest.TestCase):
             created.import_tsv(self.path("twin_of_study.tsv"))
         self.assertEqual(created.subject_ids, ["sub-P01"])
         self.assertEqual(created.subject("sub-P01")["nihss"], "4")
-        # Files: a case twin of a subject is skipped with the reason, the subject keeps its row
+        # Files: a file of a case twin of a subject is that subject's file (one name on macOS): no second row
         lesion = self._image("drop/sub-p01_lesion.nii.gz", affine=MNI2009C_2MM, value=1)
         report = created.add_files([lesion])
         self.assertEqual(report["added"], [])
-        self.assertEqual(report["skipped"], [{"path": lesion, "reason": "Subject sub-p01 differs from sub-P01 only in letter case: on macOS they would share files"}])
+        self.assertEqual(report["updated"], ["sub-P01"])
+        self.assertEqual(report["skipped"], [])
         self.assertEqual(created.subject_ids, ["sub-P01"])
+        self.assertEqual(created.subject("sub-P01")["lesion"], created.relpath(lesion))
         # Removing a subject frees its id in every case
         created.remove_subject("sub-P01")
         self.assertIsNone(created.case_twin("sub-p01"))
         created.add_subject("p01")
         self.assertEqual(created.subject_ids, ["sub-p01"])
         self.assertEqual(len({path.casefold() for path in (created.lesion_relpath(sid) for sid in created.subject_ids)}), len(created))
+
+    def test_files_go_to_the_row_whose_id_differs_only_in_case(self):
+        # Adopt in place: participants.tsv says "Patient01" or "PATIENT03", the files say "patient01": one participant
+        created = Study.create(self.path("caseids"), space="MNI152NLin2009cAsym")
+        with open(self.path("caseids.tsv"), "w", encoding="utf-8") as f:
+            f.write("participant_id\tnihss\nPatient01\t4\npatient02\t5\nPATIENT03\t6\n")
+        created.import_tsv(self.path("caseids.tsv"))
+        self.assertEqual(created.subject_ids, ["sub-Patient01", "sub-patient02", "sub-PATIENT03"])
+        for n in (1, 2, 3):
+            self._image(f"caseids_in/patient0{n}_T1w.nii.gz", affine=MNI2009C_2MM)
+        for n in (1, 3):
+            self._image(f"caseids_in/patient0{n}_lesion.nii.gz", affine=MNI2009C_2MM, value=1)
+        report = created.add_files(self.path("caseids_in"))
+        self.assertEqual(report["skipped"], [])
+        self.assertEqual(report["added"], [])
+        self.assertEqual(sorted(report["updated"]), ["sub-PATIENT03", "sub-Patient01", "sub-patient02"])
+        self.assertEqual(created.subject_ids, ["sub-Patient01", "sub-patient02", "sub-PATIENT03"])
+        for sid, n, traced in (("sub-Patient01", 1, True), ("sub-patient02", 2, False), ("sub-PATIENT03", 3, True)):
+            row = created.subject(sid)
+            self.assertEqual(row["scan"], created.relpath(self.path(f"caseids_in/patient0{n}_T1w.nii.gz")))
+            self.assertEqual(row["lesion"], created.relpath(self.path(f"caseids_in/patient0{n}_lesion.nii.gz")) if traced else "n/a")
+            self.assertEqual(row["status"], "traced" if traced else "untraced")
+        self.assertEqual(sorted(report["pairs"]), ["sub-PATIENT03", "sub-Patient01", "sub-patient02"])
+        # New subjects: files spelling one id in different cases make one subject, not a skipped twin
+        scan = self._image("caseids_new/Patient09_T1w.nii.gz", affine=MNI2009C_2MM)
+        lesion = self._image("caseids_new/patient09_lesion.nii.gz", affine=MNI2009C_2MM, value=1)
+        report = created.add_files(self.path("caseids_new"))
+        self.assertEqual(report["skipped"], [])
+        self.assertEqual(len(report["added"]), 1)
+        row = created.subject(report["added"][0])
+        self.assertEqual(report["added"][0].casefold(), "sub-patient09")
+        self.assertEqual((row["scan"], row["lesion"], row["status"]), (created.relpath(scan), created.relpath(lesion), "traced"))
 
 
 if __name__ == "__main__":
