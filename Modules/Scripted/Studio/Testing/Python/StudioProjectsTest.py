@@ -3428,6 +3428,33 @@ class StudioProjectsTest(unittest.TestCase):
         finally:
             projects.setCurrentProject(previous)
 
+    def test_52c_rename_to_only_forbidden_characters_is_refused_not_renamed_untitled(self):
+        """Typing "//:*?" in Rename renamed the project "Untitled project" (BB-1: the fallback name of a new project), a name the
+        user did not type: it is refused with a short reason and the project keeps its name; mixed text is still cleaned up.
+        """
+        from unittest import mock
+
+        from StudioLib import projects_ui
+
+        projects = self.projects
+        projects.ensureRoot()
+        closed = projects.createProject("Case 8")
+        notices = []
+        for typed in ("//:*?", "...", " . / . "):
+            del notices[:]
+            with mock.patch.object(projects_ui, "_notice", lambda _parent, title, text: notices.append((title, text))):
+                timer = self._answerDialog("StudioProjectsRenameDialog", "StudioProjectsRenameDialogButton0", {}, fill=typed)
+                self.assertIsNone(projects_ui.renameDialog(closed.path), typed)
+                timer.stop()
+            self.assertEqual(len(notices), 1, (typed, notices))
+            self.assertTrue(os.path.isdir(closed.path), typed)
+            self.assertFalse(os.path.exists(os.path.join(projects.projectsFolder(), projects.UNTITLED_NAME)), typed)
+        # Mixed text keeps its letters
+        timer = self._answerDialog("StudioProjectsRenameDialog", "StudioProjectsRenameDialogButton0", {}, fill="a/b")
+        newPath = projects_ui.renameDialog(closed.path)
+        timer.stop()
+        self.assertEqual(os.path.basename(newPath), "a b")
+
     def test_53b_moved_study_with_a_taken_name_is_named_after_its_new_folder(self):
         """A study that Change folder > Move lands as "<name> 2" is named "<name> 2" in its study.json too (BB-1): the Library
         titles a study card by that name, so the two "Stroke" studies were identical cards. A name the user chose stays; the

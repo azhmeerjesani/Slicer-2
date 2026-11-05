@@ -810,7 +810,12 @@ def renameDialog(path=None, parent=None):
         newName = dialog.run()
     finally:
         dialog.deleteLater()
-    newName = projects.sanitizeName(newName) if newName and str(newName).strip() else ""
+    typed = newName if newName and str(newName).strip() else ""
+    # fallback="": a name of only forbidden characters or dots is refused, not renamed to "Untitled project" (which the user did not type)
+    newName = projects.sanitizeName(typed, fallback="") if typed else ""
+    if typed and not newName:
+        _notice(parent, _("Rename project"), _("These characters cannot be used in a name: / \\ : * ? \" < > |. Type a name with letters or numbers."))
+        return None
     if not newName or newName == name:
         return None
     try:
