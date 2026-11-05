@@ -2509,6 +2509,55 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         finally:
             importer.openAddDataDialog = original
 
+    def test_mixed_drop_lesion_stays_the_draw_lesion(self):
+        """A drop with a scan, its lesion and a file that Studio does not open itself (markups, a .mgz scan): only that file
+        goes to Add Data (where a lesion would be read as a label map), and Draw edits the dropped lesion on the scan.
+        """
+        from StudioLib import importer
+
+        studioShell = self._applyStudio()
+        scan = self._writeVolume("sub-01_T1w.nii.gz", GRID_SHIFTED)
+        lesion = self._writeMask("sub-01_lesion.nii.gz", GRID_SHIFTED)
+        mgzScan = self._writeVolume("sub-01_T1w.mgz", GRID_SHIFTED)
+        markupsNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "targets")
+        markupsNode.AddControlPoint(0.0, 0.0, 0.0)
+        markups = os.path.join(self.directory, "targets.mrk.json")
+        self.assertTrue(slicer.util.saveNode(markupsNode, markups))
+        slicer.mrmlScene.RemoveNode(markupsNode)
+        calls = []
+
+        def addData(paths):
+            # As the Add Data dialog: a lesion name is read as a label map (W3-04), a markups file as markups
+            calls.append([os.path.basename(path) for path in paths])
+            for path in paths:
+                if path.endswith(".mrk.json"):
+                    slicer.util.loadMarkups(path)
+                elif importer.isLesionName(path):
+                    slicer.util.loadLabelVolume(path)
+                else:
+                    slicer.util.loadVolume(path)
+
+        original = importer.openAddDataDialog
+        importer.openAddDataDialog = addData
+        try:
+            for paths, toAddData, scanName in (([scan, lesion, markups], ["targets.mrk.json"], "sub-01_T1w"),
+                                               ([mgzScan, lesion], ["sub-01_T1w.mgz"], "sub-01_T1w")):
+                slicer.mrmlScene.Clear(0)
+                self._pump()
+                calls.clear()
+                result = importer.handleDrop(paths, shell=studioShell)
+                self._pump(8)
+                self.assertEqual(calls, [toAddData])
+                self.assertEqual([node.GetName() for node in result.segmentations], ["sub-01_lesion"])
+                self.assertEqual(slicer.util.getNodesByClass("vtkMRMLLabelMapVolumeNode"), [])
+                self.assertEqual(self._editor().segmentationNode().GetName(), "sub-01_lesion")
+                self.assertEqual(self._editor().sourceVolumeNode().GetName(), scanName)
+                self.assertTrue(self._editor().segmentationNode().GetDisplayNode().GetVisibility())
+                if toAddData == ["targets.mrk.json"]:
+                    self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLMarkupsFiducialNode")), 1)
+        finally:
+            importer.openAddDataDialog = original
+
     def test_recent_times_recorded(self):
         """Opened files are recorded in Studio/RecentOpenTimes and folders in Studio/RecentFolders."""
         from StudioLib import importer

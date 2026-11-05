@@ -23,7 +23,9 @@ not loaded a second time: it becomes current again, with the toast "<name> is al
 official behavior (the file is loaded again).
 
 Anything else (other file types, several folders, Shift+drop) opens the classic Add Data dialog with the
-dropped paths. A DICOM folder goes to the DICOM module; a folder with several NIfTI files is offered as
+dropped paths. In Studio, a load that mixes files of other types with scans or lesions sends only those files to the
+dialog: the scans and lesions load directly, and a scan that the dialog loads (a ``.mgz``) is a scan of the load.
+A DICOM folder goes to the DICOM module; a folder with several NIfTI files is offered as
 a card in the Library, whose primary action is "Create study" (W3-07, ``StudioLib.study_ui``); a study folder
 (with a ``study.json``) opens the study. While a study is open, "Start on MNI template" adds a case to the study on
 its template, and ``loadedSet()`` is None (the study replaces the loaded set). In Studio, loading a scan switches to Draw, on the lesion loaded with it or on a new
@@ -1342,6 +1344,21 @@ def openAddDataDialog(paths):
 #: Kinds of file whose load Draw edits a lesion of (a scene, a scan, a 4D image, a lesion)
 _TRACED_KINDS = ("scene", "volume", "sequence", "lesion")
 
+#: Kinds of file that Studio opens itself, without the Add Data dialog
+_DIRECT_KINDS = ("scene", "volume", "sequence", "lesion", "figure", "statmap")
+
+
+def _openAddDataDialogForScans(paths):
+    """Open the Add Data dialog with ``paths`` and return the scans that it added to the scene.
+
+    The scans are shown by the load they belong to: the transient module watcher leaves them alone.
+    """
+    before = {node.GetID() for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")}
+    with _ownLoad():
+        openAddDataDialog(paths)
+    return [node for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")
+            if node.GetID() not in before and _isScan(node) and not node.GetHideFromEditors()]
+
 
 def _studySubjectOfFile(studySession, path):
     """The subject of the open study whose scan or lesion is ``path`` (also its open node), else None."""
@@ -1390,7 +1407,9 @@ def loadFiles(paths, shell=None, pairedLesion=None):
     """Load files directly (see the module documentation) and return a ``LoadResult``.
 
     If a path is a folder or a file of another type, nothing is loaded and the Add Data dialog opens with
-    all the paths. In Studio, the first scan becomes the background of the slice views, the Segment Editor
+    all the paths. In Studio, only the files of another type go to the Add Data dialog when the load also has scans or
+    lesions (and no scene): those are loaded here, with the scans that the dialog loaded. In Studio, the first scan
+    becomes the background of the slice views, the Segment Editor
     is prepared on it (with the lesion file of the same load, if any) and Draw is shown. Figures, statistical maps
     and participants tables take their own routes (module documentation). ``pairedLesion``: a lesion that the scan
     of this load belongs to ("Open with patient_T1.nii.gz"): Draw edits it on the scan. With a study open, a subject's own
@@ -1421,14 +1440,28 @@ def loadFiles(paths, shell=None, pairedLesion=None):
             paths, kinds = [path for path, _kind in kept], [kind for _path, kind in kept]
             if not paths:
                 return result
-        if any(kind not in ("scene", "volume", "sequence", "lesion", "figure", "statmap") for kind in kinds):
+        others = [path for path, kind in zip(paths, kinds, strict=True) if kind not in _DIRECT_KINDS]
+        if others and (len(others) == len(paths) or "scene" in kinds):
+            # Nothing that Studio opens itself, or a scene (it may replace what the dialog loads): all go to Add Data
             result.addDataPaths = paths
             openAddDataDialog(paths)
             return result
+        if others:
+            # Only the files Studio does not open itself go to Add Data: the scans and lesions of the load take Studio's
+            # route (left in the dialog, a lesion would be read as a label map that Draw does not edit)
+            kept = [(path, kind) for path, kind in zip(paths, kinds, strict=True) if kind in _DIRECT_KINDS]
+            paths, kinds = [path for path, _kind in kept], [kind for _path, kind in kept]
         routed = _routeStudyLoad(paths, kinds, shell)
         if routed is None:
             return result
         paths, kinds = routed
+        if others:
+            result.addDataPaths = others
+            addedScans = _openAddDataDialogForScans(others)
+            if paths:
+                # A scan that the dialog loaded (for example a FreeSurfer .mgz) is a scan of this load: its lesion is
+                # shown and edited on it
+                result.volumes.extend(addedScans)
         if not paths:
             return result
 
