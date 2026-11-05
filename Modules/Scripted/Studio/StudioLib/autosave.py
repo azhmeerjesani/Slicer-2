@@ -178,6 +178,14 @@ def _relocateSavedLesions(oldFolder, newFolder):
         logging.error("Slicer Studio: following the moved folder for Save lesion failed:\n" + traceback.format_exc())
 
 
+def _followSavedLesions(movedPath):
+    """Draw's Save lesion follows the lesions that moved (``movedPath(path)`` is the new path of ``path``)."""
+    draw = sys.modules.get("StudioLib.draw")
+    if draw is None or not hasattr(draw, "followMovedLesions"):
+        return
+    draw.followMovedLesions(movedPath)
+
+
 def _io():
     from StudioLib import autosave_io
 
@@ -2228,6 +2236,7 @@ class AutosaveService:
                 timer.stop()
             self._suspendCount += 1
             succeeded = False
+            failed = False  # failed with an error (reported); a kill leaves what moved to finishInterruptedMove
             # Items that landed under another name (" 2") because the new folder already had one with that name: paths
             # follow them there, never the other item that kept the name (a project of the new folder)
             renamed = {}
@@ -2254,6 +2263,7 @@ class AutosaveService:
                 for name in moved:  # lesions saved in this session in a moved folder (outside the open project too)
                     _relocateSavedLesions(os.path.join(oldRoot, name), os.path.join(newRoot, name))
             except Exception:
+                failed = not succeeded
                 if not succeeded:
                     projects.clearPendingMove()
                     if not resuming:
@@ -2275,6 +2285,8 @@ class AutosaveService:
                         self._relocateProject(project.path, newPath)
                     else:
                         project.lock()
+                if failed:
+                    self._followPartialMove(oldRoot, newRoot, renamed, renamedIds)
             self._followMovedRecoveries(oldRoot, newRoot, renamed)
             _updateRecentStudies(oldRoot, newRoot, renamed)
             # A move that finishes an interrupted one: paths into the items moved before the interruption follow them too
@@ -2289,6 +2301,47 @@ class AutosaveService:
                 templates.followRenamedIds(renamedIds)
         projects.setRoot(newRoot)
         return moved
+
+    def _followPartialMove(self, oldRoot, newRoot, renamed, renamedIds):
+        """After a move that failed partway (the new disk is full): what the settings and this session remember of the
+        items that did move follows them into the new folder, as the open project does, though the setting stays on the old
+        folder. Without this, the recent studies, the Cohort study and the registered connectomes would point at folders
+        that are gone, and a later move (after the user freed space) knows nothing of the " 2" names of this one: it would
+        point them at the new folder's own items that kept the names (BB-1).
+
+        Only a path whose item really moved follows: it is gone from the old folder and its new place exists. Never raises
+        (the move's own error is reported).
+        """
+        projects = self._projects()
+
+        def movedPath(path):
+            if not path:
+                return path
+            newPath = projects.pathAfterMove(path, oldRoot, newRoot, renamed)
+            if os.path.normpath(newPath) == os.path.normpath(path) or os.path.lexists(path) or not os.path.lexists(newPath):
+                return path
+            return newPath
+
+        steps = (
+            lambda: _followSavedLesions(movedPath),
+            lambda: self._followMovedRecoveries(oldRoot, newRoot, renamed),
+            lambda: _updateRecentStudies(oldRoot, newRoot, renamed, movedTo=movedPath),
+            lambda: _updateMovedPathSettings(oldRoot, newRoot, (), renamed, movedTo=movedPath),
+        )
+        for step in steps:
+            try:
+                step()
+            except Exception:
+                logging.error("Slicer Studio: following the items moved before the move failed:\n" + traceback.format_exc())
+        if renamedIds:
+            try:
+                from StudioLib import templates
+
+                # The moved templates have their new ids in the new folder: the default follows them, or a later move
+                # would make it the template of the new folder that kept the id
+                templates.followRenamedIds(renamedIds)
+            except Exception:
+                logging.error("Slicer Studio: following the moved templates failed:\n" + traceback.format_exc())
 
     def newProject(self):
         """New project (Ctrl+N): save and close the open project; the next data creates the next project."""
@@ -2495,8 +2548,12 @@ def showAutosaveSettings():
         action.trigger()
 
 
-def _updateRecentStudies(oldRoot, newRoot, renamed=None):
-    """Recent studies that moved with the Slicer Studio folder point at their new place (fork-only key)."""
+def _updateRecentStudies(oldRoot, newRoot, renamed=None, movedTo=None):
+    """Recent studies that moved with the Slicer Studio folder point at their new place (fork-only key).
+
+    ``movedTo(path)``, when given, is the new path of ``path`` instead of ``projects.pathAfterMove`` (after a failed move,
+    only the items that did move follow: ``AutosaveService._followPartialMove``).
+    """
     try:
         from StudioLib import projects, study_ui
     except ImportError:
@@ -2512,7 +2569,12 @@ def _updateRecentStudies(oldRoot, newRoot, renamed=None):
     changed = False
     for record in records:
         path = record.get("path") if isinstance(record, dict) else None
-        newPath = projects.pathAfterMove(path, oldRoot, newRoot, renamed) if path else path
+        if not path:
+            newPath = path
+        elif movedTo is not None:
+            newPath = movedTo(path)
+        else:
+            newPath = projects.pathAfterMove(path, oldRoot, newRoot, renamed)
         if newPath != path:
             if record.get("name") == os.path.basename(os.path.normpath(path)) != os.path.basename(os.path.normpath(newPath)):
                 record["name"] = os.path.basename(os.path.normpath(newPath))  # the study follows its folder (moveContent)
@@ -2534,17 +2596,20 @@ MOVED_PATH_KEYS = (
 )
 
 
-def _updateMovedPathSettings(oldRoot, newRoot, moved, renamed=None):
+def _updateMovedPathSettings(oldRoot, newRoot, moved, renamed=None, movedTo=None):
     """Paths of ``MOVED_PATH_KEYS`` inside the moved items point at their new place; the open Map follows them too.
 
     Only paths inside an item that moved (``moved``, as ``projects.moveContent`` returns it) change: anything else in
-    the old folder stayed there.
+    the old folder stayed there. ``movedTo(path)``, when given, is the new path of ``path`` instead (after a failed move,
+    only the items that did move follow: ``AutosaveService._followPartialMove``).
     """
     from StudioLib import projects
 
     movedNames = {os.path.normcase(name) for name in moved or ()}
 
     def movedPath(path):
+        if movedTo is not None:
+            return movedTo(path) if path and projects.isInside(path, oldRoot) else path
         if not path or not movedNames or not projects.isInside(path, oldRoot):
             return path
         relative = os.path.relpath(os.path.realpath(path), os.path.realpath(oldRoot))

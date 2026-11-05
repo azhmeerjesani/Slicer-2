@@ -5909,6 +5909,132 @@ class StudioProjectsTest(unittest.TestCase):
             os.environ[projects.ROOT_ENVIRONMENT] = self.root
             templates.registerGrids(force=True)
 
+    def test_81c_failed_root_move_into_a_folder_with_the_same_names_follows_what_moved(self):
+        """Change folder > Move into a folder that has a study, a template and a connectome with the same names fails
+        partway (the new disk is full); the user frees space and moves again (BB-1). The failed move left the recent study,
+        the Cohort study, the registered connectomes and the default template on A's items that had moved away (as
+        "<name> 2"), and the move done again, which knows nothing of those names, pointed them at the new folder's own
+        items that kept the names (B's study and connectome); the Cohort study stayed on a folder that is gone. Now what
+        moved is followed when the move fails, as the open project is, and the move done again ends as one move would.
+        """
+        import errno
+        from unittest import mock
+
+        from StudioLib import study_ui, templates
+
+        projects = self.projects
+
+        def makeStudy(root, mark):
+            path = os.path.join(root, projects.STUDIES_DIR, "Stroke")
+            os.makedirs(path)
+            with open(os.path.join(path, "study.json"), "w", encoding="utf-8") as f:
+                json.dump({"format": "slicer-studio-study", "version": 1, "name": "Stroke", "created": "2026-01-01"}, f, indent=2)
+                f.write("\n")
+            with open(os.path.join(path, "whose.txt"), "w") as f:
+                f.write(mark)
+            return path
+
+        def makeConnectome(root, mark):
+            path = os.path.join(root, projects.LNM_DIR, "connectomes", "GSP")
+            os.makedirs(path)
+            with open(os.path.join(path, "whose.txt"), "w") as f:
+                f.write(mark)
+            return path
+
+        def whose(path):
+            with open(os.path.join(path, "whose.txt")) as f:
+                return f.read()
+
+        def connectomeSetting():
+            value = settings.value("Studio/LNM/Connectomes")
+            value = [value] if isinstance(value, str) else list(value or ())
+            return [os.path.normpath(path) for path in value]
+
+        builtin = templates.builtinTemplates()[0]
+        settings = qt.QSettings()
+        keys = (templates.DEFAULT_KEY, study_ui.RECENT_STUDIES_KEY, "Studio/LNM/Connectomes", "Studio/LNM/CohortStudy")
+        previous = {key: settings.value(key) for key in keys}
+        os.environ.pop(projects.ROOT_ENVIRONMENT)
+        realRename = os.rename
+        try:
+            # The disk fills up while Templates/ moves (A's study and connectome moved, A's template did not), or at the
+            # very end (everything but "About this folder.txt" moved, A's template with a new id)
+            for case, failing in (("templates", os.path.join(projects.TEMPLATES_DIR, "My template")),
+                                  ("end", projects.ABOUT_FILE)):
+                with self.subTest(case=case):
+                    oldRoot = os.path.normpath(os.path.join(self.tempDir, "full disk " + case, "A", "Slicer Studio"))
+                    newRoot = os.path.normpath(os.path.join(self.tempDir, "full disk " + case, "B", "Slicer Studio"))
+                    newStudy = makeStudy(newRoot, "B")
+                    newConnectome = makeConnectome(newRoot, "B")
+                    theirs = templates.addTemplate(builtin.imagePath, name="My template", rootPath=newRoot)
+                    with contextlib.suppress(OSError):
+                        os.remove(os.path.join(newRoot, projects.ABOUT_FILE))
+                    oldStudy = makeStudy(oldRoot, "A")
+                    oldConnectome = makeConnectome(oldRoot, "A")
+                    mine = templates.addTemplate(builtin.maskPath, name="My template", rootPath=oldRoot, makeDefault=True)
+                    self.assertEqual(mine.id, theirs.id, "the two templates have the same id")
+                    with open(os.path.join(oldRoot, projects.ABOUT_FILE), "w") as f:
+                        f.write("about")
+                    settings.setValue(projects.ROOT_KEY, oldRoot)
+                    settings.setValue(study_ui.RECENT_STUDIES_KEY, json.dumps([{"path": oldStudy, "name": "Stroke"}]))
+                    settings.setValue("Studio/LNM/CohortStudy", oldStudy)
+                    settings.setValue("Studio/LNM/Connectomes", [oldConnectome])
+
+                    def fullDisk(source, destination, *args, failing=failing, **kwargs):
+                        if os.path.normpath(os.fspath(source)).endswith(os.sep + failing):
+                            raise OSError(errno.ENOSPC, "No space left on device", os.fspath(destination))
+                        return realRename(source, destination, *args, **kwargs)
+
+                    with mock.patch.object(projects.os, "rename", side_effect=fullDisk):
+                        with self.assertRaises(OSError) as context:
+                            self._service().moveRoot(newRoot, moveContent=True, run=lambda function: function())
+                    self.assertEqual(context.exception.errno, errno.ENOSPC)
+                    self.assertEqual(projects.root(), oldRoot, "the setting is unchanged")
+                    self.assertIsNone(projects.pendingMove())
+                    movedStudy = os.path.join(newRoot, projects.STUDIES_DIR, "Stroke 2")
+                    movedConnectome = os.path.join(newRoot, projects.LNM_DIR, "connectomes", "GSP 2")
+                    self.assertFalse(os.path.exists(oldStudy), "A's study moved")
+                    self.assertEqual(whose(movedStudy), "A")
+                    self.assertEqual(whose(movedConnectome), "A")
+                    # What moved is followed now, though the move failed
+                    recent = json.loads(settings.value(study_ui.RECENT_STUDIES_KEY))
+                    self.assertEqual(os.path.normpath(recent[0]["path"]), movedStudy, "the recent study after the failure")
+                    self.assertEqual(recent[0]["name"], "Stroke 2")
+                    self.assertEqual(os.path.normpath(settings.value("Studio/LNM/CohortStudy")), movedStudy, "the Cohort study after the failure")
+                    self.assertEqual(connectomeSetting(), [movedConnectome], "the registered connectome after the failure")
+                    if case == "end":
+                        self.assertNotEqual(templates.defaultTemplateId(), theirs.id, "A's template moved with a new id: the default follows it")
+                    else:
+                        self.assertEqual(templates.defaultTemplateId(), mine.id, "A's template did not move")
+                    # The user frees space and moves again
+                    self._service().moveRoot(newRoot, moveContent=True, run=lambda function: function())
+                    self.assertEqual(projects.root(), newRoot)
+                    self.assertEqual(sorted(os.listdir(oldRoot)), [], "nothing is left in the old folder")
+                    recent = json.loads(settings.value(study_ui.RECENT_STUDIES_KEY))
+                    self.assertEqual(os.path.normpath(recent[0]["path"]), movedStudy, "the recent study stays A's")
+                    self.assertEqual(os.path.normpath(settings.value("Studio/LNM/CohortStudy")), movedStudy, "the Cohort study stays A's")
+                    self.assertEqual(connectomeSetting(), [movedConnectome], "the registered connectome stays A's")
+                    self.assertEqual(whose(newStudy), "B")
+                    self.assertEqual(whose(newConnectome), "B")
+                    listed = {template.id: template for template in templates.userTemplates(newRoot)}
+                    self.assertEqual(len(listed), 2, "two templates, two ids")
+                    self.assertEqual(listed[theirs.id].imageSha256, theirs.imageSha256, "B's template keeps its id")
+                    others = [template for template in listed.values() if template.id != theirs.id]
+                    self.assertEqual(others[0].imageSha256, mine.imageSha256)
+                    self.assertEqual(templates.defaultTemplateId(), others[0].id, "A's template stays the default")
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    settings.remove(key)
+                else:
+                    settings.setValue(key, value)
+            settings.remove(projects.ROOT_KEY)
+            settings.remove(projects.ROOT_CHOSEN_KEY)
+            projects.clearPendingMove()
+            getattr(projects, "discardMoveJournal", lambda: None)()
+            os.environ[projects.ROOT_ENVIRONMENT] = self.root
+            templates.registerGrids(force=True)
+
     def test_83_crash_offer_follows_the_projects_when_the_folder_is_moved(self):
         """A crash offer (the Library card, the notice, the Classic box) made before Change folder > Move: Open project then
         opened the old folder's path, which the move had emptied, and answered "P2 was renamed or moved" (BB-1). The offer

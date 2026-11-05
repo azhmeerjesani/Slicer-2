@@ -1916,6 +1916,16 @@ def relocateSavedLesions(oldFolder, newFolder):
         _savedRecords[segmentationId] = (reference, os.path.join(newNorm, relative) if relative else newNorm, stamp, savedTime)
 
 
+def followMovedLesions(movedPath):
+    """The lesions saved in this session that moved (a move of the Slicer Studio folder that failed partway): Save writes
+    them at their new place. ``movedPath(path)`` is the new path of ``path`` (``path`` itself when it did not move).
+    """
+    for segmentationId, (reference, path, stamp, savedTime) in list(_savedRecords.items()):
+        newPath = movedPath(path)
+        if newPath and newPath != path:
+            _savedRecords[segmentationId] = (reference, newPath, stamp, savedTime)
+
+
 def _savedRecord(segmentationNode):
     if segmentationNode is None:
         return None
