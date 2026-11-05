@@ -1339,7 +1339,10 @@ class _Context:
         present = [(volume, share) for volume, share in shares if share is not None]
         if present and all(share == 0.0 for _, share in present):
             names = ", ".join(volume.name for volume, _ in present[:3]) + (", ..." if len(present) > 3 else "")
-            raise ValueError(f"No voxel of the {what} ({names}) lies inside the template's field of view ({self.template.name}); nothing could be drawn. Is the {what} in the template's space (for example MNI)?")
+            if len(present) == 1 and what.endswith("s"):
+                what = what[:-1]  # one input: "the lesion", not "the lesions"
+            be = "Are" if what.endswith("s") else "Is"
+            raise ValueError(f"No voxel of the {what} ({names}) lies inside the template's field of view ({self.template.name}); nothing could be drawn. {be} the {what} in the template's space (for example MNI)?")
         return [(volume, share) for volume, share in present if share < 1.0]
 
     def lesion_notes(self, volumes, labels=None):
@@ -1354,8 +1357,10 @@ class _Context:
         cases = [by_id[id(volume)] for volume, _ in partial]
         shown = ", ".join(cases[:8]) + (", ..." if len(cases) > 8 else "")
         worst = min(share for _, share in partial)
-        noun = "lesion lies" if len(cases) == 1 else "lesions lie"
-        return [f"Warning: {len(cases)} of {len(volumes)} {noun} partly or wholly outside the template's field of view (case {shown}; at worst {_percent_text(1.0 - worst)} of a lesion is not shown)."]
+        # "1 of 1 lesion lies", "1 of 2 lesions lies", "2 of 2 lesions lie": the noun follows the total, the verb the count
+        noun = "lesion" if len(volumes) == 1 else "lesions"
+        verb = "lies" if len(cases) == 1 else "lie"
+        return [f"Warning: {len(cases)} of {len(volumes)} {noun} {verb} partly or wholly outside the template's field of view (case {shown}; at worst {_percent_text(1.0 - worst)} of a lesion is not shown)."]
 
     def map(self, source, title, role="map"):
         volume = load_volume(source)
@@ -2008,7 +2013,7 @@ def overlap(count=None, lesions=None, template=None, slices="auto", n_lesions=No
     layer = Layer(grid_count, "sequential", vmin=0, vmax=max(max_count, 1), discrete=True, opacity=1.0)
     tiles = [TileSpec(p, index, _slice_label(p, c), meta={"coordinate_mm": c}) for p, c, index in planes]
     panels = [PanelSpec(ctx.scene([layer]), tiles, options.columns or len(tiles), "", meta={"map": name, "mode": "count", "max_count": max_count, "legend": legend})]
-    of = f" of {n_lesions} lesions ({round(100.0 * max_count / n_lesions):.0f}%)" if n_lesions else ""
+    of = f" of {n_lesions} {'lesion' if n_lesions == 1 else 'lesions'} ({round(100.0 * max_count / n_lesions):.0f}%)" if n_lesions else ""
     caption = [
         f"Lesion overlap: colour = number of lesions covering each voxel, exact integer bins 1\u2013{max(max_count, 1)} (sequential colour map); maximum {max_count}{of}.",
         _orientation_sentence(options.convention, [plane]),

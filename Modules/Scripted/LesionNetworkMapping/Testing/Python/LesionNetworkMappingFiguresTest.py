@@ -615,9 +615,28 @@ class FiguresTest(unittest.TestCase):
             self.assertIn("outside the template's field of view and are not shown", figure.caption)
         lesions = [(ball((-16, 0, 0), 6), self.affine, "a"), self._moved(ball((0, 0, 0), 6), 52.0, "b")]
         for figure in (figures.overlap(lesions=lesions, template=self.template, **SMALL), figures.gallery(lesions, self.template, **SMALL)[0]):
-            self.assertIn("1 of 2 lesion lies partly or wholly outside the template's field of view (case 2", figure.caption)
+            self.assertIn("1 of 2 lesions lies partly or wholly outside the template's field of view (case 2", figure.caption)
         clean = figures.gallery(lesions[:1], self.template, **SMALL)[0]
         self.assertNotIn("outside the template", clean.caption)
+
+    def test_number_agreement_in_overlap_caption_and_coverage_messages(self):
+        # "maximum 1 of 1 lesions", "Is the lesions in the template's space" and "1 of 2 lesion lies" read wrongly
+        one = figures.overlap(lesions=[(ball((-16, 0, 0), 6), self.affine, "a")], template=self.template, **SMALL)
+        self.assertIn("maximum 1 of 1 lesion (100%)", one.caption)
+        two = figures.overlap(lesions=[(ball((-16, 0, 0), 6), self.affine, "a"), (ball((16, 0, 0), 6), self.affine, "b")], template=self.template, **SMALL)
+        self.assertIn("maximum 1 of 2 lesions (50%)", two.caption)
+        far = [self._moved(ball((-16, 0, 0), 6), 300.0, "x"), self._moved(ball((16, 0, 0), 6), 300.0, "y")]
+        with self.assertRaises(ValueError) as caught:
+            figures.gallery(far, self.template, **SMALL)
+        self.assertIn("Are the lesions in the template's space", str(caught.exception))
+        with self.assertRaises(ValueError) as caught:
+            figures.gallery(far[:1], self.template, **SMALL)
+        self.assertIn("No voxel of the lesion (x) lies", str(caught.exception))
+        self.assertIn("Is the lesion in the template's space", str(caught.exception))
+        inside = (ball((-16, 0, 0), 6), self.affine, "a")
+        outside = [self._moved(ball((0, 0, 0), 6), 52.0, "b"), self._moved(ball((0, 0, 0), 6), 52.0, "c")]
+        self.assertIn("2 of 3 lesions lie partly", figures.gallery([inside, *outside], self.template, **SMALL)[0].caption)
+        self.assertIn("1 of 3 lesions lies partly", figures.gallery([inside, outside[0], self._moved(ball((-16, 0, 0), 6), 0.0, "d")], self.template, **SMALL)[0].caption)
 
     def test_same_named_maps_keep_their_own_records(self):
         positive = ((10.0 * ball((-14, 0, 0), 8)), self.affine, "T")
