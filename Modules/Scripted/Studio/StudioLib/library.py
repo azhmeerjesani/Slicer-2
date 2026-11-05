@@ -935,7 +935,7 @@ def nodeFile(node):
 
 
 def _internalFolders():
-    """Real paths of the application's cache and temporary folders and of the sample data cache."""
+    """Real paths of the application's cache and temporary folders, of the sample data cache and of the autosave folder."""
     folders = []
     for attribute in ("cachePath", "temporaryPath"):
         value = getattr(slicer.app, attribute, None)
@@ -951,12 +951,19 @@ def _internalFolders():
         folders.append(downloads.cacheDirectory())
     except Exception:
         pass
+    try:
+        from . import autosave_io
+
+        # The private autosave scenes (an entry that an earlier version recorded when a session was recovered)
+        folders.append(autosave_io.defaultRoot())
+    except Exception:
+        pass
     return [os.path.normcase(os.path.realpath(folder)) for folder in folders if folder]
 
 
 def isInternalPath(path, folders=None):
-    """True for a file in the application's cache or temporary folders or in the sample data cache (the templates and the
-    samples that Studio downloads): not a file of the user, so Recent never lists it. ``folders``: ``_internalFolders()``.
+    """True for a file in the application's cache or temporary folders, in the sample data cache (the templates and the
+    samples that Studio downloads) or in the private autosave folder: not a file of the user, so Recent never lists it. ``folders``: ``_internalFolders()``.
     """
     if not path:
         return False

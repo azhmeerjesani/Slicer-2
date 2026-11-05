@@ -387,6 +387,94 @@ class StudioAutosaveTest(unittest.TestCase):
         self.assertEqual(self._storageFilesUnder(self.root), [])
         self.assertNotEqual(slot.session.status, "recovered")
 
+    def _recentlyLoadedPaths(self):
+        """The files of the official recently loaded list: the menu of the main window and the shared setting."""
+        from StudioLib import library
+
+        paths = []
+        menu = library.recentlyLoadedMenu()
+        if menu is not None:
+            for action in menu.actions():
+                properties = action.property("fileParameters")
+                if properties:
+                    paths.append(str(properties.get("fileName", "")))
+        settings = qt.QSettings()
+        count = settings.beginReadArray("RecentlyLoadedFiles/RecentFiles")
+        for index in range(count):
+            settings.setArrayIndex(index)
+            properties = settings.value("file")
+            if properties:
+                paths.append(str(dict(properties).get("fileName", "")))
+        settings.endArray()
+        return [os.path.normcase(os.path.realpath(path)) for path in paths if path]
+
+    def test_e5_recoverIsNotARecentFile(self):
+        """BB-1: Recover loaded the private autosave scene like a file of the user: it was added to the official
+        RecentlyLoadedFiles (shared with official 3D Slicer) and listed in Library > Opened from elsewhere, and it outlived
+        its session. Recovering is not opening a file: nothing is recorded, and the IO manager signals are restored.
+        """
+        from StudioLib import library, recovery
+
+        self._buildScene()
+        service = self._service()
+        self._generate(service)
+        slot = recovery.scan(self.root, None)[0].slots[0]
+        scenePath = os.path.normcase(os.path.realpath(slot.scenePath()))
+        root = os.path.normcase(os.path.realpath(self.root))
+        self.assertIsNotNone(library.recentlyLoadedMenu(), "the test needs the main window")
+        settings = qt.QSettings()
+        keepKey = "RecentlyLoadedFiles/NumberToKeep"
+        previousKeep = settings.value(keepKey)
+        settings.setValue(keepKey, 10)  # the main window records nothing without it (a new settings file)
+        try:
+            slicer.mrmlScene.Clear(0)
+            ioManager = slicer.app.coreIOManager()
+            self.assertFalse(ioManager.signalsBlocked())
+            self.assertIsNotNone(recovery.recover(slot, mode="replace"))
+            self.assertFalse(ioManager.signalsBlocked())
+            self.assertNotIn(scenePath, self._recentlyLoadedPaths())
+            self.assertEqual([path for path in self._recentlyLoadedPaths() if path.startswith(root + os.sep)], [])
+            self.assertEqual([entry for entry in library.recentEntries(limit=50) if os.path.realpath(entry.path).startswith(root)], [])
+            # Control: a scene that is loaded like a file of the user is recorded
+            slicer.util.loadScene(slot.scenePath(), {"clear": True})
+            self.assertIn(scenePath, self._recentlyLoadedPaths())
+        finally:
+            if previousKeep is None:
+                settings.remove(keepKey)
+            else:
+                settings.setValue(keepKey, previousKeep)
+            slicer.mrmlScene.Clear(0)
+
+    def test_e6_recoverFailureRestoresIOSignals(self):
+        from StudioLib import recovery
+
+        self._buildScene()
+        service = self._service()
+        self._generate(service)
+        slot = recovery.scan(self.root, None)[0].slots[0]
+        entry = next(e for e in service.writer.entries.values() if e["name"] == "Lesions")
+        with open(os.path.join(slot.path, entry["file"]), "wb") as f:
+            f.write(b"not a nrrd file")
+        slicer.mrmlScene.Clear(0)
+        with self.assertRaises(RuntimeError):
+            recovery.recover(slot, mode="replace")
+        self.assertFalse(slicer.app.coreIOManager().signalsBlocked())
+
+    def test_e7_autosaveFolderIsInternalForRecent(self):
+        """Entries that an earlier version recorded are not listed in Library (the autosave folder is not a user folder)."""
+        from StudioLib import library
+
+        previous = os.environ.get("SLICER_STUDIO_AUTOSAVE_DIR")
+        os.environ["SLICER_STUDIO_AUTOSAVE_DIR"] = self.root
+        try:
+            self.assertTrue(library.isInternalPath(os.path.join(self.root, "20260101-000000-1-1", "scene-1", "Scene.mrml")))
+            self.assertFalse(library.isInternalPath(os.path.join(self.userDir, "My scene.mrml")))
+        finally:
+            if previous is None:
+                os.environ.pop("SLICER_STUDIO_AUTOSAVE_DIR", None)
+            else:
+                os.environ["SLICER_STUDIO_AUTOSAVE_DIR"] = previous
+
     def test_e2_recoveredMessagePlural(self):
         from StudioLib import recovery
 

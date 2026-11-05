@@ -509,6 +509,22 @@ def recoveredText(count, time):
     return _("Recovered {count} items from the autosave of {time}. Use File › Save to keep them.").format(count=count, time=time)  # noqa: RUF001
 
 
+def _loadAutosavedScene(scenePath):
+    """Load the scene of an autosave slot without recording it as a recently loaded file.
+
+    The autosave folder is private (SPEC 9.9): recovering is not opening a file of the user. 3D Slicer adds every loaded file to
+    "RecentlyLoadedFiles" (a setting that official installations share, and that Library > Opened from elsewhere lists), where
+    the private path would stay after the session is deleted, and where opening it would bind the data to the autosave folder.
+    The main window records a file when the IO manager emits ``newFileLoaded``: that signal is blocked during the load.
+    """
+    ioManager = slicer.app.coreIOManager()
+    wasBlocked = ioManager.blockSignals(True)
+    try:
+        slicer.util.loadScene(scenePath)
+    finally:
+        ioManager.blockSignals(wasBlocked)
+
+
 def recover(slot, mode=None, parent=None):
     """Load an autosaved slot and re-link its data to the original files. Return the report, or None if cancelled."""
     scene = slicer.mrmlScene
@@ -536,7 +552,7 @@ def recover(slot, mode=None, parent=None):
             with slicer.util.tryWithErrorDisplay(_("Failed to recover the autosaved scene."), waitCursor=True):
                 loadError = None
                 try:
-                    slicer.util.loadScene(slot.scenePath())
+                    _loadAutosavedScene(slot.scenePath())
                 except Exception as error:
                     # A node that cannot be read (for example its original file was moved or deleted) fails the load,
                     # but the other nodes are loaded: they are re-linked like after a complete load, so that none stays
