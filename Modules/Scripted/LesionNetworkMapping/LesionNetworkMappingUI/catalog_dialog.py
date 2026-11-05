@@ -810,7 +810,9 @@ class CatalogDialog(qt.QDialog):
             archive = ""
             if status.get("archiveCount"):
                 archive = _(" · archive {i} of {n}").format(i=status.get("archiveIndex") or 1, n=status["archiveCount"])
-            subjects = _(" · {n} subjects").format(n=status["subjects"]) if status.get("subjects") else ""
+            subjects = ""
+            if status.get("subjects"):
+                subjects = (_(" · 1 subject") if status["subjects"] == 1 else _(" · {n} subjects").format(n=status["subjects"]))
             eta = f" · {status['eta']}" if status["eta"] else ""
             percent = f"{int(fraction * 100)}%" if fraction is not None else _("starting")
             data = ""

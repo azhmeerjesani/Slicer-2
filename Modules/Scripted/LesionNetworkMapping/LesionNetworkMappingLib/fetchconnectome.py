@@ -1155,6 +1155,10 @@ def _run_fetch(entry, live, plan, terms_sha, state, work, bundle, dest, session,
 
     def convert(source, item, info, last):
         """Convert one archive from its stream; returns the stream's result (see ``ArchiveSource.result``)."""
+        # The converter counts per stream (``subjects_done`` restarts at 0 in every archive, and in a resumed one), but the progress
+        # shows the subjects the bundle holds: those of the archives converted before plus the ones this archive adds
+        held = progress.subjects
+        added = 0
         try:
             for checkpoint in connectome.from_tar_stream(
                 source, bundle, layout=layout, name=bundle_name(entry), resume=True, start_offset=source.start, cancel=cancel, finalize=last, description=description,
@@ -1169,7 +1173,9 @@ def _run_fetch(entry, live, plan, terms_sha, state, work, bundle, dest, session,
                     info["memberOffset"] = int(checkpoint["member_offset"])
                     break
                 info.update({"status": "partial", "memberOffset": int(checkpoint["member_offset"]), "bytes": source.position, "subjectsDone": checkpoint.get("subjects_done", 0)})
-                progress.subjects = checkpoint.get("subjects_done", 0)
+                if not checkpoint.get("skipped"):
+                    added += 1  # a skipped subject (one the bundle holds already, or one outside the subset) adds nothing
+                progress.subjects = held + added
                 for message in checkpoint.get("warnings") or []:
                     emit("warning", code="conversion", message=message, archive=item["name"], subject=checkpoint.get("subject"))
                 state.save(force=False)
@@ -1215,6 +1221,7 @@ def _run_fetch(entry, live, plan, terms_sha, state, work, bundle, dest, session,
                 info = state.archive(item["name"])
                 info.update({"md5Published": item.get("md5"), "size": item["size"]})
                 progress.archive, progress.index = item["name"], index + 1
+                progress.subjects = len(_bundle_subject_ids(bundle))  # what the bundle holds before this archive is converted (also in a resume)
                 progress.completed = completed()
                 if source is not None:
                     progress.update(source, force=True)

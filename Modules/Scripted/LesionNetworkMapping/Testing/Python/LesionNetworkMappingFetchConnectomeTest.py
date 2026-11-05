@@ -781,6 +781,26 @@ class FetchStreamingTest(FetchConnectomeBase):
         self.assertEqual(progress[-1]["done"], total)
         self.assertEqual(progress[-1]["archive_count"], 3)
 
+    def _shown_subjects(self):
+        return [e["subjects"] for e in self.events if e["event"] == "progress"]
+
+    def test_the_progress_subject_count_is_the_bundle_total_not_the_count_of_the_archive(self):
+        self.fetch()
+        shown = self._shown_subjects()
+        self.assertEqual(shown, sorted(shown), "the subject count never falls back at the start of an archive")
+        self.assertEqual(shown[-1], 5)  # the 5 subjects of the 3 archives (2 + 2 + 1), not the 1 of the last archive
+
+    def test_the_progress_subject_count_keeps_growing_after_a_resume(self):
+        bundle = self.bundle()
+        with self.assertRaises(jobs.Cancelled):
+            self.fetch(cancel=lambda: os.path.isfile(os.path.join(bundle, "subjects", "sub-0003.f16.npy")))
+        before = len(self.events)
+        self.fetch(resume=True)
+        shown = [e["subjects"] for e in self.events[before:] if e["event"] == "progress"]
+        self.assertGreaterEqual(shown[0], 2, "the subjects of the finished archive are counted again from the first line")
+        self.assertEqual(shown, sorted(shown))
+        self.assertEqual(shown[-1], 5)
+
 
 class FetchIntegrityTest(FetchConnectomeBase):
     def test_a_checksum_mismatch_is_read_twice_then_stops_with_an_override_option(self):

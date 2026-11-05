@@ -290,6 +290,20 @@ class LesionNetworkMappingCatalogDialogTest(unittest.TestCase):
             self.assertGreaterEqual(chip.width, chip.sizeHint.width(), "row %d: chip '%s' is clipped" % (row, chip.text))
             self.assertGreaterEqual(table.columnWidth(1), cell.sizeHint.width())
 
+    def test_the_progress_line_uses_the_singular_for_one_subject(self):
+        dialog = self.makeDialog(None)
+        base = {"state": "running", "name": "demo", "fraction": 0.09, "archiveCount": 3, "archiveIndex": 1, "eta": None, "bytes": 7, "total": 70, "error": None, "warnings": []}
+        texts = {}
+        for count in (0, 1, 2):
+            with mock.patch.object(dialog.controller, "status", return_value={**base, "subjects": count}), mock.patch.object(dialog.controller, "job", None):
+                dialog.onControllerChanged()
+            texts[count] = dialog.progress.label.text
+        self.assertIn("archive 1 of 3 · 1 subject", texts[1])
+        self.assertNotIn("1 subjects", texts[1])
+        self.assertTrue(texts[2].endswith("2 subjects"), texts[2])
+        self.assertNotIn("subject", texts[0])
+
+
     def test_failed_terms_fetch_keeps_the_failure_text(self):
         dialog = self.makeDialog(None)
         dialog.entry = {"id": "demo-entry"}
