@@ -631,11 +631,19 @@ def notify(text, report=None):
     if slicer.app.testingEnabled():
         logging.info(" ".join([text] + details))
         return
+    _classicMessage(text, details, report)
+
+
+def _classicMessage(text, details, report=None):
+    """The Classic message box. Its details section exists only when there are details."""
     if report and report.get("missing"):
         # Not only in the details: data of these files is not in the recovered scene
         text += "\n\n" + _("These original files no longer exist and were not loaded: {files}").format(
             files=", ".join(os.path.basename(p) for p in report["missing"][:5]))
-    slicer.util.infoDisplay(text, windowTitle=_("Recover autosaved work"), detailedText="\n".join(details) if details else None)
+    # slicer.util.messageBox treats the mere presence of the detailedText keyword as "has details" (it pads the
+    # window title and sets the text, None becoming the string "None"), so pass it only when there is something to show.
+    kwargs = {"detailedText": "\n".join(details)} if details else {}
+    slicer.util.infoDisplay(text, windowTitle=_("Recover autosaved work"), **kwargs)
 
 
 def discard(session, confirm=True, parent=None):

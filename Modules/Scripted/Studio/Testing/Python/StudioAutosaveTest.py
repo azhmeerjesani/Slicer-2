@@ -486,6 +486,26 @@ class StudioAutosaveTest(unittest.TestCase):
         self.assertIn("Recovered 3 items from the autosave of 15:53", many)
         self.assertIn("Save to keep them.", many)
 
+    def test_e3_classicRecoveredMessageHasNoDetailsWithoutDetails(self):
+        """Classic's message box has a details section (and the padded title it needs) only when there are details."""
+        from StudioLib import recovery
+
+        calls = []
+        realInfoDisplay = slicer.util.infoDisplay
+        slicer.util.infoDisplay = lambda text, **kwargs: calls.append((text, kwargs))
+        try:
+            recovery._classicMessage("Recovered 2 items.", [])
+            recovery._classicMessage("Recovered 2 items.", ["Changed on disk since the autosave: a.nrrd"])
+            recovery._classicMessage("Recovered 2 items.", [], {"missing": [os.path.join(self.root, "b.nrrd")]})
+        finally:
+            slicer.util.infoDisplay = realInfoDisplay
+        self.assertEqual(len(calls), 3)
+        self.assertNotIn("detailedText", calls[0][1])
+        self.assertTrue(calls[0][1]["windowTitle"].strip())
+        self.assertIn("a.nrrd", calls[1][1]["detailedText"])
+        self.assertNotIn("detailedText", calls[2][1])
+        self.assertIn("b.nrrd", calls[2][0])
+
     def test_f_largeVolume(self):
         scene = slicer.mrmlScene
         service = self._service()
