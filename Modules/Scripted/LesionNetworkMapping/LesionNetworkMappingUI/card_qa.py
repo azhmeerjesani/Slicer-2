@@ -963,6 +963,13 @@ class QACard:
         self._notifyShownOverlay()
         return volume
 
+    def onStatisticChanged(self):
+        """The Result card switched the statistic (T, Fz, r): while the debiased view is shown, it shows the residual of the new
+        statistic's map (made once per run and statistic), so the views, the legend and the Result switch agree.
+        """
+        if self._shown == "debiased":
+            self.setDebiased(True)
+
     def debiasedVolume(self):
         """Make (once per run) the debiased volume of the displayed statistic; return it, or None when it cannot be made."""
         from LesionNetworkMappingLib import similarity

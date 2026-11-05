@@ -5255,6 +5255,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             return
         self._parameterNode.statistic = STATISTICS[index]
         self.refreshResult(reloadMaps=True)
+        qa = self.ctx.card("qa") if self.ctx is not None else None
+        if qa is not None and hasattr(qa, "onStatisticChanged"):
+            qa.onStatisticChanged()  # the debiased view is the residual of the statistic now shown
 
     def _showOpacityPercent(self, value=None):
         value = self.opacitySlider.value if value is None else value
@@ -6959,6 +6962,25 @@ class LesionNetworkMappingTest(ScriptedLoadableModuleTest):
             self.assertNotIn("derived", after)
             self.assertAlmostEqual(after["window"], mapWindow, places=4)
             self.assertEqual(str(widget.peaksTable.horizontalHeaderItem(2).text()), "T")
+
+        # The statistic switch while the debiased view is on: the views show the residual of the statistic now chosen
+        self.delayDisplay("The debiased view follows the statistic switch")
+        composite = slicer.app.layoutManager().sliceWidget("Red").mrmlSliceCompositeNode()
+        qa.debiasedCheckBox.setChecked(True)
+        settle()
+        for statistic, expected, volumeLabel in (("Fz", "Fz resid", "AvgRFzResid"), ("r", "r resid", "AvgRResid"), ("T", "T resid", "TResid")):
+            widget.statisticGroup.button(STATISTICS.index(statistic)).click()
+            settle()
+            self.assertTrue(qa.debiasedCheckBox.checked, statistic)
+            shown = slicer.mrmlScene.GetNodeByID(composite.GetForegroundVolumeID())
+            self.assertIn(volumeLabel, shown.GetName(), statistic)
+            state = widget.legendState()
+            self.assertEqual(state["statistic"], expected)
+            self.assertEqual(state.get("derived"), "debiased")
+            self.assertEqual(str(widget.peaksTable.horizontalHeaderItem(2).text()), f"{statistic} map")
+        qa.debiasedCheckBox.setChecked(False)
+        settle()
+        self.assertEqual(widget.legendState()["statistic"], "T")
 
     def test_LesionNetworkMapping_emptySeed(self):
         """A segment that was never drawn is an empty seed ("trace it in Draw first"), not a read error with logged tracebacks."""
