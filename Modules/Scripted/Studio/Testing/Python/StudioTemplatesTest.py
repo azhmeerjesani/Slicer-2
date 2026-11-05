@@ -1776,3 +1776,55 @@ class StudioTemplatesTest(unittest.TestCase):
             self.assertEqual(sorted(os.listdir(folder)), ["Lab ICBM copy", "Lab ICBM from Ana"])
         finally:
             shutil.rmtree(os.path.dirname(otherRoot), ignore_errors=True)
+
+    def test_34_template_json_with_a_field_of_the_wrong_type_is_skipped(self):
+        """BB-1: one template.json edited by hand with a field of the wrong type ("resolution_mm": "2 mm", "sha256": "abc",
+        "shape": 97, "files" or "grid" that are not objects) made Template() raise, so the list, the grids, the Start menu and
+        Search all failed and Settings > Templates showed no row, not even the built-in one. The damaged folder is skipped
+        (like one with invalid JSON); the other templates and the built-in one stay listed and usable.
+        """
+        templates, ui = self.templates, self.ui
+        good = self._add(name="Good one")
+        other = self._add(path=self.bundled, name="Other one", mask=self.bundledMask)
+        path = os.path.join(other.folder, templates.TEMPLATE_JSON)
+        with open(path, encoding="utf-8") as f:
+            original = json.load(f)
+        builtinIds = [template.id for template in templates.builtinTemplates()]
+        self.assertTrue(builtinIds)
+        damages = (
+            {"resolution_mm": "2 mm"}, {"sha256": "abc"}, {"sha256": [1, 2]}, {"shape": 97}, {"shape": ["a"]}, {"files": "image.nii.gz"},
+            {"files": {"image": 5}}, {"files": {"image": "image.nii.gz", "surfaces": "a.vtk"}}, {"grid": [1, 2]},
+            {"grid": {"shape": 5, "affine": 3}}, {"grid": {"shape": [8, 8, 8], "affine": "x"}},
+        )
+        for damage in damages:
+            with self.subTest(damage=damage):
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(dict(original, **damage), f)
+                self.assertIsNone(templates.readRecord(other.folder))
+                self.assertEqual([template.id for template in templates.userTemplates()], [good.id])
+                self.assertEqual([template.id for template in templates.listTemplates()], builtinIds + [good.id])
+                self.assertTrue(templates.registerGrids(force=True))
+                self.assertIsNone(templates.templateById(other.id))
+                menu = qt.QMenu()
+                try:
+                    ui.populateTemplateMenu(menu, onStart=lambda templateId: None)
+                    entries = [action.data() for action in menu.actions() if action.objectName == "studioTemplateMenuItem"]
+                finally:
+                    menu.deleteLater()
+                self.assertIn(good.id, entries)
+                self.assertNotIn(other.id, entries)
+                ids = [item["id"] for item in ui.paletteItems()]
+                self.assertIn(f"templates.start.{good.slug}", ids)
+                self.assertNotIn(f"templates.start.{other.slug}", ids)
+                panel = ui.TemplatesSettingsPanel()
+                try:
+                    panel.refresh()
+                    rowIds = [row.property("templateId") for row in panel.rows]
+                finally:
+                    panel.deleteLater()
+                self.assertIn(good.id, rowIds)
+                self.assertTrue(set(builtinIds) & set(rowIds))
+        # Fixed by hand: listed again
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(original, f)
+        self.assertEqual(sorted(template.id for template in templates.userTemplates()), sorted([good.id, other.id]))

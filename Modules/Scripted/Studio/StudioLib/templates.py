@@ -42,6 +42,7 @@ import datetime
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -817,14 +818,60 @@ def templatesFolder(rootPath=None):
     return os.path.join(rootPath, TEMPLATES_DIR)
 
 
+def _isNumber(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _isNumberList(value, allowNested=False):
+    if not isinstance(value, (list, tuple)):
+        return False
+    return all(_isNumberList(item) if allowNested else _isNumber(item) for item in value)
+
+
+def _recordIsUsable(record):
+    """True when the fields ``Template`` and its users read have the types they expect. A template.json edited by hand (or
+    written by another tool) with, say, ``"resolution_mm": "2 mm"`` is then skipped like an unreadable one, instead of
+    making every listing of the templates fail.
+    """
+    resolution = record.get("resolution_mm")
+    if resolution is not None and not _isNumber(resolution):
+        return False
+    shape = record.get("shape")
+    if shape is not None and not (isinstance(shape, (list, tuple)) and all(isinstance(item, int) and not isinstance(item, bool) for item in shape)):
+        return False
+    sha256 = record.get("sha256")
+    if sha256 is not None and not isinstance(sha256, dict):
+        return False
+    grid = record.get("grid")
+    if grid is not None:
+        if not isinstance(grid, dict):
+            return False
+        if grid.get("shape") is not None and not _isNumberList(grid["shape"]):
+            return False
+        if grid.get("affine") is not None and not _isNumberList(grid["affine"], allowNested=True):
+            return False
+    files = record.get("files")
+    if files is not None:
+        if not isinstance(files, dict):
+            return False
+        if any(files.get(role) is not None and not isinstance(files[role], str) for role in ("image", "mask", "head")):
+            return False
+        surfaces = files.get("surfaces")
+        if surfaces is not None and not (isinstance(surfaces, (list, tuple)) and all(isinstance(item, str) for item in surfaces)):
+            return False
+    return True
+
+
 def readRecord(folder):
-    """The template.json of a template folder, or None."""
+    """The template.json of a template folder, or None (unreadable, not a template, or with a field of the wrong type)."""
     try:
         with open(os.path.join(folder, TEMPLATE_JSON), encoding="utf-8") as f:
             record = json.load(f)
     except (OSError, ValueError):
         return None
     if not isinstance(record, dict) or record.get("schema") != SCHEMA or not record.get("id"):
+        return None
+    if not _recordIsUsable(record):
         return None
     return record
 
@@ -847,7 +894,12 @@ def userTemplates(rootPath=None):
         if record is not None:
             entries.append((name, path, record))
     _makeCopiedIdsUnique(entries)
-    found = [Template(record, folder=path) for name, path, record in entries]
+    found = []
+    for name, path, record in entries:
+        try:
+            found.append(Template(record, folder=path))
+        except (TypeError, ValueError, AttributeError):
+            logging.warning(f"Slicer Studio: the template folder {name} could not be read and is skipped")
     found.sort(key=lambda template: template.name.lower())
     return found
 
