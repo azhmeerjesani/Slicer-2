@@ -425,6 +425,10 @@ class QACard:
         among the null cohorts' maps. The mean map of the rule's statistic is the group map of the Map module, so it is
         preferred; the run folder is ``nulls`` next to the cohort maps (the newest one wins), or the maps folder itself.
         A run of other maps is not used (``self.groupQaStale`` is then True): see :meth:`_nullsMatchMaps`.
+
+        An exact-pooled run wins over a newer fast-mode one: a fast run compares the approximate fast-mode map (recomputed
+        like with like), not the group map of the Map module, and fast-mode maps are never reported as the observed map
+        (addendum §3.6). Without an exact run, the newest fast run is returned marked ``"approximate": True``.
         """
         self.groupQaStale = False
         mapsPath = getattr(self.ctx, "cohortMaps", None)
@@ -439,6 +443,7 @@ class QACard:
                 found.append((os.stat(path).st_mtime_ns, path))
             except OSError:
                 continue
+        approximate = None
         for stamp, path in sorted(found, reverse=True):
             try:
                 with open(path, encoding="utf-8") as f:
@@ -451,13 +456,26 @@ class QACard:
             if not self._nullsMatchMaps(record, stamp, os.fspath(mapsPath)):
                 self.groupQaStale = True
                 continue
+            values = None
             for key in ("mean", "overlap"):
-                values = group.get(key)
-                if isinstance(values, dict) and "level" in values:
-                    return values
-            if "level" in group and group.get("available", True):
-                return group
-        return None
+                if isinstance(group.get(key), dict) and "level" in group[key]:
+                    values = group[key]
+                    break
+            if values is None and "level" in group and group.get("available", True):
+                values = group
+            if values is None:
+                continue
+            if not self._nullsApproximate(record):
+                return values
+            if approximate is None:
+                approximate = dict(values, approximate=True)
+        return approximate
+
+    @staticmethod
+    def _nullsApproximate(record):
+        """True when a ``nulls.json`` record is of a fast-mode run (approximate maps), not an exact-pooled one."""
+        statistic = (record.get("group_qa") or {}).get("statistic") or record.get("statistic") or ""
+        return bool(record.get("approximate")) or record.get("mode") == "approximate" or str(statistic).startswith("approximate")
 
     @staticmethod
     def _nullsMatchMaps(record, stamp, mapsPath):
@@ -551,6 +569,15 @@ class QACard:
                 self._setCalibrated("neutral", _("Not calibrated"), _("Group maps: not calibrated — the Nulls run is of other maps, run Nulls again."))
             elif group is None:
                 self._setCalibrated("neutral", _("Not calibrated"), _("Group maps: not calibrated — run Nulls to compare a group map with null cohorts."))
+            elif group.get("approximate"):
+                # Only a fast-mode Nulls run: its values describe the approximate fast-mode map, not the group map of the
+                # Map module, so they are labelled approximate and the reference rows (of that map) are not shown
+                approximateValues = {key: value for key, value in group.items() if key not in ("mu_r", "mu_r_sample")}
+                level, chipText, text = self._calibratedFromValues(approximateValues)
+                if level != "not_calibrated":
+                    chipText = _("{chip} (approx.)").format(chip=chipText)
+                    levels.append(level)
+                self._setCalibrated(level, chipText, _("Group map: no exact Nulls run of these maps. Fast-mode run (approximate maps, not the group map): {text}. Run Nulls in exact mode to calibrate the group map.").format(text=text))
             else:
                 level, chipText, text = self._calibratedFromValues(group)
                 self._setCalibrated(level, chipText, _("Group map: {text}").format(text=text))

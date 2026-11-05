@@ -970,6 +970,9 @@ class NullsCard:
         values = group.get("mean") if isinstance(group.get("mean"), dict) else group.get("overlap")
         if not isinstance(values, dict) or values.get("percentile") is None:
             return _("Group map QA: not calibrated.")
+        if str(group.get("statistic") or "").startswith("approximate"):
+            return _("Group map QA of the fast-mode map (approximate; the QA card uses an exact run when there is one): r(fast-mode map, μC_r) is at the {p} percentile of {k} null cohorts' maps ({text}).").format(
+                p=ordinal(round(values["percentile"])), k=int(values.get("k") or 0), text=values.get("text") or "")
         return _("Group map QA (shown in the QA card): r(group map, μC_r) is at the {p} percentile of {k} null cohorts' maps ({text}).").format(
             p=ordinal(round(values["percentile"])), k=int(values.get("k") or 0), text=values.get("text") or "")
 

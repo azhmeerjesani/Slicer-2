@@ -494,5 +494,91 @@ class QaDerivedOverlayParkTest(unittest.TestCase):
         self.assertFalse(self.card.debiasedCheckBox.checked)
 
 
+@unittest.skipUnless(_has_slicer(), "needs the Slicer application")
+class QaGroupChipFastModeTest(unittest.TestCase):
+    """BB-1 qa-group-chip-uses-fast-mode-approximate-group-map: the QA card's group chip and reference rows describe the
+    exact group map. An exact-pooled Nulls run wins over a newer fast-mode one (whose group_qa is of the approximate
+    fast-mode map); a fast-only run is labelled approximate and its reference rows are not shown as the group map's.
+    """
+
+    IDS = ("sub-01", "sub-02", "sub-03")
+
+    def setUp(self):
+        import types
+
+        import slicer
+
+        from LesionNetworkMappingLib import cohortmaps
+        from LesionNetworkMappingUI import card_qa, context
+
+        slicer.mrmlScene.Clear(0)
+        self.root = tempfile.mkdtemp(prefix="lnm-qa-groupfast-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.folder = os.path.join(self.root, "cohort")
+        os.makedirs(self.folder)
+        self.mapsTsv = os.path.join(self.folder, "maps.tsv")
+        with open(self.mapsTsv, "w", encoding="utf-8") as f:
+            f.write("participant_id\tAvgR\n" + "".join(f"{pid}\tn/a\n" for pid in self.IDS))
+        with open(os.path.join(self.folder, cohortmaps.COHORTMAPS_JSON), "w", encoding="utf-8") as f:
+            json.dump({"run_id": "cm-1"}, f)
+        self.stamp = os.stat(self.mapsTsv).st_mtime
+        os.utime(self.mapsTsv, (self.stamp, self.stamp))
+        self.ctx = context.MapContext(runner=object())
+        self.card = card_qa.QACard(self.ctx)
+        self.addCleanup(self.card.cleanup)
+        self.ctx.cohortMaps = self.mapsTsv
+        self.ctx.bundle = types.SimpleNamespace(path=os.path.join(self.root, "none.lnmc"), name="Synthetic")
+        self.card._mode = lambda: "cohort"
+        self.card._hasReferenceFiles = lambda bundle: True
+
+    def _writeNulls(self, name, fast, percentile, muR, level, k, after):
+        folder = os.path.join(self.folder, name)
+        os.makedirs(folder)
+        values = {"mu_r": muR, "mu_rho": muR, "pc1_r": muR, "r2_ref": muR, "percentile": percentile, "k": k, "level": level,
+                  "text": "test verdict", "null_kind": "rl_independent"}  # fmt: skip
+        record = {"format": "lnm-nulls", "kind": "rl_independent", "mode": "approximate" if fast else "exact_pooled", "approximate": fast,
+                  "statistic": "approximate Fz" if fast else "T", "participants": list(self.IDS), "excluded": [], "inputs": {"cohortmaps_run": "cm-1"},
+                  "group_qa": {"available": True, "null_kind": "rl_independent", "mean": values, "overlap": dict(values),
+                               "statistic": "approximate Fz" if fast else "T"}}  # fmt: skip
+        path = os.path.join(folder, "nulls.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(record, f)
+        os.utime(path, (self.stamp + after, self.stamp + after))
+
+    def test_exact_run_wins_over_newer_fast_run(self):
+        self._writeNulls("nulls-rl_independent-exact", False, 68.8, 0.9836, "amber", 199, after=10)
+        self._writeNulls("nulls-rl_independent-fast", True, 99.2, 0.9976, "red", 500, after=20)
+        values = self.card._findGroupQa()
+        self.assertEqual(values["k"], 199)
+        self.assertFalse(values.get("approximate", False))
+        self.card.refresh()
+        self.assertEqual(self.card.calibratedChip.text, "69th percentile")
+        self.assertIn("r(μC_r) = 0.98", self.card.calibratedLabel.text)
+        self.assertIn("of 199 null cohorts", self.card.calibratedLabel.text)
+        self.assertFalse(self.card.table.isHidden())
+        self.assertEqual(self.card.table.item(0, 1).text(), "0.98")
+
+    def test_fast_only_is_labelled_approximate(self):
+        self._writeNulls("nulls-rl_independent-fast", True, 99.2, 0.9976, "red", 500, after=20)
+        values = self.card._findGroupQa()
+        self.assertTrue(values["approximate"])
+        self.card.refresh()
+        chip, label = self.card.calibratedChip.text, self.card.calibratedLabel.text
+        self.assertEqual(chip, "99th percentile (approx.)")
+        self.assertIn("Fast-mode run (approximate maps, not the group map)", label)
+        self.assertIn("exact mode", label)
+        self.assertNotIn("1.00", label)  # the approximate map's r(μC_r) is not shown as the group map's
+        self.assertTrue(self.card.table.isHidden())
+        self.assertTrue(self.card.r2Label.isHidden())
+
+    def test_nulls_card_labels_fast_group_qa(self):
+        from LesionNetworkMappingUI import card_nulls
+
+        values = {"percentile": 99.2, "k": 500, "level": "red", "text": "more degree-like"}
+        text = card_nulls.NullsCard.groupQaText({"available": True, "mean": values, "statistic": "approximate Fz"})
+        self.assertIn("fast-mode map (approximate", text)
+        self.assertIn("(shown in the QA card)", card_nulls.NullsCard.groupQaText({"available": True, "mean": values, "statistic": "T"}))
+
+
 if __name__ == "__main__":
     unittest.main()
