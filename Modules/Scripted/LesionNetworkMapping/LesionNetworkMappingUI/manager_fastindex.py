@@ -136,6 +136,43 @@ def cohortSubjects(mapsTsv):
     return [str(i) for i in ids] if isinstance(ids, list) and ids else None
 
 
+def _samePath(a, b):
+    try:
+        return os.path.normcase(os.path.realpath(os.fspath(a))) == os.path.normcase(os.path.realpath(os.fspath(b)))
+    except (TypeError, ValueError):
+        return False
+
+
+def otherConnectome(mapsTsv, bundle, cardBundle=None):
+    """The name of the connectome the lesion maps of ``mapsTsv`` were computed with when it is not ``bundle`` (an open
+    ``ConnectomeBundle``), else None.
+
+    The connectome of the maps is the one of their cohortmaps.json: the same manifest sha256 (stable when the bundle moves)
+    or the same folder. A record without either belongs to the Connectome card's connectome (``cardBundle``), whose cohort
+    folder holds the maps. The fast index dialog of another connectome (Manage… → select it → Build fast index…) must not use their
+    subjects or check its index against them, and must not write their parity report (the Nulls card reads it).
+    """
+    from LesionNetworkMappingLib import cohortmaps
+
+    if bundle is None or not mapsTsv:
+        return None
+    record = cohortmaps.read_record(os.path.join(os.path.dirname(os.path.abspath(os.fspath(mapsTsv))), cohortmaps.COHORTMAPS_JSON)) or {}
+    info = record.get("bundle") if isinstance(record.get("bundle"), dict) else {}
+    name = info.get("name") or getattr(cardBundle, "name", None) or _("another connectome")
+    manifest, path = info.get("manifest_sha256"), info.get("path")
+    if manifest or path:
+        if path and _samePath(path, bundle.path):
+            return None
+        try:
+            own = _sha256(os.path.join(bundle.path, "connectome.json"))
+        except OSError:
+            own = None
+        return None if manifest and manifest == own else name
+    if cardBundle is not None:
+        return None if _samePath(cardBundle.path, bundle.path) else name
+    return None
+
+
 def indexInfo(folder):
     """{"parcels", "subjects", "created", "sha256"} of a fast index folder (index.json only: no matrix is read), or None."""
     path = os.path.join(folder, "index.json")
@@ -607,12 +644,25 @@ class FastIndexDialog(qt.QDialog):
                 self.onParityDone(job)
         self.refresh()
 
-    def mapsTsv(self):
-        """maps.tsv of the cohort's finished lesion maps (the Cohort card's), or None."""
+    def cohortMapsTsv(self):
+        """maps.tsv of the cohort's finished lesion maps (the Cohort card's), whatever connectome they were computed with, or None."""
         path = getattr(self.ctx, "cohortMaps", None)
         if path and os.path.isfile(path) and (_readJson(os.path.join(os.path.dirname(path), "cohortmaps.json")) or {}).get("status") == "done":
             return path
         return None
+
+    def mapsConnectome(self):
+        """Name of the connectome of the Cohort card's lesion maps when it is not this dialog's connectome, else None."""
+        return otherConnectome(self.cohortMapsTsv(), self.bundle, getattr(self.ctx, "bundle", None))
+
+    def mapsTsv(self):
+        """maps.tsv of the cohort's finished lesion maps (the Cohort card's) when they were computed with this dialog's
+        connectome, or None: the dialog of another connectome (Manage…) offers neither their subjects nor a parity check on them.
+        """
+        path = self.cohortMapsTsv()
+        if path is None or self.mapsConnectome() is not None:
+            return None
+        return path
 
     def scheduleRefresh(self):
         self._timer.start()
@@ -749,8 +799,11 @@ class FastIndexDialog(qt.QDialog):
             return
         self.bundleLabel.setText(_("Connectome: {name} · N={n:,} subjects · {v:,} voxels").format(name=bundle.name, n=bundle.n_subjects, v=bundle.n_voxels))
         key, ids = self.selectedSubjects()
+        other = None if self._cohortIds else self.mapsConnectome()
         if self._cohortIds:
             self.subjectsHint.setText(_("The lesion maps use {n} subjects.").format(n=len(self._cohortIds)) + ("" if ids == self._cohortIds else " " + _("Fast mode needs an index built from exactly those subjects.")))
+        elif other is not None:
+            self.subjectsHint.setText(_("The lesion maps of the Cohort card were computed with another connectome ({name}): fast mode for them needs an index of that connectome.").format(name=other))
         else:
             self.subjectsHint.setText(_("No lesion maps yet: fast mode needs an index built from the subjects of the lesion maps (Cohort card)."))
         existing = self._existingIndex(ids)
@@ -880,6 +933,9 @@ class FastIndexDialog(qt.QDialog):
         if self.bundle is None:
             return False, _("Select a connectome first.")
         if mapsTsv is None:
+            other = self.mapsConnectome()
+            if other is not None:
+                return False, _("The lesion maps of the Cohort card were computed with another connectome ({name}). To check this connectome's index, choose it in the Connectome card and map the lesions with it.").format(name=other)
             return False, _("Map the lesions first (Cohort card): the parity check compares the index with their exact maps.")
         if self.parityJob is not None and not self.parityJob.isFinished():
             return False, _("The parity check is running…")
@@ -899,7 +955,7 @@ class FastIndexDialog(qt.QDialog):
         self.parityReason.setText(reason)
         self.parityReason.setVisible(bool(reason))
         if mapsTsv is None:
-            self.paritySource.setText(_("Exact maps: none yet."))
+            self.paritySource.setText(_("Exact maps: none computed with this connectome yet.") if self.mapsConnectome() is not None else _("Exact maps: none yet."))
         else:
             n = len(parityPairs(mapsTsv))
             self.paritySource.setText(_("Exact maps: the {n} lesion maps of the Cohort card that have a lesion file and an AvgFz map (at most {cap} are used).").format(n=n, cap=MAX_PARITY_LESIONS))
