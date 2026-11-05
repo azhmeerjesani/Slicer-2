@@ -675,6 +675,46 @@ class StudioAccessibilityTest(ScriptedLoadableModule.ScriptedLoadableModuleTest)
         self.assertTrue(viewport.rect.contains(rect),
                         f"F6 focused {focused.className()} {focused.objectName} out of view (scroll {bar.value})")
 
+    def test_tab_into_a_scrolled_inspector_shows_the_focus(self):
+        """Tab from outside the inspector (a view, the top bar) into an inspector that is scrolled down scrolls the new
+        focus into view (SPEC 2.11, USABILITY 9.2). Qt scrolls only for a move that starts inside the scroll area.
+        A click on a control and a move inside the inspector do not get the extra scroll from the shell.
+        """
+        import numpy as np
+
+        slicer.util.addVolumeFromArray(np.arange(8 * 9 * 10, dtype=np.uint8).reshape(8, 9, 10), name="Scan")
+        dock = self.mainWindow.findChild("QDockWidget", "PanelDockWidget")
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        scrollArea = dock.findChild("QScrollArea", "ScrollArea")
+        bar = scrollArea.verticalScrollBar()
+        for height in (520, 440, 380, 320):
+            self.mainWindow.resize(1366, height)
+            self._pump(8)
+            if bar.maximum > 0:
+                break
+        if bar.maximum <= 0:
+            self.skipTest("the Draw inspector does not scroll in this window")
+        stops = [w for w in self._tabStops(scrollArea.widget()) if w.isVisible()]
+        outside = self.mainWindow.findChild("QWidget", "StudioSearchPill")
+        self.assertIsNotNone(outside)
+        self.assertFalse(scrollArea.isAncestorOf(outside))
+        viewport = scrollArea.viewport()
+
+        def inView(widget):
+            rect = qt.QRect(widget.mapTo(viewport, qt.QPoint(0, 0)), widget.size)
+            return viewport.rect.contains(rect)
+
+        # The stop that is out of view when the inspector is at the bottom (the first one)
+        bar.setValue(bar.maximum)
+        self._pump()
+        target = stops[0]
+        self.assertFalse(inView(target), "the first stop is out of view when the inspector is scrolled down")
+        self.assertTrue(self._focus(outside, qt.Qt.TabFocusReason))
+        self.assertTrue(self._focus(target, qt.Qt.TabFocusReason))
+        self.assertTrue(inView(target), f"Tab focused {target.className()} {target.objectName} out of view (scroll {bar.value})")
+        self.assertEqual(bar.value, 0)
+
     def _tabStops(self, root):
         """The widgets under ``root`` that Tab stops on now, in the order of the keyboard focus chain (starting at the
         stop that is highest on the screen, then left).
