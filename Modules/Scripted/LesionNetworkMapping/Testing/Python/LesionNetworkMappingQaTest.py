@@ -493,6 +493,50 @@ class QaDerivedOverlayParkTest(unittest.TestCase):
         self.assertIsNone(self.card.shownOverlay())
         self.assertFalse(self.card.debiasedCheckBox.checked)
 
+    def _reenter(self, kind, widget):
+        """Map is left and entered again: its layers put the plain map back in the views; the card puts its derived map back."""
+        import slicer
+
+        volume = self._showOverlay(kind, widget)
+        if kind == "debiased":
+            self.card._overlays[kind] = (volume, self.run.runDir, "T")  # the statistic displayed (no parameter node: T)
+        plain = slicer.util.addVolumeFromArray(np.ones((2, 2, 2), dtype=np.float32), name="plain map", nodeClassName="vtkMRMLScalarVolumeNode")
+        slicer.util.setSliceViewerLayers(foreground=plain)
+        self.assertNotIn(volume.GetID(), self._foregroundIds())
+        notified = []
+        slicer.modules.LesionNetworkMappingWidget = type("W", (), {"onDerivedOverlayChanged": lambda self: notified.append(1)})()
+        self.addCleanup(lambda: delattr(slicer.modules, "LesionNetworkMappingWidget"))
+        self.card.reshowShownOverlay()
+        return volume, notified
+
+    def test_debiased_view_comes_back_when_map_is_entered_again(self):
+        volume, notified = self._reenter("debiased", self.card.debiasedCheckBox)
+        self.assertEqual(self._foregroundIds(), {volume.GetID()})
+        self.assertEqual(self.card.shownOverlay()["kind"], "debiased")
+        self.assertTrue(self.card.debiasedCheckBox.checked)
+        self.assertTrue(notified)
+
+    def test_analytic_z_comes_back_when_map_is_entered_again(self):
+        volume, notified = self._reenter("analytic", self.card.analyticButton)
+        self.assertEqual(self._foregroundIds(), {volume.GetID()})
+        self.assertEqual(self.card.shownOverlay()["kind"], "analytic")
+        self.assertTrue(self.card.analyticButton.checked)
+        self.assertTrue(notified)
+
+    def test_derived_map_that_is_gone_is_dropped_when_map_is_entered_again(self):
+        import slicer
+
+        volume = self._showOverlay("debiased", self.card.debiasedCheckBox)
+        slicer.mrmlScene.RemoveNode(volume)
+        self.card.reshowShownOverlay()
+        self.assertIsNone(self.card.shownOverlay())
+        self.assertFalse(self.card.debiasedCheckBox.checked)
+        self.assertEqual(self.card._overlays, {})
+
+    def test_nothing_shown_changes_nothing(self):
+        self.card.reshowShownOverlay()
+        self.assertIsNone(self.card.shownOverlay())
+
 
 @unittest.skipUnless(_has_slicer(), "needs the Slicer application")
 class QaGroupChipFastModeTest(unittest.TestCase):

@@ -970,6 +970,23 @@ class QACard:
         if self._shown == "debiased":
             self.setDebiased(True)
 
+    def reshowShownOverlay(self):
+        """Map was entered again: its layers put the plain map back in the views, so the derived map this card still shows (its
+        toggle is ticked) goes back to the foreground, and the legend, chips and peak header follow. A derived map that is
+        gone is dropped with its toggle.
+        """
+        if self._shown is None:
+            return
+        entry = self._overlays.get(self._shown)
+        if entry is None or entry[0] is None or entry[0].GetScene() is None:
+            self._dropOverlays()
+            self._notifyShownOverlay()
+        elif self._shown == "debiased":
+            self.setDebiased(True)  # the volume of the statistic now displayed (made again when that changed), shown and announced
+        else:
+            self._showForeground(entry[0])
+            self._notifyShownOverlay()
+
     def debiasedVolume(self):
         """Make (once per run) the debiased volume of the displayed statistic; return it, or None when it cannot be made."""
         from LesionNetworkMappingLib import similarity

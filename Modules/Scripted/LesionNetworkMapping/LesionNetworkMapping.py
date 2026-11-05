@@ -5740,6 +5740,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             volume = None
         if volume is not None:
             display.showLayers(self._templateUnderMaps(load=True), volume, node.opacity if node is not None else 0.8)
+            qa = self.ctx.card("qa") if self.ctx is not None else None
+            if qa is not None and hasattr(qa, "reshowShownOverlay"):
+                qa.reshowShownOverlay()  # a derived map from the QA card (debiased view, analytic z) stays what the views show
         segNode, segmentId = self.ctx.seed()
         if segNode is not None and self.seedMode() == "lesion" and self._outlineState is None:
             self._outlineState = display.lesionOutline(segNode, segmentId)
