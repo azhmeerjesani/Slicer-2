@@ -60,6 +60,20 @@ import vtk
 import slicer
 
 
+def _plainToolTip(label):
+    """The tool tip of a label as a normalized path (Qt may wrap it in rich text)."""
+    import html
+
+    return os.path.normpath(html.unescape(re.sub(r"<[^>]+>", "", str(label.toolTip))))
+
+
+def _pumpFor(seconds):
+    end = time.time() + seconds
+    while time.time() < end:
+        slicer.app.processEvents()
+        time.sleep(0.01)
+
+
 def _md5File(path):
     with open(path, "rb") as f:
         return hashlib.md5(f.read()).hexdigest()
@@ -7205,6 +7219,55 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(folder)), ["Race", "Race 2", "Race 3"])
         # The projects of the other window were left as they were
         self.assertEqual(os.listdir(os.path.join(folder, "Race")), [projects.PRIVATE_DIR])
+
+    def test_94_library_inspector_project_card_follows_the_folder_after_a_root_move(self):
+        """Change folder > Move: the project card of the Library inspector shows the open project's new folder (BB-1).
+        It showed "Projects > <name>" with the tool tip of the old folder, which no longer exists, until the next
+        workspace switch: the card was rebuilt only for scene events and when the panel was shown, and the move changes
+        neither.
+        """
+        from unittest import mock
+
+        from StudioLib import library
+
+        projects = self.projects
+        service = self._service()
+        volume, _path = self._userVolume()
+        self._lesion(volume)
+        project = self._projectFor(service)
+        self._save(service)
+        name = project.name
+        oldPath = os.path.normpath(project.path)
+        newRoot = os.path.join(self.tempDir, "card-move", "Slicer Studio")
+        os.makedirs(newRoot)
+        settings = qt.QSettings()
+        os.environ.pop(projects.ROOT_ENVIRONMENT)
+        settings.setValue(projects.ROOT_KEY, self.root)
+        panel = None
+        try:
+            with mock.patch.object(library.LibraryPanel, "withCanvas", staticmethod(lambda: True)):
+                panel = library.LibraryPanel()
+                panel.widget.show()
+                panel.build()
+                _pumpFor(0.2)
+                # The move may also touch the scene: only the notifications of the project are to refresh the card here
+                panel._sceneRefresher.setEnabled(False)
+                card = panel.overviewCard
+                self.assertEqual(_plainToolTip(card.pathLabel), oldPath)
+                service.moveRoot(newRoot, moveContent=True)
+                newPath = os.path.join(os.path.normpath(newRoot), projects.PROJECTS_DIR, os.path.basename(service.project.path))
+                self.assertEqual(os.path.normpath(service.project.path), newPath)
+                self.assertFalse(os.path.isdir(oldPath))
+                _pumpFor(0.4)
+                self.assertEqual(_plainToolTip(card.pathLabel), newPath, "the card shows the new folder")
+                self.assertIn(service.project.name, str(card.pathLabel.property("fullText")))
+        finally:
+            if panel is not None:
+                panel.widget.hide()
+                panel._disposeProjectListener()
+            settings.remove(projects.ROOT_KEY)
+            settings.remove(projects.ROOT_CHOSEN_KEY)
+            os.environ[projects.ROOT_ENVIRONMENT] = self.root
 
 
 def _sphere(center=(0, 0, 0)):

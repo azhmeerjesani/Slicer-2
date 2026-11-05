@@ -6402,6 +6402,13 @@ class LibraryPanel(qt.QObject):
         self.recentList = None
         self.studyCards = None
         self._sceneRefresher = _SceneRefresher(self.refresh)
+        # The open project changes without a scene event (Change folder > Move switches it to its new folder, a rename or a
+        # save changes what the project card shows): the card follows the project notifications, debounced (saves notify)
+        self._overviewTimer = qt.QTimer()
+        self._overviewTimer.setSingleShot(True)
+        self._overviewTimer.setInterval(100)
+        self._overviewTimer.connect("timeout()", self._refreshOverview)
+        self._listensToProjects = False
         _installEventFilter(self.widget, self)
         _panels.append(self)
 
@@ -6452,7 +6459,32 @@ class LibraryPanel(qt.QObject):
 
         ui.addPaletteListener(self._refreshIcons)
         self._refreshIcons()
+        self._listenToProjects()
         self.refresh()
+
+    def _listenToProjects(self):
+        projects = ProjectOverviewCard._projects()
+        if projects is not None and not self._listensToProjects:
+            self._listensToProjects = True
+            projects.addListener(self._scheduleOverview)
+
+    def _scheduleOverview(self):
+        if _isAlive(self.widget):
+            self._overviewTimer.start()
+
+    def _refreshOverview(self):
+        """The project card shows the project that is open now (its name and folder after Change folder > Move, for example)."""
+        if not self.isBuilt() or not _isAlive(self.widget) or not self.widget.isVisible():
+            return
+        if _studySession() is None and self.withCanvas() and hasData():
+            self.overviewCard.refresh()
+
+    def _disposeProjectListener(self):
+        self._overviewTimer.stop()
+        projects = ProjectOverviewCard._projects()
+        if projects is not None and self._listensToProjects:
+            self._listensToProjects = False
+            projects.removeListener(self._scheduleOverview)
 
     @staticmethod
     def withCanvas():
@@ -6535,6 +6567,7 @@ def _livePanel():
             if panel.recentList is not None:
                 panel.recentList.dispose()
             panel._sceneRefresher.dispose()
+            panel._disposeProjectListener()
             if panel.openNowCard is not None:
                 panel.openNowCard.dispose()
             continue
