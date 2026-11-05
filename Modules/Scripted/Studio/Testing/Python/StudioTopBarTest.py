@@ -958,6 +958,45 @@ class StudioTopBarTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         topBar._updateLayoutPicker()
         self.assertTrue(compare.isHidden())
 
+    def test_figure_view_chip_reset_and_rotate_leave_the_figure(self):
+        """The orientation chip entries "Reset orientation" and "Rotate to volume plane" leave a figure view as it is: the default
+        orientation of the view would show the 2D picture edge-on (a line), and its volume plane would flip it. Other views still follow them.
+        """
+        figure = self._addVolume("figure", shape=(1, 30, 20), role="figure")
+        scan = self._addVolume("scan", shape=(16, 24, 24))
+        yellowWidget = self.layoutManager.sliceWidget("Yellow")
+        redWidget = self.layoutManager.sliceWidget("Red")
+        yellowWidget.mrmlSliceCompositeNode().SetBackgroundVolumeID(figure.GetID())
+        redWidget.mrmlSliceCompositeNode().SetBackgroundVolumeID(scan.GetID())
+        yellowNode = yellowWidget.mrmlSliceNode()
+        yellowNode.SetOrientationToAxial()
+        yellowWidget.fitSliceToBackground()
+        self._pump()
+        controller = yellowWidget.sliceController()
+
+        def matrixOf(node):
+            matrix = node.GetSliceToRAS()
+            return [matrix.GetElement(row, column) for row in range(4) for column in range(4)]
+
+        before = matrixOf(yellowNode)
+        fieldOfView = list(yellowNode.GetFieldOfView())
+        for name in ("ResetOrientationAction", "actionRotate_to_volume_plane"):
+            action = controller.findChild("QAction", name)
+            self.assertIsNotNone(action, name)
+            action.trigger()
+            self._pump()
+            self.assertEqual(yellowNode.GetOrientationString(), "Axial", name)
+            self.assertEqual(matrixOf(yellowNode), before, name)
+            self.assertEqual(list(yellowNode.GetFieldOfView()), fieldOfView, name)
+        # The same entries still work on a scan view: Reset goes back to the default orientation
+        redNode = redWidget.mrmlSliceNode()
+        redNode.SetOrientationToCoronal()
+        self._pump()
+        self.assertEqual(redNode.GetOrientationString(), "Coronal")
+        redWidget.sliceController().findChild("QAction", "ResetOrientationAction").trigger()
+        self._pump()
+        self.assertEqual(redNode.GetOrientationString(), "Axial")
+
     def test_more_layouts_does_not_modify_layoutmenu(self):
         """More layouts… shows the Studio layouts and the classic actions by reference; the Layout menu is not changed."""
         before = self._studioLayoutActions()

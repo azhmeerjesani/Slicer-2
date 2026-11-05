@@ -616,6 +616,11 @@ void qMRMLSliceControllerWidgetPrivate::setupFlatBar()
                    q,
                    [q]()
                    {
+                     // A figure has no patient directions: the default orientation of the view would show it edge-on
+                     if (q->isFigureBackground())
+                     {
+                       return;
+                     }
                      vtkMRMLSliceNode* sliceNode = q->mrmlSliceNode();
                      const char* defaultOrientation = sliceNode ? sliceNode->GetDefaultOrientation() : nullptr;
                      if (defaultOrientation && strlen(defaultOrientation) > 0 && strcmp(defaultOrientation, vtkMRMLSliceNode::GetReformatOrientationName()) != 0)
@@ -2820,9 +2825,26 @@ void qMRMLSliceControllerWidget::moveBackgroundComboBox(bool more)
 }
 
 //---------------------------------------------------------------------------
+bool qMRMLSliceControllerWidget::isFigureBackground() const
+{
+  Q_D(const qMRMLSliceControllerWidget);
+  if (!d->MRMLSliceCompositeNode || !this->mrmlScene())
+  {
+    return false;
+  }
+  const char* backgroundID = d->MRMLSliceCompositeNode->GetBackgroundVolumeID();
+  return backgroundID && isFigureVolume(vtkMRMLVolumeNode::SafeDownCast(this->mrmlScene()->GetNodeByID(backgroundID)));
+}
+
+//---------------------------------------------------------------------------
 void qMRMLSliceControllerWidget::rotateSliceToLowestVolumeAxes()
 {
   Q_D(qMRMLSliceControllerWidget);
+  // A figure has no patient directions: rotating it to its "plane" would flip it and no longer fit
+  if (this->isFigureBackground())
+  {
+    return;
+  }
   vtkSmartPointer<vtkCollection> nodes = d->saveNodesForUndo("vtkMRMLSliceNode");
   if (!nodes.GetPointer())
   {
