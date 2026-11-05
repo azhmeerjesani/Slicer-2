@@ -629,6 +629,20 @@ def _map_score(prep_maps, data, vector, score, circuit, top_pct, bases_terms):
     return scores.fisher_z(scores.similarity_from_terms(cross, lesion, scores.map_terms(vector[None, :], bases), 0)[:, 0])
 
 
+def _fixed_reason(fixed):
+    """Why a fixed map gives no usable lesion score, or None. A constant (or all-zero) map has no spatial r with any
+    lesion map, and a score that is the same for every lesion carries no information: the model would silently fall
+    back to the volume-only model while the table and the verdicts name the map.
+    """
+    fixed = np.asarray(fixed, dtype=np.float64)
+    finite = fixed[np.isfinite(fixed)]
+    if finite.size < 3:
+        return "the map gives no defined score for the lesions (a constant or empty map has no spatial r)"
+    if np.ptp(finite) <= 1e-12 * max(float(np.abs(finite).max()), 1.0):
+        return "the map gives the same score to every lesion (a constant map has no spatial r)"
+    return None
+
+
 def _prepare(data, circuit, score, top_pct):
     data.check()
     if circuit not in CIRCUITS:
@@ -673,13 +687,20 @@ def _prepare(data, circuit, score, top_pct):
             item.status, item.reason = "not computed", data.reference_reason or "no reference maps (μC_r, PC1) for this connectome"
         else:
             item.fixed = _map_score(Y, data, reference[key], score, circuit, top_pct, terms)
+            item.reason = _fixed_reason(item.fixed)
+            if item.reason:
+                item.status = "not computed"
         predictors.append(item)
     location = _Predictor("location", "Lesion location (in-fold proportional subtraction)" if data.outcome_type == "binary" else "Lesion location (in-fold outcome-weighted occupancy)", "baseline", "location")
     if gram is None:
         location.status, location.reason = "not computed", data.occupancy_reason or "no lesion occupancy (weights.npz) for these maps"
     predictors.append(location)
     for name, vector in data.refmaps.items():
-        predictors.append(_Predictor(f"ref:{name}", f"Reference map {name}", "baseline", "fixed", fixed=_map_score(Y, data, vector, score, circuit, top_pct, terms)))
+        item = _Predictor(f"ref:{name}", f"Reference map {name}", "baseline", "fixed", fixed=_map_score(Y, data, vector, score, circuit, top_pct, terms))
+        item.reason = _fixed_reason(item.fixed)
+        if item.reason:
+            item.status = "not computed"
+        predictors.append(item)
     occupancy_csc = data.occupancy.tocsc() if data.occupancy is not None and score == "damage" else None
     return _Prepared(data, circuit, score, float(top_pct), predictors, nuisance, voxel_mean, bases, lesion, gram, occupancy_csc, [b.astype(PASS_DTYPE) for b in bases])
 

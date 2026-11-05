@@ -350,6 +350,24 @@ class ValidationTest(unittest.TestCase):
         self.assertFalse(record["circuit"]["permutation_thresholds_in_folds"])
         json.dumps(jobs.to_json(record))
 
+    def test_constant_reference_map_is_not_computed(self):
+        # A constant or all-zero map has no spatial r with any lesion map: it is listed as not computed with a reason
+        # (not as the volume-only model under the map's name), and no verdict says the circuit exceeds it.
+        data = _cohort()
+        data.refmaps = {"const": np.ones(300), "zero": np.zeros(300), "other": np.random.default_rng(1).standard_normal(300)}
+        result = validate.validate(data, "slnm", scheme="kfold", k=4, repeats=1, n_boot=2, n_perm=0)
+        rows = {item["name"]: item for item in result.predictors}
+        for name in ("ref:const", "ref:zero"):
+            self.assertEqual(rows[name]["status"], "not computed", name)
+            self.assertTrue(rows[name]["reason"], name)
+        self.assertEqual(rows["ref:other"]["status"], "computed")
+        entries = {entry["baseline"]: entry for entry in result.comparisons}
+        for name, label in (("ref:const", "const"), ("ref:zero", "zero")):
+            self.assertEqual(entries[name]["status"], "not computed")
+            self.assertIsNone(entries[name]["delta"])
+            self.assertIn(f"reference-map baseline {label} was not computed", entries[name]["text"])
+            self.assertFalse(any(f"baseline {label} " in text and "exceeds" in text for text in result.verdicts))
+
     def test_planted_effect_and_neutral_verdicts(self):
         data = _cohort(n=60, effect=0.08, seed=11)
         result = validate.validate(data, "glm", scheme="kfold", k=5, repeats=2, n_boot=20, n_perm=19, seed=2)
