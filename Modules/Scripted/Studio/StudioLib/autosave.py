@@ -2034,8 +2034,25 @@ class AutosaveService:
             if current is not None and os.path.normcase(os.path.realpath(current.path)) == os.path.normcase(os.path.realpath(projectPath)):
                 return True  # the open project: nothing to load (adding it again would duplicate every node)
             return self.openProject(projectPath)
+        if self.refuseDamagedSceneFile(path):
+            return False  # nothing was read: the open project stays open
         self.setPendingSceneSource(path)
         slicer.util.loadScene(path, {"clear": True})
+        return True
+
+    def refuseDamagedSceneFile(self, path):
+        """True if ``path`` is a scene file (.mrml) that was cut short (an interrupted save, a sync conflict) and projects are
+        on: it is announced ("not-opened") and left as it is. Checked before the scene is replaced, so the open project stays
+        open (Load Scene would clear it first and then fail) and the failed load adds no error dialog or traceback on top.
+        """
+        if not str(path).lower().endswith(".mrml") or not self._projects().isEnabled() or not self.projectsActive():
+            return False
+        if _sceneFileParses(path):
+            return False
+        name = self._projects().displayName(os.path.basename(path))
+        logging.warning(f"Slicer Studio: the scene file {os.path.basename(path)} is damaged and could not be read; it is left as it is")
+        self._announce("not-opened", None, name=name, missing=False, damaged=True, path=os.path.dirname(path), reason=_(
+            "{name} is damaged and could not be read: nothing was opened, and the file is left as it is.").format(name=name))
         return True
 
     def _afterSceneImport(self):

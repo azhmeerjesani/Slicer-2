@@ -1952,6 +1952,15 @@ def _loadScene(path, shell):
     service = _sceneProjectService(shell)
     if service is not None:
         return bool(service.openSceneFile(path))
+    if shell is not None:
+        try:
+            from . import autosave
+
+            service = autosave.instance()
+        except ImportError:
+            service = None
+        if service is not None and service.refuseDamagedSceneFile(path):
+            return False  # damaged: announced there; no error dialog or traceback on top of it
     _announceSceneSource(path)
     slicer.util.loadScene(path, {})
     return True
