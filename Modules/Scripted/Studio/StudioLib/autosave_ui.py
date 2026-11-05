@@ -405,6 +405,8 @@ class AutosaveUi:
         try:
             if handler is not None:
                 handler(slot)
+                # Like the ordinary recovery: the next start does not offer this session again
+                _recovery().markRecovered(slot)
                 self.closeCard()
                 return True
             report = _recovery().recover(slot, parent=slicer.util.mainWindow())

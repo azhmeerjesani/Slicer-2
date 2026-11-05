@@ -555,12 +555,19 @@ def recover(slot, mode=None, parent=None):
             service.releaseSlot(slot.path)
     if report is None:
         return None
-    if not slot.session.own:
-        markSession(slot.session, "recovered")
+    markRecovered(slot)
     updated = _shortTime(slot.updated, timeOnlyToday=True)
     text = recoveredText(report["restored"], updated)
     notify(text, report)
     return report
+
+
+def markRecovered(slot):
+    """Mark the session of ``slot`` as recovered, so that the next start does not offer it again (the scene of the running
+    session itself is not a recovery).
+    """
+    if not slot.session.own:
+        markSession(slot.session, "recovered")
 
 
 def markSession(session, state, synchronous=False, closedForUpdate=None):
@@ -854,6 +861,8 @@ class RecoveryDialog(qt.QDialog):
             try:
                 if canHandle(slot):
                     handle(slot)
+                    # A handler (reopen the study) recovers the work like "Recover" does: not offered again
+                    markRecovered(slot)
                     self.close()
                     return
             except Exception:

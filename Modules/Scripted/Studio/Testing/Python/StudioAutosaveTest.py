@@ -1158,6 +1158,48 @@ class StudioAutosaveTest(unittest.TestCase):
         # A recovered session is not offered again
         self.assertIsNone(ui.presentRecovery(sessions))
 
+    def test_u2_recoveryHandlerMarksRecovered(self):
+        """BB-1: reopening the study (a recovery handler) from the card or from the dialog left the session 'running' in
+        session.json, so the next start offered the same unsaved work again.
+        """
+        from StudioLib import autosave_ui, recovery
+
+        service = self._service()
+        self._studioScene()
+        self._generate(service)
+        handled = []
+        service.registerRecoveryHandler(lambda slot: True, handled.append)
+
+        def state(session):
+            return (self.io.readJson(os.path.join(session.path, self.io.SESSION_FILE)) or {}).get("state")
+
+        # The card ("Reopen study at <sid>")
+        sessions = self._crashedSessions(service)
+        studioShell = self._applyStudio(service)
+        ui = autosave_ui.instance()
+        self.assertEqual(state(sessions[0]), "running")
+        self.assertTrue(ui.recover(sessions[0].recoverableSlots()[0]))
+        self.assertEqual(len(handled), 1)
+        self.io.backgroundWriter().drain(5.0)  # the write goes through the background writer
+        self.assertEqual(state(sessions[0]), "recovered")
+        self.assertEqual([s for s in recovery.scan(self.root, service.sessionId) if s.presentable()], [])
+
+        # The dialog ("Recover unsaved work...")
+        shutil.rmtree(sessions[0].path)
+        sessions = self._crashedSessions(service)
+        self.assertEqual(state(sessions[0]), "running")
+        dialog = recovery.RecoveryDialog()
+        try:
+            dialog.setSessions(sessions, startup=True, root=self.root)
+            dialog.list.setCurrentItem(dialog.list.topLevelItem(0))
+            dialog.onRecover()
+        finally:
+            dialog.close()
+        self.assertEqual(len(handled), 2)
+        self.io.backgroundWriter().drain(5.0)
+        self.assertEqual(state(sessions[0]), "recovered")
+        self.assertIsNotNone(studioShell)
+
     def test_v_studioClassic(self):
         from StudioLib import autosave_ui, library
 
