@@ -930,6 +930,37 @@ class FiguresTest(unittest.TestCase):
         code, events = self._cli(base)  # no --font: Pillow's font, as documented
         self.assertEqual(code, 0)
 
+    def test_font_that_is_not_a_font_and_out_that_is_a_file_name_the_option_and_the_file(self):
+        out = os.path.join(self.tmp, "o-raw")
+        map_path = os.path.join(self.tmp, "raw-map.nii.gz")
+        nifti.write_nifti(map_path, self.tmap[0], self.affine)
+        base = ["--preset", "montage", "--map", map_path, "--threshold", "3", "--slices", "A 0", "--width-mm", "89", "--dpi", "150", "--formats", "png"]
+        text_font = os.path.join(self.tmp, "Inter-Regular.ttf")
+        with open(text_font, "w", encoding="utf-8") as f:
+            f.write("not a font\n")
+        empty_font = os.path.join(self.tmp, "empty.ttf")
+        open(empty_font, "wb").close()
+        for bad in (text_font, empty_font):
+            code, events = self._cli(base + ["--font", bad, "--out", out])
+            self.assertNotEqual(code, 0, bad)
+            self.assertEqual(events[-1]["code"], "input", bad)
+            self.assertIn("Cannot read the font " + bad, events[-1]["message"])
+            self.assertIn("--font", events[-1]["message"])
+            self.assertFalse(os.path.exists(os.path.join(out, "figures")), "nothing may be written for a bad --font")
+        a_file = os.path.join(self.tmp, "afile")
+        with open(a_file, "w", encoding="utf-8") as f:
+            f.write("x")
+        for bad in (a_file, os.path.join(a_file, "sub")):
+            code, events = self._cli(base + ["--out", bad])
+            self.assertNotEqual(code, 0, bad)
+            self.assertEqual(events[-1]["code"], "input", bad)
+            self.assertIn("--out", events[-1]["message"])
+            self.assertIn(a_file, events[-1]["message"])
+            self.assertIn("not a folder", events[-1]["message"])
+            self.assertNotIn("Errno", events[-1]["message"])
+        code, events = self._cli(base + ["--out", os.path.join(self.tmp, "o-new", "deeper")])  # a missing folder is still created
+        self.assertEqual(code, 0)
+
     def test_watermark_for(self):
         study = os.path.join(self.tmp, "study")
         os.makedirs(study)

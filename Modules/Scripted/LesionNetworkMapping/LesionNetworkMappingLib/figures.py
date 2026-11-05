@@ -2415,6 +2415,14 @@ def main(argv=None, cancel=None):
         raise jobs.JobError(f"--columns must be at least 1, got {args.columns}", code="usage", exit_code=jobs.EXIT_USAGE)
     if args.per_page < 1:
         raise jobs.JobError(f"--per-page must be at least 1, got {args.per_page}", code="usage", exit_code=jobs.EXIT_USAGE)
+    if args.out is not None:
+        # An --out that is a file (or lies under one) would fail in write_figure with "[Errno 20] Not a directory"
+        blocker = os.path.abspath(args.out)
+        while blocker and not os.path.exists(blocker) and os.path.dirname(blocker) != blocker:
+            blocker = os.path.dirname(blocker)
+        if os.path.exists(blocker) and not os.path.isdir(blocker):
+            where = "is a file, not a folder" if blocker == os.path.abspath(args.out) else f"lies under {blocker}, which is a file, not a folder"
+            raise jobs.JobError(f"--out {args.out} {where}; give a folder for the figures", code="input")
     out_root = args.out or os.path.join(args.study, "derivatives", "lnm")
     run_root = args.run_root or args.study or _find_study(out_root) or out_root
     name = args.name or args.preset
@@ -2431,6 +2439,18 @@ def main(argv=None, cancel=None):
     # only the right fallback when no font was asked for)
     if args.font is not None and not os.path.isfile(args.font):
         raise jobs.JobError(f"Font file not found: {args.font} (--font needs an Inter TTF file)", code="input")
+    if args.font is not None:
+        # A file that is not a font (a text file, an empty file, a renamed download) would otherwise fail only when
+        # the first text is drawn, with Pillow's bare "unknown file format"
+        try:
+            from PIL import ImageFont
+
+            ImageFont.truetype(args.font, 10)
+        except OSError as exc:
+            raise jobs.JobError(
+                f"Cannot read the font {args.font} (--font): not a TrueType/OpenType font ({exc}); give an Inter TTF file",
+                code="input",
+            ) from exc
     watermark = args.watermark
     if watermark == "auto":
         watermark = watermark_for(args.study, args.connectome)
