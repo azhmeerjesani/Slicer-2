@@ -127,6 +127,8 @@ Run with the main window and testing enabled::
 - ``test_53_a_scan_opened_from_outside_a_study_never_feeds_done_next`` (BB-1): with a study open, opening a subject's own
   scan opens that subject; another scan closes the study first (the subject's lesion is written) and is saved like any
   scan; a lesion of another scan in Draw gets Save lesion, never Done → next of the hidden subject.
+- ``test_55b_segment_selector_keeps_the_stored_selection_for_ids_the_new_node_has`` (BB-1): the multi-selection of
+  qMRMLSegmentSelectorWidget survives a node change for the segment IDs the new node has (as upstream); only missing IDs are dropped, silently.
 - ``test_54_return_in_the_columns_dialog_never_cancels_the_edits`` (BB-1): Return in the Columns… dialog (on a role combo, the
   table, the filter check box or a button) neither closes it nor drops the edits: the dialog has no default button (Cancel was,
   so Return threw every edit away without a word); Confirm still saves.
@@ -4669,6 +4671,61 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertFalse(segmentationNode.GetDisplayNode().GetSegmentVisibility("2.25.1111"))
         selector.setSelectedSegmentIDs(["2.25.1111"])
         self.assertTrue(segmentationNode.GetDisplayNode().GetSegmentVisibility("2.25.1111"))
+
+    def test_55b_segment_selector_keeps_the_stored_selection_for_ids_the_new_node_has(self):
+        """qMRMLSegmentSelectorWidget is a public widget of official 3D Slicer. Its multi-selection is kept across a change of the
+        segmentation node, as upstream does, for the segment IDs that exist in the new node: a scripted module that restores a saved
+        selection, or keeps it across segmentations with matching IDs, relies on it. Only the IDs that the new node lacks are dropped,
+        silently (BB-1: the fix of the hidden lesion on project open had cleared the whole selection on every node change).
+        """
+        slicer.mrmlScene.Clear(0)
+        self.addCleanup(slicer.mrmlScene.Clear, 0)
+
+        def pump():
+            for _ in range(5):
+                slicer.app.processEvents()
+
+        def addSegmentation(name, segmentIds):
+            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", name)
+            node.CreateDefaultDisplayNodes()
+            for segmentId in segmentIds:
+                node.GetSegmentation().AddEmptySegment(segmentId, name + "-" + segmentId)
+            return node
+
+        nodeA = addSegmentation("segA", ["Segment_1", "Segment_2", "Segment_3"])
+        nodeB = addSegmentation("segB", ["Segment_1", "Segment_2", "Segment_3"])
+        nodeC = addSegmentation("segC", ["Segment_2", "Other"])
+        widget = slicer.qMRMLSegmentSelectorWidget()
+        self.addCleanup(widget.deleteLater)
+        widget.multiSelection = True
+        widget.setMRMLScene(slicer.mrmlScene)
+        signals = []
+        widget.connect("segmentSelectionChanged(QStringList)", lambda ids: signals.append(list(ids)))
+        widget.setCurrentNode(nodeA)
+        widget.setSelectedSegmentIDs(["Segment_1", "Segment_3"])
+        pump()
+        self.assertEqual(list(widget.selectedSegmentIDs()), ["Segment_1", "Segment_3"])
+        signals.clear()
+
+        widget.setCurrentNode(nodeB)
+        pump()
+        self.assertEqual(list(widget.selectedSegmentIDs()), ["Segment_1", "Segment_3"], "IDs that the new node has are kept")
+        widget.setCurrentNode(nodeA)
+        pump()
+        self.assertEqual(list(widget.selectedSegmentIDs()), ["Segment_1", "Segment_3"], "and kept when switching back")
+        self.assertEqual(signals, [], "a node change that keeps the selection reports no change")
+
+        widget.setCurrentNode(nodeC)
+        pump()
+        self.assertEqual(list(widget.selectedSegmentIDs()), [], "IDs that the new node lacks are dropped")
+        self.assertEqual(signals, [], "and silently, so listeners do not hide the new node's segments")
+        widget.setSelectedSegmentIDs(["Segment_2", "Other"])
+        pump()
+        signals.clear()
+        widget.setCurrentNode(nodeB)
+        pump()
+        self.assertEqual(list(widget.selectedSegmentIDs()), ["Segment_2"], "only the IDs that exist in the new node are kept")
+        self.assertEqual(signals, [])
 
     def test_54_return_in_the_columns_dialog_never_cancels_the_edits(self):
         """Columns...: Return that a focused child leaves unhandled (a closed role combo, the table, the "Only columns without

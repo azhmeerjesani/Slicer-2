@@ -203,6 +203,56 @@ int testMultiSelectionNodeChange(qMRMLSegmentSelectorWidget* segmentSelectorWidg
   return EXIT_SUCCESS;
 }
 
+// ----------------------------------------------------------------------------
+int testMultiSelectionSharedSegmentIDs(qMRMLSegmentSelectorWidget* segmentSelectorWidget)
+{
+  // As in upstream, the stored selection survives a change of the segmentation node
+  // for the segment IDs that exist in the new node (scripted modules restore a saved
+  // selection, or keep it across segmentations that share segment IDs).
+  vtkNew<vtkMRMLScene> scene;
+  segmentSelectorWidget->setMultiSelection(true);
+  segmentSelectorWidget->setMRMLScene(scene.GetPointer());
+
+  vtkNew<vtkMRMLSegmentationNode> segmentationNodeA;
+  vtkNew<vtkMRMLSegmentationNode> segmentationNodeB;
+  vtkNew<vtkMRMLSegmentationNode> segmentationNodeC;
+  scene->AddNode(segmentationNodeA);
+  scene->AddNode(segmentationNodeB);
+  scene->AddNode(segmentationNodeC);
+  for (const char* id : { "Segment_1", "Segment_2", "Segment_3" })
+  {
+    segmentationNodeA->GetSegmentation()->AddEmptySegment(id);
+    segmentationNodeB->GetSegmentation()->AddEmptySegment(id);
+  }
+  segmentationNodeC->GetSegmentation()->AddEmptySegment("Segment_2");
+  segmentationNodeC->GetSegmentation()->AddEmptySegment("Other");
+
+  segmentSelectorWidget->setCurrentNode(segmentationNodeA);
+  segmentSelectorWidget->setSelectedSegmentIDs(QStringList() << "Segment_1" << "Segment_3");
+  CHECK_QSTRINGLIST(QStringList() << "Segment_1" << "Segment_3", segmentSelectorWidget->selectedSegmentIDs());
+
+  QSignalSpy segmentSelectionChangedSpy(segmentSelectorWidget, SIGNAL(segmentSelectionChanged(QStringList)));
+
+  // The IDs exist in the other node as well: the selection is kept, without a signal
+  segmentSelectorWidget->setCurrentNode(segmentationNodeB);
+  CHECK_QSTRINGLIST(QStringList() << "Segment_1" << "Segment_3", segmentSelectorWidget->selectedSegmentIDs());
+  segmentSelectorWidget->setCurrentNode(segmentationNodeA);
+  CHECK_QSTRINGLIST(QStringList() << "Segment_1" << "Segment_3", segmentSelectorWidget->selectedSegmentIDs());
+  CHECK_INT(segmentSelectionChangedSpy.count(), 0);
+
+  // Only the IDs that exist in the new node are kept, silently
+  segmentSelectorWidget->setCurrentNode(segmentationNodeC);
+  CHECK_INT(segmentSelectorWidget->selectedSegmentIDs().count(), 0);
+  CHECK_INT(segmentSelectionChangedSpy.count(), 0);
+  segmentSelectorWidget->setSelectedSegmentIDs(QStringList() << "Segment_2" << "Other");
+  CHECK_INT(segmentSelectionChangedSpy.count(), 1);
+  segmentSelectorWidget->setCurrentNode(segmentationNodeB);
+  CHECK_QSTRINGLIST(QStringList() << "Segment_2", segmentSelectorWidget->selectedSegmentIDs());
+  CHECK_INT(segmentSelectionChangedSpy.count(), 1);
+
+  return EXIT_SUCCESS;
+}
+
 //-----------------------------------------------------------------------------
 int qMRMLSegmentSelectorWidgetTest1(int argc, char* argv[])
 {
@@ -233,6 +283,13 @@ int qMRMLSegmentSelectorWidgetTest1(int argc, char* argv[])
   qMRMLSegmentSelectorWidget nodeChangeSegmentSelectorWidget;
   nodeChangeSegmentSelectorWidget.show();
   if (testMultiSelectionNodeChange(&nodeChangeSegmentSelectorWidget) != EXIT_SUCCESS)
+  {
+    return EXIT_FAILURE;
+  }
+
+  qMRMLSegmentSelectorWidget sharedIDsSegmentSelectorWidget;
+  sharedIDsSegmentSelectorWidget.show();
+  if (testMultiSelectionSharedSegmentIDs(&sharedIDsSegmentSelectorWidget) != EXIT_SUCCESS)
   {
     return EXIT_FAILURE;
   }
