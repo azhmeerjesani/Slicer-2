@@ -49,6 +49,32 @@ CASE_GROUPS = (
 )
 #: Shown read-only under the groups (derived or recorded by the application): (column, label)
 CASE_FACTS = (("hemisphere", "Hemisphere"), ("review_status", "Review"), ("trace_method", "Traced by"), ("qc_flags", "Flags"), ("duplicate_of", "Duplicate of"))
+
+
+def caseFactWords(column, row, value):
+    """``(text, tooltip)`` of one fact of the Case facts line, in the words used elsewhere in the Library: the review state as in the
+    Review section ("Changes requested"), the QC flags as in the Flags column ("Side, CSF, Parts", the sentences of the flags in the
+    tooltip). Other values are shown as they are stored.
+    """
+    if column == "review_status":
+        labels = _lnm("review").STATE_LABELS
+        return _(labels.get(str(value).strip(), str(value))), ""
+    if column == "qc_flags":
+        from . import libcard_flags
+
+        codes = libcard_flags._flags(row)
+        if not codes:
+            return str(value), ""
+        try:
+            explanations = _lnm("lesionops").QC_FLAGS
+        except ImportError:
+            explanations = {}
+        names = [_(libcard_flags.FLAG_SHORT.get(code, code)) for code in codes]
+        tip = "\n".join(f"{name}: {explanations.get(code, code)}" for name, code in zip(names, codes, strict=True))
+        return ", ".join(names), tip
+    return str(value), ""
+
+
 #: Short labels of the Case fields (the registry's descriptions are the tooltips)
 FIELD_LABELS = {
     "source_type": "Source type", "source_dataset": "Source dataset", "source_id": "Source ID", "doi": "DOI", "pmid": "PMID", "citation": "Citation",
@@ -879,12 +905,16 @@ class CaseSection:
             self._loading = False
         self.warningLabel.setText("  ".join(warnings))
         self.warningLabel.setVisible(bool(warnings))
-        facts = []
+        facts, tips = [], []
         for column, label in CASE_FACTS:
             value = row.get(column)
             if not _missing(value) and value != "none":
-                facts.append(f"{_(label)}: {value}")
+                text, tip = caseFactWords(column, row, value)
+                facts.append(f"{_(label)}: {text}")
+                if tip:
+                    tips.append(tip)
         self.factsLabel.setText(" · ".join(facts))
+        self.factsLabel.setToolTip("\n".join(tips))
         self.factsLabel.setVisible(bool(facts))
         number = self._caseNumber(study, sid)
         self.numberLabel.setText(_("Case {n} in the figures").format(n=number) if number else "")

@@ -5869,3 +5869,42 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertEqual(_flagsValue(_Opaque()), 132)
         self.assertIsNone(_flagsValue(_Unreadable()))
         self.assertIsNone(_flagsValue(None))
+
+    def test_78_case_facts_line_uses_the_words_of_the_library(self):
+        """The Case section's facts line showed the stored codes ("Review: changes", "Flags: side_mismatch;csf;multipart") while the
+        list and the Review section show words (BB-1). It reads "Review: Changes requested" and "Flags: Side, CSF, Parts" now, with the
+        sentences of the flags in the tooltip.
+        """
+        from StudioLib import libcard_columns, libcard_flags, lesionqc, study_ui
+
+        if not study_ui.isAvailable():
+            self.skipTest("needs the lesion network mapping library")
+        stored = lesionqc.flagsValue(["side_mismatch", "csf", "multipart"])
+        study = self._study([("sub-01", {"qc_flags": stored, "review_status": "changes"}, False), ("sub-02", {}, False)])
+        host = None
+        try:
+            session = study_ui.openStudy(study.path, showLibrary=False)
+            self.assertIsNotNone(session)
+            host = qt.QWidget()
+            hostLayout = qt.QVBoxLayout(host)
+            sectionWidget = libcard_columns._createSection(session)
+            section = libcard_columns._sections[sectionWidget]
+            hostLayout.addWidget(sectionWidget)
+            host.resize(306, 600)
+            host.show()
+            section.refresh("sub-01")
+            text = str(section.factsLabel.text)
+            self.assertIn("Review: Changes requested", text)
+            self.assertIn("Flags: Side, CSF, Parts", text)
+            for code in ("side_mismatch", "multipart", ";", "Review: changes"):
+                self.assertNotIn(code, text)
+            self.assertIn("Side:", str(section.factsLabel.toolTip), "the tooltip explains the flags")
+            self.assertEqual(libcard_columns.caseFactWords("qc_flags", {"qc_flags": "xform;subvoxel"}, "xform;subvoxel")[0], "Header, Tiny")
+            self.assertEqual(libcard_flags.flagsCell({"qc_flags": stored})[0], "Side, CSF +1")
+            # a value without words is shown as it is
+            self.assertEqual(libcard_columns.caseFactWords("review_status", {}, "odd")[0], "odd")
+            self.assertEqual(libcard_columns.caseFactWords("hemisphere", {}, "left")[0], "left")
+        finally:
+            if host is not None:
+                host.deleteLater()
+            study_ui.closeStudy()
