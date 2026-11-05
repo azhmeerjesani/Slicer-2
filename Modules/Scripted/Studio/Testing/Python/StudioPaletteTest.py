@@ -1157,6 +1157,40 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             dialog.hide()
             self._pump()
 
+    def test_15d_settings_panel_list_fits_its_column_at_a_larger_app_font(self):
+        """The panel list was fixed at 200 px while the names, icons and padding grow with the application font: at 17 px
+        (about 125 %) "Internationalization" no longer fitted and the list got a horizontal scroll bar. The list is wide
+        enough for its longest name at the font in use, and never scrolls sideways.
+        """
+        self._applyStudio()
+        dialog = slicer.app.settingsDialog()
+        tree = dialog.findChild("QTreeWidget", "SettingsTreeWidget")
+        self.assertIsNotNone(tree)
+        savedFont = qt.QFont(qt.QApplication.font())
+        try:
+            for pixelSize in (14, 17, 20):
+                dialog.hide()
+                font = qt.QFont(savedFont)
+                font.setPixelSize(pixelSize)
+                qt.QApplication.setFont(font)
+                # The dialog is created once: its list keeps the font it was created with, as it would be created at this font
+                tree.setFont(font)
+                self._pump()
+                dialog.setCurrentPanel(str(tree.topLevelItem(0).data(0, qt.Qt.UserRole + 1101) or tree.topLevelItem(0).text(0)))
+                dialog.show()
+                dialog.resize(1100, 700)
+                self._wait(0.5)
+                bar = tree.horizontalScrollBar()
+                self.assertFalse(bar.isVisible(), f"font {pixelSize} px: horizontal scroll bar, range {bar.minimum}-{bar.maximum}")
+                self.assertEqual(bar.maximum, 0, f"font {pixelSize} px: the panel list scrolls sideways")
+                self.assertGreaterEqual(tree.viewport().width, tree.sizeHintForColumn(0),
+                                        f"font {pixelSize} px: the longest panel name does not fit the list")
+        finally:
+            qt.QApplication.setFont(savedFont)
+            tree.setFont(savedFont)
+            dialog.hide()
+            self._pump()
+
     def test_15a_settings_panel_icons_follow_a_theme_switch_with_the_dialog_open(self):
         """The theme is switched on the Appearance page while the (modal) settings dialog stays open, so no Show event redraws
         the panel list: its Lucide icons (pixmaps tinted for the palette at show time) kept the old theme's ink, and the

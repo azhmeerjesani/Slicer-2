@@ -899,7 +899,8 @@ class SettingsDialogLook:
         tree = self._tree()
         if tree is not None:
             if not self.applied:
-                self._saved["tree"] = (tree.styleSheet, tree.indentation, tree.iconSize, tree.minimumWidth)
+                self._saved["tree"] = (tree.styleSheet, tree.indentation, tree.iconSize, tree.minimumWidth,
+                                       tree.horizontalScrollBarPolicy)
             for item in self._items(tree):
                 original = item.data(0, _SETTINGS_TEXT_ROLE)
                 if original is None or original == "":
@@ -910,8 +911,13 @@ class SettingsDialogLook:
             self._applyPanelIcons(tree)
             tree.setIndentation(0)
             tree.setIconSize(qt.QSize(16, 16))
-            tree.setMinimumWidth(200)
             ui.bindStyleSheet(tree, self._treeStyleSheet)
+            # The column is at least 200 px wide, and wide enough for the longest panel name at the application font (the
+            # name, the icon and the padding grow with it, so a larger font gave the list a horizontal scroll bar); the
+            # vertical scroll bar and the frame are added to it. A name wider than a very narrow list is elided, never scrolled
+            frame = 2 * tree.frameWidth + tree.style().pixelMetric(qt.QStyle.PM_ScrollBarExtent) + 8
+            tree.setMinimumWidth(max(200, tree.sizeHintForColumn(0) + frame))
+            tree.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
             # The panel shown at opening is the current item but is not selected (the list has no selection until a key moves
             # it): select it, so that the list marks the panel that is shown
             current = tree.currentItem()
@@ -1090,11 +1096,13 @@ class SettingsDialogLook:
                         item.setIcon(0, icons[original])
                     item.setData(0, _SETTINGS_TEXT_ROLE, "")
             ui.bindStyleSheet(tree, None)
-            styleSheet, indentation, iconSize, minimumWidth = self._saved.get("tree", ("", 20, qt.QSize(16, 16), 0))
+            styleSheet, indentation, iconSize, minimumWidth, hPolicy = self._saved.get(
+                "tree", ("", 20, qt.QSize(16, 16), 0, qt.Qt.ScrollBarAsNeeded))
             tree.setStyleSheet(styleSheet)
             tree.setIndentation(indentation)
             tree.setIconSize(iconSize)
             tree.setMinimumWidth(minimumWidth)
+            tree.setHorizontalScrollBarPolicy(hPolicy)
         box = self._buttonBox()
         if box is not None:
             for standard in (qt.QDialogButtonBox.Ok, qt.QDialogButtonBox.Cancel, qt.QDialogButtonBox.RestoreDefaults, qt.QDialogButtonBox.Reset):
