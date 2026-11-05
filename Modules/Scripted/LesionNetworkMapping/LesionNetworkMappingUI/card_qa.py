@@ -770,7 +770,8 @@ class QACard:
                 self.nullLabel.setText(_("Relocated null: off for this run ({cost}). Run it to compare the map with relocated lesions of the same shape.").format(cost=nullCostText(bundle, n)))
                 widgets.setChipLevel(self.nullChip, "warn", _("Null"))
                 self.nullRunButton.show()
-        elif partial:
+        elif partial and not running:
+            # Only a run that ended early: while the run goes on, the null is computed with the map when it finishes
             self.nullLabel.setText(_("Relocated null: not computed, the run stopped at N={n} (partial).").format(n=n))
             widgets.setChipLevel(self.nullChip, "warn", _("Null"))
         elif relocations > 0:

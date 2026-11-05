@@ -539,6 +539,42 @@ class QaDerivedOverlayParkTest(unittest.TestCase):
 
 
 @unittest.skipUnless(_has_slicer(), "needs the Slicer application")
+class QaNullRowWhileRunningTest(unittest.TestCase):
+    """BB-1 map-single:qa-null-row-says-run-stopped-while-running: each partial map of a run that goes on made the QA card's Null
+    row say "not computed, the run stopped at N=.. (partial)". That text is only for a run that ended early; while the run
+    goes on the row says the null is computed with the map.
+    """
+
+    def setUp(self):
+        import slicer
+
+        from LesionNetworkMappingUI import card_qa, context
+
+        slicer.mrmlScene.Clear(0)
+        self.ctx = context.MapContext(runner=object())
+        self.card = card_qa.QACard(self.ctx)
+        self.addCleanup(self.card.cleanup)
+
+    def _text(self, running, partial):
+        self.card._refreshNull(None, None, None, running, partial, 50)
+        return str(self.card.nullLabel.text)
+
+    def test_running_partial_map_says_computed_with_the_map(self):
+        text = self._text(True, True)
+        self.assertNotIn("stopped", text)
+        self.assertIn("computed with the map", text)
+
+    def test_run_that_ended_early_says_stopped(self):
+        text = self._text(False, True)
+        self.assertIn("the run stopped at N=50", text)
+
+    def test_snapshot_event_of_a_running_run(self):
+        self.card.onRunEvent({"event": "start", "qc": []})
+        self.card.onRunEvent({"event": "snapshot", "n": 50})
+        self.assertNotIn("stopped", str(self.card.nullLabel.text))
+
+
+@unittest.skipUnless(_has_slicer(), "needs the Slicer application")
 class QaGroupChipFastModeTest(unittest.TestCase):
     """BB-1 qa-group-chip-uses-fast-mode-approximate-group-map: the QA card's group chip and reference rows describe the
     exact group map. An exact-pooled Nulls run wins over a newer fast-mode one (whose group_qa is of the approximate
