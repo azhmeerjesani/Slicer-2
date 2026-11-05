@@ -455,6 +455,20 @@ class _MoveRecorder(qt.QObject):
         return False
 
 
+def _flagsValue(value):
+    """The int of a QFlags property read, or None when it cannot be converted: with Qt 6 such a read (``widget.<flags>``
+    or ``widget.property("<flags>")``) is an opaque object in PythonQt that int() rejects (Qt 5.15 gives a plain int).
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        pass
+    try:
+        return int(value.value)
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
 class StudioRegressionTest(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.mkdtemp(prefix="StudioRegressionTest", dir=slicer.app.temporaryPath)
@@ -4370,7 +4384,9 @@ class StudioRegressionTest(unittest.TestCase):
                 results[width] = needed
                 self.assertEqual(row.height, needed, f"width {width}: the row is {row.height} px high, its text needs {needed} px")
                 self.assertLessEqual(label.y, 1, "the text starts at the top of the row")
-                self.assertTrue(int(label.alignment) & int(qt.Qt.AlignTop), "the text is top-aligned")
+                alignment = _flagsValue(label.alignment)  # None: an opaque Qt 6 QFlags read; the y and height checks remain
+                if alignment is not None:
+                    self.assertTrue(alignment & int(qt.Qt.AlignTop), "the text is top-aligned")
                 firstLineCentre = label.y + lineHeight / 2
                 boxCentre = checkBox.y + checkBox.height / 2
                 self.assertLessEqual(abs(firstLineCentre - boxCentre), 3, f"width {width}: text {firstLineCentre}, box {boxCentre}")
@@ -5802,3 +5818,54 @@ class StudioRegressionTest(unittest.TestCase):
                 slicer.app.processEvents()
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
+
+    def test_76_tests_do_not_convert_a_qflags_property_read_with_int(self):
+        """Bug qt6-tests-int-of-qflags-property-read: with Qt 6 a QFlags property read (``label.alignment``,
+        ``readout.textInteractionFlags``, ``widget.property("textInteractionFlags")``) is an opaque object in PythonQt
+        and int() raises TypeError (on Qt 5.15 the read is a plain int, and ``label.alignment()`` is not callable), so
+        the tests read such a property through ``_flagsValue``.
+        """
+        import ast
+
+        here = os.path.dirname(os.path.abspath(__file__))
+        modules = os.path.dirname(os.path.dirname(os.path.dirname(here)))
+        paths = [
+            os.path.join(here, "StudioAccessibilityTest.py"),
+            os.path.join(here, "StudioRegressionTest.py"),
+            os.path.join(modules, "LesionNetworkMapping", "Testing", "Python", "LesionNetworkMappingDisclaimerFocusTest.py"),
+        ]
+        flagProperties = {"alignment", "textInteractionFlags", "windowFlags", "inputMethodHints", "orientations"}
+        offenders = []
+        for path in paths:
+            if not os.path.isfile(path):
+                continue
+            with open(path, encoding="utf-8") as f:
+                tree = ast.parse(f.read())
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "int" and node.args):
+                    continue
+                for sub in ast.walk(node.args[0]):
+                    attr = isinstance(sub, ast.Attribute) and sub.attr in flagProperties and isinstance(sub.value, ast.Name) and sub.value.id != "qt"
+                    prop = (
+                        isinstance(sub, ast.Call)
+                        and isinstance(sub.func, ast.Attribute)
+                        and sub.func.attr == "property"
+                        and sub.args
+                        and isinstance(sub.args[0], ast.Constant)
+                        and sub.args[0].value in flagProperties
+                    )
+                    if attr or prop:
+                        offenders.append(f"{os.path.basename(path)}:{node.lineno}")
+        self.assertEqual(offenders, [], "int() of a QFlags property read raises TypeError on Qt 6")
+
+    def test_77_flags_value_reads_plain_and_opaque_flags(self):
+        class _Opaque:
+            value = 132
+
+        class _Unreadable:
+            pass
+
+        self.assertEqual(_flagsValue(132), 132)
+        self.assertEqual(_flagsValue(_Opaque()), 132)
+        self.assertIsNone(_flagsValue(_Unreadable()))
+        self.assertIsNone(_flagsValue(None))

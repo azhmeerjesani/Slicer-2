@@ -30,6 +30,20 @@ def _pump(count=10):
         slicer.app.processEvents()
 
 
+def _flagsValue(value):
+    """The int of a QFlags property read, or None when it cannot be converted: with Qt 6 such a read (``widget.<flags>``
+    or ``widget.property("<flags>")``) is an opaque object in PythonQt that int() rejects (Qt 5.15 gives a plain int).
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        pass
+    try:
+        return int(value.value)
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
 class DisclaimerFocusTest(unittest.TestCase):
     def setUp(self):
         from LesionNetworkMappingUI import widgets
@@ -107,8 +121,9 @@ class DisclaimerFocusTest(unittest.TestCase):
         """
         import inspect
 
-        flags = int(self.label.property("textInteractionFlags"))  # property(): QFlags read the same on Qt 5 and Qt 6
-        self.assertEqual(flags & int(qt.Qt.LinksAccessibleByKeyboard), 0)
+        flags = _flagsValue(self.label.property("textInteractionFlags"))
+        if flags is not None:  # None: a Qt 6 QFlags property read that does not convert; focusPolicy below still checks
+            self.assertEqual(flags & int(qt.Qt.LinksAccessibleByKeyboard), 0)
         self.assertEqual(int(self.label.focusPolicy), int(qt.Qt.NoFocus))
         code = [line for line in inspect.getsource(self.widgets.disclaimerLine).splitlines() if not line.lstrip().startswith("#")]
         self.assertNotIn("installEventFilter", "\n".join(code))

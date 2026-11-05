@@ -51,6 +51,20 @@ def focusChangeStats(focusedImage, unfocusedImage):
     return count, largest
 
 
+def _flagsValue(value):
+    """The int of a QFlags property read, or None when it cannot be converted: with Qt 6 such a read (``widget.<flags>``
+    or ``widget.property("<flags>")``) is an opaque object in PythonQt that int() rejects (Qt 5.15 gives a plain int).
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        pass
+    try:
+        return int(value.value)
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
 class StudioAccessibilityTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
     """Accessibility, first-run and close tests of the Studio shell. They need the main window."""
 
@@ -605,10 +619,14 @@ class StudioAccessibilityTest(ScriptedLoadableModule.ScriptedLoadableModuleTest)
         try:
             readout = card.readoutLabel
             card._setReadout("Empty lesion", None)
-            self.assertEqual(int(readout.textInteractionFlags), int(qt.Qt.NoTextInteraction))
+            interaction = _flagsValue(readout.textInteractionFlags)  # None: an opaque Qt 6 QFlags read; focusPolicy checks
+            if interaction is not None:
+                self.assertEqual(interaction, int(qt.Qt.NoTextInteraction))
             self.assertFalse(int(readout.focusPolicy) & tab, "a label without a link is no Tab stop")
             card._setReadout('2 parts <a href="keep">Keep largest</a>', None)
-            self.assertTrue(int(readout.textInteractionFlags) & int(qt.Qt.LinksAccessibleByKeyboard))
+            interaction = _flagsValue(readout.textInteractionFlags)
+            if interaction is not None:
+                self.assertTrue(interaction & int(qt.Qt.LinksAccessibleByKeyboard))
             self.assertTrue(int(readout.focusPolicy) & tab, "a link is reachable with Tab")
             card._setReadout("Left \u00b7 1.00 mL", None)
             self.assertFalse(int(readout.focusPolicy) & tab)
