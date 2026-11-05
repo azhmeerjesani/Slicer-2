@@ -4818,6 +4818,121 @@ class StudioProjectsTest(unittest.TestCase):
             else:
                 settings.setValue("Studio/LastOpenDirectory", savedFolder)
 
+    def test_66c_web_map_connectome_cohort_and_card_dialogs_start_in_the_last_open_folder(self):
+        """Map > Add connectome, Convert (Folder, Mask, Bundle folder), Cohort > Open study and the Clusters, Networks and
+        Export cards' Open / Add ROI / export dialogs passed their own start folder, empty on first use, so in the web build the
+        first of them opened in the container HOME, not /data. When they have no folder of their own they now start in
+        ``Studio/LastOpenDirectory`` like the other dialogs; a folder of their own is kept, and elsewhere nothing changes.
+        """
+        slicer.util.selectModule("LesionNetworkMapping")
+        import LesionNetworkMapping as lnm
+        from LesionNetworkMappingUI import card_clusters, card_export, card_networks
+        from StudioLib import importer
+
+        widget = slicer.modules.lesionnetworkmapping.widgetRepresentation().self()
+        settings = qt.QSettings()
+        savedFolder = settings.value("Studio/LastOpenDirectory")
+        savedExport = settings.value("Studio/LNM/LastExportFolder")
+        savedCohort = settings.value(lnm.COHORT_STUDY_SETTING)
+        savedWeb = os.environ.get("SLICER_STUDIO_WEB")
+        savedGiven = importer._webStartFolderGiven
+        realGetExistingDirectory = qt.QFileDialog.getExistingDirectory
+        realGetOpenFileName = qt.QFileDialog.getOpenFileName
+        folder = os.path.join(self.tempDir, "data folder 3")
+        os.makedirs(folder)
+        starts = []
+
+        def fakeDialog(parent, caption, start="", *args):
+            starts.append((str(caption), str(start)))
+            return ""
+
+        def convertDialog():
+            dialog = lnm.ConvertConnectomeDialog.__new__(lnm.ConvertConnectomeDialog)
+            dialog.source = lambda: "nifti"
+            dialog.inputEdit = qt.QLineEdit()
+            dialog.outEdit = qt.QLineEdit()
+            return dialog
+
+        def cohortOpenStudy():
+            widget.cohortStudy = None
+            widget.onOpenCohortStudy()
+
+        def addBundle():
+            widget._connectomePath = ""
+            widget.onAddBundle()
+
+        def clustersExport():
+            card = card_clusters.ClustersCard.__new__(card_clusters.ClustersCard)
+            card.table = object()
+            card.export()
+
+        def networksExport():
+            card = card_networks.NetworksCard.__new__(card_networks.NetworksCard)
+            card.rows = [object()]
+            card.export()
+
+        def exportCard():
+            card = card_export.ExportCard.__new__(card_export.ExportCard)
+            card._run = object
+            card.studyDestination = lambda: None
+            card.export()
+
+        calls = (
+            (addBundle, "Choose a connectome bundle (.lnmc folder)"),
+            (cohortOpenStudy, "Choose a study folder"),
+            (lambda: convertDialog().onBrowseInput(), "Choose the folder of the time series"),
+            (lambda: convertDialog().onBrowseMask(), "Choose the mask of the connectome grid"),
+            (lambda: convertDialog().onBrowseOut(), "Choose where the bundle folder is written"),
+            (lambda: card_clusters.SourceBar.__new__(card_clusters.SourceBar).openFile(), "Open a map"),
+            (lambda: card_networks.NetworksCard.__new__(card_networks.NetworksCard).addRoiFile(), "Add a region of interest"),
+            (clustersExport, "Export the cluster table into…"),
+            (networksExport, "Export the networks into…"),
+            (exportCard, "Export the network map into…"),
+        )
+        try:
+            settings.setValue("Studio/LastOpenDirectory", folder)
+            settings.remove("Studio/LNM/LastExportFolder")
+            settings.remove(lnm.COHORT_STUDY_SETTING)
+            qt.QFileDialog.getExistingDirectory = fakeDialog
+            qt.QFileDialog.getOpenFileName = fakeDialog
+            os.environ["SLICER_STUDIO_WEB"] = "1"
+            for call, caption in calls:
+                importer._webStartFolderGiven = False
+                del starts[:]
+                call()
+                self.assertEqual(starts, [(caption, folder)], caption)
+                del starts[:]
+                call()
+                self.assertEqual(starts, [(caption, "")], "the second dialog leaves the folder to Qt: " + caption)
+            # A folder of their own is kept
+            own = os.path.join(self.tempDir, "own folder")
+            os.makedirs(own)
+            settings.setValue("Studio/LNM/LastExportFolder", own)
+            importer._webStartFolderGiven = False
+            del starts[:]
+            exportCard()
+            card_clusters.SourceBar.__new__(card_clusters.SourceBar).openFile()
+            self.assertEqual(starts, [("Export the network map into…", own), ("Open a map", own)])
+            settings.remove("Studio/LNM/LastExportFolder")
+            os.environ.pop("SLICER_STUDIO_WEB", None)
+            for call, caption in calls:
+                del starts[:]
+                call()
+                self.assertEqual(starts, [(caption, "")], "outside the web build nothing changes: " + caption)
+        finally:
+            qt.QFileDialog.getExistingDirectory = realGetExistingDirectory
+            qt.QFileDialog.getOpenFileName = realGetOpenFileName
+            importer._webStartFolderGiven = savedGiven
+            if savedWeb is None:
+                os.environ.pop("SLICER_STUDIO_WEB", None)
+            else:
+                os.environ["SLICER_STUDIO_WEB"] = savedWeb
+            for key, value in (("Studio/LastOpenDirectory", savedFolder), ("Studio/LNM/LastExportFolder", savedExport), (lnm.COHORT_STUDY_SETTING, savedCohort)):
+                if value is None:
+                    settings.remove(key)
+                else:
+                    settings.setValue(key, value)
+
     def _engineRunCard(self):
         from LesionNetworkMappingUI import card_robust
 

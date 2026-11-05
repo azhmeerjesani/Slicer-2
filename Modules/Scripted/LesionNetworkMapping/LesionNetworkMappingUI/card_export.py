@@ -161,7 +161,7 @@ class ExportCard:
         destination = self.studyDestination()
         if not destination:
             settings = qt.QSettings()
-            start = str(settings.value(LAST_FOLDER_SETTING) or "")
+            start = str(settings.value(LAST_FOLDER_SETTING) or "") or widgets.dialogStartFolder()
             folder = qt.QFileDialog.getExistingDirectory(slicer.util.mainWindow(), _("Export the network map into…"), start)
             if not folder:
                 return None

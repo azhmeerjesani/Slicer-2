@@ -1438,6 +1438,13 @@ def _pythonPackagesDirectory():
     return os.path.join(_dataDirectory(), "python-packages")
 
 
+def _dialogStartFolder():
+    """Where a file dialog without a folder of its own starts: /data in the web build, else Qt's choice."""
+    from LesionNetworkMappingUI import widgets
+
+    return widgets.dialogStartFolder()
+
+
 class ConvertConnectomeDialog(qt.QDialog):
     """Convert… of the connectome manager: the source (a NIfTI time series folder or a Lead-DBS connectome folder),
     its metadata and data use terms, the size and free-space estimate, then a resumable conversion job.
@@ -1548,19 +1555,20 @@ class ConvertConnectomeDialog(qt.QDialog):
 
     def onBrowseInput(self):
         path = qt.QFileDialog.getExistingDirectory(self, _("Choose the folder of the time series") if self.source() == "nifti" else _("Choose the Lead-DBS connectome folder"),
-                                                   self.inputEdit.text)
+                                                   self.inputEdit.text or _dialogStartFolder())
         if path:
             self.inputEdit.setText(path)
             self._inputsChanged()
 
     def onBrowseMask(self):
-        path = qt.QFileDialog.getOpenFileName(self, _("Choose the mask of the connectome grid"), self.inputEdit.text, "NIfTI (*.nii.gz *.nii)")
+        path = qt.QFileDialog.getOpenFileName(self, _("Choose the mask of the connectome grid"), self.inputEdit.text or _dialogStartFolder(), "NIfTI (*.nii.gz *.nii)")
         if path:
             self.maskEdit.setText(path)
             self._inputsChanged()
 
     def onBrowseOut(self):
-        path = qt.QFileDialog.getExistingDirectory(self, _("Choose where the bundle folder is written"), os.path.dirname(self.outEdit.text))
+        path = qt.QFileDialog.getExistingDirectory(self, _("Choose where the bundle folder is written"),
+                                                   os.path.dirname(self.outEdit.text) or _dialogStartFolder())
         if path:
             name = _safeName(self.nameEdit.text.strip() or "connectome", "connectome")
             self.outEdit.setText(os.path.join(path, f"{name}.lnmc"))
@@ -3624,6 +3632,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
     def onOpenCohortStudy(self):
         """Choose the study of the Cohort seed (kept in Studio/LNM/CohortStudy, never in the scene)."""
         start = self.cohortStudy.path if self.cohortStudy is not None else str(qt.QSettings().value(COHORT_STUDY_SETTING) or "")
+        start = start or self._dialogStartFolder()
         path = qt.QFileDialog.getExistingDirectory(slicer.util.mainWindow(), _("Choose a study folder"), start)
         if not path:
             return
@@ -4310,7 +4319,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
 
     def onAddBundle(self):
         """Register a connectome bundle folder chosen by the user (validated by ``ConnectomeBundle.open``)."""
-        start = os.path.dirname(self._connectomePath) if self._connectomePath else ""
+        start = (os.path.dirname(self._connectomePath) if self._connectomePath else "") or self._dialogStartFolder()
         path = qt.QFileDialog.getExistingDirectory(slicer.util.mainWindow(), _("Choose a connectome bundle (.lnmc folder)"), start)
         if not path:
             return

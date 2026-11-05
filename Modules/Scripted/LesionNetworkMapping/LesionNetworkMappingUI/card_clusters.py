@@ -759,7 +759,7 @@ class SourceBar:
     def openFile(self, path=None):
         """Choose a NIfTI map file (``path`` skips the dialog) and describe it."""
         if not path:
-            start = str(_settings().value(LAST_FOLDER_SETTING) or "")
+            start = str(_settings().value(LAST_FOLDER_SETTING) or "") or widgets.dialogStartFolder()
             path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Open a map"), start, "NIfTI (*.nii *.nii.gz);;All files (*)")
         if path:
             self.model.addFile(path)
@@ -1783,7 +1783,7 @@ class ClustersCard:
         if self.table is None:
             return None
         if not folder:
-            start = str(_settings().value(LAST_FOLDER_SETTING) or "")
+            start = str(_settings().value(LAST_FOLDER_SETTING) or "") or widgets.dialogStartFolder()
             folder = qt.QFileDialog.getExistingDirectory(slicer.util.mainWindow(), _("Export the cluster table into…"), start)
             if not folder:
                 return None

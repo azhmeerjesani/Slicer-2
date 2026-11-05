@@ -1410,7 +1410,7 @@ class NetworksCard:
     def addRoiFile(self, path=None):
         """Add a NIfTI mask as an ROI (a dialog asks for the file when ``path`` is None); return the entry."""
         if not path:
-            start = str(_settings().value(LAST_FOLDER_SETTING) or "")
+            start = str(_settings().value(LAST_FOLDER_SETTING) or "") or widgets.dialogStartFolder()
             path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Add a region of interest"), start, "NIfTI (*.nii *.nii.gz);;All files (*)")
         if not path:
             return None
@@ -1697,7 +1697,7 @@ class NetworksCard:
         if not self.rows:
             return None
         if not folder:
-            start = str(_settings().value(LAST_FOLDER_SETTING) or "")
+            start = str(_settings().value(LAST_FOLDER_SETTING) or "") or widgets.dialogStartFolder()
             folder = qt.QFileDialog.getExistingDirectory(slicer.util.mainWindow(), _("Export the networks into…"), start)
             if not folder:
                 return None
