@@ -404,6 +404,64 @@ class SeedsTest(RobustnessTestBase):
             robustness.consolidate_hemisphere(self.study_dir, "bilateral", self.path("other"))
 
 
+class ReadCoordinatesTest(unittest.TestCase):
+    """read_coordinates names the file, the row and the column of a wrong value (bug robust-coordinates-file-errors-raw-and-late)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="lnm-coords-test-")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def read(self, text, name="seeds.tsv"):
+        path = os.path.join(self.tmp, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return robustness.read_coordinates(path)
+
+    def message(self, text, name="seeds.tsv"):
+        with self.assertRaises(ValueError) as caught:
+            self.read(text, name)
+        message = str(caught.exception)
+        self.assertNotIn(self.tmp, message, "the message carries the absolute path")
+        return message
+
+    def test_a_good_file(self):
+        self.assertEqual(self.read("participant_id\tx\ty\tz\nsub-01\t1\t2\t3\nsub-01\t-4.5\t5\t6\nsub-02\t7\t8\t9\n"),
+                         {"sub-01": [(1.0, 2.0, 3.0), (-4.5, 5.0, 6.0)], "sub-02": [(7.0, 8.0, 9.0)]})
+
+    def test_a_word_in_a_coordinate_names_file_row_and_column(self):
+        message = self.message("participant_id\tx\ty\tz\nsub-01\t1\t2\t3\nsub-02\tleft\t2\t3\n")
+        for part in ("seeds.tsv", "row 2", "column x", "'left'"):
+            self.assertIn(part, message)
+
+    def test_a_missing_value_is_not_called_a_conversion_error(self):
+        message = self.message("participant_id\tx\ty\tz\nsub-01\t1\t2\n")
+        for part in ("seeds.tsv", "row 1", "column z", "missing"):
+            self.assertIn(part, message)
+
+    def test_nan_and_infinity_are_refused(self):
+        for value in ("nan", "inf"):
+            message = self.message(f"participant_id\tx\ty\tz\nsub-01\t1\t{value}\t3\n")
+            self.assertIn("column y", message)
+            self.assertIn("finite", message)
+
+    def test_a_wrong_header_names_the_file_and_the_column(self):
+        message = self.message("subject\tx\ty\tz\nsub-01\t1\t2\t3\n")
+        self.assertIn("seeds.tsv", message)
+        self.assertIn("participant_id", message)
+        message = self.message("participant_id,x,y,z\nsub-01,1,2,3\n")
+        self.assertIn("comma-separated", message)
+
+    def test_an_empty_or_header_only_file_and_a_missing_file_are_refused(self):
+        self.assertIn("no participant_id column", self.message(""))
+        self.assertIn("no rows", self.message("participant_id\tx\ty\tz\n"))
+        with self.assertRaises(ValueError) as caught:
+            robustness.read_coordinates(os.path.join(self.tmp, "absent.tsv"))
+        self.assertIn("absent.tsv", str(caught.exception))
+        self.assertNotIn(self.tmp, str(caught.exception))
+
+
 class LabelsAndCommandLineTest(RobustnessTestBase):
     def run_cli(self, *argv):
         process = subprocess.run([sys.executable, "-m", "LesionNetworkMappingLib.robustness", *argv], cwd=MODULE_DIR, env=_env(), capture_output=True, text=True, timeout=600, check=False)

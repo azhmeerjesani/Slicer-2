@@ -1419,16 +1419,43 @@ def _sphere_volume(centres, radius, spacing=1.0, margin=2.0):
 
 
 def read_coordinates(path):
-    """{participant_id: [(x, y, z), ...]} from a TSV with participant_id, x, y, z (RAS mm)."""
+    """{participant_id: [(x, y, z), ...]} from a TSV with participant_id, x, y, z (RAS mm).
+
+    :raises ValueError: that names the file, the data row (the first row after the header is row 1) and the column
+      of the first wrong value (missing, not a number, NaN or infinite), or says that a column is missing or that
+      the file has no rows. A file that cannot be read raises a ``ValueError`` too.
+    """
     from .study import read_tsv
 
-    columns, rows = read_tsv(path)
+    name = os.path.basename(os.fspath(path))
+    try:
+        columns, rows = read_tsv(path)
+    except OSError as exc:
+        raise ValueError(f"{name} cannot be read: {exc.strerror or exc}") from None
     for column in ("participant_id", "x", "y", "z"):
         if column not in columns:
-            raise ValueError(f"{path} has no {column} column")
+            hint = " It looks comma-separated: save it as a tab-separated table (TSV)." if len(columns) == 1 and "," in columns[0] else ""
+            raise ValueError(f"{name} has no {column} column (the columns are participant_id, x, y, z, separated by tabs).{hint}")
+    if not rows:
+        raise ValueError(f"{name} has no rows: add one row per seed (participant_id, x, y, z).")
     out = {}
-    for row in rows:
-        out.setdefault(row["participant_id"], []).append(tuple(float(row[axis]) for axis in "xyz"))
+    for number, row in enumerate(rows, start=1):
+        sid = row["participant_id"]
+        if sid == "n/a":
+            raise ValueError(f"{name}, row {number}: participant_id is missing")
+        point = []
+        for axis in "xyz":
+            value = row[axis]
+            if value == "n/a":
+                raise ValueError(f"{name}, row {number}, column {axis}: the value is missing (a number in mm is needed)")
+            try:
+                number_value = float(value)
+            except ValueError:
+                raise ValueError(f"{name}, row {number}, column {axis}: {value!r} is not a number (RAS mm)") from None
+            if not math.isfinite(number_value):
+                raise ValueError(f"{name}, row {number}, column {axis}: {value!r} is not a finite number (RAS mm)")
+            point.append(number_value)
+        out.setdefault(sid, []).append(tuple(point))
     return out
 
 

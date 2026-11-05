@@ -283,6 +283,7 @@ class RobustCard:
         self._scope = None
         self._cleanedUp = False
         self._coordinates = None  # coordinates file of the sphere variants
+        self._coordinatesError = None  # why the file that was chosen is not usable (it is not kept)
         self._engineRun = None  # engine run chosen by the user for the connectome split-half
         self._bundleInfo = {}  # path -> (name, n, bundle) or None
         self._timer = qt.QTimer()
@@ -756,6 +757,8 @@ class RobustCard:
             variants = self.selectedVariants()
             if not variants:
                 return False, _("Tick at least one variant.")
+            if any(variant in COORDINATE_VARIANTS for variant in variants) and self._coordinatesError:
+                return False, self._coordinatesError
             if any(variant in COORDINATE_VARIANTS for variant in variants) and not self._coordinates:
                 return False, _("The sphere variants need a coordinates file (participant_id, x, y, z).")
         if kind == "connsplit" and self.engineRunDir() is None:
@@ -930,6 +933,7 @@ class RobustCard:
         if designPath is None:
             self.designCheck.setChecked(False)
         self.coordinatesLabel.setText(os.path.basename(self._coordinates) if self._coordinates else _("none (needed by the spheres)"))
+        self.coordinatesLabel.setToolTip(self._coordinatesError or "")
         for variant in COORDINATE_VARIANTS:
             self.variantChecks[variant].setToolTip(robustness.VARIANTS[variant][1] + ("" if self._coordinates else " " + _("(needs a coordinates file)")))
         engine = self.engineRunDir()
@@ -943,12 +947,12 @@ class RobustCard:
         """Run one analysis (after the cohort maps job when the lesions are not mapped); return the job, or None."""
         if self.running() or kind not in KINDS:
             return None
-        self.setNotice("")
         enabled, reason = self.runState(kind)
         if not enabled:
             self.sections[kind]["reason"].setText(reason)
             self.sections[kind]["reason"].show()
             return None
+        self.setNotice("")
         if kind in MAP_KINDS and self.currentMapsTsv() is None:
             job = self.mapsRunning()
             if job is None:
@@ -1378,7 +1382,16 @@ class RobustCard:
             self.setCoordinates(path)
 
     def setCoordinates(self, path):
-        self._coordinates = path or None
+        """Use ``path`` as the coordinates file of the sphere variants after checking it (a file with a wrong column, row or value is refused, with the reason)."""
+        from LesionNetworkMappingLib import robustness
+
+        self._coordinates, self._coordinatesError = path or None, None
+        if path:
+            try:
+                robustness.read_coordinates(path)
+            except ValueError as exc:
+                self._coordinates, self._coordinatesError = None, str(exc)
+        self.setNotice(self._coordinatesError or "")
         self.scheduleRefresh()
 
     def chooseEngineRun(self):
