@@ -430,11 +430,13 @@ def sceneFingerprint(scene, ignoreIds=()):
             items.extend(_hierarchyItems(node))
             continue
         count += 1
+        if _isExcludedClass(node):
+            continue  # a camera is a storable node too, and the 3D view moves it after a project opens (not an edit)
         if _isStorableClass(node):
             storableMTime = max(storableMTime, contentMTime(node))
             if _isMarkupsClass(node):
                 points.append((node.GetID(), _markupsDetails(node)))
-        elif not _isExcludedClass(node):
+        else:
             otherMTime = max(otherMTime, settledMTime(node))
     return (count, storableMTime, otherMTime, hash(tuple(items)), hash(tuple(points)))
 

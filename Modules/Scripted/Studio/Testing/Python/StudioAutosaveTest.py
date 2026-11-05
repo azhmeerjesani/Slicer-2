@@ -1554,6 +1554,26 @@ class StudioAutosaveTest(unittest.TestCase):
                             f"studio_projects.md names {name!r}, which the Saving panel does not have")
         self.assertNotIn("Show", named, "the Saving panel has no button called Show")
 
+    def test_zc0_cameraMovingAfterOpenIsNotAnEdit(self):
+        """BB-1: a camera node is a storable node, but the 3D view moves it on its own a moment after a scene with points,
+        a line or a curve is shown (the project was rewritten and "Last edited" moved on every open). A camera moving is
+        not an edit; a new node is still a change.
+        """
+        scene = slicer.mrmlScene
+        scene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "Pts").AddControlPoint([1.0, 2.0, 3.0], "P1")
+        camera = scene.AddNewNodeByClass("vtkMRMLCameraNode", "ViewCamera")
+
+        def fingerprint():
+            return self.io.sceneFingerprint(scene, self.io.sentinelIds())
+
+        before = fingerprint()
+        camera.SetPosition(0.0, 400.0, 10.0)
+        camera.SetFocalPoint(1.0, 2.0, 3.0)
+        camera.Modified()
+        self.assertEqual(fingerprint(), before, "a moved camera makes the project look edited")
+        scene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "More")
+        self.assertNotEqual(fingerprint(), before)
+
     def test_zc_labelLockAndTreeOrderAreEdits(self):
         """BB-1: the label, the description and the lock of a control point (they invoke a custom modified event, not
         Modified(), so the node's MTime stays) and the order of siblings in the Data tree (the fingerprint sorted the items)
