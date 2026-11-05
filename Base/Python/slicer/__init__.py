@@ -234,6 +234,11 @@ def __getattr__(name):
     import sys
 
     util = sys.modules.get(__name__ + ".util")
+    if name == "__all__" and util is not None:
+        # 'from slicer import *' looks up __all__ first and, as slicer has none, then copies the
+        # public names of slicer.__dict__. Import the wrappers not imported yet, so that the star
+        # import gets every class, as with the eager import (and official 3D Slicer).
+        util._importPendingLazyWrappers()
     if name.startswith("__") or util is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     return util._resolveLazyWrapperAttribute(name)
