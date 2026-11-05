@@ -303,7 +303,7 @@ def main(argv=None):
         except RoiError as exc:
             print(json.dumps({"event": "error", "message": str(exc)}))
             return jobs.EXIT_USAGE
-        print(json.dumps({"event": "done", "out": os.path.abspath(args.out), "voxels": count, "next": "python -m LesionNetworkMappingLib.glm --mask <out> ... (small-volume FWE)"}))
+        print(json.dumps({"event": "done", "out": os.path.abspath(args.out), "voxels": count, "next": jobs.command_text("python -m LesionNetworkMappingLib.glm --mask <out> ... (small-volume FWE)")}))
         return 0
     return _run_glm(args)
 

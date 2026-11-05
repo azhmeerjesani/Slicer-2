@@ -894,7 +894,7 @@ def _reference_for(args, cohort, subjects_sha, indices, mask_shape):
         if hasattr(bundle, "close"):
             bundle.close()
     if ref is None:
-        return None, "no valid reference maps for this connectome and subject list (python -m LesionNetworkMappingLib.reference build)", None
+        return None, jobs.command_text("no valid reference maps for this connectome and subject list (python -m LesionNetworkMappingLib.reference build)"), None
     info = {"definition": ref.definition, "path": ref.path, "sha256": ref.sha256, "subjects_sha256": ref.subjects_sha256, "covariates": list(REFERENCE_COVARIATES)}
     return ref, None, info
 

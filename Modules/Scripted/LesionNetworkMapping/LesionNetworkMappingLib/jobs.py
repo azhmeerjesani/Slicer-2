@@ -276,6 +276,32 @@ class Locked(JobError):
 # Command line
 
 
+#: Name that the library commands go by when ``app.run_library_command`` runs them (``slicer-lnm <command>``); None otherwise
+APP_PROG = None
+_PYTHON_M = "python -m LesionNetworkMappingLib."
+
+
+def _app_prog():
+    """``APP_PROG`` of the imported ``LesionNetworkMappingLib.jobs`` module: ``app.run_library_command`` sets it there, and
+    ``slicer-lnm jobs`` runs this file a second time as ``__main__`` (runpy), whose own ``APP_PROG`` stays None.
+    """
+    module = sys.modules.get(f"{__package__}.jobs") if __package__ else None
+    if module is None or module is sys.modules.get(__name__):
+        return APP_PROG
+    return getattr(module, "APP_PROG", None)
+
+
+def command_text(text):
+    """``text`` with the library-command form ``python -m LesionNetworkMappingLib.<name>`` written as ``slicer-lnm <name>``
+    while ``app.run_library_command`` runs a command (the app's wrapper and the pip wheel have no ``python`` that can import
+    the package, so a copied ``python -m`` command would fail); unchanged otherwise.
+    """
+    prog = _app_prog()
+    if prog is None or not isinstance(text, str):
+        return text
+    return text.replace(_PYTHON_M, prog + " ")
+
+
 class JsonArgumentParser(argparse.ArgumentParser):
     """Argument parser without abbreviated options that reports usage errors as a JSON error event (exit code 2).
 
@@ -290,6 +316,8 @@ class JsonArgumentParser(argparse.ArgumentParser):
 
     def __init__(self, *args, **kwargs):
         kwargs.setdefault("allow_abbrev", False)
+        if kwargs.get("prog"):
+            kwargs["prog"] = command_text(kwargs["prog"])
         super().__init__(*args, **kwargs)
 
     def print_help(self, file=None):

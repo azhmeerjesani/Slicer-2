@@ -157,14 +157,19 @@ def library_commands():
 
 def run_library_command(name, argv):
     """Run ``python -m LesionNetworkMappingLib.<name> <argv>`` in this process; return its exit code."""
-    saved = sys.argv
+    from . import jobs
+
+    saved, saved_prog = sys.argv, jobs.APP_PROG
     sys.argv = [f"{PROG} {name}", *argv]
+    # runpy (alter_sys) replaces sys.argv[0] by the module's file, so the parsers and hints take the name from jobs.APP_PROG
+    jobs.APP_PROG = PROG
     try:
         runpy.run_module(f"{PACKAGE}.{name}", run_name="__main__", alter_sys=True)
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
     finally:
         sys.argv = saved
+        jobs.APP_PROG = saved_prog
     return 0
 
 

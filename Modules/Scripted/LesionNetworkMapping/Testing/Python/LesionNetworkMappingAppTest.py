@@ -312,6 +312,55 @@ class AppHelpersTest(unittest.TestCase):
         self.assertIn("error (usage): Invalid arguments: the following arguments are required", output)
         self.assertNotIn('{"event"', output)
 
+    def test_library_command_usage_and_hints_name_slicer_lnm(self):
+        """Run as ``slicer-lnm <command>``, usage lines and hints name ``slicer-lnm <command>`` (a copied ``python -m`` command fails in the app's wrapper and the wheel)."""
+        # qa has its own argparse subclass; jobs runs its own file a second time as __main__ (runpy), whose APP_PROG is None
+        for args, prog in ((("vlsm", "--nosuch"), "slicer-lnm vlsm"), (("vlsm", "run", "--help"), "slicer-lnm vlsm run"), (("calibrate", "--help"), "slicer-lnm calibrate"),
+                           (("normalize", "check", "--help"), "slicer-lnm normalize check"), (("reference", "build", "--help"), "slicer-lnm reference build"),
+                           (("qa", "--nosuch"), "slicer-lnm qa"), (("qa", "degree", "--help"), "slicer-lnm qa degree"), (("jobs", "--help"), "slicer-lnm jobs"),
+                           (("jobs", "selftest", "--help"), "slicer-lnm jobs selftest")):
+            _code, _events_unused, out, err = cli(*args)
+            self.assertIn(f"usage: {prog}", out + err, args)  # qa's own parser prints --help on standard output
+            self.assertNotIn("python -m", out + err, args)
+        # normalize without a command prints its usage text
+        _code, _events_unused, _out, err = cli("normalize")
+        self.assertIn("slicer-lnm normalize run --scan", err)
+        self.assertNotIn("python -m", err)
+        # run directly as a module, the python -m form stays
+        _code, _events_unused, _out, err = cli("--nosuch", module="vlsm")
+        self.assertIn("usage: python -m LesionNetworkMappingLib.vlsm", err)
+        _code, _events_unused, _out, err = cli("--nosuch", module="qa")
+        self.assertIn("usage: python -m LesionNetworkMappingLib.qa", err)
+        _code, _events_unused, _out, err = cli("--help", module="jobs")
+        self.assertIn("usage: python -m LesionNetworkMappingLib.jobs", err)
+        from LesionNetworkMappingLib import jobs, recipes
+
+        text = "build them with 'python -m LesionNetworkMappingLib.reference build'"
+        self.assertEqual(jobs.command_text(text), text)
+        self.assertIsNone(jobs.APP_PROG)
+        # the "where" of a step outside the pipeline (recipes config) names the roi command the same way
+        import copy
+
+        darby = recipes.find_recipe("darby2019_cnm", recipes.load_recipes())
+        with_roi = recipes.Recipe(dict(copy.deepcopy(darby.data), steps=[*darby.steps, "roi"]), origin=darby.origin, path=darby.path)
+        where = {step["id"]: step["where"] for step in recipes.to_pipeline_config(with_roi, module_available=lambda name: True)["outside_pipeline"]}
+        self.assertEqual(where["roi"], "Map ▸ Recipe (ROI inference) or python -m LesionNetworkMappingLib.roi")
+        with mock.patch.object(jobs, "APP_PROG", "slicer-lnm"):
+            self.assertEqual(jobs.command_text(text), "build them with 'slicer-lnm reference build'")
+            self.assertEqual(jobs.JsonArgumentParser(prog="python -m LesionNetworkMappingLib.glm").prog, "slicer-lnm glm")
+            where = {step["id"]: step["where"] for step in recipes.to_pipeline_config(with_roi, module_available=lambda name: True)["outside_pipeline"]}
+            self.assertEqual(where["roi"], "Map ▸ Recipe (ROI inference) or slicer-lnm roi")
+        # run_library_command sets the name for the library hints and restores it afterwards
+        seen = {}
+
+        def probe(*_a, **_k):
+            seen["prog"] = jobs.APP_PROG
+
+        with mock.patch.object(app.runpy, "run_module", probe):
+            app.run_library_command("glm", [])
+        self.assertEqual(seen["prog"], "slicer-lnm")
+        self.assertIsNone(jobs.APP_PROG)
+
     def test_usage_errors(self):
         with tempfile.TemporaryDirectory() as tmp:
             code, events, _out, _err = cli(tmp, os.path.join(tmp, "out"), "group", "--connectome", tmp, "--subject-list", "a,b", "--events", "json")

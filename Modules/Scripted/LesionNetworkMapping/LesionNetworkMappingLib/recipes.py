@@ -1262,7 +1262,9 @@ def to_pipeline_config(recipe, study=None, params=None, module_available=None):
     record = {**recipe.record(), "label": custom_label(recipe, params), "steps": [{"id": step["id"], "status": step["status"]} for step in checked]}
     if plan is not None:
         record["plan_sha256"] = plan.get("sha256")
-    outside = [{"id": step, "label": STEPS[step][0], "where": MANUAL_STEP_PLACES.get(step, "Map")} for step in steps if STEPS[step][2] is None]
+    from . import jobs
+
+    outside = [{"id": step, "label": STEPS[step][0], "where": jobs.command_text(MANUAL_STEP_PLACES.get(step, "Map"))} for step in steps if STEPS[step][2] is None]
     return {"config": config, "recipe": record, "steps": checked, "unavailable": [step["id"] for step in checked if not step["available"]], "outside_pipeline": outside}
 
 
@@ -1272,7 +1274,9 @@ def to_pipeline_config(recipe, study=None, params=None, module_available=None):
 def _parser():
     import argparse
 
-    parser = argparse.ArgumentParser(prog="python -m LesionNetworkMappingLib.recipes", description="Analysis recipes and the analysis plan of lesion network mapping studies.")
+    from . import jobs
+
+    parser = argparse.ArgumentParser(prog=jobs.command_text("python -m LesionNetworkMappingLib.recipes"), description="Analysis recipes and the analysis plan of lesion network mapping studies.")
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("list", "show", "config"):
         sub = commands.add_parser(name)

@@ -609,9 +609,9 @@ def build_tiling(bundle, atlas_entries=None, cache=None, cell_mm=DEFAULT_CELL_MM
             continue
         loaded.append((entry, atlas, digest))
     if unknown:
-        raise ValueError(f"Unknown tiling atlas id(s): {', '.join(unknown)}; they are not in the atlas catalog (python -m LesionNetworkMappingLib.fetch list --catalog atlases).")
+        raise ValueError(jobs.command_text(f"Unknown tiling atlas id(s): {', '.join(unknown)}; they are not in the atlas catalog (python -m LesionNetworkMappingLib.fetch list --catalog atlases)."))
     if missing:
-        raise fetch.NotCachedError(f"The fast index needs these atlases, which are not cached: {', '.join(missing)}. Download them first (python -m LesionNetworkMappingLib.fetch get --catalog atlases --id <id>).", resource_id=missing[0])
+        raise fetch.NotCachedError(jobs.command_text(f"The fast index needs these atlases, which are not cached: {', '.join(missing)}. Download them first (python -m LesionNetworkMappingLib.fetch get --catalog atlases --id <id>)."), resource_id=missing[0])
     for entry, atlas, digest in loaded:
         stratum = entry["stratum"]
         known = family not in ("unknown", "native") and atlas.family not in ("unknown", "native")
@@ -1406,7 +1406,7 @@ def gate(report, constants=None, min_lesions=None, min_group=None):
     if not size_axis:
         messages.append("No lesion volumes were given: the gate is applied per stratum only.")
     if report.get("reference") is None:
-        messages.append("No reference maps: the partial r (mu_r and PC1 partialled out) cannot be computed, so no stratum passes. Build them with 'python -m LesionNetworkMappingLib.reference build'.")
+        messages.append(jobs.command_text("No reference maps: the partial r (mu_r and PC1 partialled out) cannot be computed, so no stratum passes. Build them with 'python -m LesionNetworkMappingLib.reference build'."))
     allowed_strata = sorted(s for s, v in strata.items() if v["passed"] and enough)
     allowed_bins = [b for b in SIZE_BIN_NAMES if b in bins and bins[b]["passed"] and enough]
     excluded = []

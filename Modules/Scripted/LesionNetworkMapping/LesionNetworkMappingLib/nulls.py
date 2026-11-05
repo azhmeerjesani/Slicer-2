@@ -1274,7 +1274,7 @@ def _relocation_columns(context, relocator, cohort, reference, emit):
         key = STRENGTH_MAPS[context.strength]
         maps = getattr(reference, "maps", reference) if reference is not None else None
         if not maps or maps.get(key) is None:
-            raise jobs.JobError(f"rl_strength needs the bundle's reference maps ({key}); build them with 'python -m LesionNetworkMappingLib.reference build'", code="no_reference")
+            raise jobs.JobError(jobs.command_text(f"rl_strength needs the bundle's reference maps ({key}); build them with 'python -m LesionNetworkMappingLib.reference build'"), code="no_reference")
         columns, shifts, candidates = relocate_strength(relocator, maps[key], k_pool, seed, STRENGTH_CANDIDATES)
         values = lesion_strength(relocator, maps[key])
         info = {"strength": context.strength, "map": key, "candidates": STRENGTH_CANDIDATES, "lesion_strength": dict(zip(cohort.ids, values, strict=True)),
@@ -1746,7 +1746,7 @@ def run(
         if mode == "fast":
             index_path = index or find_fast_index(bundle, cohort.subject_ids)
             if index_path is None:
-                raise jobs.JobError("No fast index for this connectome and subject list: build it with 'python -m LesionNetworkMappingLib.fastmap build', or use exact mode", code="no_index")
+                raise jobs.JobError(jobs.command_text("No fast index for this connectome and subject list: build it with 'python -m LesionNetworkMappingLib.fastmap build', or use exact mode"), code="no_index")
             try:
                 fast_index = fastmap.load_index(index_path, bundle)
             except (OSError, ValueError) as exc:

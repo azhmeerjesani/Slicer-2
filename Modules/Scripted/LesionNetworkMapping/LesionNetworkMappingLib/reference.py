@@ -1303,7 +1303,7 @@ def _compare_main(argv):
         subjects_sha = bundle.resolve_subject_list(args.subject_list).sha256 if args.subject_list else None
         reference = load_reference(bundle, subjects_sha=subjects_sha, path=args.reference)
         if reference is None:
-            raise jobs.JobError("No valid reference maps for this connectome and subject list: build them with 'python -m LesionNetworkMappingLib.reference build'", code="no_reference")
+            raise jobs.JobError(jobs.command_text("No valid reference maps for this connectome and subject list: build them with 'python -m LesionNetworkMappingLib.reference build'"), code="no_reference")
         external = external_on_grid(args.external, bundle, args.min_coverage)
     except (OSError, ValueError, KeyError) as exc:
         raise jobs.JobError(f"{type(exc).__name__}: {exc}", code="input") from None

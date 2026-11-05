@@ -2809,7 +2809,7 @@ def main(argv):
     """Command-line entry point (see the module documentation); events go to standard output."""
     command, rest = _split_command(argv)
     if command is None:
-        print(__doc__, file=sys.stderr)
+        print(jobs.command_text(__doc__), file=sys.stderr)
         if not argv:
             jobs.emit("error", code="usage", message=f"Give a command: {', '.join(COMMANDS)}")
             return jobs.EXIT_USAGE
