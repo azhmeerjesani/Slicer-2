@@ -5267,10 +5267,27 @@ class StudioRegressionTest(unittest.TestCase):
         write(os.path.join(installPath, "StudioCliProbe", *libDir.split("/"), "cli-modules", "StudioCliProbe"), b"\x7fELF\x02\x01\x01\x00", 0o755)
         with open(os.path.join(installPath, "StudioCliProbe.s4ext"), "w", encoding="utf-8") as stream:
             stream.write(f"installed true\nenabled true\nslicer_revision {serverRevision}\nos linux\narch amd64\n")
+        errorLog = slicer.app.errorLogModel()
+
+        def logRows(text):
+            """The levels of the error log rows that contain text (the log groups consecutive messages of a level in a
+            row and shortens long ones: the start of the first message of a row is what is looked for).
+            """
+            return [errorLog.index(row, 2).data() for row in range(errorLog.rowCount()) if text in (errorLog.index(row, 4).data() or "")]
+
         started = newModel()
         started.updateModel()
         assertCxxIncompatible(started, "StudioCliProbe", "StudioCliProbe", "at start")
         assertCxxIncompatible(started, "StudioCxxProbe", "libqSlicerStudioCxxProbeModule.so", "at start")
+        # ... and said as a warning, not an error: it is kept disabled by design and was announced at install, so it must
+        # not light the error badge of the top bar at every start (BB-1)
+        for _ in range(100):  # the log reads the messages of the application from its own thread
+            slicer.app.processEvents()
+            if logRows("Extension StudioCliProbe is incompatible"):
+                break
+            time.sleep(0.05)
+        self.assertEqual(logRows("Extension StudioCliProbe is incompatible"), ["Warning"])
+        self.assertEqual(logRows("is incompatible"), ["Warning"], "an extension kept disabled for its compiled modules is not an error")
         assertPythonCompatible(started, "at start")
         with open(os.path.join(installPath, "StudioCliProbe.s4ext"), encoding="utf-8") as stream:
             self.assertIn("enabled false", stream.read())

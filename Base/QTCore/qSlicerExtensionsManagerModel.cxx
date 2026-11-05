@@ -2990,9 +2990,21 @@ void qSlicerExtensionsManagerModel::identifyIncompatibleExtensions()
     QStringList reasons = this->isExtensionCompatible(extensionName, d->SlicerRevision, d->SlicerOs, d->SlicerArch);
     if (!reasons.isEmpty())
     {
+      // Slicer Studio fork: an extension that is incompatible only because it has compiled modules (built for official
+      // 3D Slicer) is kept disabled by design and was announced when it was installed (and the Extensions Manager says
+      // why): it is a warning at each start, not an error that lights the error badge of Studio at every start.
+      const bool onlyCompiledModules = //
+        qSlicerExtensionsManagerModelPrivate::isExtensionCompatible(this->extensionMetadata(extensionName), d->SlicerRevision, d->SlicerOs, d->SlicerArch).isEmpty();
       //: %1 is extension name
       reasons.prepend(tr("Extension %1 is incompatible").arg(extensionName));
-      qCritical() << reasons.join("\n  ");
+      if (onlyCompiledModules)
+      {
+        qWarning() << reasons.join("\n  ");
+      }
+      else
+      {
+        qCritical() << reasons.join("\n  ");
+      }
       this->setExtensionEnabled(extensionName, false);
       emit this->extensionIdentifedAsIncompatible(extensionName);
     }
