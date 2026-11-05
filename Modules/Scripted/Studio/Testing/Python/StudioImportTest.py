@@ -2133,6 +2133,84 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertIsNone(importer.loadedSet())
         self.assertNotIn("of 3", str(studioShell.topBar.breadcrumbButton.text))
 
+    def test_figure_view_shows_no_lesion(self):
+        """BB-1 figure-view-paints-lesion-over-unfitted-figure: a figure view shows the picture only. The template lesion
+        (and any segmentation or model) is not drawn over the figure, whose single slice lies at z = 0 with the picture's
+        pixel coordinates; it stays in the other views. The own views come back when the figure leaves, in Classic, and
+        after a scene saved with the figure is opened again.
+        """
+        from StudioLib import figure as figureModule
+        from StudioLib import importer
+
+        studioShell = self._applyStudio()
+        _template, lesion = importer.startOnTemplate(shell=studioShell)
+        self._pump(6)
+        display = lesion.GetDisplayNode()
+        self.assertEqual(list(display.GetViewNodeIDs()), [])
+        red, yellow, green = (f"vtkMRMLSliceNode{name}" for name in ("Red", "Yellow", "Green"))
+        threeD = slicer.util.getNodesByClass("vtkMRMLViewNode")[0].GetID()
+        figure = self._routeFigure(studioShell, fromLibrary=False)
+        self._pump(6)
+        self.assertEqual(self._background("Yellow").GetID(), figure.GetID())
+        self.assertFalse(display.IsDisplayableInView(yellow), list(display.GetViewNodeIDs()))
+        for viewId in (red, green, threeD):
+            self.assertTrue(display.IsDisplayableInView(viewId), viewId)
+        self.assertEqual(display.GetAttribute(importer.VIEWS_BEFORE_FIGURE_ATTRIBUTE), "")
+        # A segmentation or a model added while the figure is shown is not drawn over it either
+        mask = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "brain_mask")
+        mask.CreateDefaultDisplayNodes()
+        model = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "surface")
+        model.CreateDefaultDisplayNodes()
+        # Views chosen by the user keep their other views (only the figure view leaves)
+        chosen = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "chosen")
+        chosen.CreateDefaultDisplayNodes()
+        chosen.GetDisplayNode().SetViewNodeIDs([red, yellow])
+        self._pump(6)
+        for node in (mask, model):
+            self.assertFalse(node.GetDisplayNode().IsDisplayableInView(yellow), node.GetName())
+            self.assertTrue(node.GetDisplayNode().IsDisplayableInView(red), node.GetName())
+        self.assertEqual(list(chosen.GetDisplayNode().GetViewNodeIDs()), [red])
+        # The trace views (L-29): Red (template with the figure over it) shows the lesion, Green (the figure alone) not
+        session = figureModule.session()
+        self.assertIsNotNone(session)
+        session.enterTrace()
+        self._pump(8)
+        self.assertEqual(self._background("Green").GetID(), session.panel().figureId)
+        self.assertFalse(display.IsDisplayableInView(green), list(display.GetViewNodeIDs()))
+        self.assertTrue(display.IsDisplayableInView(red))
+        self.assertTrue(display.IsDisplayableInView(yellow))
+        session.leaveTrace()
+        self._pump(8)
+        # Classic: the views are the user's (official behaviour); back in Studio the figure view is left out again
+        studioShell.classic(persist=False)
+        self._pump(6)
+        self.assertEqual(list(display.GetViewNodeIDs()), [])
+        self.assertIsNone(display.GetAttribute(importer.VIEWS_BEFORE_FIGURE_ATTRIBUTE))
+        self.assertEqual(list(chosen.GetDisplayNode().GetViewNodeIDs()), [red, yellow])
+        studioShell.studio()
+        self._pump(8)
+        if self._background("Yellow") is not None and self._background("Yellow").GetAttribute("Studio.Role") == "figure":
+            self.assertFalse(display.IsDisplayableInView(yellow))
+        # A scene saved with the figure shown: opened again, the lesion gets its own views back when the figure leaves
+        self._composite("Yellow").SetBackgroundVolumeID(figure.GetID())
+        self._pump(6)
+        self.assertFalse(display.IsDisplayableInView(yellow))
+        scenePath = os.path.join(self.directory, "figure_lesion.mrb")
+        self.assertTrue(slicer.util.saveScene(scenePath))
+        slicer.mrmlScene.Clear(0)
+        self._pump(6)
+        importer.loadFiles([scenePath], studioShell)
+        self._pump(10)
+        loaded = slicer.mrmlScene.GetFirstNodeByName(lesion.GetName())
+        self.assertIsNotNone(loaded)
+        figures = [node for node in slicer.util.getNodesByClass("vtkMRMLVolumeNode") if node.GetAttribute("Studio.Role") == "figure"]
+        self.assertTrue(figures)
+        for node in figures:
+            slicer.mrmlScene.RemoveNode(node)
+        self._pump(8)
+        self.assertEqual(list(loaded.GetDisplayNode().GetViewNodeIDs()), [])
+        self.assertIsNone(loaded.GetDisplayNode().GetAttribute(importer.VIEWS_BEFORE_FIGURE_ATTRIBUTE))
+
     def test_figure_classic_untouched(self):
         """In Classic, the figure controller leaves the views alone: Link views stays linked, a new Yellow volume stays."""
         from StudioLib import importer

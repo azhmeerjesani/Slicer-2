@@ -38,7 +38,9 @@ Studio import routes (USABILITY 2, 6.4, 7, 8, 13; U-07). Nothing here hides a fo
   layout (7005), next to the template (Red, where you draw). It is tagged ``Studio.Role`` = "figure", never becomes
   the Segment Editor source, cannot be painted into (interactor guard) and never follows linked views or the
   wheel off its single slice. A notice asks on which side of the figure the patient's right is; "Right" mirrors the
-  figure pane. Removing the figure restores the previous layout and the Yellow view. On a template the figure also
+  figure pane. Segmentations and models are not drawn in a figure view (the lesion's cut through the figure's plane
+  would be at a place that means nothing on the picture; ``Studio.ViewsBeforeFigure`` keeps their own view IDs).
+  Removing the figure restores the previous layout and the Yellow view. On a template the figure also
   opens for tracing (``StudioLib.figure``, L-29): the Figure card of Draw crops it, fits it to a cut plane of the
   template with landmarks and shows it over the template; on a scan in scan space it stays this reference only;
 - a **statistical map** (``*_statmap``, ``*_desc-T_*``... or a NIfTI intent code TTEST, ZSCORE, CORREL) is shown as a
@@ -1172,7 +1174,7 @@ def _deleteNow(widget):
 
 def _disposeOnQuit():
     """Release what the importer holds before the application quits: notice widgets, overlays, observers, the offer."""
-    global _figureController, _transientWatcher, _loadedSet
+    global _figureController, _transientWatcher, _loadedSet, _figureViewExclusion
     for widget in list(_pendingNotices.values()):
         _deleteNow(widget)
     _pendingNotices.clear()
@@ -1194,6 +1196,9 @@ def _disposeOnQuit():
     if _figureController is not None:
         _figureController.dispose()
         _figureController = None
+    if _figureViewExclusion is not None:
+        _figureViewExclusion.dispose()
+        _figureViewExclusion = None
 
 
 def _withdrawNotice(key, shell=None, delete=True):
@@ -3697,6 +3702,9 @@ class _FigureReference(VTKObservationMixin):
         self._installGuard()
         self._layoutChanged = False
         self._lastSourceId = self._editorSourceId()
+        if _figureViewExclusion is not None:
+            # The lesion is not drawn over the figure (it is not even shown there for a moment)
+            _figureViewExclusion.update()
 
     @staticmethod
     def _editorSourceId():
@@ -4015,6 +4023,155 @@ class _FigureReference(VTKObservationMixin):
                 layoutManager.disconnect("layoutChanged(int)", self._onLayoutChanged)
             except Exception:
                 pass
+
+
+#: Display node attribute: the view node IDs a segmentation or model had before the figure views were taken out of them
+#: (space-separated; empty: all views). Kept in the scene so that a scene saved while a figure is shown gets them back.
+VIEWS_BEFORE_FIGURE_ATTRIBUTE = "Studio.ViewsBeforeFigure"
+
+
+class _FigureViewExclusion(VTKObservationMixin):
+    """Segmentations and models are not drawn in a figure view (a slice view whose background is a figure).
+
+    A figure is a 2D reference picture: its slice view shows the picture only (the Compare view of U-07, Green of the
+    trace views of L-29). Its single slice lies at the RAS position its file gives it (z = 0, x and y from the pixel
+    size), so a template-space lesion cut by that plane would be drawn over the picture at a place that means nothing.
+    While a figure view is shown, the view node IDs of every segmentation and model display node leave it out (all the
+    other views keep showing them); they are given back when no figure view is left and in Classic. Views the user chooses
+    meanwhile become the node's own views. ``VIEWS_BEFORE_FIGURE_ATTRIBUTE`` keeps the original IDs in the scene (official 3D Slicer shows such a scene as
+    it was saved, with the figure view left out).
+    """
+
+    DISPLAY_CLASSES = ("vtkMRMLSegmentationDisplayNode", "vtkMRMLModelDisplayNode")
+
+    def __init__(self):
+        VTKObservationMixin.__init__(self)
+        self._suspended = False
+        #: display node ID -> view node IDs set here (a different value means the user changed them)
+        self._applied = {}
+        self._timer = qt.QTimer()
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(0)
+        self._timer.connect("timeout()", self.update)
+        scene = slicer.mrmlScene
+        for event in (scene.NodeAddedEvent, scene.NodeRemovedEvent, scene.EndImportEvent, scene.EndRestoreEvent, scene.EndBatchProcessEvent):
+            self.addObserver(scene, event, self._onSceneChanged)
+        self.addObserver(scene, scene.EndCloseEvent, self._onSceneClosed)
+        self.update()
+
+    def _onSceneChanged(self, caller=None, event=None):
+        self._timer.start()
+
+    def _onSceneClosed(self, caller=None, event=None):
+        self._applied = {}
+        self._timer.start()
+
+    def _onCompositeModified(self, caller=None, event=None):
+        self._timer.start()
+
+    def _observeCompositeNodes(self):
+        for compositeNode in slicer.util.getNodesByClass("vtkMRMLSliceCompositeNode"):
+            if not self.hasObserver(compositeNode, vtk.vtkCommand.ModifiedEvent, self._onCompositeModified):
+                self.addObserver(compositeNode, vtk.vtkCommand.ModifiedEvent, self._onCompositeModified)
+
+    @staticmethod
+    def figureViewNodeIds():
+        """IDs of the slice nodes whose view shows a figure as its background."""
+        ids = []
+        for compositeNode in _figureCompositeNodes():
+            sliceNode = space._sliceNode(compositeNode.GetLayoutName())
+            if sliceNode is not None:
+                ids.append(sliceNode.GetID())
+        return ids
+
+    @classmethod
+    def _displayNodes(cls):
+        for className in cls.DISPLAY_CLASSES:
+            for displayNode in slicer.util.getNodesByClass(className):
+                displayable = displayNode.GetDisplayableNode()
+                if displayable is None or displayable.GetHideFromEditors():
+                    continue  # display nodes are hidden from editors; their displayable node is not (slice models are)
+                if displayable.GetAttribute("StudioFigure") or displayNode.GetAttribute("StudioFigure"):
+                    continue  # the figure's own nodes (L-29) stay in the figure views
+                yield displayNode
+
+    @staticmethod
+    def _viewIds(displayNode):
+        return [str(nodeId) for nodeId in displayNode.GetViewNodeIDs()]
+
+    def update(self):
+        """Take the figure views out of the views of segmentations and models, or give them back."""
+        self._timer.stop()
+        scene = slicer.mrmlScene
+        if scene.IsImporting() or scene.IsClosing() or scene.IsRestoring() or scene.IsBatchProcessing():
+            return
+        try:
+            self._observeCompositeNodes()
+            figureIds = [] if self._suspended else self.figureViewNodeIds()
+            otherIds = [node.GetID() for node in slicer.util.getNodesByClass("vtkMRMLAbstractViewNode") if node.GetID() not in figureIds]
+            liveIds = set()
+            for displayNode in self._displayNodes():
+                liveIds.add(displayNode.GetID())
+                self._updateDisplayNode(displayNode, figureIds, otherIds)
+            for nodeId in [nodeId for nodeId in self._applied if nodeId not in liveIds]:
+                del self._applied[nodeId]
+        except Exception:
+            logging.error(f"Studio: figure view exclusion failed:\n{traceback.format_exc()}")
+
+    def _updateDisplayNode(self, displayNode, figureIds, otherIds):
+        nodeId = displayNode.GetID()
+        before = displayNode.GetAttribute(VIEWS_BEFORE_FIGURE_ATTRIBUTE)
+        current = self._viewIds(displayNode)
+        if before is not None and nodeId in self._applied and current != self._applied[nodeId]:
+            # The user chose the views of this node while a figure was shown: they are its own views now
+            self._applied.pop(nodeId, None)
+            displayNode.RemoveAttribute(VIEWS_BEFORE_FIGURE_ATTRIBUTE)
+            before = None
+        original = before.split() if before is not None else current
+        if original:
+            # Views chosen by the user: only the figure views leave (a node shown only in figure views keeps them)
+            wanted = [viewId for viewId in original if viewId not in figureIds] or original
+        else:
+            # All views: every view but the figure views
+            wanted = list(otherIds) if figureIds and otherIds else []
+        if wanted == original:
+            # Nothing to take out: the node has (or gets back) its own views
+            if before is not None:
+                self._applied.pop(nodeId, None)
+                wasModifying = displayNode.StartModify()
+                if current != original:
+                    displayNode.SetViewNodeIDs(original)
+                displayNode.RemoveAttribute(VIEWS_BEFORE_FIGURE_ATTRIBUTE)
+                displayNode.EndModify(wasModifying)
+            return
+        wasModifying = displayNode.StartModify()
+        if before is None:
+            displayNode.SetAttribute(VIEWS_BEFORE_FIGURE_ATTRIBUTE, " ".join(original))
+        if current != wanted:
+            displayNode.SetViewNodeIDs(wanted)
+        displayNode.EndModify(wasModifying)
+        self._applied[nodeId] = wanted
+
+    def suspend(self):
+        """Classic: the views of segmentations and models are given back (the views are the user's there)."""
+        self._suspended = True
+        self.update()
+
+    def resume(self):
+        self._suspended = False
+        self.update()
+
+    def dispose(self):
+        self._timer.stop()
+        self.removeObservers()
+
+
+_figureViewExclusion = None
+
+
+def figureViewExclusion():
+    """The object that keeps segmentations and models out of the figure views (None outside Studio)."""
+    return _figureViewExclusion
 
 
 def _figureConventionNotice(figureNode, shell):
@@ -4533,7 +4690,7 @@ def install(shell):
     """Handle the files dropped on the main window while Studio is shown; open scans loaded by the Sample Data and DICOM
     modules in Draw; guard a figure view; show the importer's notices.
     """
-    global _dropHandler, _uninstallOnQuit, _transientWatcher
+    global _dropHandler, _uninstallOnQuit, _transientWatcher, _figureViewExclusion
     uninstall(shell)
     _dropHandler = _DropHandler(shell)
     shell.mainWindow.installEventFilter(_dropHandler)
@@ -4549,6 +4706,11 @@ def install(shell):
     _watchTemplate()
     if _figureController is not None:
         _figureController.resume(shell)
+    # Segmentations and models are not drawn over a figure (its view shows the picture only)
+    if _figureViewExclusion is None:
+        _figureViewExclusion = _FigureViewExclusion()
+    else:
+        _figureViewExclusion.resume()
     figure = _figureModule()
     if figure is not None:
         try:
@@ -4581,6 +4743,9 @@ def uninstall(shell):
         _transientWatcher = None
     if _figureController is not None:
         _figureController.suspend()
+    if _figureViewExclusion is not None and shell is not None:
+        # Classic (not when the application quits: the scene is not changed then)
+        _figureViewExclusion.suspend()
     figure = sys.modules.get("StudioLib.figure")
     if figure is not None:
         try:
