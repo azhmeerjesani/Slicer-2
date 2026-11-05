@@ -102,6 +102,24 @@ class LesionNetworkMappingThemeSwitchTest(unittest.TestCase):
             # The button's palette is the application's: a stylesheet of its own would freeze the old theme's palette
             self.assertEqual(more.palette.color(qt.QPalette.Window).lightness() < 128, dark, f"{theme}: palette of the more button")
 
+    def test_selected_row_of_a_table_differs_from_the_card_in_both_themes(self):
+        """The "selected" token is white in Light: the selected row of the tables must not take it there."""
+        from LesionNetworkMappingUI import widgets
+
+        ui = self.ui
+        for theme in ("Light", "Dark", "Light"):
+            self._applyStyle(f"{theme} Slicer")
+            sheet = widgets._tableStyleSheet()
+            match = re.search(r"::item:selected \{ background-color: (#[0-9a-fA-F]{6});", sheet)
+            self.assertIsNotNone(match, f"{theme}: selected rule")
+            selected = match.group(1).lower()
+            expected = "selected" if ui.isDark() else "control-pressed"
+            self.assertEqual(selected, ui.token(expected).name().lower(), f"{theme}: token of the selected row")
+            # Not the color of the dialog or the card the table sits on
+            for surface in ("card", "card-low", "window"):
+                self.assertNotEqual(selected, ui.token(surface).name().lower(), f"{theme}: selected row equals {surface}")
+            self.assertIn(selected, widgets.tableView(["a"]).styleSheet.lower(), f"{theme}: bound stylesheet")
+
 
 if __name__ == "__main__":
     unittest.main()

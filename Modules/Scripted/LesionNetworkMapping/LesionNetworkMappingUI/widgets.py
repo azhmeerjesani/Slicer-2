@@ -588,10 +588,13 @@ def _tableStyleSheet():
         return ""
     hairline = ui.token("hairline").name()
     table = 'QTableWidget[lnmTable="true"]'
+    # The "selected" token is white in Light, like the dialogs and cards the tables sit on: the selected row would be
+    # invisible. As in the Settings list and Search, Light marks it with the control-pressed token (VISUAL 3)
+    selected = ui.token("selected" if ui.isDark() else "control-pressed").name()
     return (
         f"{table} {{ background: transparent; border: none; gridline-color: {hairline}; }}"
         f"{table}::item {{ border: none; border-bottom: 1px solid {hairline}; padding: 0px {TABLE_ITEM_PADDING}px; }}"
-        f"{table}::item:selected {{ background-color: {ui.token('selected').name()}; color: {ui.token('text').name()}; }}"
+        f"{table}::item:selected {{ background-color: {selected}; color: {ui.token('text').name()}; }}"
         f"{table} QHeaderView::section {{ background: transparent; color: {ui.token('text3').name()}; border: none;"
         f" border-bottom: 1px solid {hairline}; padding: 2px 6px; font-size: {ui.fontPx(11)}px; }}")
 
