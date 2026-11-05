@@ -78,6 +78,27 @@ class RobustSeedsUITest(unittest.TestCase):
         self.assertIn("over the changed lesions", self.robust.seedsNote.text)
         self.assertIn("changed", self.robust.seedsTable.horizontalHeaderItem(2).toolTip())
 
+    def test_caption_gives_variant_notes_not_group_row_descriptions(self):
+        # bug map-robust-card:seeds-caption-repeats-group-row-descriptions: the group rows' column descriptions were
+        # joined, unseparated, into the caption and the cell tooltips
+        description = "mean of the lesion maps (unthresholded)"
+        rows = [("binarized", "all", "variant", 0, "n/a", "n/a", "n/a", "not applicable: no lesion changed")]
+        for sid in ("sub-01", "sub-02"):
+            rows.append(("flipped", sid, "lesion", "true", 0.9, 0.8, "3/3", "approximate (mirror)"))
+        rows.append(("flipped", "group mean", "group_mean", 2, 0.9, "n/a", "3/3", description))
+        rows.append(("flipped", "group overlap", "group_overlap", 2, 0.9, 0.8, "3/3", "r of the overlap % maps; Dice of the sensitivity maps, each thresholded at its own rule"))
+        self.writeSeeds(rows)
+        self.robust.showSeeds(self.tmp)
+        caption = self.robust.seedsNote.text
+        self.assertNotIn(description, caption)
+        self.assertNotIn("Dice of the sensitivity maps", caption)
+        self.assertIn(". Binarized: not applicable: no lesion changed.", caption)
+        self.assertIn(" Flipped L-R: approximate (mirror).", caption)
+        table = self.robust.seedsTable
+        for row in range(table.rowCount):
+            for column in range(table.columnCount):
+                self.assertNotIn(description, table.item(row, column).toolTip())
+
 
 if __name__ == "__main__":
     unittest.main()
