@@ -88,6 +88,31 @@ def _mapWidget():
     return getattr(slicer.modules, "LesionNetworkMappingWidget", None)
 
 
+def _stretchNames(table):
+    """The first column (the row names) takes the room the others leave; the number columns fit their contents.
+
+    ``widgets.tableView`` gives every column the same width, which elides names such as "Extrusion 2 mm" / "Extrusion 4 mm"
+    until the rows cannot be told apart. A name that still does not fit keeps its end (the middle is elided).
+    """
+    header = table.horizontalHeader()
+    header.setSectionResizeMode(0, qt.QHeaderView.Stretch)
+    for column in range(1, table.columnCount):
+        header.setSectionResizeMode(column, qt.QHeaderView.ResizeToContents)
+    table.setTextElideMode(qt.Qt.ElideMiddle)
+
+
+def _splitMetricName(metric):
+    """The name of a split-half metric for the table's first column (``metric`` is the long name of the TSV).
+
+    "r of the halves' overlap maps" and "r of the halves' GLM t maps" are 190 to 230 px wide and share their first words:
+    elided, the rows cannot be told apart. The section text says "of the halves"; the tooltip has the long name.
+    """
+    from LesionNetworkMappingLib import robustness
+
+    short = {"r_overlap": _("r, overlap maps"), "dice_sensitivity": _("Dice, sensitivity"), "r_glm_t": _("r, GLM t maps")}
+    return next((short[key] for key, text in robustness.METRIC_LABELS.items() if text == metric and key in short), metric)
+
+
 def _readTsv(path):
     """The rows of a BIDS-style TSV as dicts of strings ([] when it is missing)."""
     try:
@@ -356,10 +381,7 @@ class RobustCard:
         section["result"].addWidget(self.tileNote)
         self.sweepTable = widgets.tableView([_("Setting"), "mL", _("Dice"), "r"])
         self.sweepTable.setObjectName("LNMRobustSweepTable")
-        header = self.sweepTable.horizontalHeader()
-        header.setSectionResizeMode(0, qt.QHeaderView.Stretch)
-        for column in (1, 2, 3):
-            header.setSectionResizeMode(column, qt.QHeaderView.ResizeToContents)
+        _stretchNames(self.sweepTable)
         section["result"].addWidget(self.sweepTable)
         self.allSettings = qt.QCheckBox(_("Show every overlap criterion"))
         self.allSettings.setObjectName("LNMRobustAllSettings")
@@ -385,6 +407,7 @@ class RobustCard:
         section["result"].addWidget(self.replicateSummary)
         self.replicateTable = widgets.tableView([_("Map"), "r", _("Dice"), _("Peaks"), _("Flag")])
         self.replicateTable.setObjectName("LNMRobustReplicateTable")
+        _stretchNames(self.replicateTable)
         section["result"].addWidget(self.replicateTable)
         section["result"].addWidget(label(f"{_('Reference')}: {robustness.CROSS_CONNECTOME_REFERENCE}. {robustness.CROSS_CONNECTOME_NOTE}", "LNMRobustReplicateReference", "caption"))
         layout.addWidget(section["card"])
@@ -412,6 +435,7 @@ class RobustCard:
         self._runRow("splithalf", section, _("Run split-half"))
         self.splitTable = widgets.tableView([_("Metric"), _("Median"), _("95% of splits"), _("Range")])
         self.splitTable.setObjectName("LNMRobustSplitTable")
+        _stretchNames(self.splitTable)
         section["result"].addWidget(self.splitTable)
         self.splitLabel = label("", "LNMRobustSplitLabel", "caption")
         section["result"].addWidget(self.splitLabel)
@@ -453,6 +477,7 @@ class RobustCard:
         self._runRow("seeds", section, _("Run variants"))
         self.seedsTable = widgets.tableView([_("Variant"), _("Changed"), _("Median r"), _("Median Dice")])
         self.seedsTable.setObjectName("LNMRobustSeedsTable")
+        _stretchNames(self.seedsTable)
         for column in (2, 3):
             self.seedsTable.horizontalHeaderItem(column).setToolTip(_("Median over the lesions the variant changed; the others keep their primary seed"))
         section["result"].addWidget(self.seedsTable)
@@ -1229,9 +1254,10 @@ class RobustCard:
         self.splitTable.setRowCount(len(rows))
         for index, row in enumerate(rows):
             low, high = _float(row["p2_5"]), _float(row["p97_5"])
-            values = [row["metric"], _num(_float(row["median"])), _interval((low, high)) if low is not None and high is not None else "—", f"{_num(_float(row['min']))} to {_num(_float(row['max']))}"]
+            values = [_splitMetricName(row["metric"]), _num(_float(row["median"])), _interval((low, high)) if low is not None and high is not None else "—", f"{_num(_float(row['min']))} to {_num(_float(row['max']))}"]
             for column, text in enumerate(values):
-                self.splitTable.setItem(index, column, _tableItem(text, None, right=column > 0))
+                # The full metric name is the tooltip: the short name is all the first column has room for
+                self.splitTable.setItem(index, column, _tableItem(text, row["metric"] if column == 0 else None, right=column > 0))
         _fitTable(self.splitTable, len(rows))
         first = rows[0] if rows else {}
         self.splitLabel.setText(_("{n} random splits into halves of {half} lesions (seed {seed}). {label}.").format(n=first.get("n_splits", "?"), half=first.get("half_size", "?"), seed=first.get("seed", "?"), label=first.get("label", "")))
