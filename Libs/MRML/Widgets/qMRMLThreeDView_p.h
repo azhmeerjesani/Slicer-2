@@ -32,6 +32,9 @@
 // We mean it.
 //
 
+// Qt includes
+#include <QPoint>
+
 // CTK includes
 #include <ctkVTKRenderView_p.h>
 #include <ctkPimpl.h>
@@ -78,6 +81,9 @@ protected:
 
   vtkMRMLDisplayableManagerGroup* DisplayableManagerGroup;
   vtkMRMLThreeDViewInteractorStyle* InteractorObserver;
+  /// Global position of the pointer at the last Leave event of the view (see qMRMLSliceView::enterEvent).
+  QPoint LastLeaveGlobalPos;
+  bool HasLeft{ false };
   vtkMRMLScene* MRMLScene;
   vtkMRMLViewNode* MRMLViewNode;
 

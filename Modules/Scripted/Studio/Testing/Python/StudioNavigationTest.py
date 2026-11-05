@@ -84,6 +84,15 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         for index in range(count):
             slicer.app.processEvents()
 
+    def _settle(self, seconds=0.3):
+        """Process events for some time, so that the events of the display (a real pointer entry) arrive."""
+        import time
+
+        end = time.time() + seconds
+        while time.time() < end:
+            slicer.app.processEvents()
+            time.sleep(0.01)
+
     def _applyStudio(self):
         from StudioLib import shell
 
@@ -1317,6 +1326,81 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         focused = hoverGivesFocus()
         if focused is not None:
             self.assertFalse(focused, "hovering a view gives it the keyboard focus in Classic")
+
+    def test_15b_popup_close_does_not_move_focus_to_view(self):
+        """Closing a popup (Search palette, a menu) with the pointer resting over a view leaves the keyboard focus on the
+        control that had it. Qt sends an Enter event to the view under the resting pointer when the popup closes, and
+        focus follows mouse took it (BB-1). Only the pointer entering the view (it moved since it left) gives it the focus.
+        """
+        sliceWidget = slicer.vtkMRMLSliceIntersectionWidget
+        if not hasattr(sliceWidget, "SetPageStepSlices"):
+            self.skipTest("this build has no Studio navigation behaviours (W3-02a)")
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        self._settle()
+        self.assertTrue(slicer.app.property("SlicerFocusFollowsMouse"))
+        self.mainWindow.activateWindow()
+        self._settle()
+        if slicer.app.activeWindow() != self.mainWindow:
+            self.skipTest("the main window cannot be activated on this display")
+        views = [("slice", self._redSliceView())]
+        threeDWidget = self.layoutManager.threeDWidget(0) if self.layoutManager.threeDViewCount > 0 else None
+        if threeDWidget is not None and threeDWidget.threeDView().isVisible():
+            views.append(("3D", threeDWidget.threeDView()))
+        # A button that can take the focus, standing for the tile or button that had it before the popup
+        panel = qt.QPushButton("Focus target", self.mainWindow)
+        panel.move(0, 0)
+        panel.show()
+        self.addCleanup(panel.deleteLater)
+        self._settle()
+
+        def enterEvent(view):
+            point = qt.QPointF(10, 10)
+            if hasattr(qt, "QEnterEvent"):
+                return qt.QEnterEvent(point, point, qt.QPointF(view.mapToGlobal(qt.QPoint(10, 10))))
+            return qt.QEvent(qt.QEvent.Enter)
+
+        for name, view in views:
+            vtkWidget = view.VTKWidget()
+            where = view.mapToGlobal(qt.QPoint(view.width // 2, view.height // 2))
+            qt.QCursor.setPos(where)
+            self._settle()
+            hit = qt.QApplication.widgetAt(qt.QCursor.pos())
+            if hit is None or not (hit == view or view.isAncestorOf(hit)):
+                self.skipTest("the pointer cannot be put over the view on this display")
+            # The pointer leaves the view under the popup that opens (it does not move), then the popup closes.
+            panel.setFocus()
+            self._settle()
+            self.assertNotEqual(slicer.app.focusWidget(), vtkWidget, "the focus target cannot be given the focus on this display")
+            qt.QApplication.sendEvent(view, qt.QEvent(qt.QEvent.Leave))
+            qt.QApplication.sendEvent(view, enterEvent(view))
+            self._settle()
+            self.assertNotEqual(slicer.app.focusWidget(), vtkWidget, f"the {name} view took the focus with a resting pointer")
+            # The pointer moves out of the view and back in: the view takes the focus
+            qt.QCursor.setPos(qt.QPoint(where.x() + 5, where.y() + 5))
+            self._settle()
+            qt.QApplication.sendEvent(view, qt.QEvent(qt.QEvent.Leave))
+            qt.QCursor.setPos(where)
+            self._settle()
+            qt.QApplication.sendEvent(view, enterEvent(view))
+            self._settle()
+            self.assertEqual(slicer.app.focusWidget(), vtkWidget, f"the {name} view did not take the focus when the pointer entered it")
+
+        # A real menu popup closed over the resting pointer
+        name, view = views[0]
+        vtkWidget = view.VTKWidget()
+        qt.QCursor.setPos(view.mapToGlobal(qt.QPoint(view.width // 2, view.height // 2)))
+        self._settle()
+        panel.setFocus()
+        self._settle()
+        menu = qt.QMenu(self.mainWindow)
+        menu.addAction("An entry")
+        menu.popup(view.mapToGlobal(qt.QPoint(view.width // 4, view.height // 4)))
+        self._settle()
+        menu.close()
+        self._settle()
+        menu.deleteLater()
+        self.assertNotEqual(slicer.app.focusWidget(), vtkWidget, "the view took the focus when a menu closed over the resting pointer")
 
     def test_16_error_log_bottom(self):
         """In Studio the error log opens at the bottom; Classic restores where it was."""
