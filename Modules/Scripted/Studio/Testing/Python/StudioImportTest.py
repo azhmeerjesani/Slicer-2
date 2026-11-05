@@ -2587,6 +2587,42 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         finally:
             importer.openAddDataDialog = original
 
+    def test_semicolon_csv_participants_table_is_recognized(self):
+        """A participants.csv that Excel saved in a decimal-comma locale ("CSV (semicolon separated)") is a participants
+        table like the comma CSV: it never opens Add Data, its columns are named, and its decimal commas read as numbers
+        (BB-1: it was read as one column "participant_id;age;..." and went to Add Data).
+        """
+        from StudioLib import importer, library, study_ui
+
+        studioShell = self._applyStudio()
+        path = os.path.join(self.directory, "participants.csv")
+        with open(path, "w", encoding="utf-8-sig", newline="") as f:
+            f.write("participant_id;age;aphasia_score;group\r\nsub-01;54,5;1,25;Patient\r\nsub-02;61,75;0,125;Kontrolle\r\n")
+        self.assertEqual(importer.readTableHeader(path), (["participant_id", "age", "aphasia_score", "group"], 2))
+        self.assertTrue(importer.isParticipantsTable(path))
+        self.assertEqual(library.participantsLine(path), "participants.csv · 2 rows · age, aphasia_score, group")
+        columns, rows = study_ui.readTable(path)
+        self.assertEqual(columns, ["participant_id", "age", "aphasia_score", "group"])
+        self.assertEqual([(row["participant_id"], row["age"], row["aphasia_score"], row["group"]) for row in rows],
+                         [("sub-01", "54.5", "1.25", "Patient"), ("sub-02", "61.75", "0.125", "Kontrolle")])
+        # A comma CSV keeps its commas inside quotes, a tab CSV is still read
+        comma = os.path.join(self.directory, "comma", "participants.csv")
+        os.makedirs(os.path.dirname(comma))
+        with open(comma, "w", encoding="utf-8") as f:
+            f.write('participant_id,"note, with comma",group\nsub-01,"a;b",case\n')
+        self.assertEqual(importer.readTableHeader(comma), (["participant_id", "note, with comma", "group"], 1))
+        self.assertEqual(study_ui.readTable(comma)[1], [{"participant_id": "sub-01", "note, with comma": "a;b", "group": "case"}])
+        calls = []
+        original = importer.openAddDataDialog
+        importer.openAddDataDialog = lambda paths: calls.append(list(paths))
+        try:
+            result = importer.handleDrop([path], shell=studioShell)
+            self._pump()
+            self.assertEqual(calls, [])
+            self.assertEqual(result.tables, [os.path.abspath(path)])
+        finally:
+            importer.openAddDataDialog = original
+
     def test_mixed_drop_lesion_stays_the_draw_lesion(self):
         """A drop with a scan, its lesion and a file that Studio does not open itself (markups, a .mgz scan): only that file
         goes to Add Data (where a lesion would be read as a label map), and Draw edits the dropped lesion on the scan.

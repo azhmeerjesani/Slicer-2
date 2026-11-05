@@ -490,17 +490,28 @@ def groupMappingProposal(columns, rows):
     return None
 
 
+#: A number written with a decimal comma ("54,5", "-0,25")
+_DECIMAL_COMMA = re.compile(r"^([+-]?\d+),(\d+)$")
+
+
 def readTable(path):
-    """(columns, rows) of a participants table (.tsv, or .csv with commas)."""
+    """(columns, rows) of a participants table (.tsv, or .csv separated by commas or semicolons).
+
+    A semicolon-separated .csv is what Excel saves in a decimal-comma locale: its numbers like "54,5" are read as "54.5".
+    """
     study = _lnm("study")
     if str(path).lower().endswith(".csv"):
         import csv
 
         with open(path, "rb") as f:
             text = study.decode_table(f.read(), path)  # TableError (a ValueError) for a table that is not UTF-8
-        table = [row for row in csv.reader(io.StringIO(text, newline="")) if any(cell.strip() for cell in row)]
+        header = next((line for line in text.splitlines() if line.strip()), "")
+        delimiter = _importer().tableDelimiter(header, path)
+        table = [row for row in csv.reader(io.StringIO(text, newline=""), delimiter=delimiter) if any(cell.strip() for cell in row)]
         if not table:
             return [], []
+        if delimiter == ";":
+            table = [table[0]] + [[_DECIMAL_COMMA.sub(r"\1.\2", cell.strip()) for cell in row] for row in table[1:]]
         columns = [name.strip() for name in table[0]]
         rows = [{column: (value.strip() or study.NA) for column, value in zip(columns, row + [""] * (len(columns) - len(row)), strict=False)}
                 for row in table[1:]]

@@ -59,6 +59,7 @@ The loading functions also work in Classic (``shell=None``): they only load the 
 tables go to the Add Data dialog, as in 3D Slicer).
 """
 
+import csv
 import gzip
 import json
 import logging
@@ -344,9 +345,22 @@ def bidsSubject(text):
     return match.group(1) if match else None
 
 
+def tableDelimiter(header, path):
+    """The separator of the table ``path`` whose header line is ``header``: a tab for a .tsv, else the most frequent of
+    comma, semicolon and tab outside double quotes in the header (Excel in a decimal-comma locale, such as German or French,
+    saves "CSV (semicolon separated)"). A header without any of them is a comma table with one column.
+    """
+    if _extension(path) == ".tsv":
+        return "\t"
+    bare = re.sub(r'"[^"]*"', "", header)
+    if not any(char in bare for char in (",", ";", "\t")):
+        return ","
+    return max((",", ";", "\t"), key=bare.count)
+
+
 def readTableHeader(path, countRows=True):
-    """``(columns, rowCount)`` of a TSV or CSV file (its first non-empty line is the header), None if it cannot be read
-    (or is not UTF-8 text).
+    """``(columns, rowCount)`` of a TSV or CSV file (its first non-empty line is the header; a CSV may be separated by
+    commas or semicolons, see ``tableDelimiter()``), None if it cannot be read (or is not UTF-8 text).
 
     Rows are counted up to ``MAX_TABLE_ROWS_COUNTED`` (a large file dropped by mistake is not read to its end); without
     ``countRows`` only the header is read and ``rowCount`` is None.
@@ -370,8 +384,8 @@ def readTableHeader(path, countRows=True):
         return None  # unreadable, or not UTF-8 text (Excel's Windows-1252 and UTF-16): no garbled column names
     if header is None:
         return None
-    delimiter = "\t" if "\t" in header or _extension(path) == ".tsv" else ","
-    columns = [column.strip().strip('"') for column in header.split(delimiter)]
+    delimiter = tableDelimiter(header, path)
+    columns = [column.strip() for column in next(csv.reader([header], delimiter=delimiter), [])]  # quoted names keep their separators
     while columns and not columns[-1]:
         columns.pop()  # empty names after the last column (spreadsheets write trailing tabs)
     return columns, (rowCount if countRows else None)
