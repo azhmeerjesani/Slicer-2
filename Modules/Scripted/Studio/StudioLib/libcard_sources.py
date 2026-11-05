@@ -576,7 +576,9 @@ class SourcesCard:
                 self._offersAll = records.merge_offers()
                 self._offersKey = key
             offers = self._offersAll
-        self._offers = [offer for offer in offers if offer[:2] not in self._dismissed]
+        # "Keep both" is remembered per study: record ids (first author and year) repeat between studies
+        path = self._study().path if self._study() is not None else None
+        self._offers = [offer for offer in offers if (path,) + tuple(offer[:2]) not in self._dismissed]
         self.offerRow.setVisible(bool(self._offers))
         if self._offers:
             keep, drop, ratio = self._offers[0]
@@ -726,7 +728,8 @@ class SourcesCard:
 
     def keepOffer(self):
         if self._offers:
-            self._dismissed.add(self._offers[0][:2])
+            studyObject = self._study()
+            self._dismissed.add((studyObject.path if studyObject is not None else None,) + tuple(self._offers[0][:2]))
             self._refreshOffers()
 
     # Import

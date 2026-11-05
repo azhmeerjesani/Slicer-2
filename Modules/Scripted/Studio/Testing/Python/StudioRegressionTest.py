@@ -5688,3 +5688,60 @@ class StudioRegressionTest(unittest.TestCase):
             pump()
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
+
+    def test_75_keep_both_in_one_study_does_not_hide_the_offer_in_another(self):
+        """Sources > Keep both remembered the pair of record ids for the whole session, and record ids (first author and year)
+        repeat between studies: a second study whose near-duplicate records had the same ids was never offered for merging
+        (BB-1). The decision now belongs to the study it was made in.
+        """
+        from LesionNetworkMappingLib import sources
+        from LesionNetworkMappingLib.study import Study
+
+        from StudioLib import libcard_sources, study_ui
+
+        if not study_ui.isAvailable():
+            self.skipTest("needs the lesion network mapping library")
+
+        def make(name, title):
+            path = os.path.join(self.directory, name)
+            study = Study.create(path, name=name)
+            records = sources.Records.open(study)
+            records.add([{"title": title, "authors": "Smith J", "year": "2020"},
+                         {"title": title + ".", "authors": "Smith J", "year": "2020"}])
+            records.save()
+            study.save()
+            return path
+
+        pathA = make("Keep A", "Epilepsy surgery outcome mapped to a hippocampal network")
+        pathB = make("Keep B", "Tremor after pontine lesion localises to cerebellar circuit")
+        card = None
+        try:
+            session = study_ui.openStudy(pathA, showLibrary=False)
+            self.assertIsNotNone(session)
+            card = libcard_sources.SourcesCard(session)
+            card.widget.show()
+            card.refresh()
+            self.assertTrue(card._offers, "study A is offered its duplicate")
+            card.keepOffer()
+            self.assertEqual(card._offers, [])
+
+            study_ui.closeStudy()
+            self.assertIsNotNone(study_ui.openStudy(pathB, showLibrary=False))
+            card.refresh()
+            self.assertEqual(card.records.ids(), ["smith2020", "smith2020b"])
+            self.assertTrue(card._offers, "study B (same record ids) is still offered its duplicate")
+
+            # Back in study A the decision still holds
+            study_ui.closeStudy()
+            self.assertIsNotNone(study_ui.openStudy(pathA, showLibrary=False))
+            card.refresh()
+            self.assertEqual(card._offers, [])
+        finally:
+            if card is not None:
+                card.widget.hide()
+                card.widget.deleteLater()
+            study_ui.closeStudy()
+            for _ in range(4):
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
