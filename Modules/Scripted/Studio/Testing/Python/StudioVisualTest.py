@@ -412,12 +412,22 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
                 labelCentre = label.mapToGlobal(qt.QPoint(0, label.height // 2)).y()
                 boxCentre = box.mapToGlobal(qt.QPoint(0, box.height // 2)).y()
                 self.assertLessEqual(abs(labelCentre - boxCentre), 2, f"{boxName}: switch centre {boxCentre}, label centre {labelCentre}")
+            # The combo boxes and the font button keep their natural height but are centred on their labels as well
+            combos = (("ThemeLabel", "ThemeComboBox"), ("DensityLabel", "DensityComboBox"), ("FontLabel", "FontButton"))
+            for labelName, controlName in combos:
+                label = panel.findChild("QLabel", labelName)
+                control = panel.findChild("QWidget", controlName)
+                self.assertTrue(control.isVisible(), controlName)
+                labelCentre = label.mapToGlobal(qt.QPoint(0, label.height // 2)).y()
+                controlCentre = control.mapToGlobal(qt.QPoint(0, control.height // 2)).y()
+                self.assertLessEqual(abs(labelCentre - controlCentre), 2, f"{controlName}: centre {controlCentre}, label centre {labelCentre}")
             # Classic: the natural height again
             live = shell._shell
             live._settingsLook.restore()
             self._pump()
             for _labelName, boxName in pairs:
                 self.assertLess(panel.findChild("QCheckBox", boxName).minimumHeight, ui.SETTINGS_ROW_HEIGHT, boxName)
+            self.assertEqual(panel.findChild("QWidget", "FontButton").sizePolicy.horizontalPolicy(), qt.QSizePolicy.Minimum)
         finally:
             dialog.hide()
             self._pump()

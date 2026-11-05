@@ -983,6 +983,8 @@ class SettingsDialogLook:
     #: Labels of the Appearance panel (``qSlicerSettingsStylesPanel``) and its check boxes, drawn as switches in Studio
     APPEARANCE_LABELS = ("ThemeLabel", "AccentColorLabel", "DensityLabel", "FontLabel", "ShowToolTipsLabel", "ShowToolButtonTextLabel", "RestoreUILabel")
     APPEARANCE_CHECKBOXES = ("ShowToolTipsCheckBox", "ShowToolButtonTextCheckBox", "RestoreUICheckBox")
+    #: Controls that keep their natural height; the form row centres them vertically on the 44 px label instead
+    APPEARANCE_CENTRED = ("ThemeComboBox", "DensityComboBox", "FontButton")
 
     def _appearancePanel(self):
         return self.dialog.findChild("QWidget", "qSlicerSettingsStylesPanel")
@@ -1014,6 +1016,17 @@ class SettingsDialogLook:
                 box.setProperty("slicerRole", "switch")
                 box.style().unpolish(box)
                 box.style().polish(box)
+        # A form row puts a control that is lower than the row at the top of it; the label rows are 44 px high
+        saved["centred"] = {}
+        for name in self.APPEARANCE_CENTRED:
+            control = panel.findChild("QWidget", name)
+            if control is not None:
+                policy = control.sizePolicy
+                saved["centred"][name] = policy.horizontalPolicy()
+                if policy.horizontalPolicy() == qt.QSizePolicy.Minimum:
+                    # With a Minimum width the form row keeps the font button at the top of the row whatever its alignment
+                    control.setSizePolicy(qt.QSizePolicy.Preferred, policy.verticalPolicy())
+                form.setAlignment(control, qt.Qt.AlignVCenter)
         header = qt.QWidget()
         header.setObjectName("StudioAppearancePageHeader")
         headerLayout = qt.QVBoxLayout(header)
@@ -1037,6 +1050,11 @@ class SettingsDialogLook:
             if label is not None:
                 label.setText(text)
                 label.setMinimumHeight(minimumHeight)
+        for name, horizontal in saved["centred"].items():
+            control = panel.findChild("QWidget", name)
+            if control is not None:
+                form.setAlignment(control, qt.Qt.Alignment(0))
+                control.setSizePolicy(horizontal, control.sizePolicy.verticalPolicy())
         for name in self.APPEARANCE_CHECKBOXES:
             box = panel.findChild("QCheckBox", name)
             if box is not None:
