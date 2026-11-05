@@ -494,6 +494,15 @@ class Records:
             return None
         return value if isinstance(value, dict) else None
 
+    def seeds(self, record):
+        from . import runs as runslib
+
+        try:
+            value = runslib.read_field(self.root, record, "seeds")
+        except (OSError, ValueError):
+            return None
+        return value if isinstance(value, dict) else None
+
     def run_json(self, record, name):
         folder = self.run_dir(record)
         return _read_json(os.path.join(folder, name)) if folder else None
@@ -1000,7 +1009,11 @@ def statistics_section(records, used):
         for record in records.done_runs(kind):
             found = True
             summary = records.summary(record) or {}
-            text = f"{KIND_LABELS.get(kind, kind.capitalize())} (run {record['id']}): {_generic_text(summary) or 'summary ' + NOT_RECORDED}."
+            if kind == "robustness":
+                body = robustness_text(summary, records.params(record), records.seeds(record))
+            else:
+                body = _generic_text(summary)
+            text = f"{KIND_LABELS.get(kind, kind.capitalize())} (run {record['id']}): {body or 'summary ' + NOT_RECORDED}."
             if kind == "nulls":
                 text += f" {NULL_CAPTION}"
             section.paragraph(text)
@@ -1027,6 +1040,143 @@ def _generic_text(data, keys=None):
         if len(parts) >= 8:
             break
     return "; ".join(parts)
+
+
+def _rule_param_text(rule):
+    """'FWE (Bonferroni) (alpha 0.05)' of a threshold rule dict (not recorded when it is not a rule)."""
+    if not isinstance(rule, dict) or not rule.get("kind"):
+        return NOT_RECORDED
+    from . import thresholds
+
+    extras = ", ".join(f"{key} {_number(value) or value}" for key, value in rule.items() if key != "kind" and value is not None and not isinstance(value, (dict, list)))
+    return f"{thresholds.RULE_LABELS.get(rule['kind'], rule['kind'])}{f' ({extras})' if extras else ''}"
+
+
+def _median_text(summary):
+    """The median of a distribution summary, or not recorded (None, a missing metric or a bare number)."""
+    value = summary.get("median") if isinstance(summary, dict) else summary
+    return _number(value) or NOT_RECORDED
+
+
+def _lesions_text(params):
+    lesions = params.get("lesions")
+    return {"cases": "the cases only", "all": "all lesions"}.get(lesions, f"lesion set {_or_nr(lesions)}")
+
+
+def robustness_text(summary, params=None, seeds=None):
+    """Methods sentence of one robustness run: what was done and found; missing values are "not recorded".
+
+    :param summary: the run's registry summary (``analysis`` names the analysis).
+    :param params: the run's registry params (rule, overlap, sign, n_splits, side, ...).
+    :param seeds: the run's registry seeds (the split-half seed is ``seeds["splits"]``).
+    :return: the text without the run label and the final full stop; "" for a summary of another shape
+      (the caller then falls back to the scalar values of the summary).
+    """
+    summary = summary if isinstance(summary, dict) else {}
+    params = params if isinstance(params, dict) else {}
+    analysis = summary.get("analysis") or params.get("analysis")
+    handler = {
+        "sweep": _sweep_text,
+        "replicate": _replicate_text,
+        "splithalf": _splithalf_text,
+        "influence": _influence_text,
+        "seeds": _seeds_text,
+        "consolidate": _consolidate_text,
+        "connectome_split_half": _connectome_split_half_text,
+    }.get(analysis)
+    if handler is None:
+        return _generic_text(summary)
+    return handler(summary, params, seeds if isinstance(seeds, dict) else {})
+
+
+def _sweep_text(summary, params, seeds):
+    flips = summary.get("conclusion_flips")
+    overlap = _number(params.get("overlap_pct"))
+    return (
+        f"threshold sweep around the primary rule {_rule_param_text(params.get('rule'))}, "
+        f"≥ {overlap + '%' if overlap else NOT_RECORDED} overlap, sign {_or_nr(params.get('sign'))}, {_lesions_text(params)}; "
+        f"{_number(summary.get('settings')) or NOT_RECORDED} settings; "
+        + (flips if isinstance(flips, str) and flips else "no conclusion flip found at any setting")
+    )
+
+
+def _replicate_text(summary, params, seeds):
+    connectomes = summary.get("connectomes")
+    thresholds_ = summary.get("thresholds")
+    text = (
+        f"replication on a second connectome ({' vs '.join(str(c) for c in connectomes) if isinstance(connectomes, list) and connectomes else NOT_RECORDED}), "
+        f"{_number(summary.get('n_lesions')) or NOT_RECORDED} lesions; median lesion map r between the connectomes {_number(summary.get('cross_connectome_r')) or NOT_RECORDED}, "
+        f"group map r {_number(summary.get('group_r')) or NOT_RECORDED}; {_number(summary.get('flagged')) or NOT_RECORDED} map(s) flagged"
+    )
+    if isinstance(thresholds_, dict) and thresholds_:
+        text += "; thresholds " + ", ".join(f"{label} {value}" for label, value in thresholds_.items())
+    if summary.get("rule_resolution"):
+        text += f"; rule resolved {summary['rule_resolution']}"
+    if summary.get("reference"):
+        text += f"; reference {summary['reference']}"
+    return text
+
+
+def _splithalf_text(summary, params, seeds):
+    distribution = summary.get("lesion_split_half")
+    distribution = distribution if isinstance(distribution, dict) else {}
+    text = (
+        f"lesion split-half, {_or_nr(params.get('n_splits'))} random splits (seed {_or_nr(seeds.get('splits'))}), "
+        f"{'with the GLM design' if params.get('design') else 'overlap maps only (no GLM design)'}"
+        f"{', stratified by ' + str(params['strata']) if params.get('strata') else ''}, {_lesions_text(params)}; "
+        f"rule {_rule_param_text(params.get('rule'))}, ≥ {_or_nr(_number(params.get('overlap_pct')))}% overlap, sign {_or_nr(params.get('sign'))}; "
+        f"median r of the halves' overlap maps {_median_text(distribution.get('r_overlap'))}, "
+        f"median Dice of the halves' sensitivity maps {_median_text(distribution.get('dice_sensitivity'))}"
+    )
+    if params.get("design") or "r_glm_t" in distribution:
+        text += f", median r of the halves' GLM t maps {_median_text(distribution.get('r_glm_t'))}"
+    return text
+
+
+def _influence_text(summary, params, seeds):
+    top = summary.get("influence_top")
+    return (
+        f"leave-one-lesion-out influence ({_or_nr(summary.get('influence'))}), "
+        f"{'with the GLM design' if params.get('design') else 'overlap maps only (no GLM design)'}, {_lesions_text(params)}; "
+        f"rule {_rule_param_text(params.get('rule'))}, ≥ {_or_nr(_number(params.get('overlap_pct')))}% overlap, sign {_or_nr(params.get('sign'))}; "
+        f"most influential lesions {', '.join(str(sid) for sid in top) if isinstance(top, list) and top else NOT_RECORDED}"
+    )
+
+
+def _seeds_text(summary, params, seeds):
+    variants = summary.get("seed_variants")
+    comparisons = summary.get("comparisons")
+    text = f"seed variants {', '.join(str(v) for v in variants) if isinstance(variants, list) and variants else NOT_RECORDED}"
+    text += f", primary seeds {'fractional (probabilistic)' if params.get('probabilistic') else 'binary (non-zero)'}" if "probabilistic" in params else f", primary seeds {NOT_RECORDED}"
+    if not isinstance(comparisons, dict) or not comparisons:
+        return text + f"; comparison of the variants' maps with the primary maps {NOT_RECORDED}"
+    parts = []
+    for variant, entry in comparisons.items():
+        entry = entry if isinstance(entry, dict) else {}
+        parts.append(
+            f"{variant}: median r {_number(entry.get('median_lesion_r')) or NOT_RECORDED}, median Dice {_number(entry.get('median_lesion_dice')) or NOT_RECORDED} "
+            f"over {_number(entry.get('n_changed')) or NOT_RECORDED} changed lesion(s), group map r {_number(entry.get('group_r')) or NOT_RECORDED}",
+        )
+    return f"{text}; rule {_rule_param_text(params.get('rule'))}; " + "; ".join(parts)
+
+
+def _consolidate_text(summary, params, seeds):
+    data = summary.get("consolidation")
+    data = data if isinstance(data, dict) else {}
+    side = data.get("side") or params.get("side")
+    counts = ", ".join(f"{label} {_number(data.get(key)) or NOT_RECORDED}" for key, label in (
+        ("mirrored", "mirrored"), ("kept", "kept"), ("bilateral_or_midline", "bilateral or midline (not mirrored)"), ("empty", "empty")))
+    return f"lesions consolidated to the {_or_nr({'L': 'left', 'R': 'right'}.get(side, side))} hemisphere (an analysis option, not the primary result): {counts}"
+
+
+def _connectome_split_half_text(summary, params, seeds):
+    data = summary.get("split_half")
+    data = data if isinstance(data, dict) else {}
+    return (
+        f"connectome split-half (odd/even subjects), {_or_nr(data.get('label'))}: {_number(data.get('n_odd')) or NOT_RECORDED} and {_number(data.get('n_even')) or NOT_RECORDED} subjects per half; "
+        f"median r {_number(data.get('median_r')) or NOT_RECORDED}, minimum r {_number(data.get('min_r')) or NOT_RECORDED}"
+        f"{'; small halves (the estimate is less reliable)' if data.get('small_halves') else ''}"
+    )
 
 
 def _tails_text(tails):

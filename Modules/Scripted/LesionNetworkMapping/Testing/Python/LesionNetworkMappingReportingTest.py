@@ -240,6 +240,50 @@ class MethodsTest(_StudyCase):
         self.assertIn("| fwe | \\|T\\| ≥ 5.22 |", methods.render([table], "md"))  # pipes in table cells are escaped
         self.assertIn("| none | not recorded |", methods.render([table], "md"))
 
+    def test_robustness_sentences_state_parameters_and_results(self):
+        # Each robustness analysis registers nested summaries (medians, comparisons, counts) and its settings as params
+        runs.register_kind("robustness")
+        self.make_study([("sub-01", {"group": "case"})])
+        rule_a = {"kind": "fwe_bonferroni", "alpha": 0.05}
+        rule_b = {"kind": "top_pct", "value": 10.0, "statistic": "Fz", "sign": "both"}
+        sweep = {"overlap_pct": 25.0, "sign": "both", "lesions": "all"}
+        self.register("robustness", self.run_dir("sweep-a"), summary={"analysis": "sweep", "conclusion_flips": None, "settings": 25}, params={"analysis": "sweep", "rule": rule_a, **sweep})
+        self.register("robustness", self.run_dir("sweep-b"), summary={"analysis": "sweep", "conclusion_flips": "Conclusion flips at Custom T, ≥ 50% overlap (the ROI no longer survives).", "settings": 25},
+                      params={"analysis": "sweep", "rule": rule_b, **sweep})
+        self.register("robustness", self.run_dir("splithalf"), summary={"analysis": "splithalf", "label": "lesion split-half", "lesion_split_half": {"r_overlap": 0.9312, "dice_sensitivity": 0.8, "r_glm_t": None}},
+                      params={"analysis": "splithalf", "rule": rule_a, "sign": "both", "overlap_pct": 25.0, "n_splits": 500, "design": True, "glm_input": "Fz", "strata": None, "lesions": "all"})
+        self.register("robustness", self.run_dir("seeds"), summary={"analysis": "seeds", "seed_variants": ["sphere2", "sphere4"], "comparisons": {"sphere2": {"median_lesion_r": 0.971, "median_lesion_dice": 0.9, "n_changed": 4, "group_r": 0.99}}},
+                      params={"analysis": "seeds", "variants": ["sphere2", "sphere4"], "rule": rule_a, "probabilistic": False})
+        self.register("robustness", self.run_dir("consolidate-l"), summary={"analysis": "consolidate", "consolidation": {"side": "L", "mirrored": 4, "kept": 6, "empty": 0, "bilateral_or_midline": 1}}, params={"analysis": "consolidate", "side": "L"})
+        self.register("robustness", self.run_dir("consolidate-r"), summary={"analysis": "consolidate", "consolidation": {"side": "R", "mirrored": 2, "kept": 8, "empty": 0, "bilateral_or_midline": 1}}, params={"analysis": "consolidate", "side": "R"})
+        self.register("robustness", self.run_dir("chsh"), summary={"analysis": "connectome_split_half", "split_half": {"label": "GSP1000MF", "n_odd": 500, "n_even": 500, "median_r": 0.991, "min_r": 0.98, "small_halves": False}},
+                      params={"analysis": "connectome_split_half"})
+        text = {section.id: section.text() for section in methods.methods_sections(self.root)}["statistics"]
+        lines = [line for line in text.splitlines() if line.startswith("Robustness")]
+        self.assertEqual(len(lines), 7)
+        joined = "\n".join(lines)
+        # Sweep: the rule differs between the two runs, and the conclusion is stated either way
+        self.assertIn("FWE (Bonferroni) (alpha 0.05)", joined)
+        self.assertIn("Top x% (N-independent) (value 10", joined)
+        self.assertIn("no conclusion flip found", joined)
+        self.assertIn("Conclusion flips at Custom T", joined)
+        # Split-half: number of splits, seed (not recorded here), design, medians
+        for phrase in ("500 random splits (seed not recorded)", "with the GLM design", "overlap maps 0.931", "sensitivity maps 0.8", "GLM t maps not recorded"):
+            self.assertIn(phrase, joined)
+        # Seeds: variants and comparison
+        for phrase in ("sphere2, sphere4", "sphere2: median r 0.971", "over 4 changed lesion(s)"):
+            self.assertIn(phrase, joined)
+        # Consolidation: the side and the counts, so the two runs differ
+        for phrase in ("left hemisphere", "right hemisphere", "mirrored 4, kept 6", "mirrored 2, kept 8", "bilateral or midline (not mirrored) 1"):
+            self.assertIn(phrase, joined)
+        # Connectome split-half: halves and r
+        for phrase in ("GSP1000MF", "500 and 500 subjects", "median r 0.991", "minimum r 0.98"):
+            self.assertIn(phrase, joined)
+        self.assertNotIn("analysis seeds.", joined)
+        self.assertEqual(methods.lint_wording(joined), [])
+        # A summary of another shape keeps the scalar fallback
+        self.assertEqual(methods.robustness_text({"split_half": 0.98}), "split_half 0.98")
+
     def test_acknowledgement_only_for_gsp_bundles(self):
         self.make_study([("sub-01", {})])
         self.cohortmaps(gsp=False)
