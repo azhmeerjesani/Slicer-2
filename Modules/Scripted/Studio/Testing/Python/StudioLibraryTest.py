@@ -343,6 +343,32 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertIn("three stat cells", readme)
         self.assertIn("Fill gaps and specks* (an item of the lesion's ⋯ menu)", readme)
 
+    def test_docs_list_the_subject_list_columns_and_inspector_cards_that_exist(self):
+        """BB-1: the user guide names every column of the subject list (the six standard ones and the ones of the Library
+        extensions) and says the inspector shows its cards on every study, not "when the study needs them".
+        """
+        from StudioLib import library
+        root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", ".."))
+        path = os.path.join(root, "Docs", "user_guide", "modules", "studio.md")
+        if not os.path.isfile(path):
+            self.skipTest("the documentation is not next to this build")
+        with open(path, encoding="utf-8") as stream:
+            studio = " ".join(stream.read().split())
+        paragraph = studio.split("**With a study open**", 1)[1].split("| Key (in the subject list or grid)", 1)[0]
+        headers = [header for _key, header in library.STUDY_COLUMNS]
+        for module in library.libcardModules():
+            for column in getattr(module, "COLUMNS", None) or ():
+                headers.append(column["header"] if isinstance(column, dict) else column[0])
+        self.assertGreaterEqual(len(headers), 10)
+        for header in headers:
+            self.assertIn(header, paragraph, f"the subject list column {header!r} is not in the user guide")
+        cards = studio.split("The inspector shows these cards", 1)[1].split("### Draw", 1)[0]
+        for card in ("Study", "Columns", "Review", "Sources", "Agreement", "Cohort diagnostics", "Control sets", "Analysis",
+                     "Share", "Import", "Subject", "Case", "Batch"):
+            self.assertIn(f"**{card}**", cards)
+        self.assertNotIn("appear when the study needs them", studio)
+        self.assertNotIn("columns ID, Group, Lesion mL, Space, Status and QC", studio)
+
     def test_button_icons_are_16_px_at_every_pixel_ratio(self):
         """The icons of the Library buttons are 16 logical px (VISUAL 3). Without an icon size a button uses the style's 24 px:
         a 16 px icon that has a pixmap for a device pixel ratio above 1 is then drawn at 24 px (1.5 times larger than at 1x).

@@ -135,7 +135,8 @@ scene. The list of what is loaded is called **Open now**. Studio uses one word f
 **Close**; "Delete" stays the word of the Data module, and "Remove from study" never deletes files.
 
 **With a study open** Library shows a 44 px filter row (a search field, filter chips and the sort order), the subject **list** with
-columns ID, Group, Lesion mL, Space, Status and QC, and an optional **grid** of cards with a lesion thumbnail on the
+columns ID, Group, Lesion mL, Space, Status, QC, 2nd tracing, Flags, Norm and Review (the last four come from the
+second-tracing, flag, normalization and review features and show "—" or a neutral state until a subject uses them), and an optional **grid** of cards with a lesion thumbnail on the
 template (switch with the List/Grid buttons; the slider sets the card size). Thumbnails are computed in the background
 and cached in the study's `.studio` folder. Each thumbnail is marked **R** at its left edge and **L** at its right edge: the patient's right is on the screen left.
 
@@ -148,10 +149,14 @@ and cached in the study's `.studio` folder. Each thumbnail is marked **R** at it
 | `Ctrl+A` | select all subjects |
 | `/` | search the subjects |
 
-The inspector shows the cards **Study** (name, folder, counts, "All changes saved"), **Subject** (paths, space chip,
-lesion volume, group, scores, notes, **Open in Draw**), **Batch** (set the group or a score of the selected subjects,
-remove from the study) and **Import** (add files or a folder, import a `participants.tsv`). Further cards (QC flags,
-normalization, the analysis line) appear when the study needs them.
+The inspector shows these cards, top to bottom, on every study, also a brand-new one. With no subject selected: **Study**
+(name, folder, counts, "All changes saved"), **Columns** (the role of each participants column), **Review** (counts and the
+review settings), **Sources** (literature records and PRISMA counts), **Agreement** (second tracing and adjudication),
+**Cohort diagnostics** (the properties of the lesion set), **Control sets**, **Analysis** (one line about the cohort analysis,
+for example "Cohort analysis: never run"), **Share** (export for sharing) and **Import** (add files or a folder, import a
+`participants.tsv`). Selecting one subject adds **Subject** (paths, space chip, lesion volume, group, scores, notes,
+**Open in Draw**) and **Case** (the registry fields); selecting several subjects adds **Batch** (set the group or a score of the
+selected subjects, remove from the study).
 
 ### Draw
 
