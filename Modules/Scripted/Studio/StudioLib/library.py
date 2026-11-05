@@ -1426,26 +1426,77 @@ class _OfferLine:
         self.signature = None
 
 
+class _LesionRowFilter(qt.QObject):
+    """Lays a lesion row out again when its width changes (``_LesionBlock.relayout()``)."""
+
+    def __init__(self, block):
+        qt.QObject.__init__(self)
+        self.block = block
+
+    def eventFilter(self, obj, event):
+        if event.type() in (qt.QEvent.Resize, qt.QEvent.Show):
+            self.block.relayout()
+        return False
+
+
 class _LesionBlock:
-    """Widgets of the lesion rows of the Current work card: name, metrics and save state."""
+    """Widgets of the lesion rows of the Current work card: name, metrics and save state.
+
+    One line when the row is wide enough for all of them: swatch, name, metrics, save state chip (VISUAL 4.2). In a narrow
+    row (the card's text column is about 215 px wide at 1366 x 768) the metrics and the chip go to a second line below the
+    name: the volume ("0.51 mL"), the card's key number, and the state stay readable and only the name is elided.
+    """
 
     #: Narrowest name (about 16 characters), and narrowest save state chip; the chip's stylesheet padding is 2 x 8 px
     NAME_MIN_WIDTH = 110
     CHIP_MIN_WIDTH = 56
     CHIP_PADDING = 16
+    SWATCH = 10
+    SPACING = 8
+    #: Room the metrics keep next to the chip in the second line
+    METRICS_MIN_WIDTH = 50
 
     def __init__(self, segmentationNode, indent):
         self.nodeId = segmentationNode.GetID()
+        self.indent = indent
+        self.chipWidth = self.CHIP_MIN_WIDTH
+        self.mode = None
         self.widget = qt.QWidget()
         self.widget.setObjectName("StudioCurrentWorkLesion")
+        # The row never asks the card for less than a one-line row did (the name's minimum and the narrowest chip), so that the
+        # card's ``fit()`` still moves its action column below a narrow text column (where the scan name is elided) as before
+        self.widget.setMinimumWidth(indent + self.SWATCH + 3 * self.SPACING + self.NAME_MIN_WIDTH + self.CHIP_MIN_WIDTH)
+        rootLayout = qt.QVBoxLayout(self.widget)
+        rootLayout.setContentsMargins(indent, 0, 0, 0)
+        rootLayout.setSpacing(2)
         # One line (VISUAL 4.2): swatch, name, metrics, save state chip
-        layout = qt.QHBoxLayout(self.widget)
-        layout.setContentsMargins(indent, 0, 0, 0)
-        layout.setSpacing(8)
+        self._topRow = qt.QHBoxLayout()
+        self._topRow.setContentsMargins(0, 0, 0, 0)
+        self._topRow.setSpacing(self.SPACING)
+        rootLayout.addLayout(self._topRow)
+        # The second line of a narrow row (hidden otherwise): the metrics and the chip, under the name, and in a still narrower
+        # row (the chip does not fit next to the metrics) the chip on a third line
+        self._detailRow = qt.QWidget()
+        self._detailRow.setObjectName("StudioCurrentWorkLesionDetails")
+        detailLayout = qt.QVBoxLayout(self._detailRow)
+        detailLayout.setContentsMargins(self.SWATCH + self.SPACING, 0, 0, 0)
+        detailLayout.setSpacing(2)
+        self._lineTwo = qt.QHBoxLayout()
+        self._lineTwo.setContentsMargins(0, 0, 0, 0)
+        self._lineTwo.setSpacing(self.SPACING)
+        detailLayout.addLayout(self._lineTwo)
+        self._lineThree = qt.QWidget()
+        lineThreeLayout = qt.QHBoxLayout(self._lineThree)
+        lineThreeLayout.setContentsMargins(0, 0, 0, 0)
+        self._lineThreeLayout = lineThreeLayout
+        detailLayout.addWidget(self._lineThree)
+        self._lineThree.hide()
+        self._detailRow.hide()
+        rootLayout.addWidget(self._detailRow)
         self.swatch = qt.QLabel()
         self.swatch.setObjectName("StudioCurrentWorkLesionSwatch")
-        self.swatch.setFixedSize(10, 10)
-        layout.addWidget(self.swatch, 0, qt.Qt.AlignVCenter)
+        self.swatch.setFixedSize(self.SWATCH, self.SWATCH)
+        self._topRow.addWidget(self.swatch, 0, qt.Qt.AlignVCenter)
         self.nameLabel = _elidedLabel("", 13, "StudioCurrentWorkLesionName")
         font = qt.QFont(self.nameLabel.font)
         font.setWeight(qt.QFont.Medium)
@@ -1453,8 +1504,7 @@ class _LesionBlock:
         # An Ignored label as wide as its whole text (at most 220 px; ``refresh()`` sets the maximum) and as the row allows: a
         # Preferred label would take the width of its elided text and never grow back ("L...n" in a wide row)
         self.nameLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
-        # Its minimum is wide enough for the start and the end of a name ("sub-PCS0…e_lesion"): in a narrow row the state chip
-        # and the metrics give way first (a 40 px name read "s…n" next to a 146 px chip)
+        # Its minimum is wide enough for the start and the end of a name ("sub-PCS0…e_lesion"); the name is the first to be elided
         self.nameLabel.setMinimumWidth(self.NAME_MIN_WIDTH)
         self.nameLabel.setMaximumWidth(220)
         # The metrics ("Left · 4.22 mL · 1 part") are elided to the width the row leaves them (a rich-text label cannot
@@ -1463,14 +1513,65 @@ class _LesionBlock:
         self.metricsLabel = _elidedLabel("", 12, "StudioCurrentWorkLesionMetrics", mode="right")
         self.metricsLabel.setProperty("hideWhenTiny", True)
         # The chip is elided too ("Saved in…"; its full text is the tool tip), between a minimum and its whole text
-        # (``refresh()`` sets the maximum), so that a narrow row squeezes it instead of the name
+        # (``setChipWidth()``)
         self.stateLabel = _elidedLabel("", 12, "StudioCurrentWorkLesionState", mode="right")
         self.stateLabel.setProperty("elidePadding", self.CHIP_PADDING)
-        self.stateLabel.setMinimumWidth(self.CHIP_MIN_WIDTH)
         self.stateLabel.setFixedHeight(20)
-        layout.addWidget(self.nameLabel, 3)
-        layout.addWidget(self.metricsLabel, 1)
-        layout.addWidget(self.stateLabel, 1)
+        # Fixed (its width is set by ``relayout()``): the layout gives a label with an Ignored size policy no room of its own
+        self.stateLabel.setSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Fixed)
+        self._topRow.addWidget(self.nameLabel, 3)
+        self._topRow.addWidget(self.metricsLabel, 1)
+        self._topRow.addWidget(self.stateLabel, 0)
+        self.mode = "wide"
+        self._filter = _LesionRowFilter(self)
+        _installEventFilter(self.widget, self._filter)
+
+    def setChipWidth(self, chipText):
+        """The width of the whole chip text; the chip is never wider, and in a row with room never narrower (``relayout()``)."""
+        self.chipWidth = qt.QFontMetrics(self.stateLabel.font).horizontalAdvance(chipText) + self.CHIP_PADDING + 4
+        self.relayout()
+
+    def relayout(self):
+        """Choose the layout for the row's width: "wide" (everything on one line) when the row has room for the name's minimum,
+        the whole metrics and the whole chip; "compact" (the metrics and the chip on a second line under the name); "stacked"
+        (the chip on a third line) when they do not fit side by side. The name is elided first, the metrics last.
+        """
+        if not _isAlive(self.widget):
+            return
+        width = self.widget.width - self.indent
+        metricsNeed = qt.QFontMetrics(self.metricsLabel.font).horizontalAdvance(str(self.metricsLabel.property("fullText") or "")) + 4
+        lineRoom = width - self.SWATCH - self.SPACING
+        if width >= self.SWATCH + 3 * self.SPACING + self.NAME_MIN_WIDTH + metricsNeed + self.chipWidth:
+            mode = "wide"
+        elif lineRoom >= metricsNeed + self.SPACING + self.chipWidth:
+            mode = "compact"
+        else:
+            mode = "stacked"
+        # A fixed width for the chip: its whole text unless the row is narrower
+        self.stateLabel.setFixedWidth(self.chipWidth if mode != "stacked" else max(self.CHIP_MIN_WIDTH, min(self.chipWidth, lineRoom)))
+        self.metricsLabel.setMinimumWidth(metricsNeed if mode == "wide" else 0)
+        if mode == self.mode:
+            return
+        self.mode = mode
+        for label in (self.metricsLabel, self.stateLabel):
+            for layout in (self._topRow, self._lineTwo, self._lineThreeLayout):
+                layout.removeWidget(label)
+        if mode == "wide":
+            self._topRow.addWidget(self.metricsLabel, 1)
+            self._topRow.addWidget(self.stateLabel, 0)
+        else:
+            self._lineTwo.addWidget(self.metricsLabel, 1)
+            if mode == "compact":
+                self._lineTwo.addWidget(self.stateLabel, 0)
+            else:
+                self._lineThreeLayout.addWidget(self.stateLabel, 0, qt.Qt.AlignLeft)
+        self._lineThree.setVisible(mode == "stacked")
+        self._detailRow.setVisible(mode != "wide")
+
+    @property
+    def compact(self):
+        """True when the metrics and the chip are not on the name's line."""
+        return self.mode != "wide"
 
     def node(self):
         node = slicer.mrmlScene.GetNodeByID(self.nodeId)
@@ -1815,7 +1916,8 @@ class CurrentWorkCard(qt.QObject):
             # The chip says the state; the full text (file, time) is its tooltip
             chipText = text.split(" · ")[0] if text else ""
             setElidedText(block.stateLabel, chipText, block.stateLabel.toolTip)
-            block.stateLabel.setMaximumWidth(qt.QFontMetrics(block.stateLabel.font).horizontalAdvance(chipText) + _LesionBlock.CHIP_PADDING + 4)
+            block.setChipWidth(chipText)
+            block.relayout()
         if queue and self._pendingMetrics:
             self._metricsTimer.start()
 

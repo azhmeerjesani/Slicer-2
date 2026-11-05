@@ -547,8 +547,8 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertNotIn("Unsaved", text)
 
     def test_lesion_row_narrow_keeps_name_readable(self):
-        """In a narrow Continue card (220 px for the row, as at 1366 x 768) the state chip and the metrics give way
-        before the lesion name: the name keeps room for its start and end ("sub-PC…lesion", not "s…n").
+        """In a narrow Continue card (220 px for the row, as at 1366 x 768) the name keeps room for its start and end
+        ("sub-PC…lesion", not "s…n"), and the metrics and the state chip stay readable (second line below the name).
         """
         studioShell = self._applyStudio()
         _volumeNode, segmentationNode = self._template(studioShell, fill=True)
@@ -566,13 +566,44 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         shown = block.nameLabel.text.replace("\u2026", "")
         self.assertGreaterEqual(len(shown), 10, block.nameLabel.text)
         self.assertTrue(shown.startswith("sub-PC") and shown.endswith("lesion"), block.nameLabel.text)
-        # The chip is squeezed (elided), its whole text stays in the tool tip
-        self.assertLess(block.stateLabel.width, qt.QFontMetrics(block.stateLabel.font).horizontalAdvance(self._plain(block.stateLabel).split(" · ")[0]) + 16)
+        self.assertEqual(block.stateLabel.text, "Not saved yet")
         self.assertIn("Not saved yet", block.stateLabel.toolTip)
         # A wide row shows the whole chip text again
         block.widget.setFixedWidth(700)
         self._pump(6)
         self.assertEqual(block.stateLabel.text, "Not saved yet")
+
+    def test_lesion_row_narrow_keeps_metrics_and_state_readable(self):
+        """At 1366 x 768 the text column of the Continue card is about 214 px wide: the lesion's volume (the card's key
+        number) and the save state are shown whole, on a second line, and only the long name is elided (the "…" and "Sav…"
+        bug); a wide row has everything on one line.
+        """
+        studioShell = self._applyStudio()
+        _volumeNode, segmentationNode = self._template(studioShell, fill=True)
+        segmentationNode.SetName("sub-PCS0042_ses-baseline_acq-highres3DMPRAGE_T1w_desc-manualtrace_lesion")
+        canvas = self._library(studioShell)
+        card = canvas.currentWork
+        block = next(iter(card._blocks.values()))
+        self.assertTrue(str(block.metricsLabel.property("fullText")))
+        for width in (214, 260):
+            block.widget.setFixedWidth(width)
+            self._pump(6)
+            card.refresh()
+            self._pump(4)
+            metrics = str(block.metricsLabel.property("fullText"))
+            self.assertEqual(block.metricsLabel.text, metrics, (width, block.metricsLabel.width))
+            self.assertEqual(block.stateLabel.text, "Not saved yet", (width, block.stateLabel.width))
+            self.assertTrue(block.compact, width)
+            shown = block.nameLabel.text.replace("\u2026", "")
+            self.assertTrue(shown.startswith("sub-PC") and shown.endswith("lesion"), block.nameLabel.text)
+            # Nothing is wider than the row
+            for label in (block.nameLabel, block.metricsLabel, block.stateLabel):
+                self.assertLessEqual(label.mapTo(block.widget, qt.QPoint(label.width, 0)).x(), width, label.objectName)
+        block.widget.setFixedWidth(900)
+        self._pump(6)
+        self.assertFalse(block.compact)
+        self.assertEqual(block.metricsLabel.text, str(block.metricsLabel.property("fullText")))
+        self.assertEqual(block.metricsLabel.mapTo(block.widget, qt.QPoint(0, 0)).y(), block.nameLabel.mapTo(block.widget, qt.QPoint(0, 0)).y())
 
     #
     # Recent
