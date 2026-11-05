@@ -564,6 +564,9 @@ class ValidateCard:
         self.tableWidget.setAlternatingRowColors(False)
         self.tableWidget.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
         self.tableWidget.setVerticalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+        # Every reference-map row starts with "Reference: ": on the narrow inspector the default right-side elision keeps
+        # only that prefix and two maps read the same. Eliding in the middle keeps the end of the name (the part that differs)
+        self.tableWidget.setTextElideMode(qt.Qt.ElideMiddle)
         box.addWidget(self.tableWidget)
         self.tableCaption = label("", "LNMValidateTableCaption", "caption")
         box.addWidget(self.tableCaption)
