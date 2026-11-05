@@ -1828,3 +1828,63 @@ class StudioTemplatesTest(unittest.TestCase):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(original, f)
         self.assertEqual(sorted(template.id for template in templates.userTemplates()), sorted([good.id, other.id]))
+
+    def test_35_file_dropped_on_a_text_field_of_the_add_dialog_is_the_template_image(self):
+        """BB-1: a file dropped on the Name field (or "Your label") of "Add your own MNI template" put its path in the field and
+        chose no image when the drag offered the path as text besides the URL (GNOME Files does). A file dropped anywhere
+        on the dialog is the template image; a drag that is no usable file (web link, folder, text file) is refused, with
+        the copy action for the rest, and never typed into a field.
+        """
+        text = os.path.join(self.inputs, "notes.txt")
+        with open(text, "w", encoding="utf-8") as f:
+            f.write("not an image")
+
+        def drag(widget, paths, kind, asText=True):
+            mimeData = qt.QMimeData()
+            urls = [qt.QUrl(path) if "://" in path else qt.QUrl.fromLocalFile(path) for path in paths]
+            mimeData.setUrls(urls)
+            if asText:
+                mimeData.setText("\n".join(paths))
+            point = qt.QPoint(widget.width // 2, widget.height // 2)
+            actions = qt.Qt.CopyAction | qt.Qt.MoveAction | qt.Qt.LinkAction
+            try:
+                if kind == "enter":
+                    event = qt.QDragEnterEvent(point, actions, mimeData, qt.Qt.LeftButton, qt.Qt.NoModifier)
+                else:
+                    event = qt.QDropEvent(qt.QPointF(point), actions, mimeData, qt.Qt.LeftButton, qt.Qt.NoModifier)
+            except (TypeError, ValueError):
+                self.skipTest("This PythonQt cannot make drag events")
+            event.ignore()
+            qt.QApplication.sendEvent(widget, event)
+            return event
+
+        dialog = self.ui.AddTemplateDialog()
+        try:
+            dialog.show()
+            slicer.app.processEvents()
+            for widget in (dialog.nameEdit, dialog.spaceLabelEdit, dialog):
+                with self.subTest(widget=widget.objectName or "dialog"):
+                    dialog.imagePath = None
+                    dialog.nameEdit.setText("")
+                    dialog.spaceLabelEdit.setText("")
+                    # Not usable: refused, no text typed
+                    for paths in (["http://example.org/a.nii.gz"], [self.inputs], [text]):
+                        enter = drag(widget, paths, "enter")
+                        self.assertFalse(enter.isAccepted(), paths)
+                        drop = drag(widget, paths, "drop")
+                        self.assertFalse(drop.isAccepted(), paths)
+                        self.assertEqual(dialog.nameEdit.text, "")
+                        self.assertEqual(dialog.spaceLabelEdit.text, "")
+                        self.assertIsNone(dialog.imagePath)
+                    # The template image, offered as a URL and as text
+                    enter = drag(widget, [self.image15], "enter")
+                    self.assertTrue(enter.isAccepted())
+                    self.assertEqual(enter.dropAction(), qt.Qt.CopyAction)
+                    drop = drag(widget, [self.image15], "drop")
+                    self.assertTrue(drop.isAccepted())
+                    self.assertEqual(dialog.imagePath, self.image15)
+                    self.assertNotIn(os.sep, dialog.nameEdit.text)
+                    self.assertEqual(dialog.spaceLabelEdit.text, "")
+        finally:
+            dialog.deleteLater()
+            os.remove(text)

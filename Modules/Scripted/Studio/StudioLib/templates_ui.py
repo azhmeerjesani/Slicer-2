@@ -182,21 +182,41 @@ def _companionRole(path):
 
 
 class _DropFilter(qt.QObject):
+    """Takes the files dragged onto the "Add your own template" dialog, wherever on it they are dropped.
+
+    It is installed on the dialog and on its text fields: a file manager that offers the path as text besides the URL (GNOME
+    Files does) is otherwise taken by the field, which would put the path in the name. Only local files of a kind the dialog
+    can use (an image or a 3D surface) are accepted, with the copy action; any other drag (a web link, a folder, a text file)
+    is refused, so the pointer shows it cannot be dropped, and is never typed into a field.
+    """
+
     def __init__(self, callback):
         qt.QObject.__init__(self)
         self.callback = callback
 
+    @staticmethod
+    def _usablePaths(event):
+        mimeData = event.mimeData()
+        if not mimeData.hasUrls():
+            return None
+        paths = [url.toLocalFile() for url in mimeData.urls() if url.isLocalFile()]
+        return [path for path in paths if templates.isImageFile(path) or templates.isSurfaceFile(path)]
+
     def eventFilter(self, obj, event):
-        if event.type() == qt.QEvent.DragEnter and event.mimeData().hasUrls():
-            event.acceptProposedAction()
+        eventType = event.type()
+        if eventType not in (qt.QEvent.DragEnter, qt.QEvent.DragMove, qt.QEvent.Drop):
+            return False
+        paths = self._usablePaths(event)
+        if paths is None:
+            return False  # not a file drag: a text drag into a field works as usual
+        if not paths:
+            event.ignore()
             return True
-        if event.type() == qt.QEvent.Drop and event.mimeData().hasUrls():
-            paths = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
-            event.acceptProposedAction()
-            if paths:
-                self.callback(paths)
-            return True
-        return False
+        event.setDropAction(qt.Qt.CopyAction)
+        event.accept()
+        if eventType == qt.QEvent.Drop:
+            self.callback(paths)
+        return True
 
 
 class _OptionalRow:
@@ -428,6 +448,8 @@ class AddTemplateDialog(qt.QDialog):
 
         self._dropFilter = _DropFilter(self._onDropped)
         self.installEventFilter(self._dropFilter)
+        for edit in (self.nameEdit, self.spaceLabelEdit):
+            edit.installEventFilter(self._dropFilter)
         self._progressTimer = qt.QTimer(self)
         self._progressTimer.setInterval(100)
         self._progressTimer.connect("timeout()", self._showProgress)
