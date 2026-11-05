@@ -2672,6 +2672,51 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         finally:
             importer.openAddDataDialog = original
 
+    def test_mgz_scan_dropped_twice_is_not_loaded_twice(self):
+        """A FreeSurfer .mgz scan that is already open is not sent to Add Data again: its node becomes current again, as
+        for a NIfTI scan (BB-1: T1 and T1_1 were created, and the project held the scan twice). A model dropped twice still
+        goes to Add Data (3D Slicer's route).
+        """
+        from StudioLib import importer
+
+        studioShell = self._applyStudio()
+        mgzScan = self._writeVolume("sub-01_T1w.mgz", GRID_SHIFTED)
+        niftiScan = self._writeVolume("sub-02_T1w.nii.gz", GRID_SHIFTED)
+        calls = []
+
+        def addData(paths):
+            calls.append([os.path.basename(path) for path in paths])
+            for path in paths:
+                slicer.util.loadVolume(path)
+
+        original = importer.openAddDataDialog
+        importer.openAddDataDialog = addData
+        try:
+            first = importer.handleDrop([mgzScan], shell=studioShell)
+            self._pump(8)
+            self.assertEqual(calls, [["sub-01_T1w.mgz"]])
+            self.assertEqual(first.addDataPaths, [mgzScan])
+            scanNode = slicer.util.getNode("sub-01_T1w")
+            self.assertIsNotNone(importer.openNodeForFile(mgzScan))
+            # The second drop: no Add Data, no new node, the scan is current again
+            importer.handleDrop([niftiScan], shell=studioShell)
+            self._pump(8)
+            again = importer.handleDrop([mgzScan], shell=studioShell)
+            self._pump(8)
+            self.assertEqual(calls, [["sub-01_T1w.mgz"]])
+            self.assertEqual([node.GetID() for node in again.alreadyOpen], [scanNode.GetID()])
+            self.assertEqual(sorted(node.GetName() for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")),
+                             ["sub-01_T1w", "sub-02_T1w"])
+            self.assertEqual(self._editor().sourceVolumeNode().GetID(), scanNode.GetID())
+            # Together with a new .mgz scan, only the new one goes to Add Data
+            newMgz = self._writeVolume("sub-03_T1w.mgz", GRID_SHIFTED)
+            importer.handleDrop([mgzScan, newMgz], shell=studioShell)
+            self._pump(8)
+            self.assertEqual(calls[-1], ["sub-03_T1w.mgz"])
+            self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")), 3)
+        finally:
+            importer.openAddDataDialog = original
+
     def test_recent_times_recorded(self):
         """Opened files are recorded in Studio/RecentOpenTimes and folders in Studio/RecentFolders."""
         from StudioLib import importer

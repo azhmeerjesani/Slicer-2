@@ -1426,7 +1426,8 @@ def loadFiles(paths, shell=None, pairedLesion=None):
     """Load files directly (see the module documentation) and return a ``LoadResult``.
 
     If a path is a folder or a file of another type, nothing is loaded and the Add Data dialog opens with
-    all the paths. In Studio, only the files of another type go to the Add Data dialog when the load also has scans or
+    all the paths. In Studio, a scan of another format (a FreeSurfer .mgz) that is already open is not loaded again (its node
+    becomes current again), and only the files of another type go to the Add Data dialog when the load also has scans or
     lesions (and no scene): those are loaded here, with the scans that the dialog loaded. In Studio, the first scan
     becomes the background of the slice views, the Segment Editor
     is prepared on it (with the lesion file of the same load, if any) and Draw is shown. Figures, statistical maps
@@ -1458,6 +1459,22 @@ def loadFiles(paths, shell=None, pairedLesion=None):
             kept = [(path, kind) for path, kind in zip(paths, kinds, strict=True) if path not in tables]
             paths, kinds = [path for path, _kind in kept], [kind for _path, kind in kept]
             if not paths:
+                return result
+        # A scan of another format (a FreeSurfer .mgz) that is already open is not loaded again by the Add Data dialog: its
+        # node becomes current again, as for a NIfTI or NRRD scan
+        reopened = {}
+        if "scene" not in kinds:
+            for path, kind in zip(paths, kinds, strict=True):
+                openNode = openNodeForFile(path) if kind == "other" else None
+                if openNode is not None and _isScan(openNode):
+                    reopened[path] = openNode
+        if reopened:
+            result.alreadyOpen.extend(reopened.values())
+            recordOpenTimes(list(reopened))
+            kept = [(path, kind) for path, kind in zip(paths, kinds, strict=True) if path not in reopened]
+            paths, kinds = [path for path, _kind in kept], [kind for _path, kind in kept]
+            if not paths:
+                _afterLoad(result, shell)
                 return result
         others = [path for path, kind in zip(paths, kinds, strict=True) if kind not in _DIRECT_KINDS]
         if others and (len(others) == len(paths) or "scene" in kinds):
