@@ -12,6 +12,7 @@ import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -33,6 +34,19 @@ GSP_DOI = "10.7910/DVN/KKTJQC"
 
 def _env():
     return dict(os.environ, PYTHONPATH=MODULE_DIR + os.pathsep + os.environ.get("PYTHONPATH", ""))
+
+
+def _process_chain(top_pid):
+    """Return the pids from a process down to its deepest descendant (a linear chain of launchers), POSIX only."""
+    listing = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, check=True).stdout
+    children = {}
+    for line in listing.splitlines():
+        pid, ppid = (int(value) for value in line.split())
+        children.setdefault(ppid, []).append(pid)
+    chain = [top_pid]
+    while children.get(chain[-1]):
+        chain.append(children[chain[-1]][0])
+    return chain
 
 
 def _sphere_lesion(path, center_world, radius=3.0):
@@ -607,8 +621,12 @@ class EngineStopTest(_TempDirTestCase):
         process = subprocess.Popen(launcher + command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=_env(), cwd=self.tmp)
         try:
             self.assertTrue(opened.wait(60), "the engine did not start reading the lesion")
-            process.kill()  # the launcher is gone; the engine is re-parented
-            process.wait(10)
+            # Kill the engine's own parent, not the top process: under Slicer, sys.executable is the PythonSlicer
+            # launcher, which starts the real Python as a child, so the chain is longer than the test's launcher.
+            # (The engine has not printed its "start" event yet: it is still blocked reading the lesion.)
+            chain = _process_chain(process.pid)
+            self.assertGreaterEqual(len(chain), 2, f"the engine is not below a launcher: {chain}")
+            os.kill(chain[-2], signal.SIGKILL)  # the engine's launcher is gone; the engine is re-parented
             time.sleep(2.5)  # the orphan watchdog polls every second
         finally:
             release.set()
@@ -616,6 +634,8 @@ class EngineStopTest(_TempDirTestCase):
             stdout, _ = process.communicate(timeout=120)  # EOF once the engine has exited
         finally:
             stop.set()
+            with contextlib.suppress(OSError):
+                process.kill()  # the top process normally ended with its killed child; this only cleans up
             with contextlib.suppress(OSError):
                 os.close(os.open(fifo, os.O_RDONLY | os.O_NONBLOCK))  # unblocks a feeder waiting for a reader
             feeder.join(10)
