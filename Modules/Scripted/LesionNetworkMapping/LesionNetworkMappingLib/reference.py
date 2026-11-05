@@ -1036,14 +1036,15 @@ def _candidates(bundle, path=None):
     return [base, *sorted(glob.glob(os.path.join(base, "subj-*")))]
 
 
-def reference_status(bundle, subjects_sha=None, path=None, strict=False, verify=True):
+def reference_status(bundle, subjects_sha=None, path=None, strict=False, verify=True, check_data=True):
     """Status of every reference folder of a bundle: a list of {path, status, reason, metadata}.
 
     status is "ok", "missing", "stale" (another definition, or the connectome changed: its
     data-defining keys, kind or preprocessing record, mask, the time series of the reference's
     subjects or, with ``strict``, any byte of connectome.json), "other_subjects" (with
     ``subjects_sha``) or "corrupt" (reference.json is malformed, or with ``verify`` a file is missing
-    or does not match its sha256).
+    or does not match its sha256). With ``check_data`` False the time series of the subjects are not
+    hashed (a quick check for listings; :func:`load_reference` always checks them).
     """
     bundle = _open_bundle(bundle)
     statuses = []
@@ -1084,7 +1085,7 @@ def reference_status(bundle, subjects_sha=None, path=None, strict=False, verify=
             entry.update(status="stale", reason="connectome.json changed")
         elif subjects_sha is not None and metadata["subjects"].get("sha256") != subjects_sha:
             entry.update(status="other_subjects", reason="built for another subject list")
-        elif _subjects_data_stale(bundle, metadata["subjects"]):
+        elif check_data and _subjects_data_stale(bundle, metadata["subjects"]):
             entry.update(status="stale", reason="the connectome time series changed (subjects/<id>.norms.npy)")
         elif verify:
             for item in metadata["maps"].values():

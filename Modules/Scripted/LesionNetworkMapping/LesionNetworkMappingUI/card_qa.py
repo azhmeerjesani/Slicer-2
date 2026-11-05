@@ -119,6 +119,46 @@ def referenceMetadata(bundlePath):
     return best[1] if best else None
 
 
+_staleCache = {}
+
+
+def staleReferenceReason(bundle):
+    """Why the reference maps of a bundle cannot be used (all of them out of date or damaged), or None.
+
+    None when there are no reference maps or when one is valid. Unlike :func:`referenceMetadata` this asks the engine
+    (``reference.reference_status``, which hashes the subjects' norms and the map files), so the answer is cached until
+    a reference.json or connectome.json changes.
+    """
+    from LesionNetworkMappingLib import reference
+    from LesionNetworkMappingLib.connectome import ConnectomeBundle
+
+    stamp = []
+    for path in [os.path.join(bundle.path, "connectome.json")] + [os.path.join(folder, "reference.json") for folder in referenceFolders(bundle.path)]:
+        try:
+            info = os.stat(path)
+            stamp.append((path, info.st_mtime_ns, info.st_size))
+        except OSError:
+            stamp.append((path, None, None))
+    cached = _staleCache.get(bundle.path)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    fresh = None
+    try:
+        # Opened again: the open bundle keeps the connectome.json it was opened with
+        fresh = ConnectomeBundle.open(bundle.path)
+        statuses = [entry for entry in reference.reference_status(fresh) if entry["status"] != "missing"]
+    except Exception as exc:
+        statuses = [{"status": "corrupt", "reason": f"{type(exc).__name__}: {exc}"}]
+    finally:
+        if fresh is not None:
+            fresh.close()
+    reason = None
+    if statuses and not any(entry["status"] == "ok" for entry in statuses):
+        reason = statuses[0]["reason"] or statuses[0]["status"]
+    _staleCache[bundle.path] = (stamp, reason)
+    return reason
+
+
 def buildSeconds(bundle):
     """Estimated seconds of ``reference build`` for a bundle from the bytes its passes read (no measurement)."""
     from LesionNetworkMappingLib import reference
@@ -559,6 +599,7 @@ class QACard:
 
         # The calibrated chip and the reference rows
         shownValues = None
+        staleReason = None
         if cohort:
             group = self._findGroupQa() if bundle is not None else None
             if bundle is None:
@@ -597,7 +638,12 @@ class QACard:
         elif not hasFiles:
             self._setCalibrated("warn", _("Not calibrated"), _("Not calibrated: this connectome has no reference maps yet. Build them once to compare the map with what any lesion gives."))
         else:
-            self._setCalibrated("warn", _("Not calibrated"), _("Not calibrated: this map was computed without valid reference maps (made before them, or they are out of date). Map again."))
+            # Mapping again helps only when the map is older than valid reference maps; out-of-date maps must be rebuilt
+            staleReason = staleReferenceReason(bundle)
+            if staleReason:
+                self._setCalibrated("warn", _("Not calibrated"), _("Not calibrated: the reference maps of this connectome are out of date and were not used. Rebuild them, then map again. Reason: {reason}.").format(reason=staleReason))
+            else:
+                self._setCalibrated("warn", _("Not calibrated"), _("Not calibrated: this map was computed before the reference maps were built. Map again."))
         self.tableCaption.setVisible(shownValues is not None)
         self.table.setVisible(shownValues is not None)
         self.r2Label.setVisible(shownValues is not None)
@@ -616,12 +662,13 @@ class QACard:
             self.r2Label.setText(text)
 
         # Reference maps: build action
-        buildable = bundle is not None and not hasFiles
+        buildable = bundle is not None and (not hasFiles or bool(staleReason))
         referenceRunning = self.referenceJob is not None and not self.referenceJob.isFinished()
         self.referenceButton.setVisible(buildable and not referenceRunning)
         self.referenceProgress.widget.setVisible(referenceRunning)
         if buildable:
-            self.referenceButton.setText(_("Build reference maps ({eta})").format(eta=self._etaText(bundle)))
+            label = _("Rebuild reference maps ({eta})") if staleReason else _("Build reference maps ({eta})")
+            self.referenceButton.setText(label.format(eta=self._etaText(bundle)))
 
         # Debiased view and analytic z need the reference of the run
         usable = (not cohort) and bool(reference) and run is not None and not running and not partial and bundle is not None

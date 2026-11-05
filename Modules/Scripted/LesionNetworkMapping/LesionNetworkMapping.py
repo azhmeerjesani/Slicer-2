@@ -1773,10 +1773,13 @@ class ConnectomeManagerDialog(qt.QDialog):
                 terms = _("accepted") if accepted else _("not accepted")
                 name = row["name"] + (f" ({DEMO_LABEL})" if row.get("synthetic") else "")
                 values = [name, f"{row['n_subjects']:,}", f"{row['time_points']:,}", f"{row['n_voxels']:,}", row["size"], row.get("space") or "—", terms,
-                          _("yes") if row.get("has_reference") else _("no")]
+                          self._referenceText(row)]
             for column, value in enumerate(values):
                 item = qt.QTableWidgetItem(str(value))
-                item.setToolTip(row["path"] if column == 0 else str(value))
+                tip = row["path"] if column == 0 else str(value)
+                if column == len(values) - 1 and row.get("reference_reason") and row.get("reference_status") not in ("ok", "missing"):
+                    tip = _("Out of date ({reason}): Build reference maps… again.").format(reason=row["reference_reason"])
+                item.setToolTip(tip)
                 table.setItem(index, column, item)
             if current and os.path.normpath(row["path"]) == os.path.normpath(current):
                 selectRow = index
@@ -1785,6 +1788,16 @@ class ConnectomeManagerDialog(qt.QDialog):
         if selectRow >= 0:
             table.selectRow(selectRow)
         self.onSelectionChanged()
+
+    @staticmethod
+    def _referenceText(row):
+        """The Reference column: "yes" only for maps the loader accepts; maps built before the connectome changed are "out of date"."""
+        status = row.get("reference_status")
+        if status is None:  # a row without the quick check
+            return _("yes") if row.get("has_reference") else _("no")
+        if status == "ok":
+            return _("yes")
+        return _("no") if status == "missing" else _("out of date")
 
     def selectedRow(self):
         rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() is not None else []

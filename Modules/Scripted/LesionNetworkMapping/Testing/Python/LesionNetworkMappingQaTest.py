@@ -580,5 +580,109 @@ class QaGroupChipFastModeTest(unittest.TestCase):
         self.assertIn("(shown in the QA card)", card_nulls.NullsCard.groupQaText({"available": True, "mean": values, "statistic": "T"}))
 
 
+def _edit_preprocessing(bundle_path):
+    """Change the preprocessing record of connectome.json, which makes the bundle's reference maps stale."""
+    manifest = os.path.join(bundle_path, "connectome.json")
+    with open(manifest, encoding="utf-8") as f:
+        metadata = json.load(f)
+    metadata["preprocessing"] = dict(metadata.get("preprocessing") or {}, note="converted again")
+    with open(manifest, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2)
+
+
+class StaleReferenceTest(unittest.TestCase):
+    """BB-1 stale-reference-maps-manager-yes-qa-says-map-again-dead-end: reference maps built before the connectome's
+    preprocessing record changed are rejected by the loader, so the manager does not say "yes" for them and the QA card
+    offers to rebuild them instead of "Map again" (which cannot help).
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="lnm-qa-stale-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        rng = np.random.default_rng(3)
+        shape = (8, 8, 8)
+        mask = np.zeros(shape, dtype=bool)
+        mask[1:7, 1:7, 1:7] = True
+        n_voxels = int(mask.sum())
+        self.path = os.path.join(self.tmp, "stale.lnmc")
+        writer = connectome.ConnectomeWriter(self.path, mask, np.diag([2.0, 2.0, 2.0, 1.0]), name="Stale", overwrite=True)
+        for s in range(3):
+            writer.add_subject(f"sub-{s + 1:02d}", [rng.standard_normal((n_voxels, 20)) + 10.0])
+        writer.finalize()
+        reference.build(self.path, n_seeds=20, k=2, power_iters=1, register=False, emit=lambda *args, **kwargs: None)
+
+    def test_manager_row_says_out_of_date(self):
+        from LesionNetworkMappingLib import manager
+
+        row = manager.bundle_summary(self.path)
+        self.assertEqual(row["reference_status"], "ok")
+        self.assertTrue(row["has_reference"])
+        _edit_preprocessing(self.path)
+        self.assertIsNone(reference.load_reference(self.path))
+        row = manager.bundle_summary(self.path)
+        self.assertTrue(row["has_reference"])  # reference.json is still there
+        self.assertEqual(row["reference_status"], "stale")
+        self.assertIn("preprocessing", row["reference_reason"])
+        shutil.rmtree(os.path.join(self.path, "derived", "reference"))
+        self.assertEqual(manager.bundle_summary(self.path)["reference_status"], "missing")
+
+    def test_quick_status_skips_the_time_series_only(self):
+        self.assertEqual(reference.reference_status(self.path, verify=False, check_data=False)[0]["status"], "ok")
+        _edit_preprocessing(self.path)
+        self.assertEqual(reference.reference_status(self.path, verify=False, check_data=False)[0]["status"], "stale")
+
+    @unittest.skipUnless(_has_slicer(), "needs the Slicer application")
+    def test_manager_column_and_qa_card(self):
+        import slicer
+
+        import LesionNetworkMapping
+        from LesionNetworkMappingLib import manager
+        from LesionNetworkMappingUI import card_qa, context
+
+        text = LesionNetworkMapping.ConnectomeManagerDialog._referenceText
+        self.assertEqual(text(manager.bundle_summary(self.path)), "yes")
+
+        slicer.mrmlScene.Clear(0)
+        bundle = connectome.ConnectomeBundle.open(self.path)
+        self.addCleanup(bundle.close)
+        ctx = context.MapContext(runner=object())
+        card = card_qa.QACard(ctx)
+        self.addCleanup(card.cleanup)
+        ctx.bundle = bundle
+        run = context.RunInfo(runDir=os.path.join(self.tmp, "run"), n=3)
+        os.makedirs(run.runDir)
+        ctx.setCurrentRun(run)
+        card.qa = {}  # a map computed without reference maps
+
+        # Valid reference maps: the map was made before them, mapping again calibrates it
+        card.refresh()
+        self.assertIn("Map again", card.calibratedLabel.text)
+        self.assertNotIn("out of date", card.calibratedLabel.text)
+        self.assertTrue(card.referenceButton.isHidden())
+
+        # Out-of-date reference maps: the manager says so and the card offers to rebuild them
+        # (the card's bundle stays the one opened before connectome.json changed, as in the app)
+        _edit_preprocessing(self.path)
+        self.assertEqual(text(manager.bundle_summary(self.path)), "out of date")
+        card.qa = {}
+        card.refresh()
+        label = card.calibratedLabel.text
+        self.assertIn("out of date", label)
+        self.assertIn("preprocessing", label)
+        self.assertIn("Rebuild them", label)
+        self.assertNotIn("Map again.", label)
+        self.assertFalse(card.referenceButton.isHidden())
+        self.assertTrue(card.referenceButton.text.startswith("Rebuild reference maps"))
+        self.assertEqual(card.referenceButton.objectName, "LNMQABuildReferenceButton")
+
+        # No reference maps at all: the usual Build action
+        shutil.rmtree(os.path.join(self.path, "derived", "reference"))
+        self.assertEqual(text(manager.bundle_summary(self.path)), "no")
+        card.qa = {}
+        card.refresh()
+        self.assertIn("no reference maps yet", card.calibratedLabel.text)
+        self.assertTrue(card.referenceButton.text.startswith("Build reference maps"))
+
+
 if __name__ == "__main__":
     unittest.main()

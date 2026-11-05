@@ -86,7 +86,8 @@ def bundle_summary(path):
 
     Keys: path, name, n_subjects, time_points (total over subjects), runs, n_voxels, size_bytes, size,
     voxel_mm, space, gsr (True/False/None), kind, licence, doi, version, has_degree, has_reference,
-    synthetic, error.
+    reference_status ("ok", "missing", "stale" or "corrupt": a quick check of derived/reference, without
+    hashing the subjects' time series or the map files), reference_reason, synthetic, error.
     """
     from .connectome import ConnectomeBundle
 
@@ -125,7 +126,21 @@ def bundle_summary(path):
         "has_reference": os.path.isfile(os.path.join(reference_dir, "reference.json")),
         "synthetic": "synthetic" in f"{bundle.name} {bundle.description}".lower(),
     })
+    row["reference_status"], row["reference_reason"] = _reference_status(bundle, reference_dir)
     return row
+
+
+def _reference_status(bundle, reference_dir):
+    """(status, reason) of the bundle's reference maps of all subjects: whether reference.json exists is not enough,
+    since maps built before the connectome changed are rejected by the loader.
+    """
+    from . import reference
+
+    try:
+        entry = reference.reference_status(bundle, path=reference_dir, verify=False, check_data=False)[0]
+    except Exception as exc:
+        return "corrupt", f"{type(exc).__name__}: {exc}"
+    return entry["status"], entry["reason"]
 
 
 def provenance_line(row):
