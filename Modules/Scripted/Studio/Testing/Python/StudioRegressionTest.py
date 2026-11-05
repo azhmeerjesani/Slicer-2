@@ -143,7 +143,8 @@ Run with the main window and testing enabled::
 - ``test_66_cxx_extensions_of_the_official_build_are_said_incompatible`` (BB-1): an extension with compiled (C++) modules
   (a library in ``qt-loadable-modules``, an executable in ``cli-modules``) is incompatible, with a plain reason, and kept
   disabled (its folders are not in the module or launcher paths), at install and when found at start: such modules were
-  built for official 3D Slicer and never load in the fork. An extension written in Python stays compatible and enabled.
+  built for official 3D Slicer and never load in the fork. An extension written in Python stays compatible and enabled. The Manage list
+  does not say "Install pending restart" on the rows of the disabled ones (a restart would not load them).
 - ``test_67_save_lesion_is_off_in_second_tracing_adjudication_and_review`` (BB-1): in a blind second tracing, an adjudication
   and a review, Save lesion (Ctrl+Shift+S), Save lesion as… (the Lesion card ⋯ menu and Search) are off with a toast: they
   proposed the first tracer's file (the scan's folder, its BIDS subject) and replaced it with the second rater's strokes, the
@@ -5189,7 +5190,8 @@ class StudioRegressionTest(unittest.TestCase):
         """The fork asks the extensions server for the extensions of official 3D Slicer, so an extension with compiled (C++)
         modules installed but never loaded: they need official Slicer's own libraries. It is said to be incompatible, in
         plain words, and kept disabled (its folders are not added to the module or launcher paths), at install and when
-        an extension installed earlier is found at start; an extension written in Python stays compatible and enabled (BB-1).
+        an extension installed earlier is found at start; an extension written in Python stays compatible and enabled (BB-1). The Manage list shows no pending-restart status on the
+        rows of the disabled ones.
         """
         import tarfile
 
@@ -5291,6 +5293,25 @@ class StudioRegressionTest(unittest.TestCase):
         assertPythonCompatible(started, "at start")
         with open(os.path.join(installPath, "StudioCliProbe.s4ext"), encoding="utf-8") as stream:
             self.assertIn("enabled false", stream.read())
+
+        # The Manage list does not say a restart is pending for an extension that is kept disabled: restarting would not load
+        # it. An extension installed and enabled but not loaded yet (written in Python) does say so (BB-1).
+        listWidget = slicer.qSlicerExtensionsLocalWidget()
+        self.addCleanup(listWidget.deleteLater)
+        listWidget.setExtensionsManagerModel(started)
+        listWidget.refresh()
+        statuses = {}
+        for row in range(listWidget.count):
+            item = listWidget.item(row)
+            rowWidget = listWidget.itemWidget(item)
+            if rowWidget is None:
+                continue
+            label = rowWidget.findChild(qt.QLabel, "StatusLabel")
+            statuses[item.data(qt.Qt.UserRole)] = (label.text if label is not None and not label.isHidden() else "")
+        self.assertEqual(statuses.get("StudioPythonProbe"), "Install pending restart", str(statuses))
+        for name in ("StudioCxxProbe", "StudioCliProbe"):
+            self.assertIn(name, statuses, str(statuses))
+            self.assertEqual(statuses[name], "", f"{name} is incompatible and disabled, yet its row says a restart is pending")
 
     def test_67_save_lesion_is_off_in_second_tracing_adjudication_and_review(self):
         """Save lesion (Ctrl+Shift+S, the Lesion card ⋯ menu, Search) in a second tracing, an adjudication or a review

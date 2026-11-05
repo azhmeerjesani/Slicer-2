@@ -153,7 +153,9 @@ public:
     this->InstallButton->setVisible(!installed);
     this->InstallButton->setEnabled(compatible && available);
 
-    if (installed && !loaded)
+    // An incompatible extension that is installed but not loaded (for example a compiled extension that Slicer Studio
+    // disables) does not wait for a restart: restarting would not load it, so no pending status is shown for it.
+    if (installed && !loaded && compatible)
     {
       this->StatusLabel->setVisible(true);
       this->StatusLabel->setText(qSlicerExtensionsLocalWidget::tr("Install pending restart"));
