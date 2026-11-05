@@ -345,6 +345,33 @@ class SeedsTest(RobustnessTestBase):
             robustness.seed_variants(self.study_dir, ("flipped",), os.path.join(lesions_dir, "variants"), compare=False)
         self.assertEqual(_tree_state(lesions_dir), before)
 
+    def test_variant_summary_is_over_changed_lesions(self):
+        """A variant that changes a few lesions completely is not summarised as 1.00 by the lesions it left unchanged.
+
+        Bug map-robust-card:seeds-median-hides-changed-lesions: two coordinates on the anti-correlated blob B turn the
+        sphere seeds of two lesions into inverted maps (r ~ -1), but the median over all six lesions (four unchanged,
+        r = 1 by construction) read 1.00 in variants.json and on the card.
+        """
+        out = self.path("seeds-summary")
+        centre_b = tuple(self.meta_a["blobs"]["B"]["center_world"])
+        moved = (self.sids[0], self.sids[3])
+        record = robustness.seed_variants(self.study_dir, ("sphere4",), out, bundle=self.bundle_a, coordinates={sid: [centre_b] for sid in moved}, rule=TOP10, overlap_pct=50,
+                                          emit=_quiet, cohortmaps_options={"cache_root": self.path("cache")}, run_root=out, register=False)
+        _columns, rows = read_tsv(os.path.join(out, robustness.SEEDS_TSV))
+        lesions = [row for row in rows if row["variant"] == "sphere4" and row["kind"] == "lesion"]
+        changed = sorted(float(row["r"]) for row in lesions if row["changed"] == "true")
+        self.assertEqual(sorted(row["map"] for row in lesions if row["changed"] == "true"), sorted(moved))
+        self.assertTrue(all(float(row["r"]) > 0.999999 for row in lesions if row["changed"] == "false"))
+        self.assertLess(max(changed), 0.0, "the seeds on blob B give inverted maps")
+        with open(os.path.join(out, robustness.VARIANTS_JSON), encoding="utf-8") as f:
+            comparison = json.load(f)["comparisons"]["sphere4"]
+        self.assertEqual(comparison, record["comparisons"]["sphere4"])
+        self.assertAlmostEqual(comparison["median_lesion_r"], float(np.median(changed)), places=5)
+        self.assertLess(comparison["median_lesion_r"], 0.0, "the summary hides the inverted maps of the changed lesions")
+        self.assertEqual((comparison["n_changed"], comparison["median_over"]), (2, "changed lesions"))
+        dice = [float(row["dice"]) for row in lesions if row["changed"] == "true"]
+        self.assertAlmostEqual(comparison["median_lesion_dice"], float(np.median(dice)), places=5)
+
     def test_consolidation_manifest(self):
         lesions_dir = os.path.join(self.study_dir, "lesions")
         before = _tree_state(lesions_dir)

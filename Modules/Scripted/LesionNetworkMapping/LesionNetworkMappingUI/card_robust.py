@@ -452,6 +452,8 @@ class RobustCard:
         self._runRow("seeds", section, _("Run variants"))
         self.seedsTable = widgets.tableView([_("Variant"), _("Changed"), _("Median r"), _("Median Dice")])
         self.seedsTable.setObjectName("LNMRobustSeedsTable")
+        for column in (2, 3):
+            self.seedsTable.horizontalHeaderItem(column).setToolTip(_("Median over the lesions the variant changed; the others keep their primary seed"))
         section["result"].addWidget(self.seedsTable)
         self.seedsNote = label("", "LNMRobustSeedsNote", "caption")
         section["result"].addWidget(self.seedsNote)
@@ -1247,16 +1249,20 @@ class RobustCard:
         for index, variant in enumerate(order):
             mine = [row for row in rows if row["variant"] == variant]
             items = [row for row in mine if row.get("kind") == "lesion"]
-            changed = sum(1 for row in items if _flag(row.get("changed")) is True)
+            moved = [row for row in items if _flag(row.get("changed")) is True]
+            changed = len(moved)
+            # Unchanged lesions keep their primary seed (r = Dice = 1 by construction): the medians are over the
+            # lesions the variant changed, else a variant that inverts a few maps reads as 1.00 (files without the flag: all)
+            summarised = moved if moved or any(_flag(row.get("changed")) is False for row in items) else items
             text = robustness.VARIANTS[variant][0]
-            values = [text, f"{changed}/{len(items)}" if items else "0", _num(_median([_float(row["r"]) for row in items])), _num(_median([_float(row["dice"]) for row in items]))]
+            values = [text, f"{changed}/{len(items)}" if items else "0", _num(_median([_float(row["r"]) for row in summarised])), _num(_median([_float(row["dice"]) for row in summarised]))]
             tooltip = "; ".join(sorted({row["note"] for row in mine if row.get("note") not in ("n/a", "", None)})) or None
             if tooltip:
                 notes.append(f"{text}: {tooltip}")
             for column, cell in enumerate(values):
                 self.seedsTable.setItem(index, column, _tableItem(cell, tooltip, right=column > 0))
         _fitTable(self.seedsTable, len(order))
-        self.seedsNote.setText(_("Derived lesion files are in the run folder (robustness/seeds), never in lesions/. ") + " ".join(notes[:2]))
+        self.seedsNote.setText(_("Median r and Dice are over the changed lesions. Derived lesion files are in the run folder (robustness/seeds), never in lesions/. ") + " ".join(notes[:2]))
 
     def showConsolidate(self, folder):
         record = _readJson(os.path.join(folder, "consolidation.json")) or {}

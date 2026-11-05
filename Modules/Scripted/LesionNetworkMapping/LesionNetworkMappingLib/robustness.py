@@ -1523,7 +1523,9 @@ def seed_variants(study, variants=DEFAULT_VARIANTS, out=None, bundle=None, lesio
     :param probabilistic: how the primary seeds are mapped (cohortmaps' ``probabilistic``: False maps every non-zero
       voxel of the primary file as lesion, recorded as ``primary_binarization`` in variants.json).
     :param cancel: optional ``jobs.CancelToken`` (or Event/callable), checked before each variant and inside the mappings.
-    :return: the record written to ``<out>/variants.json``; with ``compare`` its "rows" are in seeds.tsv.
+    :return: the record written to ``<out>/variants.json``; with ``compare`` its "rows" are in seeds.tsv and its
+      "comparisons" summarise each applicable variant over the lesions it changed ("median_lesion_r",
+      "median_lesion_dice"; unchanged lesions match the primary by construction) with the group-mean map's "group_r".
     """
     from . import cohortmaps, jobs
     from .export import file_sha256
@@ -1584,7 +1586,11 @@ def seed_variants(study, variants=DEFAULT_VARIANTS, out=None, bundle=None, lesio
             for row in result["rows"]:
                 rows.append({"variant": variant, "map": row["map"], "kind": row["kind"], "changed": changed.get(row["participant_id"]) if row["participant_id"] else manifest[variant]["changed"],
                              "r": row["r"], "dice": row["dice"], "peaks_persist": row["peaks_persist"], "note": row["note"] or ("approximate (mirror)" if variant == "flipped" and row["kind"] == "lesion" else "")})
-            comparisons[variant] = {"median_lesion_r": result["median_lesion_r"], "group_r": result["group_r"], "run_id": run_v}
+            # Lesions the variant left unchanged keep their primary seed, so their r and Dice are 1 by construction:
+            # the summary is over the changed lesions, else a variant that inverts a few maps reads as 1.00
+            moved = [row for row in result["rows"] if row["kind"] == "lesion" and changed.get(row["participant_id"])]
+            comparisons[variant] = {"median_lesion_r": _median_or_none(row["r"] for row in moved), "median_lesion_dice": _median_or_none(row["dice"] for row in moved),
+                                    "median_over": "changed lesions", "n_changed": len(moved), "group_r": result["group_r"], "run_id": run_v}
         write_seeds_tsv(rows, os.path.join(out, SEEDS_TSV))
     _check_cancel(cancel)
     summary = {"seed_variants": list(variants), "comparisons": comparisons}
@@ -1597,6 +1603,14 @@ def seed_variants(study, variants=DEFAULT_VARIANTS, out=None, bundle=None, lesio
     _write_json(os.path.join(out, VARIANTS_JSON), record)
     record["rows"] = rows
     return record
+
+
+def _median_or_none(values):
+    """Median of the finite values, or None."""
+    np = _np()
+    finite = np.asarray([value for value in values if value is not None], dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    return float(np.median(finite)) if finite.size else None
 
 
 def _mirror_caveat():
