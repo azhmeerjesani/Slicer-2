@@ -259,6 +259,24 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(editor.currentSegmentID(), segmentId)
         self.assertEqual(editor.sourceVolumeNode().GetID(), volumeNode.GetID())
 
+    def test_metrics_tooltip_uses_singular_for_one(self):
+        """The Continue card's metrics tooltip says "1 part" and "1 gap" (singular), and plurals otherwise."""
+        from StudioLib import draw, library
+
+        original = draw.viewGaps
+        try:
+            for voxels, parts, gaps, expected in (
+                (8, 1, 0, "8 voxels \u00b7 1 part \u00b7 0 gaps"),
+                (1, 2, 1, "1 voxel \u00b7 2 parts \u00b7 1 gap"),
+                (5, 3, 2, "5 voxels \u00b7 3 parts \u00b7 2 gaps"),
+            ):
+                draw.viewGaps = lambda metrics, count=gaps: [None] * count
+                tip = library.CurrentWorkCard._metricsToolTip({"metrics": {"voxels": voxels, "parts": parts}})
+                self.assertEqual(tip, expected)
+        finally:
+            draw.viewGaps = original
+        self.assertEqual(library.CurrentWorkCard._metricsToolTip({"metrics": None}), "")
+
     def test_empty_state_unchanged(self):
         """Nothing loaded: the 480x220 drop zone, the three buttons and Recent; a stray segmentation changes nothing."""
         from StudioLib import library

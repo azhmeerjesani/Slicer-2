@@ -1933,7 +1933,15 @@ class CurrentWorkCard(qt.QObject):
         metrics = summary["metrics"]
         if not metrics or not metrics["voxels"]:
             return ""
-        return _("{voxels} voxels · {parts} parts · {gaps} gaps").format(voxels=metrics["voxels"], parts=metrics["parts"], gaps=len(_draw().viewGaps(metrics)))
+        voxels, parts, gaps = metrics["voxels"], metrics["parts"], len(_draw().viewGaps(metrics))
+        # Singular for exactly 1, as the visible text ("1 part") does
+        return " · ".join(
+            (
+                _("{count} voxel").format(count=voxels) if voxels == 1 else _("{count} voxels").format(count=voxels),
+                _("{count} part").format(count=parts) if parts == 1 else _("{count} parts").format(count=parts),
+                _("{count} gap").format(count=gaps) if gaps == 1 else _("{count} gaps").format(count=gaps),
+            ),
+        )
 
     def _computeNext(self):
         """Compute the metrics of the next lesion with a cold cache (one per event loop iteration)."""
