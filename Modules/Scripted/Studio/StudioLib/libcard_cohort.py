@@ -421,6 +421,20 @@ def groupsText(summary, blind=False):
     return " · ".join(parts) or (_("1 lesion") if summary.get("n", 0) == 1 else _("{n} lesions").format(n=summary.get("n", 0)))
 
 
+def subsetText(name, nCases, nControls, before=None, after=None, nUnmatched=0):
+    """"Subset volume_matched: 5 cases + 5 controls · volume SMD -0.58 → -0.59 · 1 case without a control"; singular for one."""
+    text = _("Subset {name}: {cases} + {controls}").format(
+        name=name,
+        cases=f"{nCases} " + _("case" if nCases == 1 else "cases"),
+        controls=f"{nControls} " + _("control" if nControls == 1 else "controls"),
+    )
+    if before is not None and after is not None:
+        text += " · " + _("volume SMD {before} → {after}").format(before=f"{before:+.2f}", after=f"{after:+.2f}")
+    if nUnmatched:
+        text += " · " + (_("1 case without a control") if nUnmatched == 1 else _("{n} cases without a control").format(n=nUnmatched))
+    return text
+
+
 def excludedReasonText(reason):
     """Plain words for a reason of ``study.analysis_rows`` ("include=0" reads "excluded"); any other reason is already
     words ("lesion file not found") and stays as it is. The raw strings stay the keys of the engine, preflight and
@@ -1176,11 +1190,7 @@ class CohortCard:
         matched = made["matched"]
         cases = [sid for sid in made["sids"] if sid in {lesion["participant_id"] for lesion in self.result["summary"]["lesions"] if lesion["group"] == "case"}]
         before, after = matched["smd_before"].get("volume_ml"), matched["smd_after"].get("volume_ml")
-        text = _("Subset {name}: {cases} cases + {controls} controls").format(name=made["name"], cases=len(cases), controls=len(made["sids"]) - len(cases))
-        if before is not None and after is not None:
-            text += " · " + _("volume SMD {before} → {after}").format(before=f"{before:+.2f}", after=f"{after:+.2f}")
-        if matched.get("unmatched_cases"):
-            text += " · " + _("{n} cases without a control").format(n=len(matched["unmatched_cases"]))
+        text = subsetText(made["name"], len(cases), len(made["sids"]) - len(cases), before, after, len(matched.get("unmatched_cases") or []))
         self.matchLabel.setText(text + ". " + _("Stored in study.json; no lesion was excluded."))
         return made["name"]
 

@@ -1966,6 +1966,20 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertNotIn("\n", message)
             self.assertIn("cannot be read", message)
 
+    def test_cohort_subset_line_uses_singular_for_one(self):
+        """The subset line says "1 case + 1 control" and "1 case without a control", not "1 cases + 1 controls"."""
+        from StudioLib import libcard_cohort
+
+        self.assertEqual(
+            libcard_cohort.subsetText("volume_matched-2", 1, 1, -0.55, 0.0, 1),
+            "Subset volume_matched-2: 1 case + 1 control · volume SMD -0.55 → +0.00 · 1 case without a control",
+        )
+        self.assertEqual(
+            libcard_cohort.subsetText("volume_matched", 5, 5, -0.58, -0.59, 2),
+            "Subset volume_matched: 5 cases + 5 controls · volume SMD -0.58 → -0.59 · 2 cases without a control",
+        )
+        self.assertEqual(libcard_cohort.subsetText("s", 2, 1), "Subset s: 2 cases + 1 control")
+
     def test_review_and_agreement_counts_use_singular_for_one(self):
         """The Review, Agreement and adjudication texts say "1 change requested", "1 pair", "1 lesion" and "1 second tracing", not
         "1 changes requested", "1 pairs", "lesion(s)" or "tracing(s)".
