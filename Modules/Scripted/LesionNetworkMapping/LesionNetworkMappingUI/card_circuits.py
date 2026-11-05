@@ -1114,7 +1114,8 @@ class CircuitsCard:
             try:
                 fetch.fetch(resource, cache=cache)
             except Exception as exc:
-                state["error"] = f"{type(exc).__name__}: {exc}"
+                logging.info(f"Lesion network mapping: the GM prior could not be downloaded: {exc!r}")
+                state["error"] = fetch.user_message(exc)  # a sentence, never the exception class
             state["done"] = True
 
         thread = threading.Thread(target=work, name="lnm-gm-fetch", daemon=True)

@@ -122,6 +122,76 @@ class LesionNetworkMappingDownloadCacheUITest(unittest.TestCase):
         spec = jobrunner.JobSpec("LesionNetworkMappingLib.fetch", [])
         self.assertEqual(fetch.cache_dir(jobrunner.JobRunner.environment(None, spec, 1).get(fetch.CACHE_ENV)), self.expected)
 
+    def test_failed_downloads_show_a_sentence_without_the_exception_class(self):
+        """Run everything's atlas Download, Circuits' Get GM prior and the Cohort card's tissue priors name the problem in words."""
+        fetch = self.fetch
+        from LesionNetworkMappingUI import card_circuits, card_pipeline
+
+        sentence = "No connection to templateflow.s3.amazonaws.com: the proxy server cannot be reached. Check the network and try again."
+
+        def failing(resource, cache=None, *args, **kwargs):
+            raise fetch.OfflineError(sentence)
+
+        def other(resource, cache=None, *args, **kwargs):
+            raise ValueError("HTTPSConnectionPool(host='a.example', port=443): Max retries exceeded")
+
+        def assertPlain(text, what):
+            for raw in ("OfflineError", "ValueError", "FetchError", "HTTPSConnectionPool", "Max retries"):
+                self.assertNotIn(raw, text, what)
+
+        # Run everything: the text of the atlas status
+        for function, expected in ((failing, sentence), (other, None)):
+            shown = []
+            page = types.SimpleNamespace(atlasJob=None, atlasStatus=types.SimpleNamespace(setText=shown.append), _update=lambda: None, _atlasCached=lambda refresh=False: None)
+            with mock.patch.object(fetch, "fetch_set", function):
+                card_pipeline.OptionsDialog.downloadAtlas(page)
+                self.assertTrue(wait(lambda shown=shown: any(text.startswith("The download failed") for text in shown)), shown)
+            text = next(t for t in shown if t.startswith("The download failed"))
+            assertPlain(text, "Run everything's atlas Download")
+            if expected:
+                self.assertEqual(text, f"The download failed: {expected}")
+
+        # Circuits: the notice
+        for function, expected in ((failing, sentence), (other, None)):
+            notices = []
+            circuits = types.SimpleNamespace(
+                gmFetch=None, circuitSpace=lambda: (None, "2009"), gmTimer=mock.Mock(), _refreshGm=lambda: None,
+                _setNotice=notices.append, _refreshTargetsState=lambda: None, _cleanedUp=False,
+            )
+            with mock.patch.object(fetch, "fetch", function):
+                self.assertTrue(card_circuits.CircuitsCard.getGmPrior(circuits, confirm=False))
+                circuits.gmFetch["thread"].join(10)
+            card_circuits.CircuitsCard._pollGmFetch(circuits)
+            self.assertEqual(len(notices), 1, notices)
+            assertPlain(notices[0], "Circuits' Get GM prior")
+            if expected:
+                self.assertEqual(notices[0], f"The GM prior could not be downloaded: {expected}")
+
+    def test_cohort_priors_failure_is_a_sentence(self):
+        try:
+            from StudioLib import libcard_cohort
+        except ImportError as exc:
+            self.skipTest(f"Studio is not part of this build ({exc})")
+        fetch = self.fetch
+        for exception in (fetch.OfflineError("No connection to a.example. Check the network and try again."), ValueError("HTTPSConnectionPool: Max retries exceeded")):
+            worker = libcard_cohort._Worker(lambda result, error: None)
+            with mock.patch.object(fetch, "fetch", side_effect=exception):
+                worker._work(libcard_cohort.fetchPriorsWork, {"cache": os.path.join(slicer.app.temporaryPath, "lnm-priors-failure")})
+            (result, error), = [worker._queue.get_nowait()]
+            self.assertIsNone(result)
+            for raw in ("OfflineError", "ValueError", "FetchError", "HTTPSConnectionPool", "Max retries"):
+                self.assertNotIn(raw, error)
+            if isinstance(exception, fetch.OfflineError):
+                self.assertEqual(error, str(exception))
+        # Another job keeps its class name (the diagnostics are not downloads)
+
+        def broken(progress, cancel):
+            raise RuntimeError("boom")
+
+        worker = libcard_cohort._Worker(lambda result, error: None)
+        worker._work(broken, {})
+        self.assertEqual(worker._queue.get_nowait(), (None, "RuntimeError: boom"))
+
     def test_studio_readers_use_the_same_folder(self):
         try:
             from StudioLib import lesionqc, libcard_cohort, libcard_tutorials

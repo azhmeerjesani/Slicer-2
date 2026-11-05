@@ -174,7 +174,12 @@ def fetchPriorsWork(progress, cancel, cache=None):
     paths = []
     for index, resourceId in enumerate(PRIOR_IDS):
         progress("priors", index, len(PRIOR_IDS))
-        paths.append(fetch.fetch(fetch.find_resource(resourceId, ("templates",)), cache, cancel=cancel))
+        try:
+            paths.append(fetch.fetch(fetch.find_resource(resourceId, ("templates",)), cache, cancel=cancel))
+        except (fetch.FetchError, _lnm("jobs").Cancelled):
+            raise
+        except Exception as exc:  # the user sees one sentence; the details go to the log
+            raise fetch.FetchError(fetch.user_message(exc)) from exc
     progress("priors", len(PRIOR_IDS), len(PRIOR_IDS))
     return paths
 
@@ -776,7 +781,8 @@ class _Worker:
             self._queue.put((None, "cancelled"))
         except Exception as e:
             logging.debug(f"Studio cohort diagnostics: the run failed:\n{traceback.format_exc()}")
-            self._queue.put((None, f"{type(e).__name__}: {e}"))
+            # A failed download is a sentence for the user (no exception class); other failures keep their class
+            self._queue.put((None, _lnm("fetch").user_message(e) if isinstance(e, _lnm("fetch").FetchError) else f"{type(e).__name__}: {e}"))
 
     def _pump(self):
         if self.onProgress is not None and self.progress != self._shown:

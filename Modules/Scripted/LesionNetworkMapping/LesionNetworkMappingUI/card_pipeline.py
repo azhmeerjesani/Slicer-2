@@ -2582,7 +2582,8 @@ class OptionsDialog:
             try:
                 fetch.fetch_set(fetch.find_resource(SCHAEFER_ID), cache=cache, progress=progress)
             except Exception as exc:
-                state["error"] = f"{type(exc).__name__}: {exc}"
+                logging.info(f"Lesion network mapping: the atlas {SCHAEFER_ID} could not be downloaded: {exc!r}")
+                state["error"] = fetch.user_message(exc)  # a sentence, never the exception class
             state["done"] = True
 
         timer = qt.QTimer()
