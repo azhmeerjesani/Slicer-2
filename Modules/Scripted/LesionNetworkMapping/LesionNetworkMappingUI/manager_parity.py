@@ -253,7 +253,9 @@ class ParityDialog(qt.QDialog):
         self.termsJob = None
         self.termsSha = None
         self.catalogPath = None
-        self.cache = os.path.join(slicer.app.cachePath, "LNM")
+        from LesionNetworkMappingLib import fetch
+
+        self.cache = fetch.app_cache_dir()
         self.parityResult = None
         self.setObjectName("LNMLeadDbsParityDialog")
         self.setWindowTitle(_("Verify against Lead-DBS"))

@@ -846,6 +846,13 @@ class AtlasManager:
 
         return fetch.find_resource(atlasId, ("atlases",))
 
+    @staticmethod
+    def cacheDir():
+        """The application's download cache (the folder the Result card's peak regions and the other cards read)."""
+        from LesionNetworkMappingLib import fetch
+
+        return fetch.app_cache_dir()
+
     def title(self, atlasId):
         if atlasId in self.override:
             return self.override[atlasId].title
@@ -865,7 +872,8 @@ class AtlasManager:
 
                 resource = self.resource(atlasId)
                 labels = resource.label_resource()
-                self._status[atlasId] = bool(fetch.is_cached(resource) and (labels is None or fetch.is_cached(labels)))
+                cache = self.cacheDir()
+                self._status[atlasId] = bool(fetch.is_cached(resource, cache) and (labels is None or fetch.is_cached(labels, cache)))
             except Exception:
                 self._status[atlasId] = False
         return self._status[atlasId]
@@ -886,7 +894,7 @@ class AtlasManager:
                 continue
             if atlasId not in self._memo:
                 try:
-                    self._memo[atlasId] = atlases.Atlas.load(atlasId)
+                    self._memo[atlasId] = atlases.Atlas.load(atlasId, self.cacheDir())
                 except Exception:
                     logging.exception(f"Lesion network mapping: the atlas {atlasId} could not be loaded")
                     continue
@@ -943,6 +951,7 @@ class AtlasManager:
         if not ids:
             return False
         state = {"text": _("Downloading…"), "errors": [], "done": False}
+        cache = self.cacheDir()  # resolved here: the thread never reads the application settings
 
         def work():
             from LesionNetworkMappingLib import fetch
@@ -954,7 +963,7 @@ class AtlasManager:
                     def progress(done, total, title=resource.title):
                         state["text"] = _("Downloading {title}… {pct}%").format(title=title, pct=int(100 * done / total)) if total else _("Downloading {title}…").format(title=title)
 
-                    fetch.fetch_set(resource, progress=progress)
+                    fetch.fetch_set(resource, cache=cache, progress=progress)
                 except Exception as exc:
                     logging.info(f"Lesion network mapping: the atlas {atlasId} could not be downloaded: {exc!r}")
                     state["errors"].append(fetch.user_message(exc))

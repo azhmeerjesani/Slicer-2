@@ -5898,8 +5898,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
 
         from LesionNetworkMappingLib import atlases, fetch
 
-        explicit = os.environ.get(fetch.CACHE_ENV)
-        cache = explicit or (os.path.join(slicer.app.cachePath, "LNM") if slicer.app.cachePath else None)
+        cache = fetch.app_cache_dir()  # the folder the cards download to (Clusters' Get atlases)
         points = [peak["world"] for peak in peaks]
         space = self._peakSpace(grid)
         executor = getattr(LesionNetworkMappingWidget, "_regionExecutor", None)

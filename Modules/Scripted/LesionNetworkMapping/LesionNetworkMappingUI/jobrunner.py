@@ -41,6 +41,7 @@ import time
 import qt
 import slicer
 
+from LesionNetworkMappingLib import fetch as _fetch  # the download cache folder (standard library only at import)
 from LesionNetworkMappingLib import jobs as _jobs  # the job protocol (standard library only)
 
 #: Fork-only setting (SPEC Appendix B, D-S1): the maximum number of threads of a heavy job
@@ -817,6 +818,10 @@ class JobRunner:
             env[name] = str(threads)
         env[_jobs.MAX_THREADS_ENV] = str(threads)  # jobs.budget_threads() of nested workers
         env.setdefault("PYTHONUNBUFFERED", "1")
+        # A job that reads the download cache without --cache (cached atlases of the pipeline) uses the application's
+        # cache, where the cards download, not the library's default folder
+        if not os.environ.get(_fetch.CACHE_ENV):
+            env.setdefault(_fetch.CACHE_ENV, _fetch.app_cache_dir())
         # The reader decodes with the locale encoding: make the job write the same, replacing what it cannot hold
         env.setdefault("PYTHONIOENCODING", f"{locale.getpreferredencoding(False) or 'utf-8'}:replace")
         # Under the C/POSIX locale the PythonSlicer launcher drops non-ASCII letters from the job's paths

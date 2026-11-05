@@ -60,8 +60,8 @@ def _toast(text, ms=3000, **kwargs):
 
 
 def cacheFolder():
-    """The LNM cache folder (``<application cache>/LNM``, as the other cards use it)."""
-    return os.path.join(slicer.app.cachePath, "LNM")
+    """The LNM cache folder (``$SLICER_LNM_CACHE``, else ``<application cache>/LNM``, as the other cards use it)."""
+    return _lnm("fetch").app_cache_dir()
 
 
 def defaultFolder(entry):

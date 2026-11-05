@@ -49,6 +49,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 import threading
 import time
 import urllib.parse
@@ -172,10 +173,29 @@ def badge_for(licence):
 def cache_dir(explicit=None):
     """Cache folder: ``explicit``, else ``$SLICER_LNM_CACHE``, else ``~/.cache/SlicerStudio/LNM``.
 
-    The application passes ``slicer.app.cachePath/LNM``. The folder is created when a file is written.
+    The application passes :func:`app_cache_dir` (``slicer.app.cachePath/LNM``). The folder is created when a file is written.
     """
     path = explicit or os.environ.get(CACHE_ENV) or os.path.join(os.path.expanduser("~"), ".cache", "SlicerStudio", "LNM")
     return os.path.abspath(os.path.expanduser(os.fspath(path)))
+
+
+def app_cache_dir():
+    """The application's cache folder: ``$SLICER_LNM_CACHE``, else ``slicer.app.cachePath/LNM`` inside the application,
+    else :func:`cache_dir`'s default (no application, for example a command-line worker).
+
+    Every caller in the application uses this one folder, so a file downloaded by one card serves every card (the
+    Clusters atlases name the Result card's peaks). Call it on the main thread (``slicer.app`` reads the settings) and
+    pass the folder to work that runs in a thread.
+    """
+    explicit = os.environ.get(CACHE_ENV)
+    if explicit:
+        return cache_dir(explicit)
+    app = getattr(sys.modules.get("slicer"), "app", None)  # never imports slicer: a plain Python worker has no application
+    try:
+        cachePath = str(app.cachePath or "") if app is not None else ""
+    except Exception:
+        cachePath = ""
+    return cache_dir(os.path.join(cachePath, "LNM") if cachePath else None)
 
 
 def manifest_path(cache=None):

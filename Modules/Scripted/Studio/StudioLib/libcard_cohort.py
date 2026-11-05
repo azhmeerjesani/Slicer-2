@@ -143,8 +143,8 @@ def formatAge(isoText):
 
 
 def cacheFolder():
-    """The fetch cache of the application (``<cache>/LNM``)."""
-    return os.path.join(slicer.app.cachePath, "LNM")
+    """The fetch cache of the application (``$SLICER_LNM_CACHE``, else ``<cache>/LNM``; the folder every card uses)."""
+    return _lnm("fetch").app_cache_dir()
 
 
 def priorFamilyOf(study):

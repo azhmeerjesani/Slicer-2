@@ -807,6 +807,23 @@ class CatalogTest(unittest.TestCase):
             else:
                 os.environ[fetch.CACHE_ENV] = saved
 
+    def test_app_cache_dir(self):
+        """The application's one cache folder: $SLICER_LNM_CACHE, else <application cache>/LNM, else the library default."""
+        import types
+        from unittest import mock
+
+        with mock.patch.dict(os.environ), mock.patch.dict(sys.modules):
+            os.environ.pop(fetch.CACHE_ENV, None)
+            sys.modules["slicer"] = types.SimpleNamespace(app=types.SimpleNamespace(cachePath="/tmp/app cache"))
+            self.assertEqual(fetch.app_cache_dir(), os.path.abspath(os.path.join("/tmp/app cache", "LNM")))
+            os.environ[fetch.CACHE_ENV] = "/tmp/lnm-env-cache"
+            self.assertEqual(fetch.app_cache_dir(), os.path.abspath("/tmp/lnm-env-cache"))
+            os.environ.pop(fetch.CACHE_ENV)
+            sys.modules["slicer"] = types.SimpleNamespace(app=None)  # a worker: no application
+            self.assertEqual(fetch.app_cache_dir(), fetch.cache_dir())
+            sys.modules.pop("slicer")
+            self.assertEqual(fetch.app_cache_dir(), fetch.cache_dir())
+
 
 # Synthetic atlases
 

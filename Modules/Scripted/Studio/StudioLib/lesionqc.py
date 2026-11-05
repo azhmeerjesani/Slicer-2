@@ -1011,12 +1011,7 @@ class QcCore:
     # Resources
 
     def cacheDir(self):
-        fetch = _lnm("fetch")
-        explicit = os.environ.get(fetch.CACHE_ENV)
-        if explicit:
-            return fetch.cache_dir(explicit)
-        cachePath = getattr(slicer.app, "cachePath", "") if slicer.app is not None else ""
-        return fetch.cache_dir(os.path.join(cachePath, "LNM") if cachePath else None)
+        return _lnm("fetch").app_cache_dir()
 
     def ensureResources(self, reload=False):
         """Load the cached atlases, priors and brain masks in the worker (once; ``reload`` after a download)."""

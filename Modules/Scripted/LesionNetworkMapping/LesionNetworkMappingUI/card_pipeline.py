@@ -403,8 +403,9 @@ def _atlasPaths(choice, refresh=False):
         from LesionNetworkMappingLib import fetch
 
         resource = fetch.find_resource(SCHAEFER_ID)
-        path = fetch.cached_path(resource)
-        labels = fetch.label_table_path(resource) if path else None
+        cache = fetch.app_cache_dir()
+        path = fetch.cached_path(resource, cache)
+        labels = fetch.label_table_path(resource, cache) if path else None
         result = (path, labels) if path else (None, None)
     except Exception:
         result = (None, None)
@@ -2559,15 +2560,16 @@ class OptionsDialog:
         if self.atlasJob is not None and self.atlasJob.get("thread") is not None and self.atlasJob["thread"].is_alive():
             return
         state = {"text": _("Downloading…"), "error": None, "done": False}
+        from LesionNetworkMappingLib import fetch
+
+        cache = fetch.app_cache_dir()  # resolved here: the thread never reads the application settings
+
+        def progress(done, total):
+            state["text"] = _("Downloading… {pct}%").format(pct=int(100 * done / total)) if total else _("Downloading… {mb:.1f} MB").format(mb=done / 1e6)
 
         def work():
             try:
-                from LesionNetworkMappingLib import fetch
-
-                def progress(done, total):
-                    state["text"] = _("Downloading… {pct}%").format(pct=int(100 * done / total)) if total else _("Downloading… {mb:.1f} MB").format(mb=done / 1e6)
-
-                fetch.fetch_set(fetch.find_resource(SCHAEFER_ID), progress=progress)
+                fetch.fetch_set(fetch.find_resource(SCHAEFER_ID), cache=cache, progress=progress)
             except Exception as exc:
                 state["error"] = f"{type(exc).__name__}: {exc}"
             state["done"] = True

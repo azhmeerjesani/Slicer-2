@@ -252,9 +252,12 @@ def packAtlasIds(pack, bundle=None):
 
 
 def missingAtlases(ids, cache=None):
-    """The atlas ids of ``ids`` that are not in the fetch cache (with their label tables)."""
+    """The atlas ids of ``ids`` that are not in the fetch cache (with their label tables); ``cache`` None is the
+    application's cache, where the Clusters card's Get atlases downloads them.
+    """
     from LesionNetworkMappingLib import fetch
 
+    cache = cache or fetch.app_cache_dir()
     missing = []
     for atlasId in ids:
         try:
@@ -824,8 +827,9 @@ class FastIndexDialog(qt.QDialog):
         elif self.pack() == "fine":
             for entry in self.packEntries()[0]:
                 args += ["--atlas", f"{entry['id']}:{entry['stratum']}"]
-        if self.cache:
-            args += ["--cache", self.cache]
+        from LesionNetworkMappingLib import fetch
+
+        args += ["--cache", self.cache or fetch.app_cache_dir()]  # the folder the atlases were checked and downloaded in
         return args
 
     def startBuild(self):

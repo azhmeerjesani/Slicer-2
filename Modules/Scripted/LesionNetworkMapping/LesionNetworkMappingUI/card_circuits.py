@@ -1055,7 +1055,7 @@ class CircuitsCard:
             return None, None
         try:
             resource = fetch.find_resource(resourceId, ("templates",))
-            path = fetch.cached_path(resource)
+            path = fetch.cached_path(resource, fetch.app_cache_dir())
         except Exception:
             return None, None
         return (path, resource.get("space")) if path else (None, None)
@@ -1108,10 +1108,11 @@ class CircuitsCard:
             if _exec(box) != qt.QMessageBox.Ok:
                 return False
         state = {"text": _("Downloading {title}…").format(title=resource.title), "error": None, "done": False}
+        cache = fetch.app_cache_dir()  # resolved here: the thread never reads the application settings
 
         def work():
             try:
-                fetch.fetch(resource)
+                fetch.fetch(resource, cache=cache)
             except Exception as exc:
                 state["error"] = f"{type(exc).__name__}: {exc}"
             state["done"] = True
