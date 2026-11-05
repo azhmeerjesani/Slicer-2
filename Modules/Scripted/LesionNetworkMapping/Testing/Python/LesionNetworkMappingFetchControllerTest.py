@@ -158,6 +158,55 @@ class LesionNetworkMappingFetchControllerTest(unittest.TestCase):
         self.assertEqual(self.controller.state, "idle")
         self.assertEqual(json.loads(qt.QSettings().value(self.mc.ACTIVE_FETCH_SETTING)), self.request)
 
+    def test_an_unfinished_download_can_be_discarded_and_is_not_offered_again(self):
+        self._state(complete=False)
+        self.assertIsNotNone(self.controller.unfinished())
+        self.assertEqual(self.controller.discard(), self.request)
+        self.assertIsNone(qt.QSettings().value(self.mc.ACTIVE_FETCH_SETTING))
+        self.assertIsNone(self.controller.savedRequest())
+        self.assertIsNone(self.controller.unfinished())
+        self.assertIsNone(self.controller.resume())  # nothing to resume any more
+        self.assertEqual(self.controller.state, "idle")
+        self.assertTrue(os.path.isdir(self.dest))  # the files stay: the notice tells the user where
+        self.assertIn(self.dest, self.controller.discardedNotice(self.request))
+        self.assertIsNone(self.controller.discard())  # nothing left to forget
+
+    def test_a_paused_download_can_be_discarded(self):
+        self._state(complete=False)
+        self.controller.request = dict(self.request)
+        self.controller.state = "paused"
+        self.assertIsNotNone(self.controller.unfinished())
+        self.assertEqual(self.controller.discard(), self.request)
+        self.assertIsNone(self.controller.request)
+        self.assertEqual(self.controller.state, "idle")
+        self.assertIsNone(self.controller.unfinished())
+        self.assertIsNone(qt.QSettings().value(self.mc.ACTIVE_FETCH_SETTING))
+
+    def test_the_catalog_dialog_has_a_discard_for_the_unfinished_download(self):
+        from LesionNetworkMappingUI import catalog_dialog
+
+        self._state(complete=False)
+        dialog = catalog_dialog.CatalogDialog(catalogPath=self.catalogPath)
+        self.addCleanup(dialog.deleteLater)
+        dialog.controller = self.controller
+        self.controller.observers.append(dialog.onControllerChanged)
+        dialog.updateResumeBanner()
+        self.assertFalse(dialog.resumeBanner.isHidden())
+        labels = [button.text for button in dialog.resumeBanner.findChildren("QToolButton")]
+        self.assertEqual(labels, ["Resume", "Discard"])
+        dialog.onDiscard()
+        self.assertTrue(dialog.resumeBanner.isHidden())
+        self.assertIsNone(qt.QSettings().value(self.mc.ACTIVE_FETCH_SETTING))
+        self.assertIn(self.dest, dialog.notice.findChild("QLabel", "LNMBannerText").text.replace("\u200b", ""))
+        # a paused download has the button in its progress card too
+        self.controller.request = dict(self.request)
+        self.controller.state = "paused"
+        dialog.onControllerChanged()
+        self.assertFalse(dialog.discardButton.isHidden())
+        self.controller.state = "idle"
+        dialog.onControllerChanged()
+        self.assertTrue(dialog.progressCard.isHidden())  # the card (and its Discard) goes with the state
+
     def test_a_fetch_another_live_process_runs_is_reported_not_offered(self):
         from LesionNetworkMappingLib import fetchconnectome
 

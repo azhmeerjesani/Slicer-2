@@ -216,10 +216,27 @@ class FetchController:
         return self.start(request, resume=True, acceptChecksumMismatch=acceptChecksumMismatch)
 
     def discard(self):
-        """Forget an unfinished job's request (its files stay in the destination folder)."""
+        """Forget an unfinished job's request (its files stay in the destination folder); return the request forgotten, or None.
+
+        Nothing offers the download again, at the next launch or in the catalog dialog. A running job is not discarded (pause it first).
+        """
+        if self.isRunning():
+            return None
+        request = self.request if self.state in ("paused", "failed") else None
+        request = request or self.savedRequest()
         qt.QSettings().remove(ACTIVE_FETCH_SETTING)
-        self.state = "idle" if not self.isRunning() else self.state
+        if self.state != "done":
+            self.state = "idle"
+            self.request = None
+            self.error = self.errorEvent = None
         self._notify()
+        return request
+
+    @staticmethod
+    def discardedNotice(request):
+        """What to tell the user after :meth:`discard`: the downloaded files are still in the folder and can be deleted by hand."""
+        return _("The unfinished download was forgotten and will not be offered again. What was already downloaded stays in {dest}; delete that folder if you do not need it.").format(
+            dest=(request or {}).get("dest", ""))
 
     # Saved job
 
@@ -459,11 +476,14 @@ def offerResume():
         return False
     request, summary = found
     percent = f" ({int(summary['fraction'] * 100)}%)" if summary.get("fraction") is not None else ""
-    box = qt.QMessageBox(qt.QMessageBox.Question, _("Unfinished download"), _("Fetching {name} stopped before it was finished{percent}. Resume it? It continues where it stopped; nothing is downloaded until you click Resume.").format(name=current.shortName(request), percent=percent),
-                         qt.QMessageBox.NoButton, slicer.util.mainWindow())
+    text = _("Fetching {name} stopped before it was finished{percent}. Resume it? It continues where it stopped; nothing is downloaded until you click Resume. "
+             "Discard forgets it; what was already downloaded stays in {dest} and can be deleted.").format(name=current.shortName(request), percent=percent, dest=request["dest"])
+    box = qt.QMessageBox(qt.QMessageBox.Question, _("Unfinished download"), text, qt.QMessageBox.NoButton, slicer.util.mainWindow())
     box.setObjectName("LNMFetchResumeOffer")
     resume = box.addButton(_("Resume"), qt.QMessageBox.AcceptRole)
-    box.addButton(_("Not now"), qt.QMessageBox.RejectRole)
+    notNow = box.addButton(_("Not now"), qt.QMessageBox.RejectRole)
+    discard = box.addButton(_("Discard"), qt.QMessageBox.DestructiveRole)
+    box.setEscapeButton(notNow)
     box.setModal(False)
 
     def answered(result):
@@ -472,6 +492,10 @@ def offerResume():
             current.request = request
             if current.resume() is None and current.lastRequestError:
                 dialog.showNotice(current.lastRequestError)
+        elif box.clickedButton() == discard:
+            current.request = request
+            current.discard()
+            _showInformation("LNMFetchDiscarded", _("Download forgotten"), current.discardedNotice(request))
 
     box.connect("finished(int)", answered)
     _dialogs["offer"] = box

@@ -53,7 +53,9 @@ and custom terms; **grey** when the terms are not stated. A grey entry is never 
 - Each archive is **streamed into the converter**: no archive is stored unless you choose "keep archives". The download
   runs as a light, low-priority job with a status chip ("Fetching GSP1000 · 41% · 2 h 10 min"); **Pause** stops it and
   **Resume** continues from where it stopped. If the application was closed during a download, Map asks, a few seconds after it is opened again, whether to resume
-  ("Resume" or "Not now"); nothing resumes by itself.
+  ("Resume", "Not now" or "Discard"); nothing resumes by itself. "Not now" asks again at the next launch; "Discard" (also
+  a button in the catalog dialog) forgets the unfinished download so that it is never offered again. What was already
+  downloaded stays in the destination folder, and the notice says where, so you can delete it.
 - The computer is kept awake during the download on macOS and Windows.
 - The result is `<destination>/<id>.lnmc`, a normal connectome bundle (see
   [The connectome bundle](lesionnetworkmapping.md#data)), registered and listed in Map. It is selected only when the

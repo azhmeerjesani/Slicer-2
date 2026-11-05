@@ -252,7 +252,7 @@ class CatalogDialog(qt.QDialog):
         self.notice.setObjectName("LNMCatalogNotice")
         self.notice.hide()
         layout.addWidget(self.notice)
-        self.resumeBanner = widgets.banner("", ((_("Resume"), self.onResume),), level="busy")
+        self.resumeBanner = widgets.banner("", ((_("Resume"), self.onResume), (_("Discard"), self.onDiscard)), level="busy")
         self.resumeBanner.setObjectName("LNMCatalogResumeBanner")
         self.resumeBanner.hide()
         layout.addWidget(self.resumeBanner)
@@ -443,6 +443,10 @@ class CatalogDialog(qt.QDialog):
         self.resumeButton = _button(_("Resume"), "LNMCatalogResume")
         self.resumeButton.connect("clicked()", self.onResume)
         buttons.addWidget(self.resumeButton)
+        self.discardButton = _button(_("Discard"), "LNMCatalogDiscard")
+        self.discardButton.setToolTip(_("Forget this unfinished download so that it is not offered again; what was already downloaded stays in its folder and can be deleted"))
+        self.discardButton.connect("clicked()", self.onDiscard)
+        buttons.addWidget(self.discardButton)
         self.acceptMismatchButton = _button(_("Keep this data anyway…"), "LNMCatalogAcceptMismatch")
         self.acceptMismatchButton.setToolTip(_("Accept the archive whose checksum does not match; the choice is recorded as checksum_override in the bundle"))
         self.acceptMismatchButton.connect("clicked()", self.onAcceptMismatch)
@@ -830,6 +834,7 @@ class CatalogDialog(qt.QDialog):
             self.progress.setProgress(1.0, text=_("Done: the connectome is registered and ready in the Connectome card."))
             self.progress.stopButton.setEnabled(False)
         self.resumeButton.setVisible(state in ("paused", "failed") and not status["mismatch"] and not status["termsChanged"])
+        self.discardButton.setVisible(state in ("paused", "failed"))
         self.acceptMismatchButton.setVisible(state == "failed" and status["mismatch"])
         self.openFolderButton.setVisible(state == "done" and bool(status["path"]))
         notes = [w for w in status["warnings"] if w][-3:]
@@ -845,7 +850,7 @@ class CatalogDialog(qt.QDialog):
             return
         request, summary = found
         percent = f" ({int(summary['fraction'] * 100)}%)" if summary.get("fraction") is not None else ""
-        widgets.setBannerText(self.resumeBanner, _("An unfinished download of {name}{percent} is waiting. Resume continues where it stopped.").format(name=self.controller.shortName(request), percent=percent))
+        widgets.setBannerText(self.resumeBanner, _("An unfinished download of {name}{percent} is waiting. Resume continues where it stopped; Discard forgets it (what was downloaded stays in its folder).").format(name=self.controller.shortName(request), percent=percent))
         self.resumeBanner.show()
 
     def onResume(self):
@@ -853,6 +858,11 @@ class CatalogDialog(qt.QDialog):
             self.controller.request = self.controller.savedRequest()
         if self.controller.resume() is None and self.controller.lastRequestError:
             self.showNotice(self.controller.lastRequestError)
+
+    def onDiscard(self):
+        request = self.controller.discard()
+        if request is not None:
+            self.showNotice(self.controller.discardedNotice(request))
 
     def onAcceptMismatch(self):
         question = _("The checksum of an archive does not match the one the provider lists, also after reading it twice. Every file in it passed its integrity check, so the data may be fine, "
