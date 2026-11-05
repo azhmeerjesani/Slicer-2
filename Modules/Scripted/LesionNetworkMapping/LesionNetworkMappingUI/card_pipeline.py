@@ -20,7 +20,8 @@ connectome of the Seed and Connectome cards, as one heavy job of the application
 - **Staleness and re-attach.** ``pipeline.plan(…, hash_lesions=True)`` runs in a worker thread (file reads and hashing;
   no MRML or Qt) when the card is shown, the study, connectome, rule or options change; the card then says "3 new or
   changed lesions · 37 up to date", or "Design changed since the last run" when the analysed subjects, their groups,
-  scores or covariates are not those of the last run (``pipeline.design_fingerprint``). A run of another process (the command line, a restarted Slicer) is found by the
+  scores or covariates are not those of the last run (``pipeline.design_fingerprint``; for a run of an earlier build,
+  which records none, the analysed subjects and groups of pipeline.json). A run of another process (the command line, a restarted Slicer) is found by the
   heartbeat of ``.pipeline/lock.json`` and followed through ``.pipeline/progress.json`` every 2 s.
 - **Results.** Open report and Show folder (the system browser, else an in-app web viewer, else a message with the
   path), Load maps (at most 6 group maps, one per 30 ms tick, over the template), Warnings (a non-modal list).
@@ -536,18 +537,48 @@ def summarizePlan(result):
         "exit_code": result.exit_code,
         "scores": list(result.scores),
         "design_sha256": getattr(result, "design_sha256", "") or "",
+        # The analysed subjects and their groups: compared with the rows of a pipeline.json that has no design_sha256 (designChanged)
+        "design_subjects": sorted([row["participant_id"], row.get("group") or "n/a"] for row in result.rows if row["status"] in pipeline.ANALYSED_STATUSES),
         "elapsed": float(result.elapsed),
     }
 
 
+#: Final row statuses of pipeline.json ("inputs"/"rows") whose subjects the run analysed (mapped now or reused)
+RECORD_ANALYSED_STATUSES = ("computed", "reused")
+
+
+def recordDesignSubjects(record):
+    """Sorted ``[participant_id, group]`` of the subjects the run of pipeline.json ``record`` analysed (its "inputs"/"rows"),
+    or None when the record has no rows to tell.
+    """
+    rows = ((record or {}).get("inputs") or {}).get("rows")
+    if not isinstance(rows, list) or not rows:
+        return None
+    subjects = []
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("participant_id"):
+            return None
+        if row.get("status") in RECORD_ANALYSED_STATUSES:
+            subjects.append([str(row["participant_id"]), row.get("group") or "n/a"])
+    return sorted(subjects)
+
+
 def designChanged(plan, record):
     """True when the design of the study (the analysed subjects, their groups, scores and covariates) is not the one the
-    last run analysed: the plan's ``design_sha256`` differs from the one of pipeline.json. False when either has none
-    (a run of an earlier build records none).
+    last run analysed: the plan's ``design_sha256`` differs from the one of pipeline.json. A run of an earlier build
+    records no design_sha256: its analysed subjects and their groups (the record's "inputs"/"rows") are then compared
+    with the plan's (its scores and covariates cannot be). False when neither can be compared.
     """
-    recorded = ((record or {}).get("inputs") or {}).get("design_sha256")
+    inputs = (record or {}).get("inputs") or {}
+    recorded = inputs.get("design_sha256")
     current = (plan or {}).get("design_sha256")
-    return bool(recorded and current and recorded != current)
+    if recorded:
+        return bool(current and recorded != current)
+    subjects = (plan or {}).get("design_subjects")
+    recordedSubjects = recordDesignSubjects(record)
+    if subjects is None or recordedSubjects is None:
+        return False
+    return sorted([str(sid), group or "n/a"] for sid, group in subjects) != recordedSubjects
 
 
 class PlanWorker:

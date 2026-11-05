@@ -8,6 +8,7 @@ They need the Slicer application and run the real pipeline (A-04) on the synthet
 Under a plain PythonSlicer (the library test glob) the module is skipped.
 """
 
+import json
 import os
 import shutil
 import signal
@@ -378,6 +379,56 @@ class LesionNetworkMappingPipelineUITest(unittest.TestCase):
         finally:
             with open(self.participants, "wb") as f:
                 f.write(before)
+        self._settle()
+        self.assertTrue(card.stateLabel.text.startswith("Up to date"), card.stateLabel.text)
+
+    def test_4c_design_change_after_a_run_of_an_earlier_build(self):
+        """A pipeline.json of an earlier build has no inputs/design_sha256 (only its rows): a group or include change is
+        still a design change, and the unchanged study is still up to date.
+        """
+        from LesionNetworkMappingLib.study import read_tsv, write_tsv
+
+        card = self.card
+        self._settle()
+        record = os.path.join(card.outDir(), "pipeline.json")
+        with open(record, "rb") as f:
+            recordBytes = f.read()
+        with open(self.participants, "rb") as f:
+            before = f.read()
+        data = json.loads(recordBytes.decode("utf-8"))
+        del data["inputs"]["design_sha256"]  # as written by 827d5b1
+        try:
+            with open(record, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=1)
+            self._settle()
+            self.assertTrue(card.stateLabel.text.startswith("Up to date"), card.stateLabel.text)
+            try:
+                from StudioLib import libcard_analysis
+            except ImportError:
+                libcard_analysis = None
+            for change in ("group", "include"):
+                columns, rows = read_tsv(self.participants)
+                columns = columns if "include" in columns else [*columns, "include"]
+                cases = [row for row in rows if row["group"] == "case"]
+                if change == "group":
+                    cases[0]["group"] = "control"
+                else:
+                    cases[1]["include"] = "0"
+                write_tsv(self.participants, columns, rows)
+                self._settle()
+                self.assertEqual(card.stateLabel.text, "Design changed since the last run", change)
+                if libcard_analysis is not None:
+                    text, level = libcard_analysis.stateLine(libcard_analysis.latestAnalysis(self.fx["study"]), card.plan)
+                    self.assertEqual((text, level), ("Cohort analysis: design changed since the last run", "warning"), change)
+                with open(self.participants, "wb") as f:
+                    f.write(before)
+            self._settle()
+            self.assertTrue(card.stateLabel.text.startswith("Up to date"), card.stateLabel.text)
+        finally:
+            with open(self.participants, "wb") as f:
+                f.write(before)
+            with open(record, "wb") as f:
+                f.write(recordBytes)
         self._settle()
         self.assertTrue(card.stateLabel.text.startswith("Up to date"), card.stateLabel.text)
 
