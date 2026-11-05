@@ -32,6 +32,7 @@ the bottom is the robustness text of ``methods.py`` for the study (L-18). The ca
 Studio shell.
 """
 
+import hashlib
 import logging
 import math
 import os
@@ -547,7 +548,13 @@ class RobustCard:
             return None
         if kind == "replicate":
             path = self.replicatePath()
-            return os.path.join(root, f"replicate_{_safeName(self.bundleName(path))}") if path else None
+            name = self.replicateFolderName(path) if path else None
+            if not name:
+                return None
+            folder = os.path.join(root, name)
+            if not os.path.isfile(os.path.join(folder, RESULT_FILES[kind])):
+                folder = self.legacyReplicateFolder(root, path) or folder
+            return folder
         if kind == "consolidate":
             return os.path.join(root, f"consolidate_{self.side()}")
         return os.path.join(root, FOLDER_NAMES.get(kind, kind))
@@ -600,6 +607,43 @@ class RobustCard:
 
     def replicatePath(self):
         return self.replicateCombo.currentData or None
+
+    def replicateFolderName(self, path):
+        """``replicate_<name>_<tag>``: the run folder of replicating on a registered connectome, or None when it cannot be opened.
+
+        The tag (8 hex digits of the connectome's identifier, its name and data fingerprint as ``connectomeIdentifier``) gives
+        each connectome its own folder: two with the same name (a full connectome and a subset of it), or with names that
+        differ only in punctuation ("GSP-1000", "GSP 1000"), no longer share, show or overwrite one result. The same
+        connectome in another folder or on another computer keeps its folder.
+        """
+        from LesionNetworkMappingLib.export import data_sha256
+
+        info = self.bundleInfo(path)
+        if info is None:
+            return None
+        identifier = f"{info[0]}#{data_sha256(info[2].metadata)[:16]}"
+        return f"replicate_{_safeName(info[0])}_{hashlib.sha256(identifier.encode('utf-8')).hexdigest()[:8]}"
+
+    def legacyReplicateFolder(self, root, path):
+        """The ``replicate_<name>`` folder of an earlier version (no tag) when its result is of this very connectome, else None.
+
+        Such a folder was shared by every connectome of that name: its result is shown only for the connectome it names
+        (the same connectome.json), not for another one of the same name.
+        """
+        from LesionNetworkMappingLib.export import file_sha256
+
+        info = self.bundleInfo(path)
+        if info is None:
+            return None
+        folder = os.path.join(root, f"replicate_{_safeName(info[0])}")
+        record = _readJson(os.path.join(folder, RESULT_FILES["replicate"]))
+        used = record.get("connectome_b") if isinstance(record, dict) else None
+        used = used.get("manifest_sha256") if isinstance(used, dict) else None
+        manifest = os.path.join(info[2].path, "connectome.json")
+        try:
+            return folder if used and used == file_sha256(manifest) else None
+        except OSError:
+            return None
 
     def bundleName(self, path):
         info = self.bundleInfo(path)
