@@ -337,6 +337,36 @@ class LesionNetworkMappingConnectomeManagerTest(unittest.TestCase):
         self.assertEqual((manager.width, manager.height), (manager.minimumWidth, manager.minimumHeight))
         check("at the minimum size")
 
+    def test_name_column_stays_readable_at_a_larger_app_font(self):
+        # At a 125% app font (17 px) the seven content-sized columns took the whole 720 px dialog and left the Name column
+        # 65 px ("Sh…"). The dialog asks for the width of the other columns plus a readable Name column, up to the screen.
+        import qt
+
+        original = qt.QFont(qt.QApplication.font())
+        font = qt.QFont(original)
+        manager = None
+        try:
+            if self.widget.managerDialog is not None:
+                self.widget.managerDialog.hide()
+                self.widget.managerDialog = None  # a manager made at the new font
+            font.setPixelSize(17)
+            qt.QApplication.setFont(font)
+            _pump(300)
+            manager = self.widget.openManager()
+            _pump(300)
+            table = manager.table
+            metrics = qt.QFontMetrics(table.font)
+            shortest = min(metrics.horizontalAdvance(str(table.item(row, 0).text()).split(" (")[0]) for row in range(table.rowCount))
+            self.assertGreaterEqual(table.columnWidth(0), shortest + 12, f"the Name column is {table.columnWidth(0)} px, a short name needs {shortest} px")
+            self.assertGreaterEqual(table.columnWidth(0), manager.NAME_COLUMN_WIDTH[0] - 20)
+            self.assertFalse(table.horizontalScrollBar().isVisible(), "the table scrolls sideways")
+        finally:
+            if manager is not None:
+                manager.hide()
+            self.widget.managerDialog = None
+            qt.QApplication.setFont(original)
+            _pump(200)
+
 
 if __name__ == "__main__":
     unittest.main()

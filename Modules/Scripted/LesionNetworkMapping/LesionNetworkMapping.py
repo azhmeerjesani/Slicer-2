@@ -1734,8 +1734,38 @@ class ConnectomeManagerDialog(qt.QDialog):
         self.refresh()
         # A top-level window takes no height for width from its layout: size it for the wrapped button rows before it
         # is first shown (as wide as the layout wants, as high as it needs at that width)
-        width = max(self.minimumWidth, layout.totalSizeHint().width())
+        width = max(self.minimumWidth, layout.totalSizeHint().width(), self._tableWidthHint(layout))
+        area = self._availableWidth()
+        if area:
+            width = max(self.minimumWidth, min(width, area))
         self.resize(width, max(self.minimumHeight, layout.totalHeightForWidth(width)))
+
+    NAME_COLUMN_WIDTH = (160, 360)  # least and most width (px) that the dialog asks for the Name column
+
+    def _tableWidthHint(self, layout):
+        """The dialog width at which the table shows its seven content-sized columns whole and the Name column in readable width.
+
+        The layout's size hint does not include these widths (a table's size hint is its default), so at a larger app
+        font the other columns took the whole 720 px and left the Name column a few letters.
+        """
+        table = self.table
+        header = table.horizontalHeader()
+        wide = [max(header.sectionSizeHint(column), table.sizeHintForColumn(column)) for column in range(table.columnCount)]
+        least, most = self.NAME_COLUMN_WIDTH
+        name = max(least, min(wide[0], most))
+        margins = layout.contentsMargins()
+        extra = 2 * table.frameWidth + table.verticalScrollBar().sizeHint.width() + margins.left() + margins.right()
+        return name + sum(wide[1:]) + extra
+
+    def _availableWidth(self):
+        """The width of the screen area (without panels) that shows the dialog; 0 when there is no screen."""
+        try:
+            from LesionNetworkMappingUI.catalog_dialog import _availableArea
+
+            area = _availableArea(self.parentWidget())
+            return int(area.width()) if area is not None else 0
+        except Exception:  # noqa: BLE001 (the layout's width is fine without a screen)
+            return 0
 
     def _button(self, row, text, objectName, callback, toolTip):
         button = qt.QPushButton(text)
