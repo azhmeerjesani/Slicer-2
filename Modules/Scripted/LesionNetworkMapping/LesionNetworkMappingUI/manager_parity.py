@@ -136,6 +136,10 @@ class ImportDialog(qt.QDialog):
         close.connect("clicked()", self.close)
         buttons.addWidget(close)
         layout.addLayout(buttons)
+        # Return in a field runs Import (not the first auto-default button, "Browse…", which opened a folder chooser)
+        for button in self.findChildren(qt.QPushButton):
+            button.setAutoDefault(False)
+        self.importButton.setDefault(True)
         self.scan()
 
     def browse(self):
@@ -326,6 +330,9 @@ class ParityDialog(qt.QDialog):
         close.connect("clicked()", self.close)
         buttons.addWidget(close)
         layout.addLayout(buttons)
+        for button in self.findChildren(qt.QPushButton):
+            button.setAutoDefault(False)
+        self.verifyButton.setDefault(True)
         self.setBundle(bundlePath)
 
     # Bundle

@@ -300,6 +300,57 @@ class LesionNetworkMappingConnectomeManagerTest(unittest.TestCase):
         finally:
             dialog.hide()
 
+    def _defaultButtons(self, dialog):
+        """The text of every push button of the dialog (not of the dialogs it opened) that Return would click."""
+        return [str(button.text) for button in dialog.findChildren("QPushButton") if button.isDefault() and button.window().objectName == dialog.objectName]
+
+    def test_return_in_the_manager_does_not_open_a_file_chooser(self):
+        # No button is the default (QDialog made "Add bundle…" the default: Return on the table opened its file chooser)
+        manager = self.widget.openManager()
+        manager.show()
+        _pump(200)
+        self.assertEqual(self._defaultButtons(manager), [])
+        for button in manager.findChildren("QPushButton"):
+            if button.window().objectName == manager.objectName:
+                self.assertFalse(button.autoDefault, str(button.text))
+        manager.table.setFocus()
+        _pump(100)
+        self.assertEqual(self._defaultButtons(manager), [])
+
+    def test_return_in_the_import_dialog_runs_import_not_browse(self):
+        # "Browse…" was the default: Return in the Folder or Destination field opened its folder chooser
+        from LesionNetworkMappingUI import manager_parity
+
+        dialog = manager_parity.openImport(self.widget.ctx)
+        try:
+            dialog.show()
+            _pump(200)
+            self.assertEqual(self._defaultButtons(dialog), ["Import"])
+            for edit in (dialog.folderEdit, dialog.outEdit):
+                edit.setFocus()
+                _pump(50)
+                self.assertEqual(self._defaultButtons(dialog), ["Import"])
+            self.assertFalse(dialog.findChild("QPushButton", "LNMLeadDbsImportBrowse").autoDefault)
+        finally:
+            dialog.hide()
+
+    def test_return_in_the_convert_dialog_runs_convert(self):
+        # "Estimate size" was the default; Return in a path field now runs Convert, never a Browse… button
+        manager = self.widget.openManager()
+        manager.openConvert()
+        _pump(100)
+        dialog = manager.convertDialog
+        try:
+            dialog.show()
+            _pump(200)
+            self.assertEqual(self._defaultButtons(dialog), ["Convert"])
+            dialog.outEdit.setFocus()
+            _pump(50)
+            self.assertEqual(self._defaultButtons(dialog), ["Convert"])
+            self.assertFalse(dialog.estimateButton.autoDefault)
+        finally:
+            dialog.hide()
+
     def test_buttons_show_their_full_text_at_the_smallest_size(self):
         # The seven actions of the selected connectome were one row: at 1366 x 768 their labels were cut. They wrap now:
         # as opened (the dialog fits the screen) and at the dialog's minimum size, every visible button is as wide as its

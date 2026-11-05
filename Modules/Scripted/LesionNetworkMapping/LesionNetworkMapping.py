@@ -1518,6 +1518,10 @@ class ConvertConnectomeDialog(qt.QDialog):
         closeButton.connect("clicked()", self.close)
         buttons.addWidget(closeButton)
         layout.addLayout(buttons)
+        # Return in a field runs Convert (not the first auto-default button, "Estimate size" or a Browse… button)
+        for button in self.findChildren(qt.QPushButton):
+            button.setAutoDefault(False)
+        self.convertButton.setDefault(True)
         self.onSourceChanged(0)
 
     def _pathRow(self, objectName, callback):
@@ -1739,6 +1743,10 @@ class ConnectomeManagerDialog(qt.QDialog):
         closeButton.connect("clicked()", self.close)
         closeRow.addWidget(closeButton)
         layout.addLayout(closeRow)
+        # No default button: QDialog would otherwise make the first auto-default button ("Add bundle…") the default, and
+        # Return on a table row (which does not take it) opened a file chooser
+        for button in self.findChildren(qt.QPushButton):
+            button.setAutoDefault(False)
         self.refresh()
         # A top-level window takes no height for width from its layout: size it for the wrapped button rows before it
         # is first shown (as wide as the layout wants, as high as it needs at that width)
