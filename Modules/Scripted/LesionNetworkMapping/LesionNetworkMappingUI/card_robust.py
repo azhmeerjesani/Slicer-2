@@ -25,7 +25,9 @@ Sections (each one runs ``LesionNetworkMappingLib.robustness`` in the job runner
 
 Results are written to ``<study>/derivatives/lnm/conn-<label>[_n-N]/robustness/<analysis>/`` (sweep.tsv,
 connectomes.tsv, splithalf.tsv, influence.tsv, seeds.tsv, ...; paths in them are relative) and registered in the run
-registry; the card shows the newest result of each analysis again after a restart. The "Methods sentences" box at
+registry; the card shows the newest result of each analysis again after a restart. A result of the cohort maps
+(thresholds, replicate, split-half, influence) is marked "run again" when the lesions were mapped again since with
+other lesions (maps.tsv), or when a lesion file changed after it was mapped. The "Methods sentences" box at
 the bottom is the robustness text of ``methods.py`` for the study (L-18). The card works in Classic and without the
 Studio shell.
 """
@@ -245,6 +247,9 @@ class RobustCard:
         self.pendingKind = None  # the analysis that starts when the lesions are mapped
         self.notice = ""
         self.results = {}  # kind -> folder of the shown result
+        self.stale = {}  # kind -> why the shown result does not belong to the current cohort maps ("" when it does)
+        self._mapsInfo = (None, None, [])  # (path and stat of maps.tsv, its maps_sha256, its rows with absolute paths)
+        self._lesionHashes = {}  # (lesion path, size, mtime) -> sha256
         self.sections = {}
         self.sweepTilesFor = None
         self.sweepStale = False
@@ -317,7 +322,11 @@ class RobustCard:
         holder.setLayout(result)
         holder.hide()
         section["layout"].addWidget(holder)
-        section.update(run=button, reason=reason, result=result, holder=holder)
+        staleLabel = label("", f"LNMRobust{kind.capitalize()}Stale", None)
+        staleLabel.setStyleSheet(f"color: {levelColor('warn')};")
+        staleLabel.hide()
+        result.addWidget(staleLabel)
+        section.update(run=button, reason=reason, result=result, holder=holder, stale=staleLabel)
 
     def _combo(self, objectName, toolTip, callback=None):
         combo = qt.QComboBox()
@@ -707,6 +716,7 @@ class RobustCard:
         if scope != self._scope:  # another study or connectome: its own results
             self._scope = scope
             self.results = {}
+            self.stale = {}
             self.sweepTilesFor = None
             for section in self.sections.values():
                 section["holder"].hide()
@@ -728,11 +738,16 @@ class RobustCard:
                     section["holder"].hide()
                     if want:
                         self.loadResult(kind, want)
+                elif want and self.staleReason(kind, want) != self.stale.get(kind, ""):
+                    self.loadResult(kind, want)  # the cohort maps or a lesion changed since it was shown
             elif kind == "sweep" and kind in self.results and self._sweepKey != self.primaryKey():
                 self.loadResult(kind, self.results[kind])  # shown again against the primary as it is now
+            elif kind in self.results and self.staleReason(kind, self.results[kind]) != self.stale.get(kind, ""):
+                self.loadResult(kind, self.results[kind])  # the cohort maps or a lesion changed since it was shown
             elif kind not in self.results:
                 self.loadLatest(kind)
         self.statusLabel.setText(self.statusText())
+        self.methodsHeader.setText(_("Methods sentences (some describe runs that must be run again: see the sections above)") if self.staleKinds() else _("Methods sentences"))
 
     def statusText(self):
         if self.ctx.study is None:
@@ -740,7 +755,98 @@ class RobustCard:
         done = [kind for kind in KINDS if kind in self.results]
         if not done:
             return _("No robustness analysis has run for this connectome yet.")
-        return _("{n} of {total} analyses have results for this connectome.").format(n=len(done), total=len(KINDS))
+        text = _("{n} of {total} analyses have results for this connectome.").format(n=len(done), total=len(KINDS))
+        stale = self.staleKinds()
+        if stale:
+            text += " " + _("{n} of them belong to earlier cohort maps or lesions: run them again.").format(n=len(stale))
+        return text
+
+    def staleKinds(self):
+        return [kind for kind in KINDS if kind in self.results and self.stale.get(kind)]
+
+    #
+    # Staleness: a result of the cohort maps belongs to the maps it was computed on
+    #
+
+    def mapsInfo(self):
+        """(``robustness.maps_sha256``, rows with absolute paths) of the current maps.tsv, read again only when the file changes; (None, []) without maps."""
+        path = self.currentMapsTsv()
+        if not path:
+            return None, []
+        stamp = (path, _stat(path))
+        if self._mapsInfo[0] != stamp:
+            from LesionNetworkMappingLib import cohortmaps, robustness
+
+            try:
+                rows = cohortmaps.read_maps_tsv(path)
+                value = robustness.maps_sha256(rows)
+            except (OSError, ValueError, KeyError):
+                rows, value = [], None
+            self._mapsInfo = (stamp, value, rows)
+        return self._mapsInfo[1], self._mapsInfo[2]
+
+    def changedLesions(self):
+        """The participant ids whose lesion file changed after the current cohort maps were made (their bytes no longer have the maps.tsv lesion_sha256).
+
+        Only the files modified after the maps.tsv are hashed (once per size and time), so that an unchanged study costs one stat per lesion.
+        """
+        path = self.currentMapsTsv()
+        if not path:
+            return []
+        from LesionNetworkMappingLib import export
+
+        try:
+            mapsTime = os.stat(path).st_mtime_ns
+        except OSError:
+            return []
+        rows = self.mapsInfo()[1]
+        changed = []
+        for row in rows:
+            lesion, recorded = row.get("lesion"), row.get("lesion_sha256")
+            if not lesion or recorded in (None, "", "n/a"):
+                continue
+            try:
+                info = os.stat(lesion)
+            except OSError:
+                continue  # a removed lesion is the Cohort card's matter; its map is unchanged
+            if info.st_mtime_ns <= mapsTime:
+                continue
+            key = (lesion, info.st_size, info.st_mtime_ns)
+            if key not in self._lesionHashes:
+                try:
+                    self._lesionHashes[key] = export.file_sha256(lesion)
+                except OSError:
+                    continue
+            if self._lesionHashes[key] != recorded:
+                changed.append(row.get("participant_id"))
+        return changed
+
+    def staleReason(self, kind, folder):
+        """Why the result in ``folder`` does not belong to the current cohort maps (a sentence), or "" when it does.
+
+        A result records the maps it used (``cohort_maps.maps_sha256``); a result written before that was recorded is
+        stale when the maps.tsv is newer than it. Only the analyses of the cohort maps (``MAP_KINDS``) are checked.
+        """
+        if kind not in MAP_KINDS or not folder:
+            return ""
+        mapsTsv = self.currentMapsTsv()
+        if not mapsTsv:
+            return ""
+        path = os.path.join(folder, RESULT_FILES[kind])
+        record = _readJson(path) or {}
+        used = (record.get("cohort_maps") or {}).get("maps_sha256") if isinstance(record.get("cohort_maps"), dict) else None
+        if used:
+            stale = used != self.mapsInfo()[0]
+        else:
+            stale = (_stat(path) or (0, 0))[0] < (_stat(mapsTsv) or (0, 0))[0]
+        if stale:
+            return _("Computed on the previous cohort maps: the lesions were mapped again since ({n} lesion maps now). Run it again to update; until then this is not the current result.").format(
+                n=len(self.mapsInfo()[1]))
+        changed = self.changedLesions()
+        if changed:
+            names = ", ".join(changed[:3]) + (" …" if len(changed) > 3 else "")
+            return _("A lesion changed after the lesions were mapped ({names}): map the lesions again (Cohort card), then run this again; until then this is not the current result.").format(names=names)
+        return ""
 
     def showSettings(self):
         from LesionNetworkMappingLib import robustness
@@ -927,6 +1033,7 @@ class RobustCard:
         if not folder or not os.path.isfile(os.path.join(folder, RESULT_FILES[kind])):
             return False
         self.results[kind] = folder
+        self.stale[kind] = self.staleReason(kind, folder)
         section = self.sections[kind]
         show = {"sweep": self.showSweep, "replicate": self.showReplicate, "splithalf": self.showSplitHalf, "influence": self.showInfluence, "seeds": self.showSeeds,
                 "consolidate": self.showConsolidate, "connsplit": self.showConnectome}[kind]
@@ -935,8 +1042,11 @@ class RobustCard:
         except Exception:
             logging.exception(f"Lesion network mapping: the {kind} result could not be shown")
             self.results.pop(kind, None)
+            self.stale.pop(kind, None)
             section["holder"].hide()
             return False
+        section["stale"].setText(self.stale[kind])
+        section["stale"].setVisible(bool(self.stale[kind]))
         section["holder"].show()
         self.showMethods()
         return True
@@ -968,7 +1078,7 @@ class RobustCard:
             self.flipLabel.setText(_("Conclusion flips could not be checked: the primary has no peak or region of interest to follow."))
             self.flipLabel.setStyleSheet("")
         self.flipLabel.show()
-        self.sweepStale = stale
+        self.sweepStale = stale or bool(self.stale.get("sweep"))
         every = self.allSettings.isChecked()
         shown = [row for row in rows if every or _flag(row.get("primary")) or _float(row.get("overlap_pct")) in (None, primaryPct)]
         self.sweepTable.setRowCount(len(shown))
@@ -1002,7 +1112,10 @@ class RobustCard:
         _clear(self.tileGrid)
         self.tileNote.setText("")
         if self.sweepStale:
-            self.tileNote.setText(_("The tiles are not drawn: they would show the current primary, not the one this table was computed for."))
+            if self.stale.get("sweep"):
+                self.tileNote.setText(_("The tiles are not drawn: they would show the current cohort maps, not the ones this table was computed on."))
+            else:
+                self.tileNote.setText(_("The tiles are not drawn: they would show the current primary, not the one this table was computed for."))
             return
         mapsTsv = self.currentMapsTsv()
         if not mapsTsv:
@@ -1205,6 +1318,10 @@ class RobustCard:
         self.scheduleRefresh()
 
     def onResultChanged(self):
+        self.scheduleRefresh()
+
+    def onCohortMapsChanged(self, path=None):
+        """The lesions were mapped (again): the shown results are checked against the new maps."""
         self.scheduleRefresh()
 
     def cleanup(self):

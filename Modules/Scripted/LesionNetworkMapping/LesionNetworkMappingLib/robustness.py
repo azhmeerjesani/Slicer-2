@@ -576,11 +576,43 @@ class Cohort:
         self.info = info or {}
         self.statistic = statistic
         self.run_id = run_id
+        self.maps_sha256 = None  # the identity of the maps.tsv the maps were read from (:func:`maps_sha256`), when known
 
     def subset(self, ids):
         index = {sid: row for row, sid in enumerate(self.ids)}
         rows = [index[sid] for sid in ids]
-        return Cohort(self.maps[rows], ids, self.n, self.grid, self.mask_indices, self.gsr, self.label, self.info, self.statistic, self.run_id)
+        subset = Cohort(self.maps[rows], ids, self.n, self.grid, self.mask_indices, self.gsr, self.label, self.info, self.statistic, self.run_id)
+        subset.maps_sha256 = self.maps_sha256
+        return subset
+
+
+def maps_sha256(rows):
+    """The identity of a cohort's per-lesion maps: SHA-256 of the sorted (participant_id, cache key) pairs of its maps.tsv rows.
+
+    The cache key covers the lesion's bytes, the connectome and its subjects and the mapping options (cohortmaps'
+    ``lesions_sha256``); rows without a key use their lesion_sha256. Mapping the same lesions again gives the same value.
+    """
+    from . import runs
+
+    pairs = []
+    for row in rows:
+        key = row.get("key")
+        if key in (None, "", NA):
+            key = row.get("lesion_sha256")
+        pairs.append((str(row.get("participant_id")), str(key)))
+    return runs.params_sha256(sorted(pairs))
+
+
+def maps_tsv_sha256(maps_tsv):
+    """:func:`maps_sha256` of a maps.tsv file."""
+    from . import cohortmaps
+
+    return maps_sha256(cohortmaps.read_maps_tsv(maps_tsv, resolve_paths=False))
+
+
+def _cohort_maps(cohort):
+    """{"run_id", "maps_sha256"} of the cohort maps a run used: a run whose maps are not the current ones is marked stale in the Robust card."""
+    return {"run_id": cohort.run_id, "maps_sha256": getattr(cohort, "maps_sha256", None)}
 
 
 def bundle_cohort_info(bundle, n=None):
@@ -632,8 +664,10 @@ def load_cohort(maps_tsv, column="T", label=None):
     n = record.get("n")
     if n is None:
         n = cohort_lib._n_from_header(rows[0]["T"]) if "T" in rows[0] else None
-    return Cohort(maps, [row["participant_id"] for row in rows], n, Grid(shape, affine), indices, gsr=bundle.get("gsr"),
-                  label=label or bundle.get("label") or "A", info=bundle, statistic=column, run_id=record.get("run_id"))
+    cohort = Cohort(maps, [row["participant_id"] for row in rows], n, Grid(shape, affine), indices, gsr=bundle.get("gsr"),
+                    label=label or bundle.get("label") or "A", info=bundle, statistic=column, run_id=record.get("run_id"))
+    cohort.maps_sha256 = maps_sha256(rows)
+    return cohort
 
 
 def case_subset(cohort, participants, group_column="group"):
@@ -1008,7 +1042,7 @@ def replicate_on(maps_a, info_a, bundle_b, lesions, rule, out, ids=None, sign="b
                      connectome_a={"label": cohort_a.label, "n": cohort_a.n, "v": cohort_a.v, "manifest_sha256": (cohort_a.info or {}).get("manifest_sha256"), "run_id": cohort_a.run_id},
                      connectome_b={"label": cohort_b.label, "n": cohort_b.n, "v": cohort_b.v, "manifest_sha256": (cohort_b.info or {}).get("manifest_sha256"), "run_id": run_b},
                      resolved_a=_resolved_json(result["resolved_a"]), resolved_b=_resolved_json(result["resolved_b"]), common_voxels=result["common_voxels"],
-                     summary=summary, flagged=flagged, outputs={"connectomes": _relative(tsv, out)})
+                     summary=summary, flagged=flagged, outputs={"connectomes": _relative(tsv, out)}, cohort_maps=_cohort_maps(cohort_a))
     _write_json(os.path.join(out, "replicate.json"), record)
     record["rows"] = result["rows"]
     return record
@@ -1839,7 +1873,7 @@ def main(argv=None):
             lesion_set = _lesion_set(cohort, left_out)
             run_id = _register(_run_root(args, out), out, "sweep", {"rule": rule, "overlap_pct": args.overlap, "sign": args.sign, "lesions": lesion_set["lesions"]}, parents=[*parents, cohort.run_id],
                                summary=summary, outputs=[SWEEP_TSV])
-            _write_json(os.path.join(out, "sweep.json"), _record("sweep", out, run_id, rule=rule, overlap_pct=args.overlap, sign=args.sign, summary=summary, **lesion_set))
+            _write_json(os.path.join(out, "sweep.json"), _record("sweep", out, run_id, rule=rule, overlap_pct=args.overlap, sign=args.sign, summary=summary, cohort_maps=_cohort_maps(cohort), **lesion_set))
             outputs = [os.path.join(out, SWEEP_TSV)]
         elif args.command == "replicate":
             cohort, _left_out = _cases_of(args, load_cohort(args.maps))
@@ -1901,7 +1935,7 @@ def main(argv=None):
                 fields = {k: v for k, v in result.items() if k != "rows"}
             run_id = _register(_run_root(args, out, args.study), out, args.command, params, parents=[*parents, cohort.run_id], summary=summary, outputs=outputs,
                                seeds={"splits": args.seed} if args.command == "splithalf" else None)
-            _write_json(os.path.join(out, f"{args.command}.json"), _record(args.command, out, run_id, glm_input=glm_input, **fields, **_lesion_set(cohort, left_out)))
+            _write_json(os.path.join(out, f"{args.command}.json"), _record(args.command, out, run_id, glm_input=glm_input, cohort_maps=_cohort_maps(cohort), **fields, **_lesion_set(cohort, left_out)))
             outputs = [os.path.join(out, name) for name in outputs]
         elif args.command == "seeds":
             variants = [name.strip() for name in args.variants.split(",") if name.strip()]

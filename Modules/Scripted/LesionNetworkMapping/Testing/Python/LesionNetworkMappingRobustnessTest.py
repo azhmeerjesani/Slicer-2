@@ -139,6 +139,9 @@ class ReplicateTest(RobustnessTestBase):
         self.assertTrue(all(-1.0 <= float(row["r"]) <= 1.0 for row in lesion_rows))
         self.assertTrue(all(row["peaks_persist"].endswith("/3") for row in lesion_rows))
         self.assertEqual({row["kind"] for row in rows}, {"lesion", "group_mean", "group_sensitivity"})
+        # the maps of connectome A that it replicated (the Robust card marks it stale when they change)
+        self.assertEqual(record["cohort_maps"], {"run_id": self.cohort_a.run_id, "maps_sha256": self.cohort_a.maps_sha256})
+        self.assertTrue(self.cohort_a.maps_sha256)
         # Registered with the summary that the reporting checklist reads
         record_run = runs.load(out)[record["run_id"]]
         summary = runs.read_summary(out, record_run)
@@ -424,6 +427,34 @@ class LabelsAndCommandLineTest(RobustnessTestBase):
         code, events, stderr = self.run_cli("consolidate", "--study", self.study_dir, "--side", "X", "--out", self.path("bad"))
         self.assertEqual(code, 1)
         self.assertEqual(events[-1]["event"], "error")
+
+    def test_records_name_the_cohort_maps_they_used(self):
+        """Every analysis of the cohort maps records the identity of its maps.tsv (``cohort_maps.maps_sha256``), so that
+        the Robust card can tell a result of earlier maps from a current one: mapping the same lesions again keeps the
+        identity, mapping other lesions changes it (bug map-robust-card:robust-results-not-stale-after-cohort-remap).
+        """
+        maps = os.path.join(self.maps_a_dir, cohortmaps.MAPS_TSV)
+        identity = robustness.maps_tsv_sha256(maps)
+        self.assertEqual(self.cohort_a.maps_sha256, identity)
+        self.assertEqual(self.cohort_a.subset(self.sids[:3]).maps_sha256, identity)  # a subset names the maps it was taken from
+        rows = cohortmaps.read_maps_tsv(maps, resolve_paths=False)
+        self.assertEqual(robustness.maps_sha256(list(reversed(rows))), identity)  # the row order does not matter
+        # the same lesions mapped again (from the cache): the same maps
+        again = self.path("maps-again")
+        cohortmaps.run(self.lesions, self.bundle_a, again, cache_root=os.path.join(self.data, "cache"), emit=_quiet, run_root=self.tmp)
+        self.assertEqual(robustness.maps_tsv_sha256(os.path.join(again, cohortmaps.MAPS_TSV)), identity)
+        # one lesion fewer: other maps
+        fewer = self.path("maps-fewer")
+        cohortmaps.run(self.lesions[:-1], self.bundle_a, fewer, cache_root=os.path.join(self.data, "cache"), emit=_quiet, run_root=self.tmp)
+        self.assertNotEqual(robustness.maps_tsv_sha256(os.path.join(fewer, cohortmaps.MAPS_TSV)), identity)
+        rule = json.dumps(TOP10)
+        for command, extra in (("sweep", []), ("splithalf", ["--n-splits", "4"]), ("influence", ["--top-k", "2"])):
+            out = self.path(f"cli-maps-{command}")
+            code, events, stderr = self.run_cli(command, "--maps", maps, "--rule", rule, "--overlap", "50", *extra, "--out", out, "--run-root", out)
+            self.assertEqual(code, 0, (stderr, events[-1:]))
+            with open(os.path.join(out, f"{command}.json"), encoding="utf-8") as f:
+                record = json.load(f)
+            self.assertEqual(record.get("cohort_maps"), {"run_id": self.cohort_a.run_id, "maps_sha256": identity}, command)
 
     def test_command_line_primary_is_the_overlap_tabs_sensitivity_map(self):
         """With the Overlap tab's sign and participants.tsv (as the Robust card passes them), the sweep's primary row is
