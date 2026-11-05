@@ -720,6 +720,7 @@ class PipelineModel:
         self.queuedFor = None
         self.version = 0
         self.finishedAt = None
+        self._peak = 0.0  # the highest overall percent so far (the bar, the state line and the status chip never go back)
 
     @property
     def out(self):
@@ -767,6 +768,7 @@ class PipelineModel:
             self.cancelledEvent = event
         elif kind == "error":
             self.errorEvent = event
+        self._peak = max(self._peak, self._rawPercent())
         self.version += 1
 
     def finish(self, job):
@@ -790,9 +792,18 @@ class PipelineModel:
             return None
 
     def percent(self):
-        """Estimate-weighted percent of the whole run (0-100)."""
+        """Estimate-weighted percent of the whole run (0-100); it only grows.
+
+        The counter of a progress event restarts inside a stage (maps, then permutations; each null-model sub-step), so the
+        raw estimate would fall back each time a sub-step starts: the highest value seen is kept for the job.
+        """
         if self.state == "done":
             return 100.0
+        self._peak = max(self._peak, self._rawPercent())
+        return self._peak
+
+    def _rawPercent(self):
+        """Estimate-weighted percent of the whole run from the finished stages and the last progress event of the current one."""
         weights = self.weights()
         total = sum(weights.values())
         if not total:

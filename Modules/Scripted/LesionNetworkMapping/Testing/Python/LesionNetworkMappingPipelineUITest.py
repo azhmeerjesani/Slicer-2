@@ -783,5 +783,33 @@ class LesionNetworkMappingPipelineUITest(unittest.TestCase):
                 os.environ[pipeline.NORMALIZER_ENV] = previous
 
 
+class LesionNetworkMappingPipelineModelPercentTest(unittest.TestCase):
+    """The overall percent of the Run everything card (bar, state line, status chip) only grows (A-04c)."""
+
+    def test_percent_never_goes_back_when_a_sub_step_restarts_its_counter(self):
+        from LesionNetworkMappingUI import card_pipeline as cp
+
+        model = cp.PipelineModel()
+        stages = [{"name": "maps", "estimate_s": 10}, {"name": "stats", "estimate_s": 10}, {"name": "report", "estimate_s": 20}]
+        model.apply({"event": "start", "stages": stages})
+        model.apply({"event": "stage", "name": "maps", "status": "running"})
+        model.apply({"event": "stage", "name": "maps", "status": "done"})
+        model.apply({"event": "stage", "name": "stats", "status": "running"})
+        seen = []
+        # a sub-step ends at 20/25 and the next one restarts at 3/100: the raw estimate would fall back
+        for done, total in ((20, 25), (3, 100), (40, 100), (90, 100)):
+            model.apply({"event": "progress", "stage": "stats", "done": done, "total": total})
+            seen.append(model.percent())
+        self.assertEqual(seen, [45.0, 45.0, 45.0, 47.5])
+        text = model.statusText()
+        model.apply({"event": "stage", "name": "stats", "status": "done"})  # the stage start/end events clear the counter too
+        self.assertEqual(model.percent(), 50.0)
+        model.apply({"event": "stage", "name": "report", "status": "running"})
+        self.assertEqual(model.percent(), 50.0)
+        self.assertIn("47%", text)
+        model.state = "done"
+        self.assertEqual(model.percent(), 100.0)
+
+
 if __name__ == "__main__":
     unittest.main()
