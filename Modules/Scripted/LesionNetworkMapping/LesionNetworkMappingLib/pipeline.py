@@ -2864,6 +2864,13 @@ class Runner:
                 results[label] = {"column": column, "n": len(scored), "skipped": f"fewer than {self.config.min_slnm_n} values"}
                 self._drop_stale_results([self.path(STAGES_DIR, f"slnm-{label}")], slnm)
                 continue
+            if scored and len({value for _row, value in scored}) == 1:
+                shown = self.study.subject(scored[0][0]["participant_id"]).get(column)
+                reason = f"{column} has the same value ({shown}) for every mapped lesion: there is nothing to map"
+                self.info(f"sLNM of {column} not run: {reason}.", code="slnm_constant_score")
+                results[label] = {"column": column, "n": len(scored), "skipped": reason}
+                self._drop_stale_results([self.path(STAGES_DIR, f"slnm-{label}")], slnm)
+                continue
             folder = self.stage_dir(f"slnm-{label}")
             args = ["--maps", self.maps_tsv, "--participants", self.participants_tsv, "--score", column, "--covariates", ",".join(self.config.covariates)]
             if self.config.volume_off_reason and "volume_ml" not in self.config.covariates:
@@ -2904,6 +2911,9 @@ class Runner:
             results[label] = {"column": column, "n": record.get("n"), "method": self.config.slnm_method, "covariates": self.config.covariates, "max_abs_r": None if r_map is None else float(np.nanmax(np.abs(r_map))),
                               "fwe_voxels": fwe_voxels, "r_with_volume": None if r_volume is None or not math.isfinite(r_volume) else round(r_volume, 4), "descs": descs, "stem": desc_stem,
                               "folder": self.rel(folder), "run_id": record.get("run_id")}
+        if results and all("skipped" in value for value in results.values()):
+            # Nothing was run (every score constant or with too few values): a skipped stage with the reason, not a done one with no outputs
+            return self._skip("slnm", " | ".join(f"{value['column']}: {value['skipped']}" for value in results.values()), "skipped")
         status = "done"
         reason = None
         if failed and len(failed) == sum(1 for value in results.values() if "skipped" not in value):

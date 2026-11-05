@@ -612,6 +612,21 @@ class ChecksTest(_StudyTestCase):
                 self.assertNotIn("collinear_covariate", blocks)
                 self.assertIn(message, [check.message for check in design.checks if check.code == "invalid_transform"])
 
+    def test_constant_score_is_named_not_called_linearly_dependent(self):
+        rows = [(f"sub-{index:02d}", {"group": "case" if index % 2 else "control", "volume_ml": float(5 + index), "score": 5.0}) for index in range(12)]
+        study = self.make_study(rows, "constscore")
+        design = designlib.build_design(study, DesignSpec(test="continuous", score_column="score", covariates=["volume_ml"]))
+        blocks = _codes(design.checks, "block")
+        self.assertIn("constant_score", blocks)
+        self.assertNotIn("rank_deficient", blocks)
+        self.assertNotIn("contrast_not_estimable", blocks)
+        message = next(check.message for check in design.checks if check.code == "constant_score")
+        self.assertEqual(message, "score has the same value (5) for every included lesion: there is nothing to map")
+        # A score that varies has no such check
+        rows[0][1]["score"] = 6.0
+        varied = designlib.build_design(self.make_study(rows, "varscore"), DesignSpec(test="continuous", score_column="score", covariates=["volume_ml"]))
+        self.assertNotIn("constant_score", _codes(varied.checks))
+
     def test_dimensionality_imbalance(self):
         rows = []
         for index in range(30):

@@ -709,6 +709,12 @@ def build_design(study, spec=None, run_metas=None, maps=None):
             checks.append(Check("block", "invalid_transform", error))
         effect_columns = [np.ones(n), values - np.mean(values)]
         effect_names = [INTERCEPT, name]
+        if not error and np.all(np.isfinite(values)) and np.ptp(values) == 0:
+            # A score with one value for every lesion has no variance to map: say so, instead of the rank and
+            # estimability messages that its all-zero centred column would cause
+            constant_score = spec.score_column
+            shown = rows[0][spec.score_column]
+            checks.append(Check("block", "constant_score", f"{constant_score} has the same value ({shown}) for every included lesion: there is nothing to map", {"score": constant_score}))
         treatment_columns, treatment_names = effect_columns, effect_names
     else:
         effect_columns, effect_names = [np.ones(n)], [INTERCEPT]
@@ -865,6 +871,9 @@ def build_design(study, spec=None, run_metas=None, maps=None):
             reduced = np.delete(X, [len(effect_names) + index for index in indices], axis=1)
             if indices and _deficiency(X) > _deficiency(reduced):
                 checks.append(Check("block", "collinear_covariate", f"Covariate {column} is collinear with {spec.score_column} and the other columns; remove it", {"covariate": column}))
+    if any(check.code == "constant_score" for check in checks):
+        # Consequences of the constant score column, already explained by the check above
+        matrix = [check for check in matrix if check.code not in ("rank_deficient", "contrast_not_estimable")]
     checks.extend(matrix)
     if run_metas:
         from .export import check_poolable

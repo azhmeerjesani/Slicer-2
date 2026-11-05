@@ -891,7 +891,7 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         self.assertTrue({"conjPos", "caseVsControlTstat"} <= listed, listed)
 
     def test_methods_cite_only_the_slnm_of_the_latest_run(self):
-        """A rerun whose sLNM fails (every score equal: the design is rank-deficient) leaves no sLNM in its methods, report or
+        """A rerun whose sLNM is skipped (every score equal: there is nothing to map) leaves no sLNM in its methods, report or
         files; a rerun that computes it again cites only its own sLNM, not also the one it superseded (same folder, same score).
         """
         fx = fixture.make_fixture(os.path.join(self.tmp, "f-slnm-rerun"))
@@ -921,7 +921,13 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         self.assertEqual(len(first), 1, first)
         set_scores(lambda index: 5)
         status, texts = outputs("constant scores")
-        self.assertEqual(status["slnm"], "failed")
+        self.assertEqual(status["slnm"], "skipped", "a constant score is skipped with its reason, not a failed stage")
+        with open(os.path.join(out, "pipeline.json"), encoding="utf-8") as f:
+            pipeline_json = json.load(f)
+        self.assertEqual(pipeline_json.get("failed_stages"), [])
+        for name, text in texts.items():
+            self.assertNotIn("linearly dependent", text, name)
+            self.assertNotIn("rank-deficient", text, name)
         for name, text in texts.items():
             self.assertEqual(cited.findall(text), [], f"{name} describes the sLNM of an earlier run")
         self.assertNotIn(first[0], texts["methods.md"])
