@@ -101,6 +101,14 @@ class OverlapTab:
         self.signFrame, self.signGroup = widgets.segmented([SIGN_LABELS[sign] for sign in SIGNS])
         self.signFrame.setObjectName("LNMOverlapSign")
         self.signFrame.setToolTip(_("Sign · ± both (sign-specific sensitivity), + positive, − negative"))  # noqa: RUF001
+        widgets.nameSegmentedButtons(
+            self.signGroup,
+            [
+                (_("Both tails"), _("Sign-specific sensitivity")),
+                (_("Positive tail"), _("Only positive values")),
+                (_("Negative tail"), _("Only negative values")),
+            ],
+        )
         for index in range(len(SIGNS)):
             # the Robust card's primary uses this sign too (its "Primary (fixed)" line and its analyses)
             self.signGroup.button(index).connect("toggled(bool)", lambda checked: self.ctx.notifyOverlapChanged() if checked else None)

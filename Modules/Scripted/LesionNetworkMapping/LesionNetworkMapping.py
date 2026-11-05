@@ -5067,6 +5067,15 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.signFrame, self.signGroup = self.widgets.segmented([SIGN_LABELS[sign] for sign in SIGNS])
         self.signFrame.setObjectName("LNMSignSegmented")
         self.signFrame.setToolTip(_("Sign · ± both tails, + positive, − negative"))  # noqa: RUF001
+        # The glyph buttons carry their own accessible name and tooltip (a screen reader would say "plus" and "minus")
+        self.widgets.nameSegmentedButtons(
+            self.signGroup,
+            [
+                (_("Both tails"), _("Positive and negative values")),
+                (_("Positive tail"), _("Only positive values")),
+                (_("Negative tail"), _("Only negative values")),
+            ],
+        )
         self.signGroup.connect("idClicked(int)", self.onSignClicked)
         row.addWidget(self.signFrame)
         layout.addLayout(row)

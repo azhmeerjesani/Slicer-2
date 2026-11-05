@@ -574,6 +574,19 @@ def segmented(labels):
     return frame, group
 
 
+def nameSegmentedButtons(group, entries):
+    """Give the buttons of a ``segmented()`` group an accessible name and a tooltip each.
+
+    ``entries`` holds one ``(name, description)`` per button, in the order of the group. The buttons of a glyph-only
+    segmented control (plus, minus, plus-minus) would otherwise be announced by their glyph and have no tooltip of their own
+    (USABILITY 10: every control has a tooltip, "Name · description").
+    """
+    ui = _studioUi()
+    for button, (name, description) in zip(group.buttons(), entries, strict=False):
+        button.setAccessibleName(name)
+        button.setToolTip(ui.tooltip(name, None, description) if ui is not None else f"{name} · {description}")
+
+
 #: Height of the rows of a ``tableView()`` (VISUAL 4.5: 28 px)
 TABLE_ROW_HEIGHT = 28
 
