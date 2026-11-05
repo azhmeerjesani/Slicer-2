@@ -1078,6 +1078,61 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             else:
                 settings.setValue("Studio/PanelWidth", savedWidth)
 
+    def test_11b_inspector_notice_shows_all_wrapped_lines(self):
+        """A notice whose wrapped lines need more than its sizeHint (a title that wraps, an explanation line) is given its
+        height-for-width: the slot is not capped at the notice's sizeHint and no line is cut off (ENG-22).
+        """
+        from StudioLib import ui
+
+        settings = qt.QSettings()
+        savedWidth = settings.value("Studio/PanelWidth")
+        try:
+            studioShell = self._applyStudio()
+            studioShell.switchTo("draw")
+            studioShell.panelWidth = 340
+            self._pump(10)
+            notice = qt.QFrame()
+            notice.setObjectName("StudioTestWrappedNotice")
+            notice.setProperty("studioNoticeLine", True)
+            notice.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+            layout = qt.QVBoxLayout(notice)
+            layout.setContentsMargins(12, 6, 8, 6)
+            layout.setSpacing(4)
+            title = qt.QLabel("Adjudicate \u00b7 sub-02 \u00b7 1 of 1")
+            title.setWordWrap(True)
+            layout.addWidget(title)
+            detail = qt.QLabel()
+            detail.setWordWrap(True)
+            detail.setTextFormat(qt.Qt.PlainText)
+            detail.setText(
+                "A (red): first tracing by AB \u00b7 B (blue): second tracing by CD\n"
+                "Dice 0.00 \u00b7 centroid distance 30.0 mm \u00b7 volumes 1.47 / 1.47 mL\n"
+                "The consensus becomes the lesion (rater = consensus); both tracings are kept, every choice is recorded")
+            layout.addWidget(detail)
+            _keepAlive.append(notice)
+            studioShell.setInspectorNotice(notice, key="wrapped", workspace="draw")
+            self._pump(10)
+            slot = self.mainWindow.findChild("QWidget", "StudioInspectorNotice")
+            self.assertTrue(notice.isVisible())
+            # Narrow enough that the explanation needs several lines: the layout's sizeHint is shorter than its height-for-width
+            needed = notice.heightForWidth(notice.width)
+            self.assertGreater(needed, 0)
+            self.assertGreaterEqual(notice.height, needed, "notice %d px, needs %d" % (notice.height, needed))
+            self.assertGreaterEqual(detail.height, detail.heightForWidth(detail.width), "the last line of the notice is cut off")
+            self.assertGreaterEqual(slot.height, slot.heightForWidth(slot.width))
+            # A notice of one short line is not stretched
+            short = ui.noticeLine("Download the template?")
+            _keepAlive.append(short)
+            studioShell.setInspectorNotice(short, key="short", workspace="draw")
+            self._pump(10)
+            self.assertLessEqual(slot.height, short.heightForWidth(short.width) + 20)
+            studioShell.setInspectorNotice(None)
+        finally:
+            if savedWidth is None:
+                settings.remove("Studio/PanelWidth")
+            else:
+                settings.setValue("Studio/PanelWidth", savedWidth)
+
     def test_12_help_and_menu_hooks(self):
         """'?' shows the help of the current tool from the hook and links the module help; '⋯' shows hook items."""
         from StudioLib import shell, workspaces

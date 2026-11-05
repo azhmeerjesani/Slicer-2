@@ -2264,8 +2264,10 @@ class Shell:
         layout = contents.layout()
         self._noticeSlot = qt.QWidget()
         self._noticeSlot.setObjectName("StudioInspectorNotice")
-        # Ignored: a notice never sets the minimum width of the inspector (notices are height-for-width)
-        policy = qt.QSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Maximum)
+        # Ignored: a notice never sets the minimum width of the inspector (notices are height-for-width).
+        # Preferred, not Maximum, vertically: Maximum caps the slot at its (width-independent) sizeHint, which is
+        # shorter than heightForWidth() for a notice with wrapped lines, and cuts off its last line
+        policy = qt.QSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
         policy.setHeightForWidth(True)
         self._noticeSlot.setSizePolicy(policy)
         noticeLayout = qt.QVBoxLayout(self._noticeSlot)
