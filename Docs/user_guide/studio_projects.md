@@ -44,7 +44,9 @@ Templates/ appears when you add your own MNI template. How to add one and use it
 explained in [Your own MNI templates](studio_templates.md).
 
 A folder appears only when something is saved into it, so a new project with
-one scan has just `Images/` and its `.mrml` file.
+one scan has `Images/` (the copy of the scan), `Segmentations/` (the empty
+lesion drawing that opening a scan creates, `Lesions (<scan name>)`) and its
+`.mrml` file.
 
 ## Projects
 

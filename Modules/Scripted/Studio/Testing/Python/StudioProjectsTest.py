@@ -5007,6 +5007,44 @@ class StudioProjectsTest(unittest.TestCase):
             self.assertNotIn("Choose folder…", content, f"{name} names a button that the folder question does not have")
             self.assertIn("Choose…", content, f"{name} does not name the button that picks another folder")
 
+    def test_68b_documentation_names_the_folders_of_a_new_project_with_one_scan(self):
+        """The docs said that a new project with one scan has just Images/ and its .mrml file; opening a scan also creates the
+        empty "Lesions (<scan>)" drawing, which is saved into Segmentations/ (BB-1). The folders that a saved one-scan project
+        holds must be exactly the folders that the page names for it.
+        """
+        import re
+
+        from StudioLib import importer, shell
+
+        root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", ".."))
+        path = os.path.join(root, "Docs", "user_guide", "studio_projects.md")
+        if not os.path.isfile(path):
+            self.skipTest("the documentation is not next to this build")
+        with open(path, encoding="utf-8") as stream:
+            content = " ".join(stream.read().split())
+        sentence = re.search(r"A folder appears only when something is saved into it, so a new project with one scan (.*?\.mrml`)", content)
+        self.assertIsNotNone(sentence, "the page no longer says what a new project with one scan holds")
+        named = set(re.findall(r"`([A-Za-z]+)/`", sentence.group(1)))
+
+        volume, scanPath = self._userVolume("one_scan", shape=(12, 14, 16))
+        slicer.mrmlScene.RemoveNode(volume)
+        service = self._service()
+        running = self.autosave._service
+        self.autosave._service = service  # as the running service of the application
+        studioShell = shell.Shell(force=True)
+        try:
+            studioShell.apply()
+            slicer.app.processEvents()
+            importer.loadFiles([scanPath], studioShell)
+            project = self._projectFor(service)
+            self._save(service)
+            held = {name for name in os.listdir(project.path) if os.path.isdir(os.path.join(project.path, name)) and not name.startswith(".")}
+        finally:
+            self.autosave._service = running
+            studioShell.dispose()
+            slicer.app.processEvents()
+        self.assertEqual(held, named, "the page names other folders for a new project with one scan than the project holds")
+
     def test_69_renaming_a_folder_patient_or_study_is_saved(self):
         """Renaming a folder, patient or study item in the Data module was never saved (BB-1): the item has no data node, so
         vtkMRMLSubjectHierarchyNode::SetItemName does not modify the hierarchy node, and the fingerprint cached the
