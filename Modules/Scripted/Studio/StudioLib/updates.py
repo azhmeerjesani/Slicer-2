@@ -2244,6 +2244,14 @@ class RequiredUpdateDialog:
         if self.state != "ready":
             self.service.prepared = None
             self.service._disconnectQuit()
+        else:
+            # The update is ready and installs at the exit, but Quit is not Restart now: the exit that Restart now
+            # asked for (and the user cancelled) must not start the application again. (With administrator rights the
+            # helper is already running with its relaunch choice and cannot be changed.)
+            try:
+                self.service.installOnQuit(relaunch=False)
+            except updates_install.InstallError:
+                logging.error("Updates: setting the install at quit failed:\n" + traceback.format_exc())
         self._closeApplication()
 
     def _closeApplication(self):

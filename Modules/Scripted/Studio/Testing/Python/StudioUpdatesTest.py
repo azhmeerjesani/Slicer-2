@@ -2649,6 +2649,43 @@ fi
         self.assertFalse(service._quitConnected)
         self.assertTrue(self._waitFor(lambda: not os.path.exists(root), 10), "the staged copy is removed")
 
+    def test_RequiredDialogQuitAfterReadyDoesNotRelaunch(self):
+        """Required update, Update now, ready (Restart now asked for a restart), the exit is cancelled and the dialog
+        comes back: Quit must not start the application again (the update still installs at the exit).
+        """
+        updates = self.updates
+        if updates.platformKey() != "linux-x86_64":
+            self.skipTest("the Linux package path is tested on Linux")
+        self._publish("1.2.1", required=True)
+        target = self._fakeLinuxInstall("0.9.0")
+        updates._installableOverride = True
+        updates.installTargetOverride = target
+        service = self._service()
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        required = updates.RequiredUpdateDialog(service, slicer.util.mainWindow())
+        self.addCleanup(required.dispose)
+        closes = []
+        required._closeApplication = lambda: closes.append(True)
+        required.onUpdateClicked()
+        self.assertTrue(self._waitFor(lambda: required.state in ("ready", "failed"), 30), required.statusLabel.text)
+        self.assertEqual(required.state, "ready", required.statusLabel.text)
+        self.assertEqual(closes, [True], "Restart now closes the application")
+        self.assertTrue(service._relaunch, "Restart now asked for a relaunch")
+        self.assertTrue(service._quitConnected)
+        # The exit was cancelled (the dialog is back with Restart now): Quit
+        required.quit()
+        self.assertEqual(closes, [True, True])
+        self.assertFalse(service._relaunch, "Quit does not start the application again")
+        self.assertTrue(service._quitConnected, "the update installs at the exit")
+        self.assertIsNotNone(service.prepared)
+        # What the exit starts: the install helper without relaunch
+        launches = []
+        service.prepared.launch = lambda stateDir, relaunch=True, record=None, **kw: launches.append(relaunch)
+        service._onAboutToQuit()
+        self.assertEqual(launches, [False])
+        service.prepared = None
+        service.dispose()
+
     def test_NothingUnderTesting(self):
         updates = self.updates
         self.assertTrue(updates.isDisabledByEnvironment())
