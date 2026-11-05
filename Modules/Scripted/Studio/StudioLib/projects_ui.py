@@ -210,6 +210,15 @@ def _question(parent, title, text, buttons, default=0):
         dialog.deleteLater()
 
 
+def _notice(parent, title, text):
+    """A refusal or error in the Studio dialog chrome (one OK button), instead of the legacy "Slicer error" box."""
+    dialog = _ChromeDialog(parent, "StudioProjectsNotice", "triangle-alert", title, text, [_("OK")], 0)
+    try:
+        return dialog.run()
+    finally:
+        dialog.deleteLater()
+
+
 class RenameDialog(_ChromeDialog):
     """"Rename project": the name field, Rename (primary) and Cancel (``StudioProjectsRenameDialog``). ``name`` is the text
     when accepted, None otherwise.
@@ -782,7 +791,7 @@ def openProjectDialog():
     if not path:
         return False
     if projects.sceneFile(path) is None:
-        slicer.util.errorDisplay(_("{folder} is not a project: it has no scene file (.mrml).").format(folder=path))
+        _notice(None, _("Open project"), _("{folder} is not a project: it has no scene file (.mrml).").format(folder=path))
         return False
     return openProject(path)
 
@@ -813,7 +822,7 @@ def renameDialog(path=None, parent=None):
     except (projects.ProjectError, OSError) as error:
         from .autosave import plainOSError
 
-        slicer.util.errorDisplay(plainOSError(error) if isinstance(error, OSError) else str(error))
+        _notice(parent, _("Rename project"), plainOSError(error) if isinstance(error, OSError) else str(error))
         return None
     projects.notifyChanged()
     message(_("Renamed to {name}").format(name=os.path.basename(newPath)))
@@ -858,6 +867,11 @@ def duplicate(path):
 
 def moveToTrash(path, parent=None):
     name = os.path.basename(os.path.normpath(path))
+    # The open project and one open in another Slicer Studio cannot be moved: say so before asking, not after the answer
+    refusal = projects.trashRefusal(path)
+    if refusal:
+        _notice(parent, _("Move to Trash"), refusal)
+        return False
     if _question(parent, _("Move to Trash"), _("Move the project {name} to the Trash?").format(name=name), [_("Move to Trash"), _("Cancel")]) != 0:
         return False
 
@@ -868,7 +882,7 @@ def moveToTrash(path, parent=None):
     try:
         gone = projects.trashFolder(path, confirmDelete)
     except (projects.ProjectError, OSError) as error:
-        slicer.util.errorDisplay(str(error))
+        _notice(parent, _("Move to Trash"), str(error))
         return False
     if gone:
         projects.notifyChanged()
@@ -922,7 +936,8 @@ def _studyOpen():
 def changeRootDialog(parent=None):
     """Change… of Settings › Saving: choose another folder; offer to move the projects, studies and templates there."""  # noqa: RUF002
     if projects.isRootFromEnvironment():
-        slicer.util.errorDisplay(_("The folder is set by the {variable} environment variable.").format(variable=projects.ROOT_ENVIRONMENT))
+        _notice(parent, _("Change the Slicer Studio folder"),
+                _("The folder is set by the {variable} environment variable.").format(variable=projects.ROOT_ENVIRONMENT))
         return None
     oldRoot = projects.root()
     dialog = FolderChooserDialog(parent, proposal=oldRoot, cancellable=True)
@@ -942,7 +957,7 @@ def changeRootDialog(parent=None):
             try:
                 projects.ensureRoot(oldRoot, recreate=True)
             except OSError as error:
-                slicer.util.errorDisplay(_("The folder {path} cannot be used: {reason}").format(
+                _notice(parent, _("Change the Slicer Studio folder"), _("The folder {path} cannot be used: {reason}").format(
                     path=oldRoot, reason=(getattr(error, "strerror", None) or str(error)).strip()))
                 return None
             projects.notifyChanged()
@@ -996,8 +1011,9 @@ def changeRootDialog(parent=None):
         projects.notifyChanged()
         return None
     except OSError as error:
-        slicer.util.errorDisplay(_("Your projects could not all be moved: {error}\nWhat was moved is in the new folder; the folder setting is "
-                                   "unchanged.").format(error=error))
+        _notice(parent, _("Change the Slicer Studio folder"),
+                _("Your projects could not all be moved: {error}\nWhat was moved is in the new folder; the folder setting is "
+                  "unchanged.").format(error=error))
         projects.notifyChanged()
         return None
     projects.notifyChanged()

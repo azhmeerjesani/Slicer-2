@@ -1834,16 +1834,26 @@ def moveToTrash(path):
     return bool(result) and not os.path.exists(path)
 
 
+def trashRefusal(path):
+    """Why the project folder ``path`` cannot be moved to the trash now (it is the open project, or open in another Slicer
+    Studio), in plain words; None if it can.
+    """
+    current = currentProject()
+    if current is not None and os.path.normcase(os.path.realpath(current.path)) == os.path.normcase(os.path.realpath(path)):
+        return _("{name} is open. Close it first (New project).").format(name=os.path.basename(os.path.normpath(path)))
+    if isLockedByOther(path):
+        return _("{name} is open in another Slicer Studio.").format(name=os.path.basename(os.path.normpath(path)))
+    return None
+
+
 def trashFolder(path, confirmDelete=None):
     """Move a project to the trash; where there is no trash, delete it after ``confirmDelete()`` returns True.
 
     Return True if the project is gone. Raise ProjectError for the open project or one open elsewhere.
     """
-    current = currentProject()
-    if current is not None and os.path.normcase(os.path.realpath(current.path)) == os.path.normcase(os.path.realpath(path)):
-        raise ProjectError(_("{name} is open. Close it first (New project).").format(name=os.path.basename(path)))
-    if isLockedByOther(path):
-        raise ProjectError(_("{name} is open in another Slicer Studio.").format(name=os.path.basename(path)))
+    refusal = trashRefusal(path)
+    if refusal:
+        raise ProjectError(refusal)
     if moveToTrash(path):
         return True
     if confirmDelete is not None and not confirmDelete():

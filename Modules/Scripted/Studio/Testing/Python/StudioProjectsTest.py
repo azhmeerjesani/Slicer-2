@@ -3383,6 +3383,51 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertEqual(projects_ui._question(None, "Title", "Text", ["Move", "Keep", "Cancel"]), 0)
         timer.stop()
 
+    def test_52b_trash_of_the_open_project_is_refused_before_asking_in_the_dialog_chrome(self):
+        """Move to Trash on the open project said "Move the project X to the Trash?" and, after the user confirmed, refused in a
+        legacy "Slicer error" box (BB-1): it is refused up front, with no question, in the Studio dialog chrome (one OK button);
+        the other refusals (rename of a taken name, a folder without a scene) use the same dialog.
+        """
+        from unittest import mock
+
+        from StudioLib import projects_ui
+
+        projects = self.projects
+        projects.ensureRoot()
+        project = projects.createProject("Case 7")
+        previous = projects.currentProject()
+        projects.setCurrentProject(project)
+        try:
+            def fail(*args, **kwargs):
+                raise AssertionError("asked a question or showed the legacy error box")
+
+            seen = {}
+            timer = self._answerDialog("StudioProjectsNotice", "StudioProjectsNoticeButton0", seen)
+            with mock.patch.object(projects_ui, "_question", fail), mock.patch.object(slicer.util, "errorDisplay", fail):
+                self.assertFalse(projects_ui.moveToTrash(project.path))
+            timer.stop()
+            self.assertEqual(seen.get("className"), "_ChromeDialog", seen)
+            self.assertTrue(seen["frameless"], seen)
+            self.assertTrue(seen["chrome"], seen)
+            self.assertTrue(seen["iconTile"], seen)
+            self.assertEqual(seen["buttons"], ["OK"])
+            self.assertTrue(os.path.isdir(project.path))
+            # A name that is taken: the refusal of Rename is the same dialog
+            taken = projects.createProject("Taken")
+            other = projects.createProject("Other")
+            seen = {}
+            notices = []
+            with mock.patch.object(projects_ui, "_notice", lambda parent, title, text: notices.append((title, text))), \
+                    mock.patch.object(slicer.util, "errorDisplay", fail):
+                timer = self._answerDialog("StudioProjectsRenameDialog", "StudioProjectsRenameDialogButton0", seen, fill="Taken")
+                self.assertIsNone(projects_ui.renameDialog(other.path))
+                timer.stop()
+            self.assertEqual(len(notices), 1, notices)
+            self.assertTrue(os.path.isdir(other.path))
+            self.assertTrue(os.path.isdir(taken.path))
+        finally:
+            projects.setCurrentProject(previous)
+
     def test_53b_moved_study_with_a_taken_name_is_named_after_its_new_folder(self):
         """A study that Change folder > Move lands as "<name> 2" is named "<name> 2" in its study.json too (BB-1): the Library
         titles a study card by that name, so the two "Stroke" studies were identical cards. A name the user chose stays; the
