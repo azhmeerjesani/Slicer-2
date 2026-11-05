@@ -662,6 +662,10 @@ def writeNct(source, folder, prefix="networks_nct"):
     wantPos, wantNeg = _signs(source.sign)
     for name, desc in (("binary", "supra"), ("pos", "suprapos"), ("neg", "supraneg"), ("map", "thresholded")):
         if (name == "pos" and not wantPos) or (name == "neg" and not wantNeg) or (name in ("pos", "neg") and source.sign != "both"):
+            # Not part of this export: an earlier export of both signs into the same folder may have left it, and the sidecar must not sit beside a mask it does not list
+            stale = os.path.join(folder, f"{prefix}_desc-{desc}.nii.gz")
+            if os.path.isfile(stale):
+                os.remove(stale)
             continue
         path = os.path.join(folder, f"{prefix}_desc-{desc}.nii.gz")
         nifti.write_nifti(path, volumes[name], target.affine, dtype="uint8" if name != "map" else "float32", descrip=f"LNM {source.statistic} {desc}")

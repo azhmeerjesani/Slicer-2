@@ -175,6 +175,40 @@ class LesionNetworkMappingNetworksUITest(unittest.TestCase):
             slicer.app.processEvents()
             shutil.rmtree(folder, ignore_errors=True)
 
+    def test_nct_export_into_a_used_folder_leaves_no_volume_of_the_earlier_export(self):
+        """Exporting both signs and then one sign into the same folder: the folder holds only the files the new sidecar lists."""
+        import json
+        import os
+        import shutil
+        import tempfile
+        from types import SimpleNamespace
+
+        import numpy as np
+
+        grid = self.cn.nctGrid()
+        volume = np.zeros(grid.shape, dtype=np.float32)
+        volume[10, 10, 10] = 8.0
+        volume[20, 20, 20] = -8.0
+        folder = tempfile.mkdtemp(prefix="lnm-nct-")
+        try:
+
+            def export(sign):
+                source = SimpleNamespace(grid=grid, volume=volume, value=5.0, sign=sign, statistic="T", space=None)
+                self.cn.writeNct(source, folder)
+                with open(os.path.join(folder, "networks_nct.json"), encoding="utf-8") as f:
+                    listed = json.load(f)["files"]
+                volumes = sorted(name for name in os.listdir(folder) if name.endswith(".nii.gz"))
+                self.assertEqual(volumes, sorted(listed), sign)
+                return volumes
+
+            self.assertEqual(len(export("both")), 4)
+            # One sign: the binary mask and the thresholded map only; the earlier suprapos / supraneg are gone
+            for sign in ("pos", "neg"):
+                self.assertEqual(export(sign), ["networks_nct_desc-supra.nii.gz", "networks_nct_desc-thresholded.nii.gz"])
+            self.assertEqual(len(export("both")), 4)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
     def test_roi_rows_leave_the_not_in_these_networks_row_unchanged(self):
         """An ROI is an extra row: the voxels in it but in no network stay in "not in these networks" (rows add up to 100 %)."""
         import numpy as np
