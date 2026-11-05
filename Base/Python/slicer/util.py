@@ -507,6 +507,15 @@ def importModuleObjects(from_module_name, dest_module_name, type_info):
 # - after ``startupCompleted``, the remaining wrappers are imported one per event-loop pass while
 #   the application is idle, so that the namespace converges to the eager one within seconds.
 
+import threading
+
+# One re-entrant lock serializes every change of the state below and every wrapper import, so that a
+# Python worker thread that reads ``slicer.<Class>`` while the main thread imports wrappers (the idle
+# prefetch) waits until the classes are copied, instead of finding the module "imported" but empty or
+# iterating a dictionary that another thread changes. Re-entrant because importing a wrapper can read
+# ``slicer.<Class>`` in the same thread.
+_lazyWrapperLock = threading.RLock()
+
 _lazyWrapperState = {
     "indexes": [],  # registered (directory, index path)
     "classes": {},  # class name -> wrapper module name, for classes not copied into slicer yet
@@ -546,6 +555,11 @@ def _registerLazyWrapperIndex(directory, indexPath):
     the index does not list (a stale index) are imported right away. Returns False, after doing
     nothing, if the index cannot be used; the caller then imports the wrappers eagerly.
     """
+    with _lazyWrapperLock:
+        return _registerLazyWrapperIndexLocked(directory, indexPath)
+
+
+def _registerLazyWrapperIndexLocked(directory, indexPath):
     import fnmatch
     import json
     import os
@@ -628,6 +642,11 @@ def _registerLazyWrapperIndex(directory, indexPath):
 
 def _importLazyWrapperModule(moduleName):
     """Import one wrapper module and copy its classes into ``slicer``, as the eager import does."""
+    with _lazyWrapperLock:
+        _importLazyWrapperModuleLocked(moduleName)
+
+
+def _importLazyWrapperModuleLocked(moduleName):
     import importlib
     import sys
 
@@ -659,15 +678,25 @@ def _importLazyWrapperModule(moduleName):
                 # with the first wrapped subclass.
                 setattr(slicerModule, itemName, item)
     # Indexed names that the eager import would not have copied (not a class of this kind)
-    for className in [name for name, owner in classes.items() if owner == moduleName]:
+    for className in [name for name, owner in list(classes.items()) if owner == moduleName]:
         del classes[className]
 
 
 def _importPendingLazyWrappers():
     """Import all wrapper modules that are not imported yet."""
-    state = _lazyWrapperState
-    while state["pending"]:
-        _importLazyWrapperModule(state["pending"][0])
+    with _lazyWrapperLock:
+        while _importNextPendingLazyWrapper():
+            pass
+
+
+def _importNextPendingLazyWrapper():
+    """Import the first wrapper module that is not imported yet. Return False if there is none."""
+    with _lazyWrapperLock:
+        pending = _lazyWrapperState["pending"]
+        if not pending:
+            return False
+        _importLazyWrapperModule(pending[0])
+        return True
 
 
 _LAZY_WRAPPER_CLASS_NAME = None
@@ -698,7 +727,8 @@ def _resolveLazyWrapperAttribute(name):
 
 def _lazyWrapperClassNames():
     """Return the names of the indexed classes that are not copied into ``slicer`` yet."""
-    return list(_lazyWrapperState["classes"])
+    with _lazyWrapperLock:
+        return list(_lazyWrapperState["classes"])
 
 
 def _onStartupCompletedLazyWrapperPrefetch():
@@ -718,8 +748,7 @@ def _startLazyWrapperPrefetch():
 
     def importNext():
         try:
-            if state["pending"]:
-                _importLazyWrapperModule(state["pending"][0])
+            _importNextPendingLazyWrapper()
         finally:
             if not state["pending"]:
                 timer.stop()

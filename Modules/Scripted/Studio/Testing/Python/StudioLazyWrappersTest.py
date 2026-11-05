@@ -14,6 +14,8 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import unittest
 
 import slicer
@@ -87,3 +89,28 @@ class StudioLazyWrappersTest(unittest.TestCase):
         self.assertNotIn(_CLASS, slicer.__dict__)
         self.assertEqual(getattr(slicer, _CLASS).__name__, _CLASS)
         self.assertNotIn(_MODULE, slicer.util._lazyWrapperState["pending"])
+
+    def test_worker_thread_waits_for_import_in_progress(self):
+        """A Python thread that reads a class while another thread imports its wrapper gets the class (it used to
+        get AttributeError: the module was marked imported before its classes were copied into slicer).
+        """
+        with open(os.path.join(self.directory, _MODULE + ".py"), "w", encoding="utf-8") as stream:
+            stream.write(f"import time\n\nimport vtk\n\ntime.sleep(0.6)\n\n\nclass {_CLASS}(vtk.vtkObject):\n    pass\n")
+        self.assertTrue(slicer.util._registerLazyWrapperIndex(self.directory, self.indexPath))
+        self.assertNotIn(_CLASS, slicer.__dict__)
+
+        result = {}
+
+        def worker():
+            time.sleep(0.2)  # the main thread is inside the import of the wrapper by now
+            try:
+                result["name"] = getattr(slicer, _CLASS).__name__
+            except Exception as detail:
+                result["error"] = repr(detail)
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        self.assertEqual(getattr(slicer, _CLASS).__name__, _CLASS)
+        thread.join(10)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result, {"name": _CLASS})
