@@ -40,6 +40,7 @@ The functions above the "Service" section use no Qt and no Slicer object (the te
 import filecmp
 import hashlib
 import http.client
+import errno
 import importlib
 import json
 import logging
@@ -153,6 +154,53 @@ _ASSET_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,254}$")
 
 class UpdateError(Exception):
     """A check or a download failed; the message is shown to the user."""
+
+
+def sentence(text):
+    """``text`` as a finished sentence (a full stop added when it ends without one), so that it can be followed by
+    another sentence: "Cannot reach the update server. Slicer Studio was not changed.".
+    """
+    text = str(text or "").strip()
+    return text if not text or text[-1] in ".!?\u2026" else text + "."
+
+
+#: Error numbers of a connection that cannot be made or that broke
+_NETWORK_ERRNOS = frozenset(
+    getattr(errno, name) for name in (
+        "ECONNREFUSED", "ECONNRESET", "ECONNABORTED", "ENETUNREACH", "ENETDOWN", "ENETRESET", "EHOSTUNREACH", "EHOSTDOWN",
+        "EADDRNOTAVAIL", "EPIPE", "ETIMEDOUT", "ENOTCONN", "EPROTO", "ENOPROTOOPT") if hasattr(errno, name))
+
+
+def _networkFailure(error):
+    """How a failed connection is described in plain words, or None when ``error`` is not about the network (a file that
+    cannot be written, for example). Never the error number or the text of the resolver or the proxy.
+    """
+    import socket
+    import ssl
+
+    reason = getattr(error, "reason", None)  # URLError wraps the OSError
+    if isinstance(reason, BaseException):
+        error = reason
+    if isinstance(error, (socket.timeout, TimeoutError)):
+        return _("no answer in time")
+    if isinstance(error, ssl.SSLError):
+        return _("the secure connection failed")
+    if isinstance(error, ValueError):
+        return _("the address is not valid")
+    if isinstance(error, (socket.gaierror, socket.herror, ConnectionError, http.client.HTTPException)):
+        return _("no connection")
+    if isinstance(error, OSError) and (error.errno in _NETWORK_ERRNOS or getattr(error, "winerror", None) or error.errno is None):
+        # no error number: the text of a proxy ("Tunnel connection failed: 502 Bad Gateway"), a name that is not found
+        return _("no connection")
+    return None
+
+
+def cannotReach(error):
+    """An ``UpdateError`` for a check or download that could not connect to the update server: a plain sentence and what
+    to do, without the error number or the library's text.
+    """
+    return UpdateError(_("Cannot reach the update server ({reason}). Check your internet connection and try again.").format(
+        reason=_networkFailure(error) or _("no connection")))
 
 
 #
@@ -288,11 +336,10 @@ def _open(url, feed, timeout, notFound=None):
             raise UpdateError(notFound or _("No release with an update manifest was found ({address}).").format(address=url))
         raise UpdateError(_("The server answered {code} {reason}.").format(code=error.code, reason=error.reason))
     except (urllib.error.URLError, OSError, ValueError) as error:
-        reason = getattr(error, "reason", error)
-        raise UpdateError(_("Cannot reach the update server: {reason}").format(reason=reason))
+        raise cannotReach(error)
     except http.client.HTTPException:
         # not an OSError: a reply that is not HTTP (BadStatusLine), cut off or malformed
-        raise UpdateError(_("Cannot reach the update server: it did not send a valid answer."))
+        raise UpdateError(_("Cannot reach the update server (it did not send a valid answer). Try again later."))
 
 
 #
@@ -387,9 +434,10 @@ def fetchManifest(feed=None, timeout=CHECK_TIMEOUT_S):
             try:
                 block = read(16 * 1024)
             except OSError as error:
-                raise UpdateError(_("Cannot reach the update server: {reason}").format(reason=error))
+                raise cannotReach(error)
             except http.client.HTTPException:  # not an OSError: a chunked or other reply that is cut off or malformed
-                raise UpdateError(_("Cannot reach the update server: the connection was interrupted."))
+                raise UpdateError(_("Cannot reach the update server (the connection was interrupted). "
+                                    "Check your internet connection and try again."))
             if not block:
                 break
             blocks.append(block)
@@ -644,10 +692,14 @@ def downloadAsset(manifest, key, directory, feed=None, progress=None, cancelled=
         raise
     except OSError as error:
         _removeQuietly(part)
-        raise UpdateError(_("The download failed: {error}").format(error=error))
+        if _networkFailure(error) is not None:
+            raise cannotReach(error)
+        # a local failure (no space left, no permission): its plain reason, without the error number and the file name
+        reason = (getattr(error, "strerror", None) or "").strip().rstrip(".")
+        raise UpdateError(_("The download failed: {reason}.").format(reason=reason) if reason else _("The download failed."))
     except http.client.HTTPException:  # not an OSError: a chunked reply that is cut off or malformed (the network dropped)
         _removeQuietly(part)
-        raise UpdateError(_("The download failed: the connection was interrupted."))
+        raise UpdateError(_("The download failed (the connection was interrupted). Check your internet connection and try again."))
     return path
 
 
@@ -2221,7 +2273,7 @@ class RequiredUpdateDialog:
             self.state = "offer"
             self.updateButton.setText(_("Update now") if cancelled else _("Try again"))
             manual = getattr(error, "manualSteps", None)
-            self._setStatus(str(error) + (" " + manual if manual else ""), error=True)
+            self._setStatus(sentence(error) + (" " + manual if manual else ""), error=True)
             return
         self.state = "ready"
         self.updateButton.setText(_("Restart now"))
@@ -2423,7 +2475,7 @@ class UpdateDialog:
         self.task = None
         if error is not None:
             manual = getattr(error, "manualSteps", None)
-            self._setState("failed", str(error) + (" " + manual if manual else "") + " " + _("Slicer Studio was not changed."))
+            self._setState("failed", sentence(error) + (" " + manual if manual else "") + " " + _("Slicer Studio was not changed."))
         else:
             self._setState("ready", _("Slicer Studio {version} was downloaded and checked. Slicer Studio restarts to install it; "
                                       "you are asked to save unsaved work, and autosaved work is offered for recovery after the restart.").format(

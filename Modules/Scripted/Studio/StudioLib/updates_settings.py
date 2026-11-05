@@ -187,7 +187,7 @@ class UpdatesSettingsPanel(ctk.ctkSettingsPanel):
             if status.available and service is not None and service.unavailableReason():
                 parts.append(service.unavailableReason())
         if service is not None and service.lastError is not None:
-            parts.append(_("The last check failed: {error}").format(error=service.lastError))
+            parts.append(_("The last check failed. {error}").format(error=updates.sentence(service.lastError)))
         last = updates.settingsValue("LastCheck")
         if last:
             lastTime = updates.parseTime(last)

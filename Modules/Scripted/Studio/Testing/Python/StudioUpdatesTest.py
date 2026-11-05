@@ -463,6 +463,69 @@ class StudioUpdatesTest(unittest.TestCase):
         with self.assertRaisesRegex(updates.UpdateError, "connection was interrupted"):
             updates.fetchManifest(self.feed)
 
+    def test_OfflineMessagesArePlainSentences(self):
+        """No connection (a closed port, a name that cannot be resolved, a timeout) is a plain message without the error
+        number or the library's text, and it ends in a full stop so that the next sentence can follow it.
+        """
+        import errno
+        import socket
+        import urllib.error
+
+        updates = self.updates
+        raw = ("Errno", "refused", "nodename", "Tunnel")
+        with self.assertRaises(updates.UpdateError) as caught:
+            updates.fetchManifest("http://127.0.0.1:1/studio-update.json")  # nothing listens
+        text = str(caught.exception)
+        self.assertEqual(text, "Cannot reach the update server (no connection). Check your internet connection and try again.")
+        for error in (ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused"),
+                      socket.gaierror(8, "nodename nor servname provided, or not known"),
+                      urllib.error.URLError(socket.gaierror(-2, "Name or service not known")),
+                      OSError("Tunnel connection failed: 502 Bad Gateway"),
+                      TimeoutError("timed out")):
+            message = str(updates.cannotReach(error))
+            self.assertTrue(message.startswith("Cannot reach the update server ("), message)
+            self.assertTrue(message.endswith("Check your internet connection and try again."), message)
+            for word in raw:
+                self.assertNotIn(word, message)
+        self.assertIn("no answer in time", str(updates.cannotReach(TimeoutError("timed out"))))
+        # a download that fails the same way, and a local failure that is not about the network
+        data = self._publish("1.2.0")
+        manifest = updates.parseManifest(data)
+        downloads = os.path.join(self.tempDir, "downloads-offline")
+        saved = updates._open
+        try:
+            def refuse(*args, **kwargs):
+                raise updates.cannotReach(ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused"))
+
+            updates._open = refuse
+            with self.assertRaises(updates.UpdateError) as caught:
+                updates.downloadAsset(manifest, "linux-x86_64", downloads, feed=self.feed)
+            self.assertNotIn("Errno", str(caught.exception))
+        finally:
+            updates._open = saved
+        # Settings > Updates and the update dialog run the message and the next sentence apart
+        from StudioLib import updates_settings
+
+        os.environ[updates.FEED_ENVIRONMENT_VARIABLE] = "http://127.0.0.1:1/studio-update.json"
+        service = self._service()
+        done = []
+        service.check(onDone=lambda status, error: done.append(error))
+        self.assertTrue(self._waitFor(lambda: done, 15))
+        panel = updates_settings.UpdatesSettingsPanel(service)
+        text = panel.statusText()
+        self.assertIn("The last check failed. Cannot reach the update server (no connection). "
+                      "Check your internet connection and try again.", text)
+        self.assertNotIn("Errno", text)
+        dialog = updates.UpdateDialog(service, slicer.util.mainWindow())
+        dialog.wanted = True  # an open dialog shows the failure itself (a closed one hands it to a notice)
+        self.addCleanup(dialog.dialog.close)
+        dialog._onJobDone(None, updates.cannotReach(ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused")))
+        self.assertEqual(dialog.state, "failed")
+        self.assertIn("try again. Slicer Studio was not changed.", dialog.text.text)
+        self.assertNotIn("Errno", dialog.text.text)
+        dialog._onJobDone(None, updates.UpdateError("Something went wrong"))
+        self.assertIn("Something went wrong. Slicer Studio was not changed.", dialog.text.text)
+
     def test_DownloadCancelWhileStalled(self):
         """Cancel stops a download at once when the server stops sending (it does not wait for the next block or the timeout)."""
         updates = self.updates
