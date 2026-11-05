@@ -133,8 +133,9 @@ def _absolute_strings(value):
     if not isinstance(value, str):
         return []
     option, has_value, option_value = value.partition("=")
-    # A whole absolute path, or the value of a "--opt=/abs/path" command-line token
-    return [value] if os.path.isabs(value) or (has_value and option.startswith("-") and os.path.isabs(option_value)) else []
+    # A whole absolute path, a comma-separated list of them, or the value of a "--opt=/abs/path" command-line token
+    candidate = option_value if has_value and option.startswith("-") else value
+    return [value] if any(os.path.isabs(part) for part in candidate.split(",")) else []
 
 
 class PortableRecordTest(unittest.TestCase):
@@ -149,6 +150,22 @@ class PortableRecordTest(unittest.TestCase):
         self.assertEqual(_absolute_strings(stored), [])
         self.assertEqual(_absolute_strings(record), [bundle, bundle, f"--maps={bundle}"])
         self.assertEqual(record["argv"][2], f"--maps={bundle}")  # the input record is not changed
+
+    def test_comma_separated_path_lists_are_relative_in_every_entry(self):
+        # validation.json: "--refmaps a.nii.gz,b.nii.gz" (card_validate joins the reference maps with a comma)
+        folder = os.path.abspath(os.path.join(os.sep, "data", "study", "derivatives", "lnm", "conn-X", "validation", "y"))
+        first = os.path.abspath(os.path.join(os.sep, "data", "refmaps", "condA.nii.gz"))
+        second = os.path.abspath(os.path.join(os.sep, "home", "someone", "refmaps", "const.nii.gz"))
+        joined = f"{first},{second}"
+        relative = f"{export._portable_file(first, folder)},{export._portable_file(second, folder)}"
+        record = {"argv": ["--refmaps", joined, f"--refmaps={joined}", "--refmaps", first, "--label=a,b", "--names", "x,y"]}
+        stored = export.portable_record_paths(record, folder, ())
+        self.assertEqual(stored["argv"], ["--refmaps", relative, f"--refmaps={relative}", "--refmaps", export._portable_file(first, folder), "--label=a,b", "--names", "x,y"])
+        self.assertEqual(_absolute_strings(stored), [])
+        self.assertEqual(_absolute_strings(record), [joined, f"--refmaps={joined}", first])
+        # One absolute path that merely contains a comma is still a single path
+        odd = os.path.abspath(os.path.join(os.sep, "data", "a,b", "c.nii.gz"))
+        self.assertEqual(export.portable_record_paths({"argv": ["--maps", odd]}, folder, ())["argv"][1], export._portable_file(odd, folder))
 
 
 class BatchPlanTest(unittest.TestCase):

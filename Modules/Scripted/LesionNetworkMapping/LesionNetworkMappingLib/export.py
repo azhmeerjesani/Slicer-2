@@ -556,15 +556,29 @@ def _record_fields(record, field, convert):
         node[keys[-1]] = [convert(item) if isinstance(item, str) and item else item for item in value]
 
 
+def _portable_argv_value(value, folder):
+    """A command-line value with its absolute path(s) made relative to ``folder``: one path, or a comma-separated
+    list of paths ("--refmaps /a.nii.gz,/b.nii.gz"; every absolute entry is converted). A value that is not a list
+    of absolute paths (a single path that contains a comma, for example) is treated as one path.
+    """
+    if not os.path.isabs(value):
+        return value
+    parts = value.split(",")
+    if len(parts) > 1 and all(os.path.isabs(part) for part in parts):
+        return ",".join(_portable_file(part, folder) for part in parts)
+    return _portable_file(value, folder)
+
+
 def _portable_argv_token(token, folder):
-    """A command-line token with its absolute path made relative to ``folder``: a whole path ("--opt", "/a/b")
-    or the value of the "--opt=/a/b" form (argparse accepts both); other tokens are kept.
+    """A command-line token with its absolute path(s) made relative to ``folder``: a whole path ("--opt", "/a/b"),
+    a comma-separated list of paths ("/a,/b") or the value of the "--opt=/a/b" form (argparse accepts both);
+    other tokens are kept.
     """
     if os.path.isabs(token):
-        return _portable_file(token, folder)
+        return _portable_argv_value(token, folder)
     option, has_value, value = token.partition("=")
     if has_value and option.startswith("-") and os.path.isabs(value):
-        return f"{option}={_portable_file(value, folder)}"
+        return f"{option}={_portable_argv_value(value, folder)}"
     return token
 
 
