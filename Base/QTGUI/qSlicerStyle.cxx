@@ -1623,6 +1623,8 @@ void drawCollapsibleHeader(const QStyleOption* option, QPainter* painter, const 
   const QStyle::State state = option->state;
   const bool enabled = state & QStyle::State_Enabled;
   const QRectF rect(option->rect);
+  // The header is a Tab stop (Space opens and closes it): its focus ring is shown only for keyboard focus
+  const bool keyboardFocus = enabled && (state & QStyle::State_HasFocus) && (state & QStyle::State_KeyboardFocusChange);
   QColor fill;
   if (enabled && (state & QStyle::State_Sunken))
   {
@@ -1648,6 +1650,11 @@ void drawCollapsibleHeader(const QStyleOption* option, QPainter* painter, const 
       painter->fillPath(header.intersected(row), fill);
       painter->restore();
     }
+    if (keyboardFocus)
+    {
+      // The 2 px keyboard focus ring around the title row, inside the card's border
+      drawFocusRing(painter, rect.adjusted(1., 1., -1., -1.), 9., optionToken(option, "accent-fg"));
+    }
     return;
   }
   if (fill.isValid())
@@ -1660,6 +1667,10 @@ void drawCollapsibleHeader(const QStyleOption* option, QPainter* painter, const 
     painter->setPen(optionToken(option, "hairline"));
     painter->drawLine(option->rect.bottomLeft(), option->rect.bottomRight());
     painter->restore();
+  }
+  if (keyboardFocus)
+  {
+    drawFocusRing(painter, rect.adjusted(1., 1., -1., -1.), 6., optionToken(option, "accent-fg"));
   }
 }
 

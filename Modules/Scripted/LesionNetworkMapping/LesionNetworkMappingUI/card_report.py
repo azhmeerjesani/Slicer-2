@@ -564,6 +564,7 @@ class ReportCard:
         self.detailLabel = self._label("LNMReportDetail", role="secondaryText")
         self.detailLabel.setTextFormat(qt.Qt.RichText)
         self.detailLabel.setTextInteractionFlags(qt.Qt.TextBrowserInteraction)
+        self.detailLabel.setFocusPolicy(qt.Qt.NoFocus)  # until it shows evidence links (_setDetail)
         self.detailLabel.connect("linkActivated(QString)", self.onLinkActivated)
         layout.addWidget(self.detailLabel)
 
@@ -686,7 +687,7 @@ class ReportCard:
         if 0 <= selected < len(items):
             self.table.selectRow(selected)
         else:
-            self.detailLabel.setText(_("Select a row to see its value and evidence."))
+            self._setDetail(_("Select a row to see its value and evidence."))
 
     def _renderState(self):
         state = self.state
@@ -724,6 +725,13 @@ class ReportCard:
     # Actions
     #
 
+    def _setDetail(self, text):
+        """Show ``text`` in the detail label. The label is a Tab stop only while it has evidence links (Qt then draws the
+        focus on the focused link); without links a focus stop would show no focus at all.
+        """
+        self.detailLabel.setText(text)
+        self.detailLabel.setFocusPolicy(qt.Qt.TabFocus if "<a " in text else qt.Qt.NoFocus)
+
     def onSelectionChanged(self):
         row = self.table.currentRow()
         if not 0 <= row < len(self.state.items):
@@ -735,7 +743,7 @@ class ReportCard:
             evidence.append(f'<a href="{html.escape(token, quote=True)}">{html.escape(label)}</a>')
         text = f"<b>{html.escape(item['id'])} {html.escape(item['title'])}</b><br>{html.escape(item['value'])}"
         text += "<br>" + (_("Evidence: ") + ", ".join(evidence) if evidence else _("Evidence: none"))
-        self.detailLabel.setText(text)
+        self._setDetail(text)
 
     def onLinkActivated(self, link):
         """Open the run folder or file of an evidence link, or the bundle folder ("bundle:")."""
@@ -746,7 +754,7 @@ class ReportCard:
         if path and os.path.exists(path):
             widgets.showInFileManager(path)
         else:
-            self.detailLabel.setText(_("That file or run folder is not on disk."))
+            self._setDetail(_("That file or run folder is not on disk."))
 
     def methodsText(self, fmt):
         return self.state.methodsText(fmt)
