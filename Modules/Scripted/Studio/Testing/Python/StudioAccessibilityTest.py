@@ -619,6 +619,44 @@ class StudioAccessibilityTest(ScriptedLoadableModule.ScriptedLoadableModuleTest)
         self._pump(8)
         self.assertEqual(int(panelScrollArea.focusPolicy), int(classicPolicy), "Classic gets the focus policy back")
 
+    def test_f6_to_a_scrolled_inspector_shows_the_focus(self):
+        """F6 into an inspector that is scrolled down focuses its first stop and scrolls it into view, as Tab does
+        (SPEC 2.11: the focus ring is visible), instead of leaving the focused control above the viewport.
+        """
+        import numpy as np
+
+        slicer.util.addVolumeFromArray(np.arange(8 * 9 * 10, dtype=np.uint8).reshape(8, 9, 10), name="Scan")
+        dock = self.mainWindow.findChild("QDockWidget", "PanelDockWidget")
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        self.mainWindow.resize(1366, 520)
+        self._pump(8)
+        scrollArea = dock.findChild("QScrollArea", "ScrollArea")
+        bar = scrollArea.verticalScrollBar()
+        for height in (520, 440, 380, 320):
+            self.mainWindow.resize(1366, height)
+            self._pump(8)
+            if bar.maximum > 0:
+                break
+        if bar.maximum <= 0:
+            self.skipTest("the Draw inspector does not scroll in this window")
+        # The keyboard user went down the inspector (it scrolled), then left it and comes back with F6
+        bar.setValue(bar.maximum)
+        self._pump()
+        self.assertGreater(bar.value, 0)
+        self.mainWindow.activateWindow()
+        studioShell._focusInspector()
+        self._pump()
+        # The focus widget of the window (the application's one is empty while the window is not active)
+        focused = self.mainWindow.focusWidget()
+        self.assertIsNotNone(focused)
+        if not scrollArea.isAncestorOf(focused):
+            self.skipTest("F6 focuses the panel header, which is outside the scroll area")
+        viewport = scrollArea.viewport()
+        rect = qt.QRect(focused.mapTo(viewport, qt.QPoint(0, 0)), focused.size)
+        self.assertTrue(viewport.rect.contains(rect),
+                        f"F6 focused {focused.className()} {focused.objectName} out of view (scroll {bar.value})")
+
     def _tabStops(self, root):
         """The widgets under ``root`` that Tab stops on now, in the order of the keyboard focus chain (starting at the
         stop that is highest on the screen, then left).

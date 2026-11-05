@@ -2817,6 +2817,12 @@ class Shell:
             target = modulePanel
         if target is not None:
             target.setFocus(qt.Qt.ShortcutFocusReason)
+            # Tab scrolls the inspector to its target (QScrollArea::focusNextPrevChild); setFocus() does not, so the
+            # stop would stay out of view when the inspector is scrolled (SPEC 2.11: the focus ring is visible)
+            scrollArea = self._panelScrollArea
+            if scrollArea is not None and self._isAlive(scrollArea) and scrollArea.widget() is not None \
+                    and scrollArea.isAncestorOf(target):
+                scrollArea.ensureWidgetVisible(target)
 
     @staticmethod
     def _firstTabStop(container, maximumSteps=2000):
