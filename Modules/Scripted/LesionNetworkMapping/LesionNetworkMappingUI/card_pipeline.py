@@ -21,7 +21,9 @@ connectome of the Seed and Connectome cards, as one heavy job of the application
   no MRML or Qt) when the card is shown, the study, connectome, rule or options change; the card then says "3 new or
   changed lesions · 37 up to date", or "Design changed since the last run" when the analysed subjects, their groups,
   scores or covariates are not those of the last run (``pipeline.design_fingerprint``; for a run of an earlier build,
-  which records none, the analysed subjects and groups of pipeline.json). A run of another process (the command line, a restarted Slicer) is found by the
+  which records none, the analysed subjects and groups of pipeline.json), or "Settings changed since the last run" when
+  an analysis setting of the next run (``RESULT_SETTING_KEYS``: rule, contrast, permutations, …) is not that of pipeline.json
+  "config" (a recipe or a locked plan that set another contrast after the run, for example). A run of another process (the command line, a restarted Slicer) is found by the
   heartbeat of ``.pipeline/lock.json`` and followed through ``.pipeline/progress.json`` every 2 s.
 - **Results.** Open report and Show folder (the system browser, else an in-app web viewer, else a message with the
   path), Load maps (at most 6 group maps, one per 30 ms tick, over the template), Warnings (a non-modal list).
@@ -579,6 +581,45 @@ def designChanged(plan, record):
     if subjects is None or recordedSubjects is None:
         return False
     return sorted([str(sid), group or "n/a"] for sid, group in subjects) != recordedSubjects
+
+
+#: Analysis settings of the Run everything configuration (:func:`configDict`) that change the group results without changing
+#: the analysed subjects or the design (those are :func:`designChanged`): a finished run whose pipeline.json "config" has
+#: other values is not up to date ("Settings changed since the last run").
+RESULT_SETTING_KEYS = ("rule", "extra_rules", "sensitivity", "specificity", "perm", "tfce", "contrast", "null_relocations", "nulls")
+
+
+def _sameSetting(a, b):
+    """True when two JSON values are equal, numbers compared by value (90 == 90.0)."""
+    if isinstance(a, bool) or isinstance(b, bool):
+        return a is b if isinstance(a, bool) and isinstance(b, bool) else False
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return float(a) == float(b)
+    if isinstance(a, dict) and isinstance(b, dict):
+        return set(a) == set(b) and all(_sameSetting(a[key], b[key]) for key in a)
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        return len(a) == len(b) and all(_sameSetting(x, y) for x, y in zip(a, b, strict=True))
+    return a == b
+
+
+def settingsChanged(config, record):
+    """The :data:`RESULT_SETTING_KEYS` whose value in the configuration of a run now (:func:`configDict`) differs from the one
+    of the last run (pipeline.json ``record`` "config"), as a sorted list ([] when they are the same or cannot be compared).
+
+    pipeline.json leaves out the contrast when it is two-sided (and a run of an earlier build records none): a missing
+    contrast is "two_sided". Other settings that the record does not have are not compared.
+    """
+    recorded = (record or {}).get("config")
+    if not config or not isinstance(recorded, dict):
+        return []
+    pipeline = _pipeline()
+    keys = [key for key in RESULT_SETTING_KEYS if key in recorded or key == "contrast"]
+    try:
+        current = pipeline.PipelineConfig.from_json({key: config[key] for key in keys if key in config})
+        before = pipeline.PipelineConfig.from_json({key: recorded.get(key, "two_sided" if key == "contrast" else None) for key in keys})
+    except (ValueError, TypeError):
+        return []  # a record of another version that this build cannot read: nothing to compare
+    return sorted(key for key in keys if not _sameSetting(getattr(current, key), getattr(before, key)))
 
 
 class PlanWorker:
@@ -1374,11 +1415,21 @@ class PipelineCard:
             return int(self.plan.get("eligible") or 0)
         return int(self.cohortInfo().get("n") or 0)
 
+    def _currentConfig(self):
+        """:meth:`config` (computed once per apply)."""
+        memo = self._memo
+        if memo is not None and "config" in memo:
+            return memo["config"]
+        config = self.config()
+        if memo is not None:
+            memo["config"] = config
+        return config
+
     def _currentPlanKey(self):
         memo = self._memo
         if memo is not None and "planKey" in memo:
             return memo["planKey"]
-        config = self.config()
+        config = self._currentConfig()
         key = planKey(config) if config is not None else None
         if memo is not None:
             memo["planKey"] = key
@@ -1492,10 +1543,12 @@ class PipelineCard:
         stale = 0
         upToDate = 0
         designStale = False
+        settingsStale = []
         if self.plan is not None and self.planKey == self._currentPlanKey():
             stale = int(self.plan["counts"].get("compute", 0)) + int(self.plan["counts"].get("normalize", 0))
             upToDate = int(self.plan["counts"].get("reuse", 0))
             designStale = designChanged(self.plan, self.record)
+            settingsStale = settingsChanged(self._currentConfig(), self.record)
         if self.record is None and model is None:
             if self.plan is not None and self.plan.get("review"):
                 return self._reviewLine(), "warn"
@@ -1504,6 +1557,8 @@ class PipelineCard:
             return _plural(stale, "{n} new or changed lesion", "{n} new or changed lesions") + " · " + _("{n} up to date").format(n=upToDate), "warn"
         if designStale and status in ("done", "done_with_failures"):
             return _("Design changed since the last run"), "warn"
+        if settingsStale and status in ("done", "done_with_failures"):
+            return _("Settings changed since the last run"), "warn"
         if failedStages:
             return _plural(len(failedStages), "Finished with {n} failed stage", "Finished with {n} failed stages"), "warn"
         if self.plan is not None and self.plan.get("review"):

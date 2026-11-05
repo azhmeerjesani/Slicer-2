@@ -432,6 +432,43 @@ class LesionNetworkMappingPipelineUITest(unittest.TestCase):
         self._settle()
         self.assertTrue(card.stateLabel.text.startswith("Up to date"), card.stateLabel.text)
 
+    def test_4d_settings_change_is_not_up_to_date(self):
+        """An analysis setting of the next run that is not the last run's (a recipe or a locked plan sets the one-sided
+        contrast A>B after a two-sided run, whose pipeline.json "config" has no contrast; fewer permutations): the card says
+        the settings changed, never 'Up to date'; the same settings as the run (a recorded A>B, numbers as 5000.0) are up to date.
+        """
+        card = self.card
+        self._settle()
+        self.assertTrue(card.stateLabel.text.startswith("Up to date"), card.stateLabel.text)
+        record = os.path.join(card.outDir(), "pipeline.json")
+        with open(record, "rb") as f:
+            recordBytes = f.read()
+        data = json.loads(recordBytes.decode("utf-8"))
+        self.assertNotIn("contrast", data["config"], "a two-sided run records no contrast (as 827d5b1)")
+        config = card.config()
+        self.assertEqual(self.cp.settingsChanged(config, data), [])
+        self.assertEqual(self.cp.settingsChanged(dict(config, contrast="A>B", perm=1000), data), ["contrast", "perm"])
+        self.assertEqual(self.cp.settingsChanged(dict(config, contrast="A>B"), {"status": "done"}), [], "a record without config cannot be compared")
+        try:
+            for options, changed in (({"contrast": "A>B"}, ["contrast"]), ({"perm": 1000}, ["perm"]), ({"tfce": True}, ["tfce"])):
+                self._setOptions(options)
+                self._settle()
+                self.assertEqual(self.cp.settingsChanged(card.config(), card.record), changed, options)
+                self.assertEqual(card.stateLabel.text, "Settings changed since the last run", options)
+                self.assertEqual(card.stateLine()[1], "warn", options)
+            # A run that recorded the one-sided contrast, and the same perm written as a float: up to date
+            self._setOptions({"contrast": "A>B"})
+            with open(record, "w", encoding="utf-8") as f:
+                json.dump(dict(data, config=dict(data["config"], contrast="A>B", perm=float(data["config"]["perm"]))), f, indent=1)
+            self._settle()
+            self.assertTrue(card.stateLabel.text.startswith("Up to date"), card.stateLabel.text)
+        finally:
+            with open(record, "wb") as f:
+                f.write(recordBytes)
+            qt.QSettings().remove(self.cp.OPTIONS_SETTING)
+        self._settle()
+        self.assertTrue(card.stateLabel.text.startswith("Up to date"), card.stateLabel.text)
+
     def test_5_stop_and_resume(self):
         """With one lesion per pass: Stop shows 'Stopped · k of 12 maps kept' within 3 s; the next run reuses at least k and completes."""
         card = self.card
