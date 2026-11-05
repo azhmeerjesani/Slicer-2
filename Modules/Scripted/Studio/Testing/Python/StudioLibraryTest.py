@@ -1847,6 +1847,37 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertNotEqual(label.font.capitalization(), qt.QFont.AllUppercase, text)
             self.assertEqual(label.font.letterSpacing(), 0.0, text)
 
+    def test_control_sets_list_elides_long_rows_without_a_scroll_bar(self):
+        """A row of the Control sets list that does not fit is elided with an ellipsis: the list has no horizontal scroll bar (the
+        row was as wide as its text, so it was cut mid-word at the panel edge and the bar took height from the fixed-height list).
+        """
+        import types
+
+        from StudioLib import libcard_controls
+
+        entries = [{"name": "ctlset", "n": 24, "space": "MNI152NLin2009cAsym", "licence_note": "A licence note that is long enough " * 4}]
+        saved = libcard_controls._session, libcard_controls.registeredSets
+        libcard_controls._session = lambda: types.SimpleNamespace(study=types.SimpleNamespace(control_sets=[]))
+        libcard_controls.registeredSets = lambda: entries
+        host = qt.QWidget()
+        try:
+            card = libcard_controls.ControlSetsCard(None)
+            card._renderSelection = lambda: None  # only the list is under test
+            layout = qt.QVBoxLayout(host)
+            layout.addWidget(card.widget)
+            host.setFixedWidth(300)
+            host.show()
+            card.refresh()
+            slicer.app.processEvents()
+        finally:
+            libcard_controls._session, libcard_controls.registeredSets = saved
+        self.cleanup.append(host.deleteLater)
+        self.assertEqual(card.list.horizontalScrollBarPolicy, qt.Qt.ScrollBarAlwaysOff)
+        self.assertFalse(card.list.horizontalScrollBar().isVisible())
+        self.assertFalse(card.list.verticalScrollBar().isVisible(), "the one row fits the fixed-height list")
+        self.assertEqual(card.list.textElideMode, qt.Qt.ElideRight)
+        self.assertTrue(card.list.sizeHintForColumn(0) > card.list.viewport().width, "the row text is wider than the list")
+
     def test_assign_button_returns_when_the_form_closes(self):
         """The "Assign second tracing…" row of the Agreement card and of the BATCH card is shown again when the form closes (Cancel,
         Assign, Escape). Assign saves and refreshes the card while the form is still open, so the row stayed hidden afterwards.

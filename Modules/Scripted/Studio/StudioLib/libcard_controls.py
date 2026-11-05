@@ -492,6 +492,8 @@ class ControlSetsCard:
         self.list.setAccessibleName(_("Control sets"))
         self.list.setWordWrap(False)  # two elided lines per set (the tool tip has the whole text): a stable row height
         self.list.setTextElideMode(qt.Qt.ElideRight)
+        # a row is as wide as its text, so with a horizontal bar the item is wider than the viewport and is cut with no ellipsis
+        self.list.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
         self.list.setVerticalScrollMode(qt.QAbstractItemView.ScrollPerPixel)
         self.list.connect("currentRowChanged(int)", lambda _row: self._renderSelection())
         layout.addWidget(self.list)
