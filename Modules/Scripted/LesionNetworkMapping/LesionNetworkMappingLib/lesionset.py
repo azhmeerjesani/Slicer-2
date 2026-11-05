@@ -93,10 +93,32 @@ OVERLAP_NAME = "group_space-{space}_desc-overlap{kind}_map.nii.gz"
 EXCLUDED_MISSING_FILE = "lesion file not found"
 EXCLUDED_UNREADABLE = "lesion file unreadable"
 EXCLUDED_EMPTY = "empty lesion"
+_EXCLUDED_SPACE = "space {space} is not in the {family} family of {target}"
+
+
+def space_exclusion(lesion_space, family, target):
+    """The exclusion reason of a lesion in another space family than the grid's (see :func:`excluded_for_space`)."""
+    return _EXCLUDED_SPACE.format(space=lesion_space or "unknown", family=family, target=target)
+
+
+def excluded_for_space(reason):
+    """True for an exclusion reason :func:`space_exclusion` made (a lesion of another space family than the grid's)."""
+    return isinstance(reason, str) and reason.startswith("space ") and " is not in the " in reason and " family of " in reason
+
 
 CITATION_VDH = "van den Heuvel 2026"
 CITATION_COTOVIO = "Cotovio 2022"
 CITATION_CUI = "Cui 2026"
+
+
+class GridSpaceError(ValueError):
+    """A grid that is not a standard template grid was given without its space (``grid`` is the grid)."""
+
+    def __init__(self, grid):
+        spacing = "x".join(f"{float(v):g}" for v in grid.spacing)
+        shape = " x ".join(str(int(n)) for n in grid.shape)
+        super().__init__(f"The grid ({shape} voxels, {spacing} mm) is not a standard template grid; give its space")
+        self.grid = grid
 
 
 class PriorFamilyError(ValueError):
@@ -184,7 +206,7 @@ def _grid_space(grid, space):
         return str(space)
     match = detect_grid_candidates(grid.shape, grid.affine)
     if match is None:
-        raise ValueError(f"{grid} is not a standard template grid; give its space")
+        raise GridSpaceError(grid)
     return match.space
 
 
@@ -402,7 +424,7 @@ def load_occupancies(study, grid=None, include_only=True, groups=None, probabili
             header = read_nifti_header(path)
             lesion_family, lesion_space = _lesion_family(row, header)
             if lesion_family != family:
-                excluded.setdefault(f"space {lesion_space or 'unknown'} is not in the {family} family of {choice.space}", []).append(sid)
+                excluded.setdefault(space_exclusion(lesion_space, family, choice.space), []).append(sid)
                 continue
             data, affine, _ = read_nifti(path)
         except (OSError, ValueError, EOFError) as exc:

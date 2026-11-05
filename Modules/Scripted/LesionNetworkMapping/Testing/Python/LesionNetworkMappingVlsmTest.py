@@ -256,6 +256,45 @@ class VlsmRunTest(unittest.TestCase):
         self.assertEqual(code, jobs.EXIT_USAGE)
         self.assertEqual(events[-1]["code"], "design_blocked")
 
+    def test_command_line_usage_errors_name_the_option(self):
+        grid = os.path.join(self.tmp, "usage-grid.nii.gz")
+        nifti.write_nifti(grid, np.zeros(SHAPE, dtype=np.uint8), AFFINE)
+        out = os.path.join(self.tmp, "usage")
+        cases = (
+            (("--study", self.study.path, "--grid", grid, "--space", "Foo"), "Unknown --space Foo \\(known: MNI152NLin2009cAsym.*: no lesion of the study is in its family \\(space MNI152NLin2009cAsym is not in the unknown family of Foo: 40\\)"),
+            (("--study", self.study.path, "--grid", grid, "--space", "MNI152NLin6Asym"), "No lesion of the study is in the family of --space MNI152NLin6Asym \\(space MNI152NLin2009cAsym is not in the fsl6 family"),
+            (("--study", os.path.join(self.tmp, "no-such-study"), "--grid", grid, "--space", SPACE), "The --study folder does not exist"),
+            (("--study", self.tmp, "--grid", grid, "--space", SPACE), "The --study folder is not a study folder"),
+            (("--study", self.study.path, "--grid", grid), "Pass --space for this grid: The grid \\(16 x 16 x 16 voxels, 2x2x2 mm\\)"),
+        )
+        for arguments, pattern in cases:
+            with self.subTest(arguments=arguments):
+                code, events, stderr = _run_cli("run", *arguments, "--out", out, "--perm", "200")
+                self.assertEqual(code, jobs.EXIT_USAGE, stderr)
+                self.assertEqual(events[-1]["code"], "usage")
+                self.assertRegex(events[-1]["message"], pattern)
+                self.assertNotIn("Error:", events[-1]["message"])
+                self.assertNotIn("Grid(", events[-1]["message"])
+
+    def test_command_line_accepts_the_study_own_space_label(self):
+        # A user's own template label (outside the known families) is a valid --space when the lesions carry it: the
+        # label is not rejected up front, only one no lesion of the study can use is
+        custom = "MyTemplate"
+        study, _scores = make_study(os.path.join(self.tmp, "custom-study"), n=12, space=custom)
+        grid = os.path.join(self.tmp, "custom-grid.nii.gz")
+        nifti.write_nifti(grid, np.zeros(SHAPE, dtype=np.uint8), AFFINE)
+        out = os.path.join(self.tmp, "custom")
+        code, events, stderr = _run_cli("run", "--study", study.path, "--grid", grid, "--space", custom, "--out", out, "--perm", "50", "--min-lesions", "2", "--min-percent", "0", "--threads", "1")
+        self.assertEqual(code, 0, stderr + json.dumps(events[-1:]))
+        self.assertEqual(events[-1]["event"], "done")
+        with open(os.path.join(out, vlsm.VLSM_JSON), encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["space"], custom)
+        # The same label on lesions that carry another one is the usage error, not an unexplained empty design
+        code, events, _stderr = _run_cli("run", "--study", self.study.path, "--grid", grid, "--space", custom, "--out", os.path.join(self.tmp, "custom-bad"), "--perm", "50")
+        self.assertEqual(code, jobs.EXIT_USAGE)
+        self.assertEqual(events[-1]["code"], "usage")
+        self.assertIn("Unknown --space MyTemplate", events[-1]["message"])
+
 
 class SeedClusterTest(unittest.TestCase):
     """A VLSM on the grid of a synthetic connectome whose planted lesion region is blob A: its cluster seeds a circuit."""

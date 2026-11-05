@@ -253,6 +253,20 @@ def _check(level, code, message, detail=None):
     return designlib.Check(level, code, message, detail)
 
 
+class NoLesionsError(designlib.DesignError):
+    """No lesion of the study could be loaded (``excluded`` is {reason: [sids]}, ``space`` the space of the grid)."""
+
+    def __init__(self, excluded, space):
+        reasons = "; ".join(f"{reason}: {len(sids)}" for reason, sids in excluded.items())
+        super().__init__(f"No lesion could be loaded ({reasons or 'the study has no lesions'})")
+        self.excluded = {reason: list(sids) for reason, sids in excluded.items()}
+        self.space = space
+
+    def all_for_space(self):
+        """True when every lesion was excluded for being in another space family than the grid's."""
+        return bool(self.excluded) and all(lesionset.excluded_for_space(reason) for reason in self.excluded)
+
+
 def prepare(study, spec=None, grid=None, space=None, min_lesions=DEFAULT_MIN_LESIONS, min_percent=DEFAULT_MIN_PERCENT, n_perm=None, occ=None, binarize_at=BINARIZE_AT,
             template_dirs=(), cancel=None, progress=None, memmap_path=None):
     """Build the design of a VLSM on a study's lesions and the lesion matrix of its subjects.
@@ -274,8 +288,7 @@ def prepare(study, spec=None, grid=None, space=None, min_lesions=DEFAULT_MIN_LES
     if occ is None:
         occ = load_lesions(study, grid=grid, space=space, template_dirs=template_dirs, cancel=cancel, progress=progress)
     if not len(occ):
-        excluded = "; ".join(f"{reason}: {len(sids)}" for reason, sids in occ.excluded.items())
-        raise designlib.DesignError(f"No lesion could be loaded ({excluded or 'the study has no lesions'})")
+        raise NoLesionsError(occ.excluded, occ.space)
     volumes = {sid: f"{float(volume):.6g}" for sid, volume in zip(occ.sids, occ.volumes_ml, strict=True)}
     subset, filled = glm._subset_study(study, set(occ.sids), volumes)
     design = designlib.build_design(subset, spec)
@@ -450,7 +463,8 @@ def vlsm(study, spec=None, grid=None, space=None, min_lesions=DEFAULT_MIN_LESION
     :param emit: ``emit(event, **fields)`` for job events (default: none).
     :param design_path: the design.json the spec was read from (recorded).
     :return: vlsm.json content with absolute paths (``record`` is its path).
-    :raises design.DesignError: an invalid spec; ``jobs.JobError`` (exit code 2) for a blocked design.
+    :raises design.DesignError: an invalid spec, or (:class:`NoLesionsError`) a ``space`` no lesion of the study is in the
+      family of; ``jobs.JobError`` (exit code 2) for a blocked design.
     """
     from .export import DISCLAIMER, LIBRARY_VERSION, now_iso, versions
     from .study import Study
@@ -483,6 +497,8 @@ def vlsm(study, spec=None, grid=None, space=None, min_lesions=DEFAULT_MIN_LESION
     try:
         prepared = prepare(study, spec, occ=occ, min_lesions=min_lesions, min_percent=min_percent, n_perm=n_perm)
     except designlib.DesignError as exc:
+        if space is not None and isinstance(exc, NoLesionsError) and exc.all_for_space():
+            raise  # the caller's space is one no lesion of the study can use: its error, not the design's (main names --space)
         raise jobs.JobError(f"The design cannot be built: {exc}", code="design_blocked", exit_code=jobs.EXIT_USAGE) from None
     design = prepared.design
     if design.blocking:
@@ -852,6 +868,36 @@ def _parser():
     return parser
 
 
+_TEMPLATE_SPACES = ("MNI152NLin2009cAsym", "MNI152NLin2009aAsym", "MNI152NLin2009bAsym", "MNI152NLin6Asym", "MNI152Lin", "MNIColin27", "MNIPediatricAsym")
+
+
+def _check_study_option(study):
+    """A usage error (exit 2) naming ``--study`` when its folder does not exist or is not a study folder."""
+    from .study import STUDY_JSON
+
+    path = os.fspath(study)
+    if not (os.path.isfile(os.path.join(path, STUDY_JSON)) or (os.path.basename(path) == STUDY_JSON and os.path.isfile(path))):
+        what = "is not a study folder (it has no study.json)" if os.path.isdir(path) else "does not exist"
+        raise jobs.JobError(f"The --study folder {what}: {study}", code="usage", exit_code=jobs.EXIT_USAGE)
+
+
+def _space_option_error(space, exc):
+    """The usage error naming ``--space`` when no lesion is in its family (``exc`` is the :class:`NoLesionsError`).
+
+    The label is not checked up front: a user's own template label (any label outside the known families) is valid
+    when the study's lesions carry it, so only a label that no lesion of the study can use is an error.
+    """
+    from .geometry import space_family
+
+    reasons = "; ".join(f"{reason}: {len(sids)}" for reason, sids in exc.excluded.items())
+    known = f"known: {', '.join(_TEMPLATE_SPACES)}, their usual aliases, or the label the study's lesions carry"
+    if space_family(space) == "unknown":
+        message = f"Unknown --space {space} ({known}): no lesion of the study is in its family ({reasons})"
+    else:
+        message = f"No lesion of the study is in the family of --space {space} ({reasons}; {known})"
+    return jobs.JobError(message, code="usage", exit_code=jobs.EXIT_USAGE)
+
+
 def main(argv=None):
     """Command-line entry point (see the module docstring); returns the exit code."""
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -863,6 +909,7 @@ def main(argv=None):
                 raise jobs.JobError(f"--seed must not be negative, got {args.seed}", code="usage", exit_code=jobs.EXIT_USAGE)
             if args.min_lesions < 0 or not 0 <= args.min_percent <= 100:
                 raise jobs.JobError("--min-lesions must not be negative and --min-percent must be in [0, 100]", code="usage", exit_code=jobs.EXIT_USAGE)
+            _check_study_option(args.study)
             try:
                 spec = designlib.DesignSpec.load(args.design) if args.design else designlib.DesignSpec()
             except (OSError, ValueError) as exc:
@@ -878,7 +925,11 @@ def main(argv=None):
     except (jobs.Cancelled, jobs.JobError):
         raise
     except designlib.DesignError as exc:
+        if args.command == "run" and args.space is not None and isinstance(exc, NoLesionsError) and exc.all_for_space():
+            raise _space_option_error(args.space, exc) from None
         raise jobs.JobError(f"The design cannot be built: {exc}", code="design_blocked", exit_code=jobs.EXIT_USAGE) from None
+    except lesionset.GridSpaceError as exc:
+        raise jobs.JobError(f"Pass --space for this grid: {exc}", code="usage", exit_code=jobs.EXIT_USAGE) from None
     except (OSError, ValueError, KeyError) as exc:
         raise jobs.JobError(f"{type(exc).__name__}: {exc}", code="input") from None
 
