@@ -533,9 +533,15 @@ def onStartupCompleted(then=None):
 
 
 def saveNow(shell=None):
-    """Save now (Ctrl+S): the open project, else the official Save dialog. Return True if saved."""
+    """Save now (Ctrl+S): the open project, else the official Save dialog. Return True if saved.
+
+    Data that was opened a moment ago has no project until the next autosave poll (up to 1 s); Ctrl+S then creates it
+    first (D-A16: Ctrl+S saves now), so that the classic Save dialog does not open and write files into the home folder.
+    """
     service = _service()
     project = service.currentProject() if service is not None else None
+    if project is None and service is not None:
+        project = service.ensureProject()
     if project is None:
         mainWindow = slicer.util.mainWindow()
         action = mainWindow.findChild(qt.QAction, "FileSaveSceneAction") if mainWindow is not None else None

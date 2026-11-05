@@ -162,6 +162,11 @@ def unsavedSummary():
     return _service.unsavedSummary() if _service is not None else ""
 
 
+def ensureProject():
+    """Create the project of the user's data now if there is none yet. Return the open project, or None."""
+    return _service.ensureProject() if _service is not None else None
+
+
 def saveNow(reason="save", progress=True):
     """Save the open project now (Ctrl+S). Return True if everything is saved; False without a project or on failure."""
     return _service.saveNow(reason, progress=progress) if _service is not None else False
@@ -1423,6 +1428,27 @@ class AutosaveService:
             return
         if fingerprint == self._lastProjectCheck or self._recovering or not self.projectsActive():
             return
+        self._startProjectForScene(scene, fingerprint)
+
+    def ensureProject(self):
+        """Create (or continue) the project of the user's data now, without waiting for the next poll (Ctrl+S right after
+        data was opened: "Ctrl+S saves now", D-A16). Return the open project, or None if there is none to save into: an empty
+        scene (no user data), a study, Classic, a folder that is not chosen or cannot be written, a scene that is loading.
+        """
+        if self.project is not None:
+            return self.project
+        scene = slicer.mrmlScene
+        if not self.enabled() or self._recovering or not self.projectsActive() or self._sceneBusy(scene):
+            return None
+        io = _io()
+        try:
+            self._startProjectForScene(scene, io.sceneFingerprint(scene, io.sentinelIds()))
+        except Exception:
+            logging.error("Slicer Studio: project handling failed:\n" + traceback.format_exc())
+        return self.project
+
+    def _startProjectForScene(self, scene, fingerprint):
+        """The scene holds user data and no project is open: continue the project of its scene file, or create a new one."""
         if self._sceneBusy(scene):
             return
         self._lastProjectCheck = fingerprint

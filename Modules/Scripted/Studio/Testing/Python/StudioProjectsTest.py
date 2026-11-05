@@ -2991,6 +2991,54 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("Keep"))
         self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("New points"))
 
+    def test_47b_ctrl_s_right_after_opening_a_scan_saves_the_project(self):
+        """Ctrl+S in the first second after a scan was opened (BB-1). The project is made by the autosave poll (up to 1 s
+        later), so Ctrl+S found none and opened the classic "Save Scene and Unsaved Data" dialog, which wrote files into the
+        home folder. It now makes the project first (D-A16: Ctrl+S saves now); the classic dialog stays for an empty scene,
+        Classic and a study. Here the classic Save action is replaced by one that only counts (a dialog would block the test).
+        """
+        from StudioLib import projects_ui
+
+        mainWindow = slicer.util.mainWindow()
+        real = mainWindow.findChild("QAction", "FileSaveSceneAction")
+        self.assertIsNotNone(real)
+        real.setObjectName("FileSaveSceneActionHidden")
+        standIn = qt.QAction(mainWindow)
+        standIn.setObjectName("FileSaveSceneAction")
+        classicDialogs = []
+        standIn.connect("triggered()", lambda: classicDialogs.append(1))
+        running = self.autosave._service
+        studio = self._service()
+        classic = self._service(studio=False)
+        try:
+            self.autosave._service = studio
+            # An empty scene has nothing to save: no project is made, the classic dialog is the fallback
+            self.assertIsNone(studio.ensureProject())
+            self.assertFalse(projects_ui.saveNow())
+            self.assertEqual(len(classicDialogs), 1)
+            self.assertIsNone(studio.project)
+            self._userVolume()
+            self.assertIsNone(studio.project, "no poll has run: the project does not exist yet")
+            self.assertTrue(projects_ui.saveNow(), "Ctrl+S makes the project and saves into it")
+            self.assertEqual(len(classicDialogs), 1, "the classic Save dialog did not open")
+            self.io.backgroundWriter().drain(30.0)
+            self.assertIsNotNone(studio.project)
+            self.assertTrue(studio.lastSaveComplete())
+            self.assertTrue(os.path.isfile(studio.project.scenePath))
+            self.assertTrue(any(path.startswith("Images/") for path in self._projectFiles(studio.project)))
+            self.assertIs(studio.ensureProject(), studio.project, "the project that is open is returned as it is")
+            # Classic: no project for the scene (projects are made in Studio only)
+            studio.releaseProject()
+            self.autosave._service = classic
+            self.assertIsNone(classic.ensureProject())
+            self.assertIsNone(classic.project)
+        finally:
+            self.autosave._service = running
+            standIn.setObjectName("")
+            standIn.deleteLater()
+            real.setObjectName("FileSaveSceneAction")
+        self.assertEqual(len(self.projects.listProjects()), 1, "one project, made once")
+
     def test_46_root_move_across_two_mounts_of_one_disk_copies(self):
         """Change folder > Move from a bind mount (the web build's /data, a Docker volume) to a folder of the same disk
         (BB-1). Both have one st_dev, so the move took the rename path only, and rename(2) refuses to cross mount points
