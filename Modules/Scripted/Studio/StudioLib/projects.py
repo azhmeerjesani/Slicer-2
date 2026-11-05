@@ -1259,14 +1259,28 @@ class Project:
         return f"Project({self.name!r})"
 
 
+#: How many names ``createProject`` tries when other windows keep taking the free name
+CREATE_NAME_ATTEMPTS = 50
+
+
 def createProject(name=None, rootPath=None):
     """Create ``<root>/Projects/<name>`` (a unique name) with its .studio folder; return the ``Project`` (not locked)."""
     rootPath = ensureRoot(rootPath or root())
     folder = projectsFolder(rootPath)
     os.makedirs(folder, exist_ok=True)
-    name = uniqueName(folder, sanitizeName(name or UNTITLED_NAME), isFile=False)
-    path = os.path.join(folder, name)
-    os.makedirs(privateFolder(path))
+    wanted = sanitizeName(name or UNTITLED_NAME)
+    # Another window may take the name between the listing and the creation of the folder (two "Start on template"
+    # actions, two loads of scans with the same name): os.mkdir is atomic, so take the folder first and, if it exists
+    # now, choose the next free name
+    for attempt in range(CREATE_NAME_ATTEMPTS):
+        path = os.path.join(folder, uniqueName(folder, wanted, isFile=False))
+        try:
+            os.mkdir(path)
+            break
+        except FileExistsError:
+            if attempt == CREATE_NAME_ATTEMPTS - 1:
+                raise
+    os.makedirs(privateFolder(path), exist_ok=True)
     project = Project(path)
     project.writeJson(state="open")
     return project

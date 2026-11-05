@@ -7137,6 +7137,37 @@ class StudioProjectsTest(unittest.TestCase):
             studioShell.dispose()
             slicer.app.processEvents()
 
+    def test_93_same_name_taken_by_another_window_between_choice_and_creation_gets_the_next_name(self):
+        """Two windows that create a project of the same name at the same moment: the one that loses the race for the folder
+        gets "Name 2" and a project, not "Autosave paused: the Slicer Studio folder cannot be written (File exists)" (BB-1).
+        The other window is simulated: it makes the folder right after this one has chosen the name.
+        """
+        service = self._service()
+        projects = self.projects
+        folder = projects.projectsFolder(projects.ensureRoot())
+        real = projects.uniqueName
+        raced = []
+
+        def uniqueNameThenOtherWindowCreatesIt(*args, **kwargs):
+            name = real(*args, **kwargs)
+            if len(raced) < 2:  # lost twice in a row: "Race", then "Race 2" are taken in between
+                raced.append(name)
+                os.makedirs(os.path.join(folder, name, projects.PRIVATE_DIR))
+            return name
+
+        from unittest import mock
+
+        with mock.patch.object(projects, "uniqueName", uniqueNameThenOtherWindowCreatesIt):
+            project = service.createProject("Race", announce=None)
+        self.assertEqual(raced, ["Race", "Race 2"])
+        self.assertIsNotNone(project, "a project is created, not an unwritable-folder pause")
+        self.assertEqual(os.path.basename(project.path), "Race 3")
+        self.assertTrue(os.path.isdir(projects.privateFolder(project.path)))
+        self.assertNotEqual(service._status.state, "paused", "autosave is not paused")
+        self.assertEqual(sorted(os.listdir(folder)), ["Race", "Race 2", "Race 3"])
+        # The projects of the other window were left as they were
+        self.assertEqual(os.listdir(os.path.join(folder, "Race")), [projects.PRIVATE_DIR])
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk
