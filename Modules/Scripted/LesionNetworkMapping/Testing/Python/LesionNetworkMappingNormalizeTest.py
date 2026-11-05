@@ -248,8 +248,10 @@ class NormalizeTest(unittest.TestCase):
         code, events, _, _ = _run("run", "--scan", template, "--out", self.path("errors", "out"))
         self.assertEqual(code, normalize.EXIT_NOTHING_TO_DO)
         self.assertEqual(_first(events, "error")["code"], "already_template_space")
-        # no BRAINSFit on an emptied PATH
-        code, events, _, _ = _run("run", "--scan", scan, "--lesion", lesion, "--out", self.path("errors", "out"), env=_env(PATH=""))
+        # an explicit --brainsfit that does not exist. (An emptied PATH cannot be used here: under Slicer
+        # sys.executable is the PythonSlicer launcher, which puts Slicer's cli-modules back on PATH; the
+        # PATH lookup is covered by test_04_find_executable.)
+        code, events, _, _ = _run("run", "--scan", scan, "--lesion", lesion, "--out", self.path("errors", "out"), "--brainsfit", self.path("no-such-dir", "BRAINSFit"))
         self.assertEqual(code, jobs.EXIT_ERROR)
         self.assertEqual(_first(events, "error")["code"], "executable_missing")
         # a missing template (NLin6 files are never bundled)
@@ -262,6 +264,22 @@ class NormalizeTest(unittest.TestCase):
             error = _first(events, "error")
             self.assertEqual(error["code"], "template_missing")
             self.assertTrue(error["files"][0]["url"].startswith("https://templateflow.s3.amazonaws.com/"))
+
+    def test_04_find_executable(self):
+        """The PATH lookup of find_executable, without a launcher that re-adds Slicer's cli-modules to PATH."""
+        from unittest import mock
+
+        with mock.patch.object(normalize.shutil, "which", return_value=None):
+            with self.assertRaises(jobs.JobError) as raised:
+                normalize.find_executable("BRAINSFit")
+        self.assertEqual(raised.exception.code, "executable_missing")
+        here = os.path.abspath(__file__)
+        with mock.patch.object(normalize.shutil, "which", return_value=here):
+            self.assertEqual(normalize.find_executable("BRAINSFit"), here)
+        self.assertEqual(normalize.find_executable("BRAINSFit", here), here)
+        with self.assertRaises(jobs.JobError) as raised:
+            normalize.find_executable("BRAINSFit", self.path("no-such-dir", "BRAINSFit"))
+        self.assertEqual(raised.exception.code, "executable_missing")
 
     # Accuracy
 
