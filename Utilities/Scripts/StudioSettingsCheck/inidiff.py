@@ -5,6 +5,7 @@ usage: inidiff.py base.ini control.ini fork.ini   (control = base after an offic
 """
 
 import json
+import os
 import sys
 
 FORK_PREFIXES = ("Studio/", "Appearance/")
@@ -37,6 +38,13 @@ def usageError(message):
     sys.exit(2)
 
 
+def requireIniFiles(paths):
+    """Exit with status 2 naming the first path that is not a readable file (parse() itself stays tolerant for analyse.py)."""
+    for path in paths:
+        if not os.path.isfile(path):
+            usageError(f"no such ini file: {path}")
+
+
 def isFork(key):
     return key.startswith(FORK_PREFIXES)
 
@@ -48,11 +56,13 @@ if __name__ == "__main__":
     if sys.argv[1:2] == ["--keys"]:
         if len(sys.argv) != 3:
             usageError("--keys needs exactly one ini file")
+        requireIniFiles(sys.argv[2:3])
         d = parse(sys.argv[2])
         print(json.dumps({"official_keys": sorted(k for k in d if not isFork(k)), "fork_keys": sorted(k for k in d if isFork(k))}, indent=1))
         sys.exit(0)
     if len(sys.argv) != 4:
         usageError(f"expected three ini files (base, control, fork), got {len(sys.argv) - 1}")
+    requireIniFiles(sys.argv[1:4])
     base, control, fork = (parse(p) for p in sys.argv[1:4])
     churn = {k for k in set(base) | set(control) if base.get(k) != control.get(k)}
     report = {"churn_in_official_control": sorted(churn), "rewritten_official_keys": [], "new_official_keys_not_written_by_official": [], "removed_official_keys": [],
