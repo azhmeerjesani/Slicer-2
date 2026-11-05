@@ -873,6 +873,96 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         with open(os.path.join(folder, "participants.csv"), encoding="utf-8") as f:
             self.assertTrue(f.read().startswith("participant_id,age,aphasia_score,group\nsub-01,54.5,1.25,Patient\n"))
 
+    def test_participants_csv_is_imported_by_every_create_study_route(self):
+        """A participants.csv in the study folder supplies the groups and the scores on the routes without the folder card:
+        the "Create study" of the opened (dropped) participants.csv, New study… and Create study of a loaded set. Each
+        showed no group step and made a study with group n/a and without the CSV's columns (BB-1).
+        """
+        import csv
+
+        from StudioLib import importer, study_ui
+
+        studioShell = self._applyStudio()
+        if not study_ui.isAvailable():
+            self.skipTest("needs the lesion network mapping library")
+        toasts = []
+        studioShell.toast = lambda text, *args, **kwargs: toasts.append((str(text), kwargs))
+        shown = []
+
+        def fakeExec(dialog):
+            # The group-mapping step: record its title, accept the proposed mapping
+            shown.append([str(label.text) for label in dialog.findChildren("QLabel") if label.objectName == "StudioGroupMappingTitle"])
+            return True
+
+        originalExec = study_ui._execDialog
+        study_ui._execDialog = fakeExec
+        self.cleanup.append(lambda: setattr(study_ui, "_execDialog", originalExec))
+        self.cleanup.append(study_ui.closeStudy)
+
+        def writeCsv(folder):
+            with open(os.path.join(folder, "participants.csv"), "w", encoding="utf-8") as f:
+                f.write("participant_id,group,nihss,age\nsub-01,Patient,12,54.5\nsub-02,Patient,7,61\nsub-03,Control,3,70\n")
+
+        def check(folder, route):
+            self.assertIsNotNone(study_ui.session(), route)
+            with open(os.path.join(folder, "participants.tsv"), encoding="utf-8") as f:
+                rows = {row["participant_id"]: row for row in csv.DictReader(f, delimiter="\t")}
+            self.assertEqual({sid: row["group"] for sid, row in rows.items()}, {"sub-01": "case", "sub-02": "case", "sub-03": "control"}, route)
+            self.assertEqual({sid: row.get("nihss") for sid, row in rows.items()}, {"sub-01": "12", "sub-02": "7", "sub-03": "3"}, route)
+            self.assertEqual({sid: row.get("age") for sid, row in rows.items()}, {"sub-01": "54.5", "sub-02": "61", "sub-03": "70"}, route)
+            self.assertEqual(shown[-1], ["participants.csv has groups in column 'group'. Choose the study group of each value:"], route)
+            self.assertTrue(any("participants.csv imported" in text for text, _kwargs in toasts), (route, toasts))
+            # The user's table is read, never rewritten
+            with open(os.path.join(folder, "participants.csv"), encoding="utf-8") as f:
+                self.assertTrue(f.read().startswith("participant_id,group,nihss,age\nsub-01,Patient,12,54.5\n"), route)
+            study_ui.closeStudy()
+            self._pump(4)
+            del toasts[:]
+
+        # 1. The participants.csv is dropped with no study open: its toast offers Create study
+        folder = self._writeTinyFiles(3, "dropped")
+        writeCsv(folder)
+        study_ui.openParticipantsTable(os.path.join(folder, "participants.csv"), studioShell)
+        offers = [kwargs["action"] for _text, kwargs in toasts if kwargs.get("actionText") == "Create study"]
+        self.assertEqual(len(offers), 1, toasts)
+        offers[0]()
+        self._pump(4)
+        check(folder, "Create study of the dropped participants.csv")
+
+        # 2. New study… on a folder with a participants.csv
+        folder = self._writeTinyFiles(3, "newstudy")
+        writeCsv(folder)
+        realQt = study_ui.qt
+
+        class FileDialog:
+            @staticmethod
+            def getExistingDirectory(*args):
+                return folder
+
+        class QtProxy:
+            def __getattr__(self, name):
+                return FileDialog if name == "QFileDialog" else getattr(realQt, name)
+
+        study_ui.qt = QtProxy()
+        try:
+            study_ui.newStudyDialog(studioShell)
+        finally:
+            study_ui.qt = realQt
+        self._pump(4)
+        check(folder, "New study…")
+
+        # 3. Create study of a loaded set of lesion masks with a participants.csv next to them
+        paths = self._writeCohort(3, folder="loadedset", participants=False)
+        folder = os.path.dirname(paths[0])
+        writeCsv(folder)
+        importer.loadFiles(paths, studioShell)
+        self._pump(10)
+        card = self._library(studioShell).loadedSet
+        self.assertIsNotNone(card.createStudyButton)
+        card.createStudyButton.click()
+        self._pump(6)
+        check(folder, "Create study of a loaded set")
+
     #
     # Loaded set
     #

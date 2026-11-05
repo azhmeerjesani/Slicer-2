@@ -8,6 +8,8 @@ A study is a plain folder (``LesionNetworkMappingLib.study``): ``study.json``, `
   written once to ``.studio/participants.orig.tsv`` and the values of a group column ("patient", "HC", "1"...) are
   mapped to case / control / exclude (``groupMappingProposal()``); the original text is kept in ``group_original``.
   A yes / no or 0 / 1 flag column that is not named like a group ("aphasia", "smoker") is never proposed as the groups.
+  Any other participants table (a ``participants.csv`` in the folder, the table that was opened, a BIDS table of the
+  parent folder shown on the folder card) is imported into the study with the same group mapping (``studyTable()``).
   The routes without the folder card (New study…, Create study of a participants table or of the loaded set) show the
   same group-mapping step first (``askGroupMapping()``, L-01).
   Another column named like a study column but holding other values (a "status" of "alive" / "deceased") is kept as
@@ -506,6 +508,23 @@ def readTable(path):
     return study.read_tsv(path)
 
 
+def studyTable(folder, table=None):
+    """The participants table that a study of ``folder`` imports (its groups and scores): ``table`` (the table that was
+    opened, or the one the folder card shows), else the folder's ``participants.csv`` when it has no participants.tsv.
+    None when there is none to import, and for the folder's own participants.tsv, which is adopted in place instead.
+    """
+    studyModule = _lnm("study")
+    folder = os.path.abspath(folder)
+    tsvPath = os.path.join(folder, studyModule.PARTICIPANTS_TSV)
+    if table is not None:
+        table = os.path.abspath(str(table))
+        return None if os.path.normcase(table) == os.path.normcase(tsvPath) else table
+    csvPath = os.path.join(folder, "participants.csv")
+    if not os.path.isfile(tsvPath) and os.path.isfile(csvPath):
+        return csvPath
+    return None
+
+
 def applyGroupMapping(rows, column, mapping):
     """Set the study group of ``rows`` (dicts) from ``column`` with ``mapping`` ({value: target}); return the changed count.
 
@@ -541,14 +560,15 @@ class GroupMappingDialog:
 
     ROWS_SHOWN = 8  # rows visible at once; more values scroll
 
-    def __init__(self, column, mapping, parent=None):
+    def __init__(self, column, mapping, parent=None, tableName="participants.tsv"):
         self.column = column
         self.dialog = qt.QDialog(parent or slicer.util.mainWindow())
         self.dialog.setObjectName("StudioGroupMappingDialog")
         self.dialog.setWindowTitle(_("New study: groups"))
         self.dialog.setMinimumWidth(400)
         layout = qt.QVBoxLayout(self.dialog)
-        self.titleLabel = qt.QLabel(_("participants.tsv has groups in column '{column}'. Choose the study group of each value:").format(column=column))
+        self.titleLabel = qt.QLabel(_("{table} has groups in column '{column}'. Choose the study group of each value:").format(
+            table=tableName, column=column))
         self.titleLabel.setObjectName("StudioGroupMappingTitle")
         self.titleLabel.setWordWrap(True)
         layout.addWidget(self.titleLabel)
@@ -584,7 +604,7 @@ class GroupMappingDialog:
             scroll.setWidget(rowsWidget)
             scroll.setFixedHeight(self.ROWS_SHOWN * (qt.QComboBox().sizeHint.height() + 4))
             layout.addWidget(scroll)
-        note = qt.QLabel(_("— leaves the group empty. Your participants.tsv keeps its columns; you can change groups later."))
+        note = qt.QLabel(_("— leaves the group empty. Your {table} keeps its columns; you can change groups later.").format(table=tableName))
         note.setObjectName("StudioGroupMappingNote")
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -606,10 +626,13 @@ class GroupMappingDialog:
         return {value: combo.itemData(combo.currentIndex) for value, combo in self.combos.items()}
 
 
-def askGroupMapping(folder, parent=None):
+def askGroupMapping(folder, parent=None, table=None):
     """The group-mapping step (L-01) before a study is made of ``folder`` without the folder card.
 
-    :return: the ``createStudy`` keywords: ``{}`` when there is nothing to map (no participants.tsv to adopt, or no group
+    The table is the one ``createStudy(folder=folder, table=table)`` uses: the folder's participants.tsv to adopt, else
+    the table it imports (``studyTable()``: ``table``, or the folder's participants.csv).
+
+    :return: the ``createStudy`` keywords: ``{}`` when there is nothing to map (no participants table, or no group
       column proposed), ``{"groupColumn", "groupMapping"}`` as chosen in ``GroupMappingDialog``, or None when the user
       cancelled (no study is created).
     """
@@ -617,17 +640,19 @@ def askGroupMapping(folder, parent=None):
         return {}
     studyModule = _lnm("study")
     folder = os.path.abspath(folder)
-    tablePath = os.path.join(folder, studyModule.PARTICIPANTS_TSV)
-    if not os.path.isfile(tablePath) or studyModule.Study.is_study(folder):
-        return {}
+    tablePath = studyTable(folder, table)
+    if tablePath is None:
+        tablePath = os.path.join(folder, studyModule.PARTICIPANTS_TSV)
+        if not os.path.isfile(tablePath) or studyModule.Study.is_study(folder):
+            return {}
     try:
-        proposal = groupMappingProposal(*studyModule.read_tsv(tablePath))
+        proposal = groupMappingProposal(*readTable(tablePath))
     except (OSError, ValueError):
         return {}  # createStudy says what is wrong with the table
     if proposal is None:
         return {}
     column, mapping = proposal
-    dialog = GroupMappingDialog(column, mapping, parent)
+    dialog = GroupMappingDialog(column, mapping, parent, tableName=os.path.basename(tablePath))
     try:
         if not _execDialog(dialog.dialog):
             return None
@@ -938,12 +963,15 @@ def _commonFolder(files):
         return folders[0]
 
 
-def createStudy(files, shell=None, folder=None, groupColumn=None, groupMapping=None, name=None, openIt=True):
+def createStudy(files, shell=None, folder=None, groupColumn=None, groupMapping=None, name=None, openIt=True, table=None):
     """Create a study of NIfTI files (a dropped folder, a loaded set) and open it; return the ``StudySession``.
 
     The study folder is ``folder``, else the folder that holds the files. A folder that already is a study is opened
     (and the files are added to it); a folder with a participants.tsv is adopted in place (``adoptFolder()``).
     Scans and lesions are paired by subject id from their file names, reading only their headers: no node is created.
+    The participants table ``studyTable(folder, table)`` (the table that was opened or shown, else the folder's
+    participants.csv) is imported into the study (groups and scores); ``groupColumn`` and ``groupMapping`` then apply
+    to that table, else to the adopted participants.tsv.
     """
     if not isAvailable():
         raise RuntimeError(_("Studies need the lesion network mapping library, which is not part of this build"))
@@ -961,6 +989,11 @@ def createStudy(files, shell=None, folder=None, groupColumn=None, groupMapping=N
     files = [path for path in files if not any(_isInside(path, other) for other in excluded)]
     # Nor are the files of another study in a subfolder
     files = _outsideOtherStudies(files, folder)
+    # A participants table that is not the folder's own participants.tsv is imported, with the group mapping
+    importPath = studyTable(folder, table)
+    importGroups = (groupColumn, groupMapping)
+    if importPath is not None:
+        groupColumn = groupMapping = None
     startTime = time.perf_counter()
     if studyModule.Study.is_study(folder):
         studyObject = studyModule.Study.open(folder)
@@ -981,6 +1014,14 @@ def createStudy(files, shell=None, folder=None, groupColumn=None, groupMapping=N
     report = studyObject.add_files(files) if files else {"added": [], "updated": [], "skipped": [], "pairs": {}, "warnings": []}
     gridRows = _gridCandidates(studyObject)
     _applyGridAnswers(studyObject, gridRows)
+    imported, importProblem = None, None
+    if importPath is not None:
+        try:
+            imported = _importTable(studyObject, importPath, *importGroups)
+        except (OSError, ValueError) as exc:
+            # The study is made all the same; the toast says why the table was not imported (Import can do it later)
+            importProblem = str(exc)
+            logging.warning(f"Studio: {os.path.basename(importPath)} was not imported into the new study: {exc}")
     studyObject.save()
     elapsed = time.perf_counter() - startTime
     logging.info(f"Studio: study {studyObject.name} {how} in {elapsed * 1000:.0f} ms ({len(studyObject)} subjects, {len(files)} files)")
@@ -995,13 +1036,47 @@ def createStudy(files, shell=None, folder=None, groupColumn=None, groupMapping=N
         "adopted": _("Study {name} created in place: {n} subjects (participants.tsv kept, backup in .studio)"),
         "opened": _("Study {name}: {n} subjects"),
     }[how].format(name=studyObject.name, n=len(studyObject))
-    for column, kept in (getattr(studyObject, "adoptedRenames", None) or {}).items():
+    if imported is not None:
+        message += " · " + _("{table} imported").format(table=os.path.basename(importPath))
+    elif importProblem:
+        message += " · " + _("{table} not imported: {reason}").format(table=os.path.basename(importPath), reason=importProblem)
+    renames = dict(getattr(studyObject, "adoptedRenames", None) or {})
+    renames.update((imported or {}).get("renamed") or {})
+    for column, kept in renames.items():
         message += " · " + _("your {column} column is kept as {kept}").format(column=column, kept=kept)
     if report.get("skipped"):
         message += " · " + (_("1 file skipped") if len(report["skipped"]) == 1 else _("{n} files skipped").format(n=len(report["skipped"])))
-    _toast(shell, message, ms=5000, action=lambda: _showFolder(folder), actionText=_("Show folder"),
-           level="consequence")
+    _toast(shell, message, ms=5000 if not importProblem else 10000, action=lambda: _showFolder(folder), actionText=_("Show folder"),
+           level="consequence" if not importProblem else "warning")
     return session
+
+
+def _importTable(studyObject, path, groupColumn=None, groupMapping=None):
+    """Merge a participants table into ``studyObject`` (not saved): ``StudySession.importTable()`` without a session."""
+    columns, rows = readTable(path)
+    if groupColumn is None:
+        proposal = groupMappingProposal(columns, rows)
+        if proposal is not None:
+            groupColumn, groupMapping = proposal
+    if groupColumn and groupMapping:
+        applyGroupMapping(rows, groupColumn, groupMapping)
+        columns = list(columns) + [column for column in ("group", "include", GROUP_ORIGINAL_COLUMN) if column not in columns and any(column in row for row in rows)]
+    studyModule = _lnm("study")
+    columns = list(columns)
+    renamed = _importClashingColumns(studyModule, columns, rows)
+    temporary = os.path.join(studyObject.path, studyModule.PRIVATE_DIR, f"import-{os.getpid()}.tsv")
+    os.makedirs(os.path.dirname(temporary), exist_ok=True)
+    studyModule.write_tsv(temporary, columns, rows)
+    try:
+        result = studyObject.import_tsv(temporary)
+    except ValueError as exc:
+        # The reason names the user's table, not the temporary copy
+        raise ValueError(str(exc).replace(temporary, os.path.basename(path))) from exc
+    finally:
+        with contextlib.suppress(OSError):
+            os.remove(temporary)
+    result["renamed"] = renamed
+    return result
 
 
 def _gridCandidates(studyObject):
@@ -1300,7 +1375,7 @@ def _studiesFolder():
 
 def newStudyDialog(shell=None):
     """New study…: choose a folder (the dialog starts in Studies/ of the Slicer Studio folder); its NIfTI files (if any)
-    become the subjects, its participants.tsv is adopted. Studies/ itself and Studio's other own folders are refused with
+    become the subjects, its participants.tsv is adopted (a participants.csv is imported). Studies/ itself and Studio's other own folders are refused with
     a warning (``studyFolderProblem()``): a study goes in a folder of its own.
     """
     if not isAvailable():
@@ -1348,11 +1423,13 @@ def openParticipantsTable(path, shell=None):
         shell.toast(summary + " · " + problem, ms=8000, level="warning")
     elif shell is not None:
         def create():
-            groups = askGroupMapping(folder)
+            # The table that was opened supplies the groups and the scores (adopted in place when it is the folder's
+            # participants.tsv, else imported)
+            groups = askGroupMapping(folder, table=path)
             if groups is None:
                 return
             niftiFiles, _isDicom = _importer().scanFolder(folder)
-            createStudy(niftiFiles, shell, folder=folder, **groups)
+            createStudy(niftiFiles, shell, folder=folder, table=path, **groups)
 
         shell.toast(summary, ms=8000, action=create, actionText=_("Create study"), level="consequence")
     return None
@@ -2568,28 +2645,7 @@ class StudySession:
         folder keeps it: the study's own column is not changed, except include, which takes the values that keep their
         meaning (yes / no, 1.0 / 0.0). A table that still cannot be imported raises ValueError with a reason that names it.
         """
-        columns, rows = readTable(path)
-        if groupColumn is None:
-            proposal = groupMappingProposal(columns, rows)
-            if proposal is not None:
-                groupColumn, groupMapping = proposal
-        if groupColumn and groupMapping:
-            applyGroupMapping(rows, groupColumn, groupMapping)
-            columns = list(columns) + [column for column in ("group", "include", GROUP_ORIGINAL_COLUMN) if column not in columns and any(column in row for row in rows)]
-        studyModule = _lnm("study")
-        columns = list(columns)
-        renamed = _importClashingColumns(studyModule, columns, rows)
-        temporary = os.path.join(self.study.path, studyModule.PRIVATE_DIR, f"import-{os.getpid()}.tsv")
-        studyModule.write_tsv(temporary, columns, rows)
-        try:
-            result = self.study.import_tsv(temporary)
-        except ValueError as exc:
-            # The reason names the user's table, not the temporary copy
-            raise ValueError(str(exc).replace(temporary, os.path.basename(path))) from exc
-        finally:
-            with contextlib.suppress(OSError):
-                os.remove(temporary)
-        result["renamed"] = renamed
+        result = _importTable(self.study, path, groupColumn, groupMapping)
         self.flush()
         _notify(self)
         return result
