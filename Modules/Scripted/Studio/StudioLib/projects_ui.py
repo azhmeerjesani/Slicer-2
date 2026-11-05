@@ -1011,7 +1011,28 @@ def changeRootDialog(parent=None):
 #
 
 
-class _ClickFilter(qt.QObject):
+class _DoubleClickGuard:
+    """A double click on a card opens it once: Qt reports the second press as MouseButtonDblClick, and the release that
+    follows it must not open the card again. A real double click is handled in an idle event loop only after the first
+    click's open has loaded the project, so the release of the second click would otherwise queue a second open that runs
+    after whatever the user did meanwhile (Ctrl+N: New project closes the project, and the second open then reopens it).
+    """
+
+    _secondReleaseDue = False
+
+    def isSecondClickRelease(self, eventType, event):
+        """True for the left release that ends a double click; the press and double click events set and clear the state."""
+        if eventType == qt.QEvent.MouseButtonDblClick and event.button() == qt.Qt.LeftButton:
+            self._secondReleaseDue = True
+        elif eventType == qt.QEvent.MouseButtonPress:
+            self._secondReleaseDue = False
+        elif eventType == qt.QEvent.MouseButtonRelease and event.button() == qt.Qt.LeftButton and self._secondReleaseDue:
+            self._secondReleaseDue = False
+            return True
+        return False
+
+
+class _ClickFilter(_DoubleClickGuard, qt.QObject):
     """Left click opens a project card; the context menu shows its actions. A resized card elides its texts, and a
     resized section lays its cards out again (the number of columns follows the width).
     """
@@ -1031,6 +1052,9 @@ class _ClickFilter(qt.QObject):
             else:
                 self.section.elideCard(obj)
             return False
+        if self.isSecondClickRelease(eventType, event):
+            # The release that ends a double click: the first click opened the card
+            return bool(obj.property("studioProjectPath"))
         if eventType == qt.QEvent.MouseButtonRelease and event.button() == qt.Qt.LeftButton:
             path = obj.property("studioProjectPath")
             if path:
@@ -1947,7 +1971,7 @@ class StudiesSection(qt.QObject):
             ui.bindStyleSheet(self.widget, None)
 
 
-class _StudyClickFilter(qt.QObject):
+class _StudyClickFilter(_DoubleClickGuard, qt.QObject):
     """A click, Enter or Space on a study card opens the study; a resized card elides its name."""
 
     def __init__(self, section):
@@ -1962,6 +1986,8 @@ class _StudyClickFilter(qt.QObject):
                 text = str(label.property("fullText") or "")
                 label.setText(qt.QFontMetrics(label.font).elidedText(text, qt.Qt.ElideRight, max(0, label.width)))
             return False
+        if self.isSecondClickRelease(eventType, event):
+            return bool(path)
         if path and ((eventType == qt.QEvent.MouseButtonRelease and event.button() == qt.Qt.LeftButton)
                      or (eventType == qt.QEvent.KeyPress and event.key() in (qt.Qt.Key_Return, qt.Qt.Key_Enter, qt.Qt.Key_Space))):
             qt.QTimer.singleShot(0, lambda path=path: self.section.open(path))

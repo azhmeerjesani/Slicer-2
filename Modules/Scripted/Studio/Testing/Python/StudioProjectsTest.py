@@ -6772,6 +6772,76 @@ class StudioProjectsTest(unittest.TestCase):
                 else:
                     settings.setValue(key, value)
 
+    def test_91_second_click_of_a_double_click_on_a_card_does_not_open_it_again(self):
+        """A real double click is handled when the first click's open has loaded the project: Qt then reports the second
+        press as a double click and its release must not queue another open, which would run after what the user did in
+        between (Ctrl+N closes the project, the queued open reopens it) (BB-1).
+        """
+        from StudioLib import projects_ui
+
+        class Section:
+            widget = None
+
+            def __init__(self):
+                self.opened = []
+
+            def open(self, path):
+                self.opened.append(path)
+
+            def onShown(self):
+                pass
+
+            def updateColumns(self):
+                pass
+
+            def elideCard(self, card):
+                pass
+
+        def send(widget, kind, button=qt.Qt.LeftButton):
+            pos = qt.QPoint(5, 5)
+            event = qt.QMouseEvent(kind, qt.QPointF(pos), qt.QPointF(widget.mapToGlobal(pos)), button, button, qt.Qt.NoModifier)
+            qt.QApplication.sendEvent(widget, event)
+
+        def realDoubleClick(widget):
+            # What Qt delivers for a double click: press, release, double click (in place of the second press), release
+            for kind in (qt.QEvent.MouseButtonPress, qt.QEvent.MouseButtonRelease, qt.QEvent.MouseButtonDblClick, qt.QEvent.MouseButtonRelease):
+                send(widget, kind)
+
+        for filterClass, key in ((projects_ui._ClickFilter, "studioProjectPath"), (projects_ui._StudyClickFilter, "studioStudyPath")):
+            section = Section()
+            clickFilter = filterClass(section)
+            card = qt.QWidget()
+            card.setProperty(key, "/projects/A")
+            card.installEventFilter(clickFilter)
+            card.resize(40, 30)
+            card.show()
+            try:
+                slicer.app.processEvents()
+                # One click opens the card (once)
+                send(card, qt.QEvent.MouseButtonPress)
+                send(card, qt.QEvent.MouseButtonRelease)
+                slicer.app.processEvents()
+                self.assertEqual(section.opened, ["/projects/A"], filterClass.__name__)
+                # A double click opens it once: the release of the second click queues nothing
+                section.opened.clear()
+                realDoubleClick(card)
+                slicer.app.processEvents()
+                self.assertEqual(section.opened, ["/projects/A"], f"{filterClass.__name__}: a double click opens the card once")
+                # The next click (and the next double click) are not swallowed
+                section.opened.clear()
+                send(card, qt.QEvent.MouseButtonPress)
+                send(card, qt.QEvent.MouseButtonRelease)
+                slicer.app.processEvents()
+                self.assertEqual(section.opened, ["/projects/A"], f"{filterClass.__name__}: the click after a double click opens")
+                section.opened.clear()
+                realDoubleClick(card)
+                slicer.app.processEvents()
+                self.assertEqual(len(section.opened), 1)
+            finally:
+                card.removeEventFilter(clickFilter)
+                card.hide()
+                card.deleteLater()
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk
