@@ -619,6 +619,44 @@ class CommandLineTest(unittest.TestCase):
         self.assertEqual(record["circuit"]["thresholding"], "top 10% of |t| (a fixed rank rule)")
         self.assertEqual(_absolute_strings(record), [])
 
+    def test_missing_reference_maps_reason_is_a_sentence_for_the_app(self):
+        """A connectome without reference maps: the μC and PC1 rows, their verdicts and validation.json say where to build
+        them in the app (Manage… > Build reference maps), not a terminal command (the user sees these texts in the card).
+        """
+        mask, affine = self._grid()
+        rng = np.random.default_rng(5)
+        bundle_path = os.path.join(self.tmp, "synth.lnmc")
+        writer = connectome.ConnectomeWriter(bundle_path, mask, affine, name="Synth Conn", overwrite=True)
+        n_voxels = int(mask.sum())
+        for s in range(4):
+            writer.add_subject(f"sub-{s + 1:02d}", [rng.standard_normal((n_voxels, 30)) + 50.0 for _ in range(2)])
+        writer.finalize()
+        sha = subjects_sha256(connectome.ConnectomeBundle.open(bundle_path).subject_ids)
+        fixture = self._write_fixture(self.tmp, n=24, bundle=(bundle_path, sha))
+        out = os.path.join(self.tmp, "validation")
+        code, events = self.run_in_process(["--maps", fixture["maps_tsv"], "--participants", fixture["participants"], "--outcome", "group", "--type", "binary", "--circuit", "glm", "--scheme", "kfold", "--k", "3", "--repeats", "1", "--out", out, "--boot", "3", "--perm", "3", "--threads", "1"])
+        self.assertEqual(code, 0, events[-1])
+        with open(os.path.join(out, "validation.json"), encoding="utf-8") as f:
+            record = json.load(f)
+        rows = {item["name"]: item for item in record["predictors"]}
+        texts = [rows[name]["reason"] for name in ("mu_r", "pc1", "circuit_partial")]
+        texts += [text for text in record["verdicts"] if text and "reference maps" in text]
+        texts += [event["message"] for event in events if event["event"] == "warning" and "reference maps" in event["message"]]
+        self.assertGreaterEqual(len(texts), 5)
+        for text in texts:
+            self.assertIn("no valid reference maps", text)
+            self.assertIn("Manage… > Build reference maps", text)
+            self.assertNotIn("python -m", text)
+            self.assertNotIn("slicer-lnm", text)
+        # The partial comparison of the slnm command line keeps its command-line pointer
+        from LesionNetworkMappingLib import slnm
+
+        bundle = connectome.ConnectomeBundle.open(bundle_path)
+        args = type("Args", (), {"bundle": bundle_path})()
+        _, reason, _ = slnm._reference_for(args, None, None, bundle.mask_indices, tuple(bundle.shape))
+        bundle.close()
+        self.assertIn("python -m LesionNetworkMappingLib.reference build", reason)
+
     def _rewrite_datasets(self, participants, filler):
         with open(participants, encoding="utf-8") as f:
             lines = f.read().splitlines()

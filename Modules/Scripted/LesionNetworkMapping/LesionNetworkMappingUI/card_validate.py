@@ -482,6 +482,9 @@ class ValidateCard:
         self.refmapLabel = label("", "LNMValidateRefmaps", "secondaryText")
         refRow.addWidget(self.refmapLabel, 1)
         layout.addLayout(refRow)
+        # The μC and PC1 baselines need the connectome's reference maps (not the extra maps above): said before the run, not after
+        self.connectomeRefNote = label("", "LNMValidateConnectomeRefs", "secondaryText")
+        layout.addWidget(self.connectomeRefNote)
         # Options
         self.optionsButton = qt.QToolButton()
         self.optionsButton.setObjectName("LNMValidateOptionsButton")
@@ -1167,9 +1170,28 @@ class ValidateCard:
         self.showRefmapState()
         self.showState()
 
+    def connectomeHasReference(self):
+        """Whether the connectome has valid reference maps (μC_r, PC1 behind two baselines); True when there is no connectome yet.
+
+        A listing of reference.json files (no data read), asked again at every refresh so that a build that finishes shows.
+        """
+        bundle = self.ctx.bundle
+        if bundle is None:
+            return True
+        try:
+            from LesionNetworkMappingLib import reference
+
+            return any(entry["status"] == "ok" for entry in reference.reference_status(bundle, verify=False, check_data=False))
+        except Exception:
+            logging.debug("Lesion network mapping: the reference maps of the connectome could not be listed", exc_info=True)
+            return True
+
     def showRefmapState(self):
         names = [os.path.basename(path) for path in self._refmaps]
-        self.refmapLabel.setText(_("{n} reference map(s): {names}").format(n=len(names), names=", ".join(names[:3]) + (" …" if len(names) > 3 else "")) if names else _("No reference maps (volume, μC, PC1 and lesion location are always included)."))
+        self.refmapLabel.setText(_("{n} reference map(s): {names}").format(n=len(names), names=", ".join(names[:3]) + (" …" if len(names) > 3 else "")) if names else _("No extra reference maps (volume and lesion location are always included)."))
+        missing = not self.connectomeHasReference()
+        self.connectomeRefNote.setText(_("The μC (degree) and PC1 baselines need the connectome's reference maps, which this connectome does not have yet: they will show as not computed. Build them in the Connectome card (Manage… > Build reference maps).") if missing else "")
+        self.connectomeRefNote.setVisible(missing)
 
     #
     # Run

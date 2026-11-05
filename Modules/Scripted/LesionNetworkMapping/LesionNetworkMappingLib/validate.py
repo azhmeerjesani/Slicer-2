@@ -116,6 +116,9 @@ FZ_WARN = 10.0
 LOO_WARNING = "pooled LOO predictions are negatively biased for r/AUC and have high variance"
 #: Reference maps partialled out of the circuit similarity and used as the degree and PC1 baselines
 REFERENCE_KEYS = ("mu_r", "pc1")
+#: Where to build the missing reference maps; the reason is shown in the app and kept in validation.json, so it names the
+#: Connectome card's Manage… menu and no terminal command (the command line is in the reference module's help)
+REFERENCE_BUILD_HINT = "build them in the Connectome card: Manage… > Build reference maps"
 #: Inner blocks of the cross-fitting: a training subject's score comes from the in-fold circuit (and location map)
 #: built without its block, so that the models are fitted on out-of-sample training scores
 INNER_FOLDS = 5
@@ -1813,7 +1816,7 @@ def load_data(maps_tsv, participants, outcome, outcome_type, covariates=(), mask
         raise ValueError(f"Damage scores need the lesion occupancy: {occupancy_reason}")
     subjects_sha = mapped[sids[0]][2][1]
 
-    ref, ref_reason, ref_info = slnm._reference_for(types.SimpleNamespace(bundle=bundle_path), cohort, subjects_sha if isinstance(subjects_sha, str) and len(subjects_sha) == 64 else None, indices, mask_shape)
+    ref, ref_reason, ref_info = slnm._reference_for(types.SimpleNamespace(bundle=bundle_path), cohort, subjects_sha if isinstance(subjects_sha, str) and len(subjects_sha) == 64 else None, indices, mask_shape, build_hint=REFERENCE_BUILD_HINT)
     reference = {key: np.asarray(ref.maps[key], dtype=np.float64) for key in REFERENCE_KEYS} if ref is not None else None
     loaded_refmaps = {}
     for path in refmaps:

@@ -875,8 +875,12 @@ def _prepare_permutations(sdesign, n_perm, what):
     return count, exhaustive
 
 
-def _reference_for(args, cohort, subjects_sha, indices, mask_shape):
-    """(Reference or None, reason, info dict) for the partial comparison."""
+def _reference_for(args, cohort, subjects_sha, indices, mask_shape, build_hint=None):
+    """(Reference or None, reason, info dict) for the partial comparison.
+
+    ``build_hint`` replaces the command-line pointer of the "no valid reference maps" reason, for callers whose reason is
+    shown to people in the app (the validation record keeps it): a plain sentence, no terminal command.
+    """
     from . import connectome, reference
 
     path = args.bundle or ((cohort or {}).get("bundle") or {}).get("path")
@@ -894,6 +898,8 @@ def _reference_for(args, cohort, subjects_sha, indices, mask_shape):
         if hasattr(bundle, "close"):
             bundle.close()
     if ref is None:
+        if build_hint:
+            return None, f"no valid reference maps for this connectome and subject list ({build_hint})", None
         return None, jobs.command_text("no valid reference maps for this connectome and subject list (python -m LesionNetworkMappingLib.reference build)"), None
     info = {"definition": ref.definition, "path": ref.path, "sha256": ref.sha256, "subjects_sha256": ref.subjects_sha256, "covariates": list(REFERENCE_COVARIATES)}
     return ref, None, info
