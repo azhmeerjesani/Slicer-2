@@ -227,6 +227,30 @@ class ExclusionTest(ShareTestBase):
         checklist = share.checklist(self.study, {"licence": "CC0-1.0"})
         self.assertNotIn("own_patient", [item["id"] for item in checklist])
 
+    def test_damaged_lesion_mask_is_named(self):
+        # A truncated .nii.gz (an interrupted copy) made gzip raise a bare EOFError that named no file: the user saw
+        # "Not exported: EOFError: Compressed file ended…" and could not tell which subject to repair or exclude.
+        path = os.path.join(self.root, "lesions", f"sub-05_space-{SPACE}_desc-lesion_mask.nii.gz")
+        with open(path, "r+b") as f:
+            f.truncate(os.path.getsize(path) // 2)
+        out = os.path.join(self.tmp, "damaged")
+        with self.assertRaises(share.ShareError) as caught:
+            share.export_dataset(self.study, out, {"licence": "CC0-1.0", "lesions": True, "own_patient": "share"})
+        message = str(caught.exception)
+        self.assertIn("The lesion mask of sub-05", message)
+        self.assertIn(os.path.basename(path), message)
+        self.assertIn("damaged", message)
+        self.assertNotIn("Error", message)
+        self.assertNotIn(self.root, message)  # the file name is enough
+        self.assertFalse(os.path.exists(out))
+        self.assertEqual([name for name in os.listdir(self.tmp) if name.startswith("damaged")], [])
+        # Excluding the subject lets the export go ahead
+        lesions = len(share.plan(self.study, {"licence": "CC0-1.0", "lesions": True, "own_patient": "share"})["lesions"])
+        self.study.set("sub-05", include="0")
+        self.study.save()
+        result = share.export_dataset(self.study, out, {"licence": "CC0-1.0", "lesions": True, "own_patient": "share"})
+        self.assertEqual(result["lesions"], lesions - 1)
+
     def test_output_inside_private_folder_is_refused(self):
         with self.assertRaises(share.ShareError):
             share.export_dataset(self.study, os.path.join(self.root, ".studio", "share-out"), {"licence": "CC0-1.0"})

@@ -56,6 +56,7 @@ import re
 import secrets
 import shutil
 import zipfile
+import zlib
 
 import numpy as np
 
@@ -616,8 +617,18 @@ def scrub_nifti(src, dst, compresslevel=6):
     """
     from . import nifti
 
-    nifti._check_extension(src)
     nifti._check_extension(dst)
+    header, voxels = _read_scrubbed(src)
+    os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
+    nifti._write_image(dst, header, voxels, compresslevel)
+    return dst
+
+
+def _read_scrubbed(src):
+    """The scrubbed header and the voxel bytes of the NIfTI-1 image ``src`` (see :func:`scrub_nifti`); nothing is written."""
+    from . import nifti
+
+    nifti._check_extension(src)
     with nifti._open(src, "rb") as f:
         raw = f.read()
     parsed = nifti._parse_header(raw, src)
@@ -628,8 +639,27 @@ def scrub_nifti(src, dst, compresslevel=6):
     for field in ("descrip", "aux_file", "db_name", "data_type"):
         header[field] = b""
     header["vox_offset"] = nifti.HEADER_SIZE + 4  # the extensions are dropped (they may hold DICOM fields)
+    return header, raw[offset:]
+
+
+def _scrub_source(src, dst, what):
+    """:func:`scrub_nifti` for an export: a source that cannot be read raises a ShareError that names it.
+
+    ``what`` names the image for the user (for example "The lesion mask of sub-02"). Only reading the source is
+    reported this way; an error while writing ``dst`` (a full disk) is raised as it is.
+    """
+    from . import nifti
+
+    nifti._check_extension(dst)
+    try:
+        header, voxels = _read_scrubbed(src)
+    except (OSError, EOFError, ValueError, zlib.error) as exc:
+        # A truncated .nii.gz (an interrupted copy) raises a bare EOFError that names no file; with hundreds of
+        # subjects the user must be told which one to repair or exclude.
+        raise ShareError(f"{what} ({os.path.basename(os.fspath(src))}) cannot be read: the file is damaged, incomplete or missing. "
+                         "Repair or replace it, or exclude it from the study, then export again.") from exc
     os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
-    nifti._write_image(dst, header, raw[offset:], compresslevel)
+    nifti._write_image(dst, header, voxels, 6)
     return dst
 
 
@@ -1219,7 +1249,7 @@ def export_dataset(study, out, options=None, progress=None, cancel=None, maps=No
             anat = os.path.join(staging, new, "anat")
             stem = f"{new}_space-{space}_desc-lesion_mask"
             ext = ".nii.gz"
-            scrub_nifti(src, os.path.join(anat, stem + ext))
+            _scrub_source(src, os.path.join(anat, stem + ext), f"The lesion mask of {sid}")
             _write_json(os.path.join(anat, stem + ".json"), _lesion_sidecar(study, sid, src, space))
             if "fmriprep" in options["aliases"]:
                 shutil.copyfile(os.path.join(anat, stem + ext), os.path.join(anat, f"{new}_label-lesion_roi{ext}"))
@@ -1239,7 +1269,7 @@ def export_dataset(study, out, options=None, progress=None, cancel=None, maps=No
             base = os.path.basename(entry["path"])
             target = base if base not in used else f"{os.path.basename(os.path.dirname(entry['path']))}_{base}"
             used.add(target)
-            scrub_nifti(entry["path"], os.path.join(staging, "group", target))
+            _scrub_source(entry["path"], os.path.join(staging, "group", target), "The group map")
             _write_json(os.path.join(staging, "group", re.sub(r"\.nii(\.gz)?$", ".json", target)), _map_sidecar(entry, licence))
             written["maps"] += 1
         if mapped:
@@ -1400,7 +1430,7 @@ def neurovault_folder(study_or_run, out, maps=None, connectome=None, include_les
         base = _rename(os.path.basename(path), id_map)
         target = base if base not in used else f"{os.path.basename(os.path.dirname(path))}_{base}"
         used.add(target)
-        scrub_nifti(path, os.path.join(out, target))
+        _scrub_source(path, os.path.join(out, target), "The map")
         image = dict(image)
         image["file"] = target
         image["name"] = re.sub(r"\.nii(\.gz)?$", "", target)
