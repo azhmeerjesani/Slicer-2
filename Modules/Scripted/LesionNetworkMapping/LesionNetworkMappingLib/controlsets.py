@@ -31,7 +31,8 @@ sha256 is :func:`content_sha256` of the set (its space and lesion hashes), so a 
 
 **Maps** go to the set's own cache (:func:`maps_cache_root`): :func:`map_controls` (or the cohortmaps command line with
 :func:`map_job_args`) maps the set once per connectome and subject list, and every study that links the set looks its
-lesions up in the same cache (:func:`study_control_lesions` with ``cache_root=maps_cache_root(entry)``).
+lesions up in the same cache: the cohortmaps job of a study (``--study``) and the pipeline's maps stage pass
+:func:`study_maps_cache_roots` as shared caches, and the entries found there are copied into the study's cache.
 
 **Balance**: :func:`mismatch_report` compares a study's cases with the set (standardized mean differences of volume,
 2D share and left hemisphere share, |SMD| > 0.25 flagged, and the template family); :func:`matched_subsample` picks a
@@ -688,6 +689,29 @@ def is_control_row(row, name=None):
 def linked_rows(study, name=None):
     """The study rows linked from control sets (from the set ``name``)."""
     return [row for row in study.subjects if is_control_row(row, name)]
+
+
+def study_maps_cache_roots(study, root=None):
+    """The map caches (:func:`maps_cache_root`) of the control sets linked to a study (its study.json ``control_sets``):
+    the ``shared_cache_roots`` of its cohortmaps runs. Sets that are not registered (in this registry) are skipped.
+
+    :param study: a ``Study`` or its folder.
+    :param root: registry folder (default the study's ``controlset_root``, else :func:`registry_root`'s default).
+    """
+    if isinstance(study, (str, os.PathLike)):
+        from .study import Study
+
+        study = Study.open(study)
+    root = root if root is not None else getattr(study, "controlset_root", None)
+    out = []
+    for item in getattr(study, "control_sets", None) or ():
+        try:
+            folder = maps_cache_root(item["name"], root)
+        except (OSError, ValueError, KeyError):
+            continue
+        if folder not in out:
+            out.append(folder)
+    return out
 
 
 def study_control_lesions(study, name, root=None):

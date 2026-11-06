@@ -165,7 +165,7 @@ _EXPORTS = {
     "atlases": ["Atlas", "LabelRow", "LabelResult", "label_point", "label_points", "label_mask", "label_cluster", "load_cached", "network_of", "to_yeo7", "read_label_table", "mask_family"],
     "coords": ["Focus", "OutsideMaskError", "foci_from_rows", "read_foci", "read_sleuth", "read_nimare_json", "mni2tal", "tal2mni", "to_mni", "sphere_occupancy", "spheres", "random_coordinate_null", "prepare_coordinates", "prepare_atrophy", "prepare_stimulation",
                "atrophy_seed", "stimulation_seed", "write_seed_set", "read_seed_record"],
-    "controlsets": ["AmbiguousSpaceError", "list_sets", "register_folder", "set_lesions", "map_controls", "study_control_lesions", "mismatch_report", "unregister", "content_sha256"],
+    "controlsets": ["AmbiguousSpaceError", "list_sets", "register_folder", "set_lesions", "map_controls", "study_control_lesions", "study_maps_cache_roots", "mismatch_report", "unregister", "content_sha256"],
     "fastmap": ["Tiling", "FastIndex", "build_tiling", "build_index", "load_index", "approximate_maps", "parcel_occupancy", "import_parcel_matrix", "compare_parcel_matrices", "lesion_allowed"],
     "figurefit": ["FigureFitError", "CutPlane", "FigureFit", "cut_plane", "fit_figure", "fit_2d", "apply_2d", "residual_chip", "make_record", "validate_record", "read_fit_json", "write_fit_json", "figure_ijk_to_ras", "image_sha256"],
     "figures": ["Figure", "Scene", "Layer", "Options", "MapInfo", "TileSpec", "PanelSpec", "load_volume", "display_grid", "reslice", "write_figure", "watermark_for", "triptych", "glass", "replication", "render_slice"],

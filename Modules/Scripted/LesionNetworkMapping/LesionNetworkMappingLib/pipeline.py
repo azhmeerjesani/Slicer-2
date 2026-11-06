@@ -1325,10 +1325,11 @@ def plan(config, hash_lesions=True, providers=None):
     # Reuse: the map cache (cohortmaps.lookup), or the fallback's per-lesion fingerprints
     if eligible and hash_lesions:
         if providers["maps"].kind == "preferred" and not config.recompute:
-            from . import cohortmaps
+            from . import cohortmaps, controlsets
 
             found = cohortmaps.lookup([(row["participant_id"], row["path"], row["sha256"]) for row in eligible], bundle, subjects=config.preview_n, random_subset=bool(config.preview_n), seed=config.preview_seed,
-                                      study_path=study.path, out_dir=os.path.join(out, STAGES_DIR, "cohortmaps"), null_relocations=null_k, null_seed=config.null_seed, budget_bytes=budget)
+                                      study_path=study.path, out_dir=os.path.join(out, STAGES_DIR, "cohortmaps"), null_relocations=null_k, null_seed=config.null_seed, budget_bytes=budget,
+                                      shared_cache_roots=controlsets.study_maps_cache_roots(study))
             hits = {item["participant_id"]: item["hit"] and (item["qa_hit"] or not null_k) for item in found["lesions"]}
             for row in eligible:
                 if hits.get(row["participant_id"]):
@@ -2316,6 +2317,11 @@ class Runner:
         lesions_tsv = self._write_lesions_tsv(rows)
         cache = os.path.join(folder, "cache") if self.config.recompute else os.path.join(self.study.path, *cohortmaps.CACHE_RELPATH)
         args = ["--lesions-tsv", lesions_tsv, "--bundle", self.bundle.path, "--out", folder, "--cache", cache, "--null-relocations", str(self.null_k), "--null-seed", str(self.config.null_seed)]
+        if not self.config.recompute:  # the maps of the study's linked control sets, mapped once in their own caches
+            from . import controlsets
+
+            for root in controlsets.study_maps_cache_roots(self.study):
+                args += ["--shared-cache", root]
         if self.config.preview_n:
             args += ["--subjects", str(self.config.preview_n), "--random", "--seed", str(self.config.preview_seed)]
         if self.config.memory_budget_gb:

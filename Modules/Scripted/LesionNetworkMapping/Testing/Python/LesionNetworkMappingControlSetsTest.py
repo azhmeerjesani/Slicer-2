@@ -7,9 +7,11 @@ Run without Slicer's GUI:
 """
 
 import contextlib
+import glob
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -452,6 +454,78 @@ class CacheTest(ControlSetsTestBase):
         args = controlsets.map_job_args(entry, self.bundle.path)
         self.assertEqual(args[args.index("--cache") + 1], cache_root)
         self.assertEqual(args[args.index("--lesions-tsv") + 1], os.path.join(entry["dir"], controlsets.LESIONS_TSV))
+
+    def test_linked_study_reuses_the_set_maps(self):
+        """"Map controls with <connectome>" maps a set once; a linked study's own mapping (Map > Cohort's job, with the
+        study's default cache) and Run everything reuse those maps instead of mapping every control again.
+        """
+        entry = self.register()
+        with counting_engine() as passes:
+            controlsets.map_controls(entry, self.bundle, emit=_quiet)
+        self.assertEqual(sum(passes), self.n_usable)
+        cases = [((-8.0, 0.0, 0.0), 5.0), ((8.0, 0.0, 0.0), 5.0), ((0.0, 8.0, 0.0), 5.0)]
+
+        def linked(name):
+            study = self.study(name, cases=cases)
+            study.link_control_set("Ferguson490")
+            study.save()
+            return Study.open(study.path)
+
+        # The library: the study's linked sets give their caches; a set that is no longer registered is skipped
+        study = linked("A")
+        self.assertEqual(controlsets.study_maps_cache_roots(study), [controlsets.maps_cache_root(entry)])
+        self.assertEqual(controlsets.study_maps_cache_roots(study.path), [controlsets.maps_cache_root(entry)])
+        self.assertEqual(controlsets.study_maps_cache_roots(study, root=self.path("elsewhere")), [])
+        lesions, _excluded = cohortmaps.study_lesions(study)
+        self.assertEqual(len(lesions), len(cases) + self.n_usable)
+        plan = cohortmaps.lookup(lesions, self.bundle, study_path=study.path)
+        self.assertEqual((plan["hits"], plan["new"]), (self.n_usable, len(cases)))
+        self.assertEqual(plan["cache_dir"], cohortmaps.cache_dir_for(cohortmaps.default_cache_root(study.path), self.bundle.name, plan["subject_ids_sha256"]))
+        self.assertFalse(os.path.isdir(plan["cache_dir"]))  # a lookup copies nothing
+        self.assertEqual(cohortmaps.lookup(lesions, self.bundle, study_path=study.path, shared_cache_roots=[])["hits"], 0)
+
+        # Map > Cohort's job: cohortmaps --study --lesions-tsv (no --cache): only the cases are computed
+        out = os.path.join(study.path, "derivatives", "lnm", "cohort-maps")
+        os.makedirs(out)
+        tsv = os.path.join(out, "lesions.tsv")
+        with open(tsv, "w", encoding="utf-8") as f:
+            f.write("participant_id\tlesion\n" + "".join(f"{sid}\t{os.path.relpath(path, out)}\n" for sid, path, _sha in lesions))
+        set_files = {name: os.stat(name) for name in glob.glob(os.path.join(controlsets.maps_cache_dir(entry, self.bundle), "*", "*"))}
+        with counting_engine() as passes, mock.patch.object(jobs, "emit", _quiet):
+            code = cohortmaps.main(["--study", study.path, "--lesions-tsv", tsv, "--bundle", self.bundle.path, "--out", out, "--resume"])
+        self.assertEqual(code, jobs.EXIT_OK)
+        self.assertEqual(sum(passes), len(cases))
+        record = cohortmaps.read_record(os.path.join(out, cohortmaps.COHORTMAPS_JSON))
+        self.assertEqual(record["lesions"]["cache_hits"], self.n_usable)
+        self.assertEqual(record["lesions"]["computed"], len(cases))
+        self.assertEqual(record["cache_dir"], plan["cache_dir"])  # the study keeps a complete cache of its own ...
+        rows = cohortmaps.read_maps_tsv(os.path.join(out, cohortmaps.MAPS_TSV))
+        for row in rows:
+            self.assertTrue(row["T"].startswith(plan["cache_dir"] + os.sep), row["T"])
+            entry_json = os.path.join(os.path.dirname(row["T"]), cohortmaps.ENTRY_JSON)
+            with open(entry_json, encoding="utf-8") as f:
+                stored = json.load(f)["lesion"]
+            self.assertFalse(os.path.isabs(stored))  # ... with relative lesion paths that still lead to the lesion
+            self.assertTrue(os.path.samefile(cohortmaps.read_entry(plan["cache_dir"], row["key"])["lesion"], {sid: path for sid, path, _sha in lesions}[row["participant_id"]]))
+            self.assertEqual(os.stat(row["T"]).st_nlink, 1)  # copied, never hard-linked (D-A21)
+        for name, stat in set_files.items():  # the set's cache is only read
+            self.assertEqual((os.stat(name).st_mtime_ns, os.stat(name).st_size), (stat.st_mtime_ns, stat.st_size), name)
+
+        # Run everything (a pipeline job, which passes the set's cache to its cohortmaps child): only the cases are computed
+        study = linked("B")
+        env = dict(os.environ, PYTHONPATH=MODULE_DIR + os.pathsep + os.environ.get("PYTHONPATH", ""), SLICER_LNM_OFFLINE="1")
+        env[controlsets.ENV_ROOT] = self.root
+        with mock.patch.dict(os.environ, {controlsets.ENV_ROOT: self.root}):
+            from LesionNetworkMappingLib import pipeline
+
+            config = pipeline.config_from_args(pipeline._parser().parse_args(["run", "--study", study.path, "--bundle", self.bundle.path, "--accept-terms", "--null-relocations", "0"]))
+            planned = pipeline.plan(config)
+        self.assertEqual((planned.count("reuse"), planned.count("compute")), (self.n_usable, len(cases)))
+        result = subprocess.run([sys.executable, "-m", "LesionNetworkMappingLib.pipeline", "run", "--study", study.path, "--bundle", self.bundle.path, "--accept-terms", "--perm", "1000",
+                                 "--events", "json", "--nulls", "off", "--no-report", "--null-relocations", "0"], cwd=MODULE_DIR, env=env, capture_output=True, text=True, encoding="utf-8", timeout=900, check=False)
+        record = cohortmaps.read_record(os.path.join(pipeline.default_out(config, self.bundle.name), pipeline.STAGES_DIR, "cohortmaps", cohortmaps.COHORTMAPS_JSON))
+        self.assertIsNotNone(record, result.stdout[-2000:] + result.stderr[-2000:])
+        self.assertEqual((record["lesions"]["cache_hits"], record["lesions"]["computed"]), (self.n_usable, len(cases)), result.stderr[-2000:])
 
 
 if __name__ == "__main__":

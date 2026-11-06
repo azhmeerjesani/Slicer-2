@@ -24,6 +24,13 @@ files (D-A21). An entry whose files are missing or have another size is recomput
 sha256 is computed from the bytes that are mapped: each lesion file is read once into memory,
 hashed, and parsed from those bytes.
 
+Shared caches (``shared_cache_roots``, ``--shared-cache``) are other cache roots that are only read: the caches of
+the control-lesion sets linked to the study (``controlsets.study_maps_cache_roots``, the default with a study), where
+"Map controls with <connectome>" mapped the set once. A lesion that is not in the cache but has a valid entry under
+the same key in a shared cache is a cache hit: :func:`run` copies that entry into the cache (files copied, never
+hard-linked (D-A21); the lesion path made relative to the new entry folder), so the study keeps a complete cache of
+its own and no engine pass is needed for it.
+
 The run writes ``<out>/maps.tsv`` (one row per mapped lesion: participant_id, lesion (see below),
 lesion_sha256, key, AvgR, AvgFz and T (the cache files), volume_ml,
 voxels_in_mask, fractional_sum, the pooling compatibility fields of ``export.compatibility_key`` and
@@ -48,7 +55,8 @@ posted to the study inbox (``Study.post_results``, source "cohortmaps").
 Command line (JSON events, see ``jobs``; exit codes 0 done, 1 error, 2 usage, 3 cancelled, 75 locked)::
 
     python -m LesionNetworkMappingLib.cohortmaps (--study DIR | --lesions-tsv F [--study DIR]) --bundle B --out DIR
-        [--subjects N [--random] [--seed S] | --subject-list SPEC] [--cache DIR] [--threads K] [--budget-gb G]
+        [--subjects N [--random] [--seed S] | --subject-list SPEC] [--cache DIR] [--shared-cache DIR ...]
+        [--threads K] [--budget-gb G]
         [--include-unreviewed] [--probabilistic] [--supersample K]
         [--null-relocations K [--null-seed S] [--null-voxels N] [--brain-mask MASK]]
         [--dry-run] [--cancel-file F] [--resume] [--run-root DIR] [--parent-run ID]
@@ -583,7 +591,7 @@ def _load_lesion(path, data):
 class _Context:
     """Everything a cohort run depends on, resolved once (subjects, hashes, cache folder, QA settings)."""
 
-    def __init__(self, bundle, subjects=None, random_subset=False, seed=0, subject_list=None, cache_root=None, study_path=None, out_dir=None, supersample=2, probabilistic=False, null_relocations=0, null_seed=0, null_voxels=engine.NULL_MAX_VOXELS, brain_mask=None, budget_bytes=None):
+    def __init__(self, bundle, subjects=None, random_subset=False, seed=0, subject_list=None, cache_root=None, study_path=None, out_dir=None, supersample=2, probabilistic=False, null_relocations=0, null_seed=0, null_voxels=engine.NULL_MAX_VOXELS, brain_mask=None, budget_bytes=None, shared_cache_roots=None):
         self.bundle = ConnectomeBundle.open(bundle) if isinstance(bundle, (str, os.PathLike)) else bundle
         if self.bundle.kind != "timeseries":
             raise ValueError(f"The connectome {self.bundle.name!r} is a {self.bundle.kind!r} bundle; network maps need a time series connectome")
@@ -607,6 +615,12 @@ class _Context:
             cache_root = default_cache_root(study_path) if study_path else os.path.join(os.fspath(out_dir or "."), "cache")
         self.cache_root = os.path.abspath(os.fspath(cache_root))
         self.cache_dir = cache_dir_for(self.cache_root, self.bundle.name, self.subject_ids_sha256)
+        # Read-only caches looked up after this one (a linked control set's cache): the same folder scheme and keys
+        self.shared_cache_dirs = []
+        for root in shared_cache_roots or ():
+            folder = cache_dir_for(os.path.abspath(os.fspath(root)), self.bundle.name, self.subject_ids_sha256)
+            if os.path.normcase(folder) != os.path.normcase(self.cache_dir) and folder not in self.shared_cache_dirs:
+                self.shared_cache_dirs.append(folder)
         self.null_k = int(null_relocations)
         self.null_seed = int(null_seed)
         self.brain_mask = os.path.abspath(brain_mask) if brain_mask else None
@@ -666,6 +680,12 @@ def _lookup_items(context, lesions):
             continue
         key = context.key(sha)
         entry = read_entry(context.cache_dir, key)
+        shared = False
+        for folder in context.shared_cache_dirs if entry is None else ():
+            entry = read_entry(folder, key)
+            if entry is not None:  # mapped into a shared cache (a control set): run() copies it into the cache
+                shared = True
+                break
         if entry is None:  # mapped before when it is in the cache
             try:
                 _check_lesion_header(path)
@@ -674,16 +694,69 @@ def _lookup_items(context, lesions):
                 details[sid] = _unreadable_detail(path, exc)
                 continue
         qa = read_entry_qa(entry, context.qa_key) if entry is not None else None
-        items.append({"participant_id": sid, "lesion": path, "lesion_sha256": sha, "key": key, "hit": entry is not None, "qa_hit": qa is not None, "entry": entry, "qa": qa})
+        items.append({"participant_id": sid, "lesion": path, "lesion_sha256": sha, "key": key, "hit": entry is not None, "qa_hit": qa is not None, "entry": entry, "qa": qa, "shared": shared})
     return items, excluded, details
+
+
+def _adopt_entry(cache_dir, entry):
+    """Publish a copy of a shared cache's entry (:func:`read_entry`'s dict) in ``cache_dir``; return the copy's entry.
+
+    The files are copied (never hard-linked: a file edited in one cache must not change the other, D-A21); the lesion
+    path of entry.json is made relative to the new entry folder.
+    """
+    key = entry["key"]
+
+    def build(folder):
+        for name in os.listdir(entry["dir"]):
+            source = os.path.join(entry["dir"], name)
+            if name == ENTRY_JSON or not os.path.isfile(source):
+                continue
+            shutil.copyfile(source, os.path.join(folder, name))
+        stored = _read_json(os.path.join(entry["dir"], ENTRY_JSON))
+        stored["lesion"] = portable_lesion_path(entry.get("lesion"), entry_dir(cache_dir, key))
+        with open(os.path.join(folder, ENTRY_JSON), "w", encoding="utf-8") as f:
+            f.write(jobs.to_json(stored) + "\n")
+
+    return _publish_entry(cache_dir, key, build)
+
+
+def _adopt_shared_items(context, items, emit):
+    """Copy the entries found in shared caches into the cache (:func:`_adopt_entry`); a lesion whose entry cannot be
+    copied is computed instead.
+    """
+    for item in items:
+        if not item.get("shared"):
+            continue
+        try:
+            item["entry"] = _adopt_entry(context.cache_dir, item["entry"])
+        except (OSError, ValueError, TypeError) as exc:
+            emit("warning", code="shared_cache", participant_id=item["participant_id"], message=f"The cached maps of {item['participant_id']} could not be copied from {item['entry']['dir']} ({exc}); they are computed again.")
+            item.update({"entry": None, "hit": False, "qa_hit": False, "qa": None})
+        item["shared"] = False
+        if item["entry"] is not None:
+            item["qa"] = read_entry_qa(item["entry"], context.qa_key)
+            item["qa_hit"] = item["qa"] is not None
 
 
 def _emit_unreadable(emit, sid, detail):
     emit("warning", code="unreadable", participant_id=sid, path=detail["path"], message=f"The lesion file of {sid} cannot be mapped and is excluded: {detail['message']} ({detail['path']})")
 
 
-def lookup(lesions, bundle, cache_root=None, subjects=None, random_subset=False, seed=0, subject_list=None, study_path=None, out_dir=None, supersample=2, probabilistic=False, null_relocations=0, null_seed=0, null_voxels=engine.NULL_MAX_VOXELS, brain_mask=None, budget_bytes=None):
+def _study_shared_roots(study):
+    """The map caches of a study's linked control sets (``controlsets.study_maps_cache_roots``); [] when they cannot be read."""
+    from .controlsets import study_maps_cache_roots
+
+    try:
+        return study_maps_cache_roots(study)
+    except (OSError, ValueError, KeyError):
+        return []
+
+
+def lookup(lesions, bundle, cache_root=None, subjects=None, random_subset=False, seed=0, subject_list=None, study_path=None, out_dir=None, supersample=2, probabilistic=False, null_relocations=0, null_seed=0, null_voxels=engine.NULL_MAX_VOXELS, brain_mask=None, budget_bytes=None, shared_cache_roots=None):
     """Look the lesions up in the cache without computing anything (A-04's plan: "N new or changed lesions").
+
+    An entry of a shared cache (``shared_cache_roots``, see the module docstring; default with ``study_path``: the caches
+    of the study's linked control sets) counts as a hit; nothing is copied.
 
     :return: dict with cache_dir, subject_ids_sha256, qa_key, budget_bytes, batch_size, "lesions" (one
       {participant_id, lesion, lesion_sha256, key, hit, qa_hit} per usable lesion), "excluded"
@@ -691,7 +764,9 @@ def lookup(lesions, bundle, cache_root=None, subjects=None, random_subset=False,
       files that cannot be read or parsed), and the counts n, hits, new (lesions without an entry),
       qa_missing and passes (engine passes needed).
     """
-    context = _Context(bundle, subjects, random_subset, seed, subject_list, cache_root, study_path, out_dir, supersample, probabilistic, null_relocations, null_seed, null_voxels, brain_mask, budget_bytes)
+    if shared_cache_roots is None and study_path:
+        shared_cache_roots = _study_shared_roots(study_path)
+    context = _Context(bundle, subjects, random_subset, seed, subject_list, cache_root, study_path, out_dir, supersample, probabilistic, null_relocations, null_seed, null_voxels, brain_mask, budget_bytes, shared_cache_roots)
     items, excluded, details = _lookup_items(context, lesions)
     new_keys = {item["key"] for item in items if not item["hit"]}
     qa_keys = {item["key"] for item in items if item["hit"] and not item["qa_hit"] and context.null_k > 0}
@@ -853,6 +928,7 @@ def run(
     argv=None,
     emit=None,
     register=True,
+    shared_cache_roots=None,
 ):
     """Map a cohort of lesions with batched engine passes and the per-lesion cache; write maps.tsv and cohortmaps.json.
 
@@ -862,6 +938,8 @@ def run(
       or ``subject_list`` (a subset name, a file of ids or ids; see ``ConnectomeBundle.resolve_subject_list``).
     :param cache_root: folder of the cache (the entries go to <cache_root>/conn-<label>_subj-<sha8>/);
       default <study>/derivatives/lnm/cache, or <out_dir>/cache without a study.
+    :param shared_cache_roots: read-only cache roots looked up after ``cache_root``; their entries are copied into the
+      cache. Default (None) with a ``study``: the caches of its linked control sets (``controlsets.study_maps_cache_roots``).
     :param study: optional ``Study`` or study folder: volumes missing from it are posted to its inbox.
     :param cancel: optional ``jobs.CancelToken`` (or any callable/Event); a stopped run raises ``jobs.Cancelled``
       after the batches already finished were published (a rerun or ``resume`` skips them).
@@ -883,6 +961,8 @@ def run(
         from .study import Study
 
         study_obj = Study.open(study) if isinstance(study, (str, os.PathLike)) else study
+        if shared_cache_roots is None:
+            shared_cache_roots = _study_shared_roots(study_obj)
     context = _Context(
         bundle,
         subjects,
@@ -899,6 +979,7 @@ def run(
         null_voxels,
         brain_mask,
         budget_bytes,
+        shared_cache_roots,
     )
     bundle = context.bundle
     lock = jobs.OutputLock(os.path.join(out_dir, LOCK_NAME))
@@ -915,6 +996,7 @@ def run(
         sweep_stale_temporaries(context.cache_dir)
         excluded = {reason: list(sids) for reason, sids in (excluded or {}).items()}
         items, lookup_excluded, details = _lookup_items(context, lesions)
+        _adopt_shared_items(context, items, emit)
         for reason, sids in lookup_excluded.items():
             excluded.setdefault(reason, []).extend(sids)
         n_requested = len(items) + sum(len(sids) for sids in excluded.values())
@@ -1312,6 +1394,7 @@ def main(argv=None):
     parser.add_argument("--seed", type=int, default=0, help="random seed for --random")
     parser.add_argument("--subject-list", default=None, metavar="SPEC", help="a named subset of the bundle, a text file of subject ids or a comma-separated list of ids")
     parser.add_argument("--cache", default=None, help="cache folder (default: <study>/derivatives/lnm/cache, or <out>/cache without a study)")
+    parser.add_argument("--shared-cache", action="append", default=[], metavar="DIR", help="another cache folder whose entries are reused (copied into the cache); repeatable. With --study, the caches of the study's linked control sets are added")
     parser.add_argument("--budget-gb", type=float, default=None, help="memory budget of one engine pass in GB (default: min(25%% of the memory, 4 GB))")
     parser.add_argument("--include-unreviewed", action="store_true", help="also map lesions that review has not approved when the study requires review")
     parser.add_argument("--probabilistic", action="store_true", help="use lesion image values as weights instead of binarizing")
@@ -1339,9 +1422,10 @@ def main(argv=None):
 
             study = Study.open(args.study)
             lesions, excluded = study_lesions(study, args.include_unreviewed, lesions)
+            shared = [*_study_shared_roots(study), *args.shared_cache]
             review = {"required": study.review_required, "include_unreviewed": bool(args.include_unreviewed)}
         else:
-            study = None
+            study, shared = None, list(args.shared_cache)
     except (OSError, ValueError, KeyError) as exc:
         raise jobs.JobError(f"{type(exc).__name__}: {exc}", code="input") from None
     options = {
@@ -1357,6 +1441,7 @@ def main(argv=None):
         "null_voxels": args.null_voxels,
         "brain_mask": args.brain_mask,
         "budget_bytes": _budget_bytes(args.budget_gb),
+        "shared_cache_roots": shared,
     }
     try:
         if args.dry_run:
